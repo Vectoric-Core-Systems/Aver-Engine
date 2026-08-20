@@ -57,6 +57,7 @@ using hud_draw_fn      = int32_t(__cdecl*)(int32_t, float);
 using graph_load_fn    = int32_t(__cdecl*)(int32_t entity, const char* utf8Path);
 using graph_tick_fn    = void(__cdecl*)(int32_t entity, float timeSeconds);
 using graph_unload_fn  = void(__cdecl*)(int32_t entity);
+using graph_fire_fn    = int32_t(__cdecl*)(int32_t entity, const char* utf8EventName);
 using declare_graph_classes_fn = int32_t(__cdecl*)(const char* utf8ContentDir);
 using tick_graph_class_instances_fn = void(__cdecl*)(float dt);
 
@@ -104,6 +105,7 @@ struct ScriptHost::Impl {
     graph_load_fn   graphLoad   = nullptr;
     graph_tick_fn   graphTick   = nullptr;
     graph_unload_fn graphUnload = nullptr;
+    graph_fire_fn   graphFire   = nullptr;
     declare_graph_classes_fn      declareGraphClasses    = nullptr;
     tick_graph_class_instances_fn tickGraphClassInstances = nullptr;
 };
@@ -219,6 +221,15 @@ bool ScriptHost::init(const HostDesc& desc) {
         AVER_WARN("[Scripting] the bridge exports no Graph entry points; graph hosting is unavailable");
     }
 
+    // GraphFire is optional SEPARATELY from the three above, not folded in with them, because it
+    // arrived later: a bridge that predates it hosts and ticks graphs correctly and is only unable
+    // to be fired at. Folding it into the block above would turn a bridge missing one new export
+    // into a bridge with no graph hosting at all.
+    if (!bind(L"GraphFire", reinterpret_cast<void**>(&impl_->graphFire))) {
+        impl_->graphFire = nullptr;
+        AVER_WARN("[Scripting] the bridge exports no GraphFire; animation notifies will not reach graphs");
+    }
+
     // GRAPH-AS-CLASS is optional too, same reasoning: a bridge built before DeclareGraphClasses/
     // GraphTickBoundInstances existed still boots, and graphClassesAvailable() just reports false.
     if (!bind(L"DeclareGraphClasses", reinterpret_cast<void**>(&impl_->declareGraphClasses)) ||
@@ -320,6 +331,18 @@ void ScriptHost::graphUnload(i32 entity) {
     impl_->graphUnload(entity);
 }
 
+// Whether the staged bridge exports GraphFire -- see its own optional-bind block in init().
+bool ScriptHost::graphFireAvailable() const {
+    return ready_ && impl_ && impl_->graphFire;
+}
+
+// Raises `eventName` on the graph bound to `entity`. False when unavailable, when the entity has
+// no graph, or when the graph declares no such event.
+bool ScriptHost::graphFire(i32 entity, const std::string& eventName) {
+    if (!graphFireAvailable() || eventName.empty()) return false;
+    return impl_->graphFire(entity, eventName.c_str()) != 0;
+}
+
 // Whether the staged bridge exports the graph-class entry points -- see the optional-bind block in init().
 bool ScriptHost::graphClassesAvailable() const {
     return ready_ && impl_ && impl_->declareGraphClasses && impl_->tickGraphClassInstances;
@@ -376,6 +399,8 @@ bool ScriptHost::graphAvailable() const { return false; }
 bool ScriptHost::graphLoad(i32, const std::string&) { return false; }
 void ScriptHost::graphTick(i32, f32) {}
 void ScriptHost::graphUnload(i32) {}
+bool ScriptHost::graphFireAvailable() const { return false; }
+bool ScriptHost::graphFire(i32, const std::string&) { return false; }
 bool ScriptHost::graphClassesAvailable() const { return false; }
 i32  ScriptHost::declareGraphClasses(const std::string&) { return 0; }
 void ScriptHost::tickGraphClassInstances(f32) {}

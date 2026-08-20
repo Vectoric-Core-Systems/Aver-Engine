@@ -451,12 +451,19 @@ shape an `ENTRY` record can point at. Nothing here is special-cased to the strin
 it is treated as one more on-demand event name, exactly as a project-invented event name would be
 (`OcGraphParser.cs:774-786`, `GraphCompiler.cs:2191-2198`).
 
-**`OnHit` is a demonstrated *mechanism*, not a wired collision hook.** Grepping the engine outside
-the graph/scripting layer and its own tests turns up no caller anywhere that invokes
-`GraphHost.Fire("OnHit", …)` — no physics or collision system raises it today. A graph can declare
-an `OnHit` entry and a test harness can call `Fire("OnHit", …)` directly
-(`Aver.Graph.Tests/OnHitAdversarialTests.cs`), but nothing in the shipped engine connects a real
-collision to that call yet.
+**`OnHit` is still a demonstrated *mechanism*, not a wired collision hook** — no physics or collision
+system raises it. A graph can declare an `OnHit` entry and a test harness can call `Fire("OnHit", …)`
+directly (`Aver.Graph.Tests/OnHitAdversarialTests.cs`), but nothing connects a real collision to that
+call yet.
+
+**One engine system does now raise graph events, though: ANIMATION NOTIFIES.** A marker placed on a
+clip in the animation editor names an event, and crossing it while the clip plays fires that name at
+the playing entity’s graph — so a `CustomEvent` named `OnFootstep` runs on the frame the foot lands,
+with no polling of the clip time from `OnTick`. The path is
+`AnimSystem::tick` → a host-installed sink → `ScriptHost::graphFire` → `HostBridge.GraphFire` → the
+same `FireEventRouter` a `FireEvent` node reaches, and it is proved end to end (a clip on disk making
+a graph run) by `tests/anim.scene/src/AnimNotifyGraphTest.cpp`. This is what the note above about
+`GraphEvents.cs` having "no native caller" used to describe; it has one now.
 
 `Sequence` defaults to two exec outputs (`then0`, `then1`); add more by hand-writing additional
 `PIN … out exec` records — the compiler fans out however many exec-output pins the node actually

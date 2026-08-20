@@ -9,6 +9,7 @@
 
 #include <cmath>
 #include <string>
+#include <vector>
 
 using namespace aver;
 
@@ -436,6 +437,80 @@ int main() {
         Vec3 lo3, hi3;
         anim::posedBounds(bmin3, bmax3, used3, skin3.data(), 3, restMin, restMax, lo3, hi3);
         check(hi3.x < 1000.0f, "and contributes NOTHING even when its matrix is enormous");
+    }
+
+    AVER_INFO("=== notify crossings ===");
+    {
+        // A 2 s clip with markers at 0, 0.5, 1.25 and 2.0 -- both ends included on purpose, because
+        // the ends are where an off-by-one interval shows up as an event that never fires or one
+        // that fires twice per loop.
+        fmt::OcAnimation c;
+        c.duration = 2.0f;
+        c.notifies = {{0.0f, "A"}, {0.5f, "B"}, {1.25f, "C"}, {2.0f, "D"}};
+
+        std::vector<u32> hit;
+        auto step = [&](f32 prev, f32 now, bool fwd, bool swept, bool incl) {
+            anim::ClipStep st;
+            st.prev = prev; st.now = now; st.forward = fwd;
+            st.sweptWholeClip = swept; st.inclusiveStart = incl;
+            hit.clear();
+            anim::notifiesCrossed(c, st, hit);
+            std::string names;
+            for (const u32 i : hit) names += c.notifies[i].name;
+            return names;
+        };
+
+        // ---- forward, no wrap
+        check(step(0.4f, 0.6f, true, false, false) == "B", "a step over one marker fires exactly it");
+        check(step(0.6f, 0.9f, true, false, false).empty(), "a step over none fires none");
+        check(step(0.4f, 1.5f, true, false, false) == "BC", "a step over two fires both, in file order");
+
+        // ---- THE DOUBLE-FIRE TEST. The half-open interval is the whole reason a marker landing
+        // exactly on a frame boundary fires once rather than on both sides of it.
+        check(step(0.0f, 0.5f, true, false, false) == "B", "a marker exactly at `now` fires");
+        check(step(0.5f, 1.0f, true, false, false).empty(),
+              "AND NOT AGAIN on the next step, which starts exactly on it");
+
+        // ---- the first step of a clip includes its own start
+        check(step(0.0f, 0.1f, true, false, false).empty(),
+              "a marker at 0 is NOT re-fired by an ordinary step from 0");
+        check(step(0.0f, 0.1f, true, false, true) == "A",
+              "but IS fired by the first step of the clip (inclusiveStart)");
+
+        // ---- looping
+        check(step(1.9f, 0.1f, true, false, false) == "AD",
+              "a wrap fires the tail of the clip and then its head, INCLUDING the marker at 0");
+        check(step(1.9f, 0.1f, true, false, false).find("D") != std::string::npos,
+              "the end-of-clip marker at exactly duration is reachable at all");
+        check(step(1.3f, 1.9f, true, false, false).empty(), "and a step short of the end fires nothing");
+
+        // ---- reverse
+        check(step(0.6f, 0.4f, false, false, false) == "B", "running backwards fires the marker passed");
+        check(step(1.5f, 0.4f, false, false, false) == "BC", "and every marker in the span");
+        check(step(0.1f, 1.9f, false, false, false) == "AD",
+              "a backward wrap fires off the front and back onto the end");
+
+        // ---- a step that swallows the clip
+        check(step(0.4f, 0.4f, true, true, false) == "ABCD", "a step longer than the clip fires everything");
+        check(step(0.4f, 0.4f, true, true, false).size() == 4,
+              "ONCE EACH, not once per lap -- a stalled frame must not deliver a burst");
+
+        // ---- a marker outside the clip is clamped rather than lost
+        fmt::OcAnimation past;
+        past.duration = 1.0f;
+        past.notifies = {{5.0f, "late"}, {-3.0f, "early"}};
+        std::vector<u32> h2;
+        anim::ClipStep st;
+        st.prev = 0.9f; st.now = 0.05f; st.forward = true;
+        anim::notifiesCrossed(past, st, h2);
+        check(h2.size() == 2, "markers past both ends of a shortened clip still arrive, clamped");
+
+        // ---- a clip with no notifies costs nothing and appends nothing
+        fmt::OcAnimation bare;
+        bare.duration = 1.0f;
+        std::vector<u32> h3{99u};
+        anim::notifiesCrossed(bare, st, h3);
+        check(h3.size() == 1 && h3[0] == 99u, "a notify-free clip leaves the output vector alone");
     }
 
     AVER_INFO(g_failures ? "AnimTest: {} FAILURES" : "AnimTest: all checks passed ({})", g_failures);

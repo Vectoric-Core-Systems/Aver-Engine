@@ -60,6 +60,22 @@ public:
     // Drops the graph bound to `entity`, if any.
     void graphUnload(i32 entity);
 
+    // Raises a named event on whatever graph is bound to `entity`, and returns whether anything
+    // ran. THE FIRST NATIVE CALLER OF A GRAPH EVENT -- until animation notifies there were none,
+    // which is why GraphEvents.cs's own comment records that this seam was investigated and left
+    // unbuilt rather than shipped as an export with nothing behind it.
+    //
+    // False for every ordinary reason as well as every failing one: no scripting host, a bridge
+    // predating this export, an entity with no graph, or a graph that declares no such event. A
+    // caller cannot tell those apart HERE and should not try -- the managed side logs each with
+    // its own message, once per (entity, event), so a footstep fired at a graph that never handles
+    // one costs a line rather than a line per frame.
+    bool graphFire(i32 entity, const std::string& eventName);
+
+    // Whether the staged bridge exports GraphFire at all. Distinct from graphAvailable(): a bridge
+    // built before this existed hosts graphs perfectly well and simply cannot be fired at.
+    bool graphFireAvailable() const;
+
     // GRAPH-AS-CLASS: bound OPTIONALLY, exactly like the graph three just above -- a bridge built
     // before these existed still boots; graphClassesAvailable() is false and both calls below are
     // documented no-ops.

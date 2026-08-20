@@ -71,6 +71,32 @@ struct OcTrack {
 };
 
 // One clip: every animated bone's tracks, plus the clip's own timing.
+// ONE NOTIFY: a named event the clip raises when playback crosses `time`.
+//
+// WHAT IT IS FOR. A footstep sound on the frame the foot lands, a muzzle flash on the frame the
+// weapon fires, a hit window opening partway through a swing. All of those are "at THIS moment in
+// this animation, tell the game" -- and until now an author had exactly one way to express it: read
+// the clip time in a graph every tick and compare. That is a polling loop for an event, it drifts
+// with frame rate, and it puts a number from the animation into the gameplay code where nobody
+// editing the animation will ever find it.
+//
+// A NAME, NOT AN ENUM OR AN ID. The name is fired as a graph EVENT, and GraphHost.Fire is already
+// name-agnostic -- it branches on nothing, so "OnFootstep" needs no registration anywhere in the
+// engine (see the CustomEvent node, which exists for exactly this shape). An enum would have made
+// every project share one vocabulary and required an engine change to add a footstep.
+//
+// NO DURATION, deliberately, and this is the one place this diverges from Unreal. Unreal has both a
+// Notify (instant) and a Notify State (begin/tick/end over a range), and the state form needs the
+// runtime to track which states are open, close them when a clip is interrupted, and decide what
+// happens when it loops mid-state. None of that machinery exists here yet, and a half-built version
+// that silently fails to close a state on interruption would be worse than not having it: the
+// symptom is a hit window that never shuts. Two instant notifies express the same thing today, and
+// say out loud that nothing is tracking the span between them.
+struct OcNotify {
+    f32 time = 0.0f;      // seconds from the clip start
+    std::string name;     // the event name fired; opaque here, exactly as OcAnimation::skeletonRef is
+};
+
 struct OcAnimation {
     f32  duration = 0.0f;                      // seconds
     OcAnimStorage storage = OcAnimStorage::Keyframed;
@@ -78,6 +104,12 @@ struct OcAnimation {
     u16  sampleRate = 0;                       // only meaningful for BakedUniform
     std::string skeletonRef;                   // which skeleton the bone indices belong to
     std::vector<OcTrack> tracks;
+
+    // Notifies, in whatever order the file lists them -- NOT required to be sorted, because a
+    // reader that needs them in time order can sort a handful of entries far more cheaply than
+    // every writer can be trusted to have done so. Empty for every clip written before they
+    // existed, which is every clip: the NOTF chunk is optional and its absence is not an error.
+    std::vector<OcNotify> notifies;
 
     // True when the duration, storage and every track are consistent.
     bool valid() const;

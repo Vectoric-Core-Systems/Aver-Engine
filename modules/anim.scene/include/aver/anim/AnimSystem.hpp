@@ -22,12 +22,32 @@ namespace aver::anim {
 // discovery is a project's business and this module has no idea where content lives.
 using AssetPathFn = std::string (*)(u64 objectId, void* user);
 
+// Called when a playing clip crosses one of its notifies. Supplied by the host FOR THE SAME REASON
+// AssetPathFn is: what a named event MEANS is a project's business. This module knows when the
+// clock passed 1.25 s and that the marker there says "OnFootstep"; it has, and should have, no idea
+// that somewhere there is a graph with an OnFootstep handler. The host owns that wire.
+//
+// `name` points into the loaded clip and is valid ONLY for the duration of the call. A sink that
+// wants to keep it must copy it.
+using AnimNotifyFn = void (*)(scene::Entity e, const char* name, void* user);
+
 // Owns the loaded rigs and clips, and the pose of every animated entity.
 class AnimSystem {
 public:
     // Installs the resolver. Without one nothing loads and tick() is a no-op that still advances
     // clocks, so a scrubbing editor works before any asset path is known.
     void setResolver(AssetPathFn fn, void* user) { resolve_ = fn; user_ = user; }
+
+    // Installs the notify sink. Without one, crossings are still TRACKED (so installing a sink
+    // mid-session does not deliver a backlog) but nothing is delivered -- an editor previewing a
+    // clip has no graphs to fire at, and should not pay for pretending otherwise.
+    void setNotifySink(AnimNotifyFn fn, void* user) { notify_ = fn; notifyUser_ = user; }
+    bool hasNotifySink() const { return notify_ != nullptr; }
+
+    // How many notifies this system has delivered since the last clear(). Exists so a test can
+    // assert on the COUNT without installing a sink that records, and so a host can see at a glance
+    // whether an "it never fires" report is about the sink or about the clip.
+    u64 notifiesFired() const { return fired_; }
 
     // Advances every playing CAnimator by `dt` and reposes the entity's skeleton.
     //
@@ -59,6 +79,17 @@ private:
         Pose pose;
         std::vector<Mat4> skin;
     };
+
+    // WHERE THE CLOCK WAS LAST TICK, which is the whole of what firing a notify needs and the whole
+    // of what a component cannot hold: CAnimator.time is a savable field a script may write at any
+    // moment, so "the previous value of time" is a property of this SYSTEM'S last observation, not
+    // of the entity. Kept in its own map rather than on Posed because a clip with no rig resolved
+    // still has a clock, still crosses its notifies, and never gets a Posed entry.
+    struct NotifyClock {
+        f32 prev = 0.0f;
+        u64 clip = 0;         // resets the history when the animator is pointed at a different clip
+        bool started = false; // false until the first observation, which is what makes step 1 inclusive
+    };
     // An asset that failed to load is cached as a null so a missing file is not re-opened every
     // frame for the life of the session.
     std::unordered_map<u64, std::unique_ptr<fmt::OcSkeleton>>  skeletons_;
@@ -71,8 +102,21 @@ private:
     // way would have inherited its GPU buffers with it. The generation is in the handle precisely
     // so a recycled slot is a different key.
     std::unordered_map<scene::Entity, Posed> posed_;
+    // Observes one animator's clock and fires whatever it passed. Split out of tick() because it
+    // is the one part of that loop with nothing to do with posing, and because its own state
+    // (clocks_) has a different lifetime rule than the pose cache beside it.
+    void stepNotifies(scene::Entity e, const scene::CAnimator& a, f32 step, bool paused);
+    // Runs one step's crossings out to the sink.
+    void deliver(scene::Entity e, const fmt::OcAnimation& c, const ClipStep& s);
+
+    std::unordered_map<scene::Entity, NotifyClock> clocks_;
     AssetPathFn resolve_ = nullptr;
     void* user_ = nullptr;
+    AnimNotifyFn notify_ = nullptr;
+    void* notifyUser_ = nullptr;
+    u64 fired_ = 0;
+    // Reused across entities and ticks so a frame of notifies costs no allocation after the first.
+    std::vector<u32> crossed_;
 };
 
 // The process-global system, matching scene::World::instance().

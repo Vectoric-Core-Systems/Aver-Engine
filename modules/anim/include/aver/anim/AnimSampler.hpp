@@ -21,6 +21,33 @@ f32 clipTime(const fmt::OcAnimation& clip, f32 seconds);
 // per FORMAT_SPECS.md 9.2 ("each key = Time + inTangent + value + outTangent").
 void sampleAnimation(const fmt::OcAnimation& clip, f32 seconds, Pose& inOut);
 
+// How a clock step is travelling through a clip. Everything notifiesCrossed needs that it cannot
+// work out from the two times alone -- a step from 1.9 to 0.1 in a 2 s clip is a forward wrap, a
+// backward scrub, or a whole loop plus a bit, and those fire different notifies.
+struct ClipStep {
+    f32  prev = 0.0f;          // where the clock was, already wrapped into [0, duration]
+    f32  now = 0.0f;           // where it is, likewise wrapped
+    bool forward = true;       // the SIGN OF THE STEP, not of `now - prev`
+    bool sweptWholeClip = false;   // one step covered >= the clip: everything is crossed, once
+    // THE FIRST STEP OF A CLIP INCLUDES ITS OWN START. Every other step uses a half-open interval
+    // -- (prev, now] going forward -- because prev was already fired last step and firing it again
+    // is a double-fire. But the first step has no last step, so a half-open rule would make a notify
+    // AT TIME ZERO the one notify that never fires on play, which is exactly where an author puts
+    // "the swing starts". Loop wraps do not need this flag: their second interval already includes 0.
+    bool inclusiveStart = false;
+};
+
+// Appends the INDEX of every notify in `clip` that `step` crossed, in the clip's own file order.
+//
+// Indices rather than names or pointers, so a caller can decide for itself whether to copy the name,
+// and so this stays usable if notifies ever grow a payload. Appends rather than assigns, so one
+// scratch vector can serve a whole tick's worth of entities.
+//
+// A notify outside [0, duration] -- which the format permits, since nothing on write clamps it -- is
+// clamped here rather than dropped. An author who drags a marker past the end of a clip and then
+// shortens the clip should get the event at the end, not silence.
+void notifiesCrossed(const fmt::OcAnimation& clip, const ClipStep& step, std::vector<u32>& outIndices);
+
 // Plays one clip against a skeleton, and crossfades when the clip changes.
 //
 // It holds POINTERS to clips it does not own; whatever owns the assets must outlive the player.

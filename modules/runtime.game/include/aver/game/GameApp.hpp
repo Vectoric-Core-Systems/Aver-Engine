@@ -313,6 +313,9 @@ private:
     // supported tearing down and re-initialising within one process (see ScriptHost.hpp's own "one
     // per process" phrasing), so this member is constructed once and lives exactly as long as GameApp
     // does -- never reset on a project change the way content_/level_ are.
+    // Installed onto anim::animSystem() once the scripting host is up -- see its own definition.
+    static void animNotify(scene::Entity e, const char* name, void* user);
+
     aver::scripting::ScriptHost scripts_;
     bool scriptsReady_ = false;
 

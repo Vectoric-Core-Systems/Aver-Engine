@@ -697,10 +697,42 @@ void GameApp::initScripting() {
         const i32 graphClasses = scripts_.declareGraphClasses(project_.contentDir());
         if (graphClasses > 0)
             AVER_INFO("[Graph] {} graph class(es) declared from '{}'", graphClasses, project_.contentDir());
+
+        // ANIMATION NOTIFIES, installed here rather than beside the asset resolver in GameContent
+        // for one reason: the sink needs the ScriptHost, and that lives on this class. It survives
+        // a content reload without being reinstalled -- AnimSystem::clear() drops the loaded clips
+        // and the playhead history, deliberately NOT the sink, because which host owns the wire
+        // does not change when a project reloads its content.
+        if (scripts_.graphFireAvailable()) {
+            anim::animSystem().setNotifySink(&GameApp::animNotify, this);
+            AVER_INFO("[Anim] animation notifies will be raised as graph events");
+        } else {
+            AVER_WARN("[Anim] this build's scripting bridge cannot be fired at; animation notifies "
+                      "will be tracked but not delivered (see ScriptHost::graphFireAvailable)");
+        }
     } else {
         AVER_INFO("[Game] scripting host unavailable ({}) -- graphs and any other C# gameplay will not run",
                   scripts_.declineReason());
     }
+#endif
+}
+
+    // THE ANIMATION-NOTIFY WIRE. A clip crossed a marker; that marker names a graph event; the
+    // entity playing the clip is the one to raise it on. Every part of that sentence belongs to a
+    // different module, and this function is the only place they meet -- which is exactly why the
+    // anim module takes a function pointer instead of knowing what a graph is.
+    //
+    // A MISSING HANDLER IS NOT AN ERROR HERE. graphFire returns false for an entity with no graph,
+    // a graph with no such event, and a bridge too old to be fired at, and none of those is worth a
+    // line per frame from an animation tick -- the managed router already logs each once per
+    // (entity, event) pair with a message that says which it was.
+void GameApp::animNotify(scene::Entity e, const char* name, void* user) {
+#if AVER_MODULE_SCRIPTING
+    auto* self = static_cast<GameApp*>(user);
+    if (!self || !name) return;
+    self->scripts_.graphFire(static_cast<i32>(e), name);
+#else
+    (void)e; (void)name; (void)user;
 #endif
 }
 

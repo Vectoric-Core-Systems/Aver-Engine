@@ -390,6 +390,129 @@ int main() {
         check(b.tracks[2].values.size() == b.tracks[2].times.size() * 9, "value count matches the stride");
     }
 
+    AVER_INFO("=== .ocanim notifies: a named event at a time in a clip ===");
+    {
+        fmt::OcAnimation a;
+        a.duration = 2.0f;
+        a.skeletonRef = "SK_Character";
+        fmt::OcTrack t;
+        t.boneIndex = 0;
+        t.channels = fmt::kOcChannelTranslation;
+        t.times = {0.0f, 2.0f};
+        t.values = {0,0,0,  1,2,3};
+        a.tracks = {t};
+        // Deliberately NOT in time order, and with a name carrying a space and a dot: the format
+        // interns names into the same string table skeletonRef uses, which has no such limit, and a
+        // reader that quietly required sorted input would be a rule nothing enforces on write.
+        a.notifies.push_back({1.25f, "OnFootstep.Right"});
+        a.notifies.push_back({0.5f,  "OnFootstep Left"});
+
+        std::vector<u8> bytes; std::string why;
+        check(fmt::writeOcAnim(a, bytes, &why), "a clip with notifies writes: " + why);
+        fmt::OcAnimation b;
+        check(fmt::parseOcAnim(bytes.data(), bytes.size(), b, &why), "and reads back: " + why);
+        check(b.notifies.size() == 2, "both notifies survive");
+        if (b.notifies.size() == 2) {
+            checkNear(b.notifies[0].time, 1.25f, 1e-6f, "the first notify keeps its time");
+            check(b.notifies[0].name == "OnFootstep.Right", "and its name, dot included");
+            checkNear(b.notifies[1].time, 0.5f, 1e-6f, "the second keeps its time");
+            check(b.notifies[1].name == "OnFootstep Left", "and its name, space included");
+            check(b.notifies[0].time > b.notifies[1].time,
+                  "FILE ORDER IS PRESERVED, not silently sorted -- see OcAnimation::notifies");
+        }
+        check(b.tracks.size() == 1 && b.tracks[0].values == a.tracks[0].values,
+              "and the clip itself is unaffected by carrying them");
+    }
+
+    AVER_INFO("=== .ocanim without notifies is byte-identical to before they existed ===");
+    {
+        // THE BACKWARD-COMPATIBILITY CLAIM, checked rather than asserted: a clip with no notifies
+        // must add NO chunk, so an engine that predates NOTF sees a file it would have written
+        // itself. Compared by BYTES, because "it still parses" would pass even if an empty chunk
+        // were being emitted.
+        fmt::OcAnimation a;
+        a.duration = 1.0f;
+        fmt::OcTrack t;
+        t.boneIndex = 0;
+        t.channels = fmt::kOcChannelTranslation;
+        t.times = {0.0f, 1.0f};
+        t.values = {0,0,0,  1,1,1};
+        a.tracks = {t};
+
+        std::vector<u8> plain; std::string why;
+        check(fmt::writeOcAnim(a, plain, &why), "the notify-free clip writes: " + why);
+
+        fmt::OcAnimation withOne = a;
+        withOne.notifies.push_back({0.5f, "OnBeat"});
+        std::vector<u8> marked;
+        check(fmt::writeOcAnim(withOne, marked, &why), "the same clip with one notify writes");
+        check(marked.size() > plain.size(), "adding a notify adds bytes (the chunk is really there)");
+
+        fmt::OcAnimation back;
+        check(fmt::parseOcAnim(plain.data(), plain.size(), back, &why), "the notify-free clip reads");
+        check(back.notifies.empty(), "and carries no notifies rather than an empty-named one");
+    }
+
+    AVER_INFO("=== .ocanim survives the round trip the ANIMATION EDITOR puts it through ===");
+    {
+        // WHAT THIS IS REALLY ABOUT. AnimEditor::save writes the WHOLE clip back from the struct it
+        // parsed, because adding a notify is an edit to the file and there is no partial write. So
+        // every field the parser does not capture is a field the editor DELETES the first time
+        // somebody drops a footstep marker on a clip -- silently, on an asset with no source art.
+        // Idempotence is the check that catches it: write, parse, write again, compare BYTES. If the
+        // second write differs, the parse lost something the first write emitted.
+        fmt::OcAnimation a;
+        a.duration = 3.5f;
+        a.storage = fmt::OcAnimStorage::Keyframed;
+        a.flags = fmt::kOcAnimLoop;
+        a.sampleRate = 0;
+        a.skeletonRef = "SK_Mannequin";
+
+        // Three tracks that differ in every way the format allows one to: which bone, which
+        // channels, which interpolation, how many keys.
+        fmt::OcTrack t0;
+        t0.boneIndex = 0;
+        t0.channels = fmt::kOcChannelTranslation | fmt::kOcChannelRotation;
+        t0.interp = fmt::OcInterp::Linear;
+        t0.times = {0.0f, 1.75f, 3.5f};
+        t0.values = {0,0,0,      0,0,0,1,
+                     5,0,0,      0,0,0,1,
+                     10,0,0,     0,0,0,1};
+        fmt::OcTrack t1;
+        t1.boneIndex = 7;
+        t1.channels = fmt::kOcChannelScale;
+        t1.interp = fmt::OcInterp::Step;
+        t1.times = {0.0f, 3.5f};
+        t1.values = {1,1,1,  2,2,2};
+        a.tracks = {t0, t1};
+        a.notifies = {{0.25f, "OnFootstep.L"}, {2.0f, "OnFootstep.R"}, {3.5f, "OnLand"}};
+
+        std::vector<u8> first; std::string why;
+        check(fmt::writeOcAnim(a, first, &why), "the fully-populated clip writes: " + why);
+
+        fmt::OcAnimation back;
+        check(fmt::parseOcAnim(first.data(), first.size(), back, &why), "and parses: " + why);
+
+        std::vector<u8> second;
+        check(fmt::writeOcAnim(back, second, &why), "and writes again: " + why);
+        check(first == second,
+              "BYTE-IDENTICAL after a parse and a rewrite -- so opening a clip in the editor and "
+              "saving it back cannot quietly drop a field");
+
+        // Named individually as well, because "the bytes match" tells you nothing about WHICH field
+        // went missing on the day it stops matching.
+        checkNear(back.duration, a.duration, 1e-6f, "duration survives");
+        check(back.flags == a.flags, "flags survive");
+        check(back.storage == a.storage, "storage survives");
+        check(back.skeletonRef == a.skeletonRef, "the skeleton reference survives");
+        check(back.tracks.size() == 2, "both tracks survive");
+        check(back.notifies.size() == 3, "all three notifies survive");
+        if (back.tracks.size() == 2) {
+            check(back.tracks[1].boneIndex == 7 && back.tracks[1].interp == fmt::OcInterp::Step,
+                  "including the second track's bone index and its STEP interpolation");
+        }
+    }
+
     AVER_INFO("=== .ocanim refuses malformed clips ===");
     {
         std::vector<u8> bytes; std::string why;

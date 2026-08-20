@@ -261,6 +261,18 @@ public:
 
     const std::string& path() const override { return path_; }
     std::string title() const override { return std::filesystem::path(path_).filename().string(); }
+
+    // THIS EDITOR COULD NOT WRITE ANYTHING UNTIL NOW. It opened a clip, drew it, and that was the
+    // whole contract -- which was honest while everything on screen was derived from the file. A
+    // notify is the first thing an author can CREATE here, so the tab needs the dirty/save pair
+    // every other asset editor already has.
+    bool dirty() const override { return dirty_; }
+    bool save(std::string* why) override {
+        if (!isClip_) { if (why) *why = "a skeleton has nothing to save from this tab"; return false; }
+        if (!fmt::saveOcAnim(path_, clip_, why)) return false;
+        dirty_ = false;
+        return true;
+    }
     void draw(Engine& e) override;
     void onFileChanged() override { reload_ = true; }
 
@@ -270,6 +282,7 @@ private:
     void drawTracks();
     void drawBones();
     void drawAssetBrowser();
+    void drawNotifies();
     void buildPreview(Engine& e);
     void reloadIfNeeded();
 
@@ -307,6 +320,9 @@ private:
     fmt::OcSkeleton skel_;
     bool isClip_ = true;
     bool reload_ = false;
+    bool dirty_ = false;
+    int  selectedNotify_ = -1;
+    char notifyNameBuf_[96] = {};
 
     f32 time_ = 0.0f;
     f32 speed_ = 1.0f;
@@ -568,6 +584,106 @@ void AnimEditor::drawTransport() {
 #endif
 }
 
+// The notify list: add at the playhead, rename, retime, delete.
+//
+// ADDED AT THE PLAYHEAD rather than at a typed time, because placing an event in an animation is
+// something an author does by SCRUBBING to the frame and saying "here" -- the number is the result,
+// not the input. It is editable afterwards for the case where the number is what you actually have.
+void AnimEditor::drawNotifies() {
+#if AVER_WITH_IMGUI
+    if (!isClip_) { ImGui::TextDisabled("a skeleton has no notifies"); return; }
+
+    // SAVE LIVES HERE, next to the only thing in this editor that can be edited. The host only
+    // ever calls saveAllDirty() from the quit prompt, so without this the sole way to write an
+    // authored notify to disk would be to close the editor -- and Ctrl+S alongside it, matching
+    // GraphEditor's own toolbar exactly, because that is where a hand already goes.
+    ImGui::BeginDisabled(!dirty_);
+    const bool saveClicked = ImGui::SmallButton("Save");
+    ImGui::EndDisabled();
+    const bool saveKey = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+                         ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false);
+    if (dirty_ && (saveClicked || saveKey)) {
+        std::string why;
+        if (!save(&why)) AVER_ERROR("[AnimEditor] save failed for '{}': {}", path_, why);
+    }
+    ImGui::SameLine();
+
+    if (ImGui::SmallButton("Add at playhead")) {
+        fmt::OcNotify n;
+        n.time = time_;
+        n.name = "OnNotify";
+        clip_.notifies.push_back(n);
+        selectedNotify_ = static_cast<int>(clip_.notifies.size()) - 1;
+        std::snprintf(notifyNameBuf_, sizeof notifyNameBuf_, "%s", n.name.c_str());
+        dirty_ = true;
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("%zu notify(s)", clip_.notifies.size());
+
+    if (clip_.notifies.empty()) {
+        ImGui::TextDisabled("Scrub to a frame and press Add.");
+        return;
+    }
+
+    for (usize i = 0; i < clip_.notifies.size(); ++i) {
+        ImGui::PushID(static_cast<int>(i));
+        fmt::OcNotify& n = clip_.notifies[i];
+        const bool sel = (static_cast<int>(i) == selectedNotify_);
+
+        // THE TIME AND THE NAME GO INSIDE THE SELECTABLE, not beside it. A Selectable given a zero
+        // width spans the whole line, so a SameLine after one starts at the right-hand edge and
+        // everything drawn there is off the end of the panel. PushID above already makes the row
+        // unique, so two notifies with identical text are still two rows.
+        char row[160];
+        std::snprintf(row, sizeof row, "%7.3f s   %s", n.time, n.name.c_str());
+        if (ImGui::Selectable(row, sel)) {
+            selectedNotify_ = static_cast<int>(i);
+            std::snprintf(notifyNameBuf_, sizeof notifyNameBuf_, "%s", n.name.c_str());
+            // Selecting a notify moves the playhead to it, which is the only way to SEE what it is
+            // marking. Pauses, for the reason the scrubber does: a playhead that keeps running has
+            // not been placed anywhere.
+            time_ = n.time;
+            playing_ = false;
+        }
+
+        if (sel) {
+            ImGui::Indent();
+            ImGui::SetNextItemWidth(180.0f * (ImGui::GetFontSize() / 16.0f));
+            ImGui::InputText("Event", notifyNameBuf_, sizeof notifyNameBuf_);
+            // Committed on deactivate, the same activate/apply/deactivate boundary the graph editor's
+            // own text fields use, so one typed name is one edit and not one per keystroke.
+            if (ImGui::IsItemDeactivatedAfterEdit()) {
+                std::string next = notifyNameBuf_;
+                // A name is fired as a graph event and lands in a NODE-adjacent record, so leading and
+                // trailing space is silently unhelpful rather than an error worth refusing.
+                while (!next.empty() && next.front() == ' ') next.erase(next.begin());
+                while (!next.empty() && next.back() == ' ') next.pop_back();
+                if (!next.empty() && next != n.name) { n.name = next; dirty_ = true; }
+            }
+            f32 t = n.time;
+            const f32 dur = clip_.duration > 0.0f ? clip_.duration : 1.0f;
+            ImGui::SetNextItemWidth(180.0f * (ImGui::GetFontSize() / 16.0f));
+            if (ImGui::SliderFloat("Time", &t, 0.0f, dur, "%.3f s")) {
+                n.time = t;
+                time_ = t;
+                playing_ = false;
+                dirty_ = true;
+            }
+            if (ImGui::SmallButton("Delete")) {
+                clip_.notifies.erase(clip_.notifies.begin() + static_cast<isize>(i));
+                selectedNotify_ = -1;
+                dirty_ = true;
+                ImGui::Unindent();
+                ImGui::PopID();
+                break;   // the vector moved under this loop; next frame redraws it
+            }
+            ImGui::Unindent();
+        }
+        ImGui::PopID();
+    }
+#endif
+}
+
 void AnimEditor::drawTimeline() {
 #if AVER_WITH_IMGUI
     const f32 dur = clip_.duration > 0.0f ? clip_.duration : 1.0f;
@@ -583,6 +699,23 @@ void AnimEditor::drawTimeline() {
             const f32 x = p0.x + (p1.x - p0.x) * (dur > 0.0f ? k / dur : 0.0f);
             dl->AddLine(ImVec2(x, p1.y - 4.0f), ImVec2(x, p1.y), IM_COL32(240, 190, 90, 200), 1.0f);
         }
+    }
+
+    // NOTIFIES, on the SAME bar as the keys and above them. Unreal gives them their own lane, and
+    // that is the right answer once there are lanes to give; with one clip and no curves the thing
+    // an author needs is the notify's position against the KEYS it is being placed relative to --
+    // a footstep belongs on the frame the foot plants, and that frame is one of those yellow ticks.
+    for (usize i = 0; i < clip_.notifies.size(); ++i) {
+        const fmt::OcNotify& n = clip_.notifies[i];
+        const f32 x = p0.x + (p1.x - p0.x) * (dur > 0.0f ? n.time / dur : 0.0f);
+        const bool sel = (static_cast<int>(i) == selectedNotify_);
+        const ImU32 col = sel ? IM_COL32(255, 220, 90, 255) : IM_COL32(120, 200, 255, 230);
+        // A downward triangle sitting on the bar: a shape rather than another vertical line, so a
+        // notify is never mistaken for the key ticks it sits among.
+        const f32 top = p0.y;
+        const ImVec2 tri[3] = {ImVec2(x - 5.0f, top), ImVec2(x + 5.0f, top), ImVec2(x, top + 9.0f)};
+        dl->AddConvexPolyFilled(tri, 3, col);
+        dl->AddLine(ImVec2(x, top), ImVec2(x, p1.y), col, sel ? 2.0f : 1.0f);
     }
 #endif
 }
@@ -759,6 +892,10 @@ void AnimEditor::draw(Engine& e) {
     ImGui::SameLine();
 
     if (ImGui::BeginChild("tracks", ImVec2(0, h), true)) {
+        ImGui::TextDisabled("NOTIFIES");
+        if (ImGui::BeginChild("notifies", ImVec2(0, h * 0.38f), false)) drawNotifies();
+        ImGui::EndChild();
+        ImGui::Separator();
         ImGui::TextDisabled("TRACKS");
         drawTracks();
     }

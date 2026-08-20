@@ -16,6 +16,12 @@ constexpr u32 kChunkSKEL = avrFourCC("SKEL");
 constexpr u32 kChunkSTRT = avrFourCC("STRT");
 constexpr u32 kChunkAHDR = avrFourCC("AHDR");
 constexpr u32 kChunkTRKS = avrFourCC("TRKS");
+// OPTIONAL, and that is the whole backward-compatibility story. A reader asks for a chunk by id
+// and gets null when it is absent, so an engine that predates notifies opens a notify-bearing
+// clip and plays it exactly as it always did -- it simply never asks for NOTF. Marking it
+// Required instead would have made those files unopenable, which is the difference between an
+// additive format change and a breaking one.
+constexpr u32 kChunkNOTF = avrFourCC("NOTF");
 
 // Sets `why` and returns false.
 bool fail(std::string* why, std::string m) { if (why) *why = std::move(m); return false; }
@@ -229,6 +235,18 @@ bool writeOcAnim(const OcAnimation& in, std::vector<u8>& out, std::string* why) 
         }
     }
 
+    // Notifies, before AHDR only because both intern into the same string table and the table is
+    // written last. A clip with none adds no chunk at all rather than an empty one.
+    std::vector<u8> notf;
+    if (!in.notifies.empty()) {
+        W w{notf};
+        w.u32v(static_cast<u32>(in.notifies.size()));
+        for (const OcNotify& n : in.notifies) {
+            w.f32v(n.time);
+            w.u32v(strt.add(n.name));
+        }
+    }
+
     std::vector<u8> ahdr;
     {
         W w{ahdr};
@@ -255,6 +273,8 @@ bool writeOcAnim(const OcAnimation& in, std::vector<u8>& out, std::string* why) 
     f.flags = kAvrFlagCooked;
     f.add(kChunkAHDR, std::move(ahdr), kAvrChunkRequired);
     f.add(kChunkTRKS, std::move(trks));
+    if (!notf.empty()) f.add(kChunkNOTF, std::move(notf));
+    // AFTER the notify names have been interned, or the table would be written without them.
     f.add(kChunkSTRT, strt.bytes());
     return writeAvr1(f, out, why);
 }
@@ -279,6 +299,26 @@ bool parseOcAnim(const u8* bytes, usize size, OcAnimation& out, std::string* why
     out.flags      = r.u8v();
     out.sampleRate = r.u16v();
     out.skeletonRef= std::string(strt.get(r.u32v()));
+
+    // NOTIFIES. Absent is the ordinary case and not an error -- every clip written before they
+    // existed has no NOTF chunk, and find() answering null is exactly how this format says "this
+    // file predates that idea" rather than "this file is broken".
+    if (const AvrChunk* notf = f.find(kChunkNOTF)) {
+        R n{notf->data.data(), notf->data.data() + notf->data.size()};
+        const u32 count = n.u32v();
+        // Bounded by what the chunk could POSSIBLY hold (4 bytes of time + 4 of name offset each)
+        // before reserving, so a corrupt count cannot ask for an enormous allocation on the way to
+        // failing. The reader below still checks each read; this only stops the allocation.
+        const usize maxPossible = notf->data.size() / 8;
+        if (count > maxPossible) return fail(why, ".ocanim: NOTF says it holds more notifies than it can");
+        out.notifies.reserve(count);
+        for (u32 i = 0; i < count; ++i) {
+            OcNotify entry;
+            entry.time = n.f32v();
+            entry.name = std::string(strt.get(n.u32v()));
+            out.notifies.push_back(std::move(entry));
+        }
+    }
     if (!r.ok) return fail(why, ".ocanim: truncated AHDR");
     if (n == 0) return fail(why, ".ocanim: TrackCount is 0");
     if (out.storage != OcAnimStorage::Keyframed && out.storage != OcAnimStorage::BakedUniform)

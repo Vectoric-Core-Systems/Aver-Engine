@@ -19,12 +19,18 @@ namespace Aver.Graph;
 /// reason: Aver.Framework cannot see HostBridge either, and already solved this the same way for
 /// Actors.Get. See GraphCompiler's own FireEventMethod for the emitted IL call site: a plain static-
 /// method call on THIS class, exactly like every other GraphInterop wrapper GraphCompiler already
-/// calls by reflection -- no native ABI, no ScriptHost export, because the whole call graph (compiled
-/// IL -> this router -> the target's own GraphHost.Fire) never leaves managed code. See this task's
-/// own report for why a native "ScriptHost::graphFire" seam was investigated and NOT added: nothing
-/// in native code fires a graph event today (no physics contact, no engine-side hit calls into
-/// scripting at all -- grepped and confirmed empty), so an export with no caller would be dead code,
-/// not a seam.</summary>
+/// calls by reflection -- no native ABI, no ScriptHost export needed for THIS path, because a
+/// FireEvent node's whole call graph (compiled IL -> this router -> the target's own GraphHost.Fire)
+/// never leaves managed code.
+///
+/// A NATIVE SEAM NOW EXISTS BESIDE IT, and this comment used to say it never would. It recorded that
+/// "ScriptHost::graphFire" had been investigated and left unbuilt because nothing in native code
+/// fired a graph event -- true when written, and no longer true: ANIMATION NOTIFIES fire one. A
+/// marker crossed on a playing clip reaches HostBridge.GraphFire, which calls the SAME FireEventRouter
+/// this delegate is bound to rather than a second lookup of its own, so a footstep fired by a clip and
+/// one fired by a graph resolve their target identically and cannot drift apart. What has not changed
+/// is the reason THIS field exists: Aver.Graph still cannot see HostBridge, so a FireEvent node still
+/// reaches the router through a delegate installed from above.</summary>
 public static class GraphEvents
 {
     /// <summary>Installed once, at bootstrap, by HostBridge.SetupManagedActors -- resolves (target

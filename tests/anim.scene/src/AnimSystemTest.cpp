@@ -11,6 +11,7 @@
 #include <cmath>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 using namespace aver;
 
@@ -33,12 +34,29 @@ static void checkNear(f32 got, f32 want, f32 eps, const std::string& what) {
 // Where the fixture assets are written, and what the resolver maps ids onto.
 static std::string g_dir;
 static u64 kSkelId = 0x5EE10001ull, kClipId = 0xC11B0001ull;
+// A second clip, carrying notifies. Separate from the pose fixture so the existing checks keep
+// measuring a clip with none -- which is what proves notifies cost a clip without them nothing.
+static u64 kNotifyClipId = 0xC11B0002ull;
+
+// WHAT THE SINK SAW, in order. The host end of the wire in a test is a vector; in the editor it
+// is ScriptHost::graphFire. The system cannot tell the difference, which is the point of it
+// taking a function pointer.
+static std::vector<std::string> g_fired;
+static void recordNotify(scene::Entity, const char* name, void*) { g_fired.emplace_back(name); }
+// The whole of what the sink saw since the last reset, as one string, so an expectation reads as
+// the sequence an author would describe: "B then C".
+static std::string firedSeq() {
+    std::string out;
+    for (const std::string& n : g_fired) { if (!out.empty()) out += " "; out += n; }
+    return out;
+}
 
 // The host's job: an id to a path. Deliberately a plain function, because the system takes a
 // function pointer rather than owning any idea of where content lives.
 static std::string resolvePath(u64 id, void*) {
     if (id == kSkelId) return g_dir + "/rig.ocskel";
     if (id == kClipId) return g_dir + "/clip.ocanim";
+    if (id == kNotifyClipId) return g_dir + "/notify.ocanim";
     return {};
 }
 
@@ -69,6 +87,13 @@ int main() {
         t.values = {0, 0, 50,  100, 0, 50};
         a.tracks.push_back(t);
         check(fmt::saveOcAnim(g_dir + "/clip.ocanim", a, &why), "the fixture clip writes: " + why);
+
+        // The same clip with markers on it: at the very start, in the middle, and at the very end.
+        // Both ends on purpose -- they are where an interval bug shows up as an event that never
+        // fires or one that fires twice a loop.
+        fmt::OcAnimation n = a;
+        n.notifies = {{0.0f, "Start"}, {0.5f, "Mid"}, {1.0f, "End"}};
+        check(fmt::saveOcAnim(g_dir + "/notify.ocanim", n, &why), "the notify clip writes: " + why);
     }
 
     scene::World& w = scene::World::instance();
@@ -213,6 +238,93 @@ int main() {
 
         w.destroy(reborn);
         w.flush();
+    }
+
+    AVER_INFO("a playing clip fires its notifies");
+    {
+        sys.setNotifySink(&recordNotify, nullptr);
+        check(sys.hasNotifySink(), "the sink installs");
+
+        const scene::Entity e = w.create("notified");
+        auto* a = static_cast<scene::CAnimator*>(w.addComponent(e, scene::kComponentAnimator));
+        a->clip = kNotifyClipId;
+
+        // NO SKELETAL MESH ON THIS ENTITY AT ALL. A notify is an event on a clock, and the clock
+        // runs whether or not a rig ever resolved -- an audio cue on an unrigged prop is not less
+        // real for having no bones. If this ever regresses to "only posed entities fire", this is
+        // the check that says so.
+        check(!w.component<scene::CSkeletalMesh>(e, scene::kComponentSkeletalMesh),
+              "the entity has no rig, deliberately");
+
+        g_fired.clear();
+        sys.tick(w, 0.1f);
+        check(firedSeq() == "Start",
+              "the first tick fires the marker AT ZERO -- the one a half-open interval would lose");
+
+        g_fired.clear();
+        sys.tick(w, 0.1f);   // 0.1 -> 0.2
+        check(firedSeq().empty(), "a tick over empty clip time fires nothing");
+
+        g_fired.clear();
+        sys.tick(w, 0.4f);   // 0.2 -> 0.6, over Mid
+        check(firedSeq() == "Mid", "and a tick that crosses one fires exactly it");
+
+        g_fired.clear();
+        sys.tick(w, 0.2f);   // 0.6 -> 0.8
+        check(firedSeq().empty(), "NOT AGAIN on the next tick, which is the double-fire this guards");
+
+        // Round the loop: 0.8 -> 1.1 wraps to 0.1, crossing End (at 1.0) and Start (at 0).
+        g_fired.clear();
+        sys.tick(w, 0.3f);
+        check(firedSeq() == "Start End" || firedSeq() == "End Start",
+              "a loop fires the end of the clip and its start, both");
+
+        // ---- a paused animator is being INSPECTED, not played
+        g_fired.clear();
+        a->flags |= scene::kAnimatorPaused;
+        a->time = 0.9f;      // a script (or a scrubbing editor) jumping the playhead
+        sys.tick(w, 0.1f);
+        check(firedSeq().empty(), "scrubbing a PAUSED animator across a marker fires nothing");
+        a->flags &= ~scene::kAnimatorPaused;
+        g_fired.clear();
+        sys.tick(w, 0.05f);  // 0.9 -> 0.95, still short of End
+        check(firedSeq().empty(),
+              "and resuming continues from where the scrub left it, not from where it was paused");
+
+        // ---- a step that swallows the clip
+        g_fired.clear();
+        sys.tick(w, 10.0f);
+        check(g_fired.size() == 3, "a stalled frame delivers each marker ONCE, not once per lap");
+
+        // ---- pointing the animator at a different clip forgets the old playhead
+        g_fired.clear();
+        a->clip = kClipId;   // the notify-free fixture
+        sys.tick(w, 0.1f);
+        check(firedSeq().empty(), "a clip with no notifies fires none");
+
+        const u64 firedBefore = sys.notifiesFired();
+        check(firedBefore > 0, "the system counts what it delivered");
+
+        // ---- no sink means no delivery, and NO BACKLOG when one is installed later
+        sys.setNotifySink(nullptr, nullptr);
+        check(!sys.hasNotifySink(), "the sink uninstalls");
+        a->clip = kNotifyClipId;
+        a->time = 0.0f;
+        g_fired.clear();
+        sys.tick(w, 0.6f);   // would have crossed Start and Mid
+        check(firedSeq().empty(), "with no sink installed, nothing is delivered");
+        check(sys.notifiesFired() == firedBefore, "and nothing is counted");
+        sys.setNotifySink(&recordNotify, nullptr);
+        g_fired.clear();
+        sys.tick(w, 0.1f);   // 0.6 -> 0.7, crosses nothing
+        check(firedSeq().empty(),
+              "installing a sink mid-session delivers NO BACKLOG -- the crossings it missed are gone, "
+              "not queued");
+
+        w.destroy(e);
+        w.flush();
+        sys.tick(w, 0.1f);   // the prune runs here
+        sys.setNotifySink(nullptr, nullptr);
     }
 
     std::filesystem::remove_all(g_dir, ec);

@@ -1,6 +1,7 @@
 // Clip sampling: key lookup, the three interpolations, and the player's clock.
 #include "aver/anim/AnimSampler.hpp"
 
+#include <algorithm>
 #include <cmath>
 
 namespace aver::anim {
@@ -124,6 +125,38 @@ void sampleAnimation(const fmt::OcAnimation& clip, f32 seconds, Pose& inOut) {
             x.rotation = Quat{v[0], v[1], v[2], v[3]}.normalized();
         if (sampleChannel(t, fmt::kOcChannelScale, seconds, v, 3))
             x.scale = Vec3{v[0], v[1], v[2]};
+    }
+}
+
+void notifiesCrossed(const fmt::OcAnimation& clip, const ClipStep& step, std::vector<u32>& outIndices) {
+    if (clip.notifies.empty()) return;
+    const f32 dur = clip.duration;
+
+    for (usize i = 0; i < clip.notifies.size(); ++i) {
+        const f32 t = dur > 0.0f ? std::min(std::max(clip.notifies[i].time, 0.0f), dur)
+                                 : 0.0f;
+        bool hit;
+        if (step.sweptWholeClip) {
+            // ONE STEP, ONE FIRING, however many times round the clip it went. A frame that lost a
+            // second to a breakpoint or a level load should not deliver forty footsteps at once --
+            // and the alternative (firing per lap) is not more correct, it is just louder about a
+            // frame that already went wrong.
+            hit = true;
+        } else if (step.forward) {
+            hit = (step.now >= step.prev)
+                    ? (step.inclusiveStart ? (t >= step.prev && t <= step.now)
+                                           : (t >  step.prev && t <= step.now))
+                    // WRAPPED: the tail of the clip and then its head, and the head half INCLUDES 0
+                    // so a start-of-clip notify fires on every loop rather than only on the first.
+                    : ((t > step.prev && t <= dur) || (t >= 0.0f && t <= step.now));
+        } else {
+            hit = (step.now <= step.prev)
+                    ? (step.inclusiveStart ? (t <= step.prev && t >= step.now)
+                                           : (t <  step.prev && t >= step.now))
+                    // Wrapped the other way: off the front of the clip and back onto its end.
+                    : ((t < step.prev && t >= 0.0f) || (t >= step.now && t <= dur));
+        }
+        if (hit) outIndices.push_back(static_cast<u32>(i));
     }
 }
 

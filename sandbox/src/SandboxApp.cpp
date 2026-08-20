@@ -1252,6 +1252,13 @@ public:
             hd.scriptsDir = resolveScriptsDir();
             scripts_.init(hd);
 
+            // ANIMATION NOTIFIES. The editor wants this as much as a shipped game does -- a clip
+            // previewed in Play mode should fire what it fires -- and the sink survives every
+            // level and project reload below, because AnimSystem::clear() drops clips and
+            // playheads without dropping the wire.
+            if (scripts_.graphFireAvailable())
+                anim::animSystem().setNotifySink(&SandboxApp::animNotify, this);
+
             // GRAPH-AS-CLASS CATCH-UP, for a project opened from the COMMAND LINE. applyProject's own
             // "Starting scripts" stage already tries scripts_.declareGraphClasses/spawnClassPlacements
             // (see that function's own comment), but a project named on argv is opened at ~line 850,
@@ -10658,6 +10665,21 @@ private:
     bool particlesAttached_=false;
 #endif
 #if AVER_MODULE_SCRIPTING
+    // THE ANIMATION-NOTIFY WIRE. A clip crossed a marker; that marker names a graph event; the
+    // entity playing the clip is the one to raise it on. Every part of that sentence belongs to a
+    // different module, and this function is the only place they meet -- which is exactly why the
+    // anim module takes a function pointer instead of knowing what a graph is.
+    //
+    // A MISSING HANDLER IS NOT AN ERROR HERE. graphFire returns false for an entity with no graph,
+    // a graph with no such event, and a bridge too old to be fired at, and none of those is worth a
+    // line per frame from an animation tick -- the managed router already logs each once per
+    // (entity, event) pair with a message that says which it was.
+    static void animNotify(scene::Entity e, const char* name, void* user) {
+        auto* self = static_cast<SandboxApp*>(user);
+        if (!self || !name) return;
+        self->scripts_.graphFire(static_cast<i32>(e), name);
+    }
+
     scripting::ScriptHost scripts_;
 #endif
     // The retained game UI's renderer. Heap-owned because create() may decline.

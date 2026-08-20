@@ -34,6 +34,17 @@ const T* cachedLoad(std::unordered_map<u64, std::unique_ptr<T>>& cache, u64 id,
     return raw;
 }
 
+// Where a raw animator clock lands inside a clip. ONE COPY, called by both the sampling path and
+// the notify path, because the two disagreeing about where the playhead is would show up as a
+// footstep landing on the wrong frame -- a symptom nobody would trace back to a duplicated fmod.
+f32 wrapClipTime(const fmt::OcAnimation& c, f32 time, bool once) {
+    if (c.duration <= 0.0f) return 0.0f;
+    if (once) return time < 0.0f ? 0.0f : (time > c.duration ? c.duration : time);
+    f32 t = std::fmod(time, c.duration);
+    if (t < 0.0f) t += c.duration;
+    return t;
+}
+
 } // namespace
 
 const fmt::OcSkeleton* AnimSystem::skeleton(u64 objectId) {
@@ -54,6 +65,10 @@ void AnimSystem::clear() {
     skeletons_.clear();
     clips_.clear();
     posed_.clear();
+    // The clock history goes with the clips it refers to. Keeping it would have the first tick after
+    // a project reload compare against times measured in a world that no longer exists.
+    clocks_.clear();
+    fired_ = 0;
 }
 
 void AnimSystem::tick(scene::World& world, f32 dt) {
@@ -63,6 +78,13 @@ void AnimSystem::tick(scene::World& world, f32 dt) {
     for (auto it = posed_.begin(); it != posed_.end(); ) {
         if (world.valid(it->first) && !world.destroyPending(it->first)) ++it;
         else it = posed_.erase(it);
+    }
+    // The clock history is pruned on the SAME rule and for the same reason -- an entry that outlived
+    // its entity would hand a recycled handle somebody else's playhead, and the first step measured
+    // from it could fire a burst of notifies that nothing in the new entity's clip ever passed.
+    for (auto it = clocks_.begin(); it != clocks_.end(); ) {
+        if (world.valid(it->first) && !world.destroyPending(it->first)) ++it;
+        else it = clocks_.erase(it);
     }
 
     scene::ComponentPool* animators = world.pool(scene::kComponentAnimator);
@@ -81,7 +103,16 @@ void AnimSystem::tick(scene::World& world, f32 dt) {
 
         // THE CLOCK ADVANCES EVEN WITHOUT A RIG. Time is data on the component, so a scrubbing
         // editor and a save file both work before any asset has resolved.
-        if (!(a->flags & scene::kAnimatorPaused)) a->time += dt * speed;
+        const bool paused = (a->flags & scene::kAnimatorPaused) != 0;
+        if (!paused) a->time += dt * speed;
+
+        // NOTIFIES, here rather than beside the sampling below, because a clip crosses its markers
+        // whether or not a rig ever resolved -- the two `continue`s that follow are about having
+        // something to POSE, and an audio cue on an unrigged prop is not less real for having no
+        // bones. This is also before any weight or blend consideration for the same reason: a notify
+        // is an event on a clock, not a contribution to a pose. A clip faded to zero weight still
+        // reaches the moment its footstep is on.
+        stepNotifies(e, *a, dt * speed, paused);
 
         const auto* sm = world.component<scene::CSkeletalMesh>(e, scene::kComponentSkeletalMesh);
         if (!sm || sm->skeleton == 0) continue;
@@ -100,15 +131,7 @@ void AnimSystem::tick(scene::World& world, f32 dt) {
         if (const fmt::OcAnimation* c = clip(a->clip)) {
             // The loop flag lives on the COMPONENT, not the clip, so one clip can be looped by one
             // actor and played once by another.
-            f32 t = a->time;
-            if (c->duration > 0.0f) {
-                if (a->flags & scene::kAnimatorOnce) {
-                    t = t < 0.0f ? 0.0f : (t > c->duration ? c->duration : t);
-                } else {
-                    t = std::fmod(t, c->duration);
-                    if (t < 0.0f) t += c->duration;
-                }
-            }
+            const f32 t = wrapClipTime(*c, a->time, (a->flags & scene::kAnimatorOnce) != 0);
             if (weight >= 0.999f) {
                 sampleAnimation(*c, t, p.pose);
             } else if (weight > 0.0f) {
@@ -121,6 +144,67 @@ void AnimSystem::tick(scene::World& world, f32 dt) {
             }
         }
         poseToSkinning(*skel, p.pose, p.skin);
+    }
+}
+
+void AnimSystem::stepNotifies(scene::Entity e, const scene::CAnimator& a, f32 step, bool paused) {
+    const fmt::OcAnimation* c = a.clip != 0 ? clip(a.clip) : nullptr;
+    if (!c || c->duration <= 0.0f) {
+        // No clip, or one with no length to travel: forget any history so a later clip starts clean
+        // rather than measuring its first step from a stranger's playhead.
+        clocks_.erase(e);
+        return;
+    }
+
+    NotifyClock& clock = clocks_[e];
+    if (clock.clip != a.clip) { clock = NotifyClock{}; clock.clip = a.clip; }
+
+    const f32 wrapped = wrapClipTime(*c, a.time, (a.flags & scene::kAnimatorOnce) != 0);
+
+    // A PAUSED ANIMATOR FIRES NOTHING, and this is the deliberate answer to scrubbing. A script (or
+    // an editor) that writes CAnimator.time while paused is INSPECTING the clip, and delivering a
+    // gunshot every time somebody drags a slider is the behaviour nobody wants. The playhead is
+    // still recorded, so resuming continues from where the scrub left it rather than replaying the
+    // span that was skipped.
+    if (paused || step == 0.0f || !clock.started) {
+        const bool first = !clock.started;
+        clock.started = true;
+        clock.prev = wrapped;
+        // The FIRST observation of a running clip is not silent: it fires whatever sits exactly at
+        // the start. See ClipStep::inclusiveStart. It is skipped for a paused first observation,
+        // which is a clip sitting still rather than one starting.
+        if (first && !paused && step != 0.0f) {
+            ClipStep s;
+            s.prev = 0.0f;
+            s.now = wrapped;
+            s.forward = step > 0.0f;
+            s.inclusiveStart = true;
+            deliver(e, *c, s);
+        }
+        return;
+    }
+
+    ClipStep s;
+    s.prev = clock.prev;
+    s.now = wrapped;
+    s.forward = step > 0.0f;
+    s.sweptWholeClip = std::fabs(step) >= c->duration;
+    clock.prev = wrapped;
+    deliver(e, *c, s);
+}
+
+void AnimSystem::deliver(scene::Entity e, const fmt::OcAnimation& c, const ClipStep& s) {
+    if (!notify_) return;   // still tracked above, so installing a sink later delivers no backlog
+    crossed_.clear();
+    notifiesCrossed(c, s, crossed_);
+    for (const u32 i : crossed_) {
+        ++fired_;
+        // BY INDEX INTO THE LIVE CLIP, and the sink is called immediately rather than queued. A
+        // queue would need the names copied (the clip is cached and could in principle be evicted
+        // between filling the queue and draining it) and would put the event a frame after the pose
+        // it belongs to. Calling straight through costs the sink the right to unload this clip from
+        // inside itself, which nothing does and which a comment is cheaper than defending against.
+        notify_(e, c.notifies[i].name.c_str(), notifyUser_);
     }
 }
 

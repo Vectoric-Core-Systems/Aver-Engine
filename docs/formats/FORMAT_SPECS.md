@@ -371,7 +371,7 @@ JOINTS/WEIGHTS live in the vertex attribute buffers (`R8G8B8A8_UINT`/`R16G16B16A
 
 ## 9. `.ocanim` — animation clip
 
-Subtype `'ANIM'`. Fixes the three fidelity losses from recon `assets §7/§9`: **no forced 30 fps resample**, **cubicspline tangents preserved**, **step curves preserved**. Chunks: `AHDR` (required), `TRKS` (track data), `STRT`.
+Subtype `'ANIM'`. Fixes the three fidelity losses from recon `assets §7/§9`: **no forced 30 fps resample**, **cubicspline tangents preserved**, **step curves preserved**. Chunks: `AHDR` (required), `TRKS` (track data), `NOTF` (notifies, optional), `STRT`.
 
 ### 9.1 `AHDR`
 | Off | Size | Type | Field |
@@ -387,7 +387,28 @@ Subtype `'ANIM'`. Fixes the three fidelity losses from recon `assets §7/§9`: *
 ### 9.2 `TrackDesc` (24 B)
 `u16 BoneIndex`, `u8 ChannelMask` (bit0 T, bit1 R, bit2 S — matches `.ocbeam` ANIM mask), `u8 Interp` (0 LINEAR, 1 STEP, 2 CUBICSPLINE), `u64 KeyDataOffset` (into `TRKS`), `u32 KeyCount`, `u32 Reserved`.
 
-### 9.3 `TRKS` key layout
+### 9.3 `NOTF` — animation notifies (optional)
+`u32 Count`, then per notify: `f32 Time` (seconds from the clip start), `u32 StringRef Name`.
+
+A **named event the clip raises when playback crosses `Time`** — a footstep on the frame the foot
+lands, a muzzle flash on the frame the weapon fires. The name is opaque to this format and is fired
+verbatim as a graph event (`GraphHost.Fire`), so a project invents its own vocabulary with no engine
+change; see `docs/AVER_NODE_NODES.md` §`CustomEvent`.
+
+**The chunk is optional and its absence is not an error.** A clip with no notifies emits no `NOTF`
+at all, so a file written by an engine that predates them is byte-identical to one written now, and
+a reader that predates them ignores a chunk it never asks for. Notifies are stored **in file order,
+not sorted** — a reader needing time order can sort a handful of entries far more cheaply than every
+writer can be trusted to have done so. `Time` outside `[0, Duration]` is permitted on write and
+**clamped on read**, so shortening a clip moves a trailing marker to the end rather than losing it.
+
+**There is no notify STATE (a begin/end range), deliberately.** Tracking which states are open,
+closing them when a clip is interrupted, and deciding what a loop does mid-state is machinery this
+runtime does not have; a half-built version whose symptom is a hit window that never shuts is worse
+than not having it. Two instant notifies express the same intent and say out loud that nothing is
+tracking the span between them.
+
+### 9.4 `TRKS` key layout
 Per track, for each present channel, a sub-array. **Keyframed** (`Storage=0`): each key = `f32 Time` + value(s): T/S = 3×f32, R = 4×f32 quat; for `CUBICSPLINE`, each key = `Time` + `inTangent` + `value` + `outTangent` (glTF cubic spec preserved). **Baked-uniform** (`Storage=1`): no per-key time; `KeyCount = round(Duration*SampleRate)+1` samples at `frame/SampleRate`, values only (this is the runtime-fast form, equivalent to the current `.ocbeam` ANIM but with chosen rate). Quaternions renormalized on read; slerp for LINEAR, hold for STEP, Hermite for CUBICSPLINE. A cooker can emit both: keep the keyframed source, bake a uniform variant into `.ocpak` for shipping.
 
 ---

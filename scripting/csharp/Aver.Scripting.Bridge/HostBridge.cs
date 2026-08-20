@@ -484,6 +484,40 @@ public static class HostBridge
         try { s_graphs.Remove(entity); } catch { }
     }
 
+    /// <summary>Raises <paramref name="utf8EventName"/> on whatever graph is bound to
+    /// <paramref name="entity"/>. Returns 1 if a handler ran, 0 otherwise.
+    ///
+    /// THE NATIVE ENTRY TO THE EVENT ROUTER, and deliberately nothing more than that: it unwraps a
+    /// UTF-8 pointer and hands both arguments to <see cref="FireEventRouter"/> -- the SAME closure
+    /// a FireEvent node's compiled IL reaches through GraphEvents.Router. One router, so a footstep
+    /// fired by an animation notify resolves its target exactly as one fired by a graph does
+    /// (s_graphInstances first, then s_graphs), logs on the same once-per-pair rule, and cannot
+    /// drift from it.
+    ///
+    /// It does NOT go through GraphEvents.FireEventForGraph, whose depth guard counts nesting on
+    /// one call stack. A notify is a fresh stack from the native tick, at depth zero by
+    /// construction; anything the handler fires onward enters that guard normally at the node that
+    /// fires it. Routing through it here would have spent one of the eight allowed levels on the
+    /// call that cannot recurse.</summary>
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static int GraphFire(int entity, IntPtr utf8EventName)
+    {
+        try
+        {
+            string? name = Marshal.PtrToStringUTF8(utf8EventName);
+            if (string.IsNullOrEmpty(name)) return 0;
+            return FireEventRouter(entity, name) ? 1 : 0;
+        }
+        catch (Exception ex)
+        {
+            // NEVER THROWS ACROSS THE ABI. An exception escaping an UnmanagedCallersOnly frame
+            // tears the process down with no usable diagnostic, and this one is called from inside
+            // an animation tick that has no idea it is talking to managed code.
+            Emit((int)Log.Level.Error, $"[Graph] entity {entity}: fire threw: {Describe(ex)}");
+            return 0;
+        }
+    }
+
     // ------------------------------------------------------------------ graph classes
     //
     // GRAPH-AS-CLASS: a .ocgraph carrying a CLASS record becomes a real registered actor class,
