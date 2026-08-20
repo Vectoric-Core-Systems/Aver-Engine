@@ -1,10 +1,19 @@
-// The animation editor tab: clip header, transport, timeline, bone tree, track list, and a 3D
-// preview that draws one box per bone.
+// The animation editor tab: clip header, transport, timeline, bone tree, an asset browser of every
+// clip the rig can play, a track list, and a 3D preview of the SKINNED MESH.
 //
-// IT DOES NOT DRAW A SKINNED MESH, and that is the whole reason it exists this early. Skinning needs
-// the RHI to be able to bind a buffer as an SRV or a UAV, which it cannot -- see docs/STATUS.md. A
-// box per bone is honest about what is being shown, needs nothing new from the renderer, and is what
-// makes a clip scrubbable today rather than after an RHI change.
+// IT USED TO SAY IT COULD NOT DRAW A SKINNED MESH, "because skinning needs the RHI to be able to
+// bind a buffer as an SRV or a UAV, which it cannot". That was true for SEVENTEEN MINUTES. This
+// file's box-per-bone preview landed at 15:00:28 on 2026-08-01 (commit 1735709); commit 9fbe761 at
+// 15:17:25 the same afternoon is titled "RHI: a buffer can be a shader resource, which is what
+// blocked GPU skinning". setSrvBuffer/setUavBuffer have been pure virtual on IResourceFactory ever
+// since, both backends implement them, and modules/render.skin has been a complete GPU linear-blend
+// skinning module with its own self-tests for just as long. The comment outlived its truth by the
+// entire life of the file, and a scatter of cubes is what an animator got for it.
+//
+// THE BONE BOXES ARE STILL HERE, as an overlay toggle rather than as the only thing on screen. They
+// are the right view for a rig problem -- which joint is rotating, where a chain is broken -- and
+// the mesh is the right view for everything else. Deleting them to celebrate the mesh would have
+// traded one incomplete answer for another.
 #include "AnimEditor.hpp"
 
 #include "ActorEditor.hpp"
@@ -14,6 +23,8 @@
 #include "aver/formats/OcAnim.hpp"
 #include "aver/render/preview/ActorPreview.hpp"
 #include "aver/render/preview/PreviewMeshCache.hpp"
+#include "aver/render/SkinningPass.hpp"
+#include "aver/formats/OcMesh.hpp"
 #include "aver/runtime/Engine.hpp"
 
 #if AVER_WITH_IMGUI
@@ -86,6 +97,160 @@ Mat4 boneBox(const Vec3& from, const Vec3& to, f32 thick) {
     return basis;
 }
 
+// The one render feature this editor owns: it turns the pose the UI just sampled into posed
+// vertices, once per frame, before the preview draws them.
+//
+// A FEATURE RATHER THAN A CALL FROM draw(), because a compute dispatch needs an IRenderContext and
+// the UI has none -- the editor runs inside ImGui, the GPU work runs inside the frame. This is the
+// same shape SkinnedScene uses for the scene path, down to the prePass/overlayPass pair: dispatch
+// leaves the output buffer in GeometryRead so the draw can read it, and EVERY frame must hand it
+// back to Common before submit, because D3D12 decays buffer state at the end of a command list and
+// next frame's barrier would otherwise claim a state the hardware no longer holds.
+//
+// REGISTERED BEFORE THE PREVIEW, which is what makes the pose on screen this frame's and not last
+// frame's: features get prePass in registration order, and ActorPreview renders the preview image
+// in its own prePass.
+class AnimSkinFeature final : public rhi::IRenderFeature {
+public:
+    const char* name() const override { return "Aver.AnimEditor.Skin"; }
+
+    bool init(rhi::IDevice& dev) {
+        dev_ = &dev;
+        ready_ = pass_.init(dev);
+        if (!ready_) AVER_WARN("[AnimEditor] GPU skinning unavailable; the preview stays on bone boxes");
+        return ready_;
+    }
+
+    void shutdown() {
+        if (gpu_.valid()) pass_.destroyMesh(gpu_);
+        gpu_ = {};
+        pass_.shutdown();
+        ready_ = false;
+        drawMesh_ = 0;
+    }
+
+    bool ready() const { return ready_; }
+    rhi::MeshHandle drawMesh() const { return drawMesh_; }
+    f32 boundsRadius() const { return radius_; }
+
+    // Binds a rig + mesh pair. Idempotent for the same pair, so the editor can call it every frame
+    // without rebuilding GPU resources -- which it does, because the clip (and therefore possibly the
+    // rig) can change under it when someone clicks the asset browser.
+    bool bind(rhi::IDevice& dev, const std::string& meshPath, u32 boneCount) {
+        if (!ready_) return false;
+        if (meshPath == meshPath_ && gpu_.valid() && boneCount == boneCount_) return true;
+
+        if (gpu_.valid()) pass_.destroyMesh(gpu_);
+        gpu_ = {};
+        drawMesh_ = 0;
+        meshPath_ = meshPath;
+        boneCount_ = boneCount;
+        if (meshPath.empty() || boneCount == 0) return false;
+
+        fmt::OcMeshData md;
+        std::string why;
+        if (!fmt::loadOcMesh(meshPath, md, &why)) {
+            AVER_WARN("[AnimEditor] {}", why);
+            return false;
+        }
+        if (!md.hasSkin()) {
+            // Not an error and not silent: a mesh beside the rig with no skin streams is an ordinary
+            // thing to find, and the editor falls back to bone boxes rather than drawing a T-pose that
+            // never moves and looks like a broken clip.
+            AVER_INFO("[AnimEditor] {} has no skin streams; the preview stays on bone boxes", meshPath);
+            return false;
+        }
+
+        // OcMeshData keeps positions, normals and uvs as three FLAT float arrays; the RHI wants one
+        // interleaved MeshVertex stream. Built here rather than borrowed from PreviewMeshCache
+        // because the cache resolves CONTENT-RELATIVE paths and this mesh is found by walking the
+        // skeleton's own directory -- and because the skinning pass needs the decoded OcMeshData
+        // anyway for its rest and bind streams, so the file is already open.
+        const usize vcount = md.positions.size() / 3;
+        if (vcount == 0 || md.normals.size() < vcount * 3 || md.uvs.size() < vcount * 2) return false;
+        std::vector<rhi::MeshVertex> verts0(vcount);
+        for (usize i = 0; i < vcount; ++i) {
+            verts0[i].px = md.positions[i * 3 + 0];
+            verts0[i].py = md.positions[i * 3 + 1];
+            verts0[i].pz = md.positions[i * 3 + 2];
+            verts0[i].nx = md.normals[i * 3 + 0];
+            verts0[i].ny = md.normals[i * 3 + 1];
+            verts0[i].nz = md.normals[i * 3 + 2];
+            verts0[i].u  = md.uvs[i * 2 + 0];
+            verts0[i].v  = md.uvs[i * 2 + 1];
+        }
+        const rhi::MeshHandle source = dev.createMesh(verts0.data(), static_cast<u32>(vcount),
+                                                       md.indices.data(),
+                                                       static_cast<u32>(md.indices.size()));
+        if (!source) return false;
+        rhi::BufferHandle verts = 0;
+        // The DRAW handle whose vertex buffer IS the skin target -- so the posed vertices are what the
+        // preview rasterises, with no second copy and nothing taught about a new stream.
+        drawMesh_ = dev.createSkinTargetMesh(source, &verts);
+        if (!drawMesh_ || !verts) { drawMesh_ = 0; return false; }
+        if (!pass_.createMesh(md, boneCount, gpu_, verts)) { drawMesh_ = 0; return false; }
+
+        // A bounds radius for the preview's frameAll, from the rest mesh: the posed mesh moves, but
+        // not far enough to matter for framing, and computing it per frame off GPU data we never read
+        // back is not possible anyway.
+        radius_ = 1.0f;
+        for (usize i = 0; i < vcount; ++i) {
+            const f32 x = md.positions[i * 3 + 0], y = md.positions[i * 3 + 1], z = md.positions[i * 3 + 2];
+            radius_ = std::max(radius_, std::sqrt(x * x + y * y + z * z));
+        }
+        return true;
+    }
+
+    // This frame's skinning matrices, copied because prePass runs later than the UI that produced them.
+    void stage(const std::vector<Mat4>& skin) { staged_ = skin; }
+
+    void prePass(rhi::IRenderContext& ctx) override {
+        if (!ready_ || !gpu_.valid() || staged_.empty()) return;
+        pass_.dispatch(ctx, gpu_, staged_.data(), static_cast<u32>(staged_.size()));
+    }
+
+    void overlayPass(rhi::IRenderContext& ctx, u32 width, u32 height) override {
+        (void)width; (void)height;
+        if (!ready_ || !gpu_.valid()) return;
+        // Unconditional, not "only if dispatched": see SkinnedScene::overlayPass, which states the
+        // same rule -- skinTransition is a no-op when the state already matches, and a buffer left in
+        // GeometryRead at submit is a validation error next frame, not a visible bug this one.
+        render::skinTransition(ctx, gpu_, rhi::ResourceState::Common);
+    }
+
+private:
+    rhi::IDevice*           dev_ = nullptr;
+    render::SkinningPass    pass_;
+    render::SkinnedMeshGpu  gpu_;
+    rhi::MeshHandle         drawMesh_ = 0;
+    std::string             meshPath_;
+    u32                     boneCount_ = 0;
+    f32                     radius_ = 1.0f;
+    bool                    ready_ = false;
+    std::vector<Mat4>       staged_;
+};
+
+AnimSkinFeature g_skin;
+bool g_skinTried = false;
+
+// Created and registered ONCE, and BEFORE the shared preview for the ordering reason in
+// AnimSkinFeature's comment. Shared rather than per-tab, matching sharedPreview() beside it: two
+// animation tabs open at once share one preview already, so a second skinning target would have
+// nothing to draw into.
+// Keeps the device the feature was registered with, so teardown can unregister from the SAME one.
+rhi::IDevice* g_skinDevice = nullptr;
+
+AnimSkinFeature* sharedSkin(Engine& e) {
+    if (!g_skinTried && e.device()) {
+        g_skinTried = true;
+        if (g_skin.init(*e.device())) {
+            g_skinDevice = e.device();
+            g_skinDevice->addRenderFeature(&g_skin);
+        }
+    }
+    return g_skin.ready() ? &g_skin : nullptr;
+}
+
 // One .ocanim or .ocskel, open.
 class AnimEditor final : public AssetEditor {
 public:
@@ -152,6 +317,13 @@ private:
 
     anim::Pose pose_;
     std::vector<Mat4> model_;
+    std::vector<Mat4> skin_;      // poseToSkinning output, handed to the GPU each frame
+    // The bone boxes are an OVERLAY now, not the picture. On by default only when there is no
+    // skinned mesh to show, so a rig with no mesh looks exactly as it always did.
+    bool showBones_ = false;
+    bool showMesh_ = true;
+    bool skinBound_ = false;
+    std::string meshPath_;         // <rig>.ocmesh beside the skeleton, if there is one
     bool framed_ = false;
     u32 pendingW_ = 0, pendingH_ = 0;
     f64 resizeDue_ = 0.0;
@@ -277,8 +449,25 @@ void AnimEditor::drawAssetBrowser() {
 
 void AnimEditor::buildPreview(Engine& e) {
 #if AVER_WITH_IMGUI
+    // BEFORE sharedPreview, so the skinning dispatch is registered ahead of the preview render and
+    // the pose on screen is this frame's. See AnimSkinFeature's own comment.
+    AnimSkinFeature* skin = sharedSkin(e);
     render::preview::ActorPreview* preview = sharedPreview(e);
     if (!preview || !e.device()) return;
+
+    // The mesh is found the way the skeleton already is: by convention, beside it. A rig called
+    // character.ocskel is skinned by character.ocmesh -- the same <stem> the clip names use.
+    if (meshPath_.empty() && !skelPath_.empty()) {
+        std::filesystem::path guess = std::filesystem::path(skelPath_);
+        guess.replace_extension(".ocmesh");
+        std::error_code ec;
+        if (std::filesystem::exists(guess, ec)) meshPath_ = guess.string();
+    }
+    if (skin && !skinBound_) {
+        skinBound_ = true;   // tried once; a failure falls back to bones and does not retry per frame
+        showMesh_ = skin->bind(*e.device(), meshPath_, static_cast<u32>(skel_.bones.size()));
+        showBones_ = !showMesh_;
+    }
 
     anim::restPose(skel_, pose_);
     if (isClip_ && !clip_.tracks.empty()) {
@@ -290,6 +479,13 @@ void AnimEditor::buildPreview(Engine& e) {
         anim::sampleAnimation(clip_, t, pose_);
     }
     anim::poseToModel(skel_, pose_, model_);
+    // The SAME pose, in the other space the renderer needs: poseToModel gives joint transforms for
+    // drawing bones, poseToSkinning gives bind-relative matrices for moving vertices. Both come from
+    // one sampled pose, so the boxes and the mesh can never disagree about what frame it is.
+    if (skin && showMesh_) {
+        anim::poseToSkinning(skel_, pose_, skin_);
+        skin->stage(skin_);
+    }
 
     render::preview::PreviewMeshCache& meshes = sharedPreviewMeshes();
     meshes.setContentRoot(*e.device(), g_contentRoot);
@@ -298,8 +494,22 @@ void AnimEditor::buildPreview(Engine& e) {
     if (!cube) return;
 
     std::vector<render::preview::PreviewDraw> draws;
-    draws.reserve(model_.size());
-    for (usize i = 0; i < model_.size(); ++i) {
+    draws.reserve(model_.size() + 1);
+
+    // THE MESH FIRST, at identity: the skinning pass has already put every vertex where the pose
+    // says it goes, so a world transform here would move it a second time.
+    if (skin && showMesh_ && skin->drawMesh()) {
+        render::preview::PreviewDraw d;
+        d.mesh = skin->drawMesh();
+        d.boundsRadius = skin->boundsRadius();
+        d.roughness = 0.62f;
+        d.baseColor[0] = 0.78f; d.baseColor[1] = 0.76f; d.baseColor[2] = 0.72f;
+        const Mat4 id = Mat4::identity();
+        std::memcpy(d.world, &id.m[0][0], sizeof d.world);
+        draws.push_back(d);
+    }
+
+    for (usize i = 0; showBones_ && i < model_.size(); ++i) {
         const Vec3 here{model_[i].m[3][0], model_[i].m[3][1], model_[i].m[3][2]};
         const i32 parent = skel_.bones[i].parent;
         render::preview::PreviewDraw d;
@@ -473,6 +683,22 @@ void AnimEditor::draw(Engine& e) {
     ImGui::Separator();
     if (isClip_) { drawTransport(); drawTimeline(); }
 
+    // What the preview shows. Both can be on at once, which is the useful state while checking
+    // whether a joint is where the silhouette says it is.
+    {
+        AnimSkinFeature* sk = sharedSkin(e);
+        ImGui::BeginDisabled(!sk || !sk->drawMesh());
+        ImGui::Checkbox("Mesh", &showMesh_);
+        ImGui::EndDisabled();
+        if ((!sk || !sk->drawMesh()) && ImGui::IsItemHovered()) {
+            ImGui::SetTooltip(meshPath_.empty()
+                               ? "No <skeleton>.ocmesh beside this rig."
+                               : "That mesh has no skin streams, or the device has no compute.");
+        }
+        ImGui::SameLine();
+        ImGui::Checkbox("Bones", &showBones_);
+    }
+
     buildPreview(e);
 
     ImGui::Separator();
@@ -545,6 +771,21 @@ void AnimEditor::draw(Engine& e) {
 } // namespace
 
 void setAnimEditorContentRoot(std::string root) { g_contentRoot = std::move(root); }
+
+// Unregisters the skinning feature and frees its GPU resources, BEFORE the device goes.
+//
+// THIS WAS MISSING AND IT CRASHED ON EXIT -- an access violation at shutdown, after the last frame
+// had already been captured, which is the most misleading shape a lifetime bug has: everything on
+// screen was correct and the process died anyway. A feature registered with addRenderFeature is
+// held NON-OWNING by the device, exactly as ActorEditor's own shared preview is, so something has
+// to take it back out. sharedPreview had this from the start; the new feature simply did not copy
+// it.
+void shutdownAnimEditors() {
+    if (g_skinDevice) g_skinDevice->removeRenderFeature(&g_skin);
+    g_skinDevice = nullptr;
+    g_skin.shutdown();
+    g_skinTried = false;
+}
 
 std::unique_ptr<AssetEditor> makeAnimEditor(const std::string& path) {
     const std::string ext = std::filesystem::path(path).extension().string();

@@ -11,6 +11,10 @@ namespace aver::editor {
 // Creates an animation editor for a .ocanim or .ocskel, else nullptr.
 std::unique_ptr<AssetEditor> makeAnimEditor(const std::string& path);
 
+// Unregisters the animation editor's GPU skinning feature. Must run before the device is torn
+// down -- see the definition for what happens when it does not.
+void shutdownAnimEditors();
+
 // Sets the project's content root, which a clip's skeletonRef is resolved against.
 void setAnimEditorContentRoot(std::string root);
 

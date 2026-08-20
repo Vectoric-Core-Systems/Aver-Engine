@@ -4115,6 +4115,7 @@ public:
         setLogSink(nullptr, nullptr);
         editor::flushEditorPrefs();
         editor::shutdownActorEditors();
+    editor::shutdownAnimEditors();
         setMouseCaptured(false);
 #if AVER_MODULE_PHYSICS
         aver_phys_shutdown();
