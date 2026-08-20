@@ -228,6 +228,17 @@ internal static class GraphInterop
     internal static bool AttachToSocketForGraph(int entity, int parent, string socket) =>
         new Entity(entity).AttachToSocket(new Entity(parent), socket);
 
+    /// <summary>GetAnimCurve's own surface: the value of a named curve on the clip
+    /// <paramref name="entity"/> is playing, or 0 when there is no such curve.
+    ///
+    /// A SINGLE FLOAT, NOT A (value, found) PAIR, and that is a genuine loss stated rather than
+    /// hidden: a graph node returns through pins, PinType has Float and Bool, and a node CAN carry
+    /// both -- but the emitter would then need two locals and a second output for a distinction a
+    /// graph author almost never branches on. The C# surface keeps TryGetAnimationCurve for the
+    /// callers that do care.</summary>
+    internal static float GetAnimCurveForGraph(int entity, string curve) =>
+        new Entity(entity).GetAnimationCurve(curve, 0.0f);
+
     /// <summary>CharacterMove's own surface: the last Blueprint-parity node, one coarse exec call
     /// wrapping <see cref="AverCharacter"/>.DriveFromGraph -- itself a one-line forward to the
     /// existing <c>protected</c> Drive(dt, moveAxis, yawDeltaDeg, pitchDeltaDeg), which owns the

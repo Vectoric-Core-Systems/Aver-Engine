@@ -524,6 +524,11 @@ public class OcGraphParser
                     {
                         node.MeshPath = v;
                     }
+                    // curve= names the curve a "getanimcurve" node reads (see Node.CurveName).
+                    else if (k == "curve")
+                    {
+                        node.CurveName = v;
+                    }
                     // socket= names the socket an "attachtosocket" node hangs its entity on (see
                     // Node.SocketName).
                     else if (k == "socket")
@@ -2089,6 +2094,14 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "parent", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            // ---- GetAnimCurve ------------------------------------------------------------------
+            // A PURE READ: no exec pins, so it needs no exec emitter and no IsExecCapable predicate.
+            // It is the first node in this group that only asks a question.
+            case "getanimcurve":
+                node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "value", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
                 break;
         }
     }

@@ -703,6 +703,9 @@ void GameApp::initScripting() {
         // a content reload without being reinstalled -- AnimSystem::clear() drops the loaded clips
         // and the playhead history, deliberately NOT the sink, because which host owns the wire
         // does not change when a project reloads its content.
+        // Installed unconditionally: a C++ caller can ask for a curve with no scripting host at all.
+        aver_fw_set_anim_curve_provider(&GameApp::animCurve, this);
+
         if (scripts_.graphFireAvailable()) {
             anim::animSystem().setNotifySink(&GameApp::animNotify, this);
             AVER_INFO("[Anim] animation notifies will be raised as graph events");
@@ -726,6 +729,16 @@ void GameApp::initScripting() {
     // a graph with no such event, and a bridge too old to be fired at, and none of those is worth a
     // line per frame from an animation tick -- the managed router already logs each once per
     // (entity, event) pair with a message that says which it was.
+// The animation system's answer to the framework's relayed curve query. See framework_abi.h for
+// why this is a function pointer rather than a link edge.
+i32 GameApp::animCurve(i32 entity, i64 nameHash, f32* outValue, void*) {
+    f32 v = 0.0f;
+    if (!anim::animSystem().curveValue(static_cast<scene::Entity>(entity),
+                                       static_cast<u64>(nameHash), v)) return 0;
+    *outValue = v;
+    return 1;
+}
+
 void GameApp::animNotify(scene::Entity e, const char* name, void* user) {
 #if AVER_MODULE_SCRIPTING
     auto* self = static_cast<GameApp*>(user);

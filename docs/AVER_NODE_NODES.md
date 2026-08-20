@@ -274,6 +274,7 @@ different cost profiles depending on which compiler reaches it.
 | `SetMesh` | `entity` (in, int), `success` (out, bool) | `mesh=` | W | Ensures a mesh renderer on `entity`, pointed at `mesh=`'s asset path. |
 | `SetMaterial` | `entity` (in, int), `success` (out, bool) | `material=` | W | Sets the material on `entity`'s mesh renderer. |
 | `AttachToSocket` | `entity` (in, int), `parent` (in, int), `success` (out, bool) | `socket=` | W | Hangs `entity` on a named socket of `parent`'s rig, so it rides the posed bone every frame. **Two entity pins**: the thing, then what it hangs from. Attaching *is* parenting plus a socket, so this also reparents `entity`. A socket name the parent's rig does not declare leaves the entity where it is rather than snapping it to the parent's origin. |
+| `GetAnimCurve` | `entity` (in, int), `value` (out, float) | `curve=` | D | The named float curve on whatever clip `entity` is playing, at its current playhead. **Pure** — no exec pins, no side effect — so it works in both compilers. Returns **0** when the entity has no clip or the clip declares no such curve; a graph cannot tell that from a curve that genuinely reads zero, and C#'s `TryGetAnimationCurve` exists for callers that need to. |
 
 **No exec pins by default on the four field-access nodes** — `GetField`/`SetField`/`GetFieldVec3`/
 `SetFieldVec3` all get plain data pins only, including the two *writes*. This is the sharpest

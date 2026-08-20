@@ -76,6 +76,15 @@ public:
     // cost every character memory so that the few with attachments could save a walk.
     bool socketModel(scene::Entity e, const std::string& name, Mat4& out) const;
 
+    // The value of a named float curve on whatever clip this entity is playing, at its current
+    // playhead. False when the entity has no clip or the clip declares no such curve -- which a
+    // caller SHOULD distinguish from a value of zero, because "the curve is not there" and "the
+    // curve reads 0" mean opposite things to a script.
+    //
+    // BY HASH, because the only callers that matter cannot carry a string: a graph node and the C#
+    // relay both name a curve by fnv1a64, exactly as a socket is named.
+    bool curveValue(scene::Entity e, u64 nameHash, f32& out) const;
+
     // The rig this entity is posed against, or nullptr. Exposed so a caller can enumerate sockets
     // (an editor listing them, a script validating a name) without resolving the asset itself.
     const fmt::OcSkeleton* posedSkeleton(scene::Entity e) const;
@@ -115,6 +124,11 @@ private:
         f32 prev = 0.0f;
         u64 clip = 0;         // resets the history when the animator is pointed at a different clip
         bool started = false; // false until the first observation, which is what makes step 1 inclusive
+        // WHERE THE PLAYHEAD IS AND WHAT IT IS PLAYING, refreshed every tick. Kept here rather than
+        // on Posed because a clip needs NO RIG to have curves on it -- an "animation" that is only
+        // curves is a real thing, and Posed exists only once a skeleton has resolved.
+        const fmt::OcAnimation* asset = nullptr;
+        f32 wrapped = 0.0f;   // `prev` is the last OBSERVATION; this is where the clock is NOW
     };
     // An asset that failed to load is cached as a null so a missing file is not re-opened every
     // frame for the life of the session.

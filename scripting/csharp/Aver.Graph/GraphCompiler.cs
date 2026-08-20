@@ -551,6 +551,10 @@ public class GraphCompiler
                 EmitAttachToSocket(node);
                 break;
 
+            case "getanimcurve":
+                EmitGetAnimCurve(node);
+                break;
+
             case "sin":
                 EmitSin(node);
                 break;
@@ -1433,6 +1437,29 @@ public class GraphCompiler
         _il.Emit(OpCodes.Call, SetMeshMethod);
 
         if (_pinLocals.TryGetValue((node.Id, "success"), out var local))
+            _il.Emit(OpCodes.Stloc, local);
+        else
+            _il.Emit(OpCodes.Pop);
+    }
+
+    /// GetAnimCurve(entity) -> value: the named curve on whatever clip `entity` is playing, at its
+    /// current playhead. Wraps GraphInterop.GetAnimCurveForGraph(int,string).
+    ///
+    /// PURE, so there is no exec twin of this method and no IsExecCapable predicate -- it reads and
+    /// writes nothing, so the topological pass running it once per invocation is exactly right. It
+    /// is therefore also absent from IsPushOnlySideEffectType, along with every other reader.
+    private void EmitGetAnimCurve(Node node)
+    {
+        if (_il == null) return;
+
+        if (string.IsNullOrEmpty(node.CurveName))
+            throw new InvalidOperationException($"GetAnimCurve node '{node.Id}' has no curve= attribute naming which curve to read");
+
+        LoadPin(node.Id, "entity");
+        _il.Emit(OpCodes.Ldstr, node.CurveName);
+        _il.Emit(OpCodes.Call, GetAnimCurveMethod);
+
+        if (_pinLocals.TryGetValue((node.Id, "value"), out var local))
             _il.Emit(OpCodes.Stloc, local);
         else
             _il.Emit(OpCodes.Pop);
@@ -3766,6 +3793,20 @@ public class GraphCompiler
                 EmitPullInput(source, "key"); _il.Emit(OpCodes.Call, InputKeyPressedMethod); return;
             case "inputkeyreleased":
                 EmitPullInput(source, "key"); _il.Emit(OpCodes.Call, InputKeyReleasedMethod); return;
+            // GetAnimCurve DOES get a standalone pull path, unlike Raycast/MouseDelta/MoveAxis below.
+            // The reason those three are refused is that they must run exactly ONCE however many pins
+            // are read, so a node that behaved differently on and off the exec chain would be a trap.
+            // A curve read has neither property: it has one output, no side effect, and re-reading it
+            // in the same activation gives the same number, because the playhead does not move between
+            // two pulls. So pulling it here is not a second behaviour, it is the same one.
+            case "getanimcurve":
+                if (string.IsNullOrEmpty(source.CurveName))
+                    throw new InvalidOperationException(
+                        $"GetAnimCurve node '{source.Id}' has no curve= attribute naming which curve to read");
+                EmitPullInput(source, "entity");
+                _il.Emit(OpCodes.Ldstr, source.CurveName);
+                _il.Emit(OpCodes.Call, GetAnimCurveMethod);
+                return;
             case "select":
             {
                 // Mirrors EmitSelect's own branch shape, but PULLED (recursive, uncached) rather than
@@ -4178,6 +4219,9 @@ public class GraphCompiler
     private static readonly MethodInfo AttachToSocketMethod =
         typeof(GraphInterop).GetMethod("AttachToSocketForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.AttachToSocketForGraph was not found by reflection");
+    private static readonly MethodInfo GetAnimCurveMethod =
+        typeof(GraphInterop).GetMethod("GetAnimCurveForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.GetAnimCurveForGraph was not found by reflection");
     // CharacterMove: the last Blueprint-parity node, reflected the same way every other GraphInterop
     // wrapper above is -- see GraphInterop.CharacterMoveForGraph's own comment for why this call, not
     // a cast onto AverCharacter.Drive, is the seam.

@@ -157,6 +157,11 @@ public class Node
     // fnv1a64 at invocation time and matched against the parent rig's own socket names by
     // AnimSystem, which this assembly cannot see. Null for every other node type.
     public string? SocketName { get; set; }
+
+    // Which curve a "getanimcurve" node reads, e.g. "ReloadProgress". Set from the NODE line's
+    // "curve=<name>" attribute -- same mechanism as SocketName above, same reason. Null for every
+    // other node type.
+    public string? CurveName { get; set; }
 }
 
 /// One parameter the compiled method accepts -- e.g. the entity a graph drives, or the current

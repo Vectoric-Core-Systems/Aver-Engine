@@ -128,6 +128,31 @@ void sampleAnimation(const fmt::OcAnimation& clip, f32 seconds, Pose& inOut) {
     }
 }
 
+f32 sampleCurve(const fmt::OcCurve& c, f32 seconds, f32 fallback) {
+    const usize n = c.times.size();
+    // A curve with no keys has no value to give, and 0 would be a lie that looks like data. The
+    // caller supplies what "no value" means to it.
+    if (n == 0 || c.values.size() != n) return fallback;
+    if (seconds <= c.times[0]) return c.values[0];
+    if (seconds >= c.times[n - 1]) return c.values[n - 1];
+
+    // Binary search for the last key at or before `seconds` -- the same shape findKey uses for a
+    // bone track, because a curve is the same problem with a width of one.
+    usize lo = 0, hi = n - 1;
+    while (hi - lo > 1) {
+        const usize mid = (lo + hi) / 2;
+        if (c.times[mid] <= seconds) lo = mid; else hi = mid;
+    }
+    if (c.interp == fmt::OcInterp::Step) return c.values[lo];
+
+    const f32 span = c.times[hi] - c.times[lo];
+    // TWO KEYS AT THE SAME TIME are legal and mean a jump. Dividing by that zero span would give
+    // an infinity; holding the earlier value makes the jump land exactly at the later key.
+    if (span <= 1e-9f) return c.values[lo];
+    const f32 a = (seconds - c.times[lo]) / span;
+    return c.values[lo] + (c.values[hi] - c.values[lo]) * a;
+}
+
 void notifiesCrossed(const fmt::OcAnimation& clip, const ClipStep& step, std::vector<u32>& outIndices) {
     if (clip.notifies.empty()) return;
     const f32 dur = clip.duration;

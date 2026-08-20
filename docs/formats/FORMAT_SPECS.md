@@ -389,7 +389,7 @@ the first time something attaches.
 **Imported from glTF as an Empty parented to a bone** — see `docs/ASSET_IMPORT.md`.
 ## 9. `.ocanim` — animation clip
 
-Subtype `'ANIM'`. Fixes the three fidelity losses from recon `assets §7/§9`: **no forced 30 fps resample**, **cubicspline tangents preserved**, **step curves preserved**. Chunks: `AHDR` (required), `TRKS` (track data), `NOTF` (notifies, optional), `STRT`.
+Subtype `'ANIM'`. Fixes the three fidelity losses from recon `assets §7/§9`: **no forced 30 fps resample**, **cubicspline tangents preserved**, **step curves preserved**. Chunks: `AHDR` (required), `TRKS` (track data), `NOTF` (notifies, optional), `CRVE` (curves, optional), `STRT`.
 
 ### 9.1 `AHDR`
 | Off | Size | Type | Field |
@@ -426,7 +426,35 @@ runtime does not have; a half-built version whose symptom is a hit window that n
 than not having it. Two instant notifies express the same intent and say out loud that nothing is
 tracking the span between them.
 
-### 9.4 `TRKS` key layout
+### 9.4 `CRVE` — named float curves (optional)
+`u32 Count`, then per curve: `u32 StringRef Name`, `u32 Interp` (0 LINEAR, 1 STEP, 2 CUBICSPLINE),
+`u32 KeyCount`, then `KeyCount` f32 times followed by `KeyCount` f32 values.
+
+A **named float that varies over the clip** — "how far through the reload am I", "how hard is the
+foot planted". The animator authors it beside the pose, in the same file, so it stays in step when
+the animation is re-timed.
+
+**A curve is not a notify.** A notify is an *event*: it happens once, at an instant, and something
+runs. A curve is a *value*: it always has one wherever the playhead is, and nothing runs. Expressing
+one with the other gives either an event that fires every frame or a value that exists at three
+moments.
+
+**Scalar, not a vector** — a stated limit, matching Unreal. Vector cases decompose into named
+components without the format growing a width field every reader must branch on.
+
+**`CUBICSPLINE` is carried but read as LINEAR.** A curve stores one value per key with no tangent
+slots, so there is nothing to build a Hermite from; inventing tangents would be a different curve
+than the one authored. An unknown interp value also reads as LINEAR rather than refusing the file.
+
+Times and values **must be the same length** — refused at write, because the sampler indexes values
+by the key it found in times. Sampling **clamps at both ends**: a time past the last key reads that
+key, since the caller has already wrapped the clock into the clip. Two keys at one time are a legal
+jump, held rather than divided by a zero span.
+
+Read at runtime with `AnimSystem::curveValue` (native), `Entity.GetAnimationCurve` /
+`TryGetAnimationCurve` (C#), or the `GetAnimCurve` node.
+
+### 9.5 `TRKS` key layout
 Per track, for each present channel, a sub-array. **Keyframed** (`Storage=0`): each key = `f32 Time` + value(s): T/S = 3×f32, R = 4×f32 quat; for `CUBICSPLINE`, each key = `Time` + `inTangent` + `value` + `outTangent` (glTF cubic spec preserved). **Baked-uniform** (`Storage=1`): no per-key time; `KeyCount = round(Duration*SampleRate)+1` samples at `frame/SampleRate`, values only (this is the runtime-fast form, equivalent to the current `.ocbeam` ANIM but with chosen rate). Quaternions renormalized on read; slerp for LINEAR, hold for STEP, Hermite for CUBICSPLINE. A cooker can emit both: keep the keyframed source, bake a uniform variant into `.ocpak` for shipping.
 
 ---

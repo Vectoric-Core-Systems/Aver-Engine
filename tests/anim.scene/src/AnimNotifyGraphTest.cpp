@@ -17,6 +17,7 @@
 // "unavailable" and exits 0, exactly as the engine itself boots without scripting.
 #include "aver/anim/AnimSystem.hpp"
 #include "aver/framework/framework_abi.h"
+#include "aver/framework/framework_abi.h"
 #include "aver/core/Log.hpp"
 #include "aver/formats/OcAnim.hpp"
 #include "aver/platform/FileSystem.hpp"
@@ -40,11 +41,31 @@ static void check(bool cond, const std::string& what) {
     AVER_ERROR("  FAIL  {}", what);
 }
 
+// Records one assertion that two floats agree to `eps`.
+static void checkNear(f32 got, f32 want, f32 eps, const std::string& what) {
+    if (std::fabs(got - want) <= eps) { AVER_INFO("  ok    {} ({:.5f})", what, got); return; }
+    ++g_failures;
+    AVER_ERROR("  FAIL  {} (got {:.6f}, want {:.6f})", what, got, want);
+}
+
 static std::string g_dir;
 static constexpr u64 kClipId = 0xC11B0BEAull;
+static constexpr u64 kCurveClipId = 0xC11B0CEEull;
 
 static std::string resolvePath(u64 id, void*) {
-    return id == kClipId ? g_dir + "/beat.ocanim" : std::string();
+    if (id == kClipId) return g_dir + "/beat.ocanim";
+    if (id == kCurveClipId) return g_dir + "/curve.ocanim";
+    return {};
+}
+
+// The animation-curve provider a composition root installs on the framework. SandboxApp and
+// GameApp each install exactly this; the test is standing in for one.
+static i32 testAnimCurve(i32 entity, i64 nameHash, f32* outValue, void*) {
+    f32 v = 0.0f;
+    if (!anim::animSystem().curveValue(static_cast<scene::Entity>(entity),
+                                       static_cast<u64>(nameHash), v)) return 0;
+    *outValue = v;
+    return 1;
 }
 
 // The sink under test: the same two lines SandboxApp and GameApp each install, with the return value
@@ -140,6 +161,37 @@ static std::string attachGraphText(i32 holder) {
     + "LINK thing.value hang.entity\n"
     + "LINK holder.value hang.parent\n";
 }
+
+// A graph that reads a curve and writes it into its own X, so a native reader can see the value.
+// PURE dataflow feeding an exec write: GetAnimCurve has no exec pins at all.
+static const char* kCurveGraphText =
+    "OCGRAPH 1\n"
+    "NAME CurveProbe\n"
+    "DESCRIPTION Writes the ReloadProgress curve into its own X when OnRead fires.\n"
+    "\n"
+    "PARAM entity int\n"
+    "NODE ent Param param=entity\n"
+    "\n"
+    "ENTRY go OnRead\n"
+    "NODE go CustomEvent name=OnRead\n"
+    "\n"
+    "NODE curve GetAnimCurve curve=ReloadProgress\n"
+    "LINK ent.value curve.entity\n"
+    "\n"
+    "NODE zero ConstFloat value=0.0\n"
+    "NODE move SetFieldVec3 field=CLocal.position\n"
+    "PIN move exec in exec\n"
+    "PIN move entity in int\n"
+    "PIN move x in float\n"
+    "PIN move y in float\n"
+    "PIN move z in float\n"
+    "PIN move then out exec\n"
+    "PIN move success out bool\n"
+    "LINK go.exec move.exec\n"
+    "LINK ent.value move.entity\n"
+    "LINK curve.value move.x\n"
+    "LINK zero.value move.y\n"
+    "LINK zero.value move.z\n";
 
 int main() {
     AVER_INFO("AnimNotifyGraphTest");
@@ -345,6 +397,88 @@ int main() {
               "a node with no socket= is REFUSED, rather than compiling and attaching to nothing");
 
         w.destroy(other); w.destroy(gun); w.destroy(carrier);
+        w.flush();
+    }
+
+    AVER_INFO("an animation CURVE, read through the framework relay by a graph");
+    {
+        // THE LONGEST CHAIN IN THIS FILE, and every link of it is a place the value could be lost:
+        // a clip on disk -> AnimSystem publishing the playhead -> the provider this test installs ->
+        // aver_fw_anim_curve -> the C# P/Invoke -> GraphInterop -> compiled IL -> back out to CLocal
+        // where a native reader can check the number. Nothing shorter proves the relay is wired.
+        fmt::OcAnimation ca;
+        ca.duration = 2.0f;
+        ca.flags = fmt::kOcAnimLoop;
+        fmt::OcTrack ct;
+        ct.boneIndex = 0;
+        ct.channels = fmt::kOcChannelTranslation;
+        ct.interp = fmt::OcInterp::Linear;
+        ct.times = {0.0f, 2.0f};
+        ct.values = {0,0,0,  1,0,0};
+        ca.tracks.push_back(ct);
+        fmt::OcCurve rc;
+        rc.name = "ReloadProgress";
+        rc.times = {0.0f, 2.0f};
+        rc.values = {0.0f, 8.0f};   // so t=0.5 reads 2.0 -- a value no other path would produce
+        ca.curves.push_back(rc);
+
+        std::string why;
+        check(fmt::saveOcAnim(g_dir + "/curve.ocanim", ca, &why), "the curve clip writes: " + why);
+
+        std::ofstream cf(g_dir + "/curve.ocgraph", std::ios::binary);
+        cf << kCurveGraphText;
+        cf.close();
+
+        // The provider the composition roots install. This test IS a composition root.
+        aver_fw_set_anim_curve_provider(&testAnimCurve, nullptr);
+
+        const scene::Entity reader = w.create("reader");
+        auto* ra = static_cast<scene::CAnimator*>(w.addComponent(reader, scene::kComponentAnimator));
+        ra->clip = kCurveClipId;
+        ra->flags |= scene::kAnimatorPaused;
+        ra->time = 0.5f;
+        auto* rl = w.component<scene::CLocal>(reader, scene::kComponentLocal);
+        if (rl) rl->xf.position.x = -1.0f;
+
+        sys.tick(w, 0.0f);   // publishes the playhead the curve is read at
+
+        // First: the native query, so a failure downstream can be attributed.
+        f32 direct = -1.0f;
+        check(sys.curveValue(reader, fnv1a64("ReloadProgress"), direct),
+              "AnimSystem answers the curve query");
+        checkNear(direct, 2.0f, 1e-4f, "with the value at the playhead, interpolated");
+        check(!sys.curveValue(reader, fnv1a64("NoSuchCurve"), direct),
+              "and refuses a curve the clip does not declare, rather than returning 0");
+
+        // Then the relay, which is the seam C# actually uses.
+        f32 relayed = -1.0f;
+        check(aver_fw_anim_curve(static_cast<i32>(reader), static_cast<i64>(fnv1a64("ReloadProgress")),
+                                 &relayed) != 0,
+              "and the FRAMEWORK RELAY answers it too -- the seam C# binds");
+        checkNear(relayed, 2.0f, 1e-4f, "with the same value");
+
+        // Then the whole way round through a graph.
+        check(g_host->graphLoad(static_cast<i32>(reader), g_dir + "/curve.ocgraph"),
+              "the curve graph compiles");
+        check(g_host->graphFire(static_cast<i32>(reader), "OnRead"), "and runs");
+        rl = w.component<scene::CLocal>(reader, scene::kComponentLocal);
+        check(rl && std::fabs(rl->xf.position.x - 2.0f) < 1e-3f,
+              "A GRAPH READ THE CURVE AND THE VALUE ARRIVED BACK IN THE SCENE");
+        if (rl) AVER_INFO("  X = {:.3f}", rl->xf.position.x);
+
+        // Move the playhead and the graph must read a different number -- a relay that returned a
+        // constant, or read the wrong entity, passes every check above and fails this one.
+        ra->time = 1.5f;   // 0.75 of the way -> 6.0
+        sys.tick(w, 0.0f);
+        check(g_host->graphFire(static_cast<i32>(reader), "OnRead"), "fired again at a new playhead");
+        rl = w.component<scene::CLocal>(reader, scene::kComponentLocal);
+        check(rl && std::fabs(rl->xf.position.x - 6.0f) < 1e-3f,
+              "and the value CHANGED WITH THE PLAYHEAD, so nothing along the chain is constant");
+        if (rl) AVER_INFO("  X = {:.3f}", rl->xf.position.x);
+
+        g_host->graphUnload(static_cast<i32>(reader));
+        aver_fw_set_anim_curve_provider(nullptr, nullptr);
+        w.destroy(reader);
         w.flush();
     }
 

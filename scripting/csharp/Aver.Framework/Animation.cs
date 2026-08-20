@@ -94,6 +94,30 @@ public readonly partial struct Entity
         return SetInt64("CAttachment.socket", Assets.ObjectIdOf(socket));
     }
 
+    /// <summary>Reads a named float curve off the clip this entity is playing, at its current
+    /// playhead -- "how far through the reload am I", "how hard is the foot planted".
+    ///
+    /// A CURVE IS NOT A NOTIFY. A notify is an event that happens once and runs something; a curve
+    /// always has a value wherever the playhead is and runs nothing. Poll this from OnTick; do not
+    /// try to express one with the other.
+    ///
+    /// Returns <paramref name="fallback"/> when the entity has no clip, the clip declares no such
+    /// curve, or the host installed no animation system. Use <see cref="TryGetAnimationCurve"/>
+    /// when the difference between "not there" and "reads zero" matters -- and it usually does.</summary>
+    public float GetAnimationCurve(string curve, float fallback = 0.0f) =>
+        TryGetAnimationCurve(curve, out float v) ? v : fallback;
+
+    /// <summary>As <see cref="GetAnimationCurve"/>, but says whether the curve was there at all.
+    /// <paramref name="value"/> is 0 on false, and that 0 means NOTHING -- a curve that genuinely
+    /// holds zero returns true.</summary>
+    public bool TryGetAnimationCurve(string curve, out float value)
+    {
+        value = 0.0f;
+        if (string.IsNullOrEmpty(curve)) return false;
+        // The same fnv1a64 the engine hashes a socket and an asset path with; no string crosses.
+        return Fw.aver_fw_anim_curve(Handle, Assets.ObjectIdOf(curve), out value) != 0;
+    }
+
     /// <summary>Stops riding a socket. The entity keeps its parent and stays where it last was.</summary>
     public bool DetachFromSocket() =>
         HasComponent(Component.Attachment) && SetInt64("CAttachment.socket", 0);

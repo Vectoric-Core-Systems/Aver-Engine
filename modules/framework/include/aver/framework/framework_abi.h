@@ -151,6 +151,33 @@ AVER_FW_ABI int32_t aver_fw_set_paused(int32_t paused);
 /* The first declared non-abstract class carrying ALL of `flags`, or 0. 0 flags -> 0. */
 AVER_FW_ABI int32_t aver_fw_find_class_with_flags(int32_t flags);
 
+/* ---- ANIMATION CURVES, RELAYED --------------------------------------------------------------
+ *
+ *
+ * The framework does not know what an animation is and does not link the module that does. It
+ * holds a function pointer the composition root installs, and forwards. That is the same shape
+ * AnimSystem itself uses for asset resolution and for notifies, and it is why C# can ask "what
+ * does this curve read" through the library it ALREADY binds instead of needing a new one.
+ *
+ * A host that installs nothing leaves aver_fw_anim_curve returning 0 for everything, which is the
+ * same answer a clip with no such curve gives -- a game with no animation system is not an error. */
+/* AVER_FW_CALL is defined by framework_hooks.h, which owns every other callback typedef in this
+ * ABI. Defined here too rather than including that header, because this one is the SURFACE C#
+ * binds and pulling in the dispatch-table header for one macro would widen it for no reason. */
+#if defined(_WIN32) && !defined(AVER_FW_CALL)
+#  define AVER_FW_CALL __cdecl
+#elif !defined(AVER_FW_CALL)
+#  define AVER_FW_CALL
+#endif
+typedef int32_t (AVER_FW_CALL* aver_fw_anim_curve_fn)(int32_t entity, int64_t nameHash,
+                                                      float* outValue, void* user);
+/* Installs the provider. Passing null clears it. Always returns 1. */
+AVER_FW_ABI int32_t aver_fw_set_anim_curve_provider(aver_fw_anim_curve_fn fn, void* user);
+/* Writes the curve value and returns 1, or leaves *outValue alone and returns 0 when there is no
+ * provider, no clip on the entity, or no curve of that name. THE CALLER MUST DISTINGUISH THOSE
+ * FROM A VALUE OF ZERO: a curve that reads 0 and a curve that is not there mean opposite things. */
+AVER_FW_ABI int32_t aver_fw_anim_curve(int32_t entity, int64_t nameHash, float* outValue);
+
 /* The session singletons begin_play populated; each is 0 in EDITOR. */
 AVER_FW_ABI int32_t aver_fw_game_instance(void);
 /* The running session's GameMode. */

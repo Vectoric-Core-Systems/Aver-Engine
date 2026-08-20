@@ -159,6 +159,12 @@ Override these on your `AverActor` subclass. All are optional; the defaults do n
 | `bool OnEvent(string name)` | A named event was raised **at this entity**. Two things raise one: an **animation notify** (a marker crossed on a playing clip) and a graph's `FireEvent` node aimed here. Return `true` if you handled it -- the value is what the caller reads as its own success. |
 | `void BuildModels(ActorBuilder builder)` | `protected`. Builds the actor's model tree; the editor overrides it in a generated `.Designer.cs`. Hand code rarely writes this. |
 
+**Animation curves** are the value-shaped sibling of notifies: `entity.GetAnimationCurve("ReloadProgress")`
+reads a named float off the clip the entity is playing, at its current playhead, and
+`TryGetAnimationCurve(name, out value)` says whether the curve was there at all — which matters,
+because "not there" and "reads zero" mean opposite things. Poll them from `OnTick`; a curve is a
+value that always exists, not an event that fires.
+
 `OnEvent` is **one hook, not a method per event name.** Unreal resolves anim notifies by reflecting on
 `AnimNotify_<Name>`; that works there because a notify is its own class. Here an event name is opaque all
 the way down -- the format stores a string, `GraphHost.Fire` branches on nothing, and a project invents

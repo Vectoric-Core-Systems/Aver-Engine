@@ -21,6 +21,20 @@ f32 clipTime(const fmt::OcAnimation& clip, f32 seconds);
 // per FORMAT_SPECS.md 9.2 ("each key = Time + inTangent + value + outTangent").
 void sampleAnimation(const fmt::OcAnimation& clip, f32 seconds, Pose& inOut);
 
+// A named float curve at `seconds`. Returns the value, or `fallback` when the curve has no keys.
+//
+// CLAMPED AT BOTH ENDS, NOT WRAPPED: before the first key the curve reads that key's value, after
+// the last it reads that one. A curve is a value that always exists, so there is no "outside" to
+// return nothing from -- and the caller has already wrapped the CLOCK into the clip (clipTime), so
+// a time past the last key means the animator simply stopped keying before the clip ended.
+//
+// STEP HOLDS THE KEY BEFORE. Linear interpolates. CUBICSPLINE IS TREATED AS LINEAR and that is a
+// stated limit rather than a silent one: the format can carry the mode (a glTF importer would set
+// it), but a curve stores one value per key with no tangent slots, so there is nothing to build a
+// Hermite from. Reading it as linear is the closest honest answer; inventing tangents would be a
+// different curve than the one authored.
+f32 sampleCurve(const fmt::OcCurve& c, f32 seconds, f32 fallback = 0.0f);
+
 // How a clock step is travelling through a clip. Everything notifiesCrossed needs that it cannot
 // work out from the two times alone -- a step from 1.9 to 0.1 in a 2 s clip is a forward wrap, a
 // backward scrub, or a whole loop plus a bit, and those fire different notifies.

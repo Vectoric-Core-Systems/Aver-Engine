@@ -27,6 +27,8 @@ constexpr u32 kChunkTRKS = avrFourCC("TRKS");
 // Required instead would have made those files unopenable, which is the difference between an
 // additive format change and a breaking one.
 constexpr u32 kChunkNOTF = avrFourCC("NOTF");
+// Optional, exactly as NOTF and SOCK are.
+constexpr u32 kChunkCRVE = avrFourCC("CRVE");
 
 // Sets `why` and returns false.
 bool fail(std::string* why, std::string m) { if (why) *why = std::move(m); return false; }
@@ -107,6 +109,17 @@ bool OcSkeleton::valid() const {
 // is the only choice that is stable under an edit to a later entry.
 const OcSocket* OcSkeleton::socket(const std::string& name) const {
     for (const OcSocket& k : sockets) if (k.name == name) return &k;
+    return nullptr;
+}
+
+const OcCurve* OcAnimation::curve(const std::string& name) const {
+    for (const OcCurve& c : curves) if (c.name == name) return &c;
+    return nullptr;
+}
+
+const OcCurve* OcAnimation::curveById(u64 id) const {
+    if (id == 0) return nullptr;
+    for (const OcCurve& c : curves) if (fnv1a64(c.name) == id) return &c;
     return nullptr;
 }
 
@@ -298,6 +311,16 @@ bool writeOcAnim(const OcAnimation& in, std::vector<u8>& out, std::string* why) 
         }
     }
 
+    // A CURVE WITH MISMATCHED TIMES AND VALUES IS REFUSED AT WRITE, not silently truncated. The
+    // sampler indexes values by the key it found in times, so a short values array would read past
+    // the end -- and the guard belongs here, where the caller still knows what it built, rather than
+    // in the sampler where the only available response is to invent a zero.
+    for (const OcCurve& c : in.curves) {
+        if (c.times.size() != c.values.size())
+            return fail(why, ".ocanim: curve '" + c.name + "' has " + std::to_string(c.times.size()) +
+                             " time(s) and " + std::to_string(c.values.size()) + " value(s)");
+    }
+
     // Notifies, before AHDR only because both intern into the same string table and the table is
     // written last. A clip with none adds no chunk at all rather than an empty one.
     std::vector<u8> notf;
@@ -307,6 +330,21 @@ bool writeOcAnim(const OcAnimation& in, std::vector<u8>& out, std::string* why) 
         for (const OcNotify& n : in.notifies) {
             w.f32v(n.time);
             w.u32v(strt.add(n.name));
+        }
+    }
+
+    // Curves. Same placement reasoning as the notifies above: built before AHDR only because the
+    // string table both intern into is written last.
+    std::vector<u8> crve;
+    if (!in.curves.empty()) {
+        W w{crve};
+        w.u32v(static_cast<u32>(in.curves.size()));
+        for (const OcCurve& c : in.curves) {
+            w.u32v(strt.add(c.name));
+            w.u32v(static_cast<u32>(c.interp));
+            w.u32v(static_cast<u32>(c.times.size()));
+            for (const f32 t : c.times) w.f32v(t);
+            for (const f32 v : c.values) w.f32v(v);
         }
     }
 
@@ -337,6 +375,7 @@ bool writeOcAnim(const OcAnimation& in, std::vector<u8>& out, std::string* why) 
     f.add(kChunkAHDR, std::move(ahdr), kAvrChunkRequired);
     f.add(kChunkTRKS, std::move(trks));
     if (!notf.empty()) f.add(kChunkNOTF, std::move(notf));
+    if (!crve.empty()) f.add(kChunkCRVE, std::move(crve));
     // AFTER the notify names have been interned, or the table would be written without them.
     f.add(kChunkSTRT, strt.bytes());
     return writeAvr1(f, out, why);
@@ -366,6 +405,37 @@ bool parseOcAnim(const u8* bytes, usize size, OcAnimation& out, std::string* why
     // NOTIFIES. Absent is the ordinary case and not an error -- every clip written before they
     // existed has no NOTF chunk, and find() answering null is exactly how this format says "this
     // file predates that idea" rather than "this file is broken".
+    // CURVES. Absent is ordinary.
+    out.curves.clear();
+    if (const AvrChunk* crve = f.find(kChunkCRVE)) {
+        R c{crve->data.data(), crve->data.data() + crve->data.size()};
+        const u32 count = c.u32v();
+        // A curve is at least 12 bytes (name, interp, key count) even with no keys.
+        if (count > crve->data.size() / 12) return fail(why, ".ocanim: CRVE says it holds more curves than it can");
+        out.curves.reserve(count);
+        for (u32 i = 0; i < count; ++i) {
+            OcCurve cur;
+            cur.name = std::string(strt.get(c.u32v()));
+            const u32 interp = c.u32v();
+            // An UNKNOWN interpolation mode reads as Linear rather than refusing the file. A curve
+            // is additive data: a reader that predates a mode should still play the clip, and the
+            // worst case is a value that eases where it should hold. Refusing would make a clip
+            // unopenable over a field nothing else in the file depends on.
+            cur.interp = interp <= static_cast<u32>(OcInterp::CubicSpline)
+                       ? static_cast<OcInterp>(interp) : OcInterp::Linear;
+            const u32 keys = c.u32v();
+            if (!c.ok) return fail(why, ".ocanim: truncated CRVE header");
+            // Bounded before reserving: each key is 8 bytes (a time and a value).
+            if (keys > crve->data.size() / 8) return fail(why, ".ocanim: a curve says it holds more keys than the chunk can");
+            cur.times.resize(keys);
+            cur.values.resize(keys);
+            for (u32 k = 0; k < keys; ++k) cur.times[k] = c.f32v();
+            for (u32 k = 0; k < keys; ++k) cur.values[k] = c.f32v();
+            out.curves.push_back(std::move(cur));
+        }
+        if (!c.ok) return fail(why, ".ocanim: truncated curve table");
+    }
+
     if (const AvrChunk* notf = f.find(kChunkNOTF)) {
         R n{notf->data.data(), notf->data.data() + notf->data.size()};
         const u32 count = n.u32v();

@@ -440,6 +440,64 @@ int main() {
         check(again == bytes, "BYTE-IDENTICAL -- a parse and a rewrite cannot quietly drop a field");
     }
 
+    AVER_INFO("=== .ocanim curves: a named float that varies over the clip ===");
+    {
+        fmt::OcAnimation a;
+        a.duration = 2.0f;
+        fmt::OcTrack t;
+        t.boneIndex = 0;
+        t.channels = fmt::kOcChannelTranslation;
+        t.times = {0.0f, 2.0f};
+        t.values = {0,0,0,  1,2,3};
+        a.tracks = {t};
+
+        fmt::OcCurve reload;
+        reload.name = "ReloadProgress";
+        reload.times = {0.0f, 1.0f, 2.0f};
+        reload.values = {0.0f, 0.25f, 1.0f};
+        fmt::OcCurve planted;
+        planted.name = "FootPlanted";
+        planted.interp = fmt::OcInterp::Step;
+        planted.times = {0.0f, 0.5f};
+        planted.values = {0.0f, 1.0f};
+        a.curves = {reload, planted};
+
+        std::vector<u8> bytes; std::string why;
+        check(fmt::writeOcAnim(a, bytes, &why), "a clip with curves writes: " + why);
+        fmt::OcAnimation b;
+        check(fmt::parseOcAnim(bytes.data(), bytes.size(), b, &why), "and reads back: " + why);
+        check(b.curves.size() == 2, "both curves survive");
+        if (const fmt::OcCurve* c = b.curve("ReloadProgress")) {
+            check(c->times.size() == 3 && c->values.size() == 3, "with all their keys");
+            checkNear(c->values[1], 0.25f, 1e-6f, "and the key VALUES, not just the count");
+            check(c->interp == fmt::OcInterp::Linear, "and the default interpolation");
+        } else check(false, "ReloadProgress resolves by name");
+        if (const fmt::OcCurve* c = b.curve("FootPlanted"))
+            check(c->interp == fmt::OcInterp::Step, "a STEP curve keeps its mode");
+        else check(false, "FootPlanted resolves by name");
+        check(b.curve("Nope") == nullptr, "an unknown name is null");
+
+        // A CURVE WHOSE TIMES AND VALUES DISAGREE IS REFUSED AT WRITE. The sampler indexes values by
+        // the key it found in times, so a short array would read past the end -- and the writer is
+        // the last place that still knows what the caller built.
+        fmt::OcAnimation bad = a;
+        bad.curves[0].values.pop_back();
+        std::vector<u8> junk;
+        check(!fmt::writeOcAnim(bad, junk, &why), "a curve with mismatched times and values is refused");
+
+        // Idempotence, for the reason the clip and the rig both have it.
+        std::vector<u8> again;
+        check(fmt::writeOcAnim(b, again, &why), "the parsed clip writes again");
+        check(again == bytes, "BYTE-IDENTICAL -- a parse and a rewrite drop no curve field");
+
+        // And a clip with none adds no chunk.
+        fmt::OcAnimation plain = a;
+        plain.curves.clear();
+        std::vector<u8> plainBytes;
+        check(fmt::writeOcAnim(plain, plainBytes, &why), "the curve-free clip writes");
+        check(plainBytes.size() < bytes.size(), "and is smaller -- no empty chunk is emitted");
+    }
+
     AVER_INFO("=== .ocanim notifies: a named event at a time in a clip ===");
     {
         fmt::OcAnimation a;

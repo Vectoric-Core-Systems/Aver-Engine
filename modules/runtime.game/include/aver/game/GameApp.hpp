@@ -315,6 +315,8 @@ private:
     // does -- never reset on a project change the way content_/level_ are.
     // Installed onto anim::animSystem() once the scripting host is up -- see its own definition.
     static void animNotify(scene::Entity e, const char* name, void* user);
+    // Answers the framework's relayed animation-curve query -- see its own definition.
+    static i32 animCurve(i32 entity, i64 nameHash, f32* outValue, void* user);
 
     aver::scripting::ScriptHost scripts_;
     bool scriptsReady_ = false;

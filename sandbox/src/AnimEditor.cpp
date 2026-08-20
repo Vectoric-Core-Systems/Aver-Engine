@@ -288,6 +288,7 @@ private:
     void drawAssetBrowser();
     void drawNotifies();
     void drawSockets();
+    void drawCurves();
     void buildPreview(Engine& e);
     void reloadIfNeeded();
 
@@ -330,6 +331,8 @@ private:
     char notifyNameBuf_[96] = {};
     int  selectedSocket_ = -1;
     char socketNameBuf_[96] = {};
+    int  selectedCurve_ = -1;
+    char curveNameBuf_[96] = {};
 
     f32 time_ = 0.0f;
     f32 speed_ = 1.0f;
@@ -628,6 +631,135 @@ void AnimEditor::drawTransport() {
 // socket goes is choosing a bone -- and the bone tree is already open on the left with one
 // highlighted. A socket created against nothing would need a bone chosen before it meant anything,
 // which is a second decision for no gain.
+// The curve list: what each one reads AT THE PLAYHEAD, and its keys.
+//
+// THE VALUE AT THE PLAYHEAD IS THE HEADLINE, not the key list, and that is the whole reason this
+// panel is worth having over editing the file by hand. A curve is a number that varies, and the
+// question an author has is "what does it read HERE" -- which is answered by scrubbing and reading,
+// not by looking at three keyframes and interpolating in your head.
+//
+// NOT A GRAPH EDITOR. Unreal draws curves on a 2D graph with draggable tangents; this draws the
+// shape over the timeline and edits keys as numbers. That is a real difference in authoring comfort
+// and it is stated rather than glossed: the format stores no tangents (see OcCurve), so a tangent
+// handle would have nothing to write to.
+void AnimEditor::drawCurves() {
+#if AVER_WITH_IMGUI
+    if (!isClip_) { ImGui::TextDisabled("a skeleton has no curves"); return; }
+
+    if (ImGui::SmallButton("Add curve")) {
+        fmt::OcCurve c;
+        // Made unique on creation, for the reason a socket is: curve() returns the FIRST match, so a
+        // duplicate name leaves the loser permanently unreadable by name.
+        std::string name = "NewCurve";
+        for (int n = 1; clip_.curve(name) != nullptr; ++n) name = "NewCurve" + std::to_string(n);
+        c.name = name;
+        // ONE KEY AT THE PLAYHEAD rather than none. An empty curve reads the caller's fallback
+        // everywhere, which looks identical to a curve that is not there -- so a curve created with
+        // no keys would appear broken the moment anything read it.
+        c.times = {time_};
+        c.values = {0.0f};
+        clip_.curves.push_back(c);
+        selectedCurve_ = static_cast<int>(clip_.curves.size()) - 1;
+        std::snprintf(curveNameBuf_, sizeof curveNameBuf_, "%s", c.name.c_str());
+        dirty_ = true;
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("%zu curve(s)", clip_.curves.size());
+
+    if (clip_.curves.empty()) {
+        ImGui::TextDisabled("None. A curve is a named float that varies over the clip.");
+        return;
+    }
+
+    for (usize i = 0; i < clip_.curves.size(); ++i) {
+        ImGui::PushID(static_cast<int>(i));
+        fmt::OcCurve& c = clip_.curves[i];
+        const bool sel = (static_cast<int>(i) == selectedCurve_);
+
+        char row[192];
+        std::snprintf(row, sizeof row, "%s   = %.4f", c.name.c_str(), anim::sampleCurve(c, time_));
+        if (ImGui::Selectable(row, sel)) {
+            selectedCurve_ = static_cast<int>(i);
+            std::snprintf(curveNameBuf_, sizeof curveNameBuf_, "%s", c.name.c_str());
+        }
+
+        if (sel) {
+            ImGui::Indent();
+            const f32 w = 170.0f * (ImGui::GetFontSize() / 16.0f);
+            ImGui::SetNextItemWidth(w);
+            ImGui::InputText("Name", curveNameBuf_, sizeof curveNameBuf_);
+            if (ImGui::IsItemDeactivatedAfterEdit()) {
+                std::string next = curveNameBuf_;
+                while (!next.empty() && next.front() == ' ') next.erase(next.begin());
+                while (!next.empty() && next.back() == ' ') next.pop_back();
+                const fmt::OcCurve* clash = next.empty() ? nullptr : clip_.curve(next);
+                if (clash && clash != &c) {
+                    AVER_WARN("[AnimEditor] a curve called '{}' already exists on this clip", next);
+                    std::snprintf(curveNameBuf_, sizeof curveNameBuf_, "%s", c.name.c_str());
+                } else if (!next.empty() && next != c.name) { c.name = next; dirty_ = true; }
+            }
+
+            // CUBICSPLINE IS NOT OFFERED. The format can carry it and the sampler reads it as linear,
+            // because a curve stores one value per key with no tangents -- so putting it in this combo
+            // would let an author choose a mode that does nothing.
+            int mode = c.interp == fmt::OcInterp::Step ? 1 : 0;
+            ImGui::SetNextItemWidth(w);
+            if (ImGui::Combo("Interp", &mode, "Linear\0Step\0")) {
+                c.interp = mode == 1 ? fmt::OcInterp::Step : fmt::OcInterp::Linear;
+                dirty_ = true;
+            }
+
+            if (ImGui::SmallButton("Add key at playhead")) {
+                // INSERTED IN TIME ORDER. The sampler binary-searches `times`, so an out-of-order key
+                // does not merely look odd in the list -- it makes every lookup past it wrong.
+                usize at = 0;
+                while (at < c.times.size() && c.times[at] < time_) ++at;
+                c.times.insert(c.times.begin() + static_cast<isize>(at), time_);
+                c.values.insert(c.values.begin() + static_cast<isize>(at), anim::sampleCurve(c, time_));
+                dirty_ = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Delete curve")) {
+                clip_.curves.erase(clip_.curves.begin() + static_cast<isize>(i));
+                selectedCurve_ = -1;
+                dirty_ = true;
+                ImGui::Unindent();
+                ImGui::PopID();
+                break;
+            }
+
+            for (usize k = 0; k < c.times.size() && k < c.values.size(); ++k) {
+                ImGui::PushID(static_cast<int>(k));
+                f32 kv[2] = {c.times[k], c.values[k]};
+                ImGui::SetNextItemWidth(w * 1.4f);
+                if (ImGui::DragFloat2("##key", kv, 0.01f)) {
+                    // The time is CLAMPED BETWEEN ITS NEIGHBOURS rather than sorted after the fact, so
+                    // dragging a key can never reorder the array under the binary search. Dragging past
+                    // a neighbour holds instead of swapping -- delete and re-add to move a key past
+                    // another, which is rare and unambiguous.
+                    const f32 lo = k > 0 ? c.times[k - 1] : -1e9f;
+                    const f32 hi = (k + 1) < c.times.size() ? c.times[k + 1] : 1e9f;
+                    c.times[k] = kv[0] < lo ? lo : (kv[0] > hi ? hi : kv[0]);
+                    c.values[k] = kv[1];
+                    dirty_ = true;
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("x")) {
+                    c.times.erase(c.times.begin() + static_cast<isize>(k));
+                    c.values.erase(c.values.begin() + static_cast<isize>(k));
+                    dirty_ = true;
+                    ImGui::PopID();
+                    break;
+                }
+                ImGui::PopID();
+            }
+            ImGui::Unindent();
+        }
+        ImGui::PopID();
+    }
+#endif
+}
+
 void AnimEditor::drawSockets() {
 #if AVER_WITH_IMGUI
     if (skel_.bones.empty()) { ImGui::TextDisabled("no skeleton"); return; }
@@ -878,6 +1010,33 @@ void AnimEditor::drawTimeline() {
         }
     }
 
+    // THE SELECTED CURVE, drawn over the same bar. Only the selected one: overlaying every curve
+    // on a 20-pixel-high slider gives a scribble, and the one being edited is the one whose shape
+    // an author is trying to see. Normalised to its own min and max, because a curve's range is
+    // whatever the author chose and a fixed 0..1 would flatten most of them into a line.
+    if (selectedCurve_ >= 0 && static_cast<usize>(selectedCurve_) < clip_.curves.size()) {
+        const fmt::OcCurve& c = clip_.curves[static_cast<usize>(selectedCurve_)];
+        if (c.times.size() >= 2 && c.values.size() == c.times.size()) {
+            f32 lo = c.values[0], hi = c.values[0];
+            for (const f32 v : c.values) { lo = v < lo ? v : lo; hi = v > hi ? v : hi; }
+            const f32 span = (hi - lo) > 1e-6f ? (hi - lo) : 1.0f;
+            const f32 top = p0.y + 2.0f, bot = p1.y - 2.0f;
+            ImVec2 prev{};
+            bool have = false;
+            // SAMPLED ACROSS THE BAR rather than drawn key-to-key, so a STEP curve reads as steps
+            // instead of as a straight line between its keys -- which is what it is not.
+            const int steps = 96;
+            for (int k = 0; k <= steps; ++k) {
+                const f32 u = static_cast<f32>(k) / static_cast<f32>(steps);
+                const f32 v = anim::sampleCurve(c, u * dur);
+                const ImVec2 pt(p0.x + (p1.x - p0.x) * u, bot - (bot - top) * ((v - lo) / span));
+                if (have) dl->AddLine(prev, pt, IM_COL32(150, 230, 160, 210), 1.5f);
+                prev = pt;
+                have = true;
+            }
+        }
+    }
+
     // NOTIFIES, on the SAME bar as the keys and above them. Unreal gives them their own lane, and
     // that is the right answer once there are lanes to give; with one clip and no curves the thing
     // an author needs is the notify's position against the KEYS it is being placed relative to --
@@ -1075,6 +1234,10 @@ void AnimEditor::draw(Engine& e) {
     if (ImGui::BeginChild("tracks", ImVec2(0, h), true)) {
         ImGui::TextDisabled("NOTIFIES");
         if (ImGui::BeginChild("notifies", ImVec2(0, h * 0.38f), false)) drawNotifies();
+        ImGui::EndChild();
+        ImGui::Separator();
+        ImGui::TextDisabled("CURVES");
+        if (ImGui::BeginChild("curves", ImVec2(0, h * 0.30f), false)) drawCurves();
         ImGui::EndChild();
         ImGui::Separator();
         ImGui::TextDisabled("TRACKS");

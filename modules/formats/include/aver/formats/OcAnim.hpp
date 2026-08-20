@@ -139,6 +139,30 @@ struct OcNotify {
     std::string name;     // the event name fired; opaque here, exactly as OcAnimation::skeletonRef is
 };
 
+// ONE CURVE: a named float that varies over the clip.
+//
+// WHAT IT IS FOR. "How far through the reload am I", "how hard is the foot planted", "how much
+// should the cloth billow" -- a number the animator authors ALONGSIDE the pose, in the same file,
+// so it stays in step with the animation when the animation is re-timed. Without one, every such
+// number is either a constant in gameplay code (and wrong the moment the clip changes length) or a
+// hand-written comparison against the clip time (which is the same polling loop notifies replaced,
+// with the same drift).
+//
+// A CURVE IS NOT A NOTIFY, and the two are deliberately different records. A notify is an EVENT --
+// it happens once, at an instant, and something runs. A curve is a VALUE -- it always has one,
+// wherever the playhead is, and nothing runs. Trying to express one with the other gives either an
+// event that fires every frame or a value that only exists at three moments.
+//
+// SCALAR, NOT A VECTOR, and that is a real limit rather than an oversight. Unreal's curves are
+// float curves too, and every vector case decomposes into named components without needing the
+// format to grow a width field that every reader must then branch on.
+struct OcCurve {
+    std::string name;            // what a script asks for; opaque here
+    OcInterp interp = OcInterp::Linear;   // Step holds; CubicSpline is NOT supported -- see below
+    std::vector<f32> times;      // seconds from the clip start, ascending
+    std::vector<f32> values;     // one per time
+};
+
 struct OcAnimation {
     f32  duration = 0.0f;                      // seconds
     OcAnimStorage storage = OcAnimStorage::Keyframed;
@@ -152,6 +176,16 @@ struct OcAnimation {
     // every writer can be trusted to have done so. Empty for every clip written before they
     // existed, which is every clip: the NOTF chunk is optional and its absence is not an error.
     std::vector<OcNotify> notifies;
+
+    // Named float curves. Optional in the same way notifies are: a clip with none emits no chunk,
+    // so a file written now is byte-identical to one written before curves existed.
+    std::vector<OcCurve> curves;
+
+    // The curve of that name, or nullptr. Linear, for the reason OcSkeleton::socket is.
+    const OcCurve* curve(const std::string& name) const;
+    // By fnv1a64 of the name, for a caller holding a hash rather than a string -- a component or a
+    // graph node, which cannot carry one.
+    const OcCurve* curveById(u64 id) const;
 
     // True when the duration, storage and every track are consistent.
     bool valid() const;

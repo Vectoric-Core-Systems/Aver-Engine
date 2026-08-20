@@ -634,6 +634,33 @@ int32_t aver_fw_destroy_preview(int32_t e) {
 }
 
 // The entity's class, or 0.
+// ---- ANIMATION CURVES, RELAYED ---------------------------------------------------------------
+//
+// A FUNCTION POINTER, NOT A LINK EDGE, and the alternatives are worth naming. Aver.Framework could
+// link Aver.Anim.Scene and call it directly -- but that module is STATIC, so linking it from here
+// AND from the executable would give the process two copies of a system whose whole design is a
+// process-global singleton. Making it SHARED for one query would change how every composition root
+// builds. Relaying costs one indirect call on a query nothing calls in a hot loop.
+//
+// NOT ATOMIC, and that is a deliberate match to the rest of this file: the provider is installed
+// once at startup by the composition root, on the same thread everything else here runs on.
+aver_fw_anim_curve_fn g_animCurve = nullptr;
+void* g_animCurveUser = nullptr;
+
+int32_t aver_fw_set_anim_curve_provider(aver_fw_anim_curve_fn fn, void* user) {
+    g_animCurve = fn;
+    g_animCurveUser = user;
+    return 1;
+}
+
+int32_t aver_fw_anim_curve(int32_t entity, int64_t nameHash, float* outValue) {
+    // outValue is LEFT ALONE on every failure. A caller that ignores the return code and reads it
+    // anyway gets whatever it initialised, which is its own default -- not a zero this function
+    // invented and that reads exactly like a curve that genuinely holds zero.
+    if (!g_animCurve || !outValue) return 0;
+    return g_animCurve(entity, nameHash, outValue, g_animCurveUser);
+}
+
 int32_t aver_fw_class_of(int32_t e) {
     return classOfEntity(toEntity(e));
 }

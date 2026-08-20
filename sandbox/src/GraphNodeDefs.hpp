@@ -606,6 +606,13 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"AttachToSocket", "Attach To Socket", "Scene", {
         pin("entity", "int", false), pin("parent", "int", false), pin("success", "bool", true)},
         {attr("socket", "Socket")}});
+
+    // -- GetAnimCurve: a PURE read, so it has no exec pins and needs no exec emitter -- the only
+    //    node in this animation group that reads rather than writes. curve= names it, the same
+    //    NODE-line attribute mechanism every other string carrier here uses.
+    t.push_back({"GetAnimCurve", "Get Anim Curve", "Scene", {
+        pin("entity", "int", false), pin("value", "float", true)},
+        {attr("curve", "Curve")}});
     return t;
 }
 

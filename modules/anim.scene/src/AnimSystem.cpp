@@ -205,6 +205,11 @@ void AnimSystem::stepNotifies(scene::Entity e, const scene::CAnimator& a, f32 st
     if (clock.clip != a.clip) { clock = NotifyClock{}; clock.clip = a.clip; }
 
     const f32 wrapped = wrapClipTime(*c, a.time, (a.flags & scene::kAnimatorOnce) != 0);
+    // Published for curveValue BEFORE any of the early-outs below. A paused animator still has a
+    // playhead and its curves still read there -- scrubbing a clip in the editor should move the
+    // curve readout even though it fires no notifies.
+    clock.asset = c;
+    clock.wrapped = wrapped;
 
     // A PAUSED ANIMATOR FIRES NOTHING, and this is the deliberate answer to scrubbing. A script (or
     // an editor) that writes CAnimator.time while paused is INSPECTING the clip, and delivering a
@@ -259,6 +264,15 @@ const Mat4* AnimSystem::skinning(scene::Entity e, u32& outCount) const {
     if (it == posed_.end() || it->second.skin.empty()) return nullptr;
     outCount = static_cast<u32>(it->second.skin.size());
     return it->second.skin.data();
+}
+
+bool AnimSystem::curveValue(scene::Entity e, u64 nameHash, f32& out) const {
+    auto it = clocks_.find(e);
+    if (it == clocks_.end() || !it->second.asset) return false;
+    const fmt::OcCurve* c = it->second.asset->curveById(nameHash);
+    if (!c) return false;
+    out = sampleCurve(*c, it->second.wrapped);
+    return true;
 }
 
 const fmt::OcSkeleton* AnimSystem::posedSkeleton(scene::Entity e) const {

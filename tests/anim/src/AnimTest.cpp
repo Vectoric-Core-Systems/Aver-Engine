@@ -439,6 +439,51 @@ int main() {
         check(hi3.x < 1000.0f, "and contributes NOTHING even when its matrix is enormous");
     }
 
+    AVER_INFO("=== curve sampling ===");
+    {
+        fmt::OcCurve c;
+        c.name = "Ramp";
+        c.times = {0.0f, 1.0f, 3.0f};
+        c.values = {0.0f, 10.0f, 30.0f};
+
+        checkNear(anim::sampleCurve(c, 0.0f), 0.0f, 1e-5f, "at the first key it is that key");
+        checkNear(anim::sampleCurve(c, 0.5f), 5.0f, 1e-5f, "half way between two keys it is half way");
+        checkNear(anim::sampleCurve(c, 1.0f), 10.0f, 1e-5f, "exactly on a key it is that key");
+        checkNear(anim::sampleCurve(c, 2.0f), 20.0f, 1e-5f, "and the SECOND span interpolates too");
+        // CLAMPED, NOT WRAPPED, at both ends. A curve always has a value; the caller has already
+        // wrapped the clock into the clip, so a time past the last key means the animator stopped
+        // keying, not that the curve ran out.
+        checkNear(anim::sampleCurve(c, -5.0f), 0.0f, 1e-5f, "before the first key it clamps");
+        checkNear(anim::sampleCurve(c, 99.0f), 30.0f, 1e-5f, "and after the last it clamps too");
+
+        fmt::OcCurve step = c;
+        step.interp = fmt::OcInterp::Step;
+        checkNear(anim::sampleCurve(step, 0.5f), 0.0f, 1e-5f, "a STEP curve HOLDS the key before");
+        checkNear(anim::sampleCurve(step, 0.999f), 0.0f, 1e-5f, "right up to the next one");
+        checkNear(anim::sampleCurve(step, 1.0f), 10.0f, 1e-5f, "and takes it exactly on the key");
+
+        // A CubicSpline curve reads as linear rather than as nonsense -- the format can carry the
+        // mode but a curve stores no tangents, so there is nothing to build a Hermite from.
+        fmt::OcCurve cubic = c;
+        cubic.interp = fmt::OcInterp::CubicSpline;
+        checkNear(anim::sampleCurve(cubic, 0.5f), 5.0f, 1e-5f,
+                  "a CUBICSPLINE curve reads as LINEAR, the stated limit");
+
+        // Two keys at one time is a JUMP, not a division by zero.
+        fmt::OcCurve jump;
+        jump.times = {0.0f, 1.0f, 1.0f, 2.0f};
+        jump.values = {0.0f, 0.0f, 5.0f, 5.0f};
+        const f32 before = anim::sampleCurve(jump, 0.999f);
+        const f32 after = anim::sampleCurve(jump, 1.5f);
+        check(before < 0.1f && after > 4.9f && std::isfinite(before) && std::isfinite(after),
+              "two keys at the same time jump, and neither side is infinite");
+
+        // No keys at all returns the caller's fallback, not a zero that looks like data.
+        fmt::OcCurve empty;
+        checkNear(anim::sampleCurve(empty, 0.5f, -7.0f), -7.0f, 1e-6f,
+                  "an empty curve returns the FALLBACK, not 0");
+    }
+
     AVER_INFO("=== sockets follow the posed bone ===");
     {
         // The chain() rig: root at the origin, spine 40 up, head another 60 up. A socket 10 out
