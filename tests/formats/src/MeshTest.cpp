@@ -390,6 +390,56 @@ int main() {
         check(b.tracks[2].values.size() == b.tracks[2].times.size() * 9, "value count matches the stride");
     }
 
+    AVER_INFO("=== .ocskel sockets: a named place on the rig ===");
+    {
+        fmt::OcSkeleton k;
+        fmt::OcBone root;  root.name = "root";
+        fmt::OcBone hand;  hand.name = "hand_r"; hand.parent = 0; hand.translation = Vec3{0, 0, 90};
+        k.bones = {root, hand};
+        k.rootBone = 0;
+        k.sockets.push_back({"WeaponGrip", 1, Vec3{2.5f, -1.0f, 0.5f}, Quat{0, 0, 0.7071f, 0.7071f}, Vec3{1, 1, 1}});
+        k.sockets.push_back({"Muzzle",     1, Vec3{40.0f, 0, 0},       Quat{0, 0, 0, 1},             Vec3{2, 2, 2}});
+
+        std::vector<u8> bytes; std::string why;
+        check(fmt::writeOcSkel(k, bytes, &why), "a rig with sockets writes: " + why);
+        fmt::OcSkeleton b;
+        check(fmt::parseOcSkel(bytes.data(), bytes.size(), b, &why), "and reads back: " + why);
+        check(b.sockets.size() == 2, "both sockets survive");
+        if (b.sockets.size() == 2) {
+            check(b.sockets[0].name == "WeaponGrip" && b.sockets[0].bone == 1,
+                  "the first keeps its name and its bone");
+            checkNear(b.sockets[0].translation.x, 2.5f, 1e-6f, "and its offset");
+            checkNear(b.sockets[0].rotation.z, 0.7071f, 1e-6f, "and its rotation");
+            checkNear(b.sockets[1].scale.y, 2.0f, 1e-6f, "the second keeps a non-unit scale");
+        }
+        check(b.socket("Muzzle") != nullptr && b.socket("Muzzle")->bone == 1, "lookup by name works");
+        check(b.socket("NoSuchThing") == nullptr, "and an unknown name is null, not the first socket");
+
+        // THE FAILURE THIS EXISTS TO CATCH: a rig re-exported with fewer bones leaves every socket
+        // past the new end pointing at nothing. Refused at write AND at load, so the bad file is
+        // rejected with a message rather than indexing off the end the first time something attaches.
+        fmt::OcSkeleton bad = k;
+        bad.sockets[0].bone = 7;
+        std::vector<u8> junk;
+        check(!fmt::writeOcSkel(bad, junk, &why), "a socket naming a bone that does not exist is refused");
+
+        // And a rig with none adds no chunk at all -- the backward-compatibility claim, by bytes.
+        fmt::OcSkeleton plain = k;
+        plain.sockets.clear();
+        std::vector<u8> plainBytes;
+        check(fmt::writeOcSkel(plain, plainBytes, &why), "the socket-free rig writes");
+        check(plainBytes.size() < bytes.size(), "and is SMALLER -- no empty chunk is emitted");
+        fmt::OcSkeleton backPlain;
+        check(fmt::parseOcSkel(plainBytes.data(), plainBytes.size(), backPlain, &why), "and reads");
+        check(backPlain.sockets.empty(), "carrying no sockets rather than one unnamed one");
+
+        // Idempotence, for the reason the clip has it: an editor that adds a socket rewrites the
+        // whole rig, so anything the parser drops is something the editor deletes.
+        std::vector<u8> again;
+        check(fmt::writeOcSkel(b, again, &why), "the parsed rig writes again");
+        check(again == bytes, "BYTE-IDENTICAL -- a parse and a rewrite cannot quietly drop a field");
+    }
+
     AVER_INFO("=== .ocanim notifies: a named event at a time in a clip ===");
     {
         fmt::OcAnimation a;

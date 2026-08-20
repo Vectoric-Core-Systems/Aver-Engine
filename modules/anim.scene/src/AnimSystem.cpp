@@ -126,6 +126,7 @@ void AnimSystem::tick(scene::World& world, f32 dt) {
         }
 
         Posed& p = posed_[e];
+        p.skel = skel;
         restPose(*skel, p.pose);
 
         if (const fmt::OcAnimation* c = clip(a->clip)) {
@@ -214,6 +215,21 @@ const Mat4* AnimSystem::skinning(scene::Entity e, u32& outCount) const {
     if (it == posed_.end() || it->second.skin.empty()) return nullptr;
     outCount = static_cast<u32>(it->second.skin.size());
     return it->second.skin.data();
+}
+
+const fmt::OcSkeleton* AnimSystem::posedSkeleton(scene::Entity e) const {
+    auto it = posed_.find(e);
+    return it == posed_.end() ? nullptr : it->second.skel;
+}
+
+bool AnimSystem::socketModel(scene::Entity e, const std::string& name, Mat4& out) const {
+    auto it = posed_.find(e);
+    if (it == posed_.end() || !it->second.skel) return false;
+    const fmt::OcSocket* s = it->second.skel->socket(name);
+    if (!s) return false;
+    std::vector<Mat4> model;
+    poseToModel(*it->second.skel, it->second.pose, model);
+    return socketModelMatrix(model, *s, out);
 }
 
 const Pose* AnimSystem::pose(scene::Entity e) const {

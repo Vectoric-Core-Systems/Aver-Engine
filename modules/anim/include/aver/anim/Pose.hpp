@@ -32,6 +32,21 @@ void poseToModel(const fmt::OcSkeleton& skel, const Pose& p, std::vector<Mat4>& 
 // pose transformed by these lands exactly where it started, which is the property restPose gives.
 void poseToSkinning(const fmt::OcSkeleton& skel, const Pose& p, std::vector<Mat4>& outSkin);
 
+// Where a socket is, in the skeleton's MODEL space, given the model matrices poseToModel produced.
+//
+// THE POSED BONE, NOT THE REST BONE, which is the entire point of a socket: a grip in the hand has
+// to travel with the hand. That is why this takes `model` rather than reading the skeleton's rest
+// transforms -- pass poseToModel's output for this frame's pose and the socket follows the
+// animation; pass a rest-pose model and it sits where the rig was authored.
+//
+// NOT poseToSkinning's output. Those carry the inverse bind, which exists to put a BIND-POSE VERTEX
+// where it belongs; a socket offset is already expressed in the bone's own space and applying the
+// inverse bind to it would send it somewhere meaningless. The two are easy to confuse and produce
+// a result that is wrong in a way that still looks like a transform.
+//
+// False, leaving `out` untouched, when the socket names a bone outside `model`.
+bool socketModelMatrix(const std::vector<Mat4>& model, const fmt::OcSocket& sock, Mat4& out);
+
 // `a` toward `b` by `t`, per bone: lerp on translation and scale, shortest-arc slerp on rotation.
 // `t` is clamped. Mismatched bone counts leave `out` as a copy of `a`.
 void blendPose(const Pose& a, const Pose& b, f32 t, Pose& out);

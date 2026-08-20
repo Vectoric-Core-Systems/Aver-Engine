@@ -439,6 +439,50 @@ int main() {
         check(hi3.x < 1000.0f, "and contributes NOTHING even when its matrix is enormous");
     }
 
+    AVER_INFO("=== sockets follow the posed bone ===");
+    {
+        // The chain() rig: root at the origin, spine 40 up, head another 60 up. A socket 10 out
+        // along +X from the SPINE.
+        const fmt::OcSkeleton skel = chain();
+        fmt::OcSocket grip;
+        grip.name = "Grip";
+        grip.bone = 1;                       // spine
+        grip.translation = Vec3{10, 0, 0};
+
+        anim::Pose p;
+        anim::restPose(skel, p);
+        std::vector<Mat4> model;
+        anim::poseToModel(skel, p, model);
+
+        Mat4 m;
+        check(anim::socketModelMatrix(model, grip, m), "the socket resolves against a posed rig");
+        // Row-vector: the translation lives in row 3. At rest the spine is at (0,0,40), so a socket
+        // 10 out along X is at (10,0,40) -- NOT (10,0,0), which is what dropping the bone gives, and
+        // NOT (0,0,40), which is what dropping the offset gives.
+        checkNear(m.m[3][0], 10.0f, 1e-4f, "socket X is the offset");
+        checkNear(m.m[3][2], 40.0f, 1e-4f, "socket Z is the BONE's height, so the bone was not dropped");
+
+        // NOW ROTATE THE BONE, which is the whole reason a socket is not just a number written down
+        // in gameplay code. A quarter turn about Z takes the +X offset onto +Y. If the composition
+        // order were reversed the socket would instead orbit the character and X would stay at 10 --
+        // a result that still looks like a transform, which is why this is checked and not eyeballed.
+        const f32 h = 0.70710678f;           // cos/sin of 45 degrees: a 90-degree quaternion
+        p.local[1].rotation = Quat{0, 0, h, h};
+        anim::poseToModel(skel, p, model);
+        check(anim::socketModelMatrix(model, grip, m), "and again with the bone turned");
+        checkNear(m.m[3][0], 0.0f, 1e-3f, "the offset turned with the bone: X is now 0");
+        checkNear(m.m[3][1], 10.0f, 1e-3f, "and Y is 10 -- the socket TRAVELS with the pose");
+        checkNear(m.m[3][2], 40.0f, 1e-3f, "with the bone still at its own height");
+
+        // A socket naming a bone the rig does not have is refused rather than read off the end.
+        fmt::OcSocket bad = grip;
+        bad.bone = 99;
+        Mat4 untouched = Mat4::identity();
+        untouched.m[3][0] = 1234.0f;
+        check(!anim::socketModelMatrix(model, bad, untouched), "an out-of-range bone is refused");
+        checkNear(untouched.m[3][0], 1234.0f, 1e-6f, "and the output is left alone, not half-written");
+    }
+
     AVER_INFO("=== notify crossings ===");
     {
         // A 2 s clip with markers at 0, 0.5, 1.25 and 2.0 -- both ends included on purpose, because

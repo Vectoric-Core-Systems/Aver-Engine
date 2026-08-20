@@ -13,6 +13,10 @@ namespace aver::fmt {
 namespace {
 
 constexpr u32 kChunkSKEL = avrFourCC("SKEL");
+// OPTIONAL, exactly as NOTF is on a clip and for the same reason: a rig with no sockets emits no
+// chunk, so a file written now is byte-identical to one written before sockets existed and an
+// older reader never asks for what it does not know about.
+constexpr u32 kChunkSOCK = avrFourCC("SOCK");
 constexpr u32 kChunkSTRT = avrFourCC("STRT");
 constexpr u32 kChunkAHDR = avrFourCC("AHDR");
 constexpr u32 kChunkTRKS = avrFourCC("TRKS");
@@ -89,7 +93,20 @@ bool OcSkeleton::valid() const {
         if (p < 0 || usize(p) >= bones.size()) return false;
         if (usize(p) >= i) return false;
     }
+    // A SOCKET POINTING AT A BONE THAT DOES NOT EXIST is the failure this catches, and it is the one
+    // that actually happens: a rig is re-exported with fewer bones and every socket past the new end
+    // becomes an out-of-range index. Refusing it here means the bad file is rejected at load with a
+    // message, instead of indexing off the end of the bone array the first time something attaches.
+    for (const OcSocket& k : sockets) if (usize(k.bone) >= bones.size()) return false;
     return true;
+}
+
+// The socket of that name, or nullptr. FIRST MATCH WINS on a duplicate: the format does not enforce
+// unique names (see OcSkeleton::sockets), so this has to answer something, and answering the first
+// is the only choice that is stable under an edit to a later entry.
+const OcSocket* OcSkeleton::socket(const std::string& name) const {
+    for (const OcSocket& k : sockets) if (k.name == name) return &k;
+    return nullptr;
 }
 
 // Encodes a skeleton into an .ocskel container. Returns false with `why` set on invalid input.
@@ -114,11 +131,27 @@ bool writeOcSkel(const OcSkeleton& in, std::vector<u8>& out, std::string* why) {
         }
     }
 
+    // Sockets, interned into the same string table the bone names use. Built before the table is
+    // written, or their names would not be in it.
+    std::vector<u8> sock;
+    if (!in.sockets.empty()) {
+        W w{sock};
+        w.u32v(static_cast<u32>(in.sockets.size()));
+        for (const OcSocket& s : in.sockets) {
+            w.u32v(strt.add(s.name));
+            w.u32v(s.bone);
+            w.f32v(s.translation.x); w.f32v(s.translation.y); w.f32v(s.translation.z);
+            w.f32v(s.rotation.x); w.f32v(s.rotation.y); w.f32v(s.rotation.z); w.f32v(s.rotation.w);
+            w.f32v(s.scale.x); w.f32v(s.scale.y); w.f32v(s.scale.z);
+        }
+    }
+
     Avr1File f;
     f.subtype = kAvrSubtypeSkel;
     f.contentVersion = 1;
     f.flags = kAvrFlagCooked;
     f.add(kChunkSKEL, std::move(skel), kAvrChunkRequired);
+    if (!sock.empty()) f.add(kChunkSOCK, std::move(sock));
     f.add(kChunkSTRT, strt.bytes());
     return writeAvr1(f, out, why);
 }
@@ -152,7 +185,30 @@ bool parseOcSkel(const u8* bytes, usize size, OcSkeleton& out, std::string* why)
         for (int k = 0; k < 16; ++k) b.inverseBind[k] = r.f32v();
     }
     if (!r.ok) return fail(why, ".ocskel: truncated bone table");
-    if (!out.valid()) return fail(why, ".ocskel: bone parents are out of range, cyclic, or not in parent-before-child order");
+
+    // Sockets. Absent is the ordinary case -- every rig written before they existed has no SOCK.
+    out.sockets.clear();
+    if (const AvrChunk* sock = f.find(kChunkSOCK)) {
+        R s{sock->data.data(), sock->data.data() + sock->data.size()};
+        const u32 n = s.u32v();
+        // Bounded by what the chunk COULD hold (44 bytes each) before reserving, so a corrupt count
+        // cannot ask for an enormous allocation on the way to failing.
+        if (n > sock->data.size() / 44) return fail(why, ".ocskel: SOCK says it holds more sockets than it can");
+        out.sockets.resize(n);
+        for (u32 i = 0; i < n; ++i) {
+            OcSocket& k = out.sockets[i];
+            k.name = std::string(strt.get(s.u32v()));
+            k.bone = s.u32v();
+            k.translation = Vec3{s.f32v(), s.f32v(), s.f32v()};
+            k.rotation = Quat{s.f32v(), s.f32v(), s.f32v(), s.f32v()};
+            k.scale = Vec3{s.f32v(), s.f32v(), s.f32v()};
+        }
+        if (!s.ok) return fail(why, ".ocskel: truncated socket table");
+    }
+
+    if (!out.valid()) return fail(why, ".ocskel: bone parents are out of range, cyclic, or not in "
+                                      "parent-before-child order, or a socket names a bone that does "
+                                      "not exist");
     return true;
 }
 

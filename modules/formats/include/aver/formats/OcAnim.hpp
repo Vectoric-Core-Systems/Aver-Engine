@@ -24,12 +24,47 @@ struct OcBone {
     f32  inverseBind[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
 };
 
+// ONE SOCKET: a named place on the rig, offset from a bone.
+//
+// WHAT IT IS FOR. Hanging something on a character -- a weapon in the hand, a scabbard on the hip,
+// a muzzle to spawn a flash at. Without one, every attachment in a project is a bone index plus a
+// hand-tuned offset written down somewhere in gameplay code, which means: it is invisible to the
+// person posing the rig, it is duplicated in every script that attaches anything, and it silently
+// becomes wrong the day the rig is re-exported with a different bone order.
+//
+// A SOCKET LIVES ON THE SKELETON, NOT THE MESH, and that is the whole reason it is worth having.
+// Every clip, every mesh and every character that shares this rig gets the same "Hand_R" without
+// being told about it, because the thing they all share is the skeleton.
+//
+// STORED AS A LOCAL OFFSET FROM ITS BONE -- not a world transform, and not a second bone. A world
+// transform would be meaningless the moment the character moved; a bone would be posed by clips
+// that know nothing about it. An offset composes with whatever the bone is doing this frame, which
+// is exactly what "in the hand" means.
+struct OcSocket {
+    std::string name;                // what a script asks for; opaque here
+    u32  bone = 0;                   // index into OcSkeleton::bones
+    Vec3 translation{0, 0, 0};       // offset from the bone, engine centimetres
+    Quat rotation{0, 0, 0, 1};
+    Vec3 scale{1, 1, 1};             // rarely anything but 1, and free to carry
+};
+
 // A bone hierarchy, parents before children.
 struct OcSkeleton {
     std::vector<OcBone> bones;
     u32  rootBone = 0xFFFFFFFFu;     // convenience hint; -1 when there is no single root
 
-    // True when parents are in range, acyclic, and each precedes its children.
+    // Sockets, in file order. Empty for every rig written before they existed: the SOCK chunk is
+    // optional and its absence is not an error. NAMES ARE NOT CHECKED FOR UNIQUENESS on write --
+    // see socket() for what a duplicate means (the first wins, and the editor refuses to create
+    // one), because a format that refused would make a rig unopenable over a naming mistake.
+    std::vector<OcSocket> sockets;
+
+    // The socket of that name, or nullptr. Linear, because a rig has a handful and a map would
+    // cost more to keep in step than the scan saves.
+    const OcSocket* socket(const std::string& name) const;
+
+    // True when parents are in range, acyclic, and each precedes its children, and every socket
+    // names a bone that exists.
     bool valid() const;
 };
 

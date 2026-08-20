@@ -38,6 +38,16 @@ void poseToModel(const fmt::OcSkeleton& skel, const Pose& p, std::vector<Mat4>& 
     }
 }
 
+bool socketModelMatrix(const std::vector<Mat4>& model, const fmt::OcSocket& sock, Mat4& out) {
+    if (static_cast<usize>(sock.bone) >= model.size()) return false;
+    // ROW-VECTOR, offset first: v * socket * bone, matching poseToModel's own `localM * parent`
+    // exactly. Reversing these two is the classic way to get a socket that orbits the character
+    // instead of sitting on it -- and it still looks like a plausible transform while doing so.
+    const Transform xf{sock.translation, sock.rotation, sock.scale};
+    out = xf.toMatrix() * model[static_cast<usize>(sock.bone)];
+    return true;
+}
+
 void poseToSkinning(const fmt::OcSkeleton& skel, const Pose& p, std::vector<Mat4>& outSkin) {
     std::vector<Mat4> model;
     poseToModel(skel, p, model);

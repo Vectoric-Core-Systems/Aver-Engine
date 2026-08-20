@@ -63,6 +63,23 @@ public:
     // animation editor draws a box per bone from this.
     const Pose* pose(scene::Entity e) const;
 
+    // Where a named socket on this entity's rig is THIS FRAME, in the skeleton's model space.
+    // False when the entity is not posed, has no rig, or the rig declares no socket of that name --
+    // three different reasons a caller cannot usefully tell apart, and none of them an error.
+    //
+    // MODEL SPACE, NOT WORLD, deliberately: this module has a pose and a skeleton and no opinion
+    // about where the character is standing. Composing with the entity's own world matrix is the
+    // caller's job, and the caller is the one holding it.
+    //
+    // RECOMPUTED PER CALL from the stored pose rather than cached. A pose is a handful of bones and
+    // a socket query is a handful per frame; caching model matrices for every posed entity would
+    // cost every character memory so that the few with attachments could save a walk.
+    bool socketModel(scene::Entity e, const std::string& name, Mat4& out) const;
+
+    // The rig this entity is posed against, or nullptr. Exposed so a caller can enumerate sockets
+    // (an editor listing them, a script validating a name) without resolving the asset itself.
+    const fmt::OcSkeleton* posedSkeleton(scene::Entity e) const;
+
     // Assets, loaded on demand and cached by id. Null when the id is unknown or the file is bad.
     const fmt::OcSkeleton*  skeleton(u64 objectId);
     const fmt::OcAnimation* clip(u64 objectId);
@@ -78,6 +95,10 @@ private:
     struct Posed {
         Pose pose;
         std::vector<Mat4> skin;
+        // The rig this pose belongs to, borrowed from skeletons_ which owns it and outlives this
+        // entry (clear() drops both together). Held so a socket query needs no World to find the
+        // CSkeletalMesh and no second cache lookup.
+        const fmt::OcSkeleton* skel = nullptr;
     };
 
     // WHERE THE CLOCK WAS LAST TICK, which is the whole of what firing a notify needs and the whole

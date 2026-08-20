@@ -268,8 +268,12 @@ public:
     // every other asset editor already has.
     bool dirty() const override { return dirty_; }
     bool save(std::string* why) override {
-        if (!isClip_) { if (why) *why = "a skeleton has nothing to save from this tab"; return false; }
-        if (!fmt::saveOcAnim(path_, clip_, why)) return false;
+        // A SKELETON HAS SOMETHING TO SAVE NOW. It did not when this override was written -- the
+        // rig tab showed a bone tree derived entirely from the file and offered nothing to change.
+        // Sockets are authored here, so refusing to write a .ocskel would make them unsavable.
+        const bool ok = isClip_ ? fmt::saveOcAnim(path_, clip_, why)
+                                : fmt::saveOcSkel(path_, skel_, why);
+        if (!ok) return false;
         dirty_ = false;
         return true;
     }
@@ -283,6 +287,7 @@ private:
     void drawBones();
     void drawAssetBrowser();
     void drawNotifies();
+    void drawSockets();
     void buildPreview(Engine& e);
     void reloadIfNeeded();
 
@@ -323,6 +328,8 @@ private:
     bool dirty_ = false;
     int  selectedNotify_ = -1;
     char notifyNameBuf_[96] = {};
+    int  selectedSocket_ = -1;
+    char socketNameBuf_[96] = {};
 
     f32 time_ = 0.0f;
     f32 speed_ = 1.0f;
@@ -549,6 +556,32 @@ void AnimEditor::buildPreview(Engine& e) {
         std::memcpy(d.world, &m.m[0][0], sizeof d.world);
         draws.push_back(d);
     }
+
+    // SOCKETS, drawn whether or not the bones are. A socket is a thing an author is placing by
+    // eye, so hiding it behind the "Bones" toggle would hide it exactly when the mesh is on and
+    // the placement actually matters -- "is the grip inside the hand" is a question you ask with
+    // the hand visible.
+    for (usize i = 0; i < skel_.sockets.size(); ++i) {
+        Mat4 sm;
+        if (!anim::socketModelMatrix(model_, skel_.sockets[i], sm)) continue;
+        const Vec3 at{sm.m[3][0], sm.m[3][1], sm.m[3][2]};
+        render::preview::PreviewDraw d;
+        d.mesh = cube;
+        d.boundsRadius = radius;
+        d.roughness = 0.35f;
+        d.selected = static_cast<int>(i) == selectedSocket_;
+        // Cyan, and the same cyan the notify markers use on the timeline: one colour meaning
+        // "a thing an author added" across the whole editor.
+        d.baseColor[0] = 0.18f; d.baseColor[1] = 0.72f; d.baseColor[2] = 0.95f;
+        if (d.selected) { d.baseColor[0] = 0.98f; d.baseColor[1] = 0.82f; d.baseColor[2] = 0.30f; }
+        // Deliberately SMALLER than a root cube: a socket marks a point, and a marker as big as
+        // the joint it sits on would swallow the joint.
+        const f32 sz = kRootCubeCm * 0.55f;
+        const Mat4 mm = Mat4::scale(Vec3{sz, sz, sz}) * Mat4::translation(at);
+        std::memcpy(d.world, &mm.m[0][0], sizeof d.world);
+        draws.push_back(d);
+    }
+
     preview->setDrawList(std::move(draws));
 
     // FRAMED ONCE, by the preview's own frameAll rather than by hand. It scales each draw's bounds
@@ -589,6 +622,150 @@ void AnimEditor::drawTransport() {
 // ADDED AT THE PLAYHEAD rather than at a typed time, because placing an event in an animation is
 // something an author does by SCRUBBING to the frame and saying "here" -- the number is the result,
 // not the input. It is editable afterwards for the case where the number is what you actually have.
+// The socket list: add on the selected bone, rename, retarget, nudge the offset, delete.
+//
+// ADDED ON THE SELECTED BONE, not on a bone picked from a second list, because choosing where a
+// socket goes is choosing a bone -- and the bone tree is already open on the left with one
+// highlighted. A socket created against nothing would need a bone chosen before it meant anything,
+// which is a second decision for no gain.
+void AnimEditor::drawSockets() {
+#if AVER_WITH_IMGUI
+    if (skel_.bones.empty()) { ImGui::TextDisabled("no skeleton"); return; }
+    // SKELETON TAB ONLY, and this is a correctness rule rather than a layout preference. A socket
+    // lives on the .ocskel; save() on a CLIP tab writes the .ocanim. Editing a socket from a clip
+    // would set dirty_, write the clip, clear the flag, and lose the socket without a word. The bone
+    // tree is shown on both tabs because reading a rig while looking at a clip is useful; WRITING one
+    // from there is not, and there is a tab where it works.
+    if (isClip_) {
+        if (skel_.sockets.empty()) ImGui::TextDisabled("None on this rig.");
+        else for (const fmt::OcSocket& k : skel_.sockets) {
+            const char* bn = k.bone < skel_.bones.size() ? skel_.bones[k.bone].name.c_str() : "?";
+            ImGui::BulletText("%s  on %s", k.name.c_str(), bn);
+        }
+        ImGui::TextDisabled("Open the .ocskel to edit these.");
+        return;
+    }
+
+    // Save sits here for the same reason it sits on the notify panel: the host only calls
+    // saveAllDirty() from the quit prompt, so without a button the only way to persist an authored
+    // socket would be to close the editor.
+    ImGui::BeginDisabled(!dirty_);
+    const bool saveClicked = ImGui::SmallButton("Save##sock");
+    ImGui::EndDisabled();
+    const bool saveKey = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+                         ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false);
+    if (dirty_ && (saveClicked || saveKey)) {
+        std::string why;
+        if (!save(&why)) AVER_ERROR("[AnimEditor] save failed for '{}': {}", path_, why);
+    }
+    ImGui::SameLine();
+
+    const bool haveBone = selectedBone_ >= 0 && static_cast<usize>(selectedBone_) < skel_.bones.size();
+    ImGui::BeginDisabled(!haveBone);
+    if (ImGui::SmallButton("Add on selected bone")) {
+        fmt::OcSocket k;
+        k.bone = static_cast<u32>(selectedBone_);
+        // NAMED AFTER THE BONE AND MADE UNIQUE, because the format does not enforce unique names and
+        // OcSkeleton::socket returns the FIRST match -- two sockets called "Socket" would leave the
+        // second one permanently unreachable by name, which is a trap the editor should not set.
+        const std::string base = skel_.bones[static_cast<usize>(selectedBone_)].name + "_Socket";
+        std::string name = base;
+        for (int n = 1; skel_.socket(name) != nullptr; ++n) name = base + std::to_string(n);
+        k.name = name;
+        skel_.sockets.push_back(k);
+        selectedSocket_ = static_cast<int>(skel_.sockets.size()) - 1;
+        std::snprintf(socketNameBuf_, sizeof socketNameBuf_, "%s", k.name.c_str());
+        dirty_ = true;
+    }
+    ImGui::EndDisabled();
+    if (!haveBone && ImGui::IsItemHovered()) ImGui::SetTooltip("Select a bone in the tree first.");
+
+    if (skel_.sockets.empty()) {
+        ImGui::TextDisabled("None. Select a bone and press Add.");
+        return;
+    }
+
+    for (usize i = 0; i < skel_.sockets.size(); ++i) {
+        ImGui::PushID(static_cast<int>(i));
+        fmt::OcSocket& k = skel_.sockets[i];
+        const bool sel = (static_cast<int>(i) == selectedSocket_);
+        const char* boneName = k.bone < skel_.bones.size()
+                             ? skel_.bones[k.bone].name.c_str() : "<out of range>";
+
+        char row[192];
+        std::snprintf(row, sizeof row, "%s   on %s", k.name.c_str(), boneName);
+        if (ImGui::Selectable(row, sel)) {
+            selectedSocket_ = static_cast<int>(i);
+            std::snprintf(socketNameBuf_, sizeof socketNameBuf_, "%s", k.name.c_str());
+            // Selecting a socket selects its bone, so the tree, the preview highlight and this list
+            // all agree about what is being looked at.
+            if (k.bone < skel_.bones.size()) selectedBone_ = static_cast<int>(k.bone);
+        }
+
+        if (sel) {
+            ImGui::Indent();
+            const f32 w = 170.0f * (ImGui::GetFontSize() / 16.0f);
+            ImGui::SetNextItemWidth(w);
+            ImGui::InputText("Name", socketNameBuf_, sizeof socketNameBuf_);
+            if (ImGui::IsItemDeactivatedAfterEdit()) {
+                std::string next = socketNameBuf_;
+                while (!next.empty() && next.front() == ' ') next.erase(next.begin());
+                while (!next.empty() && next.back() == ' ') next.pop_back();
+                // A rename onto a name that already exists is REFUSED rather than accepted, for the
+                // same reason the add path disambiguates: the loser would be unreachable by name.
+                const fmt::OcSocket* clash = next.empty() ? nullptr : skel_.socket(next);
+                if (clash && clash != &k) {
+                    AVER_WARN("[AnimEditor] a socket called '{}' already exists on this rig", next);
+                    std::snprintf(socketNameBuf_, sizeof socketNameBuf_, "%s", k.name.c_str());
+                } else if (!next.empty() && next != k.name) {
+                    k.name = next;
+                    dirty_ = true;
+                }
+            }
+
+            ImGui::SetNextItemWidth(w);
+            if (ImGui::SmallButton("Move to selected bone") && haveBone &&
+                k.bone != static_cast<u32>(selectedBone_)) {
+                k.bone = static_cast<u32>(selectedBone_);
+                dirty_ = true;
+            }
+
+            // CENTIMETRES, and dragged rather than typed: placing a grip is done by watching the
+            // marker in the preview, not by knowing the number. The number is still editable for the
+            // case where it IS what you have.
+            f32 t[3] = {k.translation.x, k.translation.y, k.translation.z};
+            ImGui::SetNextItemWidth(w * 1.6f);
+            if (ImGui::DragFloat3("Offset (cm)", t, 0.25f)) {
+                k.translation = Vec3{t[0], t[1], t[2]};
+                dirty_ = true;
+            }
+            f32 q[4] = {k.rotation.x, k.rotation.y, k.rotation.z, k.rotation.w};
+            ImGui::SetNextItemWidth(w * 1.6f);
+            if (ImGui::DragFloat4("Rotation (xyzw)", q, 0.01f)) {
+                // RENORMALISED ON EDIT. Dragging four components independently leaves a quaternion
+                // that is not a rotation, and the composition downstream would scale the attachment
+                // rather than turn it. A zero-length drag falls back to identity instead of NaN.
+                const f32 len = std::sqrt(q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3]);
+                k.rotation = len > 1e-6f ? Quat{q[0]/len, q[1]/len, q[2]/len, q[3]/len}
+                                         : Quat{0, 0, 0, 1};
+                dirty_ = true;
+            }
+
+            if (ImGui::SmallButton("Delete")) {
+                skel_.sockets.erase(skel_.sockets.begin() + static_cast<isize>(i));
+                selectedSocket_ = -1;
+                dirty_ = true;
+                ImGui::Unindent();
+                ImGui::PopID();
+                break;   // the vector moved under this loop; next frame redraws it
+            }
+            ImGui::Unindent();
+        }
+        ImGui::PopID();
+    }
+#endif
+}
+
 void AnimEditor::drawNotifies() {
 #if AVER_WITH_IMGUI
     if (!isClip_) { ImGui::TextDisabled("a skeleton has no notifies"); return; }
@@ -848,6 +1025,10 @@ void AnimEditor::draw(Engine& e) {
             ImGui::TextDisabled("BONES");
             drawBones();
         }
+        ImGui::EndChild();
+        ImGui::Separator();
+        ImGui::TextDisabled("SOCKETS");
+        if (ImGui::BeginChild("sockets", ImVec2(0, h * 0.30f), false)) drawSockets();
         ImGui::EndChild();
         ImGui::Separator();
         ImGui::TextDisabled("ANIMATIONS");
