@@ -177,6 +177,32 @@ explicit `Conv_R8`/`Conv_R4` IL, called out in `EmitSin`'s own comment as a less
 once (skipping either conversion still compiles, and silently reinterprets bits instead of
 converting the value).
 
+## Vector
+
+THE ENGINE IS 3D AND EVERY MATH NODE ABOVE IS SCALAR. These take and return LOOSE COMPONENTS
+rather than a vector value, because there is no Vec3 pin type -- `PinType` is `Float`, `Int`,
+`Bool` and `Exec` -- and that is the same convention `GetFieldVec3` / `SetFieldVec3` already use.
+All of them are PURE: no exec pins, safe to pull as often as anything asks, and an output nobody
+reads costs nothing.
+
+| Node | Pins | Attribute | Path | What it does |
+|---|---|---|---|---|
+| `VecAdd` | `ax` `ay` `az` (in, float), `bx` `by` `bz` (in, float), `x` `y` `z` (out, float) | — | D | `a + b`, component-wise. |
+| `VecSub` | `ax` `ay` `az` (in, float), `bx` `by` `bz` (in, float), `x` `y` `z` (out, float) | — | D | `a - b`, component-wise. |
+| `VecScale` | `ax` `ay` `az` (in, float), `s` (in, float), `x` `y` `z` (out, float) | — | D | `a * s`. |
+| `VecCross` | `ax` `ay` `az` (in, float), `bx` `by` `bz` (in, float), `x` `y` `z` (out, float) | — | D | `a × b`. |
+| `VecNormalize` | `ax` `ay` `az` (in, float), `x` `y` `z` (out, float) | — | D | `a / max(\|a\|, 1e-6)`. A zero vector normalises to ZERO, not to NaN. |
+| `VecLerp` | `ax` `ay` `az` (in, float), `bx` `by` `bz` (in, float), `t` (in, float), `x` `y` `z` (out, float) | — | D | `a + (b - a) * t`, exact at t = 0 and t = 1. |
+| `VecDot` | `ax` `ay` `az` (in, float), `bx` `by` `bz` (in, float), `result` (out, float) | — | D | `a · b`. |
+| `VecLength` | `ax` `ay` `az` (in, float), `result` (out, float) | — | D | `\|a\|`. |
+| `VecDistance` | `ax` `ay` `az` (in, float), `bx` `by` `bz` (in, float), `result` (out, float) | — | D | `\|a - b\|`. |
+
+## Debug
+
+| Node | Pins | Attribute | Path | What it does |
+|---|---|---|---|---|
+| `Print` | `exec` (in), `value` (in, float), `then` (out, exec) | — | X | Writes `[Graph] <node id> = <value>` to the log. LABELLED BY THE NODE ID, so `NODE muzzleLen Print` prints `muzzleLen`. Refused if pulled as data, like every other side effect. |
+
 ## Logic
 
 | Node | Pins | Attribute | Path | What it does |

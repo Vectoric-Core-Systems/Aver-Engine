@@ -397,6 +397,18 @@ public class GraphCompiler
                 EmitMultiply(node);
                 break;
 
+            case "vecadd":
+            case "vecsub":
+            case "vecscale":
+            case "veccross":
+            case "vecnormalize":
+            case "veclerp":
+            case "vecdot":
+            case "veclength":
+            case "vecdistance":
+                EmitVecNode(node);
+                break;
+
             case "compare":
             case "compare_f32":
                 EmitCompare(node);
@@ -629,6 +641,85 @@ public class GraphCompiler
 
         if (_pinLocals.TryGetValue((node.Id, "value"), out var local))
             _il.Emit(OpCodes.Stloc, local);
+    }
+
+    /// One output component of a vector node, onto the stack.
+    ///
+    /// RECOMPUTED PER OUTPUT rather than evaluated once into three shared locals, deliberately.
+    /// Both compilers already re-emit a pure expression at every read -- that is what
+    /// EmitPullOutput IS -- and a hoisted local would have to live somewhere the topological pass
+    /// and an inline pull could both reach. Normalize pays the most, a square root per component,
+    /// and that is still a handful of float ops.
+    ///
+    /// Dup-then-Mul is used to square, so a squared term pulls its input ONCE. That matters when the
+    /// input is not a constant but a subgraph: pulling it twice would emit that subgraph twice.
+    private void EmitVecComponent(Node node, string pinName)
+    {
+        if (_il == null) return;
+
+        void In(string p) => EmitPullInput(node, p);
+        void Sq(string p) { In(p); _il.Emit(OpCodes.Dup); _il.Emit(OpCodes.Mul); }
+        void DiffSq(string a, string b) { In(a); In(b); _il.Emit(OpCodes.Sub); _il.Emit(OpCodes.Dup); _il.Emit(OpCodes.Mul); }
+        void Sqrt() { _il.Emit(OpCodes.Conv_R8); _il.Emit(OpCodes.Call, MathSqrtMethod); _il.Emit(OpCodes.Conv_R4); }
+        void Len() { Sq("ax"); Sq("ay"); _il.Emit(OpCodes.Add); Sq("az"); _il.Emit(OpCodes.Add); Sqrt(); }
+
+        string other = pinName == "x" ? "ax" : pinName == "y" ? "ay" : "az";
+        string bOther = pinName == "x" ? "bx" : pinName == "y" ? "by" : "bz";
+
+        switch (node.Type.ToLowerInvariant())
+        {
+            case "vecadd": In(other); In(bOther); _il.Emit(OpCodes.Add); return;
+            case "vecsub": In(other); In(bOther); _il.Emit(OpCodes.Sub); return;
+            case "vecscale": In(other); In("s"); _il.Emit(OpCodes.Mul); return;
+
+            // x = ay*bz - az*by, and the two cyclic rotations of it.
+            case "veccross":
+                if (pinName == "x") { In("ay"); In("bz"); _il.Emit(OpCodes.Mul); In("az"); In("by"); _il.Emit(OpCodes.Mul); _il.Emit(OpCodes.Sub); }
+                else if (pinName == "y") { In("az"); In("bx"); _il.Emit(OpCodes.Mul); In("ax"); In("bz"); _il.Emit(OpCodes.Mul); _il.Emit(OpCodes.Sub); }
+                else { In("ax"); In("by"); _il.Emit(OpCodes.Mul); In("ay"); In("bx"); _il.Emit(OpCodes.Mul); _il.Emit(OpCodes.Sub); }
+                return;
+
+            // Divided by max(length, 1e-6): a zero vector normalises to zero rather than to NaN,
+            // and a NaN here would propagate into a transform and take the actor with it.
+            case "vecnormalize":
+                In(other); Len(); _il.Emit(OpCodes.Ldc_R4, 1e-6f); _il.Emit(OpCodes.Call, MathMaxMethod);
+                _il.Emit(OpCodes.Div); return;
+
+            // a + (b - a) * t, which is exact at t = 0 and t = 1 -- unlike a*(1-t) + b*t.
+            case "veclerp":
+                In(other); In(bOther); In(other); _il.Emit(OpCodes.Sub); In("t"); _il.Emit(OpCodes.Mul);
+                _il.Emit(OpCodes.Add); return;
+
+            case "vecdot":
+                In("ax"); In("bx"); _il.Emit(OpCodes.Mul);
+                In("ay"); In("by"); _il.Emit(OpCodes.Mul); _il.Emit(OpCodes.Add);
+                In("az"); In("bz"); _il.Emit(OpCodes.Mul); _il.Emit(OpCodes.Add); return;
+
+            case "veclength": Len(); return;
+
+            case "vecdistance":
+                DiffSq("ax", "bx"); DiffSq("ay", "by"); _il.Emit(OpCodes.Add);
+                DiffSq("az", "bz"); _il.Emit(OpCodes.Add); Sqrt(); return;
+
+            default:
+                throw new InvalidOperationException(
+                    $"vector node '{node.Id}' has type {node.Type}, which EmitVecComponent does not know");
+        }
+    }
+
+    /// The PULL compiler's topological visit of a vector node: every output it declared a local for
+    /// gets its component computed and stored. An output nobody reads has no local and is skipped,
+    /// so an unread Cross costs nothing.
+    private void EmitVecNode(Node node)
+    {
+        if (_il == null) return;
+        foreach (var p in node.Pins)
+        {
+            if (!p.IsOutput) continue;
+            if (!_pinLocals.TryGetValue((node.Id, p.Name), out var local)) continue;
+            EmitVecComponent(node, p.Name);
+            _il.Emit(OpCodes.Stloc, local);
+        }
     }
 
     private void EmitAdd(Node node)
@@ -2746,6 +2837,16 @@ public class GraphCompiler
                 EmitPullInput(source, "a"); EmitPullInput(source, "b"); _il.Emit(OpCodes.Add); return;
             case "multiply":
                 EmitPullInput(source, "a"); EmitPullInput(source, "b"); _il.Emit(OpCodes.Mul); return;
+            case "vecadd":
+            case "vecsub":
+            case "vecscale":
+            case "veccross":
+            case "vecnormalize":
+            case "veclerp":
+            case "vecdot":
+            case "veclength":
+            case "vecdistance":
+                EmitVecComponent(source, pinName); return;
             case "subtract":
             case "sub":
                 EmitPullInput(source, "a"); EmitPullInput(source, "b"); _il.Emit(OpCodes.Sub); return;

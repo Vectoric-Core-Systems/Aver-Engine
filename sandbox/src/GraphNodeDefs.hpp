@@ -114,6 +114,21 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     //    Print` already names itself, the id is already unique within the graph, and an
     //    attribute would have needed a parser field, a writer field and an editor row to say
     //    what the id says for free.
+    // -- VECTOR MATHS. Every math node in this table was SCALAR, in an engine whose world is
+    //    centimetres in three axes: a graph wanting a direction, a distance or an offset had to
+    //    spell it out one component at a time out of Add and Multiply, which is how
+    //    AN_FPCharacter ends up a wall of Const Float. There is no Vec3 PIN TYPE to carry these
+    //    (PinType is Float, Int, Bool, Exec), so they take and return loose components -- exactly
+    //    the convention GetFieldVec3/SetFieldVec3 already established.
+    t.push_back({"VecAdd", "Vec Add", "Vector", {pin("ax", "float", false), pin("ay", "float", false), pin("az", "float", false), pin("bx", "float", false), pin("by", "float", false), pin("bz", "float", false), pin("x", "float", true), pin("y", "float", true), pin("z", "float", true)}});
+    t.push_back({"VecSub", "Vec Subtract", "Vector", {pin("ax", "float", false), pin("ay", "float", false), pin("az", "float", false), pin("bx", "float", false), pin("by", "float", false), pin("bz", "float", false), pin("x", "float", true), pin("y", "float", true), pin("z", "float", true)}});
+    t.push_back({"VecScale", "Vec Scale", "Vector", {pin("ax", "float", false), pin("ay", "float", false), pin("az", "float", false), pin("s", "float", false), pin("x", "float", true), pin("y", "float", true), pin("z", "float", true)}});
+    t.push_back({"VecCross", "Vec Cross", "Vector", {pin("ax", "float", false), pin("ay", "float", false), pin("az", "float", false), pin("bx", "float", false), pin("by", "float", false), pin("bz", "float", false), pin("x", "float", true), pin("y", "float", true), pin("z", "float", true)}});
+    t.push_back({"VecNormalize", "Vec Normalize", "Vector", {pin("ax", "float", false), pin("ay", "float", false), pin("az", "float", false), pin("x", "float", true), pin("y", "float", true), pin("z", "float", true)}});
+    t.push_back({"VecLerp", "Vec Lerp", "Vector", {pin("ax", "float", false), pin("ay", "float", false), pin("az", "float", false), pin("bx", "float", false), pin("by", "float", false), pin("bz", "float", false), pin("t", "float", false), pin("x", "float", true), pin("y", "float", true), pin("z", "float", true)}});
+    t.push_back({"VecDot", "Vec Dot", "Vector", {pin("ax", "float", false), pin("ay", "float", false), pin("az", "float", false), pin("bx", "float", false), pin("by", "float", false), pin("bz", "float", false), pin("result", "float", true)}});
+    t.push_back({"VecLength", "Vec Length", "Vector", {pin("ax", "float", false), pin("ay", "float", false), pin("az", "float", false), pin("result", "float", true)}});
+    t.push_back({"VecDistance", "Vec Distance", "Vector", {pin("ax", "float", false), pin("ay", "float", false), pin("az", "float", false), pin("bx", "float", false), pin("by", "float", false), pin("bz", "float", false), pin("result", "float", true)}});
     t.push_back({"Print", "Print", "Debug", {
         pin("exec", "exec", false), pin("value", "float", false), pin("then", "exec", true)}});
     t.push_back({"Multiply", "Multiply", "Math", {pin("a", "float", false), pin("b", "float", false), pin("result", "float", true)}});
