@@ -106,19 +106,41 @@ inline Vec2 fromIm(ImVec2 v) { return Vec2(v.x, v.y); }
 //
 // Unrecognised categories fall back to the cool default rather than asserting, for the same
 // reason colorForType has a grey fallback: a category this editor has not seen must still draw.
+// THE NODE CHROME IS WHERE THIS ENGINE LOOKS LIKE ITSELF, which is the counterpart to the note on
+// colorForType below: pin colours are Unreal's because a pin colour is a learned language, and the
+// body of the node is not, so this is the surface that carries Aver's palette.
+//
+// A FUNCTION CALL IS AVER ORANGE, not the blue Blueprint gives it. Blueprint marks a call with a
+// blue header and an "f", and that blue is the single most common colour on a real graph -- so it is
+// the one worth spending on identity. White title text over it, which every header already used.
+//
+// EVENTS MOVE TO RED, and they had to. They were Aver orange, and two node classes sharing one
+// colour is worse than either choice on its own: an entry point and a call are the two things a
+// reader most needs to tell apart at a glance. Red is also what Blueprint uses for an event, so
+// this ends up MORE readable to someone arriving from there, not less.
+//
+// The split is by what the node DOES, not by which family it is filed under: calling into the
+// engine is orange, computing a value is cool, ordering other nodes is neutral.
 ImU32 headerColorForCategory(const std::string& category) {
     std::string c = category;
     for (char& ch : c) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-    // Warm: something outside the graph is involved.
-    if (c == "event")    return IM_COL32(242, 101,  34, 255);  // Aver orange -- entry points
-    if (c == "scene" || c == "actor" || c == "material" || c == "mesh" || c == "name")
-                         return IM_COL32(150,  74,  40, 255);  // banked orange -- world writes
-    if (c == "input")    return IM_COL32(190,  90,  45, 255);  // device in, between the two
-    // Neutral: ordering only.
+
+    // Entry points: something outside the graph called US.
+    if (c == "event")    return IM_COL32(155,  36,  36, 255);  // deep red, as Blueprint marks an event
+
+    // Function calls: WE call something outside the graph. Aver orange.
+    if (c == "scene" || c == "actor" || c == "material" || c == "mesh" || c == "name" ||
+        c == "character" || c == "game" || c == "physics" || c == "transform" || c == "debug")
+                         return IM_COL32(242, 101,  34, 255);  // Aver orange -- the "f" nodes
+    if (c == "input")    return IM_COL32(190,  90,  45, 255);  // device in, between call and compute
+
+    // Neutral: ordering only, nothing computed and nothing called.
     if (c == "flow")     return IM_COL32( 74,  82,  96, 255);  // slate
-    // Cool: pure computation.
+
+    // Cool: pure computation. Vector and Convert sit here rather than with the calls above because
+    // they are arithmetic -- the same place Blueprint puts a pure function, just not the same hue.
     if (c == "var")      return IM_COL32( 78, 104, 168, 255);  // steel, darkened -- storage
-    return IM_COL32( 91, 141, 239, 255);                        // Aver steel -- math, logic, const
+    return IM_COL32( 91, 141, 239, 255);                        // Aver steel -- math, vector, convert, logic, const
 }
 
 ImU32 colorForType(const std::string& type) {
