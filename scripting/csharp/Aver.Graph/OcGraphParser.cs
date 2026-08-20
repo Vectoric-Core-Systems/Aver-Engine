@@ -1314,6 +1314,27 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "pointZ", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
                 break;
 
+            // Reroute: one pin in, the same type out. Purely a place to bend a wire.
+            case "reroutefloat":
+                node.Pins.Add(new Pin { Name = "a", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "result", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "rerouteint":
+                node.Pins.Add(new Pin { Name = "a", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "result", Type = PinType.Int, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "reroutebool":
+                node.Pins.Add(new Pin { Name = "a", Type = PinType.Bool, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "result", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "rerouteexec":
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                break;
+
             case "printint":
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "value", Type = PinType.Int, IsOutput = false, NodeId = node.Id });

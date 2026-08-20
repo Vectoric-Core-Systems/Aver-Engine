@@ -370,6 +370,20 @@ See trap #3 above for the editor-palette pin-type gap this node shares with `Get
 | `OnTick` | `exec` (out) | — | X | Entry point: fires every tick after `OnStart` has fired. |
 | `OnHit` | `exec` (out) | — | X | Entry point: fires only when something calls `GraphHost.Fire("OnHit", …)`. |
 | `CustomEvent` | `exec` (out) | `name=` | X | Entry point under a name the author chooses. Fires on `GraphHost.Fire("<name>", …)`. |
+| `RerouteFloat` | `a` (in, float), `result` (out, float) | — | D | Returns its input unchanged. A place to bend a wire. |
+| `RerouteInt` | `a` (in, int), `result` (out, int) | — | D | As above, int. |
+| `RerouteBool` | `a` (in, bool), `result` (out, bool) | — | D | As above, bool. |
+| `RerouteExec` | `exec` (in), `then` (out) | — | X | As above, for the exec chain. |
+
+**The four `Reroute*` nodes COMPILE TO NOTHING.** A data reroute emits its input and no
+instruction of its own; the exec one needs no compiler case at all, because every exec node
+ends with the same unconditional fan-out and a reroute is *only* that fan-out. Bending a wire
+therefore costs a graph author nothing at run time, which is the only honest way to ship a node
+that exists purely to be looked at.
+
+**One per type, not one generic.** `Validate` refuses a link whose two pins disagree on type and
+there are no generic pins here, so a single wildcard `Reroute` would have to weaken that check —
+the check that catches every genuinely wrong wiring. Four nodes is the cheaper price.
 
 **`DoOnce`, `Gate` and `FlipFlop` REMEMBER something between activations**, which no other node
 here does — `Branch` and `Sequence` decide from their inputs alone. That memory lives in the same

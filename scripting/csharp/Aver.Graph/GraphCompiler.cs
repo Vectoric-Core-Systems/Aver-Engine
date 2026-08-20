@@ -440,6 +440,12 @@ public class GraphCompiler
                 EmitGetVelocity(node);
                 break;
 
+            case "reroutefloat":
+            case "rerouteint":
+            case "reroutebool":
+                EmitSimpleApiRead(node);
+                break;
+
             case "getbodyposition":
             case "getbodyvelocity":
             case "isbodyvalid":
@@ -3146,6 +3152,11 @@ public class GraphCompiler
                 EmitPullGetViewEntity(source, pinName); return;
             case "getvelocity":
                 EmitPullGetVelocity(source, pinName); return;
+            // A data reroute IS its input. No instruction of its own, in either compiler.
+            case "reroutefloat":
+            case "rerouteint":
+            case "reroutebool":
+                EmitPullInput(source, "a"); return;
             case "getbodyposition":
                 EmitPullVec3Read(source, pinName, BodyPositionMethod, -1, "body"); return;
             case "getbodyvelocity":

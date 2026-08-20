@@ -201,6 +201,22 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"AddSensorBox", "Add Sensor Box", "Physics", {pin("exec", "exec", false), pin("cx", "float", false), pin("cy", "float", false), pin("cz", "float", false), pin("hx", "float", false), pin("hy", "float", false), pin("hz", "float", false), pin("then", "exec", true), pin("body", "int", true)}});
     t.push_back({"AddSensorSphere", "Add Sensor Sphere", "Physics", {pin("exec", "exec", false), pin("cx", "float", false), pin("cy", "float", false), pin("cz", "float", false), pin("radius", "float", false), pin("then", "exec", true), pin("body", "int", true)}});
     t.push_back({"SphereCast", "Sphere Cast", "Physics", {pin("exec", "exec", false), pin("originX", "float", false), pin("originY", "float", false), pin("originZ", "float", false), pin("dirX", "float", false), pin("dirY", "float", false), pin("dirZ", "float", false), pin("maxDist", "float", false), pin("radius", "float", false), pin("then", "exec", true), pin("hit", "bool", true), pin("body", "int", true), pin("pointX", "float", true), pin("pointY", "float", true), pin("pointZ", "float", true)}});
+    // -- REROUTE. A node that returns exactly what it was given, and exists only so a WIRE can be
+    //    bent around something. Blueprint draws these as a bare dot; here they are ordinary small
+    //    nodes, because the pin-drawing code already knows how to put one pin on each side and a
+    //    special case would be a second thing to maintain for a cosmetic gain.
+    //
+    //    ONE PER TYPE, because Validate refuses a link whose pins differ in type and there are no
+    //    generics here. That is four nodes instead of one, and the alternative -- a wildcard pin
+    //    type -- would weaken the check that catches every genuinely wrong wiring.
+    //
+    //    They compile to NOTHING. A data reroute emits its input and no instruction of its own; the
+    //    exec one falls through to the fan-out every exec node ends with. Bending a wire costs a
+    //    graph author nothing at run time, which is the only way a purely visual node is honest.
+    t.push_back({"RerouteFloat", "Reroute (Float)", "Flow", {pin("a", "float", false), pin("result", "float", true)}});
+    t.push_back({"RerouteInt", "Reroute (Int)", "Flow", {pin("a", "int", false), pin("result", "int", true)}});
+    t.push_back({"RerouteBool", "Reroute (Bool)", "Flow", {pin("a", "bool", false), pin("result", "bool", true)}});
+    t.push_back({"RerouteExec", "Reroute (Exec)", "Flow", {pin("exec", "exec", false), pin("then", "exec", true)}});
     t.push_back({"PrintInt", "Print Int", "Debug", {
         pin("exec", "exec", false), pin("value", "int", false), pin("then", "exec", true)}});
     t.push_back({"Print", "Print", "Debug", {
