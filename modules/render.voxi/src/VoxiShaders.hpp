@@ -1002,6 +1002,9 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     s.rough    = clamp(inst.roughness, 0.045, 1.0);   // the same floor averEvalMaterial clamps to
     s.ndv      = saturate(dot(s.N, s.V));
     s.f90      = 1.0;
+    // The same 0.04 the line below builds F0 from, carried so averShadeIndirect uses THIS value
+    // rather than a gMatReflectance that nothing bound for a ray hit.
+    s.reflectance = 0.04;
     s.F0       = lerp((0.04).xxx, s.albedo, s.metallic);
     s.F        = fresnelSchlick(saturate(dot(s.H, s.V)), s.F0, s.f90);
     s.kdAlbedo = (1.0 - s.metallic) * s.albedo;
@@ -1014,15 +1017,48 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     sun.radiance   = averSunRadiance();
     sun.visibility = sunVis;
 
+    const uint bounces = (uint)max(gPtBounceParams.x, 1.0);
+
     float3 radiance = averShadeDirect(0.0, s, sun);
-    radiance += s.kdAlbedo * averSkyIrradiance(N) * gAmbient.r;
+
+    // THE ENVIRONMENT THROUGH THE ENGINE'S OWN INDIRECT TERM, not a diffuse-only line of this
+    // shader's own. What stood here was `radiance += s.kdAlbedo * averSkyIrradiance(N) * gAmbient.r`,
+    // and the white furnace measured two separate faults in it:
+    //
+    //   - A WHITE METAL RENDERED BLACK, 0.003 against a correct 1.000. averShadeIndirect was never
+    //     called, so the environment SPECULAR term (FssEss * ind.specular) did not exist on this
+    //     path at all. A metal has kdAlbedo = 0, so a diffuse-only ambient line hands it nothing,
+    //     and roughness could not matter either -- every roughness column read identically.
+    //   - TURNING PATH TRACING ON DOUBLED THE ENERGY, 1.000 -> 1.977. This line added the sky once,
+    //     and then the bounce loop below added it AGAIN every time a ray escaped to it. In an open
+    //     scene every path escapes on its first bounce, so the environment was counted exactly
+    //     twice -- and because every path was already gone by bounce 1, a sweep over bounce depth
+    //     came back perfectly flat and hid it.
+    //
+    // ONE OWNER FOR THE ENVIRONMENT, and it is this call. The bounce loop below no longer adds the
+    // sky when a ray escapes; it carries surface-to-surface light only. Zeroing ind.ambient instead
+    // and letting the escaping ray supply the sky was tried first and measured worse: the
+    // multiple-scattering term FmsEms multiplies the IRRADIANCE, so zeroing it threw the
+    // compensation away and a white metal fell straight back down the single-scatter curve,
+    // 0.971 at roughness 0.05 to 0.450 at 1.0. FmsEms is specular energy, not diffuse, and a
+    // path-traced bounce does not carry it.
+    //
+    // This also makes the ray path structurally the same as the raster one, which adds a full
+    // unoccluded sky ambient and then adds bounced light on top of it without subtracting the sky
+    // that bounce occludes. Same approximation, same place, one thing to fix if it is ever wrong.
+    float3 R = reflect(dir, N);
+    AverIndirect ind;
+    ind.ambient      = averSkyIrradiance(N);
+    ind.ambientScale = gAmbient.r;
+    ind.diffuse      = 0.0;   // the bounce loop accumulates into `radiance` directly
+    ind.specular     = skyColor(R);
+    ind.occlusion    = 1.0;   // no AO on this path; a traced bounce is its own occlusion
+    radiance = averShadeIndirect(radiance, s, ind);
 
     // THE BOUNCE CARRIES THE DIFFUSE RESPONSE, not the raw albedo. A metal reflects almost
     // nothing diffusely, so multiplying a path's throughput by base colour would light an
     // interior with bounced light off surfaces that do not bounce it.
     float3 throughput = s.kdAlbedo;
-
-    const uint bounces = (uint)max(gPtBounceParams.x, 1.0);
     float3 bp = wpos;
     float3 bn = N;
     [loop] for (uint b = 1; b < bounces; ++b) {
@@ -1048,8 +1084,10 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         qb.Proceed();
 
         if (qb.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {
-            // The ray escaped: the sky is the last thing it sees, and the path ends there.
-            radiance += throughput * skyColor(dirB) * gAmbient.r;
+            // The ray escaped, and the path simply ends. It deliberately does NOT add the sky:
+            // averShadeIndirect above already gave this surface the whole unoccluded environment,
+            // and adding it again here is what made turning path tracing on read 1.977 in a
+            // furnace where the answer is 1.000. The loop carries bounced light off SURFACES.
             break;
         }
 

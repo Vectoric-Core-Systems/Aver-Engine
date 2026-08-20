@@ -133,6 +133,13 @@ struct AverSurface {
     float3 kdAlbedo;     // the diffuse response
     float3 emissive;     // self-emitted radiance
     float  metallic, rough, ndv, f90;
+    // The DIELECTRIC F0 this surface was built from. Carried here rather than read back off
+    // gMatReflectance, because a RAY HIT HAS NO MATERIAL CONSTANT BUFFER BOUND -- PSRayDriven says
+    // exactly that where it defaults this to 0.04 by hand. averShadeIndirect reaching for the
+    // global instead measured a white dielectric at 1.030 on the ray path against 1.000 on the
+    // raster one: with no material bound the global is not 0.04, the diffuse lobe stopped being
+    // charged for the specular reflectance it takes off the top, and the surface read too bright.
+    float  reflectance;
     float  alpha;
     float  occlusion;    // the material's OWN occlusion map, distinct from the renderer's AO
     uint   model;        // AVER_MODEL_*
@@ -253,6 +260,7 @@ AverSurface averEvalMaterial(AverVertex v, AverLight l) {
     s.emissive = gEmissive.rgb + gEmissiveFactor * map.emissive;
     s.occlusion = lerp(1.0, map.occlusion, gOcclusionStrength);
     s.f90 = gMatF90;
+    s.reflectance = gMatReflectance;
     s.display = gShadingModel == AVER_MODEL_UNLIT;
     s.displayColor = float4(gBaseColor.rgb, gBaseColor.a);
     s.albedo = srgbToLin(gBaseColor.rgb) * base.rgb;
@@ -387,7 +395,7 @@ float3 averShadeIndirect(float3 radiance, AverSurface s, AverIndirect ind) {
         // is strongly non-linear in F0 -- a surface at F0 = 0.52 returns much less than the mean of one
         // at 0.04 and one at 1.0. The physical claim this code makes is at the two ENDS, which now
         // measure 1.000 across every roughness. The middle is a documented approximation.
-        float3 F0d     = gMatReflectance.xxx;
+        float3 F0d     = s.reflectance.xxx;
         float3 FssEssD = F0d * dfg.x + dfg.y;
         float3 FavgD   = F0d + (1.0 - F0d) / 21.0;
         float3 FmsEmsD = Ems * FssEssD * FavgD / max(1.0 - Ems * FavgD, 1e-4);
