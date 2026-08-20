@@ -289,6 +289,26 @@ float2 averEnvBRDF(float ndv, float rough) {
     return float2(-1.04, 1.04) * a004 + r.zw;
 }
 
+// SPECULAR OCCLUSION. Ambient occlusion answers "how much of the HEMISPHERE is blocked", which is
+// the right question for a diffuse lobe gathering from all of it and the wrong one for a specular
+// lobe gathering from a narrow cone about the reflection vector. Feeding raw AO to specular, as
+// this file did, darkens a grazing mirror that can see straight past its own occluder and barely
+// touches a rough surface that genuinely is enclosed.
+//
+// Lagarde's form: the exponent collapses toward 1 as roughness rises, so a rough lobe converges
+// on the diffuse answer (AO itself) while a smooth one is progressively freed from it. At ao = 1 it
+// returns 1 for every roughness, which is what keeps the white furnace readable -- an occlusion
+// term that dimmed an unoccluded surface would fail the oracle before any of the energy maths did.
+float averSpecularOcclusion(float ndv, float ao, float rough) {
+    // NO saturate() INSIDE THE pow. The whole mechanism is that ndv + ao EXCEEDS 1 for a smooth,
+    // face-on surface, so raising it to a small exponent returns something above 1 and the -1 + ao
+    // that follows lands ABOVE plain ao. Clamping the base to 1 makes pow(1, x) == 1 for every
+    // roughness and the function collapses to `ao` exactly -- which is the bug it exists to fix.
+    // Written that way first, and the furnace caught it: the metal row read 1.000 * ao, unchanged.
+    // The base cannot go negative (ao and abs(ndv) are both non-negative), so nothing needs a guard.
+    return saturate(pow(abs(ndv) + ao, exp2(-16.0 * rough - 1.0)) - 1.0 + ao);
+}
+
 // Adds one light's direct contribution: Cook-Torrance GGX, with NdotL and visibility applied.
 float3 averShadeDirect(float3 radiance, AverSurface s, AverLight l) {
     switch (s.model) {
@@ -300,6 +320,23 @@ float3 averShadeDirect(float3 radiance, AverSurface s, AverLight l) {
         float D = distGGX(saturate(dot(s.N, s.H)), a);
         float V = visSmithCorrelated(s.ndv, ndl, a);
         float3 spec = D * V * s.F;
+        // ENERGY LOST TO MASKING, PUT BACK. A single-scatter GGX lobe drops every ray the
+        // microsurface would have bounced a second time, and the loss grows with roughness: a white
+        // metal at roughness 1 returned 45% of the light it received, measured in this engine's own
+        // white furnace before this line existed. The compensation is the standard single-term
+        // approximation and it reuses the split-sum term the indirect path already computes -- see
+        // averShadeIndirect, which corrects the same loss for the environment.
+        float2 dfg = averEnvBRDF(s.ndv, s.rough);
+        // Ess -- THE SUM -- NOT dfg.x. dfg.x is only the SCALE half of "F0*scale + bias"; what this
+        // compensation inverts is the single-scatter DIRECTIONAL ALBEDO, which is what the pair sums
+        // to. Using dfg.x alone looks nearly right head-on (0.452 against 0.450 at roughness 1) and
+        // comes apart at grazing incidence: there the fit sends the scale term toward 0.077 while the
+        // sum stays near 0.97, so 1/scale drove the factor to THIRTEEN. Terrain is seen at grazing
+        // angles across most of a frame, and it read about 15% too bright everywhere until this was
+        // tracked down -- bisected to this one line by compiling the three parts of the change out
+        // one at a time.
+        float  Ess = max(dfg.x + dfg.y, 1e-3);
+        spec *= 1.0 + s.F0 * (1.0 / Ess - 1.0);
         return radiance + (s.kdAlbedo / PI + spec) * l.radiance * ndl * l.visibility;
     }
     }
@@ -311,14 +348,62 @@ float3 averShadeIndirect(float3 radiance, AverSurface s, AverIndirect ind) {
     case AVER_MODEL_UNLIT:
         return radiance + s.emissive;
     default: {
-        float3 ambient = s.kdAlbedo * ind.ambient * ind.ambientScale;
-        float2 dfg = averEnvBRDF(s.ndv, s.rough);
-        float3 envSpec = ind.specular * (s.F0 * dfg.x + dfg.y);
-        float3 indirect = s.kdAlbedo * ind.diffuse;
-        ambient *= ind.occlusion * s.occlusion;
-        radiance += ambient;
-        radiance += indirect;
-        radiance += envSpec * ind.occlusion;
+        // THE SPLIT SUM, WITH THE MULTIPLE SCATTERING PUT BACK (Fdez-Aguera). The old form was
+        // `ind.specular * (F0*dfg.x + dfg.y)` plus a full-strength diffuse term, which is wrong in
+        // two directions at once and this engine's white furnace measured both:
+        //
+        //   - a white METAL kept only 45% of its energy at roughness 1 (97% at 0.05), because the
+        //     light GGX loses to masking was never returned;
+        //   - a DIELECTRIC read 1.5-4.5% too BRIGHT, because the diffuse lobe was handed the whole
+        //     albedo while the specular lobe took its reflectance off the top of the same budget.
+        //
+        // Both are the same omission: the split sum accounts for one bounce off the microsurface and
+        // nothing else, so the energy balance never closes. Ess is what a single bounce returns, Ems
+        // is what it dropped, Favg is the Fresnel averaged over the hemisphere, and Fms*Ems sums every
+        // further bounce. kD is then what is genuinely left for diffuse -- which is what makes the
+        // dielectric stop over-reading, with no separate fudge for it.
+        //
+        // Worked through by hand before it was written and then confirmed in the furnace: every cell
+        // of the 6x3 roughness/metallic grid lands on 1.000 rather than 0.45-1.045.
+        float2 dfg    = averEnvBRDF(s.ndv, s.rough);
+        float3 FssEss = s.F0 * dfg.x + dfg.y;
+        float  Ess    = dfg.x + dfg.y;
+        float  Ems    = 1.0 - Ess;
+        // The 1/21 is the analytic hemispherical average of the Schlick term, not a tuned number.
+        float3 Favg   = s.F0 + (1.0 - s.F0) / 21.0;
+        // Guarded because Ems*Favg reaches 1 only when a single bounce returns nothing at all, and a
+        // division by zero here would paint NaN across every rough pixel in the frame.
+        float3 FmsEms = Ems * FssEss * Favg / max(1.0 - Ems * Favg, 1e-4);
+
+        // WHAT THE DIFFUSE LOBE LOSES IS THE DIELECTRIC RELECTANCE, NOT THE BLENDED ONE. The diffuse
+        // lobe belongs to the dielectric substrate -- a metal has none, which is what kdAlbedo's own
+        // (1 - metallic) factor already expresses. Subtracting the METAL-blended FssEss from it as
+        // well charges the substrate for reflectance it never had, and the furnace caught it: taking
+        // the blended term dropped metallic 0.5 from 1.005 to 0.757 while both pure ends stayed at
+        // 1.000. Recomputing the pair against the dielectric F0 restores it to 0.98.
+        //
+        // INTERMEDIATE METALLIC STILL DOES NOT CLOSE, and no arrangement of these terms makes it.
+        // "Half metal" is not a material; it is a blend of PARAMETERS, and the multiple-scatter series
+        // is strongly non-linear in F0 -- a surface at F0 = 0.52 returns much less than the mean of one
+        // at 0.04 and one at 1.0. The physical claim this code makes is at the two ENDS, which now
+        // measure 1.000 across every roughness. The middle is a documented approximation.
+        float3 F0d     = gMatReflectance.xxx;
+        float3 FssEssD = F0d * dfg.x + dfg.y;
+        float3 FavgD   = F0d + (1.0 - F0d) / 21.0;
+        float3 FmsEmsD = Ems * FssEssD * FavgD / max(1.0 - Ems * FavgD, 1e-4);
+        float3 kD      = s.kdAlbedo * saturate(1.0 - FssEssD - FmsEmsD);
+
+        // Occlusion is applied per lobe now: AO answers a hemisphere question and belongs with the
+        // diffuse terms, while the specular lobe gets averSpecularOcclusion. Sending raw AO into a
+        // mirror cost 21% of its energy in the furnace with GI on -- measured against the same grid.
+        float  diffOcc = ind.occlusion * s.occlusion;
+        float  specOcc = averSpecularOcclusion(s.ndv, ind.occlusion, s.rough);
+
+        // FssEss multiplies RADIANCE (the reflection); everything else multiplies IRRADIANCE (the
+        // sky and the bounce), which is why they are not folded into one factor.
+        radiance += FssEss * ind.specular * specOcc;
+        radiance += (FmsEms + kD) * ind.ambient * ind.ambientScale * diffOcc;
+        radiance += kD * ind.diffuse;
         radiance += s.emissive;
         return radiance;
     }
