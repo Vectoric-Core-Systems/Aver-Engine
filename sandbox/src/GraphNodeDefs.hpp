@@ -220,6 +220,22 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"FuncReturn", "Return", "Function", {}});
     t.push_back({"CallFunc", "Call Function", "Function", {}});
 
+    // -- SWITCH. Blueprint's Switch on Int: route the exec chain to ONE of several outputs by an
+    //    integer, instead of nesting Branches. Until this existed a three-way choice cost two Branch
+    //    nodes and a comparison each, and the graph said "is it 0, else is it 1, else" rather than
+    //    what it meant.
+    //
+    //    FOUR CASES PLUS A DEFAULT, a fixed set rather than a pin count an author grows. Blueprint
+    //    lets you add pins; this format derives a node's pins from its TYPE (AddDefaultPins), so a
+    //    variable count would need per-node PIN records written into the file and kept in step with
+    //    the wiring by hand. Four covers the cases a state machine or a weapon-slot selector actually
+    //    has, and a fifth is a second Switch off `default` -- which is exactly what the nesting looks
+    //    like when it IS warranted.
+    //
+    //    `taken` reports which output fired, and -1 for the default, so a graph can observe its own
+    //    routing without a parallel chain of comparisons. Same reason Branch has `tookTrue`.
+    t.push_back({"SwitchInt", "Switch on Int", "Flow", {pin("exec", "exec", false), pin("selector", "int", false), pin("case0", "exec", true), pin("case1", "exec", true), pin("case2", "exec", true), pin("case3", "exec", true), pin("default", "exec", true), pin("taken", "int", true)}});
+
     // -- REROUTE. A node that returns exactly what it was given, and exists only so a WIRE can be
     //    bent around something. Blueprint draws these as a bare dot; here they are ordinary small
     //    nodes, because the pin-drawing code already knows how to put one pin on each side and a

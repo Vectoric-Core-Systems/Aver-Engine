@@ -217,6 +217,10 @@ static int Main()
         // accepted, not that arguments arrived in order or that the callee ran at all.
         failures += FunctionTests.RunAll();
 
+        // SwitchInt: the N-way branch. Checked by reading the taken pin back, because a switch that runs
+        // every arm compiles exactly as happily as one that runs the right one.
+        failures += SwitchIntTests.RunAll();
+
         if (failures == 0)
             Console.WriteLine("\nAll tests passed.");
         else

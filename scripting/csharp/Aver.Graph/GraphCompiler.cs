@@ -2329,6 +2329,10 @@ public class GraphCompiler
                 case "branch":
                     EmitBranch(node);
                     return; // branch owns its own fan-out (exactly one of two arms); no generic fan-out after it
+                case "switchint":
+                    EmitSwitchInt(node);
+                    return; // same reason as branch: it picks ONE arm, and a generic fan-out after it
+                            // would additionally run every other arm it just decided against
                 // Each owns its own fan-out: it decides which output runs, and generic fan-out
                 // afterwards would run them all again.
                 case "doonce":
@@ -2458,6 +2462,57 @@ public class GraphCompiler
 
     /// branch: a bool condition, ONE incoming exec pulse, and exactly one of two outgoing exec pins
     /// (`true`/`false`) fires -- unlike EmitExecFanOut, which fires ALL of a node's exec-out pins.
+    /// Blueprint's Switch on Int: evaluate the selector once, then run exactly ONE of the case
+    /// chains, or the default.
+    ///
+    /// A CHAIN OF COMPARES RATHER THAN AN IL `switch` OPCODE. The switch opcode needs a dense jump
+    /// table over a contiguous range starting at zero, and this node's selector is an arbitrary int
+    /// an author wires in -- negative, sparse, or far out of range are all ordinary. Four compares
+    /// cost nothing at this scale and behave identically for every input, which a table does not.
+    ///
+    /// THE SELECTOR IS PULLED ONCE, into a local, and compared against that local. Pulling it per
+    /// case would re-evaluate whatever computes it -- and EmitPullOutput is deliberately uncached
+    /// (see its own comment), so a selector fed by a Raycast would trace the ray once per case.
+    private void EmitSwitchInt(Node node)
+    {
+        if (_il == null) return;
+
+        var sel = _il.DeclareLocal(typeof(int));
+        EmitPullInput(node, "selector");
+        _il.Emit(OpCodes.Stloc, sel);
+
+        var takenPin = node.Pins.FirstOrDefault(p => p.IsOutput && p.Name == "taken" && p.Type == PinType.Int);
+        LocalBuilder? taken = takenPin != null ? GetOrCreateExecLocal(node.Id, "taken", typeof(int)) : null;
+
+        var endLabel = _il.DefineLabel();
+        // Every case that the node actually declares a pin for -- so a hand-written file that gives a
+        // SwitchInt only case0 and default compiles to exactly that, rather than to four branches
+        // three of which can never be reached.
+        for (int i = 0; ; ++i)
+        {
+            string pinName = "case" + i.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            if (!node.Pins.Any(p => p.IsOutput && p.Name == pinName && p.Type == PinType.Exec)) break;
+
+            var nextTest = _il.DefineLabel();
+            _il.Emit(OpCodes.Ldloc, sel);
+            _il.Emit(OpCodes.Ldc_I4, i);
+            _il.Emit(OpCodes.Bne_Un, nextTest);
+            if (taken != null) { _il.Emit(OpCodes.Ldc_I4, i); _il.Emit(OpCodes.Stloc, taken); }
+            Node? target = FindExecTarget(node.Id, pinName);
+            if (target != null) EmitExecNode(target);
+            _il.Emit(OpCodes.Br, endLabel);
+            _il.MarkLabel(nextTest);
+        }
+
+        // The default arm. -1 rather than the case count, so "no case matched" is one value whatever
+        // the node's width is and a graph reading `taken` does not have to know how many cases exist.
+        if (taken != null) { _il.Emit(OpCodes.Ldc_I4_M1); _il.Emit(OpCodes.Stloc, taken); }
+        Node? def = FindExecTarget(node.Id, "default");
+        if (def != null) EmitExecNode(def);
+
+        _il.MarkLabel(endLabel);
+    }
+
     private void EmitBranch(Node node)
     {
         if (_il == null) return;
@@ -3399,7 +3454,7 @@ public class GraphCompiler
         // this is the belt to that braces, and it is what makes a FuncEntry harmless if one is ever
         // left behind in the event graph by a hand edit.
         "onstart" or "ontick" or "onhit" or "customevent" or "branch" or "sequence" or "while" or "foreach"
-            or "funcentry" => true,
+            or "funcentry" or "switchint" => true,
         _ => false,
     };
 

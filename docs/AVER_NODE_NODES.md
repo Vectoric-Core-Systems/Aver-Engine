@@ -373,6 +373,7 @@ See trap #3 above for the editor-palette pin-type gap this node shares with `Get
 | Node | Pins | Attribute | Path | What it does |
 |---|---|---|---|---|
 | `Branch` | `exec` (in), `cond` (in, bool), `true` (out), `false` (out), `tookTrue` (out, bool) | — | X | Routes exec down `true` or `false` by `cond`. |
+| `SwitchInt` | `exec` (in), `selector` (in, int), `case0`..`case3` (out), `default` (out), `taken` (out, int) | — | X | Routes exec to ONE of four cases by an integer, or `default`. `taken` reports which fired, **-1 for the default** so it does not depend on the case count. Emitted as a chain of compares, not an IL `switch` table: the selector is an arbitrary author-supplied int, and negative or far-out-of-range are ordinary inputs a dense table would not take. |
 | `Sequence` | `exec` (in), `then0` (out), `then1` (out), `fireLog` (out, int) | — | X | Fires each exec output in order. |
 | `While` | `exec` (in), `cond` (in, bool), `loop` (out), `done` (out), `iterations` (out, int) | — | X | Loops `loop` while `cond` holds; `cond` is re-checked every pass. |
 | `ForEach` | `exec` (in), `count` (in, int), `loop` (out), `index` (out, int), `done` (out) | — | X | Counted-repeat loop, `count` times. |
