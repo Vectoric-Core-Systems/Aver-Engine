@@ -89,8 +89,10 @@ Mat4 boneBox(const Vec3& from, const Vec3& to, f32 thick) {
 // One .ocanim or .ocskel, open.
 class AnimEditor final : public AssetEditor {
 public:
-    AnimEditor(std::string path, fmt::OcAnimation clip, fmt::OcSkeleton skel, bool isClip)
-        : path_(std::move(path)), clip_(std::move(clip)), skel_(std::move(skel)), isClip_(isClip) {}
+    AnimEditor(std::string path, fmt::OcAnimation clip, fmt::OcSkeleton skel, bool isClip,
+                std::string skelPath = {})
+        : path_(std::move(path)), skelPath_(std::move(skelPath)), clip_(std::move(clip)),
+          skel_(std::move(skel)), isClip_(isClip) {}
 
     const std::string& path() const override { return path_; }
     std::string title() const override { return std::filesystem::path(path_).filename().string(); }
@@ -102,10 +104,40 @@ private:
     void drawTimeline();
     void drawTracks();
     void drawBones();
+    void drawAssetBrowser();
     void buildPreview(Engine& e);
     void reloadIfNeeded();
 
+    // THE ASSET BROWSER, which is Persona's name for it and its shape too: every clip this
+    // skeleton can play, listed beside the preview, one click to watch it.
+    //
+    // WHY IT IS THE FIRST THING THIS EDITOR NEEDED after the preview itself. The FirstPerson
+    // project ships 32 clips against one 7-bone skeleton, and until now the only way to see the
+    // second one was to close the tab and open another file. An animator compares clips -- walk
+    // against run, the two melee swings against each other -- and comparing meant a round trip
+    // through the content browser every time.
+    struct ClipEntry {
+        std::string path;
+        std::string name;      // the file stem, which is what the tab shows
+        std::string display;   // the same with the rig prefix removed -- see scanClips
+        f32  duration = 0.0f;
+        u32  tracks = 0;
+        // A clip whose highest bone index is past this skeleton's bone count cannot be played
+        // against it -- sampling would read off the end of the pose. Computed once at scan time
+        // and shown as a disabled row rather than hidden, so a mismatched clip in the folder
+        // reads as "not for this rig" instead of as a file that mysteriously is not there.
+        bool compatible = true;
+    };
+    std::vector<ClipEntry> clips_;
+    bool clipsScanned_ = false;
+    void scanClips();
+    void openClip(const std::string& path);
+
     std::string path_;
+    // Where the skeleton came from. findSkeleton() already worked this out and the result was
+    // discarded once the bones were loaded; the asset browser needs it to know what the rig is
+    // CALLED, which is how it strips the shared <skeleton>_ prefix off 32 clip names.
+    std::string skelPath_;
     fmt::OcAnimation clip_;
     fmt::OcSkeleton skel_;
     bool isClip_ = true;
@@ -138,6 +170,109 @@ void AnimEditor::reloadIfNeeded() {
         if (fmt::loadOcSkel(path_, s, &why)) skel_ = std::move(s);
         else AVER_WARN("[AnimEditor] {}", why);
     }
+}
+
+// Every .ocanim beside this asset, with the two facts the list shows and the one that decides
+// whether a row is clickable.
+//
+// SCANNED ONCE, not per frame. Thirty-two clips is thirty-two file reads; doing that every frame
+// would be the kind of cost that only shows up on someone else's slower disk.
+void AnimEditor::scanClips() {
+    clipsScanned_ = true;
+    clips_.clear();
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path dir = fs::path(path_).parent_path();
+    if (dir.empty()) return;
+
+    const u32 boneCount = static_cast<u32>(skel_.bones.size());
+    // The rig's own stem, for the prefix strip below. Taken from the skeleton file when one was
+    // resolved, so a project that does NOT follow the <skeleton>_<action> convention simply keeps
+    // its full names rather than getting something chopped off the front.
+    const std::string rigStem = skelPath_.empty()
+        ? std::string()
+        : std::filesystem::path(skelPath_).stem().string();
+    for (fs::directory_iterator it(dir, ec), end; it != end && !ec; it.increment(ec)) {
+        if (!it->is_regular_file(ec) || it->path().extension() != ".ocanim") continue;
+        fmt::OcAnimation c;
+        std::string why;
+        if (!fmt::loadOcAnim(it->path().string(), c, &why)) continue;   // unreadable: not a row
+        ClipEntry entry;
+        entry.path = it->path().string();
+        entry.name = it->path().stem().string();
+        // THE DISPLAY NAME DROPS THE RIG PREFIX. Clips here are named <skeleton>_<action> by
+        // convention -- the same stem convention findSkeleton() already relies on -- so every one
+        // of the 32 rows began "character_" and the part that told them apart was the part that
+        // got truncated. The full name is still what the tooltip and the tab title show.
+        entry.display = entry.name;
+        if (!rigStem.empty() && entry.display.size() > rigStem.size() + 1 &&
+            entry.display.compare(0, rigStem.size(), rigStem) == 0 &&
+            entry.display[rigStem.size()] == '_') {
+            entry.display = entry.display.substr(rigStem.size() + 1);
+        }
+        entry.duration = c.duration;
+        entry.tracks = static_cast<u32>(c.tracks.size());
+        // COMPATIBILITY BY BONE INDEX, not by skeletonRef. The ref is a filename hint the importer
+        // wrote and nothing at runtime reads (see findSkeleton above); the bone indices are what
+        // sampling actually uses, so they are what decides whether this clip can drive this rig.
+        for (const fmt::OcTrack& t : c.tracks) {
+            if (t.boneIndex >= boneCount) { entry.compatible = false; break; }
+        }
+        clips_.push_back(std::move(entry));
+    }
+    std::sort(clips_.begin(), clips_.end(),
+              [](const ClipEntry& a, const ClipEntry& b) { return a.name < b.name; });
+}
+
+// Swaps which clip this tab is previewing, in place.
+//
+// IN PLACE, rather than opening a second tab, because that is what Persona does and because the
+// point of the browser is comparison: a new tab per clip would put the thing being compared behind
+// the thing it is compared to. The path changes with it, so the tab title and a later reload both
+// name the clip actually on screen.
+void AnimEditor::openClip(const std::string& path) {
+    fmt::OcAnimation c;
+    std::string why;
+    if (!fmt::loadOcAnim(path, c, &why)) { AVER_WARN("[AnimEditor] {}", why); return; }
+    clip_ = std::move(c);
+    path_ = path;
+    isClip_ = true;
+    time_ = 0.0f;
+    playing_ = true;
+    selectedBone_ = -1;
+}
+
+void AnimEditor::drawAssetBrowser() {
+#if AVER_WITH_IMGUI
+    if (!clipsScanned_) scanClips();
+
+    if (ImGui::SmallButton("Refresh")) scanClips();
+    ImGui::SameLine();
+    ImGui::TextDisabled("%zu clip(s)", clips_.size());
+
+    if (clips_.empty()) {
+        ImGui::TextDisabled("No .ocanim beside this asset.");
+        return;
+    }
+
+    const std::string current = std::filesystem::path(path_).stem().string();
+    for (const ClipEntry& c : clips_) {
+        const bool isCurrent = (c.name == current);
+        if (!c.compatible) {
+            // Shown and refused, rather than hidden. See ClipEntry::compatible.
+            ImGui::BeginDisabled();
+            ImGui::Selectable(c.display.c_str(), false);
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Not for this skeleton: a track addresses a bone past %zu.",
+                                   skel_.bones.size());
+            continue;
+        }
+        if (ImGui::Selectable(c.display.c_str(), isCurrent) && !isCurrent) openClip(c.path);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s\n%.2f s, %u track(s)", c.name.c_str(), c.duration, c.tracks);
+    }
+#endif
 }
 
 void AnimEditor::buildPreview(Engine& e) {
@@ -342,9 +477,25 @@ void AnimEditor::draw(Engine& e) {
 
     ImGui::Separator();
     const f32 h = ImGui::GetContentRegionAvail().y;
-    if (ImGui::BeginChild("left", ImVec2(240, h), true)) {
-        ImGui::TextDisabled("BONES");
-        drawBones();
+    // SCALED, not 240 raw pixels. Every size in this file predates the editor running at 300% DPI,
+    // where a 240px column is about 80 logical pixels -- narrow enough that the bone names fit only
+    // because they are short. GetFontSize() is the DPI proxy rather than a plumbed-through scale,
+    // because it is already correct here and needs nothing threading through four call sites.
+    const f32 uiScale = ImGui::GetFontSize() / 16.0f;
+    if (ImGui::BeginChild("left", ImVec2(260.0f * uiScale, h), true)) {
+        // The bone tree and the clip list share the left column, split so neither starves: the
+        // rig is a fixed small thing (7 bones here) and the clip list is the one that grows.
+        if (ImGui::BeginChild("bones", ImVec2(0, h * 0.42f), false)) {
+            ImGui::TextDisabled("BONES");
+            drawBones();
+        }
+        ImGui::EndChild();
+        ImGui::Separator();
+        ImGui::TextDisabled("ANIMATIONS");
+        if (ImGui::BeginChild("clips", ImVec2(0, 0), false)) {
+            drawAssetBrowser();
+        }
+        ImGui::EndChild();
     }
     ImGui::EndChild();
     ImGui::SameLine();
@@ -410,7 +561,7 @@ std::unique_ptr<AssetEditor> makeAnimEditor(const std::string& path) {
         if (!rig.empty() && !fmt::loadOcSkel(rig, skel, &why))
             AVER_WARN("[AnimEditor] {} names skeleton '{}' but it did not load: {}",
                       path, clip.skeletonRef, why);
-        return std::make_unique<AnimEditor>(path, std::move(clip), std::move(skel), true);
+        return std::make_unique<AnimEditor>(path, std::move(clip), std::move(skel), true, rig);
     }
     if (ext == ".ocskel") {
         fmt::OcSkeleton skel;
@@ -418,7 +569,9 @@ std::unique_ptr<AssetEditor> makeAnimEditor(const std::string& path) {
             AVER_WARN("[AnimEditor] {}", why);
             return nullptr;
         }
-        return std::make_unique<AnimEditor>(path, fmt::OcAnimation{}, std::move(skel), false);
+        // A .ocskel opened directly IS its own rig, so the browser lists every clip beside it --
+        // which is Persona's Skeleton editor, arrived at by the same panel rather than a second one.
+        return std::make_unique<AnimEditor>(path, fmt::OcAnimation{}, std::move(skel), false, path);
     }
     return nullptr;
 }
