@@ -52,6 +52,13 @@ cbuffer VoxiFrame : register(AVER_GI_JOIN(b, AVER_GI_FRAME_REG)) {
     float4   gSceneViewport;
     float4x4 gGiShadowViewProj;
     float4   gGiShadowParams;
+    // THE TAIL THIS MIRROR WAS MISSING. The comment above calls this block byte for byte
+    // FrameConstants, and it stopped three float4s short of being that -- harmless while nothing
+    // here read past gGiShadowParams, and exactly the drift that comment exists to prevent. The
+    // gather below now needs gGiParams, so the tail is declared rather than assumed.
+    float4   gRtDenoiseParams;
+    float4   gPtBounceParams;
+    float4   gGiParams;
 };
 
 // t(AVER_GI_SRV) the GI volume, t(AVER_GI_SRV_1) the shadow map -- the only two of Voxi's table-0
@@ -149,8 +156,11 @@ float3 coneTracedIndirect(float3 wpos, float3 N, out float ao) {
     float4 sum = traceCone(wpos, N, aperture);
     float occ = sum.a;
     float wsum = 1.0;
-    [unroll] for (int k = 0; k < 5; ++k) {
-        float ang = 1.2566 * k;                // 2*pi/5
+    // Mirrors VoxiShaders.hpp's coneTracedIndirect -- see the note there.
+    const uint  ring = (uint)max(gGiParams.x, 1.0) - 1u;
+    const float dphi = ring > 0u ? 6.2831853 / (float)ring : 0.0;
+    [loop] for (uint k = 0; k < ring; ++k) {
+        float ang = dphi * (float)k;
         float3 d = normalize(N * 0.5 + (T * cos(ang) + B * sin(ang)) * 0.866);
         float w = saturate(dot(N, d));
         float4 c = traceCone(wpos, d, aperture);

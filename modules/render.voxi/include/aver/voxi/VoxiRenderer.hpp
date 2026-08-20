@@ -485,6 +485,10 @@ private:
         // whose name says "denoise" carrying a bounce count is the kind of thing that reads
         // fine for a week and then costs an afternoon.
         f32 ptBounceParams[4] = {};
+        // GI gather control -- mirrored as gGiParams. x = how many cones the diffuse gather
+        // traces, total, including the axial one; y/z/w unused. Its own float4 for the reason
+        // ptBounceParams above has one.
+        f32 giParams[4] = {};
     } cb_;
 
     // THE MIRROR THIS FILE HAS ALWAYS HAD AND NEVER GUARDED. `cbuffer VoxiFrame : register(b4)` in
@@ -492,7 +496,7 @@ private:
     // the same unguarded-mirror bug already fixed for PathTracer's FrameCB and PcgVolume's VolumeCB.
     // VoxiFrame was simply the one that never got the assert. Appending here without appending there
     // reads garbage off the end of the block in every Voxi shader at once.
-    static_assert(sizeof(FrameConstants) == 608,
+    static_assert(sizeof(FrameConstants) == 624,
                   "cbuffer VoxiFrame in VoxiShaders.hpp mirrors this byte for byte");
     static_assert(sizeof(FrameConstants) % 16 == 0, "must be a legal constant-buffer size");
 

@@ -81,6 +81,11 @@ void Renderer::setSettings(const Settings& s) {
     if (n.globalIllumination != settings_.globalIllumination && n.giUpdateInterval == settings_.giUpdateInterval)
         n.giUpdateInterval = giUpdateIntervalForQuality(n.globalIllumination);
 
+    // And the CONE COUNT, by the same rule -- the one that was missing, and the one that carries
+    // most of the cost. See Settings::giCones.
+    if (n.globalIllumination != settings_.globalIllumination && n.giCones == settings_.giCones)
+        n.giCones = giConesForQuality(n.globalIllumination);
+
     // The RT sun-shadow knobs follow their own tier the same way, and for a sharper reason: with RT
     // on by default there is no longer any configuration in which these are inert, so a tier change
     // that left them alone would advertise Medium while running whatever the last tier paid for.
@@ -99,6 +104,9 @@ void Renderer::setSettings(const Settings& s) {
         n.ptBounces = ptBouncesForQuality(n.pathTracing);
 
     n.voxelResolution = std::clamp(n.voxelResolution, 32u, 512u);
+    // At least the axial cone, or the gather returns nothing and GI silently switches itself off.
+    // 16 is a ceiling on a per-pixel loop, for the same reason the bounce count has one.
+    n.giCones         = std::clamp(n.giCones, 1u, 16u);
     n.giIntensity     = std::clamp(n.giIntensity, 0.0f, 8.0f);
     n.giMaxDistance   = std::clamp(n.giMaxDistance, 1.0f, 100000.0f);
     // Mirrors VoxiRenderer::kMaxShadowRays / kMaxPixelsPerRayTile, restated rather than shared: this
@@ -200,6 +208,26 @@ const char* Renderer::featureName(Feature f) {
 //   Medium    (128):  ~50 MB   (today's fixed default, unchanged)
 //   High      (256):  ~400 MB
 //   Epic      (512):  ~3.2 GB  -- by far the steepest rung; only for a GPU with gigabytes to spare
+// MEDIUM IS SIX, WHICH IS WHAT EVERY TIER USED TO TRACE. The default rung is deliberately the old
+// hardcoded number: this commit changes what the LADDER does, not what a default project looks
+// like, and the struct default must equal the default tier's rung or the derivation never fires
+// at all (it only runs on a tier CHANGE).
+//
+// Low buys speed and High/Epic spend it -- about 0.22 ms per cone. The gather is a weighted
+// AVERAGE, normalised by the sum of the cosine weights, so changing the count changes how well
+// the hemisphere is sampled rather than how bright the result is: fewer cones is a coarser
+// estimate of the same quantity, not a darker one.
+u32 Renderer::giConesForQuality(Quality q) {
+    switch (q) {
+        case Quality::Off:    return 6;   // inert: nothing gathers with GI off
+        case Quality::Low:    return 3;
+        case Quality::Medium: return 6;
+        case Quality::High:   return 9;
+        case Quality::Epic:   return 13;
+        default:              return 6;
+    }
+}
+
 u32 Renderer::voxelResolutionForQuality(Quality q) {
     switch (q) {
         case Quality::Off:

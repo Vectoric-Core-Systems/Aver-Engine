@@ -49,6 +49,8 @@ cbuffer VoxiFrame : register(b4) {
     // measure nothing and report it as free.
     float4   gRtDenoiseParams;
     float4   gPtBounceParams;
+    // x = total cones the diffuse gather traces, including the axial one. y/z/w unused.
+    float4   gGiParams;
 };
 
 // ---- Voxi: voxel cone traced GI ----
@@ -766,8 +768,20 @@ float3 coneTracedIndirect(float3 wpos, float3 N, out float ao) {
     float4 sum = traceCone(wpos, N, aperture);
     float occ = sum.a;
     float wsum = 1.0;
-    [unroll] for (int k = 0; k < 5; ++k) {
-        float ang = 1.2566 * k;                // 2*pi/5
+    // THE RING COMES FROM THE QUALITY TIER NOW, not from a hardcoded 5. The axial cone along N is
+    // always traced, so gGiParams.x is the TOTAL and the ring is one fewer.
+    //
+    // A DYNAMIC [loop], not the [unroll] this was: an unrolled loop with a dynamic bound is
+    // predicated rather than skipped, so every tier would still pay for six cones and the ladder
+    // would be a lie. That is the whole reason this is worth the loop overhead.
+    //
+    // The angle is 2*pi/ring computed rather than the 1.2566 literal that stood here. That literal
+    // was a rounded 2*pi/5, so the six-cone case shifts by about 3e-5 radians and is no longer
+    // bit-identical to before -- in the more correct direction.
+    const uint  ring = (uint)max(gGiParams.x, 1.0) - 1u;
+    const float dphi = ring > 0u ? 6.2831853 / (float)ring : 0.0;
+    [loop] for (uint k = 0; k < ring; ++k) {
+        float ang = dphi * (float)k;
         float3 d = normalize(N * 0.5 + (T * cos(ang) + B * sin(ang)) * 0.866);
         float w = saturate(dot(N, d));
         float4 c = traceCone(wpos, d, aperture);

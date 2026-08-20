@@ -90,6 +90,22 @@ struct Settings {
     // and setSettings. Set it explicitly (a different value than what's currently active, in the
     // same call that changes the tier) to override the tier's rung.
     u32 voxelResolution = 128;
+
+    // HOW MANY CONES THE DIFFUSE GATHER TRACES, total, including the axial one along the normal.
+    // Defaults to Medium's rung (6) below, and derived from globalIllumination on a tier change
+    // exactly as voxelResolution above it is.
+    //
+    // THIS IS THE GI SETTING THAT ACTUALLY COSTS ANYTHING, and until now the tier did not touch it.
+    // globalIllumination derived voxelResolution and giUpdateInterval, both of which move the
+    // volume BUILD -- measured at 0.4-0.5 ms -- while the per-pixel GATHER, measured at 1.3 ms and
+    // by far the larger half, was a hardcoded six for every tier. Turning GI down bought almost
+    // nothing, and turning it up to High made the frame SLOWER with no way to spend the budget
+    // (6.0 -> 6.4 ms: a bigger volume to sample, same number of samples).
+    //
+    // Cost is LINEAR in this and independent of the march length -- measured at about 0.22 ms per
+    // cone, with the 24-step loop bound unreachable at the diffuse aperture because the cones exit
+    // early. So this is the one GI number worth putting on a ladder.
+    u32 giCones         = 6;
     f32 giIntensity     = 1.0f;
     f32 giMaxDistance   = 4000.0f;  // centimetres
 
@@ -265,6 +281,8 @@ public:
     // voxelResolution from a tier change -- see setSettings and Voxi.cpp for the ladder and why it
     // only ever applies when the caller left voxelResolution untouched.
     static u32 voxelResolutionForQuality(Quality q);
+    // Total cones for the diffuse gather, including the axial one. See Settings::giCones.
+    static u32 giConesForQuality(Quality q);
     // Returns the revoxelisation interval a GI quality tier resolves to, derived by setSettings on a
     // tier change under exactly the same "only if the caller left it untouched" rule as the grid edge
     // above. Epic is 1 -- always fresh -- so the top tier's indirect light is unchanged by this.

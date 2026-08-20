@@ -494,6 +494,7 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
     cb_.voxelOrigin[3] = size > 0.0f ? 1.0f / size : 0.0f;   // the shader multiplies by this
     cb_.voxelParams[0] = static_cast<f32>(voxelResBuilt_);
     cb_.voxelParams[1] = settings_.giIntensity;
+    cb_.giParams[0]    = static_cast<f32>(settings_.giCones);
     cb_.voxelParams[2] = settings_.giMaxDistance;
     // gates the cone trace -- see setConeTraceEnabled's own comment for why that toggle is ANDed in
     // here rather than folded into giEnabled(): this is the one place a caller doing the A/B
