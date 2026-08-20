@@ -25,6 +25,30 @@ public abstract class AverActor
     /// <summary>Runs after a hot reload has rebound this instance and restored its native state.</summary>
     public virtual void OnRebound() { }
 
+    /// <summary>Runs when a named event is raised at this actor's entity.
+    ///
+    /// TWO THINGS RAISE ONE TODAY, and they are deliberately the same hook. An ANIMATION NOTIFY --
+    /// a marker placed on a clip in the animation editor, delivered on the frame playback crosses
+    /// it -- and a graph's <c>FireEvent</c> node aimed at this entity. Both mean "something
+    /// happened, here, now, and it is called <paramref name="name"/>", and a script that wants to
+    /// play a footstep sound should not have to care which one delivered it.
+    ///
+    /// WHY ONE HOOK RATHER THAN A METHOD PER EVENT NAME. Unreal binds notifies by NAME
+    /// (<c>AnimNotify_Footstep</c>), resolved by reflection at load. That works there because an
+    /// anim notify is a distinct concept with its own class; here an event name is opaque all the
+    /// way down -- the format stores a string, GraphHost.Fire branches on nothing, and a project
+    /// invents names freely. A reflection-by-name convention would put a silent failure (a typo in
+    /// a method name) exactly where this engine has been bitten before, and would still need this
+    /// method underneath for the names that are computed rather than written.
+    ///
+    /// NOT CALLED FOR OnBeginPlay/OnTick/OnEndPlay: those have their own hooks and are driven by
+    /// the tick, not raised at an entity.
+    ///
+    /// Return true if this actor handled it. The value is reported back to whatever raised the
+    /// event -- a <c>FireEvent</c> node reads it as its own success -- so returning false from the
+    /// default branch of a switch is the honest answer for a name this actor does not know.</summary>
+    public virtual bool OnEvent(string name) => false;
+
     /// <summary>Releases any native resource this actor owns. Host-driven, after OnEndPlay, whatever the reason.</summary>
     internal virtual void OnUnbound() { }
 

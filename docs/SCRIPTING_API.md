@@ -156,7 +156,28 @@ Override these on your `AverActor` subclass. All are optional; the defaults do n
 | `void OnTick(float dt)` | Every frame the class is scheduled to tick, in its tick group. `dt` is clamped seconds. Requires `b.Ticks(...)` in `Configure`. |
 | `void OnEndPlay(EndReason reason)` | Once when the actor stops playing. `Stop` = the world stopped; `Destroy` = it was destroyed; `Reload` = the entity stays, only the managed half is rebuilt. |
 | `void OnRebound()` | **DECLARED BUT NEVER CALLED.** The hook exists in `framework_hooks.h` and nothing in the engine invokes it; the bridge's own comment records the rebind path as out of scope. Do not put logic here expecting it to run. |
+| `bool OnEvent(string name)` | A named event was raised **at this entity**. Two things raise one: an **animation notify** (a marker crossed on a playing clip) and a graph's `FireEvent` node aimed here. Return `true` if you handled it -- the value is what the caller reads as its own success. |
 | `void BuildModels(ActorBuilder builder)` | `protected`. Builds the actor's model tree; the editor overrides it in a generated `.Designer.cs`. Hand code rarely writes this. |
+
+`OnEvent` is **one hook, not a method per event name.** Unreal resolves anim notifies by reflecting on
+`AnimNotify_<Name>`; that works there because a notify is its own class. Here an event name is opaque all
+the way down -- the format stores a string, `GraphHost.Fire` branches on nothing, and a project invents
+names freely -- so a name-based convention would turn a typo into silence, and would still need this method
+underneath for names that are computed. Switch on `name`, and return `false` from the default branch.
+
+```csharp
+public override bool OnEvent(string name)
+{
+    switch (name)
+    {
+        case "OnFootstep": PlayFootstep(); return true;
+        default: return false;
+    }
+}
+```
+
+An entity is bound to a graph **or** to a C# actor, never both, so an event reaches exactly one of them.
+A graph is checked first; a C# actor is the fallback. Nothing receives it twice.
 
 Pawn-only hooks (`AverPawn`): `OnPossessed(Entity controller)`, `OnUnpossessed()`.
 GameMode-only hook (`AverGameMode`): `OnPostLogin(Entity controller)`.

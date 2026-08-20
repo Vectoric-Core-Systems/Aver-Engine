@@ -1432,9 +1432,36 @@ public static class HostBridge
 
         if (host == null)
         {
+            // A C# ACTOR IS THE THIRD KIND OF THING THAT CAN RECEIVE ONE, checked only after both
+            // graph tables miss. The order is not arbitrary: an entity is bound to a graph OR to a
+            // C# actor, never both (DispBind constructs one or the other -- see its own comment), so
+            // this is a fallback rather than a second delivery. Reaching it means the entity is
+            // scripted in C#, and an animation notify aimed at a C# character used to die here with
+            // a "no live graph" warning that named the wrong problem.
+            if (s_actorsByEntity.TryGetValue(targetEntity, out ActorLive? live) && !live.Disabled)
+            {
+                try
+                {
+                    if (live.Instance.OnEvent(eventName)) return true;
+                }
+                catch (Exception ex)
+                {
+                    // Same treatment as every other actor hook: one bad actor is disabled, the
+                    // caller is told it was not handled, and nothing propagates into compiled IL or
+                    // back across the ABI.
+                    DisableActor(live, "OnEvent", ex);
+                    return false;
+                }
+                if (s_fireWarnedOnce.Add((targetEntity, eventName)))
+                    Emit((int)Log.Level.Warn,
+                         $"[Graph] FireEvent: entity {targetEntity} is a C# actor ({live.Name}) whose " +
+                         $"OnEvent did not handle '{eventName}'");
+                return false;
+            }
+
             if (s_fireWarnedOnce.Add((targetEntity, eventName)))
                 Emit((int)Log.Level.Warn,
-                     $"[Graph] FireEvent: entity {targetEntity} has no live graph to fire '{eventName}' at");
+                     $"[Graph] FireEvent: entity {targetEntity} has no live graph or actor to fire '{eventName}' at");
             return false;
         }
 

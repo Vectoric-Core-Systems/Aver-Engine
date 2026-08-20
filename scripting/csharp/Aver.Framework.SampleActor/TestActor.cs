@@ -2,6 +2,7 @@
 // Developed by Vectoric-Core-Systems. All rights reserved.
 // Proprietary. See LICENSE.md at the repository root.
 using Aver.Framework;
+using Aver.Scene;
 using Aver.Scripting;
 
 namespace Aver.Framework.SampleActor;
@@ -31,4 +32,26 @@ public sealed class TestActor : AverActor
     /// <summary>Logs the end of the session and the tick count.</summary>
     public override void OnEndPlay(EndReason reason) =>
         Log.Info($"[TestActor] OnEndPlay reason={reason} after {_ticks} tick(s)");
+
+    /// <summary>Counts every "OnBeat" it receives and writes the running total into its own X.
+    ///
+    /// An ANIMATION NOTIFY arrives here exactly as a graph's FireEvent node does -- the same hook,
+    /// because both mean "this happened, at this entity, now". Writing the count into the transform
+    /// rather than only logging it is what lets a native test READ the result: a log line proves a
+    /// method ran, and this codebase has shipped more than one hook that ran and changed nothing.
+    ///
+    /// Returning false for an unrecognised name is the honest answer, and it is what the caller
+    /// reports as its own success -- a FireEvent node aimed at this actor reads it.</summary>
+    public override bool OnEvent(string name)
+    {
+        if (name != "OnBeat") return false;
+        ++_beats;
+        Log.Info($"[TestActor] OnEvent '{name}' #{_beats} entity={Self.Handle}");
+        Vec3 p = Self.LocalPosition;
+        p.X = _beats;
+        Self.SetLocalPosition(p);
+        return true;
+    }
+
+    private int _beats;
 }

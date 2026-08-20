@@ -16,6 +16,7 @@
 // bridge) cannot run this and is not failing it -- ScriptHost::init declines, and this reports
 // "unavailable" and exits 0, exactly as the engine itself boots without scripting.
 #include "aver/anim/AnimSystem.hpp"
+#include "aver/framework/framework_abi.h"
 #include "aver/core/Log.hpp"
 #include "aver/formats/OcAnim.hpp"
 #include "aver/platform/FileSystem.hpp"
@@ -143,6 +144,10 @@ int main() {
     scripting::ScriptHost host;
     scripting::HostDesc hd;
     hd.bridgeDir = executableDir() + "\\Scripting";
+    // The sample actor assembly, staged by the same build that staged the bridge. It is what
+    // makes AN_TestActor a REGISTERED MANAGED CLASS in this process -- without it the C# half of
+    // this test has no actor to spawn, and reports so rather than silently skipping.
+    hd.scriptsDir = executableDir() + "\\ActorScripts";
     if (!host.init(hd)) {
         AVER_WARN("AnimNotifyGraphTest: UNAVAILABLE -- {}", host.declineReason());
         AVER_WARN("  (no .NET runtime or no staged bridge; this is the same path the engine itself "
@@ -217,6 +222,44 @@ int main() {
               "and so does an entity with no graph at all");
         w.destroy(e2);
         w.flush();
+    }
+
+    AVER_INFO("a C# ACTOR receives the same event, through the same router");
+    {
+        // THE THIRD KIND OF RECEIVER, and the one that used to be told "no live graph" and left it
+        // there. A project whose character is written in C# rather than as a graph could not hear a
+        // single animation notify, which is not a limitation anybody would have guessed from the
+        // feature's description.
+        const i32 cls = aver_fw_class_find("AN_TestActor");
+        if (cls == 0) {
+            AVER_WARN("  SKIPPED -- AN_TestActor is not registered (no ActorScripts staged beside "
+                      "this executable); the C# actor path is NOT covered by this run");
+        } else {
+            const f32 pos[3] = {0.0f, 0.0f, 0.0f};
+            const i32 actor = aver_fw_spawn(cls, "beater-cs", pos, nullptr, nullptr);
+            check(actor != 0, "a managed actor spawns");
+
+            // Fired by hand rather than through a clip. The clip half is already proved above, and
+            // what is unproved HERE is the router's third branch -- reached identically whichever
+            // side raised the event.
+            check(g_host->graphFire(actor, "OnBeat"),
+                  "AN ACTOR HANDLED IT -- OnEvent returned true, so the caller sees a real success");
+            check(g_host->graphFire(actor, "OnBeat"), "and again");
+
+            const scene::Entity ae = static_cast<scene::Entity>(actor);
+            const auto* al = w.component<scene::CLocal>(ae, scene::kComponentLocal);
+            check(al && std::fabs(al->xf.position.x - 2.0f) < 1e-4f,
+                  "and the actor's own count reached the native side: X is 2 after two events");
+            if (al) AVER_INFO("  X = {:.3f}", al->xf.position.x);
+
+            // The refusal is the other half of the contract: OnEvent returns false for a name it
+            // does not know, and that false is what a FireEvent node reads as its own success pin.
+            check(!g_host->graphFire(actor, "NotMine"),
+                  "an event the actor does not handle reports false rather than a bare true");
+
+            aver_fw_destroy(actor);
+            w.flush();
+        }
     }
 
     sys.setNotifySink(nullptr, nullptr);
