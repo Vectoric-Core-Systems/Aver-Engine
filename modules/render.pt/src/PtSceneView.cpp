@@ -66,13 +66,48 @@ float4 PSPathTracePresent(PtPresentIn i) : SV_TARGET {
     // i.e. row 0 leans toward whatever "up" the camera was handed). Flipping v here is what keeps the
     // two agreeing without needing a matching flip on the C++ side.
     float2 uv = i.ndc * 0.5 + 0.5;
-    uint px = (uint)clamp(uv.x * float(W), 0.0, float(W) - 1.0);
-    uint py = (uint)clamp((1.0 - uv.y) * float(H), 0.0, float(H) - 1.0);
-    uint pixel = py * W + px;
 
-    float4 rad = gPtAccumRead[pixel * 2 + 0];
-    float traced = max(gPtAccumRead[pixel * 2 + 1].z, 1.0);
-    return float4(rad.rgb / traced, 1.0);
+    // BILINEAR, NOT NEAREST, AND THIS IS THE CHEAPEST REAL IMPROVEMENT ON THIS PATH.
+    //
+    // The accumulator is 480x270 (kAccumWidth/kAccumHeight) and the viewport it is shown in is
+    // whatever the window is -- 3532x1987 on the display this was measured on, a 7.4x blow-up. The
+    // old lookup truncated uv to an integer texel, so every accumulator texel became a solid ~7x7
+    // block of identical pixels. That does not add noise, but it MAGNIFIES it: per-texel variance
+    // that would read as fine film grain reads instead as coarse blocky mottling, which is far more
+    // objectionable at the same numerical error. It also stair-stepped every silhouette in the
+    // image, visible on the horizon line of any capture taken before this.
+    //
+    // Manual rather than a SamplerState because the accumulator is a StructuredBuffer, not a
+    // texture -- it has to be, since the compute pass writes it as a UAV of float4 PAIRS (radiance,
+    // and a sample count in .z). Four fetches instead of one, on a fullscreen pass that was already
+    // trivially cheap.
+    //
+    // THE SAMPLE COUNT IS INTERPOLATED TOO, not taken from one texel. Every texel of a still frame
+    // holds the same count so it makes no difference then -- but the frame after a camera move has
+    // texels mid-update, and dividing one texel's radiance by another's count is how a blend seam
+    // becomes a bright or dark band.
+    float fx = clamp(uv.x * float(W) - 0.5, 0.0, float(W) - 1.0);
+    float fy = clamp((1.0 - uv.y) * float(H) - 0.5, 0.0, float(H) - 1.0);
+    uint x0 = (uint)floor(fx), y0 = (uint)floor(fy);
+    uint x1 = min(x0 + 1u, W - 1u), y1 = min(y0 + 1u, H - 1u);
+    float tx = fx - float(x0), ty = fy - float(y0);
+
+    float4 r00 = gPtAccumRead[(y0 * W + x0) * 2 + 0];
+    float4 r10 = gPtAccumRead[(y0 * W + x1) * 2 + 0];
+    float4 r01 = gPtAccumRead[(y1 * W + x0) * 2 + 0];
+    float4 r11 = gPtAccumRead[(y1 * W + x1) * 2 + 0];
+    float  n00 = gPtAccumRead[(y0 * W + x0) * 2 + 1].z;
+    float  n10 = gPtAccumRead[(y0 * W + x1) * 2 + 1].z;
+    float  n01 = gPtAccumRead[(y1 * W + x0) * 2 + 1].z;
+    float  n11 = gPtAccumRead[(y1 * W + x1) * 2 + 1].z;
+
+    float3 radTop = lerp(r00.rgb, r10.rgb, tx);
+    float3 radBot = lerp(r01.rgb, r11.rgb, tx);
+    float3 rad    = lerp(radTop, radBot, ty);
+    float  nTop   = lerp(n00, n10, tx);
+    float  nBot   = lerp(n01, n11, tx);
+    float  traced = max(lerp(nTop, nBot, ty), 1.0);
+    return float4(rad / traced, 1.0);
 }
 )";
 
