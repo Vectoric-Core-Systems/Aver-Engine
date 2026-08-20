@@ -447,6 +447,14 @@ float3 skyColor(float3 dir){
 // dir.z; the old ground crossfade evaluated to zero there too. Only dir.z < 0 changes, which is why
 // the fog's zenith sample and every probe that shades a surface are untouched.
 float3 averSkyPhysical(float3 dir) {
+    // FURNACE FIRST, exactly as skyColor does it. A furnace is a UNIFORM environment of radiance L,
+    // and this function is the sky the backends draw whenever the physical atmosphere is on -- so
+    // without this guard, turning the atmosphere on left the furnace shading against a real sky:
+    // every surface correctly reading L, in front of a background that was not L. The shading was
+    // right and the picture was a lie, which is the worse of the two failures because it makes the
+    // oracle unreadable by eye and stops the background being usable as the reference the plates are
+    // compared against.
+    if (averFurnaceOn()) return averFurnaceL();
     float3 L   = normalize(gLightDir.xyz);
     float  alt = averAtmoCamAlt();
     float  r0  = gAtmoPlanet.x + alt;

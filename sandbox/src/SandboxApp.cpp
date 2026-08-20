@@ -1097,6 +1097,64 @@ public:
             white("FurnaceCaveBack",  Vec3{-520, -520, 160}, Vec3{20.0f, 200.0f, 200.0f});
             white("FurnaceCaveLeft",  Vec3{-330, -700, 160}, Vec3{200.0f, 20.0f, 200.0f});
             white("FurnaceCaveTop",   Vec3{-330, -520, 350}, Vec3{200.0f, 200.0f, 20.0f});
+
+            // --furnace-grid: THE SPECULAR HALF OF THE SAME QUESTION. Everything above is
+            // albedo 1, roughness 1, metallic 0 -- a perfect Lambertian white, which exercises the
+            // DIFFUSE path and the occlusion term and nothing else. Single-scatter GGX loses energy
+            // to masking that it never puts back, and that loss grows with roughness and with
+            // metalness; none of it is visible in a test that never varies either.
+            //
+            // A flat plate rather than a sphere, facing the camera down -X, so every pixel of a
+            // cell is at normal incidence and the cell has ONE value to read instead of a gradient.
+            // That measures the loss at ndv = 1, which is its SMALLEST: grazing angles lose more.
+            // Read this table as a floor on the error, not the whole of it.
+            //
+            // Replaces the five boxes rather than joining them, so the existing furnace probes
+            // (and any gate reading them) see exactly what they saw before.
+            if (furnaceGrid_) {
+                objects_.clear();
+                const f32 rough[6] = {0.05f, 0.25f, 0.45f, 0.65f, 0.85f, 1.0f};
+                const f32 metal[3] = {0.0f, 0.5f, 1.0f};
+                for (int mi = 0; mi < 3; ++mi) {
+                    for (int ri = 0; ri < 6; ++ri) {
+                        MeshObj o;
+                        char nm[64];
+                        std::snprintf(nm, sizeof(nm), "Cell_m%.1f_r%.2f", metal[mi], rough[ri]);
+                        o.name = nm;
+                        o.mesh = unitCubeMesh_;
+                        // Columns march along +Y (right), rows up +Z, on one plane at +X.
+                        o.pos   = Vec3{700.0f, -450.0f + 180.0f * (f32)ri, 60.0f + 140.0f * (f32)mi};
+                        // THIN, so a tilt shows the same face at a glancing angle instead of swapping
+                        // to the side one. At 5cm thick and 75 degrees of yaw, the side face was wider on
+                        // screen than the front and the probe was reading a surface still nearly square to
+                        // the camera -- the tilt sweep came back perfectly flat and meant nothing.
+                        o.scale = Vec3{0.5f, 60.0f, 60.0f};
+                        // --furnace-tilt turns every plate about its own vertical axis so the same
+                        // cell is read at GRAZING incidence instead of face-on. That matters more than
+                        // it sounds: single-scatter GGX loses most of its energy at low ndv, so a table
+                        // taken at ndv = 1 is the SMALLEST the error ever gets. Rotating about Z keeps
+                        // each cell centred on the same screen position, so one set of sample
+                        // coordinates serves every tilt.
+                        //
+                        // WHAT THIS AXIS CANNOT SHOW, so nobody reads a flat sweep as a passing grade:
+                        // these cells are albedo 1, so a METAL has F0 = 1, and averEnvBRDF is fitted so
+                        // that dfg.x + dfg.y is very nearly constant in ndv at F0 = 1. The white metal
+                        // row therefore reads the same at every tilt whether the shading model is right
+                        // or wrong. Tilt earns its keep on COLOURED metals and on dielectrics, where the
+                        // two halves of the fit stop cancelling. Give the cells a non-unit albedo before
+                        // concluding anything from a tilt sweep.
+                        o.rotDeg = Vec3{furnaceTilt_, 0.0f, 0.0f};
+                        o.color[0] = o.color[1] = o.color[2] = 1.0f;
+                        o.metallic  = metal[mi];
+                        o.roughness = rough[ri];
+                        o.aabbMin = Vec3{-o.scale.x*1.1f, -o.scale.y*1.1f, -o.scale.z*1.1f};
+                        o.aabbMax = Vec3{ o.scale.x*1.1f,  o.scale.y*1.1f,  o.scale.z*1.1f};
+                        objects_.push_back(o);
+                    }
+                }
+                AVER_INFO("[Furnace] grid: 6 roughness x 3 metallic at albedo 1, L = {}",
+                          sky_.furnaceRadiance);
+            }
         }
 
         // --refl-test: are ray-traced reflections GLOBAL? A mirror, and a beacon parked on its
@@ -4348,6 +4406,12 @@ public:
     void setReflTest() { reflTest_ = true; }                                       // --refl-test
     void setFurnaceTest() { furnaceTest_ = true; }                                 // --furnace-test
     void setFurnaceSun() { furnaceTest_ = true; furnaceSun_ = true; }              // --furnace-sun
+    // --furnace-grid: implies --furnace-test for the same reason --pt-furnace does -- the furnace
+    // is a property of the SKY, and a grid of plates lit by nothing measures nothing. Combines
+    // with --furnace-sun, which is how the DIRECT specular path gets the same treatment.
+    void setFurnaceGrid() { furnaceTest_ = true; furnaceGrid_ = true; }            // --furnace-grid
+    // --furnace-tilt DEG: implies the grid, since it is the grid it rotates.
+    void setFurnaceTilt(f32 d) { furnaceTest_ = true; furnaceGrid_ = true; furnaceTilt_ = d; }
     // --sun-angle DEG: the sun's ANGULAR DIAMETER. Not a look control -- it is what sets how wide
     // a ray-traced penumbra is, and at the real 0.545 degrees that penumbra is narrower than a
     // pixel at contact distances. A gate that wants to sample a partially-occluded ray-traced
@@ -10611,6 +10675,8 @@ private:
     u64  particleTickFrames_ = 0;
     bool reflTest_ = false;       // --refl-test: are ray-traced reflections global?
     bool furnaceTest_ = false;    // --furnace-test: does the shading model conserve energy?
+    bool furnaceGrid_ = false;    // --furnace-grid: the same question across roughness/metallic
+    f32  furnaceTilt_ = 0.0f;     // --furnace-tilt DEG: read that grid at grazing incidence
     bool furnaceSun_ = false;     // --furnace-sun: the variant where only the DIRECT term is lit
     f32  sunAngle_ = -1.0f;       // --sun-angle: negative leaves the sky's own value alone
     bool ptFurnaceTest_ = false;  // --pt-furnace: the same question asked of the path tracer
@@ -12455,7 +12521,7 @@ Application* createApplication(int argc, char** argv) {
     // right here and nothing else may override it; --mcp with no number defers to mcp.conf, resolved
     // once argument parsing is done and engineRoot() can be asked (see mcpRequested below).
     bool mcpRequested = false, mcpPortExplicit = false;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool ptFurnace=false; bool ptScene=false; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int rtRenderMode=-1; int pt=0; int ptBounces=-1; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; bool openLegacy=false; std::string graphSelectNode; std::string graphTab; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool furnaceGrid=false; f32 furnaceTilt=0.0f; bool ptFurnace=false; bool ptScene=false; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int rtRenderMode=-1; int pt=0; int ptBounces=-1; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; bool openLegacy=false; std::string graphSelectNode; std::string graphTab; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -12831,6 +12897,8 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--refl-test")) reflTest=true;
         else if (!std::strcmp(argv[i],"--furnace-test")) furnaceTest=true;
         else if (!std::strcmp(argv[i],"--furnace-sun")) furnaceSun=true;
+        else if (!std::strcmp(argv[i],"--furnace-grid")) furnaceGrid=true;
+        else if (!std::strcmp(argv[i],"--furnace-tilt") && i+1<argc) furnaceTilt=(f32)std::atof(argv[++i]);
         else if (!std::strcmp(argv[i],"--sun-angle") && i+1<argc) sunAngle=(f32)std::atof(argv[++i]);
         else if (!std::strcmp(argv[i],"--pt-furnace")) ptFurnace=true;
         else if (!std::strcmp(argv[i],"--pt-scene")) ptScene=true;
@@ -13067,6 +13135,8 @@ Application* createApplication(int argc, char** argv) {
     if (reflTest) app->setReflTest();
     if (furnaceTest) app->setFurnaceTest();
     if (furnaceSun) app->setFurnaceSun();
+    if (furnaceGrid) app->setFurnaceGrid();
+    if (furnaceTilt != 0.0f) app->setFurnaceTilt(furnaceTilt);
     if (sunAngle > 0.0f) app->setSunAngle(sunAngle);
     if (ptFurnace) app->setPtFurnaceTest();
     if (ptScene) app->setPtSceneView();
