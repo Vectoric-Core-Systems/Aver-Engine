@@ -1322,6 +1322,10 @@ private:
     // Set in beginFrame when a feature suppressed the scene (its own scenePass replaced the whole
     // frame), read in endFrame so the deferred sky draw doesn't run over what that feature drew.
     bool sceneSuppressed_ = false;
+    // Set alongside sceneSuppressed_ in beginFrame; read by the deferred sky in endFrame. A
+    // feature can suppress the scene GEOMETRY without owning the frame -- see
+    // IRenderFeature::suppressesWholeFrame.
+    bool frameSuppressed_ = false;
     // The authored atmosphere; the frame block above holds the packed form the shader reads.
     SkyAtmosphere sky_{};
     bool wireframe_ = false;
@@ -2950,11 +2954,13 @@ void D3D12Device::beginFrame() {
     cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
     sceneSuppressed_ = false;
+    frameSuppressed_ = false;
     for (IRenderFeature* f : features_) {
         if (!f->suppressesScene()) continue;
         if (rhiContext_) f->scenePass(*rhiContext_);
         cmdList_->SetPipelineState(pso_.Get());
         sceneSuppressed_ = true;
+        if (f->suppressesWholeFrame()) frameSuppressed_ = true;
         return;
     }
 
@@ -3198,10 +3204,12 @@ LineHandle D3D12Device::createLineMesh(const LineVertex* verts, u32 count) {
     return static_cast<LineHandle>(lineMeshes_.size());
 }
 
-// Draws a line list, unless a feature has replaced the scene.
+// Draws a line list, unless a feature has replaced the whole frame.
 void D3D12Device::drawLines(LineHandle mesh, const f32 world[16]) {
     if (!hasSwapchain_ || mesh == 0 || mesh > lineMeshes_.size()) return;
-    for (IRenderFeature* f : features_) if (f->suppressesScene()) return;
+    // Gizmos and wireframes belong in a ray-driven viewport as much as in a rastered one, and they
+    // depth-test against the real depth the ray pass writes.
+    for (IRenderFeature* f : features_) if (f->suppressesWholeFrame()) return;
     const GpuLineMesh& m = lineMeshes_[mesh - 1];
     bindGraphicsRoot(rootSig_.Get());
     cmdList_->SetPipelineState(lineDepth_ ? linePso_.Get() : lineOverlayPso_.Get());
@@ -4083,7 +4091,11 @@ void D3D12Device::endFrame() {
     // ALSO never writes depth (DepthWriteMask ZERO), the particle's own depth test still runs against
     // the same clear value it always did and still passes. Nothing about occlusion, sort order, or the
     // depth-write-off contract changes; only what colour a particle blends ONTO in open sky does.
-    if (skyEnabled_ && !sceneSuppressed_) {
+    // NOT sceneSuppressed_. Ray-driven primary visibility suppresses the scene without owning the
+    // frame, and it writes depth 1.0 on a miss -- which is exactly what this pass's DepthFunc=EQUAL
+    // is looking for, so the sky fills the missed pixels and leaves every hit alone. Testing the
+    // wrong flag here is what left that mode with no clouds, no atmosphere and no sun.
+    if (skyEnabled_ && !frameSuppressed_) {
         cmdList_->RSSetViewports(1, &sceneVp);
         cmdList_->RSSetScissorRects(1, &sceneSc);
         bindGraphicsRoot(rootSig_.Get());
@@ -4123,7 +4135,10 @@ void D3D12Device::endFrame() {
     // explicitly (not trusted to still be whatever the sky draw above left them) for the same reason
     // the sky draw itself re-sets them rather than trusting beginFrame: cheap, idempotent, and correct
     // regardless of what ran in between.
-    if (rhiContext_ && !sceneSuppressed_) {
+    // frameSuppressed_, matching the sky above: a particle in a ray-driven frame is as real as one in
+    // a rastered frame, and the depth contract it relies on is unchanged -- the ray pass writes real
+    // SV_DEPTH, so a particle behind a wall is still hidden by that wall.
+    if (rhiContext_ && !frameSuppressed_) {
         cmdList_->RSSetViewports(1, &sceneVp);
         cmdList_->RSSetScissorRects(1, &sceneSc);
         bindGraphicsRoot(rootSig_.Get());

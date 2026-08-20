@@ -683,8 +683,30 @@ public:
     virtual BindingSetHandle sceneBindingSet() const { return 0; }
     virtual bool sceneConstants(const void** data, u32* bytes) const { (void)data; (void)bytes; return false; }
 
-    // Whether this feature replaces the scene entirely. Suppression covers line/overlay draws too.
+    // Whether this feature draws the scene GEOMETRY itself, so the device's own drawMesh path
+    // should stand aside. Says nothing about the rest of the frame -- see suppressesWholeFrame.
     virtual bool suppressesScene() const { return false; }
+
+    // Whether the suppression above extends to EVERYTHING ELSE IN THE FRAME: the sky pass, the
+    // line draws, the transparent pass.
+    //
+    // THE TWO USED TO BE ONE PREDICATE, AND CONFLATING THEM COST THE SKY. There are genuinely two
+    // different things a feature can mean by "I am drawing the scene":
+    //
+    //   1. "THE FRAME IS MINE" -- a debug visualisation or a research view that paints every pixel
+    //      from its own model and would be corrupted by anything else drawing into it. Nothing else
+    //      should run. This is the default, so a feature that says nothing keeps the old behaviour.
+    //
+    //   2. "THE FIRST SURFACE IS MINE" -- ray-driven primary visibility. It replaces the RASTER,
+    //      and nothing more: the frame still has a sky above it, still has editor gizmos in it,
+    //      still has particles in front of it. Suppressing those as well left the ray-driven
+    //      viewport with no clouds, no physical atmosphere, no sun disc and no gizmos -- and the
+    //      cloud loss is not subtle, it is the whole sky.
+    //
+    // A feature in case 2 overrides this to false. Defaulting to suppressesScene() means every
+    // existing feature behaves exactly as it did.
+    virtual bool suppressesWholeFrame() const { return suppressesScene(); }
+
     // Draws the replacement scene, after the colour target is bound.
     virtual void scenePass(IRenderContext& ctx) { (void)ctx; }
 

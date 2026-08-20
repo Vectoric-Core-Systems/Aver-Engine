@@ -1443,6 +1443,13 @@ bool VoxiRenderer::overridesScenePipeline() const { return giReady_; }
 // in the header, which asks only about the first.
 bool VoxiRenderer::suppressesScene() const { return debugViewActive() || rayDrivenActive(); }
 
+// The debug raymarch paints every pixel from the voxel volume and has no depth to test against, so
+// anything else drawing into that frame is drawing over a picture of something else. Ray-driven
+// mode is the opposite case: it writes real SV_DEPTH (1.0 on a miss -- exactly the value the sky
+// pass tests EQUAL against), so the sky lands on precisely the pixels the primary rays missed and
+// nothing more.
+bool VoxiRenderer::suppressesWholeFrame() const { return debugViewActive(); }
+
 // Draws whichever pass has replaced the scene, over the colour target and viewport the backend
 // already bound. The debug raymarch wins when both are somehow asked for: it is a diagnostic, and
 // a diagnostic that silently did not run because another mode outranked it would be useless.

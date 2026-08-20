@@ -142,6 +142,10 @@ public:
 
     // True while the debug view replaces the scene, including the backend's line draws.
     bool suppressesScene() const override;
+    // ONLY the debug raymarch owns the whole frame. Ray-driven mode replaces how the first
+    // surface is found and nothing else -- the sky, the gizmos and the particles in that frame are
+    // as real as they are in a rastered one. See IRenderFeature::suppressesWholeFrame.
+    bool suppressesWholeFrame() const override;
     // Draws the debug raymarch over the already-bound colour target.
     void scenePass(rhi::IRenderContext& ctx) override;
 

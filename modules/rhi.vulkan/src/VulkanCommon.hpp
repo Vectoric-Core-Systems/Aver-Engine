@@ -1308,6 +1308,10 @@ private:
 
     bool skyEnabled_ = false;
     bool sceneSuppressed_ = false;   // set in beginFrame when a feature suppressed the scene; read in endFrame so the deferred sky draw doesn't run over it
+    // The narrower question: did that feature own the WHOLE frame, or only the scene geometry? See
+    // IRenderFeature::suppressesWholeFrame. Kept in lockstep with the D3D12 backend deliberately --
+    // a sky that appears on one backend and not the other is the worst shape of bug this repo has.
+    bool frameSuppressed_ = false;
     SkyAtmosphere sky_{};
     bool wireframe_ = false;
     bool lineDepth_ = true;

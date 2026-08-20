@@ -1708,7 +1708,8 @@ LineHandle VulkanDevice::createLineMesh(const LineVertex* verts, u32 count) {
 
 void VulkanDevice::drawLines(LineHandle mesh, const f32 world[16]) {
     if (!hasSwapchain_ || mesh == 0 || mesh > lineMeshes_.size()) return;
-    for (IRenderFeature* f : features_) if (f->suppressesScene()) return;
+    // suppressesWholeFrame, matching D3D12: gizmos belong in a ray-driven viewport.
+    for (IRenderFeature* f : features_) if (f->suppressesWholeFrame()) return;
     const GpuLineMesh& m = lineMeshes_[mesh - 1];
     VkCommandBuffer cmd = commandBuffers_[frameIndex_];
     const u32 zeroOffset = 0;
@@ -2126,10 +2127,12 @@ void VulkanDevice::beginFrame() {
     api_.CmdSetScissor(cmd, 0, 1, &sc);
 
     sceneSuppressed_ = false;
+    frameSuppressed_ = false;
     for (IRenderFeature* f : features_) {
         if (!f->suppressesScene()) continue;
         if (rhiContext_) f->scenePass(*rhiContext_);
         sceneSuppressed_ = true;
+        if (f->suppressesWholeFrame()) frameSuppressed_ = true;
         return;
     }
     // Unlike D3D12Device::beginFrame, nothing is bound here as a "default" pipeline: every draw
@@ -2144,7 +2147,8 @@ void VulkanDevice::endFrame() {
 
     // THE DEFERRED SKY DRAW -- same timing as D3D12Device::endFrame's own: after every opaque
     // drawMesh call this frame, before the rendering scope this scene lives in is closed.
-    if (skyEnabled_ && !sceneSuppressed_) {
+    // frameSuppressed_, not sceneSuppressed_ -- see the D3D12 backend's own comment on this line.
+    if (skyEnabled_ && !frameSuppressed_) {
         const f32 rx = vpW_ ? static_cast<f32>(vpX_) : 0.0f;
         const f32 ry = vpW_ ? static_cast<f32>(vpY_) : 0.0f;
         const f32 rw = vpW_ ? static_cast<f32>(vpW_) : static_cast<f32>(width_);
