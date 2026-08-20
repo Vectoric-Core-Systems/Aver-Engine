@@ -125,6 +125,17 @@ public class AverCharacter : AverPawn
             float[] v = new float[3];
             return Phys.aver_phys_character_velocity(_capsule, v) != 0 ? new Vec3(v[0], v[1], v[2]) : Vec3.Zero;
         }
+        /// <summary>Replaces the character's momentum outright -- a launch pad, a dash, a dead stop.
+        ///
+        /// A SETTER RATHER THAN AN AddForce: this is a CharacterVirtual, not a rigid body, and it is
+        /// integrated from a velocity its owner supplies each step. Silently does nothing when the
+        /// character is not simulated, exactly as the getter returns zero there, so neither a script
+        /// nor a graph has to test IsSimulated before using it.</summary>
+        set
+        {
+            if (_capsule == 0) return;
+            Phys.aver_phys_character_set_velocity(_capsule, value.X, value.Y, value.Z);
+        }
     }
 
     /// <summary>Jumps if grounded. Returns false when airborne.</summary>

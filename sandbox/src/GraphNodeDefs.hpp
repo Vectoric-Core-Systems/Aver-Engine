@@ -129,6 +129,34 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"VecDot", "Vec Dot", "Vector", {pin("ax", "float", false), pin("ay", "float", false), pin("az", "float", false), pin("bx", "float", false), pin("by", "float", false), pin("bz", "float", false), pin("result", "float", true)}});
     t.push_back({"VecLength", "Vec Length", "Vector", {pin("ax", "float", false), pin("ay", "float", false), pin("az", "float", false), pin("result", "float", true)}});
     t.push_back({"VecDistance", "Vec Distance", "Vector", {pin("ax", "float", false), pin("ay", "float", false), pin("az", "float", false), pin("bx", "float", false), pin("by", "float", false), pin("bz", "float", false), pin("result", "float", true)}});
+    // -- THE ENGINE'S OWN API, reachable from a graph. Measured before these were written: 72 of
+    //    the 77 public members of Aver.Framework had no node at all. AverCharacter had exactly one
+    //    (Jump) out of eighteen, Game had none out of twelve, AverPlayerController none out of four.
+    //    These are the three classes a gameplay graph reaches for first.
+    //
+    //    Teleport is NOT SetFieldVec3 on CLocal.position, and the difference matters: setting the
+    //    transform alone leaves the physics capsule where it was and the character snaps back on
+    //    the next step. Teleport moves both and clears velocity.
+    t.push_back({"GetVelocity", "Get Velocity", "Character", {pin("entity", "int", false), pin("x", "float", true), pin("y", "float", true), pin("z", "float", true), pin("success", "bool", true)}});
+    t.push_back({"IsGrounded", "Is Grounded", "Character", {pin("entity", "int", false), pin("grounded", "bool", true)}});
+    t.push_back({"SetVelocity", "Set Velocity", "Character", {pin("exec", "exec", false), pin("entity", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"Teleport", "Teleport", "Character", {pin("exec", "exec", false), pin("entity", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"GetPlayerPawn", "Get Player Pawn", "Game", {pin("index", "int", false), pin("entity", "int", true)}});
+    t.push_back({"GetPlayerController", "Get Player Controller", "Game", {pin("index", "int", false), pin("entity", "int", true)}});
+    t.push_back({"GetGameMode", "Get Game Mode", "Game", {pin("entity", "int", true)}});
+    t.push_back({"IsPlaying", "Is Playing", "Game", {pin("playing", "bool", true)}});
+    t.push_back({"Possess", "Possess", "Game", {pin("exec", "exec", false), pin("controller", "int", false), pin("pawn", "int", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"Unpossess", "Unpossess", "Game", {pin("exec", "exec", false), pin("controller", "int", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    // -- CONVERSION. Validate refuses a LINK whose two pins differ in type (Graph.cs's
+    //    srcPin.Type != tgtPin.Type check), which is what stops an exec pin being wired to a
+    //    float -- correct, and it also meant an int or a bool could not reach a float input at
+    //    all. Unreal converts silently and shows a little cast bubble on the wire; this
+    //    vocabulary has no such machinery, so the cast is a node you can see.
+    //    FloatToInt TRUNCATES toward zero, which is what C# (int)f does -- Floor exists for the
+    //    other rounding, and having both means neither has to be guessed.
+    t.push_back({"IntToFloat", "Int To Float", "Convert", {pin("a", "int", false), pin("result", "float", true)}});
+    t.push_back({"BoolToFloat", "Bool To Float", "Convert", {pin("a", "bool", false), pin("result", "float", true)}});
+    t.push_back({"FloatToInt", "Float To Int", "Convert", {pin("a", "float", false), pin("result", "int", true)}});
     t.push_back({"Print", "Print", "Debug", {
         pin("exec", "exec", false), pin("value", "float", false), pin("then", "exec", true)}});
     t.push_back({"Multiply", "Multiply", "Math", {pin("a", "float", false), pin("b", "float", false), pin("result", "float", true)}});

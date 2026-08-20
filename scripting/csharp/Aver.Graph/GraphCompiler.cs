@@ -436,6 +436,23 @@ public class GraphCompiler
                 EmitGetViewEntity(node);
                 break;
 
+            case "getvelocity":
+                EmitGetVelocity(node);
+                break;
+
+            case "inttofloat":
+            case "booltofloat":
+            case "floattoint":
+                EmitSimpleApiRead(node);
+                break;
+            case "isgrounded":
+            case "getplayerpawn":
+            case "getplayercontroller":
+            case "getgamemode":
+            case "isplaying":
+                EmitSimpleApiRead(node);
+                break;
+
             case "setfieldvec3":
                 // Present here too, exactly like "setfield" above -- Compile()'s topological pass
                 // visits every non-exec-only node EXACTLY ONCE regardless of graph shape, so running
@@ -939,6 +956,78 @@ public class GraphCompiler
     /// why it needs no attribute: `NODE muzzleLen Print` prints "muzzleLen = 35" and the author
     /// already chose that name. The id is pushed as a compile-time constant, so the string costs
     /// nothing at run time beyond the call.
+    /// The four writing API calls, which differ only in which method they call and what they push.
+    /// The bool every one of them returns is stored into `success` when the node declared it and
+    /// popped otherwise, because the stack has to balance either way -- the shape EmitJump uses.
+    private void EmitExecApiCall(Node node)
+    {
+        if (_il == null) return;
+        switch (node.Type.ToLowerInvariant())
+        {
+            case "setvelocity":
+                EmitPullInput(node, "entity"); EmitPullInput(node, "x");
+                EmitPullInput(node, "y"); EmitPullInput(node, "z");
+                _il.Emit(OpCodes.Call, SetVelocityMethod); break;
+            case "teleport":
+                EmitPullInput(node, "entity"); EmitPullInput(node, "x");
+                EmitPullInput(node, "y"); EmitPullInput(node, "z");
+                _il.Emit(OpCodes.Call, TeleportMethod); break;
+            case "possess":
+                EmitPullInput(node, "controller"); EmitPullInput(node, "pawn");
+                _il.Emit(OpCodes.Call, PossessMethod); break;
+            default:
+                EmitPullInput(node, "controller");
+                _il.Emit(OpCodes.Call, UnpossessMethod); break;
+        }
+        if (_pinLocals.TryGetValue((node.Id, "success"), out var local)) _il.Emit(OpCodes.Stloc, local);
+        else                                                            _il.Emit(OpCodes.Pop);
+    }
+
+    /// GetVelocity(entity) -> x, y, z + success. Three out-parameters wide, the same shape
+    /// EmitPullGetForward uses and for the same reason: one native call, several pins.
+    private void EmitPullGetVelocity(Node node, string pinName)
+    {
+        if (_il == null) return;
+        EmitPullInput(node, "entity");
+        var xL = _il.DeclareLocal(typeof(float));
+        var yL = _il.DeclareLocal(typeof(float));
+        var zL = _il.DeclareLocal(typeof(float));
+        _il.Emit(OpCodes.Ldloca, xL);
+        _il.Emit(OpCodes.Ldloca, yL);
+        _il.Emit(OpCodes.Ldloca, zL);
+        _il.Emit(OpCodes.Call, VelocityMethod);
+        if (pinName == "success") return;
+        _il.Emit(OpCodes.Pop);
+        _il.Emit(OpCodes.Ldloc, pinName == "x" ? xL : pinName == "y" ? yL : zL);
+    }
+
+    /// The PULL compiler's visit of GetVelocity: every declared output gets its own call, which
+    /// costs one extra native read per pin and keeps this emitter the same shape as the pull one.
+    private void EmitGetVelocity(Node node)
+    {
+        if (_il == null) return;
+        foreach (var p in node.Pins)
+        {
+            if (!p.IsOutput) continue;
+            if (!_pinLocals.TryGetValue((node.Id, p.Name), out var local)) continue;
+            EmitPullGetVelocity(node, p.Name);
+            _il.Emit(OpCodes.Stloc, local);
+        }
+    }
+
+    /// The single-output API reads: at most one input pin, one call, one output local.
+    private void EmitSimpleApiRead(Node node)
+    {
+        if (_il == null) return;
+        foreach (var p in node.Pins)
+        {
+            if (!p.IsOutput) continue;
+            if (!_pinLocals.TryGetValue((node.Id, p.Name), out var local)) continue;
+            EmitPullOutput(node, p.Name);
+            _il.Emit(OpCodes.Stloc, local);
+        }
+    }
+
     private void EmitExecPrint(Node node)
     {
         if (_il == null) return;
@@ -1798,6 +1887,7 @@ public class GraphCompiler
                     else if (IsExecCapableCharacterMoveType(node.Type)) EmitExecCharacterMove(node);
                     else if (IsExecCapableJumpType(node.Type)) EmitJump(node);
                     else if (IsExecCapablePrintType(node.Type)) EmitExecPrint(node);
+                    else if (IsExecCapableApiCallType(node.Type)) EmitExecApiCall(node);
                     else if (IsExecCapableFireEventType(node.Type)) EmitExecFireEvent(node);
                     EmitExecFanOut(node);
                     return;
@@ -2287,6 +2377,17 @@ public class GraphCompiler
     private static bool IsExecCapablePrintType(string type) =>
         type.Equals("print", StringComparison.OrdinalIgnoreCase);
 
+    /// The four framework calls that WRITE. Grouped into ONE predicate where Jump and CharacterMove
+    /// deliberately are not, and the difference is real: those two have separate emitters, while
+    /// these four share EmitExecApiCall entirely -- same shape, same bool return, same handling of
+    /// the success pin. A predicate that matches exactly what one emitter handles still describes
+    /// what it matches.
+    private static bool IsExecCapableApiCallType(string type)
+    {
+        string t = type.ToLowerInvariant();
+        return t == "setvelocity" || t == "teleport" || t == "possess" || t == "unpossess";
+    }
+
     /// FireEvent's own version of IsExecCapableSpawnType -- a SEVENTH, separate predicate/emitter
     /// pair, refused by the PULL compiler's topological pass ENTIRELY (see EmitNode's "fireevent"
     /// case, above), the same stricter-than-SetField treatment Spawn/CharacterMove get. Kept as its
@@ -2766,7 +2867,7 @@ public class GraphCompiler
             IsExecCapableSetNameType(source.Type) || IsExecCapableSetMeshType(source.Type) ||
             IsExecCapableSetMaterialType(source.Type) || IsExecCapableCharacterMoveType(source.Type) ||
             IsExecCapableFireEventType(source.Type) || IsExecCapableJumpType(source.Type) ||
-            IsExecCapablePrintType(source.Type))
+            IsExecCapablePrintType(source.Type) || IsExecCapableApiCallType(source.Type))
             throw new InvalidOperationException(
                 $"'{source.Id}.{pinName}' cannot be read as a data value: {source.Type} has a side effect " +
                 "and must be reached by wiring it directly into the exec chain (give it exec pins), not " +
@@ -2874,6 +2975,25 @@ public class GraphCompiler
             case "getviewentity":
             case "get_view_entity":
                 EmitPullGetViewEntity(source, pinName); return;
+            case "getvelocity":
+                EmitPullGetVelocity(source, pinName); return;
+            // int and bool are both I4 on the CIL stack, so widening either to a float is the same
+            // one instruction -- the node types differ so the GRAPH can tell them apart, not the IL.
+            case "inttofloat":
+            case "booltofloat":
+                EmitPullInput(source, "a"); _il.Emit(OpCodes.Conv_R4); return;
+            case "floattoint":
+                EmitPullInput(source, "a"); _il.Emit(OpCodes.Conv_I4); return;
+            case "isgrounded":
+                EmitPullInput(source, "entity"); _il.Emit(OpCodes.Call, IsGroundedMethod); return;
+            case "getplayerpawn":
+                EmitPullInput(source, "index"); _il.Emit(OpCodes.Call, PlayerPawnMethod); return;
+            case "getplayercontroller":
+                EmitPullInput(source, "index"); _il.Emit(OpCodes.Call, PlayerControllerMethod); return;
+            case "getgamemode":
+                _il.Emit(OpCodes.Call, GameModeMethod); return;
+            case "isplaying":
+                _il.Emit(OpCodes.Call, IsPlayingMethod); return;
             case "getvar":
                 EmitPullGetVar(source); return;
             case "param":
@@ -3312,6 +3432,37 @@ public class GraphCompiler
         typeof(GraphInterop).GetMethod("LookDirectionForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.LookDirectionForGraph was not found by reflection");
     // GetViewEntity: the camera node a character looks through -- what a viewmodel parents to.
+    // The engine-API surfaces, reflected the same way every other GraphInterop entry point is.
+    private static readonly MethodInfo VelocityMethod =
+        typeof(GraphInterop).GetMethod("VelocityForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.VelocityForGraph was not found by reflection");
+    private static readonly MethodInfo SetVelocityMethod =
+        typeof(GraphInterop).GetMethod("SetVelocityForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SetVelocityForGraph was not found by reflection");
+    private static readonly MethodInfo IsGroundedMethod =
+        typeof(GraphInterop).GetMethod("IsGroundedForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.IsGroundedForGraph was not found by reflection");
+    private static readonly MethodInfo TeleportMethod =
+        typeof(GraphInterop).GetMethod("TeleportForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.TeleportForGraph was not found by reflection");
+    private static readonly MethodInfo PlayerPawnMethod =
+        typeof(GraphInterop).GetMethod("PlayerPawnForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.PlayerPawnForGraph was not found by reflection");
+    private static readonly MethodInfo PlayerControllerMethod =
+        typeof(GraphInterop).GetMethod("PlayerControllerForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.PlayerControllerForGraph was not found by reflection");
+    private static readonly MethodInfo GameModeMethod =
+        typeof(GraphInterop).GetMethod("GameModeForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.GameModeForGraph was not found by reflection");
+    private static readonly MethodInfo IsPlayingMethod =
+        typeof(GraphInterop).GetMethod("IsPlayingForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.IsPlayingForGraph was not found by reflection");
+    private static readonly MethodInfo PossessMethod =
+        typeof(GraphInterop).GetMethod("PossessForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.PossessForGraph was not found by reflection");
+    private static readonly MethodInfo UnpossessMethod =
+        typeof(GraphInterop).GetMethod("UnpossessForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.UnpossessForGraph was not found by reflection");
     // Print: one line to the log, labelled with the node id the emitter pushes.
     private static readonly MethodInfo PrintMethod =
         typeof(GraphInterop).GetMethod("PrintForGraph", BindingFlags.NonPublic | BindingFlags.Static)

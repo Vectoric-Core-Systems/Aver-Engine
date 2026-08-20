@@ -368,6 +368,96 @@ internal static class GraphInterop
         Log.Info($"[Graph] {label} = {value}");
     }
 
+    /// <summary>The character this entity is, or null with one warning line. Every character node
+    /// below funnels through here so they all fail the same way and say the same thing -- the shape
+    /// JumpForGraph and GetViewEntity already established.</summary>
+    private static AverCharacter? CharacterFor(int entity, string node)
+    {
+        AverActor? actor = Actors.Get(new Entity(entity));
+        if (actor is AverCharacter c) return c;
+        Log.Warn(actor is null
+            ? $"[Graph] {node}: entity {entity} has no live actor bound to it"
+            : $"[Graph] {node}: entity {entity} is a {actor.GetType().Name}, not an AverCharacter");
+        return null;
+    }
+
+    /// <summary>AverCharacter.Velocity, in cm/s. False (and zeroes) when there is no character or it
+    /// is not simulated -- an unsimulated character HAS no velocity, which is different from having
+    /// one of zero, and the success pin is how a graph can tell those apart.</summary>
+    internal static bool VelocityForGraph(int entity, out float x, out float y, out float z)
+    {
+        x = y = z = 0.0f;
+        AverCharacter? c = CharacterFor(entity, "GetVelocity");
+        if (c is null || !c.IsSimulated) return false;
+        Vec3 v = c.Velocity;
+        x = v.X; y = v.Y; z = v.Z;
+        return true;
+    }
+
+    /// <summary>Sets the character velocity directly. This is a TELEPORT OF MOMENTUM, not a force:
+    /// it replaces whatever the physics character was doing, which is what a graph asking for it
+    /// almost always means (a launch pad, a dash, a stop).</summary>
+    internal static bool SetVelocityForGraph(int entity, float x, float y, float z)
+    {
+        AverCharacter? c = CharacterFor(entity, "SetVelocity");
+        if (c is null || !c.IsSimulated) return false;
+        c.Velocity = new Vec3(x, y, z);
+        return true;
+    }
+
+    /// <summary>AverCharacter.IsGrounded. False rather than an error when the entity is not a
+    /// character at all: a graph asking "am I on the ground" about a crate has its answer.</summary>
+    internal static bool IsGroundedForGraph(int entity)
+    {
+        AverActor? actor = Actors.Get(new Entity(entity));
+        return actor is AverCharacter c && c.IsGrounded;
+    }
+
+    /// <summary>AverCharacter.Teleport: moves the character AND its capsule to a feet position and
+    /// clears velocity. Setting the transform alone leaves the physics capsule behind, and the
+    /// character snaps back on the next step -- which is exactly the bug a graph would write if it
+    /// reached for SetFieldVec3 on CLocal.position instead of this.</summary>
+    internal static bool TeleportForGraph(int entity, float x, float y, float z)
+    {
+        AverCharacter? c = CharacterFor(entity, "Teleport");
+        if (c is null) return false;
+        c.Teleport(new Vec3(x, y, z));
+        return true;
+    }
+
+    /// <summary>Game.GetPlayerPawn / GetPlayerController, as raw handles. 0 when there is none, which
+    /// is what Entity.IsValid tests, so a graph can Branch on it without a second pin.</summary>
+    internal static int PlayerPawnForGraph(int index) => Game.GetPlayerPawn(index).Handle;
+    internal static int PlayerControllerForGraph(int index) => Game.GetPlayerController(index).Handle;
+    internal static int GameModeForGraph() => Game.Mode.Handle;
+
+    /// <summary>Game.IsPlaying -- true only in a running session, false in the editor. The one thing
+    /// a graph needs to know before it does anything irreversible.</summary>
+    internal static bool IsPlayingForGraph() => Game.IsPlaying;
+
+    /// <summary>AverPlayerController.Possess / Unpossess. Possession is what makes the game camera
+    /// follow a pawn at all (see the FirstPerson template README), so a graph that spawns a
+    /// character and wants it controlled needs this and nothing else.</summary>
+    internal static bool PossessForGraph(int controller, int pawn)
+    {
+        if (Actors.Get(new Entity(controller)) is not AverPlayerController pc)
+        {
+            Log.Warn($"[Graph] Possess: entity {controller} is not an AverPlayerController");
+            return false;
+        }
+        return pc.Possess(new Entity(pawn));
+    }
+
+    internal static bool UnpossessForGraph(int controller)
+    {
+        if (Actors.Get(new Entity(controller)) is not AverPlayerController pc)
+        {
+            Log.Warn($"[Graph] Unpossess: entity {controller} is not an AverPlayerController");
+            return false;
+        }
+        return pc.Unpossess();
+    }
+
     internal static bool JumpForGraph(int entity)
     {
         Entity e = new Entity(entity);
