@@ -1427,6 +1427,32 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
                 break;
 
+            // Tags and visibility. A tag is an int bitmask -- see GraphInterop's own comment for why
+            // that spared this family the compile-time-attribute machinery every string-shaped node needs.
+            case "setvisible":
+            case "addtag":
+            case "removetag":
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin {
+                    Name = node.Type.Equals("setvisible", StringComparison.OrdinalIgnoreCase) ? "visible" : "mask",
+                    Type = node.Type.Equals("setvisible", StringComparison.OrdinalIgnoreCase) ? PinType.Bool : PinType.Int,
+                    IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "hastag":
+                node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "mask", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "has", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "gettags":
+                node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "mask", Type = PinType.Int, IsOutput = true, NodeId = node.Id });
+                break;
+
             // SwitchInt: an N-way Branch. See GraphNodeDefs.hpp for why the case count is fixed.
             case "switchint":
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });

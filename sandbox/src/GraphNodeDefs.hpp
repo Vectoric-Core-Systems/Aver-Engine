@@ -220,6 +220,20 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"FuncReturn", "Return", "Function", {}});
     t.push_back({"CallFunc", "Call Function", "Function", {}});
 
+    // -- TAGS AND VISIBILITY. Entity's own tag bitmask, which the C# side has had all along and the
+    //    graph vocabulary could not reach. A tag here is an int bit pattern, not a string, so these
+    //    needed none of the compile-time-attribute machinery class=/name=/var= exist for -- and a
+    //    graph can COMPUTE a mask, which a string attribute could never do.
+    t.push_back({"SetVisible", "Set Visible", "Scene", {pin("exec", "exec", false), pin("entity", "int", false),
+        pin("visible", "bool", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"AddTag", "Add Tag", "Scene", {pin("exec", "exec", false), pin("entity", "int", false),
+        pin("mask", "int", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"RemoveTag", "Remove Tag", "Scene", {pin("exec", "exec", false), pin("entity", "int", false),
+        pin("mask", "int", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"HasTag", "Has Tag", "Scene", {pin("entity", "int", false), pin("mask", "int", false),
+        pin("has", "bool", true)}});
+    t.push_back({"GetTags", "Get Tags", "Scene", {pin("entity", "int", false), pin("mask", "int", true)}});
+
     // -- SWITCH. Blueprint's Switch on Int: route the exec chain to ONE of several outputs by an
     //    integer, instead of nesting Branches. Until this existed a three-way choice cost two Branch
     //    nodes and a comparison each, and the graph said "is it 0, else is it 1, else" rather than

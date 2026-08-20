@@ -257,6 +257,11 @@ different cost profiles depending on which compiler reaches it.
 
 | Node | Pins | Attribute | Path | What it does |
 |---|---|---|---|---|
+| `SetVisible` | `exec` (in), `entity` (in, int), `visible` (in, bool), `then` (out), `success` (out, bool) | — | P | Shows or hides an entity. |
+| `AddTag` | `exec` (in), `entity` (in, int), `mask` (in, int), `then` (out), `success` (out, bool) | — | P | ORs `mask` into the entity's tag bits. |
+| `RemoveTag` | `exec` (in), `entity` (in, int), `mask` (in, int), `then` (out), `success` (out, bool) | — | P | Clears every bit of `mask`. |
+| `HasTag` | `entity` (in, int), `mask` (in, int), `has` (out, bool) | — | D | True when **every** bit of `mask` is set — all-of, not any-of, matching `Entity.HasTag`. A zero mask is false. |
+| `GetTags` | `entity` (in, int), `mask` (out, int) | — | D | The whole tag bitmask, so a graph can stash it in a `VAR` or compare two entities directly. 0 for a dead handle. |
 | `GetField` | `entity` (in, int), `value` (out, float) | `field=` | D | Reads a scalar (F32-kind) scene field by qualified name. |
 | `SetField` | `entity` (in, int), `value` (in, float), `success` (out, bool) | `field=` | W | Writes a scalar scene field. |
 | `GetFieldVec3` | `entity` (in, int), `x`/`y`/`z` (out, float) | `field=` | D | Reads a Vec3-kind scene field as three floats. |
@@ -314,6 +319,26 @@ node's `field=` at a Vec3/Quat/Bool/I32 field fails with an explicit "not an F32
 needs `GetFieldVec3`/`SetFieldVec3` instead — the pin-type model has no `Vec3` pin, so the split
 into a second node pair is how a three-float value crosses the format at all, rather than a new
 `PinType` member (`OcGraphParser.cs:653-659`).
+
+**A TAG IS A BITMASK, NOT A STRING**, and that is why this family needed none of the compile-time
+attribute machinery `class=`/`name=`/`field=`/`var=` exist for. `PinType` has no string, so every
+other string-shaped API had to put its argument on the `NODE` line where a graph can never compute
+it; `Entity.Tags` is a `uint` over `CTags.bits`, so an ordinary `int` pin carries it. A graph can
+therefore **build** a mask at runtime `—` OR two together, read one out of a `VAR`, or test several
+bits at once `—` which a string attribute could not have done at any price.
+
+The pin is `int` rather than an unsigned type because `PinType` has none, and inventing one to
+carry a bit pattern would be a new pin type for a reinterpretation. A mask with the top bit set
+arrives as a negative int and works; `unchecked((uint))` is the whole of the conversion, in the
+same direction `Entity.Tags` already does it.
+
+**`success` IS READABLE ON THESE**, and on `SetVelocity`/`Teleport`/`Possess`/`Unpossess`, as of the
+same change: `EmitExecApiCall` stores it into an exec local rather than into `_pinLocals`, which
+the exec compiler never reads. Before that it was a pin no graph could ever get a value out of.
+**Ten other emitters still have that bug** (`EmitSetField`, `EmitSetParent`, `EmitSetName`,
+`EmitSetMesh`, `EmitSetMaterial`, `EmitSetFieldVec3`, `EmitExecPhysicsWrite`,
+`EmitExecTransformWrite`, `EmitGetForward`, `EmitGetViewEntity`) and were deliberately left alone:
+each is a behaviour change to nodes that change did not otherwise touch.
 
 ## Input
 

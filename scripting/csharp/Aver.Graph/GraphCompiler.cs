@@ -504,6 +504,8 @@ public class GraphCompiler
                 EmitSimpleApiRead(node);
                 break;
             case "isgrounded":
+            case "hastag":
+            case "gettags":
             case "getplayerpawn":
             case "getplayercontroller":
             case "getgamemode":
@@ -1161,12 +1163,42 @@ public class GraphCompiler
             case "possess":
                 EmitPullInput(node, "controller"); EmitPullInput(node, "pawn");
                 _il.Emit(OpCodes.Call, PossessMethod); break;
+            case "setvisible":
+                EmitPullInput(node, "entity"); EmitPullInput(node, "visible");
+                _il.Emit(OpCodes.Call, SetVisibleMethod); break;
+            case "addtag":
+                EmitPullInput(node, "entity"); EmitPullInput(node, "mask");
+                _il.Emit(OpCodes.Call, AddTagMethod); break;
+            case "removetag":
+                EmitPullInput(node, "entity"); EmitPullInput(node, "mask");
+                _il.Emit(OpCodes.Call, RemoveTagMethod); break;
             default:
                 EmitPullInput(node, "controller");
                 _il.Emit(OpCodes.Call, UnpossessMethod); break;
         }
-        if (_pinLocals.TryGetValue((node.Id, "success"), out var local)) _il.Emit(OpCodes.Stloc, local);
-        else                                                            _il.Emit(OpCodes.Pop);
+        // INTO AN EXEC LOCAL, NOT _pinLocals, and that is a fix rather than a preference.
+        //
+        // _pinLocals belongs to the PULL compiler and is empty while CompileEntryPoint is running, so
+        // this lookup never hit, every one of these nodes fell to Pop, and `success` was a pin no
+        // graph could read. Wiring the node into the exec chain did not help either: EmitPullOutput
+        // checks _execLocals FIRST and only then falls through to its side-effect refusal, so an
+        // author who had done exactly the right thing was still told the node "must be reached by
+        // wiring it directly into the exec chain" -- which they had.
+        //
+        // This is the shape EmitExecRaycast already uses for its own outputs; the only reason it
+        // works there and not here was which dictionary got asked. `success` is now readable for
+        // SetVelocity, Teleport, Possess, Unpossess, SetVisible, AddTag and RemoveTag, so a graph can
+        // branch on whether the write landed -- which for Teleport (false on a character with no
+        // capsule yet) is the difference between noticing a failure and silently continuing.
+        //
+        // THE SAME BUG IS IN TEN OTHER EMITTERS (EmitSetField, EmitSetParent, EmitSetName, EmitSetMesh,
+        // EmitSetMaterial, EmitSetFieldVec3, EmitExecPhysicsWrite, EmitExecTransformWrite,
+        // EmitGetForward, EmitGetViewEntity) and is deliberately NOT fixed here. Each is a behaviour
+        // change to nodes this commit does not otherwise touch, and they deserve their own change with
+        // their own tests rather than riding along unexamined.
+        var successPin = node.Pins.FirstOrDefault(p => p.IsOutput && p.Name == "success" && p.Type == PinType.Bool);
+        if (successPin != null) _il.Emit(OpCodes.Stloc, GetOrCreateExecLocal(node.Id, "success", typeof(bool)));
+        else                    _il.Emit(OpCodes.Pop);
     }
 
     /// GetVelocity(entity) -> x, y, z + success. Three out-parameters wide, the same shape
@@ -2969,7 +3001,8 @@ public class GraphCompiler
     private static bool IsExecCapableApiCallType(string type)
     {
         string t = type.ToLowerInvariant();
-        return t == "setvelocity" || t == "teleport" || t == "possess" || t == "unpossess";
+        return t == "setvelocity" || t == "teleport" || t == "possess" || t == "unpossess" ||
+               t == "setvisible" || t == "addtag" || t == "removetag";
     }
 
     /// FireEvent's own version of IsExecCapableSpawnType -- a SEVENTH, separate predicate/emitter
@@ -3638,6 +3671,11 @@ public class GraphCompiler
                 EmitPullInput(source, "a"); _il.Emit(OpCodes.Conv_I4); return;
             case "isgrounded":
                 EmitPullInput(source, "entity"); _il.Emit(OpCodes.Call, IsGroundedMethod); return;
+            case "hastag":
+                EmitPullInput(source, "entity"); EmitPullInput(source, "mask");
+                _il.Emit(OpCodes.Call, HasTagMethod); return;
+            case "gettags":
+                EmitPullInput(source, "entity"); _il.Emit(OpCodes.Call, TagsMethod); return;
             case "getplayerpawn":
                 EmitPullInput(source, "index"); _il.Emit(OpCodes.Call, PlayerPawnMethod); return;
             case "getplayercontroller":
@@ -4171,6 +4209,25 @@ public class GraphCompiler
     private static readonly MethodInfo IsGroundedMethod =
         typeof(GraphInterop).GetMethod("IsGroundedForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.IsGroundedForGraph was not found by reflection");
+
+    // The tag/visibility family. Bound by REFLECTION like every other interop method here, which is
+    // why the throw names the member: a rename on the Aver.Framework side would otherwise surface as
+    // a null MethodInfo inside an emitter, thousands of lines from the cause.
+    private static readonly MethodInfo SetVisibleMethod =
+        typeof(GraphInterop).GetMethod("SetVisibleForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SetVisibleForGraph was not found by reflection");
+    private static readonly MethodInfo AddTagMethod =
+        typeof(GraphInterop).GetMethod("AddTagForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.AddTagForGraph was not found by reflection");
+    private static readonly MethodInfo RemoveTagMethod =
+        typeof(GraphInterop).GetMethod("RemoveTagForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.RemoveTagForGraph was not found by reflection");
+    private static readonly MethodInfo HasTagMethod =
+        typeof(GraphInterop).GetMethod("HasTagForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.HasTagForGraph was not found by reflection");
+    private static readonly MethodInfo TagsMethod =
+        typeof(GraphInterop).GetMethod("TagsForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.TagsForGraph was not found by reflection");
     private static readonly MethodInfo TeleportMethod =
         typeof(GraphInterop).GetMethod("TeleportForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.TeleportForGraph was not found by reflection");

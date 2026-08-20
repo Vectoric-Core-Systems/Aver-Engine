@@ -221,6 +221,11 @@ static int Main()
         // every arm compiles exactly as happily as one that runs the right one.
         failures += SwitchIntTests.RunAll();
 
+        // Tags and visibility over Entity's own tag bitmask. These check pin shape, that an emitter
+        // exists, and that the reflection handle resolved -- the native scene they ultimately reach is
+        // not booted in this process, exactly as NewNodeTests explains for InputKey and Raycast.
+        failures += TagNodeTests.RunAll();
+
         if (failures == 0)
             Console.WriteLine("\nAll tests passed.");
         else

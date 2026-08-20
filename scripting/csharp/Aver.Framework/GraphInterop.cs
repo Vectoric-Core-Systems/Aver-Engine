@@ -394,6 +394,60 @@ internal static class GraphInterop
     /// <summary>AverCharacter.Velocity, in cm/s. False (and zeroes) when there is no character or it
     /// is not simulated -- an unsimulated character HAS no velocity, which is different from having
     /// one of zero, and the success pin is how a graph can tell those apart.</summary>
+    // ---- tags and visibility ---------------------------------------------------------------------
+    //
+    // A TAG IS A BITMASK, NOT A STRING, which is why this family needed no new format machinery at
+    // all. Every other string-shaped API (class=, name=, field=, var=) had to invent a compile-time
+    // NODE attribute because PinType has no string; Entity.Tags is a uint over CTags.bits, so an
+    // ordinary int pin carries it and a graph can compute one -- combine two masks with a bitwise Or
+    // node, test several at once, or read a mask out of a VAR.
+    //
+    // int RATHER THAN uint on the pin, because PinType has no unsigned type and inventing one to
+    // carry a bit pattern would be a new pin type for a reinterpretation. `unchecked((uint))` is the
+    // whole of the conversion, and it is exactly what Entity.Tags already does in the other
+    // direction (EntityScene.cs). A mask with the top bit set arrives as a negative int and works.
+
+    /// <summary>Shows or hides an entity. False when the handle names nothing alive.</summary>
+    internal static bool SetVisibleForGraph(int entity, bool visible)
+    {
+        Entity e = new Entity(entity);
+        if (!e.IsAlive) return false;
+        return e.SetVisible(visible);
+    }
+
+    /// <summary>ORs `mask` into the entity's tags.</summary>
+    internal static bool AddTagForGraph(int entity, int mask)
+    {
+        Entity e = new Entity(entity);
+        if (!e.IsAlive) return false;
+        return e.AddTag(unchecked((uint)mask));
+    }
+
+    /// <summary>Clears every bit of `mask` from the entity's tags.</summary>
+    internal static bool RemoveTagForGraph(int entity, int mask)
+    {
+        Entity e = new Entity(entity);
+        if (!e.IsAlive) return false;
+        return e.RemoveTag(unchecked((uint)mask));
+    }
+
+    /// <summary>True when EVERY bit of `mask` is set -- Entity.HasTag's own all-of rule, not any-of,
+    /// so a graph testing two tags at once gets the same answer C# does. A zero mask is false.</summary>
+    internal static bool HasTagForGraph(int entity, int mask)
+    {
+        Entity e = new Entity(entity);
+        if (!e.IsAlive) return false;
+        return e.HasTag(unchecked((uint)mask));
+    }
+
+    /// <summary>The whole tag mask, so a graph can test bits the node vocabulary has no operator
+    /// for, stash it in a VAR, or compare two entities' tags directly. 0 for a dead handle.</summary>
+    internal static int TagsForGraph(int entity)
+    {
+        Entity e = new Entity(entity);
+        return e.IsAlive ? unchecked((int)e.Tags) : 0;
+    }
+
     internal static bool VelocityForGraph(int entity, out float x, out float y, out float z)
     {
         x = y = z = 0.0f;
