@@ -775,6 +775,7 @@ struct PerFrameCB {
     f32 atmoSunE0[4];
     f32 fogInscatterRef[4];
     f32 furnace[4];
+    f32 skySh[9][4];     // nine L2 SH coefficients of the sky, rgb; w unused
 };
 // Constants for every post pass. Byte-for-byte mirror of D3D12Device.cpp's PostCB, which itself
 // mirrors `cbuffer AverPost : register(b0)` in rhi::postShaderSource().

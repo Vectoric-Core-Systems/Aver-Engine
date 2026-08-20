@@ -516,6 +516,7 @@ struct PerFrameCB {
     f32 atmoSunE0[4];    // rgb sun irradiance above the air, w ground albedo
     f32 fogInscatterRef[4]; // rgb averFogInscatterRef's answer, baked once per frame on the CPU
     f32 furnace[4];      // x on, y radiance -- the white-furnace energy oracle
+    f32 skySh[9][4];     // nine L2 SH coefficients of the sky, rgb; w unused
 };
 
 // Constants for every post pass. Mirrors `cbuffer AverPost : register(b0)` in
@@ -3331,6 +3332,12 @@ void D3D12Device::packAtmosphere(const SkyAtmosphere& s) {
 
     if (!on) {
         for (int i = 0; i < 4; ++i) frameCB_.atmoSunE0[i] = 0.0f;
+        // Zeroed for the same reason the furnace row is written above the early-out: a stale
+        // row is a worse failure than an empty one. Nothing reads these with the atmosphere
+        // off -- averSkyIrradiance gates on averAtmoOn() -- but leaving last frame's sky here
+        // would make any future reader that forgets the gate fail intermittently.
+        for (int k = 0; k < 9; ++k)
+            for (int i = 0; i < 4; ++i) frameCB_.skySh[k][i] = 0.0f;
         return;
     }
 
@@ -3373,6 +3380,16 @@ void D3D12Device::packAtmosphere(const SkyAtmosphere& s) {
     atmoFogInscatterRef(fit, altKm, s.sunDirection, e0, sunRadius, fogRef);
     for (int i = 0; i < 3; ++i) frameCB_.fogInscatterRef[i] = fogRef[i];
     frameCB_.fogInscatterRef[3] = 0.0f;
+
+    // The sky as nine coefficients, for the AMBIENT term. Same argument as the fog reference
+    // directly above -- no view direction and no world position enters it, so every pixel that
+    // wants the sky's irradiance wants the same nine numbers.
+    AtmosphereSkySH sh{};
+    atmoSkyRadianceSH(fit, altKm, s.sunDirection, e0, sunRadius, sh);
+    for (int k = 0; k < 9; ++k) {
+        for (int i = 0; i < 3; ++i) frameCB_.skySh[k][i] = sh.c[k][i];
+        frameCB_.skySh[k][3] = 0.0f;
+    }
 }
 
 // Builds the post chain's root signature, PSOs and constant ring. Size-independent, so built once.

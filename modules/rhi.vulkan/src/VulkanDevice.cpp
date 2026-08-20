@@ -1887,6 +1887,14 @@ void VulkanDevice::packAtmosphere(const SkyAtmosphere& s) {
     atmoFogInscatterRef(fit, altKm, s.sunDirection, e0, sunRadius, fogRef);
     for (int i = 0; i < 3; ++i) frameCB_.fogInscatterRef[i] = fogRef[i];
     frameCB_.fogInscatterRef[3] = 0.0f;
+
+    // Mirrors D3D12Device::packAtmosphere field for field; see its comment.
+    AtmosphereSkySH sh{};
+    atmoSkyRadianceSH(fit, altKm, s.sunDirection, e0, sunRadius, sh);
+    for (int k = 0; k < 9; ++k) {
+        for (int i = 0; i < 3; ++i) frameCB_.skySh[k][i] = sh.c[k][i];
+        frameCB_.skySh[k][3] = 0.0f;
+    }
 }
 
 // ================================================================================================

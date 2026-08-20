@@ -91,6 +91,18 @@ struct AtmosphereDome {
 void atmoFitDome(const AtmosphereProfile& a, f32 altitudeKm, f32 sunCosZenith,
                  const f32 sunIrradiance[3], f32 sunAngularRadiusRad, AtmosphereDome& out);
 
+// Nine L2 spherical-harmonic coefficients of the sky, in the same LINEAR radiance units
+// atmoSkyRadiance returns. Order is the usual one: 00, 1-1, 10, 11, 2-2, 2-1, 20, 21, 22.
+//
+// WHY THE DOME ABOVE CANNOT DO THIS JOB. AtmosphereDome::horizon is documented as "averaged
+// over azimuth", and that is not an implementation detail -- a two-colour dome blended by
+// dir.z is azimuthally symmetric BY CONSTRUCTION. No lookup into it can tell a wall facing
+// the rising sun from one facing away, which is exactly the difference the ambient term was
+// throwing away. Nine coefficients can, at about twenty ALU and no texture.
+struct AtmosphereSkySH { f32 c[9][3]; };
+void atmoSkyRadianceSH(const AtmosphereProfile& a, f32 altitudeKm, const f32 sunDir[3],
+                       const f32 sunIrradiance[3], f32 sunAngularRadiusRad, AtmosphereSkySH& out);
+
 // The fog/dome-veil reference colour: ambient (straight up) blended with a horizontal march toward
 // the sun's own azimuth. Mirrors RHIShaders.cpp's averFogInscatterRef() function for function -- see
 // its own comment for why two terms and why that blend. `sunDir` need not be normalised.

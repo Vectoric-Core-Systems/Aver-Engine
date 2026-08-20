@@ -141,6 +141,11 @@ cbuffer PerFrame : register(b0) {
     // sun stays lit, which is the only configuration in which the direct term is under test at all.
     // A measuring instrument, not a look -- see averFurnaceOn.
     float4   gFurnace;
+    // Nine L2 spherical-harmonic coefficients of the sky, rgb, w unused. Baked once per frame on
+    // the CPU by atmoSkyRadianceSH -- the same division of labour gFogInscatterRef uses, and for
+    // the same reason: nothing about them varies per pixel. Only written while the PHYSICAL
+    // atmosphere is on; averSkyIrradiance reads them only under averAtmoOn() for that reason.
+    float4   gSkySh[9];
 };
 // The per-draw block: transform plus shading constants. 32 dwords, matching kObjectConstantDwords.
 cbuffer PerObject : register(b1) {
@@ -716,8 +721,38 @@ float3 averTransformNormal(float3 n, float4x4 w) {
     return mul(n, cof);
 }
 
+// The sky as irradiance, from the nine coefficients, DIVIDED BY PI so the result is a mean
+// radiance rather than an irradiance -- which is the unit every caller of averSkyIrradiance
+// already expects (see the E = sunIrradiance*ndl + PI*skyRadiance*ambient note above: the sky
+// term is a radiance and the PI cancels). The three constants are the cosine-convolution
+// factors PI, 2PI/3 and PI/4 with the basis constants folded in and the PI divided back out.
+//
+// SELF-CHECK, and it is worth keeping in mind when this looks wrong: a UNIFORM sky of radiance L
+// projects to c[0] = L * 0.282095 * 4PI and nothing else, and this returns exactly L. That is
+// what keeps the white furnace reading 1.000 through this path.
+float3 averShIrradiance(float3 n) {
+    float3 e = gSkySh[0].rgb * 0.282095;
+    e += (gSkySh[1].rgb * n.y + gSkySh[2].rgb * n.z + gSkySh[3].rgb * n.x) * 0.325735;
+    e += (gSkySh[4].rgb * (n.x * n.y) + gSkySh[5].rgb * (n.y * n.z) +
+          gSkySh[7].rgb * (n.x * n.z)) * 0.273137;
+    e += gSkySh[6].rgb * ((3.0 * n.z * n.z - 1.0) * 0.078848);
+    e += gSkySh[8].rgb * ((n.x * n.x - n.y * n.y) * 0.136569);
+    // L2 can undershoot on a sky with a strong, small bright region; ambient light is never
+    // negative, and a negative here would subtract light from whatever it is added to.
+    return max(e, 0.0);
+}
+
 float3 averSkyIrradiance(float3 N) {
     if (averFurnaceOn()) return averFurnaceL();
+    // THE AZIMUTH IS THE POINT. Everything below this line reads only N.z, because the authored
+    // dome it samples has no azimuthal term to read -- so a wall facing the rising sun and one
+    // facing away were handed identical ambient light. Under the physical atmosphere the sky
+    // genuinely does vary with azimuth, and nine coefficients carry that for about twenty ALU.
+    //
+    // The authored dome keeps the old path deliberately: it IS azimuthally symmetric, so there is
+    // nothing for the coefficients to add, and projecting it would move every probe in every
+    // non-physical-sky project to say the same thing more expensively.
+    if (averAtmoOn()) return averShIrradiance(N);
     float meanZ = N.z * 0.5;
     float3 dome = skyColorFull(float3(0.0, 0.0, meanZ));
     float belowFraction = saturate(0.5 - N.z * 0.5) * gGroundColor.a;

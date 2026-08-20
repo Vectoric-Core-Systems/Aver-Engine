@@ -392,6 +392,114 @@ int main() {
                       "5 m eye height vs the altitude floor, channel " + std::to_string(i));
     }
 
+    AVER_INFO("sky irradiance as spherical harmonics");
+    {
+        // MIRRORS averShIrradiance IN RHIShaders.cpp, constants and all. That duplication is the
+        // point rather than a smell: these five numbers are the cosine convolution with the SH
+        // basis folded in, they are the one place the CPU projection and the GPU reconstruction
+        // have to agree, and nothing else in the build would notice if one of them were retyped.
+        auto irradiance = [](const rhi::AtmosphereSkySH& sh, f32 x, f32 y, f32 z, f32 out[3]) {
+            for (int c = 0; c < 3; ++c) {
+                f32 e = sh.c[0][c] * 0.282095f;
+                e += (sh.c[1][c] * y + sh.c[2][c] * z + sh.c[3][c] * x) * 0.325735f;
+                e += (sh.c[4][c] * (x * y) + sh.c[5][c] * (y * z) + sh.c[7][c] * (x * z)) * 0.273137f;
+                e += sh.c[6][c] * ((3.0f * z * z - 1.0f) * 0.078848f);
+                e += sh.c[8][c] * ((x * x - y * y) * 0.136569f);
+                out[c] = e > 0.0f ? e : 0.0f;
+            }
+        };
+
+        f32 sun[3] = {3.0f, 2.88f, 2.70f};
+
+        // A LOW SUN ALONG +X. This is the case the whole change exists for: before it, the ambient
+        // term read only N.z, so these two walls were handed identical light.
+        f32 lowSun[3] = {0.995f, 0.0f, 0.1f};
+        rhi::AtmosphereSkySH low{};
+        rhi::atmoSkyRadianceSH(air, 0.0f, lowSun, sun, sunRadius, low);
+
+        f32 toward[3], away[3], up[3];
+        irradiance(low,  1.0f, 0.0f, 0.0f, toward);
+        irradiance(low, -1.0f, 0.0f, 0.0f, away);
+        irradiance(low,  0.0f, 0.0f, 1.0f, up);
+
+        for (int c = 0; c < 3; ++c)
+            check(toward[c] >= 0.0f && away[c] >= 0.0f && up[c] >= 0.0f,
+                  "reconstructed irradiance is never negative, channel " + std::to_string(c));
+        AVER_INFO("  low sun along +X: facing it {} vs facing away {} ({}x)",
+                  lum(toward), lum(away), lum(toward) / (lum(away) + 1e-9f));
+        check(lum(toward) > lum(away) * 1.1f,
+              "a wall facing a low sun receives more sky light than one facing away");
+        check(lum(up) > 0.0f, "and the sky still lights an upward-facing surface");
+
+        // THE OTHER SIDE OF THE SAME TEST, and it is the one that would catch a projection that
+        // merely invented a gradient: with the sun at the ZENITH the sky IS azimuthally symmetric,
+        // so the same two walls must come back together again.
+        f32 highSun[3] = {0.0f, 0.0f, 1.0f};
+        rhi::AtmosphereSkySH high{};
+        rhi::atmoSkyRadianceSH(air, 0.0f, highSun, sun, sunRadius, high);
+        f32 hEast[3], hWest[3];
+        irradiance(high,  1.0f, 0.0f, 0.0f, hEast);
+        irradiance(high, -1.0f, 0.0f, 0.0f, hWest);
+        checkNear(lum(hEast), lum(hWest), 0.02,
+                  "with the sun overhead the azimuth stops mattering again");
+
+        // AGAINST A BRUTE-FORCE HEMISPHERE INTEGRAL, which is the only check here that can tell a
+        // plausible reconstruction from a correct one. The nine coefficients are supposed to encode
+        // (1/PI) * integral over the hemisphere of L(w) * max(0, w.n) dw -- so compute exactly that,
+        // by summation over the sphere, and compare. Nothing else in this file would notice if the
+        // cosine convolution factors were wrong by a constant, and a constant is precisely the kind
+        // of error that reads as "the scene got darker" rather than as a fault.
+        auto reference = [&](const f32 sunD[3], f32 nx, f32 ny, f32 nz, f32 out[3]) {
+            const int   kRef   = 4096;
+            const f32   golden = 2.399963229728653f;
+            const f32   w      = 4.0f * 3.14159265358979f / static_cast<f32>(kRef);
+            const f32   len    = std::sqrt(sunD[0]*sunD[0] + sunD[1]*sunD[1] + sunD[2]*sunD[2]);
+            const f32   sx = sunD[0]/len, sy = sunD[1]/len, sz = sunD[2]/len;
+            out[0] = out[1] = out[2] = 0.0f;
+            for (int i = 0; i < kRef; ++i) {
+                const f32 z   = 1.0f - (2.0f * static_cast<f32>(i) + 1.0f) / static_cast<f32>(kRef);
+                const f32 rad = std::sqrt(std::fmax(1.0f - z * z, 0.0f));
+                const f32 phi = golden * static_cast<f32>(i);
+                const f32 x = rad * std::cos(phi), y = rad * std::sin(phi);
+                const f32 cosine = x * nx + y * ny + z * nz;
+                if (cosine <= 0.0f) continue;
+                f32 rgb[3];
+                rhi::atmoSkyRadiance(air, 0.0f, z, sz,
+                                     std::fmax(-1.0f, std::fmin(1.0f, x*sx + y*sy + z*sz)),
+                                     sun, sunRadius, rgb);
+                for (int c = 0; c < 3; ++c) out[c] += rgb[c] * cosine * w;
+            }
+            for (int c = 0; c < 3; ++c) out[c] /= 3.14159265358979f;
+        };
+
+        const f32 normals[3][3] = {{1.0f, 0.0f, 0.0f}, {-1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}};
+        const char* names[3] = {"toward the sun", "away from the sun", "straight up"};
+        for (int t = 0; t < 3; ++t) {
+            f32 got[3], want[3];
+            irradiance(low, normals[t][0], normals[t][1], normals[t][2], got);
+            reference(lowSun, normals[t][0], normals[t][1], normals[t][2], want);
+            for (int c = 0; c < 3; ++c)
+                // 0.15, and the slack is L2 TRUNCATION, not tolerance for a bug. Nine
+                // coefficients cannot represent a sky with a strong low sun exactly; the two
+                // horizontal normals land within 1.4% and the zenith red channel is the worst
+                // case at about 12%. That is the documented price of nine numbers over a
+                // per-pixel march, and it is far smaller than the error it replaces.
+                checkNear(got[c], want[c], 0.15,
+                          std::string("SH irradiance matches the hemisphere integral, ") + names[t] +
+                          ", channel " + std::to_string(c));
+        }
+
+        // A zero sun direction is the one input that cannot be projected; it must return zeroes
+        // rather than a NaN that would then be multiplied into every lit pixel in the frame.
+        f32 noSun[3] = {0.0f, 0.0f, 0.0f};
+        rhi::AtmosphereSkySH none{};
+        rhi::atmoSkyRadianceSH(air, 0.0f, noSun, sun, sunRadius, none);
+        bool allZero = true;
+        for (int k = 0; k < 9; ++k)
+            for (int c = 0; c < 3; ++c) if (none.c[k][c] != 0.0f) allZero = false;
+        check(allZero, "a degenerate sun direction projects to zeroes, not to NaN");
+    }
+
     AVER_INFO(g_failures ? "AtmosphereTest: {} FAILURES" : "AtmosphereTest: all checks passed ({})",
               g_failures);
     return g_failures ? 1 : 0;

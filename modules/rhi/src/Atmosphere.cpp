@@ -271,6 +271,54 @@ void atmoFitDome(const AtmosphereProfile& a, f32 altitudeKm, f32 sunCosZenith,
     atmoSunTransmittance(a, altitudeKm, sunCosZenith, sunAngularRadiusRad, out.sunTransmittance);
 }
 
+// Projects the sky onto nine L2 spherical harmonics. Same cost class as atmoFitDome beside it,
+// which already spends about forty atmoSkyRadiance marches per frame for its own fit.
+//
+// A FIBONACCI SPHERE rather than a lat-long grid: it is uniform in SOLID ANGLE, so every sample
+// carries the same weight and the projection is a plain sum. A lat-long grid clusters samples at
+// the poles and would need a sin(theta) weight that is easy to forget and silently tilts the
+// answer toward straight up -- which is the very bias this function exists to remove.
+//
+// 128 samples. The sky at L2 is extremely smooth (that is the whole premise of using nine
+// coefficients), so this is far past what the fit needs; it is chosen for margin, not resolution.
+void atmoSkyRadianceSH(const AtmosphereProfile& a, f32 altitudeKm, const f32 sunDir[3],
+                       const f32 sunIrradiance[3], f32 sunAngularRadiusRad, AtmosphereSkySH& out) {
+    for (int k = 0; k < 9; ++k) out.c[k][0] = out.c[k][1] = out.c[k][2] = 0.0f;
+
+    const f32 len = std::sqrt(sunDir[0] * sunDir[0] + sunDir[1] * sunDir[1] + sunDir[2] * sunDir[2]);
+    if (len < 1e-6f) return;
+    const f32 sx = sunDir[0] / len, sy = sunDir[1] / len, sz = sunDir[2] / len;
+
+    const int   kSamples = 128;
+    const f32   kGolden  = 2.399963229728653f;   // the golden angle, in radians
+    const f32   weight   = 4.0f * 3.14159265358979f / static_cast<f32>(kSamples);
+
+    for (int i = 0; i < kSamples; ++i) {
+        const f32 z   = 1.0f - (2.0f * static_cast<f32>(i) + 1.0f) / static_cast<f32>(kSamples);
+        const f32 rad = std::sqrt(std::fmax(1.0f - z * z, 0.0f));
+        const f32 phi = kGolden * static_cast<f32>(i);
+        const f32 x = rad * std::cos(phi), y = rad * std::sin(phi);
+
+        f32 rgb[3];
+        atmoSkyRadiance(a, altitudeKm, z, sz, clampf(x * sx + y * sy + z * sz, -1.0f, 1.0f),
+                        sunIrradiance, sunAngularRadiusRad, rgb);
+
+        // The real SH basis, unnormalised by anything else -- the cosine convolution that turns
+        // radiance into irradiance is applied in the shader, not here, so these stay a plain
+        // description of the sky and can be reused by anything that wants one.
+        const f32 Y[9] = {
+            0.282095f,
+            0.488603f * y, 0.488603f * z, 0.488603f * x,
+            1.092548f * x * y, 1.092548f * y * z,
+            0.315392f * (3.0f * z * z - 1.0f),
+            1.092548f * x * z,
+            0.546274f * (x * x - y * y),
+        };
+        for (int k = 0; k < 9; ++k)
+            for (int c = 0; c < 3; ++c) out.c[k][c] += rgb[c] * Y[k] * weight;
+    }
+}
+
 // What RHIShaders.cpp's averFogInscatterRef() reads back: this is the CPU side of that value, baked
 // once per frame into gFogInscatterRef (there is no HLSL twin of the maths below -- averFogInscatterRef
 // itself is just the cbuffer read).
