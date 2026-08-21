@@ -1392,6 +1392,11 @@ ShaderHandle VulkanResourceFactory::createShader(const ShaderDesc& d) {
     std::string src;
     if (d.prelude) src = d.prelude;
     src += d.source;
+    // The same re-bind the fixed pipelines apply, for the same reason: a caller-supplied shader
+    // that prepends sharedShaderPrelude() carries the prelude's set-0 PerFrame block, and
+    // tableSetLayout() puts SRVs there. Applied to EVERY shader rather than only those with a
+    // prelude, because patchPerFrameSet is a no-op on source that does not contain the block.
+    patchPerFrameSet(src);
 
     RhiShader s;
     s.stage = d.stage;

@@ -673,6 +673,39 @@ constexpr u32 kVkDescriptorSetCount = 4;
 // bounds one binding SET's slot count, so 0..15 for SRVs / 16..31 for UAVs never collide.
 constexpr u32 kVkUavBindingBase = kMaxBindingSlots;
 
+// Moves the shared prelude's per-frame constant buffer to the descriptor set this backend
+// actually binds it in. MUST be applied to any HLSL that includes sharedShaderPrelude() before
+// it is handed to the compiler.
+//
+// WHY: the prelude (modules/rhi/src/RHIShaders.cpp, shared with D3D12 and off-limits to this
+// module) declares `cbuffer PerFrame : register(b0)` with no register space, because a space is
+// meaningless to the D3D12 root signature that reads the same text. DXC maps HLSL register space
+// to SPIR-V descriptor set, so with no space the block lands at SET 0 -- and set 0 in this
+// backend is table 0 (SRVs/UAVs, see section 4), with the per-frame UBO at set kVkSetConstants.
+// Every shader that touches gViewProj therefore named a descriptor its own pipeline layout did
+// not contain.
+//
+// HOW THAT FAILED, and why it was not obvious: AMD's two shader compilers disagree about what to
+// do with it. The integrated GPU's driver returns VK_ERROR_INVALID_SHADER_NV from
+// vkCreateGraphicsPipelines -- recoverable, diagnosable. The discrete card's LLPC calls abort()
+// instead, which surfaces as the process dying with 0xC0000409 inside amdvlk64.dll and no
+// message at all. Same defect, and only one of the two ways of hitting it looks like a bug in
+// this repo.
+//
+// The annotation is Vulkan-only DXC syntax and is inserted into the assembled string this module
+// alone owns -- the shared prelude is never modified, and the D3D12 backend never sees this. Same
+// approach, and the same reasoning, as patchPushConstants in VulkanDevice.cpp.
+inline bool patchPerFrameSet(std::string& src) {
+    const std::string needle = "cbuffer PerFrame : register(b0)";
+    const std::size_t pos = src.find(needle);
+    if (pos == std::string::npos) return false;
+    // Prefixed rather than rewriting the register: `register(b0)` still names the D3D-side slot,
+    // and [[vk::binding(binding, set)]] overrides only the SPIR-V placement.
+    src.insert(pos, "[[vk::binding(0, " + std::to_string(kVkSetConstants) + ")]] ");
+    return true;
+}
+
+
 // The push-constant byte layout for one built pipeline. objectOffset/objectBytes are the SAME on
 // every pipeline (b1 is always present, always first, always 128 bytes); slotOffset/slotBytes
 // cover every OTHER declared root-constant slot, back to back in slot order; the mesh-geometry

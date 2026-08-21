@@ -16,6 +16,9 @@
 #include <cmath>
 #include <cstring>
 
+#include <filesystem>
+
+
 namespace aver::rhi::vkb {
 
 // ================================================================================================
@@ -1046,6 +1049,12 @@ bool VulkanDevice::createPipeline() {
     }
 
     std::string src = sceneShaderSource();
+    if (!patchPerFrameSet(src)) {
+        AVER_ERROR("[RHI.Vulkan] the shared prelude no longer contains the exact PerFrame cbuffer "
+                   "text this backend re-binds to set {}; every fixed pipeline would name a "
+                   "descriptor its layout does not have", kVkSetConstants);
+        return false;
+    }
     if (!patchPushConstants(src, /*mesh=*/false)) return false;
 
     std::vector<u32> vsSpv, psSpv, skyVsSpv, skyPsSpv, wireVsSpv, lineVsSpv, linePsSpv;
@@ -1229,6 +1238,11 @@ bool VulkanDevice::initMeshShaders() {
     }
 
     std::string src = sceneShaderSource();
+    if (!patchPerFrameSet(src)) {
+        AVER_ERROR("[RHI.Vulkan] the shared prelude no longer contains the PerFrame cbuffer text "
+                   "the mesh path re-binds to set {}", kVkSetConstants);
+        return false;
+    }
     if (!patchPushConstants(src, /*mesh=*/true)) return false;
     const std::string defines = "AVER_MS=1;AVER_MS_VTX_REG=" + std::to_string(kMeshSrvBase) +
                                 ";AVER_MS_IDX_REG=" + std::to_string(kMeshSrvBase + 1);
@@ -2380,6 +2394,35 @@ void VulkanDevice::resize(u32 w, u32 h) {
 namespace { VkSampler g_postSampler = VK_NULL_HANDLE; std::vector<VkDescriptorSet> g_postSets; }
 
 bool VulkanDevice::createPostPipelines() {
+    // REFUSED, DELIBERATELY, and this is the honest state of this chain rather than a stub.
+    //
+    // The post shaders come from rhi::postShaderSource(), shared with D3D12, which declares
+    // b0/t0/t1/t2/s0/u0/u1 with no register space. DXC maps space to descriptor SET, so all of them
+    // land in set 0 -- while postSetLayout_ below puts six bindings in set kVkSetConstants and
+    // leaves set 0 empty. That is the same defect patchPerFrameSet fixes for the scene pipelines,
+    // but it does NOT have the same one-line fix, for two reasons:
+    //
+    //   1. The bindings are permuted, not merely moved: the layout wants b0->0, t0->1, t1->2,
+    //      t2->3, u0->4, u1->5. DXC can express that only through per-register-class shifts, and
+    //      this backend already spends its single -fvk-u-shift on kVkUavBindingBase for the scene
+    //      path -- so the compiler needs a per-compile binding map it does not currently have.
+    //   2. binds[1] and binds[2] are COMBINED_IMAGE_SAMPLER with immutable samplers, and DXC lowers
+    //      HLSL Texture2D + SamplerState to two SEPARATE descriptors. No DXC flag combines them.
+    //
+    // WHY REFUSE RATHER THAN TRY: handing AMD a pipeline whose shaders name descriptors its layout
+    // does not contain does not return an error on the discrete card -- amdvlk64.dll dereferences
+    // null and takes the process with it. A backend that says what it cannot do is strictly better
+    // than one that kills the caller, and this way the device creation fails cleanly and
+    // rhi::createDevice falls through to the next backend.
+    AVER_WARN("[RHI.Vulkan] the camera post chain is NOT implemented on this backend: its shaders "
+              "bind resources in set 0 (DXC's default for a space-less register) while its "
+              "descriptor layout puts them in set {}, permuted, with combined image samplers DXC "
+              "does not emit. Building it anyway crashes the AMD driver outright.", kVkSetConstants);
+    return false;
+
+}
+
+#if 0   // kept, not deleted: this is the shape the chain should have once the binding map exists
     if (!g_postSampler) {
         VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
         si.magFilter = VK_FILTER_LINEAR; si.minFilter = VK_FILTER_LINEAR;
@@ -2537,6 +2580,8 @@ bool VulkanDevice::createPostPipelines() {
     }
     return true;
 }
+
+#endif
 
 void VulkanDevice::releasePostTargets() {
     for (VkImageView v : bloomAttachmentViews_) if (v) api_.DestroyImageView(device_, v, nullptr);
