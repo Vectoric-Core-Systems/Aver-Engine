@@ -81,6 +81,9 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #endif
 #include "ToolsMenu.hpp"
 #include "UiRegistry.hpp"
+#if AVER_MODULE_SYNAPSE
+#include "NavBakeCommand.hpp"
+#endif
 
 #if AVER_MODULE_MCP
 #include "aver/mcp/McpBridge.hpp"
@@ -4059,6 +4062,15 @@ public:
             const Mat4 g = Mat4::identity();
             e.device()->drawLines(gridMesh_, &g.m[0][0]);
         }
+#if AVER_MODULE_SYNAPSE
+        if (showNav_ && navMesh_) {
+            // Already in world space -- buildNavOverlay emits absolute cell corners, because a
+            // grid has an origin of its own and folding it into a matrix would mean two places
+            // could disagree about where the navmesh is.
+            const Mat4 n = Mat4::identity();
+            e.device()->drawLines(navMesh_, &n.m[0][0]);
+        }
+#endif
         drawGizmo(e);
 #if AVER_MODULE_LANDSCAPE
         drawSculptCursor(e);
@@ -4098,6 +4110,9 @@ public:
             skinScene_->tick(e, vpX_, vpY_, vpW_, vpH_, 0u);
 #endif
         captureCheck(e);
+#if AVER_MODULE_SYNAPSE
+        navBakeCheck(e);
+#endif
     }
 
     // Drives --skin-draw-test, handing it the LIVE viewport rect so its probes can be expressed as
@@ -4543,6 +4558,70 @@ public:
     void setPtSceneToggleOnAuto(int framesIn)  { ptSceneToggleOnAutoFrames_  = framesIn; }
     void setPtSceneToggleOffAuto(int framesIn) { ptSceneToggleOffAutoFrames_ = framesIn; }
     void setSkinSceneDir(std::string d) { skinSceneDir_ = std::move(d); }          // --skin-scene-test <dir>
+#if AVER_MODULE_SYNAPSE
+    void setBakeNavOnStart(f32 cellCm) { navBakeOnStart_ = true; navBakeCell_ = cellCm; }   // --bake-nav [cm]
+
+    // Rebuilds the overlay line mesh from nav_. Destroying the old one FIRST is the point: this
+    // runs on every bake and every level open, and before destroyLineMesh existed each call
+    // leaked one committed upload buffer for as long as the editor stayed open.
+    void rebuildNavOverlay(Engine& e) {
+        if (navMesh_) { e.device()->destroyLineMesh(navMesh_); navMesh_ = 0; }
+        if (nav_.cells.empty()) return;
+        const std::vector<rhi::LineVertex> lines = editor::buildNavOverlay(nav_, navRegionColours_);
+        if (lines.empty()) return;
+        navMesh_ = e.device()->createLineMesh(lines.data(), (u32)lines.size());
+    }
+
+    // Bakes, writes the result beside the level, and rebuilds the overlay. Returns false with a
+    // reason rather than throwing one away, because every way this fails is something the author
+    // has to act on: an empty level, an entity dropped far from the rest, physics not running.
+    bool bakeNavigationNow(Engine& e, std::string* why = nullptr) {
+        editor::NavBakeSettings s;
+        s.cellSizeCm = navBakeCell_;
+        std::string reason;
+        synapse::BakeStats st;
+        if (!editor::bakeNavigation(scene::World::instance(), s, nav_, &st, &reason)) {
+            AVER_WARN("[Editor] navigation bake failed: {}", reason);
+            if (why) *why = reason;
+            nav_ = fmt::OcNavData{};
+            rebuildNavOverlay(e);
+            return false;
+        }
+        rebuildNavOverlay(e);
+        showNav_ = true;   // baking something invisible is how a bake gets run twice
+
+        // NOT WRITTEN FOR AN UNSAVED LEVEL. A .ocnav is named after its level, so a level with no
+        // path has nowhere for one to go; baking it into the session and saying so beats
+        // inventing a filename the author never asked for.
+        if (levelPath_.empty()) {
+            AVER_WARN("[Editor] navigation baked but NOT saved -- this level has no path yet; "
+                      "save the level and bake again to write its .ocnav");
+            return true;
+        }
+        const std::string path = editor::navPathForLevel(levelPath_);
+        std::string wwhy;
+        if (!fmt::saveOcNav(path, nav_, &wwhy)) {
+            AVER_WARN("[Editor] navigation bake could not be written to {}: {}", path, wwhy);
+            if (why) *why = wwhy;
+            return false;
+        }
+        AVER_INFO("[Editor] navigation written to {}", path);
+        return true;
+    }
+
+    // Loads the navigation that belongs to a level, if it has any. An ABSENT file is the normal
+    // case -- every level until somebody bakes one -- so it clears rather than complains.
+    void loadNavForLevel(Engine& e) {
+        nav_ = fmt::OcNavData{};
+        const std::string path = editor::navPathForLevel(levelPath_);
+        std::string why;
+        if (!path.empty() && fmt::loadOcNav(path, nav_, &why)) {
+            AVER_INFO("[Editor] navigation loaded from {} ({}x{} cells)", path,
+                      nav_.widthCells, nav_.heightCells);
+        }
+        rebuildNavOverlay(e);
+    }
+#endif
     void setFocusCompile(bool b) { tools_.armCompile(b); }   // --compile-scripts
     void setFocusReload(int frames) { if (frames > 0) tools_.armReload(frames); } // --reload-scripts [N]
     void setMsaaOverride(int n) { msaaOverride_ = n; }   // --msaa N
@@ -7741,7 +7820,23 @@ private:
                 ImGui::EndMenu();
             }
             tools_.drawMenu(project_);
-            if (ImGui::BeginMenu("Build")){ ImGui::MenuItem("Build Lighting"); ImGui::MenuItem("Build Geometry"); ImGui::EndMenu(); }
+            if (ImGui::BeginMenu("Build")){
+                ImGui::MenuItem("Build Lighting");
+                ImGui::MenuItem("Build Geometry");
+#if AVER_MODULE_SYNAPSE
+                ImGui::Separator();
+                if (ImGui::MenuItem("Bake Navigation")) bakeNavigationNow(e);
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip("Samples the live physics scene into a walkable grid and "
+                                      "writes it beside this level as .ocnav.\n"
+                                      "Colours in the overlay are REGIONS: two patches of floor "
+                                      "in different colours have no path between them.");
+                ImGui::MenuItem("Show Navigation", nullptr, &showNav_);
+                if (ImGui::MenuItem("Region Colours", nullptr, &navRegionColours_))
+                    rebuildNavOverlay(e);
+#endif
+                ImGui::EndMenu();
+            }
             uiReg_.track("menu.build");
             if (ImGui::BeginMenu("Select")){ if(ImGui::MenuItem("Select All")) {} if(ImGui::MenuItem("Select None")) sel_=-1; ImGui::EndMenu(); }
             uiReg_.track("menu.select");
@@ -10363,6 +10458,20 @@ private:
 
     // Requests the probe pixel and the screenshot on a capture run, then reports what was read.
     // --probe-rel resolves against the live viewport rect, --probe is absolute, neither means centre.
+#if AVER_MODULE_SYNAPSE
+    // --bake-nav, fired once. Frame 5 rather than frame 0 for a stated reason: applyProject runs
+    // its "Loading level" stage during startup, and it is that stage which builds the collision
+    // bodies the bake samples. A bake at frame 0 would find no floor anywhere and write a
+    // perfectly valid file describing an empty world.
+    void navBakeCheck(Engine& e) {
+        if (navLoadPending_) { navLoadPending_ = false; loadNavForLevel(e); }
+        if (!navBakeOnStart_ || navBakeDone_) return;
+        if (e.time().frame < 5) return;
+        navBakeDone_ = true;
+        bakeNavigationNow(e);
+    }
+#endif
+
     void captureCheck(Engine& e) {
         const u64 f = e.time().frame;
         const u64 sf = maxFrames_>8?maxFrames_-3:4;
@@ -10549,6 +10658,22 @@ private:
     f32 capVpX_=0, capVpY_=0, capVpW_=0, capVpH_=0;
     // editor viewport aids
     rhi::LineHandle gridMesh_=0;
+#if AVER_MODULE_SYNAPSE
+    // The baked grid and the line mesh drawn from it. The mesh is REBUILT on every bake and
+    // every load, which is why destroyLineMesh had to exist first: without it each rebuild
+    // leaked a committed upload buffer, and the overlay is the one thing here that rebuilds.
+    fmt::OcNavData  nav_;
+    rhi::LineHandle navMesh_=0;
+    bool showNav_=false;
+    bool navRegionColours_=true;
+    // --bake-nav: bake once at startup, then carry on. Deferred to a frame rather than done at
+    // init because the bake reads PHYSICS BODIES, and a level's bodies are built by
+    // applyProject, which has not run when the app is constructed.
+    bool navBakeOnStart_=false;
+    bool navBakeDone_=false;
+    bool navLoadPending_=false;
+    f32  navBakeCell_=50.0f;
+#endif
     rhi::LineHandle gzMove_[3]={0,0,0}, gzMoveHi_[3]={0,0,0};
     rhi::LineHandle gzRot_[3]={0,0,0}, gzRotHi_[3]={0,0,0};
     rhi::LineHandle gzScale_[3]={0,0,0}, gzScaleHi_[3]={0,0,0};
@@ -11615,6 +11740,12 @@ private:
         applyLevelSky(w);
         levelPath_ = path;
         levelName_ = w.name;
+#if AVER_MODULE_SYNAPSE
+        // The overlay is a DEVICE resource and this function has no device -- loadLevel is
+        // reachable from paths that pass no Engine at all. Latched here and serviced from the
+        // frame loop, which is the only place a line mesh can be created.
+        navLoadPending_ = true;
+#endif
 
         sel_ = -1;
         selEntity_ = scene::kInvalidEntity;
@@ -12660,7 +12791,7 @@ Application* createApplication(int argc, char** argv) {
     // right here and nothing else may override it; --mcp with no number defers to mcp.conf, resolved
     // once argument parsing is done and engineRoot() can be asked (see mcpRequested below).
     bool mcpRequested = false, mcpPortExplicit = false;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool furnaceGrid=false; f32 furnaceTilt=0.0f; bool ptFurnace=false; bool ptScene=false; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int rtRenderMode=-1; int pt=0; int ptBounces=-1; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; bool openLegacy=false; std::string graphSelectNode; std::string graphTab; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool furnaceGrid=false; f32 furnaceTilt=0.0f; bool ptFurnace=false; bool ptScene=false; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int rtRenderMode=-1; int pt=0; int ptBounces=-1; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; bool openLegacy=false; std::string graphSelectNode; std::string graphTab; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false; bool bakeNav=false; f32 bakeNavCell=50.0f;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -13065,6 +13196,14 @@ Application* createApplication(int argc, char** argv) {
             ptSceneToggleOff = (i+1 < argc && argv[i+1][0] != '-') ? std::atoi(argv[++i]) : 15;
         }
         else if (!std::strcmp(argv[i],"--skin-scene-test") && i+1<argc) skinSceneDir=argv[++i];
+        // --bake-nav [cellCm]: bake this level's navigation once at startup and write its
+        // .ocnav. Deferred to a frame rather than run at init, because the bake samples PHYSICS
+        // and a level's bodies are built by applyProject, which has not run yet at construction.
+        else if (!std::strcmp(argv[i],"--bake-nav")) {
+            bakeNav = true;
+            if (i+1 < argc && argv[i+1][0] >= '0' && argv[i+1][0] <= '9')
+                bakeNavCell = static_cast<f32>(std::atof(argv[++i]));
+        }
         else if (!std::strcmp(argv[i],"--frames") && i+1<argc) frames=std::strtoull(argv[++i],nullptr,10);
         else if (!std::strcmp(argv[i],"--screenshot") && i+1<argc) shot=argv[++i];
         else if (!std::strcmp(argv[i],"--bloom") && i+1<argc) bloom=static_cast<f32>(std::atof(argv[++i]));
@@ -13297,6 +13436,11 @@ Application* createApplication(int argc, char** argv) {
     if (ptSceneToggleOn > 0)  app->setPtSceneToggleOnAuto(ptSceneToggleOn);
     if (ptSceneToggleOff > 0) app->setPtSceneToggleOffAuto(ptSceneToggleOff);
     if (!skinSceneDir.empty()) app->setSkinSceneDir(skinSceneDir);
+#if AVER_MODULE_SYNAPSE
+    if (bakeNav) app->setBakeNavOnStart(bakeNavCell);
+#else
+    if (bakeNav) AVER_WARN("[Sandbox] --bake-nav ignored: this build has no navigation module");
+#endif
     return app;
 }
 

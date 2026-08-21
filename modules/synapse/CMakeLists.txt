@@ -7,7 +7,14 @@
 aver_add_module(Aver.Synapse
   SOURCES
     src/Nav.cpp
+    src/NavBake.cpp
   DEPS
     Aver.Formats
     Aver.Core
 )
+
+
+# Carried PUBLIC so anything that links Synapse can #if on it, matching Aver.Physics. The editor
+# needs it: SandboxApp holds a baked grid and an overlay handle, and both have to compile away
+# entirely in a build configured without navigation.
+target_compile_definitions(Aver.Synapse PUBLIC AVER_MODULE_SYNAPSE=1)

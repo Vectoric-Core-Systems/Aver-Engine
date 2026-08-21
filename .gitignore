@@ -62,3 +62,9 @@ __pycache__/
 # not committed: a checked-in copy would let that test pass against a stale file even if the C++
 # writer it is supposed to be proving had broken.
 *.output.ocgraph
+
+# BUILD OUTPUT, in test content. A .ocnav is regenerated in one command
+# (`Sandbox.exe <project> --headless --frames 12 --bake-nav`), and a committed copy would let a
+# change to the baker look gate-clean while the file in the tree still described the old behaviour.
+# A real project's .ocnav is shipped content and is NOT covered by this -- the path is deliberate.
+test-content/**/*.ocnav

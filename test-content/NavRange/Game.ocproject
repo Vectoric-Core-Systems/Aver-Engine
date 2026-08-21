@@ -1,0 +1,14 @@
+OCPROJECT 1
+# The navigation bake's test level. No scripts, no C#, no classes -- three boxes and a floor.
+#
+# It exists because Bake Navigation cannot be checked without a world that has collision in it, and
+# every other project in test-content is built out of `class` placements, which get NO physics body
+# from anywhere in this engine. A navmesh baked against one of those would be empty and correct.
+#
+# CREATEDWITH tracks the current engine version on purpose: an older value raises the project-upgrade
+# modal on load, and a modal blocks the headless run this map is meant to be driven by.
+NAME NavRange
+ENGINE Aver 0.3.0
+CREATEDWITH 0.3.0
+CONTENT Content
+STARTMAP Maps/NavRange.ocmap

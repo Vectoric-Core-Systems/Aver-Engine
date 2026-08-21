@@ -13,6 +13,7 @@ add_executable(Sandbox
   src/McpConf.cpp
   src/IdeIntegration.cpp
   src/ShellIntegration.cpp
+  src/NavBakeCommand.cpp
   src/ToolsMenu.cpp
   src/GraphEditorGeometry.cpp
   src/GraphEditor.cpp
@@ -113,6 +114,12 @@ if(TARGET Aver.Physics)
   # scene and material systems are: the app owns the frame loop, and the frame loop is what decides
   # when the world is stepped.
   target_link_libraries(Sandbox PRIVATE Aver.Physics)
+endif()
+if(TARGET Aver.Synapse)
+  # Navigation. The editor is where a bake can happen at all: terrain collision is editor-only, so
+  # this process is the only one that can see the ground it would sample. Aver.Synapse itself knows
+  # nothing about physics or a scene -- src/NavBakeCommand.cpp is the piece that does.
+  target_link_libraries(Sandbox PRIVATE Aver.Synapse)
 endif()
 if(TARGET Aver.Framework)
   # Gameplay (brings AVER_MODULE_FRAMEWORK=1). It carries Aver.Scene transitively, but the scene is
