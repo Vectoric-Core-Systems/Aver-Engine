@@ -190,6 +190,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #if AVER_MODULE_SYNAPSE_SCENE
 #include "aver/synapse/SynapseAgent.hpp"
 #include "aver/synapse/SynapsePerception.hpp"
+#include "aver/synapse/SynapseBt.hpp"
 #endif
 
 #if AVER_WITH_IMGUI
@@ -856,6 +857,8 @@ public:
         // today, but nothing here assumes otherwise) would not re-register a second CSynapseAgent.
         synapse::agentSystem().registerComponents(scene::World::instance());
         synapse::perceptionSystem().registerComponents(scene::World::instance());
+        synapse::btSystem().registerComponents(scene::World::instance());
+        synapse::registerBuiltinBehaviors(synapse::btSystem());
 #endif
 
         // RESOLVED BEFORE THE PROJECT OPENS, AND THAT IS THE WHOLE POINT. This decision used to live
@@ -1377,6 +1380,8 @@ public:
                 // scripts_.graphFire(entity, name), nothing anim-specific, and PerceptionSystem's
                 // NotifyFn is byte-for-byte AnimNotifyFn's own signature (SynapsePerception.hpp).
                 synapse::perceptionSystem().setNotifySink(&SandboxApp::animNotify, this);
+                // The built-in "FireEvent" BT action reaches a graph the SAME way.
+                synapse::btSystem().setNotifySink(&SandboxApp::animNotify, this);
 #endif
             }
 
@@ -2244,6 +2249,9 @@ public:
             // frame's actual position, not last frame's. Needs dt (unlike AgentSystem::tick) for
             // its own think-interval throttle.
             synapse::perceptionSystem().tick(scene::World::instance(), t.dt);
+            // AFTER perceptionSystem: a behaviour's own "CanSeeTarget"/"HasTarget" conditions read
+            // THIS frame's sight state, not last frame's.
+            synapse::btSystem().tick(scene::World::instance(), t.dt);
         }
 #endif
 #endif

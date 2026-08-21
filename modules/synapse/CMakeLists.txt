@@ -8,6 +8,9 @@ aver_add_module(Aver.Synapse
   SOURCES
     src/Nav.cpp
     src/NavBake.cpp
+    # The behaviour-tree evaluator -- pure for the identical reason Nav.cpp is: a hand-built tree
+    # and a pair of fake Condition/Action functions test the whole algorithm with no world at all.
+    src/Bt.cpp
   DEPS
     Aver.Formats
     Aver.Core

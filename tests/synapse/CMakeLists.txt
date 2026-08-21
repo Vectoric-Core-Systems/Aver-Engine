@@ -7,6 +7,13 @@ target_link_libraries(NavTest PRIVATE Aver.Synapse Aver.Formats Aver.Core Aver.P
 set_target_properties(NavTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 
+# BtTest -- the behaviour-tree evaluator, against hand-built trees and fake Condition/Action
+# functions. Links no scene, matching NavTest's own reasoning: the algorithm (composites, Cooldown,
+# Running-state resume) is checked with no world at all.
+add_executable(BtTest src/BtTest.cpp)
+target_link_libraries(BtTest PRIVATE Aver.Synapse Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(BtTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # NavBakeTest -- turning a world into a grid, against a world made of arithmetic.
 #
 # Links no physics either. bakeNav takes two function pointers rather than calling
@@ -33,4 +40,14 @@ if(TARGET Aver.Synapse.Scene AND TARGET Aver.Physics)
   target_link_libraries(PerceptionTest PRIVATE Aver.Synapse.Scene Aver.Synapse Aver.Scene
                                                Aver.Physics Aver.Formats Aver.Core Aver.Platform)
   set_target_properties(PerceptionTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
+# BtSystemTest -- CSynapseBehavior + BtSystem::tick, against a real scene::World: the real built-in
+# Wait action, a real .ocbt file round-tripped through disk, and a recycled entity handle that must
+# not inherit the previous occupant's Running state.
+if(TARGET Aver.Synapse.Scene)
+  add_executable(BtSystemTest src/BtSystemTest.cpp)
+  target_link_libraries(BtSystemTest PRIVATE Aver.Synapse.Scene Aver.Synapse Aver.Scene Aver.Formats
+                                             Aver.Core Aver.Platform)
+  set_target_properties(BtSystemTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()

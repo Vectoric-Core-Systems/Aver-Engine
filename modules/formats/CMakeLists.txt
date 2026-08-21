@@ -30,6 +30,9 @@ aver_add_module(Aver.Formats
     src/OcSave.cpp
     # .ocnav -- baked navigation. Beside the other AVR1 readers; it is a grid and a header.
     src/OcNav.cpp
+    # .ocbt -- a baked Synapse behaviour tree. Beside the other AVR1 readers for the same reason:
+    # a node array and a string table, nothing that needs Aver.Scene.
+    src/OcBt.cpp
     src/Texture.cpp
   DEPS
     Aver.Core

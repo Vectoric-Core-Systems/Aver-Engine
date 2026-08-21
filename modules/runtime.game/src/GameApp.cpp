@@ -24,6 +24,7 @@
 #if AVER_MODULE_SYNAPSE_SCENE
 #  include "aver/synapse/SynapseAgent.hpp"
 #  include "aver/synapse/SynapsePerception.hpp"
+#  include "aver/synapse/SynapseBt.hpp"
 #endif
 #if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
 #  include "aver/particles/ParticleSystem.hpp"
@@ -864,6 +865,9 @@ void GameApp::initScripting() {
             // scripts_.graphFire(entity, name), nothing anim-specific, and PerceptionSystem's
             // NotifyFn is byte-for-byte AnimNotifyFn's own signature (see SynapsePerception.hpp).
             synapse::perceptionSystem().setNotifySink(&GameApp::animNotify, this);
+            // The built-in "FireEvent" BT action reaches a graph the SAME way -- BtSystem::NotifyFn
+            // is the identical signature too (SynapseBt.hpp).
+            synapse::btSystem().setNotifySink(&GameApp::animNotify, this);
 #endif
             AVER_INFO("[Anim] animation notifies will be raised as graph events");
         } else {
@@ -1363,6 +1367,12 @@ void GameApp::onInit(Engine& e) {
     // later slice's concern; none does yet) must find the component already registered.
     synapse::agentSystem().registerComponents(scene::World::instance());
     synapse::perceptionSystem().registerComponents(scene::World::instance());
+    synapse::btSystem().registerComponents(scene::World::instance());
+    // AFTER registerComponents: the seven built-ins read CSynapseAgent/CSynapsePerception through
+    // agentSystem()/perceptionSystem() directly (see registerBuiltinBehaviors' own comment), so
+    // both must already have a registered component type before this call would be meaningful --
+    // it does not itself require one, but there is no reason to race the ordering.
+    synapse::registerBuiltinBehaviors(synapse::btSystem());
 #endif
     openProject(e);
 #if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
@@ -1486,6 +1496,9 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     // Same "after flush" reasoning -- a perceiver's sight check reads this frame's actual position,
     // not last frame's. Needs dt (unlike AgentSystem::tick) for its own think-interval throttle.
     synapse::perceptionSystem().tick(scene::World::instance(), t.dt);
+    // AFTER perceptionSystem: a behaviour's own "CanSeeTarget"/"HasTarget" conditions read THIS
+    // frame's sight state, not last frame's.
+    synapse::btSystem().tick(scene::World::instance(), t.dt);
 #endif
 #endif
 
