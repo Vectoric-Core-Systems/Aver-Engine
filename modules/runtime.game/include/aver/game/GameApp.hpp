@@ -330,6 +330,13 @@ private:
 #if AVER_MODULE_SYNAPSE_SCENE
     // Answers the framework's relayed Synapse steering-target query -- see its own definition.
     static i32 synapseTarget(i32 entity, f32* outX, f32* outY, f32* outZ, void* user);
+#if AVER_MODULE_FRAMEWORK
+    // PerceptionSystem's own TargetResolverFn -- who agents should perceive. See its own definition.
+    static scene::Entity synapseTargetResolver(void* user);
+#endif
+    // Answers the framework's relayed Synapse perception query -- see its own definition.
+    static i32 synapsePerception(i32 entity, i32* outCanSee, i32* outLastTarget,
+                                 f32* outTimeSinceSeen, void* user);
 #endif
 
     aver::scripting::ScriptHost scripts_;

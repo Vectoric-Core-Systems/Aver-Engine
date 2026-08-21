@@ -713,6 +713,22 @@ int32_t aver_fw_synapse_target(int32_t e, float* outX, float* outY, float* outZ)
     return g_synapseTarget(e, outX, outY, outZ, g_synapseTargetUser);
 }
 
+// ---- SYNAPSE PERCEPTION, RELAYED ---------------------------------------------------------------
+aver_fw_synapse_perception_fn g_synapsePerception = nullptr;
+void* g_synapsePerceptionUser = nullptr;
+
+int32_t aver_fw_set_synapse_perception_provider(aver_fw_synapse_perception_fn fn, void* user) {
+    g_synapsePerception = fn;
+    g_synapsePerceptionUser = user;
+    return 1;
+}
+
+int32_t aver_fw_synapse_perception(int32_t e, int32_t* outCanSee, int32_t* outLastTarget,
+                                   float* outTimeSinceSeen) {
+    if (!g_synapsePerception || !outCanSee || !outLastTarget || !outTimeSinceSeen) return 0;
+    return g_synapsePerception(e, outCanSee, outLastTarget, outTimeSinceSeen, g_synapsePerceptionUser);
+}
+
 // Dispatches OnBeginPlay on an actor spawned without it. See the header for why the split exists.
 int32_t aver_fw_dispatch_begin_play(int32_t e, int32_t reason) {
     const Entity ent = static_cast<Entity>(static_cast<uint32_t>(e));

@@ -23,6 +23,7 @@
 #endif
 #if AVER_MODULE_SYNAPSE_SCENE
 #  include "aver/synapse/SynapseAgent.hpp"
+#  include "aver/synapse/SynapsePerception.hpp"
 #endif
 #if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
 #  include "aver/particles/ParticleSystem.hpp"
@@ -845,10 +846,25 @@ void GameApp::initScripting() {
         // GetSynapseTarget (Aver Node) reaches CSynapseAgent's current waypoint through this --
         // same reason and same placement as the anim-curve provider immediately above.
         aver_fw_set_synapse_target_provider(&GameApp::synapseTarget, this);
+        // GetSynapsePerception (Aver Node) reaches CSynapsePerception's current sight state the
+        // same way.
+        aver_fw_set_synapse_perception_provider(&GameApp::synapsePerception, this);
+#if AVER_MODULE_FRAMEWORK
+        // PerceptionSystem's own resolver seam (SynapsePerception.hpp), NOT a framework_abi.h relay
+        // -- see that header's own comment for why Aver.Synapse.Scene must not link Aver.Framework
+        // at all, so only a composition root (linking both) can answer "who is the target".
+        synapse::perceptionSystem().setTargetResolver(&GameApp::synapseTargetResolver, this);
+#endif
 #endif
 
         if (scripts_.graphFireAvailable()) {
             anim::animSystem().setNotifySink(&GameApp::animNotify, this);
+#if AVER_MODULE_SYNAPSE_SCENE
+            // The SAME sink as animNotify immediately above -- its body is just
+            // scripts_.graphFire(entity, name), nothing anim-specific, and PerceptionSystem's
+            // NotifyFn is byte-for-byte AnimNotifyFn's own signature (see SynapsePerception.hpp).
+            synapse::perceptionSystem().setNotifySink(&GameApp::animNotify, this);
+#endif
             AVER_INFO("[Anim] animation notifies will be raised as graph events");
         } else {
             AVER_WARN("[Anim] this build's scripting bridge cannot be fired at; animation notifies "
@@ -889,6 +905,23 @@ i32 GameApp::synapseTarget(i32 entity, f32* outX, f32* outY, f32* outZ, void*) {
     *outX = a->targetXCm;
     *outY = a->targetYCm;
     *outZ = a->targetZCm;
+    return 1;
+}
+
+#if AVER_MODULE_FRAMEWORK
+scene::Entity GameApp::synapseTargetResolver(void*) {
+    return static_cast<scene::Entity>(aver_fw_controlled_pawn(aver_fw_player_controller(0)));
+}
+#endif
+
+i32 GameApp::synapsePerception(i32 entity, i32* outCanSee, i32* outLastTarget, f32* outTimeSinceSeen, void*) {
+    scene::World& w = scene::World::instance();
+    const auto* p = w.component<synapse::CSynapsePerception>(
+        static_cast<scene::Entity>(entity), synapse::perceptionSystem().componentType());
+    if (!p) return 0;
+    *outCanSee = p->canSeeTarget;
+    *outLastTarget = p->lastKnownTargetEntity;
+    *outTimeSinceSeen = p->timeSinceSeenSec;
     return 1;
 }
 #endif
@@ -1329,6 +1362,7 @@ void GameApp::onInit(Engine& e) {
     // and no physics, and a class placement spawned by openProject that carries CSynapseAgent (a
     // later slice's concern; none does yet) must find the component already registered.
     synapse::agentSystem().registerComponents(scene::World::instance());
+    synapse::perceptionSystem().registerComponents(scene::World::instance());
 #endif
     openProject(e);
 #if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
@@ -1449,6 +1483,9 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     // last frame's stale transform. gameNav_ may be empty (no baked navigation for this level, or
     // none loaded yet) -- AgentSystem::tick treats that as "wait", not an error; see its own comment.
     synapse::agentSystem().tick(scene::World::instance(), &gameNav_);
+    // Same "after flush" reasoning -- a perceiver's sight check reads this frame's actual position,
+    // not last frame's. Needs dt (unlike AgentSystem::tick) for its own think-interval throttle.
+    synapse::perceptionSystem().tick(scene::World::instance(), t.dt);
 #endif
 #endif
 

@@ -189,6 +189,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #endif
 #if AVER_MODULE_SYNAPSE_SCENE
 #include "aver/synapse/SynapseAgent.hpp"
+#include "aver/synapse/SynapsePerception.hpp"
 #endif
 
 #if AVER_WITH_IMGUI
@@ -854,6 +855,7 @@ public:
         // physics. registerComponent is idempotent, so re-entering onInit (there is no such path
         // today, but nothing here assumes otherwise) would not re-register a second CSynapseAgent.
         synapse::agentSystem().registerComponents(scene::World::instance());
+        synapse::perceptionSystem().registerComponents(scene::World::instance());
 #endif
 
         // RESOLVED BEFORE THE PROJECT OPENS, AND THAT IS THE WHOLE POINT. This decision used to live
@@ -1368,8 +1370,15 @@ public:
             // previewed in Play mode should fire what it fires -- and the sink survives every
             // level and project reload below, because AnimSystem::clear() drops clips and
             // playheads without dropping the wire.
-            if (scripts_.graphFireAvailable())
+            if (scripts_.graphFireAvailable()) {
                 anim::animSystem().setNotifySink(&SandboxApp::animNotify, this);
+#if AVER_MODULE_SYNAPSE_SCENE
+                // The SAME sink as animNotify immediately above -- its body is just
+                // scripts_.graphFire(entity, name), nothing anim-specific, and PerceptionSystem's
+                // NotifyFn is byte-for-byte AnimNotifyFn's own signature (SynapsePerception.hpp).
+                synapse::perceptionSystem().setNotifySink(&SandboxApp::animNotify, this);
+#endif
+            }
 
             // ANIMATION CURVES. The framework relays a query it cannot answer itself; this is where
             // the answer comes from. Installed unconditionally -- unlike the notify sink it needs no
@@ -1380,6 +1389,15 @@ public:
             // GetSynapseTarget (Aver Node) reaches CSynapseAgent's current waypoint through this --
             // same reason and same placement as the anim-curve provider immediately above.
             aver_fw_set_synapse_target_provider(&SandboxApp::synapseTarget, this);
+            // GetSynapsePerception (Aver Node) reaches CSynapsePerception's current sight state
+            // the same way.
+            aver_fw_set_synapse_perception_provider(&SandboxApp::synapsePerception, this);
+#if AVER_MODULE_FRAMEWORK
+            // PerceptionSystem's own resolver seam (SynapsePerception.hpp), NOT a framework_abi.h
+            // relay -- see that header's own comment for why Aver.Synapse.Scene must not link
+            // Aver.Framework at all, so only a composition root (linking both) can answer this.
+            synapse::perceptionSystem().setTargetResolver(&SandboxApp::synapseTargetResolver, this);
+#endif
 #endif
 
             // SAVE/LOAD, so a project can test its own save path in the editor rather than only in
@@ -2220,8 +2238,13 @@ public:
         //
         // nav_ may be empty or a frame stale (loadNavForLevel/navBakeCheck poll from onRender, not
         // here) -- AgentSystem::tick treats that as "wait for a grid", not an error.
-        if (!spawnTestClass_.empty() || aver_fw_play_state() == AVER_FW_PLAY_PLAYING)
+        if (!spawnTestClass_.empty() || aver_fw_play_state() == AVER_FW_PLAY_PLAYING) {
             synapse::agentSystem().tick(scene::World::instance(), &nav_);
+            // Same gate, same "after flush" reasoning -- a perceiver's sight check reads this
+            // frame's actual position, not last frame's. Needs dt (unlike AgentSystem::tick) for
+            // its own think-interval throttle.
+            synapse::perceptionSystem().tick(scene::World::instance(), t.dt);
+        }
 #endif
 #endif
 #if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE
@@ -10987,6 +11010,28 @@ private:
         *outX = a->targetXCm;
         *outY = a->targetYCm;
         *outZ = a->targetZCm;
+        return 1;
+    }
+
+#if AVER_MODULE_FRAMEWORK
+    // PerceptionSystem's own TargetResolverFn -- who agents should perceive. Same one-liner as
+    // GameApp::synapseTargetResolver.
+    static scene::Entity synapseTargetResolver(void*) {
+        return static_cast<scene::Entity>(aver_fw_controlled_pawn(aver_fw_player_controller(0)));
+    }
+#endif
+
+    // Answers the framework's relayed Synapse perception query -- same shape as synapseTarget
+    // above, installed the same way.
+    static i32 synapsePerception(i32 entity, i32* outCanSee, i32* outLastTarget,
+                                 f32* outTimeSinceSeen, void*) {
+        scene::World& w = scene::World::instance();
+        const auto* p = w.component<synapse::CSynapsePerception>(
+            static_cast<scene::Entity>(entity), synapse::perceptionSystem().componentType());
+        if (!p) return 0;
+        *outCanSee = p->canSeeTarget;
+        *outLastTarget = p->lastKnownTargetEntity;
+        *outTimeSinceSeen = p->timeSinceSeenSec;
         return 1;
     }
 #endif

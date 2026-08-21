@@ -1956,6 +1956,18 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;
 
+            // GetSynapsePerception: a PURE read of CSynapsePerception's current sight state, tracked
+            // by the native PerceptionSystem tick (aver_fw_synapse_perception, framework_abi.h). NO
+            // exec pins, same as getworldposition above. "success" means something DIFFERENT here
+            // than on every other node in this file -- see GraphNodeDefs.hpp's own comment on why.
+            case "getsynapseperception":
+                node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "canSeeTarget", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "lastKnownTarget", Type = PinType.Int, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "timeSinceSeen", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
             // ---- FireEvent -------------------------------------------------------------------------
             // GAP 3: the cross-entity event node. SIDE-EFFECTING (runs ANOTHER entity's whole exec
             // chain, not merely a scalar write) -- exec pins by default, mirroring Spawn/CharacterMove

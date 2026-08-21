@@ -45,6 +45,10 @@ internal static class Fw
     // SYNAPSE STEERING TARGET, relayed -- same shape as aver_fw_anim_curve immediately above, for
     // the identical reason (framework_abi.h).
     [DllImport(Lib)] internal static extern int aver_fw_synapse_target(int entity, out float outX, out float outY, out float outZ);
+    // SYNAPSE PERCEPTION, relayed -- same reason, but 0/false does NOT mean "nothing to report"
+    // here; see framework_abi.h's own comment on aver_fw_synapse_perception for why the RETURN
+    // value and outCanSee carry two different questions.
+    [DllImport(Lib)] internal static extern int aver_fw_synapse_perception(int entity, out int outCanSee, out int outLastTarget, out float outTimeSinceSeen);
     // SAVE/LOAD, relayed. The framework does not know what a save file is; a provider installed by
     // the composition root answers these. See framework_abi.h for why it is a relay.
     [DllImport(Lib)] internal static extern int aver_fw_save_write([MarshalAs(UnmanagedType.LPUTF8Str)] string path);

@@ -619,6 +619,25 @@ internal static class GraphInterop
         return Fw.aver_fw_synapse_target(entity, out x, out y, out z) != 0;
     }
 
+    /// <summary>GetSynapsePerception's own surface: the entity's CURRENT CSynapsePerception sight
+    /// state, as tracked by the native PerceptionSystem tick (framework_abi.h's
+    /// aver_fw_synapse_perception). UNLIKE GetSynapseTarget, the return value here does NOT mean
+    /// "can it see something" -- it means "does this entity carry CSynapsePerception at all". A
+    /// perceiving agent that currently cannot see its target is a real, common, meaningful state
+    /// (canSeeTarget = false), not the same as having no perception component (this method returns
+    /// false and every output stays at zero/default only in THAT second case).</summary>
+    internal static bool SynapseGetPerceptionForGraph(int entity, out bool canSeeTarget,
+                                                       out int lastKnownTarget, out float timeSinceSeen)
+    {
+        canSeeTarget = false; lastKnownTarget = 0; timeSinceSeen = 0f;
+        if (Fw.aver_fw_synapse_perception(entity, out int canSee, out int lastTarget, out float t) == 0)
+            return false;
+        canSeeTarget = canSee != 0;
+        lastKnownTarget = lastTarget;
+        timeSinceSeen = t;
+        return true;
+    }
+
     /// <summary>SynapseSteer's own surface: "where am I, which way am I facing, where do I want to
     /// go" turned into the forward/right/yawDelta CharacterMove already knows how to consume (see
     /// AverCharacter.Drive's own doc comment for their exact contract: forward/right are -1..1 axis

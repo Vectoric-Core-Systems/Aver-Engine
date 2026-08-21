@@ -1,21 +1,23 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems. All rights reserved.
 // Proprietary. See LICENSE.md at the repository root.
-// Tests for GetSynapseTarget and SynapseSteer -- Synapse slice 4's graph-facing half. See
-// GraphInterop.SynapseGetTargetForGraph / SynapseSteerForGraph for the two wrappers,
-// GraphCompiler.cs's "getsynapsetarget"/"synapsesteer" PULL cases and EmitPullSynapseSteer for the
-// emitters, and sandbox/src/GraphNodeDefs.hpp for the pin shapes this file asserts against.
+// Tests for GetSynapseTarget, SynapseSteer (slice 4) and GetSynapsePerception (slice 5) -- Synapse's
+// graph-facing half. See GraphInterop.SynapseGetTargetForGraph / SynapseSteerForGraph /
+// SynapseGetPerceptionForGraph for the three wrappers, GraphCompiler.cs's
+// "getsynapsetarget"/"synapsesteer"/"getsynapseperception" PULL cases and EmitPullSynapseSteer /
+// EmitPullSynapsePerception for the emitters, and sandbox/src/GraphNodeDefs.hpp for the pin shapes
+// this file asserts against.
 //
-// BOTH NODES TOUCH REAL NATIVE CODE, UNLIKE GetForward. GetForward's own graceful "unbound entity ->
-// false" test (GetForwardNodeTests.cs) works in this bare process because its whole native surface is
-// Actors.Get, a MANAGED lookup with no P/Invoke involved at all. GetSynapseTarget and SynapseSteer are
-// not that lucky: GetSynapseTarget calls the raw aver_fw_synapse_target relay directly (no managed
-// fallback), and SynapseSteer's very first line is Entity.IsAlive, which calls aver_scene_valid. Both
-// throw EntryPointNotFoundException naming the exact symbol in THIS process (no engine build anywhere
-// near Aver.Graph.Tests' own output directory, so neither Aver.Framework.dll nor Aver.Scene.dll's
-// native counterpart exists for their own NativeResolver to find) -- the identical proof-of-wiring
-// SaveLoadGameNodeTests.cs already establishes for SaveGame/LoadGame; see that file's own header for
-// why the exception IS the proof, not a workaround.
+// ALL THREE NODES TOUCH REAL NATIVE CODE, UNLIKE GetForward. GetForward's own graceful "unbound
+// entity -> false" test (GetForwardNodeTests.cs) works in this bare process because its whole native
+// surface is Actors.Get, a MANAGED lookup with no P/Invoke involved at all. None of these three are
+// that lucky: GetSynapseTarget and GetSynapsePerception each call a raw aver_fw_synapse_* relay
+// directly (no managed fallback), and SynapseSteer's very first line is Entity.IsAlive, which calls
+// aver_scene_valid. All three throw EntryPointNotFoundException naming the exact symbol in THIS
+// process (no engine build anywhere near Aver.Graph.Tests' own output directory, so neither
+// Aver.Framework.dll nor Aver.Scene.dll's native counterpart exists for their own NativeResolver to
+// find) -- the identical proof-of-wiring SaveLoadGameNodeTests.cs already establishes for
+// SaveGame/LoadGame; see that file's own header for why the exception IS the proof, not a workaround.
 using System;
 using Aver.Graph;
 
@@ -29,6 +31,8 @@ static class SynapseNodeTests
         failures += TestSynapseSteerDefaultPinsShape();
         failures += TestSynapseSteerUnboundEntityReturnsFalseAndZeroesPull();
         failures += TestSynapseSteerUnboundEntityReturnsFalseAndZeroesPush();
+        failures += TestGetSynapsePerceptionDefaultPinsShape();
+        failures += TestGetSynapsePerceptionEmitsRealNativeCallNamingTheSymbol();
         return failures;
     }
 
@@ -222,6 +226,83 @@ static class SynapseNodeTests
                     return 1;
                 }
                 Console.WriteLine($"  PASS: real call attempted 'aver_scene_valid', proving the entity pin reached Entity.IsAlive: {epEx.Message}");
+                return 0;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL: {ex.InnerException?.Message ?? ex.Message}");
+            return 1;
+        }
+    }
+
+    private static int TestGetSynapsePerceptionDefaultPinsShape()
+    {
+        Console.WriteLine("Test: GetSynapsePerception's default pins are entity:int-in, canSeeTarget:bool/lastKnownTarget:int/timeSinceSeen:float/success:bool-out, no exec");
+        try
+        {
+            var text = "OCGRAPH 1\nNODE gsp GetSynapsePerception\nOUT gsp canSeeTarget\n";
+            if (!OcGraphParser.Parse(text, out var graph, out var err))
+            {
+                Console.WriteLine($"  FAIL: Parse error: {err}");
+                return 1;
+            }
+            var node = graph.Nodes["gsp"];
+            bool ok =
+                node.Pins.Find(p => p.Name == "entity" && !p.IsOutput && p.Type == PinType.Int) != null &&
+                node.Pins.Find(p => p.Name == "canSeeTarget" && p.IsOutput && p.Type == PinType.Bool) != null &&
+                node.Pins.Find(p => p.Name == "lastKnownTarget" && p.IsOutput && p.Type == PinType.Int) != null &&
+                node.Pins.Find(p => p.Name == "timeSinceSeen" && p.IsOutput && p.Type == PinType.Float) != null &&
+                node.Pins.Find(p => p.Name == "success" && p.IsOutput && p.Type == PinType.Bool) != null &&
+                node.Pins.Count == 5 &&
+                node.Pins.TrueForAll(p => p.Type != PinType.Exec);
+            if (!ok)
+            {
+                Console.WriteLine($"  FAIL: unexpected pin set: [{string.Join(", ", node.Pins.ConvertAll(p => $"{p.Name}:{p.Type}:{(p.IsOutput ? "out" : "in")}"))}]");
+                return 1;
+            }
+            Console.WriteLine("  PASS: 5 pins, exactly the declared shape, and no exec pins");
+            return 0;
+        }
+        catch (Exception ex) { Console.WriteLine($"  FAIL: {ex.Message}"); return 1; }
+    }
+
+    private static int TestGetSynapsePerceptionEmitsRealNativeCallNamingTheSymbol()
+    {
+        Console.WriteLine("Test: GetSynapsePerception pulled as data emits a real native call naming aver_fw_synapse_perception");
+        try
+        {
+            const string text =
+                "OCGRAPH 1\n" +
+                "NODE ent ConstInt value=4242\n" +
+                "NODE gsp GetSynapsePerception\n" +
+                "LINK ent.value gsp.entity\n" +
+                "OUT gsp success\n";
+            if (!OcGraphParser.Parse(text, out var graph, out var perr))
+            {
+                Console.WriteLine($"  FAIL: Parse error: {perr}");
+                return 1;
+            }
+            var compiled = new GraphCompiler(graph).Compile(out var cerr);
+            if (compiled is not Func<bool> fn)
+            {
+                Console.WriteLine($"  FAIL: compile: {cerr ?? "(wrong delegate shape)"}");
+                return 1;
+            }
+            try
+            {
+                var got = fn();
+                Console.WriteLine($"  FAIL: expected invoking this to throw (see this file's header comment) but it returned {got}");
+                return 1;
+            }
+            catch (EntryPointNotFoundException epEx)
+            {
+                if (!epEx.Message.Contains("aver_fw_synapse_perception"))
+                {
+                    Console.WriteLine($"  FAIL: threw EntryPointNotFoundException, but not naming aver_fw_synapse_perception: {epEx.Message}");
+                    return 1;
+                }
+                Console.WriteLine($"  PASS: real call attempted 'aver_fw_synapse_perception', proving the entity pin reached the native relay: {epEx.Message}");
                 return 0;
             }
         }

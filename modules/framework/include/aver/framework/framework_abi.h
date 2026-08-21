@@ -285,6 +285,28 @@ AVER_FW_ABI int32_t aver_fw_set_synapse_target_provider(aver_fw_synapse_target_f
  * (None/Requested/Arrived/Failed all mean "nothing to head toward right now"). */
 AVER_FW_ABI int32_t aver_fw_synapse_target(int32_t e, float* outX, float* outY, float* outZ);
 
+/* ---- SYNAPSE PERCEPTION, RELAYED ---------------------------------------------------------------
+ *
+ * Same reason and same shape as the steering-target relay immediately above: Aver.Synapse.Scene
+ * must not link Aver.Framework, so a host installs a provider and this forwards.
+ *
+ * UNLIKE aver_fw_synapse_target, 0/false here does NOT mean "nothing to report" -- "I currently
+ * cannot see the target" is a real, common, meaningful answer for a perceiving agent, not an
+ * absence. The RETURN VALUE distinguishes the two instead: 0 only when `e` carries no
+ * CSynapsePerception at all (or there is no provider); 1 whenever it does, with *outCanSee telling
+ * the caller which case applies. This is the same "false means absent, not zero" discipline
+ * aver_fw_anim_curve's own comment states, applied one level up: here the OUTER call tells you
+ * "there is an answer", and one of the outputs tells you what it is. */
+typedef int32_t (AVER_FW_CALL* aver_fw_synapse_perception_fn)(int32_t entity, int32_t* outCanSee,
+                                                               int32_t* outLastTarget,
+                                                               float* outTimeSinceSeen, void* user);
+/* Installs the provider. Passing null clears it. Always returns 1. */
+AVER_FW_ABI int32_t aver_fw_set_synapse_perception_provider(aver_fw_synapse_perception_fn fn, void* user);
+/* Writes the entity's current perception state and returns 1, or leaves the outputs untouched and
+ * returns 0 when there is no provider or `e` carries no CSynapsePerception. */
+AVER_FW_ABI int32_t aver_fw_synapse_perception(int32_t e, int32_t* outCanSee, int32_t* outLastTarget,
+                                               float* outTimeSinceSeen);
+
 /* The session singletons begin_play populated; each is 0 in EDITOR. */
 AVER_FW_ABI int32_t aver_fw_game_instance(void);
 /* The running session's GameMode. */

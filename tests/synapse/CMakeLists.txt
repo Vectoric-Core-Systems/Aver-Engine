@@ -25,3 +25,12 @@ if(TARGET Aver.Synapse.Scene)
                                           Aver.Core Aver.Platform)
   set_target_properties(AgentTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# PerceptionTest -- CSynapsePerception + PerceptionSystem::tick, against a REAL Jolt world: the
+# occlusion check is the whole point, and Aver.Synapse has no raycast of its own to fake it with.
+if(TARGET Aver.Synapse.Scene AND TARGET Aver.Physics)
+  add_executable(PerceptionTest src/PerceptionTest.cpp)
+  target_link_libraries(PerceptionTest PRIVATE Aver.Synapse.Scene Aver.Synapse Aver.Scene
+                                               Aver.Physics Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(PerceptionTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

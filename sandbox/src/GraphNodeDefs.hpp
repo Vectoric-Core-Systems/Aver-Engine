@@ -559,6 +559,19 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         pin("forward", "float", true), pin("right", "float", true), pin("yawDelta", "float", true),
         pin("arrived", "bool", true), pin("success", "bool", true)}});
 
+    // GetSynapsePerception: a PURE node reading CSynapsePerception's current sight state, tracked
+    //    by the native PerceptionSystem tick (aver_fw_synapse_perception, framework_abi.h). The
+    //    companion query "OnSeeTarget" itself needs -- the graph-event seam
+    //    (ScriptHost::graphFire) carries no payload, so a handler for "I just saw something" has no
+    //    other way to ask WHICH entity that was. "success" means something DIFFERENT here than on
+    //    every other node above: it is NOT "could I see the target" (canSeeTarget answers that, and
+    //    false is a real, common, meaningful state -- see GraphInterop.SynapseGetPerceptionForGraph's
+    //    own comment) -- it means "does this entity carry CSynapsePerception at all".
+    t.push_back({"GetSynapsePerception", "Get Synapse Perception", "Actor", {
+        pin("entity", "int", false),
+        pin("canSeeTarget", "bool", true), pin("lastKnownTarget", "int", true),
+        pin("timeSinceSeen", "float", true), pin("success", "bool", true)}});
+
     // FireEvent: GAP 3, cross-entity events -- fires a DECLARED event (event=, e.g. "OnHit") on
     //    ANOTHER entity's own graph. SIDE-EFFECTING (runs a stranger's whole exec chain, not a scalar
     //    write) -- exec pins by default, mirroring Spawn/CharacterMove above rather than SetField; see

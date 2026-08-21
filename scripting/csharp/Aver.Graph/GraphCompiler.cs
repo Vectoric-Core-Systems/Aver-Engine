@@ -497,6 +497,7 @@ public class GraphCompiler
             case "isactor":
             case "getsynapsetarget":
             case "synapsesteer":
+            case "getsynapseperception":
                 EmitSimpleApiRead(node);
                 break;
 
@@ -1110,6 +1111,31 @@ public class GraphCompiler
             case "right":    _il.Emit(OpCodes.Ldloc, rightL);    break;
             case "yawDelta": _il.Emit(OpCodes.Ldloc, yawDeltaL); break;
             case "arrived":  _il.Emit(OpCodes.Ldloc, arrivedL);  break;
+        }
+    }
+
+    /// GetSynapsePerception's own emission -- same overall shape as EmitPullSynapseSteer (three
+    /// real outputs of MIXED type on top of the method's own bool return), for the identical
+    /// reason: EmitPullVec3Read only ever produces three floats, and this node's outputs are
+    /// bool/int/float, not float/float/float.
+    private void EmitPullSynapsePerception(Node node, string pinName)
+    {
+        if (_il == null) return;
+        EmitPullInput(node, "entity");
+        var canSeeL = _il.DeclareLocal(typeof(bool));
+        var lastTargetL = _il.DeclareLocal(typeof(int));
+        var timeSinceSeenL = _il.DeclareLocal(typeof(float));
+        _il.Emit(OpCodes.Ldloca, canSeeL);
+        _il.Emit(OpCodes.Ldloca, lastTargetL);
+        _il.Emit(OpCodes.Ldloca, timeSinceSeenL);
+        _il.Emit(OpCodes.Call, SynapseGetPerceptionMethod);
+        if (pinName == "success") return;
+        _il.Emit(OpCodes.Pop);
+        switch (pinName)
+        {
+            case "canSeeTarget":    _il.Emit(OpCodes.Ldloc, canSeeL);         break;
+            case "lastKnownTarget": _il.Emit(OpCodes.Ldloc, lastTargetL);     break;
+            case "timeSinceSeen":   _il.Emit(OpCodes.Ldloc, timeSinceSeenL);  break;
         }
     }
 
@@ -3867,6 +3893,8 @@ public class GraphCompiler
                 EmitPullVec3Read(source, pinName, SynapseGetTargetMethod, -1); return;
             case "synapsesteer":
                 EmitPullSynapseSteer(source, pinName); return;
+            case "getsynapseperception":
+                EmitPullSynapsePerception(source, pinName); return;
             case "isalive":
                 EmitPullInput(source, "entity"); _il.Emit(OpCodes.Call, IsAliveMethod); return;
             case "isactor":
@@ -4421,6 +4449,9 @@ public class GraphCompiler
     private static readonly MethodInfo SynapseSteerMethod =
         typeof(GraphInterop).GetMethod("SynapseSteerForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SynapseSteerForGraph was not found by reflection");
+    private static readonly MethodInfo SynapseGetPerceptionMethod =
+        typeof(GraphInterop).GetMethod("SynapseGetPerceptionForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SynapseGetPerceptionForGraph was not found by reflection");
     private static readonly MethodInfo TranslateMethod =
         typeof(GraphInterop).GetMethod("TranslateForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.TranslateForGraph was not found by reflection");
