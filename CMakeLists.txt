@@ -302,6 +302,9 @@ if(AVER_MODULE_SCENE)
   # The scene/animation join. Guarded on BOTH, because it is the edge between them and neither owns
   # it; a build with either switched off simply does not have the join.
   add_subdirectory(modules/anim.scene)
+  # Save/load of a whole world. Guarded on SCENE for the same reason anim.scene is: it is the edge
+  # between the world and the container format, and a build with no scene has no world to save.
+  add_subdirectory(modules/save)
 endif()
 if(AVER_MODULE_FRAMEWORK)
   add_subdirectory(modules/framework)     # optional: gameplay vocabulary over the world
@@ -452,6 +455,7 @@ if(AVER_BUILD_TESTS)
   if(AVER_MODULE_SCENE)
     add_subdirectory(tests/scene)
     add_subdirectory(tests/anim.scene)
+    add_subdirectory(tests/save)
     # The placement -> entity loop the editor and the game runtime now share. Guarded on the scene
     # for the same reason the module's own source is: without it there is nothing to instantiate into.
     add_subdirectory(tests/world)
