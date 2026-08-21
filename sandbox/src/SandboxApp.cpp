@@ -253,12 +253,32 @@ void saveBeginPlay(aver::scene::Entity e, void*) {
 // would take the entity out from under a live C# object.
 void saveDestroyActor(aver::scene::Entity e, void*) { aver_fw_destroy(static_cast<i32>(e)); }
 
+// GRAPH-LOCAL VARIABLES: thin forwards to the aver_fw_graph_var_* relay (framework_abi.h), the
+// same one-line shape saveClassOf/saveBeginPlay/saveDestroyActor already use for their own ABI
+// calls. AVER_SCENE_KIND_F32/I32/BOOL cross unchanged -- both sides already agree on those values
+// (scene_abi.h), the same "plain u32, no shared header" contract OcSave.hpp's own `kind` field
+// documents.
+i32 saveGraphVarCount(aver::scene::Entity e, void*) {
+    return aver_fw_graph_var_count(static_cast<i32>(e));
+}
+i32 saveGraphVarAt(aver::scene::Entity e, i32 index, char* nameBuf, i32 nameBufLen,
+                   u32* outKind, f32* outF, i32* outI, void*) {
+    return aver_fw_graph_var_at(static_cast<i32>(e), index, nameBuf, nameBufLen,
+                                reinterpret_cast<int32_t*>(outKind), outF, outI);
+}
+i32 saveGraphVarSet(aver::scene::Entity e, const char* name, u32 kind, f32 f, i32 i, void*) {
+    return aver_fw_graph_var_set(static_cast<i32>(e), name, static_cast<int32_t>(kind), f, i);
+}
+
 aver::save::Host saveHost() {
     aver::save::Host h;
-    h.spawnClass   = &saveSpawnClass;
-    h.classOf      = &saveClassOf;
-    h.beginPlay    = &saveBeginPlay;
-    h.destroyActor = &saveDestroyActor;
+    h.spawnClass    = &saveSpawnClass;
+    h.classOf       = &saveClassOf;
+    h.beginPlay     = &saveBeginPlay;
+    h.destroyActor  = &saveDestroyActor;
+    h.graphVarCount = &saveGraphVarCount;
+    h.graphVarAt    = &saveGraphVarAt;
+    h.graphVarSet   = &saveGraphVarSet;
     return h;
 }
 

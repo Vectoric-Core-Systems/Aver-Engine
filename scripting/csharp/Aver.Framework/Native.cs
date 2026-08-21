@@ -46,6 +46,15 @@ internal static class Fw
     // the composition root answers these. See framework_abi.h for why it is a relay.
     [DllImport(Lib)] internal static extern int aver_fw_save_write([MarshalAs(UnmanagedType.LPUTF8Str)] string path);
     [DllImport(Lib)] internal static extern int aver_fw_save_load([MarshalAs(UnmanagedType.LPUTF8Str)] string path);
+    // GRAPH-LOCAL VARIABLES, relayed -- same shape as anim_curve/save_write just above. Declared HERE,
+    // not in Aver.Scripting.Bridge, for a reason that cost a real EntryPointNotFoundException to find:
+    // ONLY this assembly has a DllImportResolver registered (NativeResolver.cs) routing "Aver.Framework"
+    // to the native DLL one directory up. A raw [DllImport("Aver.Framework")] declared directly in the
+    // Bridge assembly instead resolves through default probing, which finds bin/Scripting/Aver.Framework.dll
+    // first -- the MANAGED assembly of the same name sitting right next to the bridge -- and GetProcAddress
+    // against a pure-IL PE fails for every symbol. Every native call from HostBridge.cs must go through
+    // Fw.* (this class) for exactly this reason; see ManagedDispatch.Install for the identical precedent.
+    [DllImport(Lib)] internal static extern int aver_fw_set_graph_var_provider(IntPtr count, IntPtr at, IntPtr setVar, IntPtr user);
     [DllImport(Lib)] internal static extern int aver_fw_class_of(int e);   // != 0 IS the definition of "actor"
 
     // Possession is rejected unless the two classes carry the PAWN / CONTROLLER flags.

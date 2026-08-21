@@ -32,6 +32,63 @@ bool fail(std::string* why, std::string m) { if (why) *why = std::move(m); retur
 
 // Components a snapshot deliberately never writes, each for a stated reason. A SMALL NAMED LIST
 // rather than an opt-in flag on the component, because the default must be "a component nobody
+// GRAPH-LOCAL VARIABLES, as a SYNTHETIC component riding the same OcSaveComponent/OcSaveField
+// shape every real component already uses -- not a new chunk, not a new list on OcSaveEntity, so
+// every reader this format already has (including one built before this existed) round-trips a
+// save that carries one unchanged. `$` cannot start a registered component's name (every real one
+// is a bare C identifier, "CLocal"/"CMeshRenderer"/...), so this can never collide with one, and
+// restore() special-cases it BEFORE the componentId() lookup below for exactly that reason -- a
+// build with no graph scripting at all still opens a save that carries this, skipping it rather
+// than warning "component '$GraphVars' is not registered in this build" as though it were a
+// dropped FEATURE rather than a kind of state that was never a component to begin with.
+constexpr char kGraphVarsComponentType[] = "$GraphVars";
+// A generous cap, not a measured one: real graphs declare a handful of VARs. Exists so one
+// pathological graph cannot make a save entity unbounded; the excess is dropped with a name and a
+// count, never silently.
+constexpr usize kMaxGraphVarsPerEntity = 64;
+
+// Asks the host for entity `e`'s current graph-local VAR values (GraphVarStore, entirely managed
+// memory -- see GraphVarCountFn's own comment for why this is a SEPARATE seam from the generic
+// field walk below) and appends them as one synthetic component, if there are any. A no-op for an
+// entity with no live graph host, or when the host installs neither seam.
+void captureGraphVars(scene::Entity e, fmt::OcSaveEntity& en, const CaptureOptions& opt) {
+    if (!opt.host.graphVarCount || !opt.host.graphVarAt) return;
+    const i32 n = opt.host.graphVarCount(e, opt.host.user);
+    if (n <= 0) return;
+
+    const i32 want = n > static_cast<i32>(kMaxGraphVarsPerEntity)
+                   ? static_cast<i32>(kMaxGraphVarsPerEntity) : n;
+    fmt::OcSaveComponent sc;
+    sc.type = kGraphVarsComponentType;
+    char nameBuf[64];
+    for (i32 i = 0; i < want; ++i) {
+        u32 kind = 0; f32 fv = 0.0f; i32 iv = 0;
+        nameBuf[0] = '\0';
+        if (!opt.host.graphVarAt(e, i, nameBuf, static_cast<i32>(sizeof(nameBuf)), &kind, &fv, &iv,
+                                 opt.host.user))
+            continue;
+        if (nameBuf[0] == '\0') continue;
+
+        fmt::OcSaveField f;
+        f.name = nameBuf;
+        f.kind = kind;
+        // F32 carries its value in `.f` (one element, matching ocSaveFloatCount's own F32 == 1);
+        // I32 and BOOL both carry theirs in `.i`, the same split every real field above already
+        // uses. A VAR is never any other kind (Aver.Graph's own PinType restriction), so anything
+        // else here is a provider bug -- captured as I32 rather than silently dropped, so it is at
+        // least visible in the file rather than invisible.
+        if (kind == AVER_SCENE_KIND_F32) f.f = {fv};
+        else                             f.i = iv;
+        sc.fields.push_back(std::move(f));
+    }
+    if (n > static_cast<i32>(kMaxGraphVarsPerEntity))
+        AVER_WARN("[Save] entity '{}' declares {} graph VAR(s), over the {} this format captures -- "
+                  "the rest were dropped", en.name, n, kMaxGraphVarsPerEntity);
+    if (!sc.fields.empty()) en.components.push_back(std::move(sc));
+}
+
+// Components a snapshot deliberately never writes, each for a stated reason. A SMALL NAMED LIST
+// rather than an opt-in flag on the component, because the default must be "a component nobody
 // thought about is saved" -- the opposite default is how a feature added later silently stops
 // persisting and nobody notices until a player reports it.
 bool isDerivedComponent(u32 type) {
@@ -163,6 +220,7 @@ void appendSubtree(const scene::World& w, scene::Entity e, i32 parentIndex,
 
     const usize selfIndex = g.out.entities.size();
     captureFields(w, e, en, selfIndex, g);
+    captureGraphVars(e, en, opt);
 
     g.out.entities.push_back(std::move(en));
     g.handles.push_back(e);
@@ -347,6 +405,28 @@ bool restore(const fmt::OcSaveData& in, scene::World& w, const RestoreOptions& o
         if (en.objectId != 0 && en.objectId != fnv1a64(en.name)) w.setObjectId(e, en.objectId);
 
         for (const fmt::OcSaveComponent& sc : en.components) {
+            // GRAPH-LOCAL VARIABLES, special-cased BEFORE the componentId() lookup below -- this
+            // name was never registered as a real component (see kGraphVarsComponentType's own
+            // comment) and must not fall into the "not registered in this build" warning path,
+            // which is for a FEATURE this build dropped, not a kind of state that was never a
+            // component. Applied HERE, not in a later pass: the entity's live graph host already
+            // exists by this point (spawnClass ran moments ago, above), seeded at its declared
+            // defaults, and beginPlay has not run yet -- exactly the same window field restoration
+            // already depends on, so an OnBeginPlay that reads a VAR sees the restored value, not
+            // the default (see BeginPlayFn's own comment for the ordering this rests on).
+            if (sc.type == kGraphVarsComponentType) {
+                if (opt.host.graphVarSet) {
+                    for (const fmt::OcSaveField& f : sc.fields) {
+                        const f32 fv = (f.kind == AVER_SCENE_KIND_F32 && !f.f.empty()) ? f.f[0] : 0.0f;
+                        if (!opt.host.graphVarSet(e, f.name.c_str(), f.kind, fv,
+                                                  static_cast<i32>(f.i), opt.host.user))
+                            ++droppedFields;
+                    }
+                } else {
+                    droppedFields += static_cast<u32>(sc.fields.size());
+                }
+                continue;
+            }
             const u32 type = w.componentId(sc.type);
             if (type == 0) {
                 // A component the save knows and this build does not. The entity restores without

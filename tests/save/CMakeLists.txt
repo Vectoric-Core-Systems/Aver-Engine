@@ -20,4 +20,15 @@ if(TARGET Aver.Scripting.Host AND TARGET Aver.Framework)
   set_target_properties(SaveActorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
   # It loads the staged bridge and the sample actor assembly at run time.
   add_dependencies(SaveActorTest Aver.Scripting.Host)
+
+  # GraphVarPersistTest — graph-VAR persistence is scoped to GameInstance-classed entities, at the
+  # HostBridge.cs provider layer (FindPersistedGraphHost), not in Aver.Save itself. Same real-CLR
+  # shape as SaveActorTest immediately above, driving aver_fw_graph_var_count/at/set directly rather
+  # than going through a full capture()/restore() round trip.
+  add_executable(GraphVarPersistTest src/GraphVarPersistTest.cpp)
+  target_link_libraries(GraphVarPersistTest PRIVATE Aver.Save Aver.Scene Aver.Formats
+                                                     Aver.Framework Aver.Scripting.Host
+                                                     Aver.Core Aver.Platform)
+  set_target_properties(GraphVarPersistTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+  add_dependencies(GraphVarPersistTest Aver.Scripting.Host)
 endif()

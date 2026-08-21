@@ -199,6 +199,13 @@ public class GraphHost
     /// successful Load(). Exposed read-only; GraphHost owns compiling it, nothing else should.</summary>
     public Graph? Graph => _graph;
 
+    /// <summary>This host's own VAR storage -- null exactly when <see cref="Graph"/> is null, or when
+    /// the loaded graph declares no VAR records (see <c>_varStore</c>'s own field comment). Exposed
+    /// read-only for the SAME reason <see cref="Graph"/> is: a caller outside this class (a save
+    /// provider reading every declared VAR's current value to capture it, or restoring one after a
+    /// load) needs to reach the store GraphHost already owns, not a second copy of the idea.</summary>
+    public GraphVarStore? VarStore => _varStore;
+
     /// <param name="positionSink">Where computed positions go. Defaults to writing the live scene's
     /// CLocal.position via Aver.Scene.Native.aver_scene_set_vec. Pass a fake here in a test that has
     /// no native scene running -- see GraphHostTests in Aver.Graph.Tests for exactly that pattern,

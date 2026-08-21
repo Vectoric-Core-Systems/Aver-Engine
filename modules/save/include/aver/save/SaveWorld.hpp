@@ -33,12 +33,29 @@ using BeginPlayFn = void (*)(scene::Entity e, void* user);
 // released. Plain entities are destroyed through World::destroy and never reach this.
 using DestroyActorFn = void (*)(scene::Entity e, void* user);
 
+// GRAPH-LOCAL VARIABLES (Aver.Graph's own GraphVarStore) live entirely in MANAGED memory, with no
+// representation in the native scene at all -- there is no component this module's ordinary,
+// generic field capture (OcSave.hpp's own "generic over components, by name" design) could ever
+// see. These two seams are the second, narrower door that lets a save reach them anyway, without
+// this module gaining an edge to Aver.Framework OR Aver.Graph -- the identical reasoning
+// spawnClass/classOf/beginPlay/destroyActor above already gives, applied to a kind of state those
+// four cannot touch. COUNT THEN INDEX, matching aver_fw_graph_var_count/_at's own shape
+// (framework_abi.h) exactly, since that ABI is what a host's implementation of these ultimately
+// relays through.
+using GraphVarCountFn = i32 (*)(scene::Entity e, void* user);
+using GraphVarAtFn    = i32 (*)(scene::Entity e, i32 index, char* nameBuf, i32 nameBufLen,
+                                u32* outKind, f32* outF, i32* outI, void* user);
+using GraphVarSetFn   = i32 (*)(scene::Entity e, const char* name, u32 kind, f32 f, i32 i, void* user);
+
 // The seams a host supplies. Every one may be null; the effect of leaving one null is stated.
 struct Host {
     SpawnClassFn   spawnClass   = nullptr;   // null: actors restore as PLAIN entities, and say so
     ClassOfFn      classOf      = nullptr;   // null: nothing is recognised as an actor
     BeginPlayFn    beginPlay    = nullptr;   // null: a restored actor never begins play
     DestroyActorFn destroyActor = nullptr;   // null: actors are torn down as plain entities
+    GraphVarCountFn graphVarCount = nullptr; // null: no entity is ever asked for graph VARs
+    GraphVarAtFn    graphVarAt    = nullptr; // null: capture() never reads them (paired with above)
+    GraphVarSetFn   graphVarSet   = nullptr; // null: restore() never writes them; graphs keep defaults
     void*          user         = nullptr;
 };
 

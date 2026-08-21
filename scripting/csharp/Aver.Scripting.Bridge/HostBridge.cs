@@ -912,6 +912,7 @@ public static class HostBridge
             // positive entity id in s_graphs, so the order is still a real, stated choice: a class-
             // spawned instance's own host wins if an id were ever to appear in both.
             GraphEvents.Router = FireEventRouter;
+            InstallGraphVarProvider();
         }
         catch (Exception ex)
         {
@@ -950,6 +951,136 @@ public static class HostBridge
                  "[Scripting] the framework refused the managed dispatch table (contract or size mismatch) "
                  + "- actor scripts are disabled");
         return ok;
+    }
+
+    // ================================================================== graph-VAR persistence
+    //
+    // A SEPARATE provider pair from ManagedDispatch above, deliberately: this answers a save, not an
+    // actor lifecycle event, and reuses aver_fw_set_save_provider/aver_fw_set_anim_curve_provider's
+    // OWN shape (framework_abi.h) -- a small, independently-installable trio -- rather than growing
+    // ManagedDispatch's versioned struct for a concern that has nothing to do with bind/tick/endPlay.
+    // Nothing stops the INSTALLER being C# here where every prior "set_provider" call in this engine
+    // happens to be C++-to-C++: the mechanism (a plain cdecl function pointer plus a void* user, with
+    // a null provider answering 0/false) does not care which language calls it, only that ONE
+    // composition root calls it. See modules/save/include/aver/save/SaveWorld.hpp's own comment on
+    // GraphVarCountFn for why the save module needs this seam at all -- GraphVarStore is pure managed
+    // state with no representation in the native scene.
+    //
+    // SCOPED TO GameInstance: an explicit, later user decision -- VARs persist ONLY for entities
+    // whose class is GameInstance or a subclass, not every graph-hosted entity. All three provider
+    // methods below resolve the host through FindPersistedGraphHost (which layers the class-flag
+    // check on top of FindGraphHost), never FindGraphHost directly.
+    // Routed through Fw.aver_fw_set_graph_var_provider (Aver.Framework/Native.cs), NOT a raw
+    // [DllImport("Aver.Framework")] declared in this assembly -- see that declaration's own comment
+    // for why a bridge-local DllImport resolves to the wrong same-name DLL and fails with
+    // EntryPointNotFoundException despite the native export genuinely existing.
+    private static unsafe void InstallGraphVarProvider()
+    {
+        Fw.aver_fw_set_graph_var_provider(
+            (IntPtr)(delegate* unmanaged[Cdecl]<int, IntPtr, int>)&GraphVarCountProvider,
+            (IntPtr)(delegate* unmanaged[Cdecl]<int, int, byte*, int, int*, float*, int*, IntPtr, int>)&GraphVarAtProvider,
+            (IntPtr)(delegate* unmanaged[Cdecl]<int, byte*, int, float, int, IntPtr, int>)&GraphVarSetProvider,
+            IntPtr.Zero);
+    }
+
+    // A VAR's declared PinType, as the AVER_SCENE_KIND_* the save format's OcSaveField.kind carries
+    // (scene_abi.h) -- NOT the same integer as PinType's own ordinal (Float=0,Int=1,Bool=2 there;
+    // F32=0,I32=3,BOOL=4 here), so this is a real translation, not a cast. -1 for Exec, which a VAR
+    // can never declare (OcGraphParser rejects "VAR ... exec" at parse time) and which every caller
+    // below therefore treats as "this provider has a bug", not a normal refusal.
+    private static int SceneKindOf(PinType t) => t switch
+    {
+        PinType.Float => 0,   // AVER_SCENE_KIND_F32
+        PinType.Int   => 3,   // AVER_SCENE_KIND_I32
+        PinType.Bool  => 4,   // AVER_SCENE_KIND_BOOL
+        _             => -1,
+    };
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static int GraphVarCountProvider(int entity, IntPtr user)
+    {
+        // Graph.Variables, not VarStore: the STORE holds only whatever has been written so far
+        // (nothing, on a freshly-bound instance), while Variables is the DECLARED list -- every VAR
+        // this graph has, in file order, whether or not anything has touched it yet. Capture must see
+        // all of them, seeded default or not, or a save silently omits a variable nobody has written
+        // this session. FindPersistedGraphHost, not FindGraphHost: a non-GameInstance entity reports
+        // zero VARs here, so SaveWorld.cpp's captureGraphVars sees "nothing to capture" for it, exactly
+        // as if it had no GraphHost at all.
+        return FindPersistedGraphHost(entity)?.Graph?.Variables.Count ?? 0;
+    }
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static unsafe int GraphVarAtProvider(int entity, int index, byte* nameBuf, int nameBufLen,
+                                                 int* outKind, float* outF, int* outI, IntPtr user)
+    {
+        GraphHost? host = FindPersistedGraphHost(entity);
+        List<GraphVariable>? vars = host?.Graph?.Variables;
+        if (vars == null || (uint)index >= (uint)vars.Count || nameBuf == null || nameBufLen <= 0)
+            return 0;
+
+        GraphVariable v = vars[index];
+        int kind = SceneKindOf(v.Type);
+        if (kind < 0) return 0;   // unreachable in practice -- see SceneKindOf's own comment
+
+        // A caller-owned buffer, not a returned pointer: the name lives in MANAGED memory
+        // (GraphVariable.Name), and handing native code a raw pointer into it would be a GC hazard
+        // the moment anything moved -- the same reason every other string in this file crosses the
+        // ABI by value (aver_scene_get_str) or, here for the first time in this direction, by copy.
+        byte[] utf8 = Encoding.UTF8.GetBytes(v.Name);
+        if (utf8.Length >= nameBufLen)
+        {
+            // A VAR name longer than the buffer -- vanishingly unlikely (63 UTF8 bytes is a very
+            // long identifier) but handled rather than overflowing: this ONE var is skipped: entity
+            // '{}': the SaveWorld.cpp code counts how many at() calls actually succeeded against the
+            // count() this call belongs to, so a caller can tell fewer arrived than were promised.
+            return 0;
+        }
+        Marshal.Copy(utf8, 0, (IntPtr)nameBuf, utf8.Length);
+        nameBuf[utf8.Length] = 0;
+
+        *outKind = kind;
+        GraphVarStore store = host!.VarStore!;   // non-null: Graph is non-null, so Load() ran CreateFor
+        switch (v.Type)
+        {
+            case PinType.Float: *outF = store.GetFloat(v.Name); *outI = 0;    break;
+            case PinType.Int:   *outI = store.GetInt(v.Name);   *outF = 0f;   break;
+            case PinType.Bool:  *outI = store.GetBool(v.Name) ? 1 : 0; *outF = 0f; break;
+            default: return 0;   // unreachable -- SceneKindOf already refused any other PinType
+        }
+        return 1;
+    }
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static unsafe int GraphVarSetProvider(int entity, byte* namePtr, int kind, float f, int i, IntPtr user)
+    {
+        GraphHost? host = FindPersistedGraphHost(entity);
+        GraphVarStore? store = host?.VarStore;
+        if (store == null || namePtr == null) return 0;
+
+        string? name = Marshal.PtrToStringUTF8((IntPtr)namePtr);
+        if (string.IsNullOrEmpty(name)) return 0;
+
+        // DECLARED, not merely "the store happens to have this key" -- CreateFor seeds every
+        // declared VAR at Load() time, so a name the store does not recognise is a name this
+        // graph never declared, exactly the "field no longer exists" case applyField (C++) treats
+        // as a dropped field rather than a crash. Matched here for the identical reason.
+        GraphVariable? declared = host!.Graph?.Variables.Find(v => v.Name == name);
+        if (declared == null) return 0;
+
+        // A KIND MISMATCH IS A DROPPED FIELD, not a crash -- the same rule applyField (SaveWorld.cpp)
+        // already enforces for ordinary component fields, applied here for the identical reason: a
+        // save whose VAR changed declared type between builds must not reinterpret four saved bytes
+        // as the wrong kind.
+        if (SceneKindOf(declared.Type) != kind) return 0;
+
+        switch (declared.Type)
+        {
+            case PinType.Float: store.SetFloat(name, f);        break;
+            case PinType.Int:   store.SetInt(name, i);          break;
+            case PinType.Bool:  store.SetBool(name, i != 0);    break;
+            default: return 0;   // unreachable -- SceneKindOf already refused any other PinType
+        }
+        return 1;
     }
 
     // Declares the five framework base types as lineage roots. Abstract, and never MANAGED. Then
@@ -1422,13 +1553,41 @@ public static class HostBridge
     // closure would propagate out of whatever Tick()/Fire() call is currently running, exactly the
     // same "runtime errors are not swallowed" contract GraphHost's own class comment already documents
     // for every other node -- this method simply never manufactures one of its own to swallow.
+    // Entity -> live GraphHost, checking BOTH tables a graph can be reached through -- factored out
+    // of FireEventRouter (its own original home) so the graph-VAR save provider below can reach the
+    // identical entity, with no second, possibly-drifting notion of "which host owns this entity".
+    // s_graphInstances first, s_graphs second: a class-spawned instance's own host wins if an id
+    // were ever to appear in both (s_graphs is the drone/MCP-harness "a caller manages this entity's
+    // graph by hand" table and, in ordinary play, never collides with a real spawned entity's id --
+    // see s_graphInstances' own field comment for the fuller account).
+    private static GraphHost? FindGraphHost(int entity)
+    {
+        if (s_graphInstances.TryGetValue(entity, out GraphInstanceLive? instanceLive))
+            return instanceLive.Host;
+        if (s_graphs.TryGetValue(entity, out GraphHost? bareHost))
+            return bareHost;
+        return null;
+    }
+
+    // GraphVarCountProvider/At/Set below must see ONLY entities whose class is GameInstance or a
+    // subclass -- an explicit, later user decision narrowing what was originally "every entity with
+    // a live GraphHost". Reuses the class-flag check every other class-kind gate in this file already
+    // uses (see the aver_fw_class_get_flags(... & ClassFlags.Managed/GameMode ...) calls elsewhere) --
+    // flags propagate through inheritance at class-declare time, so this also matches a graph class
+    // parented to the built-in "GameInstance" base (DeclareBaseClasses, ClassFlags.GameInstance),
+    // not just a C# AverGameInstance subclass. No new native ABI: aver_fw_class_of/get_flags already
+    // exist. Deliberately NOT used by FireEventRouter -- FireEvent must keep reaching every entity.
+    private static GraphHost? FindPersistedGraphHost(int entity)
+    {
+        int c = Fw.aver_fw_class_of(entity);
+        if (c == 0 || (Fw.aver_fw_class_get_flags(c) & ClassFlags.GameInstance) == 0)
+            return null;
+        return FindGraphHost(entity);
+    }
+
     private static bool FireEventRouter(int targetEntity, string eventName)
     {
-        GraphHost? host = null;
-        if (s_graphInstances.TryGetValue(targetEntity, out GraphInstanceLive? instanceLive))
-            host = instanceLive.Host;
-        else if (s_graphs.TryGetValue(targetEntity, out GraphHost? bareHost))
-            host = bareHost;
+        GraphHost? host = FindGraphHost(targetEntity);
 
         if (host == null)
         {

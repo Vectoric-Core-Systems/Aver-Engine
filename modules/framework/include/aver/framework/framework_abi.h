@@ -210,6 +210,56 @@ AVER_FW_ABI int32_t aver_fw_set_anim_curve_provider(aver_fw_anim_curve_fn fn, vo
  * FROM A VALUE OF ZERO: a curve that reads 0 and a curve that is not there mean opposite things. */
 AVER_FW_ABI int32_t aver_fw_anim_curve(int32_t entity, int64_t nameHash, float* outValue);
 
+/* ---- GRAPH-LOCAL VARIABLES, RELAYED -----------------------------------------------------------
+ *
+ * The framework does not know what a graph is and does not link the module that does, for the
+ * same reason it does not know what a save file is (aver_fw_set_save_provider, three sections up)
+ * or an animation curve. A host installs a provider and these forward.
+ *
+ * WHY THIS EXISTS: a save must capture and restore graph-local VAR storage (Aver.Graph's own
+ * GraphVarStore), which is pure managed state with no representation in the native scene at all --
+ * see modules/save/include/aver/save/SaveWorld.hpp's own header for why that module cannot reach
+ * Aver.Framework, let alone Aver.Graph, to get at it directly. This is the seam that lets a save
+ * do it anyway, without either module gaining an edge it must not have.
+ *
+ * COUNT THEN INDEX, not one bulk call, and deliberately: everything else in this file is scalars
+ * and const char* (see the file's own opening comment) -- a struct or an array-of-structs crossing
+ * here would be the first of either. A handful of ABI calls per entity, only during a save or a
+ * load, costs nothing worth avoiding that purity for.
+ *
+ * A host that installs nothing leaves every one of these returning 0 -- a game with no graph
+ * scripting reports exactly that, the same as a clip with no such curve does for
+ * aver_fw_anim_curve. */
+typedef int32_t (AVER_FW_CALL* aver_fw_graph_var_count_fn)(int32_t entity, void* user);
+/* Fills the name (into nameBuf, capacity nameBufLen bytes, UTF8, always NUL-terminated even when
+ * truncated), kind (AVER_SCENE_KIND_F32/I32/BOOL -- scene_abi.h; a VAR is never any other kind)
+ * and value (outF for F32, outI for I32/BOOL -- the same "kind decides which member" convention
+ * aver::fmt::OcSaveField's own fields use) of VAR `index`, 0..count-1 in DECLARATION order. */
+typedef int32_t (AVER_FW_CALL* aver_fw_graph_var_at_fn)(int32_t entity, int32_t index,
+                                                        char* nameBuf, int32_t nameBufLen,
+                                                        int32_t* outKind, float* outF,
+                                                        int32_t* outI, void* user);
+/* Sets one VAR by name on the entity's live graph host. 0 when there is no host, the name was
+ * never declared, or `kind` disagrees with what was declared -- the identical "a kind mismatch is
+ * a dropped field, not a crash" rule aver::save::applyField already applies to component fields. */
+typedef int32_t (AVER_FW_CALL* aver_fw_graph_var_set_fn)(int32_t entity, const char* name,
+                                                          int32_t kind, float f, int32_t i,
+                                                          void* user);
+/* Installs the trio. Any may be null. Always returns 1. */
+AVER_FW_ABI int32_t aver_fw_set_graph_var_provider(aver_fw_graph_var_count_fn count,
+                                                   aver_fw_graph_var_at_fn at,
+                                                   aver_fw_graph_var_set_fn setVar, void* user);
+/* How many graph-local VARs entity `e`'s live graph host currently holds. 0 for no provider, no
+ * host, or a graph declaring none. */
+AVER_FW_ABI int32_t aver_fw_graph_var_count(int32_t e);
+/* Relays to the installed provider's at() -- see aver_fw_graph_var_at_fn's own comment. 0 (and
+ * *outKind/*outF/*outI left untouched) for no provider or an out-of-range index. */
+AVER_FW_ABI int32_t aver_fw_graph_var_at(int32_t e, int32_t index, char* nameBuf,
+                                         int32_t nameBufLen, int32_t* outKind, float* outF,
+                                         int32_t* outI);
+/* Relays to the installed provider's setVar() -- see aver_fw_graph_var_set_fn's own comment. */
+AVER_FW_ABI int32_t aver_fw_graph_var_set(int32_t e, const char* name, int32_t kind, float f, int32_t i);
+
 /* The session singletons begin_play populated; each is 0 in EDITOR. */
 AVER_FW_ABI int32_t aver_fw_game_instance(void);
 /* The running session's GameMode. */

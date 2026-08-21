@@ -661,6 +661,40 @@ int32_t aver_fw_anim_curve(int32_t entity, int64_t nameHash, float* outValue) {
     return g_animCurve(entity, nameHash, outValue, g_animCurveUser);
 }
 
+// ---- GRAPH-LOCAL VARIABLES, RELAYED -----------------------------------------------------------
+// Same shape as g_animCurve just above, for the same reason: only a composition root links both
+// Aver.Framework and Aver.Graph, so this file holds a function pointer instead of an edge to it.
+// NOT ATOMIC, matching every other provider in this file.
+aver_fw_graph_var_count_fn g_graphVarCount = nullptr;
+aver_fw_graph_var_at_fn    g_graphVarAt    = nullptr;
+aver_fw_graph_var_set_fn   g_graphVarSet   = nullptr;
+void* g_graphVarUser = nullptr;
+
+int32_t aver_fw_set_graph_var_provider(aver_fw_graph_var_count_fn count, aver_fw_graph_var_at_fn at,
+                                       aver_fw_graph_var_set_fn setVar, void* user) {
+    g_graphVarCount = count;
+    g_graphVarAt    = at;
+    g_graphVarSet   = setVar;
+    g_graphVarUser  = user;
+    return 1;
+}
+
+int32_t aver_fw_graph_var_count(int32_t e) {
+    if (!g_graphVarCount) return 0;
+    return g_graphVarCount(e, g_graphVarUser);
+}
+
+int32_t aver_fw_graph_var_at(int32_t e, int32_t index, char* nameBuf, int32_t nameBufLen,
+                             int32_t* outKind, float* outF, int32_t* outI) {
+    if (!g_graphVarAt || !nameBuf || nameBufLen <= 0 || !outKind || !outF || !outI) return 0;
+    return g_graphVarAt(e, index, nameBuf, nameBufLen, outKind, outF, outI, g_graphVarUser);
+}
+
+int32_t aver_fw_graph_var_set(int32_t e, const char* name, int32_t kind, float f, int32_t i) {
+    if (!g_graphVarSet || !name || !*name) return 0;
+    return g_graphVarSet(e, name, kind, f, i, g_graphVarUser);
+}
+
 // Dispatches OnBeginPlay on an actor spawned without it. See the header for why the split exists.
 int32_t aver_fw_dispatch_begin_play(int32_t e, int32_t reason) {
     const Entity ent = static_cast<Entity>(static_cast<uint32_t>(e));
