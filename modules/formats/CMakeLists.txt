@@ -28,6 +28,8 @@ aver_add_module(Aver.Formats
     # .ocsave -- a whole world captured generically. In the BASE target because it needs only the
     # AVR1 container: a field KIND crosses it as a plain u32, so this never reaches Aver.Scene.
     src/OcSave.cpp
+    # .ocnav -- baked navigation. Beside the other AVR1 readers; it is a grid and a header.
+    src/OcNav.cpp
     src/Texture.cpp
   DEPS
     Aver.Core

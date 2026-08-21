@@ -201,6 +201,9 @@ add_subdirectory(modules/formats.roslyn)
 # Animation sampling, above formats because it reads .ocskel/.ocanim through it and below anything
 # that draws. Posing a skeleton is arithmetic, so this needs no RHI and never will.
 add_subdirectory(modules/anim)
+# Synapse: navigation and pathfinding. Core+Formats only, so it builds and tests with no scene,
+# no physics and no device -- see the module's own CMakeLists for why that split is the point.
+add_subdirectory(modules/synapse)
 # Sub-bone vertex deformation, above anim because a cage is generated against a skeleton's rest
 # pose. Optional: a game that only needs bone skinning does not link it.
 if(AVER_MODULE_DEFORM)
@@ -465,6 +468,10 @@ if(AVER_BUILD_TESTS)
   endif()
   if(TARGET Aver.Settings)
     add_subdirectory(tests/settings)
+  endif()
+
+  if(TARGET Aver.Synapse)
+    add_subdirectory(tests/synapse)
   endif()
   if(AVER_MODULE_FRAMEWORK)
     add_subdirectory(tests/framework)
