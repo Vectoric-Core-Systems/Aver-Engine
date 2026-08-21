@@ -1706,11 +1706,33 @@ LineHandle VulkanDevice::createLineMesh(const LineVertex* verts, u32 count) {
     return static_cast<LineHandle>(lineMeshes_.size());
 }
 
+bool VulkanDevice::destroyLineMesh(LineHandle mesh) {
+    if (mesh == 0 || mesh > lineMeshes_.size()) return false;
+    GpuLineMesh& m = lineMeshes_[mesh - 1];
+    if (m.vb == VK_NULL_HANDLE) return false;   // already released; saying so beats reporting a second success
+    // DEFERRED, not immediate -- the same reason as the D3D12 twin. A frame already submitted may
+    // still be reading this buffer, and vkDestroyBuffer on it is undefined behaviour that surfaces
+    // as a validation error somewhere unrelated. VulkanResourceFactory::retire runs the deleter
+    // once the timeline semaphore has passed the value this frame retires behind, which is exactly
+    // the machinery destroyBuffer already uses for factory-owned buffers (see its own retire call).
+    VkBuffer buf = m.vb;
+    VkDeviceMemory mem = m.vbMemory;
+    if (rhiFactory_) rhiFactory_->retire([this, buf, mem]() { destroyBufferCommitted(*this, buf, mem); });
+    else destroyBufferCommitted(*this, buf, mem);   // no factory: nothing was ever submitted either
+    // The slot is CLEARED AND KEPT, never recycled -- see IDevice::destroyLineMesh.
+    m.vb = VK_NULL_HANDLE;
+    m.vbMemory = VK_NULL_HANDLE;
+    m.count = 0;
+    return true;
+}
+
 void VulkanDevice::drawLines(LineHandle mesh, const f32 world[16]) {
     if (!hasSwapchain_ || mesh == 0 || mesh > lineMeshes_.size()) return;
     // suppressesWholeFrame, matching D3D12: gizmos belong in a ray-driven viewport.
     for (IRenderFeature* f : features_) if (f->suppressesWholeFrame()) return;
     const GpuLineMesh& m = lineMeshes_[mesh - 1];
+    // A DESTROYED MESH DRAWS NOTHING -- the half that makes the kept-slot contract true.
+    if (m.vb == VK_NULL_HANDLE || m.count == 0) return;
     VkCommandBuffer cmd = commandBuffers_[frameIndex_];
     const u32 zeroOffset = 0;
     api_.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, lineDepth_ ? linePso_ : lineOverlayPso_);

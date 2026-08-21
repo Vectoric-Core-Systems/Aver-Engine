@@ -964,6 +964,7 @@ public:
     MeshHandle createMesh(const MeshVertex* verts, u32 vcount, const u32* indices, u32 icount) override;
     MeshHandle createSkinTargetMesh(MeshHandle source, BufferHandle* outVertices) override;
     bool destroyMesh(MeshHandle mesh) override;
+    bool destroyLineMesh(LineHandle mesh) override;
     BufferHandle meshVertexBuffer(MeshHandle mesh) const override {
         if (!mesh || mesh > meshes_.size()) return 0;
         const GpuMesh& m = meshes_[mesh - 1];
@@ -3204,6 +3205,25 @@ LineHandle D3D12Device::createLineMesh(const LineVertex* verts, u32 count) {
     return static_cast<LineHandle>(lineMeshes_.size());
 }
 
+// Releases a line mesh. The SLOT stays, marked dead -- see IDevice::destroyLineMesh for why a
+// stale handle must never be handed a live mesh.
+bool D3D12Device::destroyLineMesh(LineHandle mesh) {
+    if (mesh == 0 || mesh > lineMeshes_.size()) return false;
+    GpuLineMesh& m = lineMeshes_[mesh - 1];
+    if (!m.vb) return false;   // already released; saying so beats pretending it worked twice
+    // DEFERRED, not immediate. The GPU may still be reading this buffer for a frame already in
+    // flight, and an UPLOAD-heap resource released under a live command list is a use-after-free
+    // that the debug layer reports somewhere else entirely, if at all. The resource factory already
+    // owns a fence-keyed retire list for exactly this (D3D12ResourceFactory::retire), which is what
+    // destroyMesh reaches indirectly through destroyBuffer -- a line buffer joins the same list
+    // rather than growing a second mechanism beside it.
+    if (rhiFactory_) rhiFactory_->retire(m.vb);
+    m.vb.Reset();
+    m.vbv = D3D12_VERTEX_BUFFER_VIEW{};
+    m.count = 0;
+    return true;
+}
+
 // Draws a line list, unless a feature has replaced the whole frame.
 void D3D12Device::drawLines(LineHandle mesh, const f32 world[16]) {
     if (!hasSwapchain_ || mesh == 0 || mesh > lineMeshes_.size()) return;
@@ -3211,6 +3231,10 @@ void D3D12Device::drawLines(LineHandle mesh, const f32 world[16]) {
     // depth-test against the real depth the ray pass writes.
     for (IRenderFeature* f : features_) if (f->suppressesWholeFrame()) return;
     const GpuLineMesh& m = lineMeshes_[mesh - 1];
+    // A DESTROYED MESH DRAWS NOTHING. The slot is kept so a stale handle names something dead
+    // rather than something live (see IDevice::destroyLineMesh); this is the half that makes that
+    // true, instead of binding a null vertex view and asking the driver for zero primitives.
+    if (!m.vb || m.count == 0) return;
     bindGraphicsRoot(rootSig_.Get());
     cmdList_->SetPipelineState(lineDepth_ ? linePso_.Get() : lineOverlayPso_.Get());
     cmdList_->SetGraphicsRoot32BitConstants(kSceneObjectParam, 16, world, 0);

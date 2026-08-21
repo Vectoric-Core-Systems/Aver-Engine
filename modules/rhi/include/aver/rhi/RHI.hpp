@@ -477,6 +477,20 @@ public:
     // Unlit line geometry (grid, gizmos): per-vertex colour, drawn as a line list.
     virtual LineHandle createLineMesh(const LineVertex* verts, u32 count) { (void)verts; (void)count; return 0; }
     virtual void drawLines(LineHandle mesh, const f32 world[16]) { (void)mesh; (void)world; }
+    // Releases a line mesh's GPU memory. False for a stale or already-released handle.
+    //
+    // WHY THIS HAD TO EXIST. Every line mesh is a committed UPLOAD-heap buffer and there was no way
+    // to free one -- createLineMesh appended to a vector that only ever grew. Fine for the handful
+    // the editor builds once at startup (the grid, the gizmo, the sculpt ring); a leak per rebuild
+    // for anything that CHANGES, which is every debug overlay worth drawing: a navmesh, an agent's
+    // current path, a perception cone. docs/CHUNKS.md raised exactly this for meshes (B6) and
+    // destroyMesh was added; line meshes were missed.
+    //
+    // THE SLOT IS KEPT, NOT RECYCLED, exactly as destroyMesh does and for the reason stated there:
+    // a stale handle must address a DEAD mesh rather than a live one. Handing handle 3 to a new
+    // caller means whoever still held the old 3 starts drawing somebody else's geometry -- a bug
+    // that looks like corruption and cannot be traced back to here.
+    virtual bool destroyLineMesh(LineHandle mesh) { (void)mesh; return false; }
 
     // Mesh shader geometry path (mesh-shader Tier 1 + SM 6.5), replacing the input-assembler vertex
     // path for every draw. Ignored when unavailable.

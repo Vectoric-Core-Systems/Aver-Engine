@@ -1150,6 +1150,7 @@ public:
     bool selfTest(const f32 inRGBA[4], f32 outRGBA[4]) override;
     MeshHandle createMesh(const MeshVertex* verts, u32 vertexCount, const u32* indices, u32 indexCount) override;
     bool destroyMesh(MeshHandle mesh) override;
+    bool destroyLineMesh(LineHandle mesh) override;
     MeshHandle createSkinTargetMesh(MeshHandle source, BufferHandle* outVertices) override;
     BufferHandle meshVertexBuffer(MeshHandle mesh) const override;
     bool meshGeometry(MeshHandle mesh, BufferHandle* vb, BufferHandle* ib, u32* vertexCount, u32* indexCount) const override;
