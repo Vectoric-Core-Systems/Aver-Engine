@@ -187,6 +187,9 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 // itself: the game runtime needs the identical one, and one of the two would drift.
 #include "aver/world/ScatterPalette.hpp"
 #endif
+#if AVER_MODULE_SYNAPSE_SCENE
+#include "aver/synapse/SynapseAgent.hpp"
+#endif
 
 #if AVER_WITH_IMGUI
 #include "imgui.h"
@@ -846,6 +849,13 @@ public:
         }
 #endif
 
+#if AVER_MODULE_SYNAPSE_SCENE
+        // Mirrors GameApp::onInit's own placement: before any project opens, needs no level and no
+        // physics. registerComponent is idempotent, so re-entering onInit (there is no such path
+        // today, but nothing here assumes otherwise) would not re-register a second CSynapseAgent.
+        synapse::agentSystem().registerComponents(scene::World::instance());
+#endif
+
         // RESOLVED BEFORE THE PROJECT OPENS, AND THAT IS THE WHOLE POINT. This decision used to live
         // further down onInit, which reads as harmless -- it is the same code, a few hundred lines
         // later -- and silently disabled the entire GPU per-cluster path for the process lifetime.
@@ -1365,6 +1375,12 @@ public:
             // the answer comes from. Installed unconditionally -- unlike the notify sink it needs no
             // scripting host, because a C++ caller can ask too.
             aver_fw_set_anim_curve_provider(&SandboxApp::animCurve, this);
+
+#if AVER_MODULE_SYNAPSE_SCENE
+            // GetSynapseTarget (Aver Node) reaches CSynapseAgent's current waypoint through this --
+            // same reason and same placement as the anim-curve provider immediately above.
+            aver_fw_set_synapse_target_provider(&SandboxApp::synapseTarget, this);
+#endif
 
             // SAVE/LOAD, so a project can test its own save path in the editor rather than only in
             // a shipped game -- which, given there is no packaged game today, is the only place it
@@ -2194,6 +2210,19 @@ public:
             }
         }
         scene::World::instance().flush();
+#if AVER_MODULE_SYNAPSE_SCENE && AVER_MODULE_FRAMEWORK
+        // GATED ON PLAY, matching the physics/fw_tick block above -- pathing and movement targets
+        // are gameplay, not an authoring-time preview the way an animation clip or a particle
+        // effect is (those loop for an artist to look at regardless of Play state; an AI agent
+        // chasing a goal has nothing meaningful to do while nothing else in the level is moving
+        // either). Same condition as that block, re-evaluated here rather than threaded through as
+        // a local: --spawn-test widens it there for the identical CLI-harness reason.
+        //
+        // nav_ may be empty or a frame stale (loadNavForLevel/navBakeCheck poll from onRender, not
+        // here) -- AgentSystem::tick treats that as "wait for a grid", not an error.
+        if (!spawnTestClass_.empty() || aver_fw_play_state() == AVER_FW_PLAY_PLAYING)
+            synapse::agentSystem().tick(scene::World::instance(), &nav_);
+#endif
 #endif
 #if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE
         drivePlayCamera();
@@ -10946,6 +10975,21 @@ private:
         *outValue = v;
         return 1;
     }
+
+#if AVER_MODULE_SYNAPSE_SCENE
+    // Answers the framework's relayed Synapse steering-target query -- same shape as animCurve
+    // immediately above, installed the same way.
+    static i32 synapseTarget(i32 entity, f32* outX, f32* outY, f32* outZ, void*) {
+        scene::World& w = scene::World::instance();
+        const auto* a = w.component<synapse::CSynapseAgent>(static_cast<scene::Entity>(entity),
+                                                             synapse::agentSystem().componentType());
+        if (!a || a->status != static_cast<i32>(synapse::AgentStatus::Pathing)) return 0;
+        *outX = a->targetXCm;
+        *outY = a->targetYCm;
+        *outZ = a->targetZCm;
+        return 1;
+    }
+#endif
 
     static void animNotify(scene::Entity e, const char* name, void* user) {
         auto* self = static_cast<SandboxApp*>(user);

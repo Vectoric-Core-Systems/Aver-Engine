@@ -21,6 +21,9 @@
 #  include "aver/save/SaveWorld.hpp"
 #  include "aver/formats/OcSave.hpp"
 #endif
+#if AVER_MODULE_SYNAPSE_SCENE
+#  include "aver/synapse/SynapseAgent.hpp"
+#endif
 #if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
 #  include "aver/particles/ParticleSystem.hpp"
 // --particle-test's own content (spawnParticleTestContent, below) needs the component types,
@@ -195,6 +198,20 @@ u32 parseU32(const char* s, u32 fallback) {
     if (end == s || v == 0) return fallback;
     return static_cast<u32>(v);
 }
+
+#if AVER_MODULE_SYNAPSE_SCENE
+// A level's own .ocnav sits beside it with the same stem -- e.g. Content/Maps/Arena.ocworld ->
+// Content/Maps/Arena.ocnav. Deliberately a SEPARATE copy of sandbox/src/NavBakeCommand.cpp's own
+// navPathForLevel, not a shared call: that file is editor-only (sandbox/), and this composition
+// root must not depend on it for a five-line string derivation.
+std::string navPathForLevel(const std::string& levelPath) {
+    if (levelPath.empty()) return {};
+    const usize slash = levelPath.find_last_of("/\\");
+    const usize dot = levelPath.find_last_of('.');
+    const bool hasExt = dot != std::string::npos && (slash == std::string::npos || dot > slash);
+    return (hasExt ? levelPath.substr(0, dot) : levelPath) + ".ocnav";
+}
+#endif
 
 // Logs one line per file the engine opens. Installed only under --trace-opens.
 //
@@ -736,6 +753,23 @@ void GameApp::openProject(Engine& e) {
     content_.loadProjectParticleEffects();
 #endif
     level_.loadStartMap(project_, content_);
+#if AVER_MODULE_SYNAPSE_SCENE
+    // OPTIONAL, and silently so: most levels have no baked navigation, loadOcNav's own failure path
+    // leaves gameNav_ default-constructed (empty, OcNavData::valid() == false), and
+    // AgentSystem::tick already treats that identically to "no grid yet" -- an agent with a goal
+    // simply waits rather than failing. Only worth a WARN, never an ERROR: this is not the game
+    // failing to start.
+    {
+        std::string navErr;
+        const std::string navPath = navPathForLevel(level_.path());
+        if (!navPath.empty() && fmt::loadOcNav(navPath, gameNav_, &navErr)) {
+            AVER_INFO("[Game] navigation: '{}' ({}x{} cells)", navPath, gameNav_.widthCells, gameNav_.heightCells);
+        } else if (!navPath.empty()) {
+            AVER_INFO("[Game] navigation: no baked '{}' ({}) -- Synapse agents will wait for a goal grid",
+                      navPath, navErr);
+        }
+    }
+#endif
     // Apply the level's sun and sky settings
     applyLevelSky();
     fitGiVolumeToLevel();
@@ -807,6 +841,12 @@ void GameApp::initScripting() {
         // SAVE/LOAD. The framework relays; this is what it relays to.
         aver_fw_set_save_provider(&saveWriteProvider, &saveLoadProvider, this);
 
+#if AVER_MODULE_SYNAPSE_SCENE
+        // GetSynapseTarget (Aver Node) reaches CSynapseAgent's current waypoint through this --
+        // same reason and same placement as the anim-curve provider immediately above.
+        aver_fw_set_synapse_target_provider(&GameApp::synapseTarget, this);
+#endif
+
         if (scripts_.graphFireAvailable()) {
             anim::animSystem().setNotifySink(&GameApp::animNotify, this);
             AVER_INFO("[Anim] animation notifies will be raised as graph events");
@@ -839,6 +879,19 @@ i32 GameApp::animCurve(i32 entity, i64 nameHash, f32* outValue, void*) {
     *outValue = v;
     return 1;
 }
+
+#if AVER_MODULE_SYNAPSE_SCENE
+i32 GameApp::synapseTarget(i32 entity, f32* outX, f32* outY, f32* outZ, void*) {
+    scene::World& w = scene::World::instance();
+    const auto* a = w.component<synapse::CSynapseAgent>(static_cast<scene::Entity>(entity),
+                                                         synapse::agentSystem().componentType());
+    if (!a || a->status != static_cast<i32>(synapse::AgentStatus::Pathing)) return 0;
+    *outX = a->targetXCm;
+    *outY = a->targetYCm;
+    *outZ = a->targetZCm;
+    return 1;
+}
+#endif
 
 void GameApp::animNotify(scene::Entity e, const char* name, void* user) {
 #if AVER_MODULE_SCRIPTING
@@ -1271,6 +1324,12 @@ void GameApp::onInit(Engine& e) {
     attachParticles(e);
     if (cfg_.pcgVolumeTest) attachPcgTest(e);
     initPhysics();      // BEFORE openProject: level load builds a static body per colliding placement
+#if AVER_MODULE_SYNAPSE_SCENE
+    // BEFORE openProject, matching initPhysics() immediately above -- registration needs no level
+    // and no physics, and a class placement spawned by openProject that carries CSynapseAgent (a
+    // later slice's concern; none does yet) must find the component already registered.
+    synapse::agentSystem().registerComponents(scene::World::instance());
+#endif
     openProject(e);
 #if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
     // AFTER openProject: needs registerBuiltins' unit cube (or spawns it itself when no project ever
@@ -1385,6 +1444,12 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     if (skinnedScene_) skinnedScene_->update(scene::World::instance(), anim::animSystem(), *e.device());
 
     scene::World::instance().flush();
+#if AVER_MODULE_SYNAPSE_SCENE
+    // AFTER flush: an agent must path from where physics/anim actually left it this frame, not from
+    // last frame's stale transform. gameNav_ may be empty (no baked navigation for this level, or
+    // none loaded yet) -- AgentSystem::tick treats that as "wait", not an error; see its own comment.
+    synapse::agentSystem().tick(scene::World::instance(), &gameNav_);
+#endif
 #endif
 
     // AFTER flush, BEFORE the view matrix is built in onRender. Reading pawn transforms before the

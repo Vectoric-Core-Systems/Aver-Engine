@@ -601,6 +601,87 @@ internal static class GraphInterop
         return true;
     }
 
+    // ================================================================== Synapse
+    //
+    // SynapseSteer computes; GetSynapseTarget reads. The two are deliberately independent of each
+    // other -- see the design doc's own "Steering" section for why SynapseSteer takes an explicit
+    // target rather than reading CSynapseAgent itself: the identical node then does direct chase
+    // (target = a seen enemy's live position) as readily as path-following (target =
+    // GetSynapseTarget's own output), and neither call needs to know which one a caller is doing.
+
+    /// <summary>GetSynapseTarget's own surface: the entity's CURRENT CSynapseAgent steering target,
+    /// as tracked by the native AgentSystem tick (framework_abi.h's aver_fw_synapse_target). FALSE
+    /// -- not (0,0,0) -- when the entity carries no CSynapseAgent or its status is not Pathing
+    /// (None/Requested/Arrived/Failed all mean "nothing to head toward right now"), the same "absent
+    /// is not zero" contract every other relayed graph read in this file already follows.</summary>
+    internal static bool SynapseGetTargetForGraph(int entity, out float x, out float y, out float z)
+    {
+        return Fw.aver_fw_synapse_target(entity, out x, out y, out z) != 0;
+    }
+
+    /// <summary>SynapseSteer's own surface: "where am I, which way am I facing, where do I want to
+    /// go" turned into the forward/right/yawDelta CharacterMove already knows how to consume (see
+    /// AverCharacter.Drive's own doc comment for their exact contract: forward/right are -1..1 axis
+    /// intent relative to the entity's CURRENT facing, and yawDelta is already a PER-FRAME degree
+    /// delta, not a rate). PURE MATH -- no native call beyond the position/forward reads
+    /// WorldPositionForGraph/EntityAxisForGraph already use, and no dependency on CSynapseAgent at
+    /// all.
+    ///
+    /// right is always 0: this node steers by TURNING toward the target (yawDelta, clamped to
+    /// +-turnRateDegPerSec*dt) rather than by strafing, which is enough for v1 and keeps the two
+    /// tuning knobs (how fast do I turn, how close is close enough) independent of a third. forward
+    /// eases toward 0 as the misalignment grows (cosine of the yaw error, floored at 0) so an agent
+    /// starting up to 180 degrees off its target turns in place first instead of visibly walking
+    /// away before it finishes turning -- see the design doc's own "visible jitter, say so" note for
+    /// why this is a floor on the roughness, not a promise of none.
+    ///
+    /// arrived is true, and forward/right/yawDelta are all left at 0, once the entity is within
+    /// arriveRadiusCm of the target (measured on the ground plane only, matching the 2.5D grid
+    /// Synapse paths across) -- a caller wires that straight into whatever decides "stop calling
+    /// CharacterMove now".</summary>
+    internal static bool SynapseSteerForGraph(int entity, float dt, float targetX, float targetY, float targetZ,
+                                              float turnRateDegPerSec, float arriveRadiusCm,
+                                              out float forward, out float right, out float yawDelta,
+                                              out bool arrived)
+    {
+        forward = 0f; right = 0f; yawDelta = 0f; arrived = false;
+        Entity e = new Entity(entity);
+        if (!e.IsAlive) return false;
+
+        Vec3 pos = e.WorldPosition;
+        Vec3 fwd = e.WorldForward;
+
+        float dx = targetX - pos.X, dy = targetY - pos.Y;
+        float dist = MathF.Sqrt(dx * dx + dy * dy);
+        if (dist <= arriveRadiusCm)
+        {
+            arrived = true;
+            return true;
+        }
+
+        float desiredYaw = MathF.Atan2(dy, dx) * (180f / MathF.PI);
+        float currentYaw = MathF.Atan2(fwd.Y, fwd.X) * (180f / MathF.PI);
+        float yawDiff = WrapDegrees(desiredYaw - currentYaw);
+
+        float maxStep = MathF.Abs(turnRateDegPerSec) * MathF.Max(dt, 0f);
+        yawDelta = Math.Clamp(yawDiff, -maxStep, maxStep);
+
+        float align = MathF.Cos(yawDiff * (MathF.PI / 180f));
+        forward = Math.Clamp(align, 0f, 1f);
+        return true;
+    }
+
+    /// <summary>Wraps a degree value to (-180, 180] -- the yaw-error convention SynapseSteer needs
+    /// so a target 179 degrees one way and 181 the other are recognised as the SAME one-degree turn,
+    /// not opposite ends of a 360-degree sweep.</summary>
+    private static float WrapDegrees(float degrees)
+    {
+        degrees %= 360f;
+        if (degrees > 180f) degrees -= 360f;
+        if (degrees < -180f) degrees += 360f;
+        return degrees;
+    }
+
     /// <summary>Entity.Translate: an INCREMENTAL offset, not an assignment. A graph nudging
     /// something every tick wants this rather than reading the position, adding, and writing it
     /// back through three nodes.</summary>

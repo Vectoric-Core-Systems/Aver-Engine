@@ -232,6 +232,11 @@ static int Main()
         // member of that family. See SaveLoadGameNodeTests.cs's own header comment.
         failures += SaveLoadGameNodeTests.RunAll();
 
+        // GetSynapseTarget / SynapseSteer: Synapse slice 4's graph-facing half. The native pathing
+        // itself is tested at the C++ level (tests/synapse/src/AgentTest.cpp); this covers the pin
+        // shapes and the wiring both compilers reach. See SynapseNodeTests.cs's own header comment.
+        failures += SynapseNodeTests.RunAll();
+
         if (failures == 0)
             Console.WriteLine("\nAll tests passed.");
         else

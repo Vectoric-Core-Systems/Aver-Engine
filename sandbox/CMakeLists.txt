@@ -121,6 +121,11 @@ if(TARGET Aver.Synapse)
   # nothing about physics or a scene -- src/NavBakeCommand.cpp is the piece that does.
   target_link_libraries(Sandbox PRIVATE Aver.Synapse)
 endif()
+if(TARGET Aver.Synapse.Scene)
+  # CSynapseAgent + AgentSystem (brings AVER_MODULE_SYNAPSE_SCENE=1) -- the join between the grid
+  # above and a live scene::World, so the editor can register the component and tick agents in Play.
+  target_link_libraries(Sandbox PRIVATE Aver.Synapse.Scene)
+endif()
 if(TARGET Aver.Framework)
   # Gameplay (brings AVER_MODULE_FRAMEWORK=1). It carries Aver.Scene transitively, but the scene is
   # still named above on its own: the framework is optional and the world is not meant to become

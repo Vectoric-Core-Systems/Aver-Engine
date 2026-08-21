@@ -15,6 +15,9 @@
 #if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
 #  include "aver/particles/ParticleRenderer.hpp"
 #endif
+#if AVER_MODULE_SYNAPSE_SCENE
+#  include "aver/formats/OcNav.hpp"
+#endif
 #if AVER_MODULE_SCRIPTING
 #  include "aver/scripting/ScriptHost.hpp"
 #endif
@@ -288,6 +291,13 @@ private:
     particles::ParticleRenderer particleRenderer_;
     bool particlesAttached_ = false;
 #endif
+#if AVER_MODULE_SYNAPSE_SCENE
+    // Loaded once per level, right after level_.loadStartMap() -- mirrors SandboxApp's own nav_
+    // member. EMPTY (default-constructed) is a legal, common state: most levels have no baked
+    // navigation, and AgentSystem::tick treats a grid that fails OcNavData::valid() as "not
+    // available yet" rather than an error.
+    fmt::OcNavData gameNav_;
+#endif
     // --screenshot bookkeeping (captureScreenshotIfDue). Latched true once the PNG is written, so a
     // capture requested near the end of a run is not re-requested every remaining frame.
     bool screenshotDone_ = false;
@@ -317,6 +327,10 @@ private:
     static void animNotify(scene::Entity e, const char* name, void* user);
     // Answers the framework's relayed animation-curve query -- see its own definition.
     static i32 animCurve(i32 entity, i64 nameHash, f32* outValue, void* user);
+#if AVER_MODULE_SYNAPSE_SCENE
+    // Answers the framework's relayed Synapse steering-target query -- see its own definition.
+    static i32 synapseTarget(i32 entity, f32* outX, f32* outY, f32* outZ, void* user);
+#endif
 
     aver::scripting::ScriptHost scripts_;
     bool scriptsReady_ = false;

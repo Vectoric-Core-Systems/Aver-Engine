@@ -260,6 +260,31 @@ AVER_FW_ABI int32_t aver_fw_graph_var_at(int32_t e, int32_t index, char* nameBuf
 /* Relays to the installed provider's setVar() -- see aver_fw_graph_var_set_fn's own comment. */
 AVER_FW_ABI int32_t aver_fw_graph_var_set(int32_t e, const char* name, int32_t kind, float f, int32_t i);
 
+/* ---- SYNAPSE STEERING TARGET, RELAYED ---------------------------------------------------------
+ *
+ * The framework does not know what Synapse is and does not link the module that does, for the
+ * identical reason it does not know what a graph or an animation curve is: a host installs a
+ * provider and this forwards. SYNAPSE ADVISES, IT DOES NOT MOVE (see SynapseAgent.hpp's own header
+ * comment) -- AgentSystem tracks a path and writes the agent's current waypoint onto its own
+ * CSynapseAgent component, and this is the one seam that lets a graph's GetSynapseTarget node read
+ * that value back, exactly as aver_fw_anim_curve lets a graph read an animation curve it cannot see
+ * the component of directly. CSynapseAgent's fields ARE registered through the generic scene
+ * reflection API (World::registerComponent), but that reflection is a C++-only surface
+ * (World::fieldId/field/fieldCount/fieldAt) with no C ABI of its own -- scene_abi.h exposes typed
+ * get/set by dense FIELD ID, never a lookup BY NAME, so a caller that only has "CSynapseAgent" and
+ * "targetXCm" as strings (as every managed caller does) has no other way in.
+ *
+ * A host that installs nothing leaves this returning 0 for everything -- a game with no Synapse
+ * agents is not an error, the same as a clip with no curve or a graph with no VAR. */
+typedef int32_t (AVER_FW_CALL* aver_fw_synapse_target_fn)(int32_t entity, float* outX, float* outY,
+                                                           float* outZ, void* user);
+/* Installs the provider. Passing null clears it. Always returns 1. */
+AVER_FW_ABI int32_t aver_fw_set_synapse_target_provider(aver_fw_synapse_target_fn fn, void* user);
+/* Writes the entity's current steering target and returns 1, or leaves the outputs untouched and
+ * returns 0 when there is no provider, `e` carries no CSynapseAgent, or its status is not Pathing
+ * (None/Requested/Arrived/Failed all mean "nothing to head toward right now"). */
+AVER_FW_ABI int32_t aver_fw_synapse_target(int32_t e, float* outX, float* outY, float* outZ);
+
 /* The session singletons begin_play populated; each is 0 in EDITOR. */
 AVER_FW_ABI int32_t aver_fw_game_instance(void);
 /* The running session's GameMode. */

@@ -1922,6 +1922,40 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;
 
+            // ---- Synapse ------------------------------------------------------------------------------
+            // GetSynapseTarget: a PURE read of CSynapseAgent's current steering target, tracked by the
+            // native AgentSystem tick (aver_fw_synapse_target, framework_abi.h). NO exec pins, same as
+            // getworldposition above -- "success" is a real "nothing to head toward right now" outcome
+            // (no CSynapseAgent, or its status is not Pathing), not an error.
+            case "getsynapsetarget":
+                node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "x", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "y", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "z", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            // SynapseSteer: a PURE node turning "where am I, where do I want to go" into the
+            // forward/right/yawDelta charactermove above already consumes -- see
+            // GraphInterop.SynapseSteerForGraph's own comment for the full contract. Takes an EXPLICIT
+            // target (targetX/Y/Z), never CSynapseAgent's own: the identical node does direct chase and
+            // path-following (GetSynapseTarget's own output) for that reason. "arrived" and "success"
+            // are deliberately separate outputs -- see GraphNodeDefs.hpp's own comment on why.
+            case "synapsesteer":
+                node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "dt", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "targetX", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "targetY", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "targetZ", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "turnRate", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "arriveRadius", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "forward", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "right", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "yawDelta", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "arrived", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
             // ---- FireEvent -------------------------------------------------------------------------
             // GAP 3: the cross-entity event node. SIDE-EFFECTING (runs ANOTHER entity's whole exec
             // chain, not merely a scalar write) -- exec pins by default, mirroring Spawn/CharacterMove

@@ -695,6 +695,24 @@ int32_t aver_fw_graph_var_set(int32_t e, const char* name, int32_t kind, float f
     return g_graphVarSet(e, name, kind, f, i, g_graphVarUser);
 }
 
+// ---- SYNAPSE STEERING TARGET, RELAYED ----------------------------------------------------------
+// Same shape as g_animCurve/g_graphVar* above, for the same reason: only a composition root links
+// both Aver.Framework and Aver.Synapse.Scene, so this file holds a function pointer instead of an
+// edge to it. NOT ATOMIC, matching every other provider in this file.
+aver_fw_synapse_target_fn g_synapseTarget = nullptr;
+void* g_synapseTargetUser = nullptr;
+
+int32_t aver_fw_set_synapse_target_provider(aver_fw_synapse_target_fn fn, void* user) {
+    g_synapseTarget = fn;
+    g_synapseTargetUser = user;
+    return 1;
+}
+
+int32_t aver_fw_synapse_target(int32_t e, float* outX, float* outY, float* outZ) {
+    if (!g_synapseTarget || !outX || !outY || !outZ) return 0;
+    return g_synapseTarget(e, outX, outY, outZ, g_synapseTargetUser);
+}
+
 // Dispatches OnBeginPlay on an actor spawned without it. See the header for why the split exists.
 int32_t aver_fw_dispatch_begin_play(int32_t e, int32_t reason) {
     const Entity ent = static_cast<Entity>(static_cast<uint32_t>(e));

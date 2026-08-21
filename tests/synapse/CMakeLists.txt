@@ -15,3 +15,13 @@ set_target_properties(NavTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY
 add_executable(NavBakeTest src/NavBakeTest.cpp)
 target_link_libraries(NavBakeTest PRIVATE Aver.Synapse Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(NavBakeTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# AgentTest -- CSynapseAgent + AgentSystem::tick, against a real scene::World. The one test in this
+# directory that links Aver.Scene: everything above stays pure so ITS tests can run with no world at
+# all, and this is the "somebody" that proves the join between pathfinding and an actual entity.
+if(TARGET Aver.Synapse.Scene)
+  add_executable(AgentTest src/AgentTest.cpp)
+  target_link_libraries(AgentTest PRIVATE Aver.Synapse.Scene Aver.Synapse Aver.Scene Aver.Formats
+                                          Aver.Core Aver.Platform)
+  set_target_properties(AgentTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

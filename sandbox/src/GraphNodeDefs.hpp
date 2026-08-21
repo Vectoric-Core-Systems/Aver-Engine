@@ -529,6 +529,36 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         pin("yawDelta", "float", false), pin("pitchDelta", "float", false),
         pin("then", "exec", true), pin("success", "bool", true)}});
 
+    // GetSynapseTarget: a PURE node reading CSynapseAgent's current steering target, tracked by the
+    //    native AgentSystem tick (aver_fw_synapse_target, framework_abi.h). NO exec pins -- a data
+    //    read exactly like GetWorldPosition, refused by side-effect rules for the identical reason
+    //    (see IsExecCapableCharacterMoveType's own comment on what "PURE" means here). "success" --
+    //    not a more specific name -- to reuse EmitPullVec3Read's own x/y/z-plus-bool shape exactly as
+    //    GetWorldPosition does, and because false here is a real "nothing to head toward right now"
+    //    outcome (no CSynapseAgent, or its status is not Pathing), not an error -- see
+    //    GraphInterop.SynapseGetTargetForGraph's own comment.
+    t.push_back({"GetSynapseTarget", "Get Synapse Target", "Actor", {
+        pin("entity", "int", false),
+        pin("x", "float", true), pin("y", "float", true), pin("z", "float", true),
+        pin("success", "bool", true)}});
+
+    // SynapseSteer: a PURE node turning "where am I, where do I want to go" into the
+    //    forward/right/yawDelta CharacterMove above already consumes -- see
+    //    GraphInterop.SynapseSteerForGraph's own comment for the full contract. Takes an EXPLICIT
+    //    target (x/y/z), never CSynapseAgent's own: the identical node does direct chase (a seen
+    //    enemy's live position) and path-following (GetSynapseTarget's own output above) for that
+    //    reason, and neither this node nor the compiler needs to know which one a graph is doing.
+    //    "success" -- the entity was alive, matching every other pure node's meaning for that pin --
+    //    is a SEPARATE output from "arrived": a graph that never checks success still gets usable
+    //    (if meaningless) zeros for a dead entity, but a caller that DOES check it can tell "nothing
+    //    happened" from "arrived and correctly holding still".
+    t.push_back({"SynapseSteer", "Synapse Steer", "Actor", {
+        pin("entity", "int", false), pin("dt", "float", false),
+        pin("targetX", "float", false), pin("targetY", "float", false), pin("targetZ", "float", false),
+        pin("turnRate", "float", false), pin("arriveRadius", "float", false),
+        pin("forward", "float", true), pin("right", "float", true), pin("yawDelta", "float", true),
+        pin("arrived", "bool", true), pin("success", "bool", true)}});
+
     // FireEvent: GAP 3, cross-entity events -- fires a DECLARED event (event=, e.g. "OnHit") on
     //    ANOTHER entity's own graph. SIDE-EFFECTING (runs a stranger's whole exec chain, not a scalar
     //    write) -- exec pins by default, mirroring Spawn/CharacterMove above rather than SetField; see

@@ -495,6 +495,8 @@ public class GraphCompiler
             case "getlocalscale":
             case "isalive":
             case "isactor":
+            case "getsynapsetarget":
+            case "synapsesteer":
                 EmitSimpleApiRead(node);
                 break;
 
@@ -1072,6 +1074,43 @@ public class GraphCompiler
         if (pinName == "success") return;
         _il.Emit(OpCodes.Pop);
         _il.Emit(OpCodes.Ldloc, pinName == "x" ? xL : pinName == "y" ? yL : zL);
+    }
+
+    /// SynapseSteer's own emission -- NOT EmitPullVec3Read, which only ever produces three floats
+    /// and a bool: this node has four real outputs (forward, right, yawDelta, arrived) on top of
+    /// the method's own bool return ("success", the same "entity was not alive" meaning every other
+    /// pure node's success pin already carries). Same overall shape as EmitPullVec3Read otherwise --
+    /// push every input pin in declared order, push the address of one local per out-parameter,
+    /// Call, then either leave the bool return on the stack (pinName == "success") or pop it and
+    /// push whichever local the caller actually asked for.
+    private void EmitPullSynapseSteer(Node node, string pinName)
+    {
+        if (_il == null) return;
+        EmitPullInput(node, "entity");
+        EmitPullInput(node, "dt");
+        EmitPullInput(node, "targetX");
+        EmitPullInput(node, "targetY");
+        EmitPullInput(node, "targetZ");
+        EmitPullInput(node, "turnRate");
+        EmitPullInput(node, "arriveRadius");
+        var forwardL = _il.DeclareLocal(typeof(float));
+        var rightL = _il.DeclareLocal(typeof(float));
+        var yawDeltaL = _il.DeclareLocal(typeof(float));
+        var arrivedL = _il.DeclareLocal(typeof(bool));
+        _il.Emit(OpCodes.Ldloca, forwardL);
+        _il.Emit(OpCodes.Ldloca, rightL);
+        _il.Emit(OpCodes.Ldloca, yawDeltaL);
+        _il.Emit(OpCodes.Ldloca, arrivedL);
+        _il.Emit(OpCodes.Call, SynapseSteerMethod);
+        if (pinName == "success") return;
+        _il.Emit(OpCodes.Pop);
+        switch (pinName)
+        {
+            case "forward":  _il.Emit(OpCodes.Ldloc, forwardL);  break;
+            case "right":    _il.Emit(OpCodes.Ldloc, rightL);    break;
+            case "yawDelta": _il.Emit(OpCodes.Ldloc, yawDeltaL); break;
+            case "arrived":  _il.Emit(OpCodes.Ldloc, arrivedL);  break;
+        }
     }
 
     /// The three transform writers. Same shape as EmitExecApiCall: push, call, keep or drop the bool.
@@ -3824,6 +3863,10 @@ public class GraphCompiler
                 EmitPullVec3Read(source, pinName, EntityAxisMethod, 2); return;
             case "getlocalscale":
                 EmitPullVec3Read(source, pinName, LocalScaleMethod, -1); return;
+            case "getsynapsetarget":
+                EmitPullVec3Read(source, pinName, SynapseGetTargetMethod, -1); return;
+            case "synapsesteer":
+                EmitPullSynapseSteer(source, pinName); return;
             case "isalive":
                 EmitPullInput(source, "entity"); _il.Emit(OpCodes.Call, IsAliveMethod); return;
             case "isactor":
@@ -4372,6 +4415,12 @@ public class GraphCompiler
     private static readonly MethodInfo LocalScaleMethod =
         typeof(GraphInterop).GetMethod("LocalScaleForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.LocalScaleForGraph was not found by reflection");
+    private static readonly MethodInfo SynapseGetTargetMethod =
+        typeof(GraphInterop).GetMethod("SynapseGetTargetForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SynapseGetTargetForGraph was not found by reflection");
+    private static readonly MethodInfo SynapseSteerMethod =
+        typeof(GraphInterop).GetMethod("SynapseSteerForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SynapseSteerForGraph was not found by reflection");
     private static readonly MethodInfo TranslateMethod =
         typeof(GraphInterop).GetMethod("TranslateForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.TranslateForGraph was not found by reflection");

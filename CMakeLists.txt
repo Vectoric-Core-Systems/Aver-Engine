@@ -311,6 +311,10 @@ if(AVER_MODULE_SCENE)
   # Save/load of a whole world. Guarded on SCENE for the same reason anim.scene is: it is the edge
   # between the world and the container format, and a build with no scene has no world to save.
   add_subdirectory(modules/save)
+  # The scene/navigation join, same shape as anim.scene immediately above and for the same reason:
+  # Aver.Synapse stays pure grid-and-arithmetic (added unconditionally, above), and this is the
+  # "somebody" that turns a goal into a scene::Entity's actual path.
+  add_subdirectory(modules/synapse.scene)
 endif()
 if(AVER_MODULE_FRAMEWORK)
   add_subdirectory(modules/framework)     # optional: gameplay vocabulary over the world
