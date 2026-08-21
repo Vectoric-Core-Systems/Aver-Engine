@@ -661,6 +661,44 @@ int32_t aver_fw_anim_curve(int32_t entity, int64_t nameHash, float* outValue) {
     return g_animCurve(entity, nameHash, outValue, g_animCurveUser);
 }
 
+// Dispatches OnBeginPlay on an actor spawned without it. See the header for why the split exists.
+int32_t aver_fw_dispatch_begin_play(int32_t e, int32_t reason) {
+    const Entity ent = static_cast<Entity>(static_cast<uint32_t>(e));
+    if (!world().valid(ent)) return 0;
+    if (classOfEntity(ent) == 0) return 0;   // not an actor; nothing is bound to dispatch to
+    AvManagedDispatch& d = managedDispatch();
+    if (!d.beginPlay) return 0;
+    d.beginPlay(static_cast<aver_entity>(ent), reason);
+    return 1;
+}
+
+// ---- SAVE/LOAD, RELAYED ---------------------------------------------------------------------
+//
+// A function pointer rather than a link edge, for the reason the header gives and the reason
+// g_animCurve above gives: only a composition root links both sides. Not atomic, matching every
+// other installed pointer in this file -- it is set once at startup on the one thread everything
+// here runs on.
+aver_fw_save_fn g_saveWrite = nullptr;
+aver_fw_save_fn g_saveLoad  = nullptr;
+void* g_saveUser = nullptr;
+
+int32_t aver_fw_set_save_provider(aver_fw_save_fn write, aver_fw_save_fn load, void* user) {
+    g_saveWrite = write;
+    g_saveLoad  = load;
+    g_saveUser  = user;
+    return 1;
+}
+
+int32_t aver_fw_save_write(const char* utf8Path) {
+    if (!g_saveWrite || !utf8Path || !*utf8Path) return 0;
+    return g_saveWrite(utf8Path, g_saveUser);
+}
+
+int32_t aver_fw_save_load(const char* utf8Path) {
+    if (!g_saveLoad || !utf8Path || !*utf8Path) return 0;
+    return g_saveLoad(utf8Path, g_saveUser);
+}
+
 int32_t aver_fw_class_of(int32_t e) {
     return classOfEntity(toEntity(e));
 }

@@ -18,9 +18,33 @@ public sealed class TestActor : AverActor
     /// <summary>The class recipe: tick in PrePhysics. Run once at load, per class.</summary>
     public static void Configure(ClassBuilder b) => b.Ticks(TickGroup.PrePhysics);
 
-    /// <summary>Logs that the instance spawned and bound.</summary>
-    public override void OnBeginPlay(BeginReason reason) =>
+    /// <summary>Logs that the instance spawned and bound, and RECORDS WHAT IT SAW.
+    ///
+    /// Copying its own X into its own Z-scale looks arbitrary and is the point: it makes
+    /// "what did OnBeginPlay observe about itself" readable from native code with no extra ABI.
+    /// A save restore has to patch an actor's fields BEFORE dispatching BeginPlay -- otherwise every
+    /// actor begins play against its class defaults, and a door that checks whether it is already
+    /// open reads provably wrong data on every load. SaveActorTest asserts exactly this value.</summary>
+    public override void OnBeginPlay(BeginReason reason)
+    {
         Log.Info($"[TestActor] OnBeginPlay reason={reason} entity={Self.Handle}");
+        ++_begins;
+        Vec3 p = Self.LocalPosition;
+        Vec3 s = Self.LocalScale;
+        // Z: WHAT it observed about itself. Y: HOW MANY TIMES it has begun play.
+        //
+        // The count is the load-bearing half, and the first version of SaveActorTest did not have
+        // it and therefore proved nothing: a restore that spawns with BeginPlay and then dispatches
+        // BeginPlay again produces the same Z as one that gets the order right, because the second
+        // call overwrites what the first saw. Only the COUNT tells the two apart. Per-instance, not
+        // static, because a restored actor is a brand-new instance and should begin play exactly
+        // once.
+        s.Y = _begins;
+        s.Z = p.X;
+        Self.SetLocalScale(s);
+    }
+
+    private int _begins;
 
     /// <summary>Counts and logs one tick.</summary>
     public override void OnTick(float dt)

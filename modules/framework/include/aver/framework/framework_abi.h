@@ -24,6 +24,15 @@
 extern "C" {
 #endif
 
+/* AVER_FW_CALL is defined by framework_hooks.h, which owns every other callback typedef in this
+ * ABI. Defined here too rather than including that header, because this one is the SURFACE C#
+ * binds and pulling in the dispatch-table header for one macro would widen it for no reason. */
+#if defined(_WIN32) && !defined(AVER_FW_CALL)
+#  define AVER_FW_CALL __cdecl
+#elif !defined(AVER_FW_CALL)
+#  define AVER_FW_CALL
+#endif
+
 /* ABI version, as (major << 16) | minor. Versioned independently of AVER_SCENE_ABI_VERSION. */
 #define AVER_FW_ABI_VERSION_MAJOR 1
 /* 1: added aver_fw_set_view_entity / aver_fw_view_entity. Additive only.
@@ -120,6 +129,37 @@ AVER_FW_ABI int32_t aver_fw_spawn_preview(int32_t c, const char* name,
                                           const float* pos3, const float* quat4, const float* scale3);
 /* Destroys a preview actor without dispatching OnEndPlay. */
 AVER_FW_ABI int32_t aver_fw_destroy_preview(int32_t e);
+
+/* Dispatches OnBeginPlay on an actor that was spawned WITHOUT it, once its caller has finished
+ * setting it up. `reason` is an AVER_FW_BEGIN_* value (framework_hooks.h).
+ *
+ * WHY THIS EXISTS: aver_fw_spawn is synchronous -- bind, build_models and beginPlay all run
+ * inline before it returns -- so anything that must configure an actor BEFORE it begins playing
+ * has no moment in which to do it. A save restore is exactly that: patch the saved fields in,
+ * THEN begin play, or every actor OnBeginPlay reads its class defaults instead of the values the
+ * player left it with. Pair it with aver_fw_spawn_preview.
+ *
+ * 0 for a stale handle, an entity that is not an actor, or one with no managed instance bound.
+ * Calling it twice dispatches twice -- this ABI does not remember, and the caller that chose to
+ * split the spawn is the one that knows. */
+AVER_FW_ABI int32_t aver_fw_dispatch_begin_play(int32_t e, int32_t reason);
+
+/* ---- SAVE/LOAD, RELAYED -----------------------------------------------------------------
+ *
+ * The framework does not know what a save file is and does not link the module that does, for
+ * the same reason it does not link the animation system: Aver.Save sits at its own tier and only
+ * a composition root links both. The host installs a provider and these forward -- the identical
+ * shape aver_fw_set_anim_curve_provider already uses, three exports down.
+ *
+ * A host that installs nothing leaves both returning 0, which is what a game with no save system
+ * should report rather than crashing. */
+typedef int32_t (AVER_FW_CALL* aver_fw_save_fn)(const char* utf8Path, void* user);
+/* Installs the pair. Either may be null. Always returns 1. */
+AVER_FW_ABI int32_t aver_fw_set_save_provider(aver_fw_save_fn write, aver_fw_save_fn load, void* user);
+/* Writes the whole world to `utf8Path`. 0 when there is no provider or the write failed. */
+AVER_FW_ABI int32_t aver_fw_save_write(const char* utf8Path);
+/* Replaces the whole world from `utf8Path`. 0 when there is no provider or the load failed. */
+AVER_FW_ABI int32_t aver_fw_save_load(const char* utf8Path);
 /* The entity's class. */
 AVER_FW_ABI int32_t aver_fw_class_of(int32_t e);   /* the entity's class, or 0 — != 0 IS "actor" */
 
@@ -161,14 +201,6 @@ AVER_FW_ABI int32_t aver_fw_find_class_with_flags(int32_t flags);
  *
  * A host that installs nothing leaves aver_fw_anim_curve returning 0 for everything, which is the
  * same answer a clip with no such curve gives -- a game with no animation system is not an error. */
-/* AVER_FW_CALL is defined by framework_hooks.h, which owns every other callback typedef in this
- * ABI. Defined here too rather than including that header, because this one is the SURFACE C#
- * binds and pulling in the dispatch-table header for one macro would widen it for no reason. */
-#if defined(_WIN32) && !defined(AVER_FW_CALL)
-#  define AVER_FW_CALL __cdecl
-#elif !defined(AVER_FW_CALL)
-#  define AVER_FW_CALL
-#endif
 typedef int32_t (AVER_FW_CALL* aver_fw_anim_curve_fn)(int32_t entity, int64_t nameHash,
                                                       float* outValue, void* user);
 /* Installs the provider. Passing null clears it. Always returns 1. */
