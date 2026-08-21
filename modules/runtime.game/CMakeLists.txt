@@ -57,6 +57,11 @@ target_link_libraries(Aver.Runtime.Game PUBLIC Aver.Formats Aver.Render.Skin Ave
 # carry a copy of. This is the de-duplication this file's header called "a later slice, proven by
 # the gates staying identical".
 target_link_libraries(Aver.Runtime.Game PUBLIC Aver.World)
+# Save/load of a whole world. A composition root is the only thing that may link BOTH this and
+# Aver.Framework -- Aver.Save deliberately takes function pointers instead of the framework.
+if(TARGET Aver.Save)
+  target_link_libraries(Aver.Runtime.Game PUBLIC Aver.Save)
+endif()
 
 if(TARGET Aver.Render.PBR)
   target_link_libraries(Aver.Runtime.Game PUBLIC

@@ -297,3 +297,10 @@ endif()
 if(TARGET Aver.Formats.Particles)
   target_link_libraries(Sandbox PRIVATE Aver.Formats.Particles)
 endif()
+
+# Save/load of a whole world. The editor is a composition root too, so it installs the same
+# provider the game runtime does -- and today it is the only place a project can test its
+# save path at all.
+if(TARGET Aver.Save)
+  target_link_libraries(Sandbox PRIVATE Aver.Save)
+endif()

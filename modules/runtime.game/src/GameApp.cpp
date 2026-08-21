@@ -18,6 +18,8 @@
 #if AVER_MODULE_SCENE
 #  include "aver/scene/World.hpp"
 #  include "aver/anim/AnimSystem.hpp"
+#  include "aver/save/SaveWorld.hpp"
+#  include "aver/formats/OcSave.hpp"
 #endif
 #if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
 #  include "aver/particles/ParticleSystem.hpp"
@@ -82,6 +84,84 @@
 #endif
 
 namespace aver::game {
+
+#if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
+namespace {
+
+// ---- THE SAVE SEAMS a composition root installs ----------------------------------------------
+//
+// Aver.Save takes function pointers rather than linking Aver.Framework, so this is where the two
+// meet. Same shape as the animation notify sink and the animation-curve provider above.
+
+// SPAWNS WITHOUT BeginPlay, and that is the whole reason aver_fw_dispatch_begin_play exists.
+// aver_fw_spawn runs bind -> build_models -> beginPlay inline, so an actor spawned and THEN patched
+// has already begun play against its class defaults. Preview, patch, then begin.
+aver::scene::Entity saveSpawnClass(const char* className, void*) {
+    const i32 c = aver_fw_class_find(className);
+    if (c == 0) return aver::scene::kInvalidEntity;
+    const i32 e = aver_fw_spawn_preview(c, className, nullptr, nullptr, nullptr);
+    return e == 0 ? aver::scene::kInvalidEntity : static_cast<aver::scene::Entity>(e);
+}
+
+const char* saveClassOf(aver::scene::Entity e, void*) {
+    const i32 c = aver_fw_class_of(static_cast<i32>(e));
+    return c == 0 ? nullptr : aver_fw_class_name(c);
+}
+
+void saveBeginPlay(aver::scene::Entity e, void*) {
+    aver_fw_dispatch_begin_play(static_cast<i32>(e), AVER_FW_BEGIN_SPAWN);
+}
+
+// Through the framework, so OnEndPlay runs and the managed instance is released. World::destroy
+// would take the entity out from under a live C# object.
+void saveDestroyActor(aver::scene::Entity e, void*) { aver_fw_destroy(static_cast<i32>(e)); }
+
+aver::save::Host saveHost() {
+    aver::save::Host h;
+    h.spawnClass   = &saveSpawnClass;
+    h.classOf      = &saveClassOf;
+    h.beginPlay    = &saveBeginPlay;
+    h.destroyActor = &saveDestroyActor;
+    return h;
+}
+
+i32 saveWriteProvider(const char* path, void*) {
+    aver::save::CaptureOptions co;
+    co.host = saveHost();
+    aver::fmt::OcSaveData snap;
+    std::string why;
+    if (!aver::save::capture(aver::scene::World::instance(), snap, co, &why)) {
+        AVER_ERROR("[Save] capture failed: {}", why);
+        return 0;
+    }
+    if (!aver::fmt::saveOcSave(path, snap, &why)) {
+        AVER_ERROR("[Save] write failed: {}", why);
+        return 0;
+    }
+    AVER_INFO("[Save] wrote {} ({} entities)", path, snap.entities.size());
+    return 1;
+}
+
+i32 saveLoadProvider(const char* path, void*) {
+    aver::fmt::OcSaveData snap;
+    std::string why;
+    if (!aver::fmt::loadOcSave(path, snap, &why)) {
+        AVER_ERROR("[Save] load failed: {}", why);
+        return 0;
+    }
+    aver::save::RestoreOptions ro;
+    ro.host = saveHost();
+    if (!aver::save::restore(snap, aver::scene::World::instance(), ro, &why)) {
+        AVER_ERROR("[Save] restore failed: {}", why);
+        return 0;
+    }
+    return 1;
+}
+
+} // namespace
+#endif
+
+
 namespace {
 
 // Reads the value that follows a flag, or returns the fallback. Bounds-checked so a trailing flag
@@ -706,6 +786,9 @@ void GameApp::initScripting() {
         // Installed unconditionally: a C++ caller can ask for a curve with no scripting host at all.
         aver_fw_set_anim_curve_provider(&GameApp::animCurve, this);
 
+        // SAVE/LOAD. The framework relays; this is what it relays to.
+        aver_fw_set_save_provider(&saveWriteProvider, &saveLoadProvider, this);
+
         if (scripts_.graphFireAvailable()) {
             anim::animSystem().setNotifySink(&GameApp::animNotify, this);
             AVER_INFO("[Anim] animation notifies will be raised as graph events");
@@ -748,6 +831,7 @@ void GameApp::animNotify(scene::Entity e, const char* name, void* user) {
     (void)e; (void)name; (void)user;
 #endif
 }
+
 
 void GameApp::discoverProjectGraphs() {
 #if AVER_MODULE_SCRIPTING

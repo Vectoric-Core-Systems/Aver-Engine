@@ -42,6 +42,10 @@ internal static class Fw
     // ANIMATION CURVES, relayed. The framework does not know what an animation is; a provider
     // installed by the composition root answers this. See framework_abi.h for why it is a relay.
     [DllImport(Lib)] internal static extern int aver_fw_anim_curve(int entity, long nameHash, out float outValue);
+    // SAVE/LOAD, relayed. The framework does not know what a save file is; a provider installed by
+    // the composition root answers these. See framework_abi.h for why it is a relay.
+    [DllImport(Lib)] internal static extern int aver_fw_save_write([MarshalAs(UnmanagedType.LPUTF8Str)] string path);
+    [DllImport(Lib)] internal static extern int aver_fw_save_load([MarshalAs(UnmanagedType.LPUTF8Str)] string path);
     [DllImport(Lib)] internal static extern int aver_fw_class_of(int e);   // != 0 IS the definition of "actor"
 
     // Possession is rejected unless the two classes carry the PAWN / CONTROLLER flags.

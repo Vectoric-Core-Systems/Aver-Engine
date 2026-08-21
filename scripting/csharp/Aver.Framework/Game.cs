@@ -52,6 +52,33 @@ public static class Game
     /// <summary>The live entity named <paramref name="name"/> (first match), or <see cref="Entity.None"/>. A linear scan.</summary>
     public static Entity Find(string name) => new(SceneNative.aver_scene_find(name));
 
+    /// <summary>Writes the whole world to <paramref name="path"/> and returns whether it landed.
+    ///
+    /// A SNAPSHOT, not a diff: every entity, every component, every field. That is what makes a save
+    /// survive you editing the level it was taken in, and it is why the file is not small.
+    ///
+    /// The write is ATOMIC -- a temporary file, then a rename -- so a crash or a full disk part-way
+    /// through leaves the PREVIOUS save intact rather than destroying the thing the player asked the
+    /// game to keep.
+    ///
+    /// False when the host installed no save provider (a build with no save support says so rather
+    /// than pretending), or when the write itself failed. The reason is logged.</summary>
+    public static bool SaveGame(string path) =>
+        !string.IsNullOrEmpty(path) && Fw.aver_fw_save_write(path) != 0;
+
+    /// <summary>Replaces the whole world from <paramref name="path"/>.
+    ///
+    /// EVERYTHING CURRENTLY IN THE WORLD IS DESTROYED FIRST, actors through the path that runs
+    /// OnEndPlay. Any Entity handle you were holding is dead afterwards -- re-find what you need by
+    /// name. A restored actor begins play AFTER its saved fields are back, so its OnBeginPlay sees
+    /// the world the player left rather than the class defaults.
+    ///
+    /// False when there is no provider, the file is missing or malformed, or the restore failed.
+    /// A failed restore leaves the world EMPTY rather than half-populated: a world that looks
+    /// playable and is not is worse than one that plainly is not.</summary>
+    public static bool LoadGame(string path) =>
+        !string.IsNullOrEmpty(path) && Fw.aver_fw_save_load(path) != 0;
+
     /// <summary>The actor named <paramref name="name"/> as <typeparamref name="T"/>, or null.</summary>
     public static T? FindActor<T>(string name) where T : AverActor => Actors.Get<T>(Find(name));
 

@@ -172,6 +172,8 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #if AVER_MODULE_SCENE
 #include "aver/scene/scene_abi.h"
 #include "aver/anim/AnimSystem.hpp"
+#include "aver/save/SaveWorld.hpp"
+#include "aver/formats/OcSave.hpp"
 #include "aver/scene/World.hpp"
 #include "aver/scene/Components.hpp"
 // The placement -> entity loop, shared with the game runtime. See modules/world/README.md.
@@ -216,6 +218,83 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include <vector>
 
 namespace aver {
+
+#if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
+namespace {
+
+// ---- THE SAVE SEAMS a composition root installs ----------------------------------------------
+//
+// Aver.Save takes function pointers rather than linking Aver.Framework, so this is where the two
+// meet. Same shape as the animation notify sink and the animation-curve provider above.
+
+// SPAWNS WITHOUT BeginPlay, and that is the whole reason aver_fw_dispatch_begin_play exists.
+// aver_fw_spawn runs bind -> build_models -> beginPlay inline, so an actor spawned and THEN patched
+// has already begun play against its class defaults. Preview, patch, then begin.
+aver::scene::Entity saveSpawnClass(const char* className, void*) {
+    const i32 c = aver_fw_class_find(className);
+    if (c == 0) return aver::scene::kInvalidEntity;
+    const i32 e = aver_fw_spawn_preview(c, className, nullptr, nullptr, nullptr);
+    return e == 0 ? aver::scene::kInvalidEntity : static_cast<aver::scene::Entity>(e);
+}
+
+const char* saveClassOf(aver::scene::Entity e, void*) {
+    const i32 c = aver_fw_class_of(static_cast<i32>(e));
+    return c == 0 ? nullptr : aver_fw_class_name(c);
+}
+
+void saveBeginPlay(aver::scene::Entity e, void*) {
+    aver_fw_dispatch_begin_play(static_cast<i32>(e), AVER_FW_BEGIN_SPAWN);
+}
+
+// Through the framework, so OnEndPlay runs and the managed instance is released. World::destroy
+// would take the entity out from under a live C# object.
+void saveDestroyActor(aver::scene::Entity e, void*) { aver_fw_destroy(static_cast<i32>(e)); }
+
+aver::save::Host saveHost() {
+    aver::save::Host h;
+    h.spawnClass   = &saveSpawnClass;
+    h.classOf      = &saveClassOf;
+    h.beginPlay    = &saveBeginPlay;
+    h.destroyActor = &saveDestroyActor;
+    return h;
+}
+
+i32 saveWriteProvider(const char* path, void*) {
+    aver::save::CaptureOptions co;
+    co.host = saveHost();
+    aver::fmt::OcSaveData snap;
+    std::string why;
+    if (!aver::save::capture(aver::scene::World::instance(), snap, co, &why)) {
+        AVER_ERROR("[Save] capture failed: {}", why);
+        return 0;
+    }
+    if (!aver::fmt::saveOcSave(path, snap, &why)) {
+        AVER_ERROR("[Save] write failed: {}", why);
+        return 0;
+    }
+    AVER_INFO("[Save] wrote {} ({} entities)", path, snap.entities.size());
+    return 1;
+}
+
+i32 saveLoadProvider(const char* path, void*) {
+    aver::fmt::OcSaveData snap;
+    std::string why;
+    if (!aver::fmt::loadOcSave(path, snap, &why)) {
+        AVER_ERROR("[Save] load failed: {}", why);
+        return 0;
+    }
+    aver::save::RestoreOptions ro;
+    ro.host = saveHost();
+    if (!aver::save::restore(snap, aver::scene::World::instance(), ro, &why)) {
+        AVER_ERROR("[Save] restore failed: {}", why);
+        return 0;
+    }
+    return 1;
+}
+
+} // namespace
+#endif
+
 
 // Gizmo axis basis and colours: X red, Y green, Z blue, amber highlight.
 static const Vec3 kAxisDir[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
@@ -1263,6 +1342,11 @@ public:
             // the answer comes from. Installed unconditionally -- unlike the notify sink it needs no
             // scripting host, because a C++ caller can ask too.
             aver_fw_set_anim_curve_provider(&SandboxApp::animCurve, this);
+
+            // SAVE/LOAD, so a project can test its own save path in the editor rather than only in
+            // a shipped game -- which, given there is no packaged game today, is the only place it
+            // can be tested at all.
+            aver_fw_set_save_provider(&saveWriteProvider, &saveLoadProvider, this);
 
             // GRAPH-AS-CLASS CATCH-UP, for a project opened from the COMMAND LINE. applyProject's own
             // "Starting scripts" stage already tries scripts_.declareGraphClasses/spawnClassPlacements
