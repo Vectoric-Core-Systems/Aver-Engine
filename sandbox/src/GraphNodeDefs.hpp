@@ -147,6 +147,14 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"IsPlaying", "Is Playing", "Game", {pin("playing", "bool", true)}});
     t.push_back({"Possess", "Possess", "Game", {pin("exec", "exec", false), pin("controller", "int", false), pin("pawn", "int", false), pin("then", "exec", true), pin("success", "bool", true)}});
     t.push_back({"Unpossess", "Unpossess", "Game", {pin("exec", "exec", false), pin("controller", "int", false), pin("then", "exec", true), pin("success", "bool", true)}});
+
+    // -- SaveGame / LoadGame: no entity pin at all, unlike everything else in this category -- both
+    //    act on the WHOLE world. path= names the file, the same NODE-line-attribute-as-data
+    //    mechanism socket=/curve=/mesh= above already use, because PinType has no string member.
+    t.push_back({"SaveGame", "Save Game", "Game", {pin("exec", "exec", false), pin("then", "exec", true), pin("success", "bool", true)},
+        {attr("path", "Path")}});
+    t.push_back({"LoadGame", "Load Game", "Game", {pin("exec", "exec", false), pin("then", "exec", true), pin("success", "bool", true)},
+        {attr("path", "Path")}});
     // -- CONVERSION. Validate refuses a LINK whose two pins differ in type (Graph.cs's
     //    srcPin.Type != tgtPin.Type check), which is what stops an exec pin being wired to a
     //    float -- correct, and it also meant an int or a bool could not reach a float input at

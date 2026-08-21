@@ -654,6 +654,21 @@ public class GraphCompiler
                     "unconditionally on every invocation with no way to gate it. Give this node an " +
                     "ENTRY-driven exec chain and reach it through CompileEntryPoint() instead.");
 
+            case "savegame":
+            case "loadgame":
+                // Side-effecting -- writes or REPLACES THE ENTIRE WORLD -- refused here for the
+                // identical reason "spawn"/"charactermove"/"fireevent" are refused just above.
+                // LoadGame is the worst-case member of this whole family: Compile()'s topological
+                // pass running it unconditionally on every invocation would not merely create a
+                // stray entity or overwrite a field, it would tear down and rebuild EVERYTHING,
+                // including whatever entity's graph pulled it.
+                throw new InvalidOperationException(
+                    $"{(node.Type.Equals("savegame", StringComparison.OrdinalIgnoreCase) ? "SaveGame" : "LoadGame")} " +
+                    $"node '{node.Id}' cannot be compiled by Compile() -- it is a side effect with no " +
+                    "notion of 'when' in a pure-dataflow graph, and Compile()'s topological pass would " +
+                    "run it unconditionally on every invocation with no way to gate it. Give this node " +
+                    "an ENTRY-driven exec chain and reach it through CompileEntryPoint() instead.");
+
             case "getvar":
                 // A pure read -- see IsExecCapableVarSideEffectType's own comment -- so, unlike SetVar,
                 // it is welcome in the PULL-only compiler exactly like GetField.
@@ -2492,6 +2507,7 @@ public class GraphCompiler
                     else if (IsExecCapablePhysicsCreateType(node.Type)) EmitExecPhysicsCreate(node);
                     else if (IsExecCapableSphereCastType(node.Type)) EmitExecSphereCast(node);
                     else if (IsExecCapableFireEventType(node.Type)) EmitExecFireEvent(node);
+                    else if (IsExecCapableSaveLoadType(node.Type)) EmitExecSaveLoad(node);
                     EmitExecFanOut(node);
                     return;
             }
@@ -3098,6 +3114,17 @@ public class GraphCompiler
     private static bool IsExecCapableFireEventType(string type) =>
         type.Equals("fireevent", StringComparison.OrdinalIgnoreCase);
 
+    /// SaveGame/LoadGame's own version -- grouped into ONE predicate, unlike Jump/CharacterMove each
+    /// getting their own, because the two really do share one emitter (EmitExecSaveLoad) with one
+    /// internal switch, the same "a predicate matching exactly what one emitter handles still
+    /// describes what it matches" reasoning IsExecCapableApiCallType's own comment gives. Refused by
+    /// the PULL compiler's topological pass ENTIRELY (see EmitNode's "savegame"/"loadgame" case) --
+    /// the worst-case member of this whole family, since LoadGame does not merely write one field or
+    /// spawn one entity, it replaces the world.
+    private static bool IsExecCapableSaveLoadType(string type) =>
+        type.Equals("savegame", StringComparison.OrdinalIgnoreCase) ||
+        type.Equals("loadgame", StringComparison.OrdinalIgnoreCase);
+
     /// Runs a SetField node's write exactly once, at the point the exec walk reaches it -- mirrors
     /// EmitSetField's own field=/resolver/native-call logic, but pulls its "entity"/"value" inputs
     /// through EmitPullInput rather than LoadPin/_pinLocals (see the section-level comment for why the
@@ -3253,6 +3280,35 @@ public class GraphCompiler
         else
         {
             _il.Emit(OpCodes.Pop); // nothing declared to read the outcome; discard it
+        }
+    }
+
+    /// Runs a SaveGame or LoadGame node's write exactly once, at the point the exec walk reaches
+    /// it -- the ONE emitter both share (see IsExecCapableSaveLoadType's own comment for why one
+    /// predicate, one emitter, is the right split here and Jump/CharacterMove's own-predicate-each
+    /// is not). Shape otherwise mirrors EmitExecSetName: push the path= literal, call, capture-or-
+    /// discard "success" into an exec-local. NO ENTITY PULLED, unlike every other node in this exec
+    /// family -- SaveGame/LoadGame act on the whole world, not on one thing in it.
+    private void EmitExecSaveLoad(Node node)
+    {
+        if (_il == null) return;
+
+        bool isSave = node.Type.Equals("savegame", StringComparison.OrdinalIgnoreCase);
+        if (string.IsNullOrEmpty(node.SavePath))
+            throw new InvalidOperationException(
+                $"{(isSave ? "SaveGame" : "LoadGame")} node '{node.Id}' has no path= attribute naming the file");
+
+        _il.Emit(OpCodes.Ldstr, node.SavePath);
+        _il.Emit(OpCodes.Call, isSave ? SaveGameMethod : LoadGameMethod);
+
+        if (node.Pins.Any(p => p.IsOutput && p.Name == "success"))
+        {
+            var successLocal = GetOrCreateExecLocal(node.Id, "success", typeof(bool));
+            _il.Emit(OpCodes.Stloc, successLocal);
+        }
+        else
+        {
+            _il.Emit(OpCodes.Pop);
         }
     }
 
@@ -3563,10 +3619,11 @@ public class GraphCompiler
     // supported. It is supported by the OTHER compiler, which is the one thing that message could
     // have said and did not, and the author is left believing the engine has no Jump node.
     //
-    // Spawn/CharacterMove/FireEvent/SetVar keep their own hand-written cases above, deliberately:
-    // each says something specific and true about that node (Spawn would create an entity EVERY
-    // TICK), and collapsing them into this would trade four accurate sentences for one generic one.
-    // This predicate is the floor, not the ceiling.
+    // Spawn/CharacterMove/FireEvent/SetVar/SaveGame/LoadGame keep their own hand-written cases
+    // above, deliberately: each says something specific and true about that node (Spawn would
+    // create an entity EVERY TICK; LoadGame would replace the world EVERY TICK), and collapsing
+    // them into this would trade accurate sentences for one generic one. This predicate is the
+    // floor, not the ceiling.
     private static bool IsPushOnlySideEffectType(string type) =>
         IsExecCapableSideEffectType(type) || IsExecCapableVecSideEffectType(type) ||
         IsExecCapableSpawnType(type) || IsExecCapableVarSideEffectType(type) ||
@@ -3576,7 +3633,7 @@ public class GraphCompiler
         IsExecCapableFireEventType(type) || IsExecCapableJumpType(type) ||
         IsExecCapablePrintType(type) || IsExecCapableApiCallType(type) ||
         IsExecCapableTransformWriteType(type) || IsExecCapablePhysicsWriteType(type) ||
-        IsExecCapablePhysicsCreateType(type);
+        IsExecCapablePhysicsCreateType(type) || IsExecCapableSaveLoadType(type);
 
     private static bool IsExecOnlyNodeType(string type) => type.ToLowerInvariant() switch
     {
@@ -4380,6 +4437,12 @@ public class GraphCompiler
     private static readonly MethodInfo UnpossessMethod =
         typeof(GraphInterop).GetMethod("UnpossessForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.UnpossessForGraph was not found by reflection");
+    private static readonly MethodInfo SaveGameMethod =
+        typeof(GraphInterop).GetMethod("SaveGameForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SaveGameForGraph was not found by reflection");
+    private static readonly MethodInfo LoadGameMethod =
+        typeof(GraphInterop).GetMethod("LoadGameForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.LoadGameForGraph was not found by reflection");
     // PrintInt: the same line for an INT pin, because a float cannot hold an entity handle.
     private static readonly MethodInfo PrintIntMethod =
         typeof(GraphInterop).GetMethod("PrintIntForGraph", BindingFlags.NonPublic | BindingFlags.Static)

@@ -525,6 +525,19 @@ internal static class GraphInterop
     /// a graph needs to know before it does anything irreversible.</summary>
     internal static bool IsPlayingForGraph() => Game.IsPlaying;
 
+    /// <summary>Game.SaveGame / LoadGame, unchanged -- see their own doc comments for the atomic
+    /// write and the "destroy everything, then restore" load. Nothing wrapped here needs an
+    /// Entity's internal constructor the way SetMesh/SetMaterial do; this is a direct forward,
+    /// exactly like IsPlayingForGraph just above.
+    ///
+    /// LoadGameForGraph CAN DESTROY THE ENTITY CALLING IT. If a "loadgame" node fires from inside
+    /// this very entity's own graph, the world tear-down Game.LoadGame documents runs OnEndPlay on
+    /// that entity mid-exec, same as it would on any other. Not a new hazard this wrapper adds --
+    /// Game.LoadGame already carries it, node or no node -- and Blueprint's own Load Game node has
+    /// the identical footgun, so nothing here tries to guard against it.</summary>
+    internal static bool SaveGameForGraph(string path) => Game.SaveGame(path);
+    internal static bool LoadGameForGraph(string path) => Game.LoadGame(path);
+
     /// <summary>AverPlayerController.Possess / Unpossess. Possession is what makes the game camera
     /// follow a pawn at all (see the FirstPerson template README), so a graph that spawns a
     /// character and wants it controlled needs this and nothing else.</summary>

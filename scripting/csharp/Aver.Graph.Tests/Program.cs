@@ -226,6 +226,12 @@ static int Main()
         // not booted in this process, exactly as NewNodeTests explains for InputKey and Raycast.
         failures += TagNodeTests.RunAll();
 
+        // SaveGame / LoadGame: the two persistence nodes, wrapping Game.SaveGame/LoadGame -- already
+        // tested at the C++ level (tests/save) and already reachable from C# directly. Refused by the
+        // PULL compiler entirely, like Spawn/CharacterMove/FireEvent -- LoadGame is the worst-case
+        // member of that family. See SaveLoadGameNodeTests.cs's own header comment.
+        failures += SaveLoadGameNodeTests.RunAll();
+
         if (failures == 0)
             Console.WriteLine("\nAll tests passed.");
         else

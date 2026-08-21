@@ -549,6 +549,15 @@ public class OcGraphParser
                     {
                         node.EventName = v;
                     }
+                    // path= names the file a "savegame" node writes or a "loadgame" node reads (see
+                    // Node.SavePath) -- the value itself, not a lookup key, the same "carries data"
+                    // treatment name=/mesh=/material=/event= already get. Nothing to resolve at parse
+                    // time; GraphCompiler.EmitExecSaveLoad requires it non-empty at COMPILE time,
+                    // mirroring every other required-at-compile-time attribute above.
+                    else if (k == "path")
+                    {
+                        node.SavePath = v;
+                    }
                 }
 
                 nodes[nodeId] = node;
@@ -1152,6 +1161,16 @@ public class OcGraphParser
             case "unpossess":
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "controller", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            // SaveGame / LoadGame: no entity pin at all, unlike everything else in this file --
+            // both act on the WHOLE world, not on one thing in it. path= names the file (see
+            // Node.SavePath); nothing else about the shape differs from Possess/Unpossess just above.
+            case "savegame":
+            case "loadgame":
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;

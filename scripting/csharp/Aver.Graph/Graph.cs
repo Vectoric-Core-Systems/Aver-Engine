@@ -162,6 +162,15 @@ public class Node
     // "curve=<name>" attribute -- same mechanism as SocketName above, same reason. Null for every
     // other node type.
     public string? CurveName { get; set; }
+
+    // The file a "savegame" node writes to, or a "loadgame" node reads from, e.g.
+    // "Saves/Slot1.ocsave". Set from the NODE line's "path=<value>" attribute -- same mechanism as
+    // NameValue above (the value IS the data, not a lookup key). ONE property for BOTH node types,
+    // unlike every other string attribute above, which is one property per node type: SaveGame and
+    // LoadGame both name "the file this node touches", the identical kind of value, just read in
+    // one case and written in the other -- a second property would carry the same doc comment
+    // twice. Null for every other node type.
+    public string? SavePath { get; set; }
 }
 
 /// One parameter the compiled method accepts -- e.g. the entity a graph drives, or the current
