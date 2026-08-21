@@ -5,6 +5,7 @@
 #include "aver/rhi/RHIResources.hpp"
 
 #include <string>
+#include <array>
 #include <unordered_map>
 
 // The GPU residency of the material library: one binding set and one packed constant block per
@@ -19,9 +20,23 @@ static_assert(kMaterialSrvCount <= rhi::kMaxBindingSlots,
 // Owns a binding set and a constant block per material, and keeps them current with the library.
 class MaterialSystem {
 public:
-    // Turns a texture reference into a GPU texture; 0 leaves the slot on its fallback. The slot says
-    // what the pixels MEAN. The handle returned becomes this system's and is destroyed at shutdown.
-    using TextureResolver = rhi::TextureHandle (*)(const TextureRef& ref, TextureSlot slot, void* user);
+    // What a resolver hands back: the texture, and what colour it is ON AVERAGE.
+    //
+    // The average exists for consumers that CANNOT SAMPLE the texture -- the path tracer shades
+    // from one flat colour per surface and has no texture units at all. Without it such a consumer
+    // can only read baseColorFactor, and a modern material sets that to a plain white multiplier
+    // and puts the whole look in the texture: every textured surface then renders pure white, both
+    // far too bright and completely featureless. Measured on a real project whose forty materials
+    // ALL declare `baseColorFactor 1 1 1 1`.
+    struct ResolvedTexture {
+        rhi::TextureHandle handle = 0;
+        f32 averageLinear[3] = {1.0f, 1.0f, 1.0f};   // meaningful only when handle != 0
+    };
+
+    // Turns a texture reference into a GPU texture; a zero handle leaves the slot on its fallback.
+    // The slot says what the pixels MEAN. The handle returned becomes this system's and is
+    // destroyed at shutdown.
+    using TextureResolver = ResolvedTexture (*)(const TextureRef& ref, TextureSlot slot, void* user);
 
     // Creates the fallback textures and the fallback set. `tableBaseRegister` is the consuming
     // pipeline's table-0 SRV count, carried on every set.
@@ -47,6 +62,14 @@ public:
     // tags a binding with its type, so identity is the only honest test and this system is the only
     // thing that can perform it.
     bool ownsBindingSet(rhi::BindingSetHandle s) const;
+
+    // The average LINEAR base colour a draw of `s` actually shades with: baseColorFactor times the
+    // mean of its base-colour texture. False for a set this system does not own.
+    //
+    // This is the honest answer to "what colour is this surface" for something that cannot sample
+    // a texture. baseColorFactor ALONE is not that answer and is not close to it -- see
+    // ResolvedTexture above for what reading it alone actually produced.
+    bool averageBaseColor(rhi::BindingSetHandle s, f32 out[3]) const;
 
     // The identity material's set: white base colour, flat normal, full roughness, no metal.
     rhi::BindingSetHandle fallbackBindingSet() const { return fallbackSet_; }
@@ -79,7 +102,7 @@ private:
     // texture it names may finally exist.
     void writeSlots(const MaterialDesc& d, rhi::BindingSetHandle set, bool retryFailed = false);
     // Resolves and caches one texture reference. 0 when there is no resolver or it declined.
-    rhi::TextureHandle resolveTexture(const TextureRef& ref, TextureSlot slot, bool retryFailed = false);
+    ResolvedTexture resolveTexture(const TextureRef& ref, TextureSlot slot, bool retryFailed = false);
     // The entry for `h`, built on first use.
     Entry& entryFor(MaterialHandle h);
 
@@ -101,6 +124,11 @@ private:
     // texture uploads once per way of decoding it. See colourClass() in the .cpp for why the second
     // half of the key is not optional.
     std::unordered_map<std::string, rhi::TextureHandle> cache_;
+    // The mean of each cached texture, same key. Kept beside cache_ rather than inside it so a
+    // remembered FAILURE (a cached 0) carries no colour and cannot be mistaken for a black texture.
+    std::unordered_map<std::string, std::array<f32, 3>> cacheAverage_;
+    // Per binding set: baseColorFactor times its base-colour texture's mean, filled by writeSlots.
+    std::unordered_map<rhi::BindingSetHandle, std::array<f32, 3>> setAverage_;
     u32 failedResolves_ = 0;
 
     TextureResolver resolve_ = nullptr;

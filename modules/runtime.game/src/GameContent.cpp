@@ -298,16 +298,16 @@ std::string GameContent::resolveAssetPath(const pbr::TextureRef& ref) const {
     return {};
 }
 
-rhi::TextureHandle GameContent::resolveMaterialTexture(const pbr::TextureRef& ref, pbr::TextureSlot slot,
-                                                       void* user) {
+pbr::MaterialSystem::ResolvedTexture GameContent::resolveMaterialTexture(const pbr::TextureRef& ref,
+                                                                         pbr::TextureSlot slot, void* user) {
     auto* self = static_cast<GameContent*>(user);
-    if (!self || !self->textureFactory_) return 0;
+    if (!self || !self->textureFactory_) return {};
 
     const std::string path = self->resolveAssetPath(ref);
     if (path.empty()) {
         AVER_WARN("[Material] texture id 0x{:016X} is not in the content index; slot '{}' keeps its fallback",
                   ref.id, pbr::MaterialLibrary::textureSlotName(slot));
-        return 0;
+        return {};
     }
 
     // THE SLOT DECIDES THE COLOUR SPACE, NEVER THE FILENAME. A normal map read as sRGB is a subtly
@@ -326,11 +326,16 @@ rhi::TextureHandle GameContent::resolveMaterialTexture(const pbr::TextureRef& re
     if (!h) {
         AVER_WARN("[Material] {} - slot '{}' keeps its fallback", err,
                   pbr::MaterialLibrary::textureSlotName(slot));
-        return 0;
+        return {};
     }
     AVER_INFO("[Material] {} -> {}x{}, {} mips ({} KB) for slot '{}'", path, info.width, info.height,
               info.mips, info.bytes / 1024, pbr::MaterialLibrary::textureSlotName(slot));
-    return h;
+    // The mean travels with the handle -- see MaterialSystem::ResolvedTexture for why anything
+    // that cannot sample a texture needs it.
+    pbr::MaterialSystem::ResolvedTexture out;
+    out.handle = h;
+    for (int c = 0; c < 3; ++c) out.averageLinear[c] = info.averageLinear[c];
+    return out;
 }
 
 pbr::MaterialHandle GameContent::materialForSurface(const std::string& name) {

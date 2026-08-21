@@ -223,7 +223,7 @@ bool PtSceneView::init(rhi::IDevice& dev) {
     if (!pt_.init(dev)) { shutdown(); return false; }
     AVER_INFO("[PT] scene view ready: {}x{} accumulator, {} bounce(s), {} spp/step, up to {} "
               "sample(s), up to {} static instance(s)",
-              kAccumWidth, kAccumHeight, kMaxBounces, kSamplesPerStep, kMaxSamples, kMaxInstances);
+              accumWidth_, accumHeight_, kMaxBounces, kSamplesPerStep, kMaxSamples, kMaxInstances);
     return true;
 }
 
@@ -382,7 +382,7 @@ bool PtSceneView::deriveCamera(PtCamera& out) const {
     // obliged to match whatever ratio the editor happens to be docked at; deriving it from the real
     // viewport would stretch this image the moment the two disagree, and the editor's dockspace rect
     // changes size far more often than the level does.
-    out.aspect = static_cast<f32>(kAccumWidth) / static_cast<f32>(kAccumHeight);
+    out.aspect = static_cast<f32>(accumWidth_) / static_cast<f32>(accumHeight_);
     return true;
 }
 
@@ -414,7 +414,7 @@ bool PtSceneView::rebuildScene(rhi::IRenderContext& ctx) {
         AVER_ERROR("[PT] scene view: the flat geometry table could not be built");
         return false;
     }
-    if (!pt_.createTarget(0, kAccumWidth, kAccumHeight, target_)) {
+    if (!pt_.createTarget(0, accumWidth_, accumHeight_, target_)) {
         AVER_ERROR("[PT] scene view: could not allocate the accumulator");
         return false;
     }
@@ -600,6 +600,21 @@ bool PtSceneView::ensurePresentResources() {
                            target_.pixels() * kPtAccumElementsPerPixel, 0);
     }
     return true;
+}
+
+void PtSceneView::setQuality(u32 rung) {
+    const u32 clamped = rung < 4 ? rung : 3;
+    if (clamped == quality_) return;   // idempotent: safe to call every frame
+    quality_ = clamped;
+    accumWidth_  = kAccumLadder[clamped].width;
+    accumHeight_ = kAccumLadder[clamped].height;
+    // Forces prePass's re-arm branch, which is the only place createTarget() is called and
+    // therefore the only place a differently-sized accumulator can come into existence. Clearing
+    // sceneReady_ rather than the key means this works even when the scene itself has not changed.
+    sceneReady_ = false;
+    sampleCursor_ = 0;
+    loggedFirstFrame_ = convergedLogged_ = false;
+    AVER_INFO("[PT] scene view: quality rung {} -- accumulator {}x{}", quality_, accumWidth_, accumHeight_);
 }
 
 void PtSceneView::prePass(rhi::IRenderContext& ctx) {

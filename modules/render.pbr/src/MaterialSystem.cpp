@@ -117,9 +117,9 @@ void MaterialSystem::shutdown() {
 }
 
 // Resolves a reference through the host's resolver, caching the result. 0 when unavailable.
-rhi::TextureHandle MaterialSystem::resolveTexture(const TextureRef& ref, TextureSlot slot,
-                                                  bool retryFailed) {
-    if (ref.empty() || !resolve_) return 0;
+MaterialSystem::ResolvedTexture MaterialSystem::resolveTexture(const TextureRef& ref, TextureSlot slot,
+                                                               bool retryFailed) {
+    if (ref.empty() || !resolve_) return {};
     // THE COLOUR CLASS IS PART OF THE KEY. One file bound to two slots is still one upload when both
     // read it the same way -- but a PNG bound to BOTH base colour and occlusion is decoded sRGB for
     // one and linear for the other, and a key that ignored that would hand the second slot whichever
@@ -128,20 +128,36 @@ rhi::TextureHandle MaterialSystem::resolveTexture(const TextureRef& ref, Texture
     const std::string key = cacheKey(ref) + "|" + colourClass(slot);
     auto it = cache_.find(key);
     if (it != cache_.end()) {
-        if (it->second || !retryFailed) return it->second;
+        if (it->second || !retryFailed) {
+            ResolvedTexture r;
+            r.handle = it->second;
+            if (const auto a = cacheAverage_.find(key); a != cacheAverage_.end())
+                for (int i = 0; i < 3; ++i) r.averageLinear[i] = a->second[i];
+            return r;
+        }
         // A remembered failure, and the caller has reason to think it may have been fixed.
         cache_.erase(it);
+        cacheAverage_.erase(key);
         if (failedResolves_) --failedResolves_;
     }
-    const rhi::TextureHandle t = resolve_(ref, slot, resolveUser_);
+    const ResolvedTexture r = resolve_(ref, slot, resolveUser_);
+    const rhi::TextureHandle t = r.handle;
     // A FAILURE IS REMEMBERED, BUT NOT FOREVER. Caching the 0 is deliberate: without it a material
     // naming a texture that does not exist re-hits the filesystem on every dirty drain. But holding
     // it for the process lifetime means a texture dropped into the project after startup never
     // appears, and "restart the editor" is not an acceptable answer to "I added a PNG". So the
     // negatives are counted, and forgetFailedResolves() drops them when content changes.
     cache_.emplace(key, t);
+    if (t) cacheAverage_.emplace(key, std::array<f32, 3>{r.averageLinear[0], r.averageLinear[1], r.averageLinear[2]});
     if (!t) ++failedResolves_;
-    return t;
+    return r;
+}
+
+bool MaterialSystem::averageBaseColor(rhi::BindingSetHandle s, f32 out[3]) const {
+    const auto it = setAverage_.find(s);
+    if (it == setAverage_.end()) return false;
+    for (int i = 0; i < 3; ++i) out[i] = it->second[i];
+    return true;
 }
 
 // Drops every remembered failure. The 0s are not GPU resources, so nothing is destroyed here.
@@ -176,8 +192,21 @@ void MaterialSystem::writeSlots(const MaterialDesc& d, rhi::BindingSetHandle set
     static_assert(sizeof(fallback) / sizeof(fallback[0]) == kTextureSlotCount,
                   "every TextureSlot needs a fallback; a short list zero-fills and binds nothing");
     for (u32 i = 0; i < kTextureSlotCount; ++i) {
-        const rhi::TextureHandle t = resolveTexture(d.textures[i], static_cast<TextureSlot>(i), retryFailed);
-        res_->setSrv(set, i, t ? t : fallback[i]);
+        const ResolvedTexture r = resolveTexture(d.textures[i], static_cast<TextureSlot>(i), retryFailed);
+        res_->setSrv(set, i, r.handle ? r.handle : fallback[i]);
+        if (static_cast<TextureSlot>(i) != TextureSlot::BaseColor) continue;
+        // baseColorFactor TIMES the texture mean, which is what the pixel shader computes too --
+        // the factor is a multiplier over the sampled texel, not an alternative to it. With no
+        // base-colour texture the mean is 1 and this reduces to the factor alone, which is then
+        // genuinely the whole answer.
+        // packMaterial(), not d.baseColorFactor: glTF authors the factor in sRGB and packMaterial
+        // decodes it. Using the raw desc value here would report a colour in a different space
+        // from the one the pixel shader multiplies, which is a subtle wrongness rather than a
+        // visible one -- the worst kind.
+        const MaterialConstants packed = packMaterial(d);
+        std::array<f32, 3> avg{packed.baseColorFactor[0], packed.baseColorFactor[1], packed.baseColorFactor[2]};
+        if (r.handle) for (int c = 0; c < 3; ++c) avg[c] *= r.averageLinear[c];
+        setAverage_[set] = avg;
     }
 }
 

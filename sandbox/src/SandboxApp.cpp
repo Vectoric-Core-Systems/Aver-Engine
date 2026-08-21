@@ -1861,6 +1861,17 @@ public:
         // BEFORE device_->beginFrame() (see Engine::frameStep()) -- the only safe place to add or
         // remove a render feature. See syncPtSceneView()'s own comment for why.
         syncPtSceneView(e.device());
+#if AVER_MODULE_VOXI
+        // The RUNG, reconciled on the same cadence as the registration and for the same reason:
+        // --pt N, a project manifest and the settings combo all write voxi::Settings, and this is
+        // the one place that want becomes a call. setQuality() is idempotent, so calling it every
+        // frame costs one comparison; it is here rather than beside the combo so the CLI and a
+        // manifest reach it too, not only a click.
+        if (ptSceneView_) {
+            const voxi::Quality q = voxi::Renderer::get().settings().pathTracing;
+            if (q != voxi::Quality::Off) ptSceneView_->setQuality(static_cast<u32>(q) - 1);
+        }
+#endif
 #if AVER_MODULE_MCP
         // One event per frame: a click needs a press frame and a later release frame to register.
         if (mcp_.listening()) mcp_.pump([this](const mcp::Command& c) { applyMcpCommand(c); });
@@ -2243,16 +2254,16 @@ public:
 
 #if AVER_MODULE_PBR
     // Uploads the texture a material reference names and returns its handle. 0 keeps the slot's fallback.
-    static rhi::TextureHandle resolveMaterialTexture(const pbr::TextureRef& ref, pbr::TextureSlot slot,
-                                                     void* user) {
+    static pbr::MaterialSystem::ResolvedTexture resolveMaterialTexture(const pbr::TextureRef& ref,
+                                                                       pbr::TextureSlot slot, void* user) {
         auto* self = static_cast<SandboxApp*>(user);
-        if (!self || !self->textureFactory_) return 0;
+        if (!self || !self->textureFactory_) return {};
 
         const std::string path = self->resolveAssetPath(ref);
         if (path.empty()) {
             AVER_WARN("[Material] texture id 0x{:016X} is not in the content index; slot '{}' keeps "
                       "its fallback", ref.id, pbr::MaterialLibrary::textureSlotName(slot));
-            return 0;
+            return {};
         }
 
         // The slot decides the colour space, never the filename.
@@ -2270,11 +2281,14 @@ public:
         if (!h) {
             AVER_WARN("[Material] {} — slot '{}' keeps its fallback", err,
                       pbr::MaterialLibrary::textureSlotName(slot));
-            return 0;
+            return {};
         }
         AVER_INFO("[Material] {} -> {}x{}, {} mips ({} KB) for slot '{}'", path, info.width, info.height,
                   info.mips, info.bytes / 1024, pbr::MaterialLibrary::textureSlotName(slot));
-        return h;
+        pbr::MaterialSystem::ResolvedTexture out;
+        out.handle = h;
+        for (int c = 0; c < 3; ++c) out.averageLinear[c] = info.averageLinear[c];
+        return out;
     }
 
     // Returns where an asset reference points on this machine, or empty when it cannot be resolved.
@@ -4817,6 +4831,15 @@ public:
                     if (!ms.ready()) return false;
                     if (set == ms.fallbackBindingSet()) return false;   // un-authored: keep the look's colour
                     if (!ms.ownsBindingSet(set)) return false;          // not one of ours at all
+                    // THE TEXTURE'S MEAN, NOT baseColorFactor ALONE, and the difference is the whole
+                    // reason this line exists. A modern material puts its look in a TEXTURE and
+                    // leaves the factor a plain white multiplier: every one of the forty materials
+                    // in the demo project this was measured on declares `baseColorFactor 1 1 1 1`.
+                    // The tracer has no texture units, so reading the factor alone painted every
+                    // surface in the level pure white -- roughly three times too bright AND
+                    // completely flat, which is exactly what a path-traced capture of it looked
+                    // like beside the raster one.
+                    if (ms.averageBaseColor(set, outAlbedo)) return true;
                     const auto* mc = static_cast<const pbr::MaterialConstants*>(constants);
                     outAlbedo[0] = mc->baseColorFactor[0];
                     outAlbedo[1] = mc->baseColorFactor[1];
@@ -10210,11 +10233,14 @@ private:
             // value it holds is what syncPtSceneView() -- called from onUpdate(), never from here, see
             // that function's own comment for why -- reconciles PtSceneView's registration against.
             //
-            // PtSceneView HAS NO QUALITY TIERS of its own: kAccumWidth/kAccumHeight/kMaxBounces/
-            // kSamplesPerStep/kMaxSamples (PtSceneView.hpp) are fixed constants, never derived from a
-            // rung the way voxelResolution derives from globalIllumination above. So every value but
-            // Off means exactly the same thing here -- on -- until a real quality ladder exists for
-            // it; stated honestly rather than inventing tiers that would do nothing.
+            // THE TIER DRIVES THE ACCUMULATOR RESOLUTION (PtSceneView::kAccumLadder). It used to
+            // drive nothing at all -- every value but Off meant the same thing, and this comment
+            // said so -- which left the view permanently at 480x270 and therefore permanently
+            // magnified ~5.7x into an editor viewport. That blow-up, not the sample count, is what
+            // reads as a shimmering mess while the camera moves, because a moving camera restarts
+            // the accumulation every frame and never shows more than one step regardless of rung.
+            // kMaxBounces/kSamplesPerStep/kMaxSamples remain fixed; see kAccumLadder for why the
+            // rung is spent on pixels rather than on samples.
             const Status st = vx.status(Feature::PathTracing);
             ImGui::TextUnformatted(Renderer::featureName(Feature::PathTracing));
             featureStatusBadge(vx, Feature::PathTracing);
@@ -10233,6 +10259,9 @@ private:
                 // THE SEAM: this is the one place a UI event turns into a request for PtSceneView.
                 // syncPtSceneView() performs the actual RHI registration next onUpdate(), never here.
                 ptSceneViewWantEnabled_ = (s.pathTracing != Quality::Off);
+                // Quality::Low is 1, so the rung is one less; Off never reaches this branch.
+                if (ptSceneView_ && s.pathTracing != Quality::Off)
+                    ptSceneView_->setQuality(static_cast<u32>(s.pathTracing) - 1);
             }
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Turns on Aver.PathTracer's reference view: a still-camera, brute-\n"

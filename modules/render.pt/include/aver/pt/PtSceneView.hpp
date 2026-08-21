@@ -123,6 +123,18 @@ private:
     // ACCUMULATOR's own aspect -- never the real viewport's, see the class comment. False when there
     // is no camera to read yet, or the projection is degenerate.
     bool deriveCamera(PtCamera& out) const;
+
+public:
+    // Picks a rung of kAccumLadder, 0..3. Anything higher clamps to the top.
+    //
+    // Takes effect on the next frame, by forcing the same re-arm path a scene change takes: the
+    // accumulator is a GPU buffer sized at createTarget() time, so a resolution change is a
+    // reallocation, not a uniform. Idempotent -- setting the rung it is already on does nothing at
+    // all, which is what makes it safe for the editor to call every frame from its settings read.
+    void setQuality(u32 rung);
+    u32  quality() const { return quality_; }
+
+private:
     // An order-sensitive FNV-1a hash of drawsPrev_ (mesh, world bits, albedo bits) -- the exact same
     // shape and constants VoxiRenderer::giDrawsKey() uses, for the same reason: a cache whose
     // invalidation rule is "close enough" is a cache that goes stale silently, so this is bit-exact,
@@ -138,6 +150,10 @@ private:
     PtTarget                target_;
 
     PtCamera curCam_{};
+    // The rung in force, 0..3. Changing it re-creates the accumulator, which costs a re-arm.
+    u32 quality_ = 0;
+    u32 accumWidth_  = kAccumWidthLow;
+    u32 accumHeight_ = kAccumHeightLow;
     bool     haveCam_ = false;
 
     u64  sceneKey_ = 0;
@@ -211,10 +227,12 @@ private:
 
     // ---- the bounded numbers this stays inside; see the class comment's PERFORMANCE point ----
     //
-    // Small and fixed, independent of the swapchain: this is a reference view, never a render mode,
-    // and its cost must not scale with however large the editor's viewport happens to be.
-    static constexpr u32 kAccumWidth  = 480;
-    static constexpr u32 kAccumHeight = 270;
+    // Bounded and independent of the swapchain: this is a reference view, never a render mode, and
+    // its cost must not scale with however large the editor's viewport happens to be. But it is no
+    // longer FIXED -- see setQuality() and kAccumLadder for why a single hardcoded 480x270 was the
+    // single most visible thing wrong with this view.
+    static constexpr u32 kAccumWidthLow  = 480;
+    static constexpr u32 kAccumHeightLow = 270;
     static constexpr u32 kMaxBounces  = 4;
     // 8 samples per still frame, at (bounces+1)*samples = 40 RayQuery traces per pixel per dispatch
     // over 480x270 = ~5.2M traces/dispatch -- see PtSceneView.cpp's own comment at the accumulate()
@@ -229,6 +247,34 @@ private:
     // EXACT count, with no headroom, so an unbounded snapshot would try to build one BLAS per
     // instance with no limit.
     static constexpr u32 kMaxInstances = 4096;
+
+    // THE LADDER the Path Tracing quality combo drives. Four rungs, 16:9, each roughly double the
+    // pixels of the one below.
+    //
+    // WHY RESOLUTION AND NOT SAMPLES. While the camera is moving the accumulator restarts every
+    // frame, so what is on screen is always exactly ONE step -- kSamplesPerStep samples, no more,
+    // whatever the tier. What the tier CAN change is how far that image is stretched: 480x270 shown
+    // in a 2750-wide viewport is a 5.7x magnification, and that blow-up, not the sample count, is
+    // what reads as a shimmering mess while flying. Spending the tier on samples instead would
+    // sharpen an image nobody can see the pixels of.
+    //
+    // COST, MEASURED, not predicted -- and it is NOT linear in pixels, which is why the top rung is
+    // where it is. On a real project with a moving camera, against a raster frame of 9.5 ms on the
+    // same scene:
+    //
+    //     Low 480x270  4.5 ms | Medium 640x360  5.0 ms | High 960x540  5.5 ms | Epic 1280x720  6.9 ms
+    //
+    // 7.1x the pixels costs 1.5x the frame, so most of the bottom rung is fixed per-frame overhead
+    // rather than tracing -- and EVERY rung, including the top, is cheaper than the raster view it
+    // suppresses. The first draft of this comment asserted the opposite (that the top two rungs
+    // would be slower than raster); it was written before the measurement and was simply wrong.
+    struct AccumRung { u32 width; u32 height; };
+    static constexpr AccumRung kAccumLadder[4] = {
+        { 480, 270},   // Low    -- 1.0x, what this view always used to be
+        { 640, 360},   // Medium -- 1.8x
+        { 960, 540},   // High   -- 4.0x
+        {1280, 720},   // Epic   -- 7.1x
+    };
     // Root CBV register for the presentation pixel shader's own tiny constant block (accumulator
     // width/height). This pipeline never includes rhi::sharedShaderPrelude() on the PIXEL side (only
     // the vertex shader borrows its VSky entry point), so b1 here is unrelated to what b1 means to a

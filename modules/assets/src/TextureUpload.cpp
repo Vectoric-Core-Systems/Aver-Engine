@@ -3,6 +3,8 @@
 
 #include "aver/formats/Texture.hpp"
 
+#include <cmath>
+
 namespace aver::assets {
 
 // Decodes `path` and uploads it. Returns 0 on failure, with the reason in `err`.
@@ -51,7 +53,22 @@ rhi::TextureHandle uploadTexture(rhi::IResourceFactory& res, const std::string& 
         if (err) *err = "the GPU texture could not be created: " + path;
         return 0;
     }
-    if (info) *info = TextureUploadInfo{tex.width, tex.height, d.mips, bytes};
+    if (info) {
+        *info = TextureUploadInfo{tex.width, tex.height, d.mips, bytes};
+        // The last level is 1x1 (generateMipChain loops until both extents are 1). Its texel is
+        // stored in the texture's OWN encoding, so an sRGB texture needs decoding back to linear
+        // -- downsample() averaged in linear and then re-encoded, and handing the encoded byte
+        // straight out would report a colour roughly twice as bright as the texture really is.
+        const ImageData& last = tex.levels.back();
+        if (last.pixels.size() >= 4) {
+            for (int c = 0; c < 3; ++c) {
+                const f32 v = static_cast<f32>(last.pixels[c]) / 255.0f;
+                info->averageLinear[c] = tex.srgb
+                    ? (v <= 0.04045f ? v / 12.92f : std::pow((v + 0.055f) / 1.055f, 2.4f))
+                    : v;
+            }
+        }
+    }
     return h;
 }
 

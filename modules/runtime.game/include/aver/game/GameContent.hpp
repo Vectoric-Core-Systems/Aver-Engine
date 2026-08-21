@@ -7,6 +7,9 @@
 
 #if AVER_MODULE_PBR
 #  include "aver/pbr/Material.hpp"
+// resolveMaterialTexture below returns MaterialSystem::ResolvedTexture by value, so the full type
+// is needed here rather than a forward declaration.
+#  include "aver/pbr/MaterialSystem.hpp"
 #endif
 
 #include <string>
@@ -64,7 +67,7 @@ public:
     //
     // A plain function pointer with a void* because that is what MaterialSystem's resolver takes.
     // `user` is a GameContent*.
-    static rhi::TextureHandle resolveMaterialTexture(const pbr::TextureRef& ref, pbr::TextureSlot slot,
+    static pbr::MaterialSystem::ResolvedTexture resolveMaterialTexture(const pbr::TextureRef& ref, pbr::TextureSlot slot,
                                                      void* user);
 
     // Where an asset reference points on this machine, or empty.
