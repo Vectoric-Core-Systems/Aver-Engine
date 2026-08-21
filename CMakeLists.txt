@@ -190,6 +190,9 @@ add_subdirectory(modules/audio)
 if(WIN32)
   add_subdirectory(modules/audio.wasapi)
 endif()
+# Durable key/value for a shipped game. Nothing above Core/Platform, so it sits here beside them
+# rather than behind a module switch: a game with no scene still has settings.
+add_subdirectory(modules/settings)
 add_subdirectory(modules/formats)  # Phase 2 (.ocbeam / .ocmap loaders)
 # The Roslyn backend for actor scripts. Above Aver.Formats rather than inside it, so the base
 # module keeps its no-dependency, no-process guarantee. See its CMakeLists for the full argument --
@@ -459,6 +462,9 @@ if(AVER_BUILD_TESTS)
     # The placement -> entity loop the editor and the game runtime now share. Guarded on the scene
     # for the same reason the module's own source is: without it there is nothing to instantiate into.
     add_subdirectory(tests/world)
+  endif()
+  if(TARGET Aver.Settings)
+    add_subdirectory(tests/settings)
   endif()
   if(AVER_MODULE_FRAMEWORK)
     add_subdirectory(tests/framework)
