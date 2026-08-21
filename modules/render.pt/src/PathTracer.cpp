@@ -1,5 +1,8 @@
 // The path-tracing compute pass: scenes in, linear radiance out.
 #include "aver/pt/PathTracer.hpp"
+
+#include <chrono>
+#include <unordered_map>
 #include "aver/core/Log.hpp"
 #include "PtShaders.hpp"
 
@@ -98,12 +101,15 @@ void PathTracer::shutdown() {
         if (verts_)       res_->destroyBuffer(verts_);
         if (indices_)     res_->destroyBuffer(indices_);
         if (instanceBuf_) res_->destroyBuffer(instanceBuf_);
-        // BLAS handles ARE released -- destroyBlas exists and resetScene() (just below) has always
-        // used it correctly. THIS FUNCTION DID NOT, until a caller that can shut down and re-init a
-        // PathTracer repeatedly within one process -- a live editor on/off toggle, not just the
-        // process-exit call this used to be the only caller of -- turned a one-time, inert oversight
-        // into a per-toggle BLAS leak. Fixed here by doing exactly what resetScene() already does.
-        for (rhi::BlasHandle b : blas_) if (b) res_->destroyBlas(b);
+        // BLAS handles ARE released, and THIS is now the only place that does it: they are owned by
+        // blasCache_, which deliberately survives resetScene() (see its own comment). Iterating the
+        // CACHE rather than blas_ is what makes that correct -- blas_ holds only the meshes in the
+        // last snapshot, so freeing that instead would leak every mesh that had left the view.
+        //
+        // This function used not to free them at all, which was inert while the only caller was
+        // process exit and became a per-toggle leak once a live editor could shut down and re-init a
+        // PathTracer repeatedly.
+        for (const auto& [mesh, b] : blasCache_) if (b) res_->destroyBlas(b);
         // TLAS handles are NOT released here, or anywhere in this file: the RHI has no destroyTlas at
         // all (see IResourceFactory), so every TLAS this object ever built leaks for the life of the
         // DEVICE, not just of this object -- see resetScene()'s own comment for the identical,
@@ -112,6 +118,7 @@ void PathTracer::shutdown() {
         if (pipeline_)    res_->destroyPipeline(pipeline_);
         if (cs_)          res_->destroyShader(cs_);
     }
+    blasCache_.clear();
     verts_ = indices_ = instanceBuf_ = 0;
     pipeline_ = 0;
     cs_ = 0;
@@ -142,26 +149,49 @@ u32 PathTracer::addScene(const u32* surfaceIds, u32 count) {
 bool PathTracer::prepare() {
     if (!res_ || !dev_ || surfaces_.empty()) return false;
     if (prepared_) return true;
+    const auto tPrep0 = std::chrono::steady_clock::now();
 
     // Where each surface's geometry lands in the flat table. Per SURFACE and not per mesh: two
     // surfaces may share a mesh (the same quad with two albedos is exactly that case), and giving
     // them separate rows costs a few vertices and removes a deduplication that could go wrong.
     instances_.resize(surfaces_.size());
+    surfaceRow_.assign(surfaces_.size(), 0);
+    meshRows_.clear();
     totalVerts_ = totalIndices_ = 0;
+    // Mesh handle -> row. Local to this call: the rows are rebuilt from scratch on every prepare(),
+    // so this is a deduplication within one snapshot, never a cache across snapshots.
+    std::unordered_map<rhi::MeshHandle, u32> rowOf;
+    rowOf.reserve(surfaces_.size());
     for (usize i = 0; i < surfaces_.size(); ++i) {
-        rhi::BufferHandle vb = 0, ib = 0;
-        u32 vc = 0, ic = 0;
-        if (!dev_->meshGeometry(surfaces_[i].mesh, &vb, &ib, &vc, &ic)) {
-            AVER_ERROR("[PT] surface {} has no readable geometry; the backend cannot express it", i);
-            return false;
+        const rhi::MeshHandle mesh = surfaces_[i].mesh;
+        auto found = rowOf.find(mesh);
+        if (found == rowOf.end()) {
+            rhi::BufferHandle vb = 0, ib = 0;
+            u32 vc = 0, ic = 0;
+            if (!dev_->meshGeometry(mesh, &vb, &ib, &vc, &ic)) {
+                AVER_ERROR("[PT] surface {} has no readable geometry; the backend cannot express it", i);
+                return false;
+            }
+            MeshRow row;
+            row.mesh        = mesh;
+            row.firstVertex = totalVerts_;
+            row.firstIndex  = totalIndices_;
+            row.vertexCount = vc;
+            row.indexCount  = ic;
+            totalVerts_   += vc;
+            totalIndices_ += ic;
+            found = rowOf.emplace(mesh, static_cast<u32>(meshRows_.size())).first;
+            meshRows_.push_back(row);
         }
+        const MeshRow& row = meshRows_[found->second];
+        surfaceRow_[i] = found->second;
         Instance& inst = instances_[i];
         std::memcpy(inst.objectToWorld, surfaces_[i].world, sizeof(inst.objectToWorld));
         std::memcpy(inst.albedo, surfaces_[i].albedo, sizeof(inst.albedo));
-        inst.firstVertex = totalVerts_;
-        inst.firstIndex  = totalIndices_;
-        totalVerts_   += vc;
-        totalIndices_ += ic;
+        // The SHARED rows: every surface on this mesh reads the same geometry. What stays per
+        // surface is objectToWorld and albedo, right here.
+        inst.firstVertex = row.firstVertex;
+        inst.firstIndex  = row.firstIndex;
     }
     if (totalVerts_ == 0 || totalIndices_ == 0) return false;
 
@@ -191,13 +221,40 @@ bool PathTracer::prepare() {
     }
     res_->writeBuffer(instanceBuf_, instances_.data(), nd.bytes);
 
-    // One bottom-level structure per SURFACE. Two surfaces on one mesh build it twice, which is a
-    // few microseconds and removes a cache whose invalidation rule would otherwise have to be right.
-    blas_.assign(surfaces_.size(), 0);
-    for (usize i = 0; i < surfaces_.size(); ++i) {
-        blas_[i] = res_->createBlas(surfaces_[i].mesh);
-        if (!blas_[i]) { AVER_ERROR("[PT] no bottom-level structure for surface {}", i); return false; }
+    // One bottom-level structure per DISTINCT MESH. A BLAS describes geometry in object space and
+    // nothing else -- the instance transform lives in the TLAS -- so two surfaces on one mesh have
+    // always been able to share one, and building it twice was pure waste. See MeshRow for the
+    // measurement that made that waste the dominant cost of the whole feature.
+    const auto tBuf = std::chrono::steady_clock::now();
+    blas_.assign(meshRows_.size(), 0);
+    blasFresh_.assign(meshRows_.size(), 0);
+    u32 reused = 0;
+    for (usize i = 0; i < meshRows_.size(); ++i) {
+        const rhi::MeshHandle mesh = meshRows_[i].mesh;
+        if (const auto hit = blasCache_.find(mesh); hit != blasCache_.end()) {
+            // Reached only for a mesh whose meshGeometry() succeeded above, which is the liveness
+            // test the whole cache rests on -- see blasCache_ for why that is sufficient.
+            blas_[i] = hit->second;
+            ++reused;
+            continue;
+        }
+        blas_[i] = res_->createBlas(mesh);
+        if (!blas_[i]) { AVER_ERROR("[PT] no bottom-level structure for mesh {}", mesh); return false; }
+        blasFresh_[i] = 1;
+        blasCache_.emplace(mesh, blas_[i]);
     }
+    // Logged with its TIMING because this function was, measured, the entire cost of the feature:
+    // 2.2 SECONDS per re-arm before geometry was deduplicated by mesh and structures were cached,
+    // and a re-arm fires whenever the visible set changes. Anyone who makes this slow again should
+    // find out from the log rather than from the frame rate.
+    const auto tBlas = std::chrono::steady_clock::now();
+    AVER_INFO("[PT] flat table: {} surface(s) over {} distinct mesh(es), {} vertices, {} indices"
+              " | buffers {:.1f}ms, createBlas {:.1f}ms ({} built, {} reused)",
+              static_cast<u32>(surfaces_.size()), static_cast<u32>(meshRows_.size()),
+              totalVerts_, totalIndices_,
+              std::chrono::duration<f64, std::milli>(tBuf - tPrep0).count(),
+              std::chrono::duration<f64, std::milli>(tBlas - tBuf).count(),
+              static_cast<u32>(meshRows_.size()) - reused, reused);
     for (const Scene& s : scenes_) if (!s.tlas) {
         AVER_ERROR("[PT] a scene has no top-level structure");
         return false;
@@ -211,7 +268,9 @@ bool PathTracer::buildScenes(rhi::IRenderContext& ctx) {
     if (!prepared_ || built_) return built_;
 
     ctx.pushMarker("Aver.PathTracer build");
-    for (rhi::BlasHandle b : blas_) ctx.buildBlas(b);
+    // ONLY THE NEW ONES. A built BLAS stays built until it is destroyed, and re-tracing the same
+    // geometry on every re-arm is GPU work whose result is bit-identical to what is already there.
+    for (usize i = 0; i < blas_.size(); ++i) if (blasFresh_[i]) ctx.buildBlas(blas_[i]);
 
     // BOTH transitions are explicit. D3D12 would promote a Common buffer to CopyDest by itself, but
     // the RHI tracks buffer state to catch exactly this class of mistake and does not model
@@ -219,14 +278,16 @@ bool PathTracer::buildScenes(rhi::IRenderContext& ctx) {
     // state the tracker never saw it enter.
     ctx.bufferBarrier(verts_,   rhi::ResourceState::Common, rhi::ResourceState::CopyDest);
     ctx.bufferBarrier(indices_, rhi::ResourceState::Common, rhi::ResourceState::CopyDest);
-    for (usize i = 0; i < surfaces_.size(); ++i) {
+    // Per DISTINCT MESH, matching the table prepare() laid out. Copying per surface duplicated the
+    // same blob once per instance -- 31.2M vertices where 2M would do.
+    for (const MeshRow& row : meshRows_) {
         rhi::BufferHandle vb = 0, ib = 0;
         u32 vc = 0, ic = 0;
-        if (!dev_->meshGeometry(surfaces_[i].mesh, &vb, &ib, &vc, &ic)) { ctx.popMarker(); return false; }
+        if (!dev_->meshGeometry(row.mesh, &vb, &ib, &vc, &ic)) { ctx.popMarker(); return false; }
         ctx.copyBuffer(verts_, vb, static_cast<u64>(vc) * sizeof(rhi::MeshVertex),
-                       static_cast<u64>(instances_[i].firstVertex) * sizeof(rhi::MeshVertex), 0);
+                       static_cast<u64>(row.firstVertex) * sizeof(rhi::MeshVertex), 0);
         ctx.copyBuffer(indices_, ib, static_cast<u64>(ic) * sizeof(u32),
-                       static_cast<u64>(instances_[i].firstIndex) * sizeof(u32), 0);
+                       static_cast<u64>(row.firstIndex) * sizeof(u32), 0);
     }
     ctx.bufferBarrier(verts_,   rhi::ResourceState::CopyDest, rhi::ResourceState::Common);
     ctx.bufferBarrier(indices_, rhi::ResourceState::CopyDest, rhi::ResourceState::Common);
@@ -235,11 +296,13 @@ bool PathTracer::buildScenes(rhi::IRenderContext& ctx) {
         std::vector<rhi::TlasInstance> inst;
         inst.reserve(s.surfaces.size());
         for (u32 id : s.surfaces) {
-            if (id >= surfaces_.size() || !blas_[id]) continue;
+            if (id >= surfaces_.size()) continue;
+            const u32 row = surfaceRow_[id];
+            if (row >= blas_.size() || !blas_[row]) continue;
             rhi::TlasInstance i;
             std::memcpy(i.world, surfaces_[id].world, sizeof(i.world));
             i.mask = 0xFF;
-            i.blas = blas_[id];
+            i.blas = blas_[row];
             // The id a hit reads back. It indexes the SHARED instance table, so a scene holding a
             // subset of the surfaces still resolves each hit to the right geometry and albedo --
             // which CommittedInstanceIndex, a position inside this one structure, could not do.
@@ -304,16 +367,18 @@ void PathTracer::resetScene() {
         if (verts_)       res_->destroyBuffer(verts_);
         if (indices_)     res_->destroyBuffer(indices_);
         if (instanceBuf_) res_->destroyBuffer(instanceBuf_);
-        // BLAS handles ARE released (destroyBlas exists and is real on every backend that builds
-        // one). TLAS handles are NOT -- see this method's own header comment for why that is a known,
+        // BLAS handles are NOT released here any more: they belong to blasCache_, which outlives a
+        // snapshot on purpose (see its own comment). shutdown() is what frees them. TLAS handles are
+        // still not released at all -- see this method's own header comment for why that is a known,
         // accepted leak for the intended caller and not something to work around here.
-        for (rhi::BlasHandle b : blas_) if (b) res_->destroyBlas(b);
     }
     verts_ = indices_ = instanceBuf_ = 0;
     surfaces_.clear();
     instances_.clear();
     scenes_.clear();
     blas_.clear();
+    meshRows_.clear();
+    surfaceRow_.clear();
     totalVerts_ = totalIndices_ = 0;
     prepared_ = false;
     built_ = false;

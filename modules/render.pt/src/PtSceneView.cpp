@@ -1,6 +1,7 @@
 // PtSceneView -- feeding the path tracer a real scene and getting its accumulator on screen. See
 // PtSceneView.hpp for what this is, what it deliberately does not do, and why.
 #include "aver/pt/PtSceneView.hpp"
+
 #include "aver/core/Log.hpp"
 #include "aver/core/Math.hpp"
 

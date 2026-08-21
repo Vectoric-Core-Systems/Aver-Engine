@@ -16,6 +16,7 @@
 // its arithmetic needs.
 #include "aver/rhi/RHI.hpp"
 
+#include <unordered_map>
 #include <vector>
 
 namespace aver::pt {
@@ -172,7 +173,44 @@ private:
     std::vector<PtSurface> surfaces_;
     std::vector<Instance>  instances_;
     std::vector<Scene>     scenes_;
-    std::vector<rhi::BlasHandle> blas_;      // one per surface; two surfaces may share a mesh
+    // GEOMETRY IS PER MESH, NOT PER SURFACE, and this is the difference between a re-arm costing
+    // 20ms and costing two and a half SECONDS.
+    //
+    // It used to be per surface -- one createBlas and one full vertex/index copy each -- on the
+    // stated grounds that a duplicate build "is a few microseconds and removes a cache whose
+    // invalidation rule would otherwise have to be right". Measured on a real level that scatters
+    // its foliage procedurally, one snapshot was 2174 surfaces drawn from a handful of distinct
+    // meshes: 2174 createBlas calls, each allocating its own acceleration-structure AND scratch
+    // buffer, and 31.2 MILLION vertices copied into the flat table for perhaps a fiftieth of that
+    // much distinct geometry. prepare() measured 2189ms, 2251ms, 2291ms on consecutive re-arms,
+    // and a re-arm fires whenever the visible set changes -- about every five frames while flying.
+    //
+    // There is no invalidation rule to get right, which is what the original reasoning missed: the
+    // map lives for exactly one prepare() call and is thrown away with it. Nothing outlives the
+    // snapshot, so nothing can go stale.
+    struct MeshRow {
+        rhi::MeshHandle mesh = 0;
+        u32 firstVertex = 0, firstIndex = 0, vertexCount = 0, indexCount = 0;
+    };
+    std::vector<MeshRow> meshRows_;          // one per DISTINCT mesh in the snapshot
+    std::vector<u32>     surfaceRow_;        // surface -> index into meshRows_/blas_
+    std::vector<rhi::BlasHandle> blas_;      // one per DISTINCT mesh, parallel to meshRows_
+    std::vector<u8>              blasFresh_; // parallel: 1 for one built this snapshot
+
+    // BLAS BY MESH, SURVIVING resetScene(), and this is the second half of the same measurement.
+    // Deduplicating within a snapshot took a re-arm from ~2200ms to ~110ms, and the split showed
+    // the remainder was still almost all createBlas: 94 calls, 103-164ms, for the same 94 meshes
+    // every time. What churns between snapshots is which INSTANCES are visible; the set of distinct
+    // meshes barely moves, so rebuilding their structures per re-arm is the same waste one level up.
+    //
+    // THE INVALIDATION RULE, which is the thing worth being exact about: a BLAS describes one mesh
+    // and stays valid until that mesh is destroyed. The RHI already tears one down at exactly that
+    // moment -- destroyMesh calls destroyBlasForMesh -- so the ONLY way a cached handle can dangle
+    // is a mesh that died, and IDevice::meshGeometry answers false for exactly those. prepare()
+    // already calls it for every mesh it touches, so the liveness test costs nothing extra and the
+    // cache cannot outlive what it describes. Mesh handles are never recycled either (destroyMesh
+    // clears the slot and keeps it), so a handle can never come to mean a different mesh.
+    std::unordered_map<rhi::MeshHandle, rhi::BlasHandle> blasCache_;
 
     rhi::BufferHandle verts_ = 0, indices_ = 0, instanceBuf_ = 0;
     u32  totalVerts_ = 0, totalIndices_ = 0;
