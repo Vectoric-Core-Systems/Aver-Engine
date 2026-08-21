@@ -25,6 +25,9 @@ aver_add_module(Aver.Formats
     # LNK1104 on a library nobody could see a reference to.
     src/ActorScript.cpp
     src/OcProject.cpp
+    # .ocsave -- a whole world captured generically. In the BASE target because it needs only the
+    # AVR1 container: a field KIND crosses it as a plain u32, so this never reaches Aver.Scene.
+    src/OcSave.cpp
     src/Texture.cpp
   DEPS
     Aver.Core

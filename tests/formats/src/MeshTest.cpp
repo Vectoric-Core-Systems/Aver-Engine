@@ -3,6 +3,7 @@
 #include "aver/formats/Avr1.hpp"
 #include "aver/formats/OcAnim.hpp"
 #include "aver/formats/OcMesh.hpp"
+#include "aver/formats/OcSave.hpp"
 #include "aver/core/Log.hpp"
 
 #include <cmath>
@@ -388,6 +389,136 @@ int main() {
         check(b.tracks[2].componentsPerKey() == 9, "cubicspline stride is 3 components x 3 tangents");
         check(b.tracks[2].values == a.tracks[2].values, "cubicspline tangents survive exactly");
         check(b.tracks[2].values.size() == b.tracks[2].times.size() * 9, "value count matches the stride");
+    }
+
+    AVER_INFO("=== .ocsave: a whole world, captured generically ===");
+    {
+        // The kinds are mirrored as plain u32 in OcSave.cpp because Aver.Formats may not reach
+        // Aver.Scene. These literals mirror them again for the test; Aver.Save is where the real
+        // static_assert against scene::FieldKind lives, since it is the one module linking both.
+        constexpr u32 kF32 = 0, kVec3 = 1, kQuat = 2, kI32 = 3, kBool = 4, kI64 = 5,
+                      kEntity = 6, kString = 7, kMat4 = 8;
+
+        fmt::OcSaveData d;
+        d.levelPath = "Content/Maps/Default.ocmap";
+        d.engineVersion = "0.3.0";
+
+        // 0: a root carrying one of EVERY kind, so nothing is exercised only by absence.
+        fmt::OcSaveEntity root;
+        root.name = "Root";
+        root.objectId = 0x1234ull;
+        root.parent = -1;
+        {
+            fmt::OcSaveComponent c;
+            c.type = "CLocal";
+            c.fields.push_back({"position", kVec3, {1.5f, -2.0f, 3.25f}, 0, ""});
+            c.fields.push_back({"rotation", kQuat, {0.0f, 0.0f, 0.7071f, 0.7071f}, 0, ""});
+            c.fields.push_back({"scale",    kVec3, {1.0f, 1.0f, 1.0f}, 0, ""});
+            root.components.push_back(c);
+        }
+        {
+            fmt::OcSaveComponent c;
+            c.type = "CEverything";
+            c.fields.push_back({"aFloat",  kF32,    {0.5f}, 0, ""});
+            c.fields.push_back({"anInt",   kI32,    {}, -7, ""});
+            c.fields.push_back({"aBool",   kBool,   {}, 1, ""});
+            c.fields.push_back({"aLong",   kI64,    {}, 0x7FFFFFFFFFLL, ""});
+            c.fields.push_back({"aString", kString, {}, 0, "hello world"});
+            std::vector<f32> m(16, 0.0f);
+            m[0] = m[5] = m[10] = m[15] = 1.0f;
+            c.fields.push_back({"aMatrix", kMat4, m, 0, ""});
+            root.components.push_back(c);
+        }
+        d.entities.push_back(root);
+
+        // 1: a CHILD of 0, referring FORWARD to 2 through an ENTITY field. A parent may only point
+        // backwards; an ordinary reference may point anywhere, and the two rules being different is
+        // exactly what the validity check has to encode.
+        fmt::OcSaveEntity child;
+        child.name = "Child";
+        child.parent = 0;
+        child.className = "AN_Door";
+        {
+            fmt::OcSaveComponent c;
+            c.type = "CDoor";
+            c.fields.push_back({"openedBy", kEntity, {}, 2, ""});
+            child.components.push_back(c);
+        }
+        d.entities.push_back(child);
+
+        // 2: a second root, referring to NOTHING.
+        fmt::OcSaveEntity sw;
+        sw.name = "Switch";
+        sw.parent = -1;
+        {
+            fmt::OcSaveComponent c;
+            c.type = "CDoor";
+            c.fields.push_back({"openedBy", kEntity, {}, -1, ""});
+            sw.components.push_back(c);
+        }
+        d.entities.push_back(sw);
+
+        check(d.valid(), "the snapshot is valid before it is written");
+
+        std::vector<u8> bytes; std::string why;
+        check(fmt::writeOcSave(d, bytes, &why), "it writes: " + why);
+        fmt::OcSaveData b;
+        check(fmt::parseOcSave(bytes.data(), bytes.size(), b, &why), "and reads back: " + why);
+
+        check(b.entities.size() == 3, "all three entities survive");
+        check(b.levelPath == d.levelPath, "the level it was taken in survives");
+        if (b.entities.size() == 3) {
+            check(b.entities[0].objectId == 0x1234ull, "an objectId survives");
+            check(b.entities[1].parent == 0, "a parent INDEX survives");
+            check(b.entities[1].className == "AN_Door", "a class NAME survives -- a handle could not");
+            check(b.entities[2].parent == -1, "and a second root stays a root");
+
+            const fmt::OcSaveComponent& ev = b.entities[0].components[1];
+            check(ev.fields.size() == 6, "every field of the every-kind component survives");
+            checkNear(ev.fields[0].f[0], 0.5f, 1e-6f, "F32 survives");
+            check(ev.fields[1].i == -7, "a NEGATIVE I32 survives -- it crosses as an i64");
+            check(ev.fields[2].i == 1, "BOOL survives");
+            check(ev.fields[3].i == 0x7FFFFFFFFFLL, "an I64 too large for an i32 survives INTACT");
+            check(ev.fields[4].s == "hello world", "a STRING survives");
+            check(ev.fields[5].f.size() == 16 && ev.fields[5].f[15] == 1.0f, "a MAT4 survives");
+
+            checkNear(b.entities[0].components[0].fields[0].f[2], 3.25f, 1e-6f,
+                      "and a VEC3 keeps its third component, not just its first");
+            check(b.entities[1].components[0].fields[0].i == 2,
+                  "a FORWARD entity reference survives -- indices, never handles");
+        }
+
+        // IDEMPOTENCE, for the reason .ocanim and .ocskel both have it: anything the parser drops
+        // is something a save/load cycle would delete from the player's world.
+        std::vector<u8> again;
+        check(fmt::writeOcSave(b, again, &why), "the parsed snapshot writes again");
+        check(again == bytes, "BYTE-IDENTICAL after a parse and a rewrite");
+
+        // ---- what it must REFUSE ------------------------------------------------------------
+        // A parent pointing FORWARD. restore() walks the array once, forwards, and reads the
+        // parent's already-created handle out of the same array -- a forward parent reads a hole.
+        fmt::OcSaveData fwd = d;
+        fwd.entities[0].parent = 2;
+        std::vector<u8> junk;
+        check(!fwd.valid(), "a FORWARD parent is invalid");
+        check(!fmt::writeOcSave(fwd, junk, &why), "and is refused at write, not discovered at load");
+
+        fmt::OcSaveData oob = d;
+        oob.entities[1].components[0].fields[0].i = 99;
+        check(!oob.valid(), "an entity reference past the end of the snapshot is invalid");
+
+        fmt::OcSaveData bad = d;
+        bad.entities[0].components[0].fields[0].f.pop_back();   // a VEC3 with two values
+        check(!bad.valid(), "a field whose value count disagrees with its kind is invalid");
+
+        // An EMPTY snapshot is legal -- a world with nothing in it is a thing that can happen.
+        fmt::OcSaveData empty;
+        std::vector<u8> emptyBytes;
+        check(empty.valid() && fmt::writeOcSave(empty, emptyBytes, &why), "an empty snapshot writes");
+        fmt::OcSaveData emptyBack;
+        check(fmt::parseOcSave(emptyBytes.data(), emptyBytes.size(), emptyBack, &why),
+              "and reads back as empty");
+        check(emptyBack.entities.empty(), "carrying no entities rather than one blank one");
     }
 
     AVER_INFO("=== .ocskel sockets: a named place on the rig ===");
