@@ -263,6 +263,12 @@ if(AVER_RHI_D3D11)
 endif()
 if(AVER_RHI_VULKAN)
   add_subdirectory(modules/rhi.vulkan)
+  # The concrete Dear ImGui implementation of that module's IUiBackend seam, gated exactly as the
+  # D3D12 one is: nested (it DEPS on Aver.RHI.Vulkan) and additionally on AVER_ENABLE_UI, since
+  # there is nothing for it to back when UI is off. Only Sandbox links it.
+  if(AVER_ENABLE_UI)
+    add_subdirectory(modules/rhi.vulkan.imgui)
+  endif()
 endif()
 if(AVER_MODULE_PBR)
   add_subdirectory(modules/render.pbr)    # optional: material system + C ABI for C#

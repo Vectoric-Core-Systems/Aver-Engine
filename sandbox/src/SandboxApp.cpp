@@ -214,6 +214,12 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "aver/rhi/d3d12/UiBackend.hpp"
 #include "aver/rhi/d3d12/ImGuiUiBackend.hpp"
 #endif
+#if AVER_WITH_IMGUI_VULKAN
+// The same pair for Vulkan, on its own macro: a tree can build either backend, both or neither, so
+// these cannot ride along on AVER_WITH_IMGUI, which means "the D3D12 backend's types are here".
+#include "aver/rhi/vulkan/UiBackend.hpp"
+#include "aver/rhi/vulkan/ImGuiUiBackend.hpp"
+#endif
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -910,14 +916,32 @@ public:
     }
 #endif
 
-#if AVER_WITH_IMGUI
+#if AVER_WITH_IMGUI || AVER_WITH_IMGUI_VULKAN
     // Plugs the editor's Dear ImGui backend into the device BEFORE Engine::run's own uiInit() call
     // runs against it -- see Application::onDeviceCreated's own comment for why this hook exists and
-    // why onInit() (below) is too late. installUiBackend is a no-op if e.device() somehow is not a
-    // D3D12 device (checked through IDevice::backend(), not assumed).
+    // why onInit() (below) is too late.
+    //
+    // ONE OF THE TWO, CHOSEN BY WHAT THE DEVICE ACTUALLY IS. Both installUiBackend functions verify
+    // the backend tag themselves and no-op otherwise, so this could not install the wrong one even
+    // if it tried -- but asking first keeps a pointless allocation from happening in a tree that
+    // built both.
     void onDeviceCreated(Engine& e) override {
-        uiBackend_.reset(rhi::d3d12::imgui_backend::create());
-        rhi::d3d12::installUiBackend(e.device(), uiBackend_.get());
+        const rhi::Backend which = e.device() ? e.device()->backend() : rhi::Backend::D3D12;
+#if AVER_WITH_IMGUI
+        if (which == rhi::Backend::D3D12) {
+            uiBackend_.reset(rhi::d3d12::imgui_backend::create());
+            rhi::d3d12::installUiBackend(e.device(), uiBackend_.get());
+            return;
+        }
+#endif
+#if AVER_WITH_IMGUI_VULKAN
+        if (which == rhi::Backend::Vulkan) {
+            uiBackendVk_.reset(rhi::vkb::imgui_backend::create());
+            rhi::vkb::installUiBackend(e.device(), uiBackendVk_.get());
+            return;
+        }
+#endif
+        (void)which;
     }
 #endif
 
@@ -11549,6 +11573,12 @@ private:
     // Natural destruction order (this object dies only when SandboxApp itself does, well after the
     // device is gone) is what keeps this safe with no explicit detach at all.
     std::unique_ptr<rhi::d3d12::IUiBackend> uiBackend_;
+#endif
+#if AVER_WITH_IMGUI_VULKAN
+    // The Vulkan one, held on exactly the same terms and for the same teardown reason as the D3D12
+    // member above: the device's own raw pointer must not outlive this, and natural destruction
+    // order is what keeps that true with no explicit detach.
+    std::unique_ptr<rhi::vkb::IUiBackend> uiBackendVk_;
 #endif
     // 3D viewport rect, in backbuffer pixels. Latched by buildUI, consumed the next frame.
     f32 vpX_=0, vpY_=0, vpW_=1600, vpH_=900;

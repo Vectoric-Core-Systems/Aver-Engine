@@ -2622,6 +2622,9 @@ TlasHandle VulkanResourceFactory::createTlas(u32 maxInstances) {
 }
 
 void VulkanResourceFactory::destroyTexture(TextureHandle h) {
+    // BEFORE anything is torn down: a UI toolkit may hold a descriptor pointing at this texture's
+    // view, and that descriptor has to go first or it outlives what it points at.
+    if (dev_) dev_->releaseUiTextureId(h);
     RhiTexture* t = texture(h);
     if (!t) return;
     VkImage image = t->image;

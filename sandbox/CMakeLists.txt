@@ -46,6 +46,14 @@ if(TARGET Aver.RHI.D3D12.ImGui)
   target_link_libraries(Sandbox PRIVATE Aver.RHI.D3D12.ImGui imgui)
   target_compile_definitions(Sandbox PRIVATE AVER_WITH_IMGUI=1)
 endif()
+# The Vulkan half, on the same terms and INDEPENDENTLY: a tree can have either backend, both, or
+# neither, and SandboxApp.cpp picks between them at runtime off IDevice::backend(). Its own macro
+# rather than AVER_WITH_IMGUI, because that one means "the D3D12 backend's types are available" --
+# guarding the Vulkan wiring on it would break a Vulkan-only tree.
+if(TARGET Aver.RHI.Vulkan.ImGui)
+  target_link_libraries(Sandbox PRIVATE Aver.RHI.Vulkan.ImGui imgui)
+  target_compile_definitions(Sandbox PRIVATE AVER_WITH_IMGUI_VULKAN=1)
+endif()
 # The level/world runtime. The editor and the game runtime BOTH link this, which is the whole reason
 # it is not inside Aver.Runtime.Game: turning a .ocworld placement into an entity used to be written
 # out twice, and every future change to it -- chunk ownership first -- would have had to be made

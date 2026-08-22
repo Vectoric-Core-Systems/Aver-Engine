@@ -104,6 +104,7 @@
 #include <functional>
 #include <cstdlib>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 static_assert(VK_HEADER_VERSION == 296,
@@ -1436,6 +1437,14 @@ public:
     bool uiActive() const override { return uiBackend_ != nullptr && uiUp_; }
     bool uiWantsMouse() const override;
     bool uiWantsKeyboard() const override;
+    // A handle the UI toolkit can draw one of THIS backend's textures through -- the editor's 3D
+    // viewport and every asset thumbnail come through here. Zero with no backend installed, which
+    // is what it always returned before one could be.
+    u64 uiTextureId(TextureHandle t) override;
+    // Called by the factory when a texture goes away, so the descriptor the toolkit made for it does
+    // not outlive the image view it points at. A leak per destroyed texture otherwise, and the
+    // thumbnail cache destroys them constantly.
+    void releaseUiTextureId(TextureHandle t);
 
     // ---- plain (non-override) helpers, mirroring D3D12Device's own public non-interface surface ----
     void present();
@@ -1553,6 +1562,9 @@ private:
     // ownership; Sandbox holds the concrete object and outlives this device's uiShutdown().
     vkb::IUiBackend* uiBackend_ = nullptr;
     bool uiUp_ = false;   // init() succeeded and shutdown() has not run
+    // One toolkit descriptor per texture, made on first use. Keyed by handle rather than by view so
+    // releaseUiTextureId can find it from what destroyTexture knows.
+    std::unordered_map<TextureHandle, u64> uiTexIds_;
     u32 imageIndex_ = 0;    // the acquired swapchain image index this frame
 
     VkCommandPool commandPool_ = VK_NULL_HANDLE;

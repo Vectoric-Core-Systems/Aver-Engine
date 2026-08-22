@@ -1021,12 +1021,38 @@ void VulkanDevice::uiShutdown() {
     if (!uiBackend_ || !uiUp_) return;
     // Everything the toolkit built is referenced by command buffers that may still be in flight.
     waitForGpu();
+    // The toolkit owns every descriptor it made for us; its shutdown takes them all, so this map
+    // must not outlive it holding ids that no longer mean anything.
+    uiTexIds_.clear();
     uiBackend_->shutdown();
     uiUp_ = false;
 }
 
 bool VulkanDevice::uiWantsMouse() const    { return uiBackend_ && uiUp_ && uiBackend_->wantsMouse(); }
 bool VulkanDevice::uiWantsKeyboard() const { return uiBackend_ && uiUp_ && uiBackend_->wantsKeyboard(); }
+
+u64 VulkanDevice::uiTextureId(TextureHandle t) {
+    if (!uiBackend_ || !uiUp_ || !t || !rhiFactory_) return 0;
+    if (auto it = uiTexIds_.find(t); it != uiTexIds_.end()) return it->second;
+
+    const RhiTexture* tex = rhiFactory_->texture(t);
+    if (!tex || tex->srvView == VK_NULL_HANDLE) return 0;
+    // A plain linear/clamp sampler, from the SAME cache every pipeline's immutable samplers come
+    // from, so this adds no sampler the device did not already own.
+    const VkSampler samp = rhiFactory_->getOrCreateSampler(SamplerDesc{});
+    if (samp == VK_NULL_HANDLE) return 0;
+
+    const u64 id = uiBackend_->textureId(reinterpret_cast<u64>(tex->srvView), reinterpret_cast<u64>(samp));
+    if (id) uiTexIds_[t] = id;
+    return id;
+}
+
+void VulkanDevice::releaseUiTextureId(TextureHandle t) {
+    auto it = uiTexIds_.find(t);
+    if (it == uiTexIds_.end()) return;
+    if (uiBackend_ && uiUp_) uiBackend_->releaseTextureId(it->second);
+    uiTexIds_.erase(it);
+}
 
 // Already inside aver::rhi::vkb -- no nested namespace, which would make this vkb::vkb::.
 bool installUiBackend(IDevice* device, IUiBackend* backend) {
@@ -1534,7 +1560,13 @@ bool VulkanDevice::createSwapchainResources(const SwapchainDesc& d) {
     // rhi::postShaderSource()), matching D3D12's own non-sRGB DXGI_FORMAT_R8G8B8A8_UNORM backbuffer
     // -- an sRGB surface would gamma-encode a SECOND time on top of that.
     swapchainFormat_ = VK_FORMAT_UNDEFINED;
-    for (VkFormat want : {VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM}) {
+    // RGBA FIRST, AND THE ORDER IS LOAD-BEARING. B8G8R8A8_UNORM used to be preferred, and nothing in
+    // the engine's rhi::Format enum can name it -- fromVkFormat has no case for it and returns
+    // Unknown. Every consumer that asks what the swapchain format IS then gets a format it cannot
+    // use: ensureViewportTexture asked, got Unknown, and createTexture refused it 80 times a run,
+    // which is why the editor's 3D viewport was black on Vulkan while the UI around it drew fine.
+    // R8G8B8A8_UNORM is also exactly what the comment above says this is matching D3D12 on.
+    for (VkFormat want : {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_B8G8R8A8_UNORM}) {
         for (const auto& f : fmts) if (f.format == want) { swapchainFormat_ = f.format; swapchainColorSpace_ = f.colorSpace; break; }
         if (swapchainFormat_ != VK_FORMAT_UNDEFINED) break;
     }
@@ -2334,11 +2366,12 @@ bool VulkanDevice::ensureViewportTexture() {
     return true;
 }
 u64 VulkanDevice::viewportTextureId() {
-    // uiTextureId is never overridden (see the header's own note on the UI methods staying at
-    // IDevice's defaults), so there is no non-zero id to hand back yet even once the texture
-    // exists; honest 0, matching what IDevice::uiTextureId's own default already returns.
+    // Once a UI backend exists this is just another texture: the editor draws the composited scene
+    // as an image inside its viewport panel, and this is the handle it draws with. It returned a
+    // hard 0 for as long as there was no toolkit to make one -- which is why the viewport rendered
+    // black the first time the UI itself came up.
     if (!viewportToTex_ || !ensureViewportTexture()) return 0;
-    return 0;
+    return uiTextureId(viewportTex_);
 }
 
 void VulkanDevice::notifyRenderTargetsChanged() {
@@ -3259,11 +3292,13 @@ ConstantAllocation VulkanDevice::postConstants(const void* data, u32 bytes) {
 // by the time this runs; endFrame barriers it there right before calling this, mirroring D3D12's own
 // resolve-then-SRV-barrier immediately ahead of runPostChain.
 //
-// viewportToTex_ is NOT honoured here: it exists to let the editor UI draw the scene as an ordinary
-// image, but this backend does not override uiTextureId (see VulkanDevice's own note on the UI
-// methods), so nothing could ever consume that texture id anyway -- compositing straight to the
-// swapchain image unconditionally is the honest behaviour for a backend with no UI surface, not a
-// silently dropped feature.
+// viewportToTex_ IS honoured now, and the composite below is where. It used to be ignored for a
+// good reason that has since expired: it exists to let the editor UI draw the scene as an ordinary
+// image, and this backend had no uiTextureId to hand that image out through, so there was nothing
+// that could ever consume it. There is now (see uiTextureId), and the editor asks for exactly this
+// -- SandboxApp calls setViewportToTexture(true), then draws viewportTextureId() inside its
+// viewport panel. Compositing to the swapchain regardless left that panel BLACK: the UI covered the
+// backbuffer the scene had been put on, and the image it wanted was never rendered.
 void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*bbFormat*/) {
     {
         const auto now = std::chrono::steady_clock::now();
@@ -3524,12 +3559,45 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
     // composite's own sampler.
     if (srUpscaled) fillCommon(width_, height_, width_, height_);
     else            fillCommon(width_, height_, sceneWidth_, sceneHeight_);
-    VkImageMemoryBarrier2 toRt = imgBarrier(bbImage, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+
+    // WHERE THE COMPOSITE LANDS: the swapchain image normally, or the viewport texture when the
+    // editor has asked for one. Only the destination changes -- same pipeline, same source, same
+    // extent -- because the texture is deliberately created at width_ x height_ in the swapchain's
+    // own format (see ensureViewportTexture).
+    VkImage dstImage = bbImage;
+    VkImageView dstView = bbView;
+    RhiTexture* vpTex = nullptr;
+    if (viewportToTex_ && rhiFactory_ && ensureViewportTexture()) {
+        vpTex = rhiFactory_->texture(viewportTex_);
+        if (vpTex && vpTex->image && vpTex->rtvView) { dstImage = vpTex->image; dstView = vpTex->rtvView; }
+        else vpTex = nullptr;
+    }
+
+    // UNDEFINED as the old layout is right for both: the swapchain image is being fully overwritten,
+    // and so is the viewport texture -- neither's previous contents are read by this pass.
+    VkImageMemoryBarrier2 toRt = imgBarrier(dstImage, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                             VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
                                             VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT);
     pipelineBarrier(api_, cmd, &toRt, 1);
     fullscreen(compositePso_[bloom ? 1 : 0][autoExp ? 1 : 0],
-              srUpscaled ? kPostSlotCompositeUpscaled : kPostSlotComposite, width_, height_, bbView);
+              srUpscaled ? kPostSlotCompositeUpscaled : kPostSlotComposite, width_, height_, dstView);
+
+    // Back to SHADER_READ so the UI can sample it in the overlay pass that follows. Only for the
+    // texture -- the swapchain image's own transition to PRESENT is endFrame's business.
+    if (vpTex) {
+        VkImageMemoryBarrier2 toSrv = imgBarrier(vpTex->image, VK_IMAGE_ASPECT_COLOR_BIT,
+                                                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                                 VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                                 VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);
+        pipelineBarrier(api_, cmd, &toSrv, 1);
+
+        // The backbuffer still has to reach COLOR_ATTACHMENT for the overlay pass, which no longer
+        // happens as a side effect of compositing into it.
+        VkImageMemoryBarrier2 bbToRt = imgBarrier(bbImage, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                                  VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                                                  VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT);
+        pipelineBarrier(api_, cmd, &bbToRt, 1);
+    }
 }
 
 // ================================================================================================
