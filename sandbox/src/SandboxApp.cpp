@@ -535,26 +535,143 @@ struct MeshObj {
 };
 
 #if AVER_WITH_IMGUI
+// THE CANONICAL AVER ORANGE, and there is now exactly one of it.
+//
+// This value is GraphEditor.cpp's own IM_COL32(242, 101, 34, 255) -- the one its comments call
+// "Aver orange" and describe as matching the editor chrome and the website. It had drifted into
+// four different oranges: the graph editor's 242/101/34, this theme's accent at 0.95/0.42/0.13
+// (= 242/107/33, six units off on green), the viewport selection outline's brighter 1.0/0.62/0.12,
+// and an ad-hoc 0.79/0.47/0.16 on one button. Three of those were nobody's decision. The selection
+// outline stays deliberately distinct -- it has to read against arbitrary scene colour, not against
+// this chrome -- and is the one exception.
+static constexpr ImVec4 kAverOrange   (242.0f/255.0f, 101.0f/255.0f, 34.0f/255.0f, 1.00f);
+static constexpr ImVec4 kAverOrangeDim(242.0f/255.0f, 101.0f/255.0f, 34.0f/255.0f, 0.55f);
+
 // Applies the editor's dark ImGui colour scheme and metrics.
+//
+// EVERY COLOUR IS SET, and that is the substance of this function rather than a tidiness point. It
+// used to set fifteen of ImGui's fifty-odd entries and leave the rest at the library default, which
+// is BLUE -- so an active tab, a scrollbar grab, a resize corner, the docking preview overlay, a
+// table header and a text selection were all default-blue in an editor whose identity is orange on
+// steel. That reads as unfinished, and no amount of work on the fifteen would have fixed it.
+//
+// The neutrals carry a slight blue bias (green and blue channels a little above red) rather than
+// being pure grey. That is deliberate: a cool ground makes the warm accent read as chosen instead
+// of merely present, and pure mid-grey is the tell of a palette nobody picked.
 static void applyUnrealStyle() {
     ImGuiStyle& s = ImGui::GetStyle();
-    s.WindowRounding = 3; s.FrameRounding = 3; s.GrabRounding = 3; s.TabRounding = 3;
-    s.WindowBorderSize = 1; s.FrameBorderSize = 0; s.WindowPadding = ImVec2(8,8); s.FramePadding = ImVec2(7,4);
-    s.ItemSpacing = ImVec2(7,5);
+
+    // Metrics. Set UNSCALED -- applyDpi calls ScaleAllSizes(dpi) immediately after this, so writing
+    // pre-multiplied values here would square the scaling on a high-DPI display.
+    s.WindowRounding    = 4;  s.ChildRounding  = 4;  s.FrameRounding  = 4;
+    s.PopupRounding     = 4;  s.GrabRounding   = 3;  s.TabRounding    = 4;
+    s.ScrollbarRounding = 4;
+    s.WindowBorderSize  = 1;  s.FrameBorderSize = 0; s.PopupBorderSize = 1;
+    s.ChildBorderSize   = 1;
+    s.WindowPadding     = ImVec2(10, 8);
+    // FramePadding.y STAYS AT 4, and that is a gates constraint rather than a taste one. A docked
+    // tab bar is FontSize + FramePadding.y*2 tall, so raising it moves the Level viewport's top edge
+    // down and shortens it -- and the visual gates probe at RELATIVE coordinates inside exactly that
+    // rect (--probe-rel, resolved against vpX_/vpY_/vpW_/vpH_). Relative probes survive a resize but
+    // not a change of ASPECT, which is what a few pixels off the height is. The x half is free:
+    // it widens tabs and fields without touching the content region.
+    s.FramePadding      = ImVec2(8, 4);
+    s.ItemSpacing       = ImVec2(8, 6);
+    s.ItemInnerSpacing  = ImVec2(6, 4);
+    s.CellPadding       = ImVec2(6, 4);
+    s.ScrollbarSize     = 12;
+    s.GrabMinSize       = 10;
+    s.IndentSpacing     = 18;
+    s.WindowTitleAlign  = ImVec2(0.0f, 0.5f);
+    s.SeparatorTextBorderSize = 1;
+
     ImVec4* c = s.Colors;
-    const ImVec4 bg(0.086f,0.086f,0.094f,1), panel(0.129f,0.133f,0.145f,1), item(0.18f,0.185f,0.20f,1);
-    const ImVec4 accent(0.95f,0.42f,0.13f,1), accentDim(0.95f,0.42f,0.13f,0.55f);
-    c[ImGuiCol_WindowBg]=panel; c[ImGuiCol_ChildBg]=bg; c[ImGuiCol_PopupBg]=panel;
-    c[ImGuiCol_Border]=ImVec4(0.03f,0.03f,0.03f,0.9f);
-    c[ImGuiCol_FrameBg]=item; c[ImGuiCol_FrameBgHovered]=ImVec4(0.24f,0.25f,0.27f,1); c[ImGuiCol_FrameBgActive]=ImVec4(0.28f,0.29f,0.31f,1);
-    c[ImGuiCol_TitleBg]=bg; c[ImGuiCol_TitleBgActive]=ImVec4(0.11f,0.11f,0.12f,1);
-    c[ImGuiCol_MenuBarBg]=ImVec4(0.10f,0.10f,0.11f,1);
-    c[ImGuiCol_Header]=item; c[ImGuiCol_HeaderHovered]=ImVec4(0.26f,0.27f,0.29f,1); c[ImGuiCol_HeaderActive]=accentDim;
-    c[ImGuiCol_Button]=item; c[ImGuiCol_ButtonHovered]=ImVec4(0.26f,0.27f,0.29f,1); c[ImGuiCol_ButtonActive]=accentDim;
-    c[ImGuiCol_CheckMark]=accent; c[ImGuiCol_SliderGrab]=accent; c[ImGuiCol_SliderGrabActive]=accent;
-    c[ImGuiCol_Tab]=bg; c[ImGuiCol_TabHovered]=accentDim; c[ImGuiCol_Text]=ImVec4(0.86f,0.87f,0.88f,1);
-    c[ImGuiCol_TextDisabled]=ImVec4(0.45f,0.46f,0.48f,1);
-    c[ImGuiCol_Separator]=ImVec4(0.03f,0.03f,0.03f,1);
+
+    // One ladder of neutrals, deepest to lightest, so depth is expressed by ONE consistent set
+    // rather than by each widget family inventing its own near-black.
+    const ImVec4 sunken   (0.071f, 0.075f, 0.082f, 1.00f);   // behind content: viewports, child frames
+    const ImVec4 panel    (0.109f, 0.114f, 0.125f, 1.00f);   // window bodies
+    const ImVec4 raised   (0.145f, 0.152f, 0.165f, 1.00f);   // title bars, menu bar, inactive tabs
+    const ImVec4 item     (0.180f, 0.188f, 0.204f, 1.00f);   // buttons, frames, headers at rest
+    const ImVec4 itemHot  (0.235f, 0.245f, 0.265f, 1.00f);
+    const ImVec4 itemOn   (0.275f, 0.287f, 0.310f, 1.00f);
+    const ImVec4 line     (0.043f, 0.047f, 0.055f, 1.00f);   // borders and separators
+    const ImVec4 text     (0.882f, 0.894f, 0.910f, 1.00f);
+    const ImVec4 textDim  (0.478f, 0.494f, 0.522f, 1.00f);
+
+    c[ImGuiCol_Text]                  = text;
+    c[ImGuiCol_TextDisabled]          = textDim;
+    c[ImGuiCol_WindowBg]              = panel;
+    c[ImGuiCol_ChildBg]               = sunken;
+    c[ImGuiCol_PopupBg]               = ImVec4(0.094f, 0.098f, 0.110f, 0.98f);
+    c[ImGuiCol_Border]                = line;
+    c[ImGuiCol_BorderShadow]          = ImVec4(0, 0, 0, 0);
+
+    c[ImGuiCol_FrameBg]               = item;
+    c[ImGuiCol_FrameBgHovered]        = itemHot;
+    c[ImGuiCol_FrameBgActive]         = itemOn;
+
+    c[ImGuiCol_TitleBg]               = raised;
+    c[ImGuiCol_TitleBgActive]         = raised;
+    c[ImGuiCol_TitleBgCollapsed]      = ImVec4(0.071f, 0.075f, 0.082f, 0.85f);
+    c[ImGuiCol_MenuBarBg]             = raised;
+
+    // Scrollbars were default blue-grey and are on screen constantly -- easily the most visible of
+    // the entries that had been left unset.
+    c[ImGuiCol_ScrollbarBg]           = ImVec4(0.071f, 0.075f, 0.082f, 0.60f);
+    c[ImGuiCol_ScrollbarGrab]         = ImVec4(0.235f, 0.245f, 0.265f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabHovered]  = ImVec4(0.310f, 0.325f, 0.350f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabActive]   = kAverOrangeDim;
+
+    c[ImGuiCol_CheckMark]             = kAverOrange;
+    c[ImGuiCol_SliderGrab]            = kAverOrange;
+    c[ImGuiCol_SliderGrabActive]      = ImVec4(1.000f, 0.478f, 0.208f, 1.00f);   // orange, lifted
+
+    c[ImGuiCol_Button]                = item;
+    c[ImGuiCol_ButtonHovered]         = itemHot;
+    c[ImGuiCol_ButtonActive]          = kAverOrangeDim;
+
+    c[ImGuiCol_Header]                = item;
+    c[ImGuiCol_HeaderHovered]         = itemHot;
+    c[ImGuiCol_HeaderActive]          = kAverOrangeDim;
+
+    c[ImGuiCol_Separator]             = line;
+    c[ImGuiCol_SeparatorHovered]      = kAverOrangeDim;
+    c[ImGuiCol_SeparatorActive]       = kAverOrange;
+
+    c[ImGuiCol_ResizeGrip]            = ImVec4(0.235f, 0.245f, 0.265f, 0.60f);
+    c[ImGuiCol_ResizeGripHovered]     = kAverOrangeDim;
+    c[ImGuiCol_ResizeGripActive]      = kAverOrange;
+
+    // THE ACTIVE TAB is the single most-looked-at widget in a docked editor, and it was the ImGui
+    // default blue. An orange top edge on a panel-coloured body reads as "this one", which is the
+    // job; a fully orange tab would shout.
+    c[ImGuiCol_Tab]                   = raised;
+    c[ImGuiCol_TabHovered]            = itemHot;
+    c[ImGuiCol_TabActive]             = panel;
+    c[ImGuiCol_TabUnfocused]          = ImVec4(0.094f, 0.098f, 0.110f, 1.00f);
+    c[ImGuiCol_TabUnfocusedActive]    = ImVec4(0.130f, 0.136f, 0.148f, 1.00f);
+
+    c[ImGuiCol_DockingPreview]        = kAverOrangeDim;
+    c[ImGuiCol_DockingEmptyBg]        = sunken;
+
+    c[ImGuiCol_PlotLines]             = ImVec4(0.640f, 0.660f, 0.700f, 1.00f);
+    c[ImGuiCol_PlotLinesHovered]      = kAverOrange;
+    c[ImGuiCol_PlotHistogram]         = kAverOrange;
+    c[ImGuiCol_PlotHistogramHovered]  = ImVec4(1.000f, 0.478f, 0.208f, 1.00f);
+
+    c[ImGuiCol_TableHeaderBg]         = raised;
+    c[ImGuiCol_TableBorderStrong]     = line;
+    c[ImGuiCol_TableBorderLight]      = ImVec4(0.078f, 0.082f, 0.094f, 1.00f);
+    c[ImGuiCol_TableRowBg]            = ImVec4(0, 0, 0, 0);
+    c[ImGuiCol_TableRowBgAlt]         = ImVec4(1, 1, 1, 0.022f);   // banding, barely there on purpose
+
+    c[ImGuiCol_TextSelectedBg]        = ImVec4(kAverOrange.x, kAverOrange.y, kAverOrange.z, 0.35f);
+    c[ImGuiCol_DragDropTarget]        = kAverOrange;
+    c[ImGuiCol_NavHighlight]          = kAverOrange;
+    c[ImGuiCol_NavWindowingHighlight] = ImVec4(1, 1, 1, 0.70f);
+    c[ImGuiCol_NavWindowingDimBg]     = ImVec4(0.071f, 0.075f, 0.082f, 0.60f);
+    c[ImGuiCol_ModalWindowDimBg]      = ImVec4(0.020f, 0.022f, 0.026f, 0.65f);
 }
 #endif
 
@@ -10457,7 +10574,8 @@ private:
             auto modeBtn = [&](const char* label, EditorMode m, bool enabled) {
                 const bool on = mode_ == m;
                 if (!enabled) ImGui::BeginDisabled();
-                if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.79f, 0.47f, 0.16f, 1.0f));
+                // The theme's own accent, not a fourth hand-mixed orange -- see kAverOrange.
+                if (on) ImGui::PushStyleColor(ImGuiCol_Button, kAverOrangeDim);
                 if (ImGui::Button(label)) setEditorMode(m);
                 if (on) ImGui::PopStyleColor();
                 if (!enabled) {
