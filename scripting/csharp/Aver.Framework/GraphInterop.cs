@@ -601,6 +601,45 @@ internal static class GraphInterop
         return true;
     }
 
+    // ================================================================== scene identity, by name
+    //
+    // The other two members of SetName's own name= family. SetName reflects STRAIGHT into
+    // Aver.Scene.Native (it is already scalar-shaped: entity + string -> int), but these two need
+    // real wrappers: Entity.Create and Game.Find both return an Entity STRUCT, and hand-emitted IL
+    // cannot cheaply unwrap one -- the same reason every other node in this file has a wrapper
+    // rather than calling the public API directly (see this class's own header comment).
+
+    /// <summary>Entity.Create(name)'s own surface: makes a new entity and reports its handle.
+    /// success is false, and entity 0, only when the scene refused to create one at all (it is out
+    /// of entity slots) -- a name that merely duplicates an existing one is fine and expected,
+    /// because a name in this engine is not unique (see World::setName's own objectId comment).</summary>
+    internal static bool CreateEntityForGraph(string name, out int entity)
+    {
+        Entity e = Entity.Create(name ?? string.Empty);
+        entity = e.Handle;
+        return entity != 0;
+    }
+
+    /// <summary>Game.Find(name)'s own surface: the FIRST live entity with this name, or 0.
+    /// FALSE FOR "NOT FOUND" IS THE POINT -- a miss is an ordinary, expected answer (the thing has
+    /// not spawned yet, or was destroyed), not an error, so a graph can branch on it rather than
+    /// having to compare the handle against 0 itself. Note the scene's own find is a LINEAR SCAN
+    /// over live entities (World::find), so this is not free in a tight loop.</summary>
+    internal static bool FindEntityForGraph(string name, out int entity)
+    {
+        if (string.IsNullOrEmpty(name)) { entity = 0; return false; }
+        entity = Game.Find(name).Handle;
+        return entity != 0;
+    }
+
+    /// <summary>Physics.Ready -- whether aver_phys_init has actually run. A graph that adds bodies
+    /// before it has gets silent zeros back from every creator, and had no way to ask until now.</summary>
+    internal static bool PhysicsReadyForGraph() => Physics.Ready;
+
+    /// <summary>Physics.FixedStep, seconds. What a graph integrating anything by hand should use
+    /// instead of a hardcoded 1/60, so it matches the simulation it is running alongside.</summary>
+    internal static float PhysicsFixedStepForGraph() => Physics.FixedStep;
+
     // ================================================================== Synapse
     //
     // SynapseSteer computes; GetSynapseTarget reads. The two are deliberately independent of each

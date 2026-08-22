@@ -542,6 +542,25 @@ public class GraphCompiler
                 EmitSetName(node);
                 break;
 
+            case "isphysicsready":
+            case "getfixedstep":
+            case "findentity":
+                // PURE reads -- welcome in the dataflow compiler, exactly like getbodycount and
+                // getworldposition. EmitSimpleApiRead drives EmitPullOutput's own cases above.
+                EmitSimpleApiRead(node);
+                break;
+
+            case "createentity":
+                // A SIDE EFFECT: it makes a new entity. Refused here for the identical reason
+                // "spawn" is refused -- Compile()'s topological pass would run it unconditionally on
+                // every invocation, minting an entity per pull with nothing able to gate it.
+                throw new InvalidOperationException(
+                    $"CreateEntity node '{node.Id}' cannot be compiled by Compile() -- creating an " +
+                    "entity is a side effect with no notion of 'when' in a pure-dataflow graph, and " +
+                    "Compile()'s topological pass would run it unconditionally on every invocation " +
+                    "with no way to gate it. Give this node an ENTRY-driven exec chain and reach it " +
+                    "through CompileEntryPoint() instead.");
+
             case "setmesh":
                 EmitSetMesh(node);
                 break;
@@ -2573,6 +2592,7 @@ public class GraphCompiler
                     else if (IsExecCapableSphereCastType(node.Type)) EmitExecSphereCast(node);
                     else if (IsExecCapableFireEventType(node.Type)) EmitExecFireEvent(node);
                     else if (IsExecCapableSaveLoadType(node.Type)) EmitExecSaveLoad(node);
+                    else if (IsExecCapableCreateEntityType(node.Type)) EmitExecCreateEntity(node);
                     EmitExecFanOut(node);
                     return;
             }
@@ -3287,6 +3307,37 @@ public class GraphCompiler
         }
     }
 
+    /// CreateEntity is exec-only, for EmitExecSpawn's exact reason one tier down: Spawn mints an
+    /// ACTOR of a declared class, this mints a bare entity, and both are side effects a dataflow
+    /// pull has no way to gate. Same shape as EmitExecSpawn -- push the name= literal (there is no
+    /// string pin it could arrive on), Call, then capture the two outputs or discard them.
+    private void EmitExecCreateEntity(Node node)
+    {
+        if (_il == null) return;
+        if (string.IsNullOrEmpty(node.NameValue))
+            throw new InvalidOperationException(
+                $"CreateEntity node '{node.Id}' has no name= attribute naming the entity to create");
+
+        _il.Emit(OpCodes.Ldstr, node.NameValue);
+        var entityLocal = _il.DeclareLocal(typeof(int));
+        _il.Emit(OpCodes.Ldloca, entityLocal);
+        _il.Emit(OpCodes.Call, CreateEntityMethod);
+
+        if (node.Pins.Any(p => p.IsOutput && p.Name == "success"))
+            _il.Emit(OpCodes.Stloc, GetOrCreateExecLocal(node.Id, "success", typeof(bool)));
+        else
+            _il.Emit(OpCodes.Pop);   // nothing declared to read it; the stack still has to balance
+
+        if (node.Pins.Any(p => p.IsOutput && p.Name == "entity"))
+        {
+            _il.Emit(OpCodes.Ldloc, entityLocal);
+            _il.Emit(OpCodes.Stloc, GetOrCreateExecLocal(node.Id, "entity", typeof(int)));
+        }
+    }
+
+    private static bool IsExecCapableCreateEntityType(string type) =>
+        type.Equals("createentity", StringComparison.OrdinalIgnoreCase);
+
     /// Runs a CharacterMove node's native call exactly once, at the point the exec walk reaches it --
     /// mirrors EmitExecSpawn's own shape (pull inputs via EmitPullInput, Call, capture-or-discard the
     /// result into an exec-local), but with no attribute check at the top: UNLIKE Spawn's class=
@@ -3870,6 +3921,25 @@ public class GraphCompiler
                 EmitPullInput(source, "body"); _il.Emit(OpCodes.Call, BodyValidMethod); return;
             case "getbodycount":
                 _il.Emit(OpCodes.Call, BodyCountMethod); return;
+            case "isphysicsready":
+                _il.Emit(OpCodes.Call, PhysicsReadyMethod); return;
+            case "getfixedstep":
+                _il.Emit(OpCodes.Call, PhysicsFixedStepMethod); return;
+            case "findentity": {
+                // name= is edit-time data, so it is pushed as an Ldstr literal exactly as SetName's
+                // own emit does -- there is no string PIN it could arrive on.
+                if (string.IsNullOrEmpty(source.NameValue))
+                    throw new InvalidOperationException(
+                        $"FindEntity node '{source.Id}' has no name= attribute naming the entity to look up");
+                _il.Emit(OpCodes.Ldstr, source.NameValue);
+                var foundL = _il.DeclareLocal(typeof(int));
+                _il.Emit(OpCodes.Ldloca, foundL);
+                _il.Emit(OpCodes.Call, FindEntityMethod);
+                if (pinName == "found") return;   // the bool return IS that pin
+                _il.Emit(OpCodes.Pop);
+                _il.Emit(OpCodes.Ldloc, foundL);
+                return;
+            }
             case "raycastany":
                 EmitPullInput(source, "originX");
                 EmitPullInput(source, "originY");
@@ -4394,6 +4464,18 @@ public class GraphCompiler
     private static readonly MethodInfo BodyCountMethod =
         typeof(GraphInterop).GetMethod("BodyCountForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.BodyCountForGraph was not found by reflection");
+    private static readonly MethodInfo CreateEntityMethod =
+        typeof(GraphInterop).GetMethod("CreateEntityForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.CreateEntityForGraph was not found by reflection");
+    private static readonly MethodInfo FindEntityMethod =
+        typeof(GraphInterop).GetMethod("FindEntityForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.FindEntityForGraph was not found by reflection");
+    private static readonly MethodInfo PhysicsReadyMethod =
+        typeof(GraphInterop).GetMethod("PhysicsReadyForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.PhysicsReadyForGraph was not found by reflection");
+    private static readonly MethodInfo PhysicsFixedStepMethod =
+        typeof(GraphInterop).GetMethod("PhysicsFixedStepForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.PhysicsFixedStepForGraph was not found by reflection");
     private static readonly MethodInfo SetBodyPositionMethod =
         typeof(GraphInterop).GetMethod("SetBodyPositionForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SetBodyPositionForGraph was not found by reflection");

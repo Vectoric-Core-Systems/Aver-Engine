@@ -196,6 +196,13 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"GetBodyVelocity", "Get Body Velocity", "Physics", {pin("body", "int", false), pin("x", "float", true), pin("y", "float", true), pin("z", "float", true), pin("success", "bool", true)}});
     t.push_back({"IsBodyValid", "Is Body Valid", "Physics", {pin("body", "int", false), pin("valid", "bool", true)}});
     t.push_back({"GetBodyCount", "Body Count", "Physics", {pin("count", "int", true)}});
+    //    IsPhysicsReady / GetFixedStep: the two Physics STATUS reads (Physics.Ready, Physics.FixedStep).
+    //    Pure, no exec, no inputs -- they ask the simulation about itself. Worth nodes because a graph
+    //    that adds bodies before aver_phys_init has run gets silent zeros back from every creator, and
+    //    until now it had no way to ASK. GetFixedStep is what a graph integrating by hand needs so it
+    //    matches the simulation's own step rather than a hardcoded 1/60.
+    t.push_back({"IsPhysicsReady", "Is Physics Ready", "Physics", {pin("ready", "bool", true)}});
+    t.push_back({"GetFixedStep", "Fixed Step", "Physics", {pin("seconds", "float", true)}});
     t.push_back({"RaycastAny", "Raycast Any", "Physics", {pin("originX", "float", false), pin("originY", "float", false), pin("originZ", "float", false), pin("dirX", "float", false), pin("dirY", "float", false), pin("dirZ", "float", false), pin("maxDist", "float", false), pin("hit", "bool", true)}});
     t.push_back({"SetBodyPosition", "Set Body Position", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
     t.push_back({"SetBodyVelocity", "Set Body Velocity", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
@@ -634,6 +641,23 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     //    NODE-line attribute is still the only route it can reach this node.
     t.push_back({"SetName", "Set Name", "Scene", {
         pin("entity", "int", false), pin("success", "bool", true)},
+        {attr("name", "Name")}});
+
+    //    CreateEntity / FindEntity: the other two members of SetName's own name= family
+    //    (Entity.Create(name), Game.Find(name)). They REUSE name=/Node.NameValue verbatim -- the
+    //    parser already carries it for SetName, so neither needed a single line of new parsing, and
+    //    the C++ writer round-trips it through the generic extraTokens path like every other key=value.
+    //
+    //    CreateEntity is EXEC (it makes a new entity -- a side effect, refused by the pure-dataflow
+    //    compiler exactly as Spawn is), FindEntity is PURE (a lookup is idempotent, like GetWorldPosition).
+    //    FindEntity returns 0 when nothing matches, which is a real, common answer and not an error --
+    //    "found" says which case it is, the same split GetSynapsePerception's own success pin uses.
+    t.push_back({"CreateEntity", "Create Entity", "Scene", {
+        pin("exec", "exec", false),
+        pin("then", "exec", true), pin("entity", "int", true), pin("success", "bool", true)},
+        {attr("name", "Name")}});
+    t.push_back({"FindEntity", "Find Entity", "Scene", {
+        pin("entity", "int", true), pin("found", "bool", true)},
         {attr("name", "Name")}});
 
     // -- SetMesh / SetMaterial: coarse, dedicated nodes wrapping Entity.SetMesh/SetMaterial

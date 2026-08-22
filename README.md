@@ -75,6 +75,8 @@ abi/ interop/ editor/ shaders/ content/   README only — nothing is built from 
 | `scene` | `Aver.Scene` | Entities, packed component pools, hierarchy, fields addressed by name, and a C seam readable end to end without meeting the word *actor*. |
 | `framework` | `Aver.Framework` | The gameplay vocabulary over that world — class registry, defaults, spawn, possess, begin/end play — as data rather than an inheritance tree. |
 | `physics` | `Aver.Physics` | Jolt behind the engine's own plain-C seam. |
+| `synapse` | `Aver.Synapse` | AI with no world in it: the baked navigation grid, A\* across it, and the behaviour-tree evaluator. Core and Formats only, which is what lets a path be checked against a map drawn in ASCII. See [docs/SYNAPSE.md](docs/SYNAPSE.md). |
+| `synapse.scene` | `Aver.Synapse.Scene` | The join — agent, perception and behaviour components, and the ticks that drive them. Synapse advises and never moves anything itself; steering reaches a character through nodes the author can see. |
 | `scripting` | `Aver.Scripting.Host` | In-process CoreCLR via nethost/hostfxr; collectible load context, reflection discovery, hot reload. Needs Core and Platform, never the RHI. |
 | `ui` | `Aver.UI` | The retained game UI draw list — layers, batching, clip intersection, premultiplied alpha. Core-only, which is what makes it testable with no device. Not the editor's ImGui. |
 | `ui.abi` | `Aver.UI.Abi` | The C seam a game's HUD calls. |

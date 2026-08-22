@@ -1295,6 +1295,32 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "count", Type = PinType.Int, IsOutput = true, NodeId = node.Id });
                 break;
 
+            // The two Physics STATUS reads. No inputs at all -- they ask the simulation about
+            // itself, so there is nothing to pass in. Pure, no exec, same as getbodycount above.
+            case "isphysicsready":
+                node.Pins.Add(new Pin { Name = "ready", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "getfixedstep":
+                node.Pins.Add(new Pin { Name = "seconds", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                break;
+
+            // CreateEntity / FindEntity -- SetName's own name= family. Both take their string from
+            // the NODE line (Node.NameValue, already parsed for SetName), never a pin: PinType has
+            // no String member. CreateEntity is exec (it makes something); FindEntity is a pure
+            // lookup, and "found" is a real answer rather than an error -- see GraphNodeDefs.hpp.
+            case "createentity":
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "findentity":
+                node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "found", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
             case "raycastany":
                 node.Pins.Add(new Pin { Name = "originX", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "originY", Type = PinType.Float, IsOutput = false, NodeId = node.Id });

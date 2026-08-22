@@ -237,6 +237,10 @@ static int Main()
         // shapes and the wiring both compilers reach. See SynapseNodeTests.cs's own header comment.
         failures += SynapseNodeTests.RunAll();
 
+        // The parity-backlog four: CreateEntity/FindEntity (SetName's own name= family) and the two
+        // Physics status reads. See NameAndPhysicsStatusNodeTests.cs's own header.
+        failures += NameAndPhysicsStatusNodeTests.RunAll();
+
         if (failures == 0)
             Console.WriteLine("\nAll tests passed.");
         else
