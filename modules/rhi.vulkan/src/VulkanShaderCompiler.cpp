@@ -44,6 +44,9 @@
 // went green is exactly the kind of unbacked claim this repository has been burned by before.
 #include "VulkanCommon.hpp"
 
+#include <cstdlib>
+#include <cstdio>
+
 // <unknwn.h> BEFORE <dxcapi.h>, and the order is load-bearing. dxcapi.h declares COM interfaces
 // derived from IUnknown but does not itself pull in a header that defines it; the D3D12 backend
 // never noticed because d3d12.h drags the whole Windows COM surface in ahead of it, and this
@@ -245,6 +248,28 @@ bool VulkanShaderCompiler::compile(const char* src, const char* entry, ShaderSta
     // outSpirv is left untouched on every failure above, which section 8's declaration promises.
     outSpirv.resize(bytes / sizeof(u32));
     std::memcpy(outSpirv.data(), obj->GetBufferPointer(), bytes);
+
+    // AVER_VK_DUMP_SPIRV=<dir> writes every compiled module out as <entry>.spv.
+    //
+    // THIS IS THE DIAGNOSTIC THE VALIDATION LAYERS WOULD OTHERWISE BE. Khronos no longer publishes
+    // Windows validation-layer binaries -- only Android ones -- so on a machine without the LunarG
+    // SDK there is no layer to tell you that a pipeline's shaders and its descriptor layout
+    // disagree, and AMD's driver answers that disagreement by faulting rather than erroring. The
+    // SPIR-V itself carries the answer: OpDecorate DescriptorSet / Binding on every resource says
+    // exactly where the compiler put it, which is precisely what -fvk-bind-register is supposed to
+    // control and therefore precisely what needs checking.
+    //
+    // OFF UNLESS THE VARIABLE IS SET, and reading an env var per compile is nothing next to
+    // invoking DXC. It writes raw .spv words, so any SPIR-V tool -- or twenty lines of Python, since
+    // OpDecorate is opcode 71 in a trivially-walkable stream -- can read it.
+    if (const char* dumpDir = std::getenv("AVER_VK_DUMP_SPIRV")) {
+        const std::string path = std::string(dumpDir) + "/" + entry + ".spv";
+        if (std::FILE* f = std::fopen(path.c_str(), "wb")) {
+            std::fwrite(outSpirv.data(), 1, bytes, f);
+            std::fclose(f);
+            AVER_TRACE("[RHI.Vulkan] dumped {} ({} bytes)", path, bytes);
+        }
+    }
     return true;
 }
 

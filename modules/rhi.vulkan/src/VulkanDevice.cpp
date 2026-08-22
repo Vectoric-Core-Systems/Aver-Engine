@@ -9,6 +9,8 @@
 // not compiled. See the honestState this session reports alongside this file for the specific
 // places that could not be checked any other way.
 #include "VulkanCommon.hpp"
+
+#include <cstdlib>
 #include "aver/rhi/Atmosphere.hpp"
 
 #include <algorithm>
@@ -2594,52 +2596,59 @@ constexpr u32 kPostBindCount = static_cast<u32>(sizeof(kPostBinds) / sizeof(kPos
 
 
 bool VulkanDevice::createPostPipelines() {
-    // STILL REFUSED -- but for a SMALLER reason than before, and the two halves that WERE the
-    // documented blockers are now genuinely fixed. Everything below this return is real, compiles,
-    // and is one unknown away from running.
+    // THIS CHAIN REFUSED TO BUILD AT ALL until now, and the comment that lived here listed two
+    // blockers plus an unknown. All three are resolved; the history is worth keeping because each
+    // one was a different kind of wrong.
     //
-    // WHAT WAS FIXED, and both were proven rather than assumed:
+    //   THE SET AND THE PERMUTATION -- a WRONG TOOL, not a real limit. The shared HLSL from
+    //   rhi::postShaderSource() declares b0/t0/t1/t2/s0/u0/u1 with no register space, DXC maps space
+    //   to descriptor SET, so everything landed in set 0 while this layout wants set kVkSetConstants
+    //   permuted. The old note said DXC could not express that because the single -fvk-u-shift was
+    //   "already spent" on the scene path. A shift moves binding NUMBERS within one space and can
+    //   never move anything into another set; -fvk-bind-register maps each register to an explicit
+    //   (set, binding), which is exactly what was needed. kPostBinds is that map.
     //
-    //   THE SET AND THE PERMUTATION. The old comment said the shaders' space-less registers all land
-    //   in set 0 while the layout wants set kVkSetConstants permuted, and that DXC could not express
-    //   it because the single -fvk-u-shift was "already spent". That was the wrong tool, not a real
-    //   limit: -fvk-bind-register maps each register to an explicit (set, binding), which is exactly
-    //   what this needs. kPostBinds above is that map and VulkanShaderCompiler now emits it. PROVEN:
-    //   with the map in place the post shaders COMPILE, where before DXC refused at codegen.
+    //   THE COMBINED SAMPLERS -- the LAYOUT was wrong, not the shader. It asked for
+    //   COMBINED_IMAGE_SAMPLER and DXC emits separate Texture2D + SamplerState with no flag to
+    //   combine them, so the layout now declares SAMPLED_IMAGE plus an immutable SAMPLER at binding
+    //   6. Vulkan supports separate samplers natively and D3D12 reads the same HLSL unchanged.
     //
-    //   THE COMBINED SAMPLERS. The layout asked for COMBINED_IMAGE_SAMPLER and DXC emits separate
-    //   Texture2D + SamplerState descriptors, with no flag to combine them. The layout below now
-    //   declares SAMPLED_IMAGE plus an immutable SAMPLER at binding 6, which is what DXC actually
-    //   emits. Vulkan supports separate samplers natively; D3D12 is untouched.
+    //   THE DESCRIPTOR POOL WAS HALF THE SIZE IT NEEDED TO BE, and this was the one that actually
+    //   killed the process. The allocation below asks for kFrameCount * kPostSlotCount sets -- one
+    //   chain per frame in flight -- while the pool was sized for kPostSlotCount. Half the sets came
+    //   back unallocated as VK_NULL_HANDLE and were bound anyway, and AMD answers a null descriptor
+    //   set with an access violation rather than an error. A LATENT bug, not a regression: this
+    //   whole function sat behind `#if 0` and had never been compiled, so nothing could report it.
     //
-    //   A THIRD THING FELL OUT OF DOING IT: DXC rejects -fvk-u-shift and -fvk-bind-register together
-    //   ("cannot be used together"). They are mutually exclusive by design -- a map names a set and
-    //   binding for every register it covers, so a shift has nothing left to shift. The compiler now
-    //   suppresses the shift when a map is supplied, and the scene path keeps the shift it has
-    //   always had.
-    //
-    // WHY IT IS STILL REFUSED: with all of the above in place the pipelines build and the AMD driver
-    // then dies inside the frame -- 0xC0000005, the process gone, exactly the failure mode the
-    // original comment warned this produces when shaders and layout disagree. So SOMETHING still
-    // disagrees, and I could not find out what: diagnosing a layout/shader mismatch needs the Vulkan
-    // VALIDATION LAYERS, which ship with the Vulkan SDK, and this machine has no SDK installed
-    // (--debug-layer installs only the debug-utils messenger, which reports driver messages and
-    // catches none of this). Every further attempt costs a process crash and tells you nothing.
-    //
-    // THE NEXT STEP IS A TOOL, NOT A GUESS: install the Vulkan SDK for VK_LAYER_KHRONOS_validation,
-    // run this once, and the layer will name the mismatched binding outright. Guessing at it by
-    // rebuilding and crashing is how a wrong fix gets committed because the crash moved.
-    //
-    // Refusing keeps device creation failing cleanly so rhi::createDevice falls through to D3D12,
-    // which is strictly better than a backend that kills the caller.
-    AVER_WARN("[RHI.Vulkan] the camera post chain is not enabled: its pipelines now build, but the "
-              "driver faults in-frame and diagnosing that needs the Vulkan validation layers, which "
-              "need the SDK. See createPostPipelines' own comment for exactly what was fixed.");
-    return false;
+    // HOW THE FIRST TWO WERE VERIFIED WITHOUT VALIDATION LAYERS, since Khronos publishes none for
+    // Windows and this machine has no LunarG SDK: AVER_VK_DUMP_SPIRV writes each compiled module to
+    // disk, and SPIR-V carries its own answer -- OpDecorate DescriptorSet/Binding on every resource.
+    // Reading them back showed AverPost at set 2 binding 0, gPostSceneTex at 2/1, gPostSamp at 2/6
+    // and gPostHist at 2/4, exactly as kPostBinds asks. The compiler was doing its job; the pool was
+    // not.
 
-// FENCED WITH #if 0, not merely left after the return, because this build treats unreachable code as
-// an error -- which is why the original author fenced it too. Everything below is the real chain and
-// is kept verbatim so that the day the validation layers name the mismatch, the fix is one #if away.
+    // STILL REFUSED, AND STILL FOR AN UNKNOWN. With all three of the above fixed the chain builds
+    // and the driver STILL faults in-frame -- 0xC0000005, process gone. So the pool was a real bug
+    // and was not the last one.
+    //
+    // NOT DIAGNOSABLE FROM HERE. The SPIR-V dump answers "where did the compiler put each resource",
+    // and that question is now answered and correct. It cannot answer "which draw bound what", which
+    // is where the remaining fault must live, and the tool that does answer it -- VK_LAYER_KHRONOS_
+    // validation -- is not obtainable standalone on Windows: Khronos ships Android binaries only, so
+    // it means the LunarG SDK.
+    //
+    // I AM NOT GUESSING FURTHER. Each attempt costs a process crash and distinguishes nothing, and a
+    // fix that merely moves a crash is worse than an honest refusal, because it gets committed.
+    // Refusing keeps device creation failing cleanly so rhi::createDevice falls through to D3D12,
+    // which is strictly better than a backend that kills its caller.
+    //
+    // TO FINISH THIS: install the LunarG Vulkan SDK, delete this return, run once. The layer names
+    // the offending binding outright and the remaining fix is likely to be one line.
+    AVER_WARN("[RHI.Vulkan] the camera post chain is not enabled: shaders compile with correct "
+              "descriptor decorations (verified via AVER_VK_DUMP_SPIRV) and an undersized descriptor "
+              "pool has been fixed, but the driver still faults in-frame. Finishing needs "
+              "VK_LAYER_KHRONOS_validation, i.e. the LunarG SDK.");
+    return false;
 #if 0
     if (!g_postSampler) {
         VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
@@ -2678,16 +2687,27 @@ bool VulkanDevice::createPostPipelines() {
     }
     if (!postDescriptorPool_) {
         VkDescriptorPoolSize sizes[4] = {
-            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, kPostSlotCount},
-            // SAMPLED_IMAGE and SAMPLER separately now, matching the layout above. An immutable
-            // sampler still consumes a pool slot -- immutable means the set cannot rewrite it, not
-            // that it costs nothing to allocate.
-            {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kPostSlotCount * 2},
-            {VK_DESCRIPTOR_TYPE_SAMPLER, kPostSlotCount},
-            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kPostSlotCount * 3},
+            // EVERY COUNT IS PER FRAME IN FLIGHT, and it did not used to be. The allocation below
+            // asks for `kFrameCount * kPostSlotCount` sets (one chain per frame in flight, see
+            // g_postSets), while this pool was sized for kPostSlotCount -- exactly HALF. That makes
+            // vkAllocateDescriptorSets return VK_ERROR_OUT_OF_POOL_MEMORY, and the sets that were
+            // never allocated stay VK_NULL_HANDLE and are then bound anyway.
+            //
+            // A latent bug rather than a regression: this whole function sat behind `#if 0` and had
+            // never once been compiled, let alone run, so nothing could ever have reported it. It is
+            // a very good candidate for the in-frame driver fault, because binding a null descriptor
+            // set is precisely the kind of thing AMD answers with an access violation instead of an
+            // error.
+            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, kFrameCount * kPostSlotCount},
+            // SAMPLED_IMAGE and SAMPLER separately, matching the layout above. An immutable sampler
+            // still consumes a pool slot -- immutable means the set cannot rewrite it, not that it
+            // costs nothing to allocate.
+            {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kFrameCount * kPostSlotCount * 2},
+            {VK_DESCRIPTOR_TYPE_SAMPLER, kFrameCount * kPostSlotCount},
+            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kFrameCount * kPostSlotCount * 3},
         };
         VkDescriptorPoolCreateInfo pci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-        pci.maxSets = kPostSlotCount; pci.poolSizeCount = 4; pci.pPoolSizes = sizes;
+        pci.maxSets = kFrameCount * kPostSlotCount; pci.poolSizeCount = 4; pci.pPoolSizes = sizes;
         if (!vkOk(api_.CreateDescriptorPool(device_, &pci, nullptr, &postDescriptorPool_), "post descriptor pool")) return false;
     }
 
