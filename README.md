@@ -80,6 +80,7 @@ abi/ interop/ editor/ shaders/ content/   README only — nothing is built from 
 | `scripting` | `Aver.Scripting.Host` | In-process CoreCLR via nethost/hostfxr; collectible load context, reflection discovery, hot reload. Needs Core and Platform, never the RHI. |
 | `ui` | `Aver.UI` | The retained game UI draw list — layers, batching, clip intersection, premultiplied alpha. Core-only, which is what makes it testable with no device. Not the editor's ImGui. |
 | `ui.abi` | `Aver.UI.Abi` | The C seam a game's HUD calls. |
+| `sound` | `Aver.Sound` | Aver Sound — a procedural sound authored as a node graph (`.ocsnd`) and rendered to PCM. Pure: a graph and arithmetic go in, a buffer comes out, so the whole synthesiser is checkable on a machine with no sound card. See [docs/SOUND.md](docs/SOUND.md). |
 | `audio` | `Aver.Audio` | The mixer — voices, buses, 3D pan and attenuation. Core-only; it fills a buffer the caller supplies and never touches a device. |
 | `audio.wasapi` | `Aver.Audio.Wasapi` | The device. Windows only, so it is guarded the way the D3D12 backend is. |
 | `audio.abi` | `Aver.Audio.Abi` | The C seam for audio. Links the device, because "play a sound" only means something once something drives a sound card. |

@@ -18,6 +18,7 @@ add_executable(Sandbox
   src/GraphEditorGeometry.cpp
   src/GraphEditor.cpp
   src/BtEditor.cpp
+  src/SoundEditor.cpp
   src/EditorKeybinds.cpp
   src/EditorEntitySnapshot.cpp
   Sandbox.rc)
@@ -72,6 +73,23 @@ target_link_libraries(Sandbox PRIVATE Aver.UI Aver.Render.UI)
 # UiDrawList directly, so the seam a game's HUD uses is exercised by the editor too. Aver.UI is
 # still named above because the host casts aver_ui_draw_list() back to that type.
 target_link_libraries(Sandbox PRIVATE Aver.UI.Abi)
+
+# Aver Sound and the audio C seam, for the .ocsnd editor tab (sandbox/src/SoundEditor.cpp).
+#
+# TWO SEPARATE `if(TARGET)` GUARDS BECAUSE THEY ANSWER DIFFERENT QUESTIONS. Aver.Sound is the
+# synthesiser -- without it the tab cannot render a graph at all, so it is what SoundEditor.cpp's
+# own `#include "aver/sound/Synth.hpp"` needs. Aver.Audio.Abi is the mixer seam, and only the
+# PREVIEW BUTTON needs that: a tree configured without the audio seam still gets the whole editor,
+# a real render and a real waveform, and only loses the ability to make a noise. That distinction is
+# what AVER_SOUND_EDITOR_AUDIO carries into the source, and it is why the tab does not simply reuse
+# AVER_WITH_IMGUI to mean both things.
+if(TARGET Aver.Sound)
+  target_link_libraries(Sandbox PRIVATE Aver.Sound)
+endif()
+if(TARGET Aver.Audio.Abi)
+  target_link_libraries(Sandbox PRIVATE Aver.Audio.Abi)
+  target_compile_definitions(Sandbox PRIVATE AVER_SOUND_EDITOR_AUDIO=1)
+endif()
 # The actor editor's preview. Its own mesh registry, deliberately: an asset editor that reached
 # into the level editor's table could not exist or be tested without one.
 target_link_libraries(Sandbox PRIVATE Aver.Render.ActorPreview)

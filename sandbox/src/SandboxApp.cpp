@@ -94,6 +94,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "AnimEditor.hpp"
 #include "GraphEditor.hpp"
 #include "BtEditor.hpp"
+#include "SoundEditor.hpp"
 #include "EditorEuler.hpp"
 #include "EditorPrefs.hpp"
 #include "EditorIcons.hpp"
@@ -958,6 +959,8 @@ public:
         assetEditors_.registerFactory(&editor::makeGraphEditor);
         // Appended for the same reason, and it claims only .ocbt, which nothing above accepts.
         assetEditors_.registerFactory(&editor::makeBtEditor);
+        // And again for .ocsnd, which likewise nothing above claims. See SoundEditor.hpp.
+        assetEditors_.registerFactory(&editor::makeSoundEditor);
         // Must run before any actor factory: the "is Roslyn available" answer is cached on first ask.
         locateAverDesign();
         {
@@ -8518,6 +8521,37 @@ private:
     // False for engine content, which the browser mounts read-only.
     bool cbIsEditable(const std::string& path) const { return !isEnginePath(path); }
 
+    // Writes a starter .ocsnd into the selected folder and opens it. See the Add menu's own comment
+    // for why this exists at all.
+    //
+    // NO NAME PROMPT, unlike New Folder beside it: the file lands as NewSound.ocsnd and is renamed
+    // with the browser's existing Rename, which every other asset already uses. A modal here would
+    // be a second naming UI for one format.
+    void cbCreateSoundGraph() {
+        if (!cbIsEditable(cbSelectedDir_)) { cbStatus_ = cbImportBlockedReason(cbSelectedDir_); return; }
+        std::error_code ec;
+        std::filesystem::path target;
+        // Never overwrites: an existing NewSound.ocsnd may be somebody's work in progress, and
+        // silently replacing it is the one outcome this must not have.
+        for (int n = 0; n < 1000; ++n) {
+            const std::string name = n == 0 ? "NewSound.ocsnd"
+                                            : "NewSound" + std::to_string(n) + ".ocsnd";
+            std::filesystem::path candidate = std::filesystem::path(cbSelectedDir_) / name;
+            if (!std::filesystem::exists(candidate, ec)) { target = std::move(candidate); break; }
+        }
+        if (target.empty()) { cbStatus_ = "Could not find a free name for a new sound graph"; return; }
+
+        std::string why;
+        if (!fmt::saveOcSound(target.string(), editor::snStarterGraph(), &why)) {
+            cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+            AVER_ERROR("[Editor] new sound graph failed: {}", why);
+            return;
+        }
+        cbInvalidate(cbSelectedDir_);
+        assetEditors_.open(target.string());
+        cbStatus_ = "Created " + target.filename().string();
+    }
+
     // Explains why `dir` cannot be imported/created into, or empty if it can.
     std::string cbImportBlockedReason(const std::string& dir) const {
         if (cbIsEditable(dir)) return {};
@@ -8696,6 +8730,15 @@ private:
             ImGui::Separator();
             if (ImGui::MenuItem("New C++ Module...")) tools_.openNewCppModule();
             if (ImGui::MenuItem("New C++ Class..."))  tools_.openNewCppClass();
+            ImGui::Separator();
+            // A SOUND GRAPH HAS TO BE CREATABLE FROM HERE OR ITS EDITOR IS UNREACHABLE. .ocsnd is
+            // the first format the editor can edit but nothing can produce -- there is no importer
+            // that emits one, and no other tool writes one -- so without this item the tab could
+            // only ever open a file authored by hand. That is exactly the shape of the recurring
+            // "built through every layer, read by nothing" defect, and one menu item avoids it.
+            ImGui::BeginDisabled(!cbIsEditable(cbSelectedDir_));
+            if (ImGui::MenuItem("New Sound Graph")) cbCreateSoundGraph();
+            ImGui::EndDisabled();
             ImGui::EndPopup();
         }
         ImGui::SameLine();

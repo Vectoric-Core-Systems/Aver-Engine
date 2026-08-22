@@ -98,6 +98,30 @@ target_include_directories(BtEditorTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
 target_link_libraries(BtEditorTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(BtEditorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# SoundEditorTest -- the .ocsnd sound editor tab's headless core: the structural edits, the
+# topological re-sort that keeps "sources before consumers" true by construction, the tab's own
+# load / save / dirty / undo bookkeeping, and renderPreview().
+#
+# Same BtEditorTest arrangement immediately above (Sandbox is add_executable-only, so this compiles
+# sandbox/src/SoundEditor.cpp directly), and AVER_WITH_IMGUI is likewise left undefined.
+#
+# AVER_SOUND_EDITOR_AUDIO IS ALSO LEFT UNDEFINED, and that is a SECOND thing this target proves
+# rather than merely a convenience: sandbox/CMakeLists.txt defines it only when Aver.Audio.Abi is
+# linked, so a build configured without the audio seam has to keep compiling the whole tab. This is
+# the only target in the tree that actually builds that configuration -- without it, "the editor
+# still builds without audio" would be a claim nothing checks.
+#
+# GUARDED ON Aver.Sound because renderPreview() calls into the synthesiser, and -DAVER_MODULE_SOUND
+# is a configuration the module matrix is entitled to turn off.
+if(TARGET Aver.Sound)
+  add_executable(SoundEditorTest
+    src/SoundEditorTest.cpp
+    ${CMAKE_SOURCE_DIR}/sandbox/src/SoundEditor.cpp)
+  target_include_directories(SoundEditorTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+  target_link_libraries(SoundEditorTest PRIVATE Aver.Sound Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(SoundEditorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
 # ProjectCopyTest -- copyProjectTree, the "Upgrade a Copy" branch of the upgrade prompt.
 #
 # Compiles sandbox/src/ProjectScaffold.cpp directly, for EditorPrefsTest's precedent above (Sandbox
