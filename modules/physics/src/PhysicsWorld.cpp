@@ -2,6 +2,7 @@
 // file and Convert.hpp.
 #include "aver/physics/physics_abi.h"
 #include "Convert.hpp"   // src-local: it speaks Jolt, and Jolt is PRIVATE to this module
+#include "Buoyancy.hpp"  // src-local for the same reason: WaterVolume holds JPH:: types
 
 #include "aver/core/Log.hpp"
 
@@ -292,6 +293,15 @@ void aver_phys_shutdown(void) {
     g_world->byId.clear();
     g_world->sensors.clear();
     g_world->system.SetContactListener(nullptr);
+    // THE WATER TABLE IS A PROCESS-WIDE SINGLETON AND THE WORLD IS NOT. Handles restart at 1 on the
+    // next aver_phys_init, so anything left registered here is silently inherited by whatever body
+    // happens to be issued that number in the NEXT world -- a body nobody put in water, floating.
+    //
+    // Found by a test, and only after its assertion was strengthened: BuoyancyTest's "no water
+    // registered at all" run was getting the previous run's volume, which made its two runs come
+    // back BIT-IDENTICAL while the weaker assertion it had at the time reported green.
+    phys::water::waterVolumes().clearAll();
+    phys::water::waterVolumes().clearPlane();
     g_world.reset();
     AVER_INFO("[Physics] stopped");
 }
@@ -355,6 +365,27 @@ int32_t aver_phys_step(float dt) {
                                g_world->system.GetDefaultLayerFilter(Layers::MOVING),
                                {}, {}, *g_world->temp);
         }
+        // BUOYANCY, BEFORE Update AND INSIDE THE FIXED LOOP. Both halves matter.
+        //
+        // Before, because ApplyBuoyancyImpulse is exactly that -- an impulse -- and an impulse
+        // applied after the solver has already integrated this step would not be felt until the
+        // next one, giving a body that is one whole step behind the water it is floating in.
+        //
+        // Inside the loop rather than once per aver_phys_step, because the impulse is scaled by dt:
+        // applying it once with the FRAME's dt while the solver runs several fixed steps would make
+        // buoyancy depend on the frame rate, which is the one thing a fixed step exists to prevent.
+        //
+        // The two lambdas are how Buoyancy.cpp reaches the world without seeing it: `World` is
+        // file-local to this translation unit on purpose, so the table is handed the two questions
+        // it needs answered rather than the struct that answers them. See Buoyancy.hpp's own note.
+        {
+            auto find = [](int32_t h) -> const JPH::BodyID* { return findBody(h); };
+            auto each = [](const std::function<void(int32_t, const JPH::BodyID&)>& fn) {
+                for (const auto& [handle, id] : g_world->bodies) fn(handle, id);
+            };
+            phys::water::waterVolumes().evaluate(g_world->system, find, each,
+                                                 g_world->system.GetGravity(), g_world->fixedStep);
+        }
         g_world->system.Update(g_world->fixedStep, 1, g_world->temp.get(), g_world->jobs.get());
         ++steps;
     }
@@ -396,6 +427,10 @@ int32_t aver_phys_add_dynamic_sphere(float cx, float cy, float cz, float radius,
 
 // Removes and destroys a body, and drops it from every handle table.
 int32_t aver_phys_remove_body(int32_t body) {
+    // Drop any water override FIRST. Handles come from a monotonic counter so they are not reused
+    // today, but a stale entry would still make evaluate() call findBody on a dead handle every
+    // substep forever -- a slow leak of work rather than a crash, which is the kind that survives.
+    phys::water::waterVolumes().clear(body);
     const JPH::BodyID* id = findBody(body);
     if (!id) return 0;
     bi().RemoveBody(*id);

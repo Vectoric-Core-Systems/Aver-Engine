@@ -8,7 +8,13 @@
 # to include a JPH:: header by accident, because the moment something does, swapping the backend
 # stops being a decision about this module and becomes a decision about the whole tree.
 add_library(Aver.Physics SHARED
-  src/PhysicsWorld.cpp)
+  src/PhysicsWorld.cpp
+  # Buoyancy. Its own translation units rather than more of PhysicsWorld.cpp because it is the first
+  # thing in this module that a caller can turn ON AND OFF -- everything else here is unconditional
+  # machinery -- and because keeping the Jolt call in one small file makes it obvious that
+  # ApplyBuoyancyImpulse is the whole of the physics, and the rest is bookkeeping.
+  src/Buoyancy.cpp
+  src/BuoyancyAbi.cpp)
 
 target_include_directories(Aver.Physics PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(Aver.Physics PUBLIC cxx_std_20)

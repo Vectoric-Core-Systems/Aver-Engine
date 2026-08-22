@@ -134,6 +134,59 @@ AVER_PHYS_API int32_t aver_phys_add_sensor_box(float cx, float cy, float cz,
 // A sphere-shaped trigger volume.
 AVER_PHYS_API int32_t aver_phys_add_sensor_sphere(float cx, float cy, float cz, float radius);
 
+// ---- Buoyancy -----------------------------------------------------------------------------------
+// Things float. A plane of water, and the bodies it holds up.
+//
+// TWO ENTRY POINTS, AND THE GLOBAL ONE IS THE IMPORTANT ONE. Jolt's own buoyancy is per body, per
+// step, and an ABI that only offered that would be an ABI nothing ever called: something would still
+// have to decide, every frame, which bodies are in the water -- and no scene volume component exists
+// to decide it (there are none among the builtin components, and physics sensors have no callers
+// above this module). An engine feature that requires the game to write the loop that makes it work
+// is the shape this repo keeps shipping and then finding unused, so the plane comes first and the
+// per-body override second.
+//
+// Engine units and axes throughout: centimetres, +Z up. Buoyancy 1.0 is neutral -- the body's own
+// density decides whether it rises or sinks -- above 1 floats harder, below 1 sinks.
+
+// Every dynamic body whose centre is below `heightCm` gets buoyancy this step, and keeps getting it
+// until the plane is cleared. This is the call that makes water actually hold things up.
+//
+// `normalUnit` is the surface normal, normally (0,0,1); it is a parameter because a sloped water
+// plane is how a river reads. `fluidVelocityCmS` is the current, and is what carries a body
+// downstream. Drags are 0..1-ish damping factors applied to linear and angular motion in the fluid.
+//
+// Returns 1. Passing a non-positive `buoyancy` is how the plane is disabled without forgetting its
+// other settings; use aver_phys_clear_water_plane to remove it outright.
+AVER_PHYS_API int32_t aver_phys_set_water_plane(float heightCm,
+                                                const float normalUnit[3],
+                                                float buoyancy, float linearDrag, float angularDrag,
+                                                const float fluidVelocityCmS[3]);
+
+// Removes the global plane. Bodies stop being held up on the next step.
+AVER_PHYS_API void aver_phys_clear_water_plane(void);
+
+// 1 while a global water plane is set, and writes its height into `outHeightCm` when non-null. The
+// host needs this to keep the RENDERED surface and the SIMULATED one at the same height -- two
+// separate numbers for that would drift, and the drift would look like broken buoyancy.
+AVER_PHYS_API int32_t aver_phys_water_plane(float* outHeightCm);
+
+// Per-body override, for water that is not the global plane: a puddle, a tank, a body of water at a
+// different height. Takes precedence over the plane for that body. Returns 0 for a dead handle.
+AVER_PHYS_API int32_t aver_phys_set_water_volume(int32_t body,
+                                                 const float surfacePosCm[3],
+                                                 const float surfaceNormalUnit[3],
+                                                 float buoyancy, float linearDrag, float angularDrag,
+                                                 const float fluidVelocityCmS[3]);
+
+// Removes a body's override, returning it to the global plane if one is set. Returns 0 for a dead
+// handle or a body that had no override.
+AVER_PHYS_API int32_t aver_phys_clear_water_volume(int32_t body);
+
+// How many bodies had buoyancy applied on the last step. A DIAGNOSTIC THAT EARNS ITS PLACE: "nothing
+// floats" and "nothing is in the water" look identical from outside, and this is what tells them
+// apart without a debugger.
+AVER_PHYS_API int32_t aver_phys_buoyant_body_count(void);
+
 // ---- Contact and overlap events ------------------------------------------------------------------
 // POLLED, not called back. Both queues are cleared at the start of each aver_phys_step.
 

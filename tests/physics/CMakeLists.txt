@@ -22,3 +22,16 @@ add_executable(SoftBodyTest src/SoftBodyTest.cpp)
 target_link_libraries(SoftBodyTest PRIVATE Aver.Physics Aver.Core)
 set_target_properties(SoftBodyTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# BuoyancyTest -- the water plane and the per-body override, through the ABI only.
+#
+# Links Aver.Physics and Aver.Core, NOT Aver.Physics.Jolt, for SoftBodyTest's reason directly above:
+# whether a box floats is visible from outside the ABI, so it is checked the way a caller sees it.
+#
+# THIS TARGET WAS MISSING when the buoyancy code was first written, and the consequence is worth
+# recording: the test file existed, compiled by hand, and reported a real failure that nothing in
+# the build would ever have run. A test that is not in a CMakeLists is not a test.
+add_executable(BuoyancyTest src/BuoyancyTest.cpp)
+target_link_libraries(BuoyancyTest PRIVATE Aver.Physics Aver.Core)
+set_target_properties(BuoyancyTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

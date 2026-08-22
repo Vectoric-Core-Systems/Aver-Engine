@@ -93,8 +93,46 @@ endif()
 # The actor editor's preview. Its own mesh registry, deliberately: an asset editor that reached
 # into the level editor's table could not exist or be tested without one.
 target_link_libraries(Sandbox PRIVATE Aver.Render.ActorPreview)
-# GPU skinning, for --skin-test. The pass has no other consumer yet -- the mesh draw path cannot
-# take a substituted position stream -- so this link line is what keeps it compiled and checkable.
+# GPU skinning. THIS COMMENT USED TO SAY that the pass had "no other consumer yet", that "the mesh
+# draw path cannot take a substituted position stream", and that "this link line is what keeps it
+# compiled and checkable". ALL THREE ARE FALSE, and the correction is recorded here rather than
+# quietly deleted because the sentence was being cited as a reason not to attempt work that is in
+# fact already shipping.
+#
+# Verified at every link in the chain, twice -- once by hand and once by an adversarial sweep:
+#
+#   * IDevice::createSkinTargetMesh (RHI.hpp:363) mints a NEW MeshHandle over a BufferKind::Default,
+#     allowUnorderedAccess buffer seeded with the source mesh's vertices, sharing the source's index
+#     buffer. Implemented on BOTH backends -- D3D12Device.cpp:2648, VulkanDevice.cpp:1592.
+#   * SkinningPass::dispatch writes posed vertices into that buffer every frame, then transitions it
+#     UnorderedAccess -> GeometryRead.
+#   * THREE production consumers, none of them behind --skin-test: SkinnedScene registered
+#     unconditionally in the editor (SandboxApp.cpp:1311) and in the game runtime
+#     (GameApp.cpp:490-503), and the animation editor's own preview (AnimEditor.cpp:189), which
+#     calls createSkinTargetMesh directly.
+#   * Both renderers substitute the handle into the ORDINARY drawMesh every other entity uses --
+#     SandboxApp.cpp:4168 and GameRender.cpp:142. D3D12RenderContext::drawMesh has no idea the
+#     buffer is compute-written; the substitution is a MeshHandle swap and nothing below it changes.
+#
+# So substitution is not merely possible, it is the shipping path for every skinned character. The
+# HANDLE is substituted rather than the stream, deliberately -- see createSkinTargetMesh's own
+# comment for why threading a substitute stream through submitDraw instead would have been one
+# missed site away from a rest-pose shadow beside a posed character.
+#
+# WHY THIS LINE IS STILL HERE, since the old reason was wrong: Aver.Runtime.Game already PUBLIC-links
+# Aver.Render.Skin (modules/runtime.game/CMakeLists.txt:55), so removing this would not stop the
+# module compiling. It is here because the EDITOR ITSELF uses SkinningPass directly, in
+# AnimEditor.cpp and SkinDrawTest.cpp -- an ordinary link dependency, not a keep-alive.
+#
+# WHAT IS GENUINELY UNBUILT, so the correction does not swing too far the other way: this pattern
+# serves producers that emit a full interleaved rhi::MeshVertex. The two CPU producers that exist --
+# deform::deformVertices and aver_phys_softbody_vertices -- emit bare xyz, and MeshVertex is
+# {pos, normal, uv} at a 32-byte stride (RHI.hpp:46). Driving the draw path from either therefore
+# still needs real glue: normals recomputed per frame, physics output converted from WORLD space
+# back to mesh-local (drawMesh applies a per-object transform), and a frames-in-flight ring, because
+# writeBuffer is immediate, unsynchronised, and refuses a non-Upload buffer outright
+# (D3D12Device.cpp:5608) -- so the skin target cannot simply be written from the CPU. That work is
+# a render feature of its own, mirroring SkinnedScene. It is unbuilt. It is not blocked.
 target_link_libraries(Sandbox PRIVATE Aver.Render.Skin)
 # The path tracer, for --pt-furnace. Linked here for the same reason skinning is: the editor is the
 # only host that drives it, and this link line is what keeps its shader compiled and its energy
