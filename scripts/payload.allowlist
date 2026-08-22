@@ -61,6 +61,9 @@ nethost.dll
 # Fonts the editor loads by name from executableDir(). Roboto, Apache-2.0 -- the notice is required.
 Roboto-Regular.ttf
 Roboto-Medium.ttf
+# Material Icons, Apache-2.0, merged into the same atlas. Absent, the editor still starts and every
+# icon renders as an empty box -- so a payload missing this is cosmetically broken, not dead.
+MaterialIcons-Regular.ttf
 
 # Artwork sampled from executableDir(). splash.png is shown at NATIVE SIZE by the layered-window
 # splash, and the icon sheets are sliced on fixed tile dimensions, so none of these may be rescaled.

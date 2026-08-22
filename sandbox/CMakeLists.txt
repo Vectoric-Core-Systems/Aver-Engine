@@ -225,7 +225,10 @@ set_target_properties(Sandbox.AssetIcons PROPERTIES FOLDER "sandbox")
 
 # Ship the editor UI typeface next to the executable. Same OUTPUT/DEPENDS rule as the splash, and
 # for the same reason -- POST_BUILD would not re-copy a font that changed without the exe relinking.
-set(AVER_UI_FONTS Roboto-Regular.ttf Roboto-Medium.ttf)
+# MaterialIcons-Regular.ttf rides the same rule: it is MERGED into the body font's atlas at load
+# (see applyDpi), so a missing file degrades to text with notdef boxes where icons should be rather
+# than failing loudly -- which is why it has to be staged as reliably as Roboto itself.
+set(AVER_UI_FONTS Roboto-Regular.ttf Roboto-Medium.ttf MaterialIcons-Regular.ttf)
 set(AVER_UI_FONT_OUTPUTS)
 foreach(font ${AVER_UI_FONTS})
   add_custom_command(

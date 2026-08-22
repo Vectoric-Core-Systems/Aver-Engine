@@ -96,6 +96,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "BtEditor.hpp"
 #include "EditorEuler.hpp"
 #include "EditorPrefs.hpp"
+#include "EditorIcons.hpp"
 #include "EditorKeybinds.hpp"
 #include "EditorEntitySnapshot.hpp"
 #include "aver/platform/DirectoryWatcher.hpp"
@@ -745,7 +746,51 @@ public:
             return;
         }
         io.FontDefault = body;
-        if (fileExists(medium)) fontMedium_ = io.Fonts->AddFontFromFileTTF(medium.c_str(), px);
+        mergeIconFont(px);
+        if (fileExists(medium)) {
+            fontMedium_ = io.Fonts->AddFontFromFileTTF(medium.c_str(), px);
+            // The medium weight gets its own copy of the icons: a font is a separate atlas entry,
+            // so an icon pushed under fontMedium_ would otherwise be a notdef box.
+            if (fontMedium_) mergeIconFont(px);
+        }
+    }
+
+    // Merges the icon font INTO whichever font was added last, so an icon can sit inline in an
+    // ordinary label with no font push/pop around it -- ICON_FOLDER " Content" is one string, one
+    // draw call, one hit-test rect.
+    //
+    // SAFE TO MERGE because the glyphs live in the Private Use Area (U+E000-U+F8FF): no codepoint
+    // there can collide with real text, so one ImFont serves both alphabets unambiguously.
+    //
+    // A MISSING FILE IS A WARNING, NOT A FAILURE, matching Roboto's own fallback above: the editor
+    // still runs, and every icon renders as the atlas's notdef box. That is ugly and obvious, which
+    // is the right failure mode for a cosmetic asset -- far better than refusing to start.
+    void mergeIconFont(f32 px) {
+#if AVER_WITH_IMGUI
+        const std::string icons = executableDir() + "\\MaterialIcons-Regular.ttf";
+        if (!fileExists(icons)) {
+            if (!iconWarned_) {
+                iconWarned_ = true;
+                AVER_WARN("[Sandbox] '{}' missing -- icons will render as empty boxes", icons);
+            }
+            return;
+        }
+        ImGuiIO& io = ImGui::GetIO();
+        // STATIC, because ImGui keeps the pointer rather than copying the range: a local array here
+        // would dangle the moment this function returned, and the atlas would build from freed
+        // stack memory. The terminating 0 is required.
+        static const ImWchar range[] = { editor::kIconRangeFirst, editor::kIconRangeLast, 0 };
+        ImFontConfig cfg;
+        cfg.MergeMode = true;
+        cfg.PixelSnapH = true;
+        // Icons are drawn on the text baseline and read a touch large beside Roboto at the same
+        // size; nudging them down and shrinking slightly seats them on the same optical line.
+        cfg.GlyphMinAdvanceX = px;
+        cfg.GlyphOffset = ImVec2(0.0f, px * 0.10f);
+        io.Fonts->AddFontFromFileTTF(icons.c_str(), px * 0.86f, &cfg, range);
+#else
+        (void)px;
+#endif
     }
 
     // Uploads branding/logo.png for the start screen. A missing file is a warning, not a failure.
@@ -8085,7 +8130,7 @@ private:
         // this toolbar button was the same feature, unguarded.
 #if AVER_MODULE_SCENE
         ImGui::BeginDisabled(levelPath_.empty());
-        if (ImGui::Button("Save")) saveLevel(levelPath_);
+        if (ImGui::Button(ICON_SAVE " Save")) saveLevel(levelPath_);
         uiReg_.track("toolbar.save");
         ImGui::EndDisabled();
         if (levelPath_.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
@@ -8125,31 +8170,31 @@ private:
             // drone flew and Stop would sit greyed out, leaving no way to stop it from the toolbar.
             const bool anyPlay = playing || dronePlayActive();
             ImGui::BeginDisabled(anyPlay);
-            if (ImGui::Button("Play")) startPlay();
+            if (ImGui::Button(ICON_PLAY " Play")) startPlay();
             uiReg_.track("toolbar.play");
             ImGui::EndDisabled();
             ImGui::SameLine();
             // Pause stays tied to a REAL session: there is no framework state to pause for a drone,
             // and a Pause button that visibly does nothing is worse than one that is clearly off.
             ImGui::BeginDisabled(!playing);
-            if (ImGui::Button(ps == AVER_FW_PLAY_PAUSED ? "Resume" : "Pause"))
+            if (ImGui::Button(ps == AVER_FW_PLAY_PAUSED ? ICON_PLAY " Resume" : ICON_PAUSE " Pause"))
                 aver_fw_set_paused(ps != AVER_FW_PLAY_PAUSED ? 1 : 0);
             ImGui::EndDisabled();
             ImGui::SameLine();
             ImGui::BeginDisabled(!anyPlay);
-            if (ImGui::Button("Stop")) stopPlay();
+            if (ImGui::Button(ICON_STOP " Stop")) stopPlay();
             uiReg_.track("toolbar.stop");
             ImGui::EndDisabled();
 #else
             ImGui::BeginDisabled(true);
-            ImGui::Button("Play"); ImGui::SameLine();
-            ImGui::Button("Pause"); ImGui::SameLine();
-            ImGui::Button("Stop");
+            ImGui::Button(ICON_PLAY " Play"); ImGui::SameLine();
+            ImGui::Button(ICON_PAUSE " Pause"); ImGui::SameLine();
+            ImGui::Button(ICON_STOP " Stop");
             ImGui::EndDisabled();
 #endif
         }
         ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), wsize.x - 130.0f*dpi_));
-        if (dropButton("Settings")) ImGui::OpenPopup("settingsMenu");
+        if (dropButton(ICON_SETTINGS " Settings")) ImGui::OpenPopup("settingsMenu");
         if (ImGui::BeginPopup("settingsMenu")) {
             ImGui::Checkbox("Show Grid", &showGrid_);
             ImGui::Checkbox("Wireframe", &wireframe_);
@@ -10937,6 +10982,9 @@ private:
     // 3D viewport rect, in backbuffer pixels. Latched by buildUI, consumed the next frame.
     f32 vpX_=0, vpY_=0, vpW_=1600, vpH_=900;
     bool dockBuilt_=false;   // one-shot DockBuilder layout (nothing is persisted to an ini)
+    // Warn ONCE about a missing icon font, not once per DPI change: applyDpi re-runs on every
+    // monitor change, and a per-change warning would fill the log for one cosmetic asset.
+    bool iconWarned_=false;
     bool showProjectSettings_=false; // Edit > Project Settings window
     bool showWorldSettings_=false;   // Window > World Settings (per-LEVEL settings)
     bool showEditorPrefs_=false;     // Edit > Editor Preferences window

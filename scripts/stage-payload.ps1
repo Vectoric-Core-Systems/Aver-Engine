@@ -351,6 +351,10 @@ $notices = [System.Text.StringBuilder]::new()
 
 $components = @(
     @{ Name = 'Roboto (fonts)';        Licence = 'Apache-2.0';      File = 'third_party\fonts\LICENSE' }
+    # Material Icons is Apache-2.0 like Roboto and shares that same LICENSE file, but it is listed
+    # as its own component deliberately: NOTICE has to name what is redistributed, and two fonts
+    # from different upstreams happening to carry one licence text is not a reason to name only one.
+    @{ Name = 'Material Icons (font)'; Licence = 'Apache-2.0';      File = 'third_party\fonts\LICENSE' }
     @{ Name = 'Dear ImGui';            Licence = 'MIT';             File = 'third_party\imgui\LICENSE.txt' }
     @{ Name = 'Jolt Physics';          Licence = 'MIT';             File = 'modules\physics.jolt\LICENSE' }
     @{ Name = 'stb (stb_image, stb_image_write)'; Licence = 'MIT / public domain'; File = 'third_party\stb\LICENSE.txt' }
