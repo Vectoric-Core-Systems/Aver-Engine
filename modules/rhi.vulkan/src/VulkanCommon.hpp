@@ -1375,6 +1375,14 @@ public:
 
     // ---- accessors for the free helpers and the two friend classes below ----
     const VulkanApi& api() const { return api_; }
+    // Opens a dynamic-rendering scope, or joins the one already open. Returns whether it actually
+    // opened one -- the caller MUST pass that back to popRenderScope, so an inner no-op open does
+    // not close its outer owner's scope. See renderScopeDepth_ for what that cost.
+    bool pushRenderScope(VkCommandBuffer cmd, const VkRenderingInfo& ri);
+    // `opened` is pushRenderScope's return value. False closes nothing.
+    void popRenderScope(VkCommandBuffer cmd, bool opened);
+    bool renderScopeActive() const { return renderScopeDepth_ != 0; }
+
     VkDevice vkDevice() const { return device_; }
     VkPhysicalDevice vkPhysicalDevice() const { return physicalDevice_; }
     const VkPhysicalDeviceMemoryProperties& memoryProperties() const { return memoryProps_; }
@@ -1493,6 +1501,28 @@ private:
     // ---- fixed scene/line/sky pipelines (built via VulkanShaderCompiler + vkCreateGraphicsPipelines
     // directly -- NOT through VulkanResourceFactory's generic PipelineLayout cache, exactly as
     // D3D12Device builds its own rootSig_/pso_ separately from D3D12ResourceFactory's cache) ----
+    // HOW MANY vkCmdBeginRendering SCOPES ARE OPEN ON THE SHARED COMMAND BUFFER. Zero or one --
+    // dynamic-rendering scopes CANNOT NEST, and this exists because two independent owners record
+    // into the same command buffer and neither could see the other:
+    //
+    //   - THIS class opens a scope around the scene pass and around the overlay pass, then calls
+    //     IRenderFeature::scenePass / ::overlayPass from INSIDE it.
+    //   - VulkanRenderContext opens its own scope around every single draw, because a feature may
+    //     also draw from prePass() where nothing is open.
+    //
+    // So a feature drawing through the context from inside one of this class's passes issued a
+    // nested vkCmdBeginRendering ("It is invalid to issue this call inside an active render pass"),
+    // and its matching vkCmdEndRendering then closed THIS class's scope -- after which the pass's
+    // remaining draws and its own CmdEndRendering had no active pass at all. Three distinct
+    // validation errors, one cause.
+    //
+    // pushRenderScope/popRenderScope are therefore the ONLY way either owner opens one, and the
+    // inner request becomes a no-op rather than a nesting error.
+    u32 renderScopeDepth_ = 0;
+    // The scene pass opens in beginFrame and closes in endFrame, so "did I open it" has to outlive
+    // the call that answered it.
+    bool sceneScopeOpened_ = false;
+
     VkDescriptorSetLayout sceneFrameSetLayout_ = VK_NULL_HANDLE;
     // ONE empty descriptor-set layout, for the DEVICE'S LIFETIME, used as the placeholder in every
     // pipeline layout whose set 0 or set 1 goes unused.

@@ -47,10 +47,12 @@ validation errors, all of them at command-record time and none about where a res
 | What the layer says | Shape of it |
 | --- | --- |
 | `Binding 2 ... is SAMPLED_IMAGE but ... trying to bind is ACCELERATION_STRUCTURE_KHR` | slot **kinds** disagree — see below |
-| `vkCmdBeginRendering(): invalid inside an active render pass` | render passes are not being closed |
-| `vkCmdDraw/EndRendering(): must be issued inside an active render pass` | the same, from the other side |
-| `pColorAttachments[0].resolveMode` | MSAA resolve is not set up |
 | `pImageMemoryBarriers[0].image Invalid` | a barrier on a handle that is not live |
+
+Render-pass scoping and the MSAA resolve were the other two and are **fixed**: one
+`renderScopeDepth_` counter in `VulkanDevice` now owns every `vkCmdBeginRendering`, so a feature
+drawing through the render context from inside one of the device's own passes joins that scope
+instead of nesting a second one inside it.
 
 **The slot-kind disagreement is the interesting one**, and it is structural rather than a slip. A
 pipeline's table set layout gets its `SlotKind`s from **reflecting the shader**, while the

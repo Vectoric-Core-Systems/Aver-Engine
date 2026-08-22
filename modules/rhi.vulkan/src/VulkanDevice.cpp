@@ -2341,7 +2341,12 @@ void VulkanDevice::beginFrame() {
     colorAtt.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     colorAtt.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     std::memcpy(colorAtt.clearValue.color.float32, sceneClear_, sizeof(sceneClear_));
-    if (msaa) {
+    // AND sceneResolvedView_, which the barrier above already guards on: createPostTargets builds
+    // the resolve target only when sampleCount_ > 1 AND it gets far enough to build it at all, so
+    // "MSAA is on" does not by itself mean there is somewhere to resolve TO. Asking for a resolve
+    // without one is rejected outright -- "resolveMode ... is not VK_RESOLVE_MODE_NONE,
+    // resolveImageView must not be VK_NULL_HANDLE" -- and the two guards disagreeing was the bug.
+    if (msaa && sceneResolvedView_) {
         // The MSAA resolve happens HERE, as part of ending this rendering scope -- there is no
         // separate vkCmdResolveImage call anywhere in this backend (VulkanApi carries no such
         // pointer): VkRenderingAttachmentInfo's own resolveMode/resolveImageView/resolveImageLayout
@@ -2366,7 +2371,7 @@ void VulkanDevice::beginFrame() {
     ri.layerCount = 1;
     ri.colorAttachmentCount = 1; ri.pColorAttachments = &colorAtt;
     ri.pDepthAttachment = &depthAtt;
-    api_.CmdBeginRendering(cmd, &ri);
+    sceneScopeOpened_ = pushRenderScope(cmd, ri);
 
     // vpX_/vpY_/vpW_/vpH_ are already in SCENE space (setViewportRect rescales the caller's
     // present-space rect via scaleToSceneW/H before storing it), and the "no sub-rect" fallback must
@@ -2397,6 +2402,19 @@ void VulkanDevice::beginFrame() {
     // comment) -- there would be nothing for a default bind here to save.
 }
 
+bool VulkanDevice::pushRenderScope(VkCommandBuffer cmd, const VkRenderingInfo& ri) {
+    if (renderScopeDepth_ != 0) return false;   // already inside one: join it rather than nest
+    api_.CmdBeginRendering(cmd, &ri);
+    ++renderScopeDepth_;
+    return true;
+}
+
+void VulkanDevice::popRenderScope(VkCommandBuffer cmd, bool opened) {
+    if (!opened || renderScopeDepth_ == 0) return;
+    --renderScopeDepth_;
+    api_.CmdEndRendering(cmd);
+}
+
 void VulkanDevice::endFrame() {
     if (!hasSwapchain_) return;
     VkCommandBuffer cmd = commandBuffers_[frameIndex_];
@@ -2425,7 +2443,8 @@ void VulkanDevice::endFrame() {
     if (!sceneSuppressed_ || true) {
         // Always closes the scope this frame's beginFrame opened, suppressed or not -- a suppressed
         // scene still drew INTO msaaColor_/depthView_ via scenePass(), it just skipped the sky.
-        api_.CmdEndRendering(cmd);
+        popRenderScope(cmd, sceneScopeOpened_);
+        sceneScopeOpened_ = false;
     }
 
     // Barrier the resolved scene (or, with no MSAA, msaaColor_ itself) into something the post
@@ -2450,13 +2469,13 @@ void VulkanDevice::endFrame() {
         VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
         ri.renderArea = {{0, 0}, {width_, height_}};
         ri.layerCount = 1; ri.colorAttachmentCount = 1; ri.pColorAttachments = &att;
-        api_.CmdBeginRendering(cmd, &ri);
+        const bool overlayScope = pushRenderScope(cmd, ri);
         VkViewport vp{0.0f, 0.0f, static_cast<f32>(width_), static_cast<f32>(height_), 0.0f, 1.0f};
         VkRect2D sc{{0, 0}, {width_, height_}};
         api_.CmdSetViewport(cmd, 0, 1, &vp);
         api_.CmdSetScissor(cmd, 0, 1, &sc);
         for (IRenderFeature* f : features_) f->overlayPass(*rhiContext_, width_, height_);
-        api_.CmdEndRendering(cmd);
+        popRenderScope(cmd, overlayScope);
     }
 
     if (captureReq_ && captureBuf_) {
@@ -3233,7 +3252,7 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
         att.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
         ri.renderArea = {{0, 0}, {w, h}}; ri.layerCount = 1; ri.colorAttachmentCount = 1; ri.pColorAttachments = &att;
-        api_.CmdBeginRendering(cmd, &ri);
+        const bool postScope = pushRenderScope(cmd, ri);
         VkViewport vp{0.0f, 0.0f, f32(w), f32(h), 0.0f, 1.0f};
         VkRect2D sc{{0, 0}, {w, h}};
         api_.CmdSetViewport(cmd, 0, 1, &vp);
@@ -3241,7 +3260,7 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
         api_.CmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pso);
         bindSetFor(VK_PIPELINE_BIND_POINT_GRAPHICS, slot);
         api_.CmdDraw(cmd, 3, 1, 0, 0);
-        api_.CmdEndRendering(cmd);
+        popRenderScope(cmd, postScope);
     };
     auto mipW = [&](u32 m) { return bloomW_ >> m ? bloomW_ >> m : 1u; };
     auto mipH = [&](u32 m) { return bloomH_ >> m ? bloomH_ >> m : 1u; };
@@ -3374,7 +3393,7 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
             VkRenderingInfo srRi{VK_STRUCTURE_TYPE_RENDERING_INFO};
             srRi.renderArea = {{0, 0}, {width_, height_}}; srRi.layerCount = 1;
             srRi.colorAttachmentCount = 1; srRi.pColorAttachments = &srAtt;
-            api_.CmdBeginRendering(cmd, &srRi);
+            const bool srScope = pushRenderScope(cmd, srRi);
             VkViewport srVp{0.0f, 0.0f, static_cast<f32>(width_), static_cast<f32>(height_), 0.0f, 1.0f};
             VkRect2D srSc{{0, 0}, {width_, height_}};
             api_.CmdSetViewport(cmd, 0, 1, &srVp);
@@ -3386,7 +3405,7 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
             in.dstWidth = width_;        in.dstHeight = height_;
             upscaler_->execute(*rhiContext_, in, presentHdrTex_);
 
-            api_.CmdEndRendering(cmd);
+            popRenderScope(cmd, srScope);
             VkImageMemoryBarrier2 backToSrv = imgBarrier(dstT->image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                                                          VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                                                          VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);

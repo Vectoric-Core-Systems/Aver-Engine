@@ -56,7 +56,12 @@ struct RenderTargetState {
 };
 RenderTargetState g_rt;
 
-void beginRenderScope(const VulkanDevice& dev, VkCommandBuffer cb) {
+// Returns whether a scope was actually OPENED. False means one was already open -- VulkanDevice's
+// own scene, overlay or upscale pass, with this draw coming from a feature it called from inside
+// that pass -- and this draw simply records into it. Closing it here instead would leave the
+// owner's remaining draws, and its own CmdEndRendering, outside any pass at all; see
+// VulkanDevice::renderScopeDepth_ for the three validation errors that produced.
+bool beginRenderScope(VulkanDevice& dev, VkCommandBuffer cb) {
     VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
     // Falls back to the backbuffer's own size when setRenderTargets was never called (or bound
     // nothing usable) so a draw issued into "whatever was last recorded" still gets a valid,
@@ -69,10 +74,10 @@ void beginRenderScope(const VulkanDevice& dev, VkCommandBuffer cb) {
     ri.colorAttachmentCount = g_rt.colorCount;
     ri.pColorAttachments = g_rt.colorCount ? g_rt.colors : nullptr;
     ri.pDepthAttachment = g_rt.hasDepth ? &g_rt.depth : nullptr;
-    dev.api().CmdBeginRendering(cb, &ri);
+    return dev.pushRenderScope(cb, ri);
 }
-void endRenderScope(const VulkanDevice& dev, VkCommandBuffer cb) {
-    dev.api().CmdEndRendering(cb);
+void endRenderScope(VulkanDevice& dev, VkCommandBuffer cb, bool opened) {
+    dev.popRenderScope(cb, opened);
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -424,9 +429,9 @@ void VulkanRenderContext::drawMesh(MeshHandle mesh) {
     const VkDeviceSize zeroOffset = 0;
     dev_->api().CmdBindVertexBuffers(cb, 0, 1, &m.vb, &zeroOffset);
     dev_->api().CmdBindIndexBuffer(cb, m.ib, 0, VK_INDEX_TYPE_UINT32);
-    beginRenderScope(*dev_, cb);
+    const bool ownScope = beginRenderScope(*dev_, cb);
     dev_->api().CmdDrawIndexed(cb, m.indexCount, 1, 0, 0, 0);
-    endRenderScope(*dev_, cb);
+    endRenderScope(*dev_, cb, ownScope);
 }
 
 // ====================================================================================================
@@ -453,9 +458,9 @@ void VulkanRenderContext::dispatchMeshFor(MeshHandle mesh) {
     const u32 tc[4] = {tris, 0, 0, 0};
     dev_->api().CmdPushConstants(cb, le->pipelineLayout, VK_SHADER_STAGE_ALL,
                                  le->pushConstants.meshCountOffset, sizeof(tc), tc);
-    beginRenderScope(*dev_, cb);
+    const bool ownScope = beginRenderScope(*dev_, cb);
     dev_->api().CmdDrawMeshTasksEXT(cb, (tris + kMeshShaderTrisPerGroup - 1) / kMeshShaderTrisPerGroup, 1, 1);
-    endRenderScope(*dev_, cb);
+    endRenderScope(*dev_, cb, ownScope);
 }
 
 // ====================================================================================================
@@ -495,9 +500,9 @@ void VulkanRenderContext::dispatchMeshClusters(MeshHandle mesh, u32 clusterCount
     dev_->api().CmdPushConstants(cb, le->pipelineLayout, VK_SHADER_STAGE_ALL,
                                  le->pushConstants.meshCountOffset, sizeof(block), block);
     const u32 groups = (clusterCount + kClusterAmplificationGroupSize - 1) / kClusterAmplificationGroupSize;
-    beginRenderScope(*dev_, cb);
+    const bool ownScope = beginRenderScope(*dev_, cb);
     dev_->api().CmdDrawMeshTasksEXT(cb, groups, 1, 1);
-    endRenderScope(*dev_, cb);
+    endRenderScope(*dev_, cb, ownScope);
 }
 
 // ====================================================================================================
@@ -569,9 +574,9 @@ void VulkanRenderContext::copyTexture(TextureHandle dst, TextureHandle src) {
 void VulkanRenderContext::drawFullscreen() {
     VkCommandBuffer cb = cmd();
     if (!cb) return;
-    beginRenderScope(*dev_, cb);
+    const bool ownScope = beginRenderScope(*dev_, cb);
     dev_->api().CmdDraw(cb, 3, 1, 0, 0);
-    endRenderScope(*dev_, cb);
+    endRenderScope(*dev_, cb, ownScope);
 }
 
 // ====================================================================================================
@@ -613,9 +618,9 @@ void VulkanRenderContext::drawIndexed(u32 indexCount, u32 firstIndex, i32 baseVe
     VkCommandBuffer cb = cmd();
     if (!cb || indexCount == 0) return;
     applyDrawBinding();
-    beginRenderScope(*dev_, cb);
+    const bool ownScope = beginRenderScope(*dev_, cb);
     dev_->api().CmdDrawIndexed(cb, indexCount, 1, firstIndex, baseVertex, 0);
-    endRenderScope(*dev_, cb);
+    endRenderScope(*dev_, cb, ownScope);
 }
 
 // ====================================================================================================
