@@ -101,6 +101,7 @@
 #include <cstddef>
 #include <cstring>
 #include <functional>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -706,6 +707,33 @@ inline bool patchPerFrameSet(std::string& src) {
     src.insert(pos, "[[vk::binding(0, " + std::to_string(kVkSetConstants) + ")]] ");
     return true;
 }
+
+// WHY THERE IS NO GENERAL VERSION OF patchPerFrameSet, having tried to write one.
+//
+// The obvious generalisation -- annotate EVERY `cbuffer X : register(bN)` into kVkSetConstants --
+// is wrong, and wrong in a way that only the validation layer shows. It moved SkinParams from set 0
+// to set 2 and the layer immediately said set 2 binding 3 was not declared either, because
+// SkinningPass declares `constantDwords[3] = 4`: b3 is PUSH CONSTANTS, and a block cannot be both a
+// push constant and a descriptor.
+//
+// THE RULE IS NOT A PROPERTY OF THE SHADER TEXT. A cbuffer is a descriptor iff its slot's
+// constantDwords is ZERO, and that lives in the PipelineLayout, which shader compilation does not
+// have -- VulkanResourceFactory::createShader compiles a module with no idea which pipeline will
+// later use it. So no patch operating on source alone can decide this correctly, and one that
+// guesses turns a diagnosable "wrong set" into an equally broken "right set, wrong kind".
+//
+// WHAT IS ACTUALLY LEFT, named so the next person does not rediscover it one crash at a time:
+// patchPushConstants (VulkanDevice.cpp) handles exactly ONE push-constant block, PerObject at b1,
+// by exact text. Every OTHER non-zero constantDwords slot -- SkinParams at b3 today -- still
+// compiles as a descriptor and names a binding no layout contains. Fixing it means teaching this
+// backend to emit [[vk::push_constant]] for an ARBITRARY slot, which needs the PipelineLayout
+// threaded into compilation. That is a real change to the interface, not a patch, and it is the
+// same conclusion VulkanShaderCompiler.cpp's own banner reached by a different route.
+//
+// AMD's discrete driver does not report any of this. LLPC calls abort(), so each one is the process
+// dying at 0xC0000409 with nothing printed -- which is why the validation layer, not another guess,
+// is the tool for the rest of it.
+
 
 
 // The push-constant byte layout for one built pipeline. objectOffset/objectBytes are the SAME on

@@ -775,7 +775,15 @@ bool VulkanResourceFactory::init() {
 
 namespace {
 const char* kSelfTestCS = R"(
-cbuffer SelfTestCB : register(b0) { uint4 gValue; };
+// [[vk::binding]] WRITTEN DIRECTLY, not string-patched. patchPerFrameSet exists because the SHARED
+// prelude is off-limits to this module and has to be annotated after the fact; kSelfTestCS is this
+// backend's own shader, so it simply says where it wants to live.
+//
+// SET kVkSetConstants (2), because that is where this backend puts constant buffers -- with no
+// space annotation DXC would put b0 at set 0, which is table 0 (SRVs/UAVs), and the validation
+// layer said exactly that: "uses descriptor [Set 0, Binding 0, variable SelfTestCB] but the binding
+// was not declared in pSetLayouts[0]".
+[[vk::binding(0, 2)]] cbuffer SelfTestCB : register(b0) { uint4 gValue; };
 RWTexture3D<float4> gOut : register(u0);
 [numthreads(4,4,4)]
 void CSSelfTest(uint3 id : SV_DispatchThreadID) { gOut[id] = float4(gValue); }
