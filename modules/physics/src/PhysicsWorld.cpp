@@ -26,6 +26,9 @@
 #include <Jolt/Physics/Collision/Shape/MeshShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/PhysicsSettings.h>
+#include <Jolt/Physics/SoftBody/SoftBodyCreationSettings.h>
+#include <Jolt/Physics/SoftBody/SoftBodyMotionProperties.h>
+#include <Jolt/Physics/SoftBody/SoftBodySharedSettings.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/RegisterTypes.h>
 
@@ -785,6 +788,212 @@ int32_t aver_phys_sphere_cast(float ox, float oy, float oz, float dx, float dy, 
     if (outPoint)  writeVec(outPoint,  fromJolt(collector.mHit.mContactPointOn2));
     if (outNormal) writeVec(outNormal, fromJoltUnit(-collector.mHit.mPenetrationAxis.Normalized()));
     return handle;
+}
+
+} // extern "C"
+
+// ---- Soft bodies ------------------------------------------------------------------------------------
+
+namespace {
+
+// The soft-body motion properties behind a handle, or nullptr for anything that is not one.
+//
+// NO SIDE TABLE: Jolt already knows whether a body is soft, so asking it is one branch and cannot
+// fall out of step with the handle map the way a parallel "which handles are soft" set would.
+JPH::SoftBodyMotionProperties* findSoftBody(int32_t h) {
+    const JPH::BodyID* id = findBody(h);
+    if (!id) return nullptr;
+    JPH::BodyLockWrite lock(g_world->system.GetBodyLockInterface(), *id);
+    if (!lock.Succeeded()) return nullptr;
+    JPH::Body& body = lock.GetBody();
+    if (!body.IsSoftBody()) return nullptr;
+    return static_cast<JPH::SoftBodyMotionProperties*>(body.GetMotionProperties());
+}
+
+// Fills the shared settings both create paths need: particles, faces, and the edge constraints
+// generated from them.
+bool buildSoftShared(JPH::SoftBodySharedSettings& settings,
+                     const float* verticesXyz, int32_t vertexCount,
+                     const int32_t* indices, int32_t indexCount,
+                     const float* invMasses, float compliance) {
+    if (!verticesXyz || vertexCount <= 0 || !indices || indexCount < 3) return false;
+
+    settings.mVertices.reserve(static_cast<size_t>(vertexCount));
+    for (int32_t i = 0; i < vertexCount; ++i) {
+        const Vec3 p(verticesXyz[i * 3 + 0], verticesXyz[i * 3 + 1], verticesXyz[i * 3 + 2]);
+        const JPH::Vec3 jp = toJolt(p);
+        JPH::SoftBodySharedSettings::Vertex v;
+        v.mPosition = JPH::Float3(jp.GetX(), jp.GetY(), jp.GetZ());
+        // INVERSE mass, so 0 means infinitely heavy -- which is how a particle is pinned. A mass
+        // here instead would make 0 mean weightless, the exact opposite, so the name of this
+        // parameter is load-bearing all the way out to the ABI.
+        v.mInvMass = invMasses ? invMasses[i] : 1.0f;
+        settings.mVertices.push_back(v);
+    }
+
+    for (int32_t t = 0; t + 2 < indexCount; t += 3) {
+        const int32_t a = indices[t], b = indices[t + 1], c = indices[t + 2];
+        if (a < 0 || b < 0 || c < 0 || a >= vertexCount || b >= vertexCount || c >= vertexCount)
+            continue;
+        if (a == b || b == c || a == c) continue;   // Jolt asserts on a degenerate face
+        // WOUND BACKWARDS on purpose. The basis change from Aver's left-handed axes to Jolt's
+        // right-handed ones mirrors the mesh, which flips every triangle's facing; swapping two
+        // indices puts the normals back outward. Without it a pressurised body inflates INWARDS.
+        settings.AddFace(JPH::SoftBodySharedSettings::Face(static_cast<JPH::uint32>(a),
+                                                           static_cast<JPH::uint32>(c),
+                                                           static_cast<JPH::uint32>(b)));
+    }
+    if (settings.mFaces.empty()) return false;
+
+    JPH::SoftBodySharedSettings::VertexAttributes attr;
+    attr.mCompliance = compliance < 0.0f ? 0.0f : compliance;
+    attr.mShearCompliance = attr.mCompliance;
+    attr.mBendCompliance = FLT_MAX;   // no bend constraints: cloth folds, and a solid has volume
+    settings.CreateConstraints(&attr, 1);
+    return true;
+}
+
+// Creates the body, registers the handle, returns it.
+int32_t addSoftBody(JPH::SoftBodySharedSettings* shared, const Vec3& centreCm, float pressure) {
+    JPH::SoftBodyCreationSettings s(shared, toJolt(centreCm), JPH::Quat::sIdentity(), Layers::MOVING);
+    s.mPressure = pressure;
+    // The body origin stays put and the PARTICLES are what move. With this on, Jolt recentres the
+    // body on its particles every step, which would make aver_phys_body_position report a moving
+    // target for something the caller never moved.
+    s.mUpdatePosition = false;
+    JPH::Body* body = g_world->system.GetBodyInterface().CreateSoftBody(s);
+    if (!body) { AVER_WARN("[Physics] soft body limit reached"); return 0; }
+    g_world->system.GetBodyInterface().AddBody(body->GetID(), JPH::EActivation::Activate);
+    const int32_t h = g_world->nextHandle++;
+    g_world->bodies.emplace(h, body->GetID());
+    g_world->byId.emplace(body->GetID(), h);
+    return h;
+}
+
+} // namespace
+
+extern "C" {
+
+int32_t aver_phys_softbody_create(const float* verticesXyz, int32_t vertexCount,
+                                  const int32_t* indices, int32_t indexCount,
+                                  const float* invMasses,
+                                  float cx, float cy, float cz,
+                                  float compliance, float pressure) {
+    if (!g_world) return 0;
+    // Ref-counted and owned by the shape from here on: Jolt keeps it alive as long as the body
+    // needs it, which is why this is a Ref and not a local that goes out of scope.
+    JPH::Ref<JPH::SoftBodySharedSettings> shared = new JPH::SoftBodySharedSettings();
+    if (!buildSoftShared(*shared, verticesXyz, vertexCount, indices, indexCount, invMasses, compliance))
+        return 0;
+    shared->Optimize();
+    return addSoftBody(shared, Vec3(cx, cy, cz), pressure);
+}
+
+int32_t aver_phys_softbody_create_skinned(const float* verticesXyz, int32_t vertexCount,
+                                          const int32_t* indices, int32_t indexCount,
+                                          const float* invMasses,
+                                          const int32_t* jointIndices, const float* jointWeights,
+                                          int32_t influences, int32_t jointCount,
+                                          float maxDistanceCm, float backStopDistanceCm,
+                                          float cx, float cy, float cz, float compliance) {
+    if (!g_world) return 0;
+    if (!jointIndices || !jointWeights || influences <= 0 || jointCount <= 0) return 0;
+
+    JPH::Ref<JPH::SoftBodySharedSettings> shared = new JPH::SoftBodySharedSettings();
+    if (!buildSoftShared(*shared, verticesXyz, vertexCount, indices, indexCount, invMasses, compliance))
+        return 0;
+
+    // ONE INVERSE BIND PER JOINT, ALL IDENTITY, and that is the trick that makes this cheap.
+    // Jolt computes `jointMatrices[invBind.mJointIndex] * invBind.mInvBind`, and Aver's
+    // anim::poseToSkinning ALREADY produces model x inverse-bind composed. Handing that palette in
+    // against identity inverse-binds reproduces Aver's own skinning exactly, with no second
+    // definition of the bind pose to drift out of step with the renderer's.
+    shared->mInvBindMatrices.reserve(static_cast<size_t>(jointCount));
+    for (int32_t j = 0; j < jointCount; ++j)
+        shared->mInvBindMatrices.push_back(
+            JPH::SoftBodySharedSettings::InvBind(static_cast<JPH::uint32>(j), JPH::Mat44::sIdentity()));
+
+    const float maxDist = cmToM(maxDistanceCm < 0.0f ? 0.0f : maxDistanceCm);
+    const float backStop = backStopDistanceCm < 0.0f ? FLT_MAX : cmToM(backStopDistanceCm);
+    shared->mSkinnedConstraints.reserve(static_cast<size_t>(vertexCount));
+    for (int32_t i = 0; i < vertexCount; ++i) {
+        JPH::SoftBodySharedSettings::Skinned sk(static_cast<JPH::uint32>(i), maxDist, backStop, 0.0f);
+        int slot = 0;
+        for (int32_t k = 0; k < influences && slot < 4; ++k) {
+            const int32_t joint = jointIndices[i * influences + k];
+            const float w = jointWeights[i * influences + k];
+            // A ZERO WEIGHT TERMINATES Jolt's per-vertex list (see SkinVertices), so a zero in the
+            // middle would silently discard every influence after it. Compacting them out here is
+            // what the mesh actually meant.
+            if (w <= 0.0f || joint < 0 || joint >= jointCount) continue;
+            sk.mWeights[slot++] = JPH::SoftBodySharedSettings::SkinWeight(
+                static_cast<JPH::uint32>(joint), w);
+        }
+        if (slot == 0) continue;   // an unweighted vertex is left free rather than pinned to joint 0
+        shared->mSkinnedConstraints.push_back(sk);
+    }
+    shared->CalculateSkinnedConstraintNormals();
+    shared->Optimize();
+
+    // Pressure is deliberately not offered here: a skinned body's shape is governed by the skeleton
+    // it hangs off, and inflating it as well fights that.
+    return addSoftBody(shared, Vec3(cx, cy, cz), 0.0f);
+}
+
+int32_t aver_phys_softbody_skin(int32_t body, const float* jointMatrices, int32_t jointCount,
+                                int32_t hardSkin) {
+    if (!g_world || !jointMatrices || jointCount <= 0) return 0;
+    const JPH::BodyID* id = findBody(body);
+    if (!id) return 0;
+    JPH::BodyLockWrite lock(g_world->system.GetBodyLockInterface(), *id);
+    if (!lock.Succeeded()) return 0;
+    JPH::Body& b = lock.GetBody();
+    if (!b.IsSoftBody()) return 0;
+    auto* mp = static_cast<JPH::SoftBodyMotionProperties*>(b.GetMotionProperties());
+    // Jolt asserts inside SkinVertices when there is nothing skinned, so an unskinned soft body is
+    // refused here rather than being allowed to trip an assert in a release build's absence.
+    if (!mp->GetSettings() || mp->GetSettings()->mSkinnedConstraints.empty()) return 0;
+
+    std::vector<JPH::Mat44> palette(static_cast<size_t>(jointCount));
+    for (int32_t j = 0; j < jointCount; ++j) {
+        Mat4 m;
+        for (int r = 0; r < 4; ++r)
+            for (int c = 0; c < 4; ++c) m.m[r][c] = jointMatrices[j * 16 + r * 4 + c];
+        palette[static_cast<size_t>(j)] = toJolt(m);
+    }
+    mp->SkinVertices(b.GetCenterOfMassTransform(), palette.data(),
+                     static_cast<JPH::uint>(jointCount), hardSkin != 0, *g_world->temp);
+    return 1;
+}
+
+int32_t aver_phys_softbody_vertex_count(int32_t body) {
+    const JPH::SoftBodyMotionProperties* mp = findSoftBody(body);
+    return mp ? static_cast<int32_t>(mp->GetVertices().size()) : 0;
+}
+
+int32_t aver_phys_softbody_vertices(int32_t body, float* outXyz, int32_t maxVertices) {
+    if (!outXyz || maxVertices <= 0) return 0;
+    if (!g_world) return 0;
+    const JPH::BodyID* id = findBody(body);
+    if (!id) return 0;
+    JPH::BodyLockRead lock(g_world->system.GetBodyLockInterface(), *id);
+    if (!lock.Succeeded()) return 0;
+    const JPH::Body& b = lock.GetBody();
+    if (!b.IsSoftBody()) return 0;
+    const auto* mp = static_cast<const JPH::SoftBodyMotionProperties*>(b.GetMotionProperties());
+
+    // Particle positions are stored RELATIVE TO THE CENTRE OF MASS, so they have to be lifted into
+    // world space before they mean anything to a caller. Returning them raw would give a mesh that
+    // renders correctly only while the body sits at the origin -- exactly the kind of defect that
+    // looks perfect in a test scene and is wrong everywhere else.
+    const JPH::RMat44 com = b.GetCenterOfMassTransform();
+    const auto& verts = mp->GetVertices();
+    const int32_t n = std::min(maxVertices, static_cast<int32_t>(verts.size()));
+    for (int32_t i = 0; i < n; ++i) {
+        const JPH::Vec3 world = JPH::Vec3(com * verts[static_cast<size_t>(i)].mPosition);
+        writeVec(outXyz + i * 3, fromJolt(world));
+    }
+    return n;
 }
 
 } // extern "C"

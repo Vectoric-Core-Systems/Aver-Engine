@@ -92,6 +92,57 @@ static void testRotationMap() {
           "quaternion round trip preserves the axis");
 }
 
+// Checks convert(transform(M, p)) == transform(convert(M), convert(p)) over a spread of transforms.
+//
+// THE ONE PROPERTY A CALLER CAN NEVER SEE, and the reason this test links Jolt at all. The matrix
+// conversion exists to hand Aver's animation palette to Jolt's soft-body skinning, and its two
+// hazards are silent: Aver's Mat4 is ROW-VECTOR while Jolt's Mat44 is column-vector, and the basis
+// change is a handedness flip. Get either wrong and a skinned soft body still simulates, still
+// collides, and skins to the wrong place -- with nothing anywhere reporting an error.
+//
+// Falsified by dropping the negation on toJolt(Mat4)'s third column: rotations still round-trip and
+// this check fails on every case with a rotation in it.
+static void testMatrixMap() {
+    AVER_INFO("-- matrix map --");
+    const Vec3 axes[]   = {Vec3(0,0,1), Vec3(1,0,0), Vec3(0,1,0), Vec3(0.577f,0.577f,0.577f)};
+    const f32  angles[] = {0.0f, 0.4f, 1.6f, -1.1f};
+    const Vec3 trans[]  = {Vec3(0,0,0), Vec3(30,-12,7)};
+    const Vec3 probes[] = {Vec3(1,0,0), Vec3(0,1,0), Vec3(0,0,1), Vec3(11,-3,25)};
+
+    int mismatches = 0, cases = 0;
+    for (const Vec3& a : axes)
+        for (f32 ang : angles)
+            for (const Vec3& t : trans) {
+                // Row-vector composition: rotate, THEN translate, which is what Mat4 means by R*T.
+                const Mat4 m = Mat4::fromQuat(Quat::fromAxisAngle(a, ang)) * Mat4::translation(t);
+                const JPH::Mat44 jm = toJolt(m);
+                for (const Vec3& p : probes) {
+                    // Transform in engine space, then convert the RESULT as a position.
+                    const Vec3 avr(p.x*m.m[0][0] + p.y*m.m[1][0] + p.z*m.m[2][0] + m.m[3][0],
+                                   p.x*m.m[0][1] + p.y*m.m[1][1] + p.z*m.m[2][1] + m.m[3][1],
+                                   p.x*m.m[0][2] + p.y*m.m[1][2] + p.z*m.m[2][2] + m.m[3][2]);
+                    const JPH::Vec3 want = toJolt(avr);
+                    // Convert first, then transform in Jolt space. These agree only if every column
+                    // of toJolt(Mat4) is right.
+                    const JPH::Vec3 got = jm * toJolt(p);
+                    ++cases;
+                    if (!vnear(fromJolt(got), fromJolt(want), 2e-3f)) ++mismatches;
+                }
+            }
+    check(mismatches == 0,
+          "transform-then-convert == convert-then-transform over " + std::to_string(cases) +
+          " cases (" + std::to_string(mismatches) + " mismatched)");
+
+    // Identity has to survive exactly, or every unposed joint is subtly wrong.
+    const JPH::Mat44 id = toJolt(Mat4::identity());
+    check(id == JPH::Mat44::sIdentity(), "the identity converts to the identity");
+
+    // Translation-only, checked by hand against the axis contract: +X forward in Aver is -Z in Jolt.
+    const JPH::Mat44 tm = toJolt(Mat4::translation(Vec3(100, 0, 0)));
+    check(near(tm.GetTranslation().GetZ(), -1.0f),
+          "100cm of Aver forward becomes 1m of Jolt -Z");
+}
+
 // Drops a sphere onto a static floor, rays down at it, and lands a character: gravity, resting
 // contact, raycast and the character controller.
 static void testSimulation() {
@@ -389,6 +440,7 @@ static void testCharacterIsRaycastVisible() {
 int main() {
     testAxisMap();
     testRotationMap();
+    testMatrixMap();
     testSimulation();
     testEventsAndQueries();
     testShapes();

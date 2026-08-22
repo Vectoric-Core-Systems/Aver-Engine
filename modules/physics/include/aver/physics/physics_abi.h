@@ -149,6 +149,78 @@ AVER_PHYS_API int32_t aver_phys_overlap_count(void);
 AVER_PHYS_API int32_t aver_phys_overlap_get(int32_t index, int32_t* outSensor, int32_t* outBody,
                                             int32_t* outEntered);
 
+// ---- Soft bodies ------------------------------------------------------------------------------------
+// A deformable mesh: particles held together by distance constraints, colliding with the world.
+//
+// A SOFT BODY IS A BODY. It is drawn from the same handle counter as everything above, so
+// aver_phys_remove_body, aver_phys_set_entity and aver_phys_raycast all work on one unchanged --
+// there is no parallel family to keep in step.
+//
+// WHY JOLT AND NOT A SOLVER OF OUR OWN: Jolt 5.6 ships this, it is already vendored and already
+// compiled into this build, and it brings the one thing a hand-written cage solver does not get for
+// free -- collision against the real world. The engine's own contribution is the seam: engine units
+// and axes on this side, Jolt's on the other, and skinning driven from Aver's animation palette.
+//
+// WHAT IT DOES NOT DO, so it is not discovered later: Jolt soft bodies are purely ELASTIC. There is
+// no plastic deformation, no permanent set, no material yield and no break/tear. A dent that stays
+// is a different solver (see docs/recon/softbody-solver.md), not a parameter here.
+
+// Build a soft body from a triangle mesh. Positions are engine centimetres, xyz,xyz,...; `indices`
+// is 3 per triangle and gives the FACES, from which the edge constraints are generated.
+//
+// `invMasses` is optional (NULL = every particle at 1). A particle at inverse mass 0 is PINNED and
+// is how a flag stays attached to its pole.
+//
+// `compliance` is inverse stiffness: 0 is inextensible, larger is stretchier. `pressure` inflates a
+// closed mesh from within; 0 for cloth.
+AVER_PHYS_API int32_t aver_phys_softbody_create(const float* verticesXyz, int32_t vertexCount,
+                                                const int32_t* indices, int32_t indexCount,
+                                                const float* invMasses,
+                                                float cx, float cy, float cz,
+                                                float compliance, float pressure);
+
+// The same, plus SKINNED constraints -- soft body on a skeletal mesh.
+//
+// Each vertex is tethered to where ordinary bone skinning would have put it, free to move up to
+// `maxDistanceCm` away from it and no further. That single number is the whole dial between "this
+// is just skinning" (0) and "this is a free-floating cloth that happens to be near a skeleton"
+// (large): jiggle, squash and drape all live in between.
+//
+// `jointIndices` and `jointWeights` are `vertexCount * influences` long, matching the mesh's own
+// skinning data. `backStopDistanceCm` keeps a vertex from sinking back through the surface it hangs
+// off -- negative disables it.
+//
+// PASS THE BIND POSE as `verticesXyz`, because that is what the skinning is defined against. The
+// body is then driven each frame by aver_phys_softbody_skin.
+AVER_PHYS_API int32_t aver_phys_softbody_create_skinned(const float* verticesXyz, int32_t vertexCount,
+                                                        const int32_t* indices, int32_t indexCount,
+                                                        const float* invMasses,
+                                                        const int32_t* jointIndices,
+                                                        const float* jointWeights,
+                                                        int32_t influences, int32_t jointCount,
+                                                        float maxDistanceCm, float backStopDistanceCm,
+                                                        float cx, float cy, float cz,
+                                                        float compliance);
+
+// Drive a skinned soft body from an animated pose. `jointMatrices` is `jointCount` matrices of 16
+// floats, row-major, in the engine's own convention -- exactly what aver::anim::poseToSkinning
+// produces, handed over unchanged.
+//
+// `hardSkin` snaps every particle onto its skinned position instead of constraining toward it: what
+// to pass on the first frame, and after a teleport, so the body starts on the character rather than
+// flying in from wherever it was.
+//
+// Call it BEFORE aver_phys_step each frame. Returns 0 for a handle that is not a skinned soft body.
+AVER_PHYS_API int32_t aver_phys_softbody_skin(int32_t body, const float* jointMatrices,
+                                              int32_t jointCount, int32_t hardSkin);
+
+// How many particles a soft body has, or 0 for any other handle.
+AVER_PHYS_API int32_t aver_phys_softbody_vertex_count(int32_t body);
+
+// Read the deformed particle positions into a caller-owned float[maxVertices*3], as engine
+// centimetres in WORLD space. Returns how many were written. This is what the renderer draws.
+AVER_PHYS_API int32_t aver_phys_softbody_vertices(int32_t body, float* outXyz, int32_t maxVertices);
+
 // ---- Queries -------------------------------------------------------------------------------------
 
 // Cast a ray from `o` along `d` for `maxDistCm`. Returns the hit body handle, or 0 for a miss.
