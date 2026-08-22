@@ -694,6 +694,12 @@ struct DirEntry {
     bool isDir  = false;
     int  tile   = -1;      // sprite tile index, -1 for none
     bool module = false;
+    // Which typed glyph draws this entry when no sprite art exists for it. -1 = none, and then it
+    // falls back to the anonymous page. Resolved at LISTING time beside `tile` rather than at draw
+    // time, because the gallery redraws every frame and an extension lookup per tile per frame is
+    // work the 20-frame listing cache already exists to avoid.
+    int kind = -1;
+    std::string kindExt;   // lower-cased extension, for assetKindFor at draw time
 };
 
 // A Content Browser directory listing, refreshed on a frame stamp. Folders sort first and are counted.
@@ -9106,7 +9112,18 @@ private:
                                  std::filesystem::exists(ent.path / "CMakeLists.txt", mec);
                     ++c.dirCount;
                 } else {
-                    ent.tile = fileIconTile(ent.full, ent.name, lowerExt(ent.path));
+                    const std::string lext = lowerExt(ent.path);
+                    ent.tile = fileIconTile(ent.full, ent.name, lext);
+                    // Resolved even when a sprite tile exists, because the DETAILS STRIP wants the
+                    // type's name whether or not the grid drew art for it.
+                    ent.kind = -1;
+                    if (assetKindFor(lext)) {
+                        // Stored as the table index so DirEntry stays a plain value type -- a raw
+                        // pointer into a function-local static would work today and is exactly the
+                        // sort of thing that stops working when the table moves.
+                        ent.kind = 1;
+                        ent.kindExt = lext;
+                    }
                 }
                 c.entries.push_back(std::move(ent));
             }
@@ -9138,6 +9155,61 @@ private:
 
     // Returns an ASSET sheet tile for an engine asset extension, or -1. Separate from the source-file
     // sheet because the two are different textures with different provenance -- see branding/ASSETS.md.
+    // WHAT AN ASSET LOOKS LIKE WHEN THERE IS NO ART FOR IT.
+    //
+    // Only four extensions have sprite-sheet tiles (.ocanim/.ocskel/.ocmesh/.ocgraph, see
+    // assetIconTile below). EVERYTHING ELSE -- materials, particles, sound graphs, behaviour trees,
+    // levels, shaders, audio, textures -- fell through to one identical grey page, so a folder of
+    // twenty different asset types read as twenty identical documents. That is the single thing
+    // that made this browser look unfinished next to a real engine's.
+    //
+    // GLYPH PLUS COLOUR, not colour alone: colour separates types at a glance across the grid, and
+    // the glyph is what actually says WHICH type when you look straight at one. Either on its own
+    // does half the job. The glyphs come from the Material Icons already merged into the UI font
+    // (sandbox/src/EditorIcons.hpp) -- no new dependency, and they scale with the tile because they
+    // are text rather than a fixed-size bitmap.
+    //
+    // A REAL RENDERED THUMBNAIL WOULD BE BETTER AND IS NOT POSSIBLE TODAY. render::ActorPreview is
+    // a hard singleton with one colour target and one draw list, and -- decisively -- the RHI has no
+    // texture-to-texture copy and no texture readback anywhere (only copyBuffer/readBuffer), so
+    // there is no way to keep frame K's rendered pixels once frame K+1 reuses the target. Verified,
+    // not assumed. A thumbnail cache needs that primitive added to BOTH backends first.
+    struct AssetKind { const char* icon; ImU32 tint; const char* label; };
+    static const AssetKind* assetKindFor(const std::string& ext) {
+        // Grouped by what a thing IS, and coloured by group, so related assets read as related:
+        // geometry warm, animation violet, look/material orange, simulation green, audio pink,
+        // logic blue, source grey-blue, data neutral.
+        static const struct { const char* ext; AssetKind k; } kTable[] = {
+            {".ocmesh",     {ICON_TERRAIN,    IM_COL32(226, 148,  74, 255), "Mesh"}},
+            {".ocworld",    {ICON_TERRAIN,    IM_COL32(120, 190, 130, 255), "Level"}},
+            {".ocmap",      {ICON_TERRAIN,    IM_COL32(120, 190, 130, 255), "Level"}},
+            {".ocskel",     {ICON_TREE,       IM_COL32(178, 142, 232, 255), "Skeleton"}},
+            {".ocanim",     {ICON_PLAY,       IM_COL32(178, 142, 232, 255), "Animation"}},
+            {".ocmat",      {ICON_TUNE,       IM_COL32(242, 101,  34, 255), "Material"}},
+            {".ocparticle", {ICON_ADD,        IM_COL32( 96, 200, 176, 255), "Particles"}},
+            {".ocsnd",      {ICON_WAVE,       IM_COL32(232, 120, 170, 255), "Sound Graph"}},
+            {".ocaudio",    {ICON_AUDIO,      IM_COL32(232, 120, 170, 255), "Audio"}},
+            {".wav",        {ICON_AUDIO,      IM_COL32(232, 120, 170, 255), "Audio"}},
+            {".ogg",        {ICON_AUDIO,      IM_COL32(232, 120, 170, 255), "Audio"}},
+            {".ocbt",       {ICON_TREE,       IM_COL32(110, 170, 240, 255), "Behaviour Tree"}},
+            {".ocgraph",    {ICON_LINK,       IM_COL32(110, 170, 240, 255), "Graph"}},
+            {".ocnav",      {ICON_TERRAIN,    IM_COL32(150, 200, 120, 255), "Navigation"}},
+            {".hlsl",       {ICON_BUILD,      IM_COL32(140, 200, 220, 255), "Shader"}},
+            {".png",        {ICON_VISIBILITY, IM_COL32(200, 170, 110, 255), "Texture"}},
+            {".jpg",        {ICON_VISIBILITY, IM_COL32(200, 170, 110, 255), "Texture"}},
+            {".tga",        {ICON_VISIBILITY, IM_COL32(200, 170, 110, 255), "Texture"}},
+            {".gltf",       {ICON_TERRAIN,    IM_COL32(190, 160, 120, 255), "glTF"}},
+            {".glb",        {ICON_TERRAIN,    IM_COL32(190, 160, 120, 255), "glTF"}},
+            {".json",       {ICON_FILE,       IM_COL32(160, 164, 172, 255), "Data"}},
+            {".md",         {ICON_FILE,       IM_COL32(160, 164, 172, 255), "Notes"}},
+            {".fs",         {ICON_EDIT,       IM_COL32(120, 150, 210, 255), "F#"}},
+            {".fsproj",     {ICON_SETTINGS,   IM_COL32(120, 150, 210, 255), "F# Project"}},
+            {".csproj",     {ICON_SETTINGS,   IM_COL32(120, 150, 210, 255), "C# Project"}},
+        };
+        for (const auto& row : kTable) if (ext == row.ext) return &row.k;
+        return nullptr;
+    }
+
     static int assetIconTile(const std::string& ext) {
         if (ext == ".ocanim") return 0;
         if (ext == ".ocskel") return 1;
@@ -9211,7 +9283,27 @@ private:
     }
 
     // Draws one entry's icon, from the sprite sheet where there is one and the drawn glyph otherwise.
-    void drawEntryIcon(ImDrawList* dl, ImVec2 centre, f32 s, bool isDir, int tile, bool module) {
+    // Draws a typed asset glyph: a soft rounded plate in the type's colour with its Material Icon
+    // centred on it. The plate is what gives the grid a consistent silhouette -- glyphs alone have
+    // wildly different visual weight and a folder of them reads as noise.
+    void typedGlyph(ImDrawList* dl, ImVec2 c, f32 s, const AssetKind& k) {
+        const f32 half = s * 0.42f;
+        const ImU32 plate = (k.tint & 0x00FFFFFFu) | (ImU32(38) << IM_COL32_A_SHIFT);
+        const ImU32 edge  = (k.tint & 0x00FFFFFFu) | (ImU32(90) << IM_COL32_A_SHIFT);
+        dl->AddRectFilled(ImVec2(c.x - half, c.y - half), ImVec2(c.x + half, c.y + half),
+                          plate, s * 0.16f);
+        dl->AddRect(ImVec2(c.x - half, c.y - half), ImVec2(c.x + half, c.y + half),
+                    edge, s * 0.16f, 0, 1.0f);
+        // Sized off the plate rather than the font, so the glyph fills the tile at every zoom level
+        // the size slider offers.
+        ImFont* font = ImGui::GetFont();
+        const f32 px = s * 0.46f;
+        const ImVec2 sz = font->CalcTextSizeA(px, FLT_MAX, 0.0f, k.icon);
+        dl->AddText(font, px, ImVec2(c.x - sz.x * 0.5f, c.y - sz.y * 0.5f), k.tint, k.icon);
+    }
+
+    void drawEntryIcon(ImDrawList* dl, ImVec2 centre, f32 s, bool isDir, int tile, bool module,
+                       const std::string& kindExt = std::string()) {
         if (isDir) {
             if (folderIconsUiId_) blitTile(dl, folderIconsUiId_, centre, s, folderIconAspect_, module ? 1 : 0, 2);
             else                  folderGlyph(dl, centre, s, IM_COL32(232, 187, 92, 255));
@@ -9225,6 +9317,10 @@ private:
             blitTile(dl, fileIconsUiId_, centre, s, fileIconAspect_, tile, kFileIconTiles);
             return;
         }
+        // The typed glyph, before the anonymous page. This is the line that makes twenty different
+        // asset types stop looking like twenty identical documents.
+        if (!kindExt.empty())
+            if (const AssetKind* k = assetKindFor(kindExt)) { typedGlyph(dl, centre, s, *k); return; }
         fileGlyph(dl, centre, s, IM_COL32(150, 154, 162, 255));
     }
 
@@ -9312,7 +9408,7 @@ private:
                     }
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", e.name.c_str());
                     cbItemContextMenu(e.full, e.name, e.isDir);
-                    drawEntryIcon(dl, ImVec2(o.x + cellW*0.5f, o.y + tile*0.5f), tile*0.52f, e.isDir, e.tile, e.module);
+                    drawEntryIcon(dl, ImVec2(o.x + cellW*0.5f, o.y + tile*0.5f), tile*0.52f, e.isDir, e.tile, e.module, e.kindExt);
                     const f32 wrap = cellW - 4.0f*dpi_;
                     const std::string label = fitLabel(e.name, wrap, 2);
                     const ImVec2 ts = ImGui::CalcTextSize(label.c_str());
@@ -9356,7 +9452,7 @@ private:
                 const ImVec2 o = ImGui::GetCursorScreenPos();
                 ImGui::Dummy(ImVec2(h * 0.78f, h));
                 ImGui::SameLine();
-                drawEntryIcon(dl, ImVec2(o.x + h*0.39f, o.y + h*0.5f), h*0.82f, e.isDir, e.tile, e.module);
+                drawEntryIcon(dl, ImVec2(o.x + h*0.39f, o.y + h*0.5f), h*0.82f, e.isDir, e.tile, e.module, e.kindExt);
                 if (ImGui::Selectable(e.name.c_str(), cbSelectedFile_ == e.full,
                                       ImGuiSelectableFlags_AllowDoubleClick)) {
                     cbSelectedFile_ = e.full;
