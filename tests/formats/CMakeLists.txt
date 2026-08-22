@@ -231,3 +231,19 @@ if(TARGET Aver.Formats.Audio)
   target_link_libraries(AverAssetC PRIVATE Aver.Formats.Audio)
   target_compile_definitions(AverAssetC PRIVATE AVER_HAVE_AUDIO_IMPORT=1)
 endif()
+
+# AverAssetCTest -- the JSON contract Aver Exchange in the LAUNCHER parses.
+#
+# THIS IS THE ONLY THING PROTECTING A CROSS-PROCESS, CROSS-REPOSITORY INTERFACE. Nothing in this
+# repository calls AverAssetC -- correctly, since the launcher shells out to the executable -- so the
+# usual protection of "change it, break the build, notice" does not exist. Renaming a JSON key here
+# is a green build and a broken importer over there, found by a user.
+#
+# It RUNS the tool, so it depends on the target rather than merely linking a library.
+add_executable(AverAssetCTest src/AverAssetCTest.cpp)
+target_link_libraries(AverAssetCTest PRIVATE Aver.Core Aver.Platform)
+add_dependencies(AverAssetCTest AverAssetC)
+target_compile_definitions(AverAssetCTest PRIVATE
+  AVER_ASSETC_EXE="$<TARGET_FILE:AverAssetC>"
+  AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
+set_target_properties(AverAssetCTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
