@@ -29,6 +29,12 @@
 # AverEngine.exe, and one of the two has to change before release.
 Sandbox.exe
 
+# The Aver Exchange asset compiler (tools/AverAssetC.cpp). Unlike ConvertTool/ActorSweep/the test
+# executables below (deliberately NOT shipped, see the bottom of this file), the launcher's Aver
+# Exchange feature invokes this one out of process on a real user's machine, so it has to be present
+# in every edition -- unconditional, the same as Sandbox.exe itself.
+AverAssetC.exe
+
 # The C-seam DLLs the editor load-time links. Listed individually rather than as Aver.*.dll on
 # purpose: that glob would also sweep the dead root-level Aver.Scripting.dll (see below), and it
 # would hide which DLLs an edition is supposed to have.

@@ -209,3 +209,25 @@ endif()
 add_executable(MakeSamples ${CMAKE_SOURCE_DIR}/tools/MakeSamples.cpp)
 target_link_libraries(MakeSamples PRIVATE Aver.Core)
 set_target_properties(MakeSamples PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# AverAssetC -- the standalone asset compiler the launcher's Aver Exchange feature shells out to.
+# Sits here for ConvertTool's reason: this is where Aver.Formats is already linked, and it ports
+# ConvertTool's own import/merge/verify logic rather than duplicating it (see the tool's own header
+# comment). Registered as a SHIPPING tool -- unlike ConvertTool, ActorSweep and the test executables,
+# it must also be added to scripts/payload.allowlist's [bin] section, or a downloaded engine has
+# nothing for the launcher to invoke.
+add_executable(AverAssetC ${CMAKE_SOURCE_DIR}/tools/AverAssetC.cpp)
+target_link_libraries(AverAssetC PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(AverAssetC PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+# Clustering/LOD decimation is OPTIONAL, exactly like ConvertTool above.
+if(TARGET Aver.Trifactor)
+  target_link_libraries(AverAssetC PRIVATE Aver.Trifactor)
+endif()
+# Audio import (.wav/.mp3/.m4a/.flac -> .ocaudio) is OPTIONAL for the same reason MaterialTest/
+# ActorSweep guard on Aver.Formats.Material above: an AVER_MODULE_SCRIPTING-independent, always-
+# available module in most trees, but a tree can still be configured without Aver.Audio (its own
+# CMakeLists gates it), and this tool has to keep configuring in that tree too.
+if(TARGET Aver.Formats.Audio)
+  target_link_libraries(AverAssetC PRIVATE Aver.Formats.Audio)
+  target_compile_definitions(AverAssetC PRIVATE AVER_HAVE_AUDIO_IMPORT=1)
+endif()
