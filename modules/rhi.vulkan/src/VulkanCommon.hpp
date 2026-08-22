@@ -1447,7 +1447,19 @@ private:
     // ---- fixed scene/line/sky pipelines (built via VulkanShaderCompiler + vkCreateGraphicsPipelines
     // directly -- NOT through VulkanResourceFactory's generic PipelineLayout cache, exactly as
     // D3D12Device builds its own rootSig_/pso_ separately from D3D12ResourceFactory's cache) ----
-    VkDescriptorSetLayout sceneFrameSetLayout_ = VK_NULL_HANDLE;   // set kVkSetConstants, binding 0 (b0) only
+    VkDescriptorSetLayout sceneFrameSetLayout_ = VK_NULL_HANDLE;
+    // ONE empty descriptor-set layout, for the DEVICE'S LIFETIME, used as the placeholder in every
+    // pipeline layout whose set 0 or set 1 goes unused.
+    //
+    // Three call sites used to each build their own throwaway pair and destroy them the instant
+    // CreatePipelineLayout returned. That reads as tidy and is not: the pipeline layout goes on
+    // referencing them, and every pipeline built from it afterwards is created against a layout
+    // whose set layouts are gone. The validation layer reports it once per site --
+    //     "pCreateInfos[0].layout (VkPipelineLayout ...) references deleted object
+    //      VkDescriptorSetLayout ..."
+    // -- which is exactly three, and was three. Keeping one alive costs a single empty layout and
+    // removes the whole class.
+    VkDescriptorSetLayout emptySetLayout_ = VK_NULL_HANDLE;   // set kVkSetConstants, binding 0 (b0) only
     VkPipelineLayout scenePipelineLayout_ = VK_NULL_HANDLE;        // push constants: b1 object block only
     VkPipeline scenePso_ = VK_NULL_HANDLE, skyPso_ = VK_NULL_HANDLE, wirePso_ = VK_NULL_HANDLE,
                linePso_ = VK_NULL_HANDLE, lineOverlayPso_ = VK_NULL_HANDLE;   // no depth test: editor gizmos on top

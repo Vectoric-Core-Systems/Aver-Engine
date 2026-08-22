@@ -348,6 +348,7 @@ VkDescriptorSetLayout makeEmptySetLayout(const VulkanApi& api, VkDevice device) 
     return layout;
 }
 
+
 // Writes the default shading model and its parameters into the tail of a per-draw b1 block. Byte-
 // for-byte mirror of D3D12Device.cpp's own writeShadingConstants: the PerObject cbuffer's tail
 // fields (gShadingModel, gReflectance, gF90, _objPad, gEmissive) are the same 8 dwords on both
@@ -904,6 +905,8 @@ VulkanDevice::~VulkanDevice() {
         if (frameCBs_[i]) destroyBufferCommitted(*this, frameCBs_[i], frameCBMemory_[i]);
     if (sceneDescriptorPool_) api_.DestroyDescriptorPool(device_, sceneDescriptorPool_, nullptr);
     if (sceneFrameSetLayout_) api_.DestroyDescriptorSetLayout(device_, sceneFrameSetLayout_, nullptr);
+    // After every pipeline layout that named it, which is what device teardown order already gives.
+    if (emptySetLayout_) { api_.DestroyDescriptorSetLayout(device_, emptySetLayout_, nullptr); emptySetLayout_ = VK_NULL_HANDLE; }
     if (scenePipelineLayout_) api_.DestroyPipelineLayout(device_, scenePipelineLayout_, nullptr);
     if (meshPipelineLayout_) api_.DestroyPipelineLayout(device_, meshPipelineLayout_, nullptr);
     for (VkPipeline* pso : {&scenePso_, &skyPso_, &wirePso_, &linePso_, &lineOverlayPso_, &meshPso_})
@@ -1105,17 +1108,18 @@ bool VulkanDevice::createPipeline() {
 
     // ---- pipeline layout: push constants (b1, patched into the assembled source) + set2 (b0) ----
     if (!scenePipelineLayout_) {
-        VkDescriptorSetLayout empty0 = makeEmptySetLayout(api_, device_);   // kVkSetTable0, unused
-        VkDescriptorSetLayout empty1 = makeEmptySetLayout(api_, device_);   // kVkSetTable1, unused
-        VkDescriptorSetLayout sets[kVkSetConstants + 1] = {empty0, empty1, sceneFrameSetLayout_};
+        // The SAME shared layout in both unused slots -- a VkDescriptorSetLayout may appear in any
+        // number of pipeline layouts and in any number of their slots.
+        if (!emptySetLayout_) emptySetLayout_ = makeEmptySetLayout(api_, device_);
+        VkDescriptorSetLayout sets[kVkSetConstants + 1] = {emptySetLayout_, emptySetLayout_, sceneFrameSetLayout_};
         VkPushConstantRange pc{VK_SHADER_STAGE_ALL, PushConstantLayout::kObjectOffset, PushConstantLayout::kObjectBytes};
         VkPipelineLayoutCreateInfo lci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
         lci.setLayoutCount = kVkSetConstants + 1; lci.pSetLayouts = sets;
         lci.pushConstantRangeCount = 1; lci.pPushConstantRanges = &pc;
-        const bool ok = vkOk(api_.CreatePipelineLayout(device_, &lci, nullptr, &scenePipelineLayout_), "scene pipeline layout");
-        api_.DestroyDescriptorSetLayout(device_, empty0, nullptr);
-        api_.DestroyDescriptorSetLayout(device_, empty1, nullptr);
-        if (!ok) return false;
+        // NOT destroyed here -- see emptySetLayout_'s own comment. It outlives every pipeline layout
+        // that names it and is torn down with the device.
+        if (!vkOk(api_.CreatePipelineLayout(device_, &lci, nullptr, &scenePipelineLayout_), "scene pipeline layout"))
+            return false;
     }
 
     std::string src = sceneShaderSource();
@@ -1294,17 +1298,16 @@ bool VulkanDevice::initMeshShaders() {
     }
 
     if (!meshPipelineLayout_) {
-        VkDescriptorSetLayout empty1 = makeEmptySetLayout(api_, device_);
-        VkDescriptorSetLayout sets[kVkSetConstants + 1] = {g_meshGeomLayout, empty1, sceneFrameSetLayout_};
+        if (!emptySetLayout_) emptySetLayout_ = makeEmptySetLayout(api_, device_);
+        VkDescriptorSetLayout sets[kVkSetConstants + 1] = {g_meshGeomLayout, emptySetLayout_, sceneFrameSetLayout_};
         // Merged push-constant range: object bytes [0,128) then the mesh count block right after --
         // see patchPushConstants for why they are ONE HLSL block, not two.
         VkPushConstantRange pc{VK_SHADER_STAGE_ALL, 0, PushConstantLayout::kObjectBytes + 16};
         VkPipelineLayoutCreateInfo lci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
         lci.setLayoutCount = kVkSetConstants + 1; lci.pSetLayouts = sets;
         lci.pushConstantRangeCount = 1; lci.pPushConstantRanges = &pc;
-        const bool ok = vkOk(api_.CreatePipelineLayout(device_, &lci, nullptr, &meshPipelineLayout_), "mesh pipeline layout");
-        api_.DestroyDescriptorSetLayout(device_, empty1, nullptr);
-        if (!ok) return false;
+        if (!vkOk(api_.CreatePipelineLayout(device_, &lci, nullptr, &meshPipelineLayout_), "mesh pipeline layout"))
+            return false;
     }
 
     std::string src = sceneShaderSource();
@@ -2696,15 +2699,12 @@ bool VulkanDevice::createPostPipelines() {
         if (!vkOk(api_.CreateDescriptorSetLayout(device_, &ci, nullptr, &postSetLayout_), "post set layout")) return false;
     }
     if (!postPipelineLayout_) {
-        VkDescriptorSetLayout empty0 = makeEmptySetLayout(api_, device_);
-        VkDescriptorSetLayout empty1 = makeEmptySetLayout(api_, device_);
-        VkDescriptorSetLayout sets[kVkSetConstants + 1] = {empty0, empty1, postSetLayout_};
+        if (!emptySetLayout_) emptySetLayout_ = makeEmptySetLayout(api_, device_);
+        VkDescriptorSetLayout sets[kVkSetConstants + 1] = {emptySetLayout_, emptySetLayout_, postSetLayout_};
         VkPipelineLayoutCreateInfo lci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
         lci.setLayoutCount = kVkSetConstants + 1; lci.pSetLayouts = sets;
-        const bool ok = vkOk(api_.CreatePipelineLayout(device_, &lci, nullptr, &postPipelineLayout_), "post pipeline layout");
-        api_.DestroyDescriptorSetLayout(device_, empty0, nullptr);
-        api_.DestroyDescriptorSetLayout(device_, empty1, nullptr);
-        if (!ok) return false;
+        if (!vkOk(api_.CreatePipelineLayout(device_, &lci, nullptr, &postPipelineLayout_), "post pipeline layout"))
+            return false;
     }
     if (!postDescriptorPool_) {
         VkDescriptorPoolSize sizes[4] = {
