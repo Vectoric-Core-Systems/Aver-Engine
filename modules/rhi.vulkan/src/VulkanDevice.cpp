@@ -9,6 +9,7 @@
 // not compiled. See the honestState this session reports alongside this file for the specific
 // places that could not be checked any other way.
 #include "VulkanCommon.hpp"
+#include "aver/rhi/vulkan/UiBackend.hpp"
 
 #include <cstdlib>
 #include "aver/rhi/Atmosphere.hpp"
@@ -978,6 +979,60 @@ TextureHandle VulkanDevice::sceneDepthTexture() {
         depthTexDirty_ = false;
     }
     return depthTexHandle_;
+}
+
+// ================================================================================================
+// The in-window UI seam. Every one of these is a pass-through to whatever vkb::IUiBackend Sandbox
+// installed, and a no-op returning IDevice's own default when none was -- which is every game
+// build. NOTHING ABOUT DEAR IMGUI APPEARS IN THIS MODULE; see UiBackend.hpp for why the split
+// exists and why its handles cross as opaque u64s.
+// ================================================================================================
+bool VulkanDevice::uiInit(void* windowHandle) {
+    if (!uiBackend_ || uiUp_) return uiUp_;
+    if (!device_ || !instance_ || !queue_) {
+        AVER_WARN("[RHI.Vulkan] uiInit before the device is up; no UI backend can be started yet");
+        return false;
+    }
+    vkb::UiBackendInitDesc d{};
+    d.instance       = reinterpret_cast<u64>(instance_);
+    d.physicalDevice = reinterpret_cast<u64>(physicalDevice_);
+    d.device         = reinterpret_cast<u64>(device_);
+    d.queue          = reinterpret_cast<u64>(queue_);
+    d.queueFamily    = graphicsQueueFamily();
+    // The factory's pool, deliberately: a toolkit allocating from its own second pool is a second
+    // budget nothing reconciles, and this one is sized at 4096 sets against a handful in use.
+    d.descriptorPool = rhiFactory_ ? reinterpret_cast<u64>(rhiFactory_->descriptorPool_) : 0;
+    d.frameCount     = kFrameCount;
+    d.imageCount     = static_cast<u32>(swapchainImages_.size());
+    // The SWAPCHAIN format, not the HDR scene one: the UI is composed straight onto the backbuffer
+    // in the overlay pass, after the post chain has already tonemapped into it.
+    d.colorFormat    = static_cast<u32>(swapchainFormat_);
+    d.sampleCount    = 1;          // the overlay pass is never multisampled
+    d.dynamicRendering = true;     // this backend has no VkRenderPass to give -- see the desc
+
+    uiUp_ = uiBackend_->init(windowHandle, d);
+    if (!uiUp_) AVER_WARN("[RHI.Vulkan] the installed UI backend refused to initialise");
+    return uiUp_;
+}
+
+void VulkanDevice::uiNewFrame() { if (uiBackend_ && uiUp_) uiBackend_->newFrame(); }
+
+void VulkanDevice::uiShutdown() {
+    if (!uiBackend_ || !uiUp_) return;
+    // Everything the toolkit built is referenced by command buffers that may still be in flight.
+    waitForGpu();
+    uiBackend_->shutdown();
+    uiUp_ = false;
+}
+
+bool VulkanDevice::uiWantsMouse() const    { return uiBackend_ && uiUp_ && uiBackend_->wantsMouse(); }
+bool VulkanDevice::uiWantsKeyboard() const { return uiBackend_ && uiUp_ && uiBackend_->wantsKeyboard(); }
+
+// Already inside aver::rhi::vkb -- no nested namespace, which would make this vkb::vkb::.
+bool installUiBackend(IDevice* device, IUiBackend* backend) {
+    if (!device || device->backend() != Backend::Vulkan) return false;
+    static_cast<VulkanDevice*>(device)->uiBackend_ = backend;
+    return true;
 }
 
 void VulkanDevice::addRenderFeature(IRenderFeature* f) {
@@ -2496,6 +2551,10 @@ void VulkanDevice::endFrame() {
         api_.CmdSetViewport(cmd, 0, 1, &vp);
         api_.CmdSetScissor(cmd, 0, 1, &sc);
         for (IRenderFeature* f : features_) f->overlayPass(*rhiContext_, width_, height_);
+        // THE UI LAST, over everything else the overlay drew, and INSIDE the scope this opened --
+        // IUiBackend::render must not open its own (see its comment). Only reachable with a backend
+        // installed, which no game build does.
+        if (uiBackend_ && uiUp_) uiBackend_->render(reinterpret_cast<u64>(cmd));
         popRenderScope(cmd, overlayScope);
     }
 

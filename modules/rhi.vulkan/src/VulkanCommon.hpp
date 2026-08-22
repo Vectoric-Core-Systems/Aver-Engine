@@ -1230,6 +1230,13 @@ inline const char* dxcTargetPrefix(ShaderStage s) {
 // ================================================================================================
 class VulkanDevice;
 class VulkanResourceFactory;
+
+// The in-window UI seam, defined in the PUBLIC header aver/rhi/vulkan/UiBackend.hpp. Declared here
+// so VulkanDevice can hold one and befriend the installer without this header including that one --
+// it is public and must not pull vulkan.h into anything that includes it.
+class IUiBackend;
+struct UiBackendInitDesc;
+bool installUiBackend(IDevice* device, IUiBackend* backend);
 class VulkanRenderContext;
 
 // Creates a buffer, allocates device memory of the first type matching `required`, and binds them
@@ -1409,14 +1416,26 @@ public:
     void requestCapture(u32 x, u32 y) override { capX_ = x; capY_ = y; captureReq_ = true; captureReady_ = false; }
     bool getCapture(f32 outRGBA[4]) override;
     bool getFrameImage(std::vector<u8>& outRGBA, u32& w, u32& h) override;
-    // NOTE ON THE UI METHODS (uiInit/uiNewFrame/uiShutdown/uiActive/uiWantsMouse/uiWantsKeyboard/
-    // uiTextureId): deliberately NOT overridden. They stay at IDevice's own defaults (false/no-op —
-    // RHI.hpp:433-444), which is an honest "no in-window UI on this backend yet", not a broken
-    // implementation of one. D3D12 hosts Dear ImGui through imgui_impl_dx12; Vulkan's equivalent is
-    // imgui_impl_vulkan, a DIFFERENT, NOT-currently-vendored ImGui backend — adding it is a real new
-    // dependency (license, vendoring, a render-target/command-buffer contract of its own) and an
-    // explicit separate decision, not implied by "implement the Vulkan RHI backend". See this
-    // module's CMakeLists.txt for the same note next to AVER_ENABLE_UI.
+    // ---- the UI methods -----------------------------------------------------------------------
+    //
+    // These now DELEGATE to whatever aver::rhi::vulkan::IUiBackend has been installed, and behave
+    // exactly as they did before -- false/no-op, an honest "no in-window UI" -- when none has been,
+    // which is every game build. The seam is
+    // modules/rhi.vulkan/include/aver/rhi/vulkan/UiBackend.hpp; the concrete toolkit lives in its
+    // own module so that nothing about Dear ImGui is compiled into anything that merely links the
+    // RHI. NO ImGui INCLUDE OR SYMBOL MAY APPEAR IN THIS MODULE -- the same rule Aver.RHI.D3D12
+    // keeps, and the whole point of the split.
+    //
+    // Which toolkit fills that seam is still an open decision: imgui_impl_vulkan is not vendored,
+    // and vendoring it is a real dependency call rather than something implied by "implement the
+    // Vulkan backend". The seam is deliberately shaped to accept either that or a renderer written
+    // against this backend directly.
+    bool uiInit(void* windowHandle) override;
+    void uiNewFrame() override;
+    void uiShutdown() override;
+    bool uiActive() const override { return uiBackend_ != nullptr && uiUp_; }
+    bool uiWantsMouse() const override;
+    bool uiWantsKeyboard() const override;
 
     // ---- plain (non-override) helpers, mirroring D3D12Device's own public non-interface surface ----
     void present();
@@ -1529,6 +1548,11 @@ private:
     // MONOTONIC, unlike frameIndex_, which wraps at kFrameCount and so cannot distinguish "this
     // frame" from "two frames ago in the same slot".
     u64 frameSerial_ = 0;
+
+    // The installed in-window UI toolkit, or null. NON-OWNING -- see IUiBackend's own comment on
+    // ownership; Sandbox holds the concrete object and outlives this device's uiShutdown().
+    vkb::IUiBackend* uiBackend_ = nullptr;
+    bool uiUp_ = false;   // init() succeeded and shutdown() has not run
     u32 imageIndex_ = 0;    // the acquired swapchain image index this frame
 
     VkCommandPool commandPool_ = VK_NULL_HANDLE;
@@ -1742,6 +1766,8 @@ private:
     std::vector<IRenderFeature*> features_;   // non-owning
 
     friend class VulkanResourceFactory;
+    // Unqualified: VulkanDevice is itself in aver::rhi::vkb, so vkb:: would name vkb::vkb::.
+    friend bool installUiBackend(IDevice*, IUiBackend*);
     friend class VulkanRenderContext;
 };
 
