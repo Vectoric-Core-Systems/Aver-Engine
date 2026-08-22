@@ -97,6 +97,7 @@
 #include "aver/rhi/RHI.hpp"
 #include "aver/core/Log.hpp"
 
+#include <cmath>
 #include <cstddef>
 #include <cstring>
 #include <functional>
@@ -908,6 +909,16 @@ struct RhiTexture {
     // why imgui_impl_vulkan is a deliberately deferred decision). Kept so the field exists the day
     // it is wired up, rather than adding it to this struct's ABI later.
     u64 uiDescriptor = 0;
+    // True for a record that WRAPS a VkImage/VkDeviceMemory this factory did NOT allocate -- today
+    // that is only VulkanResourceFactory::adoptExternalDepthTexture's re-publication of
+    // VulkanDevice::depthBuffer_/depthMemory_ as an ordinary TextureHandle (see IDevice::
+    // sceneDepthTexture's contract in RHI.hpp). `image`/`memory` there are owned and torn down by
+    // VulkanDevice itself (its destructor, resize(), setSampleCount()); this factory's own teardown
+    // paths (destroyTexture(), ~VulkanResourceFactory()) both check this flag and must skip
+    // destroyImageCommitted() when it is set, or a resize/shutdown double-frees a VkImage/
+    // VkDeviceMemory Vulkan has already recycled. The VIEWS this record builds for itself (srvView
+    // below) are NOT foreign -- they are still destroyed the ordinary way regardless of this flag.
+    bool externallyOwned = false;
 };
 
 struct RhiBuffer {
@@ -1034,6 +1045,24 @@ struct RetiredObject {
 // for the same HLSL), so a Vulkan device with no usable DXC simply cannot compile shaders, and
 // compile() failing is what createShader must treat as this device having no working shader path
 // at all, not as one shader among many failing.
+// One explicit HLSL-register -> (set, binding) mapping, emitted as DXC's -fvk-bind-register.
+//
+// WHY THIS EXISTS, and why the -fvk-*-shift arguments beside it could not do the job: a shift moves
+// binding NUMBERS within one space and cannot move anything into a different SET, nor permute two
+// registers of the same class independently. The post chain needs both -- its six resources live in
+// set kVkSetConstants in an order (b0, t0, t1, t2, u0, u1) that interleaves register classes -- so
+// it needs a per-register map, which is exactly what this is. This is option (b) from the decision
+// recorded at the top of VulkanShaderCompiler.cpp, chosen there precisely because it keeps the
+// shared HLSL backend-neutral: no `space` annotation is added, and D3D12 reads the same source
+// unchanged.
+struct VkRegisterBind {
+    char type;      // 'b', 't', 'u' or 's' -- the HLSL register class
+    u32  number;    // the register index within that class
+    u32  space;     // the HLSL register space, 0 for everything this engine declares
+    u32  set;       // the Vulkan descriptor set it must land in
+    u32  binding;   // and the binding within that set
+};
+
 class VulkanShaderCompiler {
 public:
     // Loads dxcompiler.dll once (the SAME DLL the D3D12 backend loads for DXIL — see this module's
@@ -1051,7 +1080,8 @@ public:
     // which must agree with tableSetLayout()/descriptorLayout() byte for byte, register for
     // register). False (and logged) on any failure, `outSpirv` left untouched.
     bool compile(const char* src, const char* entry, ShaderStage stage, u32 minShaderModel,
-                 const char* defines, std::vector<u32>& outSpirv);
+                 const char* defines, std::vector<u32>& outSpirv,
+                 const VkRegisterBind* binds = nullptr, u32 bindCount = 0);
 
 private:
     bool tried_ = false;
@@ -1166,10 +1196,29 @@ public:
     IRenderContext* renderContext() override;
     void addRenderFeature(IRenderFeature* f) override;
     void removeRenderFeature(IRenderFeature* f) override;
+    // Non-owning, exactly like addRenderFeature/removeRenderFeature just above -- see
+    // D3D12Device::setUpscaler's own comment (D3D12Device.cpp) for the invariant this preserves:
+    // null is the PERMANENT default (nothing here ever assigns upscaler_ on its own), and every
+    // branch that matters is gated on this pointer rather than a quality enum or a build flag, so
+    // "no upscaler set" and "no AverSR module linked into this build at all" are the same code
+    // path. Trivial enough to stay inline, same as setClearColor/setVSync below.
+    void setUpscaler(IUpscaler* u) override { upscaler_ = u; }
+    IUpscaler* upscaler() const override { return upscaler_; }
     Format backbufferFormat() const override { return fromVkFormat(kVkSceneColorFormat); }
     Format depthFormat() const override { return fromVkFormat(kVkDepthFormat); }
     u32 sampleCount() const override { return sampleCount_; }
     bool setSampleCount(u32 samples) override;
+    // Decouples the scene's own render targets from the swapchain's -- see IDevice::setRenderScale's
+    // contract comment (RHI.hpp) for the exact semantics this must reproduce: the scene renders at
+    // round(present * scale) while everything present-resolution (the backbuffer, the viewport
+    // texture, capture) stays pinned to width_/height_, untouched. NOT inline: this backend had no
+    // scene/present size split before this method existed (createDepthBuffer/createMsaaColor/
+    // beginFrame all sized directly off width_/height_ -- see those methods' own updated comments),
+    // so the setter has real work to do -- computeSceneSize() plus a full rebuildSceneTargets() pass
+    // when a swapchain already exists. Defined in VulkanDevice.cpp with every other IDevice
+    // override, per the FILE MAP banner at the top of this header.
+    void setRenderScale(f32 scale) override;
+    f32 renderScale() const override { return renderScale_; }
     ISwapchain* createSwapchain(const SwapchainDesc& desc) override;
     void beginFrame() override;
     void endFrame() override;
@@ -1204,6 +1253,28 @@ public:
     void setDefaultDrawBinding(BindingSetHandle set, const void* constants, u32 bytes) override {
         storeDrawBinding(defaultDrawBinding_, set, constants, bytes);
     }
+
+    // ---- same-frame depth prepass -- see IDevice's own comment (RHI.hpp) for the full contract,
+    // and D3D12Device's own block of the same name (D3D12Device.cpp:1005-1013) for the shape this
+    // mirrors. OFF by default: --depth-prepass measured as a LOSS on this engine's scenes (see
+    // aver-frame-budget in project memory), so this exists for correctness/parity, not speed, and
+    // the default must reproduce today's Vulkan behaviour (no prepass) exactly.
+    void setDepthPrepassEnabled(bool on) override { depthPrepassEnabled_ = on; }
+    bool depthPrepassEnabled() const override { return depthPrepassEnabled_; }
+    void drawMeshDepthPrepass(MeshHandle mesh, const f32 world[16]) override;
+    // AUTO-CONSUMED by the very next drawMesh() call, not stored past it -- see IDevice's own
+    // comment. Plain assignment: nothing here decides whether the upcoming draw is ELIGIBLE (a
+    // skinned mesh, say), only what the CALLER already believes about it; drawMesh() itself still
+    // re-checks meshVertexBuffer(mesh) before trusting this, exactly as D3D12Device::drawMesh does.
+    void setNextDrawPrepassed(bool prepassed) override { nextDrawPrepassed_ = prepassed; }
+    // See IDevice::sceneDepthTexture's own contract comment (RHI.hpp) and D3D12Device::
+    // sceneDepthTexture (D3D12Device.cpp:1993-2006) for the shape this mirrors: lazily (re)adopts
+    // depthBuffer_ into rhiFactory_'s texture table via depthTexDirty_ -- see that flag's own
+    // comment for why a dirty bit, not a size comparison, is the trigger. modules/occlusion's HZB
+    // seed pass is the one consumer today; see this method's own definition (VulkanDevice.cpp) for
+    // what had to change ELSEWHERE (createDepthBuffer's image usage flags, a new ownership flag on
+    // RhiTexture) for the handle this returns to actually be safe to sample and safe to tear down.
+    TextureHandle sceneDepthTexture() override;
     LineHandle createLineMesh(const LineVertex* verts, u32 count) override;
     void drawLines(LineHandle mesh, const f32 world[16]) override;
     void setMeshShaders(bool enabled) override;
@@ -1257,6 +1328,15 @@ private:
     void createRenderTargetViews();
     bool createDepthBuffer();
     bool createMsaaColor();
+    // Tears down and rebuilds every target sized off sceneWidth_/sceneHeight_ after renderScale_
+    // changes with a swapchain already live. Mirrors D3D12Device::rebuildSceneTargets() exactly:
+    // wait for the GPU (nothing sized off the old scene extent may still be in flight), drop the
+    // depth/MSAA-colour images, recompute the scene size, invalidate the stored viewport sub-rect
+    // (vpX_/vpY_/vpW_/vpH_ are stored in SCENE space -- see setViewportRect's own comment -- and are
+    // stale the instant sceneWidth_/sceneHeight_ move), recreate the two scene targets at the new
+    // size, drop the post chain's own size-dependent targets (releasePostTargets(), lazily rebuilt
+    // by the next runPostChain), and renotify every registered render feature of the new size.
+    void rebuildSceneTargets();
     void waitForGpu();
     // Blocks until the timeline semaphore reaches `value`. False only when the device has been
     // lost -- the Vulkan analog of D3D12's waitFence(); VK_ERROR_DEVICE_LOST is the one VkResult
@@ -1323,6 +1403,19 @@ private:
     // MSAA resolve destination. VK_NULL_HANDLE when sampleCount_ == 1, where msaaColor_ is already it.
     VkImage sceneResolved_ = VK_NULL_HANDLE;  VkDeviceMemory sceneResolvedMemory_ = VK_NULL_HANDLE;  VkImageView sceneResolvedView_ = VK_NULL_HANDLE;
 
+    // The generic-RHI wrapper around depthBuffer_ -- see sceneDepthTexture()'s own comment. STABLE
+    // across a resize: adoptExternalDepthTexture re-fills this SAME slot rather than pushing a new
+    // one, so a caller that cached the handle across frames (modules/occlusion does not today, but
+    // nothing stops a future one) never has to notice depthBuffer_ was reallocated underneath it.
+    // Field-for-field mirror of D3D12Device's own depthTexHandle_/depthTexDirty_ pair
+    // (D3D12Device.cpp:1130-1138).
+    TextureHandle depthTexHandle_ = 0;
+    // True whenever depthBuffer_ has (re)allocated since depthTexHandle_ was last refreshed --
+    // createDepthBuffer() sets this every time it runs (initial creation, resize(), and
+    // setSampleCount()'s MSAA-target rebuild all call it); sceneDepthTexture() clears it once it
+    // has re-adopted the current depthBuffer_.
+    bool depthTexDirty_ = true;
+
     // ---- fixed scene/line/sky pipelines (built via VulkanShaderCompiler + vkCreateGraphicsPipelines
     // directly -- NOT through VulkanResourceFactory's generic PipelineLayout cache, exactly as
     // D3D12Device builds its own rootSig_/pso_ separately from D3D12ResourceFactory's cache) ----
@@ -1340,6 +1433,18 @@ private:
 
     DrawBinding drawBinding_{}, defaultDrawBinding_{};
     bool drawBindingIgnored_ = false;   // the "backend's own pipeline drops it" warning, said once
+
+    // ---- same-frame depth prepass (see IDevice::setDepthPrepassEnabled and drawMesh below) --
+    // field-for-field mirror of D3D12Device's own trio (D3D12Device.cpp:1311-1320); see that
+    // block's comment for why nextDrawPrepassed_ must be auto-consumed rather than sticky.
+    bool depthPrepassEnabled_ = false;   // --depth-prepass; OFF reproduces pre-existing behaviour
+    bool nextDrawPrepassed_ = false;
+    // Draws issued by drawMeshDepthPrepass this frame -- NOT wired to a log line the way D3D12's
+    // depthPrepassDrawsLastFrame_/depthPrepassDrawsThisFrame_ pair is (that pair only exists to
+    // feed an AVER_INFO on change, which nothing in this backend's endFrame does yet); kept as one
+    // counter rather than the D3D12 last/this pair since there is no per-frame log comparison here
+    // to drive off it. A future port of that diagnostic can split it into the same pair D3D12 uses.
+    u32 depthPrepassDrawsThisFrame_ = 0;
 
     bool skyEnabled_ = false;
     bool sceneSuppressed_ = false;   // set in beginFrame when a feature suppressed the scene; read in endFrame so the deferred sky draw doesn't run over it
@@ -1373,6 +1478,26 @@ private:
     i64 lastFrameTick_ = 0;
     f32 frameSeconds_ = 1.0f / 60.0f;
 
+    // ---- AverSR ----
+    // Null unless a host set one. EVERY branch that matters below tests THIS POINTER, not a quality
+    // enum or a build flag -- see setUpscaler's own comment for why that is what makes "no upscaler"
+    // and "no AverSR module in the build" the same code path. Field-for-field mirror of
+    // D3D12Device's own upscaler_/sceneColorTex_/presentHdrTex_ trio.
+    IUpscaler* upscaler_ = nullptr;
+    // A factory-created ALIAS of the scene colour, and the reason it has to exist: the scene target
+    // (sceneResolved_, or msaaColor_ when sampleCount_ == 1) is a raw VkImage this file allocates
+    // directly via createImageCommitted, never through VulkanResourceFactory -- so it has no
+    // TextureHandle, and IUpscaler::execute needs one for UpscalerInput::color. A per-frame
+    // vkCmdCopyImage fills this. Scene resolution, RGBA16F, sampled-only.
+    TextureHandle sceneColorTex_ = 0;
+    u32           sceneColorTexW_ = 0, sceneColorTexH_ = 0;
+    // AverSR's output: HDR (pre-tonemap) at PRESENT resolution. The upscale runs on radiance and
+    // PSComposite then tonemaps an image that is already the right size, so its own resample
+    // degenerates to 1:1 and neither the shader nor its pipeline changes for the upscaled path.
+    TextureHandle presentHdrTex_ = 0;
+    u32           presentHdrTexW_ = 0, presentHdrTexH_ = 0;
+    bool          srLogged_ = false;   // the once-only "it really ran" line -- see runPostChain
+
     // ---- capture ----
     VkBuffer captureBuf_ = VK_NULL_HANDLE; VkDeviceMemory captureMemory_ = VK_NULL_HANDLE;
     bool captureReq_ = false, captureReady_ = false;
@@ -1386,6 +1511,33 @@ private:
     std::vector<SkinSeed> skinSeeds_;
 
     u32 width_ = 0, height_ = 0;
+    // The scene's OWN render-target size: width_/height_ scaled by renderScale_, rounded, floored at
+    // 1. Equal to width_/height_ whenever renderScale_ == 1.0 (the default) -- computeSceneSize()
+    // guarantees that exactly (integer arithmetic cancels the multiply-then-divide identically to
+    // D3D12Device.cpp's own sceneWidth_/sceneHeight_ pair, which this is a field-for-field mirror
+    // of), so a build that never calls setRenderScale renders byte-for-byte what this backend
+    // rendered before renderScale_ existed. Present-resolution state (width_/height_ themselves, the
+    // swapchain, the capture buffer, ImGui were it hosted) never reads this pair; only the scene
+    // depth/MSAA-colour targets (createDepthBuffer/createMsaaColor), the scene rendering-scope's
+    // render area and default viewport (beginFrame/endFrame's sky draw), the post chain's resolve
+    // target and bloom pyramid (createPostTargets/runPostChain), and what render features are told
+    // via onRenderTargetsChanged key off this pair instead.
+    u32 sceneWidth_ = 0, sceneHeight_ = 0;
+    f32 renderScale_ = 1.0f;   // [0.25, 1.0]; see IDevice::setRenderScale
+    void computeSceneSize() {
+        sceneWidth_  = width_  ? static_cast<u32>(std::lround(static_cast<f32>(width_)  * renderScale_)) : 0;
+        sceneHeight_ = height_ ? static_cast<u32>(std::lround(static_cast<f32>(height_) * renderScale_)) : 0;
+        if (width_  && sceneWidth_  < 1) sceneWidth_  = 1;
+        if (height_ && sceneHeight_ < 1) sceneHeight_ = 1;
+    }
+    // Present-space -> scene-space scaling for the editor's viewport sub-rect (setViewportRect takes
+    // physical backbuffer pixels; the render target those pixels end up addressing is the SCENE one,
+    // smaller than the backbuffer whenever renderScale_ < 1). Exact identity at renderScale_ == 1.0
+    // (sceneWidth_ == width_, so v * sceneWidth_ / width_ == v) -- mirrors D3D12Device's
+    // scaleToSceneW/H exactly, including the u64 intermediate so the multiply cannot overflow at
+    // 4K-class present sizes.
+    u32 scaleToSceneW(u32 v) const { return width_  ? static_cast<u32>((static_cast<u64>(v) * sceneWidth_)  / width_)  : v; }
+    u32 scaleToSceneH(u32 v) const { return height_ ? static_cast<u32>((static_cast<u64>(v) * sceneHeight_) / height_) : v; }
     u32 vpX_ = 0, vpY_ = 0, vpW_ = 0, vpH_ = 0;   // scene sub-rect; w/h == 0 means full backbuffer
     u32 sampleCount_ = kDefaultSampleCount;
     DeviceCaps caps_{};
@@ -1481,6 +1633,23 @@ public:
     // The raw handle for VulkanRenderContext's copy/barrier/vertex-bind paths -- mirrors D3D12's
     // D3D12ResourceFactory::bufferResource() exactly, including "null on a bad handle".
     VkBuffer bufferResource(BufferHandle h) const;
+    // Wraps a VkImage/VkDeviceMemory this factory did NOT create (VulkanDevice::depthBuffer_/
+    // depthMemory_, made directly in VulkanDevice::createDepthBuffer() because it needs the
+    // attachment-only depthView_ VulkanDevice itself renders through, at whatever sample count
+    // setSampleCount() last chose -- createTexture() never makes either) into an ordinary
+    // TextureHandle, so a caller reaches it through setSrv/textureBarrier exactly like any
+    // factory-made texture. Concrete rather than part of IResourceFactory, same reasoning as
+    // bufferResource above and the exact mirror of D3D12ResourceFactory::adoptExternalDepthTexture:
+    // this is the mechanics of ONE specific adoption, not a general "wrap anything" entry point
+    // every backend would need to grow. Builds its OWN VkImageView for sampled reads (aspect
+    // VK_IMAGE_ASPECT_DEPTH_BIT, format kVkDepthFormat -- see RhiTexture::externallyOwned's comment
+    // for why that view, unlike `image`/`memory`, IS this record's to own and destroy) rather than
+    // reusing VulkanDevice's own depthView_, which VulkanDevice destroys on its own schedule.
+    // `existing`, when non-zero, is REUSED in place rather than allocating a new slot -- see
+    // VulkanDevice::depthTexHandle_'s own comment for why the handle has to stay stable across a
+    // resize. Returns the (possibly reused) handle, or 0 if `image` is null or the view fails.
+    TextureHandle adoptExternalDepthTexture(VkImage image, VkDeviceMemory memory, u32 width, u32 height,
+                                             TextureHandle existing);
 
     // ---- table lookups, reachable from VulkanRenderContext (friend) for render-target binding,
     // barriers, and drawMesh's mesh-table resolution ----
@@ -1581,6 +1750,28 @@ public:
     void setConstantBuffer(u32 slot, const void* data, u32 bytes) override;
     void setDrawBinding(BindingSetHandle set, const void* constants, u32 bytes) override;
     void drawMesh(MeshHandle mesh) override;
+    // drawMeshInstanced (IRenderContext::drawMeshInstanced, RHIResources.hpp) is deliberately NOT
+    // overridden here. D3D12RenderContext::drawMeshInstanced (D3D12Device.cpp:6068-6091) is an
+    // ACCELERATION path, not a semantics change: one DrawIndexedInstanced reading per-instance world
+    // matrices from a ring-allocated buffer through a root SRV bound to a raw GPU virtual address,
+    // gated on the bound pipeline having reserved that extra root parameter at build time
+    // (GraphicsPipelineDesc::instanced). The interface's own base-class default -- one setConstants
+    // + drawMesh per instance -- is called out in that default's own comment as "a correct,
+    // unaccelerated fallback... exactly what a caller would otherwise write by hand", and it is
+    // ALREADY fully correct on this backend without any override: setConstants(kObjectConstantRegister,
+    // ...) and drawMesh(mesh) both exist as ordinary overrides right here, so the inherited loop
+    // reproduces D3D12's SEMANTICS (every instance drawn with its own world matrix) exactly.
+    //
+    // Porting the ACCELERATED path is a real, separate piece of work this method's body cannot hold
+    // alone: GraphicsPipelineDesc::instanced is entirely unconsumed by VulkanPipeline.cpp today (no
+    // reserved push-constant or descriptor slot for a per-instance buffer exists yet), so building it
+    // means changing the pipeline-LAYOUT construction other in-flight work in this same module also
+    // touches, for a backend this file's own header banner already says has never been compiled. The
+    // natural Vulkan shape, if it is ever built, is a push-constant VkDeviceAddress read via
+    // gl_InstanceIndex-equivalent shader indexing rather than a new descriptor binding -- every
+    // Vulkan-created buffer already carries a valid device address (RhiBuffer::address) for exactly
+    // this reason -- but that is a decision for whoever owns VulkanPipeline.cpp next, not something
+    // to bolt on unreviewed from inside this render context.
     void dispatchMeshFor(MeshHandle mesh) override;
     void dispatchMeshClusters(MeshHandle mesh, u32 clusterCount) override;
     void dispatch(u32 gx, u32 gy, u32 gz) override;

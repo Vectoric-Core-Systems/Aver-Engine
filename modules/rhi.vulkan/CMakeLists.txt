@@ -1,14 +1,36 @@
-# src/VulkanPipeline.cpp WAS MISSING FROM THIS LIST while src/VulkanShaderCompiler.cpp was named
-# and did not exist, so this module could not CONFIGURE at all -- CMake fails on a source file that
-# is not there, before any compiler runs. Nothing caught it because scripts/module-matrix.ps1's
-# vulkan-on row was the only configuration that would have, and it had not been run since the file
-# split landed. Both halves fixed together: the compiler TU is written now (see its own banner for
-# what it does and the descriptor-set gap it cannot close), and the pipeline TU is listed.
+# src/VulkanShaderCompiler.cpp was once NAMED HERE WITHOUT EXISTING, so this module could not
+# CONFIGURE at all -- CMake fails on a missing source before any compiler runs. Nothing caught it
+# because scripts/module-matrix.ps1's vulkan-on row was the only configuration that would have. That
+# TU is written now (see its own banner).
+#
+# src/VulkanPipeline.cpp IS DELIBERATELY NOT LISTED, and this is the more interesting half.
+#
+# It was added to this list at the same time, on the reasonable assumption that a file on disk in a
+# module's src/ belongs in its build. It does not, because THE FILE SPLIT THAT CREATED IT WAS NEVER
+# FINISHED: VulkanPipeline.cpp holds pipeline/descriptor-layout code moved out of
+# VulkanResourceFactory.cpp, and the originals were never deleted. Every externally visible thing it
+# defines -- tableSetLayout, getOrCreateSampler, descriptorLayout, createGraphicsPipeline,
+# createComputePipeline and the free pushConstantLayout -- is DUPLICATED there, and all six
+# DIFFER between the two copies.
+#
+# WHICH ONE WAS WINNING IS NOT A GUESS: with the module compiled, the linker says so itself --
+#   "VulkanPipeline.cpp.obj : warning LNK4006: ... already defined in
+#    VulkanResourceFactory.cpp.obj; second definition ignored"
+# -- six times. VulkanResourceFactory.cpp's definitions link; VulkanPipeline.cpp's are discarded
+# wholesale, so that translation unit contributed NOTHING to the binary while costing six warnings
+# and offering a 686-line file in which someone could "fix" a function that never runs. Its
+# anonymous-namespace helpers are internal and reachable from nowhere else.
+#
+# DROPPING IT FROM THE LIST THEREFORE CHANGES NO BEHAVIOUR WHATEVER -- proven by the linker's own
+# message, not asserted -- and removes both the warnings and the trap. It is NOT the finished job:
+# whoever completes the split should delete the six originals from VulkanResourceFactory.cpp and
+# list this file again, which SWAPS six divergent implementations and must be verified on a real
+# Vulkan GPU rather than by a build going green. That was not attempted here, because with the
+# camera post chain still faulting the driver there is no way to tell a good swap from a bad one.
 aver_add_module(Aver.RHI.Vulkan
   SOURCES
     src/VulkanDevice.cpp
     src/VulkanShaderCompiler.cpp
-    src/VulkanPipeline.cpp
     src/VulkanResourceFactory.cpp
     src/VulkanRenderContext.cpp
   DEPS

@@ -56,6 +56,15 @@ public:
 
     // The texture the panel draws. 0 before the first render.
     u64 uiTextureId() const { return uiTextureId_; }
+
+    // The colour target itself, as an RHI handle rather than a UI id.
+    //
+    // ADDED FOR THE THUMBNAIL CACHE, which needs to copyTexture OUT of this target into something
+    // that outlives the frame -- a UI id is opaque to the RHI and cannot be a copy source. Exposing
+    // the handle does not make the target any less transient: it is still cleared and redrawn every
+    // prePass, and a caller that keeps the HANDLE rather than copying the PIXELS has kept a pointer
+    // to next frame's picture.
+    rhi::TextureHandle colorTexture() const { return color_; }
     u32 width() const { return width_; }
     u32 height() const { return height_; }
 

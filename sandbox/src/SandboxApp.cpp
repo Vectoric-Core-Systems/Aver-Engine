@@ -52,6 +52,7 @@
 #include "ReflTest.hpp"
 #if AVER_MODULE_SCENE
 #include "aver/render/SkinnedScene.hpp"
+#include "ThumbnailCache.hpp"
 #endif
 #include "aver/ui/ui_abi.h"
 
@@ -1341,6 +1342,14 @@ public:
         }
 #endif
 
+        // The content browser's thumbnails. init() registers its OWN preview and copy-pass features
+        // internally (see ThumbnailCache.hpp's own comment on why that registration order is its to
+        // own, not this call site's) -- unlike skinnedScene_ just above, there is no addRenderFeature
+        // call here because there is nothing left for the host to register. A failed init() leaves
+        // ready() false and textureId() permanently 0, which the gallery already treats as "draw the
+        // typed icon instead", so there is nothing to branch on here either.
+        thumbnails_.init(*e.device());
+
         // --skin-scene-test <dir>: the same question as --skin-draw-test but through the WHOLE
         // chain -- a real .ocmesh with skin streams, a real .ocskel, a real .ocanim, AnimSystem,
         // SkinnedScene's per-entity target, and the substituted draw handle.
@@ -2347,6 +2356,13 @@ public:
         // the same reason.
         if (softBodyScene_) softBodyScene_->update(scene::World::instance(), *e.device());
 #endif
+        // ONCE per frame, BEFORE the render features run (its own contract, see ThumbnailCache.hpp):
+        // update() is what points its preview at the next pending request, so the copy feature it
+        // registered has something fresh to copy out of by the time features actually draw this
+        // frame. Guarded on ready() rather than called unconditionally, matching every other
+        // conditionally-initialised helper above -- an init() failure left nothing behind for it to
+        // drive.
+        if (thumbnails_.ready()) thumbnails_.update();
         // --drone: switches the graph-driven drone on N frames in, on its own, mirroring
         // --chunk-stream immediately below so a --frames capture run can prove it without a human
         // clicking Window > Drone.
@@ -4661,6 +4677,11 @@ public:
             e.device()->removeRenderFeature(skinnedScene_.get());
             skinnedScene_.reset();
         }
+        // copyFeature() is exposed for exactly this call (see its own comment): thumbnails_ owns and
+        // unregisters its ActorPreview internally in shutdown(), but the copy pass is the host's to
+        // remove, the same removeRenderFeature()-then-teardown shape as skinnedScene_ just above.
+        if (thumbnails_.ready()) e.device()->removeRenderFeature(thumbnails_.copyFeature());
+        thumbnails_.shutdown();
 #endif
 #if AVER_MODULE_VOXI
         if (voxiAttached_) { e.device()->removeRenderFeature(&voxiRenderer_); voxiAttached_ = false; }
@@ -9169,11 +9190,14 @@ private:
     // (sandbox/src/EditorIcons.hpp) -- no new dependency, and they scale with the tile because they
     // are text rather than a fixed-size bitmap.
     //
-    // A REAL RENDERED THUMBNAIL WOULD BE BETTER AND IS NOT POSSIBLE TODAY. render::ActorPreview is
-    // a hard singleton with one colour target and one draw list, and -- decisively -- the RHI has no
-    // texture-to-texture copy and no texture readback anywhere (only copyBuffer/readBuffer), so
-    // there is no way to keep frame K's rendered pixels once frame K+1 reuses the target. Verified,
-    // not assumed. A thumbnail cache needs that primitive added to BOTH backends first.
+    // A REAL RENDERED THUMBNAIL WAS NOT POSSIBLE FOR MOST OF THIS BROWSER'S LIFE, which is why this
+    // typed-glyph fallback exists at all: render::preview::ActorPreview has one colour target and one
+    // draw list, and until this session the RHI had no texture-to-texture copy and no texture
+    // readback (only copyBuffer/readBuffer), so there was no way to keep frame K's rendered pixels
+    // once frame K+1 reused the target. rhi::IRenderContext::copyTexture is that missing primitive,
+    // and ThumbnailCache (see sandbox/src/ThumbnailCache.hpp, wired in at the drawFolderGallery call
+    // site below) is its first consumer: a mesh tile now draws its own rendered thumbnail once one
+    // exists, and falls through to exactly this glyph until it does.
     struct AssetKind { const char* icon; ImU32 tint; const char* label; };
     static const AssetKind* assetKindFor(const std::string& ext) {
         // Grouped by what a thing IS, and coloured by group, so related assets read as related:
@@ -9408,7 +9432,44 @@ private:
                     }
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", e.name.c_str());
                     cbItemContextMenu(e.full, e.name, e.isDir);
-                    drawEntryIcon(dl, ImVec2(o.x + cellW*0.5f, o.y + tile*0.5f), tile*0.52f, e.isDir, e.tile, e.module, e.kindExt);
+                    const ImVec2 iconCentre(o.x + cellW*0.5f, o.y + tile*0.5f);
+                    bool drewThumb = false;
+#if AVER_MODULE_SCENE
+                    // A REAL RENDERED THUMBNAIL, for mesh assets only, and only when this exact tile
+                    // is inside the clipper's visible range -- this whole block sits inside the
+                    // DisplayStart..DisplayEnd loop above, so a folder of thousands never queues more
+                    // than a screenful of requests no matter its size.
+                    //
+                    // sceneMeshes_ is looked up, never loaded: loadProjectMeshes() already uploads
+                    // every .ocmesh under Content when the project opens (see its own comment), so a
+                    // miss here means "not loaded", and the fix is a project/mesh reload -- not a
+                    // synchronous read off this draw path, which would stall the frame the first time
+                    // a big mesh's folder is opened.
+                    if (!e.isDir && e.kindExt == ".ocmesh" && thumbnails_.ready()) {
+                        const std::string content = project_.contentDir();
+                        std::error_code relEc;
+                        std::string rel = content.empty() ? std::string()
+                                          : std::filesystem::relative(e.path, content, relEc).string();
+                        if (!content.empty() && !relEc && !rel.empty()) {
+                            for (char& c : rel) if (c == '\\') c = '/';
+                            // The SAME id space sceneMeshes_/contentIndex_ already key on -- see
+                            // loadProjectMeshes()'s own comment -- so a mesh this browser can already
+                            // place in the level is exactly the set this can thumbnail.
+                            const u64 meshId = fnv1a64(std::string_view(rel));
+                            if (const auto mit = sceneMeshes_.find(meshId); mit != sceneMeshes_.end()) {
+                                thumbnails_.request(meshId, mit->second);
+                                if (const u64 tex = thumbnails_.textureId(meshId)) {
+                                    // Whole-texture, square: kThumbnailPx is fixed on both axes, so
+                                    // this is blitTile with one tile of one, not a new draw path.
+                                    blitTile(dl, tex, iconCentre, tile*0.52f, 1.0f, 0, 1);
+                                    drewThumb = true;
+                                }
+                            }
+                        }
+                    }
+#endif
+                    if (!drewThumb)
+                        drawEntryIcon(dl, iconCentre, tile*0.52f, e.isDir, e.tile, e.module, e.kindExt);
                     const f32 wrap = cellW - 4.0f*dpi_;
                     const std::string label = fitLabel(e.name, wrap, 2);
                     const ImVec2 ts = ImGui::CalcTextSize(label.c_str());
@@ -11659,6 +11720,14 @@ private:
     // The scene join: gives every entity with a CSkeletalMesh its own posed mesh. Null when the
     // skinning shader would not compile, in which case skinned entities simply draw at rest.
     std::unique_ptr<aver::render::SkinnedScene> skinnedScene_;
+    // The content browser's rendered mesh thumbnails -- a small ActorPreview of its own, kept
+    // rather than re-shared with skinnedScene_ or the asset editors' preview (see ThumbnailCache.hpp
+    // for why sharing either would fight this one for its draw list or force every thumbnail to a
+    // size it isn't). A value member rather than a unique_ptr, matching particleRenderer_'s own
+    // declaration rather than skinnedScene_ just above: init() can still fail (ready()/textureId()
+    // are how the draw path finds out), but nothing else here needs the object to not exist, only
+    // to be inert.
+    aver::editor::ThumbnailCache thumbnails_;
 #if AVER_MODULE_RENDER_SOFTBODY
     // Beside skinnedScene_ because it is the same kind of thing: a per-entity vertex source that the
     // scene pass substitutes for the authored mesh. The two never both claim one entity -- see the

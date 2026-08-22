@@ -124,7 +124,8 @@ bool VulkanShaderCompiler::usingDxc() const { return compiler_ != nullptr; }
 // below do and do not achieve.
 bool VulkanShaderCompiler::compile(const char* src, const char* entry, ShaderStage stage,
                                     u32 minShaderModel, const char* defines,
-                                    std::vector<u32>& outSpirv) {
+                                    std::vector<u32>& outSpirv,
+                                    const VkRegisterBind* binds, u32 bindCount) {
     init();
     if (!usingDxc() || !src || !entry) return false;
 
@@ -159,8 +160,41 @@ bool VulkanShaderCompiler::compile(const char* src, const char* entry, ShaderSta
         // Vulkan 1.3: dynamic rendering, buffer device address, mesh shaders -- everything this
         // backend's VulkanDevice already requires of the device.
         L"-fspv-target-env=vulkan1.3",
-        L"-fvk-u-shift", uShift.c_str(), L"0",
     };
+    // THE SHIFT AND THE EXPLICIT MAP ARE MUTUALLY EXCLUSIVE -- DXC rejects the combination outright
+    // ("-fvk-u-shift cannot be used together with -fvk-bind-register"), which is how this was found.
+    // It is not a limitation to work around: a map names a set and binding for EVERY register it
+    // covers, so a shift would have nothing left to shift. Callers that supply a map get no shifts;
+    // callers that do not (the scene path) get the shift they have always had.
+    if (!(binds && bindCount)) {
+        args.push_back(L"-fvk-u-shift");
+        args.push_back(uShift.c_str());
+        args.push_back(L"0");
+    }
+
+    // EXPLICIT PER-REGISTER BINDINGS, when the caller supplied a map. Each becomes
+    //     -fvk-bind-register <class><number> <space> <binding> <set>
+    // which is the only DXC facility that can put one register in a set of its own choosing. The
+    // strings must outlive `args`, hence the vector -- LPCWSTR is a borrowed pointer and a
+    // temporary here would be freed before Compile() ever read it.
+    std::vector<std::wstring> bindArgs;
+    if (binds && bindCount) {
+        bindArgs.reserve(static_cast<usize>(bindCount) * 4);
+        for (u32 i = 0; i < bindCount; ++i) {
+            const VkRegisterBind& b = binds[i];
+            bindArgs.push_back(std::wstring(1, static_cast<wchar_t>(b.type)) + std::to_wstring(b.number));
+            bindArgs.push_back(std::to_wstring(b.space));
+            bindArgs.push_back(std::to_wstring(b.binding));
+            bindArgs.push_back(std::to_wstring(b.set));
+        }
+        for (u32 i = 0; i < bindCount; ++i) {
+            args.push_back(L"-fvk-bind-register");
+            args.push_back(bindArgs[i * 4 + 0].c_str());
+            args.push_back(bindArgs[i * 4 + 1].c_str());
+            args.push_back(bindArgs[i * 4 + 2].c_str());
+            args.push_back(bindArgs[i * 4 + 3].c_str());
+        }
+    }
     // -fvk-invert-y ONLY ON THE STAGES THAT WRITE SV_Position. Vulkan's NDC is y-down where D3D's is
     // y-up, and the engine's projection matrices are built for D3D -- so the flip has to happen
     // somewhere, and doing it in codegen keeps one set of matrices for both backends. DXC refuses

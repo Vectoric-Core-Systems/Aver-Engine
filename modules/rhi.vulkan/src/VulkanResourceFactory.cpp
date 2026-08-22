@@ -671,7 +671,13 @@ VulkanResourceFactory::~VulkanResourceFactory() {
         if (t.rtvView) api.DestroyImageView(device, t.rtvView, nullptr);
         if (t.dsvView) api.DestroyImageView(device, t.dsvView, nullptr);
         for (VkImageView v : t.uavViews) if (v) api.DestroyImageView(device, v, nullptr);
-        destroyImageCommitted(*dev_, t.image, t.memory);
+        // externallyOwned records (today, only the depth texture adoptExternalDepthTexture builds
+        // over VulkanDevice::depthBuffer_/depthMemory_) do NOT own image/memory -- see that flag's
+        // own comment on RhiTexture. VulkanDevice::~VulkanDevice() destroys the real depth buffer
+        // itself, a few lines below this factory's own `delete rhiFactory_` in that destructor;
+        // freeing it here too would be a double-destroy of a VkImage/VkDeviceMemory Vulkan has
+        // already recycled by the time that second free ran.
+        if (!t.externallyOwned) destroyImageCommitted(*dev_, t.image, t.memory);
     }
     textures_.clear();
 
@@ -1329,6 +1335,89 @@ TextureHandle VulkanResourceFactory::createTexture(const TextureDesc& d) {
     return static_cast<TextureHandle>(textures_.size());
 }
 
+// See this method's own declaration (VulkanCommon.hpp, VulkanResourceFactory class body) for what it
+// is for and how it differs from D3D12ResourceFactory::adoptExternalDepthTexture (D3D12Device.cpp:
+// 4975-5006), which this is a structural port of, NOT a line-for-line copy -- see toVkFormat's own
+// comment on Format::R32Typeless for why a Vulkan depth image needs no typeless-resource trick at
+// all: there is only ever one VkFormat (kVkDepthFormat) for this image, and the SRV/DSV split is
+// purely a difference of VkImageView object and (at bind time) VkImageLayout, not of format.
+TextureHandle VulkanResourceFactory::adoptExternalDepthTexture(VkImage image, VkDeviceMemory memory,
+                                                                 u32 width, u32 height, TextureHandle existing) {
+    if (!image) return 0;
+
+    // The view a shader actually samples this image through -- SEPARATE from VulkanDevice's own
+    // depthView_ (which VulkanDevice creates, uses as the per-frame depth ATTACHMENT, and destroys
+    // on its own schedule: destructor, resize(), setSampleCount()) even though the two views would
+    // be created with textually identical parameters. Sharing the one VkImageView object between
+    // this record and VulkanDevice would double-destroy IT the exact same way sharing `image` itself
+    // (without RhiTexture::externallyOwned's protection) would double-free the image -- two owners
+    // for one handle either way. Same format/aspect as depthView_ (VK_FORMAT_D32_SFLOAT /
+    // VK_IMAGE_ASPECT_DEPTH_BIT): unlike D3D12's DXGI_FORMAT_R32_TYPELESS trick, Vulkan samples a
+    // depth-format image directly, through an ordinary sampled-image descriptor -- see toVkAspect's
+    // comment.
+    VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vi.image = image;
+    vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vi.format = kVkDepthFormat;
+    vi.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+    VkImageView srv = VK_NULL_HANDLE;
+    if (!vkOk(dev_->api().CreateImageView(dev_->vkDevice(), &vi, nullptr, &srv), "adopted depth SRV view"))
+        return 0;
+
+    RhiTexture t{};
+    t.image = image;
+    t.memory = memory;   // shared, not owned -- see RhiTexture::externallyOwned's own comment
+    t.srvView = srv;
+    t.externallyOwned = true;
+    t.desc.dim = TextureDim::Tex2D;
+    t.desc.width = width; t.desc.height = height; t.desc.depth = 1; t.desc.mips = 1;
+    // R32Typeless: the SAME "DSV sees D32Float, SRV sees a plain float read" generic-RHI tag
+    // D3D12ResourceFactory::adoptExternalDepthTexture uses, and the exact alias VoxiRenderer's own
+    // shadow map relies on (Format::R32Typeless's own doc comment, RHIResources.hpp) -- kept as the
+    // reported Format here even though toVkFormat/toVkAspect resolve R32Typeless and D32Float
+    // identically on this backend (both to kVkDepthFormat / VK_IMAGE_ASPECT_DEPTH_BIT), so that any
+    // caller branching on "is this the aliased-depth format" (occlusion's binding-set SlotKind
+    // selection, for one) sees the SAME answer on both backends for the SAME logical resource.
+    t.desc.format = Format::R32Typeless;
+    t.desc.bind = ResourceBind::ShaderResource | ResourceBind::DepthStencil;
+    // Matches physical reality at the moment of adoption: createDepthBuffer() transitions a freshly
+    // created depth image to VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL the first time the render loop
+    // clears/draws into it (the swapchain-acquire barrier list in beginFrame()), and nothing
+    // transitions it away from that before every subsequent frame's scenePass() writes it again. A
+    // caller wanting to READ it (modules/occlusion) does its own DepthWrite <-> NonPixelShaderResource
+    // round trip via the ordinary textureBarrier -- this factory has no idea when that is safe to do,
+    // exactly as the D3D12 comment this mirrors says.
+    t.desc.initialState = ResourceState::DepthWrite;
+    t.desc.debugName = nullptr;
+#if AVER_RHI_TRACK_STATE
+    t.debugName = "scene depth (adopted)";
+    t.states.assign(1, ResourceState::DepthWrite);
+#endif
+
+    if (existing) {
+        RhiTexture* slot = texture(existing);
+        if (slot) {
+            // Re-filling the SAME slot on a resize/setSampleCount rebuild, exactly as D3D12's own
+            // `*slot = std::move(t); return existing;` does -- STABLE across a resize so a caller
+            // that cached the handle never has to notice depthBuffer_ was reallocated underneath it
+            // (see VulkanDevice::depthTexHandle_'s own comment). Unlike D3D12's ComPtr-backed
+            // RhiTexture, the plain move-assignment below does NOT release what it is replacing:
+            // the outgoing slot's own srvView (a real VkImageView this factory built and owns, even
+            // though the image/memory it viewed were never ours) has to be destroyed explicitly, or
+            // every resize leaks one VkImageView. Retired rather than destroyed immediately -- a
+            // draw recorded before this call may still be reading through it on the GPU.
+            if (slot->srvView) {
+                VkImageView old = slot->srvView;
+                retire([this, old]() { dev_->api().DestroyImageView(dev_->vkDevice(), old, nullptr); });
+            }
+            *slot = std::move(t);
+            return existing;
+        }
+    }
+    textures_.push_back(std::move(t));
+    return static_cast<TextureHandle>(textures_.size());
+}
+
 BufferHandle VulkanResourceFactory::createBuffer(const BufferDesc& d) {
     collect();
     if (d.bytes == 0) { AVER_ERROR("[RHI.Vulkan] createBuffer of zero bytes"); return 0; }
@@ -1886,19 +1975,27 @@ void VulkanResourceFactory::destroyTexture(TextureHandle h) {
     if (!t) return;
     VkImage image = t->image;
     VkDeviceMemory memory = t->memory;
+    // See RhiTexture::externallyOwned's own comment: an adopted depth-texture record's image/memory
+    // belong to VulkanDevice, not this factory, so the retired callback below must skip
+    // destroyImageCommitted for them -- captured alongside image/memory rather than nulling those
+    // out here, so the callback's own logic (and this function's early `t->image = VK_NULL_HANDLE`
+    // below, which is this record's own bookkeeping, not the destroy call's input) stays exactly the
+    // shape every other destroy* path in this file already has.
+    const bool owned = !t->externallyOwned;
     VkImageView srv = t->srvView, rtv = t->rtvView, dsv = t->dsvView;
     std::vector<VkImageView> uavs = std::move(t->uavViews);
-    retire([this, image, memory, srv, rtv, dsv, uavs]() {
+    retire([this, image, memory, srv, rtv, dsv, uavs, owned]() {
         if (srv) dev_->api().DestroyImageView(dev_->vkDevice(), srv, nullptr);
         if (rtv) dev_->api().DestroyImageView(dev_->vkDevice(), rtv, nullptr);
         if (dsv) dev_->api().DestroyImageView(dev_->vkDevice(), dsv, nullptr);
         for (VkImageView v : uavs) if (v) dev_->api().DestroyImageView(dev_->vkDevice(), v, nullptr);
-        destroyImageCommitted(*dev_, image, memory);
+        if (owned) destroyImageCommitted(*dev_, image, memory);
     });
     t->image = VK_NULL_HANDLE;
     t->memory = VK_NULL_HANDLE;
     t->srvView = t->rtvView = t->dsvView = VK_NULL_HANDLE;
     t->uavViews.clear();
+    t->externallyOwned = false;
     collect();
 }
 
