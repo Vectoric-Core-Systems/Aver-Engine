@@ -813,7 +813,15 @@ void VulkanResourceFactory::selfTest() {
     ComputePipelineDesc cd{};
     cd.cs = cs;
     cd.layout.uavCount = 1;
-    cd.layout.constantDwords[0] = 4;
+    // ZERO, NOT 4, AND THAT IS THE SHADER'S CHOICE RATHER THAN A TUNING. A non-zero word count means
+    // ROOT CONSTANTS (RHIResources.hpp), which this backend lowers to Vulkan PUSH CONSTANTS -- but
+    // kSelfTestCS declares `cbuffer SelfTestCB : register(b0)`, and DXC lowers a cbuffer to a
+    // DESCRIPTOR, not a push constant, unless the HLSL says [[vk::push_constant]]. So the layout
+    // promised push constants while the shader asked for a uniform buffer at set 0 binding 0, and
+    // the validation layer said exactly that: "uses descriptor [Set 0, Binding 0, variable
+    // SelfTestCB] but the binding was not declared". Zero requests a root CBV, which IS a descriptor
+    // and is what the shader wrote.
+    cd.layout.constantDwords[0] = 0;
     const PipelineHandle pipe = cs ? createComputePipeline(cd) : 0;
     AVER_INFO("[RHI.Vulkan] factory self-test: compute pipeline {}", pipe ? "ok" : "FAILED");
 

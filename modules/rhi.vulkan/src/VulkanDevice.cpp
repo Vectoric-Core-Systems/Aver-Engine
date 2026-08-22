@@ -669,11 +669,39 @@ bool VulkanDevice::init(const DeviceDesc& desc) {
     ici.pApplicationInfo = &appInfo;
     ici.enabledExtensionCount = static_cast<u32>(instExts.size());
     ici.ppEnabledExtensionNames = instExts.data();
-    // No validation layer is REQUESTED here even when the SDK happens to be installed: per the
-    // vendored README, layers are a debugging aid the user opts into by installing the SDK, not a
-    // build/run dependency; asking for VK_LAYER_KHRONOS_validation unconditionally would fail
-    // instance creation outright on every machine that does not have it, which is every machine
-    // this backend is written to run on by default.
+    // VK_LAYER_KHRONOS_validation, REQUESTED ONLY WHEN BOTH ASKED FOR AND PRESENT.
+    //
+    // This used to be requested never, on reasoning that was half right: asking for it
+    // unconditionally DOES fail instance creation outright on every machine without the SDK, which
+    // is most of them. But refusing to ask even when the caller passed enableDebug AND the layer is
+    // installed made --debug-layer a misnomer -- it installed the debug-utils messenger, which
+    // reports what the DRIVER volunteers, and validation is not the driver. The messenger stayed
+    // silent while the driver access-violated, and the whole point of the flag is to be told why.
+    //
+    // ENUMERATED, NOT ASSUMED: the layer is only named if EnumerateInstanceLayerProperties reports
+    // it, so a machine without the SDK behaves exactly as before and one with it gets the
+    // diagnostic. That is the same shape every optional extension in this file already uses.
+    std::vector<const char*> instLayers;
+    if (desc.enableDebug && api_.EnumerateInstanceLayerProperties) {
+        u32 layerCount = 0;
+        api_.EnumerateInstanceLayerProperties(&layerCount, nullptr);
+        std::vector<VkLayerProperties> layerProps(layerCount);
+        if (layerCount) api_.EnumerateInstanceLayerProperties(&layerCount, layerProps.data());
+        for (const VkLayerProperties& lp : layerProps) {
+            if (std::strcmp(lp.layerName, "VK_LAYER_KHRONOS_validation") == 0) {
+                instLayers.push_back("VK_LAYER_KHRONOS_validation");
+                AVER_INFO("[RHI.Vulkan] VK_LAYER_KHRONOS_validation enabled");
+                break;
+            }
+        }
+        if (instLayers.empty())
+            AVER_WARN("[RHI.Vulkan] --debug-layer asked for validation but no validation layer is "
+                      "installed; only driver-volunteered messages will appear. Install the LunarG "
+                      "Vulkan SDK to get real validation.");
+    }
+    ici.enabledLayerCount = static_cast<u32>(instLayers.size());
+    ici.ppEnabledLayerNames = instLayers.empty() ? nullptr : instLayers.data();
+
     if (!vkOk(api_.CreateInstance(&ici, nullptr, &instance_), "vkCreateInstance")) {
         unloadApi(api_);
         return false;
@@ -765,6 +793,17 @@ bool VulkanDevice::init(const DeviceDesc& desc) {
     const bool accelStructFeaturesOk = !wantAccelStruct || asFeat.accelerationStructure;
     const bool rayQueryFeaturesOk = !wantRayQuery || rqFeat.rayQuery;
     if (!meshShaderFeaturesOk) { meshFeat.taskShader = meshFeat.meshShader = VK_FALSE; }
+    // CLEARED, because meshFeat came back from GetPhysicalDeviceFeatures2 with every bit the DEVICE
+    // supports, and it is then passed straight to vkCreateDevice as the set to ENABLE. Two of those
+    // bits have dependencies the engine does not turn on, and requesting a feature without its
+    // prerequisite is invalid device creation:
+    //     multiviewMeshShader                    needs multiview
+    //     primitiveFragmentShadingRateMeshShader needs primitiveFragmentShadingRate
+    // The engine uses neither multiview nor primitive shading rate, so clearing them is the correct
+    // minimal fix rather than enabling two features nothing asks for. Reported by the validation
+    // layer the first time it ran; the driver had been accepting them silently.
+    meshFeat.multiviewMeshShader = VK_FALSE;
+    meshFeat.primitiveFragmentShadingRateMeshShader = VK_FALSE;
     // (leave the optional feature structs zeroed/disabled when their feature bits are not actually
     // supported, even though the extension itself was present -- an extension can be exposed with
     // its feature bits false; requesting a feature the device did not report is invalid device
@@ -2627,29 +2666,6 @@ bool VulkanDevice::createPostPipelines() {
     // and gPostHist at 2/4, exactly as kPostBinds asks. The compiler was doing its job; the pool was
     // not.
 
-    // STILL REFUSED, AND STILL FOR AN UNKNOWN. With all three of the above fixed the chain builds
-    // and the driver STILL faults in-frame -- 0xC0000005, process gone. So the pool was a real bug
-    // and was not the last one.
-    //
-    // NOT DIAGNOSABLE FROM HERE. The SPIR-V dump answers "where did the compiler put each resource",
-    // and that question is now answered and correct. It cannot answer "which draw bound what", which
-    // is where the remaining fault must live, and the tool that does answer it -- VK_LAYER_KHRONOS_
-    // validation -- is not obtainable standalone on Windows: Khronos ships Android binaries only, so
-    // it means the LunarG SDK.
-    //
-    // I AM NOT GUESSING FURTHER. Each attempt costs a process crash and distinguishes nothing, and a
-    // fix that merely moves a crash is worse than an honest refusal, because it gets committed.
-    // Refusing keeps device creation failing cleanly so rhi::createDevice falls through to D3D12,
-    // which is strictly better than a backend that kills its caller.
-    //
-    // TO FINISH THIS: install the LunarG Vulkan SDK, delete this return, run once. The layer names
-    // the offending binding outright and the remaining fix is likely to be one line.
-    AVER_WARN("[RHI.Vulkan] the camera post chain is not enabled: shaders compile with correct "
-              "descriptor decorations (verified via AVER_VK_DUMP_SPIRV) and an undersized descriptor "
-              "pool has been fixed, but the driver still faults in-frame. Finishing needs "
-              "VK_LAYER_KHRONOS_validation, i.e. the LunarG SDK.");
-    return false;
-#if 0
     if (!g_postSampler) {
         VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
         si.magFilter = VK_FILTER_LINEAR; si.minFilter = VK_FILTER_LINEAR;
@@ -2671,7 +2687,12 @@ bool VulkanDevice::createPostPipelines() {
         binds[5] = {5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_ALL, nullptr};
         binds[6] = {6, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_ALL, &g_postSampler};
         VkDescriptorSetLayoutCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        ci.bindingCount = 6; ci.pBindings = binds;
+        // SEVEN. The array above has seven entries and this said six, so the immutable sampler at
+        // binding 6 was built and then never handed to Vulkan -- the layout simply did not contain
+        // it. That is precisely what the validation layer reported the moment it was switched on:
+        // "SPIR-V uses descriptor [Set 2, Binding 6, variable gPostSamp] but the binding was not
+        // declared in VkPipelineLayoutCreateInfo::pSetLayouts[2]".
+        ci.bindingCount = 7; ci.pBindings = binds;
         if (!vkOk(api_.CreateDescriptorSetLayout(device_, &ci, nullptr, &postSetLayout_), "post set layout")) return false;
     }
     if (!postPipelineLayout_) {
@@ -2825,7 +2846,6 @@ bool VulkanDevice::createPostPipelines() {
         api_.MapMemory(device_, postRing_[i].memory, 0, VK_WHOLE_SIZE, 0, reinterpret_cast<void**>(&postRing_[i].mapped));
     }
     return true;
-#endif
 }
 
 void VulkanDevice::releasePostTargets() {
