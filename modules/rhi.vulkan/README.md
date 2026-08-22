@@ -42,30 +42,54 @@ available.
 
 ## What is left
 
-**One defect drops the entire overlay, and the editor UI with it.**
+Fourteen validation errors, from 156, and none of them fatal. The frame presents.
 
-    VkDescriptorSet ... was destroyed or updated without UPDATE_AFTER_BIND
+**THE EDITOR UI DOES NOT DRAW, AND IT IS NOT A BUG IN THIS BACKEND.** The editor's interface is
+ImGui, and the only ImGui backend in this tree is `modules/rhi.d3d12.imgui`. There is no Vulkan
+equivalent, so nothing draws it — there is no error to find, because nothing is being attempted.
+Writing `modules/rhi.vulkan.imgui` is the work. The frame filling only part of the swapchain follows
+from the same gap: with no UI laying out a dockspace, `setViewportRect` keeps the editor's default
+1600x900.
 
-This backend rewrites a binding set that a *recording* command buffer has already bound. Vulkan
-forbids that, and the command buffer goes to an INVALID state -- so every call recorded afterwards
-is dropped by the driver, which in one run was 133 further errors and every UI draw in the frame.
-It is the only thing that invalidates the command buffer now.
+**The rest**
 
-Two ways out, and it is a decision rather than a patch:
-
-- declare the pool and the set layouts `UPDATE_AFTER_BIND` (`VK_EXT_descriptor_indexing`, core since
-  1.2 and this backend already requires 1.3), or
-- ring the binding sets `kFrameCount` deep, the way the constant ring already is.
-
-**Also outstanding**
-
-- The presented image fills only part of the swapchain. The scene extent and the present extent
-  disagree; with no UI to lay out a viewport rect, `setViewportRect` is left holding whatever the
-  editor last computed.
-- The two shaders on the bind-map fallback -- `gInstanceWorlds` at t17, and `MSVoxel`'s
-  `gVerts`/`gIndices`/`MeshCB` -- because `GraphicsPipelineDesc::instanced` and feature-module mesh
+- **9 of the 14** are the bind-map fallback shaders — `gInstanceWorlds` at `t17` and `MSVoxel`'s
+  `gVerts`/`gIndices`/`MeshCB` — because `GraphicsPipelineDesc::instanced` and feature-module mesh
   geometry are both unimplemented here. See the fallback note below.
-- 13 leaked objects at `vkDestroyDevice`.
+- **2** are a copy source created without the usage flag `vkCmdCopyBuffer` wants.
+- **1** image-layout expectation at `vkQueueSubmit2`, and **13 leaked objects** at
+  `vkDestroyDevice`.
+
+## Descriptor lifetime: done, and how
+
+Two defects, one message, and they had to be separated before either could be fixed. Both showed up
+as `VkDescriptorSet ... was destroyed or updated without UPDATE_AFTER_BIND`, which is not a warning
+you can leave alone: it puts the command buffer into an **INVALID state**, after which the driver
+**drops every call recorded later** — one bad write took the whole rest of the frame with it.
+
+**Binding sets are ringed `kFrameCount` deep.** A set may not be rewritten while a command buffer
+that bound it is still pending. `beginFrame()` already waits the timeline value retiring the
+frame-in-flight slot it is about to use, so that ring slot is provably free and writing it is safe.
+A write therefore lands in one slot and the others go stale, so each slot's resolved descriptor is
+recorded (`BindingSlotState`) and replayed lazily by `bindingSetForFrame()`. Vulkan cannot copy a
+binding *out* of a set, so remembering the write is the only way to bring a second set up to date.
+
+**A ring by frame only works if the collisions are cross-frame**, and that was measured, not
+assumed: a probe counting intra-frame write-after-bind found zero. `writeBindingSlot` still warns if
+it ever happens, because the ring cannot cover it.
+
+**`setConstantBuffer` takes a fresh set** rather than rewriting the one `bindDeclaredDescriptors`
+already bound — the same allocate-and-retire that function performs per `setPipeline`, so the same
+cost and the same lifetime rule. `g_constantsInfos` mirrors the set's contents so the fresh one can
+be populated in full instead of inheriting only the slot just written. A dynamic offset would have
+been cheaper and cannot do it: these are `UNIFORM_BUFFER_DYNAMIC`, but the write points a slot at
+the per-frame constant *ring*, a different `VkBuffer`, and a dynamic offset cannot change which
+buffer a descriptor names.
+
+**Descriptor-set handles are RECYCLED**, which makes the layer's report read like nonsense: it names
+the set that invalidated the buffer, and that set has often just been allocated — because a freed
+set hands its handle value straight back. Logging every allocation, retire and free with its handle
+and frame is what made the sequence legible.
 
 ## Textures and samplers: done, and how
 
