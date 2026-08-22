@@ -231,6 +231,16 @@ if(TARGET Aver.Formats.Audio)
   target_link_libraries(AverAssetC PRIVATE Aver.Formats.Audio)
   target_compile_definitions(AverAssetC PRIVATE AVER_HAVE_AUDIO_IMPORT=1)
 endif()
+# Material generation (texture set -> .ocmat, with roughness+metal channel packing) is OPTIONAL for
+# the same reason: Aver.Formats.Material only builds under AVER_MODULE_PBR (see its own CMakeLists.txt
+# comment), and this tool has to keep configuring in a tree without it too.
+if(TARGET Aver.Formats.Material)
+  target_link_libraries(AverAssetC PRIVATE Aver.Formats.Material)
+  target_compile_definitions(AverAssetC PRIVATE AVER_HAVE_MATERIAL_COMPILE=1)
+  # stb_image_write, for the packed metalRough PNG. A SECOND STB_IMAGE_WRITE_IMPLEMENTATION relative
+  # to MakeFoliage is fine: they are separate executables, so there is no duplicate symbol to collide.
+  target_include_directories(AverAssetC PRIVATE ${CMAKE_SOURCE_DIR}/third_party/stb)
+endif()
 
 # AverAssetCTest -- the JSON contract Aver Exchange in the LAUNCHER parses.
 #

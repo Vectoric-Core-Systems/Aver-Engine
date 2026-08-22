@@ -160,6 +160,68 @@ int main() {
           "every artifact it reported is actually on disk (" + std::to_string(onDisk) + " files for "
           + std::to_string(artifacts) + " reported)");
 
+    // ---- the material path (roughness + metal, no combined map) -----------------------------
+    AVER_INFO("-- a separate roughness+metal texture set packs into one metalRough and a .ocmat --");
+    const std::filesystem::path roughFixture =
+        std::filesystem::path(AVER_REPO_ROOT) / "content" / "dev" / "test_rough_1k.jpg";
+    const std::filesystem::path metalFixture =
+        std::filesystem::path(AVER_REPO_ROOT) / "content" / "dev" / "test_metal_1k.jpg";
+    check(std::filesystem::exists(roughFixture, ec), "the roughness fixture exists: " + roughFixture.string());
+    check(std::filesystem::exists(metalFixture, ec), "the metal fixture exists: " + metalFixture.string());
+
+    const std::filesystem::path matOutDir =
+        std::filesystem::temp_directory_path() / "aver-assetc-test-material";
+    std::filesystem::remove_all(matOutDir, ec);
+    std::filesystem::create_directories(matOutDir, ec);
+
+    std::string matOut;
+    int matCode = 1;
+    {
+        const std::string cmd = "\"" + exe.string() + "\" material \"" + roughFixture.string() +
+                                "\" \"" + metalFixture.string() + "\" --out-dir \"" + matOutDir.string() +
+                                "\" --base TestMat";
+        matCode = runCapture(cmd, matOut);
+    }
+    check(matCode == 0, "it exits 0 on a good material conversion (got " + std::to_string(matCode) + ")");
+
+    std::vector<std::string> matLines;
+    {
+        std::istringstream in(matOut);
+        std::string line;
+        while (std::getline(in, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (!line.empty() && line.front() == '{') matLines.push_back(line);
+        }
+    }
+    check(matLines.size() >= 2, "it emitted at least one artifact line and a summary (" +
+                                std::to_string(matLines.size()) + " JSON lines)");
+
+    bool sawMaterialArtifact = false, sawPackedFrom = false;
+    for (const std::string& l : matLines) {
+        if (hasPair(l, "kind", "\"material\"") && hasPair(l, "ok", "true") && hasPair(l, "verified", "true"))
+            sawMaterialArtifact = true;
+        if (l.find("\"packedFrom\":\"roughness+metal\"") != std::string::npos) sawPackedFrom = true;
+    }
+    check(sawMaterialArtifact, "at least one kind:material artifact reports ok:true, verified:true");
+    check(sawPackedFrom, "the roughness+metal pair reports packedFrom roughness+metal");
+
+    const std::string& matSummary = matLines.empty() ? std::string{} : matLines.back();
+    check(hasPair(matSummary, "summary", "true"), "the LAST JSON line is the summary");
+    check(hasPair(matSummary, "itemsFailed", "0"), "and reports nothing failed on a good run");
+
+    // A .ocmat and a packed metalRough PNG must actually be on disk, not just claimed.
+    bool sawOcmatFile = false, sawPackedPng = false;
+    for (const auto& e : std::filesystem::directory_iterator(matOutDir, ec)) {
+        if (!e.is_regular_file(ec)) continue;
+        const std::string name = e.path().filename().string();
+        if (name == "TestMat.ocmat") sawOcmatFile = true;
+        if (name == "TestMat_metalRough.png") sawPackedPng = true;
+    }
+    check(sawOcmatFile, "TestMat.ocmat is actually on disk");
+    check(sawPackedPng, "TestMat_metalRough.png is actually on disk");
+
+    std::filesystem::remove_all(matOutDir, ec);
+
     // ---- the failure path -------------------------------------------------------------------
     AVER_INFO("-- and a bad input FAILS detectably, rather than silently --");
     {
