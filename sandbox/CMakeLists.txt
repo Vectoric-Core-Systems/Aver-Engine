@@ -73,6 +73,12 @@ target_link_libraries(Sandbox PRIVATE Aver.UI Aver.Render.UI)
 # UiDrawList directly, so the seam a game's HUD uses is exercised by the editor too. Aver.UI is
 # still named above because the host casts aver_ui_draw_list() back to that type.
 target_link_libraries(Sandbox PRIVATE Aver.UI.Abi)
+# Water. Guarded because AVER_MODULE_WATER is a real option and the module matrix builds trees with
+# it off; linking it is also what brings AVER_MODULE_WATER=1 through to SandboxApp.cpp, which is
+# what the #if guards there key on -- the same transitive-define arrangement Scene/PBR/Physics use.
+if(TARGET Aver.Water)
+  target_link_libraries(Sandbox PRIVATE Aver.Water)
+endif()
 
 # Aver Sound and the audio C seam, for the .ocsnd editor tab (sandbox/src/SoundEditor.cpp).
 #

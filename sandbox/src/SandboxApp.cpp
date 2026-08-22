@@ -124,6 +124,10 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
 #include "aver/particles/ParticleEffectLibrary.hpp"
 #include "aver/particles/ParticleRenderer.hpp"
+#if AVER_MODULE_WATER
+#  include "aver/water/WaterRenderer.hpp"
+#  include "aver/water/Underwater.hpp"
+#endif
 #include "aver/particles/ParticleSystem.hpp"
 #include "aver/formats/OcParticle.hpp"
 #endif
@@ -1796,6 +1800,49 @@ public:
             AVER_ERROR("[Particles] renderer unavailable on this device");
         }
 
+#if AVER_MODULE_WATER
+        // Water, registered on the same terms as everything else here: if init fails the editor is
+        // unaffected and simply has no water, because HLSL is compiled at RUNTIME and can fail on a
+        // machine whose build was perfectly green.
+        if (waterEnabled_) {
+            if (waterRenderer_.init(*e.device())) {
+                waterRenderer_.setWaterLevelCm(waterHeightCm_);
+                // A default swell rather than a flat mirror: four waves at spread headings, so the
+                // surface reads as water the moment it appears instead of needing to be authored
+                // before it looks like anything. Wavelengths are deliberately not multiples of one
+                // another -- equal or harmonic ones re-phase into a visibly repeating tile.
+                water::GerstnerWave waves[4];
+                const f32 dirs[4][2] = {{1.0f, 0.15f}, {0.6f, -0.8f}, {-0.3f, 0.95f}, {-0.85f, -0.5f}};
+                const f32 lengths[4] = {1450.0f, 890.0f, 520.0f, 310.0f};
+                const f32 amps[4]    = {34.0f, 19.0f, 9.0f, 4.5f};
+                for (int i = 0; i < 4; ++i) {
+                    waves[i].dirX = dirs[i][0];
+                    waves[i].dirZ = dirs[i][1];
+                    waves[i].wavelengthCm = lengths[i];
+                    waves[i].amplitudeCm  = amps[i];
+                    waves[i].steepness    = 0.75f;
+                }
+                waterRenderer_.setWaves(waves, 4);
+                e.device()->addRenderFeature(&waterRenderer_);
+                waterAttached_ = true;
+
+                // THE SIMULATED SURFACE IS THE SAME NUMBER AS THE RENDERED ONE. Two independent
+                // heights would drift and the drift would look like broken buoyancy rather than
+                // like a mismatch, so the plane is set from waterRenderer_'s own level.
+                const f32 normal[3]  = {0.0f, 0.0f, 1.0f};
+                const f32 current[3] = {0.0f, 0.0f, 0.0f};
+                aver_phys_set_water_plane(waterRenderer_.waterLevelCm(), normal,
+                                          1.0f, 0.5f, 0.05f, current);
+                AVER_INFO("[Water] surface and buoyancy plane at z = {} cm", waterHeightCm_);
+            } else {
+                AVER_ERROR("[Water] renderer unavailable on this device");
+            }
+#else
+        if (waterEnabled_)
+            AVER_WARN("[Water] --water was given, but this build has no water module");
+#endif
+        }
+
         // --particle-test: a dust cloud (DECIDED: not a weapon effect) straddling an opaque cube, so
         // the transparent pass's own depth test (DECIDED 1) is visible in one screenshot -- some
         // particles nearer the camera than the cube, some farther and hidden behind it. Author's own
@@ -2494,6 +2541,17 @@ public:
         sky_.skyLightIntensity = sunAmbient_;
         sky_.fogDensity = fog;
         sky_.cloudTime = cloudTime_;
+        // UNDERWATER, APPLIED TO A COPY. sky_ is the AUTHORED sky and has to stay that way: folding
+        // the override back into it would make the effect accumulate every frame the camera spent
+        // below the surface, and a level saved from that state would carry underwater fog as its
+        // authored weather.
+#if AVER_MODULE_WATER
+        if (waterAttached_) {
+            const rhi::SkyAtmosphere wet =
+                water::applyUnderwaterFog(sky_, camPos_.z, waterRenderer_.waterLevelCm(), waterFog_);
+            e.device()->setSkyAtmosphere(wet);
+        } else
+#endif
         e.device()->setSkyAtmosphere(sky_);
         // Outside the viewport rect is editor chrome, not sky.
         e.device()->setClearColor(0.055f, 0.055f, 0.062f, 1);
@@ -4657,6 +4715,9 @@ public:
     }
     void setUiDemo(bool on) { showUiDemo_ = on; }                          // --ui-demo
     void setOpenAsset(std::string p) { openAsset_ = std::move(p); }        // --open-asset
+    // --water <heightCm>. Stored whether or not the module is compiled in, so a build without it can
+    // say so rather than ignoring the flag in silence.
+    void setWater(bool on, f32 heightCm) { waterEnabled_ = on; waterHeightCm_ = heightCm; }
     // --open-legacy: open an older-series project WITHOUT upgrading it. Never migrates, so it
     // cannot damage the project it is pointed at -- which is what makes it safe to hand a
     // benchmark that must measure content exactly as it exists on disk.
@@ -11198,6 +11259,20 @@ private:
     // outlive the device, torn down in onShutdown.
     particles::ParticleRenderer particleRenderer_;
     bool particlesAttached_=false;
+
+    // Water. OFF UNLESS ASKED FOR, unlike particles beside it, and the difference is deliberate: a
+    // particle renderer with no emitters draws nothing, whereas a water plane is an infinite sheet
+    // that would appear in every level ever opened, including ones whose author has never heard of
+    // it. --water <heightCm> is the opt-in.
+#if AVER_MODULE_WATER
+    water::WaterRenderer waterRenderer_;
+    water::UnderwaterFogTuning waterFog_{};
+    bool  waterAttached_ = false;
+#endif
+    // These two stay OUTSIDE the guard: the flag is parsed either way, so a build without the
+    // module can say "this build has no water" rather than silently ignoring --water.
+    bool  waterEnabled_  = false;
+    f32   waterHeightCm_ = 0.0f;
 #endif
 #if AVER_MODULE_SCRIPTING
     // THE ANIMATION-NOTIFY WIRE. A clip crossed a marker; that marker names a graph event; the
@@ -13149,7 +13224,7 @@ Application* createApplication(int argc, char** argv) {
     // right here and nothing else may override it; --mcp with no number defers to mcp.conf, resolved
     // once argument parsing is done and engineRoot() can be asked (see mcpRequested below).
     bool mcpRequested = false, mcpPortExplicit = false;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool furnaceGrid=false; f32 furnaceTilt=0.0f; bool ptFurnace=false; bool ptScene=false; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int rtRenderMode=-1; int pt=0; int ptBounces=-1; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; bool openLegacy=false; std::string graphSelectNode; std::string graphTab; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false; bool bakeNav=false; f32 bakeNavCell=50.0f;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool furnaceGrid=false; f32 furnaceTilt=0.0f; bool ptFurnace=false; bool ptScene=false; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int rtRenderMode=-1; int pt=0; int ptBounces=-1; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; bool openLegacy=false; bool waterOn=false; f32 waterHeight=0.0f; std::string graphSelectNode; std::string graphTab; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false; bool bakeNav=false; f32 bakeNavCell=50.0f;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -13333,6 +13408,13 @@ Application* createApplication(int argc, char** argv) {
                        "'{}' not written", sculptOut);
             std::exit(1);
 #endif
+        }
+        // --water <heightCm> puts a Gerstner surface and a buoyancy plane at that height. OPT-IN
+        // rather than a default, because a water plane is an infinite sheet and turning it on for
+        // every level ever opened would be a surprise, not a feature.
+        else if (!std::strcmp(argv[i],"--water") && i+1<argc) {
+            waterOn = true;
+            waterHeight = static_cast<f32>(std::atof(argv[++i]));
         }
         // --open-asset <path> opens a file through the same host a double-click goes through.
         else if (!std::strcmp(argv[i],"--open-asset") && i+1<argc) openAsset=argv[++i];
@@ -13659,6 +13741,7 @@ Application* createApplication(int argc, char** argv) {
     if (lodMeshShader >= 0) app->setLodMeshShader(lodMeshShader != 0, lodErrorPx);
     app->setUiDemo(uiDemo);
     app->setOpenAsset(openAsset);
+    app->setWater(waterOn, waterHeight);
     app->setOpenLegacy(openLegacy);
     app->setGraphTab(graphTab);
     app->setGraphSelectNode(graphSelectNode);
