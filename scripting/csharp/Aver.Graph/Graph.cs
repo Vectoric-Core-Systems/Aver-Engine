@@ -171,6 +171,14 @@ public class Node
     // one case and written in the other -- a second property would carry the same doc comment
     // twice. Null for every other node type.
     public string? SavePath { get; set; }
+
+    /// The sound file a "playsound"/"playsoundat" node plays, from a `sound=<path>` NODE-line
+    /// attribute. Same "the value IS the data" family as NameValue and SavePath above, and a
+    /// NODE-line attribute for the same reason all of them are: PinType has no String member, so an
+    /// edit-time path has no pin it could arrive on. ONE property for both node types, matching
+    /// SavePath's own precedent -- flat and positioned playback name the same kind of thing.
+    /// Null for every other node type.
+    public string? SoundPath { get; set; }
 }
 
 /// One parameter the compiled method accepts -- e.g. the entity a graph drives, or the current

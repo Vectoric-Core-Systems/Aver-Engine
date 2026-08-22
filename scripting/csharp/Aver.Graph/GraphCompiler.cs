@@ -550,6 +550,28 @@ public class GraphCompiler
                 EmitSimpleApiRead(node);
                 break;
 
+            case "issoundplaying":
+                // The one PURE audio read -- asking whether a voice is still sounding changes
+                // nothing, so both compilers are welcome to it.
+                EmitSimpleApiRead(node);
+                break;
+
+            case "playsound":
+            case "playsoundat":
+            case "stopsound":
+            case "setlistener":
+            case "setbusvolume":
+                // SIDE EFFECTS: making a noise, silencing one, moving the ears, moving a slider.
+                // Refused here for the identical reason Spawn and CreateEntity are -- Compile()'s
+                // topological pass would fire them unconditionally on every invocation, so a graph
+                // that merely READS something would make a sound every time it was evaluated.
+                throw new InvalidOperationException(
+                    $"{node.Type} node '{node.Id}' cannot be compiled by Compile() -- it has a side " +
+                    "effect with no notion of 'when' in a pure-dataflow graph, and Compile()'s " +
+                    "topological pass would run it unconditionally on every invocation with no way " +
+                    "to gate it. Give this node an ENTRY-driven exec chain and reach it through " +
+                    "CompileEntryPoint() instead.");
+
             case "createentity":
                 // A SIDE EFFECT: it makes a new entity. Refused here for the identical reason
                 // "spawn" is refused -- Compile()'s topological pass would run it unconditionally on
@@ -2593,6 +2615,7 @@ public class GraphCompiler
                     else if (IsExecCapableFireEventType(node.Type)) EmitExecFireEvent(node);
                     else if (IsExecCapableSaveLoadType(node.Type)) EmitExecSaveLoad(node);
                     else if (IsExecCapableCreateEntityType(node.Type)) EmitExecCreateEntity(node);
+                    else if (IsExecCapableAudioType(node.Type)) EmitExecAudio(node);
                     EmitExecFanOut(node);
                     return;
             }
@@ -3338,6 +3361,77 @@ public class GraphCompiler
     private static bool IsExecCapableCreateEntityType(string type) =>
         type.Equals("createentity", StringComparison.OrdinalIgnoreCase);
 
+    /// The five exec-capable audio nodes. Playing a sound, stopping one, moving the ears and moving
+    /// a slider are all side effects; IsSoundPlaying is the one pure read and is not in this list.
+    private static bool IsExecCapableAudioType(string type) => type.ToLowerInvariant() switch
+    {
+        "playsound" or "playsoundat" or "stopsound" or "setlistener" or "setbusvolume" => true,
+        _ => false,
+    };
+
+    /// Runs one audio node's call at the point the exec walk reaches it. Same shape as
+    /// EmitExecSpawn: push the sound= literal where there is one (there is no string pin it could
+    /// arrive on), pull the ordinary pins, Call, then capture or discard each output.
+    private void EmitExecAudio(Node node)
+    {
+        if (_il == null) return;
+        string t = node.Type.ToLowerInvariant();
+
+        if (t == "playsound" || t == "playsoundat")
+        {
+            if (string.IsNullOrEmpty(node.SoundPath))
+                throw new InvalidOperationException(
+                    $"{node.Type} node '{node.Id}' has no sound= attribute naming the file to play");
+            _il.Emit(OpCodes.Ldstr, node.SoundPath);
+            if (t == "playsoundat")
+            {
+                EmitPullInput(node, "x");
+                EmitPullInput(node, "y");
+                EmitPullInput(node, "z");
+            }
+            EmitPullInput(node, "volume");
+            EmitPullInput(node, "pitch");
+            EmitPullInput(node, "looping");
+            EmitPullInput(node, "bus");
+            if (t == "playsoundat")
+            {
+                EmitPullInput(node, "innerCm");
+                EmitPullInput(node, "outerCm");
+            }
+            var voiceLocal = _il.DeclareLocal(typeof(int));
+            _il.Emit(OpCodes.Ldloca, voiceLocal);
+            _il.Emit(OpCodes.Call, t == "playsound" ? PlaySoundMethod : PlaySoundAtMethod);
+
+            if (node.Pins.Any(p => p.IsOutput && p.Name == "success"))
+                _il.Emit(OpCodes.Stloc, GetOrCreateExecLocal(node.Id, "success", typeof(bool)));
+            else
+                _il.Emit(OpCodes.Pop);   // the stack still has to balance
+
+            if (node.Pins.Any(p => p.IsOutput && p.Name == "voice"))
+            {
+                _il.Emit(OpCodes.Ldloc, voiceLocal);
+                _il.Emit(OpCodes.Stloc, GetOrCreateExecLocal(node.Id, "voice", typeof(int)));
+            }
+            return;
+        }
+
+        switch (t)
+        {
+            case "stopsound":     EmitPullInput(node, "voice");  _il.Emit(OpCodes.Call, StopSoundMethod); break;
+            case "setlistener":   EmitPullInput(node, "entity"); _il.Emit(OpCodes.Call, SetListenerMethod); break;
+            case "setbusvolume":
+                EmitPullInput(node, "bus");
+                EmitPullInput(node, "volume");
+                _il.Emit(OpCodes.Call, SetBusVolumeMethod);
+                break;
+            default: return;
+        }
+        if (node.Pins.Any(p => p.IsOutput && p.Name == "success"))
+            _il.Emit(OpCodes.Stloc, GetOrCreateExecLocal(node.Id, "success", typeof(bool)));
+        else
+            _il.Emit(OpCodes.Pop);
+    }
+
     /// Runs a CharacterMove node's native call exactly once, at the point the exec walk reaches it --
     /// mirrors EmitExecSpawn's own shape (pull inputs via EmitPullInput, Call, capture-or-discard the
     /// result into an exec-local), but with no attribute check at the top: UNLIKE Spawn's class=
@@ -3965,6 +4059,9 @@ public class GraphCompiler
                 EmitPullSynapseSteer(source, pinName); return;
             case "getsynapseperception":
                 EmitPullSynapsePerception(source, pinName); return;
+            case "issoundplaying":
+                EmitPullInput(source, "voice");
+                _il.Emit(OpCodes.Call, IsSoundPlayingMethod); return;
             case "isalive":
                 EmitPullInput(source, "entity"); _il.Emit(OpCodes.Call, IsAliveMethod); return;
             case "isactor":
@@ -4464,6 +4561,24 @@ public class GraphCompiler
     private static readonly MethodInfo BodyCountMethod =
         typeof(GraphInterop).GetMethod("BodyCountForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.BodyCountForGraph was not found by reflection");
+    private static readonly MethodInfo PlaySoundMethod =
+        typeof(GraphInterop).GetMethod("PlaySoundForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.PlaySoundForGraph was not found by reflection");
+    private static readonly MethodInfo PlaySoundAtMethod =
+        typeof(GraphInterop).GetMethod("PlaySoundAtForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.PlaySoundAtForGraph was not found by reflection");
+    private static readonly MethodInfo StopSoundMethod =
+        typeof(GraphInterop).GetMethod("StopSoundForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.StopSoundForGraph was not found by reflection");
+    private static readonly MethodInfo IsSoundPlayingMethod =
+        typeof(GraphInterop).GetMethod("IsSoundPlayingForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.IsSoundPlayingForGraph was not found by reflection");
+    private static readonly MethodInfo SetListenerMethod =
+        typeof(GraphInterop).GetMethod("SetListenerForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SetListenerForGraph was not found by reflection");
+    private static readonly MethodInfo SetBusVolumeMethod =
+        typeof(GraphInterop).GetMethod("SetBusVolumeForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SetBusVolumeForGraph was not found by reflection");
     private static readonly MethodInfo CreateEntityMethod =
         typeof(GraphInterop).GetMethod("CreateEntityForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.CreateEntityForGraph was not found by reflection");

@@ -601,6 +601,64 @@ internal static class GraphInterop
         return true;
     }
 
+    // ================================================================== audio
+    //
+    // sound= is a PATH, and a NODE-line attribute rather than a pin, for SetName's exact reason:
+    // which file to play is chosen at edit time and PinType has no String member. Load is cached
+    // native-side (the same path returns the same handle without decoding again), so calling these
+    // every time the node runs costs a dictionary probe, not a decode.
+
+    /// <summary>PlaySound's own surface: load-by-path then play flat, as one scalar call. Returns
+    /// the VOICE handle so a graph can stop or steer it later, and 0 when there is no audio device
+    /// at all -- which is a supported configuration, not an error (see Audio's own comment).</summary>
+    internal static bool PlaySoundForGraph(string path, float volume, float pitch, bool looping, int bus,
+                                           out int voice)
+    {
+        Voice v = Audio.PlayFile(path, volume, pitch, looping, bus);
+        voice = v.Handle;
+        return v.IsValid;
+    }
+
+    /// <summary>PlaySoundAt's own surface: the positioned counterpart, panned and attenuated
+    /// against wherever the listener is.</summary>
+    internal static bool PlaySoundAtForGraph(string path, float x, float y, float z,
+                                              float volume, float pitch, bool looping, int bus,
+                                              float innerCm, float outerCm, out int voice)
+    {
+        Voice v = Audio.PlayAt(Audio.Load(path), new Vec3(x, y, z), volume, pitch, looping, bus, innerCm, outerCm);
+        voice = v.Handle;
+        return v.IsValid;
+    }
+
+    /// <summary>StopSound: stops one voice by handle. True when there was a handle to stop at all --
+    /// NOT whether it was still sounding, which a caller cannot act on anyway by the time it knows.</summary>
+    internal static bool StopSoundForGraph(int voice)
+    {
+        if (voice == 0) return false;
+        new Voice(voice).Stop();
+        return true;
+    }
+
+    /// <summary>IsSoundPlaying: whether that voice is still sounding right now.</summary>
+    internal static bool IsSoundPlayingForGraph(int voice) => new Voice(voice).IsPlaying;
+
+    /// <summary>SetListener: where the ears are. A graph driving its own camera needs this, or every
+    /// positioned sound pans against the world origin.</summary>
+    internal static bool SetListenerForGraph(int entity)
+    {
+        Entity e = new Entity(entity);
+        if (!e.IsAlive) return false;
+        Audio.SetListener(e.WorldPosition, e.WorldForward, e.WorldRight);
+        return true;
+    }
+
+    /// <summary>SetBusVolume: how a settings menu gives the player separate SFX and music sliders.</summary>
+    internal static bool SetBusVolumeForGraph(int bus, float volume)
+    {
+        Audio.SetBusVolume(bus, volume);
+        return true;
+    }
+
     // ================================================================== scene identity, by name
     //
     // The other two members of SetName's own name= family. SetName reflects STRAIGHT into

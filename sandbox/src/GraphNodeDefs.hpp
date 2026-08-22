@@ -579,6 +579,55 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         pin("canSeeTarget", "bool", true), pin("lastKnownTarget", "int", true),
         pin("timeSinceSeen", "float", true), pin("success", "bool", true)}});
 
+    // -- AUDIO. The mixer, the WASAPI device and the whole aver_audio_* C ABI were built, tested and
+    //    then never called by anything for weeks -- see docs' own "declared but unread" shape. These
+    //    six are the graph half of connecting it, alongside Aver.Framework's Audio class.
+    //
+    //    sound= is a PATH and a NODE-line ATTRIBUTE, not a pin, for SetName's exact reason: which
+    //    file to play is edit-time data and PinType has no String member. The load behind it is
+    //    cached natively (same path -> same handle, decoded once), so a node that plays every tick
+    //    costs a lookup rather than a decode.
+    //
+    //    PlaySound/PlaySoundAt are EXEC: making a noise is a side effect, and a dataflow pull would
+    //    fire one per invocation with nothing able to gate it -- the identical argument Spawn and
+    //    CreateEntity already make. Both hand back a VOICE int so a graph can stop or steer it.
+    //    "voice" is 0 when there is no audio device, which is a SUPPORTED configuration rather than
+    //    an error, so success being false does not mean something went wrong.
+    t.push_back({"PlaySound", "Play Sound", "Audio", {
+        pin("exec", "exec", false),
+        pin("volume", "float", false), pin("pitch", "float", false),
+        pin("looping", "bool", false), pin("bus", "int", false),
+        pin("then", "exec", true), pin("voice", "int", true), pin("success", "bool", true)},
+        {attr("sound", "Sound")}});
+
+    t.push_back({"PlaySoundAt", "Play Sound At", "Audio", {
+        pin("exec", "exec", false),
+        pin("x", "float", false), pin("y", "float", false), pin("z", "float", false),
+        pin("volume", "float", false), pin("pitch", "float", false),
+        pin("looping", "bool", false), pin("bus", "int", false),
+        pin("innerCm", "float", false), pin("outerCm", "float", false),
+        pin("then", "exec", true), pin("voice", "int", true), pin("success", "bool", true)},
+        {attr("sound", "Sound")}});
+
+    //    StopSound / SetListener / SetBusVolume are exec too -- all three change something.
+    //    IsSoundPlaying is a PURE read, so it is welcome in either compiler.
+    t.push_back({"StopSound", "Stop Sound", "Audio", {
+        pin("exec", "exec", false), pin("voice", "int", false),
+        pin("then", "exec", true), pin("success", "bool", true)}});
+
+    t.push_back({"IsSoundPlaying", "Is Sound Playing", "Audio", {
+        pin("voice", "int", false), pin("playing", "bool", true)}});
+
+    //    SetListener takes the ENTITY whose transform the ears follow -- usually the camera or the
+    //    player. Without it every positioned sound is panned against the world origin.
+    t.push_back({"SetListener", "Set Listener", "Audio", {
+        pin("exec", "exec", false), pin("entity", "int", false),
+        pin("then", "exec", true), pin("success", "bool", true)}});
+
+    t.push_back({"SetBusVolume", "Set Bus Volume", "Audio", {
+        pin("exec", "exec", false), pin("bus", "int", false), pin("volume", "float", false),
+        pin("then", "exec", true), pin("success", "bool", true)}});
+
     // FireEvent: GAP 3, cross-entity events -- fires a DECLARED event (event=, e.g. "OnHit") on
     //    ANOTHER entity's own graph. SIDE-EFFECTING (runs a stranger's whole exec chain, not a scalar
     //    write) -- exec pins by default, mirroring Spawn/CharacterMove above rather than SetField; see

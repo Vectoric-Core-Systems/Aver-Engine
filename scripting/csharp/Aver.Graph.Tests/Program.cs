@@ -241,6 +241,10 @@ static int Main()
         // Physics status reads. See NameAndPhysicsStatusNodeTests.cs's own header.
         failures += NameAndPhysicsStatusNodeTests.RunAll();
 
+        // The six audio nodes -- the graph half of connecting a mixer nothing had ever called.
+        // See AudioNodeTests.cs's own header for what these can and cannot prove.
+        failures += AudioNodeTests.RunAll();
+
         if (failures == 0)
             Console.WriteLine("\nAll tests passed.");
         else
