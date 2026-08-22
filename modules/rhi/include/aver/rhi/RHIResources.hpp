@@ -199,7 +199,17 @@ struct DepthState {
 // Logical constant slots, mapping one-to-one onto b0..b(n-1).
 constexpr u32 kMaxConstantSlots = 5;
 
+// Slots per range. Enforced: counts above this cannot declare a kind. Defined HERE, above
+// PipelineLayout, because that struct sizes its slot-kind arrays with it; BindingSetDesc further
+// down uses the same one.
+constexpr u32 kMaxBindingSlots = 16;
+
 // The binding layout a pipeline declares.
+// Declared ahead of PipelineLayout, which now carries slot kinds; defined in full further down,
+// next to BindingSetDesc, which has always carried them. An opaque enum declaration with a fixed
+// underlying type is a COMPLETE type, so arrays of it are legal here.
+enum class SlotKind : u8;
+
 struct PipelineLayout {
     u32 srvCount = 0;             // table 0: t0..t(srvCount-1)
     u32 uavCount = 0;             // table 0: u0..u(uavCount-1)
@@ -211,6 +221,31 @@ struct PipelineLayout {
     u32 constantDwords[kMaxConstantSlots] = {};
     SamplerDesc samplers[4] = {};
     u32 samplerCount = 0;         // s0..s(n-1)
+
+    // WHAT KIND OF RESOURCE EACH DECLARED SLOT HOLDS -- the same declaration BindingSetDesc makes,
+    // and it must agree with it slot for slot.
+    //
+    // WHY IT HAS TO BE DECLARED RATHER THAN INFERRED. Vulkan types every binding in a descriptor set
+    // LAYOUT, and a set is only bindable to a pipeline whose layout declares the same types. The
+    // Vulkan backend used to recover the kinds by REFLECTING the shader, which cannot see a slot the
+    // shader does not use: DXC eliminates it, reflection finds nothing, the slot defaults to
+    // Texture2D, and the pipeline then declares SAMPLED_IMAGE where the binding set holds, say, an
+    // acceleration structure. The layer's report is
+    //     "Binding 2 ... is VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE but binding 2 ... trying to bind, is
+    //      VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR"
+    // three steps away from the cause, at the draw. Voxi's t2 TLAS is exactly that slot: declared
+    // for the table, used by only some of the pipelines that share the table.
+    //
+    // D3D12 ignores these -- a root signature's descriptor ranges are typed by class (SRV/UAV), not
+    // by resource dimension -- so this is additive there.
+    //
+    // Leave slotKindsDeclared false and the backend falls back to reflection, which is correct for
+    // any layout whose shaders use every slot they declare. It warns when it has to guess.
+    bool slotKindsDeclared = false;
+    SlotKind srvKinds[kMaxBindingSlots]  = {};   // table 0
+    SlotKind uavKinds[kMaxBindingSlots]  = {};
+    SlotKind srvKinds1[kMaxBindingSlots] = {};   // table 1
+    SlotKind uavKinds1[kMaxBindingSlots] = {};
 };
 
 // How many declarable descriptor tables a layout has, and so the bound on setBindingSet's index.
@@ -312,9 +347,6 @@ enum class SlotKind : u8 {
     // ordinary Texture2D read would be invalid there, not merely wrong).
     Texture2DMS,
 };
-
-// Slots per range. Enforced: counts above this cannot declare a kind.
-constexpr u32 kMaxBindingSlots = 16;
 
 // How to create a binding set.
 struct BindingSetDesc {

@@ -46,7 +46,6 @@ validation errors, all of them at command-record time and none about where a res
 
 | What the layer says | Shape of it |
 | --- | --- |
-| `Binding 2 ... is SAMPLED_IMAGE but ... trying to bind is ACCELERATION_STRUCTURE_KHR` | slot **kinds** disagree — see below |
 | `pImageMemoryBarriers[0].image Invalid` | a barrier on a handle that is not live |
 
 Render-pass scoping and the MSAA resolve were the other two and are **fixed**: one
@@ -54,20 +53,20 @@ Render-pass scoping and the MSAA resolve were the other two and are **fixed**: o
 drawing through the render context from inside one of the device's own passes joins that scope
 instead of nesting a second one inside it.
 
-**The slot-kind disagreement is the interesting one**, and it is structural rather than a slip. A
-pipeline's table set layout gets its `SlotKind`s from **reflecting the shader**, while the
-`BindingSet` bound into that same set gets them from **what the feature module declared**. When a
-shader does not USE a slot, DXC eliminates it, reflection finds nothing and defaults the slot to
-`Texture2D` — so a pipeline whose shaders never touch the TLAS declares `SAMPLED_IMAGE` at slot 2
-while Voxi's binding set holds an acceleration structure there. Closing it means picking one source
-of truth: either `BindingSetDesc` carries the kinds and the pipeline layout uses those, or
-reflection is unioned across every pipeline that shares a binding set. That is a design decision,
-not a patch, and `VulkanCommon.hpp`'s own note on `tableSetLayout` already flags the two halves as
-"nothing at compile time tying the two together".
+**The slot-kind disagreement is FIXED**, and the shape of the fix is the same one the cbuffers and
+the register map got: stop inferring what the caller can declare. A pipeline's table set layout used
+to take its `SlotKind`s from REFLECTING the shader, which cannot see a slot the shader does not use
+-- DXC eliminates it, nothing is found, and the slot silently becomes a `Texture2D`. Voxi's t2 TLAS
+is exactly that slot, declared for the table but used by only some of the pipelines sharing it, so
+the pipeline declared `SAMPLED_IMAGE` where the binding set held an `ACCELERATION_STRUCTURE` and the
+layer only said so at the draw.
 
-**Two features are unimplemented and now say so.** `GraphicsPipelineDesc::instanced` is unconsumed
-here, so the instance SRV at `t(declaredSrvCount)` has nowhere to go; feature-module mesh geometry
-is in the same position. Shaders in that position take the fallback described below.
+`PipelineLayout` now carries the kinds `BindingSetDesc` always carried, behind
+`slotKindsDeclared`. Both sides go through the one `tableSetLayout()` cache with the same kinds, so
+they land on the same `VkDescriptorSetLayout` and are compatible by construction. Voxi declares
+them from a single `giTableKinds()` read by both its layout and its set -- the treatment
+`kGiSrvCount` already got, for the same reason. A layout that declares nothing still reflects, and
+now **warns naming each slot it had to guess** rather than only when it finds nothing at all.
 
 ## Textures and samplers: done, and how
 

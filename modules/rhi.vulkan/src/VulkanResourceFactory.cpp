@@ -228,6 +228,13 @@ SlotKind fromVkDescriptorTypeUav(VkDescriptorType t) {
 struct PendingTableKinds {
     bool active = false;
     SlotKind srv0[kMaxBindingSlots], uav0[kMaxBindingSlots], srv1[kMaxBindingSlots], uav1[kMaxBindingSlots];
+    // Which slots reflection actually FOUND, as opposed to left at the Texture2D default. A slot no
+    // shader in the pipeline references is indistinguishable from one that genuinely IS a Texture2D
+    // unless this is recorded, and that difference is the whole slot-kind bug.
+    bool srv0Seen[kMaxBindingSlots] = {};
+    bool uav0Seen[kMaxBindingSlots] = {};
+    bool srv1Seen[kMaxBindingSlots] = {};
+    bool uav1Seen[kMaxBindingSlots] = {};
 };
 PendingTableKinds gPendingKinds;
 
@@ -249,8 +256,10 @@ PendingTableKinds gPendingKinds;
 void reflectTableSlotKinds(const std::vector<u32>* const* stageSpirv, u32 stageCount,
                            const PipelineLayout& layout, PendingTableKinds& out) {
     out.active = true;
-    for (u32 i = 0; i < kMaxBindingSlots; ++i)
+    for (u32 i = 0; i < kMaxBindingSlots; ++i) {
         out.srv0[i] = out.uav0[i] = out.srv1[i] = out.uav1[i] = SlotKind::Texture2D;
+        out.srv0Seen[i] = out.uav0Seen[i] = out.srv1Seen[i] = out.uav1Seen[i] = false;
+    }
 
     std::vector<SpvBinding> bindings;
     for (u32 s = 0; s < stageCount; ++s)
@@ -259,14 +268,14 @@ void reflectTableSlotKinds(const std::vector<u32>* const* stageSpirv, u32 stageC
     bool anyFound = false;
     for (const SpvBinding& b : bindings) {
         if (b.set == kVkSetTable0) {
-            if (b.binding < layout.srvCount) { out.srv0[b.binding] = fromVkDescriptorTypeSrv(b.type); anyFound = true; }
+            if (b.binding < layout.srvCount) { out.srv0[b.binding] = fromVkDescriptorTypeSrv(b.type); out.srv0Seen[b.binding] = true; anyFound = true; }
             else if (b.binding >= kVkUavBindingBase && b.binding - kVkUavBindingBase < layout.uavCount) {
-                out.uav0[b.binding - kVkUavBindingBase] = fromVkDescriptorTypeUav(b.type); anyFound = true;
+                out.uav0[b.binding - kVkUavBindingBase] = fromVkDescriptorTypeUav(b.type); out.uav0Seen[b.binding - kVkUavBindingBase] = true; anyFound = true;
             }
         } else if (b.set == kVkSetTable1) {
-            if (b.binding < layout.srvCount1) { out.srv1[b.binding] = fromVkDescriptorTypeSrv(b.type); anyFound = true; }
+            if (b.binding < layout.srvCount1) { out.srv1[b.binding] = fromVkDescriptorTypeSrv(b.type); out.srv1Seen[b.binding] = true; anyFound = true; }
             else if (b.binding >= kVkUavBindingBase && b.binding - kVkUavBindingBase < layout.uavCount1) {
-                out.uav1[b.binding - kVkUavBindingBase] = fromVkDescriptorTypeUav(b.type); anyFound = true;
+                out.uav1[b.binding - kVkUavBindingBase] = fromVkDescriptorTypeUav(b.type); out.uav1Seen[b.binding - kVkUavBindingBase] = true; anyFound = true;
             }
         }
     }
@@ -1362,11 +1371,40 @@ VkSampler VulkanResourceFactory::getOrCreateSampler(const SamplerDesc& d) {
 const DescriptorLayoutEntry* VulkanResourceFactory::descriptorLayout(const PipelineLayout& layout, bool mesh) {
     SlotKind srv0[kMaxBindingSlots], uav0[kMaxBindingSlots], srv1[kMaxBindingSlots], uav1[kMaxBindingSlots];
     for (u32 i = 0; i < kMaxBindingSlots; ++i) srv0[i] = uav0[i] = srv1[i] = uav1[i] = SlotKind::Texture2D;
-    if (gPendingKinds.active) {
+
+    // WHAT THE CALLER DECLARED BEATS WHAT THE SHADER HAPPENS TO USE, and this order is the whole
+    // fix for the slot-kind class. Reflection cannot see a slot the shader does not reference --
+    // DXC eliminates it, nothing is found, and the slot silently becomes a Texture2D. That produced
+    // a pipeline declaring SAMPLED_IMAGE at set 0 binding 2 against a binding set holding an
+    // ACCELERATION_STRUCTURE there, reported only at the draw, three steps from the cause.
+    //
+    // A declared layout goes through tableSetLayout() with the SAME kinds BindingSetDesc gives it,
+    // so both sides land on the same cached VkDescriptorSetLayout and are compatible by
+    // construction rather than by agreement.
+    if (layout.slotKindsDeclared) {
+        std::memcpy(srv0, layout.srvKinds,  sizeof(srv0));
+        std::memcpy(uav0, layout.uavKinds,  sizeof(uav0));
+        std::memcpy(srv1, layout.srvKinds1, sizeof(srv1));
+        std::memcpy(uav1, layout.uavKinds1, sizeof(uav1));
+    } else if (gPendingKinds.active) {
         std::memcpy(srv0, gPendingKinds.srv0, sizeof(srv0));
         std::memcpy(uav0, gPendingKinds.uav0, sizeof(uav0));
         std::memcpy(srv1, gPendingKinds.srv1, sizeof(srv1));
         std::memcpy(uav1, gPendingKinds.uav1, sizeof(uav1));
+        // Every slot reflection could not account for is a guess, and a guess that is wrong is only
+        // reported at the draw. Naming them here puts the warning next to the cause.
+        std::string guessed;
+        for (u32 i = 0; i < layout.srvCount && i < kMaxBindingSlots; ++i)
+            if (!gPendingKinds.srv0Seen[i]) { guessed += guessed.empty() ? "t" : ", t"; guessed += std::to_string(i); }
+        for (u32 i = 0; i < layout.srvCount1 && i < kMaxBindingSlots; ++i)
+            if (!gPendingKinds.srv1Seen[i]) { guessed += guessed.empty() ? "t" : ", t"; guessed += std::to_string(layout.srvCount + i); }
+        for (u32 i = 0; i < layout.uavCount && i < kMaxBindingSlots; ++i)
+            if (!gPendingKinds.uav0Seen[i]) { guessed += guessed.empty() ? "u" : ", u"; guessed += std::to_string(i); }
+        if (!guessed.empty())
+            AVER_WARN("[RHI.Vulkan] no shader in this pipeline uses {} -- their kinds are GUESSED as "
+                      "Texture2D. If a binding set declares them as anything else the draw will be "
+                      "rejected; set PipelineLayout::slotKindsDeclared and fill in the kinds",
+                      guessed);
     } else if (layout.srvCount || layout.uavCount || layout.srvCount1 || layout.uavCount1) {
         AVER_WARN("[RHI.Vulkan] descriptorLayout building table shapes with no reflected kinds "
                   "(called outside createGraphicsPipeline/createComputePipeline?); every slot "

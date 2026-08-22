@@ -1,5 +1,13 @@
 #pragma once
-// .ocbeam — breakable, deformable soft-body "cage" (skeletal mesh). See docs/recon/ocbeam.md.
+// .ocbeam — breakable, deformable soft-body "cage": a mass-spring lattice of NODEs, BEAMs and
+// PANELs for a vehicle. See docs/recon/ocbeam.md.
+//
+// NOT A SKELETAL MESH, though this line used to say so in passing and the phrase misleads. A
+// skeletal mesh in this engine is a .ocmesh carrying JOINTS/WEIGHTS streams (kOcMeshHasSkin) plus a
+// .ocskel skeleton -- that is what CSkeletalMesh names and what SkinnedScene refuses to skin
+// without (SkinnedScene.cpp: "has no skin streams"). This format shares none of that path: it is
+// read only by the editor's --beam viewer, and its optional BONE/SKIN/ANIM rows are SKIPPED by the
+// parser below (hasRig merely records that they were present).
 // Engine space: cm, X fwd / Y right / Z up.
 #include "aver/core/Types.hpp"
 #include "aver/assets/AssetId.hpp"

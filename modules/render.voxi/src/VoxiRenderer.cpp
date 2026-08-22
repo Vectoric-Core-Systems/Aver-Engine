@@ -83,6 +83,33 @@ void giSamplers(rhi::PipelineLayout& l) {
     l.samplerCount = kMaterialSamplerSlot + 1;
 }
 
+// What KIND of resource each of table 0's slots holds. Declared once, here, and read by both
+// giLayout() (for every pipeline) and createVoxelVolume()'s BindingSetDesc (for the set those
+// pipelines bind). Vulkan types every binding in a set LAYOUT and refuses to bind a set whose types
+// differ from the pipeline's, so these two had to agree -- and until this function existed the
+// pipeline side did not declare them at all: the backend reflected them out of the shaders, which
+// cannot see a slot no shader uses. t2, the TLAS, is exactly that slot. See PipelineLayout's own
+// comment on slotKindsDeclared.
+void giTableKinds(rhi::SlotKind* srv, rhi::SlotKind* uav) {
+    srv[0] = rhi::SlotKind::Texture3D;              // t0 volume, whole chain
+    srv[1] = rhi::SlotKind::Texture2D;              // t1 shadow map
+    srv[2] = rhi::SlotKind::AccelerationStructure;  // t2 TLAS, filled once one exists
+    // Null-filled until the table exists. Tier 1 requires a valid descriptor of the right KIND in
+    // every declared slot, so these must be declared as structured buffers even while empty.
+    srv[3] = rhi::SlotKind::StructuredBuffer;       // t3 flat vertices
+    srv[4] = rhi::SlotKind::StructuredBuffer;       // t4 flat indices
+    srv[5] = rhi::SlotKind::StructuredBuffer;       // t5 per-instance records
+    srv[6] = rhi::SlotKind::Texture2D;              // t6 ray-traced shadow history (read)
+    srv[7] = rhi::SlotKind::Texture2D;              // t7 ray-traced reflection history (read)
+    srv[8] = rhi::SlotKind::Texture2D;              // t8 GI-only shadow map
+    uav[0] = rhi::SlotKind::Texture3D;              // u0 volume mip 0
+    uav[1] = rhi::SlotKind::Texture3D;              // u1 injection accumulator
+    uav[2] = rhi::SlotKind::Texture2D;              // u2 ray-traced shadow history (write)
+    uav[3] = rhi::SlotKind::Texture2D;              // u3 ray-traced reflection history (write)
+    static_assert(kGiSrvCount == 9 && kGiUavCount == 4,
+                  "giTableKinds fills exactly kGiSrvCount/kGiUavCount slots; widen it too");
+}
+
 // Returns the pipeline layout every Voxi raster pipeline declares.
 rhi::PipelineLayout giLayout() {
     rhi::PipelineLayout l{};
@@ -107,6 +134,11 @@ rhi::PipelineLayout giLayout() {
     l.srvCount1 = pbr::kMaterialSrvCount;
     l.constantDwords[rhi::kObjectConstantRegister] = rhi::kObjectConstantDwords;
     giSamplers(l);
+    // Table 1 is the material's textures, every one an ordinary Texture2D, which is SlotKind's
+    // default -- so only table 0 needs filling in. Declaring them at all is what stops the backend
+    // from reflecting, and reflecting is what got t2 wrong.
+    l.slotKindsDeclared = true;
+    giTableKinds(l.srvKinds, l.uavKinds);
     return l;
 }
 
@@ -1747,21 +1779,9 @@ bool VoxiRenderer::createVoxelVolume(u32 resolution) {
     // nothing checked agreed, and is now the same two constants both sites read.
     bd.srvCount = kGiSrvCount;
     bd.uavCount = kGiUavCount;
-    bd.srvKinds[0] = rhi::SlotKind::Texture3D;              // t0 volume, whole chain
-    bd.srvKinds[1] = rhi::SlotKind::Texture2D;              // t1 shadow map
-    bd.srvKinds[2] = rhi::SlotKind::AccelerationStructure;  // t2 TLAS, filled once one exists
-    // Null-filled until the table exists. Tier 1 requires a valid descriptor of the right KIND in
-    // every declared slot, so these must be declared as structured buffers even while empty.
-    bd.srvKinds[3] = rhi::SlotKind::StructuredBuffer;       // t3 flat vertices
-    bd.srvKinds[4] = rhi::SlotKind::StructuredBuffer;       // t4 flat indices
-    bd.srvKinds[5] = rhi::SlotKind::StructuredBuffer;       // t5 per-instance records
-    bd.srvKinds[6] = rhi::SlotKind::Texture2D;              // t6 ray-traced shadow history (read)
-    bd.srvKinds[7] = rhi::SlotKind::Texture2D;              // t7 ray-traced reflection history (read)
-    bd.srvKinds[8] = rhi::SlotKind::Texture2D;              // t8 GI-only shadow map
-    bd.uavKinds[0] = rhi::SlotKind::Texture3D;              // u0 volume mip 0
-    bd.uavKinds[1] = rhi::SlotKind::Texture3D;              // u1 injection accumulator
-    bd.uavKinds[2] = rhi::SlotKind::Texture2D;              // u2 ray-traced shadow history (write)
-    bd.uavKinds[3] = rhi::SlotKind::Texture2D;              // u3 ray-traced reflection history (write)
+    // The SAME kinds giLayout() declares -- one function, so the set and the pipelines that bind it
+    // cannot drift apart. They were two hand-kept copies until giTableKinds() existed.
+    giTableKinds(bd.srvKinds, bd.uavKinds);
     bindings_ = res_->createBindingSet(bd);
     if (!bindings_) { AVER_ERROR("[Voxi] main binding set could not be created"); return false; }
     res_->setSrv(bindings_, 0, voxelTex_, rhi::kAllMips);

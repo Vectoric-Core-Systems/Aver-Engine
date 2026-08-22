@@ -9232,6 +9232,9 @@ private:
             {".ocbt",       {ICON_TREE,       IM_COL32( 63, 126, 255, 255), "Behaviour Tree"}},
             {".ocgraph",    {ICON_LINK,       IM_COL32( 63, 126, 255, 255), "Graph"}},
             {".ocnav",      {ICON_TERRAIN,    IM_COL32(150, 200, 120, 255), "Navigation"}},
+            // A soft-body vehicle cage (nodes/beams/panels), NOT a skeletal mesh -- see OcBeam.hpp.
+            // Unreal has no equivalent, so this borrows the destruction family's amber-red.
+            {".ocbeam",     {ICON_TREE,       IM_COL32(214, 122,  64, 255), "Soft-Body Cage"}},
             {".hlsl",       {ICON_BUILD,      IM_COL32(140, 200, 220, 255), "Shader"}},
             {".png",        {ICON_VISIBILITY, IM_COL32(192,  64,  64, 255), "Texture"}},
             {".jpg",        {ICON_VISIBILITY, IM_COL32(192,  64,  64, 255), "Texture"}},
