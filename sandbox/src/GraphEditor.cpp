@@ -76,6 +76,36 @@ bool containsWhitespace(const std::string& s) {
     return s.find_first_of(" \t\r\n\v\f") != std::string::npos;
 }
 
+// The name a node shows on its header.
+//
+// For all 150 catalog types but two this is the catalog's own displayName. The exception is the
+// pair that READ AND WRITE A VARIABLE. A GetVar node used to draw the words "Get Var", so a wall of
+// them was unreadable -- which variable each one touched was discoverable ONLY by selecting it and
+// reading the properties panel. Unreal puts the variable's NAME on the node instead, and that is
+// what this returns.
+//
+// HEADLESS, and above the ImGui guard on purpose: the LAYOUT pass sizes a node from its title with
+// no ImGui headers in the translation unit, and a node as wide as "Get Var" would clip a variable
+// called "PlayerSpeed". nodeHeaderColor() below is the ImGui-typed other half.
+std::string nodeTitle(const fmt::OcGraphNode& n, const GraphNodeDesc* desc,
+                      const std::vector<fmt::OcGraphVariable>& vars) {
+    const std::string fallback = desc ? desc->displayName : n.type;
+    if (n.type != "GetVar" && n.type != "SetVar") return fallback;
+
+    const GraphNodeAttribute a = getNodeAttribute(n, "var");
+    // Bound to nothing yet: a freshly dropped node carries no var= token, and "Get Var" is exactly
+    // what it is until someone picks one.
+    if (!a.found || a.value.empty()) return fallback;
+
+    // SET keeps its prefix. Unreal titles its setter "SET", and a read and a write of the same
+    // variable drawn identically would be a genuinely dangerous thing to misread.
+    const std::string shown = (n.type == "SetVar") ? ("SET " + a.value) : a.value;
+    for (const fmt::OcGraphVariable& v : vars)
+        if (v.name == a.value) return shown;
+    // Names a variable this graph does not declare -- say so here rather than only in the panel.
+    return shown + "  [?]";
+}
+
 // Everything below is ImGui-typed (ImVec2/ImU32) and used only from draw(), which is itself entirely
 // behind `#if AVER_WITH_IMGUI`. Guarding these too is what lets GraphEditorLoadSaveTest compile this
 // translation unit with no ImGui headers and no ImGui context -- see that test's own file comment.
@@ -148,6 +178,12 @@ ImU32 headerColorForCategory(const std::string& category) {
     return IM_COL32( 91, 141, 239, 255);                        // Aver steel -- math, vector, convert, logic, const
 }
 
+// The one highlight colour: selected node border, selected link, selected comment border, and the
+// ring on a pin that a link ends at. It was this literal written out at each of those four sites.
+// Amber rather than Unreal's white so it cannot be confused with an exec wire, and dimmer than the
+// (255,220,90) it replaces for the same reason the pin palette came down.
+constexpr ImU32 kSelectionCol = IM_COL32(226, 188, 96, 255);
+
 ImU32 colorForType(const std::string& type) {
     std::string t = type;
     for (char& c : t) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -157,12 +193,38 @@ ImU32 colorForType(const std::string& type) {
     // without looking at a legend, and spending that recognition to be visually distinctive
     // would cost every one of those readers something and buy nothing back. The node chrome
     // around them (headerColorForCategory below) is where this engine looks like itself.
-    if (t == "float")  return IM_COL32( 91, 255,  15, 255);  // yellow-green
-    if (t == "int")    return IM_COL32( 14, 242, 183, 255);  // turquoise
-    if (t == "bool")   return IM_COL32(200,  40,  40, 255);  // red
-    if (t == "string") return IM_COL32(255,   0, 168, 255);  // magenta
-    if (t == "exec")   return IM_COL32(245, 245, 245, 255);  // white -- see above
-    return IM_COL32(190, 190, 190, 255);
+    //
+    // TONED DOWN FROM UNREAL'S LITERAL VALUES, which are near-fullbright: float was (91,255,15) and
+    // string (255,0,168). At Blueprint's wire thickness on Blueprint's background that reads fine;
+    // here, a graph of any size turned into a field of glare that pulled the eye away from the
+    // nodes -- the thing you are actually reading. These sit at roughly 75-80% value and noticeably
+    // lower saturation while keeping the HUE each type is recognised by, which is the part that
+    // carries the meaning. Someone arriving from Blueprint still reads green-as-float at a glance.
+    if (t == "float")  return IM_COL32(126, 199,  76, 255);  // yellow-green
+    if (t == "int")    return IM_COL32( 72, 181, 152, 255);  // turquoise
+    if (t == "bool")   return IM_COL32(176,  72,  72, 255);  // red
+    if (t == "string") return IM_COL32(186,  92, 152, 255);  // magenta
+    if (t == "exec")   return IM_COL32(206, 210, 216, 255);  // white -- see above
+    return IM_COL32(150, 154, 160, 255);
+}
+
+// The colour a node's header is drawn in: its category's, except for the two variable nodes, which
+// take the colour of their VARIABLE'S TYPE -- the same colour language the pins already speak. See
+// nodeTitle() above for the other half and for why they are split.
+//
+// THE TYPE COMES FROM THE VARIABLE, NOT FROM THE NODE'S OWN PIN, and that is load-bearing.
+// retypeVariable() deliberately does not rewrite the pins of nodes already placed ("DELIBERATELY
+// DOES NOT TOUCH ANY NODE'S PINS"), so a node's value pin can outlive a retype and still say
+// "float" when the variable is now an int. Reading the declaration keeps the header honest.
+ImU32 nodeHeaderColor(const fmt::OcGraphNode& n, const GraphNodeDesc* desc,
+                      const std::vector<fmt::OcGraphVariable>& vars) {
+    const ImU32 categoryCol = headerColorForCategory(desc ? desc->category : std::string());
+    if (n.type != "GetVar" && n.type != "SetVar") return categoryCol;
+    const GraphNodeAttribute a = getNodeAttribute(n, "var");
+    if (!a.found || a.value.empty()) return categoryCol;   // unbound: still a generic Var node
+    for (const fmt::OcGraphVariable& v : vars)
+        if (v.name == a.value) return colorForType(v.type);
+    return categoryCol;                                     // undeclared: do not fake a type colour
 }
 
 // Whether a pin's declared type is "exec" -- the ONE place this string comparison lives, so the
@@ -1427,7 +1489,9 @@ void GraphEditor::recomputeLayouts(float dpi) {
         auto it = displayPos_.find(n.id);
         if (it != displayPos_.end()) { display.x = it->second.x; display.y = it->second.y; }
         const GraphNodeDesc* desc = findGraphNodeDesc(n.type);
-        const std::string title = desc ? desc->displayName : n.type;
+        // The SAME string the header will draw -- a variable node is as wide as its variable's name,
+        // and computing the width from "Get Var" while drawing "PlayerSpeed" would clip it.
+        const std::string title = nodeTitle(n, desc, graph_.variables);
         // `dpi` only -- NOT dpi*zoom. Canvas-space geometry is computed once at a fixed logical
         // scale (DPI only); CanvasTransform::zoom is applied uniformly afterwards, at the point
         // canvas coordinates are converted to screen coordinates (canvasToScreen) and back
@@ -1960,7 +2024,7 @@ void GraphEditor::drawEventGraph(float dpi) {
         dl->AddRectFilled(pMin, pMax, IM_COL32(r, g, b, 40), 4.0f * dpi);
         dl->AddRectFilled(pMin, ImVec2(pMax.x, pMin.y + barH), IM_COL32(r, g, b, 200), 4.0f * dpi,
                           ImDrawFlags_RoundCornersTop);
-        dl->AddRect(pMin, pMax, sel ? IM_COL32(255, 220, 90, 255) : IM_COL32(r, g, b, 220), 4.0f * dpi, 0,
+        dl->AddRect(pMin, pMax, sel ? kSelectionCol : IM_COL32(r, g, b, 220), 4.0f * dpi, 0,
                     (sel ? 2.5f : 1.5f) * dpi);
         // The resize grip, drawn as two short strokes in the bottom-right corner. It is only ever
         // drawn -- the hit test that matches it lives in commentAtCanvas, in canvas units, so the two
@@ -1992,7 +2056,7 @@ void GraphEditor::drawEventGraph(float dpi) {
         if (!sp || !dp) continue; // a link to a pin this file's PIN records never declared; draw nothing rather than guess
         const GraphBezier b = linkBezier(sp->pos, dp->pos);
         const bool selected = (static_cast<int>(i) == selectedLink_);
-        const ImU32 col = selected ? IM_COL32(255, 220, 90, 255) : colorForType(sp->type);
+        const ImU32 col = selected ? kSelectionCol : colorForType(sp->type);
         // Exec wires are drawn HEAVIER than data wires. In a graph with both, the exec chain is
         // the spine -- the order things happen in -- and everything else is an argument being
         // fetched. Weight says which is which from across the canvas, at a distance where the
@@ -2015,7 +2079,8 @@ void GraphEditor::drawEventGraph(float dpi) {
         const fmt::OcGraphNode* srcNode = nullptr;
         for (const auto& n : graph_.nodes) if (n.id == nl.nodeId) { srcNode = &n; break; }
         const GraphNodeDesc* desc = srcNode ? findGraphNodeDesc(srcNode->type) : nullptr;
-        const ImU32 headerCol = headerColorForCategory(desc ? desc->category : std::string());
+        const ImU32 headerCol = srcNode ? nodeHeaderColor(*srcNode, desc, graph_.variables)
+                                        : headerColorForCategory(std::string());
 
         // A soft drop shadow, offset down-right, before anything else in the node. It is what makes
         // a node read as sitting ABOVE the wire layer instead of being punched out of it -- worth
@@ -2039,9 +2104,9 @@ void GraphEditor::drawEventGraph(float dpi) {
         // reading as one block on the categories whose colour is already close to the body.
         dl->AddLine(ImVec2(pMin.x, pMin.y + headerH), ImVec2(pMax.x, pMin.y + headerH),
                     IM_COL32(0, 0, 0, 90), 1.0f * dpi);
-        dl->AddRect(pMin, pMax, selected ? IM_COL32(255, 220, 90, 255) : IM_COL32(12, 14, 18, 255), 5.0f * dpi, 0, selected ? 2.5f * dpi : 1.0f * dpi);
+        dl->AddRect(pMin, pMax, selected ? kSelectionCol : IM_COL32(12, 14, 18, 255), 5.0f * dpi, 0, selected ? 2.5f * dpi : 1.0f * dpi);
         if (showTitles) {
-            const std::string label = desc ? desc->displayName : (srcNode ? srcNode->type : nl.nodeId);
+            const std::string label = srcNode ? nodeTitle(*srcNode, desc, graph_.variables) : nl.nodeId;
             dl->PushClipRect(pMin, ImVec2(pMax.x, pMin.y + headerH), true);
             dl->AddText(font, scaledFontPx, ImVec2(pMin.x + 6.0f * dpi * view_.zoom, pMin.y + 3.0f * dpi * view_.zoom),
                          IM_COL32(255, 255, 255, 255), label.c_str());
@@ -2096,7 +2161,7 @@ void GraphEditor::drawEventGraph(float dpi) {
                 // filled version's edge does and a pin does not appear to grow when it is wired.
                 dl->AddCircle(dot, r - 1.0f * dpi, pinCol, 0, 2.0f * dpi);
             }
-            if (isLinkEnd) dl->AddCircle(dot, r + 2.0f * dpi, IM_COL32(255, 220, 90, 255), 0, 2.0f * dpi);
+            if (isLinkEnd) dl->AddCircle(dot, r + 2.0f * dpi, kSelectionCol, 0, 2.0f * dpi);
             if (!showPinText) continue;
             // Measured at the SCALED size, not the UI size, or an output label would be positioned
             // from a width it no longer has and would drift off its own node as you zoom out.

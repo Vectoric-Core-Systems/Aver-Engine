@@ -33,18 +33,28 @@ CLASS AN_FPTarget Character mesh=Meshes/sphere.ocmesh material=M_Target
 PARAM entity int
 PARAM deltaTime float
 
-NODE ent Param param=entity
-NODE dt Param param=deltaTime
+# ---- CANVAS REGIONS ------------------------------------------------------------------------
+# Three entry points, three boxes. OnStart, OnHit and OnTick are independent chains that share
+# only the score VAR, and stacking them in one column is what hid that. No wiring changed.
+#
+# COMMENT id x y w h r g b text...
+COMMENT inputs 0 0 400 308 58 64 78 INPUTS  -  entity, deltaTime
+COMMENT settle 0 458 1120 600 52 74 96 ON START  -  scale up, settle once
+COMMENT score 0 1208 1120 394 86 58 62 ON HIT  -  this target owns its own score
+COMMENT report 0 1752 400 308 58 64 78 ON TICK  -  OUT the score
+
+NODE ent Param 40 110 param=entity
+NODE dt Param 40 196 param=deltaTime
 
 VAR score float 0
 
 ENTRY seed OnStart
-NODE seed OnStart
+NODE seed OnStart 40 568
 
 # ---- make the capsule, so a ray can find this at all ------------------------------------------------
-NODE zero ConstFloat value=0.0
+NODE zero ConstFloat 40 654 value=0.0
 
-NODE settle CharacterMove
+NODE settle CharacterMove 400 568
 LINK seed.exec settle.exec
 LINK ent.value settle.entity
 LINK dt.value settle.dt
@@ -76,11 +86,11 @@ LINK zero.value settle.pitchDelta
 # where a side-effecting node with no incoming exec edge is refused rather than pulled. Reaching it
 # from OnStart therefore means declaring every one of its seven pins by hand -- any PIN record at all
 # suppresses ALL defaults for that node, so miss one and it is simply gone, not defaulted.
-NODE sx ConstFloat value=25.0
-NODE sy ConstFloat value=25.0
-NODE sz ConstFloat value=25.0
+NODE sx ConstFloat 400 774 value=25.0
+NODE sy ConstFloat 400 860 value=25.0
+NODE sz ConstFloat 400 946 value=25.0
 
-NODE grow SetFieldVec3 field=CLocal.scale
+NODE grow SetFieldVec3 760 568 field=CLocal.scale
 PIN grow exec in exec
 PIN grow entity in int
 PIN grow x in float
@@ -98,16 +108,16 @@ LINK sz.value grow.z
 # An ENTRY is not a node type: it names which node begins a chain. OnHit differs from OnStart and
 # OnTick only in that nobody calls it for you -- another graph's FireEvent does.
 ENTRY hit OnHit
-NODE hit OnHit
+NODE hit OnHit 40 1318
 
-NODE one ConstFloat value=1.0
+NODE one ConstFloat 40 1404 value=1.0
 
-NODE prev GetVar var=score
-NODE next Add
+NODE prev GetVar 40 1490 var=score
+NODE next Add 400 1318
 LINK prev.value next.a
 LINK one.value next.b
 
-NODE store SetVar var=score
+NODE store SetVar 760 1318 var=score
 LINK hit.exec store.exec
 LINK next.result store.value
 
@@ -115,7 +125,7 @@ LINK next.result store.value
 # A SEPARATE GetVar from `prev`: pulling `prev` here would report the score as it stood BEFORE this
 # tick's hit was stored -- an off-by-one that reads as a lost point.
 ENTRY tick OnTick
-NODE tick OnTick
-NODE report GetVar var=score
+NODE tick OnTick 40 1862
+NODE report GetVar 40 1948 var=score
 
 OUT report value
