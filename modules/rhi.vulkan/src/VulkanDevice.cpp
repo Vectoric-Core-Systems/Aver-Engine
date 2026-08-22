@@ -316,8 +316,28 @@ VkImageMemoryBarrier2 imgBarrier(VkImage image, VkImageAspectFlags aspect, VkIma
 }
 void pipelineBarrier(const VulkanApi& api, VkCommandBuffer cmd, const VkImageMemoryBarrier2* imgs, u32 imgCount,
                      const VkBufferMemoryBarrier2* bufs = nullptr, u32 bufCount = 0) {
+    // A BARRIER AGAINST A RESOURCE THAT DOES NOT EXIST IS DROPPED HERE, at the one choke point every
+    // device-side barrier goes through, rather than reaching the driver as
+    //     "pImageMemoryBarriers[0].image Invalid VkImage Object 0x0"
+    // -- a report that names the barrier and tells you nothing about which of this file's dozen-odd
+    // render targets was never created. Every caller builds its array from members that are null
+    // until the target they name exists (msaaColor_, sceneResolved_, bloom chain, presentHdrTex_,
+    // ...), and several already test for that individually; this makes the remaining ones harmless
+    // and, more usefully, LOUD about which slot was empty.
+    VkImageMemoryBarrier2 live[16];
+    u32 liveCount = 0;
+    for (u32 i = 0; i < imgCount; ++i) {
+        if (imgs[i].image == VK_NULL_HANDLE) {
+            AVER_WARN("[RHI.Vulkan] dropping an image barrier at index {} of {}: its VkImage is null, "
+                      "so the target it names was never created", i, imgCount);
+            continue;
+        }
+        if (liveCount < 16) live[liveCount++] = imgs[i];
+    }
+    if (liveCount == 0 && bufCount == 0) return;   // nothing left to say
+
     VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-    dep.imageMemoryBarrierCount = imgCount; dep.pImageMemoryBarriers = imgs;
+    dep.imageMemoryBarrierCount = liveCount; dep.pImageMemoryBarriers = liveCount ? live : nullptr;
     dep.bufferMemoryBarrierCount = bufCount; dep.pBufferMemoryBarriers = bufs;
     api.CmdPipelineBarrier2(cmd, &dep);
 }
@@ -2931,8 +2951,13 @@ bool VulkanDevice::createPostTargets() {
                 if (bloom) defs += "AVER_POST_BLOOM=1;";
                 if (autoExp) defs += "AVER_POST_AUTOEXPOSURE=1;";
                 std::vector<u32> psSpv;
+                // kPostBinds, like every other post compile. This ONE call was missing it, so the
+                // composite pass alone had its b0/t0/s0 left in set 0 -- "variable AverPost ... the
+                // binding was not declared in pSetLayouts[0]" -- while its siblings, built from the
+                // same source against the same postPipelineLayout_, were correctly in set 2.
                 ok = vulkanShaderCompiler().compile(src, "PSComposite", ShaderStage::Pixel, 60,
-                                                    defs.empty() ? nullptr : defs.c_str(), psSpv);
+                                                    defs.empty() ? nullptr : defs.c_str(), psSpv,
+                                                    kPostBinds, kPostBindCount);
                 if (!ok) break;
                 VkShaderModule psMod{};
                 VkShaderModuleCreateInfo pmci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};

@@ -780,6 +780,16 @@ void VulkanRenderContext::textureBarrier(TextureHandle h, ResourceState from, Re
     RhiTexture* t = res_->texture(h);
     VkCommandBuffer cb = cmd();
     if (!t || !cb) { AVER_ERROR("[RHI.Vulkan] textureBarrier with an invalid handle"); return; }
+    // A RECORD CAN EXIST WITHOUT A RESOURCE, and this guard is what stops that becoming a barrier
+    // against VK_NULL_HANDLE -- "pImageMemoryBarriers[0].image Invalid VkImage Object 0x0", which
+    // the layer reports at the barrier and not at whatever left the image null. Naming the texture
+    // here is the difference between a one-line fix and a hunt.
+    if (!t->image) {
+        AVER_ERROR("[RHI.Vulkan] textureBarrier on '{}' whose VkImage is null -- the texture record "
+                   "exists but its resource does not; the barrier is skipped",
+                   t->debugName.empty() ? "<unnamed>" : t->debugName);
+        return;
+    }
 #if AVER_RHI_TRACK_STATE
     trackTextureBarrier(*t, from, to, subresource);
 #endif
@@ -836,6 +846,11 @@ void VulkanRenderContext::uavBarrierTexture(TextureHandle h) {
     RhiTexture* t = res_->texture(h);
     VkCommandBuffer cb = cmd();
     if (!t || !cb) return;
+    if (!t->image) {
+        AVER_ERROR("[RHI.Vulkan] uavBarrierTexture on '{}' whose VkImage is null",
+                   t->debugName.empty() ? "<unnamed>" : t->debugName);
+        return;
+    }
     VkImageMemoryBarrier2 b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
     b.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT;
     b.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
