@@ -474,6 +474,7 @@ bool loadDeviceApi(VulkanApi& api, VkDevice device, const std::vector<std::strin
     AVER_VK_DEV(CmdPipelineBarrier2);
     AVER_VK_DEV(CmdCopyBuffer);
     AVER_VK_DEV(CmdCopyBufferToImage);
+    AVER_VK_DEV(CmdCopyImage);
     AVER_VK_DEV(CmdCopyImageToBuffer);
     AVER_VK_DEV(CmdClearColorImage);
     AVER_VK_DEV(CmdBeginRendering);

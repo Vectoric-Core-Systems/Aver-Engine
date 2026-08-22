@@ -262,6 +262,7 @@ struct VulkanApi {
     PFN_vkCmdPipelineBarrier2 CmdPipelineBarrier2 = nullptr;
     PFN_vkCmdCopyBuffer CmdCopyBuffer = nullptr;
     PFN_vkCmdCopyBufferToImage CmdCopyBufferToImage = nullptr;
+    PFN_vkCmdCopyImage CmdCopyImage = nullptr;
     PFN_vkCmdCopyImageToBuffer CmdCopyImageToBuffer = nullptr;
     PFN_vkCmdClearColorImage CmdClearColorImage = nullptr;
     PFN_vkCmdBeginRendering CmdBeginRendering = nullptr;
@@ -1519,10 +1520,28 @@ private:
     // finished (a fence wait, not just a barrier -- the staging buffer is freed right after).
     bool uploadInitialData(VkImage image, const VkImageCreateInfo& ci, const TextureDesc& d, u32 mips);
     // Writes a valid, dimension-matched descriptor into every slot a BindingSetDesc declared but
-    // the caller never wrote -- Resource Binding Tier 1's requirement, ported by REPLICATING the
-    // null-fill pattern rather than relying on VK_EXT_descriptor_indexing's
-    // descriptorBindingPartiallyBound (which this backend does not assume the driver has -- see the
-    // contract's section 6.4 for why replication, not a feature bit, is the safe default here).
+    // the caller never wrote.
+    //
+    // WHY IT STAYS: because the engine null-fills UNCONDITIONALLY as a self-imposed policy, not
+    // because any device requires it. docs/VULKAN.md's own audit says so of the D3D12 original --
+    // "nullFill never consults caps_.resourceBindingTier ... cite Tier 1 as the origin, not the
+    // condition" -- and replicating that here keeps the two backends behaving identically, which is
+    // worth more than the descriptors it saves.
+    //
+    // WHAT THIS COMMENT USED TO SAY, AND WHY IT IS NO LONGER TRUE: it read "rather than relying on
+    // VK_EXT_descriptor_indexing's descriptorBindingPartiallyBound (which this backend does not
+    // assume the driver has)". That reasoning has expired. descriptorBindingPartiallyBound,
+    // runtimeDescriptorArray, shaderSampledImageArrayNonUniformIndexing and descriptorIndexing
+    // itself are all fields of VkPhysicalDeviceVulkan12Features -- CORE since Vulkan 1.2, no
+    // extension to hope for -- and this backend already requires VK_API_VERSION_1_3
+    // (VulkanCommon.hpp:140) and already hard-requires four bits from that same family with no
+    // fallback path at all: bufferDeviceAddress, timelineSemaphore, dynamicRendering and
+    // synchronization2 (queryRequiredFeatures, VulkanDevice.cpp:596-603).
+    //
+    // So a bindless texture array here is a FEATURE-BIT QUERY, not an extension gamble, and it is
+    // not blocked by anything this comment described. The engine's FL 11_0 minimum spec is a
+    // D3D12 statement (docs/MINIMUM_SPECS.md); the hardware it protects cannot reach Vulkan 1.3 and
+    // therefore never runs this backend at all.
     void nullFill(const RhiBindingSet& s);
 
     VulkanDevice* dev_;
