@@ -119,6 +119,13 @@ void PathTracer::shutdown() {
         if (cs_)          res_->destroyShader(cs_);
     }
     blasCache_.clear();
+    // CLEARED WITH THE BUFFERS IT DESCRIBES. Leaving it populated would let the next prepare() after
+    // a re-init match its mesh set against a table whose verts_/indices_ were just destroyed, and
+    // reuse two freed handles -- the exact hazard the geoMeshes_/verts_ pair has to be kept in step
+    // to avoid, which is why resetScene() clears NEITHER and this clears BOTH.
+    geoMeshes_.clear();
+    geoVerts_ = geoIndices_ = 0;
+    geometryReused_ = false;
     verts_ = indices_ = instanceBuf_ = 0;
     pipeline_ = 0;
     cs_ = 0;
@@ -195,17 +202,46 @@ bool PathTracer::prepare() {
     }
     if (totalVerts_ == 0 || totalIndices_ == 0) return false;
 
-    rhi::BufferDesc vd;
-    vd.bytes = static_cast<u64>(totalVerts_) * sizeof(rhi::MeshVertex);
-    vd.kind  = rhi::BufferKind::Default;
-    vd.debugName = "pt vertices";
-    verts_ = res_->createBuffer(vd);
+    // THE SAME MESHES IN THE SAME ORDER means the table this call just laid out is byte-for-byte the
+    // one verts_/indices_ already hold -- every firstVertex/firstIndex above was recomputed from the
+    // same walk -- so both the allocation and buildScenes' copy pass can be skipped entirely. See
+    // geoMeshes_ for why comparing handles is sufficient to know the geometry itself is unchanged.
+    std::vector<rhi::MeshHandle> meshOrder;
+    meshOrder.reserve(meshRows_.size());
+    for (const MeshRow& row : meshRows_) meshOrder.push_back(row.mesh);
+    // BOTH the mesh set AND the totals it implies. The set alone is what the argument above rests
+    // on -- same meshes in the same order means the same offsets -- but the totals are what the SRV
+    // is actually declared with (setSrvBuffer, in createTarget), so they are checked independently
+    // rather than assumed to follow. A mismatch here would mean declaring more vertices than the
+    // buffer holds, which is a GPU out-of-bounds read rather than a wrong picture; falling back to a
+    // rebuild costs 4ms and cannot do that.
+    geometryReused_ = verts_ && indices_ && meshOrder == geoMeshes_ &&
+                      totalVerts_ == geoVerts_ && totalIndices_ == geoIndices_;
 
-    rhi::BufferDesc id;
-    id.bytes = static_cast<u64>(totalIndices_) * sizeof(u32);
-    id.kind  = rhi::BufferKind::Default;
-    id.debugName = "pt indices";
-    indices_ = res_->createBuffer(id);
+    if (!geometryReused_) {
+        // A DIFFERENT mesh set: the offsets have moved, so whatever the old buffers hold is wrong.
+        // Released here rather than in resetScene(), which now deliberately keeps them -- this is
+        // the one place that knows whether they are still correct.
+        if (verts_)   res_->destroyBuffer(verts_);
+        if (indices_) res_->destroyBuffer(indices_);
+        verts_ = indices_ = 0;
+
+        rhi::BufferDesc vd;
+        vd.bytes = static_cast<u64>(totalVerts_) * sizeof(rhi::MeshVertex);
+        vd.kind  = rhi::BufferKind::Default;
+        vd.debugName = "pt vertices";
+        verts_ = res_->createBuffer(vd);
+
+        rhi::BufferDesc id;
+        id.bytes = static_cast<u64>(totalIndices_) * sizeof(u32);
+        id.kind  = rhi::BufferKind::Default;
+        id.debugName = "pt indices";
+        indices_ = res_->createBuffer(id);
+
+        geoMeshes_  = std::move(meshOrder);
+        geoVerts_   = totalVerts_;
+        geoIndices_ = totalIndices_;
+    }
 
     // Upload rather than Default: it is written once from the CPU and never by the GPU, so there is
     // no copy to schedule and no state to walk.
@@ -249,9 +285,10 @@ bool PathTracer::prepare() {
     // find out from the log rather than from the frame rate.
     const auto tBlas = std::chrono::steady_clock::now();
     AVER_INFO("[PT] flat table: {} surface(s) over {} distinct mesh(es), {} vertices, {} indices"
-              " | buffers {:.1f}ms, createBlas {:.1f}ms ({} built, {} reused)",
+              " | geometry {}, buffers {:.1f}ms, createBlas {:.1f}ms ({} built, {} reused)",
               static_cast<u32>(surfaces_.size()), static_cast<u32>(meshRows_.size()),
               totalVerts_, totalIndices_,
+              geometryReused_ ? "REUSED" : "rebuilt",
               std::chrono::duration<f64, std::milli>(tBuf - tPrep0).count(),
               std::chrono::duration<f64, std::milli>(tBlas - tBuf).count(),
               static_cast<u32>(meshRows_.size()) - reused, reused);
@@ -276,21 +313,32 @@ bool PathTracer::buildScenes(rhi::IRenderContext& ctx) {
     // the RHI tracks buffer state to catch exactly this class of mistake and does not model
     // promotion, so an implicit promotion followed by an explicit walk-back is a barrier claiming a
     // state the tracker never saw it enter.
-    ctx.bufferBarrier(verts_,   rhi::ResourceState::Common, rhi::ResourceState::CopyDest);
-    ctx.bufferBarrier(indices_, rhi::ResourceState::Common, rhi::ResourceState::CopyDest);
-    // Per DISTINCT MESH, matching the table prepare() laid out. Copying per surface duplicated the
-    // same blob once per instance -- 31.2M vertices where 2M would do.
-    for (const MeshRow& row : meshRows_) {
-        rhi::BufferHandle vb = 0, ib = 0;
-        u32 vc = 0, ic = 0;
-        if (!dev_->meshGeometry(row.mesh, &vb, &ib, &vc, &ic)) { ctx.popMarker(); return false; }
-        ctx.copyBuffer(verts_, vb, static_cast<u64>(vc) * sizeof(rhi::MeshVertex),
-                       static_cast<u64>(row.firstVertex) * sizeof(rhi::MeshVertex), 0);
-        ctx.copyBuffer(indices_, ib, static_cast<u64>(ic) * sizeof(u32),
-                       static_cast<u64>(row.firstIndex) * sizeof(u32), 0);
+    // SKIPPED ENTIRELY when prepare() kept the previous table: the buffers already hold this exact
+    // geometry at these exact offsets, so the copy would write identical bytes over themselves. The
+    // BARRIERS are skipped with it, deliberately -- transitioning a buffer nothing is about to write
+    // would be a barrier claiming a state the RHI's tracker never saw it enter, which is the same
+    // mistake the explicit-transition comment below exists to prevent.
+    if (!geometryReused_) {
+        // BOTH transitions are explicit. D3D12 would promote a Common buffer to CopyDest by itself,
+        // but the RHI tracks buffer state to catch exactly this class of mistake and does not model
+        // promotion, so an implicit promotion followed by an explicit walk-back is a barrier
+        // claiming a state the tracker never saw it enter.
+        ctx.bufferBarrier(verts_,   rhi::ResourceState::Common, rhi::ResourceState::CopyDest);
+        ctx.bufferBarrier(indices_, rhi::ResourceState::Common, rhi::ResourceState::CopyDest);
+        // Per DISTINCT MESH, matching the table prepare() laid out. Copying per surface duplicated
+        // the same blob once per instance -- 31.2M vertices where 2M would do.
+        for (const MeshRow& row : meshRows_) {
+            rhi::BufferHandle vb = 0, ib = 0;
+            u32 vc = 0, ic = 0;
+            if (!dev_->meshGeometry(row.mesh, &vb, &ib, &vc, &ic)) { ctx.popMarker(); return false; }
+            ctx.copyBuffer(verts_, vb, static_cast<u64>(vc) * sizeof(rhi::MeshVertex),
+                           static_cast<u64>(row.firstVertex) * sizeof(rhi::MeshVertex), 0);
+            ctx.copyBuffer(indices_, ib, static_cast<u64>(ic) * sizeof(u32),
+                           static_cast<u64>(row.firstIndex) * sizeof(u32), 0);
+        }
+        ctx.bufferBarrier(verts_,   rhi::ResourceState::CopyDest, rhi::ResourceState::Common);
+        ctx.bufferBarrier(indices_, rhi::ResourceState::CopyDest, rhi::ResourceState::Common);
     }
-    ctx.bufferBarrier(verts_,   rhi::ResourceState::CopyDest, rhi::ResourceState::Common);
-    ctx.bufferBarrier(indices_, rhi::ResourceState::CopyDest, rhi::ResourceState::Common);
 
     for (const Scene& s : scenes_) {
         std::vector<rhi::TlasInstance> inst;
@@ -364,15 +412,18 @@ bool PathTracer::createTarget(u32 scene, u32 width, u32 height, PtTarget& out) {
 
 void PathTracer::resetScene() {
     if (res_) {
-        if (verts_)       res_->destroyBuffer(verts_);
-        if (indices_)     res_->destroyBuffer(indices_);
+        // ONLY the per-surface buffer. verts_/indices_ are NOT released here any more: they belong
+        // to the geometry table keyed by geoMeshes_, which outlives a snapshot for the same reason
+        // blasCache_ does (see both of their comments). prepare() is the one place that can tell
+        // whether they are still correct, and it releases them itself when the mesh set has moved;
+        // shutdown() frees whatever is left. instanceBuf_ genuinely IS per snapshot -- it is one
+        // record per SURFACE, and the surface set is exactly what changes.
         if (instanceBuf_) res_->destroyBuffer(instanceBuf_);
-        // BLAS handles are NOT released here any more: they belong to blasCache_, which outlives a
-        // snapshot on purpose (see its own comment). shutdown() is what frees them. TLAS handles are
-        // still not released at all -- see this method's own header comment for why that is a known,
-        // accepted leak for the intended caller and not something to work around here.
+        // BLAS handles are NOT released here either, for the same reason.
+        // TLAS handles are still not released at all -- see this method's own header comment for
+        // why that is a known, accepted leak for the intended caller.
     }
-    verts_ = indices_ = instanceBuf_ = 0;
+    instanceBuf_ = 0;
     surfaces_.clear();
     instances_.clear();
     scenes_.clear();

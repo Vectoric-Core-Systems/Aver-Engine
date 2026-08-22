@@ -127,6 +127,12 @@ public:
     // fresh TlasHandle values that may reuse the same small integer scene index with a DIFFERENT
     // underlying acceleration structure.
     //
+    // WHAT IT KEEPS: the cached BLAS handles (blasCache_) and the flat GEOMETRY TABLE
+    // (verts_/indices_, recorded by geoMeshes_) both deliberately survive this call. Between them
+    // they are what makes a re-arm cheap -- see their own comments for the measurements. The next
+    // prepare() decides whether the table is still correct for the new snapshot and rebuilds it
+    // there if not, because this call cannot know: it has not been told the new surfaces yet.
+    //
     // A KNOWN, ACCEPTED COST: the RHI has no destroyTlas (see IResourceFactory -- BLAS has one,
     // TLAS does not), so every TLAS this call discards is NOT released; it leaks for the life of the
     // device. BLAS handles ARE released here, since destroyBlas exists. This is fine for the intended
@@ -211,6 +217,33 @@ private:
     // cache cannot outlive what it describes. Mesh handles are never recycled either (destroyMesh
     // clears the slot and keeps it), so a handle can never come to mean a different mesh.
     std::unordered_map<rhi::MeshHandle, rhi::BlasHandle> blasCache_;
+
+    // THE GEOMETRY TABLE BY MESH SET, SURVIVING resetScene(), and this is the third instalment of
+    // the same measurement the BLAS cache above records. With structures cached, what remained of a
+    // re-arm was the flat table itself: ~158 MB of vertex and index buffer reallocated, and then
+    // every distinct mesh's geometry copied into it on the GPU -- for a mesh set that, measured
+    // across a streaming ElectricDreams capture, went 93 -> 94 -> 94 while the SURFACE count went
+    // 2154 -> 2168 -> 2174. The third re-arm rebuilt the entire table to express six new instances
+    // of meshes it already had.
+    //
+    // What actually changes between snapshots is which INSTANCES are visible. The distinct meshes,
+    // their row order and therefore every firstVertex/firstIndex are usually identical -- and when
+    // they are, verts_/indices_ already hold exactly the right bytes, so both the allocation and the
+    // copy are pure waste. This records the mesh order the LIVE buffers were built for; prepare()
+    // compares the freshly computed order against it and reuses on a match.
+    //
+    // WHY COMPARING HANDLES IS SUFFICIENT, and it is the same argument blasCache_ makes: a mesh
+    // handle is never recycled, and meshGeometry() -- which prepare() already calls for every mesh
+    // before it gets here -- answers false for a dead one. So an unchanged handle means unchanged
+    // geometry, and the ORDER is compared too, because the row offsets depend on it.
+    std::vector<rhi::MeshHandle> geoMeshes_;
+    // What the LIVE buffers were actually sized for. Checked alongside the mesh set on reuse, and
+    // kept as its own fact rather than re-derived: these two are what the SRV is declared with.
+    u32 geoVerts_ = 0, geoIndices_ = 0;
+    // Set by prepare() when it reused the table above, read by buildScenes() to skip the copy pass
+    // AND its two barriers -- transitioning a buffer nothing is about to write would be a barrier
+    // claiming a state the RHI's own tracker never saw it enter (see buildScenes' own comment).
+    bool geometryReused_ = false;
 
     rhi::BufferHandle verts_ = 0, indices_ = 0, instanceBuf_ = 0;
     u32  totalVerts_ = 0, totalIndices_ = 0;
