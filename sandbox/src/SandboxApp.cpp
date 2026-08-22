@@ -93,6 +93,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "ActorEditor.hpp"
 #include "AnimEditor.hpp"
 #include "GraphEditor.hpp"
+#include "BtEditor.hpp"
 #include "EditorEuler.hpp"
 #include "EditorPrefs.hpp"
 #include "EditorKeybinds.hpp"
@@ -793,6 +794,8 @@ public:
         // APPENDED, not inserted: AssetEditorHost::open() tries factories in registration order, so
         // moving this ahead of the others would change which editor claims a file they both accept.
         assetEditors_.registerFactory(&editor::makeGraphEditor);
+        // Appended for the same reason, and it claims only .ocbt, which nothing above accepts.
+        assetEditors_.registerFactory(&editor::makeBtEditor);
         // Must run before any actor factory: the "is Roslyn available" answer is cached on first ask.
         locateAverDesign();
         {

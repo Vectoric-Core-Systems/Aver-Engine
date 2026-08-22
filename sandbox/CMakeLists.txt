@@ -17,6 +17,7 @@ add_executable(Sandbox
   src/ToolsMenu.cpp
   src/GraphEditorGeometry.cpp
   src/GraphEditor.cpp
+  src/BtEditor.cpp
   src/EditorKeybinds.cpp
   src/EditorEntitySnapshot.cpp
   Sandbox.rc)

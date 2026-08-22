@@ -83,6 +83,21 @@ target_compile_definitions(GraphEditorLoadSaveTest PRIVATE
 target_link_libraries(GraphEditorLoadSaveTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(GraphEditorLoadSaveTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# BtEditorTest -- the .ocbt behaviour-tree editor tab's headless core: the four structural edits
+# (add/delete/reparent/reorder) and the tab's own load/save/dirty/undo bookkeeping.
+#
+# Same GraphEditorLoadSaveTest arrangement immediately above, for the same reasons: Sandbox is
+# add_executable-only so this compiles sandbox/src/BtEditor.cpp directly, and AVER_WITH_IMGUI is
+# deliberately left UNDEFINED because BtEditor.cpp's `#include "imgui.h"` and its whole drawing half
+# sit behind it. What is left is exactly the part worth testing -- which is why the structural edits
+# are free functions rather than members (see BtEditor.hpp's own header comment).
+add_executable(BtEditorTest
+  src/BtEditorTest.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/BtEditor.cpp)
+target_include_directories(BtEditorTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(BtEditorTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(BtEditorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # ProjectCopyTest -- copyProjectTree, the "Upgrade a Copy" branch of the upgrade prompt.
 #
 # Compiles sandbox/src/ProjectScaffold.cpp directly, for EditorPrefsTest's precedent above (Sandbox
