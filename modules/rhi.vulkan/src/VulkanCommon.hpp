@@ -1218,14 +1218,28 @@ void destroyImageCommitted(VulkanDevice& dev, VkImage image, VkDeviceMemory memo
 // resource is generically bindable), traded for one line of policy instead of a matrix of usage
 // combinations no test here can yet exercise. Revisit if a specific combination turns out to be
 // something a real driver refuses.
-inline VkBufferUsageFlags toVkBufferUsage(const BufferDesc& d) {
+// `rtAvailable` gates the one usage bit that is NOT always legal: a device without
+// VK_KHR_acceleration_structure rejects a buffer asking for AS build-input usage outright.
+inline VkBufferUsageFlags toVkBufferUsage(const BufferDesc& d, bool rtAvailable) {
     VkBufferUsageFlags u = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
                            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
                            VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
     if (d.kind == BufferKind::AccelStructure)
-        u |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR |
-             VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+        u |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR;
+    // BUILD-INPUT USAGE BELONGS ON ORDINARY BUFFERS, NOT ONLY ON AccelStructure ONES, and it used to
+    // be set only on the latter. The geometry a BLAS is built FROM is a plain vertex/index buffer
+    // (BufferKind::Default), so every build was rejected:
+    //     "The following buffers are missing
+    //      VK_BUFFER_USAGE_2_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR"
+    // and vkCmdBuildAccelerationStructuresKHR is one of the calls that INVALIDATES the command
+    // buffer, so everything recorded after it -- the whole overlay, including the editor UI --
+    // was dropped by the driver.
+    //
+    // Granting it to every buffer follows this function's own "everything is everything" policy:
+    // the alternative is a BufferKind for "might be raytraced", which the caller cannot know when it
+    // uploads a mesh that some later frame decides to trace against.
+    if (rtAvailable) u |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
     return u;
 }
 inline VkImageUsageFlags toVkImageUsage(ResourceBind bind, bool isDepth) {

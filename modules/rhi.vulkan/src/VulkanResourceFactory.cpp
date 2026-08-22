@@ -1834,7 +1834,10 @@ BufferHandle VulkanResourceFactory::createBuffer(const BufferDesc& d) {
     const VkMemoryPropertyFlags required = hostVisible
         ? (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
         : VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-    if (!createBufferCommitted(*dev_, d.bytes, toVkBufferUsage(d), required, b.buffer, b.memory, &b.address, d.debugName))
+    // A null CreateAccelerationStructureKHR is how this backend knows the extension is absent --
+    // the loader leaves every unavailable entry point null (see VulkanApi).
+    const bool rtAvailable = dev_->api().CreateAccelerationStructureKHR != nullptr;
+    if (!createBufferCommitted(*dev_, d.bytes, toVkBufferUsage(d, rtAvailable), required, b.buffer, b.memory, &b.address, d.debugName))
         return 0;
 
     if (hostVisible) {
