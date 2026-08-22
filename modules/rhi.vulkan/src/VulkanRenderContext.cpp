@@ -89,6 +89,23 @@ void endRenderScope(VulkanDevice& dev, VkCommandBuffer cb, bool opened) {
 // why it cannot BE a class member.
 VkDescriptorSet g_constantsSet = VK_NULL_HANDLE;
 
+// WHAT THE CURRENT CONSTANTS SET HOLDS, slot by slot.
+//
+// Kept because setConstantBuffer can no longer rewrite the bound set in place: doing so is an
+// update-after-bind on the command buffer that already bound it, which the layer reports as
+//     VkDescriptorSet ... was destroyed or updated without UPDATE_AFTER_BIND
+// and which puts that command buffer into an INVALID state -- after which the driver DROPS every
+// call recorded later, the whole overlay and the editor UI with it. So a write takes a FRESH set
+// instead, and a fresh set has to be populated in full rather than inheriting the one slot just
+// written. Hence the mirror.
+//
+// A dynamic offset would have been cheaper and cannot do the job: these are
+// UNIFORM_BUFFER_DYNAMIC, but setConstantBuffer points a slot at the per-frame constant RING, a
+// different VkBuffer from the zero/frame CB the slot was declared with, and a dynamic offset
+// cannot change which buffer a descriptor names.
+VkDescriptorBufferInfo g_constantsInfos[kMaxConstantSlots]{};
+bool g_constantsSlotLive[kMaxConstantSlots]{};
+
 // Re-binds `set` at kVkSetConstants with a fresh all-zero dynamic-offset array sized to the current
 // pipeline's declared CBV-slot count. Called after bindDeclaredDescriptors() writes the set's
 // default contents, and again after setConstantBuffer() rewrites one binding in place -- Vulkan
@@ -390,14 +407,52 @@ void VulkanRenderContext::setConstantBuffer(u32 slot, const void* data, u32 byte
     const ConstantAllocation alloc = ringAlloc(data, bytes);
     if (!alloc.cpu) return;   // overflow already logged once this frame by ringAlloc
 
-    VkDescriptorBufferInfo info{alloc.buffer, alloc.offset, bytes};
-    VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    w.dstSet = g_constantsSet;
-    w.dstBinding = slot;
-    w.descriptorCount = 1;
-    w.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
-    w.pBufferInfo = &info;
-    dev_->api().UpdateDescriptorSets(dev_->vkDevice(), 1, &w, 0, nullptr);
+    // A FRESH SET, NOT A REWRITE OF THE BOUND ONE. g_constantsSet has already been bound into this
+    // command buffer by bindDeclaredDescriptors, and updating a bound set invalidates the buffer --
+    // see g_constantsInfos for the full account. Allocating here mirrors what that function already
+    // does on every setPipeline, so this is the same cost and the same lifetime rule, not a new one.
+    if (!g_constantsSlotLive[slot]) {
+        AVER_ERROR("[RHI.Vulkan] setConstantBuffer: slot {} is not one this pipeline declares as a CBV", slot);
+        return;
+    }
+    g_constantsInfos[slot] = VkDescriptorBufferInfo{alloc.buffer, alloc.offset, bytes};
+
+    VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    ai.descriptorPool = res_->descriptorPool_;
+    ai.descriptorSetCount = 1;
+    ai.pSetLayouts = &le->constantsSetLayout;
+    VkDescriptorSet fresh = VK_NULL_HANDLE;
+    if (!vkOk(dev_->api().AllocateDescriptorSets(dev_->vkDevice(), &ai, &fresh), "vkAllocateDescriptorSets (constants set, rewrite)"))
+        return;
+
+    VkDescriptorBufferInfo infos[kMaxConstantSlots]{};
+    VkWriteDescriptorSet writes[kMaxConstantSlots]{};
+    u32 n = 0;
+    for (u32 k = 0; k < kMaxConstantSlots; ++k) {
+        if (!g_constantsSlotLive[k]) continue;
+        infos[n] = g_constantsInfos[k];
+        writes[n] = VkWriteDescriptorSet{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        writes[n].dstSet = fresh;
+        writes[n].dstBinding = k;
+        writes[n].descriptorCount = 1;
+        writes[n].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+        writes[n].pBufferInfo = &infos[n];
+        ++n;
+    }
+    if (n) dev_->api().UpdateDescriptorSets(dev_->vkDevice(), n, writes, 0, nullptr);
+
+    // The set this replaces is still referenced by everything already recorded, so it goes behind
+    // the frame fence exactly like the one bindDeclaredDescriptors displaces.
+    if (g_constantsSet != VK_NULL_HANDLE) {
+        VkDescriptorSet stale = g_constantsSet;
+        VulkanDevice* devPtr = dev_;
+        VulkanResourceFactory* resPtr = res_;
+        res_->retire([devPtr, resPtr, stale]() {
+            VkDescriptorSet dead = stale;
+            devPtr->api().FreeDescriptorSets(devPtr->vkDevice(), resPtr->descriptorPool_, 1, &dead);
+        });
+    }
+    g_constantsSet = fresh;
     rebindConstantsSet(dev_->api(), cb, pipe_, g_constantsSet);
 }
 
@@ -1092,11 +1147,15 @@ void VulkanRenderContext::bindDeclaredDescriptors(const RhiPipeline* p) {
     VkDescriptorBufferInfo infos[kMaxConstantSlots]{};
     VkWriteDescriptorSet writes[kMaxConstantSlots]{};
     u32 n = 0;
+    for (bool& live : g_constantsSlotLive) live = false;
     for (u32 k = 0; k < kMaxConstantSlots; ++k) {
         if (le.layout.constantDwords[k] != 0) continue;
         infos[n].buffer = (k == kEngineFrameConstantRegister) ? dev_->frameCBs_[f] : zeroCB_;
         infos[n].offset = 0;
         infos[n].range = VK_WHOLE_SIZE;
+        // Mirrored so setConstantBuffer can rebuild a full set from it.
+        g_constantsInfos[k] = infos[n];
+        g_constantsSlotLive[k] = true;
         writes[n] = VkWriteDescriptorSet{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         writes[n].dstSet = set;
         writes[n].dstBinding = k;
