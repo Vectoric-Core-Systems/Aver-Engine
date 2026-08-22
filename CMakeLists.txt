@@ -155,6 +155,7 @@ option(AVER_MODULE_OCCLUSION "Occlusion module: hierarchical-Z pyramid + two-pas
 # beside AVER_MODULE_FRAMEWORK's exists just below -- see it for what happens with the scene off.
 option(AVER_MODULE_PARTICLES "Particle system: CPU-simulated billboard particles, depth-tested against the scene" ON)
 option(AVER_MODULE_WATER "Water: a Gerstner-wave surface drawn in the transparent pass, and the underwater fog override" ON)
+option(AVER_MODULE_RENDER_SOFTBODY "Draw meshes whose vertices come from a simulated soft body" ON)
 
 if(MSVC)
   add_compile_options(/W4 /permissive- /MP /utf-8 /Zc:__cplusplus /EHsc)
@@ -322,6 +323,16 @@ if(AVER_MODULE_SCENE)
 endif()
 if(AVER_MODULE_FRAMEWORK)
   add_subdirectory(modules/framework)     # optional: gameplay vocabulary over the world
+endif()
+# Soft-body drawing. Needs BOTH the scene (for CSoftBody) and physics (for the simulation), so it
+# is force-disabled without either rather than failing to configure -- the same cascade particles
+# gets from AVER_MODULE_SCENE just below.
+if(AVER_MODULE_RENDER_SOFTBODY AND (NOT AVER_MODULE_SCENE OR NOT AVER_MODULE_PHYSICS))
+  message(STATUS "Aver: soft-body drawing needs the scene and physics - forcing AVER_MODULE_RENDER_SOFTBODY=OFF")
+  set(AVER_MODULE_RENDER_SOFTBODY OFF)
+endif()
+if(AVER_MODULE_RENDER_SOFTBODY)
+  add_subdirectory(modules/render.softbody)
 endif()
 if(AVER_MODULE_WATER)
   # NOT force-disabled by AVER_MODULE_SCENE the way particles is, and deliberately: a particle
@@ -501,5 +512,8 @@ if(AVER_BUILD_TESTS)
   endif()
   if(AVER_MODULE_WATER)
     add_subdirectory(tests/water)
+  endif()
+  if(AVER_MODULE_RENDER_SOFTBODY)
+    add_subdirectory(tests/render.softbody)
   endif()
 endif()

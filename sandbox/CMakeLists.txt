@@ -79,6 +79,11 @@ target_link_libraries(Sandbox PRIVATE Aver.UI.Abi)
 if(TARGET Aver.Water)
   target_link_libraries(Sandbox PRIVATE Aver.Water)
 endif()
+# Soft-body drawing. Guarded for Water's reason above, and it brings AVER_MODULE_RENDER_SOFTBODY=1
+# through to SandboxApp.cpp the same transitive way.
+if(TARGET Aver.Render.SoftBody)
+  target_link_libraries(Sandbox PRIVATE Aver.Render.SoftBody)
+endif()
 
 # Aver Sound and the audio C seam, for the .ocsnd editor tab (sandbox/src/SoundEditor.cpp).
 #

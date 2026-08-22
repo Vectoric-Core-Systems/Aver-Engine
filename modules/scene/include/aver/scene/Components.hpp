@@ -19,7 +19,8 @@ inline constexpr u32 kComponentSkeletalMesh = 9;
 inline constexpr u32 kComponentAnimator     = 10;
 inline constexpr u32 kComponentParticleEmitter = 11;
 inline constexpr u32 kComponentAttachment   = 12;
-inline constexpr u32 kComponentBuiltinMax   = 12;
+inline constexpr u32 kComponentSoftBody     = 13;
+inline constexpr u32 kComponentBuiltinMax   = 13;
 
 // Authored local transform, plus the revision the world-matrix pass compares against.
 struct CLocal {
@@ -161,10 +162,51 @@ struct CAttachment {
     u64 socket = 0;    // fnv1a64 of the socket name; 0 = attached to nothing in particular
 };
 
+// Marks an entity's mesh as SIMULATED RATHER THAN POSED: its vertices come from a Jolt soft body
+// instead of from bone skinning, so it sags, drapes, squashes and collides with the world.
+//
+// THE MESH IS THE SIMULATION. There is no separate collision proxy to author and no cage asset: the
+// entity's own CMeshRenderer mesh supplies both the particles (its vertices) and the constraints
+// (its triangles). That is a real limit as well as a convenience -- a 50k-vertex mesh is a
+// 50k-particle soft body and will not run -- and it is stated here because nothing downstream
+// enforces a budget.
+//
+// EVERY FIELD IS ZERO-DEFAULTED ON PURPOSE. World::addComponent hands back ZERO-FILLED storage and a
+// struct's in-class initialisers never run for a component attached directly (see the flags note
+// above, which this codebase has already paid for twice), so a value that must not be zero is read
+// through a helper that substitutes its default rather than being written here and silently lost.
+struct CSoftBody {
+    // How far a vertex may leave where ordinary skinning would have put it, in centimetres. It is
+    // THE dial: 0 is indistinguishable from skinning, large is a free-floating cloth that happens to
+    // hang near a skeleton, and jiggle lives in between. Zero here means "unset" and reads as
+    // kSoftBodyDefaultMaxDistanceCm, not as "pinned" -- see softBodyMaxDistanceCm().
+    f32 maxDistanceCm = 0.0f;
+    // Inverse stiffness of the edge constraints. 0 is inextensible, which is also the sane default,
+    // so this one field genuinely means what a zero-filled component says it means.
+    f32 compliance = 0.0f;
+    // The physics handle, filled in by whoever creates the body. PROCESS-LOCAL and therefore never
+    // serialised -- see the read-only marker in Builtins.cpp, which is what keeps it out of a chunk.
+    i32 body = 0;
+    u32 flags = 0;
+};
+
+// Zero means "the author did not say", not "zero centimetres". A component that arrives zero-filled
+// cannot distinguish those two, so the substitution happens HERE, in one place both the renderer and
+// any future editor read through, rather than being re-derived at each call site.
+inline constexpr f32 kSoftBodyDefaultMaxDistanceCm = 8.0f;
+inline f32 softBodyMaxDistanceCm(const CSoftBody& sb) {
+    return sb.maxDistanceCm > 0.0f ? sb.maxDistanceCm : kSoftBodyDefaultMaxDistanceCm;
+}
+
+// NEGATIVE-SENSE, for the reason spelled out above kAnimatorPaused: zero-filled storage must mean
+// the useful state. Clear = simulated and drawn from the simulation.
+inline constexpr u32 kSoftBodyDisabled = 0x1;
+
 // Field order is chosen so neither struct gets padding: World::verifyComponent is byte-exact and
 // turns a mismatch into an abort inside World's constructor, so a padded component kills the editor
 // at startup rather than failing a test.
 static_assert(sizeof(CAttachment) == 8, "CAttachment must be padding-free");
+static_assert(sizeof(CSoftBody) == 16, "CSoftBody must be padding-free");
 static_assert(sizeof(CSkeletalMesh) == 16, "CSkeletalMesh must be padding-free");
 static_assert(sizeof(CAnimator) == 24, "CAnimator must be padding-free");
 static_assert(sizeof(CParticleEmitter) == 24, "CParticleEmitter must be padding-free");

@@ -125,6 +125,9 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "aver/particles/ParticleEffectLibrary.hpp"
 #include "aver/particles/ParticleRenderer.hpp"
 #if AVER_MODULE_WATER
+#if AVER_MODULE_RENDER_SOFTBODY
+#  include "aver/render/SoftBodyScene.hpp"
+#endif
 #  include "aver/water/WaterRenderer.hpp"
 #  include "aver/water/Underwater.hpp"
 #endif
@@ -1319,6 +1322,18 @@ public:
         } else {
             skinnedScene_.reset();   // init already said why; skinned entities draw at rest
         }
+#if AVER_MODULE_RENDER_SOFTBODY
+        // The SAME two resolvers skinnedScene_ takes: an id -> path for the asset and an
+        // id -> MeshHandle for what is already uploaded. Reusing them rather than adding a third
+        // pair is the point of both features agreeing on one resolver convention.
+        softBodyScene_ = std::make_unique<aver::render::SoftBodyScene>();
+        if (softBodyScene_->init(*e.device())) {
+            softBodyScene_->setResolvers(&SandboxApp::resolveSceneMesh, &SandboxApp::resolveAnimAsset, this);
+            e.device()->addRenderFeature(softBodyScene_.get());
+        } else {
+            softBodyScene_.reset();   // init said why; soft entities draw their authored mesh
+        }
+#endif
 
         // --skin-scene-test <dir>: the same question as --skin-draw-test but through the WHOLE
         // chain -- a real .ocmesh with skin streams, a real .ocskel, a real .ocanim, AnimSystem,
@@ -2320,6 +2335,12 @@ public:
         // the AnimSystem -- whose skinning() is only valid until the next tick.
         if (skinnedScene_)
             skinnedScene_->update(scene::World::instance(), anim::animSystem(), *e.device());
+#if AVER_MODULE_RENDER_SOFTBODY
+        // AFTER the physics step and World::flush, BEFORE the draw -- the draw asks drawHandle() for
+        // a handle that has to exist by then. Same ordering skinnedScene_ above requires, and for
+        // the same reason.
+        if (softBodyScene_) softBodyScene_->update(scene::World::instance(), *e.device());
+#endif
         // --drone: switches the graph-driven drone on N frames in, on its own, mirroring
         // --chunk-stream immediately below so a --frames capture run can prove it without a human
         // clicking Window > Drone.
@@ -4222,8 +4243,23 @@ public:
                     }
                 }
 #endif
-                if (skinnedScene_)
-                    if (const rhi::MeshHandle sk = skinnedScene_->drawHandle(ent)) mesh = sk;
+                // WHICH FEATURE OWNS THIS ENTITY'S VERTICES. Written as one explicit variable
+                // rather than as chained ifs, because the chained form is a DANGLING-ELSE TRAP: an
+                // `else` after `if (skinnedScene_) if (...)` binds to the INNER if, so soft body
+                // would have been consulted only when skinning existed AND declined -- and never at
+                // all in a build where skinnedScene_ is null. That compiles and silently draws the
+                // authored mesh forever. It was written that way here first.
+                //
+                // SKINNING WINS WHERE BOTH CLAIM AN ENTITY. Nothing forbids attaching CSoftBody to
+                // an already-skinned mesh, and the two would then be writing different vertices into
+                // different buffers for one draw; asking skinning first makes that collision
+                // deterministic rather than dependent on feature registration order.
+                rhi::MeshHandle substituted = 0;
+                if (skinnedScene_) substituted = skinnedScene_->drawHandle(ent);
+#if AVER_MODULE_RENDER_SOFTBODY
+                if (!substituted && softBodyScene_) substituted = softBodyScene_->drawHandle(ent);
+#endif
+                if (substituted) mesh = substituted;
 #if AVER_MODULE_VOXI
                 // Mirrors the depth-prepass walk's own exclusions EXACTLY -- skinned, GPU cluster
                 // dispatch, CPU per-cluster -- see that walk's block comment (search "depth prepass
@@ -11349,6 +11385,12 @@ private:
     // The scene join: gives every entity with a CSkeletalMesh its own posed mesh. Null when the
     // skinning shader would not compile, in which case skinned entities simply draw at rest.
     std::unique_ptr<aver::render::SkinnedScene> skinnedScene_;
+#if AVER_MODULE_RENDER_SOFTBODY
+    // Beside skinnedScene_ because it is the same kind of thing: a per-entity vertex source that the
+    // scene pass substitutes for the authored mesh. The two never both claim one entity -- see the
+    // draw site, where skinning is asked first and soft body only fills in where it declined.
+    std::unique_ptr<aver::render::SoftBodyScene> softBodyScene_;
+#endif
 #endif
     std::string skinSceneDir_;    // --skin-scene-test <dir>: where the cooked rig lives
     std::unique_ptr<aver::editor::SkinSceneTest> skinScene_;

@@ -124,6 +124,18 @@ void registerBuiltinComponents(World& world) {
         b.field("socket", FieldKind::I64, static_cast<u16>(offsetof(CAttachment, socket)));
         expect(b.verify(sizeof(CAttachment)), b.typeId(), kComponentAttachment, "CAttachment");
     }
+    {
+        auto b = world.registerComponent<CSoftBody>("CSoftBody");
+        b.field("maxDistanceCm", FieldKind::F32, static_cast<u16>(offsetof(CSoftBody, maxDistanceCm)))
+            .field("compliance", FieldKind::F32, static_cast<u16>(offsetof(CSoftBody, compliance)))
+            // READ-ONLY, and that is docs/CHUNKS.md 5.1 rather than a preference: `body` is a
+            // process-local physics handle and means nothing in another run, so it must never reach
+            // a serialised chunk. A read-only field cannot be written by the ABI or an editor, which
+            // is what keeps it out.
+            .field("body", FieldKind::I32, static_cast<u16>(offsetof(CSoftBody, body)), 0, /*readOnly*/ true)
+            .field("flags", FieldKind::I32, static_cast<u16>(offsetof(CSoftBody, flags)));
+        expect(b.verify(sizeof(CSoftBody)), b.typeId(), kComponentSoftBody, "CSoftBody");
+    }
 }
 
 } // namespace aver::scene::detail
