@@ -1793,6 +1793,7 @@ public:
     void dispatch(u32 gx, u32 gy, u32 gz) override;
     void copyBuffer(BufferHandle dst, BufferHandle src, u64 bytes,
                     u64 dstOffset, u64 srcOffset) override;
+    void copyTexture(TextureHandle dst, TextureHandle src) override;
     void drawFullscreen() override;
     void setVertexBuffer(BufferHandle b, u32 stride) override;
     void setIndexBuffer(BufferHandle b, Format indexFormat) override;
@@ -6160,6 +6161,24 @@ void D3D12RenderContext::copyBuffer(BufferHandle dst, BufferHandle src, u64 byte
     ID3D12Resource* s = res_->bufferResource(src);
     if (!d || !s) { AVER_ERROR("[RHI.D3D12] copyBuffer with an invalid handle"); return; }
     dev_->cmdList_->CopyBufferRegion(d, dstOffset, s, srcOffset, bytes);
+}
+
+// Copies one whole texture into another. See IRenderContext::copyTexture for why whole-resource.
+void D3D12RenderContext::copyTexture(TextureHandle dst, TextureHandle src) {
+    if (!dev_->cmdList_ || !res_) return;
+    RhiTexture* d = res_->texture(dst);
+    RhiTexture* s = res_->texture(src);
+    if (!d || !s) { AVER_ERROR("[RHI.D3D12] copyTexture with an invalid handle"); return; }
+    // CHECKED HERE RATHER THAN LEFT TO THE DEBUG LAYER, because a mismatched CopyResource is
+    // undefined behaviour on a release runtime -- it does not fail, it corrupts. A caller that gets
+    // this wrong should see a log line, not a texture full of another texture's memory.
+    if (d->desc.width  != s->desc.width  || d->desc.height != s->desc.height ||
+        d->desc.depth  != s->desc.depth  || d->desc.format != s->desc.format ||
+        d->desc.mips   != s->desc.mips   || d->desc.dim    != s->desc.dim) {
+        AVER_ERROR("[RHI.D3D12] copyTexture between mismatched textures -- refused");
+        return;
+    }
+    dev_->cmdList_->CopyResource(d->res.Get(), s->res.Get());
 }
 
 

@@ -571,6 +571,24 @@ public:
     virtual void copyBuffer(BufferHandle dst, BufferHandle src, u64 bytes,
                             u64 dstOffset = 0, u64 srcOffset = 0) = 0;
 
+    // Copies the WHOLE of one texture into another. Both must already be in CopySource / CopyDest,
+    // exactly as copyBuffer requires of its two buffers.
+    //
+    // WHY THIS EXISTS, because "copy a texture" sounds too obvious to need a reason: until now the
+    // RHI could copy buffers and not textures, so anything rendered into a target was gone the
+    // moment the next frame reused that target. That is not an inconvenience, it is a hard block on
+    // a whole class of feature -- an asset thumbnail, a cached reflection, a UI element painted once
+    // and reused -- because a render target is transient by construction and there was NO WAY to
+    // move its pixels somewhere that outlives it. The content browser wanted rendered thumbnails and
+    // could not have them for exactly this reason.
+    //
+    // WHOLE-RESOURCE, NOT A REGION, and deliberately so: a region copy needs matching subresource
+    // indices, offsets and extents on both sides, which is four more ways to be wrong for a
+    // capability nothing has asked for yet. The two textures must agree on dimension, size, format
+    // and mip count -- checked by the backends, which log and do nothing rather than record a copy
+    // the debug layer would reject.
+    virtual void copyTexture(TextureHandle dst, TextureHandle src) = 0;
+
     // ---- geometry the CALLER owns ----
     // The counterpart to GraphicsPipelineDesc::vertexLayout, for vertices a feature builds itself.
 

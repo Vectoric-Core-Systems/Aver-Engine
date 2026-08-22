@@ -1566,6 +1566,7 @@ public:
     void dispatchMeshClusters(MeshHandle mesh, u32 clusterCount) override;
     void dispatch(u32 gx, u32 gy, u32 gz) override;
     void copyBuffer(BufferHandle dst, BufferHandle src, u64 bytes, u64 dstOffset, u64 srcOffset) override;
+    void copyTexture(TextureHandle dst, TextureHandle src) override;
     void drawFullscreen() override;
     void setVertexBuffer(BufferHandle b, u32 stride) override;
     // Binds a caller-owned index buffer. R32Uint ONLY -- mirrors what D3D12RenderContext::

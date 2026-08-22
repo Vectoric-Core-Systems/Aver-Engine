@@ -116,6 +116,7 @@ struct MockContext final : public rhi::IRenderContext {
     void dispatchMeshFor(rhi::MeshHandle) override {}
     void dispatch(u32, u32, u32) override {}
     void copyBuffer(rhi::BufferHandle, rhi::BufferHandle, u64, u64, u64) override {}
+    void copyTexture(rhi::TextureHandle, rhi::TextureHandle) override {}
     void drawFullscreen() override {}
     void setVertexBuffer(rhi::BufferHandle b, u32 stride) override { calls.push_back({Call::Kind::VertexBuffer, b, stride}); }
     void setIndexBuffer(rhi::BufferHandle b, rhi::Format f) override {

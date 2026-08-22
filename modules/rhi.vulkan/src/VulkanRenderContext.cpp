@@ -524,6 +524,44 @@ void VulkanRenderContext::copyBuffer(BufferHandle dst, BufferHandle src, u64 byt
     dev_->api().CmdCopyBuffer(cb, s, d, 1, &region);
 }
 
+// Copies one whole texture into another. See IRenderContext::copyTexture for why whole-resource.
+void VulkanRenderContext::copyTexture(TextureHandle dst, TextureHandle src) {
+    VkCommandBuffer cb = cmd();
+    if (!cb || !res_) return;
+    RhiTexture* d = res_->texture(dst);
+    RhiTexture* s = res_->texture(src);
+    if (!d || !s) { AVER_ERROR("[RHI.Vulkan] copyTexture with an invalid handle"); return; }
+    if (d->desc.width  != s->desc.width  || d->desc.height != s->desc.height ||
+        d->desc.depth  != s->desc.depth  || d->desc.format != s->desc.format ||
+        d->desc.mips   != s->desc.mips   || d->desc.dim    != s->desc.dim) {
+        AVER_ERROR("[RHI.Vulkan] copyTexture between mismatched textures -- refused");
+        return;
+    }
+    // ONE REGION PER MIP. vkCmdCopyImage takes explicit extents per region and does NOT derive them
+    // from the subresource, so a mip chain copied with a single region at the base extent would
+    // write every mip at mip 0's size -- past the end of every smaller one. D3D12's CopyResource
+    // handles the whole chain itself, which is exactly the kind of asymmetry that leaves one backend
+    // right and the other quietly corrupt.
+    std::vector<VkImageCopy> regions;
+    regions.reserve(d->desc.mips);
+    for (u32 m = 0; m < d->desc.mips; ++m) {
+        VkImageCopy r{};
+        r.srcSubresource.aspectMask = toVkAspect(s->desc.format);
+        r.srcSubresource.mipLevel = m;
+        r.srcSubresource.baseArrayLayer = 0;
+        r.srcSubresource.layerCount = 1;
+        r.dstSubresource = r.srcSubresource;
+        r.extent.width  = (d->desc.width  >> m) ? (d->desc.width  >> m) : 1u;
+        r.extent.height = (d->desc.height >> m) ? (d->desc.height >> m) : 1u;
+        r.extent.depth  = d->desc.dim == TextureDim::Tex3D
+                        ? ((d->desc.depth >> m) ? (d->desc.depth >> m) : 1u) : 1u;
+        regions.push_back(r);
+    }
+    dev_->api().CmdCopyImage(cb, s->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                             d->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                             static_cast<uint32_t>(regions.size()), regions.data());
+}
+
 // ====================================================================================================
 // drawFullscreen -- the vertex shader builds its 3 vertices from gl_VertexIndex (SPIR-V's SV_VertexID
 // equivalent, produced by the SAME DXC -spirv compile); no vertex buffer is bound.
