@@ -1084,6 +1084,21 @@ void VulkanRenderContext::bindDeclaredDescriptors(const RhiPipeline* p) {
     u32 zeroOffsets[kMaxConstantSlots] = {};
     dev_->api().CmdBindDescriptorSets(cb, p->compute ? VK_PIPELINE_BIND_POINT_COMPUTE : VK_PIPELINE_BIND_POINT_GRAPHICS,
                                       le.pipelineLayout, kVkSetConstants, 1, &set, n, zeroOffsets);
+
+    // ---- the IMMUTABLE sampler set, once per pipeline bind ----------------------------------------
+    //
+    // Nothing is ever WRITTEN to it -- pImmutableSamplers bakes every VkSampler into the layout, so
+    // descriptorLayout() allocates and fills it exactly once. But "never written" is not "never
+    // bound": a pipeline whose shader names a sampler statically uses set 3, and Vulkan requires
+    // every set a pipeline statically uses to be bound before the draw. It was not, and the layer
+    // said so the moment samplers stopped colliding with table 0 and moved to their own set:
+    //     "The VkPipeline statically uses descriptor set 3, but all sets 0 to 3 are not compatible
+    //      ... The set (3) is out of bounds for the number of sets bound (3)"
+    // Binding it here rather than per draw costs one call per setPipeline and nothing per draw,
+    // which is the whole point of the set being immutable.
+    if (le.samplersSet != VK_NULL_HANDLE)
+        dev_->api().CmdBindDescriptorSets(cb, p->compute ? VK_PIPELINE_BIND_POINT_COMPUTE : VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                          le.pipelineLayout, kVkSetSamplers, 1, &le.samplersSet, 0, nullptr);
 }
 
 // ====================================================================================================

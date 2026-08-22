@@ -23,6 +23,8 @@
 // trick descriptorLayout()'s FIXED, cross-file signature forced.
 #include "VulkanCommon.hpp"
 
+#include <cstdio>
+#include <cstdlib>
 #include <algorithm>
 #include <cstring>
 
@@ -233,15 +235,26 @@ PendingTableKinds gPendingKinds;
 // declared PipelineLayout slot needs, defaulting an UNMENTIONED slot to Texture2D (logged) rather
 // than guessing further — an unread register is a real, legal case (RHIResources.hpp's own note on
 // dispatchMeshClusters "always reserving regardless of whether a shader reads all three").
-void reflectTableSlotKinds(const RhiShader* const* stages, u32 stageCount, const PipelineLayout& layout,
-                           PendingTableKinds& out) {
+// WHICH MODULE'S BINDINGS THIS READS IS LOAD-BEARING, and reading the wrong one was a real bug.
+//
+// The LAYOUT-AGNOSTIC module compiled by createShader has every register in set 0 at binding ==
+// register number, because that is what DXC does with a space-less register. In that module a
+// SAMPLER at s2 sits at set 0 binding 2 -- indistinguishable, here, from an SRV at t2. So this
+// function classified slot 2 from the sampler and overwrote the acceleration structure actually
+// declared there, and the layer reported the consequence three steps later:
+//     "Binding 2 ... from VkPipelineLayout is type VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE but binding 2
+//      ... trying to bind, is type VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR"
+// The PER-LAYOUT variant (moduleForLayout) has samplers in set 3 and table 1 in set 1, so its
+// set-0 bindings mean exactly what this function assumes they mean. Callers pass that.
+void reflectTableSlotKinds(const std::vector<u32>* const* stageSpirv, u32 stageCount,
+                           const PipelineLayout& layout, PendingTableKinds& out) {
     out.active = true;
     for (u32 i = 0; i < kMaxBindingSlots; ++i)
         out.srv0[i] = out.uav0[i] = out.srv1[i] = out.uav1[i] = SlotKind::Texture2D;
 
     std::vector<SpvBinding> bindings;
     for (u32 s = 0; s < stageCount; ++s)
-        if (stages[s]) reflectSpirvBindings(stages[s]->spirv, bindings);
+        if (stageSpirv[s] && !stageSpirv[s]->empty()) reflectSpirvBindings(*stageSpirv[s], bindings);
 
     bool anyFound = false;
     for (const SpvBinding& b : bindings) {
@@ -696,15 +709,63 @@ void collectFields(const std::string& body, std::vector<PcField>& out) {
 
 }  // namespace
 
-u32 pushConstantKey(const PipelineLayout& layout, bool mesh) {
-    u32 key = 1u << kObjectConstantRegister;   // pushConstantLayout always places b1, declared or not
+u32 buildRegisterBinds(const PipelineLayout& layout, VkRegisterBind* out, u32 maxOut) {
+    u32 n = 0;
+    auto put = [&](char type, u32 number, u32 set, u32 binding) {
+        if (n >= maxOut) return;
+        out[n++] = VkRegisterBind{type, number, 0, set, binding};
+    };
+
+    // Table 0: t0.. and u0.. at binding 0.. / kVkUavBindingBase.. in set kVkSetTable0.
+    for (u32 i = 0; i < layout.srvCount && i < kMaxBindingSlots; ++i) put('t', i, kVkSetTable0, i);
+    for (u32 i = 0; i < layout.uavCount && i < kMaxBindingSlots; ++i) put('u', i, kVkSetTable0, kVkUavBindingBase + i);
+
+    // Table 1: HLSL numbers it CONTINUOUSLY above table 0 (t(srvCount).., u(uavCount)..) because
+    // that is what D3D12's root signature wants, but it gets its own set here, restarted at 0.
+    for (u32 i = 0; i < layout.srvCount1 && i < kMaxBindingSlots; ++i) put('t', layout.srvCount + i, kVkSetTable1, i);
+    for (u32 i = 0; i < layout.uavCount1 && i < kMaxBindingSlots; ++i) put('u', layout.uavCount + i, kVkSetTable1, kVkUavBindingBase + i);
+
+    // Samplers: their own set, immutable, binding == register. descriptorLayout() builds exactly
+    // this, capped at 4 by PipelineLayout::samplers.
+    const u32 samplers = layout.samplerCount < 4 ? layout.samplerCount : 4;
+    for (u32 i = 0; i < samplers; ++i) put('s', i, kVkSetSamplers, i);
+
+    // DESCRIPTOR constant buffers, because THE MAP HAS TO BE COMPLETE. Once any -fvk-bind-register
+    // is supplied DXC requires one for EVERY resource the shader declares, and says so:
+    //     error: missing -fvk-bind-register for resource
+    // That is also why patchCbuffersForLayout's [[vk::binding]] half is switched off whenever this
+    // map is in use -- the two would be two answers to the same question.
+    //
+    // Slots with a NON-ZERO constantDwords are deliberately absent: those blocks are folded into
+    // [[vk::push_constant]] and their `register(bN)` is deleted outright, so there is no resource
+    // left for DXC to want a mapping for.
+    for (u32 k = 0; k < kMaxConstantSlots; ++k)
+        if (layout.constantDwords[k] == 0) put('b', k, kVkSetConstants, k);
+
+    return n;
+}
+
+u32 shaderVariantKey(const PipelineLayout& layout, bool mesh) {
+    // EVERY input the per-layout compile depends on has to be in here, or two layouts that differ
+    // only in an omitted field silently share one module. The constant-slot mask alone was enough
+    // while patchCbuffersForLayout was the only per-layout step; buildRegisterBinds made the SRV,
+    // UAV and sampler counts matter too.
+    u32 key = 0;
+    key |= 1u << kObjectConstantRegister;      // pushConstantLayout always places b1, declared or not
     for (u32 k = 0; k < kMaxConstantSlots; ++k)
         if (layout.constantDwords[k]) key |= 1u << k;
+    // kMaxBindingSlots is 16, so each count needs 5 bits; samplerCount is capped at 4, so 3.
+    key |= (layout.srvCount  & 31u) << 5;
+    key |= (layout.uavCount  & 31u) << 10;
+    key |= (layout.srvCount1 & 31u) << 15;
+    key |= (layout.uavCount1 & 31u) << 20;
+    key |= (layout.samplerCount & 7u) << 25;
     if (mesh) key |= 1u << 31;
     return key;
 }
 
-bool patchCbuffersForLayout(std::string& src, const PipelineLayout& layout, bool mesh) {
+bool patchCbuffersForLayout(std::string& src, const PipelineLayout& layout, bool mesh,
+                            bool annotateDescriptors) {
     const PushConstantLayout pc = pushConstantLayout(layout, mesh);
 
     // The slots pushConstantLayout gives bytes to, in the order it gives them: b1 first, then
@@ -715,28 +776,48 @@ bool patchCbuffersForLayout(std::string& src, const PipelineLayout& layout, bool
     for (u32 k = 0; k < kMaxConstantSlots; ++k)
         if (k != kObjectConstantRegister && layout.constantDwords[k]) order[n++] = k;
 
+    // SCAN A COMMENT-BLANKED COPY, NOT THE SOURCE. A comment that merely MENTIONS a cbuffer -- and
+    // this engine's shaders are heavily commented, several of them quoting the very declarations
+    // this function rewrites -- would otherwise be matched as a real one, and the annotation would
+    // be inserted into prose. DXC's report for that is "an attribute list cannot appear here",
+    // pointing at a line with no declaration on it at all.
+    //
+    // blankComments overwrites each comment character with a space rather than deleting it, so the
+    // copy is the same LENGTH as the source and every offset below indexes both.
+    std::string scan = blankComments(src);
+
     struct Block { u32 slot; size_t begin, end; std::string body; };
     std::vector<Block> blocks;
     for (u32 i = 0; i < n; ++i) {
         size_t b = 0, bb = 0, be = 0, e = 0;
-        if (!findCbufferBlock(src, order[i], b, bb, be, e)) continue;
+        if (!findCbufferBlock(scan, order[i], b, bb, be, e)) continue;
         blocks.push_back({order[i], b, e, src.substr(bb, be - bb)});
     }
 
     // ---- the DESCRIPTOR half: every cbuffer the layout does NOT make root constants -------------
+    // Skipped when the caller is supplying a -fvk-bind-register map, which places these itself.
     // Same rule, other side of it. descriptorLayout() declares a dynamic UBO at binding == register
     // in kVkSetConstants for each such slot, so that is exactly where the shader must name it;
     // DXC otherwise leaves a space-less register in set 0, where nothing declares it.
-    {
+    if (annotateDescriptors) {
         struct Ann { size_t at; u32 reg; };
         std::vector<Ann> anns;
         size_t from = 0;
         u32 reg = 0;
         size_t b = 0, bb = 0, be = 0, e = 0;
-        while (findNextCbuffer(src, from, reg, b, bb, be, e)) {
+        while (findNextCbuffer(scan, from, reg, b, bb, be, e)) {
             from = b + 7;
             if (reg >= kMaxConstantSlots) continue;          // outside the layout's slots entirely
-            if (layout.constantDwords[reg] != 0) continue;   // root constants; folded above
+            // ANY slot the push-constant half claims, which is NOT the same as "constantDwords is
+            // non-zero": pushConstantLayout places kObjectConstantRegister unconditionally, declared
+            // or not. A layout that leaves constantDwords[1] at zero while its shader includes the
+            // prelude's PerObject block therefore has b1 folded AND, without this, annotated -- and
+            // the annotation survives the fold to land on the generated struct:
+            //     [[vk::binding(1, 2)]] struct AverPcBlock {
+            // which DXC rejects with "an attribute list cannot appear here".
+            bool folded = false;
+            for (u32 oi = 0; oi < n; ++oi) if (order[oi] == reg) { folded = true; break; }
+            if (folded) continue;
             if (alreadyAnnotated(src, b)) continue;          // patchPerFrameSet got here first
             anns.push_back({b, reg});
         }
@@ -744,11 +825,12 @@ bool patchCbuffersForLayout(std::string& src, const PipelineLayout& layout, bool
         for (size_t i = anns.size(); i-- > 0;)
             src.insert(anns[i].at, "[[vk::binding(" + std::to_string(anns[i].reg) + ", " +
                                        std::to_string(kVkSetConstants) + ")]] ");
-        // Every offset in `blocks` above a shifted point is now stale, so redo the search.
+        // Every offset in `blocks` above a shifted point is now stale, so re-blank and redo the search.
         if (!anns.empty()) {
+            scan = blankComments(src);
             for (Block& blk : blocks) {
                 size_t nb = 0, nbb = 0, nbe = 0, ne = 0;
-                if (findCbufferBlock(src, blk.slot, nb, nbb, nbe, ne)) { blk.begin = nb; blk.end = ne; }
+                if (findCbufferBlock(scan, blk.slot, nb, nbb, nbe, ne)) { blk.begin = nb; blk.end = ne; }
             }
         }
     }
@@ -1044,15 +1126,13 @@ bool VulkanResourceFactory::init() {
 
 namespace {
 const char* kSelfTestCS = R"(
-// [[vk::binding]] WRITTEN DIRECTLY, not string-patched. patchPerFrameSet exists because the SHARED
-// prelude is off-limits to this module and has to be annotated after the fact; kSelfTestCS is this
-// backend's own shader, so it simply says where it wants to live.
-//
-// SET kVkSetConstants (2), because that is where this backend puts constant buffers -- with no
-// space annotation DXC would put b0 at set 0, which is table 0 (SRVs/UAVs), and the validation
-// layer said exactly that: "uses descriptor [Set 0, Binding 0, variable SelfTestCB] but the binding
-// was not declared in pSetLayouts[0]".
-[[vk::binding(0, 2)]] cbuffer SelfTestCB : register(b0) { uint4 gValue; };
+// NO [[vk::binding]] HERE, DELIBERATELY, AND IT USED TO BE HERE. With no space annotation DXC puts
+// b0 at set 0 -- which is table 0 (SRVs/UAVs) -- and the validation layer said exactly that: "uses
+// descriptor [Set 0, Binding 0, variable SelfTestCB] but the binding was not declared in
+// pSetLayouts[0]". The annotation fixed it, and then stopped being the right tool: this pipeline
+// declares a UAV, so moduleForLayout now supplies a -fvk-bind-register map, and DXC requires such a
+// map to cover EVERY resource. Two answers for where b0 goes is one more than DXC accepts.
+cbuffer SelfTestCB : register(b0) { uint4 gValue; };
 RWTexture3D<float4> gOut : register(u0);
 [numthreads(4,4,4)]
 void CSSelfTest(uint3 id : SV_DispatchThreadID) { gOut[id] = float4(gValue); }
@@ -1766,17 +1846,20 @@ ShaderHandle VulkanResourceFactory::createShader(const ShaderDesc& d) {
     std::string src;
     if (d.prelude) src = d.prelude;
     src += d.source;
+    RhiShader s;
+    s.stage = d.stage;
+    // RAW, before patchPerFrameSet below. moduleForLayout re-derives placement from the
+    // PipelineLayout, and an annotation baked in here would compete with the -fvk-bind-register map
+    // it supplies -- DXC would then have two answers for where b0 goes.
+    s.source = src;
+
     // The same re-bind the fixed pipelines apply, for the same reason: a caller-supplied shader
     // that prepends sharedShaderPrelude() carries the prelude's set-0 PerFrame block, and
     // tableSetLayout() puts SRVs there. Applied to EVERY shader rather than only those with a
     // prelude, because patchPerFrameSet is a no-op on source that does not contain the block.
+    // This affects only the LAYOUT-AGNOSTIC module compiled just below.
     patchPerFrameSet(src);
 
-    RhiShader s;
-    s.stage = d.stage;
-    // Kept for moduleForLayout: this compile cannot know which cbuffers the eventual pipeline makes
-    // root constants, so the patched source has to be reconstructible later. See RhiShader.
-    s.source = src;
     s.entry = d.entry;
     if (d.defines) s.defines = d.defines;
     s.minShaderModel = model;
@@ -1814,32 +1897,102 @@ void VulkanResourceFactory::destroyShader(ShaderHandle h) {
 // ================================================================================================
 // 9. Pipelines
 // ================================================================================================
-VkShaderModule VulkanResourceFactory::moduleForLayout(RhiShader& s, const PipelineLayout& layout, bool mesh) {
+VkShaderModule VulkanResourceFactory::moduleForLayout(RhiShader& s, const PipelineLayout& layout, bool mesh,
+                                                      const std::vector<u32>** outSpirv) {
+    // A variant that needed no recompile ALIASES the base module and carries no SPIR-V of its own,
+    // so the base's is the right answer for it too.
+    auto give = [&](const RhiShaderVariant& v) {
+        if (outSpirv) *outSpirv = v.spirv.empty() ? &s.spirv : &v.spirv;
+        return v.module;
+    };
+    if (outSpirv) *outSpirv = &s.spirv;
     if (s.source.empty()) return s.module;    // destroyed, or never carried source
-    const u32 key = pushConstantKey(layout, mesh);
+    const u32 key = shaderVariantKey(layout, mesh);
     for (const RhiShaderVariant& v : s.variants)
-        if (v.key == key) return v.module;
+        if (v.key == key) return give(v);
 
+    // Where every register this layout declares must land. Supplying this ALSO suppresses
+    // -fvk-u-shift inside compile() -- the two are mutually exclusive -- which is why the map
+    // includes the UAVs the shift used to handle rather than leaving them to it.
+    VkRegisterBind binds[kMaxRegisterBinds];
+    const u32 bindCount = buildRegisterBinds(layout, binds, kMaxRegisterBinds);
+
+    // The map, when there is one, is the single authority on placement; the [[vk::binding]] half of
+    // the patch would otherwise answer the same question a second time.
     std::string src = s.source;
-    if (!patchCbuffersForLayout(src, layout, mesh)) return VK_NULL_HANDLE;
+    if (!patchCbuffersForLayout(src, layout, mesh, /*annotateDescriptors=*/bindCount == 0))
+        return VK_NULL_HANDLE;
 
     RhiShaderVariant var;
     var.key = key;
-    if (src == s.source) {
-        // Declares none of this layout's root-constant blocks, so the layout-agnostic module already
-        // is the right one. Cached under this key so the next pipeline of the same shape skips even
-        // the patch attempt. NOTE that var.module aliases s.module -- destroyShader relies on it.
+    if (src == s.source && bindCount == 0) {
+        // Nothing to re-place: no root-constant block, and no table or sampler register either. The
+        // layout-agnostic module already is the right one, cached under this key so the next
+        // pipeline of the same shape skips even the attempt. NOTE that var.module aliases s.module
+        // -- destroyShader relies on it.
         var.module = s.module;
         s.variants.push_back(std::move(var));
-        return s.module;
+        return give(s.variants.back());
     }
 
     if (!vulkanShaderCompiler().compile(src.c_str(), s.entry.c_str(), s.stage, s.minShaderModel,
-                                        s.defines.empty() ? nullptr : s.defines.c_str(), var.spirv) ||
+                                        s.defines.empty() ? nullptr : s.defines.c_str(), var.spirv,
+                                        bindCount ? binds : nullptr, bindCount,
+                                        /*quiet=*/bindCount != 0) ||
         var.spirv.empty()) {
-        AVER_ERROR("[RHI.Vulkan] '{}' compiles on its own but not with its pipeline's push-constant "
-                   "blocks folded in", s.entry);
-        return VK_NULL_HANDLE;
+        if (bindCount == 0) {
+            AVER_ERROR("[RHI.Vulkan] '{}' compiles on its own but not with its pipeline's "
+                       "push-constant blocks folded in", s.entry);
+            return VK_NULL_HANDLE;
+        }
+
+        // WHEN THE LAYOUT DOES NOT DESCRIBE THE WHOLE SHADER, FALL BACK RATHER THAN FAIL.
+        //
+        // DXC requires a -fvk-bind-register map to cover EVERY resource, and a PipelineLayout does
+        // not always name every register its shader declares. Two real cases, both of them backend
+        // features that live outside the layout:
+        //
+        //   - the INSTANCE buffer. GraphicsPipelineDesc::instanced makes the backend bind an SRV at
+        //     t(declaredSrvCount) -- t17 for Voxi -- which is deliberately one past both tables and
+        //     so appears in no count. This backend does not implement `instanced` at all yet
+        //     (VulkanCommon.hpp:1897), so there is nowhere correct to map it TO.
+        //   - MESH GEOMETRY. The fixed mesh path declares gVerts/gIndices through its own
+        //     g_meshGeomLayout, again outside the PipelineLayout.
+        //   - DECLARED-BUT-UNUSED resources. VoxiShaders.hpp declares gVoxelTex/gVoxelSamp for every
+        //     shader that includes it, and a UAV-only pipeline like CSClear (uavCount 2, nothing
+        //     else) uses neither. DXC still wants a mapping for them. For this case the fallback is
+        //     not merely acceptable but EXACTLY equivalent: the resources it leaves misplaced are
+        //     the ones DXC then eliminates, and every resource actually used lands identically
+        //     either way.
+        //
+        // Mapping those to an invented binding would turn a compile error into a validation error,
+        // which is worse: the pipeline would exist and be wrong. Retrying WITHOUT the map restores
+        // exactly the placement these shaders had before the map existed -- imperfect, but no
+        // regression, and the shaders whose layouts ARE complete still get the correct one.
+        AVER_WARN("[RHI.Vulkan] '{}' declares a register its PipelineLayout does not describe "
+                  "(instanced draws, mesh geometry, or a resource declared by a shared header and "
+                  "not used here); falling back to the default register->set mapping", s.entry);
+        var.spirv.clear();
+        std::string fallbackSrc = s.source;
+        if (!patchCbuffersForLayout(fallbackSrc, layout, mesh, /*annotateDescriptors=*/true))
+            return VK_NULL_HANDLE;
+        if (!vulkanShaderCompiler().compile(fallbackSrc.c_str(), s.entry.c_str(), s.stage, s.minShaderModel,
+                                            s.defines.empty() ? nullptr : s.defines.c_str(), var.spirv) ||
+            var.spirv.empty()) {
+            AVER_ERROR("[RHI.Vulkan] '{}' compiles on its own but not with its pipeline's constant "
+                       "blocks lowered", s.entry);
+            // The patched HLSL, when AVER_VK_DUMP_SPIRV names a directory. A failure here is in
+            // text this backend GENERATED, so the generated text is the only useful evidence.
+            if (const char* dir = std::getenv("AVER_VK_DUMP_SPIRV")) {
+                const std::string path = std::string(dir) + "/" + s.entry + ".failed.hlsl";
+                if (FILE* f = std::fopen(path.c_str(), "wb")) {
+                    std::fwrite(fallbackSrc.data(), 1, fallbackSrc.size(), f);
+                    std::fclose(f);
+                    AVER_WARN("[RHI.Vulkan] wrote the generated source to {}", path);
+                }
+            }
+            return VK_NULL_HANDLE;
+        }
     }
     VkShaderModuleCreateInfo mi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     mi.codeSize = var.spirv.size() * sizeof(u32);
@@ -1847,7 +2000,7 @@ VkShaderModule VulkanResourceFactory::moduleForLayout(RhiShader& s, const Pipeli
     if (!vkOk(dev_->api().CreateShaderModule(dev_->vkDevice(), &mi, nullptr, &var.module), "rhi shader module (push-constant variant)"))
         return VK_NULL_HANDLE;
     s.variants.push_back(std::move(var));
-    return s.variants.back().module;
+    return give(s.variants.back());
 }
 
 PipelineHandle VulkanResourceFactory::createGraphicsPipeline(const GraphicsPipelineDesc& d) {
@@ -1866,9 +2019,20 @@ PipelineHandle VulkanResourceFactory::createGraphicsPipeline(const GraphicsPipel
     }
 
     const bool mesh = d.ms != 0;
-    const RhiShader* stages[5] = {vs, gs, ms, ps, as};
+
+    // THE MODULES BEFORE THE LAYOUT -- see createComputePipeline for why this order, and
+    // reflectTableSlotKinds for what reading the wrong module cost.
+    RhiShader* const shaders[5] = {vs, gs, ms, ps, as};
+    VkShaderModule stageModules[5] = {};
+    const std::vector<u32>* stageSpirv[5] = {};
+    for (u32 i = 0; i < 5; ++i) {
+        if (!shaders[i]) continue;
+        stageModules[i] = moduleForLayout(*shaders[i], d.layout, mesh, &stageSpirv[i]);
+        if (!stageModules[i]) return 0;
+    }
+
     PendingTableKinds saved = gPendingKinds;
-    reflectTableSlotKinds(stages, 5, d.layout, gPendingKinds);
+    reflectTableSlotKinds(stageSpirv, 5, d.layout, gPendingKinds);
     const DescriptorLayoutEntry* entry = descriptorLayout(d.layout, mesh);
     gPendingKinds = saved;
     if (!entry) return 0;
@@ -1928,6 +2092,11 @@ PipelineHandle VulkanResourceFactory::createGraphicsPipeline(const GraphicsPipel
     // own scope, not RhiShader's (which retains none -- see this file's banner).
     std::string names[5];
     bool stageFailed = false;
+    // The module built for this shader above, by identity -- addStage is handed RhiShader*s.
+    auto moduleFor = [&](const RhiShader* sh) {
+        for (u32 i = 0; i < 5; ++i) if (shaders[i] == sh) return stageModules[i];
+        return VkShaderModule{VK_NULL_HANDLE};
+    };
     VkPipelineShaderStageCreateInfo stageInfos[5];
     u32 stageCount = 0;
     auto addStage = [&](RhiShader* sh, VkShaderStageFlagBits flag) {
@@ -1935,7 +2104,7 @@ PipelineHandle VulkanResourceFactory::createGraphicsPipeline(const GraphicsPipel
         names[stageCount] = spirvEntryPointName(sh->spirv);
         VkPipelineShaderStageCreateInfo si{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
         si.stage = flag;
-        si.module = moduleForLayout(*sh, d.layout, mesh);
+        si.module = moduleFor(sh);
         if (!si.module) { stageFailed = true; return; }
         si.pName = names[stageCount].c_str();
         stageInfos[stageCount++] = si;
@@ -2011,9 +2180,16 @@ PipelineHandle VulkanResourceFactory::createComputePipeline(const ComputePipelin
         return 0;
     }
 
-    const RhiShader* stages[1] = {cs};
+    // THE MODULE BEFORE THE LAYOUT. reflectTableSlotKinds must read the per-layout variant (see its
+    // own comment), and building that needs only the layout's COUNTS -- never its slot kinds -- so
+    // there is no circularity here, just an order that has to be this way round.
+    const std::vector<u32>* csSpirv = nullptr;
+    const VkShaderModule csModule = moduleForLayout(*cs, d.layout, false, &csSpirv);
+    if (!csModule) return 0;
+
+    const std::vector<u32>* stageSpirv[1] = {csSpirv};
     PendingTableKinds saved = gPendingKinds;
-    reflectTableSlotKinds(stages, 1, d.layout, gPendingKinds);
+    reflectTableSlotKinds(stageSpirv, 1, d.layout, gPendingKinds);
     const DescriptorLayoutEntry* entry = descriptorLayout(d.layout, false);
     gPendingKinds = saved;
     if (!entry) return 0;
@@ -2021,8 +2197,7 @@ PipelineHandle VulkanResourceFactory::createComputePipeline(const ComputePipelin
     const std::string entryName = spirvEntryPointName(cs->spirv);
     VkPipelineShaderStageCreateInfo si{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
     si.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    si.module = moduleForLayout(*cs, d.layout, false);
-    if (!si.module) return 0;
+    si.module = csModule;
     si.pName = entryName.c_str();
 
     RhiPipeline p{};

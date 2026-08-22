@@ -1,4 +1,4 @@
-// VulkanShaderCompiler.cpp -- the DXC-with-`-spirv` wrapper declared in VulkanCommon.hpp section 8.
+﻿// VulkanShaderCompiler.cpp -- the DXC-with-`-spirv` wrapper declared in VulkanCommon.hpp section 8.
 //
 // This is the file the module's CMakeLists.txt has named since the backend was first written, and
 // which had never actually been written: the target listed src/VulkanShaderCompiler.cpp (absent)
@@ -128,7 +128,7 @@ bool VulkanShaderCompiler::usingDxc() const { return compiler_ != nullptr; }
 bool VulkanShaderCompiler::compile(const char* src, const char* entry, ShaderStage stage,
                                     u32 minShaderModel, const char* defines,
                                     std::vector<u32>& outSpirv,
-                                    const VkRegisterBind* binds, u32 bindCount) {
+                                    const VkRegisterBind* binds, u32 bindCount, bool quiet) {
     init();
     if (!usingDxc() || !src || !entry) return false;
 
@@ -225,9 +225,12 @@ bool VulkanShaderCompiler::compile(const char* src, const char* entry, ShaderSta
         ComPtr<IDxcBlobUtf8> errs;
         if (result && SUCCEEDED(result->GetOutput(DXC_OUT_ERRORS, IID_PPV_ARGS(&errs), nullptr)) &&
             errs && errs->GetStringLength())
-            AVER_ERROR("[RHI.Vulkan] {} ({}): {}", entry, target, errs->GetStringPointer());
+            // DEBUG when the caller expects this attempt to possibly fail -- see the quiet flag.
+            if (quiet) AVER_TRACE("[RHI.Vulkan] {} ({}): {}", entry, target, errs->GetStringPointer());
+            else       AVER_ERROR("[RHI.Vulkan] {} ({}): {}", entry, target, errs->GetStringPointer());
         else
-            AVER_ERROR("[RHI.Vulkan] {} ({}): DXC failed with no diagnostic", entry, target);
+            if (quiet) AVER_TRACE("[RHI.Vulkan] {} ({}): DXC failed with no diagnostic", entry, target);
+            else       AVER_ERROR("[RHI.Vulkan] {} ({}): DXC failed with no diagnostic", entry, target);
         return false;
     }
 

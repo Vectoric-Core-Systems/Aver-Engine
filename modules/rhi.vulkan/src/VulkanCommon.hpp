@@ -95,6 +95,7 @@
 #include <vulkan/vulkan.h>   // vendored at third_party/vulkan-headers/include, v1.3.296, Apache-2.0
 
 #include "aver/rhi/RHI.hpp"
+#include "VulkanRegisterMap.hpp"
 #include "aver/core/Log.hpp"
 
 #include <cmath>
@@ -749,10 +750,14 @@ struct PushConstantLayout {
 // VkPipelineLayout it describes, in DescriptorLayoutEntry below.
 PushConstantLayout pushConstantLayout(const PipelineLayout& layout, bool mesh);
 
-// A stable key for "which slots does this layout make root constants", so a shader compiled for one
-// layout can be reused by every other layout that agrees. Bit k set == slot k is push constants;
-// bit 31 == mesh. kObjectConstantRegister is ALWAYS set, because pushConstantLayout always places it.
-u32 pushConstantKey(const PipelineLayout& layout, bool mesh);
+// A stable key for "everything about this PipelineLayout that changes how a shader compiles", so a
+// module compiled for one layout is reused by every other layout that agrees and by no other. Packs
+// the root-constant slot mask, all four table counts, the sampler count and `mesh`.
+//
+// It must cover every per-layout compile step. It began as the constant-slot mask alone, which was
+// complete while patchCbuffersForLayout was the only such step, and stopped being complete the
+// moment buildRegisterBinds made the table counts matter. Anything added later must extend it too.
+u32 shaderVariantKey(const PipelineLayout& layout, bool mesh);
 
 // Lowers EVERY cbuffer in a shader to what its PipelineLayout says it is. This is the general form
 // of what VulkanDevice.cpp does for the three FIXED pipelines by exact text, and it replaces the
@@ -783,7 +788,12 @@ u32 pushConstantKey(const PipelineLayout& layout, bool mesh);
 // Returns false only on a malformed block or an unpaddable gap, both logged. A shader whose cbuffers
 // all already agree with its layout is left byte-identical, which moduleForLayout uses as its signal
 // to reuse the layout-agnostic module rather than compile a second one.
-bool patchCbuffersForLayout(std::string& src, const PipelineLayout& layout, bool mesh);
+//
+// `annotateDescriptors` false leaves the ZERO-dword blocks completely alone, for callers that place
+// them with a -fvk-bind-register map instead (buildRegisterBinds). The push-constant half always
+// runs: a folded block has no register left to map, so the map cannot express it.
+bool patchCbuffersForLayout(std::string& src, const PipelineLayout& layout, bool mesh,
+                            bool annotateDescriptors);
 
 // ================================================================================================
 // 5. Per-frame constant ring: the Vulkan analog of D3D12RenderContext::ringAlloc. One HOST_VISIBLE
@@ -1120,23 +1130,8 @@ struct RetiredObject {
 // for the same HLSL), so a Vulkan device with no usable DXC simply cannot compile shaders, and
 // compile() failing is what createShader must treat as this device having no working shader path
 // at all, not as one shader among many failing.
-// One explicit HLSL-register -> (set, binding) mapping, emitted as DXC's -fvk-bind-register.
-//
-// WHY THIS EXISTS, and why the -fvk-*-shift arguments beside it could not do the job: a shift moves
-// binding NUMBERS within one space and cannot move anything into a different SET, nor permute two
-// registers of the same class independently. The post chain needs both -- its six resources live in
-// set kVkSetConstants in an order (b0, t0, t1, t2, u0, u1) that interleaves register classes -- so
-// it needs a per-register map, which is exactly what this is. This is option (b) from the decision
-// recorded at the top of VulkanShaderCompiler.cpp, chosen there precisely because it keeps the
-// shared HLSL backend-neutral: no `space` annotation is added, and D3D12 reads the same source
-// unchanged.
-struct VkRegisterBind {
-    char type;      // 'b', 't', 'u' or 's' -- the HLSL register class
-    u32  number;    // the register index within that class
-    u32  space;     // the HLSL register space, 0 for everything this engine declares
-    u32  set;       // the Vulkan descriptor set it must land in
-    u32  binding;   // and the binding within that set
-};
+// VkRegisterBind / kMaxRegisterBinds / buildRegisterBinds live in VulkanRegisterMap.hpp,
+// included at the top of this file -- see that header for why they are separable.
 
 class VulkanShaderCompiler {
 public:
@@ -1154,9 +1149,13 @@ public:
     // in section 4 requires — see this method's own definition for the exact -fvk-*-shift values,
     // which must agree with tableSetLayout()/descriptorLayout() byte for byte, register for
     // register). False (and logged) on any failure, `outSpirv` left untouched.
+    //
+    // `quiet` downgrades DXC's own diagnostics from ERROR to DEBUG, for a caller that EXPECTS this
+    // compile to possibly fail and has a recovery path (moduleForLayout's bind-map attempt). The
+    // return value is unchanged; only the logging is.
     bool compile(const char* src, const char* entry, ShaderStage stage, u32 minShaderModel,
                  const char* defines, std::vector<u32>& outSpirv,
-                 const VkRegisterBind* binds = nullptr, u32 bindCount = 0);
+                 const VkRegisterBind* binds = nullptr, u32 bindCount = 0, bool quiet = false);
 
 private:
     bool tried_ = false;
@@ -1804,7 +1803,10 @@ private:
     // no cbuffer the shader declares into root constants, otherwise a variant compiled with
     // patchPushConstantSlots applied, created on first use and cached in s.variants. Null on a
     // compile failure, which the caller must treat as pipeline creation failing.
-    VkShaderModule moduleForLayout(RhiShader& s, const PipelineLayout& layout, bool mesh);
+    // `outSpirv`, when given, receives the SPIR-V the returned module was built from -- which is
+    // what reflectTableSlotKinds has to read, NOT RhiShader::spirv. See that function.
+    VkShaderModule moduleForLayout(RhiShader& s, const PipelineLayout& layout, bool mesh,
+                                   const std::vector<u32>** outSpirv = nullptr);
 
     VulkanDevice* dev_;
     VkDescriptorPool descriptorPool_ = VK_NULL_HANDLE;   // the ONE pool every binding set + every fixed/post/feature descriptor set allocates from; created with FREE_DESCRIPTOR_SET_BIT so destroyBindingSet can actually free its set (deferred through retire()/collect(), same as every other destroy here)

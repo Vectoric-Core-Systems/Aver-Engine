@@ -53,3 +53,22 @@ if(AVER_RHI_VULKAN)
   endif()
   set_target_properties(CbufferLayoutPatchTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# RegisterBindMapTest -- buildRegisterBinds, with no device and no Vulkan headers.
+#
+# It includes modules/rhi.vulkan/src/VulkanRegisterMap.hpp directly, which is the ONE header in that
+# module deliberately kept free of vulkan.h so it can be included from outside (house rule 3 is
+# about Vulkan TYPES escaping, and a VkRegisterBind is four integers describing a DXC command-line
+# argument). No third_party/vulkan-headers on the include path here, and that is the point.
+if(AVER_RHI_VULKAN)
+  add_executable(RegisterBindMapTest src/RegisterBindMapTest.cpp)
+  target_include_directories(RegisterBindMapTest PRIVATE ${CMAKE_SOURCE_DIR}/modules/rhi.vulkan/src)
+  target_link_libraries(RegisterBindMapTest PRIVATE Aver.RHI.Vulkan Aver.RHI Aver.Core Aver.Platform)
+  if(AVER_RHI_D3D12)
+    target_link_libraries(RegisterBindMapTest PRIVATE Aver.RHI.D3D12)
+  endif()
+  if(AVER_RHI_D3D11)
+    target_link_libraries(RegisterBindMapTest PRIVATE Aver.RHI.D3D11)
+  endif()
+  set_target_properties(RegisterBindMapTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

@@ -15,7 +15,8 @@
 #include <string>
 
 namespace aver::rhi::vkb {
-bool patchCbuffersForLayout(std::string& src, const PipelineLayout& layout, bool mesh);
+bool patchCbuffersForLayout(std::string& src, const PipelineLayout& layout, bool mesh,
+                            bool annotateDescriptors);
 }
 
 using namespace aver;
@@ -57,7 +58,7 @@ static void testSlotThreePadsToOneTwentyEight() {
     layout.constantDwords[3] = 4;
 
     const std::string before = src;
-    check(vkb::patchCbuffersForLayout(src, layout, false), "the patch succeeds");
+    check(vkb::patchCbuffersForLayout(src, layout, false, /*annotateDescriptors=*/true), "the patch succeeds");
     check(src != before, "the source actually changed");
     check(has(src, "[[vk::push_constant]] ConstantBuffer<AverPcBlock> gAverPc;"), "a push-constant block is emitted");
 
@@ -100,7 +101,7 @@ static void testObjectBlockNeedsNoPadding() {
     PipelineLayout layout;
     layout.constantDwords[kObjectConstantRegister] = kObjectConstantDwords;
 
-    check(vkb::patchCbuffersForLayout(src, layout, false), "the patch succeeds");
+    check(vkb::patchCbuffersForLayout(src, layout, false, /*annotateDescriptors=*/true), "the patch succeeds");
     check(has(src, "[[vk::push_constant]]"), "a push-constant block is emitted");
     check(!has(src, "_averPcPad"), "no padding is emitted for the first slot");
     check(has(src, "static float4x4 gWorld = gAverPc.gWorld;"), "a matrix field is aliased with its type");
@@ -124,7 +125,7 @@ static void testZeroDwordSlotBecomesADescriptor() {
 
     PipelineLayout layout;   // every constantDwords stays 0
 
-    check(vkb::patchCbuffersForLayout(src, layout, false), "the patch succeeds");
+    check(vkb::patchCbuffersForLayout(src, layout, false, /*annotateDescriptors=*/true), "the patch succeeds");
     check(has(src, "[[vk::binding(4, 2)]] cbuffer PreviewFrame : register(b4)"), "b4 is bound at set 2, binding 4");
     check(!has(src, "push_constant"), "it is NOT folded into push constants");
     check(has(src, "float4x4 gViewProj;"), "the block keeps its fields");
@@ -141,7 +142,7 @@ static void testAlreadyAnnotatedIsLeftAlone() {
 
     PipelineLayout layout;
     const std::string before = src;
-    check(vkb::patchCbuffersForLayout(src, layout, false), "the patch succeeds");
+    check(vkb::patchCbuffersForLayout(src, layout, false, /*annotateDescriptors=*/true), "the patch succeeds");
     check(src == before, "the source is byte-identical");
 
     // Byte-identical is not cosmetic: moduleForLayout uses exactly this to decide it can reuse the
@@ -163,7 +164,7 @@ static void testUnrelatedShaderIsUntouched() {
     layout.constantDwords[3] = 4;   // the layout HAS a push-constant slot; the shader just ignores it
 
     const std::string before = src;
-    check(vkb::patchCbuffersForLayout(src, layout, false), "the patch succeeds");
+    check(vkb::patchCbuffersForLayout(src, layout, false, /*annotateDescriptors=*/true), "the patch succeeds");
     check(src == before, "the source is byte-identical");
 }
 
@@ -196,7 +197,7 @@ static void testTwoBlocksFoldInByteOrder() {
     layout.constantDwords[kObjectConstantRegister] = kObjectConstantDwords;
     layout.constantDwords[3] = 4;
 
-    check(vkb::patchCbuffersForLayout(src, layout, false), "the patch succeeds");
+    check(vkb::patchCbuffersForLayout(src, layout, false, /*annotateDescriptors=*/true), "the patch succeeds");
     check(!has(src, "_averPcPad"), "no padding: b1 fills bytes 0..128 and b3 abuts it");
     check(!has(src, "cbuffer SkinParams"), "the b3 block is removed");
     check(!has(src, "cbuffer PerObject"), "the b1 block is removed");
@@ -214,6 +215,61 @@ static void testTwoBlocksFoldInByteOrder() {
           "b1's fields precede b3's, whatever order the source declared them in");
 }
 
+// ---- a slot can be FOLDED without its constantDwords saying so ------------------------------------
+//
+// THE BUG THIS PINS, which DXC found and no reading of the code did. pushConstantLayout places
+// kObjectConstantRegister UNCONDITIONALLY -- declared or not, whatever constantDwords[1] holds. So
+// a layout that leaves constantDwords[1] at zero, while its shader includes the shared prelude's
+// PerObject block, has b1 folded into the push-constant struct by the first half of this function
+// and, if the second half only checked constantDwords, annotated as a descriptor by the second.
+// The annotation is inserted before the `cbuffer` keyword and the fold replaces the block after it,
+// so the two compose into:
+//     [[vk::binding(1, 2)]] struct AverPcBlock {
+// which DXC rejects with "an attribute list cannot appear here" -- pointing at a line whose
+// declaration no longer exists. Voxi's CSClear/CSMip/CSResolve are exactly this shape.
+static void testFoldedSlotIsNeverAlsoAnnotated() {
+    AVER_INFO("-- a folded slot is not also annotated, even at constantDwords 0 --");
+    std::string src =
+        "cbuffer PerObject : register(b1) {\n"
+        "    float4x4 gWorld;\n"
+        "    float4   gBaseColor;\n"
+        "    float4   gMaterial;\n"
+        "    uint     gShadingModel;\n"
+        "    float    gReflectance;\n"
+        "    float    gF90;\n"
+        "    float4   gEmissive;\n"
+        "};\n"
+        "RWTexture3D<float4> gOut : register(u0);\n"
+        "[numthreads(4,4,4)] void CSClear(uint3 id : SV_DispatchThreadID) { gOut[id] = gBaseColor; }\n";
+
+    PipelineLayout layout;
+    layout.uavCount = 2;      // exactly CSClear's layout: UAVs only, constantDwords untouched
+    check(layout.constantDwords[kObjectConstantRegister] == 0, "the layout really does leave b1 at zero");
+
+    check(vkb::patchCbuffersForLayout(src, layout, false, /*annotateDescriptors=*/true), "the patch succeeds");
+    check(has(src, "struct AverPcBlock"), "b1 is folded into the push-constant struct anyway");
+    check(!has(src, "[[vk::binding(1"), "b1 is NOT also annotated as a descriptor");
+    check(!has(src, "]] struct"), "no annotation is left stranded on the generated struct");
+}
+
+// ---- a cbuffer named only in a COMMENT is not a declaration -----------------------------------------
+//
+// The scanner runs over a comment-blanked copy for exactly this reason. These shaders are heavily
+// commented and several comments quote the declarations this function rewrites; annotating one of
+// those inserts an attribute into prose.
+static void testCommentedCbufferIsNotMatched() {
+    AVER_INFO("-- a cbuffer mentioned in a comment is ignored --");
+    std::string src =
+        "// The engine declares cbuffer PerFrame : register(b0) { float4x4 gViewProj; } in the prelude.\n"
+        "/* and cbuffer Legacy : register(b2) { float4 gOld; }; was removed in 0.2 */\n"
+        "float4 PSMain() : SV_Target { return 0; }\n";
+
+    PipelineLayout layout;
+    const std::string before = src;
+    check(vkb::patchCbuffersForLayout(src, layout, false, /*annotateDescriptors=*/true), "the patch succeeds");
+    check(src == before, "the source is byte-identical -- neither comment was touched");
+}
+
 int main() {
     AVER_INFO("CbufferLayoutPatchTest -- lowering cbuffers to what the PipelineLayout says they are");
     testSlotThreePadsToOneTwentyEight();
@@ -221,6 +277,8 @@ int main() {
     testZeroDwordSlotBecomesADescriptor();
     testAlreadyAnnotatedIsLeftAlone();
     testUnrelatedShaderIsUntouched();
+    testFoldedSlotIsNeverAlsoAnnotated();
+    testCommentedCbufferIsNotMatched();
     testTwoBlocksFoldInByteOrder();
 
     if (g_failures == 0) {

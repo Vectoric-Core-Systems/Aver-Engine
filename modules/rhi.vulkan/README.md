@@ -41,24 +41,66 @@ available.
 
 ## What is left
 
-**Textures and samplers in the fixed scene pipeline.** Four bindings, and they are the only
-validation errors remaining:
+Every shader now compiles and every pipeline is created; what fails is **drawing**. The remaining
+validation errors, all of them at command-record time and none about where a resource is bound:
 
-| Variable | What the layer says |
+| What the layer says | Shape of it |
 | --- | --- |
-| `gBaseColorMap` (set 0, binding 9) | not declared in the pipeline layout |
-| `gL1BaseColorMap` (set 0, binding 14) | not declared in the pipeline layout |
-| `gMaterialSampler` (set 0, binding 2) | `VkDescriptorType` mismatch |
-| `gShadowSamp` (set 0, binding 1) | `VkDescriptorType` mismatch |
+| `Binding 2 ... is SAMPLED_IMAGE but ... trying to bind is ACCELERATION_STRUCTURE_KHR` | slot **kinds** disagree — see below |
+| `vkCmdBeginRendering(): invalid inside an active render pass` | render passes are not being closed |
+| `vkCmdDraw/EndRendering(): must be issued inside an active render pass` | the same, from the other side |
+| `pColorAttachments[0].resolveMode` | MSAA resolve is not set up |
+| `pImageMemoryBarriers[0].image Invalid` | a barrier on a handle that is not live |
 
-The shape is the same one the cbuffers had — DXC leaves a space-less `t#`/`s#` register in set 0 —
-but the fix is not, because samplers and SRVs are *colliding* there rather than merely misplaced: a
-sampler at binding 1 lands where the table set already declares a texture, which is what turns
-"undeclared" into "wrong type". Whatever the answer is, it is a statement about `tableSetLayout()`
-and the `-fvk-s-shift`/`-fvk-t-shift` scheme, not about the shader text.
+**The slot-kind disagreement is the interesting one**, and it is structural rather than a slip. A
+pipeline's table set layout gets its `SlotKind`s from **reflecting the shader**, while the
+`BindingSet` bound into that same set gets them from **what the feature module declared**. When a
+shader does not USE a slot, DXC eliminates it, reflection finds nothing and defaults the slot to
+`Texture2D` — so a pipeline whose shaders never touch the TLAS declares `SAMPLED_IMAGE` at slot 2
+while Voxi's binding set holds an acceleration structure there. Closing it means picking one source
+of truth: either `BindingSetDesc` carries the kinds and the pipeline layout uses those, or
+reflection is unioned across every pipeline that shares a binding set. That is a design decision,
+not a patch, and `VulkanCommon.hpp`'s own note on `tableSetLayout` already flags the two halves as
+"nothing at compile time tying the two together".
 
-With these outstanding the process still dies, now at `0xC0000005` inside the driver rather than the
-`0xC0000409` abort that every earlier defect produced.
+**Two features are unimplemented and now say so.** `GraphicsPipelineDesc::instanced` is unconsumed
+here, so the instance SRV at `t(declaredSrvCount)` has nowhere to go; feature-module mesh geometry
+is in the same position. Shaders in that position take the fallback described below.
+
+## Textures and samplers: done, and how
+
+`buildRegisterBinds` (`VulkanRegisterMap.hpp`) derives one `-fvk-bind-register` per register from
+the `PipelineLayout`, and `moduleForLayout` passes it to DXC. Four validation errors closed:
+
+| Register | Was | Is |
+| --- | --- | --- |
+| `t9` `gBaseColorMap` | set 0, binding 9 — undeclared | set 1, binding 0 |
+| `t14` `gL1BaseColorMap` | set 0, binding 14 — undeclared | set 1, binding 5 |
+| `s1` `gShadowSamp` | set 0, binding 1 — a texture is there | set 3, binding 1 |
+| `s2` `gMaterialSampler` | set 0, binding 2 — likewise | set 3, binding 2 |
+
+Table 1 is the crux: HLSL numbers it **continuously above table 0** (`t(srvCount)..`) because that
+is what D3D12's root signature wants, and only this backend splits the two into separate sets that
+each restart at binding 0. No amount of `-fvk-*-shift` can express that — a shift moves binding
+numbers within one space and cannot move anything into another set.
+
+Three things fell out of it that are worth knowing:
+
+- **The map must be COMPLETE.** Supply one `-fvk-bind-register` and DXC demands one for every
+  resource: `error: missing -fvk-bind-register for resource`. Descriptor cbuffers therefore go in
+  the map too, and `patchCbuffersForLayout`'s `[[vk::binding]]` half stands down when it is in use —
+  two answers to the same question is one more than DXC accepts.
+- **A layout does not always describe its whole shader** (the two unimplemented features above, plus
+  resources a shared header declares and a given shader does not use). Rather than invent a binding
+  and turn a compile error into a validation error, `moduleForLayout` retries WITHOUT the map,
+  restoring exactly the placement that shader had before — no regression, and a warning naming it.
+- **`descriptor set 3 is never bound` is what you get next.** The immutable sampler set is written
+  once at layout-build time and it is tempting to conclude it never needs binding. A pipeline whose
+  shader names a sampler *statically uses* set 3, and Vulkan requires every such set to be bound
+  before the draw. `VulkanRenderContext` binds it once per `setPipeline`.
+
+`tests/rhi/RegisterBindMapTest.cpp` pins the mapping with no device and no SDK, against the exact
+layout that was failing (Voxi's GI: `srvCount` 9, `srvCount1` 8, `uavCount` 4, 3 samplers).
 
 ## Constant buffers: done, and how
 
