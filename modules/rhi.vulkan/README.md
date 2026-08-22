@@ -4,9 +4,10 @@
 - **Depends on:** Aver.RHI (only)
 - **Option:** `AVER_RHI_VULKAN` — **OFF by default**, and staying off until it presents a frame.
 
-Vulkan 1.3 behind the same `rhi::IDevice` the D3D12 backend implements. **Not a stub.** It creates a
-real device and swapchain, compiles the engine's shared HLSL to SPIR-V, brings the whole engine up —
-and does not yet draw. What remains is named below rather than left to be rediscovered.
+Vulkan 1.3 behind the same `rhi::IDevice` the D3D12 backend implements. **It presents a frame** --
+grid, cube, shadow, sky and world axes -- which it did not until 7504a80. It is not yet correct:
+the image fills only part of the swapchain and the editor UI does not draw at all. Both are
+symptoms of the one defect named below.
 
 ## No SDK required to build or run
 
@@ -41,32 +42,30 @@ available.
 
 ## What is left
 
-Every shader now compiles and every pipeline is created; what fails is **drawing**. The remaining
-validation errors, all of them at command-record time and none about where a resource is bound:
+**One defect drops the entire overlay, and the editor UI with it.**
 
-| What the layer says | Shape of it |
-| --- | --- |
-| `pImageMemoryBarriers[0].image Invalid` | a barrier on a handle that is not live |
+    VkDescriptorSet ... was destroyed or updated without UPDATE_AFTER_BIND
 
-Render-pass scoping and the MSAA resolve were the other two and are **fixed**: one
-`renderScopeDepth_` counter in `VulkanDevice` now owns every `vkCmdBeginRendering`, so a feature
-drawing through the render context from inside one of the device's own passes joins that scope
-instead of nesting a second one inside it.
+This backend rewrites a binding set that a *recording* command buffer has already bound. Vulkan
+forbids that, and the command buffer goes to an INVALID state -- so every call recorded afterwards
+is dropped by the driver, which in one run was 133 further errors and every UI draw in the frame.
+It is the only thing that invalidates the command buffer now.
 
-**The slot-kind disagreement is FIXED**, and the shape of the fix is the same one the cbuffers and
-the register map got: stop inferring what the caller can declare. A pipeline's table set layout used
-to take its `SlotKind`s from REFLECTING the shader, which cannot see a slot the shader does not use
--- DXC eliminates it, nothing is found, and the slot silently becomes a `Texture2D`. Voxi's t2 TLAS
-is exactly that slot, declared for the table but used by only some of the pipelines sharing it, so
-the pipeline declared `SAMPLED_IMAGE` where the binding set held an `ACCELERATION_STRUCTURE` and the
-layer only said so at the draw.
+Two ways out, and it is a decision rather than a patch:
 
-`PipelineLayout` now carries the kinds `BindingSetDesc` always carried, behind
-`slotKindsDeclared`. Both sides go through the one `tableSetLayout()` cache with the same kinds, so
-they land on the same `VkDescriptorSetLayout` and are compatible by construction. Voxi declares
-them from a single `giTableKinds()` read by both its layout and its set -- the treatment
-`kGiSrvCount` already got, for the same reason. A layout that declares nothing still reflects, and
-now **warns naming each slot it had to guess** rather than only when it finds nothing at all.
+- declare the pool and the set layouts `UPDATE_AFTER_BIND` (`VK_EXT_descriptor_indexing`, core since
+  1.2 and this backend already requires 1.3), or
+- ring the binding sets `kFrameCount` deep, the way the constant ring already is.
+
+**Also outstanding**
+
+- The presented image fills only part of the swapchain. The scene extent and the present extent
+  disagree; with no UI to lay out a viewport rect, `setViewportRect` is left holding whatever the
+  editor last computed.
+- The two shaders on the bind-map fallback -- `gInstanceWorlds` at t17, and `MSVoxel`'s
+  `gVerts`/`gIndices`/`MeshCB` -- because `GraphicsPipelineDesc::instanced` and feature-module mesh
+  geometry are both unimplemented here. See the fallback note below.
+- 13 leaked objects at `vkDestroyDevice`.
 
 ## Textures and samplers: done, and how
 
