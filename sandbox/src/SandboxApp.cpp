@@ -234,6 +234,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace aver {
@@ -2835,6 +2836,7 @@ public:
             sceneMeshes_[id] = h;
             meshBounds_[id] = {md.boundsMin, md.boundsMax};
             meshTris_[id] = static_cast<u32>(md.indices.size() / 3);
+            if (md.hasSkin()) skinnedMeshIds_.insert(id);
             projectMeshIds_.push_back(id);
             ++loaded;
             AVER_INFO("[Mesh] '{}' -> {} verts, {} indices, lodCount={}, coarserLods={}, meshlets={}",
@@ -9200,28 +9202,40 @@ private:
     // exists, and falls through to exactly this glyph until it does.
     struct AssetKind { const char* icon; ImU32 tint; const char* label; };
     static const AssetKind* assetKindFor(const std::string& ext) {
-        // Grouped by what a thing IS, and coloured by group, so related assets read as related:
-        // geometry warm, animation violet, look/material orange, simulation green, audio pink,
-        // logic blue, source grey-blue, data neutral.
+        // COLOURED THE WAY UNREAL COLOURS ITS CONTENT BROWSER, because that colour coding is the
+        // thing people already know: every tile carries a bar in its type's colour, and you learn to
+        // find a mesh or a material by colour long before you read the name. Where this engine has a
+        // type Unreal also has, the colour is Unreal's own (its FAssetTypeActions_*::GetTypeColor):
+        //
+        //     Static Mesh    cyan          0,255,255      Texture    red     192, 64, 64
+        //     Skeletal Mesh  pink        241,163,241      Sound      blue      0,175,255
+        //     Skeleton       pink        241,163,241      World      amber   255,156,  0
+        //     Animation      lime        181,230, 29      Blueprint  blue     63,126,255
+        //     Material       green        64,192, 64
+        //
+        // Where it does not (F#, C#, HLSL, navmesh, behaviour trees), the colour is chosen to sit in
+        // the same family as the nearest Unreal type -- logic blue, source violet -- rather than
+        // invented, so the scheme stays learnable. A SKINNED .ocmesh takes the pink rather than the
+        // cyan: see cardAccent(), which is the one caller that can tell the two apart.
         static const struct { const char* ext; AssetKind k; } kTable[] = {
-            {".ocmesh",     {ICON_TERRAIN,    IM_COL32(226, 148,  74, 255), "Mesh"}},
-            {".ocworld",    {ICON_TERRAIN,    IM_COL32(120, 190, 130, 255), "Level"}},
-            {".ocmap",      {ICON_TERRAIN,    IM_COL32(120, 190, 130, 255), "Level"}},
-            {".ocskel",     {ICON_TREE,       IM_COL32(178, 142, 232, 255), "Skeleton"}},
-            {".ocanim",     {ICON_PLAY,       IM_COL32(178, 142, 232, 255), "Animation"}},
-            {".ocmat",      {ICON_TUNE,       IM_COL32(242, 101,  34, 255), "Material"}},
-            {".ocparticle", {ICON_ADD,        IM_COL32( 96, 200, 176, 255), "Particles"}},
-            {".ocsnd",      {ICON_WAVE,       IM_COL32(232, 120, 170, 255), "Sound Graph"}},
-            {".ocaudio",    {ICON_AUDIO,      IM_COL32(232, 120, 170, 255), "Audio"}},
-            {".wav",        {ICON_AUDIO,      IM_COL32(232, 120, 170, 255), "Audio"}},
-            {".ogg",        {ICON_AUDIO,      IM_COL32(232, 120, 170, 255), "Audio"}},
-            {".ocbt",       {ICON_TREE,       IM_COL32(110, 170, 240, 255), "Behaviour Tree"}},
-            {".ocgraph",    {ICON_LINK,       IM_COL32(110, 170, 240, 255), "Graph"}},
+            {".ocmesh",     {ICON_TERRAIN,    IM_COL32(  0, 255, 255, 255), "Static Mesh"}},
+            {".ocworld",    {ICON_TERRAIN,    IM_COL32(255, 156,   0, 255), "Level"}},
+            {".ocmap",      {ICON_TERRAIN,    IM_COL32(255, 156,   0, 255), "Level"}},
+            {".ocskel",     {ICON_TREE,       IM_COL32(241, 163, 241, 255), "Skeleton"}},
+            {".ocanim",     {ICON_PLAY,       IM_COL32(181, 230,  29, 255), "Animation"}},
+            {".ocmat",      {ICON_TUNE,       IM_COL32( 64, 192,  64, 255), "Material"}},
+            {".ocparticle", {ICON_ADD,        IM_COL32(  0, 200, 180, 255), "Particles"}},
+            {".ocsnd",      {ICON_WAVE,       IM_COL32(  0, 175, 255, 255), "Sound Graph"}},
+            {".ocaudio",    {ICON_AUDIO,      IM_COL32(  0, 175, 255, 255), "Audio"}},
+            {".wav",        {ICON_AUDIO,      IM_COL32(  0, 175, 255, 255), "Audio"}},
+            {".ogg",        {ICON_AUDIO,      IM_COL32(  0, 175, 255, 255), "Audio"}},
+            {".ocbt",       {ICON_TREE,       IM_COL32( 63, 126, 255, 255), "Behaviour Tree"}},
+            {".ocgraph",    {ICON_LINK,       IM_COL32( 63, 126, 255, 255), "Graph"}},
             {".ocnav",      {ICON_TERRAIN,    IM_COL32(150, 200, 120, 255), "Navigation"}},
             {".hlsl",       {ICON_BUILD,      IM_COL32(140, 200, 220, 255), "Shader"}},
-            {".png",        {ICON_VISIBILITY, IM_COL32(200, 170, 110, 255), "Texture"}},
-            {".jpg",        {ICON_VISIBILITY, IM_COL32(200, 170, 110, 255), "Texture"}},
-            {".tga",        {ICON_VISIBILITY, IM_COL32(200, 170, 110, 255), "Texture"}},
+            {".png",        {ICON_VISIBILITY, IM_COL32(192,  64,  64, 255), "Texture"}},
+            {".jpg",        {ICON_VISIBILITY, IM_COL32(192,  64,  64, 255), "Texture"}},
+            {".tga",        {ICON_VISIBILITY, IM_COL32(192,  64,  64, 255), "Texture"}},
             {".gltf",       {ICON_TERRAIN,    IM_COL32(190, 160, 120, 255), "glTF"}},
             {".glb",        {ICON_TERRAIN,    IM_COL32(190, 160, 120, 255), "glTF"}},
             {".json",       {ICON_FILE,       IM_COL32(160, 164, 172, 255), "Data"}},
@@ -9229,9 +9243,46 @@ private:
             {".fs",         {ICON_EDIT,       IM_COL32(120, 150, 210, 255), "F#"}},
             {".fsproj",     {ICON_SETTINGS,   IM_COL32(120, 150, 210, 255), "F# Project"}},
             {".csproj",     {ICON_SETTINGS,   IM_COL32(120, 150, 210, 255), "C# Project"}},
+            // These four have real sprite art and never reach typedGlyph, but the card's TYPE BAR
+            // still needs their colour -- which is the whole reason the table now covers them.
+            {".cs",         {ICON_EDIT,       IM_COL32(149, 117, 205, 255), "C# Script"}},
+            {".cpp",        {ICON_BUILD,      IM_COL32(100, 149, 237, 255), "C++ Source"}},
+            {".cxx",        {ICON_BUILD,      IM_COL32(100, 149, 237, 255), "C++ Source"}},
+            {".cc",         {ICON_BUILD,      IM_COL32(100, 149, 237, 255), "C++ Source"}},
+            {".hpp",        {ICON_BUILD,      IM_COL32(100, 149, 237, 255), "C++ Header"}},
+            {".hxx",        {ICON_BUILD,      IM_COL32(100, 149, 237, 255), "C++ Header"}},
+            {".h",          {ICON_BUILD,      IM_COL32(100, 149, 237, 255), "C++ Header"}},
         };
         for (const auto& row : kTable) if (ext == row.ext) return &row.k;
         return nullptr;
+    }
+
+    // True when this entry is a .ocmesh carrying skin weights -- a SKELETAL mesh, which the card
+    // colours differently from a static one. Keyed by the SAME fnv1a64(relative path) id
+    // loadProjectMeshes assigned, so the set it can answer for is exactly the set of meshes this
+    // browser can already place in a level; anything unloaded reads as static rather than guessing.
+    bool isSkinnedMeshEntry(const DirEntry& e) const {
+        if (e.isDir || e.kindExt != ".ocmesh" || skinnedMeshIds_.empty()) return false;
+        const std::string content = project_.contentDir();
+        if (content.empty()) return false;
+        std::error_code ec;
+        std::string rel = std::filesystem::relative(e.path, content, ec).string();
+        if (ec || rel.empty()) return false;
+        for (char& c : rel) if (c == '\\') c = '/';
+        return skinnedMeshIds_.count(fnv1a64(std::string_view(rel))) != 0;
+    }
+
+    // The colour of one card's type bar. Null-safe over every entry a listing can contain.
+    //
+    // `skinned` is the one thing the extension alone cannot answer: a skeletal mesh in this engine
+    // is a .ocmesh with skin weights, not a separate file type, so it is Unreal's Static Mesh cyan
+    // until something reads kOcMeshHasSkin out of the header -- which loadProjectMeshes already did
+    // when it uploaded the thing (see skinnedMeshIds_).
+    static ImU32 cardAccent(const std::string& ext, bool isDir, bool skinned) {
+        if (isDir) return IM_COL32(150, 156, 166, 255);          // neutral: a folder has no type
+        if (skinned) return IM_COL32(241, 163, 241, 255);        // Skeletal Mesh, per the table above
+        if (const AssetKind* k = assetKindFor(ext)) return k->tint;
+        return IM_COL32(130, 136, 146, 255);                     // an unrecognised file
     }
 
     static int assetIconTile(const std::string& ext) {
@@ -9417,12 +9468,23 @@ private:
                     if (col) ImGui::SameLine(0.0f, pad);
                     ImGui::PushID(idx);
                     const ImVec2 o = ImGui::GetCursorScreenPos();
-                    if (ImGui::Selectable("##cell", cbSelectedFile_ == e.full,
+                    // TRANSPARENT, and drawn over. ImGui::Selectable paints its highlight into the
+                    // draw list at the moment it is called, so the card fill below -- which is
+                    // emitted afterwards and is opaque -- would bury it. The widget stays for what
+                    // it is actually good at (hit-testing, keyboard nav, the drag source, the
+                    // context menu); selection and hover are painted with the card.
+                    ImGui::PushStyleColor(ImGuiCol_Header,        IM_COL32(0, 0, 0, 0));
+                    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, IM_COL32(0, 0, 0, 0));
+                    ImGui::PushStyleColor(ImGuiCol_HeaderActive,  IM_COL32(0, 0, 0, 0));
+                    const bool selected = cbSelectedFile_ == e.full;
+                    if (ImGui::Selectable("##cell", selected,
                                           ImGuiSelectableFlags_AllowDoubleClick, ImVec2(cellW, cellH))) {
                         cbSelectedFile_ = e.full;
                         if (ImGui::IsMouseDoubleClicked(0) || (e.isDir && !cbDoubleClickEnter_))
                             cbOpenEntry(e.full, e.isDir);
                     }
+                    ImGui::PopStyleColor(3);
+                    const bool hot = ImGui::IsItemHovered();
                     // Only placeable assets start a drag (see isPlaceableAssetExt/spawnFromAssetDrop),
                     // so the viewport drop target never has to reject a payload it received.
                     if (!e.isDir && isPlaceableAssetExt(lowerExt(e.path)) && ImGui::BeginDragDropSource()) {
@@ -9432,7 +9494,35 @@ private:
                     }
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", e.name.c_str());
                     cbItemContextMenu(e.full, e.name, e.isDir);
-                    const ImVec2 iconCentre(o.x + cellW*0.5f, o.y + tile*0.5f);
+                    // ---- the card ------------------------------------------------------------
+                    // Unreal's tile, in the three pieces that make it readable at a glance: a panel
+                    // so the grid reads as objects rather than floating glyphs, a PREVIEW square,
+                    // and a bar along the preview's bottom edge in the type's colour. The name sits
+                    // on a slightly darker strip below, which is what stops long names from looking
+                    // like they belong to the tile beneath them.
+                    const f32 round  = 3.0f * dpi_;
+                    const f32 barH   = ImMax(2.0f, 3.0f * dpi_);
+                    const f32 prevH  = tile - barH;                 // the preview square, above the bar
+                    const ImVec2 cardMin = o, cardMax(o.x + cellW, o.y + cellH);
+                    const ImU32 accent = cardAccent(e.kindExt.empty() ? lowerExt(e.path) : e.kindExt,
+                                                    e.isDir, isSkinnedMeshEntry(e));
+
+                    dl->AddRectFilled(cardMin, cardMax,
+                                      ImGui::GetColorU32(selected ? ImGuiCol_Header
+                                                                  : (hot ? ImGuiCol_FrameBgHovered : ImGuiCol_FrameBg)),
+                                      round);
+                    // The label strip, a touch darker than the preview so the two read as separate.
+                    dl->AddRectFilled(ImVec2(o.x, o.y + tile), cardMax, IM_COL32(0, 0, 0, 46), round,
+                                      ImDrawFlags_RoundCornersBottom);
+                    // THE TYPE BAR. Folders get none -- a folder has no asset type, and Unreal draws
+                    // none either.
+                    if (!e.isDir)
+                        dl->AddRectFilled(ImVec2(o.x, o.y + prevH), ImVec2(o.x + cellW, o.y + tile), accent);
+                    dl->AddRect(cardMin, cardMax,
+                                selected ? accent : ImGui::GetColorU32(ImGuiCol_Border),
+                                round, 0, selected ? 2.0f : 1.0f);
+
+                    const ImVec2 iconCentre(o.x + cellW*0.5f, o.y + prevH*0.5f);
                     bool drewThumb = false;
 #if AVER_MODULE_SCENE
                     // A REAL RENDERED THUMBNAIL, for mesh assets only, and only when this exact tile
@@ -9461,7 +9551,9 @@ private:
                                 if (const u64 tex = thumbnails_.textureId(meshId)) {
                                     // Whole-texture, square: kThumbnailPx is fixed on both axes, so
                                     // this is blitTile with one tile of one, not a new draw path.
-                                    blitTile(dl, tex, iconCentre, tile*0.52f, 1.0f, 0, 1);
+                                    // Nearly fills the preview square: a rendered thumbnail is
+                                    // the content, not a badge sitting on top of it.
+                                    blitTile(dl, tex, iconCentre, prevH*0.92f, 1.0f, 0, 1);
                                     drewThumb = true;
                                 }
                             }
@@ -9469,13 +9561,14 @@ private:
                     }
 #endif
                     if (!drewThumb)
-                        drawEntryIcon(dl, iconCentre, tile*0.52f, e.isDir, e.tile, e.module, e.kindExt);
-                    const f32 wrap = cellW - 4.0f*dpi_;
+                        drawEntryIcon(dl, iconCentre, prevH*0.58f, e.isDir, e.tile, e.module, e.kindExt);
+                    const f32 wrap = cellW - 6.0f*dpi_;
                     const std::string label = fitLabel(e.name, wrap, 2);
                     const ImVec2 ts = ImGui::CalcTextSize(label.c_str());
-                    const f32 tx = ts.x <= wrap ? o.x + (cellW - ts.x)*0.5f : o.x + 2.0f*dpi_;
+                    const f32 tx = ts.x <= wrap ? o.x + (cellW - ts.x)*0.5f : o.x + 3.0f*dpi_;
+                    const f32 ty = o.y + tile + 2.0f*dpi_;
                     const ImVec4 clip(o.x, o.y + tile, o.x + cellW, o.y + cellH);
-                    dl->AddText(nullptr, 0.0f, ImVec2(tx, o.y + tile), ImGui::GetColorU32(ImGuiCol_Text),
+                    dl->AddText(nullptr, 0.0f, ImVec2(tx, ty), ImGui::GetColorU32(ImGuiCol_Text),
                                 label.c_str(), nullptr, wrap, &clip);
                     ImGui::PopID();
                 }
@@ -13348,6 +13441,11 @@ private:
     // scattered pine forest's cost is invisible without this, and the whole reason a scatter
     // palette needs tuning "by looking" is that triangle count is not visible any other way.
     std::unordered_map<u64, u32> meshTris_;
+    // The .ocmesh ids that carry skin weights -- a SKELETAL mesh, in Unreal's vocabulary, which the
+    // Content Browser colours differently from a static one. Recorded rather than re-read, because
+    // loadProjectMeshes has already parsed the whole file by the time it knows this, and the flag is
+    // otherwise only reachable by opening every mesh in a folder from the draw path.
+    std::unordered_set<u64> skinnedMeshIds_;
     int lastSceneDrawn_=-1;           // last scene-entity draw count, so the log line fires only on change
     int lastSceneCulled_=-1;          // and the cull count, so a frustum bug shows as a number rather than a gap
 #endif
