@@ -1,4 +1,4 @@
-// SandboxApp: the Aver editor executable. Viewport, gizmos, panels, Content Browser,
+﻿// SandboxApp: the Aver editor executable. Viewport, gizmos, panels, Content Browser,
 // and the frame loop that drives the runtime modules.
 
 #include "aver/runtime/EntryPoint.hpp"
@@ -2606,7 +2606,7 @@ public:
         assets::TextureUploadInfo info;
         const rhi::TextureHandle h = assets::uploadTexture(*self->textureFactory_, path, usage, &err, &info);
         if (!h) {
-            AVER_WARN("[Material] {} — slot '{}' keeps its fallback", err,
+            AVER_WARN("[Material] {} â€” slot '{}' keeps its fallback", err,
                       pbr::MaterialLibrary::textureSlotName(slot));
             return {};
         }
@@ -3809,7 +3809,7 @@ public:
                 // crossed occlusionPass1Count, above) has ALREADY tested against a pyramid built from
                 // every one of those pass-1 draws, so occlusionWasVisible(ent) is this frame's own
                 // fresh answer, not a stale one -- exactly the same-frame guarantee the module's own
-                // top comment argues for. A box excluded from occlusionBoxes_ (degenerate — see the
+                // top comment argues for. A box excluded from occlusionBoxes_ (degenerate â€” see the
                 // pre-walk) was never tested and occlusionWasVisible defaults such an entity to
                 // visible, so it reaches here and draws, same as haveWorldBox==false already does for
                 // frustum culling two paragraphs up.
@@ -4751,6 +4751,14 @@ public:
     }
     void setUiDemo(bool on) { showUiDemo_ = on; }                          // --ui-demo
     void setOpenAsset(std::string p) { openAsset_ = std::move(p); }        // --open-asset
+    // --select <substring>: select the first entity whose name or outliner label contains it.
+    //
+    // EXISTS TO MAKE THE DETAILS PANEL CAPTURABLE. A bounded --frames run starts with nothing
+    // selected, so every panel that only renders for a selected entity -- which is most of them --
+    // was unreachable from a screenshot, and "does this UI actually appear" could only be answered
+    // by a human opening the editor. --graph-select is the same idea for a node inside the graph
+    // editor; this is its counterpart for the world.
+    void setSelectEntity(std::string p) { selectEntity_ = std::move(p); }
     // --water <heightCm>. Stored whether or not the module is compiled in, so a build without it can
     // say so rather than ignoring the flag in silence.
     void setWater(bool on, f32 heightCm) { waterEnabled_ = on; waterHeightCm_ = heightCm; }
@@ -8398,6 +8406,40 @@ private:
         buildChunkStreamingPanel();
 #endif
 #endif
+#if AVER_MODULE_SCENE
+        // Cleared after it fires, exactly like openAsset_ below: a selection the user then changes
+        // must not be yanked back every frame.
+        if (!selectEntity_.empty() && frameNo_ > 5) {
+            const std::string want = selectEntity_;
+            selectEntity_.clear();
+            scene::World& sw = scene::World::instance();
+            scene::Entity found = kInvalidId;
+            // ENUMERATED THE WAY THE OUTLINER ENUMERATES, via count()/at(), and matched against the
+            // SAME string it displays. The first version searched entityLabels_ and levelEntities_
+            // instead and matched nothing at all -- those are editor-side bookkeeping that a given
+            // entity may simply not be in, whereas the world is the authority on what exists. If
+            // this ever stops finding what the outliner shows, the two lookups have drifted and
+            // THIS is the copy that is wrong.
+            const u32 n = sw.count();
+            for (u32 i = 0; i < n && found == kInvalidId; ++i) {
+                const scene::Entity ent = sw.at(i);
+                if (!sw.valid(ent) || sw.destroyPending(ent)) continue;
+                const std::string nm = sw.name(ent);
+                const auto lit = entityLabels_.find(static_cast<u32>(ent));
+                const std::string shown = lit != entityLabels_.end() ? lit->second : nm;
+                if (shown.find(want) != std::string::npos || nm.find(want) != std::string::npos)
+                    found = ent;
+            }
+            if (found != kInvalidId) {
+                sel_ = kSelScene; selEntity_ = found;
+                AVER_INFO("[Editor] --select matched entity {} ('{}') for '{}'",
+                          (u32)found, sw.name(found), want);
+            } else {
+                AVER_WARN("[Editor] --select found no entity matching '{}' among {} in the world",
+                          want, n);
+            }
+        }
+#endif
         if (!openAsset_.empty() && frameNo_ > 5) {
             const std::string want = openAsset_;
             openAsset_.clear();
@@ -9819,6 +9861,142 @@ private:
                 }
             }
 #endif
+
+#if AVER_MODULE_PHYSICS
+            // ---- Soft Body, and the physics viewer for it -------------------------------------
+            //
+            // A PANEL THAT READS THE SIMULATION, not just the component. The component says what was
+            // authored; the questions an author actually has -- is it simulating, how many particles,
+            // did it take the skinned path, is it being drawn -- are answerable only from the live
+            // body and the render feature. A viewer that showed the struct back would answer none of
+            // them, and "my soft body does nothing" would stay a debugger problem.
+            if (auto* sb = w.component<scene::CSoftBody>(selEntity_, scene::kComponentSoftBody)) {
+                if (ImGui::CollapsingHeader(ICON_TUNE " Soft Body", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    bool disabled = (sb->flags & scene::kSoftBodyDisabled) != 0;
+                    if (ImGui::Checkbox("Simulated", &disabled)) {
+                        // The checkbox reads POSITIVELY and the flag is stored negatively -- see
+                        // kSoftBodyDisabled's own comment for why the flag has to mean that.
+                        if (disabled) sb->flags &= ~scene::kSoftBodyDisabled;
+                        else          sb->flags |=  scene::kSoftBodyDisabled;
+                    }
+                    // Shown inverted from the member, so the label is the state rather than its negation.
+                    disabled = (sb->flags & scene::kSoftBodyDisabled) == 0;
+
+                    f32 maxDist = scene::softBodyMaxDistanceCm(*sb);
+                    if (ImGui::DragFloat("Max distance (cm)", &maxDist, 0.1f, 0.0f, 500.0f, "%.2f"))
+                        sb->maxDistanceCm = maxDist;
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("How far a vertex may leave where bone skinning would have\n"
+                                          "put it. 0 reads as the default (%.0f cm), not as pinned.\n"
+                                          "Only reaches the solver on a mesh that HAS a rig.",
+                                          static_cast<double>(scene::kSoftBodyDefaultMaxDistanceCm));
+
+                    ImGui::DragFloat("Compliance", &sb->compliance, 0.0001f, 0.0f, 1.0f, "%.4f");
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Inverse stiffness of the edge constraints.\n0 is inextensible.");
+
+                    ImGui::SeparatorText("Simulation");
+                    // STRAIGHT FROM THE PHYSICS ABI, not from the component. `body` is the handle the
+                    // renderer stored; everything below is asked of Jolt this frame.
+                    if (sb->body == 0) {
+                        ImGui::TextDisabled(ICON_WARNING " no body yet");
+                        ImGui::TextWrapped("A body is created on the first frame this entity is drawn "
+                                           "with a mesh whose asset has resolved. If it never appears, "
+                                           "the mesh has no triangles, or this build has no soft-body "
+                                           "render feature.");
+                    } else {
+                        const i32 particles = aver_phys_softbody_vertex_count(sb->body);
+                        ImGui::Text("Body %d   %d particle%s", sb->body, particles,
+                                    particles == 1 ? "" : "s");
+                        // THE ANSWER TO "WHY IS IT NOT MOVING". A body exists and reports zero
+                        // particles only when Jolt took the mesh and found nothing to simulate.
+                        if (particles == 0)
+                            ImGui::TextDisabled(ICON_WARNING " the body has no particles");
+
+                        // Where its particles actually are, so "is it simulating" is answerable
+                        // without a debugger: a body at rest and a body falling look identical in
+                        // every other readout here.
+                        std::vector<f32> pos(static_cast<usize>(particles) * 3, 0.0f);
+                        const i32 got = particles > 0
+                            ? aver_phys_softbody_vertices(sb->body, pos.data(), particles) : 0;
+                        if (got > 0) {
+                            f32 lo[3] = { 1e30f,  1e30f,  1e30f};
+                            f32 hi[3] = {-1e30f, -1e30f, -1e30f};
+                            for (i32 v = 0; v < got; ++v)
+                                for (int c = 0; c < 3; ++c) {
+                                    const f32 x = pos[static_cast<usize>(v) * 3 + c];
+                                    lo[c] = x < lo[c] ? x : lo[c];
+                                    hi[c] = x > hi[c] ? x : hi[c];
+                                }
+                            ImGui::TextDisabled("bounds  x %.0f..%.0f   y %.0f..%.0f   z %.0f..%.0f",
+                                                lo[0], hi[0], lo[1], hi[1], lo[2], hi[2]);
+                            ImGui::TextDisabled("extent  %.0f x %.0f x %.0f cm",
+                                                hi[0]-lo[0], hi[1]-lo[1], hi[2]-lo[2]);
+                        }
+                    }
+
+#if AVER_MODULE_RENDER_SOFTBODY
+                    // IS IT ACTUALLY BEING DRAWN? Simulating and drawing are separate failures with
+                    // identical symptoms from the viewport, and this is the one line that tells them
+                    // apart -- a non-zero draw handle means the scene pass is substituting this
+                    // entity's simulated vertices for its authored mesh.
+                    const bool drawn = softBodyScene_ && softBodyScene_->drawHandle(selEntity_) != 0;
+                    ImGui::TextDisabled("%s drawn from the simulation: %s",
+                                        drawn ? ICON_VISIBILITY : ICON_WARNING, drawn ? "yes" : "no");
+                    if (softBodyScene_)
+                        ImGui::TextDisabled("%u resident, %u simulated last frame",
+                                            softBodyScene_->residentCount(),
+                                            softBodyScene_->simulatedLastFrame());
+#else
+                    ImGui::TextDisabled(ICON_WARNING " this build has no soft-body render feature, "
+                                        "so the simulation is not drawn");
+#endif
+                }
+            }
+#endif
+
+            // ---- Add Component ------------------------------------------------------------------
+            //
+            // THERE WAS NO WAY TO ADD A COMPONENT FROM THE EDITOR AT ALL before this. Every panel
+            // above renders only when its component is ALREADY on the entity, so a component that no
+            // importer or template attaches was unreachable without hand-editing a level file. That
+            // is why CSoftBody needed this menu rather than just a row in it.
+            ImGui::Separator();
+            if (ImGui::Button(ICON_ADD " Add Component")) ImGui::OpenPopup("addComponent");
+            if (ImGui::BeginPopup("addComponent")) {
+                // Listed by hand rather than walked from the component registry, deliberately: the
+                // registry knows every component's NAME and SIZE and nothing about whether attaching
+                // one from a menu is meaningful. CWorld and CLocal are written by the transform pass
+                // and attaching one by hand would corrupt an entity, so a generic walk would have to
+                // carry a deny-list that drifts. An allow-list of what an author may add is the same
+                // information, kept where a reader can see it.
+                struct Addable { u32 id; const char* name; const char* tip; };
+                static const Addable kAddable[] = {
+                    {scene::kComponentSoftBody, ICON_TUNE " Soft Body",
+                     "Simulate this entity's mesh instead of posing it: sag, drape, squash, collide."},
+                };
+                for (const Addable& a : kAddable) {
+                    const bool present = w.hasComponent(selEntity_, a.id);
+                    ImGui::BeginDisabled(present);
+                    if (ImGui::MenuItem(a.name)) {
+                        // addComponent hands back ZERO-FILLED storage and never runs a constructor,
+                        // so the defaults are written over it here -- the same fix World::create()
+                        // makes, and the bug CSynapseAgent already paid for once.
+                        if (a.id == scene::kComponentSoftBody) {
+                            if (auto* c = static_cast<scene::CSoftBody*>(
+                                    w.addComponent(selEntity_, a.id)))
+                                *c = scene::CSoftBody{};
+                        }
+                        cbStatus_ = std::string("Added ") + a.name;
+                    }
+                    ImGui::EndDisabled();
+                    if (present && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                        ImGui::SetTooltip("This entity already has one.");
+                    else if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("%s", a.tip);
+                }
+                ImGui::EndPopup();
+            }
 #endif
         } else if (sel_==-2){
             ImGui::TextUnformatted("Directional Light (Sun)"); ImGui::Separator();
@@ -10846,7 +11024,7 @@ private:
         if (ImGui::BeginPopup("snapRot")) {
             ImGui::Checkbox("Angle snap (rotation)", &snapRot_); ImGui::Separator();
             const f32 opts[] = {1,5,10,15,30,45,90};
-            for (f32 v : opts){ char b[24]; std::snprintf(b,sizeof b,"%gÂ°", v); if (ImGui::Selectable(b, rotSnap_==v)){ rotSnap_=v; snapRot_=true; } }
+            for (f32 v : opts){ char b[24]; std::snprintf(b,sizeof b,"%gÃ‚Â°", v); if (ImGui::Selectable(b, rotSnap_==v)){ rotSnap_=v; snapRot_=true; } }
             ImGui::EndPopup();
         }
         if (ImGui::BeginPopup("snapScale")) {
@@ -11455,6 +11633,7 @@ private:
     bool levelVisible_ = true;    // the Level tab is the selected tab
     bool openLegacy_ = false;   // --open-legacy
     std::string openAsset_;
+    std::string selectEntity_;   // --select
     std::string lastOpenAssetPath_;  // last path --open-asset opened; openAsset_ itself is cleared
                                       // once consumed, so --graph-select needs its own copy to find it
     std::string graphSelectNode_;
@@ -13266,7 +13445,7 @@ Application* createApplication(int argc, char** argv) {
     // right here and nothing else may override it; --mcp with no number defers to mcp.conf, resolved
     // once argument parsing is done and engineRoot() can be asked (see mcpRequested below).
     bool mcpRequested = false, mcpPortExplicit = false;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool furnaceGrid=false; f32 furnaceTilt=0.0f; bool ptFurnace=false; bool ptScene=false; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int rtRenderMode=-1; int pt=0; int ptBounces=-1; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; bool openLegacy=false; bool waterOn=false; f32 waterHeight=0.0f; std::string graphSelectNode; std::string graphTab; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false; bool bakeNav=false; f32 bakeNavCell=50.0f;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool furnaceGrid=false; f32 furnaceTilt=0.0f; bool ptFurnace=false; bool ptScene=false; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int rtRenderMode=-1; int pt=0; int ptBounces=-1; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string selectEntity; bool openLegacy=false; bool waterOn=false; f32 waterHeight=0.0f; std::string graphSelectNode; std::string graphTab; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false; bool bakeNav=false; f32 bakeNavCell=50.0f;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -13460,6 +13639,8 @@ Application* createApplication(int argc, char** argv) {
         }
         // --open-asset <path> opens a file through the same host a double-click goes through.
         else if (!std::strcmp(argv[i],"--open-asset") && i+1<argc) openAsset=argv[++i];
+        // --select <substring>: see setSelectEntity for why this exists.
+        else if (!std::strcmp(argv[i],"--select") && i+1<argc) selectEntity=argv[++i];
         // --open-legacy: open a project from an older series as-is, upgrading nothing. Without it
         // a frame-limited run against such a project silently measures an empty editor.
         else if (!std::strcmp(argv[i],"--open-legacy")) openLegacy=true;
@@ -13783,6 +13964,7 @@ Application* createApplication(int argc, char** argv) {
     if (lodMeshShader >= 0) app->setLodMeshShader(lodMeshShader != 0, lodErrorPx);
     app->setUiDemo(uiDemo);
     app->setOpenAsset(openAsset);
+    app->setSelectEntity(selectEntity);
     app->setWater(waterOn, waterHeight);
     app->setOpenLegacy(openLegacy);
     app->setGraphTab(graphTab);
