@@ -2309,6 +2309,7 @@ void VulkanDevice::notifyRenderTargetsChanged() {
 void VulkanDevice::beginFrame() {
     if (!hasSwapchain_) return;
 
+    ++frameSerial_;
     frameIndex_ = (frameIndex_ + 1) % kFrameCount;
     waitTimeline(frameTimelineValues_[frameIndex_]);
     if (g_meshGeomPool[frameIndex_]) api_.ResetDescriptorPool(device_, g_meshGeomPool[frameIndex_], 0);

@@ -1078,8 +1078,45 @@ struct RhiPipeline {
 // VulkanResourceFactory's single shared descriptorPool_ -- the Vulkan analog of D3D12's one
 // shared shader-visible heap, at DESCRIPTOR-SET rather than DESCRIPTOR-RANGE granularity (see the
 // architecture scout's finding #2 on why sets, not a bindless array, is the strategy here).
+// ONE SLOT'S RESOLVED DESCRIPTOR, kept so the write can be REPLAYED into a different ring slot.
+// Vulkan has no way to copy "whatever is in this binding" out of a descriptor set, so the only way
+// to bring a second set up to date is to remember what was written and write it again.
+struct BindingSlotState {
+    VkDescriptorType type = VK_DESCRIPTOR_TYPE_MAX_ENUM;   // MAX_ENUM == never written
+    VkDescriptorImageInfo      image{};
+    VkDescriptorBufferInfo     buffer{};
+    VkAccelerationStructureKHR accel = VK_NULL_HANDLE;
+    // A one-off mip view built by setSrv for THIS slot, which the slot therefore owns: it has to
+    // outlive the replay into every other ring slot, so it cannot be retired at the end of the call
+    // that made it (which is what setSrv used to do).
+    VkImageView ownedView = VK_NULL_HANDLE;
+};
+
+// A binding set, RINGED kFrameCount DEEP.
+//
+// WHY. A descriptor set may not be rewritten while a command buffer that has bound it is still
+// pending -- the layer's report is "VkDescriptorSet ... was destroyed or updated without
+// UPDATE_AFTER_BIND" -- and, worse than a warning, it puts that command buffer in an INVALID state,
+// so the driver DROPS every call recorded after it. With one set per binding set that happened
+// every frame the engine rebound anything (Voxi's RT history ping-pong rewrites four slots per
+// frame), and it took the whole overlay with it, editor UI included.
+//
+// beginFrame() already waits on the timeline value that retires frame-in-flight slot
+// frameIndexInFlight(), so the ring slot for the CURRENT frame is provably not in use, and writing
+// it is safe. The cost is that a write lands in one ring slot only, so the others go stale --
+// hence srvSlots/uavSlots and staleMask, replayed lazily by bindingSetForFrame().
+//
+// THE INVARIANT THIS RESTS ON: nothing writes a binding set AFTER binding it within the same frame.
+// A ring by FRAME cannot help with that -- the offending set would be the one this frame is already
+// using -- so it is measured rather than assumed: writeBindingSlot warns if it is ever violated,
+// and it was zero across a 12-frame run when this was built.
 struct RhiBindingSet {
-    VkDescriptorSet set = VK_NULL_HANDLE;
+    VkDescriptorSet sets[kFrameCount] = {};
+    // Bit f: ring slot f has not seen the writes below and must be replayed before it is bound.
+    u32 staleMask = 0;
+    BindingSlotState srvSlots[kMaxBindingSlots];
+    BindingSlotState uavSlots[kMaxBindingSlots];
+    u64 lastBoundSerial = ~0ull;   // the frame this set was last bound in; ~0 == never
     VkDescriptorSetLayout layout = VK_NULL_HANDLE;   // which TableShapeEntry this matches; not owned here
     u32 srvCount = 0, uavCount = 0;
     u32 srvBaseRegister = 0, uavBaseRegister = 0;
@@ -1403,6 +1440,7 @@ public:
     VkQueue graphicsQueue() const { return queue_; }
     u32 graphicsQueueFamily() const { return graphicsQueueFamily_; }
     u32 frameIndexInFlight() const { return frameIndex_; }
+    u64 frameSerial() const { return frameSerial_; }
     VkCommandBuffer currentCommandBuffer() const { return commandBuffers_[frameIndex_]; }
     // The timeline value work recorded RIGHT NOW will retire behind -- the Vulkan analog of
     // D3D12ResourceFactory::retireFence(). One past nextTimelineValue_: the CURRENT frame's submit
@@ -1488,6 +1526,9 @@ private:
     VkSemaphore imageAvailable_[kFrameCount] = {};
     std::vector<VkSemaphore> renderFinished_;     // one per SWAPCHAIN IMAGE (sized at swapchain creation), not per frame in flight
     u32 frameIndex_ = 0;    // 0..kFrameCount-1, the frame-IN-FLIGHT slot
+    // MONOTONIC, unlike frameIndex_, which wraps at kFrameCount and so cannot distinguish "this
+    // frame" from "two frames ago in the same slot".
+    u64 frameSerial_ = 0;
     u32 imageIndex_ = 0;    // the acquired swapchain image index this frame
 
     VkCommandPool commandPool_ = VK_NULL_HANDLE;
@@ -1842,6 +1883,13 @@ private:
     // D3D12 statement (docs/MINIMUM_SPECS.md); the hardware it protects cannot reach Vulkan 1.3 and
     // therefore never runs this backend at all.
     void nullFill(const RhiBindingSet& s);
+
+    // Writes one descriptor into the CURRENT frame's ring slot and records it so the other ring
+    // slots can be brought up to date later. See RhiBindingSet for why the ring exists.
+    void writeBindingSlot(RhiBindingSet& s, bool isUav, u32 slot, const BindingSlotState& st);
+    // The set to bind THIS frame, replaying any writes it has missed first. The one place a caller
+    // should get a VkDescriptorSet out of an RhiBindingSet.
+    VkDescriptorSet bindingSetForFrame(RhiBindingSet& s);
 
     // The VkShaderModule to build a pipeline of THIS layout from -- s.module when the layout makes
     // no cbuffer the shader declares into root constants, otherwise a variant compiled with

@@ -26,6 +26,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <algorithm>
+#include <array>
 #include <cstring>
 
 namespace aver::rhi::vkb {
@@ -2267,6 +2268,73 @@ void VulkanResourceFactory::destroyPipeline(PipelineHandle h) {
 // ================================================================================================
 // 10. Binding sets
 // ================================================================================================
+// Applies one recorded slot to one descriptor set. The single place a BindingSlotState is turned
+// back into a VkWriteDescriptorSet, so the write path and the replay path cannot drift.
+namespace {
+void applySlot(const VulkanApi& api, VkDevice device, VkDescriptorSet dst, u32 binding,
+               const BindingSlotState& st) {
+    if (st.type == VK_DESCRIPTOR_TYPE_MAX_ENUM || dst == VK_NULL_HANDLE) return;
+    VkWriteDescriptorSetAccelerationStructureKHR asInfo{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
+    VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    w.dstSet = dst;
+    w.dstBinding = binding;
+    w.descriptorCount = 1;
+    w.descriptorType = st.type;
+    if (st.type == VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR) {
+        if (st.accel == VK_NULL_HANDLE) return;
+        asInfo.accelerationStructureCount = 1;
+        asInfo.pAccelerationStructures = &st.accel;
+        w.pNext = &asInfo;
+    } else if (st.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
+        w.pBufferInfo = &st.buffer;
+    } else {
+        w.pImageInfo = &st.image;
+    }
+    api.UpdateDescriptorSets(device, 1, &w, 0, nullptr);
+}
+}  // namespace
+
+void VulkanResourceFactory::writeBindingSlot(RhiBindingSet& s, bool isUav, u32 slot, const BindingSlotState& st) {
+    // THE INVARIANT THE RING RESTS ON. A ring by FRAME cannot save a set written after it was bound
+    // in the SAME frame -- the set at fault would be the one this frame is already using. Measured
+    // as zero when the ring was built; if it ever fires, the ring is not enough and this needs to
+    // become a per-bind allocation instead.
+    if (s.lastBoundSerial == dev_->frameSerial())
+        AVER_WARN("[RHI.Vulkan] binding set slot {} written AFTER the set was bound in frame {} -- the "
+                  "frame ring cannot cover this; the write will be seen by a command buffer that has "
+                  "already bound the set", slot, dev_->frameSerial());
+
+    BindingSlotState& dstSlot = isUav ? s.uavSlots[slot] : s.srvSlots[slot];
+    // The previous one-off view, if this slot owned one, is dead the moment nothing can replay it.
+    if (dstSlot.ownedView != VK_NULL_HANDLE && dstSlot.ownedView != st.ownedView) {
+        const VkImageView dead = dstSlot.ownedView;
+        retire([this, dead]() { dev_->api().DestroyImageView(dev_->vkDevice(), dead, nullptr); });
+    }
+    dstSlot = st;
+
+    const u32 binding = isUav ? (kVkUavBindingBase + slot) : slot;
+    const u32 cur = dev_->frameIndexInFlight();
+    applySlot(dev_->api(), dev_->vkDevice(), s.sets[cur], binding, dstSlot);
+    // Every OTHER ring slot has now missed this write. They are brought up to date by
+    // bindingSetForFrame, when their frame comes round and their fence has been waited on.
+    for (u32 f = 0; f < kFrameCount; ++f)
+        if (f != cur) s.staleMask |= (1u << f);
+}
+
+VkDescriptorSet VulkanResourceFactory::bindingSetForFrame(RhiBindingSet& s) {
+    const u32 cur = dev_->frameIndexInFlight();
+    if (s.staleMask & (1u << cur)) {
+        // Safe here and only here: beginFrame() waited on this slot's timeline value, so no pending
+        // command buffer still references it, and nothing has bound it yet this frame.
+        for (u32 i = 0; i < s.srvCount && i < kMaxBindingSlots; ++i)
+            applySlot(dev_->api(), dev_->vkDevice(), s.sets[cur], i, s.srvSlots[i]);
+        for (u32 i = 0; i < s.uavCount && i < kMaxBindingSlots; ++i)
+            applySlot(dev_->api(), dev_->vkDevice(), s.sets[cur], kVkUavBindingBase + i, s.uavSlots[i]);
+        s.staleMask &= ~(1u << cur);
+    }
+    return s.sets[cur];
+}
+
 BindingSetHandle VulkanResourceFactory::createBindingSet(const BindingSetDesc& d) {
     collect();
     const u32 count = d.srvCount + d.uavCount;
@@ -2287,11 +2355,15 @@ BindingSetHandle VulkanResourceFactory::createBindingSet(const BindingSetDesc& d
     s.uavBaseRegister = d.uavBaseRegister;
     for (u32 i = 0; i < kMaxBindingSlots; ++i) { s.srvKinds[i] = d.srvKinds[i]; s.uavKinds[i] = d.uavKinds[i]; }
 
+    // kFrameCount sets of the SAME layout -- the ring. The pool is sized at 4096 sets against a
+    // handful of binding sets per feature, so multiplying by kFrameCount is not close to a problem.
+    VkDescriptorSetLayout ringLayouts[kFrameCount];
+    for (u32 f = 0; f < kFrameCount; ++f) ringLayouts[f] = layout;
     VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     ai.descriptorPool = descriptorPool_;
-    ai.descriptorSetCount = 1;
-    ai.pSetLayouts = &layout;
-    if (!vkOk(dev_->api().AllocateDescriptorSets(dev_->vkDevice(), &ai, &s.set), "rhi binding set")) return 0;
+    ai.descriptorSetCount = kFrameCount;
+    ai.pSetLayouts = ringLayouts;
+    if (!vkOk(dev_->api().AllocateDescriptorSets(dev_->vkDevice(), &ai, s.sets), "rhi binding set ring")) return 0;
 
     s.alive = true;
     nullFill(s);
@@ -2302,16 +2374,33 @@ BindingSetHandle VulkanResourceFactory::createBindingSet(const BindingSetDesc& d
 void VulkanResourceFactory::destroyBindingSet(BindingSetHandle h) {
     RhiBindingSet* s = bindingSet(h);
     if (!s) return;
-    VkDescriptorSet set = s->set;
-    retire([this, set]() {
-        VkDescriptorSet local = set;
-        dev_->api().FreeDescriptorSets(dev_->vkDevice(), descriptorPool_, 1, &local);
+    std::array<VkDescriptorSet, kFrameCount> ring{};
+    for (u32 f = 0; f < kFrameCount; ++f) ring[f] = s->sets[f];
+    retire([this, ring]() {
+        std::array<VkDescriptorSet, kFrameCount> local = ring;
+        dev_->api().FreeDescriptorSets(dev_->vkDevice(), descriptorPool_, kFrameCount, local.data());
     });
+    // Every one-off mip view a slot took ownership of dies with the set.
+    for (u32 i = 0; i < kMaxBindingSlots; ++i) {
+        for (const BindingSlotState* st : {&s->srvSlots[i], &s->uavSlots[i]}) {
+            if (st->ownedView == VK_NULL_HANDLE) continue;
+            const VkImageView dead = st->ownedView;
+            retire([this, dead]() { dev_->api().DestroyImageView(dev_->vkDevice(), dead, nullptr); });
+        }
+        s->srvSlots[i] = BindingSlotState{};
+        s->uavSlots[i] = BindingSlotState{};
+    }
     s->alive = false;
-    s->set = VK_NULL_HANDLE;
+    for (u32 f = 0; f < kFrameCount; ++f) s->sets[f] = VK_NULL_HANDLE;
     collect();
 }
 
+// Writes a valid dummy descriptor into every DECLARED slot of every RING slot.
+//
+// All of them, and only at creation: a replay (bindingSetForFrame) rewrites only what something
+// explicitly set, so a slot nobody ever writes has to have been made valid here -- in each ring
+// slot separately, since they are distinct descriptor sets. Nothing can be referencing a set that
+// is being created, so writing them all is safe exactly here and nowhere else.
 void VulkanResourceFactory::nullFill(const RhiBindingSet& s) {
     if (!ensureNullResources(*dev_)) {
         AVER_ERROR("[RHI.Vulkan] nullFill: dummy null resources could not be built; every declared "
@@ -2331,7 +2420,7 @@ void VulkanResourceFactory::nullFill(const RhiBindingSet& s) {
     for (u32 i = 0; i < s.srvCount; ++i) {
         const SlotKind kind = s.srvKinds[i];
         VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        w.dstSet = s.set;
+        w.dstSet = VK_NULL_HANDLE;   // filled per ring slot below
         w.dstBinding = i;
         w.descriptorCount = 1;
         w.descriptorType = toVkSrvDescriptorType(kind, rtSupported);
@@ -2357,7 +2446,7 @@ void VulkanResourceFactory::nullFill(const RhiBindingSet& s) {
         SlotKind kind = s.uavKinds[i];
         if (kind == SlotKind::AccelerationStructure) kind = SlotKind::Texture2D;   // logged already, in toVkUavDescriptorType
         VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        w.dstSet = s.set;
+        w.dstSet = VK_NULL_HANDLE;   // filled per ring slot below
         w.dstBinding = kVkUavBindingBase + i;
         w.descriptorCount = 1;
         w.descriptorType = toVkUavDescriptorType(kind);
@@ -2376,7 +2465,16 @@ void VulkanResourceFactory::nullFill(const RhiBindingSet& s) {
     // push_back can reallocate that vector and invalidate EARLIER entries' addresses that `writes[]`
     // already captured -- reserve() at the top sizes every vector to its worst case up front
     // specifically to rule that out; do not remove the reserve() calls without re-deriving this.
-    if (!writes.empty()) dev_->api().UpdateDescriptorSets(dev_->vkDevice(), static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
+    // ONCE PER RING SLOT. They are distinct descriptor sets, and a replay only ever rewrites slots
+    // something explicitly set -- so a slot nobody writes is valid only because it was filled here,
+    // in every one of them. Safe to touch them all only because this runs at CREATION, when nothing
+    // can be referencing any of them.
+    if (writes.empty()) return;
+    for (u32 f = 0; f < kFrameCount; ++f) {
+        if (s.sets[f] == VK_NULL_HANDLE) continue;
+        for (VkWriteDescriptorSet& w : writes) w.dstSet = s.sets[f];
+        dev_->api().UpdateDescriptorSets(dev_->vkDevice(), static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
+    }
 }
 
 // ================================================================================================
@@ -2616,20 +2714,14 @@ void VulkanResourceFactory::setSrv(BindingSetHandle set, u32 slot, TextureHandle
         if (!vkOk(dev_->api().CreateImageView(dev_->vkDevice(), &vi, nullptr, &builtView), "rhi setSrv mip view")) return;
         view = builtView;
     }
-    VkDescriptorImageInfo ii{VK_NULL_HANDLE, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    w.dstSet = s->set;
-    w.dstBinding = slot;
-    w.descriptorCount = 1;
-    w.descriptorType = toVkSrvDescriptorType(s->srvKinds[slot], dev_->cachedCaps().rayTracingTier != 0);
-    w.pImageInfo = &ii;
-    dev_->api().UpdateDescriptorSets(dev_->vkDevice(), 1, &w, 0, nullptr);
-
-    if (builtView) {
-        // A one-off view built for THIS call, not kept anywhere -- retire it behind the fence this
-        // write's draw could still be reading through, rather than leaking it or freeing it early.
-        retire([this, builtView]() { dev_->api().DestroyImageView(dev_->vkDevice(), builtView, nullptr); });
-    }
+    BindingSlotState st;
+    st.type = toVkSrvDescriptorType(s->srvKinds[slot], dev_->cachedCaps().rayTracingTier != 0);
+    st.image = VkDescriptorImageInfo{VK_NULL_HANDLE, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    // The one-off mip view is now OWNED BY THE SLOT rather than retired at the end of this call: a
+    // replay into another ring slot happens frames later and would otherwise write a dead view.
+    // writeBindingSlot retires whichever view the slot held before.
+    st.ownedView = builtView;
+    writeBindingSlot(*s, /*isUav=*/false, slot, st);
 }
 
 void VulkanResourceFactory::setUav(BindingSetHandle set, u32 slot, TextureHandle h, u32 mip) {
@@ -2648,14 +2740,11 @@ void VulkanResourceFactory::setUav(BindingSetHandle set, u32 slot, TextureHandle
         vi.subresourceRange = {toVkAspect(t->desc.format), mip, 1, 0, 1};
         if (!vkOk(dev_->api().CreateImageView(dev_->vkDevice(), &vi, nullptr, &t->uavViews[mip]), "rhi setUav mip view")) return;
     }
-    VkDescriptorImageInfo ii{VK_NULL_HANDLE, t->uavViews[mip], VK_IMAGE_LAYOUT_GENERAL};
-    VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    w.dstSet = s->set;
-    w.dstBinding = kVkUavBindingBase + slot;
-    w.descriptorCount = 1;
-    w.descriptorType = toVkUavDescriptorType(s->uavKinds[slot]);
-    w.pImageInfo = &ii;
-    dev_->api().UpdateDescriptorSets(dev_->vkDevice(), 1, &w, 0, nullptr);
+    BindingSlotState st;
+    st.type = toVkUavDescriptorType(s->uavKinds[slot]);
+    // t->uavViews[mip] is cached on the texture and outlives every replay, so the slot does not own it.
+    st.image = VkDescriptorImageInfo{VK_NULL_HANDLE, t->uavViews[mip], VK_IMAGE_LAYOUT_GENERAL};
+    writeBindingSlot(*s, /*isUav=*/true, slot, st);
 }
 
 void VulkanResourceFactory::setSrvTlas(BindingSetHandle set, u32 slot, TlasHandle h) {
@@ -2664,16 +2753,10 @@ void VulkanResourceFactory::setSrvTlas(BindingSetHandle set, u32 slot, TlasHandl
     if (!s || !t) { AVER_ERROR("[RHI.Vulkan] setSrvTlas with an invalid handle"); return; }
     if (slot >= s->srvCount) { AVER_ERROR("[RHI.Vulkan] setSrvTlas slot {} past the {} declared", slot, s->srvCount); return; }
 
-    VkWriteDescriptorSetAccelerationStructureKHR asInfo{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
-    asInfo.accelerationStructureCount = 1;
-    asInfo.pAccelerationStructures = &t->as;
-    VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    w.pNext = &asInfo;
-    w.dstSet = s->set;
-    w.dstBinding = slot;
-    w.descriptorCount = 1;
-    w.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-    dev_->api().UpdateDescriptorSets(dev_->vkDevice(), 1, &w, 0, nullptr);
+    BindingSlotState st;
+    st.type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+    st.accel = t->as;   // by VALUE: applySlot points at its own copy, so no pointer outlives the call
+    writeBindingSlot(*s, /*isUav=*/false, slot, st);
 }
 
 void VulkanResourceFactory::setSrvBuffer(BindingSetHandle set, u32 slot, BufferHandle bh, u32 stride, u32 count, u32 firstElement) {
@@ -2684,14 +2767,11 @@ void VulkanResourceFactory::setSrvBuffer(BindingSetHandle set, u32 slot, BufferH
     if (s->srvKinds[slot] != SlotKind::StructuredBuffer) { AVER_ERROR("[RHI.Vulkan] setSrvBuffer on slot {}, which was declared as a texture", slot); return; }
     if (stride == 0) { AVER_ERROR("[RHI.Vulkan] setSrvBuffer with a zero stride"); return; }
 
-    VkDescriptorBufferInfo bi{b->buffer, static_cast<VkDeviceSize>(firstElement) * stride, static_cast<VkDeviceSize>(count) * stride};
-    VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    w.dstSet = s->set;
-    w.dstBinding = slot;
-    w.descriptorCount = 1;
-    w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    w.pBufferInfo = &bi;
-    dev_->api().UpdateDescriptorSets(dev_->vkDevice(), 1, &w, 0, nullptr);
+    BindingSlotState st;
+    st.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    st.buffer = VkDescriptorBufferInfo{b->buffer, static_cast<VkDeviceSize>(firstElement) * stride,
+                                       static_cast<VkDeviceSize>(count) * stride};
+    writeBindingSlot(*s, /*isUav=*/false, slot, st);
 }
 
 void VulkanResourceFactory::setUavBuffer(BindingSetHandle set, u32 slot, BufferHandle bh, u32 stride, u32 count, u32 firstElement) {
@@ -2702,14 +2782,11 @@ void VulkanResourceFactory::setUavBuffer(BindingSetHandle set, u32 slot, BufferH
     if (s->uavKinds[slot] != SlotKind::StructuredBuffer) { AVER_ERROR("[RHI.Vulkan] setUavBuffer on slot {}, which was declared as a texture", slot); return; }
     if (stride == 0) { AVER_ERROR("[RHI.Vulkan] setUavBuffer with a zero stride"); return; }
 
-    VkDescriptorBufferInfo bi{b->buffer, static_cast<VkDeviceSize>(firstElement) * stride, static_cast<VkDeviceSize>(count) * stride};
-    VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    w.dstSet = s->set;
-    w.dstBinding = kVkUavBindingBase + slot;
-    w.descriptorCount = 1;
-    w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    w.pBufferInfo = &bi;
-    dev_->api().UpdateDescriptorSets(dev_->vkDevice(), 1, &w, 0, nullptr);
+    BindingSlotState st;
+    st.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    st.buffer = VkDescriptorBufferInfo{b->buffer, static_cast<VkDeviceSize>(firstElement) * stride,
+                                       static_cast<VkDeviceSize>(count) * stride};
+    writeBindingSlot(*s, /*isUav=*/true, slot, st);
 }
 
 // ================================================================================================

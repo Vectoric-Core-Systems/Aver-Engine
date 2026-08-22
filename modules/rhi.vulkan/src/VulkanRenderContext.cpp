@@ -307,6 +307,13 @@ void VulkanRenderContext::setBindingSet(BindingSetHandle set, u32 table) {
     RhiBindingSet* s = res_->bindingSet(set);
     VkCommandBuffer cb = cmd();
     if (!s || !cb) { AVER_ERROR("[RHI.Vulkan] setBindingSet with an invalid handle"); return; }
+    // THE set for this frame, with any writes it missed replayed in first. Never s->sets[..] direct:
+    // picking the ring slot and catching it up are the same decision. See RhiBindingSet.
+    const VkDescriptorSet ringSet = res_->bindingSetForFrame(*s);
+    if (ringSet == VK_NULL_HANDLE) { AVER_ERROR("[RHI.Vulkan] setBindingSet: the set has no ring slot for this frame"); return; }
+    // Recorded so writeBindingSlot can catch a write-after-bind, which is the one thing a per-frame
+    // ring cannot cover.
+    s->lastBoundSerial = dev_->frameSerial();
 
     const PipelineLayout& layout = pipe_->layoutEntry->layout;
     const u32 expectedBase = (table == 0) ? 0 : layout.srvCount;
@@ -321,7 +328,7 @@ void VulkanRenderContext::setBindingSet(BindingSetHandle set, u32 table) {
         return;
     }
     dev_->api().CmdBindDescriptorSets(cb, pipe_->compute ? VK_PIPELINE_BIND_POINT_COMPUTE : VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                      pipe_->layoutEntry->pipelineLayout, kVkSetTable0 + table, 1, &s->set, 0, nullptr);
+                                      pipe_->layoutEntry->pipelineLayout, kVkSetTable0 + table, 1, &ringSet, 0, nullptr);
 }
 
 // ====================================================================================================
