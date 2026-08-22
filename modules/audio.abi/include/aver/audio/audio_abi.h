@@ -45,6 +45,17 @@ AVER_AUDIO_API void aver_audio_collect(void);
 // the working directory. The same path loaded twice yields the SAME handle and does not decode again.
 AVER_AUDIO_API int32_t aver_audio_load(const char* utf8Path);
 // Releases a sound. Its memory goes on the next aver_audio_collect.
+/* Registers GENERATED samples as a sound, returning a handle, or 0. `samples` is interleaved f32,
+ * `frames` counts FRAMES (not individual samples), and `channels` must be 1 or 2 -- the mixer
+ * renders no others. The bytes are copied, so the caller may free its buffer immediately.
+ *
+ * THE SEAM FOR SYNTHESISED AUDIO. Every other route into the sound table starts at a file, so
+ * nothing procedurally generated could be played at all; Aver.Sound renders a .ocsnd graph and
+ * arrives here. NOT path-cached, unlike aver_audio_load: a generated buffer has no path, and two
+ * renders of one graph with different seeds are different sounds. Every call therefore adds an
+ * entry the caller owns and must aver_audio_unload. */
+AVER_AUDIO_API int32_t aver_audio_load_pcm(const float* samples, int32_t frames, int32_t channels,
+                                           int32_t sampleRate);
 AVER_AUDIO_API void    aver_audio_unload(int32_t sound);
 
 // Plays a sound the same in both ears. Returns a VOICE handle, or 0.

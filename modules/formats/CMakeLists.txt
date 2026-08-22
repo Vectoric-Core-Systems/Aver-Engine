@@ -33,6 +33,9 @@ aver_add_module(Aver.Formats
     # .ocbt -- a baked Synapse behaviour tree. Beside the other AVR1 readers for the same reason:
     # a node array and a string table, nothing that needs Aver.Scene.
     src/OcBt.cpp
+    # .ocsnd -- a procedural sound as a node graph. Beside the other AVR1 readers for the same
+    # reason: a node array, a link array and a header, nothing that needs a mixer.
+    src/OcSound.cpp
     src/Texture.cpp
   DEPS
     Aver.Core

@@ -27,6 +27,7 @@ internal static class Ax
     [DllImport(Lib)] internal static extern void aver_audio_collect();
 
     [DllImport(Lib)] internal static extern int  aver_audio_load([MarshalAs(UnmanagedType.LPUTF8Str)] string utf8Path);
+    [DllImport(Lib)] internal static extern int  aver_audio_load_pcm(float[] samples, int frames, int channels, int sampleRate);
     [DllImport(Lib)] internal static extern void aver_audio_unload(int sound);
 
     [DllImport(Lib)] internal static extern int  aver_audio_play(int sound, float volume, float pitch, int looping, int bus);
@@ -169,6 +170,27 @@ public static class Audio
     {
         if (string.IsNullOrEmpty(path)) return Sound.None;
         try { return new Sound(Ax.aver_audio_load(path)); } catch (DllNotFoundException) { return Sound.None; }
+    }
+
+    /// <summary>Registers generated samples as a playable sound: interleaved f32, 1 or 2 channels.
+    /// The buffer is copied, so the caller may reuse or free it immediately.</summary>
+    /// <remarks>THE ROUTE FOR SYNTHESISED AUDIO, and the reason Aver.Sound can be heard at all —
+    /// every other way to get a <see cref="Sound"/> starts at a file on disk.
+    ///
+    /// UNLIKE <see cref="Load"/>, THIS DOES NOT CACHE. A generated buffer has no path to key on, and
+    /// two renders of one graph with different seeds are deliberately different sounds. So every
+    /// call makes a NEW sound that the caller owns: a game rendering a fresh footstep per step must
+    /// <see cref="Sound.Unload"/> it once the voice has finished, or the mixer's sound table grows
+    /// for the life of the process.</remarks>
+    public static Sound LoadPcm(float[] samples, int channels, int sampleRate)
+    {
+        if (samples is null || samples.Length == 0) return Sound.None;
+        if (channels != 1 && channels != 2) return Sound.None;
+        if (sampleRate <= 0) return Sound.None;
+        int frames = samples.Length / channels;
+        if (frames == 0) return Sound.None;
+        try { return new Sound(Ax.aver_audio_load_pcm(samples, frames, channels, sampleRate)); }
+        catch (DllNotFoundException) { return Sound.None; }
     }
 
     /// <summary>Plays a sound the same in both ears — UI clicks, music, narration.</summary>

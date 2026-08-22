@@ -88,6 +88,34 @@ int32_t aver_audio_load(const char* utf8Path) {
     return static_cast<int32_t>(h);
 }
 
+// Registers GENERATED samples as a sound. The seam that was missing: every other way into the
+// mixer's sound table starts at a FILE, so nothing synthesised could ever be played.
+//
+// NOT PATH-CACHED, deliberately, and it is the one behavioural difference from aver_audio_load
+// above. A generated buffer has no path to key on, and two renders of the same graph with different
+// seeds are different sounds that must not collide -- so every call adds a new entry and the caller
+// owns its lifetime through aver_audio_unload. A caller that renders per play should unload per
+// play, or the table grows for the life of the process.
+int32_t aver_audio_load_pcm(const float* samples, int32_t frames, int32_t channels,
+                            int32_t sampleRate) {
+    if (!g_started || !samples) return 0;
+    if (frames <= 0 || sampleRate <= 0) return 0;
+    // The mixer renders mono or stereo only (see Mixer.cpp's own channel check); refusing here is
+    // clearer than letting it silently mis-stride a 6-channel buffer.
+    if (channels != 1 && channels != 2) return 0;
+
+    aver::audio::SoundData data;
+    data.channels   = static_cast<aver::u32>(channels);
+    data.sampleRate = static_cast<aver::u32>(sampleRate);
+    data.samples.assign(samples, samples + static_cast<aver::usize>(frames) * channels);
+    // No loop points: a generated one-shot. A caller wanting a loop sets them by authoring silence
+    // at the ends, which is what a .ocaudio would carry anyway.
+    data.loopBegin = data.loopEnd = 0;
+
+    const aver::audio::SoundHandle h = g_device.mixer().addSound(std::move(data));
+    return h ? static_cast<int32_t>(h) : 0;
+}
+
 // Releases a sound and forgets its path.
 void aver_audio_unload(int32_t sound) {
     if (!g_started || sound <= 0) return;

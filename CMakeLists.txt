@@ -204,6 +204,9 @@ add_subdirectory(modules/anim)
 # Synapse: navigation and pathfinding. Core+Formats only, so it builds and tests with no scene,
 # no physics and no device -- see the module's own CMakeLists for why that split is the point.
 add_subdirectory(modules/synapse)
+# Aver Sound: a .ocsnd node graph rendered to PCM. Core+Formats only, beside Synapse and for the
+# identical reason -- it builds and tests with no device, no mixer and no scene.
+add_subdirectory(modules/sound)
 # Sub-bone vertex deformation, above anim because a cage is generated against a skeleton's rest
 # pose. Optional: a game that only needs bone skinning does not link it.
 if(AVER_MODULE_DEFORM)
@@ -476,6 +479,7 @@ if(AVER_BUILD_TESTS)
 
   if(TARGET Aver.Synapse)
     add_subdirectory(tests/synapse)
+    add_subdirectory(tests/sound)
   endif()
   if(AVER_MODULE_FRAMEWORK)
     add_subdirectory(tests/framework)
