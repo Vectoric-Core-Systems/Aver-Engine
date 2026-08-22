@@ -535,6 +535,275 @@ PushConstantLayout pushConstantLayout(const PipelineLayout& layout, bool mesh) {
     return pc;
 }
 
+// ------------------------------------------------------------------------------------------------
+// 1b. pushConstantKey / patchPushConstantSlots -- declared in VulkanCommon.hpp section 4, and the
+//     reason RhiShader keeps its source. Both live here because both are defined in terms of the
+//     byte offsets pushConstantLayout() assigns directly above.
+// ------------------------------------------------------------------------------------------------
+namespace {
+
+inline bool isIdentCh(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+inline bool isSpaceCh(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
+inline bool isDigitCh(char c) { return c >= '0' && c <= '9'; }
+
+// A copy with every comment blanked to spaces, for FIELD-NAME extraction only -- the struct body is
+// emitted verbatim from the ORIGINAL, so nothing here can move a byte.
+std::string blankComments(const std::string& in) {
+    std::string out = in;
+    size_t i = 0;
+    while (i + 1 < out.size()) {
+        if (out[i] == '/' && out[i + 1] == '/') {
+            while (i < out.size() && out[i] != '\n') out[i++] = ' ';
+        } else if (out[i] == '/' && out[i + 1] == '*') {
+            while (i + 1 < out.size() && !(out[i] == '*' && out[i + 1] == '/')) {
+                if (out[i] != '\n') out[i] = ' ';
+                ++i;
+            }
+            if (i + 1 < out.size()) { out[i] = ' '; out[i + 1] = ' '; i += 2; }
+        } else {
+            ++i;
+        }
+    }
+    return out;
+}
+
+// `cbuffer <name> : register(b<reg> [, space<n>]) { ... } [;]` with ANY spacing -- deliberately a
+// scanner and not a needle, because the exact-text matching this replaces is what made every new
+// constant block a new crash. Walks forward from `from`; returns the register it found in `reg`.
+bool findNextCbuffer(const std::string& src, size_t from, u32& reg,
+                     size_t& begin, size_t& bodyBegin, size_t& bodyEnd, size_t& end) {
+    auto skipWs = [&src](size_t j) { while (j < src.size() && isSpaceCh(src[j])) ++j; return j; };
+    size_t pos = from;
+    while ((pos = src.find("cbuffer", pos)) != std::string::npos) {
+        const size_t after = pos + 7;
+        const bool wholeWord = (pos == 0 || !isIdentCh(src[pos - 1])) &&
+                               (after >= src.size() || !isIdentCh(src[after]));
+        if (!wholeWord) { pos = after; continue; }
+        size_t i = skipWs(after);
+        const size_t nameBegin = i;
+        while (i < src.size() && isIdentCh(src[i])) ++i;
+        if (i == nameBegin) { pos = after; continue; }
+        i = skipWs(i);
+        if (i >= src.size() || src[i] != ':') { pos = after; continue; }
+        i = skipWs(i + 1);
+        if (src.compare(i, 8, "register") != 0) { pos = after; continue; }
+        i = skipWs(i + 8);
+        if (i >= src.size() || src[i] != '(') { pos = after; continue; }
+        i = skipWs(i + 1);
+        if (i >= src.size() || (src[i] != 'b' && src[i] != 'B')) { pos = after; continue; }
+        ++i;
+        const size_t digitsBegin = i;
+        u32 n = 0;
+        while (i < src.size() && isDigitCh(src[i])) { n = n * 10 + static_cast<u32>(src[i] - '0'); ++i; }
+        if (i == digitsBegin) { pos = after; continue; }
+        const size_t rparen = src.find(')', i);
+        if (rparen == std::string::npos) { pos = after; continue; }
+        const size_t brace = skipWs(rparen + 1);
+        if (brace >= src.size() || src[brace] != '{') { pos = after; continue; }
+
+        int depth = 0;
+        size_t j = brace;
+        for (; j < src.size(); ++j) {
+            if (src[j] == '{') ++depth;
+            else if (src[j] == '}' && --depth == 0) break;
+        }
+        if (j >= src.size()) { pos = after; continue; }   // unbalanced; not this block to blame
+        reg = n;
+        begin = pos;
+        bodyBegin = brace + 1;
+        bodyEnd = j;
+        const size_t semi = skipWs(j + 1);
+        end = (semi < src.size() && src[semi] == ';') ? semi + 1 : j + 1;
+        return true;
+    }
+    return false;
+}
+
+// The one register, for the push-constant fold, which needs a specific slot rather than the walk.
+bool findCbufferBlock(const std::string& src, u32 reg,
+                      size_t& begin, size_t& bodyBegin, size_t& bodyEnd, size_t& end) {
+    size_t from = 0;
+    u32 found = 0;
+    while (findNextCbuffer(src, from, found, begin, bodyBegin, bodyEnd, end)) {
+        if (found == reg) return true;
+        from = begin + 7;
+    }
+    return false;
+}
+
+// True when a [[vk::...]] attribute already sits immediately before `begin` -- patchPerFrameSet runs
+// first and annotates b0, and annotating it twice is a compile error.
+bool alreadyAnnotated(const std::string& src, size_t begin) {
+    size_t i = begin;
+    while (i > 0 && isSpaceCh(src[i - 1])) --i;
+    return i >= 2 && src[i - 1] == ']' && src[i - 2] == ']';
+}
+
+struct PcField { std::string decl; std::string name; };
+
+// Every field a cbuffer body declares, so each keeps resolving by its own name after the block
+// becomes a struct member. Handles `float4 a, b;`, arrays, and leading type modifiers.
+void collectFields(const std::string& body, std::vector<PcField>& out) {
+    static const char* kMods[] = {"row_major", "column_major", "precise", "globallycoherent",
+                                  "unorm", "snorm", "uniform", "const"};
+    const std::string clean = blankComments(body);
+    size_t p = 0;
+    while (p < clean.size()) {
+        const size_t semi = clean.find(';', p);
+        if (semi == std::string::npos) break;
+        const std::string stmt = clean.substr(p, semi - p);
+        p = semi + 1;
+
+        size_t q = 0;
+        auto word = [&stmt](size_t& r) {
+            while (r < stmt.size() && isSpaceCh(stmt[r])) ++r;
+            const size_t b = r;
+            while (r < stmt.size() && !isSpaceCh(stmt[r]) && stmt[r] != ',') ++r;
+            return stmt.substr(b, r - b);
+        };
+        std::string typeText;
+        std::string w = word(q);
+        bool isMod = true;
+        while (!w.empty() && isMod) {
+            isMod = false;
+            for (const char* m : kMods) if (w == m) { isMod = true; break; }
+            if (isMod) { typeText += w; typeText += " "; w = word(q); }
+        }
+        if (w.empty()) continue;                 // a blank or comment-only statement
+        typeText += w;
+
+        // The rest is a comma-separated declarator list: `gFoo`, `gBar[4]`, ...
+        const std::string rest = stmt.substr(q);
+        size_t d = 0;
+        while (d <= rest.size()) {
+            const size_t comma = rest.find(',', d);
+            const std::string decl = rest.substr(d, comma == std::string::npos ? std::string::npos : comma - d);
+            d = (comma == std::string::npos) ? rest.size() + 1 : comma + 1;
+            size_t a = 0;
+            while (a < decl.size() && isSpaceCh(decl[a])) ++a;
+            const size_t nb = a;
+            while (a < decl.size() && isIdentCh(decl[a])) ++a;
+            if (a == nb) continue;
+            PcField f;
+            f.name = decl.substr(nb, a - nb);
+            f.decl = typeText + " " + decl.substr(nb);      // name + any array suffix, verbatim
+            out.push_back(std::move(f));
+        }
+    }
+}
+
+}  // namespace
+
+u32 pushConstantKey(const PipelineLayout& layout, bool mesh) {
+    u32 key = 1u << kObjectConstantRegister;   // pushConstantLayout always places b1, declared or not
+    for (u32 k = 0; k < kMaxConstantSlots; ++k)
+        if (layout.constantDwords[k]) key |= 1u << k;
+    if (mesh) key |= 1u << 31;
+    return key;
+}
+
+bool patchCbuffersForLayout(std::string& src, const PipelineLayout& layout, bool mesh) {
+    const PushConstantLayout pc = pushConstantLayout(layout, mesh);
+
+    // The slots pushConstantLayout gives bytes to, in the order it gives them: b1 first, then
+    // ascending. Walking them in THIS order is what makes the padding below correct.
+    u32 order[kMaxConstantSlots];
+    u32 n = 0;
+    order[n++] = kObjectConstantRegister;
+    for (u32 k = 0; k < kMaxConstantSlots; ++k)
+        if (k != kObjectConstantRegister && layout.constantDwords[k]) order[n++] = k;
+
+    struct Block { u32 slot; size_t begin, end; std::string body; };
+    std::vector<Block> blocks;
+    for (u32 i = 0; i < n; ++i) {
+        size_t b = 0, bb = 0, be = 0, e = 0;
+        if (!findCbufferBlock(src, order[i], b, bb, be, e)) continue;
+        blocks.push_back({order[i], b, e, src.substr(bb, be - bb)});
+    }
+
+    // ---- the DESCRIPTOR half: every cbuffer the layout does NOT make root constants -------------
+    // Same rule, other side of it. descriptorLayout() declares a dynamic UBO at binding == register
+    // in kVkSetConstants for each such slot, so that is exactly where the shader must name it;
+    // DXC otherwise leaves a space-less register in set 0, where nothing declares it.
+    {
+        struct Ann { size_t at; u32 reg; };
+        std::vector<Ann> anns;
+        size_t from = 0;
+        u32 reg = 0;
+        size_t b = 0, bb = 0, be = 0, e = 0;
+        while (findNextCbuffer(src, from, reg, b, bb, be, e)) {
+            from = b + 7;
+            if (reg >= kMaxConstantSlots) continue;          // outside the layout's slots entirely
+            if (layout.constantDwords[reg] != 0) continue;   // root constants; folded above
+            if (alreadyAnnotated(src, b)) continue;          // patchPerFrameSet got here first
+            anns.push_back({b, reg});
+        }
+        // Back to front, so each earlier offset survives the insertion after it.
+        for (size_t i = anns.size(); i-- > 0;)
+            src.insert(anns[i].at, "[[vk::binding(" + std::to_string(anns[i].reg) + ", " +
+                                       std::to_string(kVkSetConstants) + ")]] ");
+        // Every offset in `blocks` above a shifted point is now stale, so redo the search.
+        if (!anns.empty()) {
+            for (Block& blk : blocks) {
+                size_t nb = 0, nbb = 0, nbe = 0, ne = 0;
+                if (findCbufferBlock(src, blk.slot, nb, nbb, nbe, ne)) { blk.begin = nb; blk.end = ne; }
+            }
+        }
+    }
+
+    if (blocks.empty()) return true;   // uses none of its layout's root-constant slots
+
+    std::string fields;
+    std::vector<PcField> aliases;
+    u32 cursor = 0;
+    for (const Block& blk : blocks) {
+        const u32 off = pc.slotOffset[blk.slot];
+        if (off < cursor) {
+            AVER_ERROR("[RHI.Vulkan] push-constant slot b{} overlaps the previous block (byte {} < {})",
+                       blk.slot, off, cursor);
+            return false;
+        }
+        if (off > cursor) {
+            const u32 gap = off - cursor;
+            if (gap % 16 != 0) {
+                AVER_ERROR("[RHI.Vulkan] push-constant slot b{} starts at byte {}, leaving a {}-byte gap "
+                           "that is not a whole number of 16-byte rows -- HLSL cannot express it as "
+                           "padding, so this layout cannot be lowered to a push-constant block",
+                           blk.slot, off, gap);
+                return false;
+            }
+            // NOT `uint _pad[N]`: an array element in a constant block occupies a full 16-byte row,
+            // so a uint array would be four times too long. uint4 makes the packing explicit.
+            fields += "    uint4 _averPcPad" + std::to_string(blk.slot) + "[" + std::to_string(gap / 16) + "];\n";
+        }
+        fields += blk.body;
+        if (fields.empty() || fields.back() != '\n') fields += "\n";
+        collectFields(blk.body, aliases);
+        cursor = off + pc.slotBytes[blk.slot];
+    }
+    if (aliases.empty()) {
+        AVER_ERROR("[RHI.Vulkan] a root-constant cbuffer was found but no field could be read out of it");
+        return false;
+    }
+
+    std::string repl = "struct AverPcBlock {\n" + fields + "};\n";
+    repl += "[[vk::push_constant]] ConstantBuffer<AverPcBlock> gAverPc;\n";
+    // One alias per field, AFTER the struct, so the shader body's own gWorld/gVertexCount/... keep
+    // resolving unchanged and nothing above this point is affected.
+    for (const PcField& f : aliases) repl += "static " + f.decl + " = gAverPc." + f.name + ";\n";
+
+    // Erase the originals from the BACK of the source forward, so each earlier span stays valid.
+    std::vector<const Block*> byPos;
+    for (const Block& blk : blocks) byPos.push_back(&blk);
+    std::sort(byPos.begin(), byPos.end(), [](const Block* a, const Block* b) { return a->begin > b->begin; });
+    const size_t insertAt = byPos.back()->begin;
+    for (const Block* blk : byPos) src.erase(blk->begin, blk->end - blk->begin);
+    src.insert(insertAt, repl);
+    return true;
+}
+
 // ================================================================================================
 // 2. createBufferCommitted / createImageCommitted / destroyBufferCommitted / destroyImageCommitted
 //    — declared in VulkanCommon.hpp section 9.
@@ -1505,6 +1774,12 @@ ShaderHandle VulkanResourceFactory::createShader(const ShaderDesc& d) {
 
     RhiShader s;
     s.stage = d.stage;
+    // Kept for moduleForLayout: this compile cannot know which cbuffers the eventual pipeline makes
+    // root constants, so the patched source has to be reconstructible later. See RhiShader.
+    s.source = src;
+    s.entry = d.entry;
+    if (d.defines) s.defines = d.defines;
+    s.minShaderModel = model;
     if (!vulkanShaderCompiler().compile(src.c_str(), d.entry, d.stage, model, d.defines, s.spirv) || s.spirv.empty()) {
         AVER_ERROR("[RHI.Vulkan] createShader '{}' failed to compile", d.entry);
         return 0;
@@ -1525,14 +1800,56 @@ void VulkanResourceFactory::destroyShader(ShaderHandle h) {
     // Immediate, not deferred: like a D3D12 PSO, a VkPipeline does not keep referencing the
     // VkShaderModule it was built from after vkCreateGraphicsPipelines/vkCreateComputePipelines
     // returns (D3D12ResourceFactory::destroyShader resets its blob immediately for the same reason).
+    // A variant whose source needed no patch ALIASES s->module (see moduleForLayout), so it must not
+    // be destroyed twice.
+    for (RhiShaderVariant& v : s->variants)
+        if (v.module && v.module != s->module) dev_->api().DestroyShaderModule(dev_->vkDevice(), v.module, nullptr);
+    s->variants.clear();
     if (s->module) dev_->api().DestroyShaderModule(dev_->vkDevice(), s->module, nullptr);
     s->module = VK_NULL_HANDLE;
     s->spirv.clear();
+    s->source.clear();
 }
 
 // ================================================================================================
 // 9. Pipelines
 // ================================================================================================
+VkShaderModule VulkanResourceFactory::moduleForLayout(RhiShader& s, const PipelineLayout& layout, bool mesh) {
+    if (s.source.empty()) return s.module;    // destroyed, or never carried source
+    const u32 key = pushConstantKey(layout, mesh);
+    for (const RhiShaderVariant& v : s.variants)
+        if (v.key == key) return v.module;
+
+    std::string src = s.source;
+    if (!patchCbuffersForLayout(src, layout, mesh)) return VK_NULL_HANDLE;
+
+    RhiShaderVariant var;
+    var.key = key;
+    if (src == s.source) {
+        // Declares none of this layout's root-constant blocks, so the layout-agnostic module already
+        // is the right one. Cached under this key so the next pipeline of the same shape skips even
+        // the patch attempt. NOTE that var.module aliases s.module -- destroyShader relies on it.
+        var.module = s.module;
+        s.variants.push_back(std::move(var));
+        return s.module;
+    }
+
+    if (!vulkanShaderCompiler().compile(src.c_str(), s.entry.c_str(), s.stage, s.minShaderModel,
+                                        s.defines.empty() ? nullptr : s.defines.c_str(), var.spirv) ||
+        var.spirv.empty()) {
+        AVER_ERROR("[RHI.Vulkan] '{}' compiles on its own but not with its pipeline's push-constant "
+                   "blocks folded in", s.entry);
+        return VK_NULL_HANDLE;
+    }
+    VkShaderModuleCreateInfo mi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    mi.codeSize = var.spirv.size() * sizeof(u32);
+    mi.pCode = var.spirv.data();
+    if (!vkOk(dev_->api().CreateShaderModule(dev_->vkDevice(), &mi, nullptr, &var.module), "rhi shader module (push-constant variant)"))
+        return VK_NULL_HANDLE;
+    s.variants.push_back(std::move(var));
+    return s.variants.back().module;
+}
+
 PipelineHandle VulkanResourceFactory::createGraphicsPipeline(const GraphicsPipelineDesc& d) {
     collect();
     if ((d.vs == 0) == (d.ms == 0)) { AVER_ERROR("[RHI.Vulkan] createGraphicsPipeline needs exactly one of vs / ms"); return 0; }
@@ -1610,6 +1927,7 @@ PipelineHandle VulkanResourceFactory::createGraphicsPipeline(const GraphicsPipel
     // Entry-point names must stay alive through vkCreateGraphicsPipelines; kept in this function's
     // own scope, not RhiShader's (which retains none -- see this file's banner).
     std::string names[5];
+    bool stageFailed = false;
     VkPipelineShaderStageCreateInfo stageInfos[5];
     u32 stageCount = 0;
     auto addStage = [&](RhiShader* sh, VkShaderStageFlagBits flag) {
@@ -1617,7 +1935,8 @@ PipelineHandle VulkanResourceFactory::createGraphicsPipeline(const GraphicsPipel
         names[stageCount] = spirvEntryPointName(sh->spirv);
         VkPipelineShaderStageCreateInfo si{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
         si.stage = flag;
-        si.module = sh->module;
+        si.module = moduleForLayout(*sh, d.layout, mesh);
+        if (!si.module) { stageFailed = true; return; }
         si.pName = names[stageCount].c_str();
         stageInfos[stageCount++] = si;
     };
@@ -1674,6 +1993,7 @@ PipelineHandle VulkanResourceFactory::createGraphicsPipeline(const GraphicsPipel
         pi.pVertexInputState = &vin;
         pi.pInputAssemblyState = &ia;
     }
+    if (stageFailed) return 0;
     pi.stageCount = stageCount;
     pi.pStages = stageInfos;
 
@@ -1701,7 +2021,8 @@ PipelineHandle VulkanResourceFactory::createComputePipeline(const ComputePipelin
     const std::string entryName = spirvEntryPointName(cs->spirv);
     VkPipelineShaderStageCreateInfo si{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
     si.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    si.module = cs->module;
+    si.module = moduleForLayout(*cs, d.layout, false);
+    if (!si.module) return 0;
     si.pName = entryName.c_str();
 
     RhiPipeline p{};

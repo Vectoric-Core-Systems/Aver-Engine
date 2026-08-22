@@ -708,31 +708,20 @@ inline bool patchPerFrameSet(std::string& src) {
     return true;
 }
 
-// WHY THERE IS NO GENERAL VERSION OF patchPerFrameSet, having tried to write one.
+// patchPerFrameSet handles ONE block, b0, and is deliberately kept that way: it runs at
+// createShader time, where no PipelineLayout exists, and b0 is the one register the engine treats
+// identically in every layout (kEngineFrameConstantRegister -- descriptorLayout always declares it).
 //
-// The obvious generalisation -- annotate EVERY `cbuffer X : register(bN)` into kVkSetConstants --
-// is wrong, and wrong in a way that only the validation layer shows. It moved SkinParams from set 0
-// to set 2 and the layer immediately said set 2 binding 3 was not declared either, because
-// SkinningPass declares `constantDwords[3] = 4`: b3 is PUSH CONSTANTS, and a block cannot be both a
-// push constant and a descriptor.
+// Everything else is patchCbuffersForLayout's job, at PIPELINE creation. This note used to say a
+// general version was impossible; that was true only for a patch with no layout in hand, and the
+// layout is now threaded down. See patchCbuffersForLayout above for the rule and why it needs one.
 //
-// THE RULE IS NOT A PROPERTY OF THE SHADER TEXT. A cbuffer is a descriptor iff its slot's
-// constantDwords is ZERO, and that lives in the PipelineLayout, which shader compilation does not
-// have -- VulkanResourceFactory::createShader compiles a module with no idea which pipeline will
-// later use it. So no patch operating on source alone can decide this correctly, and one that
-// guesses turns a diagnosable "wrong set" into an equally broken "right set, wrong kind".
-//
-// WHAT IS ACTUALLY LEFT, named so the next person does not rediscover it one crash at a time:
-// patchPushConstants (VulkanDevice.cpp) handles exactly ONE push-constant block, PerObject at b1,
-// by exact text. Every OTHER non-zero constantDwords slot -- SkinParams at b3 today -- still
-// compiles as a descriptor and names a binding no layout contains. Fixing it means teaching this
-// backend to emit [[vk::push_constant]] for an ARBITRARY slot, which needs the PipelineLayout
-// threaded into compilation. That is a real change to the interface, not a patch, and it is the
-// same conclusion VulkanShaderCompiler.cpp's own banner reached by a different route.
-//
-// AMD's discrete driver does not report any of this. LLPC calls abort(), so each one is the process
-// dying at 0xC0000409 with nothing printed -- which is why the validation layer, not another guess,
-// is the tool for the rest of it.
+// The history is worth keeping, because the failure was silent. Annotating every cbuffer into
+// kVkSetConstants moved SkinParams from set 0 to set 2, and validation immediately said set 2
+// binding 3 was not declared either -- SkinningPass declares constantDwords[3] = 4, so b3 is push
+// constants, and a block cannot be both. AMD's discrete driver reports none of this: LLPC calls
+// abort(), so every such mistake is the process dying at 0xC0000409 with nothing printed. Run
+// --debug-layer, and believe the layer over the shader text.
 
 
 
@@ -759,6 +748,42 @@ struct PushConstantLayout {
 // file banner) — it is the pipeline-layout cache's job because the answer is cached alongside the
 // VkPipelineLayout it describes, in DescriptorLayoutEntry below.
 PushConstantLayout pushConstantLayout(const PipelineLayout& layout, bool mesh);
+
+// A stable key for "which slots does this layout make root constants", so a shader compiled for one
+// layout can be reused by every other layout that agrees. Bit k set == slot k is push constants;
+// bit 31 == mesh. kObjectConstantRegister is ALWAYS set, because pushConstantLayout always places it.
+u32 pushConstantKey(const PipelineLayout& layout, bool mesh);
+
+// Lowers EVERY cbuffer in a shader to what its PipelineLayout says it is. This is the general form
+// of what VulkanDevice.cpp does for the three FIXED pipelines by exact text, and it replaces the
+// needle-per-block approach outright.
+//
+// The rule has two halves and one source of truth -- `constantDwords[N]`:
+//
+//   NON-ZERO -> root constants. The block is folded into a single [[vk::push_constant]] struct.
+//       SPIR-V allows at most one PushConstant block per entry point, so ALL such cbuffers share
+//       one struct, concatenated in the byte order pushConstantLayout() assigns.
+//       It PADS: pushConstantLayout puts b1 at byte 0 and everything else after it, so a shader
+//       declaring only b3 still needs its fields to begin at byte 128 -- which is where the engine
+//       pushes them. Without the padding the shader reads the object block instead.
+//
+//   ZERO -> a descriptor, a dynamic UBO at binding == register in kVkSetConstants, because that is
+//       precisely where descriptorLayout() declares it. Left alone if something (patchPerFrameSet)
+//       already annotated it.
+//
+// WHY THIS TAKES A LAYOUT, when patchPerFrameSet does not. A cbuffer's kind IS NOT A PROPERTY OF THE
+// SHADER TEXT: `cbuffer SkinParams : register(b3)` reads identically whether b3 is push constants or
+// a descriptor, and only constantDwords[3] separates them. A patch over source alone must therefore
+// guess, and guessing turns a diagnosable "wrong set" into an equally broken "right set, wrong
+// kind" -- which was tried, and reverted, and is why this function exists in the shape it does.
+// createShader cannot call it (a module is compiled with no idea which pipeline will use it), so
+// RhiShader keeps its source and moduleForLayout re-patches at PIPELINE creation, where the answer
+// is finally knowable.
+//
+// Returns false only on a malformed block or an unpaddable gap, both logged. A shader whose cbuffers
+// all already agree with its layout is left byte-identical, which moduleForLayout uses as its signal
+// to reuse the layout-agnostic module rather than compile a second one.
+bool patchCbuffersForLayout(std::string& src, const PipelineLayout& layout, bool mesh);
 
 // ================================================================================================
 // 5. Per-frame constant ring: the Vulkan analog of D3D12RenderContext::ringAlloc. One HOST_VISIBLE
@@ -963,10 +988,32 @@ struct RhiBuffer {
 #endif
 };
 
+// One compile of a shader for one PUSH-CONSTANT SHAPE. See RhiShader::variants.
+struct RhiShaderVariant {
+    u32 key = 0;                  // pushConstantKey() of the PipelineLayout this was compiled for
+    std::vector<u32> spirv;
+    VkShaderModule module = VK_NULL_HANDLE;
+};
+
 struct RhiShader {
+    // The LAYOUT-AGNOSTIC compile: every cbuffer a descriptor. Still the module most pipelines use,
+    // and always the one reflectTableSlotKinds reads -- patching only ever moves CBUFFERS, so the
+    // SRV/UAV bindings it reflects are identical in every variant.
     std::vector<u32> spirv;
     ShaderStage stage = ShaderStage::Vertex;
     VkShaderModule module = VK_NULL_HANDLE;
+
+    // WHY A SHADER KEEPS ITS SOURCE. Whether a cbuffer is a descriptor or root constants is a
+    // property of the PIPELINE LAYOUT, not of the shader text -- and createShader runs with no idea
+    // which pipeline will later use the module it returns. HLSL says `cbuffer SkinParams :
+    // register(b3)` either way; only constantDwords[3] separates the two, and that arrives at
+    // createComputePipeline. So the source is kept and re-patched per layout at PIPELINE creation,
+    // where the answer is finally knowable. See moduleForLayout().
+    std::string source;           // prelude + source, already patchPerFrameSet'd
+    std::string entry;
+    std::string defines;
+    u32 minShaderModel = 60;
+    std::vector<RhiShaderVariant> variants;
 };
 
 // The cached VkDescriptorSetLayout for one table SHAPE (srvCount/uavCount + each slot's SlotKind).
@@ -1752,6 +1799,12 @@ private:
     // D3D12 statement (docs/MINIMUM_SPECS.md); the hardware it protects cannot reach Vulkan 1.3 and
     // therefore never runs this backend at all.
     void nullFill(const RhiBindingSet& s);
+
+    // The VkShaderModule to build a pipeline of THIS layout from -- s.module when the layout makes
+    // no cbuffer the shader declares into root constants, otherwise a variant compiled with
+    // patchPushConstantSlots applied, created on first use and cached in s.variants. Null on a
+    // compile failure, which the caller must treat as pipeline creation failing.
+    VkShaderModule moduleForLayout(RhiShader& s, const PipelineLayout& layout, bool mesh);
 
     VulkanDevice* dev_;
     VkDescriptorPool descriptorPool_ = VK_NULL_HANDLE;   // the ONE pool every binding set + every fixed/post/feature descriptor set allocates from; created with FREE_DESCRIPTOR_SET_BIT so destroyBindingSet can actually free its set (deferred through retire()/collect(), same as every other destroy here)

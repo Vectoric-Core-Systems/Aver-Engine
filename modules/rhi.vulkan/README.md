@@ -41,18 +41,44 @@ available.
 
 ## What is left
 
-**Push-constant cbuffers other than `PerObject`.** The engine's model is that a non-zero
-`constantDwords[slot]` means root constants, which this backend lowers to push constants — but
-`patchPushConstants` handles exactly one block, `PerObject` at b1, by exact text. Every other such
-slot (`SkinParams` at b3 today) still compiles as a descriptor and names a binding no layout
-contains. Fixing it means emitting `[[vk::push_constant]]` for an arbitrary slot, which needs the
-`PipelineLayout` threaded into shader compilation. **A cbuffer's kind is not a property of the shader
-text**, so no source-only patch can decide it — one that guesses turns a diagnosable "wrong set" into
-an equally broken "right set, wrong kind". That was tried and reverted; see `patchPerFrameSet`'s
-comment in `VulkanCommon.hpp`.
+**Textures and samplers in the fixed scene pipeline.** Four bindings, and they are the only
+validation errors remaining:
 
-**A pipeline layout referencing a destroyed `VkDescriptorSetLayout`**, reported three times during
-fixed-pipeline creation. Not yet traced.
+| Variable | What the layer says |
+| --- | --- |
+| `gBaseColorMap` (set 0, binding 9) | not declared in the pipeline layout |
+| `gL1BaseColorMap` (set 0, binding 14) | not declared in the pipeline layout |
+| `gMaterialSampler` (set 0, binding 2) | `VkDescriptorType` mismatch |
+| `gShadowSamp` (set 0, binding 1) | `VkDescriptorType` mismatch |
+
+The shape is the same one the cbuffers had — DXC leaves a space-less `t#`/`s#` register in set 0 —
+but the fix is not, because samplers and SRVs are *colliding* there rather than merely misplaced: a
+sampler at binding 1 lands where the table set already declares a texture, which is what turns
+"undeclared" into "wrong type". Whatever the answer is, it is a statement about `tableSetLayout()`
+and the `-fvk-s-shift`/`-fvk-t-shift` scheme, not about the shader text.
+
+With these outstanding the process still dies, now at `0xC0000005` inside the driver rather than the
+`0xC0000409` abort that every earlier defect produced.
+
+## Constant buffers: done, and how
+
+`patchCbuffersForLayout` (`VulkanResourceFactory.cpp`) lowers **every** cbuffer to whatever its
+`PipelineLayout` says it is, and this is the whole of that class:
+
+- `constantDwords[N] != 0` → root constants, folded into one `[[vk::push_constant]]` struct.
+- `constantDwords[N] == 0` → a descriptor, at binding `N` in `kVkSetConstants`.
+
+It replaced a per-block exact-text needle that handled only `PerObject` at b1. **A cbuffer's kind is
+not a property of the shader text** — `cbuffer SkinParams : register(b3)` reads identically either
+way — so the `PipelineLayout` is threaded down to compilation, which is why `RhiShader` keeps its
+source and `moduleForLayout()` re-patches at *pipeline* creation rather than at `createShader`.
+
+The part worth not breaking is the **padding**. `pushConstantLayout()` places the object block at
+bytes 0–128 whether or not a shader declares it, so a shader declaring only b3 needs its fields to
+begin at byte 128 — where the engine actually pushes them. Get it wrong and nothing crashes; every
+vertex is simply skinned by the top row of `gWorld`. `tests/rhi/CbufferLayoutPatchTest.cpp` pins
+this with no device and no Vulkan headers, and was checked by deliberately removing the padding
+(exactly one of its 33 checks fails).
 
 ## Also worth knowing
 

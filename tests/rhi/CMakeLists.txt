@@ -30,3 +30,26 @@ if(AVER_RHI_VULKAN)
   target_link_libraries(LineMeshTest PRIVATE Aver.RHI.Vulkan)
 endif()
 set_target_properties(LineMeshTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# CbufferLayoutPatchTest -- patchCbuffersForLayout, with no device and no Vulkan headers.
+#
+# Vulkan-only because the function is Vulkan's (D3D12 needs no such lowering: a root signature says
+# which slot is root constants at PIPELINE creation, so DXIL never has to be told). What it checks
+# is arithmetic on byte offsets, and the one that matters cannot be checked any other way: a shader
+# declaring only b3 must have its fields padded to byte 128, because pushConstantLayout places the
+# object block first whether the shader declares it or not. Get that wrong and nothing crashes --
+# every vertex is simply skinned by the wrong matrix.
+if(AVER_RHI_VULKAN)
+  add_executable(CbufferLayoutPatchTest src/CbufferLayoutPatchTest.cpp)
+  target_link_libraries(CbufferLayoutPatchTest PRIVATE Aver.RHI.Vulkan Aver.RHI Aver.Core Aver.Platform)
+  # Its own composition root, exactly as LineMeshTest above is and for the same reason: Aver.RHI
+  # calls detail::createD3D12Device et al behind AVER_HAS_* without linking the backends, so every
+  # consumer has to supply them -- even one that never creates a device.
+  if(AVER_RHI_D3D12)
+    target_link_libraries(CbufferLayoutPatchTest PRIVATE Aver.RHI.D3D12)
+  endif()
+  if(AVER_RHI_D3D11)
+    target_link_libraries(CbufferLayoutPatchTest PRIVATE Aver.RHI.D3D11)
+  endif()
+  set_target_properties(CbufferLayoutPatchTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
