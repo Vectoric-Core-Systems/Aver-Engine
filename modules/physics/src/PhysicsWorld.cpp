@@ -871,12 +871,30 @@ bool buildSoftShared(JPH::SoftBodySharedSettings& settings,
         if (a < 0 || b < 0 || c < 0 || a >= vertexCount || b >= vertexCount || c >= vertexCount)
             continue;
         if (a == b || b == c || a == c) continue;   // Jolt asserts on a degenerate face
-        // WOUND BACKWARDS on purpose. The basis change from Aver's left-handed axes to Jolt's
-        // right-handed ones mirrors the mesh, which flips every triangle's facing; swapping two
-        // indices puts the normals back outward. Without it a pressurised body inflates INWARDS.
+        // WOUND STRAIGHT THROUGH, and the swap that used to be here was a double negative.
+        //
+        // Two sign flips are in play and they cancel. Aver's winding convention is that (C-A)x(B-A)
+        // is the OUTWARD normal (see ChunkMesh.cpp, where the landscape's own convention is set) --
+        // the opposite hand from the right-handed CCW convention Jolt's volume integral assumes, so
+        // an engine mesh reads inside-out before conversion. Then toJolt maps (x,y,z) -> (y,z,-x),
+        // whose determinant is -1: it is a mirror, and it flips every triangle's facing by itself.
+        // Mirror plus opposite convention is already correct. Swapping two indices on top of that
+        // put it back inside-out.
+        //
+        // WHAT THAT COST, because "the pressure constant is too small" is what it looks like from
+        // outside: Jolt's ApplyPressure opens with `if (six_volume > 0.0f)`, so an inside-out shell
+        // gets no pressure AT ALL and deflates under its own weight regardless of the coefficient.
+        // Measured on a 6x4x1.2 m fluid shell: +172.8 with the indices as-is, -172.8 with them
+        // swapped, against a true |6V| of 172.8. Raising the coefficient by a factor of 375,000
+        // changed the rendered result by 1317 pixels out of 7 million -- which is what "the code
+        // never runs" looks like when it is mistaken for "the number is wrong".
+        //
+        // Nothing regressed by removing the swap: the only other caller (render.softbody) passes
+        // pressure 0, so this had never been exercised, and the comment that used to sit here --
+        // "without it a pressurised body inflates INWARDS" -- described a case no code had run.
         settings.AddFace(JPH::SoftBodySharedSettings::Face(static_cast<JPH::uint32>(a),
-                                                           static_cast<JPH::uint32>(c),
-                                                           static_cast<JPH::uint32>(b)));
+                                                           static_cast<JPH::uint32>(b),
+                                                           static_cast<JPH::uint32>(c)));
     }
     if (settings.mFaces.empty()) return false;
 

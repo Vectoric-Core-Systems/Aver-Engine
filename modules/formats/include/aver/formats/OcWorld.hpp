@@ -244,6 +244,16 @@ struct OcWaterPlacement {
     bool infinite = true;          // false means boundsMin/Max are meaningful
     f64 boundsMin[2] = {0, 0};     // X, Y cm
     f64 boundsMax[2] = {0, 0};     // X, Y cm
+
+    // SIMULATED rather than analytic: this surface is a soft body the physics solver sloshes, not a
+    // Gerstner sum evaluated in a vertex shader. Off by default because every water record written
+    // before this one meant the analytic surface, and because a simulated volume costs a solver body
+    // where the analytic one costs nothing.
+    //
+    // ONLY MEANINGFUL WITH bounds. A simulated volume is a closed shell with a size; an endless
+    // ocean has no size to give it, and the consumer is what refuses that pairing rather than the
+    // parser -- the format's job is to carry what was written, not to adjudicate it.
+    bool simulate = false;
 };
 
 struct OcWorldData {

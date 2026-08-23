@@ -93,6 +93,9 @@ endif()
 if(TARGET Aver.Render.SoftBody)
   target_link_libraries(Sandbox PRIVATE Aver.Render.SoftBody)
 endif()
+if(TARGET Aver.Render.Fluid)
+  target_link_libraries(Sandbox PRIVATE Aver.Render.Fluid)
+endif()
 
 # Aver Sound and the audio C seam, for the .ocsnd editor tab (sandbox/src/SoundEditor.cpp).
 #

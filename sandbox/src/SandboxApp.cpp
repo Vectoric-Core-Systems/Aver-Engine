@@ -129,6 +129,9 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #if AVER_MODULE_RENDER_SOFTBODY
 #  include "aver/render/SoftBodyScene.hpp"
 #endif
+#if AVER_MODULE_RENDER_FLUID
+#  include "aver/render/FluidScene.hpp"
+#endif
 #  include "aver/water/WaterRenderer.hpp"
 #  include "aver/water/Underwater.hpp"
 #endif
@@ -1407,6 +1410,27 @@ public:
         }
 #endif
 
+#if AVER_MODULE_RENDER_FLUID
+        // Registered unconditionally, spawned only if a level asks for it. A render feature with
+        // nothing resident does nothing per frame, and registering here rather than at the first
+        // spawn keeps feature order identical between a level with fluid and one without.
+        //
+        // ON RENDER_FLUID ALONE, outside the scene block above, because that is what this module
+        // actually depends on: its CMakeLists names Aver.Water and Aver.Physics, and neither
+        // Aver.Scene nor the soft-body renderer. This used to sit INSIDE softBodyScene_->init()'s
+        // success branch, where a soft-body failure took the fluid down with it for no reason -- and
+        // where a build with SCENE off (which forces RENDER_SOFTBODY off, see the root CMakeLists)
+        // compiled it out entirely while leaving the draw call in onRender, guarded on RENDER_FLUID
+        // alone, reading a handle nothing could ever fill.
+        //
+        // STILL BEFORE THE VOXI RENDERER below, which is the ordering that actually matters:
+        // features run prePass in registration order, and Voxi's acceleration-structure build reads
+        // the vertex buffer this feature's prePass writes. Registered after Voxi, every ray-traced
+        // effect would see the volume one frame stale -- and on its first frame, the unposed seed
+        // shell at the world origin.
+        if (fluidScene_.init(*e.device())) e.device()->addRenderFeature(&fluidScene_);
+#endif
+
         // --furnace-test: does the shading model CONSERVE ENERGY? A uniform environment of
         // radiance L and surfaces of albedo 1 -- every one must read the same, whatever its
         // orientation and whatever surrounds it.
@@ -2349,6 +2373,38 @@ public:
             aver_fw_tick(AVER_FW_TICK_PHYSICS, t.dt);
             aver_fw_tick(AVER_FW_TICK_POST_PHYSICS, t.dt);
         }
+#endif
+#if AVER_MODULE_RENDER_FLUID
+        // THE ONE PLACE A FLUID VOLUME IS EVER SPAWNED. applyLevelWater only latches what the level
+        // asked for; this drains it. See that function for why the request cannot be honoured where
+        // it is made -- in short, it is reached from three call sites across two different frame
+        // phases, and this is the single point all three pass through afterwards.
+        //
+        // A volume spawned here still gets its prePass THIS frame, and in the right order:
+        // beginFrame runs seedSkinTargets() and then every feature's prePass, so the seed shell is
+        // copied in and immediately overwritten by the world-space bytes update() stages just below.
+        // The first frame it is drawn on is already correct -- no pop at the world origin.
+        if (fluidWantPending_) {
+            fluidWantPending_ = false;
+            fluidHandle_ = fluidScene_.spawn(fluidWantDesc_, *e.device());
+            const char* nm = fluidWantName_.empty() ? "unnamed" : fluidWantName_.c_str();
+            if (fluidHandle_) {
+                AVER_INFO("[Water] '{}' is SIMULATED: a {}x{}x{} cm soft body centred at ({}, {}, {})",
+                          nm, fluidWantDesc_.halfExtentCm[0] * 2.0f, fluidWantDesc_.halfExtentCm[1] * 2.0f,
+                          fluidWantDesc_.halfExtentCm[2] * 2.0f, fluidWantDesc_.centreCm[0],
+                          fluidWantDesc_.centreCm[1], fluidWantDesc_.centreCm[2]);
+            } else {
+                AVER_ERROR("[Water] '{}' asked to be simulated but the fluid body could not be created", nm);
+            }
+        }
+        // AFTER the physics step above, and before any prePass. update() reads the solver's current
+        // particle positions: run it before the step and the frame draws the previous shape, run it
+        // after prePass and the bytes it stages are not copied until the frame after that.
+        //
+        // Guarded on RENDER_FLUID alone for the same reason the registration is: the draw call in
+        // onRender carries that guard and no other, so any wider guard here produces a build that
+        // draws a mesh nothing ever writes to.
+        fluidScene_.update();
 #endif
 #if AVER_MODULE_SCENE
         // Retires deferred destroys and propagates world matrices once, after gameplay and before onRender.
@@ -3407,6 +3463,23 @@ public:
             e.device()->drawMesh(o.mesh, &w.m[0][0], col, o.metallic, o.roughness);
             if (i == sel_) selectionOutline_ = w, selectionMesh_ = o.mesh, hasSelection_ = true;
         }
+
+#if AVER_MODULE_RENDER_FLUID
+        // The simulated fluid, drawn like any other opaque mesh -- which is the point. The analytic
+        // water surface issues its own ctx.drawIndexed in the transparent pass and is therefore
+        // invisible to the shadow cascades, the ray-tracing TLAS and GI voxelisation; going through
+        // drawMesh instead puts this surface in the scene's actual light.
+        //
+        // AN IDENTITY WORLD MATRIX, and that is a contract rather than laziness: FluidScene stages
+        // absolute world-space positions into the vertex buffer every frame, because that is the
+        // space the solver reports its particles in. Passing the volume's centre here as well would
+        // translate it twice.
+        if (const rhi::MeshHandle fluidMesh = fluidScene_.drawHandle(fluidHandle_)) {
+            const Mat4 identity{};
+            const f32 fluidCol[4] = {0.16f, 0.42f, 0.55f, 1.0f};
+            e.device()->drawMesh(fluidMesh, &identity.m[0][0], fluidCol, 0.0f, 0.12f);
+        }
+#endif
 
 #if AVER_MODULE_LANDSCAPE
         // The landscape pass: one direct select()+draw() call, the same hand-rolled shape as the
@@ -4750,6 +4823,15 @@ public:
         editor::shutdownActorEditors();
     editor::shutdownAnimEditors();
         setMouseCaptured(false);
+#if AVER_MODULE_RENDER_FLUID
+        // BEFORE aver_phys_shutdown below, and explicitly rather than leaving it to ~FluidScene: the
+        // member's destructor runs after onShutdown returns, by which point the solver is gone and
+        // retiring a live volume would call aver_phys_remove_body into a shut-down physics system
+        // (and destroyMesh into a device on its way out). This was unreachable while the spawn bug
+        // kept the resident map permanently empty. It is reachable now.
+        e.device()->removeRenderFeature(&fluidScene_);
+        fluidScene_.shutdown();
+#endif
 #if AVER_MODULE_PHYSICS
         aver_phys_shutdown();
 #endif
@@ -6026,14 +6108,80 @@ private:
         if (levelHeader_.waters.empty()) return;
 
         const fmt::OcWaterPlacement& wp = levelHeader_.waters.front();
+
         // ONE SURFACE DRAWN, and said out loud rather than discovered. WaterRenderer holds a single
         // level and a single wave set -- one infinite grid recentred under the camera -- so a second
         // WATER record has nowhere to go until the renderer can hold more than one. The format
         // deliberately allows several (an ocean AND a pool); this consumer is what does not yet.
+        //
+        // BEFORE the simulate branch below, which returns: warning after it meant a level whose
+        // first record was simulated got no warning about its second record at all.
         if (levelHeader_.waters.size() > 1)
             AVER_WARN("[Water] the level declares {} WATER records; only '{}' is rendered",
                       levelHeader_.waters.size(), wp.name.empty() ? "unnamed" : wp.name);
 
+#if AVER_MODULE_RENDER_FLUID
+        // A SIMULATED RECORD IS NOT A GERSTNER SURFACE, and taking both paths would draw two waters
+        // in the same hole fighting over the same depth. So this returns rather than falling
+        // through: the soft body IS the water for this record.
+        if (wp.simulate) {
+            if (wp.infinite) {
+                // The one pairing the format carries but nothing can honour. A simulated volume is a
+                // closed shell and needs a size; an endless ocean has none to give it. Refused here
+                // rather than in the parser, which is right -- the format's job is to carry what was
+                // written, and this is the consumer that knows why it cannot be built.
+                AVER_WARN("[Water] '{}' asks to be simulated but declares no bounds; a simulated "
+                          "volume needs a size, so it is left analytic",
+                          wp.name.empty() ? "unnamed" : wp.name);
+            } else {
+                // NO DESPAWN HERE any more. loadLevel always runs unloadLevel first, and that is
+                // where teardown lives now -- it is the one site every path that ends a level goes
+                // through, including File > New Level, which never calls this function at all.
+                water::FluidVolumeDesc fd;
+                // The shell fills the authored footprint, and hangs BELOW the surface line rather
+                // than straddling it: `level` is where the water's top sits, so the body's centre is
+                // half its depth under that. Depth is the shallower of a sensible pool depth and the
+                // footprint itself, so a small puddle does not get a shell deeper than it is wide --
+                // which would sink through whatever floor is holding it before the solver settled.
+                const f32 halfX = static_cast<f32>(wp.boundsMax[0] - wp.boundsMin[0]) * 0.5f;
+                const f32 halfY = static_cast<f32>(wp.boundsMax[1] - wp.boundsMin[1]) * 0.5f;
+                const f32 halfZ = std::min(60.0f, std::min(halfX, halfY));
+                fd.centreCm[0] = static_cast<f32>(wp.boundsMin[0] + wp.boundsMax[0]) * 0.5f;
+                fd.centreCm[1] = static_cast<f32>(wp.boundsMin[1] + wp.boundsMax[1]) * 0.5f;
+                fd.centreCm[2] = static_cast<f32>(wp.levelCm) - halfZ;
+                fd.halfExtentCm[0] = halfX;
+                fd.halfExtentCm[1] = halfY;
+                fd.halfExtentCm[2] = halfZ;
+
+                // LATCHED, NOT SPAWNED -- and this is the fix for the bug that made every
+                // simulated record log "the fluid body could not be created" at startup. onInit
+                // reaches this function through applyProject -> loadStartMap -> loadLevel, all of
+                // which run BEFORE the block that brings render features up, so the scene being
+                // spawned into had not been initialised yet and FluidScene::spawn's first line is
+                // `if (!ready_) return 0;`.
+                //
+                // Deferred rather than reordered, because reordering only fixes the startup path.
+                // loadLevel is ALSO reached from File > Open Level and from the project browser,
+                // both of which live in buildUI and therefore run inside onRender with this frame's
+                // command list already open. A single drain in onUpdate is the only placement that
+                // is correct from all three, and it cannot run until the frame loop turns -- by
+                // which time everything onInit registers has finished, whatever anybody inserts
+                // between the two later. navLoadPending_ and projectRenderPending_ are the same
+                // shape for the same reason.
+                fluidWantDesc_    = fd;
+                fluidWantName_    = wp.name;
+                fluidWantPending_ = true;
+                // The buoyancy plane still comes from the authored level: things floating ON a
+                // simulated volume are not floating on its actual deformed surface, which the solver
+                // does not expose a query for, and a flat plane at the authored height is a closer
+                // approximation than no plane at all.
+                const f32 normal[3]  = {0.0f, 0.0f, 1.0f};
+                const f32 current[3] = {0.0f, 0.0f, 0.0f};
+                aver_phys_set_water_plane(static_cast<f32>(wp.levelCm), normal, 1.0f, 0.5f, 0.05f, current);
+                return;
+            }
+        }
+#endif
         // The waves belonging to this surface: the ones that name it, plus the ones that name nothing
         // at all -- which the format defines as meaning the FIRST declared water, and this is it.
         water::GerstnerWave waves[water::kMaxGerstnerWaves];
@@ -12145,6 +12293,19 @@ private:
     // save from what the file actually said, and overwriting only what the editor genuinely owns,
     // fixes all of those at once -- and keeps fixing them for any field added to the format later,
     // which enumerating them one by one would not.
+#if AVER_MODULE_RENDER_FLUID
+    // The simulated half of water, kept beside the analytic renderer rather than inside it: a WATER
+    // record is either a Gerstner surface or a soft body, never both, and which one a level gets is
+    // decided in applyLevelWater.
+    render::FluidScene fluidScene_;
+    render::FluidHandle fluidHandle_ = 0;
+    // What a level ASKED for, and whether that ask is still outstanding. applyLevelWater fills these
+    // three and returns; the drain in onUpdate is what actually spawns. The name rides along only so
+    // the log line naming the water can be written where the spawn succeeds or fails.
+    water::FluidVolumeDesc fluidWantDesc_{};
+    std::string fluidWantName_;
+    bool fluidWantPending_ = false;
+#endif
     fmt::OcWorldData levelHeader_;
     // Whether each level entity's placement said `nocollide`. There is NO component for this: it is
     // a load-time instruction and nothing on the entity records it afterwards, so without this the
@@ -13119,6 +13280,24 @@ private:
 #if AVER_MODULE_PHYSICS
         for (const int32_t b : levelBodies_) aver_phys_remove_body(b);
         levelBodies_.clear();
+#endif
+#if AVER_MODULE_RENDER_FLUID
+        // THE ONLY teardown site for a simulated volume, and it belongs here rather than in
+        // applyLevelWater: this is what every path that ends a level runs, including File > New
+        // Level, which never calls applyLevelWater at all. Without it a simulated pool outlived its
+        // own level and went on sloshing -- and drawing -- inside the next one, which for a level
+        // with its own analytic water is exactly the two-surfaces-in-one-hole case the simulate
+        // branch exists to prevent.
+        //
+        // NOT folded into the levelBodies_ loop above: the volume's body is never pushed to
+        // levelBodies_, and removing it directly would double-free once FluidScene::retire removes
+        // it too. despawn() needs no device, which is what keeps the (void)eng at the top of this
+        // function honest.
+        if (fluidHandle_) { fluidScene_.despawn(fluidHandle_); fluidHandle_ = 0; }
+        // Cleared for the "simulated level -> level with no water" case: applyLevelWater returns
+        // immediately when the new level declares no WATER record, so a latch left standing here
+        // would spawn the OLD level's volume into the new world on the very next frame.
+        fluidWantPending_ = false;
 #endif
         hasLevelFog_ = false;
         hasLevelSun_ = false;

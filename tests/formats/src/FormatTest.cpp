@@ -500,6 +500,10 @@ static void checkOcworldWater() {
         // exactly as OcScatterSpecies::volume leaves its own empty case alone.
         check(w.waves[2].water.empty(), "wave 2: no `water` clause leaves the reference empty");
 
+        // `simulate` is absent from both records above, and absence must mean analytic rather than
+        // "whatever the last record said" -- the two are parsed by the same branch in sequence.
+        check(!pool.simulate && !ocean.simulate, "neither record is simulated without the token");
+
         // ---- round trip ----------------------------------------------------------------------
         const std::string text = writeOcworld(w);
         check(text.find("WATER name Pool") != std::string::npos, "the written text carries the pool");
@@ -526,6 +530,27 @@ static void checkOcworldWater() {
         check(std::fabs(back.waves[1].amplitudeCm - 60.0) < 1e-9 &&
               back.waves[1].water == "Ocean",
               "and a wave keeps both its numbers and its cross-reference");
+        check(writeOcworld(back) == text, "a second write reproduces the first byte for byte");
+    }
+    {
+        // `simulate`, which turns a bounded surface into a soft body the solver sloshes. A bare
+        // token like `infinite`, and it must survive a round trip past the four numbers `bounds`
+        // consumes -- written after them for exactly that reason.
+        OcWorldData w;
+        check(parseOcworld("OCWORLD 1\nNAME T\n"
+                           "WATER name Pool level -20 bounds 200 450 800 850 simulate\n", w, &err),
+              "a simulated WATER record parses");
+        check(w.waters.size() == 1 && w.waters[0].simulate, "and carries the simulate flag");
+        check(!w.waters[0].infinite, "...alongside its bounds, which it still needs");
+
+        const std::string text = writeOcworld(w);
+        check(text.find("simulate") != std::string::npos, "the written text keeps the token");
+        check(text.find("bounds 200 450 800 850 simulate") != std::string::npos,
+              "...after the bounds numbers, not between them");
+
+        OcWorldData back;
+        check(parseOcworld(text, back, &err) && back.waters.size() == 1 && back.waters[0].simulate,
+              "and it survives the round trip");
         check(writeOcworld(back) == text, "a second write reproduces the first byte for byte");
     }
     {

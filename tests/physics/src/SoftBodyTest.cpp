@@ -58,6 +58,69 @@ static Grid makeGrid(int32_t n, float spacingCm, float z) {
     return g;
 }
 
+// A closed, subdivided box shell wound to the ENGINE's convention -- (C-A)x(B-A) is the outward
+// normal. Each quad is emitted in an arbitrary order and then corrected against the outward direction
+// from the box centre, so this helper states the convention it wants instead of hard-coding six faces
+// of hand-checked index triples that a reader has to verify one at a time.
+struct Shell {
+    std::vector<float> verts;
+    std::vector<int32_t> indices;
+    int32_t count() const { return static_cast<int32_t>(verts.size() / 3); }
+};
+
+static Shell makeBoxShell(float hx, float hy, float hz, int32_t nx, int32_t ny, int32_t nz) {
+    Shell s;
+    std::vector<std::vector<std::vector<int32_t>>> id(
+        nx + 1, std::vector<std::vector<int32_t>>(ny + 1, std::vector<int32_t>(nz + 1, -1)));
+    for (int32_t i = 0; i <= nx; ++i)
+        for (int32_t j = 0; j <= ny; ++j)
+            for (int32_t k = 0; k <= nz; ++k) {
+                const bool surface = i == 0 || i == nx || j == 0 || j == ny || k == 0 || k == nz;
+                if (!surface) continue;   // interior lattice points are not part of a shell
+                id[i][j][k] = s.count();
+                s.verts.push_back(-hx + i * (2 * hx / nx));
+                s.verts.push_back(-hy + j * (2 * hy / ny));
+                s.verts.push_back(-hz + k * (2 * hz / nz));
+            }
+
+    // Emits one quad as two triangles, each flipped if it faces inward. `outward` is any vector
+    // pointing away from the box centre at that quad; the box is centred on the local origin, so the
+    // first vertex's own position serves.
+    auto quad = [&](int32_t a, int32_t b, int32_t c, int32_t d) {
+        const int32_t tri[2][3] = {{a, b, c}, {a, c, d}};
+        for (const auto& t : tri) {
+            const float* A = &s.verts[static_cast<size_t>(t[0]) * 3];
+            const float* B = &s.verts[static_cast<size_t>(t[1]) * 3];
+            const float* C = &s.verts[static_cast<size_t>(t[2]) * 3];
+            const float u[3] = {C[0] - A[0], C[1] - A[1], C[2] - A[2]};
+            const float v[3] = {B[0] - A[0], B[1] - A[1], B[2] - A[2]};
+            const float nrm[3] = {u[1] * v[2] - u[2] * v[1],
+                                  u[2] * v[0] - u[0] * v[2],
+                                  u[0] * v[1] - u[1] * v[0]};
+            const bool out = nrm[0] * A[0] + nrm[1] * A[1] + nrm[2] * A[2] > 0.0f;
+            s.indices.push_back(t[0]);
+            s.indices.push_back(out ? t[1] : t[2]);
+            s.indices.push_back(out ? t[2] : t[1]);
+        }
+    };
+    for (int32_t i = 0; i < nx; ++i)
+        for (int32_t j = 0; j < ny; ++j) {
+            quad(id[i][j][0],  id[i+1][j][0],  id[i+1][j+1][0],  id[i][j+1][0]);    // -Z
+            quad(id[i][j][nz], id[i+1][j][nz], id[i+1][j+1][nz], id[i][j+1][nz]);   // +Z
+        }
+    for (int32_t i = 0; i < nx; ++i)
+        for (int32_t k = 0; k < nz; ++k) {
+            quad(id[i][0][k],  id[i+1][0][k],  id[i+1][0][k+1],  id[i][0][k+1]);    // -Y
+            quad(id[i][ny][k], id[i+1][ny][k], id[i+1][ny][k+1], id[i][ny][k+1]);   // +Y
+        }
+    for (int32_t j = 0; j < ny; ++j)
+        for (int32_t k = 0; k < nz; ++k) {
+            quad(id[0][j][k],  id[0][j+1][k],  id[0][j+1][k+1],  id[0][j][k+1]);    // -X
+            quad(id[nx][j][k], id[nx][j+1][k], id[nx][j+1][k+1], id[nx][j][k+1]);   // +X
+        }
+    return s;
+}
+
 static void step(float seconds) {
     const float fixed = aver_phys_fixed_step();
     for (float t = 0.0f; t < seconds; t += fixed) aver_phys_step(fixed);
@@ -300,6 +363,70 @@ static void testHandleContract() {
     aver_phys_shutdown();
 }
 
+// ---- pressure actually reaches the solver ---------------------------------------------------------
+//
+// THE REGRESSION THIS EXISTS FOR. Jolt's ApplyPressure opens with `if (six_volume > 0.0f)`, so a shell
+// whose faces arrive wound inward gets no pressure AT ALL -- silently, with no warning and no error,
+// and looking exactly like a pressure coefficient that is merely too small. That is what shipped:
+// the conversion into Jolt's axes already mirrors the mesh, and an index swap on top of it put every
+// face back inside out. It went unnoticed because the only caller at the time passed pressure 0.
+//
+// Checked as a DIFFERENCE between two identical shells, one pressurised and one not, so it cannot
+// pass by accident: whatever the absolute numbers, the pressurised one must hold up and the other
+// must not.
+static void testPressureHoldsAShellUp() {
+    AVER_INFO("-- a pressurised shell holds its shape, an unpressurised one does not --");
+    check(aver_phys_init() == 1, "physics started");
+
+    check(aver_phys_add_static_box(0, 0, -10, 500, 500, 10) != 0, "a static floor exists, top at z = 0");
+
+    // THE PROPORTIONS THAT ACTUALLY FAILED: the FirstPerson template's pool, 6 m x 4 m x 1.2 m at
+    // 8 x 8 x 4. A small stiff cube survives three seconds unpressurised and proves nothing.
+    const float hx = 300.0f, hy = 200.0f, hz = 60.0f;
+    const int32_t nx = 8, ny = 8, nz = 4;
+    const Shell s = makeBoxShell(hx, hy, hz, nx, ny, nz);
+    check(s.count() > 0 && !s.indices.empty(), "a closed box shell was built");
+
+    // 0.6 * 2 g hz (nx+1)(ny+1) in Jolt's metres -- water::fluidPressureFor's own formula, restated
+    // here because this test links the ABI and nothing else (see this file's opening comment). Kept
+    // in step with that function by the two bounds below, which fail if either drifts.
+    const float pressure = 0.6f * 1.0e-4f * 2.0f * 980.0f * hz * (nx + 1) * (ny + 1);
+
+    auto heightAfter = [&](float p) {
+        const int32_t body = aver_phys_softbody_create(
+            s.verts.data(), s.count(), s.indices.data(), static_cast<int32_t>(s.indices.size()),
+            nullptr, 0.0f, 0.0f, hz + 5.0f, 1.0e-4f, p);
+        if (body == 0) return -1.0f;
+        step(4.0f);
+        std::vector<float> pos(static_cast<size_t>(s.count()) * 3, 0.0f);
+        aver_phys_softbody_vertices(body, pos.data(), s.count());
+        float lo = 1e9f, hi = -1e9f;
+        for (int32_t i = 0; i < s.count(); ++i) {
+            const float z = pos[static_cast<size_t>(i) * 3 + 2];
+            lo = std::min(lo, z);
+            hi = std::max(hi, z);
+        }
+        aver_phys_remove_body(body);
+        return hi - lo;
+    };
+
+    const float limp = heightAfter(0.0f);
+    const float firm = heightAfter(pressure);
+    check(limp >= 0.0f && firm >= 0.0f, "both shells were created");
+    check(limp < 0.92f * 2 * hz, "without pressure it sags under its own weight (height " +
+                                 std::to_string(limp) + " of " + std::to_string(2 * hz) + ")");
+    check(firm > limp + 0.1f * hz, "with pressure it holds up better (height " + std::to_string(firm) +
+                                   " against " + std::to_string(limp) + ")");
+    // BOTH ENDS, because both are real failures that shipped. Too little pressure -- or, as happened,
+    // pressure the solver silently discards because the faces arrived inside out -- and the shell
+    // puddles. Too much and it balloons out of its basin; the first version of this coefficient was
+    // 10,000x too large and swallowed the camera.
+    check(firm > 0.90f * 2 * hz, "keeping nearly all its depth (" + std::to_string(firm) + ")");
+    check(firm < 1.15f * 2 * hz, "and not gaining any (" + std::to_string(firm) + ")");
+
+    aver_phys_shutdown();
+}
+
 int main() {
     AVER_INFO("SoftBodyTest");
     testClothHangs();
@@ -307,6 +434,7 @@ int main() {
     testSkinnedFollowsItsJoints();
     testSkinnedCanLeaveItsSkin();
     testHandleContract();
+    testPressureHoldsAShellUp();
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
     return g_failures;
 }

@@ -18,6 +18,22 @@ inline f32 latticeLerp(f32 halfExtentCm, i32 idx, i32 n) {
 
 } // namespace
 
+f32 fluidPressureFor(const FluidVolumeDesc& desc, f32 gravityCmPerS2) {
+    // The same clamp generateFluidSeedShell applies, for the same reason: a subdivision count below 1
+    // is not a shell, and reading one here would make the pressure disagree with the mesh the solver
+    // is actually given.
+    // Particles ALONG each top-face axis: one more than the number of segments.
+    const f32 nx = static_cast<f32>(std::max(1, desc.subdivisions[0]) + 1);
+    const f32 ny = static_cast<f32>(std::max(1, desc.subdivisions[1]) + 1);
+    const f32 hz = std::fabs(desc.halfExtentCm[2]);
+    const f32 g  = std::fabs(gravityCmPerS2);
+    // 2 * g * hz * nx * ny, scaled out of centimetres into the metres Jolt integrates in -- both
+    // steps derived in the header. Zero depth or zero gravity legitimately wants zero pressure, since
+    // there is nothing for it to hold up, and Jolt reads a non-positive coefficient as "no pressure
+    // at all", so neither needs a special case here.
+    return kFluidPressureHeadroom * kFluidCmToJolt * 2.0f * g * hz * nx * ny;
+}
+
 // ---------------------------------------------------------------------------------------------
 // (a) THE SEED SHELL.
 //

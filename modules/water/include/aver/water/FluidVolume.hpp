@@ -46,11 +46,32 @@ namespace aver::water {
 // than cloth's 0, not so much the shell loses its shape entirely.
 constexpr f32 kHeavyLiquidCompliance = 1.0e-4f;
 
-// Internal pressure, just enough to keep the shell from caving fully in on itself under its own
-// particles' weight -- deliberately NOT enough to hold it taut. A taut pressurised shell is what a
-// balloon is; a liquid's silhouette is allowed to sag. Like kHeavyLiquidCompliance, this is a starting
-// point to move once a body built from it is actually on screen, not a validated value.
-constexpr f32 kHeavyLiquidPressure = 20.0f;
+// Internal pressure is DERIVED PER VOLUME, not carried as a constant -- see fluidPressureFor()
+// below for the arithmetic and for the measurement that forced it. A `pressure` left at this sentinel
+// asks for that derivation; any other non-negative value is passed to the solver untouched, which is
+// what an author tuning one particular pool needs.
+constexpr f32 kFluidPressureAuto = -1.0f;
+
+// How much of the derived balance point to actually use, and this one IS measured rather than
+// argued. The balance below assumes pressure alone holds the top face up; in a real shell the top
+// particles are also carried by the constraint network that runs down the side walls to the floor, so
+// the full balance is an over-estimate and the shell gains volume. Swept on the FirstPerson pool's
+// own proportions (6 x 4 x 1.2 m at 8x8x4, four seconds, free-standing on a floor) -- final depth as
+// a fraction of the 1.2 m it started with:
+//
+//     0.00 -> 84%   0.25 -> 86%   0.40 -> 95%   0.50 -> 94%
+//     0.60 -> 97%   0.75 -> 97%   1.05 -> 134% (ballooning)
+//
+// Anywhere from 0.4 to 0.75 holds the shape; past that it inflates. 0.6 sits in the middle of that
+// plateau, far enough from the blow-up to survive a shell whose proportions differ from a pool's.
+// SoftBodyTest::testPressureHoldsAShellUp pins both ends -- collapse and balloon -- so a change here
+// that reaches either has a test to answer to.
+constexpr f32 kFluidPressureHeadroom = 0.6f;
+
+// Centimetres to Jolt's metres, for the pressure coefficient specifically: gravity loses a factor of
+// 100, the enclosed volume 1e6, and the face area 1e4, and pressure is gravity * volume / area. Not
+// a general cm->m conversion and not interchangeable with one -- see fluidPressureFor.
+constexpr f32 kFluidCmToJolt = 1.0e-4f;
 
 // One fluid volume's authored placement, size, subdivision and solver tuning -- everything a level
 // author or composition root needs to see without opening FluidVolume.cpp.
@@ -71,11 +92,56 @@ struct FluidVolumeDesc {
     i32 subdivisions[3] = {8, 8, 4};
 
     // Passed straight through to aver_phys_softbody_create -- see that ABI's own comment for exact
-    // semantics, and kHeavyLiquidCompliance/kHeavyLiquidPressure's own comments for why these two
-    // numbers rather than Jolt's cloth-shaped defaults.
+    // semantics. See kHeavyLiquidCompliance for why compliance is not Jolt's cloth-shaped 0, and
+    // fluidPressureFor below for why pressure defaults to a sentinel rather than to any number.
     f32 compliance = kHeavyLiquidCompliance;
-    f32 pressure   = kHeavyLiquidPressure;
+    f32 pressure   = kFluidPressureAuto;
 };
+
+// The internal pressure this shell needs, in the units Jolt's SoftBodyCreationSettings::mPressure
+// takes (n R T, not a force per area -- see ApplyPressure in SoftBodyMotionProperties.cpp).
+//
+// WHY THIS IS COMPUTED AND NOT A CONSTANT. Jolt turns the coefficient into a per-face impulse of
+// `pressure * dt / V * area` along the face normal, so what a particle actually feels scales with
+// its share of surface area DIVIDED BY the enclosed volume. Both of those change with the pool's
+// size and with how finely it is subdivided, so one number cannot be right for two different pools:
+// a constant tuned for a bathtub is a rounding error inside a reservoir. The 20.0 that used to live
+// here was a rounding error inside a 6 m x 4 m x 1.2 m pool -- about a millionth of what that shell
+// needed -- and the volume collapsed into a puddle on the basin floor within two seconds.
+//
+// THE BALANCE POINT. For a particle on the top face, with mass 1 (every particle of a fluid shell
+// has invMass 1; aver_phys_softbody_create is passed no mass array) and area share `a`:
+//
+//     pressure * A / V  ==  gravity * m                 [ balance, over the whole top face ]
+//     A = 4 hx hy                                       [ the top face ]
+//     m = (sx + 1) (sy + 1)                             [ its particles, one unit of mass each ]
+//     V = 8 hx hy hz                                    [ the box ]
+//  => pressure = gravity * V * m / A = 2 * gravity * hz * (sx + 1) (sy + 1)
+//
+// COUNTED OVER THE WHOLE FACE rather than per particle, because a particle's share of the area is
+// not uniform -- the ones on the rim own half a cell, the corners a quarter -- while its MASS is one
+// unit wherever it sits. Balancing the totals is exact; balancing a notional per-particle cell is
+// only asymptotically right, and undershoots by (sx+1)(sy+1)/(sx sy) -- 27% at the 8x8 a pool
+// actually uses.
+//
+// IN METRES, NOT CENTIMETRES, and this is the whole of the arithmetic that is easy to get wrong.
+// Jolt stores positions in metres and velocities in m/s, so V, a and gravity in that balance are all
+// Jolt's, not the engine's. Converting a desc written in centimetres costs a factor of
+// (1/100 gravity) * (1e-6 volume) / (1e-4 area) = 1e-4 overall, which is where kFluidCmToJolt
+// comes from. Getting this wrong is not subtle in one direction and invisible in the other: a
+// coefficient 10,000x too large turned a 1.2 m deep pool into a balloon that swallowed the camera
+// inside four seconds.
+//
+// INDEPENDENT OF THE FOOTPRINT, which is surprising and is right: widening the pool adds enclosed
+// volume and top-face area in the same proportion, so they cancel. What it does depend on is depth
+// -- a deeper volume needs more pressure to hold the same surface up -- and on the horizontal
+// subdivision, because every particle carries the same mass however much area it is responsible for,
+// so a finer grid means more mass sitting on the same footprint.
+//
+// `gravityCmPerS2` is a magnitude, defaulted to the value PhysicsWorld installs at startup. A world
+// that changed its gravity should pass the new magnitude rather than let a shell derived for Earth
+// float or sink.
+f32 fluidPressureFor(const FluidVolumeDesc& desc, f32 gravityCmPerS2 = 980.0f);
 
 // Builds a closed, subdivided-box triangle shell from `desc`, in LOCAL (object) space -- vertices run
 // from -halfExtentCm to +halfExtentCm about local (0,0,0), NOT about desc.centreCm. That split mirrors

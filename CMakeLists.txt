@@ -156,6 +156,7 @@ option(AVER_MODULE_OCCLUSION "Occlusion module: hierarchical-Z pyramid + two-pas
 option(AVER_MODULE_PARTICLES "Particle system: CPU-simulated billboard particles, depth-tested against the scene" ON)
 option(AVER_MODULE_WATER "Water: a Gerstner-wave surface drawn in the transparent pass, and the underwater fog override" ON)
 option(AVER_MODULE_RENDER_SOFTBODY "Draw meshes whose vertices come from a simulated soft body" ON)
+option(AVER_MODULE_RENDER_FLUID "Simulate a water volume as a soft body and draw the deforming surface" ON)
 
 if(MSVC)
   add_compile_options(/W4 /permissive- /MP /utf-8 /Zc:__cplusplus /EHsc)
@@ -339,6 +340,19 @@ if(AVER_MODULE_RENDER_SOFTBODY AND (NOT AVER_MODULE_SCENE OR NOT AVER_MODULE_PHY
 endif()
 if(AVER_MODULE_RENDER_SOFTBODY)
   add_subdirectory(modules/render.softbody)
+endif()
+
+# Fluid drawing. Needs the WATER module (for the volume it simulates) and PHYSICS (for the solver
+# that does the simulating) -- it is the one place that knows both, which is exactly why it exists
+# as its own module rather than as glue in a composition root. Force-disabled without either, for
+# the same reason soft-body drawing is just above: a missing dependency should turn a feature off,
+# not fail the configure.
+if(AVER_MODULE_RENDER_FLUID AND (NOT AVER_MODULE_WATER OR NOT AVER_MODULE_PHYSICS))
+  message(STATUS "Aver: fluid drawing needs water and physics - forcing AVER_MODULE_RENDER_FLUID=OFF")
+  set(AVER_MODULE_RENDER_FLUID OFF)
+endif()
+if(AVER_MODULE_RENDER_FLUID)
+  add_subdirectory(modules/render.fluid)
 endif()
 if(AVER_MODULE_WATER)
   # NOT force-disabled by AVER_MODULE_SCENE the way particles is, and deliberately: a particle

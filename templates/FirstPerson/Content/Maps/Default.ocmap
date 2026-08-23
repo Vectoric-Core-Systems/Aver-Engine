@@ -50,10 +50,20 @@ PLACEG Meshes/cube.ocmesh 500 440 -75 0 0 0 300 10 75 M_Concrete      # -Y wall
 # infinite, because this is a pool and not an ocean -- `bounds` takes the interior the walls enclose
 # (200..800, 450..850), matching the basin's own water footprint rather than the wider slab around it.
 # Level -20 sits 20 cm below the rim at z 0, a real pool's coping edge rather than a surface brimming
-# level with the deck. No WAVE record follows this one: zero waves is the format's own documented
-# behaviour for flat, motionless water, which is what a pool this small should look like -- not the
-# open swell four hardcoded Gerstner waves used to give every body of water regardless of size.
-WATER name Pool level -20 bounds 200 450 800 850
+# level with the deck.
+#
+# SIMULATED, not analytic. `simulate` makes this surface a soft body the physics solver sloshes --
+# water that a player walking into it actually disturbs, and that can slop up and over the rim and
+# stay there -- instead of a Gerstner sum evaluated in a vertex shader, which is beautiful on an
+# ocean and inert in a swimming pool. A template exists to show what the engine can do, and a pool
+# that reacts is the whole reason for putting one here.
+#
+# No WAVE record follows this one, and under `simulate` there could not be a meaningful one: waves
+# describe an analytic surface, and this surface's shape comes from the solver. (Zero waves is also
+# the format's own documented behaviour for flat water, so a level that drops `simulate` still gets
+# a sensible still pool rather than the open swell four hardcoded waves used to give every body of
+# water regardless of size.)
+WATER name Pool level -20 bounds 200 450 800 850 simulate
 
 # Two crates -- set dressing, and also honest raycast targets: ordinary collide=true placements, so
 # shooting one produces a REAL hit whose entity is stamped by LevelInstance's own static-box path. It

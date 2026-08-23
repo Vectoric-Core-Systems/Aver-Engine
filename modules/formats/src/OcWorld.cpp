@@ -190,6 +190,9 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
                 // A BARE TOKEN, matching PCGVOLUME's own `infinite`: a statement about what the
                 // surface IS rather than a value it carries.
                 else if (equalsCI(t[i], "infinite")) wp.infinite = true;
+                // Another bare token, same shape as `infinite`: a statement about what this surface
+                // IS, carrying no value of its own.
+                else if (equalsCI(t[i], "simulate")) wp.simulate = true;
                 else if (equalsCI(t[i], "bounds") && i + 4 < t.size()) {
                     wp.infinite = false;
                     wp.boundsMin[0] = parseF64(t[i+1]); wp.boundsMin[1] = parseF64(t[i+2]);
@@ -392,6 +395,9 @@ std::string writeOcworld(const OcWorldData& w) {
                 s += " bounds " + num(wp.boundsMin[0]) + " " + num(wp.boundsMin[1]) + " " +
                      num(wp.boundsMax[0]) + " " + num(wp.boundsMax[1]);
             }
+            // AFTER bounds, because bounds consumes the four tokens following it and a keyword
+            // written between them would be read as a number.
+            if (wp.simulate) s += " simulate";
             s += "\n";
         }
     }
