@@ -776,6 +776,24 @@ bool parseOcMesh(const u8* bytes, usize size, OcMeshData& out, std::string* why)
     if (u64(uvOffset) + 4 > u64(attrStride))
         return fail(why, ".ocmesh: the UV stream's offset falls outside the attribute stride");
 
+    // AND THE STRIDES THEMSELVES, which checking the offsets does not cover. Position and the
+    // tangent frame are read at FIXED WIDTHS (12 bytes and 8) from offset 0, so no offset check
+    // constrains them -- only the stride does, and posStride/attrStride come verbatim from the
+    // file's stream table with nothing but a zero-means-default fallback.
+    //
+    // The size check above does not save it either, because it bounds vcount*stride while the LAST
+    // vertex reads (vcount-1)*stride + width. Concretely, with posStride 2, attrStride 1 and
+    // vcount 8: posPadded is 16, the smallest VTXS that passes is 24 bytes, and vertex 7's position
+    // read runs [14, 26) -- two bytes off the end of the chunk. The tangent frame is worse because
+    // it needs no arithmetic at all: ANY attrStride below 8 overruns the last vertex by 8-attrStride.
+    //
+    // The skin block below needs no equivalent because its reads are offset-based, and bounding
+    // jointOffset/weightOffset against skinStride already keeps them inside one stride.
+    if (u64(posStride) < 12)
+        return fail(why, ".ocmesh: the position stream's stride is smaller than the position it must hold");
+    if (u64(attrStride) < 8)
+        return fail(why, ".ocmesh: the attribute stream's stride is smaller than the tangent frame it must hold");
+
     out.positions.resize(usize(vcount) * 3);
     out.normals.resize(usize(vcount) * 3);
     out.uvs.resize(usize(vcount) * 2);
