@@ -599,6 +599,14 @@ public class GraphCompiler
                 EmitGetAnimCurve(node);
                 break;
 
+            case "setskeleton":
+                EmitSetSkeleton(node);
+                break;
+
+            case "playanimation":
+                EmitPlayAnimation(node);
+                break;
+
             case "sin":
                 EmitSin(node);
                 break;
@@ -1647,6 +1655,47 @@ public class GraphCompiler
             _il.Emit(OpCodes.Pop);
     }
 
+    /// SetSkeleton(entity) -> success: binds a skeleton asset by path -- mirrors EmitSetMesh exactly,
+    /// see that method's comment, wrapping GraphInterop.SetSkeletonForGraph(int,string) instead.
+    private void EmitSetSkeleton(Node node)
+    {
+        if (_il == null) return;
+
+        if (string.IsNullOrEmpty(node.SkeletonPath))
+            throw new InvalidOperationException($"SetSkeleton node '{node.Id}' has no skeleton= attribute naming which asset to bind");
+
+        LoadPin(node.Id, "entity");
+        _il.Emit(OpCodes.Ldstr, node.SkeletonPath);
+        _il.Emit(OpCodes.Call, SetSkeletonMethod);
+
+        if (_pinLocals.TryGetValue((node.Id, "success"), out var local))
+            _il.Emit(OpCodes.Stloc, local);
+        else
+            _il.Emit(OpCodes.Pop);
+    }
+
+    /// PlayAnimation(entity, loop) -> success: plays a clip by path -- mostly mirrors EmitSetMesh, but
+    /// with a SECOND pin load (loop) between the mesh-shaped string push and the call, because
+    /// GraphInterop.PlayAnimationForGraph takes (int,string,bool) rather than (int,string). Order on
+    /// the IL stack matches the method's own parameter order: entity, then clip, then loop.
+    private void EmitPlayAnimation(Node node)
+    {
+        if (_il == null) return;
+
+        if (string.IsNullOrEmpty(node.ClipPath))
+            throw new InvalidOperationException($"PlayAnimation node '{node.Id}' has no clip= attribute naming which clip to play");
+
+        LoadPin(node.Id, "entity");
+        _il.Emit(OpCodes.Ldstr, node.ClipPath);
+        LoadPin(node.Id, "loop");
+        _il.Emit(OpCodes.Call, PlayAnimationMethod);
+
+        if (_pinLocals.TryGetValue((node.Id, "success"), out var local))
+            _il.Emit(OpCodes.Stloc, local);
+        else
+            _il.Emit(OpCodes.Pop);
+    }
+
     private void EmitSin(Node node)
     {
         if (_il == null) return;
@@ -2602,6 +2651,8 @@ public class GraphCompiler
                     else if (IsExecCapableSetMeshType(node.Type)) EmitExecSetMesh(node);
                     else if (IsExecCapableSetMaterialType(node.Type)) EmitExecSetMaterial(node);
                     else if (IsExecCapableAttachToSocketType(node.Type)) EmitExecAttachToSocket(node);
+                    else if (IsExecCapableSetSkeletonType(node.Type)) EmitExecSetSkeleton(node);
+                    else if (IsExecCapablePlayAnimationType(node.Type)) EmitExecPlayAnimation(node);
                     else if (IsExecCapableCharacterMoveType(node.Type)) EmitExecCharacterMove(node);
                     else if (IsExecCapableJumpType(node.Type)) EmitJump(node);
                     else if (IsExecCapablePrintType(node.Type)) EmitExecPrint(node);
@@ -3126,6 +3177,19 @@ public class GraphCompiler
     /// SetMaterial's own version -- see IsExecCapableSetMeshType's comment, which applies unchanged.
     private static bool IsExecCapableSetMaterialType(string type) =>
         type.Equals("setmaterial", StringComparison.OrdinalIgnoreCase);
+
+    /// SetSkeleton's own version -- see IsExecCapableSetMeshType's comment, which applies unchanged
+    /// (SetSkeletonForGraph is the identical "needs Entity's internal constructor" GraphInterop shape).
+    private static bool IsExecCapableSetSkeletonType(string type) =>
+        type.Equals("setskeleton", StringComparison.OrdinalIgnoreCase);
+
+    /// PlayAnimation's own version -- see IsExecCapableSetMeshType's comment, which applies unchanged.
+    /// Grouped with SetMesh/SetMaterial/SetSkeleton rather than with Spawn/PlaySound because there is
+    /// only one CAnimator per entity: replaying the same clip twice overwrites the same three fields
+    /// with the same values, unlike PlaySound (a genuinely NEW voice each call, refused by the pull
+    /// compiler entirely -- see IsExecCapableSideEffectType's own family).
+    private static bool IsExecCapablePlayAnimationType(string type) =>
+        type.Equals("playanimation", StringComparison.OrdinalIgnoreCase);
 
     /// AttachToSocket's own version. Grouped with SetMesh/SetMaterial rather than with Spawn because
     /// it is IDEMPOTENT -- attaching to the same parent and socket twice is the same state, not two
@@ -3692,6 +3756,59 @@ public class GraphCompiler
         }
     }
 
+    /// Runs a SetSkeleton node's write exactly once, at the point the exec walk reaches it -- mirrors
+    /// EmitExecSetMesh exactly, see that method's comment, wrapping SetSkeletonMethod instead.
+    private void EmitExecSetSkeleton(Node node)
+    {
+        if (_il == null) return;
+
+        if (string.IsNullOrEmpty(node.SkeletonPath))
+            throw new InvalidOperationException($"SetSkeleton node '{node.Id}' has no skeleton= attribute naming which asset to bind");
+
+        EmitPullInput(node, "entity");
+        _il.Emit(OpCodes.Ldstr, node.SkeletonPath);
+        _il.Emit(OpCodes.Call, SetSkeletonMethod);
+
+        if (node.Pins.Any(p => p.IsOutput && p.Name == "success"))
+        {
+            var successLocal = GetOrCreateExecLocal(node.Id, "success", typeof(bool));
+            _il.Emit(OpCodes.Stloc, successLocal);
+        }
+        else
+        {
+            _il.Emit(OpCodes.Pop);
+        }
+    }
+
+    /// Runs a PlayAnimation node's write exactly once, at the point the exec walk reaches it -- mirrors
+    /// EmitExecSetMesh's shape, plus a second EmitPullInput (loop) between the clip string push and the
+    /// call, exactly as EmitPlayAnimation's own comment explains for the PULL-compiler twin.
+    ///
+    /// EmitPullInput, NOT LoadPin, on BOTH data pins -- see EmitExecAttachToSocket's own comment for
+    /// why: on the exec path a pin has no _pinLocals entry, so LoadPin silently reads an unset local.
+    private void EmitExecPlayAnimation(Node node)
+    {
+        if (_il == null) return;
+
+        if (string.IsNullOrEmpty(node.ClipPath))
+            throw new InvalidOperationException($"PlayAnimation node '{node.Id}' has no clip= attribute naming which clip to play");
+
+        EmitPullInput(node, "entity");
+        _il.Emit(OpCodes.Ldstr, node.ClipPath);
+        EmitPullInput(node, "loop");
+        _il.Emit(OpCodes.Call, PlayAnimationMethod);
+
+        if (node.Pins.Any(p => p.IsOutput && p.Name == "success"))
+        {
+            var successLocal = GetOrCreateExecLocal(node.Id, "success", typeof(bool));
+            _il.Emit(OpCodes.Stloc, successLocal);
+        }
+        else
+        {
+            _il.Emit(OpCodes.Pop);
+        }
+    }
+
     /// Runs a Raycast node's native query exactly once, at the point the exec walk reaches it --
     /// mirrors EmitRaycast's own "one call, five results" shape, but pulls its 7 inputs through
     /// EmitPullInput rather than LoadPin/_pinLocals (see the section-level comment for why the two
@@ -3839,7 +3956,8 @@ public class GraphCompiler
         IsExecCapableSpawnType(type) || IsExecCapableVarSideEffectType(type) ||
         IsExecCapableSetParentType(type) || IsExecCapableSetViewEntityType(type) ||
         IsExecCapableSetNameType(type) || IsExecCapableSetMeshType(type) ||
-        IsExecCapableSetMaterialType(type) || IsExecCapableCharacterMoveType(type) ||
+        IsExecCapableSetMaterialType(type) || IsExecCapableSetSkeletonType(type) ||
+        IsExecCapablePlayAnimationType(type) || IsExecCapableCharacterMoveType(type) ||
         IsExecCapableFireEventType(type) || IsExecCapableJumpType(type) ||
         IsExecCapablePrintType(type) || IsExecCapableApiCallType(type) ||
         IsExecCapableTransformWriteType(type) || IsExecCapablePhysicsWriteType(type) ||
@@ -4527,6 +4645,14 @@ public class GraphCompiler
     private static readonly MethodInfo SetMaterialMethod =
         typeof(GraphInterop).GetMethod("SetMaterialForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SetMaterialForGraph was not found by reflection");
+    // SetSkeleton/PlayAnimation, reflected the same way as SetMesh/SetMaterial immediately above --
+    // same "needs Entity's internal constructor" reason.
+    private static readonly MethodInfo SetSkeletonMethod =
+        typeof(GraphInterop).GetMethod("SetSkeletonForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SetSkeletonForGraph was not found by reflection");
+    private static readonly MethodInfo PlayAnimationMethod =
+        typeof(GraphInterop).GetMethod("PlayAnimationForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.PlayAnimationForGraph was not found by reflection");
     // AttachToSocket, reflected the same way -- Entity.AttachToSocket needs Entity's internal
     // constructor, so the call has to enter through Aver.Framework rather than from here.
     private static readonly MethodInfo AttachToSocketMethod =

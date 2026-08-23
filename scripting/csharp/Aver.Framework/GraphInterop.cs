@@ -239,6 +239,25 @@ internal static class GraphInterop
     internal static float GetAnimCurveForGraph(int entity, string curve) =>
         new Entity(entity).GetAnimationCurve(curve, 0.0f);
 
+    /// <summary>SetSkeleton's own surface: binds a skeleton asset by path, adding a CSkeletalMesh
+    /// component if the entity has none. Mirrors SetMeshForGraph's own reasoning exactly -- see that
+    /// method's comment -- wrapping <see cref="Entity.SetSkeleton"/> (Animation.cs) instead, which
+    /// composes AddComponent(Component.SkeletalMesh) + Assets.ObjectIdOf(path) + SetInt64 the same
+    /// three-step shape Entity.SetMesh does.</summary>
+    internal static bool SetSkeletonForGraph(int entity, string skeletonAsset) =>
+        new Entity(entity).SetSkeleton(skeletonAsset);
+
+    /// <summary>PlayAnimation's own surface: plays a clip from the start, adding a CAnimator component
+    /// if the entity has none. Wraps <see cref="Entity.PlayAnimation"/> (Animation.cs), which -- unlike
+    /// every other GraphInterop wrapper in this animation group -- writes THREE fields (flags, time,
+    /// clip), not one: loop folds into CAnimator.flags's AnimatorOnce bit, and the playhead is reset to
+    /// 0 so a re-trigger genuinely restarts the clip rather than continuing wherever the last one left
+    /// off. Still idempotent in the sense this node family requires -- calling it twice with the same
+    /// arguments leaves the entity in the same state, not two overlapping plays -- because there is
+    /// only one CAnimator per entity for it to write into.</summary>
+    internal static bool PlayAnimationForGraph(int entity, string clipAsset, bool loop) =>
+        new Entity(entity).PlayAnimation(clipAsset, loop);
+
     /// <summary>CharacterMove's own surface: the last Blueprint-parity node, one coarse exec call
     /// wrapping <see cref="AverCharacter"/>.DriveFromGraph -- itself a one-line forward to the
     /// existing <c>protected</c> Drive(dt, moveAxis, yawDeltaDeg, pitchDeltaDeg), which owns the

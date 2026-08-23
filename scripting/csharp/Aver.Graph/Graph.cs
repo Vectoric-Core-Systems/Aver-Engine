@@ -179,6 +179,20 @@ public class Node
     /// SavePath's own precedent -- flat and positioned playback name the same kind of thing.
     /// Null for every other node type.
     public string? SoundPath { get; set; }
+
+    // Which skeleton asset a "setskeleton" node binds, e.g. "Content/Skeletons/Hero.ocskel". Set
+    // from the NODE line's "skeleton=<path>" attribute -- same "the value IS the data" mechanism
+    // MeshPath uses (Assets.ObjectIdOf is a pure local hash, computed at INVOCATION time in
+    // Aver.Framework, not here). Null for every other node type.
+    public string? SkeletonPath { get; set; }
+
+    // Which animation clip a "playanimation" node plays, e.g. "Content/Anims/Run.ocanim". Set from
+    // the NODE line's "clip=<path>" attribute -- same mechanism as SkeletonPath immediately above.
+    // The loop flag is NOT here: unlike the clip path, it is genuine runtime data a graph may
+    // compute, so it rides an ordinary bool PIN (Node.Pins) instead of a NODE-line attribute -- see
+    // GraphNodeDefs.hpp's own "PlayAnimation gets a THIRD input pin" comment for why. Null for every
+    // other node type.
+    public string? ClipPath { get; set; }
 }
 
 /// One parameter the compiled method accepts -- e.g. the entity a graph drives, or the current

@@ -737,6 +737,34 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"GetAnimCurve", "Get Anim Curve", "Scene", {
         pin("entity", "int", false), pin("value", "float", true)},
         {attr("curve", "Curve")}});
+
+    // -- SetSkeleton / PlayAnimation: SetMesh/SetMaterial's own animation-family siblings, wrapping
+    //    Aver.Framework.Entity.SetSkeleton/PlayAnimation (Animation.cs) through
+    //    GraphInterop.SetSkeletonForGraph/PlayAnimationForGraph -- same SetField-style dispatch, same
+    //    "EnsureComponent's own idempotent add-if-absent guard is what makes re-running this every
+    //    tick harmless" reasoning SetMesh's own comment gives (SetSkeleton/PlayAnimation each add
+    //    their component -- CSkeletalMesh/CAnimator -- the identical way EnsureMeshRenderer does).
+    //
+    //    BINDING IS BY ARRAY INDEX, NOT NAME (AnimSampler.cpp's `t.boneIndex` bounds-check, never an
+    //    identity-check) -- this node cannot enforce that a skeleton= and a clip= authored on the same
+    //    entity actually agree on joint order; a mismatch drives the wrong bone, or silently drops the
+    //    track if out of range, with no error this node -- or anything downstream of it -- can raise.
+    //    That is a content problem this graph layer has no visibility into, not a gap in the node.
+    t.push_back({"SetSkeleton", "Set Skeleton", "Scene", {
+        pin("entity", "int", false), pin("success", "bool", true)},
+        {attr("skeleton", "Skeleton")}});
+    //    PlayAnimation gets a THIRD input pin -- loop -- that no Set*-shaped node above needs, because
+    //    Entity.PlayAnimation itself takes a second scalar argument (Animation.cs's own `bool loop =
+    //    true`), unlike SetMesh/SetMaterial/SetSkeleton's single string write. A PIN, not a NODE-line
+    //    attribute, for the opposite reason clip= is one: loop is genuine runtime data a graph may
+    //    reasonably compute (e.g. "loop unless this is the death clip"), not edit-time-only naming, so
+    //    it belongs on the wire the same way PlaySound's own "looping" pin does just above. The default
+    //    "true" mirrors Animation.cs's own default parameter -- unlike PlaySound's looping (which
+    //    defaults to non-looping when left unwired), a freshly spawned PlayAnimation node should behave
+    //    like calling PlayAnimation(clip) from C# with nothing else touched.
+    t.push_back({"PlayAnimation", "Play Animation", "Scene", {
+        pin("entity", "int", false), pin("loop", "bool", false, "true"), pin("success", "bool", true)},
+        {attr("clip", "Clip")}});
     return t;
 }
 

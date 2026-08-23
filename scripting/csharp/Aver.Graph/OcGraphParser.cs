@@ -547,6 +547,19 @@ public class OcGraphParser
                     {
                         node.MaterialName = v;
                     }
+                    // skeleton= names the asset path a "setskeleton" node binds (see Node.SkeletonPath)
+                    // -- same "the value IS the data" treatment mesh= gets just above.
+                    else if (k == "skeleton")
+                    {
+                        node.SkeletonPath = v;
+                    }
+                    // clip= names the asset path a "playanimation" node plays (see Node.ClipPath) --
+                    // same treatment as skeleton= immediately above. loop is NOT parsed here -- it is a
+                    // pin value, not a NODE-line attribute; see Node.ClipPath's own comment for why.
+                    else if (k == "clip")
+                    {
+                        node.ClipPath = v;
+                    }
                     // event= names which event a "fireevent" node fires on another entity's graph (see
                     // Node.EventName) -- the value itself (an event name, e.g. "OnHit"), not a lookup
                     // key, the same "carries data" treatment name=/mesh=/material= already get. Nothing
@@ -2260,6 +2273,26 @@ public class OcGraphParser
             case "getanimcurve":
                 node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "value", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                break;
+
+            // ---- SetSkeleton / PlayAnimation ----------------------------------------------------
+            // SetMesh/SetMaterial's own animation-family siblings -- same SetField-style dispatch, same
+            // reason (EnsureComponent's own idempotent add-if-absent guard). skeleton=/clip= name the
+            // asset paths (see Node.SkeletonPath/Node.ClipPath); see GraphNodeDefs.hpp's own comment on
+            // this pair for the array-index bone-binding caveat neither node can enforce.
+            case "setskeleton":
+                node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            // PlayAnimation gets a THIRD pin -- loop -- that no Set*-shaped node above needs, because
+            // Entity.PlayAnimation itself takes a second scalar argument. A pin, not a NODE-line
+            // attribute, because it is runtime data a graph may compute, not edit-time-only naming --
+            // see Node.ClipPath's own comment.
+            case "playanimation":
+                node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "loop", Type = PinType.Bool, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;
         }
     }
