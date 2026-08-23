@@ -719,7 +719,7 @@ void collectFields(const std::string& body, std::vector<PcField>& out) {
 
 }  // namespace
 
-u32 buildRegisterBinds(const PipelineLayout& layout, VkRegisterBind* out, u32 maxOut) {
+u32 buildRegisterBinds(const PipelineLayout& layout, VkRegisterBind* out, u32 maxOut, bool instanced) {
     u32 n = 0;
     auto put = [&](char type, u32 number, u32 set, u32 binding) {
         if (n >= maxOut) return;
@@ -752,10 +752,18 @@ u32 buildRegisterBinds(const PipelineLayout& layout, VkRegisterBind* out, u32 ma
     for (u32 k = 0; k < kMaxConstantSlots; ++k)
         if (layout.constantDwords[k] == 0) put('b', k, kVkSetConstants, k);
 
+    // gInstanceWorlds, for a GraphicsPipelineDesc::instanced pipeline only. The register number is
+    // NOT a constant: the shared HLSL takes it from AVER_INSTANCE_SRV, which VoxiRenderer.cpp defines
+    // as rhi::declaredSrvCount(layout) -- one past the last SRV the layout declares, across BOTH
+    // tables -- so it moves with the layout and has to be derived the same way here or the two
+    // disagree silently. Its own set (see kVkSetInstances) because that number can equal
+    // kVkUavBindingBase and collide with a UAV inside set 0.
+    if (instanced) put('t', declaredSrvCount(layout), kVkSetInstances, 0);
+
     return n;
 }
 
-u32 shaderVariantKey(const PipelineLayout& layout, bool mesh) {
+u32 shaderVariantKey(const PipelineLayout& layout, bool mesh, bool instanced) {
     // EVERY input the per-layout compile depends on has to be in here, or two layouts that differ
     // only in an omitted field silently share one module. The constant-slot mask alone was enough
     // while patchCbuffersForLayout was the only per-layout step; buildRegisterBinds made the SRV,
@@ -771,6 +779,10 @@ u32 shaderVariantKey(const PipelineLayout& layout, bool mesh) {
     key |= (layout.uavCount1 & 31u) << 20;
     key |= (layout.samplerCount & 7u) << 25;
     if (mesh) key |= 1u << 31;
+    // Bit 30 (28..30 were the free ones): an instanced pipeline compiles a DIFFERENT module from the
+    // same source and the same layout -- one extra -fvk-bind-register -- so without this the two
+    // would alias to one cached variant and whichever compiled first would serve both.
+    if (instanced) key |= 1u << 30;
     return key;
 }
 
@@ -1095,6 +1107,9 @@ VulkanResourceFactory::~VulkanResourceFactory() {
     for (auto& e : samplers_) if (e.sampler) api.DestroySampler(device, e.sampler, nullptr);
     samplers_.clear();
 
+    if (instanceSetLayout_) api.DestroyDescriptorSetLayout(device, instanceSetLayout_, nullptr);
+    instanceSetLayout_ = VK_NULL_HANDLE;
+
     destroyNullResources(*dev_);
 
     // Every VkDescriptorSet allocated from this pool (every binding set, every samplers set) dies
@@ -1118,6 +1133,9 @@ bool VulkanResourceFactory::init() {
         {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 8192},
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 16384},
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 512},
+        // gInstanceWorlds, one per instanced draw (drawMeshInstanced allocates a fresh set each
+        // time and retires it a frame later, so this budget covers kFrameCount frames of them).
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 512},
         {VK_DESCRIPTOR_TYPE_SAMPLER, 256},
         {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 256},
     };
@@ -1379,7 +1397,33 @@ VkSampler VulkanResourceFactory::getOrCreateSampler(const SamplerDesc& d) {
     return s;
 }
 
-const DescriptorLayoutEntry* VulkanResourceFactory::descriptorLayout(const PipelineLayout& layout, bool mesh) {
+// The one descriptor-set layout every GraphicsPipelineDesc::instanced pipeline shares: a single
+// STORAGE_BUFFER_DYNAMIC at binding 0, which is gInstanceWorlds.
+//
+// SHARED RATHER THAN PER-ENTRY, deliberately. Its shape does not depend on the PipelineLayout at all
+// -- one binding, always the same type -- so one object serves every instanced pipeline, and because
+// descriptor-set compatibility in Vulkan is by LAYOUT, a set allocated once from this can be bound
+// against any of them. VulkanRenderContext::drawMeshInstanced relies on exactly that.
+//
+// DYNAMIC so the per-draw ring offset rides in pDynamicOffsets instead of forcing a fresh descriptor
+// write per draw -- the same mechanism the constants set at kVkSetConstants already uses.
+VkDescriptorSetLayout VulkanResourceFactory::instanceSetLayout() {
+    if (instanceSetLayout_ != VK_NULL_HANDLE) return instanceSetLayout_;
+    VkDescriptorSetLayoutBinding b{};
+    b.binding = 0;
+    b.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
+    b.descriptorCount = 1;
+    b.stageFlags = VK_SHADER_STAGE_ALL;
+    VkDescriptorSetLayoutCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    ci.bindingCount = 1;
+    ci.pBindings = &b;
+    if (!vkOk(dev_->api().CreateDescriptorSetLayout(dev_->vkDevice(), &ci, nullptr, &instanceSetLayout_),
+              "rhi instance descriptor set layout"))
+        return VK_NULL_HANDLE;
+    return instanceSetLayout_;
+}
+
+const DescriptorLayoutEntry* VulkanResourceFactory::descriptorLayout(const PipelineLayout& layout, bool mesh, bool instanced) {
     SlotKind srv0[kMaxBindingSlots], uav0[kMaxBindingSlots], srv1[kMaxBindingSlots], uav1[kMaxBindingSlots];
     for (u32 i = 0; i < kMaxBindingSlots; ++i) srv0[i] = uav0[i] = srv1[i] = uav1[i] = SlotKind::Texture2D;
 
@@ -1434,7 +1478,9 @@ const DescriptorLayoutEntry* VulkanResourceFactory::descriptorLayout(const Pipel
     // tableSetLayout() above already deduplicates by REAL shape, comparing its OUTPUT handles is a
     // free, exact way to add that precision without touching DescriptorLayoutEntry's own fields.
     for (auto& e : descriptorLayouts_) {
-        if (e.mesh == mesh && sameLayout(e.layout, layout) &&
+        // e.instanced is part of the key for the same reason e.mesh is: it changes the SETS this
+        // pipeline layout has, so two entries that differ only in it are not interchangeable.
+        if (e.mesh == mesh && e.instanced == instanced && sameLayout(e.layout, layout) &&
             e.tableSetLayouts[kVkSetTable0] == wantTable0 && e.tableSetLayouts[kVkSetTable1] == wantTable1)
             return &e;
     }
@@ -1445,6 +1491,7 @@ const DescriptorLayoutEntry* VulkanResourceFactory::descriptorLayout(const Pipel
     DescriptorLayoutEntry e;
     e.layout = layout;
     e.mesh = mesh;
+    e.instanced = instanced;
     e.tableSetLayouts[kVkSetTable0] = wantTable0;
     e.tableSetLayouts[kVkSetTable1] = wantTable1;
     e.pushConstants = pushConstantLayout(layout, mesh);
@@ -1477,7 +1524,22 @@ const DescriptorLayoutEntry* VulkanResourceFactory::descriptorLayout(const Pipel
     // ---- samplers set: immutable only, VK_NULL_HANDLE (per DescriptorLayoutEntry's own comment)
     // when this layout declares none, so the pipeline layout below can OMIT set index 3 entirely
     // rather than bind a pointless empty set.
-    if (layout.samplerCount > 0) {
+    //
+    // EXCEPT WHEN SET 4 EXISTS. pSetLayouts is indexed 0..setLayoutCount-1 with no holes, so an
+    // instanced pipeline -- which needs set kVkSetInstances (4) -- cannot omit set 3 even with no
+    // samplers to put in it. An EMPTY descriptor set layout is the legal way to say "nothing at this
+    // index"; it allocates no descriptors and binds nothing.
+    if (layout.samplerCount == 0 && instanced) {
+        VkDescriptorSetLayoutCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        ci.bindingCount = 0;
+        if (!vkOk(api.CreateDescriptorSetLayout(device, &ci, nullptr, &e.samplersSetLayout),
+                  "rhi empty samplers descriptor set layout (instanced pipeline)")) {
+            api.DestroyDescriptorSetLayout(device, e.constantsSetLayout, nullptr);
+            return nullptr;
+        }
+        // No samplersSet is allocated: an empty layout has nothing to allocate, and nothing binds
+        // set 3 on this pipeline (see where samplersSet is bound -- it is guarded on the handle).
+    } else if (layout.samplerCount > 0) {
         const u32 n = layout.samplerCount < 4 ? layout.samplerCount : 4;
         VkDescriptorSetLayoutBinding bindings[4];
         VkSampler immutable[4];
@@ -1511,10 +1573,26 @@ const DescriptorLayoutEntry* VulkanResourceFactory::descriptorLayout(const Pipel
         }
     }
 
+    if (instanced) {
+        e.instancesSetLayout = instanceSetLayout();
+        if (e.instancesSetLayout == VK_NULL_HANDLE) {
+            if (e.samplersSet) api.FreeDescriptorSets(device, descriptorPool_, 1, &e.samplersSet);
+            if (e.samplersSetLayout) api.DestroyDescriptorSetLayout(device, e.samplersSetLayout, nullptr);
+            api.DestroyDescriptorSetLayout(device, e.constantsSetLayout, nullptr);
+            return nullptr;
+        }
+    }
+
     VkDescriptorSetLayout setLayouts[kVkDescriptorSetCount] = {
-        e.tableSetLayouts[kVkSetTable0], e.tableSetLayouts[kVkSetTable1], e.constantsSetLayout, e.samplersSetLayout,
+        e.tableSetLayouts[kVkSetTable0], e.tableSetLayouts[kVkSetTable1], e.constantsSetLayout,
+        e.samplersSetLayout, e.instancesSetLayout,
     };
-    const u32 setLayoutCount = (layout.samplerCount > 0) ? kVkDescriptorSetCount : (kVkDescriptorSetCount - 1);
+    // TRAILING sets are what may be dropped, never interior ones -- pSetLayouts has no holes. So an
+    // instanced pipeline takes all five (set 3 is empty-but-present above when it has no samplers),
+    // a sampler pipeline four, and everything else three.
+    const u32 setLayoutCount = instanced                 ? kVkDescriptorSetCount
+                             : (layout.samplerCount > 0) ? kVkSetSamplers + 1
+                                                         : kVkSetSamplers;
 
     VkPushConstantRange pcRange{};
     VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
@@ -1950,7 +2028,7 @@ void VulkanResourceFactory::destroyShader(ShaderHandle h) {
 // 9. Pipelines
 // ================================================================================================
 VkShaderModule VulkanResourceFactory::moduleForLayout(RhiShader& s, const PipelineLayout& layout, bool mesh,
-                                                      const std::vector<u32>** outSpirv) {
+                                                      bool instanced, const std::vector<u32>** outSpirv) {
     // A variant that needed no recompile ALIASES the base module and carries no SPIR-V of its own,
     // so the base's is the right answer for it too.
     auto give = [&](const RhiShaderVariant& v) {
@@ -1959,7 +2037,7 @@ VkShaderModule VulkanResourceFactory::moduleForLayout(RhiShader& s, const Pipeli
     };
     if (outSpirv) *outSpirv = &s.spirv;
     if (s.source.empty()) return s.module;    // destroyed, or never carried source
-    const u32 key = shaderVariantKey(layout, mesh);
+    const u32 key = shaderVariantKey(layout, mesh, instanced);
     for (const RhiShaderVariant& v : s.variants)
         if (v.key == key) return give(v);
 
@@ -1967,7 +2045,7 @@ VkShaderModule VulkanResourceFactory::moduleForLayout(RhiShader& s, const Pipeli
     // -fvk-u-shift inside compile() -- the two are mutually exclusive -- which is why the map
     // includes the UAVs the shift used to handle rather than leaving them to it.
     VkRegisterBind binds[kMaxRegisterBinds];
-    const u32 bindCount = buildRegisterBinds(layout, binds, kMaxRegisterBinds);
+    const u32 bindCount = buildRegisterBinds(layout, binds, kMaxRegisterBinds, instanced);
 
     // The map, when there is one, is the single authority on placement; the [[vk::binding]] half of
     // the patch would otherwise answer the same question a second time.
@@ -2004,10 +2082,13 @@ VkShaderModule VulkanResourceFactory::moduleForLayout(RhiShader& s, const Pipeli
         // not always name every register its shader declares. Two real cases, both of them backend
         // features that live outside the layout:
         //
-        //   - the INSTANCE buffer. GraphicsPipelineDesc::instanced makes the backend bind an SRV at
-        //     t(declaredSrvCount) -- t17 for Voxi -- which is deliberately one past both tables and
-        //     so appears in no count. This backend does not implement `instanced` at all yet
-        //     (VulkanCommon.hpp:1897), so there is nowhere correct to map it TO.
+        //   - the INSTANCE buffer USED TO BE THE FIRST CASE HERE, and no longer is. It is mapped
+        //     now, to set kVkSetInstances binding 0, because `instanced` reaches this function and
+        //     buildRegisterBinds can therefore derive t(declaredSrvCount) exactly as the shared HLSL
+        //     does. A pipeline built WITHOUT GraphicsPipelineDesc::instanced whose shader declares
+        //     gInstanceWorlds anyway would still land here -- but that combination cannot occur:
+        //     VoxiRenderer only defines AVER_INSTANCE_SRV for the pipelines it also marks instanced,
+        //     and the declaration is inside #ifdef AVER_INSTANCE_SRV.
         //   - MESH GEOMETRY. The fixed mesh path declares gVerts/gIndices through its own
         //     g_meshGeomLayout, again outside the PipelineLayout.
         //   - DECLARED-BUT-UNUSED resources. VoxiShaders.hpp declares gVoxelTex/gVoxelSamp for every
@@ -2022,8 +2103,8 @@ VkShaderModule VulkanResourceFactory::moduleForLayout(RhiShader& s, const Pipeli
         // exactly the placement these shaders had before the map existed -- imperfect, but no
         // regression, and the shaders whose layouts ARE complete still get the correct one.
         AVER_WARN("[RHI.Vulkan] '{}' declares a register its PipelineLayout does not describe "
-                  "(instanced draws, mesh geometry, or a resource declared by a shared header and "
-                  "not used here); falling back to the default register->set mapping", s.entry);
+                  "(mesh geometry, or a resource declared by a shared header and not used here); "
+                  "falling back to the default register->set mapping", s.entry);
         var.spirv.clear();
         std::string fallbackSrc = s.source;
         if (!patchCbuffersForLayout(fallbackSrc, layout, mesh, /*annotateDescriptors=*/true))
@@ -2079,13 +2160,13 @@ PipelineHandle VulkanResourceFactory::createGraphicsPipeline(const GraphicsPipel
     const std::vector<u32>* stageSpirv[5] = {};
     for (u32 i = 0; i < 5; ++i) {
         if (!shaders[i]) continue;
-        stageModules[i] = moduleForLayout(*shaders[i], d.layout, mesh, &stageSpirv[i]);
+        stageModules[i] = moduleForLayout(*shaders[i], d.layout, mesh, d.instanced, &stageSpirv[i]);
         if (!stageModules[i]) return 0;
     }
 
     PendingTableKinds saved = gPendingKinds;
     reflectTableSlotKinds(stageSpirv, 5, d.layout, gPendingKinds);
-    const DescriptorLayoutEntry* entry = descriptorLayout(d.layout, mesh);
+    const DescriptorLayoutEntry* entry = descriptorLayout(d.layout, mesh, d.instanced);
     gPendingKinds = saved;
     if (!entry) return 0;
 
@@ -2165,6 +2246,7 @@ PipelineHandle VulkanResourceFactory::createGraphicsPipeline(const GraphicsPipel
     RhiPipeline p{};
     p.mesh = mesh;
     p.amplification = d.as != 0;
+    p.instanced = d.instanced;
     p.layoutEntry = entry;
 
     VkGraphicsPipelineCreateInfo pi{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
@@ -2236,13 +2318,13 @@ PipelineHandle VulkanResourceFactory::createComputePipeline(const ComputePipelin
     // own comment), and building that needs only the layout's COUNTS -- never its slot kinds -- so
     // there is no circularity here, just an order that has to be this way round.
     const std::vector<u32>* csSpirv = nullptr;
-    const VkShaderModule csModule = moduleForLayout(*cs, d.layout, false, &csSpirv);
+    const VkShaderModule csModule = moduleForLayout(*cs, d.layout, false, /*instanced=*/false, &csSpirv);
     if (!csModule) return 0;
 
     const std::vector<u32>* stageSpirv[1] = {csSpirv};
     PendingTableKinds saved = gPendingKinds;
     reflectTableSlotKinds(stageSpirv, 1, d.layout, gPendingKinds);
-    const DescriptorLayoutEntry* entry = descriptorLayout(d.layout, false);
+    const DescriptorLayoutEntry* entry = descriptorLayout(d.layout, false, /*instanced=*/false);
     gPendingKinds = saved;
     if (!entry) return 0;
 

@@ -51,6 +51,7 @@ static constexpr int kSetTable0 = 0;
 static constexpr int kSetTable1 = 1;
 static constexpr int kSetConstants = 2;
 static constexpr int kSetSamplers = 3;
+static constexpr int kSetInstances = 4;
 static constexpr int kUavBase = 16;   // kVkUavBindingBase == kMaxBindingSlots
 
 // ---- the exact shape that was failing: Voxi's GI layout ------------------------------------------
@@ -194,6 +195,58 @@ static void testMaxLayoutFits() {
     check(n <= vkb::kMaxRegisterBinds, "the count stays within kMaxRegisterBinds");
     // The last sampler is the one a too-small buffer would silently drop.
     check(find(binds, n, 's', 3).set == kSetSamplers, "the last sampler survived");
+
+    // ...and the same layout WITH instancing must still fit, which is the case that sized
+    // kMaxRegisterBinds's +1. A buffer one short here would drop a register silently, and the
+    // dropped one would be gInstanceWorlds, since it is emitted last.
+    const u32 ni = vkb::buildRegisterBinds(l, binds, vkb::kMaxRegisterBinds, /*instanced=*/true);
+    check(ni == expected + 1, "instancing adds exactly one register to a maximal layout");
+    check(ni <= vkb::kMaxRegisterBinds, "kMaxRegisterBinds is big enough for the instanced maximum");
+}
+
+// gInstanceWorlds: the register D3D12 reserves as a root SRV one past every declared t-register, and
+// which the shared HLSL names via AVER_INSTANCE_SRV = rhi::declaredSrvCount(layout). Both backends
+// must derive the SAME number from the same layout or they disagree silently -- D3D12 binds t17 while
+// the SPIR-V expects something else, and nothing reports it.
+static void testInstanceRegister() {
+    PipelineLayout l{};
+    l.srvCount = 9;                   // Voxi's GI table
+    l.srvCount1 = 8;                  // the PBR material table above it
+    l.constantDwords[1] = 32;
+
+    VkRegisterBind binds[vkb::kMaxRegisterBinds];
+
+    // WITHOUT instancing there must be no such mapping at all. Emitting one for a pipeline that does
+    // not declare the resource would make the map describe a register the shader does not have, and
+    // DXC rejects a map with an entry for a resource it cannot find.
+    u32 n = vkb::buildRegisterBinds(l, binds, vkb::kMaxRegisterBinds, /*instanced=*/false);
+    check(find(binds, n, 't', 17).set == -1, "no instance register when the pipeline is not instanced");
+
+    n = vkb::buildRegisterBinds(l, binds, vkb::kMaxRegisterBinds, /*instanced=*/true);
+    check(find(binds, n, 't', 17).set == kSetInstances, "t17 -> the instances set");
+    check(find(binds, n, 't', 17).binding == 0, "t17 -> binding 0, the only binding in that set");
+    // 9 + 8 = 17 is declaredSrvCount, so the instance register sits immediately above table 1's last.
+    check(find(binds, n, 't', 16).set == kSetTable1, "t16 is still table 1's last SRV, not the instance one");
+
+    // THE NUMBER MOVES WITH THE LAYOUT -- it is not a constant 17. A layout with fewer SRVs puts
+    // gInstanceWorlds lower, and hard-coding 17 anywhere would break exactly that case.
+    PipelineLayout small{};
+    small.srvCount = 2;
+    n = vkb::buildRegisterBinds(small, binds, vkb::kMaxRegisterBinds, /*instanced=*/true);
+    check(find(binds, n, 't', 2).set == kSetInstances, "a 2-SRV layout puts the instance register at t2");
+    check(find(binds, n, 't', 17).set == -1, "and nothing at t17");
+
+    // The collision this set exists to avoid: a layout declaring the full 16 SRVs would put the
+    // instance register at t16, which inside set 0 is kVkUavBindingBase -- on top of UAV slot 0.
+    PipelineLayout full{};
+    full.srvCount = kMaxBindingSlots;
+    full.uavCount = 1;
+    n = vkb::buildRegisterBinds(full, binds, vkb::kMaxRegisterBinds, /*instanced=*/true);
+    const Where inst = find(binds, n, 't', kMaxBindingSlots);
+    const Where uav0 = find(binds, n, 'u', 0);
+    check(inst.set == kSetInstances, "a full 16-SRV layout still puts the instance register in its own set");
+    check(!(inst.set == uav0.set && inst.binding == uav0.binding),
+          "and it therefore cannot collide with UAV slot 0, which sits at binding 16 of set 0");
 }
 
 int main() {
@@ -204,6 +257,7 @@ int main() {
     testDescriptorCbuffersArePresentAndFoldedOnesAreNot();
     testEmptyLayoutStillMapsItsConstants();
     testMaxLayoutFits();
+    testInstanceRegister();
 
     if (g_failures == 0) {
         AVER_INFO("RegisterBindMapTest: {} checks, all passed", g_checks);

@@ -792,6 +792,7 @@ bool VulkanDevice::init(const DeviceDesc& desc) {
     adapterName_ = physicalDeviceProps_.deviceName;
     softwareAdapter_ = false;   // see the field's own comment; always false here, honestly
     minUboAlignment_ = physicalDeviceProps_.limits.minUniformBufferOffsetAlignment;
+    minStorageAlignment_ = physicalDeviceProps_.limits.minStorageBufferOffsetAlignment;
     maxPushConstantsSize_ = physicalDeviceProps_.limits.maxPushConstantsSize;
 
     // ---- optional device extensions (each gates exactly one DeviceCaps bit; see the header's list) ----
@@ -2541,6 +2542,39 @@ void VulkanDevice::beginFrame() {
     // comment) -- there would be nothing for a default bind here to save.
 }
 
+// KNOWN DEFECT, MEASURED, NOT YET FIXED: A PASS THAT WANTS ITS OWN RENDER TARGET DOES NOT GET ONE.
+//
+// This joins whatever scope is already open and DISCARDS the caller's VkRenderingInfo. That is right
+// for the case it was written for -- two owners recording into one command buffer, and
+// dynamic-rendering scopes cannot nest -- and wrong whenever the inner request names DIFFERENT
+// attachments.
+//
+// WHAT IT COSTS, measured rather than reasoned: VoxiRenderer::shadowPass calls
+// setRenderTargets(nullptr, 0, shadowTex_) (VoxiRenderer.cpp:1175) and then draws, from inside the
+// scene scope beginFrame opened above. Those draws join the SCENE's attachments, so the cascade
+// shadow map is never written. Nothing looks obviously broken because light-space geometry lands
+// outside the scene viewport and is simply clipped -- the frame just has no cascade shadows in it.
+// Probed on the floor beside the cube in the default scene with --no-rt (which forces the cascade
+// path, since ray-traced shadows are the default and DO work here):
+//     D3D12  darkest floor pixel (13, 15, 19)  -- a shadow
+//     Vulkan darkest floor pixel (66, 66, 66)  -- the unshadowed floor colour, no shadow anywhere
+// giShadowPass (:1293) has the same shape, so the GI-only shadow map is equally empty, and voxel
+// light injection is unshadowed on this backend.
+//
+// WHY THE ONE-LINE FIX IS NOT ENOUGH, which was tried and reverted rather than guessed at: making
+// this close the open scope and open the requested one does retarget the shadow map correctly (the
+// layer then names "[Voxi shadow map]" as the depth attachment, so the draws do arrive), but three
+// further mismatches surface immediately -- the bound pipeline's rasterizationSamples and its
+// VkPipelineRenderingCreateInfo formats are the SCENE's, not the shadow map's, and the shadow image
+// is never transitioned to DEPTH_ATTACHMENT_OPTIMAL. Validation went 10 -> 40 and the floor stopped
+// drawing entirely.
+//
+// THE REAL FIX is architectural and belongs with setRenderTargets, not here: the scope has to FOLLOW
+// the currently-bound targets (close on retarget, reopen lazily at the next draw, persist across
+// draws instead of being opened and closed around each one), and pipelines have to be created
+// against the sample count and formats of the targets they will actually be used with. That is a
+// change to how every pass on this backend gets its scope, so it wants doing deliberately rather
+// than as a patch under a shadow bug.
 bool VulkanDevice::pushRenderScope(VkCommandBuffer cmd, const VkRenderingInfo& ri) {
     if (renderScopeDepth_ != 0) return false;   // already inside one: join it rather than nest
     api_.CmdBeginRendering(cmd, &ri);

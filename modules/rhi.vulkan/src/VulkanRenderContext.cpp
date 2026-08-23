@@ -472,6 +472,179 @@ void VulkanRenderContext::setDrawBinding(BindingSetHandle set, const void* const
 // ====================================================================================================
 // drawMesh -- draws a backend-owned mesh through the input assembler.
 // ====================================================================================================
+// ====================================================================================================
+// instanceAlloc -- ringAlloc's twin for the per-instance world matrices.
+//
+// A SECOND RING RATHER THAN A SECOND USAGE FLAG ON THE FIRST. ring_ is created
+// VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT and a StructuredBuffer is a STORAGE buffer, so the same memory
+// cannot serve both without widening every constant allocation's usage. Two rings also keep the two
+// bump cursors independent, which matters because an instanced draw's payload (64 bytes per
+// instance, thousands of instances) is orders of magnitude larger than a constant block and would
+// otherwise push the constant ring into growth it does not need.
+// ====================================================================================================
+ConstantAllocation VulkanRenderContext::instanceAlloc(const void* data, u32 bytes) {
+    if (!data || bytes == 0) return {};
+    const u32 f = dev_->frameIndexInFlight() < kFrameCount ? dev_->frameIndexInFlight() : 0;
+    ConstantRing& ring = instanceRing_[f];
+    const u64 epoch = dev_->retireFenceValue();
+
+    if (instanceEpoch_ != epoch) {
+        instanceEpoch_ = epoch;
+        ring.used = 0;
+        if (ring.wanted > ring.bytes) {
+            // Same invariant ringAlloc relies on: kFrameCount frames have retired since this buffer
+            // was last recorded into, so dropping it now cannot pull memory out from under a submit.
+            if (ring.buffer) destroyBufferCommitted(*dev_, ring.buffer, ring.memory);
+            ring.buffer = VK_NULL_HANDLE;
+            ring.memory = VK_NULL_HANDLE;
+            ring.mapped = nullptr;
+            ring.bytes = 0;
+        }
+    }
+
+    if (!ring.buffer) {
+        VkDeviceSize want = ring.wanted > kRhiRingBytes ? ring.wanted : kRhiRingBytes;
+        if (want > kRhiRingMaxBytes) want = kRhiRingMaxBytes;
+        VkBuffer buf = VK_NULL_HANDLE;
+        VkDeviceMemory mem = VK_NULL_HANDLE;
+        bool coherent = true;
+        if (!createBufferCommitted(*dev_, want, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                   buf, mem, nullptr, "rhi.vulkan instance ring")) {
+            coherent = false;
+            if (!createBufferCommitted(*dev_, want, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT, buf, mem, nullptr,
+                                       "rhi.vulkan instance ring")) {
+                AVER_ERROR("[RHI.Vulkan] failed to grow the instance ring to {} KB", want / 1024);
+                return {};
+            }
+        }
+        void* ptr = nullptr;
+        if (!vkOk(dev_->api().MapMemory(dev_->vkDevice(), mem, 0, want, 0, &ptr), "vkMapMemory (instance ring)") || !ptr) {
+            destroyBufferCommitted(*dev_, buf, mem);
+            return {};
+        }
+        ring.buffer = buf;
+        ring.memory = mem;
+        ring.mapped = static_cast<u8*>(ptr);
+        ring.bytes = want;
+        ring.coherent = coherent;
+        if (want > kRhiRingBytes)
+            AVER_INFO("[RHI.Vulkan] instance ring grown to {} KB for frame {}", want / 1024, f);
+    }
+
+    const VkDeviceSize align = dev_->minStorageAlignment() ? dev_->minStorageAlignment() : 256;
+    const VkDeviceSize offset = (ring.used + align - 1) & ~(align - 1);
+    const VkDeviceSize size = (static_cast<VkDeviceSize>(bytes) + align - 1) & ~(align - 1);
+    if (offset + size > ring.bytes) {
+        const VkDeviceSize want = (offset + size) * 2;
+        if (want > ring.wanted) ring.wanted = want > kRhiRingMaxBytes ? kRhiRingMaxBytes : want;
+        if (instanceOverflowEpoch_ != instanceEpoch_) {
+            instanceOverflowEpoch_ = instanceEpoch_;
+            if (ring.bytes >= kRhiRingMaxBytes)
+                AVER_ERROR("[RHI.Vulkan] instance ring exhausted at its {} KB ceiling -- instanced draws "
+                          "in this frame are being skipped.", kRhiRingMaxBytes / 1024);
+            else
+                AVER_WARN("[RHI.Vulkan] instance ring ({} KB) exhausted this frame; growing to {} KB",
+                         ring.bytes / 1024, ring.wanted / 1024);
+        }
+        return {};
+    }
+    std::memcpy(ring.mapped + offset, data, bytes);
+    if (!ring.coherent) {
+        VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
+        range.memory = ring.memory;
+        range.offset = offset;
+        range.size = size;
+        dev_->api().FlushMappedMemoryRanges(dev_->vkDevice(), 1, &range);
+    }
+    ring.used = offset + size;
+    ConstantAllocation out;
+    out.buffer = ring.buffer;
+    out.offset = offset;
+    out.cpu = ring.mapped + offset;
+    return out;
+}
+
+// ====================================================================================================
+// drawMeshInstanced -- one vkCmdDrawIndexed for every instance of one mesh.
+// ====================================================================================================
+void VulkanRenderContext::drawMeshInstanced(MeshHandle mesh, const f32* worlds, u32 instanceCount) {
+    VkCommandBuffer cb = cmd();
+    if (!cb) return;
+    if (mesh == 0 || mesh > dev_->meshes_.size()) { AVER_ERROR("[RHI.Vulkan] drawMeshInstanced with an invalid mesh handle"); return; }
+    if (!worlds || instanceCount == 0) return;
+
+    // NOT BUILT FOR INSTANCING -> the base class's one-draw-per-instance loop, exactly as
+    // D3D12RenderContext::drawMeshInstanced falls back when instanceWorldParam < 0. That fallback is
+    // only correct when the bound shader reads gWorld, which is true precisely when the pipeline was
+    // NOT built instanced -- the instanced entry points are inside #ifdef AVER_INSTANCE_SRV and
+    // VoxiRenderer only compiles them for pipelines it also marks instanced.
+    if (!pipe_ || !pipe_->instanced) {
+        AVER_ERROR("[RHI.Vulkan] drawMeshInstanced against a pipeline built without "
+                   "GraphicsPipelineDesc::instanced; falling back to {} individual draws", instanceCount);
+        IRenderContext::drawMeshInstanced(mesh, worlds, instanceCount);
+        return;
+    }
+
+    const GpuMesh& m = dev_->meshes_[mesh - 1];
+    if (m.vb == VK_NULL_HANDLE || m.ib == VK_NULL_HANDLE) {
+        AVER_ERROR("[RHI.Vulkan] drawMeshInstanced with a destroyed mesh handle");
+        return;
+    }
+
+    const ConstantAllocation alloc = instanceAlloc(worlds, instanceCount * 16 * static_cast<u32>(sizeof(f32)));
+    if (!alloc.buffer) return;   // ring exhausted this frame; instanceAlloc already logged it
+
+    // A FRESH SET PER DRAW, retired after the frame. The alternative -- one set per frame plus a
+    // dynamic offset -- needs the descriptor's RANGE fixed at bind time, and a range that must cover
+    // the largest possible draw while still satisfying offset + range <= buffer size forces the ring
+    // to carry a permanent tail of that size. Allocating here instead keeps the range exact
+    // (offset..offset+bytes) whatever the instance count, and is the same shape setConstantBuffer
+    // already uses on this backend. Instanced draws are rare -- one per distinct mesh per cascade --
+    // so this is tens of sets a frame, not thousands.
+    const DescriptorLayoutEntry& le = *pipe_->layoutEntry;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    ai.descriptorPool = res_->descriptorPool_;
+    ai.descriptorSetCount = 1;
+    ai.pSetLayouts = &le.instancesSetLayout;
+    if (!vkOk(dev_->api().AllocateDescriptorSets(dev_->vkDevice(), &ai, &set), "rhi instance descriptor set"))
+        return;
+
+    // The dynamic offset carries the ring offset, so the descriptor itself starts at 0 and spans
+    // exactly this draw's block. bufferInfo.offset stays 0 for the same reason the constants set's
+    // does: a dynamic descriptor's offset field and its pDynamicOffsets entry ADD, and putting the
+    // whole displacement in one of them keeps the alignment rule (minStorageBufferOffsetAlignment,
+    // which instanceAlloc already rounded to) applying to a single number.
+    VkDescriptorBufferInfo bi{alloc.buffer, 0, static_cast<VkDeviceSize>(instanceCount) * 64};
+    VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    w.dstSet = set;
+    w.dstBinding = 0;
+    w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
+    w.pBufferInfo = &bi;
+    dev_->api().UpdateDescriptorSets(dev_->vkDevice(), 1, &w, 0, nullptr);
+
+    VulkanDevice* devPtr = dev_;
+    VulkanResourceFactory* resPtr = res_;
+    res_->retire([devPtr, resPtr, set]() {
+        VkDescriptorSet dead = set;
+        devPtr->api().FreeDescriptorSets(devPtr->vkDevice(), resPtr->descriptorPool_, 1, &dead);
+    });
+
+    applyDrawBinding();
+    const u32 dynamicOffset = static_cast<u32>(alloc.offset);
+    dev_->api().CmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, le.pipelineLayout,
+                                      kVkSetInstances, 1, &set, 1, &dynamicOffset);
+    const VkDeviceSize zeroOffset = 0;
+    dev_->api().CmdBindVertexBuffers(cb, 0, 1, &m.vb, &zeroOffset);
+    dev_->api().CmdBindIndexBuffer(cb, m.ib, 0, VK_INDEX_TYPE_UINT32);
+    const bool ownScope = beginRenderScope(*dev_, cb);
+    dev_->api().CmdDrawIndexed(cb, m.indexCount, instanceCount, 0, 0, 0);
+    endRenderScope(*dev_, cb, ownScope);
+}
+
 void VulkanRenderContext::drawMesh(MeshHandle mesh) {
     VkCommandBuffer cb = cmd();
     if (!cb) return;
@@ -998,6 +1171,14 @@ VulkanRenderContext::~VulkanRenderContext() {
     for (ConstantRing& r : ring_) {
         // Explicitly, even though vkFreeMemory unmaps implicitly -- the mapping is this class's, and
         // dropping it here keeps the pairing with the MapMemory in ringAlloc visible.
+        if (r.memory && r.mapped) dev_->api().UnmapMemory(dev_->vkDevice(), r.memory);
+        r.mapped = nullptr;
+        destroyBufferCommitted(*dev_, r.buffer, r.memory);
+        r.buffer = VK_NULL_HANDLE;
+        r.memory = VK_NULL_HANDLE;
+        r.bytes = r.used = 0;
+    }
+    for (ConstantRing& r : instanceRing_) {
         if (r.memory && r.mapped) dev_->api().UnmapMemory(dev_->vkDevice(), r.memory);
         r.mapped = nullptr;
         destroyBufferCommitted(*dev_, r.buffer, r.memory);

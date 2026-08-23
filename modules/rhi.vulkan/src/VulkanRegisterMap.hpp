@@ -37,7 +37,7 @@ struct VkRegisterBind {
 // The most registers one PipelineLayout can declare: 16 SRV + 16 UAV per table, 4 samplers, and
 // every constant slot (the map has to be COMPLETE -- see buildRegisterBinds). Sized so
 // buildRegisterBinds is never asked to truncate, which it would do silently.
-constexpr u32 kMaxRegisterBinds = 4 * kMaxBindingSlots + 4 + kMaxConstantSlots;
+constexpr u32 kMaxRegisterBinds = 4 * kMaxBindingSlots + 4 + kMaxConstantSlots + 1;   // +1: the instanced pipeline gInstanceWorlds register
 
 // Fills `out` with one VkRegisterBind per SRV / UAV / SAMPLER register a PipelineLayout declares,
 // mapping each to the set and binding section 4's scheme puts it in. Returns how many were written.
@@ -62,6 +62,14 @@ constexpr u32 kMaxRegisterBinds = 4 * kMaxBindingSlots + 4 + kMaxConstantSlots;
 //
 // Note what is NOT here: constant buffers. They are placed by patchCbuffersForLayout instead,
 // because a push-constant block is not a descriptor at all and has no set or binding to name.
-u32 buildRegisterBinds(const PipelineLayout& layout, VkRegisterBind* out, u32 maxOut);
+// `instanced` is GraphicsPipelineDesc::instanced, which is a SIBLING of PipelineLayout rather than a
+// field of it, so it has to be passed separately. When set, one extra mapping is emitted for
+// gInstanceWorlds at register t(declaredSrvCount(layout)) -- the register the shared HLSL computes
+// for it (VoxiRenderer.cpp derives AVER_INSTANCE_SRV from exactly that expression) -- landing in set
+// kVkSetInstances at binding 0. Omitting it when the shader declares it is not a silent
+// degradation: DXC rejects an INCOMPLETE map outright with "missing -fvk-bind-register for
+// resource", the compile falls back to the layout-agnostic module, and the pipeline is then built
+// from a shader whose gInstanceWorlds nothing has bound.
+u32 buildRegisterBinds(const PipelineLayout& layout, VkRegisterBind* out, u32 maxOut, bool instanced = false);
 
 }  // namespace aver::rhi::vkb

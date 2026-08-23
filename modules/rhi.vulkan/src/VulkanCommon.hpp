@@ -673,7 +673,15 @@ constexpr u32 kVkSetTable0    = 0;
 constexpr u32 kVkSetTable1    = 1;
 constexpr u32 kVkSetConstants = 2;
 constexpr u32 kVkSetSamplers  = 3;
-constexpr u32 kVkDescriptorSetCount = 4;
+// Set 4: the PER-INSTANCE WORLD MATRICES a GraphicsPipelineDesc::instanced pipeline reads, as one
+// StructuredBuffer<float4x4>. Its own set rather than a slot in table 0 for a reason that is forced,
+// not stylistic: the shared HLSL declares it at register t(declaredSrvCount) -- one PAST whatever the
+// layout declares -- so on a layout with 16 SRVs it would land at binding 16 in set 0, which is
+// exactly kVkUavBindingBase, i.e. on top of UAV slot 0. A set of its own cannot collide with anything
+// whatever the layout declares, and it costs nothing when a pipeline is not instanced: the set is
+// simply absent from that pipeline layout.
+constexpr u32 kVkSetInstances = 4;
+constexpr u32 kVkDescriptorSetCount = 5;   // table0, table1, constants, samplers, instances
 // UAV bindings within a table's set start here, so a layout whose declared srvCount grows later
 // never renumbers an already-cached UAV binding. kMaxBindingSlots (16, RHIResources.hpp) already
 // bounds one binding SET's slot count, so 0..15 for SRVs / 16..31 for UAVs never collide.
@@ -1062,6 +1070,13 @@ struct DescriptorLayoutEntry {
     VkDescriptorSet samplersSet = VK_NULL_HANDLE;                     // allocated ONCE, immutable-sampler-only, never rewritten; VK_NULL_HANDLE when samplerCount == 0
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
     PushConstantLayout pushConstants{};
+    // GraphicsPipelineDesc::instanced, which is a SIBLING of PipelineLayout rather than part of it,
+    // so it has to be part of this cache key too -- two pipelines with identical layouts but
+    // different instancing need different VkPipelineLayouts.
+    bool instanced = false;
+    // The shared one-binding set-4 layout, from VulkanResourceFactory::instanceSetLayout(). NOT owned
+    // here (one layout serves every instanced pipeline, exactly like tableSetLayouts above).
+    VkDescriptorSetLayout instancesSetLayout = VK_NULL_HANDLE;
 };
 
 // A pipeline state and the layout-cache entry it was built against.
@@ -1073,6 +1088,10 @@ struct RhiPipeline {
     // True when this mesh pipeline also has an amplification/task shader (GraphicsPipelineDesc::as
     // != 0), i.e. it is a dispatchMeshClusters() pipeline rather than a dispatchMeshFor() one.
     bool amplification = false;
+    // Built with GraphicsPipelineDesc::instanced -- set kVkSetInstances exists in its pipeline layout
+    // and its vertex shader reads gInstanceWorlds. drawMeshInstanced checks this exactly as
+    // D3D12RenderContext::drawMeshInstanced checks pipe_->instanceWorldParam >= 0.
+    bool instanced = false;
 };
 
 // One allocated VkDescriptorSet for table 0 or table 1, plus the slot kinds it was declared with
@@ -1478,6 +1497,10 @@ public:
     u64 retireFenceValue() const { return nextTimelineValue_ + 1; }
     VkSemaphore timelineSemaphore() const { return timeline_; }
     VkDeviceSize minUboAlignment() const { return minUboAlignment_; }
+    // The STORAGE-buffer equivalent, and a separate number: a device may align the two differently,
+    // and gInstanceWorlds is a storage buffer bound with a dynamic offset, so it is this one that
+    // constrains its ring offsets.
+    VkDeviceSize minStorageAlignment() const { return minStorageAlignment_; }
     u32 maxPushConstantsSize() const { return maxPushConstantsSize_; }
     const DeviceCaps& cachedCaps() const { return caps_; }
 
@@ -1532,6 +1555,7 @@ private:
     VkQueue queue_ = VK_NULL_HANDLE;
     u32 maxPushConstantsSize_ = 128;      // queried; 128 is only the GUARANTEED minimum until it is
     VkDeviceSize minUboAlignment_ = 256;  // queried: limits.minUniformBufferOffsetAlignment
+    VkDeviceSize minStorageAlignment_ = 256;  // queried: limits.minStorageBufferOffsetAlignment
 
     // ---- surface / swapchain ----
     VkSurfaceKHR surface_ = VK_NULL_HANDLE;
@@ -1890,7 +1914,10 @@ public:
     // The pipeline-layout cache, keyed by sameLayout(). Builds (and caches) every
     // VkDescriptorSetLayout/VkPipelineLayout a PipelineLayout needs, INCLUDING the once-only
     // immutable-samplers set. See section 4's full scheme write-up.
-    const DescriptorLayoutEntry* descriptorLayout(const PipelineLayout& layout, bool mesh);
+    const DescriptorLayoutEntry* descriptorLayout(const PipelineLayout& layout, bool mesh, bool instanced = false);
+    // The shared set-4 layout every instanced pipeline uses. Created on first use, owned by this
+    // factory, destroyed with it.
+    VkDescriptorSetLayout instanceSetLayout();
     // The table-SHAPE cache underneath descriptorLayout() -- see TableShapeEntry's own comment on
     // why this is a separate, finer-grained cache createBindingSet() shares with it.
     VkDescriptorSetLayout tableSetLayout(u32 srvCount, u32 uavCount,
@@ -1950,7 +1977,7 @@ private:
     // compile failure, which the caller must treat as pipeline creation failing.
     // `outSpirv`, when given, receives the SPIR-V the returned module was built from -- which is
     // what reflectTableSlotKinds has to read, NOT RhiShader::spirv. See that function.
-    VkShaderModule moduleForLayout(RhiShader& s, const PipelineLayout& layout, bool mesh,
+    VkShaderModule moduleForLayout(RhiShader& s, const PipelineLayout& layout, bool mesh, bool instanced,
                                    const std::vector<u32>** outSpirv = nullptr);
 
     VulkanDevice* dev_;
@@ -1966,6 +1993,7 @@ private:
     std::vector<DescriptorLayoutEntry> descriptorLayouts_;
     std::vector<TableShapeEntry>       tableShapes_;
     std::vector<SamplerCacheEntry>     samplers_;
+    VkDescriptorSetLayout instanceSetLayout_ = VK_NULL_HANDLE;   // lazily built by instanceSetLayout(); owned here, destroyed in the shutdown sweep
     std::vector<RetiredObject>         retired_;
 
     friend class VulkanRenderContext;
@@ -1996,28 +2024,29 @@ public:
     void setConstantBuffer(u32 slot, const void* data, u32 bytes) override;
     void setDrawBinding(BindingSetHandle set, const void* constants, u32 bytes) override;
     void drawMesh(MeshHandle mesh) override;
-    // drawMeshInstanced (IRenderContext::drawMeshInstanced, RHIResources.hpp) is deliberately NOT
-    // overridden here. D3D12RenderContext::drawMeshInstanced (D3D12Device.cpp:6068-6091) is an
-    // ACCELERATION path, not a semantics change: one DrawIndexedInstanced reading per-instance world
-    // matrices from a ring-allocated buffer through a root SRV bound to a raw GPU virtual address,
-    // gated on the bound pipeline having reserved that extra root parameter at build time
-    // (GraphicsPipelineDesc::instanced). The interface's own base-class default -- one setConstants
-    // + drawMesh per instance -- is called out in that default's own comment as "a correct,
-    // unaccelerated fallback... exactly what a caller would otherwise write by hand", and it is
-    // ALREADY fully correct on this backend without any override: setConstants(kObjectConstantRegister,
-    // ...) and drawMesh(mesh) both exist as ordinary overrides right here, so the inherited loop
-    // reproduces D3D12's SEMANTICS (every instance drawn with its own world matrix) exactly.
+    // ONE vkCmdDrawIndexed WITH instanceCount, reading per-instance world matrices out of a
+    // StructuredBuffer bound at set kVkSetInstances. The twin of D3D12RenderContext::
+    // drawMeshInstanced, which does the same thing through a root SRV at a raw GPU virtual address.
     //
-    // Porting the ACCELERATED path is a real, separate piece of work this method's body cannot hold
-    // alone: GraphicsPipelineDesc::instanced is entirely unconsumed by VulkanPipeline.cpp today (no
-    // reserved push-constant or descriptor slot for a per-instance buffer exists yet), so building it
-    // means changing the pipeline-LAYOUT construction other in-flight work in this same module also
-    // touches, for a backend this file's own header banner already says has never been compiled. The
-    // natural Vulkan shape, if it is ever built, is a push-constant VkDeviceAddress read via
-    // gl_InstanceIndex-equivalent shader indexing rather than a new descriptor binding -- every
-    // Vulkan-created buffer already carries a valid device address (RhiBuffer::address) for exactly
-    // this reason -- but that is a decision for whoever owns VulkanPipeline.cpp next, not something
-    // to bolt on unreviewed from inside this render context.
+    // THIS WAS NOT AN OPTIMISATION, WHICH THE NOTE THAT STOOD HERE GOT WRONG. It said the inherited
+    // base-class fallback -- one setConstants(kObjectConstantRegister) + drawMesh per instance -- was
+    // "ALREADY fully correct on this backend", the argument being that the fallback reproduces
+    // D3D12 SEMANTICS using overrides that already exist here. That is true of the fallback in
+    // isolation and false of the fallback AS USED, because the pipeline bound when Voxi calls this is
+    // built from VSShadowInstanced / VSGiShadowInstanced, and those entry points read
+    // gInstanceWorlds[instanceID] and -- their own comment says so -- NEVER READ gWorld. So the
+    // fallback set a constant the bound shader does not read, drew every instance with instanceID 0,
+    // and sourced its transform from a StructuredBuffer this backend had never bound. The shadow
+    // cascades and the GI-only shadow map were the two passes affected, which is to say: on Vulkan,
+    // shadows and the light feeding the GI volume were being drawn from undefined transforms.
+    //
+    // A DESCRIPTOR, NOT THE PUSH-CONSTANT DEVICE ADDRESS the old note proposed. Every buffer here
+    // does carry a VkDeviceAddress, but the HLSL is SHARED with D3D12 and declares
+    // StructuredBuffer<float4x4> gInstanceWorlds : register(tN) -- a descriptor by construction. A
+    // device-address design needs the shader to take a pointer, which means a Vulkan-only variant of
+    // an entry point D3D12 compiles from the same text. The whole reason this backend has an explicit
+    // -fvk-bind-register map is to avoid exactly that kind of fork.
+    void drawMeshInstanced(MeshHandle mesh, const f32* worlds, u32 instanceCount) override;
     void dispatchMeshFor(MeshHandle mesh) override;
     void dispatchMeshClusters(MeshHandle mesh, u32 clusterCount) override;
     void dispatch(u32 gx, u32 gy, u32 gz) override;
@@ -2076,6 +2105,18 @@ private:
     VkDeviceMemory zeroCBMemory_ = VK_NULL_HANDLE;
 
     ConstantRing ring_[kFrameCount]{};
+    // The per-instance world matrices, ringed exactly like ring_ above and for the same reason, but
+    // a SEPARATE buffer because the constant ring is created VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT and a
+    // StructuredBuffer is a STORAGE buffer. Same growth and same epoch-based reset.
+    ConstantRing instanceRing_[kFrameCount]{};
+    // Suballocates from instanceRing_ for one draw. Returns a null buffer on overflow, which the
+    // caller must treat as "skip the draw", never as offset 0.
+    ConstantAllocation instanceAlloc(const void* data, u32 bytes);
+    // instanceRing_'s own frame epoch. NOT shared with ringEpoch_: both rings reset their bump
+    // cursor on the first allocation of a new frame, and one shared epoch would let whichever ring
+    // allocated first consume the transition, leaving the other never reset.
+    u64 instanceEpoch_ = ~0ull;
+    u64 instanceOverflowEpoch_ = ~0ull;   // one overflow message per frame, same as ringOverflowEpoch_
     u64 ringEpoch_ = ~0ull;            // resets the ring when dev_'s timeline moves to a new frame
     u64 ringOverflowEpoch_ = ~0ull;    // the epoch an overflow was last reported in, once per frame not once per call
 
