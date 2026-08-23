@@ -765,6 +765,68 @@ void VulkanRenderContext::copyBuffer(BufferHandle dst, BufferHandle src, u64 byt
 }
 
 // Copies one whole texture into another. See IRenderContext::copyTexture for why whole-resource.
+// Copies one mip of a texture into a buffer, and back. The caller owns the layout transitions
+// (ResourceState::CopySource / CopyDest), exactly as it does for copyBuffer.
+//
+// LEGAL ONLY OUTSIDE A RENDERING SCOPE, which is a Vulkan rule rather than a choice here:
+// vkCmdCopyImageToBuffer and vkCmdCopyBufferToImage are transfer commands and cannot be recorded
+// between vkCmdBeginRendering and vkCmdEndRendering. That is satisfied by WHERE the one caller
+// stands rather than by anything enforced here -- every render feature's prePass runs before
+// VulkanDevice::beginFrame opens the scene scope (VulkanDevice.cpp: prePass at :2460, the scope at
+// :2514), which is exactly where a GI bake reads its volume back. A caller that issued one of these
+// from inside a draw pass would get a validation error naming the active render pass, and the fix
+// would be to move the call, not to suspend the scope.
+void VulkanRenderContext::copyTextureToBuffer(BufferHandle dst, u64 dstOffset, TextureHandle src, u32 mip) {
+    VkCommandBuffer cb = cmd();
+    if (!cb || !dev_->api().CmdCopyImageToBuffer) return;
+    RhiBuffer* d = res_->buffer(dst);
+    RhiTexture* t = res_->texture(src);
+    if (!d || !d->buffer || !t || !t->image) {
+        AVER_ERROR("[RHI.Vulkan] copyTextureToBuffer with an invalid handle");
+        return;
+    }
+    if (mip >= t->desc.mips) {
+        AVER_ERROR("[RHI.Vulkan] copyTextureToBuffer: mip {} is past the {} this texture has", mip, t->desc.mips);
+        return;
+    }
+    VkBufferImageCopy region{};
+    region.bufferOffset = dstOffset;
+    // 0/0: rows exactly as wide as the image, which is what textureCopyFootprint reports.
+    region.bufferRowLength = 0;
+    region.bufferImageHeight = 0;
+    region.imageSubresource = {toVkAspect(t->desc.format), mip, 0, 1};
+    region.imageExtent = {t->desc.width  >> mip ? t->desc.width  >> mip : 1u,
+                          t->desc.height >> mip ? t->desc.height >> mip : 1u,
+                          t->desc.depth  >> mip ? t->desc.depth  >> mip : 1u};
+    dev_->api().CmdCopyImageToBuffer(cb, t->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                     d->buffer, 1, &region);
+}
+
+void VulkanRenderContext::copyBufferToTexture(TextureHandle dst, u32 mip, BufferHandle src, u64 srcOffset) {
+    VkCommandBuffer cb = cmd();
+    if (!cb || !dev_->api().CmdCopyBufferToImage) return;
+    RhiTexture* t = res_->texture(dst);
+    RhiBuffer* s = res_->buffer(src);
+    if (!t || !t->image || !s || !s->buffer) {
+        AVER_ERROR("[RHI.Vulkan] copyBufferToTexture with an invalid handle");
+        return;
+    }
+    if (mip >= t->desc.mips) {
+        AVER_ERROR("[RHI.Vulkan] copyBufferToTexture: mip {} is past the {} this texture has", mip, t->desc.mips);
+        return;
+    }
+    VkBufferImageCopy region{};
+    region.bufferOffset = srcOffset;
+    region.bufferRowLength = 0;
+    region.bufferImageHeight = 0;
+    region.imageSubresource = {toVkAspect(t->desc.format), mip, 0, 1};
+    region.imageExtent = {t->desc.width  >> mip ? t->desc.width  >> mip : 1u,
+                          t->desc.height >> mip ? t->desc.height >> mip : 1u,
+                          t->desc.depth  >> mip ? t->desc.depth  >> mip : 1u};
+    dev_->api().CmdCopyBufferToImage(cb, s->buffer, t->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                     1, &region);
+}
+
 void VulkanRenderContext::copyTexture(TextureHandle dst, TextureHandle src) {
     VkCommandBuffer cb = cmd();
     if (!cb || !res_) return;

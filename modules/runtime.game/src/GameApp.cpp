@@ -1315,6 +1315,10 @@ void GameApp::pushFrame(Engine& e) {
         // move and give the shipped game a different image from the editor preview, which is the one
         // thing this whole change exists to stop.
         voxiRenderer_.setVolume(&giCenter_.x, giExtent_);
+        // The shipped runtime reads the same cache the editor wrote. It never WRITES a miss back:
+        // a game's install directory is not somewhere to grow derived data at play time, and a
+        // level shipped without a baked volume simply voxelises as it always did.
+        voxiRenderer_.setGiCacheDir(project_.valid() ? fmt::giCacheDir(project_.dir) : std::string());
         const Vec3 sd = Vec3{sky_.sunDirection[0], sky_.sunDirection[1],
                              sky_.sunDirection[2]}.getSafeNormal();
         voxiRenderer_.setSunDirection(&sd.x);

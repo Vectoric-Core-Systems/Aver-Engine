@@ -576,9 +576,18 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
                 // default interval. That cadence is half the saving; the other half is that the
                 // camera cascades no longer carry the volume at all (see fitCascades).
                 giShadowPass(ctx);
-                voxelizePass(ctx);
-                filterMips(ctx);
+                // THE CACHE SITS EXACTLY HERE, between "the gate says rebuild" and the rebuild
+                // itself, because this is the one point where the inputs are settled (takeGiSnapshot
+                // has just run) and the work has not started. A hit fills the volume from disk and
+                // the two passes below are skipped whole; a miss falls through and bakes, then hands
+                // the result back for next time.
+                if (!giCacheRestore(ctx)) {
+                    voxelizePass(ctx);
+                    filterMips(ctx);
+                    giCacheScheduleDump(ctx);
+                }
             }
+            giCacheTick();
             // Said ONCE, and as a ratio rather than a feeling: "GI rebuilt 3 of 170 ticks" is the
             // difference between this gate paying for itself and it being a hash walk that never
             // hits. A run that reports 100% rebuilt is a run where the saving is zero, and that is
@@ -863,6 +872,215 @@ bool VoxiRenderer::giSnapshotUnchanged() const {
 }
 
 // Records what the rebuild about to run was computed from.
+// ================================================================================================
+// The GI derived-data cache.
+//
+// The rebuild gate above answers "has anything changed since the last bake THIS RUN". This answers
+// the same question across runs, so a level that has been looked at before does not pay a full
+// revoxelisation to show its first lit frame.
+// ================================================================================================
+void VoxiRenderer::setGiCacheDir(const std::string& dir) {
+    if (dir == giCacheDir_) return;
+    giCacheDir_ = dir;
+    // A new directory means a new project: whatever was tried against the old one says nothing.
+    giCacheTried_ = false;
+    giCacheTriedKey_ = 0;
+}
+
+// The key describing the volume as it stands after takeGiSnapshot.
+//
+// THE SKY IS HASHED THE SAME WAY THE GATE COMPARES IT: byte for byte, minus the cloud clock. A
+// cache keyed on a running clock would miss on every load by construction, which is the one failure
+// mode that would make the whole thing look like it worked while never hitting.
+fmt::GiCacheKey VoxiRenderer::giCacheKey() const {
+    fmt::GiCacheKey k;
+    k.drawsKey = giDrawsKey_;
+    rhi::SkyAtmosphere sky = giSky_;
+    sky.cloudTime = 0.0f;
+    const u8* p = reinterpret_cast<const u8*>(&sky);
+    u64 h = 1469598103934665603ull;
+    for (usize i = 0; i < sizeof(sky); ++i) { h ^= p[i]; h *= 1099511628211ull; }
+    k.skyKey = h;
+    for (u32 i = 0; i < 3; ++i) k.centre[i] = giSnapCenter_[i];
+    k.extent     = giSnapExtent_;
+    k.resolution = voxelResBuilt_;
+    k.mipCount   = voxelMips_;
+    return k;
+}
+
+// Sizes the two staging buffers and works out where each mip sits inside them.
+//
+// THE BACKEND'S LAYOUT, NOT THE FILE'S. D3D12 pads every copy row to 256 bytes, so a 16-wide
+// RGBA16F mip occupies twice the bytes it carries; Vulkan packs tight. Both are asked rather than
+// assumed, and the difference is absorbed here so the FILE is always tightly packed and portable
+// between the two.
+bool VoxiRenderer::giCacheEnsureBuffers() {
+    if (giCacheUnsupported_ || !res_ || !voxelTex_ || voxelMips_ == 0) return false;
+
+    rhi::TextureCopyFootprint fp{};
+    if (!res_->textureCopyFootprint(voxelTex_, 0, fp)) {
+        // The backend has not implemented the texture<->buffer pair. Said once, then never again:
+        // this is a capability gap, not a per-frame error.
+        AVER_INFO("[Voxi] GI cache disabled: this backend cannot copy a texture to a buffer");
+        giCacheUnsupported_ = true;
+        return false;
+    }
+
+    u64 total = 0;
+    giCacheMipOffsets_.assign(voxelMips_, 0);
+    for (u32 m = 0; m < voxelMips_; ++m) {
+        rhi::TextureCopyFootprint f{};
+        if (!res_->textureCopyFootprint(voxelTex_, m, f)) { giCacheUnsupported_ = true; return false; }
+        // 512-aligned per mip: D3D12 wants a placed footprint's offset on a 512-byte boundary, and
+        // Vulkan wants 4. Taking the stricter of the two keeps one layout for both.
+        total = (total + 511ull) & ~511ull;
+        giCacheMipOffsets_[m] = total;
+        total += f.totalBytes;
+    }
+    if (total == 0) return false;
+    if (giCacheReadback_ && giCacheBufBytes_ >= total) return true;
+
+    if (giCacheReadback_) { res_->destroyBuffer(giCacheReadback_); giCacheReadback_ = 0; }
+    if (giCacheUpload_)   { res_->destroyBuffer(giCacheUpload_);   giCacheUpload_ = 0; }
+
+    rhi::BufferDesc rb;
+    rb.bytes = total;
+    rb.kind  = rhi::BufferKind::Readback;
+    rb.debugName = "gi cache readback";
+    giCacheReadback_ = res_->createBuffer(rb);
+
+    rhi::BufferDesc ub;
+    ub.bytes = total;
+    ub.kind  = rhi::BufferKind::Upload;
+    ub.debugName = "gi cache upload";
+    giCacheUpload_ = res_->createBuffer(ub);
+
+    if (!giCacheReadback_ || !giCacheUpload_) {
+        AVER_WARN("[Voxi] GI cache disabled: could not allocate {} KB of staging", total / 1024);
+        giCacheUnsupported_ = true;
+        return false;
+    }
+    giCacheBufBytes_ = total;
+    return true;
+}
+
+// Tries to fill voxelTex_ from disk. True when the volume now holds the cached answer and the
+// caller should skip voxelizePass/filterMips entirely.
+bool VoxiRenderer::giCacheRestore(rhi::IRenderContext& ctx) {
+    if (giCacheDir_.empty() || giCacheUnsupported_) return false;
+    const fmt::GiCacheKey key = giCacheKey();
+    if (key.resolution == 0 || key.mipCount == 0) return false;
+
+    // ONCE PER KEY. A miss must not re-open the same absent file on every rebuild -- and rebuilds
+    // are exactly the frames already doing the most work.
+    if (giCacheTried_ && giCacheTriedKey_ == key.drawsKey) return false;
+    giCacheTried_ = true;
+    giCacheTriedKey_ = key.drawsKey;
+
+    fmt::GiCacheEntry entry;
+    const std::string path = giCacheDir_ + "\\" + fmt::giCacheFileName(key);
+    std::string why;
+    if (!fmt::loadGiCache(path, entry, &why)) return false;
+    // The file name is a hash, so a collision is possible and cheap to rule out: compare the key
+    // the entry actually carries.
+    if (entry.key != key) return false;
+    if (!giCacheEnsureBuffers()) return false;
+
+    // Expand the file's TIGHTLY PACKED mips into the backend's footprint layout.
+    for (u32 m = 0; m < voxelMips_; ++m) {
+        rhi::TextureCopyFootprint f{};
+        if (!res_->textureCopyFootprint(voxelTex_, m, f)) return false;
+        const u64 srcBase = fmt::giCacheMipOffset(entry.key, m);
+        const u32 tightRow = f.rowBytes;
+        if (f.rowPitch == tightRow) {
+            res_->writeBuffer(giCacheUpload_, entry.voxels.data() + srcBase,
+                              static_cast<u64>(tightRow) * f.rows * f.depth, giCacheMipOffsets_[m]);
+        } else {
+            // Row by row, because the padding is real: a straight copy would slide each row's data
+            // into the previous row's padding.
+            for (u32 z = 0; z < f.depth; ++z)
+                for (u32 y = 0; y < f.rows; ++y) {
+                    const u64 src = srcBase + (static_cast<u64>(z) * f.rows + y) * tightRow;
+                    const u64 dst = giCacheMipOffsets_[m] + (static_cast<u64>(z) * f.rows + y) * f.rowPitch;
+                    res_->writeBuffer(giCacheUpload_, entry.voxels.data() + src, tightRow, dst);
+                }
+        }
+    }
+
+    ctx.textureBarrier(voxelTex_, rhi::ResourceState::ShaderResource, rhi::ResourceState::CopyDest);
+    for (u32 m = 0; m < voxelMips_; ++m)
+        ctx.copyBufferToTexture(voxelTex_, m, giCacheUpload_, giCacheMipOffsets_[m]);
+    ctx.textureBarrier(voxelTex_, rhi::ResourceState::CopyDest, rhi::ResourceState::ShaderResource);
+
+    AVER_INFO("[Voxi] GI cache HIT: restored a {}^3 volume from {}", key.resolution,
+              fmt::giCacheFileName(key));
+    return true;
+}
+
+// Schedules a readback of the freshly baked volume. Nothing is written yet -- see the countdown.
+void VoxiRenderer::giCacheScheduleDump(rhi::IRenderContext& ctx) {
+    if (giCacheDir_.empty() || giCacheUnsupported_) return;
+    if (giCacheDumpCountdown_) return;   // one in flight is enough
+    if (!giCacheEnsureBuffers()) return;
+
+    giCachePendingKey_ = giCacheKey();
+    if (giCachePendingKey_.resolution == 0) return;
+
+    // filterMips left the whole resource in ShaderResource; put it back there afterwards so the
+    // cone trace later this frame reads it exactly as it would have.
+    ctx.textureBarrier(voxelTex_, rhi::ResourceState::ShaderResource, rhi::ResourceState::CopySource);
+    for (u32 m = 0; m < voxelMips_; ++m)
+        ctx.copyTextureToBuffer(giCacheReadback_, giCacheMipOffsets_[m], voxelTex_, m);
+    ctx.textureBarrier(voxelTex_, rhi::ResourceState::CopySource, rhi::ResourceState::ShaderResource);
+
+    giCacheDumpCountdown_ = kGiCacheReadbackDelay;
+}
+
+// Ticks the countdown and writes the file when the GPU is provably past the copy.
+void VoxiRenderer::giCacheTick() {
+    if (!giCacheDumpCountdown_) return;
+    if (--giCacheDumpCountdown_) return;
+    if (!res_ || !giCacheReadback_) return;
+
+    // Compact the backend's footprint layout back into the tightly packed file layout.
+    fmt::GiCacheEntry entry;
+    entry.key = giCachePendingKey_;
+    entry.voxels.resize(static_cast<usize>(fmt::giCacheTotalBytes(entry.key)));
+
+    for (u32 m = 0; m < entry.key.mipCount && m < giCacheMipOffsets_.size(); ++m) {
+        rhi::TextureCopyFootprint f{};
+        if (!res_->textureCopyFootprint(voxelTex_, m, f)) return;
+        const u64 dstBase = fmt::giCacheMipOffset(entry.key, m);
+        const u32 tightRow = f.rowBytes;
+        if (f.rowPitch == tightRow) {
+            if (!res_->readBuffer(giCacheReadback_, entry.voxels.data() + dstBase,
+                                  static_cast<u64>(tightRow) * f.rows * f.depth, giCacheMipOffsets_[m]))
+                return;
+        } else {
+            for (u32 z = 0; z < f.depth; ++z)
+                for (u32 y = 0; y < f.rows; ++y) {
+                    const u64 dst = dstBase + (static_cast<u64>(z) * f.rows + y) * tightRow;
+                    const u64 src = giCacheMipOffsets_[m] + (static_cast<u64>(z) * f.rows + y) * f.rowPitch;
+                    if (!res_->readBuffer(giCacheReadback_, entry.voxels.data() + dst, tightRow, src))
+                        return;
+                }
+        }
+    }
+
+    const std::string path = giCacheDir_ + "\\" + fmt::giCacheFileName(entry.key);
+    std::string why;
+    if (!fmt::saveGiCache(path, entry, &why)) {
+        AVER_WARN("[Voxi] GI cache could not be written: {}", why);
+        return;
+    }
+    // Bounded, because nothing else bounds it: every distinct bake writes a new file and none is
+    // ever overwritten.
+    const u32 swept = fmt::giCacheSweep(giCacheDir_, 8);
+    AVER_INFO("[Voxi] GI cache WROTE {} ({} KB){}", fmt::giCacheFileName(entry.key),
+              entry.voxels.size() / 1024,
+              swept ? (", swept " + std::to_string(swept) + " older entr(ies)") : std::string());
+}
+
 void VoxiRenderer::takeGiSnapshot() {
     giDrawsKey_ = giDrawsKey();
     // Same two-step on the stored side, so both sides of the memcmp have zero padding.

@@ -8,6 +8,9 @@
 #include "aver/voxi/Voxi.hpp"
 
 #include <unordered_map>
+#include "aver/formats/GiCache.hpp"
+
+#include <string>
 #include <vector>
 
 // Voxi the render feature: voxel cone traced global illumination, a cascaded directional shadow map
@@ -38,6 +41,15 @@ public:
     // could be configured, so anyone changing them expected a visual result and got nothing.
     // One source of truth for what the sun looks like; this one owns only where it points.
     void setSunDirection(const f32 dirToLight[3]);
+    // Where a baked GI volume may be cached between runs: "<project>\\DerivedDataCache\\GI".
+    // Empty (the default) disables the cache entirely and nothing is read or written.
+    //
+    // A SETTER RATHER THAN THIS CLASS FINDING THE PROJECT, for the same reason setVolume is one:
+    // render.voxi knows about volumes and radiance, not about projects, manifests or where a user
+    // keeps their files. The editor and the game runtime both already push everything else this
+    // renderer needs per frame; this joins them.
+    void setGiCacheDir(const std::string& dir);
+
     // Replaces the scene with a raymarch of the volume.
     void setDebugView(bool on);
 
@@ -547,6 +559,45 @@ private:
     bool         drawCapReported_ = false;   // the draw-list-full warning is worth saying once, not every frame
     u64  giGateNextReport_ = 64;   // doubles each time, so the steady state gets reported too
     u64  giGateLastTicks_ = 0, giGateLastSkipped_ = 0;
+
+    // ---- the GI derived-data cache -------------------------------------------------------------
+    //
+    // WHAT IT ADDS TO THE GATE ABOVE. giSnapshotUnchanged already avoids ~93% of rebuilds within a
+    // run; what it cannot do is remember anything across one. So every level load pays a full
+    // revoxelisation before the first lit frame, and so does every return to a level already looked
+    // at. This is that memory: the resolved volume, written beside the project, keyed by exactly the
+    // inputs the gate keys on.
+    //
+    // THE KEY IS THE GATE'S KEY, not a second one. giCacheKey() reads giDrawsKey_/giSky_/centre/
+    // extent -- the same fields giSnapshotUnchanged compares -- so a cache hit and a gate hit mean
+    // the same thing by construction rather than by two implementations agreeing.
+    std::string giCacheDir_;
+    // Tried once per key, hit or miss: a miss must not re-read the same absent file every rebuild.
+    u64  giCacheTriedKey_ = 0;
+    bool giCacheTried_ = false;
+    // READBACK IS NOT IMMEDIATE. The copy is a GPU command; its results are only there once the GPU
+    // has passed it. So a bake schedules the copy, waits kGiCacheReadbackDelay frames -- longer than
+    // the deepest frame-in-flight -- and only then reads and writes the file.
+    static constexpr u32 kGiCacheReadbackDelay = 4;
+    rhi::BufferHandle giCacheReadback_ = 0;
+    rhi::BufferHandle giCacheUpload_ = 0;
+    u64  giCacheBufBytes_ = 0;
+    u32  giCacheDumpCountdown_ = 0;   // 0 = nothing pending
+    fmt::GiCacheKey giCachePendingKey_{};
+    // Per-mip byte offsets inside the readback buffer, in the BACKEND's footprint layout.
+    std::vector<u64> giCacheMipOffsets_;
+    bool giCacheUnsupported_ = false;   // textureCopyFootprint said no; stop asking
+
+    // The key describing the volume as it stands after takeGiSnapshot.
+    fmt::GiCacheKey giCacheKey() const;
+    // Tries to fill voxelTex_ from disk. True when the volume now holds the cached answer.
+    bool giCacheRestore(rhi::IRenderContext& ctx);
+    // Schedules a readback of voxelTex_ so it can be written out once the GPU is past it.
+    void giCacheScheduleDump(rhi::IRenderContext& ctx);
+    // Ticks the countdown and writes the file when it reaches zero.
+    void giCacheTick();
+    // Sizes giCacheReadback_/giCacheUpload_ and giCacheMipOffsets_ for the current volume.
+    bool giCacheEnsureBuffers();
 
     // Builds this frame's cascade matrices and splits. Returns the usable cascade count, 0 if none.
     u32 fitCascades();

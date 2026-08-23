@@ -1712,6 +1712,7 @@ public:
 
     bool writeBuffer(BufferHandle h, const void* src, u64 bytes, u64 offset) override;
     bool readBuffer(BufferHandle h, void* dst, u64 bytes, u64 offset) override;
+    bool textureCopyFootprint(TextureHandle t, u32 mip, TextureCopyFootprint& out) const override;
     bool textureInfo(TextureHandle h, TextureDesc& out) const override;
     void waitIdle() override;
 
@@ -1794,6 +1795,8 @@ public:
     void copyBuffer(BufferHandle dst, BufferHandle src, u64 bytes,
                     u64 dstOffset, u64 srcOffset) override;
     void copyTexture(TextureHandle dst, TextureHandle src) override;
+    void copyTextureToBuffer(BufferHandle dst, u64 dstOffset, TextureHandle src, u32 mip) override;
+    void copyBufferToTexture(TextureHandle dst, u32 mip, BufferHandle src, u64 srcOffset) override;
     void drawFullscreen() override;
     void setVertexBuffer(BufferHandle b, u32 stride) override;
     void setIndexBuffer(BufferHandle b, Format indexFormat) override;
@@ -6161,6 +6164,87 @@ void D3D12RenderContext::copyBuffer(BufferHandle dst, BufferHandle src, u64 byte
     ID3D12Resource* s = res_->bufferResource(src);
     if (!d || !s) { AVER_ERROR("[RHI.D3D12] copyBuffer with an invalid handle"); return; }
     dev_->cmdList_->CopyBufferRegion(d, dstOffset, s, srcOffset, bytes);
+}
+
+// The layout D3D12 requires for a texture<->buffer copy of one mip.
+//
+// GetCopyableFootprints IS THE AUTHORITY, not arithmetic on width*bpp. D3D12 aligns every copy row
+// to D3D12_TEXTURE_DATA_PITCH_ALIGNMENT (256), so a 16-wide RGBA16F mip carries 128 bytes of data in
+// a 256-byte row, and the padding is real: a caller that assumes tight packing reads one row's data
+// interleaved with another row's padding. Asking the runtime also means a format whose block size
+// this file does not model still gets the right answer.
+bool D3D12ResourceFactory::textureCopyFootprint(TextureHandle t, u32 mip, TextureCopyFootprint& out) const {
+    const RhiTexture* tex = const_cast<D3D12ResourceFactory*>(this)->texture(t);
+    if (!tex || !tex->res) return false;
+    if (mip >= tex->desc.mips) return false;
+
+    const D3D12_RESOURCE_DESC rd = tex->res->GetDesc();
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};
+    UINT rows = 0;
+    UINT64 rowBytes = 0, total = 0;
+    dev_->device_->GetCopyableFootprints(&rd, mip, 1, 0, &fp, &rows, &rowBytes, &total);
+    if (total == 0) return false;
+
+    out.totalBytes = total;
+    out.rowPitch   = fp.Footprint.RowPitch;
+    out.rowBytes   = static_cast<u32>(rowBytes);
+    out.rows       = rows;
+    out.depth      = fp.Footprint.Depth;
+    return true;
+}
+
+// Copies one mip of a texture into a buffer. The texture must already be in CopySource and the
+// buffer in CopyDest -- this issues the copy and nothing else, exactly as copyBuffer does.
+void D3D12RenderContext::copyTextureToBuffer(BufferHandle dst, u64 dstOffset, TextureHandle src, u32 mip) {
+    if (!dev_->cmdList_ || !res_) return;
+    ID3D12Resource* d = res_->bufferResource(dst);
+    RhiTexture* s = res_->texture(src);
+    if (!d || !s || !s->res) { AVER_ERROR("[RHI.D3D12] copyTextureToBuffer with an invalid handle"); return; }
+    if (mip >= s->desc.mips) { AVER_ERROR("[RHI.D3D12] copyTextureToBuffer: mip {} is past the chain", mip); return; }
+
+    const D3D12_RESOURCE_DESC rd = s->res->GetDesc();
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};
+    UINT rows = 0;
+    UINT64 rowBytes = 0, total = 0;
+    // The offset is baked into the footprint rather than passed to CopyTextureRegion, which is what
+    // D3D12 wants: a PLACED_FOOTPRINT names where in the buffer the image begins.
+    dev_->device_->GetCopyableFootprints(&rd, mip, 1, dstOffset, &fp, &rows, &rowBytes, &total);
+
+    D3D12_TEXTURE_COPY_LOCATION dl{};
+    dl.pResource = d;
+    dl.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dl.PlacedFootprint = fp;
+    D3D12_TEXTURE_COPY_LOCATION sl{};
+    sl.pResource = s->res.Get();
+    sl.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    sl.SubresourceIndex = mip;
+    dev_->cmdList_->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
+}
+
+// The same copy the other way: a buffer holding one mip's bytes, in the footprint layout, into the
+// texture. The buffer must be in CopySource and the texture in CopyDest.
+void D3D12RenderContext::copyBufferToTexture(TextureHandle dst, u32 mip, BufferHandle src, u64 srcOffset) {
+    if (!dev_->cmdList_ || !res_) return;
+    RhiTexture* d = res_->texture(dst);
+    ID3D12Resource* s = res_->bufferResource(src);
+    if (!d || !d->res || !s) { AVER_ERROR("[RHI.D3D12] copyBufferToTexture with an invalid handle"); return; }
+    if (mip >= d->desc.mips) { AVER_ERROR("[RHI.D3D12] copyBufferToTexture: mip {} is past the chain", mip); return; }
+
+    const D3D12_RESOURCE_DESC rd = d->res->GetDesc();
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};
+    UINT rows = 0;
+    UINT64 rowBytes = 0, total = 0;
+    dev_->device_->GetCopyableFootprints(&rd, mip, 1, srcOffset, &fp, &rows, &rowBytes, &total);
+
+    D3D12_TEXTURE_COPY_LOCATION dl{};
+    dl.pResource = d->res.Get();
+    dl.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    dl.SubresourceIndex = mip;
+    D3D12_TEXTURE_COPY_LOCATION sl{};
+    sl.pResource = s;
+    sl.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    sl.PlacedFootprint = fp;
+    dev_->cmdList_->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
 }
 
 // Copies one whole texture into another. See IRenderContext::copyTexture for why whole-resource.

@@ -35,8 +35,12 @@ target_compile_features(Aver.Render.Voxi.Renderer PUBLIC cxx_std_20)
 # is the thing that renders it. Voxi supplies visibility and irradiance and calls the shading model;
 # the material owns the BRDF. The dependency runs THIS way and never the other -- the material
 # system knows nothing about voxel cones.
+# Aver.Formats joined this line when the GI derived-data cache did: VoxiRenderer now READS AND
+# WRITES a file format (.cache, an AVR1 container), which is a real dependency rather than an
+# incidental one and belongs stated here. It is the same shape as the Aver.Render.PBR.Materials
+# entry above -- a library this renderer genuinely uses, not a backend leaking across the boundary.
 target_link_libraries(Aver.Render.Voxi.Renderer PUBLIC Aver.Core Aver.RHI Aver.Render.Voxi
-                                                       Aver.Render.PBR.Materials)
+                                                       Aver.Render.PBR.Materials Aver.Formats)
 
 set_target_properties(Aver.Render.Voxi.Renderer PROPERTIES FOLDER "modules")
 

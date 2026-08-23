@@ -1,6 +1,9 @@
 aver_add_module(Aver.Formats
   SOURCES
     src/Avr1.cpp
+    # The GI derived-data cache (.cache). Base target: it is the AVR1 container and arithmetic --
+    # no device, no renderer -- which is what lets its test run with neither.
+    src/GiCache.cpp
     src/GltfImport.cpp
     src/Json.cpp
     src/OcAnim.cpp

@@ -116,6 +116,22 @@ struct TextureDesc {
 };
 
 // Where a buffer's memory lives.
+// How a texture mip is laid out inside a buffer for copyTextureToBuffer / copyBufferToTexture.
+//
+// NOT NECESSARILY TIGHTLY PACKED, which is the whole reason this exists rather than the caller
+// computing width*height*depth*bpp. D3D12 requires each ROW of a copy footprint to start on a
+// 256-byte boundary, so a 16-wide RGBA16F mip -- 128 bytes of real data per row -- occupies 256.
+// Vulkan has no such rule and reports the tight pitch. A caller that wants tightly packed bytes
+// (a file, a hash) must repack using rowPitch, and one that has tightly packed bytes to upload
+// must expand into it.
+struct TextureCopyFootprint {
+    u64 totalBytes   = 0;   // what the buffer must be able to hold for this mip
+    u32 rowPitch     = 0;   // bytes from one row to the next, INCLUDING any padding
+    u32 rowBytes     = 0;   // bytes of real data in a row; <= rowPitch
+    u32 rows         = 0;   // rows per depth slice
+    u32 depth        = 1;   // slices (1 for a 2D texture, the mip's depth for a Tex3D)
+};
+
 enum class BufferKind : u8 {
     Default,         // GPU-local
     Upload,          // CPU-writable, GPU-readable
@@ -496,6 +512,15 @@ public:
     // responsible for the GPU having finished writing what it is about to read.
     virtual bool readBuffer(BufferHandle h, void* dst, u64 bytes, u64 offset = 0) = 0;
 
+    // Fills `out` with the layout IRenderContext::copyTextureToBuffer / copyBufferToTexture use for
+    // one mip of `t`. False when the handle is bad, the mip is past the chain, the format's byte
+    // size is not known, or this backend has not implemented the pair -- which is also the check a
+    // caller should make BEFORE issuing either copy.
+    virtual bool textureCopyFootprint(TextureHandle t, u32 mip, TextureCopyFootprint& out) const {
+        (void)t; (void)mip; (void)out;
+        return false;
+    }
+
     // Resolved description, with `mips` filled in when the desc asked for a full chain.
     virtual bool textureInfo(TextureHandle h, TextureDesc& out) const = 0;
 
@@ -620,6 +645,30 @@ public:
     // and mip count -- checked by the backends, which log and do nothing rather than record a copy
     // the debug layer would reject.
     virtual void copyTexture(TextureHandle dst, TextureHandle src) = 0;
+
+    // Copies ONE MIP of a texture into a buffer, and back.
+    //
+    // WHY THESE EXIST. Until they did, this RHI could move bytes texture-to-texture and
+    // buffer-to-buffer, but had no way at all to get a texture's contents to the CPU or to put CPU
+    // bytes into an existing texture -- createTexture's initialData was the only route in, and there
+    // was no route out. Anything wanting to bake, cache or verify a rendered volume had to either
+    // reach past the RHI into a backend (which D3D12Device::selfTest does, for 2D only) or make its
+    // output a structured buffer instead of a texture (which PcgVolume does, for that reason).
+    // Voxi's GI derived-data cache needs a Tex3D mip chain both ways, and neither workaround fits.
+    //
+    // THE BUFFER LAYOUT IS THE BACKEND'S, NOT TIGHTLY PACKED -- ask textureCopyFootprint first and
+    // repack. See TextureCopyFootprint for why that is not an implementation detail worth hiding.
+    //
+    // NOT PURE, same reasoning as drawMeshInstanced: adding a virtual here must not break an
+    // IRenderContext that never asked for it. The default is an honest no-op that logs nothing and
+    // copies nothing; a caller checks textureCopyFootprint first, which returns false on a backend
+    // that has not implemented the pair.
+    virtual void copyTextureToBuffer(BufferHandle dst, u64 dstOffset, TextureHandle src, u32 mip) {
+        (void)dst; (void)dstOffset; (void)src; (void)mip;
+    }
+    virtual void copyBufferToTexture(TextureHandle dst, u32 mip, BufferHandle src, u64 srcOffset) {
+        (void)dst; (void)mip; (void)src; (void)srcOffset;
+    }
 
     // ---- geometry the CALLER owns ----
     // The counterpart to GraphicsPipelineDesc::vertexLayout, for vertices a feature builds itself.

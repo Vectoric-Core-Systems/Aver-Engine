@@ -1643,6 +1643,32 @@ void VulkanResourceFactory::collect() {
 // ================================================================================================
 // 7. Textures / buffers
 // ================================================================================================
+// The layout a texture<->buffer copy of one mip uses on this backend.
+//
+// TIGHTLY PACKED, unlike D3D12's. Vulkan lets a VkBufferImageCopy leave bufferRowLength and
+// bufferImageHeight at 0, which means "the rows are exactly as wide as the image", so there is no
+// 256-byte row rule to work around here and rowBytes == rowPitch always. The same arithmetic
+// uploadInitialData already uses for its staging footprint, so an upload and a readback of the same
+// mip agree by construction rather than by two functions happening to match.
+bool VulkanResourceFactory::textureCopyFootprint(TextureHandle t, u32 mip, TextureCopyFootprint& out) const {
+    const RhiTexture* tex = const_cast<VulkanResourceFactory*>(this)->texture(t);
+    if (!tex || tex->image == VK_NULL_HANDLE || mip >= tex->desc.mips) return false;
+
+    const u32 w = tex->desc.width  >> mip ? tex->desc.width  >> mip : 1u;
+    const u32 h = tex->desc.height >> mip ? tex->desc.height >> mip : 1u;
+    const u32 d = tex->desc.depth  >> mip ? tex->desc.depth  >> mip : 1u;
+    const u64 rowPitch = packedRowPitchVk(tex->desc.format, w);
+    if (rowPitch == 0) return false;
+
+    const u32 rows = isBlockFormat(tex->desc.format) ? (h + 3) / 4 : h;
+    out.rowPitch   = static_cast<u32>(rowPitch);
+    out.rowBytes   = static_cast<u32>(rowPitch);
+    out.rows       = rows;
+    out.depth      = d;
+    out.totalBytes = rowPitch * rows * d;
+    return true;
+}
+
 bool VulkanResourceFactory::uploadInitialData(VkImage image, const VkImageCreateInfo& ci, const TextureDesc& d, u32 mips) {
     if (packedRowPitchVk(d.format, 1) == 0) {
         AVER_ERROR("[RHI.Vulkan] createTexture: initial data for a format with no CPU footprint");

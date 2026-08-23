@@ -1872,6 +1872,7 @@ public:
 
     bool writeBuffer(BufferHandle h, const void* src, u64 bytes, u64 offset) override;
     bool readBuffer(BufferHandle h, void* dst, u64 bytes, u64 offset) override;
+    bool textureCopyFootprint(TextureHandle t, u32 mip, TextureCopyFootprint& out) const override;
     bool textureInfo(TextureHandle h, TextureDesc& out) const override;
     void waitIdle() override;
 
@@ -2052,6 +2053,8 @@ public:
     void dispatch(u32 gx, u32 gy, u32 gz) override;
     void copyBuffer(BufferHandle dst, BufferHandle src, u64 bytes, u64 dstOffset, u64 srcOffset) override;
     void copyTexture(TextureHandle dst, TextureHandle src) override;
+    void copyTextureToBuffer(BufferHandle dst, u64 dstOffset, TextureHandle src, u32 mip) override;
+    void copyBufferToTexture(TextureHandle dst, u32 mip, BufferHandle src, u64 srcOffset) override;
     void drawFullscreen() override;
     void setVertexBuffer(BufferHandle b, u32 stride) override;
     // Binds a caller-owned index buffer. R32Uint ONLY -- mirrors what D3D12RenderContext::
