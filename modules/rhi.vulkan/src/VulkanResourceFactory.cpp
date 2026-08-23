@@ -1045,7 +1045,17 @@ VulkanResourceFactory::~VulkanResourceFactory() {
     for (auto& b : buffers_) destroyBufferCommitted(*dev_, b.buffer, b.memory);
     buffers_.clear();
 
-    for (auto& s : shaders_) if (s.module) api.DestroyShaderModule(device, s.module, nullptr);
+    // THE VARIANTS TOO, not just the layout-agnostic module. A shader compiled per push-constant
+    // shape owns one VkShaderModule per variant (see RhiShader::variants), and destroyShader has
+    // always freed them -- but a shader that lives to shutdown never passes through destroyShader,
+    // so every variant ever compiled leaked here. That was most of the modules the layer counted at
+    // vkDestroyDevice, and it grew with every distinct layout the frame used.
+    for (auto& s : shaders_) {
+        for (RhiShaderVariant& v : s.variants)
+            if (v.module && v.module != s.module) api.DestroyShaderModule(device, v.module, nullptr);
+        s.variants.clear();
+        if (s.module) api.DestroyShaderModule(device, s.module, nullptr);
+    }
     shaders_.clear();
 
     for (auto& p : pipelines_) if (p.pipeline) api.DestroyPipeline(device, p.pipeline, nullptr);

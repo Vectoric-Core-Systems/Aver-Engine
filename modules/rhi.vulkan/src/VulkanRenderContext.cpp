@@ -992,6 +992,24 @@ void VulkanRenderContext::popMarker() {
 // once-per-frame-not-once-per-call overflow logging. dev_->retireFenceValue() (nextTimelineValue_+1,
 // incremented once per submitted frame) stands in for D3D12's nextFence_ as the epoch signal.
 // ====================================================================================================
+VulkanRenderContext::~VulkanRenderContext() {
+    // Safe without a wait of its own: VulkanDevice::~VulkanDevice calls waitForGpu() before it
+    // deletes this, so nothing in flight still reads the ring.
+    for (ConstantRing& r : ring_) {
+        // Explicitly, even though vkFreeMemory unmaps implicitly -- the mapping is this class's, and
+        // dropping it here keeps the pairing with the MapMemory in ringAlloc visible.
+        if (r.memory && r.mapped) dev_->api().UnmapMemory(dev_->vkDevice(), r.memory);
+        r.mapped = nullptr;
+        destroyBufferCommitted(*dev_, r.buffer, r.memory);
+        r.buffer = VK_NULL_HANDLE;
+        r.memory = VK_NULL_HANDLE;
+        r.bytes = r.used = 0;
+    }
+    destroyBufferCommitted(*dev_, zeroCB_, zeroCBMemory_);
+    zeroCB_ = VK_NULL_HANDLE;
+    zeroCBMemory_ = VK_NULL_HANDLE;
+}
+
 ConstantAllocation VulkanRenderContext::ringAlloc(const void* data, u32 bytes) {
     if (!data || bytes == 0) return {};
     const u32 f = dev_->frameIndexInFlight() < kFrameCount ? dev_->frameIndexInFlight() : 0;

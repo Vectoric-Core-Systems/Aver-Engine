@@ -1675,6 +1675,17 @@ private:
     VkBuffer expBuf_ = VK_NULL_HANDLE;  VkDeviceMemory expMemory_ = VK_NULL_HANDLE;    // the one adapted-exposure scalar
     bool expSeeded_ = false;
     VkDescriptorPool postDescriptorPool_ = VK_NULL_HANDLE;
+    // MEMBERS, NOT FILE-SCOPE STATICS, and the distinction is not stylistic. These four lived in two
+    // anonymous-namespace blocks down in VulkanDevice.cpp, which meant nothing destroyed them -- the
+    // destructor can only reach what the class owns -- so the pools, the layout and the sampler were
+    // still alive at vkDestroyDevice, the last objects the validation layer reported leaked. The
+    // second-order bug was worse than the leak: a static outlives the device that filled it, so a
+    // second VulkanDevice in one process (a device-loss recovery, a backend switch) would have found
+    // them already non-null and gone on using handles belonging to a destroyed device.
+    VkSampler postSampler_ = VK_NULL_HANDLE;
+    std::vector<VkDescriptorSet> postSets_;              // allocated from postDescriptorPool_, die with it
+    VkDescriptorPool meshGeomPool_[kFrameCount] = {};
+    VkDescriptorSetLayout meshGeomLayout_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout postSetLayout_ = VK_NULL_HANDLE;
     VkPipelineLayout postPipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline bloomPrefilterPso_ = VK_NULL_HANDLE, bloomDownPso_ = VK_NULL_HANDLE, bloomUpPso_ = VK_NULL_HANDLE;
@@ -1963,6 +1974,12 @@ private:
 class VulkanRenderContext final : public IRenderContext {
 public:
     VulkanRenderContext(VulkanDevice* dev, VulkanResourceFactory* res) : dev_(dev), res_(res) {}
+    // The context OWNS Vulkan memory -- the per-frame constant ring and the shared zero CBV -- and
+    // for a long time had no destructor at all, so all three buffers and their allocations were
+    // still alive at vkDestroyDevice. IRenderContext's destructor is virtual and VulkanDevice's own
+    // destructor deletes this through the base pointer, so the only thing that was missing was
+    // this declaration.
+    ~VulkanRenderContext() override;
 
     void setPipeline(PipelineHandle p) override;
     void setViewport(u32 x, u32 y, u32 w, u32 h) override;

@@ -42,23 +42,35 @@ available.
 
 ## What is left
 
-Fourteen validation errors, from 156, and none of them fatal. The frame presents.
+Thirteen validation errors, from 156, and none of them fatal. The frame presents, the editor draws
+on it, and `vkDestroyDevice` reports **no leaked objects**.
 
-**THE EDITOR UI DOES NOT DRAW, AND IT IS NOT A BUG IN THIS BACKEND.** The editor's interface is
-ImGui, and the only ImGui backend in this tree is `modules/rhi.d3d12.imgui`. There is no Vulkan
-equivalent, so nothing draws it — there is no error to find, because nothing is being attempted.
-Writing `modules/rhi.vulkan.imgui` is the work. The frame filling only part of the swapchain follows
-from the same gap: with no UI laying out a dockspace, `setViewportRect` keeps the editor's default
-1600x900.
+**THE EDITOR UI DRAWS.** It did not until `modules/rhi.vulkan.imgui` existed, and the paragraph that
+used to sit here explaining why was correct at the time: the editor's interface is ImGui, the only
+ImGui backend in this tree was `modules/rhi.d3d12.imgui`, and nothing was attempting to draw. That
+module is now written, so menus, toolbar, World Outliner, Details, the dockspace and the 3D viewport
+all come up. The swapchain is filled too -- that symptom was the same gap, since with no UI laying
+out a dockspace `setViewportRect` kept the editor's default 1600x900.
 
 **The rest**
 
-- **9 of the 14** are the bind-map fallback shaders — `gInstanceWorlds` at `t17` and `MSVoxel`'s
-  `gVerts`/`gIndices`/`MeshCB` — because `GraphicsPipelineDesc::instanced` and feature-module mesh
-  geometry are both unimplemented here. See the fallback note below.
+- **9 of the 13** are the bind-map fallback shaders -- 7 on the mesh stage (`MSVoxel`'s
+  `gVerts`/`gIndices`/`MeshCB`) and 2 on the vertex stage (`gInstanceWorlds` at `t17`) -- because
+  `GraphicsPipelineDesc::instanced` and feature-module mesh geometry are both unimplemented here.
+  See the fallback note below.
 - **2** are a copy source created without the usage flag `vkCmdCopyBuffer` wants.
-- **1** image-layout expectation at `vkQueueSubmit2`, and **13 leaked objects** at
-  `vkDestroyDevice`.
+- **1** image-layout expectation at `vkQueueSubmit2`.
+- **1** is not an error at all: the layer's own notice that a VUID hit `duplicate_message_limit`.
+
+**Nothing leaks at teardown**, which took four separate fixes and is worth recording because three of
+them were the same mistake. `~VulkanDevice` did not call `uiShutdown()` (so the toolkit's objects
+outlived the device -- the loader said `vkDestroyBuffer: Invalid device`); the factory's shutdown
+sweep freed each shader's module but not its per-layout **variants**; `VulkanRenderContext` had **no
+destructor at all**, so its two constant rings and the shared zero CBV simply stayed; and four
+device-owned handles sat in anonymous-namespace statics where no destructor could reach them. That
+last one is the pattern to watch: a file-scope `g_` holding a `Vk` handle is not just a leak, it also
+outlives the device that filled it, so a second `VulkanDevice` in one process would find it non-null
+and use a handle belonging to a destroyed device.
 
 ## Descriptor lifetime: done, and how
 

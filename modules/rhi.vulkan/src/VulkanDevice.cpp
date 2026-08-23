@@ -897,11 +897,32 @@ bool VulkanDevice::init(const DeviceDesc& desc) {
 }
 
 VulkanDevice::~VulkanDevice() {
+    // THE UI TOOLKIT FIRST, and unconditionally -- exactly as ~D3D12Device does, and for a reason
+    // that is invisible until it is missing. Without this the toolkit's own Vulkan objects (its
+    // descriptor pool, font atlas, and the vertex/index buffers it rings per frame) are not
+    // destroyed here at all: they die later, with the backend object Sandbox owns, which by then is
+    // calling into a VkDevice that no longer exists. The loader says so --
+    //     [Vulkan Loader] ERROR: vkDestroyBuffer: Invalid device
+    // -- and the layer counts every one of them as leaked at vkDestroyDevice (40, against 13 before
+    // a UI backend existed). uiShutdown waits for the GPU itself, so this is safe as the first act
+    // of teardown.
+    uiShutdown();
     waitForGpu();
     delete rhiContext_;
     delete rhiFactory_;
 
     releasePostTargets();
+    // postSets_ come OUT of postDescriptorPool_, so the pool destroy below takes them all; the
+    // vector just must not keep naming them afterwards.
+    postSets_.clear();
+    if (postSampler_) api_.DestroySampler(device_, postSampler_, nullptr);
+    postSampler_ = VK_NULL_HANDLE;
+    for (VkDescriptorPool& p : meshGeomPool_) {
+        if (p) api_.DestroyDescriptorPool(device_, p, nullptr);
+        p = VK_NULL_HANDLE;
+    }
+    if (meshGeomLayout_) api_.DestroyDescriptorSetLayout(device_, meshGeomLayout_, nullptr);
+    meshGeomLayout_ = VK_NULL_HANDLE;
     if (postDescriptorPool_) api_.DestroyDescriptorPool(device_, postDescriptorPool_, nullptr);
     if (postSetLayout_) api_.DestroyDescriptorSetLayout(device_, postSetLayout_, nullptr);
     if (postPipelineLayout_) api_.DestroyPipelineLayout(device_, postPipelineLayout_, nullptr);
@@ -1353,7 +1374,6 @@ bool VulkanDevice::createPipeline() {
 // 6. Mesh shaders. See patchPushConstants' own comment for why b1+b5 merge into one push-constant
 //    block, and dispatchMesh's for why gVerts/gIndices cannot follow the same road.
 // ================================================================================================
-namespace { VkDescriptorPool g_meshGeomPool[kFrameCount] = {}; VkDescriptorSetLayout g_meshGeomLayout = VK_NULL_HANDLE; }
 
 bool VulkanDevice::initMeshShaders() {
     msSupported_ = false;
@@ -1379,7 +1399,7 @@ bool VulkanDevice::initMeshShaders() {
     // StructuredBuffer<MeshVtx>/ByteAddressBuffer declarations always lower to descriptor-bound
     // resources in DXC's SPIR-V backend, with no HLSL spelling in the un-annotated prelude that
     // makes one a bare pointer instead.
-    if (!g_meshGeomLayout) {
+    if (!meshGeomLayout_) {
         VkDescriptorSetLayoutBinding binds[2] = {};
         binds[0].binding = kMeshSrvBase; binds[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         binds[0].descriptorCount = 1; binds[0].stageFlags = VK_SHADER_STAGE_MESH_BIT_EXT;
@@ -1387,20 +1407,20 @@ bool VulkanDevice::initMeshShaders() {
         binds[1].descriptorCount = 1; binds[1].stageFlags = VK_SHADER_STAGE_MESH_BIT_EXT;
         VkDescriptorSetLayoutCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
         ci.bindingCount = 2; ci.pBindings = binds;
-        if (!vkOk(api_.CreateDescriptorSetLayout(device_, &ci, nullptr, &g_meshGeomLayout), "mesh geometry set layout")) return false;
+        if (!vkOk(api_.CreateDescriptorSetLayout(device_, &ci, nullptr, &meshGeomLayout_), "mesh geometry set layout")) return false;
     }
     for (u32 i = 0; i < kFrameCount; ++i) {
-        if (g_meshGeomPool[i]) continue;
+        if (meshGeomPool_[i]) continue;
         VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 256};
         VkDescriptorPoolCreateInfo pci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         pci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
         pci.maxSets = 128; pci.poolSizeCount = 1; pci.pPoolSizes = &size;
-        if (!vkOk(api_.CreateDescriptorPool(device_, &pci, nullptr, &g_meshGeomPool[i]), "mesh geometry pool")) return false;
+        if (!vkOk(api_.CreateDescriptorPool(device_, &pci, nullptr, &meshGeomPool_[i]), "mesh geometry pool")) return false;
     }
 
     if (!meshPipelineLayout_) {
         if (!emptySetLayout_) emptySetLayout_ = makeEmptySetLayout(api_, device_);
-        VkDescriptorSetLayout sets[kVkSetConstants + 1] = {g_meshGeomLayout, emptySetLayout_, sceneFrameSetLayout_};
+        VkDescriptorSetLayout sets[kVkSetConstants + 1] = {meshGeomLayout_, emptySetLayout_, sceneFrameSetLayout_};
         // Merged push-constant range: object bytes [0,128) then the mesh count block right after --
         // see patchPushConstants for why they are ONE HLSL block, not two.
         VkPushConstantRange pc{VK_SHADER_STAGE_ALL, 0, PushConstantLayout::kObjectBytes + 16};
@@ -1507,8 +1527,8 @@ void VulkanDevice::dispatchMesh(const GpuMesh& m) {
     const u32 tris = m.indexCount / 3;
     if (!tris || !m.vb || !m.ib) return;
     VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    dai.descriptorPool = g_meshGeomPool[frameIndex_];
-    dai.descriptorSetCount = 1; dai.pSetLayouts = &g_meshGeomLayout;
+    dai.descriptorPool = meshGeomPool_[frameIndex_];
+    dai.descriptorSetCount = 1; dai.pSetLayouts = &meshGeomLayout_;
     VkDescriptorSet set = VK_NULL_HANDLE;
     if (api_.AllocateDescriptorSets(device_, &dai, &set) != VK_SUCCESS) {
         AVER_ERROR("[RHI.Vulkan] mesh-geometry descriptor pool exhausted for this frame; dropping a mesh-shader draw");
@@ -2400,7 +2420,7 @@ void VulkanDevice::beginFrame() {
     ++frameSerial_;
     frameIndex_ = (frameIndex_ + 1) % kFrameCount;
     waitTimeline(frameTimelineValues_[frameIndex_]);
-    if (g_meshGeomPool[frameIndex_]) api_.ResetDescriptorPool(device_, g_meshGeomPool[frameIndex_], 0);
+    if (meshGeomPool_[frameIndex_]) api_.ResetDescriptorPool(device_, meshGeomPool_[frameIndex_], 0);
 
     api_.ResetCommandBuffer(commandBuffers_[frameIndex_], 0);
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -2749,7 +2769,6 @@ void VulkanDevice::resize(u32 w, u32 h) {
 //     ONCE per resize and never touching them again for the rest of that resize generation is not
 //     just simplest here, it is the one shape that sidesteps that hazard entirely.
 // ================================================================================================
-namespace { VkSampler g_postSampler = VK_NULL_HANDLE; std::vector<VkDescriptorSet> g_postSets; }
 
 // The post chain's explicit register map, at FILE scope because BOTH createPostPipelines and
 // createPostTargets compile these same shaders and must map them identically -- two copies that
@@ -2801,13 +2820,13 @@ bool VulkanDevice::createPostPipelines() {
     // and gPostHist at 2/4, exactly as kPostBinds asks. The compiler was doing its job; the pool was
     // not.
 
-    if (!g_postSampler) {
+    if (!postSampler_) {
         VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
         si.magFilter = VK_FILTER_LINEAR; si.minFilter = VK_FILTER_LINEAR;
         si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
         si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
         si.maxLod = VK_LOD_CLAMP_NONE;
-        if (!vkOk(api_.CreateSampler(device_, &si, nullptr, &g_postSampler), "post sampler")) return false;
+        if (!vkOk(api_.CreateSampler(device_, &si, nullptr, &postSampler_), "post sampler")) return false;
     }
     if (!postSetLayout_) {
         // SEVEN, not six: t0/t1 are SAMPLED_IMAGE and s0 is its own immutable SAMPLER at binding 6,
@@ -2820,7 +2839,7 @@ bool VulkanDevice::createPostPipelines() {
         binds[3] = {3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_ALL, nullptr};
         binds[4] = {4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_ALL, nullptr};
         binds[5] = {5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_ALL, nullptr};
-        binds[6] = {6, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_ALL, &g_postSampler};
+        binds[6] = {6, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_ALL, &postSampler_};
         VkDescriptorSetLayoutCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
         // SEVEN. The array above has seven entries and this said six, so the immutable sampler at
         // binding 6 was built and then never handed to Vulkan -- the layout simply did not contain
@@ -2842,7 +2861,7 @@ bool VulkanDevice::createPostPipelines() {
         VkDescriptorPoolSize sizes[4] = {
             // EVERY COUNT IS PER FRAME IN FLIGHT, and it did not used to be. The allocation below
             // asks for `kFrameCount * kPostSlotCount` sets (one chain per frame in flight, see
-            // g_postSets), while this pool was sized for kPostSlotCount -- exactly HALF. That makes
+            // postSets_), while this pool was sized for kPostSlotCount -- exactly HALF. That makes
             // vkAllocateDescriptorSets return VK_ERROR_OUT_OF_POOL_MEMORY, and the sets that were
             // never allocated stay VK_NULL_HANDLE and are then bound anyway.
             //
@@ -2997,7 +3016,7 @@ void VulkanDevice::releasePostTargets() {
     }
     sceneColorTexW_ = sceneColorTexH_ = presentHdrTexW_ = presentHdrTexH_ = 0;
     if (postDescriptorPool_) api_.ResetDescriptorPool(device_, postDescriptorPool_, 0);   // safe: waitForGpu() always precedes this (resize/setSampleCount)
-    g_postSets.clear();
+    postSets_.clear();
     bloomMips_ = bloomW_ = bloomH_ = 0;
     postReady_ = false;
 }
@@ -3186,15 +3205,15 @@ bool VulkanDevice::createPostTargets() {
     // exists to avoid.
     VkImageView sceneView = sceneResolvedView_ ? sceneResolvedView_ : msaaColorView_;
     const u32 totalSlots = kFrameCount * kPostSlotCount;
-    g_postSets.assign(totalSlots, VK_NULL_HANDLE);
+    postSets_.assign(totalSlots, VK_NULL_HANDLE);
     std::vector<VkDescriptorSetLayout> layouts(totalSlots, postSetLayout_);
     VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     dai.descriptorPool = postDescriptorPool_;
     dai.descriptorSetCount = totalSlots; dai.pSetLayouts = layouts.data();
-    if (!vkOk(api_.AllocateDescriptorSets(device_, &dai, g_postSets.data()), "post descriptor sets")) return false;
+    if (!vkOk(api_.AllocateDescriptorSets(device_, &dai, postSets_.data()), "post descriptor sets")) return false;
 
     auto writeSlot = [&](u32 fi, u32 slot, VkImageView t0, VkImageView t1, bool expAtT2) {
-        VkDescriptorSet set = g_postSets[fi * kPostSlotCount + slot];
+        VkDescriptorSet set = postSets_[fi * kPostSlotCount + slot];
         VkDescriptorBufferInfo ringInfo{postRing_[fi].buffer, 0, sizeof(PostCB)};
         VkDescriptorImageInfo t0i{VK_NULL_HANDLE, t0, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
         VkDescriptorImageInfo t1i{VK_NULL_HANDLE, t1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
@@ -3271,10 +3290,10 @@ ConstantAllocation VulkanDevice::postConstants(const void* data, u32 bytes) {
         // slot at the (moved) ring buffer -- createPostPipelines() sizes the ring at kRhiRingBytes
         // up front precisely so this almost never has to run; see this function's own opening note.
         const u32 base = frameIndex_ * kPostSlotCount;
-        for (u32 slot = 0; slot < kPostSlotCount && base + slot < g_postSets.size(); ++slot) {
+        for (u32 slot = 0; slot < kPostSlotCount && base + slot < postSets_.size(); ++slot) {
             VkDescriptorBufferInfo bi{ring.buffer, 0, sizeof(PostCB)};
             VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-            w.dstSet = g_postSets[base + slot]; w.dstBinding = 0; w.descriptorCount = 1;
+            w.dstSet = postSets_[base + slot]; w.dstBinding = 0; w.descriptorCount = 1;
             w.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC; w.pBufferInfo = &bi;
             api_.UpdateDescriptorSets(device_, 1, &w, 0, nullptr);
         }
@@ -3312,7 +3331,7 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
 
     VkCommandBuffer cmd = commandBuffers_[frameIndex_];
     const u32 setBase = frameIndex_ * kPostSlotCount;
-    auto slotSet = [&](u32 slot) { return g_postSets[setBase + slot]; };
+    auto slotSet = [&](u32 slot) { return postSets_[setBase + slot]; };
 
     if (!postReady_ && !createPostTargets()) {
         static bool said = false;
