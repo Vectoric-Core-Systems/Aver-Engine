@@ -52,6 +52,56 @@ VAR shotsFired float 0
 # where the view actually exists, which is tick 2 in practice and would be tick 1 if that ever changed.
 VAR gunAttached float 0
 
+# ---- THE BODY: a COMP record, not a CLASS `mesh=` attribute ------------------------------------------
+# `CLASS ... mesh=` (see AN_FPGun.ocgraph) can give the class's OWN entity ONE CMeshRenderer and
+# nothing else -- ClassBuilder.Mesh is the entire surface, and it has no Skeleton() method, so a rig
+# reaches the scene only through GraphComponentTree's `COMP <id> SkeletalMesh` kind (see
+# GraphComponentTree.cs's ApplyKind: it is the one path that also writes CSkeletalMesh.skeleton).
+# That is not a stylistic choice made here -- it is the only wiring this codebase has for a skinned
+# part, and no .ocgraph in the tree had exercised it before this one. The gun's simpler CLASS-line
+# form stays exactly as it is; the player's body needs the form the gun's does not.
+#
+# NO `pos=`/`rot=` OVERRIDE, and that is measured, not assumed: Character.ocmesh's own AABB (read
+# with loadOcMesh straight off the imported file) has its feet within 0.03cm of Y=Z=local origin on
+# every horizontal axis --
+#   boundsMin=(-5142.353,-18090.502,6.841)  boundsMax=(5339.085,18095.326,37653.703)  [pre-scale units]
+# -- centred on X and Y to within half a centimetre after the scale below, and its lowest point
+# (the feet) sits 0.03cm off Z=0. A COMP with no pos=/rot= parents at the character entity's own
+# origin, which is Character.cs's capsule FOOT plane (Height=180, "capsule spans feet+0 to feet+180",
+# Character.cs:62) -- so the unscaled mesh already stands feet-down, centred on the capsule's own
+# vertical axis, with nothing to correct but its size.
+#
+# THE SCALE, measured the same way AN_FPGun.ocgraph's gunScale comment measures Blaster.ocmesh's,
+# because eyeballing this one would have been worse than eyeballing that one: Character_Idle.glb
+# reports this rig's joints as `matrix` nodes rather than TRS (GltfImport.cpp's importSkins notes
+# this and falls back to an identity rest pose -- harmless for a STATIC bind-pose render, since a
+# bone's re-derived inverse-bind is then also identity and the skin transform cancels to identity
+# for every vertex regardless of which joint(s) it is weighted to; it would matter the day this rig
+# is ever driven by a real animation clip, which today it is not -- see AN_FPCharacter's own
+# provenance note below), so nothing about the rig's declared units could be trusted by inspection
+# either. What the raw AABB says is unambiguous, though: boundsMax.z - boundsMin.z = 37646.862
+# UNSCALED UNITS for a mesh whose two horizontal extents are comparably huge -- not a small, believable
+# number times 100 (the ordinary glTF-metres-to-engine-cm factor), which is what made this worth
+# measuring rather than assuming "must be the usual 100x". Scaling so that span becomes the capsule's
+# own 180cm (Character.cs:62 again -- the SAME constant the gun's own comment already treats as the
+# character's authoritative height) gives scale = 180 / 37646.862 = 0.0047813. Checked against the
+# OTHER two axes at that scale: 10481.438 unscaled -> 50.1cm (chest-to-back depth, plausible for a
+# stylised game character) and 36185.828 unscaled -> 173.0cm (arm-to-arm span in this rig's A-pose,
+# which for a human is close to standing height) -- both land somewhere a real body would, which a
+# wrong scale hypothesis would not have produced on TWO independent axes by chance.
+#
+# PROVENANCE: Character.ocmesh/.ocskel are Kenney's CC0 "Animated Characters Survivors" pack (see
+# Meshes/Character_LICENSE.txt and Meshes/SOURCES.md), converted FBX -> glTF2/GLB for this importer,
+# which reads .gltf/.glb only. THE PACK'S ANIMATION CLIPS ARE NOT IMPORTED: Character_Idle/Run/Jump.glb
+# were exported with zero meshes (animation-only files), and GltfImport.cpp's Gltf::run refuses any
+# file with no meshes outright ("glTF: the file contains no meshes", checked before skins or
+# animations are ever read) -- so there was no cross-file bone-index question to resolve here at all;
+# the importer's own hard gate settled it before the rig-matching question could even be asked. The
+# character therefore stands in its imported bind pose, not idling or walking -- a static, correctly
+# proportioned body being the honest deliverable today, not an animated one this importer cannot
+# produce from these particular source files without changes out of scope for a content pass.
+COMP body SkeletalMesh mesh=Meshes/Character.ocmesh material=M_Character skeleton=Skeletons/Character.ocskel scale=0.0047813,0.0047813,0.0047813
+
 # ---- CANVAS REGIONS ------------------------------------------------------------------------
 # One box per concern, and the node coordinates below are grouped to match.
 #

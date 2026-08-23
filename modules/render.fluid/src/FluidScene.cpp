@@ -263,6 +263,11 @@ rhi::MeshHandle FluidScene::drawHandle(FluidHandle h) const {
     return it == live_.end() ? 0 : it->second.drawMesh;
 }
 
+int32_t FluidScene::physicsBody(FluidHandle h) const {
+    const auto it = live_.find(h);
+    return it == live_.end() ? 0 : it->second.body;
+}
+
 void FluidScene::prePass(rhi::IRenderContext& ctx) {
     if (!ready_ || live_.empty()) return;
     for (auto& kv : live_) {

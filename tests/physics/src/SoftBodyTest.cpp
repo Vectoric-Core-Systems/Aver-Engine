@@ -346,6 +346,28 @@ static void testHandleContract() {
           "skinning an UNSKINNED soft body is refused rather than asserting inside Jolt");
     check(aver_phys_softbody_skin(rigid, palette, 1, 1) == 0, "and skinning a rigid body is refused");
 
+    // aver_phys_softbody_apply_impulse -- the same bad-input discipline as every call above it, plus
+    // the two parameters unique to this one: a non-positive radius (an empty or inverted query sphere
+    // has nothing to nudge) and the null-pointer pair a caller could hand in by mistake.
+    const float zero3[3] = {0.0f, 0.0f, 0.0f};
+    check(aver_phys_softbody_apply_impulse(rigid, zero3, 100.0f, zero3, 1.0f) == 0,
+          "apply_impulse on a rigid body is refused, same as skin/vertices above");
+    check(aver_phys_softbody_apply_impulse(999999, zero3, 100.0f, zero3, 1.0f) == 0,
+          "and on a dead handle");
+    check(aver_phys_softbody_apply_impulse(soft, zero3, 0.0f, zero3, 1.0f) == 0,
+          "a zero radius catches nothing rather than being treated as unbounded");
+    check(aver_phys_softbody_apply_impulse(soft, zero3, -50.0f, zero3, 1.0f) == 0,
+          "neither does a negative one");
+    check(aver_phys_softbody_apply_impulse(soft, nullptr, 100.0f, zero3, 1.0f) == 0,
+          "a null centre pointer is refused rather than dereferenced");
+    check(aver_phys_softbody_apply_impulse(soft, zero3, 100.0f, nullptr, 1.0f) == 0,
+          "so is a null velocity pointer");
+    // The grid's own vertices sit at z = 50 (see makeGrid's call above), all within 100 cm of the
+    // origin horizontally for at least the centre one -- a real, positive count, not just "not zero"
+    // by coincidence of the failure checks above returning zero too.
+    check(aver_phys_softbody_apply_impulse(soft, zero3, 1000.0f, zero3, 1.0f) > 0,
+          "a valid call against a real soft body actually finds and nudges vertices");
+
     check(aver_phys_softbody_create(nullptr, 4, g.indices.data(), 6, nullptr, 0,0,0, 0,0) == 0,
           "null vertices are refused");
     check(aver_phys_softbody_create(g.verts.data(), g.count(), g.indices.data(), 0, nullptr, 0,0,0, 0,0) == 0,
@@ -427,6 +449,424 @@ static void testPressureHoldsAShellUp() {
     aver_phys_shutdown();
 }
 
+// ---- does the pool react when the player walks through it? ----------------------------------------
+//
+// THE QUESTION THIS FILE ANSWERS EMPIRICALLY, in two tests. Short version: NO -- not through the
+// passive path, not today. Long version below, and in the two tests' own comments.
+//
+// aver_phys_character_create does not hand Jolt a rigid body this module drives directly -- it builds a
+// JPH::CharacterVirtual, which keeps its OWN position (advanced by ExtendedUpdate, called once per fixed
+// step from PhysicsWorld's loop, BEFORE PhysicsSystem::Update runs) and TELEPORTS a companion kinematic
+// JPH::Body to match every step via UpdateInnerBodyTransform -> BodyInterface::SetPositionAndRotation.
+// That inner body is what a soft body's own solver would have to see for the pool to react.
+//
+// Two SEPARATE Jolt mechanisms are in play here, and the measurements below show they are NOT
+// symmetric:
+//
+//   (1) THE CHARACTER'S OWN COLLISION AGAINST THE POOL. CharacterVirtual::MoveShape (called from
+//       ExtendedUpdate) does an ordinary narrow-phase shape query, and SoftBodyShape.cpp's sRegister()
+//       DOES wire up a general Convex-vs-SoftBody dispatch (sCollideConvexVsSoftBody /
+//       sCastConvexVsSoftBody) built directly from the pool's LIVE, currently-deformed vertex
+//       positions -- not a stale snapshot. This path works: testCharacterEmbeddedInPoolDoesNotMoveIt
+//       below drops a character dead centre in the pool and watches Jolt eject it by tens of
+//       centimetres, exactly as if the pool were solid ground.
+//
+//   (2) THE POOL'S OWN VERTICES REACTING TO THE CHARACTER. This is the ENTIRELY SEPARATE path a soft
+//       body uses for ITS OWN update: SoftBodyMotionProperties::DetermineCollidingShapes broadphase-
+//       queries for nearby rigid bodies and calls THEIR shape's CollideSoftBodyVertices to push the
+//       pool's own particles out. Both tests below measure this side and find NOTHING: a pool vertex
+//       sitting deep inside the character's capsule for two full seconds ends up displaced by LESS than
+//       the pool's own natural settling jiggle over the same span with no character present at all --
+//       and a character actually driven across the pool with aver_phys_character_set_velocity (the
+//       exact call AverCharacter.Drive makes every tick) produces a result INDISTINGUISHABLE from a
+//       character that never moved.
+//
+// WHAT THIS RULES OUT, with a measurement rather than a guess for each:
+//   - wrong object layer: ruled out by reading -- Layers::MOVING vs MOVING is unconditionally permitted
+//     by both ObjectLayerPairFilter and ObjectVsBroadPhaseFilter in PhysicsWorld.cpp, on both sides.
+//   - a capsule too small or too shallow to reach the pool: ruled out by MEASUREMENT --
+//     testCharacterEmbeddedInPoolDoesNotMoveIt places a 40 cm-radius capsule dead centre in the settled
+//     pool and confirms (as a precondition, not an assumption) that a real pool vertex starts well
+//     inside it.
+//   - a kinematic inner body never getting a velocity Jolt can read: this explains why the DYNAMIC-only
+//     branch at SoftBodyMotionProperties.cpp:216 never fires, but NOT the missing reaction, because the
+//     positional correction that follows it (`v.mPosition += contact_normal * projected_distance`,
+//     same file ~line 733) fires unconditionally for ANY colliding shape, no velocity required -- and
+//     the embedded-character test still finds nothing, which this alone cannot explain.
+//   - a contact listener silently rejecting the contact: there isn't one. PhysicsWorld.cpp only ever
+//     installs a JPH::ContactListener (for ordinary rigid contacts); it never calls
+//     PhysicsSystem::SetSoftBodyContactListener, so SoftBodyUpdateContext::mContactListener is null and
+//     DetermineCollidingShapes' `if (mContext.mContactListener == nullptr)` branch -- the fully
+//     permissive one -- is the one that always runs.
+//
+// What is left, and is NOT ruled out by anything measurable through this ABI: DetermineCollidingShapes'
+// own broadphase query (SoftBodyMotionProperties.cpp:253, `GetBroadPhaseQuery().CollideAABox(...)`)
+// appears to never return the character's inner BodyID as a hit, for a reason this test cannot see from
+// outside Jolt -- everything the ABI can inspect (layers, filters, listeners, geometry, sleep state:
+// CharacterVirtual explicitly sets `mAllowSleeping = false` on the inner body) comes back clean. That is
+// the honest boundary of what a black-box ABI test can diagnose; the next step would be instrumenting
+// Jolt itself, which is out of scope here.
+
+// The maximal, timing-free version of the question: drop a character CENTRED on a settled pool, deep
+// enough that a real vertex starts inside its capsule, and hold it there -- no sweep, no "did it arrive
+// in time", nothing left to explain away.
+static void testCharacterEmbeddedInPoolDoesNotMoveIt() {
+    AVER_INFO("-- a character embedded dead centre in the pool: does the pool feel it? --");
+    check(aver_phys_init() == 1, "physics started");
+    check(aver_phys_add_static_box(0, 0, -10, 800, 800, 10) != 0, "a static floor exists, top at z = 0");
+
+    // Same pool proportions as testPressureHoldsAShellUp, for the same reason given there.
+    const float hx = 300.0f, hy = 200.0f, hz = 60.0f;
+    const int32_t nx = 8, ny = 8, nz = 4;
+    const Shell s = makeBoxShell(hx, hy, hz, nx, ny, nz);
+    const float pressure = 0.6f * 1.0e-4f * 2.0f * 980.0f * hz * (nx + 1) * (ny + 1);
+    const int32_t body = aver_phys_softbody_create(
+        s.verts.data(), s.count(), s.indices.data(), static_cast<int32_t>(s.indices.size()),
+        nullptr, 0.0f, 0.0f, hz + 5.0f, 1.0e-4f, pressure);
+    check(body != 0, "the pool was created");
+    step(3.0f);   // settle before anything else exists.
+
+    std::vector<float> before(static_cast<size_t>(s.count()) * 3, 0.0f);
+    check(aver_phys_softbody_vertices(body, before.data(), s.count()) == s.count(), "settled positions read back");
+
+    // Whichever settled vertex sits closest to the pool's own centre -- found, not assumed, so this
+    // test cannot go quietly vacuous if the shell's own tessellation ever changes.
+    const float cx = 0.0f, cy = 0.0f, cz = hz + 5.0f;
+    int32_t nearestIdx = -1; float nearestDist = 1e9f;
+    for (int32_t i = 0; i < s.count(); ++i) {
+        const float dx = before[static_cast<size_t>(i) * 3 + 0] - cx;
+        const float dy = before[static_cast<size_t>(i) * 3 + 1] - cy;
+        const float dz = before[static_cast<size_t>(i) * 3 + 2] - cz;
+        const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (d < nearestDist) { nearestDist = d; nearestIdx = i; }
+    }
+
+    // 40 cm radius, 100 cm tall, centred on the pool -- big enough relative to the pool's own 300 cm
+    // half-width that missing every vertex would mean the shell itself is broken, not this test.
+    const int32_t ch = aver_phys_character_create(40.0f, 100.0f, cx, cy, cz);
+    check(ch != 0, "the character was created, embedded, at the pool's centre");
+    check(nearestDist < 40.0f,
+          "and confirmed embedded for real -- the nearest pool vertex started " +
+          std::to_string(nearestDist) + " cm from the capsule's centre, inside its 40 cm radius");
+
+    step(2.0f);   // held there, motionless, for two full seconds.
+
+    std::vector<float> after(static_cast<size_t>(s.count()) * 3, 0.0f);
+    aver_phys_softbody_vertices(body, after.data(), s.count());
+    const float vBx = before[static_cast<size_t>(nearestIdx) * 3 + 0];
+    const float vBy = before[static_cast<size_t>(nearestIdx) * 3 + 1];
+    const float vBz = before[static_cast<size_t>(nearestIdx) * 3 + 2];
+    const float vAx = after[static_cast<size_t>(nearestIdx) * 3 + 0];
+    const float vAy = after[static_cast<size_t>(nearestIdx) * 3 + 1];
+    const float vAz = after[static_cast<size_t>(nearestIdx) * 3 + 2];
+    const float vertexMoved = std::sqrt((vAx - vBx) * (vAx - vBx) + (vAy - vBy) * (vAy - vBy) +
+                                        (vAz - vBz) * (vAz - vBz));
+
+    float chAfter[3] = {0, 0, 0};
+    aver_phys_character_position(ch, chAfter);
+    const float characterDrift = std::sqrt((chAfter[0] - cx) * (chAfter[0] - cx) +
+                                           (chAfter[1] - cy) * (chAfter[1] - cy) +
+                                           (chAfter[2] - cz) * (chAfter[2] - cz));
+    aver_phys_shutdown();
+
+    // PAIRED CONTROL: identical pool, identical settle, identical hold -- no character. What the SAME
+    // vertex does entirely on its own, so "did the character move it" has a real number to beat.
+    check(aver_phys_init() == 1, "physics started (control)");
+    check(aver_phys_add_static_box(0, 0, -10, 800, 800, 10) != 0, "floor (control)");
+    const int32_t bodyCtrl = aver_phys_softbody_create(
+        s.verts.data(), s.count(), s.indices.data(), static_cast<int32_t>(s.indices.size()),
+        nullptr, 0.0f, 0.0f, hz + 5.0f, 1.0e-4f, pressure);
+    step(3.0f);
+    std::vector<float> beforeCtrl(static_cast<size_t>(s.count()) * 3, 0.0f);
+    aver_phys_softbody_vertices(bodyCtrl, beforeCtrl.data(), s.count());
+    step(2.0f);
+    std::vector<float> afterCtrl(static_cast<size_t>(s.count()) * 3, 0.0f);
+    aver_phys_softbody_vertices(bodyCtrl, afterCtrl.data(), s.count());
+    const float cBx = beforeCtrl[static_cast<size_t>(nearestIdx) * 3 + 0];
+    const float cBy = beforeCtrl[static_cast<size_t>(nearestIdx) * 3 + 1];
+    const float cBz = beforeCtrl[static_cast<size_t>(nearestIdx) * 3 + 2];
+    const float cAx = afterCtrl[static_cast<size_t>(nearestIdx) * 3 + 0];
+    const float cAy = afterCtrl[static_cast<size_t>(nearestIdx) * 3 + 1];
+    const float cAz = afterCtrl[static_cast<size_t>(nearestIdx) * 3 + 2];
+    const float controlVertexMoved = std::sqrt((cAx - cBx) * (cAx - cBx) + (cAy - cBy) * (cAy - cBy) +
+                                               (cAz - cBz) * (cAz - cBz));
+    aver_phys_shutdown();
+
+    AVER_INFO("  embedded pool vertex moved {} cm in 2s; the SAME vertex with no character moved {} cm on its own",
+              vertexMoved, controlVertexMoved);
+    AVER_INFO("  the character itself drifted {} cm from where it was dropped (proves real geometric overlap)",
+              characterDrift);
+
+    // ASYMMETRY, MEASURED. The character reacts to the pool -- Jolt's general shape-cast collision
+    // (mechanism (1) in this section's opening comment) ejects it from the overlap by many times its
+    // own capsule radius. But the pool's own vertex, sitting the whole time inside that same capsule,
+    // moves NO MORE than it would have moved on its own with no character there at all: this is
+    // TODAY'S REAL BEHAVIOUR, not a guess, and this assertion is what would fail the day it changes.
+    check(characterDrift > 10.0f,
+          "the character was visibly ejected by the overlap, so the two shapes genuinely touched (" +
+          std::to_string(characterDrift) + " cm)");
+    check(vertexMoved < controlVertexMoved + 5.0f,
+          "AS OF TODAY: the pool vertex embedded inside the character moved no more than the pool's own "
+          "natural jiggle explains (" + std::to_string(vertexMoved) + " cm vs " +
+          std::to_string(controlVertexMoved) + " cm unperturbed) -- the soft body's own collision solver "
+          "is not reacting to the character at all. If this ever fails, the passive path started "
+          "working: flip this assertion to require vertexMoved to clear the capsule's own radius, the "
+          "way testPressureHoldsAShellUp pins its own two ends.");
+}
+
+// The realistic version: the actual gameplay call (aver_phys_character_set_velocity, exactly what
+// AverCharacter.Drive calls every tick) driving a character across the pool, control-vs-treatment
+// against a character that exists but never moves -- same discipline as testPressureHoldsAShellUp.
+static void runSweepPass(bool moveThrough, float* outMaxDispCm, float* outMeanDispCm, float* outFinalX) {
+    check(aver_phys_init() == 1, "physics started");
+    check(aver_phys_add_static_box(0, 0, -10, 800, 800, 10) != 0, "a static floor exists, top at z = 0");
+
+    const float hx = 300.0f, hy = 200.0f, hz = 60.0f;
+    const int32_t nx = 8, ny = 8, nz = 4;
+    const Shell s = makeBoxShell(hx, hy, hz, nx, ny, nz);
+    const float pressure = 0.6f * 1.0e-4f * 2.0f * 980.0f * hz * (nx + 1) * (ny + 1);
+    const int32_t body = aver_phys_softbody_create(
+        s.verts.data(), s.count(), s.indices.data(), static_cast<int32_t>(s.indices.size()),
+        nullptr, 0.0f, 0.0f, hz + 5.0f, 1.0e-4f, pressure);
+    check(body != 0, "the pool was created");
+
+    step(3.0f);   // settle under gravity + pressure BEFORE the character exists, so everything the
+                  // after-minus-before diff below finds can only be the character's own wake, not
+                  // leftover settling motion the pool would have had anyway.
+
+    std::vector<float> before(static_cast<size_t>(s.count()) * 3, 0.0f);
+    check(aver_phys_softbody_vertices(body, before.data(), s.count()) == s.count(),
+          "settled positions read back");
+
+    // Standing height: capsule centre 90 cm up puts a 180 cm-tall, 25 cm-radius capsule's feet exactly
+    // on the floor and its head 90 cm above that -- comfortably taller than the pool is deep at any
+    // point along its settle, so "did the capsule reach deep enough" is not a variable this run has to
+    // account for (and testCharacterEmbeddedInPoolDoesNotMoveIt above measures that question directly
+    // anyway). Started 150 cm outside the pool's -X wall, floor sized generously so a full-speed
+    // crossing never runs the character off the edge.
+    const int32_t ch = aver_phys_character_create(25.0f, 180.0f, -(hx + 150.0f), 0.0f, 90.0f);
+    check(ch != 0, "the character was created");
+    if (moveThrough)
+        check(aver_phys_character_set_velocity(ch, 250.0f, 0.0f, 0.0f) == 1,
+              "given a walking velocity aimed at the pool -- aver_phys_character_set_velocity, exactly "
+              "what AverCharacter.Drive calls every tick");
+    // else: left at its default (0,0,0) -- THE CONTROL. Same character, same broadphase-visible inner
+    // body sitting in the same spot, just never told to move.
+
+    step(4.0f);   // at 250 cm/s (a jog) this crosses the pool's 600 cm width with 150 cm of clearance to
+                  // enter and leave on, so by the end it is a clean pass all the way through and out.
+
+    float chPos[3] = {0, 0, 0};
+    aver_phys_character_position(ch, chPos);
+    if (outFinalX) *outFinalX = chPos[0];
+
+    std::vector<float> after(static_cast<size_t>(s.count()) * 3, 0.0f);
+    aver_phys_softbody_vertices(body, after.data(), s.count());
+
+    float maxDisp = 0.0f, sumDisp = 0.0f;
+    for (int32_t i = 0; i < s.count(); ++i) {
+        const float dx = after[static_cast<size_t>(i) * 3 + 0] - before[static_cast<size_t>(i) * 3 + 0];
+        const float dy = after[static_cast<size_t>(i) * 3 + 1] - before[static_cast<size_t>(i) * 3 + 1];
+        const float dz = after[static_cast<size_t>(i) * 3 + 2] - before[static_cast<size_t>(i) * 3 + 2];
+        const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+        maxDisp = std::max(maxDisp, d);
+        sumDisp += d;
+    }
+    *outMaxDispCm = maxDisp;
+    *outMeanDispCm = sumDisp / static_cast<float>(s.count());
+
+    aver_phys_shutdown();
+}
+
+static void testCharacterSweepDoesNotVisiblyMoveTheSoftBody() {
+    AVER_INFO("-- the player's own capsule, driven the way gameplay drives it: does the pool feel it? --");
+
+    float ctrlMax = 0.0f, ctrlMean = 0.0f, sweepMax = 0.0f, sweepMean = 0.0f;
+    float ctrlFinalX = 0.0f, sweepFinalX = 0.0f;
+    runSweepPass(false, &ctrlMax, &ctrlMean, &ctrlFinalX);
+    runSweepPass(true,  &sweepMax, &sweepMean, &sweepFinalX);
+    AVER_INFO("  control (character present, stationary): max {} cm, mean {} cm, final x {} cm",
+              ctrlMax, ctrlMean, ctrlFinalX);
+    AVER_INFO("  swept through (aver_phys_character_set_velocity): max {} cm, mean {} cm, final x {} cm",
+              sweepMax, sweepMean, sweepFinalX);
+
+    // First, prove the test itself is not vacuous: the swept-through character really did walk across,
+    // the control character really did stay put. Both use the identical real ABI call the game uses.
+    check(ctrlMax >= 0.0f && sweepMax >= 0.0f, "both passes produced a reading");
+    check(std::abs(ctrlFinalX - (-(300.0f + 150.0f))) < 5.0f,
+          "the control character stayed exactly where it started (" + std::to_string(ctrlFinalX) + " cm)");
+    check(sweepFinalX > 300.0f,
+          "the swept-through character genuinely crossed the pool and came out the far side (" +
+          std::to_string(sweepFinalX) + " cm)");
+
+    // THE ACTUAL FINDING, AS A REGRESSION GUARD. Given the asymmetry measured directly in
+    // testCharacterEmbeddedInPoolDoesNotMoveIt above, a real walking pass produces NO reaction
+    // distinguishable from the stationary control -- this is TODAY'S measured behaviour, asserted so a
+    // change in either direction gets caught: a further regression (the character-side collision itself
+    // breaking) is not what this checks, but a pool that starts reacting IS what flips this assertion,
+    // which is the signal that this test (and FluidVolume's docs) need updating.
+    check(sweepMax < ctrlMax * 3.0f + 10.0f,
+          "AS OF TODAY: a character walked all the way through the pool moves it no more than a "
+          "motionless one sitting beside it (" + std::to_string(sweepMax) + " cm vs " +
+          std::to_string(ctrlMax) + " cm) -- the passive gameplay path does not make this pool react.");
+
+    // Stated plainly against the pool's own scale (hz = 60 cm, FluidVolume.hpp's half-depth, the
+    // dimension a camera watching this pool would actually see move): today's numbers are a rounding
+    // error against it, not a visible ripple.
+    const float hz = 60.0f;
+    check(sweepMax < 0.5f * hz,
+          "and in absolute terms it stays well under the pool's own 60 cm half-depth (" +
+          std::to_string(sweepMax) + " cm) -- not the visible reaction a player walking through a pool "
+          "should produce");
+
+    // No aver_phys_shutdown() here -- each of the two passes above already started and stopped its own
+    // world (runSweepPass is symmetric: one aver_phys_init, one aver_phys_shutdown), so nothing is left
+    // running for this function to close.
+}
+
+// ---- the fallback: aver_phys_softbody_apply_impulse actually moves the pool -----------------------
+//
+// THE OTHER HALF OF THE STORY ABOVE. The two tests just above measured that the PASSIVE path -- the
+// pool discovering the character on its own, through Jolt's ordinary soft-body collision update --
+// produces no reaction. This is the ACTIVE fallback SandboxApp.cpp's onUpdate now calls instead,
+// right where fluidScene_.update() runs: a direct, composition-root nudge to the vertices' own
+// velocity, the one thing SoftBodyVertex.h documents as the sanctioned external lever ("you should
+// only modify the inverse mass and/or velocity of a vertex to control the soft body... Modifying the
+// position can lead to missed collisions"). Same discipline as every test above: control vs
+// treatment, real numbers, not an assertion that "something changed".
+static void testApplyImpulseMovesNearbyVertices() {
+    AVER_INFO("-- aver_phys_softbody_apply_impulse: the active fallback, does it actually move the pool? --");
+    check(aver_phys_init() == 1, "physics started");
+    check(aver_phys_add_static_box(0, 0, -10, 800, 800, 10) != 0, "a static floor exists, top at z = 0");
+
+    // Same pool proportions as every other pool test in this file, for the same reason given in
+    // testPressureHoldsAShellUp: real numbers on a shape this file has already characterised, not a
+    // fresh shell whose settling behaviour is unknown.
+    const float hx = 300.0f, hy = 200.0f, hz = 60.0f;
+    const int32_t nx = 8, ny = 8, nz = 4;
+    const Shell s = makeBoxShell(hx, hy, hz, nx, ny, nz);
+    const float pressure = 0.6f * 1.0e-4f * 2.0f * 980.0f * hz * (nx + 1) * (ny + 1);
+    const int32_t body = aver_phys_softbody_create(
+        s.verts.data(), s.count(), s.indices.data(), static_cast<int32_t>(s.indices.size()),
+        nullptr, 0.0f, 0.0f, hz + 5.0f, 1.0e-4f, pressure);
+    check(body != 0, "the pool was created");
+    step(3.0f);   // settle first, same reason as every other pool test in this file.
+
+    std::vector<float> before(static_cast<size_t>(s.count()) * 3, 0.0f);
+    check(aver_phys_softbody_vertices(body, before.data(), s.count()) == s.count(),
+          "settled positions read back");
+
+    // A point near one corner of the pool, mid-depth, and a radius generous enough to catch a real
+    // cluster of this tessellation's vertices while clearly missing others -- CONFIRMED below, not
+    // assumed, the same way testCharacterEmbeddedInPoolDoesNotMoveIt confirms its own overlap rather
+    // than trusting the geometry by inspection.
+    const float cx = -hx * 0.6f, cy = -hy * 0.6f, cz = hz + 5.0f;
+    const float centre[3] = {cx, cy, cz};
+    const float radiusCm = 150.0f;
+    // Sideways, not straight down: the query point sits only ~5 cm above the floor's top face
+    // (hz + 5 - hz = 5), so a downward shove would be measuring "does the floor stop it", not "does
+    // the impulse move it". A push along the pool's long axis has 300+ cm of clear travel before it
+    // would reach any other boundary.
+    const float velCmPerS[3] = {300.0f, 0.0f, 0.0f};
+
+    auto sqDist = [&](const std::vector<float>& v, int32_t i) {
+        const float dx = v[static_cast<size_t>(i) * 3 + 0] - cx;
+        const float dy = v[static_cast<size_t>(i) * 3 + 1] - cy;
+        const float dz = v[static_cast<size_t>(i) * 3 + 2] - cz;
+        return dx * dx + dy * dy + dz * dz;
+    };
+    // FAR, not merely "outside the radius" -- reported as DATA below, not asserted as a bound.
+    // Measured first: at this radius/velocity, the far side of the SAME closed, pressurised shell
+    // moved 12.4 cm against the touched cluster's 16.9 cm -- most of the way there, not a rounding
+    // error. That is Jolt's own ApplyPressure being a BULK term, not a nearest-neighbour one: it is
+    // computed from the shell's total enclosed volume every step, so any local push that changes that
+    // volume changes the pressure force on every face at once, edge-adjacency or not. A "the far side
+    // barely moves" assertion would be asserting a locality property this shell does not actually
+    // have, for the same reason testPressureHoldsAShellUp needs pressure in the first place -- so this
+    // stays a logged number, and the real regression guard below is the one comparison that IS true
+    // regardless: the same vertices with the call against the same vertices without it.
+    const float farThresholdCm = 350.0f;
+    int32_t insideBefore = 0, outsideBefore = 0, farBefore = 0;
+    for (int32_t i = 0; i < s.count(); ++i) {
+        const float d2 = sqDist(before, i);
+        if (d2 < radiusCm * radiusCm) ++insideBefore; else ++outsideBefore;
+        if (d2 > farThresholdCm * farThresholdCm) ++farBefore;
+    }
+    check(insideBefore >= 3, "the query sphere catches a real cluster of vertices at this tessellation (" +
+                             std::to_string(insideBefore) + ")");
+    check(outsideBefore >= 3, "and clearly leaves others outside it (" + std::to_string(outsideBefore) + " )");
+    check(farBefore >= 3, "and a real cluster sits far enough away to judge localisation against (" +
+                          std::to_string(farBefore) + ")");
+
+    const int32_t nudged = aver_phys_softbody_apply_impulse(body, centre, radiusCm, velCmPerS, 1.0f);
+    check(nudged == insideBefore,
+          "it reports nudging exactly the vertices the sphere actually contains (" +
+          std::to_string(nudged) + " vs " + std::to_string(insideBefore) + ")");
+
+    step(0.5f);   // short: this measures an immediate velocity kick, not a long settle -- long enough
+                  // for a genuine push to separate itself from the pool's own idle jiggle, short
+                  // enough that the constraint network has not yet pulled everything back into shape.
+
+    std::vector<float> after(static_cast<size_t>(s.count()) * 3, 0.0f);
+    aver_phys_softbody_vertices(body, after.data(), s.count());
+
+    auto movedCm = [&](int32_t i) {
+        const float dx = after[static_cast<size_t>(i) * 3 + 0] - before[static_cast<size_t>(i) * 3 + 0];
+        const float dy = after[static_cast<size_t>(i) * 3 + 1] - before[static_cast<size_t>(i) * 3 + 1];
+        const float dz = after[static_cast<size_t>(i) * 3 + 2] - before[static_cast<size_t>(i) * 3 + 2];
+        return std::sqrt(dx * dx + dy * dy + dz * dz);
+    };
+    float insideSum = 0.0f, farSum = 0.0f;
+    for (int32_t i = 0; i < s.count(); ++i) {
+        const float d2 = sqDist(before, i);
+        if (d2 < radiusCm * radiusCm) insideSum += movedCm(i);
+        if (d2 > farThresholdCm * farThresholdCm) farSum += movedCm(i);
+    }
+    const float insideMean = insideSum / static_cast<float>(insideBefore);
+    const float farMean = farSum / static_cast<float>(farBefore);
+    aver_phys_shutdown();
+
+    // PAIRED CONTROL: identical pool, identical settle, NO call to apply_impulse. What the SAME
+    // vertices do on their own over the same half-second -- same discipline as
+    // testCharacterEmbeddedInPoolDoesNotMoveIt's paired control above.
+    check(aver_phys_init() == 1, "physics started (control)");
+    check(aver_phys_add_static_box(0, 0, -10, 800, 800, 10) != 0, "floor (control)");
+    const int32_t bodyCtrl = aver_phys_softbody_create(
+        s.verts.data(), s.count(), s.indices.data(), static_cast<int32_t>(s.indices.size()),
+        nullptr, 0.0f, 0.0f, hz + 5.0f, 1.0e-4f, pressure);
+    step(3.0f);
+    std::vector<float> beforeCtrl(static_cast<size_t>(s.count()) * 3, 0.0f);
+    aver_phys_softbody_vertices(bodyCtrl, beforeCtrl.data(), s.count());
+    step(0.5f);
+    std::vector<float> afterCtrl(static_cast<size_t>(s.count()) * 3, 0.0f);
+    aver_phys_softbody_vertices(bodyCtrl, afterCtrl.data(), s.count());
+    float ctrlInsideSum = 0.0f;
+    for (int32_t i = 0; i < s.count(); ++i) {
+        if (sqDist(beforeCtrl, i) >= radiusCm * radiusCm) continue;
+        const float dx = afterCtrl[static_cast<size_t>(i) * 3 + 0] - beforeCtrl[static_cast<size_t>(i) * 3 + 0];
+        const float dy = afterCtrl[static_cast<size_t>(i) * 3 + 1] - beforeCtrl[static_cast<size_t>(i) * 3 + 1];
+        const float dz = afterCtrl[static_cast<size_t>(i) * 3 + 2] - beforeCtrl[static_cast<size_t>(i) * 3 + 2];
+        ctrlInsideSum += std::sqrt(dx * dx + dy * dy + dz * dz);
+    }
+    const float ctrlInsideMean = ctrlInsideSum / static_cast<float>(insideBefore);
+    aver_phys_shutdown();
+
+    AVER_INFO("  treated pool: nudged vertices moved {} cm on average, the far side of the SAME pool "
+              "moved {} cm; the SAME nudged vertices with no call at all moved {} cm",
+              insideMean, farMean, ctrlInsideMean);
+
+    // THE ACTUAL FINDING, AS A REGRESSION GUARD: the touched vertices moved measurably more than the
+    // SAME vertices got with no call at all -- proof the CALL did this, not the pool's own settling or
+    // its own pressure-driven jiggle (testCharacterEmbeddedInPoolDoesNotMoveIt's control measured
+    // exactly that source of noise already: ~2.5 cm over a much longer 2 s). Unlike the passive path
+    // this file spends its first half proving does nothing, this is a real, attributable reaction.
+    check(insideMean > ctrlInsideMean + 5.0f,
+          "the nudged vertices moved measurably more than the SAME vertices with no call at all (" +
+          std::to_string(insideMean) + " cm vs " + std::to_string(ctrlInsideMean) + " cm)");
+    // farMean (logged above) is intentionally not asserted against -- see farThresholdCm's own comment
+    // for why "the far side barely moves" is not a property this pressurised shell actually has.
+}
+
 int main() {
     AVER_INFO("SoftBodyTest");
     testClothHangs();
@@ -435,6 +875,9 @@ int main() {
     testSkinnedCanLeaveItsSkin();
     testHandleContract();
     testPressureHoldsAShellUp();
+    testCharacterEmbeddedInPoolDoesNotMoveIt();
+    testCharacterSweepDoesNotVisiblyMoveTheSoftBody();
+    testApplyImpulseMovesNearbyVertices();
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
     return g_failures;
 }

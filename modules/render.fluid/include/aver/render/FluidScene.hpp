@@ -116,6 +116,14 @@ public:
     // rotation at draw time would move it a second time.
     rhi::MeshHandle drawHandle(FluidHandle h) const;
 
+    // The aver_phys_softbody_* handle behind this volume, or ZERO for an unknown/despawned handle or
+    // one whose body creation failed (see spawn()'s own comment on that outcome). Exists for a
+    // composition root that wants to reach into the LIVE solver state directly -- nudging nearby
+    // particles from outside the simulation loop, the way aver_phys_softbody_apply_impulse does for a
+    // player wading through a pool -- rather than duplicating what this class already tracks in a
+    // second handle table of its own.
+    int32_t physicsBody(FluidHandle h) const;
+
     const char* name() const override { return "Aver.Render.Fluid.Scene"; }
     // The copy happens in prePass, which is the only hook that runs before the scene pass reads the
     // buffer it writes -- update() has no IRenderContext to issue a barrier or a copy with.

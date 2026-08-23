@@ -21,3 +21,30 @@ material names as slots and imports neither. The blaster therefore renders with 
 `M_Gun` surface rather than Kenney's colours, which is also why this template still ships no textures
 at all. The kit's `magazine` mesh imported cleanly too and was deleted — the body alone is the
 viewmodel, and a second mesh nothing parents to would just be a file to explain.
+
+## Character.ocmesh / ../Skeletons/Character.ocskel
+
+| | |
+|---|---|
+| **Source** | Kenney *Animated Characters Survivors* 1.1 — <https://kenney.nl/assets/animated-characters-survivors> |
+| **Original file** | the pack's rigged FBX character, converted to glTF2/GLB with assimpjs (this importer reads `.gltf`/`.glb` only, not FBX) before import |
+| **Licence** | Creative Commons Zero (CC0 1.0) — <https://creativecommons.org/publicdomain/zero/1.0/> |
+| **Imported** | 2026-08-23, via `Sandbox.exe --import-gltf`, 4812 verts / 1604 tris / 45 bones |
+
+The full licence as shipped by Kenney is in `Character_LICENSE.txt` beside this file, for the same
+reason `Blaster.LICENSE.txt` is above: this template redistributes the asset to everyone who downloads
+the engine, and CC0 or not, provenance that lives only in a chat transcript is provenance nobody who
+did not have that transcript can verify.
+
+**What was NOT imported.** The pack ships its idle/run/jump clips as SEPARATE `.glb` files
+(`Character_Idle/Run/Jump.glb`) that carry zero meshes — animation-only exports of the same rig. This
+importer's `Gltf::run` refuses any file with no meshes before it ever reads a skin or an animation
+(`GltfImport.cpp`: `"glTF: the file contains no meshes"`), so none of the three could be imported at
+all; this is a hard gate in the importer, not a judgement call made in content. `AN_FPCharacter.ocgraph`
+therefore renders the character in its imported bind pose — see that file's own COMP-record comment for
+the scale measurement and the full provenance note, including why the rig's rest pose is degenerate
+(identity) without that mattering for a pose that is never animated.
+
+**The skin texture** (`Character_Skin.png`, in `../Textures/`) IS wired up, through
+`../Materials/M_Character.ocmat`'s `TEX baseColor {path:Textures/Character_Skin.png}` — unlike the
+gun, this character does not render in flat grey.

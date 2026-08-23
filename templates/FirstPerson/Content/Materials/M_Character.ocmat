@@ -1,0 +1,29 @@
+OCMAT 1
+# The player's own body. See Content/Meshes/SOURCES.md for where Character.ocmesh/.ocskel and this
+# texture came from.
+#
+# `{path:...}` RATHER THAN `{guid:...}`. FORMAT_SPECS.md 7's TEX rule accepts either -- a GUID binds
+# a cooked .octex by identity, a path binds whatever a source image decodes to at load time. This
+# project has never cooked a .octex (grep the tree: there is not one), and Character_Skin.png is
+# already a format SandboxApp::isTextureSource resolves directly (stb_image, same as every other raw
+# PNG this editor loads) through resolveMaterialTexture -> assets::uploadTexture -- no cooking step
+# exists to invoke even if one were wanted. `path:` is therefore not a shortcut taken in place of the
+# real mechanism; it is the only mechanism this tree has ever exercised for a textured material.
+#
+# ROUGHNESS 0.75, NOT THE 0.45 M_Gun WOULD WANT -- this is Kenney's stylised skin/cloth surface, not
+# a painted metal shell, and a low roughness on cloth reads as wet plastic under the same lighting
+# that makes a gun's clearcoat look right. metallicFactor 0 for the same reason: nothing on this
+# character is metal.
+SHADER standard
+BLEND opaque
+CULL back
+FLAGS twosided=0 castshadow=1
+
+PARAM baseColorFactor 1.0 1.0 1.0 1.0
+PARAM metallicFactor 0.0
+PARAM roughnessFactor 0.75
+PARAM emissiveFactor 0.0 0.0 0.0
+PARAM normalScale 1.0
+PARAM occlusionStrength 1.0
+
+TEX baseColor {path:Textures/Character_Skin.png} uv0 sRGB

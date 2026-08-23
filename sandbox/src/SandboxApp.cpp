@@ -716,6 +716,112 @@ struct DirEntry {
 // A Content Browser directory listing, refreshed on a frame stamp. Folders sort first and are counted.
 struct DirListing { int stamp = -1000; std::vector<DirEntry> entries; usize dirCount = 0; };
 
+// Replaces the characters Windows refuses in a file name. Asset names come from a glTF, so they are
+// whatever the authoring tool allowed. Lives here, at file scope, rather than as a SandboxApp member,
+// because importGltfToDir below needs it and importGltfToDir has to be callable before any SandboxApp
+// exists -- see that function's comment.
+static void sanitiseAssetName(std::string& s) {
+    for (char& c : s)
+        if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' ||
+            c == '"' || c == '<' || c == '>' || c == '|') c = '_';
+    if (s.empty()) s = "unnamed";
+}
+
+// How many of each asset kind importGltfToDir actually wrote to destDir, as opposed to skipping
+// because a same-named output file was already sitting there.
+struct GltfImportSummary { u32 meshesWritten = 0, rigsWritten = 0, clipsWritten = 0; };
+
+// Converts a glTF/GLB into one .ocmesh per mesh (+ .ocskel/.ocanim if the file carries a skin) into
+// destDir, creating destDir first if it does not already exist.
+//
+// This is the entire substance of glTF import, and it is a free function -- not a SandboxApp member
+// -- because it has two callers that do not share a SandboxApp: the Content Browser's Import button
+// (SandboxApp::importModel, just below the class, which wraps this call with cbStatus_/cbInvalidate/
+// wantMeshReload_ -- all three are Content Browser panel state that only exists once a SandboxApp is
+// alive) and the --import-gltf CLI flag (createApplication, far below, which runs before any
+// SandboxApp, device, or window exists at all). Nothing in the loop below ever touched SandboxApp in
+// the first place: fmt::importGltf/saveOcMesh/saveOcSkel/saveOcAnim are pure modules/formats calls,
+// no RHI device and no ImGui, so it was only ever sitting inside the class because its one caller so
+// far happened to be a member.
+//
+// Returns false with *outWhy set only on a hard parse failure (the source could not be read as glTF
+// at all). A source that parses cleanly but yields nothing new -- every output file already existed,
+// or the file simply had no mesh data -- returns true with an all-zero summary; the two callers each
+// decide for themselves whether an all-zero summary counts as a failure worth reporting.
+static bool importGltfToDir(const std::string& src, const std::string& destDir,
+                             GltfImportSummary& out, std::string* outWhy) {
+    std::error_code dirEc;
+    std::filesystem::create_directories(destDir, dirEc);
+
+    fmt::GltfImportResult res;
+    std::string why;
+    if (!fmt::importGltf(src, res, {}, &why)) {
+        if (outWhy) *outWhy = why;
+        return false;
+    }
+    for (const std::string& u : res.unsupported)
+        AVER_WARN("[Import] '{}' contains {} - not imported", std::filesystem::path(src).filename().string(), u);
+
+    std::error_code ec;
+    const std::string stem = std::filesystem::path(src).stem().string();
+    for (usize i = 0; i < res.meshes.size(); ++i) {
+        fmt::OcMeshData& m = res.meshes[i];
+        if (!m.valid()) { AVER_WARN("[Import] mesh {} came out empty and was skipped", i); continue; }
+
+        std::string base = i < res.meshNames.size() && !res.meshNames[i].empty() ? res.meshNames[i] : stem;
+        if (res.meshes.size() > 1 && base == stem) base += "_" + std::to_string(i);
+        for (char& c : base) if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' ||
+                                 c == '"' || c == '<' || c == '>' || c == '|') c = '_';
+
+        std::string outFile = destDir + "\\" + base + ".ocmesh";
+        if (std::filesystem::exists(outFile, ec)) {
+            AVER_WARN("[Import] '{}.ocmesh' already exists - not overwritten", base);
+            continue;
+        }
+        if (!fmt::saveOcMesh(outFile, m, &why)) { AVER_WARN("[Import] {}", why); continue; }
+        AVER_INFO("[Import] {} -> {} ({} verts, {} tris)", std::filesystem::path(src).filename().string(),
+                  base + ".ocmesh", m.vertexCount(), m.indices.size() / 3);
+        ++out.meshesWritten;
+    }
+
+    // The RIG. This used to drop res.skeletons and res.animations on the floor, so glTF could
+    // produce a skeleton and a clip that nothing ever wrote and no project could ever contain --
+    // and loadOcSkel/loadOcAnim had no caller in the engine's history.
+    for (usize i = 0; i < res.skeletons.size(); ++i) {
+        std::string base = i < res.skeletonNames.size() && !res.skeletonNames[i].empty()
+                         ? res.skeletonNames[i] : stem;
+        if (res.skeletons.size() > 1) base += "_" + std::to_string(i);
+        sanitiseAssetName(base);
+        const std::string outFile = destDir + "\\" + base + ".ocskel";
+        if (std::filesystem::exists(outFile, ec)) {
+            AVER_WARN("[Import] '{}.ocskel' already exists - not overwritten", base);
+        } else if (!fmt::saveOcSkel(outFile, res.skeletons[i], &why)) {
+            AVER_WARN("[Import] {}", why);
+        } else {
+            AVER_INFO("[Import] {} -> {} ({} bone(s))", std::filesystem::path(src).filename().string(),
+                      base + ".ocskel", res.skeletons[i].bones.size());
+            ++out.rigsWritten;
+        }
+    }
+    for (usize i = 0; i < res.animations.size(); ++i) {
+        std::string base = i < res.animationNames.size() && !res.animationNames[i].empty()
+                         ? res.animationNames[i] : (stem + "_clip" + std::to_string(i));
+        sanitiseAssetName(base);
+        const std::string outFile = destDir + "\\" + base + ".ocanim";
+        if (std::filesystem::exists(outFile, ec)) {
+            AVER_WARN("[Import] '{}.ocanim' already exists - not overwritten", base);
+        } else if (!fmt::saveOcAnim(outFile, res.animations[i], &why)) {
+            AVER_WARN("[Import] {}", why);
+        } else {
+            AVER_INFO("[Import] {} -> {} ({:.2f}s, {} track(s))",
+                      std::filesystem::path(src).filename().string(), base + ".ocanim",
+                      res.animations[i].duration, res.animations[i].tracks.size());
+            ++out.clipsWritten;
+        }
+    }
+    return true;
+}
+
 // The editor application: owns the scene, the panels, and the frame loop.
 class SandboxApp final : public Application {
 public:
@@ -2405,6 +2511,78 @@ public:
         // onRender carries that guard and no other, so any wider guard here produces a build that
         // draws a mesh nothing ever writes to.
         fluidScene_.update();
+
+#if AVER_MODULE_FRAMEWORK
+        // THE FALLBACK for a gap in Jolt's own soft-body update, not this engine's: a fluid volume's
+        // own collision pass never sees the player's capsule (see aver_phys_softbody_apply_impulse's
+        // header comment, and tests/physics/src/SoftBodyTest.cpp's testCharacterEmbeddedInPoolDoesNot-
+        // MoveIt / testCharacterSweepDoesNotVisiblyMoveTheSoftBody, which measured that empirically
+        // twice before this existed). Right here, right after update() has read this frame's solver
+        // state and before anything draws it, is where the composition root gets one more say over
+        // that state before it is gone for the frame.
+        //
+        // AVER_MODULE_FRAMEWORK alone, not AVER_MODULE_PHYSICS on top: CMakeLists.txt already forces
+        // AVER_MODULE_RENDER_FLUID off whenever AVER_MODULE_PHYSICS is off (see the "fluid drawing
+        // needs water and physics" rule), so physics being present is already guaranteed by the outer
+        // #if AVER_MODULE_RENDER_FLUID this whole block sits inside. Framework is not implied the same
+        // way -- a fluid volume needs no scene entity and no framework at all, per FluidScene's own
+        // CMakeLists.txt comment -- so this is the one piece of the gate that still has to be spelled
+        // out, and it also drags AVER_MODULE_SCENE in for free (CMakeLists.txt forces FRAMEWORK off
+        // without SCENE), which is what worldMatrix() below needs.
+        if (fluidHandle_) {
+            const i32 body = fluidScene_.physicsBody(fluidHandle_);
+            const i32 pawn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
+            if (body && pawn) {
+                const scene::Entity pe = static_cast<scene::Entity>(static_cast<u32>(pawn));
+                const Mat4& wm = scene::World::instance().worldMatrix(pe);
+                const Vec3 playerPos{wm.m[3][0], wm.m[3][1], wm.m[3][2]};
+
+                // Cheap AABB-ish reject BEFORE touching the solver: most frames the player is nowhere
+                // near any given pool, and aver_phys_softbody_apply_impulse walks every one of the
+                // body's particles to answer that same question the slow way. The margin is generous
+                // on purpose -- this only has to be a correct "definitely not near it" filter, not a
+                // tight one; the ABI call itself is what decides which particles actually react.
+                const auto& d = fluidWantDesc_;
+                const f32 marginCm = 200.0f;
+                const bool nearVolume =
+                    std::abs(playerPos.x - d.centreCm[0]) < d.halfExtentCm[0] + marginCm &&
+                    std::abs(playerPos.y - d.centreCm[1]) < d.halfExtentCm[1] + marginCm &&
+                    std::abs(playerPos.z - d.centreCm[2]) < d.halfExtentCm[2] + marginCm;
+
+                if (nearVolume) {
+                    // No native handle reaches the character's own physics velocity (AverCharacter's
+                    // Jolt capsule is created and owned entirely on the C# side -- see Character.cs --
+                    // and aver_phys_set_entity is a one-way stamp, body-to-entity, with no reverse
+                    // lookup). What IS visible here is the entity transform Character.cs writes every
+                    // tick (Self.SetLocalPosition, driven straight from the capsule), so velocity is
+                    // recovered the same way any outside observer would: finite difference across
+                    // frames. That is what actually happened to the player this frame, collisions and
+                    // all, which is a more honest number than the requested Drive velocity would be
+                    // anyway.
+                    const f32 dt = t.dt;
+                    Vec3 vel{0.0f, 0.0f, 0.0f};
+                    if (fluidPrevPlayerValid_ && dt > 1.0e-5f)
+                        vel = (playerPos - fluidPrevPlayerPosCm_) * (1.0f / dt);
+
+                    // Centred a half-height above the feet (matching AverCharacter's own foot-origin
+                    // convention -- Character.cs: "the entity's origin is the character's FEET") and
+                    // sized to comfortably bracket its default 34 cm-radius, 180 cm-tall capsule
+                    // (Character.cs: Radius/Height) without needing to read either field back out of a
+                    // C# component -- this only has to rough out where the capsule is, not model it
+                    // exactly, because aver_phys_softbody_apply_impulse's own per-vertex sphere test is
+                    // what actually decides which particles move.
+                    const Vec3 centre = playerPos + Vec3{0.0f, 0.0f, 90.0f};
+                    const f32 radiusCm = 90.0f;
+                    aver_phys_softbody_apply_impulse(body, &centre.x, radiusCm, &vel.x, 0.5f);
+                }
+
+                fluidPrevPlayerPosCm_ = playerPos;
+                fluidPrevPlayerValid_ = true;
+            } else {
+                fluidPrevPlayerValid_ = false;   // no pawn this frame -- next frame's diff would be bogus
+            }
+        }
+#endif
 #endif
 #if AVER_MODULE_SCENE
         // Retires deferred destroys and propagates world matrices once, after gameplay and before onRender.
@@ -10139,95 +10317,25 @@ private:
 #endif
 
     // Converts a glTF/GLB into one .ocmesh per mesh in destDir, and registers them for this session.
+    // The actual conversion is importGltfToDir (file scope, above the class) so that the same logic
+    // is also reachable from the --import-gltf CLI flag, which has no SandboxApp to call a member on.
     void importModel(const std::string& src, const std::string& destDir) {
-        fmt::GltfImportResult res;
+        GltfImportSummary sum;
         std::string why;
-        if (!fmt::importGltf(src, res, {}, &why)) {
+        if (!importGltfToDir(src, destDir, sum, &why)) {
             AVER_WARN("[Import] {}", why);
             cbStatus_ = "Import failed - see the Output Log";
             return;
         }
-        for (const std::string& u : res.unsupported)
-            AVER_WARN("[Import] '{}' contains {} - not imported", std::filesystem::path(src).filename().string(), u);
-
-        std::error_code ec;
-        const std::string stem = std::filesystem::path(src).stem().string();
-        u32 written = 0;
-        for (usize i = 0; i < res.meshes.size(); ++i) {
-            fmt::OcMeshData& m = res.meshes[i];
-            if (!m.valid()) { AVER_WARN("[Import] mesh {} came out empty and was skipped", i); continue; }
-
-            std::string base = i < res.meshNames.size() && !res.meshNames[i].empty() ? res.meshNames[i] : stem;
-            if (res.meshes.size() > 1 && base == stem) base += "_" + std::to_string(i);
-            for (char& c : base) if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' ||
-                                     c == '"' || c == '<' || c == '>' || c == '|') c = '_';
-
-            std::string out = destDir + "\\" + base + ".ocmesh";
-            if (std::filesystem::exists(out, ec)) {
-                AVER_WARN("[Import] '{}.ocmesh' already exists - not overwritten", base);
-                continue;
-            }
-            if (!fmt::saveOcMesh(out, m, &why)) { AVER_WARN("[Import] {}", why); continue; }
-            AVER_INFO("[Import] {} -> {} ({} verts, {} tris)", std::filesystem::path(src).filename().string(),
-                      base + ".ocmesh", m.vertexCount(), m.indices.size() / 3);
-            ++written;
-        }
-
-        // The RIG. This used to drop res.skeletons and res.animations on the floor, so glTF could
-        // produce a skeleton and a clip that nothing ever wrote and no project could ever contain --
-        // and loadOcSkel/loadOcAnim had no caller in the engine's history.
-        u32 rigs = 0, clips = 0;
-        for (usize i = 0; i < res.skeletons.size(); ++i) {
-            std::string base = i < res.skeletonNames.size() && !res.skeletonNames[i].empty()
-                             ? res.skeletonNames[i] : stem;
-            if (res.skeletons.size() > 1) base += "_" + std::to_string(i);
-            sanitiseAssetName(base);
-            const std::string out = destDir + "\\" + base + ".ocskel";
-            if (std::filesystem::exists(out, ec)) {
-                AVER_WARN("[Import] '{}.ocskel' already exists - not overwritten", base);
-            } else if (!fmt::saveOcSkel(out, res.skeletons[i], &why)) {
-                AVER_WARN("[Import] {}", why);
-            } else {
-                AVER_INFO("[Import] {} -> {} ({} bone(s))", std::filesystem::path(src).filename().string(),
-                          base + ".ocskel", res.skeletons[i].bones.size());
-                ++rigs;
-            }
-        }
-        for (usize i = 0; i < res.animations.size(); ++i) {
-            std::string base = i < res.animationNames.size() && !res.animationNames[i].empty()
-                             ? res.animationNames[i] : (stem + "_clip" + std::to_string(i));
-            sanitiseAssetName(base);
-            const std::string out = destDir + "\\" + base + ".ocanim";
-            if (std::filesystem::exists(out, ec)) {
-                AVER_WARN("[Import] '{}.ocanim' already exists - not overwritten", base);
-            } else if (!fmt::saveOcAnim(out, res.animations[i], &why)) {
-                AVER_WARN("[Import] {}", why);
-            } else {
-                AVER_INFO("[Import] {} -> {} ({:.2f}s, {} track(s))",
-                          std::filesystem::path(src).filename().string(), base + ".ocanim",
-                          res.animations[i].duration, res.animations[i].tracks.size());
-                ++clips;
-            }
-        }
-
-        if (written == 0 && rigs == 0 && clips == 0) {
+        if (sum.meshesWritten == 0 && sum.rigsWritten == 0 && sum.clipsWritten == 0) {
             cbStatus_ = "Import produced nothing - see the Output Log";
             return;
         }
-        cbStatus_ = "Imported " + std::to_string(written) + " mesh(es), " + std::to_string(rigs) +
-                    " skeleton(s) and " + std::to_string(clips) + " clip(s) from " +
-                    std::filesystem::path(src).filename().string();
+        cbStatus_ = "Imported " + std::to_string(sum.meshesWritten) + " mesh(es), " +
+                    std::to_string(sum.rigsWritten) + " skeleton(s) and " + std::to_string(sum.clipsWritten) +
+                    " clip(s) from " + std::filesystem::path(src).filename().string();
         cbInvalidate(destDir);
         wantMeshReload_ = true;
-    }
-
-    // Replaces the characters Windows refuses in a file name. Asset names come from a glTF, so they
-    // are whatever the authoring tool allowed.
-    static void sanitiseAssetName(std::string& s) {
-        for (char& c : s)
-            if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' ||
-                c == '"' || c == '<' || c == '>' || c == '|') c = '_';
-        if (s.empty()) s = "unnamed";
     }
 
     // Writes an edited material back to the .cs under Content\Materials that declares it, found by
@@ -12305,6 +12413,13 @@ private:
     water::FluidVolumeDesc fluidWantDesc_{};
     std::string fluidWantName_;
     bool fluidWantPending_ = false;
+    // The player's world position last frame, and whether that reading is trustworthy -- see the
+    // aver_phys_softbody_apply_impulse call site in onUpdate for why this exists (there is no direct
+    // read of the character's own physics velocity, so it is recovered by finite difference instead).
+    // Invalidated whenever a frame has no controlled pawn, so a pawn possessed/despawned/re-possessed
+    // between frames cannot manufacture a velocity spike out of two unrelated entities' positions.
+    Vec3 fluidPrevPlayerPosCm_{};
+    bool fluidPrevPlayerValid_ = false;
 #endif
     fmt::OcWorldData levelHeader_;
     // Whether each level entity's placement said `nocollide`. There is NO component for this: it is
@@ -14164,6 +14279,29 @@ Application* createApplication(int argc, char** argv) {
             }
             AVER_ERROR("[Sandbox] could not scaffold '{}' from template '{}': {}", nm, tmplId, why);
             std::exit(1);
+        }
+        // --import-gltf <src.gltf|.glb> <destDir> imports a model and exits, touching no device --
+        // the exact --new-project precedent above, for the Content Browser's Import button.
+        // importGltfToDir (file scope, defined just above class SandboxApp) is the SAME function the
+        // button's click handler runs through SandboxApp::importModel; this branch is not a
+        // reimplementation, it is the other caller. destDir is created if missing (importGltfToDir
+        // does that itself), so this also works as the first write into a brand new project's
+        // Content\Meshes.
+        else if (!std::strcmp(argv[i],"--import-gltf") && i+2<argc) {
+            const std::string src = argv[++i], destDir = argv[++i];
+            GltfImportSummary sum;
+            std::string why;
+            if (!importGltfToDir(src, destDir, sum, &why)) {
+                AVER_ERROR("[Sandbox] could not import '{}': {}", src, why);
+                std::exit(1);
+            }
+            if (sum.meshesWritten == 0 && sum.rigsWritten == 0 && sum.clipsWritten == 0) {
+                AVER_ERROR("[Sandbox] '{}' produced nothing importable - see the Output Log above", src);
+                std::exit(1);
+            }
+            AVER_INFO("[Sandbox] imported '{}' -> {} ({} mesh(es), {} skeleton(s), {} clip(s))",
+                      src, destDir, sum.meshesWritten, sum.rigsWritten, sum.clipsWritten);
+            std::exit(0);
         }
         // --upgrade-project <path.ocproject> applies what the prompt applies, and exits.
         //

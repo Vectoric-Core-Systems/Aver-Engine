@@ -1049,4 +1049,49 @@ int32_t aver_phys_softbody_vertices(int32_t body, float* outXyz, int32_t maxVert
     return n;
 }
 
+int32_t aver_phys_softbody_apply_impulse(int32_t body, const float* centreCm, float radiusCm,
+                                         const float* velocityCmPerS, float strength) {
+    if (!g_world || !centreCm || !velocityCmPerS || radiusCm <= 0.0f) return 0;
+    const JPH::BodyID* id = findBody(body);
+    if (!id) return 0;
+    // WRITE lock, not read: this walks GetVertices() and mutates mVelocity in place, the same access
+    // level aver_phys_softbody_skin already takes for the same reason.
+    JPH::BodyLockWrite lock(g_world->system.GetBodyLockInterface(), *id);
+    if (!lock.Succeeded()) return 0;
+    JPH::Body& b = lock.GetBody();
+    if (!b.IsSoftBody()) return 0;
+    auto* mp = static_cast<JPH::SoftBodyMotionProperties*>(b.GetMotionProperties());
+
+    // A vertex's mPosition/mVelocity are stored RELATIVE TO THE CENTRE OF MASS (same fact
+    // aver_phys_softbody_vertices above is built around) -- so the query sphere and target velocity,
+    // both handed in as world-space engine units, have to cross into that same local frame before
+    // they can be compared against or written into a vertex, rather than converting every vertex out
+    // to world space and back (this body can hold thousands of particles; the transform below is paid
+    // once, not per vertex).
+    const JPH::RMat44 com = b.GetCenterOfMassTransform();
+    const JPH::RMat44 invCom = com.InversedRotationTranslation();
+    const JPH::Vec3 worldCentre = toJolt(Vec3(centreCm[0], centreCm[1], centreCm[2]));
+    const JPH::Vec3 localCentre = JPH::Vec3(invCom * worldCentre);
+    // Velocity is a FREE VECTOR, not a point -- it takes the rotation only, never the translation.
+    // Multiply3x3Transposed is the world-to-local half of that rotation: GetRotation() is orthonormal,
+    // so its transpose is its inverse, and Jolt spells that operation as "Transposed" rather than
+    // "Inversed" to say so.
+    const JPH::Vec3 worldVel = toJoltDir(Vec3(velocityCmPerS[0], velocityCmPerS[1], velocityCmPerS[2]));
+    const JPH::Vec3 localVel = com.GetRotation().Multiply3x3Transposed(worldVel);
+
+    const float radiusM = cmToM(radiusCm);
+    const float radiusSqM = radiusM * radiusM;
+    const float s = strength < 0.0f ? 0.0f : (strength > 1.0f ? 1.0f : strength);
+
+    int32_t nudged = 0;
+    for (auto& v : mp->GetVertices()) {
+        if ((v.mPosition - localCentre).LengthSq() > radiusSqM) continue;
+        // A BLEND, not `v.mVelocity += localVel`: see the ABI header for why this has to be bounded
+        // under repeated per-frame calls rather than accumulating.
+        v.mVelocity += (localVel - v.mVelocity) * s;
+        ++nudged;
+    }
+    return nudged;
+}
+
 } // extern "C"

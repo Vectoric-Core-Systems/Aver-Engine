@@ -274,6 +274,36 @@ AVER_PHYS_API int32_t aver_phys_softbody_vertex_count(int32_t body);
 // centimetres in WORLD space. Returns how many were written. This is what the renderer draws.
 AVER_PHYS_API int32_t aver_phys_softbody_vertices(int32_t body, float* outXyz, int32_t maxVertices);
 
+// FALLBACK for a gap Jolt itself has: a soft body's own update
+// (JPH::SoftBodyMotionProperties::DetermineCollidingShapes) broadphase-queries for nearby RIGID
+// bodies and asks their SHAPE to push its particles around -- but aver_phys_character_create builds a
+// JPH::CharacterVirtual, whose companion inner body is a kinematic Body that never enters that query
+// as a hit (confirmed empirically in SoftBodyTest.cpp: a character embedded dead-centre in a settled
+// pool for two seconds moves the nearest vertex no more than the pool's own idle jiggle explains).
+// The character's own collision against the pool works fine the other way around -- this function
+// exists only to make the MISSING direction happen, from the composition root, deliberately.
+//
+// `centreCm`/`radiusCm` select which of the soft body's particles react -- every one within
+// `radiusCm` of `centreCm` (both world-space engine centimetres), typically the player's current
+// position and something a little larger than their capsule radius.
+//
+// `velocityCmPerS` is the velocity (engine cm/s, world-space) those particles are nudged TOWARD, not
+// added by: each selected vertex's velocity moves a `strength` fraction of the way from where it is
+// to `velocityCmPerS` (0 = no effect, 1 = snap to it outright). This is a BLEND, not `+=`, on purpose
+// -- SandboxApp.cpp calls this once every physics step for as long as the player is near the volume,
+// and an additive impulse repeated every step with no decay would run away without bound; a blend
+// converges toward the target and stays bounded no matter how many consecutive steps call it.
+//
+// Modifies VELOCITY ONLY, never a vertex's position directly -- SoftBodyVertex.h's own comment is
+// explicit that positions are solver-internal ("Modifying the position can lead to missed
+// collisions") and velocity is the sanctioned lever for outside code to move a soft body.
+//
+// Returns how many vertices fell inside the sphere and were nudged, or 0 for a handle that is not a
+// soft body, a non-positive radius, or a missing pointer.
+AVER_PHYS_API int32_t aver_phys_softbody_apply_impulse(int32_t body, const float* centreCm,
+                                                        float radiusCm, const float* velocityCmPerS,
+                                                        float strength);
+
 // ---- Queries -------------------------------------------------------------------------------------
 
 // Cast a ray from `o` along `d` for `maxDistCm`. Returns the hit body handle, or 0 for a miss.
