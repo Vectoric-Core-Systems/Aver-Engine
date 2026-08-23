@@ -1320,6 +1320,83 @@ void installUpgradeResources() {
 #endif
 }
 
+// Rewrites baked texture paths under a copied project's Binaries so they point at the COPY.
+//
+// WHY THIS IS NEEDED AT ALL. avermatc writes whatever string a texture slot was given straight into
+// the generated .ocmat as a `{path:...}` record (OcMat.cpp:320), and the engine honours an ABSOLUTE
+// one unchanged -- resolveAssetPath returns it as-is the moment it starts with a drive letter or a
+// separator, and only tries the project's own content root for a relative one. copyProjectTree is a
+// raw recursive filesystem copy and the upgrade chain only ever touches Content\Scripts, so nothing
+// rewrote those records. A copied or migrated project therefore kept loading its textures out of the
+// ORIGINAL project's folder: edit the copy's textures and nothing changes, delete the original and
+// the copy loses its materials.
+//
+// RELATIVE, NOT REPOINTED, and that is the durable half. Swapping one absolute root for another
+// would fix this copy and leave the next move broken exactly the same way. A path written relative to
+// the project's own content root is correct wherever the folder ends up, which is what
+// resolveAssetPath already expects of a relative record.
+//
+// A path that does NOT live under the old project is left alone: a texture deliberately shared from
+// somewhere else on disk is not a stale reference, and rewriting it would break a working setup.
+u32 repathCopiedBinaries(const std::filesystem::path& oldRoot, const std::filesystem::path& newRoot,
+                         const std::string& contentRoot) {
+    std::error_code ec;
+    const std::filesystem::path binaries = newRoot / "Binaries";
+    if (!std::filesystem::is_directory(binaries, ec)) return 0;
+
+    // Compared case-insensitively: Windows paths that differ only in case name the same file, and a
+    // record written by a tool that spelled the drive letter differently is still stale.
+    const std::string oldContent = (oldRoot / contentRoot).string();
+    std::string oldContentLower = oldContent;
+    std::transform(oldContentLower.begin(), oldContentLower.end(), oldContentLower.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+    u32 rewritten = 0;
+    for (std::filesystem::recursive_directory_iterator it(binaries, ec), end; it != end && !ec; it.increment(ec)) {
+        if (!it->is_regular_file(ec)) continue;
+        if (it->path().extension() != ".ocmat") continue;
+
+        std::string text;
+        if (!readFileText(it->path().string(), text)) continue;
+
+        std::string out;
+        out.reserve(text.size());
+        usize i = 0;
+        bool touched = false;
+        for (;;) {
+            const usize open = text.find("{path:", i);
+            if (open == std::string::npos) { out.append(text, i, std::string::npos); break; }
+            const usize close = text.find('}', open);
+            if (close == std::string::npos) { out.append(text, i, std::string::npos); break; }
+
+            const usize valueAt = open + 6;
+            const std::string value = text.substr(valueAt, close - valueAt);
+            std::string lower = value;
+            std::transform(lower.begin(), lower.end(), lower.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            std::replace(lower.begin(), lower.end(), '/', '\\');
+
+            out.append(text, i, valueAt - i);
+            if (lower.rfind(oldContentLower, 0) == 0 && lower.size() > oldContentLower.size()) {
+                // Everything after the old content root, with the separator dropped.
+                std::string rel = value.substr(oldContentLower.size());
+                while (!rel.empty() && (rel[0] == '\\' || rel[0] == '/')) rel.erase(0, 1);
+                std::replace(rel.begin(), rel.end(), '/', '\\');
+                out += rel;
+                touched = true;
+                ++rewritten;
+            } else {
+                out += value;
+            }
+            out.append(text, close, 1);
+            i = close + 1;
+        }
+
+        if (touched) writeFileText(it->path().string(), out);
+    }
+    return rewritten;
+}
+
 std::string copyProjectTree(const std::string& manifestPath, const std::string& versionTag,
                             std::string* err) {
     std::error_code ec;
@@ -1349,6 +1426,19 @@ std::string copyProjectTree(const std::string& manifestPath, const std::string& 
         if (err) *err = "the copy has no manifest at " + out.string();
         return {};
     }
+
+    // The copy's own manifest names its content root, which is what a rewritten record is made
+    // relative TO. Read from the COPY rather than assuming "Content": a project may mount its
+    // content anywhere, and ProjectDesc::contentDir() has always honoured that.
+    fmt::ProjectDesc copied;
+    const std::string contentRoot =
+        fmt::loadOcproject(out.string(), copied, nullptr) && !copied.contentRoot.empty()
+            ? copied.contentRoot
+            : std::string("Content");
+    if (const u32 n = repathCopiedBinaries(src, dst, contentRoot))
+        AVER_INFO("[Project] copy: rewrote {} baked texture path(s) under Binaries to be relative to "
+                  "the copy's own content root", n);
+
     return out.string();
 }
 

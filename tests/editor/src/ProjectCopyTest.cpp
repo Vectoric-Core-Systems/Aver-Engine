@@ -32,6 +32,17 @@ std::string makeProject(const std::filesystem::path& root, const std::string& na
     const std::string manifest = (root / name / (name + ".ocproject")).string();
     writeFileText(manifest, "OCPROJECT 1\nNAME " + name + "\nCREATEDWITH 0.1.2\nCONTENT Content\n");
     writeFileText((root / name / "Content" / "Maps" / "Default.ocmap").string(), "OCMAP 1\nNAME deep\n");
+
+    // A GENERATED .ocmat UNDER Binaries, holding the kind of record avermatc actually writes: an
+    // ABSOLUTE {path:...} into THIS project's own content. That is the shape that used to survive a
+    // copy unchanged and leave the copy reading the original's textures.
+    std::filesystem::create_directories(root / name / "Binaries" / "Materials", ec);
+    std::filesystem::create_directories(root / name / "Content" / "Textures", ec);
+    writeFileText((root / name / "Content" / "Textures" / "T_Rock.png").string(), "not-a-real-png");
+    const std::string baked = (root / name / "Content" / "Textures" / "T_Rock.png").string();
+    writeFileText((root / name / "Binaries" / "Materials" / "M_Rock.ocmat").string(),
+                  "OCMAT 1\nNAME M_Rock\nTEX baseColor {path:" + baked + "}\n"
+                  "TEX shared {path:D:\\Shared\\Library\\T_Sky.png}\n");
     return manifest;
 }
 } // namespace
@@ -55,6 +66,33 @@ int main() {
                                   "Content" / "Maps" / "Default.ocmap", ec),
           "RECURSIVE: a file two directories deep came with it");
     check(std::filesystem::exists(src, ec), "the ORIGINAL is still there, untouched");
+
+    AVER_INFO("=== baked texture paths under Binaries follow the copy ===");
+    {
+        // THE BUG THIS PROVES ABSENT: avermatc bakes a texture slot's path verbatim into the
+        // generated .ocmat, and resolveAssetPath honours an ABSOLUTE one unchanged -- so before
+        // copyProjectTree rewrote them, a copied project loaded its textures out of the ORIGINAL
+        // project's folder. Editing the copy's textures changed nothing; deleting the original took
+        // the copy's materials with it.
+        std::string mat;
+        const std::filesystem::path copiedMat =
+            std::filesystem::path(copy1).parent_path() / "Binaries" / "Materials" / "M_Rock.ocmat";
+        check(readFileText(copiedMat.string(), mat), "the copy has its generated .ocmat");
+
+        const std::string oldAbs = (root / "Demo" / "Content" / "Textures" / "T_Rock.png").string();
+        check(mat.find(oldAbs) == std::string::npos,
+              "no record still names the ORIGINAL project's absolute path");
+
+        // Rewritten RELATIVE to the content root rather than repointed at the copy's absolute path:
+        // an absolute rewrite would fix this copy and break identically on the next move.
+        check(mat.find("{path:Textures\\T_Rock.png}") != std::string::npos,
+              "the baked path is now relative to the copy's own content root");
+
+        // A path that was never under this project is somebody's deliberate shared asset, not a
+        // stale reference, and rewriting it would break a working setup.
+        check(mat.find("{path:D:\\Shared\\Library\\T_Sky.png}") != std::string::npos,
+              "a path OUTSIDE the project is left exactly as it was");
+    }
 
     AVER_INFO("=== a second copy must not overwrite the first ===");
     {
