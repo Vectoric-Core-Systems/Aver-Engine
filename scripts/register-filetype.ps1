@@ -43,15 +43,31 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 
-$progId   = 'AverEngine.Project'
 $appName  = 'Aver Engine'
-$typeName = 'Aver Engine Project'
-$ext      = '.ocproject'
+
+# EVERY TYPE THE EDITOR CLAIMS, in one table, so register, unregister and the Default Programs
+# declaration cannot drift apart -- adding a type is this table and nothing else.
+#
+# ONLY TYPES THE EDITOR CAN ACTUALLY OPEN belong here. A registration is a promise that
+# double-clicking does something, and the shell cannot express "opens, but ignores it". .ocmap was
+# the second half of a bug where the association was missing AND the editor would have dropped the
+# file if it had one: a bare path fell through to the beam loader, which refused it and left an
+# empty editor. Both halves were fixed together, so do not add an extension here before
+# createApplication's positional-argument handling in SandboxApp.cpp recognises it.
+#
+# .ocmap and .ocworld are one format under two names -- what a project calls its levels, and what
+# the same content is called outside one -- so they take distinct ProgIDs, because Windows keys the
+# icon and the open verb off the ProgID, but share a human-readable type name.
+$types = @(
+    @{ Ext = '.ocproject'; ProgId = 'AverEngine.Project'; TypeName = 'Aver Engine Project' },
+    @{ Ext = '.ocmap';     ProgId = 'AverEngine.Map';     TypeName = 'Aver Engine Level'   },
+    @{ Ext = '.ocworld';   ProgId = 'AverEngine.World';   TypeName = 'Aver Engine Level'   }
+)
 
 # Every key this script owns, named once, so register and unregister cannot drift apart.
 $hive     = if ($AllUsers) { 'HKLM:' } else { 'HKCU:' }
-$extKey   = "$hive\Software\Classes$([char]92)$ext"
-$progKey  = "$hive\Software\Classes\$progId"
+function Get-ExtKey  ($e) { "$hive\Software\Classes$([char]92)$e" }
+function Get-ProgKey ($i) { "$hive\Software\Classes\$i" }
 $capKey   = "$hive\Software\Aver\Engine\Capabilities"
 $regAppsK = "$hive\Software\RegisteredApplications"
 
@@ -110,7 +126,10 @@ function Notify-Shell { [AverShellNotify]::SHChangeNotify(0x08000000, 0x0000, [I
 
 if ($Unregister) {
     $appLeafKey = "$hive\Software\Classes\Applications\Sandbox.exe"
-    foreach ($k in @($progKey, $extKey, $appLeafKey, "$hive\Software\Aver")) {
+    $doomed = @()
+    foreach ($t in $types) { $doomed += (Get-ProgKey $t.ProgId); $doomed += (Get-ExtKey $t.Ext) }
+    $doomed += @($appLeafKey, "$hive\Software\Aver")
+    foreach ($k in $doomed) {
         if (Test-Path $k) { Remove-Item -LiteralPath $k -Recurse -Force; "removed $k" }
         else              { "absent  $k" }
     }
@@ -121,7 +140,7 @@ if ($Unregister) {
         }
     }
     Notify-Shell
-    "`n$ext is no longer associated in $hive. Explorer may need a sign-out to drop the old icon."
+    "`n$(($types | ForEach-Object { $_.Ext }) -join ', ') no longer associated in $hive. Explorer may need a sign-out to drop the old icon."
     exit 0
 }
 
@@ -141,21 +160,26 @@ $iconRef = if (Test-Path $icon) { "$icon,0" } else { "$Exe,0" }
 # would work everywhere a tester happened to look and fail for everyone at the default location.
 $command = "`"$Exe`" `"%1`""
 
-# ---- the file type ----
-New-Item -Path $extKey  -Force | Out-Null
-New-Item -Path $progKey -Force | Out-Null
-Set-ItemProperty -Path $extKey  -Name '(default)' -Value $progId
-Set-ItemProperty -Path $progKey -Name '(default)' -Value $typeName
-Set-ItemProperty -Path $progKey -Name 'FriendlyTypeName' -Value $typeName
+# ---- the file types ----
+foreach ($t in $types) {
+    $extKey  = Get-ExtKey  $t.Ext
+    $progKey = Get-ProgKey $t.ProgId
 
-New-Item -Path "$progKey\DefaultIcon" -Force | Out-Null
-Set-ItemProperty -Path "$progKey\DefaultIcon" -Name '(default)' -Value $iconRef
-New-Item -Path "$progKey\shell\open\command" -Force | Out-Null
-Set-ItemProperty -Path "$progKey\shell\open\command" -Name '(default)' -Value $command
+    New-Item -Path $extKey  -Force | Out-Null
+    New-Item -Path $progKey -Force | Out-Null
+    Set-ItemProperty -Path $extKey  -Name '(default)' -Value $t.ProgId
+    Set-ItemProperty -Path $progKey -Name '(default)' -Value $t.TypeName
+    Set-ItemProperty -Path $progKey -Name 'FriendlyTypeName' -Value $t.TypeName
 
-# Advertise the ProgID on the extension: this is what puts the engine in the Open-with list at all.
-New-Item -Path "$extKey\OpenWithProgids" -Force | Out-Null
-New-ItemProperty -Path "$extKey\OpenWithProgids" -Name $progId -PropertyType String -Value '' -Force | Out-Null
+    New-Item -Path "$progKey\DefaultIcon" -Force | Out-Null
+    Set-ItemProperty -Path "$progKey\DefaultIcon" -Name '(default)' -Value $iconRef
+    New-Item -Path "$progKey\shell\open\command" -Force | Out-Null
+    Set-ItemProperty -Path "$progKey\shell\open\command" -Name '(default)' -Value $command
+
+    # Advertise the ProgID on the extension: this is what puts the engine in the Open-with list.
+    New-Item -Path "$extKey\OpenWithProgids" -Force | Out-Null
+    New-ItemProperty -Path "$extKey\OpenWithProgids" -Name $t.ProgId -PropertyType String -Value '' -Force | Out-Null
+}
 
 # ---- the application, which is a different thing from the file type ----
 # A ProgID's description names the FILE TYPE; the name of the APPLICATION comes from the exe's
@@ -167,7 +191,9 @@ New-Item -Path "$appKey\shell\open\command" -Force | Out-Null
 Set-ItemProperty -Path "$appKey\shell\open\command" -Name '(default)' -Value $command
 Set-ItemProperty -Path $appKey -Name 'FriendlyAppName' -Value $appName
 New-Item -Path "$appKey\SupportedTypes" -Force | Out-Null
-New-ItemProperty -Path "$appKey\SupportedTypes" -Name $ext -PropertyType String -Value '' -Force | Out-Null
+foreach ($t in $types) {
+    New-ItemProperty -Path "$appKey\SupportedTypes" -Name $t.Ext -PropertyType String -Value '' -Force | Out-Null
+}
 
 # ---- Default Programs, machine-wide only ----
 # Capabilities + RegisteredApplications is the documented way a program declares "I handle this file
@@ -179,7 +205,9 @@ if ($AllUsers) {
     Set-ItemProperty -Path $capKey -Name 'ApplicationName'        -Value $appName
     Set-ItemProperty -Path $capKey -Name 'ApplicationDescription' -Value 'Aver Engine editor and runtime'
     New-Item -Path "$capKey\FileAssociations" -Force | Out-Null
-    New-ItemProperty -Path "$capKey\FileAssociations" -Name $ext -PropertyType String -Value $progId -Force | Out-Null
+    foreach ($t in $types) {
+        New-ItemProperty -Path "$capKey\FileAssociations" -Name $t.Ext -PropertyType String -Value $t.ProgId -Force | Out-Null
+    }
 
     New-Item -Path $regAppsK -Force | Out-Null
     New-ItemProperty -Path $regAppsK -Name $appName -PropertyType String `
@@ -188,7 +216,7 @@ if ($AllUsers) {
 
 Notify-Shell
 
-"registered $ext -> $progId  [$(if ($AllUsers) { 'machine-wide, HKLM' } else { 'per-user, HKCU' })]"
+"registered $(($types | ForEach-Object { $_.Ext }) -join ', ')  [$(if ($AllUsers) { 'machine-wide, HKLM' } else { 'per-user, HKCU' })]"
 "  command : $command"
 "  icon    : $iconRef"
 "  app     : $appName"

@@ -1313,6 +1313,14 @@ public:
             } else {
                 AVER_WARN("[Sandbox] '{}' not loaded: {}", projectPath_, err);
             }
+        } else if (!openMapPath_.empty()) {
+            // A LEVEL WITH NO PROJECT ABOVE IT STILL OPENS. Everything that loads a level normally
+            // hangs off applyProject, which only runs when there is a project to apply -- so without
+            // this branch a lone .ocmap would produce an empty editor and no explanation, which is
+            // the exact failure that made opening one worth fixing in the first place. Its
+            // placements will not resolve (createApplication has already said so, with the reason);
+            // seeing the level's shape with unresolved contents beats seeing nothing.
+            loadStartMap(e);
         }
 #if AVER_WITH_IMGUI
         if (e.device()->uiActive()) {
@@ -5686,6 +5694,8 @@ public:
     void setSpawnTest(std::string cls) { spawnTestClass_ = std::move(cls); }      // --spawn-test <ClassName>
     void setPlayTest() { playTest_ = true; }                                       // --play-test
     void setProjectPath(std::string p) { projectPath_ = std::move(p); }          // <path>.ocproject
+    // <path>.ocmap given on the command line: opened INSTEAD of the project's start map.
+    void setOpenMap(std::string p) { openMapPath_ = std::move(p); }
     void armBrowser(bool on) { browserActive_ = on; }   // shows the start screen
 
 private:
@@ -12170,6 +12180,7 @@ private:
     editor::ProjectBrowser browser_;
     fmt::ProjectDesc project_;
     std::string projectPath_;        // <path>.ocproject given on the command line
+    std::string openMapPath_;        // <path>.ocmap given on the command line, if any
     bool browserActive_=false;
     rhi::TextureHandle logoTexture_=0;   // 0 when logo.png was absent or undecodable
     rhi::TextureHandle fileIconsTexture_=0;     // the Content Browser file-type sprite sheet (4 tiles)
@@ -13352,6 +13363,17 @@ private:
 
     // Loads the project's start map, resolved against its content directory. Missing is not an error.
     void loadStartMap(Engine& eng) {
+        // A MAP NAMED ON THE COMMAND LINE OUTRANKS THE PROJECT'S START MAP, and is loaded even when
+        // the project has no start map at all -- which is the whole point of naming one. Checked
+        // before project_.valid(), so a level outside any project still opens (with its placements
+        // unresolved, which createApplication has already warned about) rather than silently
+        // opening nothing.
+        if (!openMapPath_.empty()) {
+            std::error_code ec;
+            if (std::filesystem::exists(openMapPath_, ec)) { loadLevel(eng, openMapPath_); return; }
+            AVER_ERROR("[Level] '{}' does not exist", openMapPath_);
+            openMapPath_.clear();                  // fall back to the start map rather than nothing
+        }
         if (!project_.valid() || project_.startMap.empty()) return;
         const std::string path = project_.contentDir() + "\\" + project_.startMap;
         std::error_code ec;
@@ -14221,18 +14243,54 @@ private:
     Mat4 invVP_, viewProj_; Vec3 eye_{0,0,0};
 };
 
-// True for a path ending in ".ocproject", case-insensitively.
-static bool isOcproject(const char* p) {
-    const usize n = std::strlen(p);
-    if (n < 11) return false;
-    const char* ext = p + n - 10;
-    static const char* kExt = ".ocproject";
-    for (int i = 0; i < 10; ++i) {
-        char a = ext[i], b = kExt[i];
+// True for a path ending in `ext` (which must be lower-case and include the dot),
+// case-insensitively, with at least one character of stem before it.
+static bool hasExtension(const char* p, const char* ext) {
+    const usize n = std::strlen(p), e = std::strlen(ext);
+    if (n <= e) return false;
+    const char* got = p + n - e;
+    for (usize i = 0; i < e; ++i) {
+        char a = got[i];
         if (a >= 'A' && a <= 'Z') a = static_cast<char>(a - 'A' + 'a');
-        if (a != b) return false;
+        if (a != ext[i]) return false;
     }
     return true;
+}
+
+// True for a path ending in ".ocproject", case-insensitively.
+static bool isOcproject(const char* p) { return hasExtension(p, ".ocproject"); }
+
+// True for a level file. BOTH spellings, because they are the same format: .ocmap is what a project
+// names its levels and .ocworld is the same content outside one (see OcWorld.hpp), and a person
+// double-clicking either means the same thing by it.
+static bool isLevelFile(const char* p) {
+    return hasExtension(p, ".ocmap") || hasExtension(p, ".ocworld");
+}
+
+// The .ocproject that owns `mapPath`, found by walking up from it, or empty if there is none.
+//
+// WHY WALKING UP IS THE RIGHT ANSWER AND NOT A HEURISTIC. A level is not self-contained: every mesh,
+// material and class it places is named by a path RELATIVE to its project's content directory, and
+// that index is built when a project opens (GameContent::adopt). Opening a bare .ocmap with no
+// project would load the placements and resolve none of them -- an editor full of missing assets,
+// which reads as a corrupt level rather than as a missing project. So the file's own location is
+// used to find what it belongs to, exactly as a person would: a .ocmap lives under <project>/Content,
+// so the owning manifest is in the nearest ancestor that has one.
+//
+// Bounded rather than unbounded: a level somewhere outside any project would otherwise walk to the
+// drive root looking for one. Eight levels is far past any real Content/Maps/... nesting.
+static std::string ownerProjectOf(const std::string& mapPath) {
+    std::error_code ec;
+    std::filesystem::path dir = std::filesystem::path(mapPath).parent_path();
+    for (int up = 0; up < 8 && !dir.empty(); ++up) {
+        for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec))
+            if (!it->is_directory(ec) && isOcproject(it->path().string().c_str()))
+                return it->path().string();
+        const std::filesystem::path parent = dir.parent_path();
+        if (parent == dir) break;                  // reached the root; parent_path() stops changing
+        dir = parent;
+    }
+    return {};
 }
 
 // Parses the command line and builds the editor application. Some flags do their work and exit.
@@ -14243,7 +14301,7 @@ Application* createApplication(int argc, char** argv) {
     // right here and nothing else may override it; --mcp with no number defers to mcp.conf, resolved
     // once argument parsing is done and engineRoot() can be asked (see mcpRequested below).
     bool mcpRequested = false, mcpPortExplicit = false;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool furnaceGrid=false; f32 furnaceTilt=0.0f; bool ptFurnace=false; bool ptScene=false; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int rtRenderMode=-1; int pt=0; int ptBounces=-1; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string selectEntity; bool openLegacy=false; bool waterOn=false; f32 waterHeight=0.0f; std::string graphSelectNode; std::string graphTab; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false; bool bakeNav=false; f32 bakeNavCell=50.0f;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool furnaceGrid=false; f32 furnaceTilt=0.0f; bool ptFurnace=false; bool ptScene=false; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int rtRenderMode=-1; int pt=0; int ptBounces=-1; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string selectEntity; bool openLegacy=false; bool waterOn=false; f32 waterHeight=0.0f; std::string graphSelectNode; std::string graphTab; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false; bool bakeNav=false; f32 bakeNavCell=50.0f; std::string openMap;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -14764,13 +14822,33 @@ Application* createApplication(int argc, char** argv) {
 #endif
                    Tool::Select;
         }
-        else if (argv[i][0]!='-') { if (isOcproject(argv[i])) project=argv[i]; else beam=argv[i]; }
+        // A BARE PATH IS WHATEVER ITS EXTENSION SAYS IT IS. This is the shell's entry point --
+        // double-clicking a file hands the engine exactly one argument and nothing else -- so every
+        // type the engine registers itself for has to be recognised here. A .ocmap used to fall
+        // through to `beam`, where loadOcbeam refused it and the editor opened empty: an
+        // association that appears to do nothing is worse than none at all.
+        else if (argv[i][0]!='-') {
+            if      (isOcproject(argv[i])) project = argv[i];
+            else if (isLevelFile(argv[i])) openMap = argv[i];
+            else                           beam    = argv[i];
+        }
     }
     // Before the engine creates a device: the backend queries the hardware inside Engine::run.
     if (forceCaps && !rhi::setCapsOverride(forceCaps))
         AVER_ERROR("[Sandbox] --force-caps '{}' was rejected; running on the UNCLAMPED device", forceCaps);
 
+    // A LEVEL NAMED ON ITS OWN BRINGS ITS PROJECT WITH IT. Opening the project is not a bonus --
+    // it is what makes the level's own contents resolvable (see ownerProjectOf). An explicit
+    // .ocproject argument still wins: if someone named both, they meant both.
+    if (!openMap.empty() && project.empty()) {
+        const std::string owner = ownerProjectOf(openMap);
+        if (!owner.empty()) project = owner;
+        else AVER_WARN("[Sandbox] '{}' is not inside a project (no .ocproject above it); its "
+                       "placements will not resolve", openMap);
+    }
+
     auto* app = new SandboxApp(frames, headless, beam, shot, tool);
+    if (!openMap.empty()) app->setOpenMap(openMap);
     app->setPost(exposure, bloom, autoExposure);
     app->applyCaptureExposureRule(autoExposure);
     app->setGiForceOff(noGi);
