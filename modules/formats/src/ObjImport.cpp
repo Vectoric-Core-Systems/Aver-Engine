@@ -95,9 +95,21 @@ bool parseCorner(std::string_view t, usize nv, usize nvt, usize nvn, Corner& out
         bool neg = false;
         if (t[i] == '-') { neg = true; ++i; }
         else if (t[i] == '+') { ++i; }
+        // SATURATING, because an .obj is untrusted input and signed overflow is UB. Twenty digits
+        // of face index overflows i64 outright; even a merely large one (5000000000, which fits in
+        // i64 comfortably) then narrows wrong in resolveIndex's static_cast<i32>. Both are garbage
+        // indices either way, and the de-index loop already substitutes a valid vertex for one it
+        // cannot resolve (see its `pi + 2 >= gp.size()` check), so stopping the accumulation early
+        // changes the result for no legal file and removes the undefined behaviour from an illegal
+        // one. The ceiling is orders past any real mesh and leaves the final multiply inside i32.
+        constexpr i64 kObjIndexCeiling = 1 << 27;   // 134,217,728
         i64 acc = 0;
         bool any = false;
-        while (i < t.size() && t[i] >= '0' && t[i] <= '9') { acc = acc * 10 + (t[i] - '0'); ++i; any = true; }
+        while (i < t.size() && t[i] >= '0' && t[i] <= '9') {
+            if (acc < kObjIndexCeiling) acc = acc * 10 + (t[i] - '0');
+            ++i;
+            any = true;
+        }
         if (any) idx[field] = neg ? -acc : acc;
         // No digits between two slashes means the field is absent (the `v//vn` form), which is
         // legal and leaves idx[field] at 0 -- resolveIndex turns that into -1.
