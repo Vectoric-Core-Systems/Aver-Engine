@@ -72,14 +72,14 @@ VAR gunAttached float 0
 # vertical axis, with nothing to correct but its size.
 #
 # THE SCALE, measured the same way AN_FPGun.ocgraph's gunScale comment measures Blaster.ocmesh's,
-# because eyeballing this one would have been worse than eyeballing that one: Character_Idle.glb
-# reports this rig's joints as `matrix` nodes rather than TRS (GltfImport.cpp's importSkins notes
-# this and falls back to an identity rest pose -- harmless for a STATIC bind-pose render, since a
-# bone's re-derived inverse-bind is then also identity and the skin transform cancels to identity
-# for every vertex regardless of which joint(s) it is weighted to; it would matter the day this rig
-# is ever driven by a real animation clip, which today it is not -- see AN_FPCharacter's own
-# provenance note below), so nothing about the rig's declared units could be trusted by inspection
-# either. What the raw AABB says is unambiguous, though: boundsMax.z - boundsMin.z = 37646.862
+# because eyeballing this one would have been worse than eyeballing that one: this rig stores its
+# joints as `matrix` nodes rather than TRS, and the importer used to drop those (and everything
+# above the topmost joint with them), which left every bone at an identity rest pose. That was
+# invisible here -- a bone's re-derived inverse bind is then identity too, so the skin transform
+# cancels for every vertex however it is weighted -- and it was fixed in 9a25807, which also proved
+# the point: re-importing with a CORRECT rest pose changed this template's rendered frame by 0.000%
+# of viewport pixels, front and rear. So the scale below was measured against the mesh, which the
+# skeleton never affected either way. What the raw AABB says is unambiguous, though: boundsMax.z - boundsMin.z = 37646.862
 # UNSCALED UNITS for a mesh whose two horizontal extents are comparably huge -- not a small, believable
 # number times 100 (the ordinary glTF-metres-to-engine-cm factor), which is what made this worth
 # measuring rather than assuming "must be the usual 100x". Scaling so that span becomes the capsule's

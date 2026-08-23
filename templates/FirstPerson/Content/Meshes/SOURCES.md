@@ -42,8 +42,15 @@ importer's `Gltf::run` refuses any file with no meshes before it ever reads a sk
 (`GltfImport.cpp`: `"glTF: the file contains no meshes"`), so none of the three could be imported at
 all; this is a hard gate in the importer, not a judgement call made in content. `AN_FPCharacter.ocgraph`
 therefore renders the character in its imported bind pose — see that file's own COMP-record comment for
-the scale measurement and the full provenance note, including why the rig's rest pose is degenerate
-(identity) without that mattering for a pose that is never animated.
+the scale measurement.
+
+**The rest pose was wrong, and is not any more.** This rig stores its joints as baked `matrix` nodes
+and hangs them under an armature node carrying the FBX-to-glTF axis and unit conversion. The importer
+read neither, so every bone arrived at identity — 45 of 45 at translation (0,0,0) — and the skeleton
+sat in a different space and orientation from the mesh it skins. Fixed in 9a25807; `Character.ocskel`
+here was regenerated with it. Worth knowing if you compare this file against an older checkout: the
+rendered frame is byte-identical either way (the re-derived inverse bind cancels whatever the rest
+pose is), which is exactly why it went unnoticed and why nothing visual changed when it was corrected.
 
 **The skin texture** (`Character_Skin.png`, in `../Textures/`) IS wired up, through
 `../Materials/M_Character.ocmat`'s `TEX baseColor {path:Textures/Character_Skin.png}` — unlike the
