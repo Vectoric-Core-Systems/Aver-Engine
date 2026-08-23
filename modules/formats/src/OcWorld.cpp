@@ -182,6 +182,33 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
             }
             if (sawDensity) { sp.densityMin = dMin; sp.densityMax = dMax; }
             out.scatterSpecies.push_back(std::move(sp));
+        } else if (equalsCI(key, "WATER")) {
+            OcWaterPlacement wp;
+            for (usize i = 1; i < t.size(); ++i) {
+                if      (equalsCI(t[i], "name")  && i + 1 < t.size()) wp.name    = std::string(t[++i]);
+                else if (equalsCI(t[i], "level") && i + 1 < t.size()) wp.levelCm = parseF64(t[++i]);
+                // A BARE TOKEN, matching PCGVOLUME's own `infinite`: a statement about what the
+                // surface IS rather than a value it carries.
+                else if (equalsCI(t[i], "infinite")) wp.infinite = true;
+                else if (equalsCI(t[i], "bounds") && i + 4 < t.size()) {
+                    wp.infinite = false;
+                    wp.boundsMin[0] = parseF64(t[i+1]); wp.boundsMin[1] = parseF64(t[i+2]);
+                    wp.boundsMax[0] = parseF64(t[i+3]); wp.boundsMax[1] = parseF64(t[i+4]);
+                    i += 4;
+                }
+            }
+            out.waters.push_back(std::move(wp));
+        } else if (equalsCI(key, "WAVE")) {
+            OcGerstnerWave gw;
+            for (usize i = 1; i < t.size(); ++i) {
+                if      (equalsCI(t[i], "water") && i + 1 < t.size()) gw.water = std::string(t[++i]);
+                else if (equalsCI(t[i], "dir")   && i + 2 < t.size()) {
+                    gw.dirX = parseF64(t[i+1]); gw.dirZ = parseF64(t[i+2]); i += 2;
+                } else if (equalsCI(t[i], "wavelength") && i + 1 < t.size()) gw.wavelengthCm = parseF64(t[++i]);
+                else if (equalsCI(t[i], "amplitude")    && i + 1 < t.size()) gw.amplitudeCm  = parseF64(t[++i]);
+                else if (equalsCI(t[i], "steepness")    && i + 1 < t.size()) gw.steepness    = parseF64(t[++i]);
+            }
+            out.waves.push_back(std::move(gw));
         } else if (equalsCI(key, "PLACE") || equalsCI(key, "PLACEG")) {
             const bool g = equalsCI(key, "PLACEG");
             OcWorldPlacement p;
@@ -349,6 +376,38 @@ std::string writeOcworld(const OcWorldData& w) {
             // what the species IS, not a value it carries.
             if (!sp.randomizeYaw) s += " noyaw";
             s += "\n";
+        }
+    }
+
+    if (!w.waters.empty()) {
+        s += "\n";
+        for (const OcWaterPlacement& wp : w.waters) {
+            s += "WATER name " + (wp.name.empty() ? std::string("unnamed") : wp.name) +
+                 " level " + num(wp.levelCm);
+            // The bounds token LAST, same reasoning as PCGVOLUME's own bounds: parsing it consumes
+            // the numbers after it, so writing it last means the reader never has to re-find them.
+            if (wp.infinite) {
+                s += " infinite";
+            } else {
+                s += " bounds " + num(wp.boundsMin[0]) + " " + num(wp.boundsMin[1]) + " " +
+                     num(wp.boundsMax[0]) + " " + num(wp.boundsMax[1]);
+            }
+            s += "\n";
+        }
+    }
+
+    if (!w.waves.empty()) {
+        s += "\n";
+        for (const OcGerstnerWave& gw : w.waves) {
+            s += "WAVE";
+            // Omitted when empty, same "no override is the default" rule GAMEMODE and SCATTER's
+            // `volume` follow: empty means "the first declared WATER", and a wave that never named
+            // one must not come back from a save claiming to have named one.
+            if (!gw.water.empty()) s += " water " + gw.water;
+            s += " dir " + num(gw.dirX) + " " + num(gw.dirZ) +
+                 " wavelength " + num(gw.wavelengthCm) +
+                 " amplitude " + num(gw.amplitudeCm) +
+                 " steepness " + num(gw.steepness) + "\n";
         }
     }
 

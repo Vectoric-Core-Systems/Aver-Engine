@@ -452,6 +452,121 @@ static void checkOcworldScatter() {
 // deliberate omission from the written text, and that a line this parser does not understand does not
 // disturb LANDSCAPE or anything else already parsed -- the same three properties checkOcworldScatter
 // already proves for SCATTER, exercised against the newest record in the chain of if/else-if branches.
+// WATER / WAVE -- the records that let a level author its own surface instead of taking whatever the
+// host's --water flag supplied. Two records rather than one, cross-referenced by name, because a
+// level may hold both an ocean and a pool and "the water" stops meaning anything once there are two.
+static void checkOcworldWater() {
+    AVER_INFO("=== .ocworld WATER / WAVE records ===");
+    using namespace fmt;
+    std::string err;
+
+    {
+        // Both shapes of surface in one file, every field given explicitly so nothing below is a
+        // struct default in disguise, plus a third WAVE that names no water at all.
+        OcWorldData w;
+        check(parseOcworld(
+            "OCWORLD 1\nNAME T\n"
+            "WATER name Pool level 45.5 bounds -300 -200 300 200\n"
+            "WATER name Ocean level 0 infinite\n"
+            "WAVE water Pool dir 1 0 wavelength 400 amplitude 8 steepness 0.4\n"
+            "WAVE water Ocean dir 0.7 0.7 wavelength 1200 amplitude 60 steepness 0.75\n"
+            "WAVE dir -1 0.2 wavelength 300 amplitude 5 steepness 0.3\n", w, &err),
+            "a world with two WATER records and three WAVEs parses");
+        check(w.waters.size() == 2, "and keeps both waters");
+        check(w.waves.size() == 3, "and all three waves");
+
+        const OcWaterPlacement& pool = w.waters[0];
+        check(pool.name == "Pool", "water 0: name");
+        check(std::fabs(pool.levelCm - 45.5) < 1e-12, "water 0: surface height");
+        check(!pool.infinite, "water 0: a `bounds` clause makes it finite");
+        check(std::fabs(pool.boundsMin[0] + 300.0) < 1e-12 && std::fabs(pool.boundsMin[1] + 200.0) < 1e-12 &&
+              std::fabs(pool.boundsMax[0] - 300.0) < 1e-12 && std::fabs(pool.boundsMax[1] - 200.0) < 1e-12,
+              "water 0: all four bounds, in order, not transposed");
+
+        const OcWaterPlacement& ocean = w.waters[1];
+        check(ocean.name == "Ocean", "water 1: name");
+        check(ocean.infinite, "water 1: `infinite` is a bare token and sets the flag");
+
+        const OcGerstnerWave& w0 = w.waves[0];
+        check(w0.water == "Pool", "wave 0: names its water");
+        check(std::fabs(w0.dirX - 1.0) < 1e-12 && std::fabs(w0.dirZ - 0.0) < 1e-12, "wave 0: direction");
+        check(std::fabs(w0.wavelengthCm - 400.0) < 1e-12, "wave 0: wavelength");
+        check(std::fabs(w0.amplitudeCm - 8.0) < 1e-12, "wave 0: amplitude");
+        check(std::fabs(w0.steepness - 0.4) < 1e-12, "wave 0: steepness");
+
+        // An unnamed wave is the common case -- one water in the level, and its author should not
+        // have to name it just to give it a swell. Empty here means "the first declared WATER", a
+        // resolution the FORMAT deliberately does not perform; it is the runtime consumer's job,
+        // exactly as OcScatterSpecies::volume leaves its own empty case alone.
+        check(w.waves[2].water.empty(), "wave 2: no `water` clause leaves the reference empty");
+
+        // ---- round trip ----------------------------------------------------------------------
+        const std::string text = writeOcworld(w);
+        check(text.find("WATER name Pool") != std::string::npos, "the written text carries the pool");
+        check(text.find("bounds -300 -200 300 200") != std::string::npos, "...with its bounds");
+        check(text.find("WATER name Ocean") != std::string::npos, "and the ocean");
+        check(text.find("infinite") != std::string::npos, "...written as `infinite`, not as bounds");
+
+        // Checked by ABSENCE, the same way the scatter test checks an unbounded density band: a wave
+        // that never named a water must not come back from a save claiming to have named one.
+        const usize thirdWave = text.rfind("WAVE");
+        const usize thirdEnd = text.find('\n', thirdWave);
+        check(thirdWave != std::string::npos &&
+              text.substr(thirdWave, thirdEnd - thirdWave).find("water ") == std::string::npos,
+              "an unnamed wave's line has no `water` token at all");
+
+        OcWorldData back;
+        check(parseOcworld(text, back, &err), "what the writer produced parses again");
+        check(back.waters.size() == 2 && back.waves.size() == 3, "with every record still present");
+        check(back.waters[0].name == pool.name && !back.waters[0].infinite &&
+              std::fabs(back.waters[0].levelCm - pool.levelCm) < 1e-9 &&
+              std::fabs(back.waters[0].boundsMax[1] - pool.boundsMax[1]) < 1e-9,
+              "and the pool's fields round-trip");
+        check(back.waters[1].infinite, "...including the ocean staying infinite");
+        check(std::fabs(back.waves[1].amplitudeCm - 60.0) < 1e-9 &&
+              back.waves[1].water == "Ocean",
+              "and a wave keeps both its numbers and its cross-reference");
+        check(writeOcworld(back) == text, "a second write reproduces the first byte for byte");
+    }
+    {
+        // THE CASE THAT MATTERS MOST FOR EVERY LEVEL THAT ALREADY EXISTS: a world with no WATER
+        // record at all must parse exactly as it did before these records were added, and produce no
+        // water rather than a default one.
+        OcWorldData w;
+        check(parseOcworld("OCWORLD 1\nNAME T\nPLACE m.ocmesh 0 0 0 0 0 0 1\n", w, &err),
+              "a world with no WATER record still parses");
+        check(w.waters.empty() && w.waves.empty(), "and declares no water at all");
+        check(writeOcworld(w).find("WATER") == std::string::npos,
+              "...and writing it back emits no WATER line");
+    }
+    {
+        // A WATER record with nothing but a level is the shortest useful form, and every omitted
+        // clause must fall to its documented default rather than to whatever the previous record left
+        // behind -- the two records here are parsed by the same branch, one after the other.
+        OcWorldData w;
+        check(parseOcworld("OCWORLD 1\nNAME T\n"
+                           "WATER name A level 10 bounds -1 -2 3 4\n"
+                           "WATER level 20\n", w, &err),
+              "a minimal WATER record parses beside a fully-specified one");
+        check(w.waters.size() == 2, "and both are kept");
+        check(w.waters[1].name.empty(), "the minimal record's name is empty, not the previous one's");
+        check(w.waters[1].infinite,
+              "and it is INFINITE by default -- a bounded neighbour must not make it a pool");
+    }
+    {
+        // The reader's standing contract, exercised against the newest records in the if/else-if
+        // chain: an unknown record between two known ones must be skipped, not fail the parse.
+        OcWorldData w;
+        check(parseOcworld("OCWORLD 1\nNAME T\n"
+                           "WATER name P level 5 infinite\n"
+                           "FUTURERECORD nobody has written this yet\n"
+                           "WAVE dir 1 0 wavelength 100 amplitude 1 steepness 0.1\n", w, &err),
+              "an unknown record between WATER and WAVE still parses");
+        check(w.waters.size() == 1 && w.waves.size() == 1,
+              "and neither record is disturbed by the one the parser did not understand");
+    }
+}
+
 static void checkOcworldLandscape() {
     AVER_INFO("=== .ocworld LANDSCAPE record ===");
     using namespace fmt;
@@ -595,6 +710,7 @@ int main(int argc, char** argv) {
     checkOcworld();
     checkOcworldScatter();
     checkOcworldLandscape();
+    checkOcworldWater();
     if (argc < 2) {
         AVER_INFO("usage: FormatTest <file.ocbeam|file.ocmap> [more...]");
         return g_failures;

@@ -1,8 +1,9 @@
 #pragma once
 // .ocworld — the native world format, and a strict superset of .ocmap (FORMAT_SPECS.md §11).
 // Identity, SUN/FOG environment, PLACE/PLACEG placements, the LANDSCAPE sections a level's terrain is
-// built from, and the SCATTER palette a PCGVOLUME's density field is populated with. Unknown records
-// parse and are skipped.
+// built from, the SCATTER palette a PCGVOLUME's density field is populated with, and the WATER
+// surfaces (with their WAVE sets) a level authors instead of taking the host's CLI-supplied ocean.
+// Unknown records parse and are skipped.
 // Engine space: centimetres, +X forward, +Y right, +Z up, left-handed. Positions are f64.
 #include "aver/core/Types.hpp"
 #include "aver/assets/AssetId.hpp"
@@ -189,6 +190,62 @@ struct OcLandscapePlacement {
     f64 extentCm = 0.0;
 };
 
+// One authored Gerstner wave, contributing to a WATER record's swell. Mirrors
+// aver::water::GerstnerWave (modules/water/include/aver/water/GerstnerWave.hpp) field for field --
+// direction, wavelength, amplitude, steepness -- but keeps f64 here rather than that struct's f32,
+// the same "narrowing happens once, at the format -> runtime conversion, not here" rule
+// OcScatterSpecies states above. Aver.Formats cannot include GerstnerWave.hpp regardless: it depends
+// on Core/Platform/Assets only (modules/formats/CMakeLists.txt's DEPS), and Aver.Water is not among
+// them, so this struct is a deliberate duplicate rather than a missed reuse.
+//
+// A SEPARATE RECORD, cross-referenced to its WATER by NAME, rather than embedded inline on the
+// WATER line -- exactly the shape OcScatterSpecies already takes against OcPcgVolume (`volume
+// <name>`, this struct's own `water` field below). Nothing in this file repeats one keyword
+// several times on a single line to build a list, and a four-or-more-wave swell would make such a
+// line unreadable; one WAVE per line keeps each wave on its own, editable line instead.
+struct OcGerstnerWave {
+    // Which WATER this wave belongs to, by name. EMPTY MEANS THE FIRST DECLARED WATER RECORD --
+    // mirroring OcScatterSpecies::volume's own "empty means the first non-Sky volume" contract,
+    // simplified because water has no equivalent of a reserved name to exclude. The overwhelmingly
+    // common case is one WATER per level, and an author of that one water should not have to name
+    // it just to give it waves.
+    std::string water;
+
+    f64 dirX = 1.0, dirZ = 0.0;    // need not be pre-normalised, matching GerstnerWave.hpp's own contract
+    f64 wavelengthCm = 800.0;
+    f64 amplitudeCm  = 25.0;
+    f64 steepness    = 0.6;
+};
+
+// One WATER surface a level authors. Replaces what sandbox/src/SandboxApp.cpp hardcoded at render
+// registration -- a --water CLI flag for the height, and four fixed-heading Gerstner waves for the
+// swell -- with level data, exactly what modules/water/README.md's "What this slice does not do"
+// section names as the follow-up owed to the LANDSCAPE record: "Making them level data is a separate
+// slice and follows the LANDSCAPE record precedent exactly."
+//
+// NAMED, for the same reason OcPcgVolume and OcLandscapePlacement are: nothing stops a level
+// declaring an ocean AND a pool, and "the water" stops meaning anything once there are two.
+//
+// MODELLED ON OcPcgVolume, not OcLandscapePlacement, despite the README's wording: a WATER record is
+// self-contained authored data, with no external asset it merely positions the way LANDSCAPE
+// positions an .ocland file, so the infinite/bounded duality below is lifted from OcPcgVolume rather
+// than from LANDSCAPE's single `extent` hint. INFINITE IS THE DEFAULT for the identical reason it is
+// there: an endless surface is what every level had before this record existed (the host's
+// CLI-supplied water has no edges), so a WATER record that never mentions bounds must still read
+// back as that same endless plane; `bounds` narrows it to a POOL.
+//
+// BOUNDS ARE HORIZONTAL ONLY (X, Y), unlike OcPcgVolume's three-axis box: a water surface already
+// has one height, `levelCm`, and no vertical thickness to bound -- a Z pair here would be a number
+// nothing ever reads, which is worse than not having one.
+struct OcWaterPlacement {
+    std::string name;              // level-local identifier; "unnamed" when empty, mirroring OcPcgVolume
+    f64 levelCm = 0.0;             // surface height, cm, +Z up -- what --water <heightCm> used to set
+
+    bool infinite = true;          // false means boundsMin/Max are meaningful
+    f64 boundsMin[2] = {0, 0};     // X, Y cm
+    f64 boundsMax[2] = {0, 0};     // X, Y cm
+};
+
 struct OcWorldData {
     int version = 1;
     u64 contentId = 0;                     // ID = FNV-1a-64(NAME)
@@ -244,6 +301,16 @@ struct OcWorldData {
     // The level's scatter palette -- what the density field above places, species by species. Order
     // is the file's order, same reasoning as pcgVolumes above.
     std::vector<OcScatterSpecies> scatterSpecies;
+
+    // The level's authored water surfaces. Order is the file's order, same reasoning as landscapes
+    // and pcgVolumes above -- a level naming two the same keeps both rather than silently losing
+    // one. EMPTY IS THE ORDINARY CASE: no WATER record means no water, exactly as a level parsed
+    // before this record existed.
+    std::vector<OcWaterPlacement> waters;
+
+    // The waves each water surface above is given, cross-referenced by name exactly as
+    // scatterSpecies is cross-referenced to pcgVolumes above. Order is the file's order.
+    std::vector<OcGerstnerWave> waves;
 
     std::vector<OcWorldPlacement> placements;
 };
