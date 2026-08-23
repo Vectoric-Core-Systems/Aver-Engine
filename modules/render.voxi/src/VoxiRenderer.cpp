@@ -1038,23 +1038,63 @@ void VoxiRenderer::fitGiShadow() {
 bool VoxiRenderer::buildGeometryTable(rhi::IRenderContext& ctx) {
     if (!res_ || !dev_ || rtInstanceData_.empty()) return false;
 
-    // What the table is built from: the ordered list of meshes. A cheap order-sensitive mix, so a
-    // reordered draw list rebuilds rather than silently keeping offsets that no longer match.
+    // ONE ENTRY PER DISTINCT MESH, NOT PER INSTANCE, and that is the whole cost of this function.
+    //
+    // This used to walk rtInstanceMesh_ and give every INSTANCE its own slice of the shared vertex
+    // and index buffers -- so a mesh drawn a thousand times had its geometry copied in a thousand
+    // times, byte for byte identical each time. The table it produced was not a little too big, it
+    // was absurd: in ElectricDreams at one camera it reported
+    //     ray-traced reflection table: 769 instances, 16320942 vertices, 11533146 indices
+    // which is ~522 MB of vertex buffer for a scene of roughly 120 distinct meshes, and the copy
+    // loop below issued TWO copyBuffer calls per instance to fill it. Raise the instance count and
+    // it scales exactly as you would fear: 6,655 instances asked for 82.3M vertices and 238.7M
+    // indices, about 3.5 GB, and 13,310 copies. That is where "Voxi acceleration structures" spent
+    // 9.1ms at 759 instances and 64.2ms at 6,571 -- the per-instance cost was ~9.7us at BOTH counts,
+    // which is the signature of a linear per-instance cost, not of a TLAS build.
+    //
+    // Geometry is a property of the MESH. Two instances of the same mesh index the same triangles;
+    // only their transforms differ, and those already live per-instance in RtInstance::objectToWorld.
+    // So the table is built over the distinct set, and every instance simply points at its mesh's
+    // slice.
+    //
+    // SORTED, not first-appearance order, and that matters for the cache key below. Offsets derived
+    // from first-appearance order change whenever the draw list is REORDERED -- which happens every
+    // frame here, since occlusionOrder_ reorders entities -- so the table would rebuild constantly
+    // while naming the same meshes. Sorting makes the offsets a function of the SET alone.
+    rtGeomMeshes_.assign(rtInstanceMesh_.begin(), rtInstanceMesh_.end());
+    std::sort(rtGeomMeshes_.begin(), rtGeomMeshes_.end());
+    rtGeomMeshes_.erase(std::unique(rtGeomMeshes_.begin(), rtGeomMeshes_.end()), rtGeomMeshes_.end());
+
     u64 key = 1469598103934665603ull;
-    for (rhi::MeshHandle h : rtInstanceMesh_) {
+    for (rhi::MeshHandle h : rtGeomMeshes_) {
         key ^= static_cast<u64>(h);
         key *= 1099511628211ull;
     }
 
+    rtGeomFirstVertex_.clear();
+    rtGeomFirstIndex_.clear();
+    rtGeomFirstVertex_.reserve(rtGeomMeshes_.size());
+    rtGeomFirstIndex_.reserve(rtGeomMeshes_.size());
     u32 totalVerts = 0, totalIndices = 0;
-    for (usize i = 0; i < rtInstanceMesh_.size(); ++i) {
+    for (rhi::MeshHandle h : rtGeomMeshes_) {
         rhi::BufferHandle vb = 0, ib = 0;
         u32 vc = 0, ic = 0;
-        if (!dev_->meshGeometry(rtInstanceMesh_[i], &vb, &ib, &vc, &ic)) return false;
-        rtInstanceData_[i].firstVertex = totalVerts;
-        rtInstanceData_[i].firstIndex  = totalIndices;
+        if (!dev_->meshGeometry(h, &vb, &ib, &vc, &ic)) return false;
+        rtGeomFirstVertex_.push_back(totalVerts);
+        rtGeomFirstIndex_.push_back(totalIndices);
         totalVerts   += vc;
         totalIndices += ic;
+    }
+
+    // Every instance points at its mesh's slice. Rewritten every frame, because the INSTANCE list
+    // changes every frame even when the mesh set does not -- which is exactly why this half is
+    // outside the key early-out below and the copy half is inside it.
+    for (usize i = 0; i < rtInstanceMesh_.size(); ++i) {
+        const auto it = std::lower_bound(rtGeomMeshes_.begin(), rtGeomMeshes_.end(), rtInstanceMesh_[i]);
+        if (it == rtGeomMeshes_.end() || *it != rtInstanceMesh_[i]) return false;
+        const usize slot = static_cast<usize>(it - rtGeomMeshes_.begin());
+        rtInstanceData_[i].firstVertex = rtGeomFirstVertex_[slot];
+        rtInstanceData_[i].firstIndex  = rtGeomFirstIndex_[slot];
     }
     if (totalVerts == 0 || totalIndices == 0) return false;
 
@@ -1116,14 +1156,15 @@ bool VoxiRenderer::buildGeometryTable(rhi::IRenderContext& ctx) {
     // the runtime still considers a copy destination.
     ctx.bufferBarrier(rtVerts_,   rhi::ResourceState::Common, rhi::ResourceState::CopyDest);
     ctx.bufferBarrier(rtIndices_, rhi::ResourceState::Common, rhi::ResourceState::CopyDest);
-    for (usize i = 0; i < rtInstanceMesh_.size(); ++i) {
+    // TWO COPIES PER DISTINCT MESH, where this used to issue two per INSTANCE.
+    for (usize m = 0; m < rtGeomMeshes_.size(); ++m) {
         rhi::BufferHandle vb = 0, ib = 0;
         u32 vc = 0, ic = 0;
-        if (!dev_->meshGeometry(rtInstanceMesh_[i], &vb, &ib, &vc, &ic)) return false;
+        if (!dev_->meshGeometry(rtGeomMeshes_[m], &vb, &ib, &vc, &ic)) return false;
         ctx.copyBuffer(rtVerts_, vb, static_cast<u64>(vc) * sizeof(rhi::MeshVertex),
-                       static_cast<u64>(rtInstanceData_[i].firstVertex) * sizeof(rhi::MeshVertex), 0);
+                       static_cast<u64>(rtGeomFirstVertex_[m]) * sizeof(rhi::MeshVertex), 0);
         ctx.copyBuffer(rtIndices_, ib, static_cast<u64>(ic) * sizeof(u32),
-                       static_cast<u64>(rtInstanceData_[i].firstIndex) * sizeof(u32), 0);
+                       static_cast<u64>(rtGeomFirstIndex_[m]) * sizeof(u32), 0);
     }
     ctx.bufferBarrier(rtVerts_,   rhi::ResourceState::CopyDest, rhi::ResourceState::Common);
     ctx.bufferBarrier(rtIndices_, rhi::ResourceState::CopyDest, rhi::ResourceState::Common);
@@ -1132,8 +1173,9 @@ bool VoxiRenderer::buildGeometryTable(rhi::IRenderContext& ctx) {
     rtGeometryReady_ = true;
     res_->setSrvBuffer(bindings_, 3, rtVerts_, sizeof(rhi::MeshVertex), totalVerts, 0);
     res_->setSrvBuffer(bindings_, 4, rtIndices_, sizeof(u32), totalIndices, 0);
-    AVER_INFO("[Voxi] ray-traced reflection table: {} instances, {} vertices, {} indices",
-              rtInstanceData_.size(), totalVerts, totalIndices);
+    AVER_INFO("[Voxi] ray-traced reflection table: {} instances over {} distinct mesh(es), "
+              "{} vertices, {} indices",
+              rtInstanceData_.size(), rtGeomMeshes_.size(), totalVerts, totalIndices);
     return true;
 }
 

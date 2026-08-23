@@ -381,6 +381,11 @@ private:
     bool rtGeometryReady_ = false;
     std::vector<RtInstance> rtInstanceData_;
     std::vector<rhi::MeshHandle> rtInstanceMesh_;   // parallel: which mesh each instance draws
+    // THE DISTINCT MESHES those instances name, sorted, plus where each one's geometry sits in the
+    // shared vertex/index table. One entry per MESH, not per instance -- see buildGeometryTable for
+    // what that distinction was costing.
+    std::vector<rhi::MeshHandle> rtGeomMeshes_;
+    std::vector<u32> rtGeomFirstVertex_, rtGeomFirstIndex_;
 
     // Builds or refreshes the flat table for this frame's draw list. Returns false when it could
     // not be made, which is the signal to fall back to cone-traced reflections.
