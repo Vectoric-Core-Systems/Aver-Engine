@@ -3790,6 +3790,100 @@ public:
             };
 #endif
 
+#if AVER_MODULE_VOXI
+            // A CASTER THE CAMERA CANNOT SEE STILL CASTS A SHADOW, and until now it did not.
+            //
+            // The two culls inside the loop below -- frustum, then occlusion -- exist to skip
+            // DRAWING an entity, and they did it with a bare `continue` straight past the
+            // drawMesh() call at the bottom. But drawMesh() is also the ONLY thing that reaches the
+            // render features: IDevice::drawMesh broadcasts submitDraw() to every registered
+            // IRenderFeature, which is how VoxiRenderer learns an entity exists at all. So a culled
+            // entity was absent from the shadow cascades, from the GI voxelisation, and from the
+            // ray-tracing TLAS -- and its shadow vanished the instant it left the view.
+            //
+            // THAT IS THE "SHADOWS ARE SCREEN-SPACE" SYMPTOM, and the name is fair even though no
+            // shadowing technique here is screen-space: cascaded shadow maps and RayQuery are both
+            // world-space, but what FED them was the camera frustum, so the result behaved exactly
+            // like a screen-space effect. Easiest to see in the FirstPerson template -- look away
+            // from something and the shadow it was casting disappears.
+            //
+            // This submits the entity to the features WITHOUT drawing it. Voxi then applies its own
+            // per-cascade cull in LIGHT space (shadowPass's sphere-versus-cascade test), which is
+            // the cull a shadow caster should have been getting all along. The visible pass is
+            // untouched: nothing extra is rasterised into the camera's view.
+            //
+            // BOUNDED BY ANGULAR SIZE, and the bound is the difference between this being free and
+            // being unaffordable. Submitting EVERY culled entity is correct and was measured at
+            // +64ms/frame in ElectricDreams, where 5,884 of 6,617 entities are culled and almost all
+            // of them are scatter plants: the ray-tracing TLAS is a full PREFER_FAST_TRACE rebuild
+            // every frame (see buildAccelerationStructures' own note that "this number IS the bill"),
+            // so its input going 759 -> 6,571 instances took it from 9.1ms to 64.2ms.
+            //
+            // The floor below is the same argument Voxi's shadowPass already makes per cascade -- an
+            // object too small to fill a shadow texel cannot put a shadow anywhere -- applied one
+            // step earlier, where it can stop the work rather than just the draw. An object subtending
+            // less than kMinCasterAngle from the camera cannot cast a shadow the viewer could
+            // resolve, so it is not worth a TLAS instance or a voxel. A crate at 5m subtends ~0.2rad
+            // and is kept; an ankle-height plant at 100m subtends ~0.003rad and is not.
+            //
+            // A NEGATIVE radius means the caller had no bounds and the entity is submitted regardless,
+            // matching the "must not vanish" rule the frustum cull itself follows.
+            constexpr f32 kMinCasterAngle = 0.02f;   // radians (~1.1 degrees)
+            auto submitShadowOnly = [&](scene::Entity sEnt, rhi::MeshHandle baseMesh, const Mat4& sWm, i32 sMat,
+                                        const Vec3& sCentre, f32 sRadius) {
+                if (sRadius >= 0.0f) {
+                    const f32 dx = sCentre.x - camPos_.x, dy = sCentre.y - camPos_.y, dz = sCentre.z - camPos_.z;
+                    const f32 dsq = dx * dx + dy * dy + dz * dz;
+                    // Inside its own radius of the camera it is always kept: the ratio is meaningless
+                    // there and that is exactly where a caster matters most.
+                    if (dsq > sRadius * sRadius) {
+                        const f32 d = std::sqrt(dsq);
+                        if (2.0f * sRadius / d < kMinCasterAngle) return;
+                    }
+                }
+                // The same substitution THE SEAM does further down: a skinned or soft-body entity's
+                // posed vertices live in a different MeshHandle, and its shadow has to come from the
+                // pose, not the rest position.
+                rhi::MeshHandle m = 0;
+                if (skinnedScene_) m = skinnedScene_->drawHandle(sEnt);
+#if AVER_MODULE_RENDER_SOFTBODY
+                if (!m && softBodyScene_) m = softBodyScene_->drawHandle(sEnt);
+#endif
+                if (!m) m = baseMesh;
+                if (!m) return;
+
+                f32 c[4] = {0.80f, 0.80f, 0.85f, 1.0f};
+                f32 metal = 0.0f, rough = 0.5f;
+                u32 authored = 0;
+#if AVER_MODULE_PBR
+                if (const auto a = surfaceMaterials_.find(sMat); a != surfaceMaterials_.end())
+                    authored = a->second;
+#endif
+                if (authored) {
+                    c[0] = c[1] = c[2] = 1.0f;
+                    metal = rough = 1.0f;
+                } else if (const auto look = surfaceLooks_.find(sMat); look != surfaceLooks_.end()) {
+                    c[0] = look->second.col[0]; c[1] = look->second.col[1]; c[2] = look->second.col[2];
+                    metal = look->second.metallic; rough = look->second.roughness;
+                }
+
+                // The material matters even for a pass that writes only depth: voxelisation shades
+                // the fragment it injects, so an off-screen caster contributing GI has to carry its
+                // own albedo or it bounces the default grey.
+                rhi::BindingSetHandle ms = 0;
+                const void* mc = nullptr;
+                u32 mb = 0;
+#if AVER_MODULE_PBR
+                if (pbr::MaterialSystem& sys = voxiRenderer_.materials(); sys.ready()) {
+                    ms = sys.bindingSet(authored);
+                    mc = &sys.constants(authored);
+                    mb = sizeof(pbr::MaterialConstants);
+                }
+#endif
+                voxiRenderer_.submit(m, &sWm.m[0][0], c, metal, rough, ms, mc, mb);
+            };
+#endif
+
             for (u32 oi = 0; oi < n; ++oi) {
 #if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
                 const u32 i = occlusionOrder_.empty() ? oi : occlusionOrder_[oi];
@@ -3847,7 +3941,17 @@ public:
                                         + pl[pi][3];
                             if (d < 0.0f) outside = true;
                         }
-                        if (outside) { ++culled; continue; }
+                        if (outside) {
+                            ++culled;
+#if AVER_MODULE_VOXI
+                            submitShadowOnly(ent, it->second, wm, mr->material,
+                                             Vec3{(wlo.x + whi.x) * 0.5f, (wlo.y + whi.y) * 0.5f, (wlo.z + whi.z) * 0.5f},
+                                             0.5f * std::sqrt((whi.x - wlo.x) * (whi.x - wlo.x) +
+                                                              (whi.y - wlo.y) * (whi.y - wlo.y) +
+                                                              (whi.z - wlo.z) * (whi.z - wlo.z)));
+#endif
+                            continue;
+                        }
                     }
                 }
 #if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
@@ -3863,6 +3967,16 @@ public:
                 // frustum culling two paragraphs up.
                 if (occlusionCullEnabled_ && occluder_ && oi >= occlusionPass1Count && haveWorldBox &&
                     !occlusionWasVisible(ent)) {
+                    // Occluded from the CAMERA is not occluded from the LIGHT: a crate behind a wall
+                    // still throws a shadow through the doorway. Same reasoning as the frustum cull
+                    // just above -- see submitShadowOnly.
+#if AVER_MODULE_VOXI
+                    submitShadowOnly(ent, it->second, wm, mr->material,
+                                     Vec3{(wlo.x + whi.x) * 0.5f, (wlo.y + whi.y) * 0.5f, (wlo.z + whi.z) * 0.5f},
+                                     0.5f * std::sqrt((whi.x - wlo.x) * (whi.x - wlo.x) +
+                                                      (whi.y - wlo.y) * (whi.y - wlo.y) +
+                                                      (whi.z - wlo.z) * (whi.z - wlo.z)));
+#endif
                     continue;
                 }
 #endif
