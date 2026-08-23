@@ -35,6 +35,13 @@ report a shader/layout mismatch — LLPC calls `abort()`**, so the process dies 
 `amdvlk64.dll` with nothing printed. Every bug found here so far was invisible without the layer, and
 each one the layer named in a single run.
 
+**Validation messages name their objects**, so `VkImage 0x27b000000027b[scene resolve]` tells you
+which resource it means instead of leaving you to hunt a raw handle. That is `VK_EXT_debug_utils`,
+and it silently did nothing for a long time: the entry points were loaded behind a `has()` that
+searches the DEVICE extension list, while debug utils is an INSTANCE extension, so the guard was
+false every run. Debug labels (`pushMarker`/`popMarker`) were inert for the same reason -- RenderDoc
+and Nsight captures had no pass names at all.
+
 `AVER_VK_DUMP_SPIRV=<dir>` writes every compiled module as `<entry>.spv`. SPIR-V carries
 `OpDecorate DescriptorSet`/`Binding` on each resource, so this answers "where did the compiler put
 it" with no SDK at all — which is how the post chain's bindings were verified before one was
@@ -42,8 +49,8 @@ available.
 
 ## What is left
 
-Thirteen validation errors, from 156, and none of them fatal. The frame presents, the editor draws
-on it, and `vkDestroyDevice` reports **no leaked objects**.
+Ten validation errors, from 156, and every remaining one is the same known gap. The frame presents,
+the editor draws on it, and `vkDestroyDevice` reports **no leaked objects**.
 
 **THE EDITOR UI DRAWS.** It did not until `modules/rhi.vulkan.imgui` existed, and the paragraph that
 used to sit here explaining why was correct at the time: the editor's interface is ImGui, the only
@@ -54,12 +61,10 @@ out a dockspace `setViewportRect` kept the editor's default 1600x900.
 
 **The rest**
 
-- **9 of the 13** are the bind-map fallback shaders -- 7 on the mesh stage (`MSVoxel`'s
+- **9 of the 10** are the bind-map fallback shaders -- 7 on the mesh stage (`MSVoxel`'s
   `gVerts`/`gIndices`/`MeshCB`) and 2 on the vertex stage (`gInstanceWorlds` at `t17`) -- because
   `GraphicsPipelineDesc::instanced` and feature-module mesh geometry are both unimplemented here.
   See the fallback note below.
-- **2** are a copy source created without the usage flag `vkCmdCopyBuffer` wants.
-- **1** image-layout expectation at `vkQueueSubmit2`.
 - **1** is not an error at all: the layer's own notice that a VUID hit `duplicate_message_limit`.
 
 **Nothing leaks at teardown**, which took four separate fixes and is worth recording because three of

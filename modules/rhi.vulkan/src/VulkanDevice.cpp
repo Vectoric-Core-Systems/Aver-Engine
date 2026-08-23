@@ -505,6 +505,7 @@ bool loadDeviceApi(VulkanApi& api, VkDevice device, const std::vector<std::strin
     AVER_VK_DEV(ResetCommandBuffer);
     AVER_VK_DEV(CmdPipelineBarrier2);
     AVER_VK_DEV(CmdCopyBuffer);
+    AVER_VK_DEV(CmdFillBuffer);
     AVER_VK_DEV(CmdCopyBufferToImage);
     AVER_VK_DEV(CmdCopyImage);
     AVER_VK_DEV(CmdCopyImageToBuffer);
@@ -539,7 +540,16 @@ bool loadDeviceApi(VulkanApi& api, VkDevice device, const std::vector<std::strin
     AVER_VK_DEV(CreateSampler);
     AVER_VK_DEV(DestroySampler);
 #undef AVER_VK_DEV
-    if (has(VK_EXT_DEBUG_UTILS_EXTENSION_NAME)) {
+    // NOT GUARDED BY has(), AND THAT WAS A REAL BUG. VK_EXT_debug_utils is an INSTANCE extension --
+    // it is pushed into instExts at instance creation, never into deviceExtensions -- so has(), which
+    // only searches the device list, was false every single time. All three pointers below stayed
+    // null: no object was ever named, so every validation message showed a bare handle
+    // ("VkImage 0x27b000000027b") with no way to tell which resource it meant, and pushMarker /
+    // popMarker were silently inert, leaving RenderDoc and Nsight captures with no pass labels at
+    // all. Loading them unconditionally is self-guarding: vkGetDeviceProcAddr returns null when the
+    // instance did not enable the extension, and all three call sites already null-check
+    // (setVkObjectName, VulkanRenderContext::pushMarker, ::popMarker).
+    {
         api.CmdBeginDebugUtilsLabelEXT = reinterpret_cast<PFN_vkCmdBeginDebugUtilsLabelEXT>(
             reinterpret_cast<void*>(api.GetDeviceProcAddr(device, "vkCmdBeginDebugUtilsLabelEXT")));
         api.CmdEndDebugUtilsLabelEXT = reinterpret_cast<PFN_vkCmdEndDebugUtilsLabelEXT>(
@@ -3257,6 +3267,7 @@ bool VulkanDevice::createPostTargets() {
     }
 
     postReady_ = true;
+    postTargetsFresh_ = true;
     return true;
 }
 
@@ -3343,22 +3354,43 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
         return;
     }
 
+    // THE ONE FRAME sceneResolved_ HAS NO LAYOUT. These targets are built lazily, from inside this
+    // function, which means they come into existence AFTER the scene pass for this frame has already
+    // been recorded -- so the MSAA resolve that normally leaves this image in a defined layout has
+    // not run against it even once. The composite below then samples it, and the layer catches the
+    // read at submit: "expects VkImage [scene resolve] to be in layout SHADER_READ_ONLY_OPTIMAL --
+    // instead, current layout is UNDEFINED." Once per run, because from the next frame on the
+    // resolve has been through it. UNDEFINED as the source discards nothing that exists.
+    if (postTargetsFresh_) {
+        postTargetsFresh_ = false;
+        if (sceneResolved_) {
+            VkImageMemoryBarrier2 seed = imgBarrier(sceneResolved_, VK_IMAGE_ASPECT_COLOR_BIT,
+                                                    VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                                    VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                                                    VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);
+            pipelineBarrier(api_, cmd, &seed, 1);
+        }
+    }
+
     const bool bloom = post_.bloomIntensity > 0.0f && bloomTex_;
     const bool autoExp = post_.autoExposure && caps_.computeShaders;
 
     if (!expSeeded_) {
-        u32 zeros[258] = {};
-        const ConstantAllocation za = postConstants(zeros, sizeof(zeros));
-        if (za.buffer) {
+        // ZEROED WITH vkCmdFillBuffer RATHER THAN COPIED FROM THE CONSTANT RING. Both of these are
+        // pure zero fills, which is the single thing fillBuffer exists to do -- and the copy it
+        // replaces was also a validation error, twice a run: the post ring is created
+        // VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT only, and vkCmdCopyBuffer requires TRANSFER_SRC on its
+        // source. Adding that flag would have silenced the layer, but this removes the staging
+        // entirely -- 1 KB of zeros no longer gets written on the CPU and uploaded to seed two
+        // buffers the GPU can clear by itself -- and drops the ring-allocation failure path with it.
+        {
             VkBufferMemoryBarrier2 pre[2] = {
                 bufBarrier(histBuf_, VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT),
                 bufBarrier(expBuf_, VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT),
             };
             pipelineBarrier(api_, cmd, nullptr, 0, pre, 2);
-            VkBufferCopy hc{za.offset, 0, 256 * sizeof(u32)};
-            api_.CmdCopyBuffer(cmd, za.buffer, histBuf_, 1, &hc);
-            VkBufferCopy ec{za.offset, 0, 2 * sizeof(u32)};
-            api_.CmdCopyBuffer(cmd, za.buffer, expBuf_, 1, &ec);
+            api_.CmdFillBuffer(cmd, histBuf_, 0, 256 * sizeof(u32), 0u);
+            api_.CmdFillBuffer(cmd, expBuf_, 0, 2 * sizeof(u32), 0u);
             VkBufferMemoryBarrier2 post[2] = {
                 bufBarrier(histBuf_, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT),
                 bufBarrier(expBuf_, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT),

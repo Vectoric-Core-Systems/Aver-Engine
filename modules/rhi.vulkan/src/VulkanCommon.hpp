@@ -265,6 +265,7 @@ struct VulkanApi {
     PFN_vkResetCommandBuffer ResetCommandBuffer = nullptr;
     PFN_vkCmdPipelineBarrier2 CmdPipelineBarrier2 = nullptr;
     PFN_vkCmdCopyBuffer CmdCopyBuffer = nullptr;
+    PFN_vkCmdFillBuffer CmdFillBuffer = nullptr;
     PFN_vkCmdCopyBufferToImage CmdCopyBufferToImage = nullptr;
     PFN_vkCmdCopyImage CmdCopyImage = nullptr;
     PFN_vkCmdCopyImageToBuffer CmdCopyImageToBuffer = nullptr;
@@ -1682,6 +1683,9 @@ private:
     // second-order bug was worse than the leak: a static outlives the device that filled it, so a
     // second VulkanDevice in one process (a device-loss recovery, a backend switch) would have found
     // them already non-null and gone on using handles belonging to a destroyed device.
+    // Set by createPostTargets, consumed once by runPostChain: the frame the targets are built is
+    // the one frame where sceneResolved_ has no layout yet. See where this is read.
+    bool postTargetsFresh_ = false;
     VkSampler postSampler_ = VK_NULL_HANDLE;
     std::vector<VkDescriptorSet> postSets_;              // allocated from postDescriptorPool_, die with it
     VkDescriptorPool meshGeomPool_[kFrameCount] = {};
