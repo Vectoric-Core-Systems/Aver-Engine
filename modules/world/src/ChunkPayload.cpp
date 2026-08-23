@@ -2,6 +2,7 @@
 
 #if AVER_MODULE_SCENE
 
+#  include "aver/core/Log.hpp"
 #  include "aver/scene/Components.hpp"
 #  include "aver/scene/scene_abi.h"
 
@@ -73,6 +74,7 @@ ChunkPayload capture(const scene::World& w, const std::vector<scene::Entity>& ro
 
 std::vector<scene::Entity> restore(const ChunkPayload& p, scene::World& w, const RestoreOptions& opt) {
     std::vector<scene::Entity> made(p.entities.size(), scene::kInvalidEntity);
+    bool warnedOrphan = false;   // said once per restore, not once per orphaned child
 
     for (usize i = 0; i < p.entities.size(); ++i) {
         const PayloadEntity& pe = p.entities[i];
@@ -81,6 +83,29 @@ std::vector<scene::Entity> restore(const ChunkPayload& p, scene::World& w, const
         scene::Entity parent = scene::kInvalidEntity;
         if (pe.parent >= 0 && static_cast<usize>(pe.parent) < i) {
             parent = made[static_cast<usize>(pe.parent)];
+            // A PARENT THAT NEVER GOT CREATED TAKES ITS SUBTREE WITH IT.
+            //
+            // made[] starts as kInvalidEntity and the `continue` below leaves it that way for any
+            // entity World::create refused -- which it does, returning kInvalidEntity, once the
+            // index space is exhausted (World.cpp:310). Falling through here with parent still
+            // kInvalidEntity does NOT merely lose the hierarchy: w.create treats kInvalidEntity as
+            // "no parent" (World.cpp:339), and this branch has already skipped the else below that
+            // puts the chunk origin back on. So the child would be created as a ROOT holding a
+            // PARENT-RELATIVE position read as a world one -- landing near the world origin,
+            // hundreds of metres from where it belongs, silently.
+            //
+            // Skipping is the honest outcome: the payload described this entity only in terms of a
+            // parent that does not exist, so there is no correct place to put it. It also cascades
+            // properly -- made[i] stays invalid, so this entity's own children skip in turn.
+            if (parent == scene::kInvalidEntity) {
+                if (!warnedOrphan) {
+                    warnedOrphan = true;
+                    AVER_WARN("[Chunk] restoring {},{},{}: an entity could not be created, so its "
+                              "children are skipped rather than reparented to the world",
+                              p.coord.x, p.coord.y, p.coord.z);
+                }
+                continue;
+            }
         } else {
             // A root: put the chunk's origin back on. This is the exact inverse of capture, and it
             // is exact -- the origin is integer centimetres and the offset is under one chunk, so
