@@ -238,6 +238,18 @@ void WaterRenderer::setColors(const f32 shallowRGB[3], const f32 deepRGB[3]) {
     std::memcpy(deepColor_, deepRGB, sizeof(deepColor_));
 }
 
+void WaterRenderer::setWaterBoundsCm(f32 minXCm, f32 minYCm, f32 maxXCm, f32 maxYCm) {
+    boundsEnabled_ = true;
+    boundsMinXCm_ = minXCm;
+    boundsMinYCm_ = minYCm;
+    boundsMaxXCm_ = maxXCm;
+    boundsMaxYCm_ = maxYCm;
+}
+
+void WaterRenderer::clearWaterBounds() {
+    boundsEnabled_ = false;
+}
+
 bool WaterRenderer::buildPipeline(u32 sampleCount, rhi::Format color, rhi::Format depth) {
     if (!res_ || !vs_ || !ps_) return false;
 
@@ -329,8 +341,35 @@ void WaterRenderer::transparentPass(rhi::IRenderContext& ctx) {
     // XY, not XZ: camPos[0]/camPos[1] below are engine X/Y, and both are what gets snapped to and fed
     // into GerstnerWave.hpp's "x"/"z" parameters. This is purely a NAMING correction -- see
     // WaterShaders.hpp's identical note at its own axis-sensitive line -- not a different formula.
-    const f32 gridOriginX = snapWorldToGridCm(camPos[0], kCellSizeCm);
-    const f32 gridOriginY = snapWorldToGridCm(camPos[1], kCellSizeCm);
+    //
+    // UNBOUNDED keeps the exact behaviour this grid always had: the origin snaps to the camera so
+    // the puck rides along underneath it, and the scale is 1 so the shader's localXY is the plain
+    // local-plus-origin sum it has always been.
+    //
+    // BOUNDED swaps what the origin and scale MEAN rather than adding a second code path in the
+    // shader: the origin becomes the centre of the bounds instead of the camera, and the scale maps
+    // the grid's fixed 25600cm extent onto however wide the bounds actually are. This is deliberately
+    // NOT done by rasterising the full grid and discarding fragments outside the bounds in the pixel
+    // shader -- clipping would still pay for 25600cm of geometry to draw a pool a few metres across,
+    // and the pool itself would sit at the grid's native 200cm cell size, three-or-so vertices from
+    // edge to edge, which reads as a faceted tarp rather than a water surface. Scaling instead spends
+    // every one of the grid's 129x129 vertices on the water that actually exists, which is both the
+    // cheaper draw and the better-looking one. The trade is that a bounded surface's wave
+    // tessellation now depends on its own size -- a small pool samples the same wave shapes at a
+    // finer resolution than the ocean does -- and that is the right trade to make here, not an
+    // oversight.
+    f32 gridOriginX, gridOriginY, gridScaleX, gridScaleY;
+    if (boundsEnabled_) {
+        gridOriginX = (boundsMinXCm_ + boundsMaxXCm_) * 0.5f;
+        gridOriginY = (boundsMinYCm_ + boundsMaxYCm_) * 0.5f;
+        gridScaleX = (boundsMaxXCm_ - boundsMinXCm_) / kGridExtentCm;
+        gridScaleY = (boundsMaxYCm_ - boundsMinYCm_) / kGridExtentCm;
+    } else {
+        gridOriginX = snapWorldToGridCm(camPos[0], kCellSizeCm);
+        gridOriginY = snapWorldToGridCm(camPos[1], kCellSizeCm);
+        gridScaleX = 1.0f;
+        gridScaleY = 1.0f;
+    }
 
     WaterFrameCB cb{};
     for (size_t i = 0; i < kMaxGerstnerWaves; ++i) {
@@ -349,8 +388,12 @@ void WaterRenderer::transparentPass(rhi::IRenderContext& ctx) {
     cb.gridOriginCount[3] = 0.0f;
     cb.waterState[0] = waterLevelCm_;
     cb.waterState[1] = elapsedSeconds_;
-    cb.waterState[2] = 0.0f;
-    cb.waterState[3] = 0.0f;
+    // z/w used to be genuinely unused; they now carry gridScaleX/Y (see this function's own comment
+    // above) rather than growing WaterFrameCB with a fifth row -- there was already room, and every
+    // other field here is filled by this same function, so there is nowhere else a stale scale could
+    // leak in from.
+    cb.waterState[2] = gridScaleX;
+    cb.waterState[3] = gridScaleY;
     cb.shallowColor[0] = shallowColor_[0]; cb.shallowColor[1] = shallowColor_[1];
     cb.shallowColor[2] = shallowColor_[2]; cb.shallowColor[3] = 0.0f;
     cb.deepColor[0] = deepColor_[0]; cb.deepColor[1] = deepColor_[1];

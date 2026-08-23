@@ -8,11 +8,52 @@ SUN dir 0.304027 0.406402 0.861629 color 1 0.98 0.92 lux 100000   # elev 59.5 az
 SKY model physical mie 0.0028 multiscatter 1.9 steps 32 aerial 4
 FOG exp density 2e-05 color 0.7 0.78 0.88
 
-# Ground: a big flat slab. A plain PLACE/PLACEG defaults collide=true (OcWorld.hpp), so this is a real
-# static body -- something to stand on, not a floating camera. It matters more here than it looks: the
-# character fires a ray from its own eye, and a floor is what stops that ray leaving the world when
-# you aim down.
-PLACEG Meshes/cube.ocmesh 0 0 -10 0 0 0 4000 4000 10 M_Floor
+# Ground: four slabs tiled around a rectangular gap, not the single slab this used to be. A plain
+# PLACE/PLACEG defaults collide=true (OcWorld.hpp), so each piece below is still a real static body --
+# something to stand on, not a floating camera -- and it still matters for the reason it always did:
+# the character fires a ray from its own eye, and a floor is what stops that ray leaving the world when
+# you aim down. Only the shape changed, not that fact. A single PLACEG box has no way to have a hole
+# cut into it, and the pool basin below needs one, so the gap is left by tiling four boxes around it
+# instead of placing one across it -- two full-depth strips either side of the gap along X, and two
+# shorter strips filling the gap's own column along Y. Every piece keeps the original slab's z -10,
+# half-extent-z 10 and M_Floor material; only x, y and the horizontal half-extents differ per piece.
+PLACEG Meshes/cube.ocmesh -1910 0 -10 0 0 0 2090 4000 10 M_Floor      # full depth, x < 180
+PLACEG Meshes/cube.ocmesh 2410 0 -10 0 0 0 1590 4000 10 M_Floor       # full depth, x > 820
+PLACEG Meshes/cube.ocmesh 500 2435 -10 0 0 0 320 1565 10 M_Floor      # gap column, y > 870
+PLACEG Meshes/cube.ocmesh 500 -1785 -10 0 0 0 320 2215 10 M_Floor     # gap column, y < 430
+
+# The pool: a basin sunk through that gap, floor and four walls built the same way the ground slab is
+# -- ordinary collide=true PLACEG cubes, not a special primitive. The ground slab's top sits at z 0
+# (centre -10, half-extent-z 10, so -10 + 10 = 0), and the basin's walls run from z -150 up to exactly
+# that surface, so the rim sits flush with the yard instead of leaving a step or floating a seam above
+# it. The floor sits at z -160 with half-extent-z 10, putting its own top at -150 -- meeting the walls'
+# bottom exactly, no gap a player could drop through between them. The floor spans the walls' full
+# footprint (320 x 220), not just the water's interior (300 x 200): a floor only as wide as the water
+# would leave open ground under each wall's own thickness, and a player standing at the rim would fall
+# through there instead of finding solid concrete.
+#
+# WHERE: centred at (500, 650) -- to the +Y side of the straight line from spawn to the dead-ahead
+# target (the corridor along y 0 from x 0 to x 600), forward of the crates and short of the row of
+# targets at x 600. The nearest wall face sits at y 430, clear of that corridor by 430 cm, and clear of
+# the +Y target's own spawn-to-target line by at least 130 cm along its whole length -- that line only
+# reaches y 300 even at its far end, x 600, where the target itself sits. Close enough to the spawn
+# point to be seen without hunting for it; nowhere near the one thing this template needs to keep
+# instant.
+PLACEG Meshes/cube.ocmesh 500 650 -160 0 0 0 320 220 10 M_Concrete    # pit floor
+PLACEG Meshes/cube.ocmesh 810 650 -75 0 0 0 10 220 75 M_Concrete      # +X wall
+PLACEG Meshes/cube.ocmesh 190 650 -75 0 0 0 10 220 75 M_Concrete      # -X wall
+PLACEG Meshes/cube.ocmesh 500 860 -75 0 0 0 300 10 75 M_Concrete      # +Y wall
+PLACEG Meshes/cube.ocmesh 500 440 -75 0 0 0 300 10 75 M_Concrete      # -Y wall
+
+# The water itself: the surface a WATER record authors instead of the old --water CLI flag (see
+# OcWaterPlacement's own comment in modules/formats/include/aver/formats/OcWorld.hpp). Bounded, not
+# infinite, because this is a pool and not an ocean -- `bounds` takes the interior the walls enclose
+# (200..800, 450..850), matching the basin's own water footprint rather than the wider slab around it.
+# Level -20 sits 20 cm below the rim at z 0, a real pool's coping edge rather than a surface brimming
+# level with the deck. No WAVE record follows this one: zero waves is the format's own documented
+# behaviour for flat, motionless water, which is what a pool this small should look like -- not the
+# open swell four hardcoded Gerstner waves used to give every body of water regardless of size.
+WATER name Pool level -20 bounds 200 450 800 850
 
 # Two crates -- set dressing, and also honest raycast targets: ordinary collide=true placements, so
 # shooting one produces a REAL hit whose entity is stamped by LevelInstance's own static-box path. It

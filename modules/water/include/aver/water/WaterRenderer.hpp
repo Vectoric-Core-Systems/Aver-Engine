@@ -72,6 +72,16 @@ public:
 
     void setColors(const f32 shallowRGB[3], const f32 deepRGB[3]);
 
+    // Places the grid over a horizontal rectangle instead of letting it recentre under the camera --
+    // see transparentPass's own comment for why scaling the grid onto the bounds, rather than
+    // discarding fragments outside them, is the design here. minXCm/minYCm/maxXCm/maxYCm are engine
+    // X/Y in centimetres, matching aver::fmt::OcWaterPlacement::boundsMin/boundsMax's own axis order.
+    void setWaterBoundsCm(f32 minXCm, f32 minYCm, f32 maxXCm, f32 maxYCm);
+
+    // Returns to the unbounded, camera-recentred grid -- the behaviour a WATER record with no bounds
+    // clause already gets, and the state this instance starts in.
+    void clearWaterBounds();
+
     const char* name() const override { return "Water"; }
 
     // Rebuilds pso_ to bake the scene target's current sample count and formats -- MSAA IS BAKED
@@ -115,6 +125,15 @@ private:
     bool loggedWaveOverflow_ = false;   // see setWaves' own comment: logged once, not once per call
 
     f32 waterLevelCm_ = 0.0f;
+
+    // Unbounded (the default) is the infinite-ocean grid every WATER record got before bounds
+    // existed: transparentPass recentres the grid under the camera and never touches these four.
+    // Bounded is a pool -- see transparentPass's own comment for how min/max become the grid's
+    // origin and scale.
+    bool boundsEnabled_ = false;
+    f32 boundsMinXCm_ = 0.0f, boundsMinYCm_ = 0.0f;
+    f32 boundsMaxXCm_ = 0.0f, boundsMaxYCm_ = 0.0f;
+
     f32 shallowColor_[3] = {0.05f, 0.35f, 0.45f};   // linear; unvalidated placeholders, see README.md
     f32 deepColor_[3]    = {0.01f, 0.05f, 0.12f};
 

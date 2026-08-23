@@ -40,7 +40,13 @@ cbuffer WaterFrame : register(b4) {
     // disagreeing with anything (buoyancy, a foam mask) that calls gerstnerHeightCm directly for the
     // same water body.
     float4 gGridOriginCount;
-    // {waterLevelCm, elapsedSeconds, unused, unused}.
+    // {waterLevelCm, elapsedSeconds, gridScaleX, gridScaleY}. z/w used to be unused; they now carry
+    // the grid's per-axis scale, multiplied into localXZ below BEFORE gGridOriginCount.xy is added
+    // (see VSWater) -- an infinite surface sets both to 1.0, which is exactly the unscaled sum this
+    // line always computed before bounded water existed, while a bounded surface sets them to however
+    // much the grid's fixed 25600cm extent must shrink or stretch to land on that surface's own
+    // bounds. See WaterRenderer.cpp's transparentPass for why scaling the grid onto the bounds, rather
+    // than clipping fragments outside them, is what makes a small pool look like a pool.
     float4 gWaterState;
     float4 gShallowColor;   // rgb, linear; a unused
     float4 gDeepColor;      // rgb, linear; a unused
@@ -112,7 +118,18 @@ VSWaterOut VSWater(VSWaterIn i) {
     // (engine X, engine Y) below, and its returned float3 is read as (engine X offset, engine Y
     // offset, VERTICAL height) -- see GerstnerWave.hpp's gerstnerDisplaceCm doc comment for the
     // identical correction made on the C++ side.
-    float2 localXY = i.localXZ + gGridOriginCount.xy;
+    //
+    // The multiply by gWaterState.zw is what places a bounded surface's grid onto its own bounds
+    // instead of the ocean's full 25600cm (see gWaterState's own comment above and WaterRenderer.cpp's
+    // transparentPass for where that scale comes from); for unbounded water it is always 1.0, so this
+    // line is byte-for-byte the plain localXZ-plus-origin sum it was before bounds existed. localXY is
+    // still a genuine WORLD-space position either way -- scaling the grid's local coordinates before
+    // adding the world-space origin is indistinguishable, per vertex, from building a coarser or
+    // finer grid at that same world position -- which is why feeding it straight into
+    // averGerstnerDisplace below is correct rather than merely convenient: a wave's wavelength is
+    // defined in world centimetres, and it must mean the same thing in a pool as it does in the
+    // open ocean.
+    float2 localXY = i.localXZ * gWaterState.zw + gGridOriginCount.xy;
 
     float3 normal;
     float3 disp = averGerstnerDisplace(localXY, gWaterState.y /* elapsedSeconds */, normal);

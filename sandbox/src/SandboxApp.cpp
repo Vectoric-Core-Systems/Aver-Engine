@@ -6011,6 +6011,88 @@ private:
     }
 #endif
 
+#if AVER_MODULE_WATER
+    // Turns a level's WATER/WAVE records into an actual surface, and into the buoyancy plane under it.
+    //
+    // A LEVEL BEATS THE COMMAND LINE, and a level that authored nothing leaves --water exactly as it
+    // was. That order is the whole point of the record existing: --water was never authoring, it was
+    // a switch for looking at water at all, and a level that says where its own water is should not
+    // need one. A level with no WATER record is every level that exists today, and behaves as before.
+    //
+    // IT ALSO BRINGS THE RENDERER UP, which the startup path only does when --water was given. Making
+    // a pool require a CLI flag to appear would defeat the record: the author placed water in the
+    // level, and that is the whole instruction.
+    void applyLevelWater(Engine& eng) {
+        if (levelHeader_.waters.empty()) return;
+
+        const fmt::OcWaterPlacement& wp = levelHeader_.waters.front();
+        // ONE SURFACE DRAWN, and said out loud rather than discovered. WaterRenderer holds a single
+        // level and a single wave set -- one infinite grid recentred under the camera -- so a second
+        // WATER record has nowhere to go until the renderer can hold more than one. The format
+        // deliberately allows several (an ocean AND a pool); this consumer is what does not yet.
+        if (levelHeader_.waters.size() > 1)
+            AVER_WARN("[Water] the level declares {} WATER records; only '{}' is rendered",
+                      levelHeader_.waters.size(), wp.name.empty() ? "unnamed" : wp.name);
+
+        // The waves belonging to this surface: the ones that name it, plus the ones that name nothing
+        // at all -- which the format defines as meaning the FIRST declared water, and this is it.
+        water::GerstnerWave waves[water::kMaxGerstnerWaves];
+        size_t n = 0;
+        size_t skipped = 0;
+        for (const fmt::OcGerstnerWave& gw : levelHeader_.waves) {
+            if (!gw.water.empty() && gw.water != wp.name) continue;
+            if (n >= water::kMaxGerstnerWaves) { ++skipped; continue; }
+            // The one narrowing from the format's f64 to the runtime's f32, at the boundary, exactly
+            // where OcScatterSpecies' own comment says such a narrowing belongs.
+            waves[n].dirX         = static_cast<f32>(gw.dirX);
+            waves[n].dirZ         = static_cast<f32>(gw.dirZ);
+            waves[n].wavelengthCm = static_cast<f32>(gw.wavelengthCm);
+            waves[n].amplitudeCm  = static_cast<f32>(gw.amplitudeCm);
+            waves[n].steepness    = static_cast<f32>(gw.steepness);
+            ++n;
+        }
+        if (skipped)
+            AVER_WARN("[Water] '{}' declares {} waves; the renderer takes {} and the rest are dropped",
+                      wp.name.empty() ? "unnamed" : wp.name, n + skipped, water::kMaxGerstnerWaves);
+
+        if (!waterAttached_) {
+            if (!waterRenderer_.init(*eng.device())) {
+                AVER_ERROR("[Water] the level authored water, but the renderer is unavailable on this device");
+                return;
+            }
+            eng.device()->addRenderFeature(&waterRenderer_);
+            waterAttached_ = true;
+            waterEnabled_ = true;
+        }
+
+        waterRenderer_.setWaterLevelCm(static_cast<f32>(wp.levelCm));
+        // AND THE BOUNDS ACTUALLY REACH THE RENDERER. Without this the record's `bounds` clause was
+        // parsed, logged as "(bounded)" and then dropped -- a pool a few metres across drew water
+        // over the entire level, and the log line read as though it had worked.
+        if (wp.infinite) {
+            waterRenderer_.clearWaterBounds();
+        } else {
+            waterRenderer_.setWaterBoundsCm(static_cast<f32>(wp.boundsMin[0]), static_cast<f32>(wp.boundsMin[1]),
+                                            static_cast<f32>(wp.boundsMax[0]), static_cast<f32>(wp.boundsMax[1]));
+        }
+        // ZERO WAVES IS A LEGAL ANSWER, not a reason to fall back on the startup swell: a level that
+        // declared a WATER record and no WAVEs asked for still water, and a pool usually wants exactly
+        // that. gerstnerHeightCm's own contract already returns the flat level for an empty set.
+        waterRenderer_.setWaves(waves, n);
+        waterHeightCm_ = static_cast<f32>(wp.levelCm);
+
+        // The same single number for both, for the reason the startup path states: two independent
+        // heights would drift, and the drift would read as broken buoyancy rather than as a mismatch.
+        const f32 normal[3]  = {0.0f, 0.0f, 1.0f};
+        const f32 current[3] = {0.0f, 0.0f, 0.0f};
+        aver_phys_set_water_plane(waterRenderer_.waterLevelCm(), normal, 1.0f, 0.5f, 0.05f, current);
+
+        AVER_INFO("[Water] level surface '{}' at z = {} cm with {} wave(s){}",
+                  wp.name.empty() ? "unnamed" : wp.name, wp.levelCm, n,
+                  wp.infinite ? "" : " (bounded)");
+    }
+#endif
+
 #if AVER_MODULE_VOXI
     // Pushes the manifest's render settings into Voxi. Defers until the device info is known.
     void applyProjectRenderSettings() {
@@ -12675,6 +12757,7 @@ private:
         std::string why;
         if (!fmt::loadOcworld(path, w, &why)) { AVER_WARN("[Level] {}", why); return; }
 
+
         // CARRIED, NOT UNDERSTOOD. The editor has no UI for a PCGVOLUME and does not need one, but
         // saveLevel builds a fresh OcWorldData from the editor's own state -- so anything the editor
         // does not hold is GONE on the next save. That silently deleted every PCGVOLUME in the
@@ -12693,6 +12776,13 @@ private:
         if (!levelPcgVolumes_.empty())
             AVER_INFO("[Level] carrying {} PCGVOLUME record(s) through the editor unchanged",
                       levelPcgVolumes_.size());
+
+#if AVER_MODULE_WATER
+        // AND THE LEVEL'S OWN WATER, if it authored any. Placed here rather than beside the PCGVOLUME
+        // carry above because this is the first point at which levelHeader_ holds the WATER/WAVE
+        // records the file declared.
+        applyLevelWater(eng);
+#endif
 
         // AND NOW THE SKY FIELD ACTUALLY REACHES THE CLOUD LAYER, as it already did in the packaged
         // runtime (GameApp::applySky). Carrying the record through a save was all the editor ever did
