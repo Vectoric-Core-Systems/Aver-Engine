@@ -491,6 +491,206 @@ int main() {
         }
     }
 
+    AVER_INFO("=== a joint stored as a baked matrix, rather than as TRS ===");
+    {
+        // THE SAME RIG, SPELLED BOTH WAYS, MUST IMPORT THE SAME. glTF lets a node give its
+        // transform either as translation/rotation/scale or as one baked 16-float `matrix`, and
+        // which one a file uses is the exporter's choice, not the artist's -- assimp writes
+        // `matrix` for every node, so anything that has been through an FBX conversion arrives in
+        // that form. Written as an EQUIVALENCE rather than against hand-computed expected values
+        // because that is the property that actually matters, and because numbers copied out of a
+        // working run prove only that the run did not change.
+        //
+        // WHAT IT CAUGHT. The matrix branch used to note the case and fall through, leaving
+        // OcBone's defaults: an identity rest pose on every joint. That is invisible on a static
+        // render -- the inverse bind is re-derived from the rest pose, so identity cancels identity
+        // and the bind pose is pixel-correct -- and only surfaces once a clip is played against the
+        // rig. Measured on a real 45-joint character, 45 of 45 bones came in at translation
+        // (0,0,0), with the largest bone offset in the whole skeleton reading 0.000 cm.
+        //
+        // THE MESH IS NOT INCIDENTAL. Gltf::run refuses a file with no meshes outright, so a rig
+        // on its own cannot be imported at all and a joints-only document would test nothing --
+        // hence the triangle, which is otherwise irrelevant to what is being checked here.
+        auto rig = [&](const std::string& childTransform) {
+            return std::string("{")
+              + "\"asset\":{\"version\":\"2.0\"},\"scene\":0,"
+              + "\"scenes\":[{\"nodes\":[0,1]}],"
+              + "\"nodes\":["
+                + "{\"mesh\":0},"
+                + "{\"name\":\"root\",\"children\":[2]},"
+                + "{\"name\":\"child\"," + childTransform + "}"
+              + "],"
+              + "\"meshes\":[{\"name\":\"Tri\",\"primitives\":[{\"attributes\":{\"POSITION\":0},\"indices\":1}]}],"
+              + "\"skins\":[{\"name\":\"rig\",\"joints\":[1,2]}],"
+              + "\"buffers\":[{\"uri\":\"data:application/octet-stream;base64," + b64(tri.bin)
+                + "\",\"byteLength\":" + std::to_string(tri.bin.size()) + "}],"
+              + "\"bufferViews\":["
+                + "{\"buffer\":0,\"byteOffset\":" + std::to_string(tri.posOff) + ",\"byteLength\":" + std::to_string(tri.posLen) + "},"
+                + "{\"buffer\":0,\"byteOffset\":" + std::to_string(tri.idxOff) + ",\"byteLength\":" + std::to_string(tri.idxLen) + "}"
+              + "],"
+              + "\"accessors\":["
+                + "{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"},"
+                + "{\"bufferView\":1,\"componentType\":5123,\"count\":3,\"type\":\"SCALAR\"}"
+              + "]}";
+        };
+        const std::string s45 = "0.70710678";
+
+        // The matrix here is the row-major, row-vector form of exactly the TRS beside it: a quarter
+        // turn about glTF +Y (which sends +X to -Z and +Z to +X, hence the two off-diagonal ones)
+        // with the same one-metre offset up. glTF stores `matrix` column-major, which is the
+        // transpose of the row-vector layout and therefore the same sixteen floats in the same
+        // order -- the equality asserted below is what confirms that, rather than assuming it.
+        const std::string trsJson = rig("\"translation\":[0,1,0],\"rotation\":[0," + s45 + ",0," + s45 + "]");
+        const std::string matJson = rig("\"matrix\":[0,0,-1,0, 0,1,0,0, 1,0,0,0, 0,1,0,1]");
+
+        fmt::GltfImportResult trs, mat;
+        std::string why;
+        check(fmt::importGltfFromMemory(reinterpret_cast<const u8*>(trsJson.data()), trsJson.size(),
+                                        "", trs, {}, &why), "the TRS spelling imports: " + why);
+        check(fmt::importGltfFromMemory(reinterpret_cast<const u8*>(matJson.data()), matJson.size(),
+                                        "", mat, {}, &why), "and so does the baked-matrix spelling: " + why);
+
+        check(trs.skeletons.size() == 1 && mat.skeletons.size() == 1, "both produce one skeleton");
+        if (trs.skeletons.size() == 1 && mat.skeletons.size() == 1 &&
+            trs.skeletons[0].bones.size() == 2 && mat.skeletons[0].bones.size() == 2) {
+            const fmt::OcBone& a = trs.skeletons[0].bones[1];
+            const fmt::OcBone& b = mat.skeletons[0].bones[1];
+            check(a.name == "child" && b.name == "child", "and the compared bone is the child in both");
+
+            // Not merely "non-zero" -- the point is that it is the RIGHT pose, and the TRS branch
+            // is covered by the test above, so it serves as the oracle.
+            checkNear(b.translation.x, a.translation.x, 1e-3f, "a baked matrix yields the same rest translation X");
+            checkNear(b.translation.y, a.translation.y, 1e-3f, "...Y");
+            checkNear(b.translation.z, a.translation.z, 1e-3f, "...Z");
+
+            // A quaternion and its negation are the same rotation, so the comparison is on |dot|,
+            // which is 1 exactly when the two describe the same turn whichever sign each carries.
+            const f32 dot = std::fabs(a.rotation.x*b.rotation.x + a.rotation.y*b.rotation.y +
+                                      a.rotation.z*b.rotation.z + a.rotation.w*b.rotation.w);
+            checkNear(dot, 1.0f, 1e-3f, "and the same rest rotation, up to quaternion sign");
+
+            checkNear(b.scale.x, a.scale.x, 1e-3f, "and the same scale X");
+            checkNear(b.scale.y, a.scale.y, 1e-3f, "...Y");
+            checkNear(b.scale.z, a.scale.z, 1e-3f, "...Z");
+
+            // The regression guard proper: identity is exactly what the old code left behind, on
+            // every joint of every rig an FBX converter had touched.
+            const f32 len = std::sqrt(b.translation.x*b.translation.x +
+                                      b.translation.y*b.translation.y +
+                                      b.translation.z*b.translation.z);
+            check(len > 1.0f, "the baked-matrix rest pose is not the identity the old code left behind");
+        }
+
+        // A pure scale of (2,3,4) about the glTF axes. Scale is dimensionless and only permutes
+        // through the basis change, so engine (x,y,z) reads the glTF (z,x,y) -- see toEngineScale,
+        // and note this is why scale is checked apart from translation, which also picks up the
+        // metres-to-centimetres factor.
+        const std::string scaledJson = rig("\"matrix\":[2,0,0,0, 0,3,0,0, 0,0,4,0, 0,0,0,1]");
+        fmt::GltfImportResult sc; std::string scy;
+        check(fmt::importGltfFromMemory(reinterpret_cast<const u8*>(scaledJson.data()), scaledJson.size(),
+                                        "", sc, {}, &scy), "a scaled baked matrix imports: " + scy);
+        if (sc.skeletons.size() == 1 && sc.skeletons[0].bones.size() == 2) {
+            const fmt::OcBone& b = sc.skeletons[0].bones[1];
+            checkNear(b.scale.x, 4.0f, 1e-3f, "glTF Z scale becomes engine X scale");
+            checkNear(b.scale.y, 2.0f, 1e-3f, "glTF X scale becomes engine Y scale");
+            checkNear(b.scale.z, 3.0f, 1e-3f, "glTF Y scale becomes engine Z scale");
+        }
+
+        // SHEAR IS THE ONE THING A TRS TRIPLE CANNOT CARRY, so it must be reported rather than
+        // quietly approximated. This tilts the second basis row into the first, which no
+        // rotation-times-scale can reproduce.
+        const std::string shearJson = rig("\"matrix\":[1,0,0,0, 0.5,1,0,0, 0,0,1,0, 0,0,0,1]");
+        fmt::GltfImportResult sh; std::string shy;
+        check(fmt::importGltfFromMemory(reinterpret_cast<const u8*>(shearJson.data()), shearJson.size(),
+                                        "", sh, {}, &shy), "a sheared baked matrix still imports: " + shy);
+        bool reported = false;
+        for (const std::string& u : sh.unsupported)
+            if (u.find("shear") != std::string::npos) reported = true;
+        check(reported, "and the shear it could not carry is reported, not silently dropped");
+    }
+
+    AVER_INFO("=== the transform ABOVE the topmost joint is part of the rest pose ===");
+    {
+        // A SKELETON MUST END UP IN THE SAME SPACE AS THE MESH IT SKINS. This importer bakes a
+        // mesh's whole node chain into its vertices, so the skeleton has to be baked the same way
+        // -- and it used to read joint LOCALS only, silently dropping every node above the topmost
+        // joint. That is not a corner case: assimp writes the FBX-to-glTF axis and unit conversion
+        // as exactly such a node, so the armature root routinely carries a rotation and a scale of
+        // 100 that the mesh received and the skeleton did not.
+        //
+        // Checked as an INVARIANT rather than against expected numbers: whatever transform sits
+        // above the rig, the mesh and the joints must move together under it. The armature node
+        // below carries a scale of 2 and a quarter turn about glTF +Y, and the same node transform
+        // is put on the mesh -- so a correct importer keeps the bone exactly where the vertex it
+        // is bound to went.
+        auto rig = [&](const std::string& armatureTransform) {
+            return std::string("{")
+              + "\"asset\":{\"version\":\"2.0\"},\"scene\":0,"
+              + "\"scenes\":[{\"nodes\":[0]}],"
+              + "\"nodes\":["
+                + "{\"name\":\"armature\"," + armatureTransform + ",\"children\":[1,2]},"
+                + "{\"mesh\":0,\"skin\":0},"
+                + "{\"name\":\"root\",\"translation\":[0,1,0]}"
+              + "],"
+              + "\"meshes\":[{\"name\":\"Tri\",\"primitives\":[{\"attributes\":{\"POSITION\":0},\"indices\":1}]}],"
+              + "\"skins\":[{\"name\":\"rig\",\"joints\":[2]}],"
+              + "\"buffers\":[{\"uri\":\"data:application/octet-stream;base64," + b64(tri.bin)
+                + "\",\"byteLength\":" + std::to_string(tri.bin.size()) + "}],"
+              + "\"bufferViews\":["
+                + "{\"buffer\":0,\"byteOffset\":" + std::to_string(tri.posOff) + ",\"byteLength\":" + std::to_string(tri.posLen) + "},"
+                + "{\"buffer\":0,\"byteOffset\":" + std::to_string(tri.idxOff) + ",\"byteLength\":" + std::to_string(tri.idxLen) + "}"
+              + "],"
+              + "\"accessors\":["
+                + "{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"},"
+                + "{\"bufferView\":1,\"componentType\":5123,\"count\":3,\"type\":\"SCALAR\"}"
+              + "]}";
+        };
+
+        const std::string plainJson = rig("\"scale\":[1,1,1]");
+        const std::string xformJson = rig("\"scale\":[2,2,2],\"rotation\":[0,0.70710678,0,0.70710678]");
+
+        fmt::GltfImportResult plain, xform;
+        std::string why;
+        check(fmt::importGltfFromMemory(reinterpret_cast<const u8*>(plainJson.data()), plainJson.size(),
+                                        "", plain, {}, &why), "the untransformed armature imports: " + why);
+        check(fmt::importGltfFromMemory(reinterpret_cast<const u8*>(xformJson.data()), xformJson.size(),
+                                        "", xform, {}, &why), "and the transformed one imports: " + why);
+
+        if (plain.skeletons.size() == 1 && xform.skeletons.size() == 1 &&
+            !plain.meshes.empty() && !xform.meshes.empty()) {
+            const fmt::OcBone& pb = plain.skeletons[0].bones[0];
+            const fmt::OcBone& xb = xform.skeletons[0].bones[0];
+
+            // The armature scales by 2, so the joint one metre up must end up twice as far out.
+            const f32 pl = std::sqrt(pb.translation.x*pb.translation.x + pb.translation.y*pb.translation.y +
+                                     pb.translation.z*pb.translation.z);
+            const f32 xl = std::sqrt(xb.translation.x*xb.translation.x + xb.translation.y*xb.translation.y +
+                                     xb.translation.z*xb.translation.z);
+            checkNear(xl, 2.0f * pl, 1e-2f, "a scale above the rig reaches the joint's rest offset");
+            check(pl > 1.0f, "and the untransformed case really did have an offset to scale");
+
+            // THE INVARIANT THAT MATTERS: bone and vertex move together. Comparing the ratio of the
+            // two rather than either alone is what makes this a test of CONSISTENCY -- the property
+            // skinning actually needs -- rather than of one hand-computed number.
+            auto meshSpan = [](const fmt::OcMeshData& m) {
+                f32 lo[3] = {1e9f,1e9f,1e9f}, hi[3] = {-1e9f,-1e9f,-1e9f};
+                for (usize v = 0; v * 3 + 2 < m.positions.size(); ++v)
+                    for (int a = 0; a < 3; ++a) {
+                        const f32 c = m.positions[v*3 + usize(a)];
+                        lo[a] = c < lo[a] ? c : lo[a];
+                        hi[a] = c > hi[a] ? c : hi[a];
+                    }
+                f32 best = 0.0f;
+                for (int a = 0; a < 3; ++a) best = (hi[a]-lo[a]) > best ? (hi[a]-lo[a]) : best;
+                return best;
+            };
+            const f32 pm = meshSpan(plain.meshes[0]), xm = meshSpan(xform.meshes[0]);
+            check(pm > 1.0f, "the mesh has a measurable span to compare");
+            checkNear(xm / pm, xl / pl, 1e-2f,
+                      "the mesh and the skeleton scaled by the SAME factor -- they stay in one space");
+        }
+    }
+
     AVER_INFO("=== two glTF skin OBJECTS naming the same joints collapse into ONE skeleton ===");
     {
         // Mirrors the shape a Kenney/Blender export produces when one armature is exported as a

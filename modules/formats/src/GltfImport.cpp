@@ -417,6 +417,103 @@ void nodeLocal(const JsonValue& n, f32 out[16]) {
     out[12]= t[0]; out[13]= t[1]; out[14]= t[2]; out[15]= 1;
 }
 
+// Splits a row-major, row-vector 4x4 back into the translation/rotation/scale a glTF node could
+// have spelled out instead. Returns false when the matrix carries something TRS cannot represent,
+// with `why` set to the reason -- the caller notes it and keeps whatever was recovered.
+//
+// WHY THIS HAS TO EXIST. glTF lets a node give its transform EITHER as translation/rotation/scale
+// OR as a baked 16-float `matrix`, and the two are equally valid and equally common. Which one a
+// file uses is decided by the exporter, not the artist: assimp emits `matrix` for every node, and
+// so does anything that flattens an FBX rig, so an entire class of perfectly ordinary character
+// assets arrives in the form this function exists to read. A skeleton importer that only handles
+// the TRS spelling does not fail loudly on those files -- every bone silently keeps OcBone's
+// default rest pose, which is identity.
+//
+// AND IDENTITY REST POSES HIDE. The inverse bind is re-derived from the rest pose (see importSkins
+// below), so if every bone is identity then every inverse bind is identity too, and the two cancel:
+// the bind-pose render is pixel-for-pixel correct. Nothing looks wrong until someone plays a clip
+// against the rig, or opens it in the animation editor, at which point the rest pose the whole
+// skeleton is defined relative to turns out to be nothing at all. Measured on a 45-joint character:
+// 45 of 45 bones at translation (0,0,0), largest bone offset in the entire rig 0.000 cm.
+//
+// SHEAR IS THE ONE THING THAT CANNOT SURVIVE. A general affine matrix can shear; a TRS triple
+// cannot express that, and OcBone stores a TRS triple. Rather than silently drop it, the skew is
+// measured against the axes it would distort and reported, because a sheared joint means the DCC
+// baked something into the rig that this format cannot carry and the artist needs to know. The
+// decomposition itself is the engine's own transformFromMatrix; only the shear test is new here.
+bool decomposeTrs(const f32 m[16], f32 t[3], f32 r[4], f32 s[3], std::string* why) {
+    // Row lengths are the scale, and a zero one means a collapsed axis: there is no rotation to
+    // recover from it, and normalising would divide by zero. Checked HERE rather than left to
+    // transformFromMatrix, which returns an identity rotation in that case without saying so --
+    // silence being exactly what this function exists to replace.
+    f32 len[3];
+    for (int i = 0; i < 3; ++i)
+        len[i] = std::sqrt(m[i*4+0]*m[i*4+0] + m[i*4+1]*m[i*4+1] + m[i*4+2]*m[i*4+2]);
+    if (len[0] <= 1e-8f || len[1] <= 1e-8f || len[2] <= 1e-8f) {
+        t[0] = m[12]; t[1] = m[13]; t[2] = m[14];
+        r[0] = r[1] = r[2] = 0.0f; r[3] = 1.0f;
+        s[0] = s[1] = s[2] = 1.0f;
+        if (why) *why = "a degenerate (zero-scale) axis";
+        return false;
+    }
+
+    // Orthogonality of the normalised rows IS the absence of shear -- a sheared basis has axes that
+    // are not at right angles, and the dot product of two unit rows is the cosine of the angle
+    // between them. 1e-3 is about a twentieth of a degree: loose enough for float round-trips
+    // through an exporter, tight enough that real skew does not pass. This is the one thing
+    // transformFromMatrix does not check (it documents that it assumes no shear), and the reason
+    // this wrapper exists at all rather than the call site using that helper directly.
+    f32 skew = 0.0f;
+    for (int a = 0; a < 3; ++a)
+        for (int b = a + 1; b < 3; ++b) {
+            f32 d = 0.0f;
+            for (int k = 0; k < 3; ++k) d += (m[a*4+k]/len[a]) * (m[b*4+k]/len[b]);
+            d = std::fabs(d);
+            skew = d > skew ? d : skew;
+        }
+
+    // THE ENGINE ALREADY KNOWS HOW TO DO THIS. transformFromMatrix (Math.hpp) is the inverse of
+    // Transform::toMatrix, handles the negative-determinant reflection, and uses Shepperd's method
+    // with all four branches. Re-deriving any of that here would be a second copy to keep in step
+    // with the first -- and the layouts already agree: glTF stores `matrix` column-major, which is
+    // the transpose of this engine's row-major row-vector Mat4 and therefore the same sixteen
+    // floats in the same order.
+    Mat4 mm;
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j) mm.m[i][j] = m[i*4+j];
+    const Transform x = transformFromMatrix(mm);
+
+    t[0] = x.position.x; t[1] = x.position.y; t[2] = x.position.z;
+    r[0] = x.rotation.x; r[1] = x.rotation.y; r[2] = x.rotation.z; r[3] = x.rotation.w;
+    s[0] = x.scale.x;    s[1] = x.scale.y;    s[2] = x.scale.z;
+
+    if (skew > 1.0e-3f) {
+        if (why) *why = "shear, which a translation/rotation/scale triple cannot represent";
+        return false;
+    }
+    return true;
+}
+
+// A node's transform as TRS, however the file spelled it -- the `matrix` form decomposed, the TRS
+// form read straight out. Both call sites below hand the result to the SAME toEngine/toEngineQuat/
+// toEngineScale conversion, which is the point of routing them through one function: a rest pose
+// and a socket offset are the same kind of quantity, and two branches converting them separately is
+// how they drift apart.
+bool nodeTrs(const JsonValue& n, f32 t[3], f32 r[4], f32 s[3], std::string* why) {
+    t[0] = t[1] = t[2] = 0.0f;
+    r[0] = r[1] = r[2] = 0.0f; r[3] = 1.0f;
+    s[0] = s[1] = s[2] = 1.0f;
+    if (n.has("matrix")) {
+        f32 m[16];
+        nodeLocal(n, m);
+        return decomposeTrs(m, t, r, s, why);
+    }
+    if (n.has("translation")) for (int i = 0; i < 3; ++i) t[i] = n["translation"][usize(i)].asFloat();
+    if (n.has("rotation"))    for (int i = 0; i < 4; ++i) r[i] = n["rotation"][usize(i)].asFloat();
+    if (n.has("scale"))       for (int i = 0; i < 3; ++i) s[i] = n["scale"][usize(i)].asFloat(1.0f);
+    return true;
+}
+
 // Multiplies two 4x4 row-major matrices.
 void mul(const f32 a[16], const f32 b[16], f32 out[16]) {
     for (int r = 0; r < 4; ++r)
@@ -487,17 +584,65 @@ bool Gltf::importSkins(std::string* why) {
             while (p >= 0 && boneOfNode[usize(p)] < 0) p = parentOfNode[usize(p)];
             b.parent = p >= 0 ? boneOfNode[usize(p)] : kOcBoneNoParent;
 
-            if (n.has("matrix")) {
-                note("a joint whose transform is a matrix rather than TRS (rest pose taken as identity)");
+            // NO BRANCH ON HOW THE FILE SPELLED IT. nodeTrs reads a baked `matrix` and a TRS
+            // triple into the same three values, so a rig exported one way gets the same rest pose
+            // as the identical rig exported the other. This used to note the matrix case and fall
+            // through with OcBone's defaults, which is an IDENTITY rest pose for every joint -- and
+            // an identity rest pose is invisible until it is not, because the inverse bind is
+            // re-derived from it a few lines below and the two cancel exactly on a bind-pose render.
+            // EVERYTHING ABOVE THE TOPMOST JOINT STILL COUNTS, and dropping it was a real bug.
+            //
+            // This importer does not follow glTF's own division of labour, and says so at the
+            // inverse-bind comment further down: rather than leaving a skinned mesh's vertices in
+            // mesh space and letting the file's inverseBindMatrices bridge to the joints, it BAKES
+            // each mesh's whole node-chain transform into its vertices and RE-DERIVES the inverse
+            // bind from the rest pose. That is a coherent design -- it avoids carrying a matrix
+            // through a determinant -1 basis change, which is a second independent chance to get
+            // the handedness wrong -- but it only holds together if the skeleton is baked the same
+            // way the mesh is. It was not: run() composes the full ancestor chain for a mesh, while
+            // this loop read each joint's LOCAL transform and ignored every node above the topmost
+            // joint entirely.
+            //
+            // WHAT THAT COST. assimp writes the FBX-to-glTF axis and unit conversion as one matrix
+            // on both the armature root and the mesh node -- on the rig this was found on,
+            // literally the same matrix on each: a quarter turn about X and a scale of 100. The
+            // mesh got it and the skeleton did not, so the two disagreed in orientation AND by two
+            // orders of magnitude: a mesh 37,653 cm tall against a rig spanning 335 cm, and lying
+            // on its back relative to it. Invisible at rest, because the re-derived inverse bind
+            // cancels against whatever the rest pose happens to be, and ruinous the moment a clip
+            // plays -- every rotation pivoting about the wrong point, in the wrong orientation, at
+            // a hundredth of the scale.
+            //
+            // ONLY ON THE TOPMOST JOINTS. A joint with a parent inside the skin already inherits
+            // the chain through that parent, so applying it at every level would raise it to the
+            // power of the hierarchy's depth.
+            f32 t[3], r[4], sc[3];
+            std::string lost;
+            if (b.parent == kOcBoneNoParent && parentOfNode[usize(ni)] >= 0) {
+                f32 above[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+                for (i32 anc = parentOfNode[usize(ni)]; anc >= 0; anc = parentOfNode[usize(anc)]) {
+                    f32 al[16], composed[16];
+                    nodeLocal(nodes[usize(anc)], al);
+                    mul(above, al, composed);          // row-vector: child then parent
+                    std::memcpy(above, composed, sizeof(above));
+                }
+                // Folded in as a MATRIX rather than by composing TRS triples, because a rotation
+                // composed with a non-uniform parent scale is not itself a TRS -- it can shear,
+                // which decomposeTrs then reports instead of quietly dropping.
+                f32 self[16], total[16];
+                nodeLocal(n, self);
+                mul(self, above, total);
+                if (!decomposeTrs(total, t, r, sc, &lost))
+                    note("a root joint ('" + b.name + "') whose chain to the scene root carries " +
+                         lost + "; the rest of its rest pose was recovered");
             } else {
-                f32 t[3] = {0,0,0}, r[4] = {0,0,0,1}, sc[3] = {1,1,1};
-                if (n.has("translation")) for (int i = 0; i < 3; ++i) t[i] = n["translation"][usize(i)].asFloat();
-                if (n.has("rotation"))    for (int i = 0; i < 4; ++i) r[i] = n["rotation"][usize(i)].asFloat();
-                if (n.has("scale"))       for (int i = 0; i < 3; ++i) sc[i] = n["scale"][usize(i)].asFloat(1.0f);
-                b.translation = toEngine(t[0], t[1], t[2], false);
-                b.rotation    = toEngineQuat(r[0], r[1], r[2], r[3]);
-                b.scale       = toEngineScale(sc[0], sc[1], sc[2]);
+                if (!nodeTrs(n, t, r, sc, &lost))
+                    note("a joint ('" + b.name + "') whose baked transform carries " + lost +
+                         "; the rest of its rest pose was recovered");
             }
+            b.translation = toEngine(t[0], t[1], t[2], false);
+            b.rotation    = toEngineQuat(r[0], r[1], r[2], r[3]);
+            b.scale       = toEngineScale(sc[0], sc[1], sc[2]);
         }
 
         // PARENTS BEFORE CHILDREN is a contract of the format, and glTF does not promise it. Sort
@@ -622,20 +767,21 @@ bool Gltf::importSkins(std::string* why) {
                     for (int i = 2; sorted.socket(k.name); ++i) k.name = base + std::to_string(i);
                 }
 
-                if (nd.has("matrix")) {
-                    note("a socket whose transform is a matrix rather than TRS (offset taken as zero)");
-                } else {
-                    f32 t[3] = {0,0,0}, r[4] = {0,0,0,1}, sc[3] = {1,1,1};
-                    if (nd.has("translation")) for (int i = 0; i < 3; ++i) t[i] = nd["translation"][usize(i)].asFloat();
-                    if (nd.has("rotation"))    for (int i = 0; i < 4; ++i) r[i] = nd["rotation"][usize(i)].asFloat();
-                    if (nd.has("scale"))       for (int i = 0; i < 3; ++i) sc[i] = nd["scale"][usize(i)].asFloat(1.0f);
-                    // THE SAME BASIS CHANGE THE BONES GET, not a hand-rolled one. A socket offset is
-                    // a bone-local transform exactly as a joint's rest transform is, so anything else
-                    // here would put attachments in a mirrored place on an otherwise correct rig.
-                    k.translation = toEngine(t[0], t[1], t[2], false);
-                    k.rotation    = toEngineQuat(r[0], r[1], r[2], r[3]);
-                    k.scale       = toEngineScale(sc[0], sc[1], sc[2]);
-                }
+                // The joints' defect exactly, and fixed the same way: a socket authored on a
+                // node the exporter baked to a matrix used to land at the bone's own origin, which
+                // reads as "the weapon is inside the character's wrist" rather than as an import
+                // warning anyone would go looking for.
+                f32 t[3], r[4], sc[3];
+                std::string lost;
+                if (!nodeTrs(nd, t, r, sc, &lost))
+                    note("a socket ('" + k.name + "') whose baked transform carries " + lost +
+                         "; the rest of its offset was recovered");
+                // THE SAME BASIS CHANGE THE BONES GET, not a hand-rolled one. A socket offset is
+                // a bone-local transform exactly as a joint's rest transform is, so anything else
+                // here would put attachments in a mirrored place on an otherwise correct rig.
+                k.translation = toEngine(t[0], t[1], t[2], false);
+                k.rotation    = toEngineQuat(r[0], r[1], r[2], r[3]);
+                k.scale       = toEngineScale(sc[0], sc[1], sc[2]);
                 sorted.sockets.push_back(std::move(k));
             }
         }
