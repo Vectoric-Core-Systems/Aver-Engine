@@ -16,6 +16,10 @@ aver_add_module(Aver.Water
   SOURCES
     src/WaterRenderer.cpp
     src/Underwater.cpp
+    # The soft-body fluid volume. NO new dependency: it builds the seed shell a solver is created
+    # from and takes simulated vertices back, but never calls one -- the same reason the buoyancy
+    # note above gives for Jolt living on the other side of the composition root.
+    src/FluidVolume.cpp
   DEPS
     Aver.Core
     Aver.RHI
