@@ -1,4 +1,5 @@
 OCGRAPH 1
+DOMAIN gameplay
 # THE GAME MODE, as a graph. This is what starts the play session.
 #
 # Before 6d7ff99 this file could declare `CLASS AN_Rules GameMode` and the very next log line would

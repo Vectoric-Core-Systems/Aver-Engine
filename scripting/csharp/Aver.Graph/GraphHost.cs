@@ -252,6 +252,20 @@ public class GraphHost
             return false;
         }
 
+        // THE ONE CHOKEPOINT WHERE A FOREIGN GRAPH IS TURNED AWAY. Both Load(path) and this method
+        // funnel here, so refusing once covers every gameplay compile in the process. A material
+        // graph's nodes are HLSL arithmetic with names this compiler has never heard of; without
+        // this it would get as far as GraphCompiler and fail with "unknown node type", which reads
+        // like a broken graph rather than a graph handed to the wrong compiler. See Graph.DomainKind
+        // for why an UNRECOGNISED domain is refused here too rather than treated as gameplay.
+        if (graph.DomainKind != GraphDomain.Gameplay)
+        {
+            LoadError = err = $"this is a '{graph.Domain}' graph, not a gameplay graph -- " +
+                               "GraphHost compiles gameplay graphs only";
+            Console.Error.WriteLine($"[GraphHost] {LoadError}");
+            return false;
+        }
+
         // WHICH PATH, decided once, the same way GraphCompiler itself decides between Compile() and
         // CompileEntryPoint(): a graph with at least one ENTRY record is event-driven. A graph
         // predating ENTRY (or one that is deliberately pure dataflow) has EntryPoints.Count == 0 and

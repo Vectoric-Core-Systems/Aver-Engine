@@ -1,4 +1,5 @@
 OCGRAPH 1
+DOMAIN gameplay
 # THE VIEWMODEL. A mesh, parented to the camera, and nothing else -- this graph has no logic at all
 # and does not tick.
 #

@@ -1,4 +1,5 @@
 OCGRAPH 1
+DOMAIN gameplay
 # THE GAME MODE, as a graph. A round clock in a VAR is already a complete demonstration of "a game mode
 # is a graph class, so the play session starts", and there is nothing first-person-specific to add.
 #

@@ -171,6 +171,11 @@ static int Main()
         // unlike every prior GraphInterop wrapper's own tests.
         failures += CharacterMoveNodeTests.RunAll();
 
+        // WHICH KIND OF GRAPH THIS IS: the DOMAIN record, and GraphHost's refusal to compile a graph
+        // that belongs to another one. See GraphDomainTests.cs's own header for why absent and
+        // unrecognised are deliberately different answers.
+        failures += GraphDomainTests.RunAll();
+
         // GRAPH-AS-CLASS: the CLASS record's format half (parse-level only -- registration and
         // per-instance binding live in Aver.Scripting.Bridge, unreachable from this bare process; see
         // GraphClassRecordTests.cs's own header comment).

@@ -67,6 +67,29 @@ public class OcGraphParser
                 }
                 sawHeader = true;
             }
+            else if (key.Equals("DOMAIN", StringComparison.OrdinalIgnoreCase))
+            {
+                // DOMAIN <name> -- which language this graph's nodes are written in, so that the
+                // passes which walk every *.ocgraph under a project (HostBridge.DeclareGraphClasses,
+                // GameApp's discoverProjectGraphs) can tell one of ours from a material graph. See
+                // Graph.DomainKind and, for the authoritative account, aver::fmt::OcGraphDomain.
+                //
+                // Refused when it names nothing, matching the C++ reader exactly: absent and
+                // present-but-blank mean opposite things to DomainKind, so a file that says the word
+                // and then says nothing has a defect worth reporting rather than silently becoming a
+                // gameplay graph.
+                if (tokens.Count < 2)
+                {
+                    err = "DOMAIN requires a name: DOMAIN gameplay|material";
+                    return false;
+                }
+                if (!string.IsNullOrEmpty(graph.Domain))
+                {
+                    err = "duplicate DOMAIN record -- a graph belongs to at most one domain";
+                    return false;
+                }
+                graph.Domain = tokens[1];
+            }
             else if (key.Equals("NAME", StringComparison.OrdinalIgnoreCase))
             {
                 // NAME <graphname>

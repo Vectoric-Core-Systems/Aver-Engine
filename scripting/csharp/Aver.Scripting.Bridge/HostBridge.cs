@@ -580,6 +580,14 @@ public static class HostBridge
                     continue;
                 }
 
+                // NOT EVERY .ocgraph IS A GAMEPLAY GRAPH. This loop reaches every one under the
+                // project's content directory, and a material graph's nodes mean nothing to this
+                // compiler -- see Graph.DomainKind. Checked before ClassName rather than after so
+                // that a foreign graph carrying a CLASS record (a material graph named after the
+                // material it shades, say) is skipped rather than declared as an actor class.
+                if (graph.DomainKind != Aver.Graph.GraphDomain.Gameplay)
+                    continue;
+
                 if (string.IsNullOrEmpty(graph.ClassName))
                     continue;   // no CLASS record -- not this pass's file
 

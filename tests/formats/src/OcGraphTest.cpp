@@ -21,6 +21,94 @@ static void check(bool cond, const std::string& what) {
     }
 }
 
+// The DOMAIN record: which LANGUAGE a graph's nodes are written in, so that the two places which
+// open every .ocgraph under a project (GameApp's class sweep, HostBridge.DeclareGraphClasses) can
+// tell a gameplay graph from a material one instead of compiling whatever they find.
+//
+// THE THREE ANSWERS ARE NOT TWO. Absent means gameplay -- every graph in this repo predates the
+// record and must keep working. An unrecognised name means Unknown, NOT gameplay, because a file
+// that names a domain this build has never heard of has said out loud that it is not a gameplay
+// graph, and guessing otherwise is how a build one version behind compiles something it should have
+// skipped.
+static void testDomainRecord() {
+    AVER_INFO("=== .ocgraph DOMAIN (which kind of graph this is) ===");
+    using namespace fmt;
+
+    const std::string legacy =
+        "OCGRAPH 1\n"
+        "NAME Legacy\n"
+        "NODE a Add 10 20\n";
+    OcGraphData g;
+    std::string err;
+    check(parseOcgraph(legacy, g, &err), "a graph with no DOMAIN parses");
+    check(g.domain.empty(), "and carries no domain string");
+    check(ocGraphDomainOf(g) == OcGraphDomain::Gameplay, "an ABSENT DOMAIN reads as gameplay");
+    check(writeOcgraph(g, legacy) == legacy,
+          "and a save does NOT invent one -- every existing graph round-trips byte for byte");
+
+    const std::string mat =
+        "OCGRAPH 1\n"
+        "DOMAIN material\n"
+        "NAME M_Puddle\n"
+        "NODE c ConstFloat3 10 20\n";
+    OcGraphData m;
+    check(parseOcgraph(mat, m, &err), "a material graph parses");
+    check(m.domain == "material", "the domain is read");
+    check(ocGraphDomainOf(m) == OcGraphDomain::Material, "and classified");
+    check(writeOcgraph(m, mat) == mat, "and survives a save unchanged");
+
+    // Case, because every other record key in this format is matched case-insensitively.
+    OcGraphData up;
+    check(parseOcgraph("OCGRAPH 1\ndomain MATERIAL\nNAME x\n", up, &err),
+          "DOMAIN is matched case-insensitively, like every other record key");
+    check(ocGraphDomainOf(up) == OcGraphDomain::Material, "and so is its value");
+    check(up.domain == "MATERIAL", "while the text itself is kept verbatim, not normalised");
+
+    // The reason Unknown exists at all.
+    OcGraphData fut;
+    check(parseOcgraph("OCGRAPH 1\nDOMAIN vfx\nNAME x\n", fut, &err),
+          "a domain from a LATER build is not a parse error");
+    check(ocGraphDomainOf(fut) == OcGraphDomain::Unknown,
+          "but it is Unknown, NOT gameplay -- an older build must skip it, not compile it");
+    check(writeOcgraph(fut, "OCGRAPH 1\nDOMAIN vfx\nNAME x\n") == "OCGRAPH 1\nDOMAIN vfx\nNAME x\n",
+          "and an older editor saving it does not rewrite the name it did not understand");
+
+    // A DOMAIN gained in memory has exactly one right position, unlike every other added record.
+    OcGraphData add;
+    check(parseOcgraph(legacy, add, &err), "reparse the legacy graph");
+    add.domain = "material";
+    const std::string promoted = writeOcgraph(add, legacy);
+    check(promoted.rfind("OCGRAPH 1\nDOMAIN material\n", 0) == 0,
+          "a domain added in memory is written DIRECTLY UNDER THE HEADER, not appended at the end");
+    check(promoted.find("NODE a Add 10 20") != std::string::npos, "and the rest of the file is intact");
+
+    // Removing it is the mirror image: an empty domain erases the line rather than writing a blank.
+    OcGraphData del;
+    check(parseOcgraph(mat, del, &err), "reparse the material graph");
+    del.domain.clear();
+    const std::string demoted = writeOcgraph(del, mat);
+    check(demoted.find("DOMAIN") == std::string::npos, "clearing the domain removes the line");
+    check(demoted.find("NAME M_Puddle") != std::string::npos, "without disturbing anything else");
+
+    // A fresh write puts it on line two, which is the whole point: one read answers "what is this".
+    OcGraphData fresh;
+    fresh.name = "M_Fresh";
+    fresh.domain = "material";
+    const std::string written = writeOcgraph(fresh, "");
+    check(written.rfind("OCGRAPH 1\nDOMAIN material\n", 0) == 0,
+          "a freshly written graph names its domain on the second line");
+
+    // Said and left blank is a defect, not an absence -- the two mean opposite things.
+    OcGraphData bad;
+    check(!parseOcgraph("OCGRAPH 1\nDOMAIN\nNAME x\n", bad, &err),
+          "a DOMAIN record with no name is REFUSED rather than read as gameplay");
+
+    check(ocGraphDomainName(OcGraphDomain::Gameplay) == "gameplay" &&
+          ocGraphDomainName(OcGraphDomain::Material) == "material" &&
+          ocGraphDomainName(OcGraphDomain::Unknown).empty(),
+          "the canonical spellings are what a writer emits; Unknown has none of its own");
+}
+
 // Tests basic parsing and data structure population.
 static void testBasicParse() {
     AVER_INFO("=== .ocgraph basic parsing ===");
@@ -1129,6 +1217,7 @@ int main(int argc, char** argv) {
     }
 
     testMeta();
+    testDomainRecord();
     testBasicParse();
     testRoundTrip();
     testUnknownRecords();

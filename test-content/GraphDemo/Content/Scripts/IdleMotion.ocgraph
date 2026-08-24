@@ -1,4 +1,5 @@
 OCGRAPH 1
+DOMAIN gameplay
 # A SELF-SEEDING IDLE MOTION, and the point of it is that it belongs to no project.
 #
 # One .ocgraph file, driving any number of entities, each animating around ITS OWN starting point.

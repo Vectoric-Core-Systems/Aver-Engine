@@ -1,4 +1,5 @@
 OCGRAPH 1
+DOMAIN gameplay
 # A PLAYABLE CHARACTER WITH NO C# ANYWHERE. This project contains not one .cs file; everything below
 # is the whole of it.
 #

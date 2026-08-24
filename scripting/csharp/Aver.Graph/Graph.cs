@@ -338,10 +338,43 @@ public class GraphFunction
     public string? ReturnNodeId { get; set; }
 }
 
+/// Which LANGUAGE a .ocgraph's nodes are written in -- the C# mirror of aver::fmt::OcGraphDomain
+/// (modules/formats/include/aver/formats/OcGraph.hpp), which owns the authoritative comment.
+///
+/// The short version of why it exists: one extension, several unrelated languages. This compiler
+/// emits IL and its nodes call the framework; a material graph is compiled to HLSL by C++ and its
+/// nodes are arithmetic on a surface. HostBridge.DeclareGraphClasses walks EVERY *.ocgraph under a
+/// project's content directory, so without a marker it would reach a material graph and try to make
+/// an actor class out of it.
+///
+/// ABSENT IS Gameplay; AN UNRECOGNISED NAME IS Unknown, NOT Gameplay. Every graph written before the
+/// record existed is a gameplay graph, so a missing DOMAIN cannot be an error -- but a file naming a
+/// domain this build has never heard of has said out loud that it is not one, and the safe reading
+/// of that is "skip it", not "compile it anyway".
+public enum GraphDomain
+{
+    Gameplay,
+    Material,
+    Unknown,
+}
+
 public class Graph
 {
     public string Name { get; set; } = "untitled";
     public string Description { get; set; } = "";
+
+    /// The raw text of the top-level `DOMAIN <name>` record, or null when the file has none.
+    /// Kept as the author wrote it rather than normalised, for the reason the C++ side's own
+    /// OcGraphData::domain gives: a build that does not recognise a domain must not rewrite it.
+    /// Ask DomainKind, not this, unless you are writing the file back out.
+    public string? Domain { get; set; }
+
+    /// This graph's domain as one of the three answers a consumer actually has. See GraphDomain.
+    public GraphDomain DomainKind =>
+        string.IsNullOrEmpty(Domain) ? GraphDomain.Gameplay
+        : Domain.Equals("gameplay", StringComparison.OrdinalIgnoreCase) ? GraphDomain.Gameplay
+        : Domain.Equals("material", StringComparison.OrdinalIgnoreCase) ? GraphDomain.Material
+        : GraphDomain.Unknown;
     public Dictionary<string, Node> Nodes { get; set; } = new();  // String keys to support both int and string IDs from different formats.
     public List<Link> Links { get; set; } = new();
     public List<ConstantOutput> ConstantOutputs { get; set; } = new();

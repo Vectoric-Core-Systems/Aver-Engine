@@ -229,18 +229,28 @@ void onWindowEvent(void* user, const Event& e) {
     static_cast<InputState*>(user)->onEvent(e);
 }
 
-// True when an .ocgraph file's text declares itself a spawnable class via a top-level CLASS record
-// (see Aver.Graph's Graph.ClassName / OcGraphParser's own comment on that record). A LIGHTWEIGHT
-// TEXT SCAN, not a parse: the C++ side has no .ocgraph reader that understands CLASS at all --
-// PARAM/VAR/CLASS all ride through OcGraph.cpp's classifyLine as OwnedLineKind::Other, by design, so
-// there is no native parser to ask. discoverProjectGraphs only needs a yes/no answer to decide
-// whether THIS file is already being driven by the class-registration/spawn path (skip it, so it is
-// never ALSO ticked against a synthetic entity in parallel with its real spawned instances) or is an
-// ordinary project-utility graph (drive it against a synthetic entity, exactly as always). Matches
-// OcGraphParser's own "a '#' starts a comment only at the START of a line" rule closely enough for
-// that yes/no purpose -- a false positive/negative here only affects which of two harmless paths one
-// specific file takes, never correctness of either path itself.
-bool ocgraphDeclaresClass(const std::string& text) {
+// ASCII case-insensitive equality, for the record scanner below and the one token it reads.
+bool equalsAsciiCI(std::string_view a, std::string_view b) {
+    if (a.size() != b.size()) return false;
+    for (usize i = 0; i < a.size(); ++i) {
+        char x = a[i], y = b[i];
+        if (x >= 'A' && x <= 'Z') x = static_cast<char>(x - 'A' + 'a');
+        if (y >= 'A' && y <= 'Z') y = static_cast<char>(y - 'A' + 'a');
+        if (x != y) return false;
+    }
+    return true;
+}
+
+// True when an .ocgraph file's text carries a top-level record with this key, and when it does, sets
+// `*outValue` to the token after the key (empty when the record names nothing).
+//
+// A LIGHTWEIGHT TEXT SCAN, not a parse, and that is still the right shape even though the C++ reader
+// has since learned one of the two records asked about here. CLASS it will never learn -- PARAM/VAR/
+// CLASS all ride through OcGraph.cpp's classifyLine as OwnedLineKind::Other by design -- and pulling
+// Aver.Formats into this module's link line to read one token off a header would be a dependency
+// bought for two string comparisons. Matches OcGraphParser's own "a '#' starts a comment only at the
+// START of a line" rule, which is close enough for the yes/no purposes both callers below have.
+bool ocgraphRecord(const std::string& text, std::string_view wanted, std::string* outValue) {
     usize pos = 0;
     while (pos <= text.size()) {
         usize nl = text.find('\n', pos);
@@ -254,18 +264,39 @@ bool ocgraphDeclaresClass(const std::string& text) {
         if (line.empty() || line[0] == '#') continue;
 
         const usize end = line.find_first_of(" \t\r");
-        const std::string_view key = end == std::string_view::npos ? line : line.substr(0, end);
-        if (key.size() != 5) continue;
-        static const char kClass[5] = {'C', 'L', 'A', 'S', 'S'};
-        bool match = true;
-        for (usize i = 0; i < 5; ++i) {
-            char c = key[i];
-            if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
-            if (c != kClass[i]) { match = false; break; }
+        if (!equalsAsciiCI(end == std::string_view::npos ? line : line.substr(0, end), wanted)) continue;
+
+        if (outValue) {
+            outValue->clear();
+            std::string_view rest = end == std::string_view::npos ? std::string_view() : line.substr(end);
+            const usize vs = rest.find_first_not_of(" \t\r");
+            if (vs != std::string_view::npos) {
+                rest.remove_prefix(vs);
+                const usize ve = rest.find_first_of(" \t\r");
+                *outValue = std::string(ve == std::string_view::npos ? rest : rest.substr(0, ve));
+            }
         }
-        if (match) return true;
+        return true;
     }
     return false;
+}
+
+// True when an .ocgraph declares itself a spawnable class via a top-level CLASS record (see
+// Aver.Graph's Graph.ClassName). discoverProjectGraphs needs only a yes/no: is THIS file already
+// driven by the class-registration/spawn path (skip it, so it is never ALSO ticked against a
+// synthetic entity in parallel with its real spawned instances), or is it an ordinary
+// project-utility graph (drive it against a synthetic entity, exactly as always).
+bool ocgraphDeclaresClass(const std::string& text) { return ocgraphRecord(text, "CLASS", nullptr); }
+
+// True when an .ocgraph belongs to a domain this loader has no business compiling -- i.e. it carries
+// a DOMAIN record naming anything other than gameplay. See aver::fmt::OcGraphDomain for the full
+// account; the asymmetry that matters here is that an ABSENT record means gameplay (every graph in
+// every project predates the record) while an UNRECOGNISED one does not, because a file naming a
+// domain this build has never heard of has said out loud that it is not a gameplay graph.
+bool ocgraphIsForeign(const std::string& text) {
+    std::string domain;
+    if (!ocgraphRecord(text, "DOMAIN", &domain) || domain.empty()) return false;
+    return !equalsAsciiCI(domain, "gameplay");
 }
 
 // True for a path ending in ".ocproject", case-insensitively. Lifted from SandboxApp.cpp:5562.
@@ -977,6 +1008,7 @@ void GameApp::discoverProjectGraphs() {
     i32 nextId = -1000;
     u32 loaded = 0;
     u32 skippedAsClasses = 0;
+    u32 skippedForeign = 0;   // graphs belonging to another domain -- see ocgraphIsForeign
     for (const std::string& path : paths) {
         // GRAPH-AS-CLASS: a file carrying a CLASS record was already claimed by
         // scripts_.declareGraphClasses (called from initScripting, before this function runs) -- it
@@ -988,7 +1020,16 @@ void GameApp::discoverProjectGraphs() {
         // rule leans on for a clean per-entity trajectory. See ocgraphDeclaresClass's own comment for
         // why this is a lightweight text scan rather than a real parse.
         std::string text;
-        if (readFileText(path, text) && ocgraphDeclaresClass(text)) {
+        const bool haveText = readFileText(path, text);
+        // NOT EVERY .ocgraph IS A GAMEPLAY GRAPH, and this sweep reaches every one under the
+        // project. A material graph handed to graphLoad below would get as far as GraphCompiler and
+        // fail with "unknown node type" -- a message that reads like a broken graph rather than a
+        // graph offered to the wrong compiler. See ocgraphIsForeign.
+        if (haveText && ocgraphIsForeign(text)) {
+            ++skippedForeign;
+            continue;
+        }
+        if (haveText && ocgraphDeclaresClass(text)) {
             ++skippedAsClasses;
             continue;
         }
@@ -1010,8 +1051,9 @@ void GameApp::discoverProjectGraphs() {
             AVER_WARN("[Graph] '{}' failed to load -- see the [GraphHost] reason above; continuing without it", path);
         }
     }
-    AVER_INFO("[Graph] {} of {} project graph(s) loaded ({} skipped -- declared as classes instead)",
-              loaded, projectGraphs_.size(), skippedAsClasses);
+    AVER_INFO("[Graph] {} of {} project graph(s) loaded ({} skipped -- declared as classes instead, "
+              "{} not gameplay graphs)",
+              loaded, projectGraphs_.size(), skippedAsClasses, skippedForeign);
 #endif
 }
 

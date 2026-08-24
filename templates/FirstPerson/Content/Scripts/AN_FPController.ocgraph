@@ -1,4 +1,5 @@
 OCGRAPH 1
+DOMAIN gameplay
 # THE PLAYER CONTROLLER, and it is deliberately empty.
 #
 # WHY IT HAS TO EXIST AT ALL. aver_fw_begin_play possesses a pawn only when it has BOTH a controller

@@ -1,4 +1,5 @@
 OCGRAPH 1
+DOMAIN gameplay
 # THE PLAYER: walk, look, and SHOOT WHAT YOU ARE LOOKING AT -- with a weapon that has to reload.
 #
 # The move/look half is the same shape test-content/AN_Playable's Player.ocgraph uses; read that file

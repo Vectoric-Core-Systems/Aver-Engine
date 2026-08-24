@@ -1,4 +1,5 @@
 OCGRAPH 1
+DOMAIN gameplay
 # A THING THAT REACTS TO BEING HIT, and remembers how often. Still no C# anywhere in this project.
 #
 # Two capabilities meet here. ENTRY OnHit has existed since 75be56b, but until 6d7ff99 nothing could

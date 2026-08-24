@@ -45,8 +45,8 @@ bool isNumericToken(std::string_view s) {
 // path (see there) to replace each kind in place at its own first occurrence, rather than collapsing
 // every kind into one inserted block. `Other` covers blank lines, comments, and anything writeOcgraph
 // does not model; those are always copied through verbatim, at their original position.
-enum class OwnedLineKind { Header, Name, Description, Var, Comp, Comment, Func, FuncPin, Node, Pin, Link,
-                            Entry, Out, Other };
+enum class OwnedLineKind { Header, Domain, Name, Description, Var, Comp, Comment, Func, FuncPin, Node,
+                            Pin, Link, Entry, Out, Other };
 
 // `sawHeader` is the caller's running state: only the FIRST line whose key is OCGRAPH counts as the
 // header; a later stray "OCGRAPH ..." line (malformed input, or inside an unrelated unknown record)
@@ -55,6 +55,7 @@ OwnedLineKind classifyLine(std::string_view line, bool sawHeaderYet) {
     const std::vector<std::string_view> t = splitWhitespace(trim(truncateHash(line)));
     if (t.empty()) return OwnedLineKind::Other; // blank line, or a comment (truncateHash ate it)
     if (!sawHeaderYet && equalsCI(t[0], "OCGRAPH")) return OwnedLineKind::Header;
+    if (equalsCI(t[0], "DOMAIN"))      return OwnedLineKind::Domain;
     if (equalsCI(t[0], "NAME"))        return OwnedLineKind::Name;
     if (equalsCI(t[0], "DESCRIPTION")) return OwnedLineKind::Description;
     if (equalsCI(t[0], "VAR"))         return OwnedLineKind::Var;
@@ -129,6 +130,17 @@ bool parseOcgraph(std::string_view text, OcGraphData& out, std::string* err) {
         if (equalsCI(key, "OCGRAPH")) {
             out.version = t.size() > 1 ? parseI32(t[1], 1) : 1;
             sawHeader = true;
+        } else if (equalsCI(key, "DOMAIN")) {
+            // DOMAIN <name> -- which language this graph's nodes are written in. Stored verbatim,
+            // not mapped to the enum here, so a name this build does not know survives a save (see
+            // OcGraphData::domain). A DOMAIN with no name is refused rather than read as absent:
+            // the two mean opposite things to ocGraphDomainOf, and a file that says the word and
+            // then says nothing has a defect worth reporting instead of silently becoming gameplay.
+            if (t.size() < 2) {
+                if (err) *err = "DOMAIN requires a name: DOMAIN gameplay|material";
+                return false;
+            }
+            out.domain = std::string(t[1]);
         } else if (equalsCI(key, "NAME")) {
             out.name = t.size() > 1 ? std::string(t[1]) : std::string();
         } else if (equalsCI(key, "DESCRIPTION")) {
@@ -496,6 +508,25 @@ bool parseOcgraph(std::string_view text, OcGraphData& out, std::string* err) {
     return true;
 }
 
+// Which domain a graph belongs to. See OcGraphDomain (OcGraph.hpp) for why absent and unrecognised
+// are different answers.
+OcGraphDomain ocGraphDomainOf(const OcGraphData& g) {
+    if (g.domain.empty())               return OcGraphDomain::Gameplay;
+    if (equalsCI(g.domain, "gameplay")) return OcGraphDomain::Gameplay;
+    if (equalsCI(g.domain, "material")) return OcGraphDomain::Material;
+    return OcGraphDomain::Unknown;
+}
+
+// The canonical spelling to write for a domain, or empty for Unknown.
+std::string_view ocGraphDomainName(OcGraphDomain d) {
+    switch (d) {
+    case OcGraphDomain::Gameplay: return "gameplay";
+    case OcGraphDomain::Material: return "material";
+    case OcGraphDomain::Unknown:  break;
+    }
+    return {};
+}
+
 // Loads a .ocgraph from disk.
 bool loadOcgraph(const std::string& path, OcGraphData& out, std::string* err) {
     std::string text;
@@ -510,6 +541,10 @@ bool loadOcgraph(const std::string& path, OcGraphData& out, std::string* err) {
 std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
     // The regenerated content for each record kind, built fresh from `g` regardless of what (if
     // anything) `existing` had. Shared by both branches below.
+    // Empty when the graph has no domain, which is how a file that never had a DOMAIN line comes
+    // back without one -- inventing `DOMAIN gameplay` on save would make an edit-free load/save
+    // change every existing graph in the tree, which this format's round-trip tests forbid.
+    const std::string domainLine = g.domain.empty() ? std::string() : ("DOMAIN " + g.domain + "\n");
     const std::string nameLine = "NAME " + (g.name.empty() ? std::string("untitled") : g.name) + "\n";
     const std::string descLine = g.description.empty() ? std::string() : ("DESCRIPTION " + g.description + "\n");
     // ONE ENTRY PER RECORD, not one string per KIND, because the merge path below matches existing
@@ -619,6 +654,7 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
     // ahead of each non-empty section, so a freshly-written file reads in visually separated blocks.
     if (trim(existing).empty()) {
         std::string out = "OCGRAPH " + std::to_string(g.version > 0 ? g.version : 1) + "\n";
+        out += domainLine;   // second line, directly under the magic, so one read answers "what is this"
         out += "# Visual scripting graph, written by the Aver Engine editor.\n";
         out += nameLine;
         out += descLine;
@@ -723,7 +759,14 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
         // No record answers to this key: it was deleted. Emitting nothing is the deletion.
     };
 
-    bool placedName = false, placedDesc = false;
+    // A DOMAIN THE FILE DOES NOT HAVE GOES DIRECTLY UNDER THE HEADER, not at the end with the other
+    // newly-added records. Everything appendUnused handles is a record whose position the file says
+    // nothing about; this one has exactly one right position, because the reason it exists is that a
+    // reader should be able to learn what kind of graph this is without reading the whole file.
+    bool fileHasDomain = false;
+    for (const OwnedLineKind k : kinds) if (k == OwnedLineKind::Domain) { fileHasDomain = true; break; }
+
+    bool placedName = false, placedDesc = false, placedDomain = false;
     std::string out;
     out.reserve(existing.size() + varBlock.size() + compBlock.size() + nodeBlock.size() + pinBlock.size() + linkBlock.size()
                 + entryBlock.size() + outBlock.size() + 64);
@@ -732,6 +775,10 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
         switch (kinds[i]) {
         case OwnedLineKind::Header:
             out += "OCGRAPH " + std::to_string(g.version > 0 ? g.version : 1) + "\n";
+            if (!fileHasDomain) { placedDomain = true; out += domainLine; }
+            break;
+        case OwnedLineKind::Domain:
+            if (!placedDomain) { placedDomain = true; out += domainLine; } // empty domainLine = removed
             break;
         case OwnedLineKind::Name:
             if (!placedName) { placedName = true; out += nameLine; }
@@ -765,6 +812,7 @@ std::string writeOcgraph(const OcGraphData& g, std::string_view existing) {
         for (const Rec& r : recs) if (!r.used) block += r.text;
         if (!block.empty()) { out += "\n"; out += block; }
     };
+    if (!placedDomain && !domainLine.empty()) out += domainLine;
     if (!placedName) out += nameLine;
     if (!placedDesc && !descLine.empty()) out += descLine;
     appendUnused(varRecs);

@@ -204,11 +204,48 @@ struct OcGraphComment {
     std::string text;            // free text, may be empty (an untitled box is legal)
 };
 
+// WHAT KIND OF GRAPH A .ocgraph IS.
+//
+// One extension, several unrelated languages. A gameplay graph is compiled to IL by
+// scripting/csharp/Aver.Graph/GraphCompiler.cs and its nodes call the framework; a material graph is
+// compiled to HLSL by C++ and its nodes are arithmetic on a surface. They share a grammar -- nodes,
+// pins, links -- and nothing else: neither compiler can do anything sane with the other's nodes.
+//
+// Until this record existed the only thing distinguishing them was which code happened to open the
+// file, and the engine has two places that open EVERY .ocgraph under a project without being asked:
+// GameApp's class sweep and HostBridge.DeclareGraphClasses. Both would have reached a material graph
+// and tried to compile it as gameplay -- not a hypothetical, since the material work landing next
+// puts material graphs in the same Content tree.
+//
+// ABSENT MEANS GAMEPLAY, AND AN UNRECOGNISED NAME MEANS NEITHER. That asymmetry is the point. Every
+// .ocgraph written before this record is a gameplay graph and must keep working untouched, so a
+// missing DOMAIN cannot be an error. But a file that says `DOMAIN sound` is telling this build it is
+// something this build has never heard of, and the safe reading of that is "not mine" -- so it maps
+// to Unknown and every consumer skips it, rather than falling back to gameplay and compiling a graph
+// whose author explicitly said it was not one.
+enum class OcGraphDomain {
+    Gameplay,   // no DOMAIN record, or `DOMAIN gameplay`: nodes call the framework, compiled to IL
+    Material,   // `DOMAIN material`: nodes shade a surface, compiled to HLSL
+    Unknown,    // a DOMAIN this build does not know -- deliberately NOT treated as gameplay
+};
+
 // A complete visual scripting graph.
 struct OcGraphData {
     int version = 1;
     std::string name;        // Graph name; empty = "untitled"
     std::string description; // Optional human-readable description
+
+    // Declared via a top-level `DOMAIN <name>` record; empty when the file has none, which is every
+    // graph written before the record existed and means Gameplay. See OcGraphDomain above for what
+    // the distinction is for and why an UNKNOWN name is not the same as an absent one.
+    //
+    // A STRING HERE, an enum only at the point of use, for the reason OcGraphVariable::type and
+    // OcGraphComponent::kind are strings too: this layer owns the grammar, not the vocabulary. A file
+    // naming a domain this build has never heard of round-trips through a load and save with its name
+    // intact -- an older editor opening a newer project must not quietly rewrite `DOMAIN vfx` into
+    // something it does prefer -- while ocGraphDomainOf() below is where a consumer asks the only
+    // question it actually has, which is "is this one mine".
+    std::string domain;
 
     std::vector<OcGraphNode> nodes;
     std::vector<OcGraphLink> links;
@@ -291,6 +328,15 @@ struct OcGraphData {
     // uniqueness here -- to the layer that actually executes the graph.
     std::vector<std::pair<std::string, std::string>> entryPoints;   // {nodeId, eventName}
 };
+
+// Which domain a graph belongs to. Case-insensitive; an ABSENT record is Gameplay and an
+// unrecognised name is Unknown -- see OcGraphDomain for why those two are not the same answer.
+OcGraphDomain ocGraphDomainOf(const OcGraphData& g);
+
+// The canonical lower-case spelling to WRITE for a domain. Unknown has no spelling of its own (a
+// graph that carries one carries its author's text verbatim in OcGraphData::domain), so it returns
+// an empty view and a caller writing one uses the string it parsed.
+std::string_view ocGraphDomainName(OcGraphDomain d);
 
 // Parses a graph from memory. Unknown records are ignored during parse but preserved during rewrite.
 // Returns false and sets *err if parsing fails (e.g., invalid header, link to non-existent node).
