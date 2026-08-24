@@ -221,6 +221,614 @@ static fmt::OcGraphData flatColorGraph() {
     return g;
 }
 
+// A ConstFloat / ConstFloat3 source node, for feeding the node under test something real.
+static fmt::OcGraphNode constFloat(const char* id, const char* value) {
+    fmt::OcGraphNode n = node(id, "ConstFloat");
+    addPin(n, "value", "float", true, value);
+    return n;
+}
+static fmt::OcGraphNode constFloat3(const char* id, const char* value) {
+    fmt::OcGraphNode n = node(id, "ConstFloat3");
+    addPin(n, "value", "float3", true, value);
+    return n;
+}
+
+// A `key=value` NODE attribute -- the same extraTokens slot Swizzle's mask= and SampleTexture's
+// slot= actually read (see MaterialGraphHlsl.cpp's nodeAttr()).
+static void attr(fmt::OcGraphNode& n, const char* keyValue) {
+    n.extraTokens.emplace_back(keyValue);
+}
+
+// --------------------------------------------------------------------- new-vocabulary coverage
+//
+// TABLE-DRIVEN, ONE SMALL GRAPH PER NODE TYPE, over one enormous graph exercising all of them at
+// once. The whole point of handing generated HLSL to a real compiler is to find out when a node's
+// emitter is wrong; a single sprawling graph would still find that out, but dxc's diagnostic names
+// a LINE in a wall of generated code, and it is then this file's job to guess which of two dozen
+// nodes produced it. A small graph per node type instead means a failure comes back already
+// labelled with the node type that caused it (runNodeCase below puts the label in front of every
+// check it makes), which is the difference between "line 214: invalid operands" and "Reflect: DXC
+// compiles it" failing. The cost is more boilerplate per node; the ORIGINAL 25-node vocabulary
+// still gets its combined-graph exercise too (testItActuallyCompiles's M_Everything, above,
+// untouched), so this is additive rather than a rewrite of how that test works.
+//
+// Each builder below wires the node under test so its OUTPUT reaches a MaterialOutput input --
+// never a node built and left floating, which emission would simply never visit (see
+// testDeadNodesAreNotEmitted). Where a node's own result is a float2 (TilingOffset, Rotator) it is
+// routed through Length first: MaterialOutput has no float2 input and a float2 cannot widen to a
+// float3 (testWideningRules covers why), but every field accepts a float, so a magnitude is the
+// smallest already-proven node that turns "some vector" into "something any field will take".
+
+// A unary float3 -> float3 node (Sqrt/Ceil/Sign/Exp/Log/Tan all have this shape), fed a literal
+// vector and driving BaseColor.
+static fmt::OcGraphData unaryMathGraph(const char* type, const char* value) {
+    fmt::OcGraphData g;
+    g.domain = "material";
+    g.name = std::string("M_") + type;
+    g.nodes.push_back(constFloat3("v", value));
+    fmt::OcGraphNode n = node("n", type);
+    addPin(n, "x", "float3", false);
+    addPin(n, "result", "float3", true);
+    g.nodes.push_back(n);
+    g.nodes.push_back(materialOutput("out"));
+    link(g, "v", "value", "n", "x");
+    link(g, "n", "result", "out", "BaseColor");
+    return g;
+}
+
+static fmt::OcGraphData cameraPositionGraph() {
+    fmt::OcGraphData g;
+    g.domain = "material";
+    g.name = "M_CameraPosition";
+    fmt::OcGraphNode n = node("n", "CameraPosition");
+    addPin(n, "xyz", "float3", true);
+    g.nodes.push_back(n);
+    g.nodes.push_back(materialOutput("out"));
+    link(g, "n", "xyz", "out", "BaseColor");
+    return g;
+}
+
+static fmt::OcGraphData objectPositionGraph() {
+    fmt::OcGraphData g;
+    g.domain = "material";
+    g.name = "M_ObjectPosition";
+    fmt::OcGraphNode n = node("n", "ObjectPosition");
+    addPin(n, "xyz", "float3", true);
+    g.nodes.push_back(n);
+    g.nodes.push_back(materialOutput("out"));
+    link(g, "n", "xyz", "out", "BaseColor");
+    return g;
+}
+
+static fmt::OcGraphData modGraph() {
+    fmt::OcGraphData g;
+    g.domain = "material";
+    g.name = "M_Modulo";
+    g.nodes.push_back(constFloat3("a", "0.9,0.7,0.5"));
+    g.nodes.push_back(constFloat3("b", "0.3,0.2,0.4"));
+    fmt::OcGraphNode n = node("n", "Modulo");
+    addPin(n, "a", "float3", false);
+    addPin(n, "b", "float3", false);
+    addPin(n, "result", "float3", true);
+    g.nodes.push_back(n);
+    g.nodes.push_back(materialOutput("out"));
+    link(g, "a", "value", "n", "a");
+    link(g, "b", "value", "n", "b");
+    link(g, "n", "result", "out", "BaseColor");
+    return g;
+}
+
+static fmt::OcGraphData stepGraph() {
+    fmt::OcGraphData g;
+    g.domain = "material";
+    g.name = "M_Step";
+    g.nodes.push_back(constFloat("x", "0.62"));
+    fmt::OcGraphNode n = node("n", "Step");
+    addPin(n, "edge", "float", false, "0.5");
+    addPin(n, "x", "float", false);
+    addPin(n, "result", "float", true);
+    g.nodes.push_back(n);
+    g.nodes.push_back(materialOutput("out"));
+    link(g, "x", "value", "n", "x");
+    link(g, "n", "result", "out", "Roughness");
+    return g;
+}
+
+static fmt::OcGraphData smoothstepGraph() {
+    fmt::OcGraphData g;
+    g.domain = "material";
+    g.name = "M_Smoothstep";
+    g.nodes.push_back(constFloat("x", "0.4"));
+    fmt::OcGraphNode n = node("n", "Smoothstep");
+    addPin(n, "edge0", "float", false, "0");
+    addPin(n, "edge1", "float", false, "1");
+    addPin(n, "x", "float", false);
+    addPin(n, "result", "float", true);
+    g.nodes.push_back(n);
+    g.nodes.push_back(materialOutput("out"));
+    link(g, "x", "value", "n", "x");
+    link(g, "n", "result", "out", "Roughness");
+    return g;
+}
+
+static fmt::OcGraphData remapGraph() {
+    fmt::OcGraphData g;
+    g.domain = "material";
+    g.name = "M_Remap";
+    g.nodes.push_back(constFloat("x", "0.75"));
+    fmt::OcGraphNode n = node("n", "Remap");
+    addPin(n, "x", "float", false);
+    addPin(n, "inMin", "float", false, "0");
+    addPin(n, "inMax", "float", false, "1");
+    addPin(n, "outMin", "float", false, "0");
+    addPin(n, "outMax", "float", false, "10");
+    addPin(n, "result", "float", true);
+    g.nodes.push_back(n);
+    g.nodes.push_back(materialOutput("out"));
+    link(g, "x", "value", "n", "x");
+    link(g, "n", "result", "out", "Roughness");
+    return g;
+}
+
+static fmt::OcGraphData crossGraph() {
+    fmt::OcGraphData g;
+    g.domain = "material";
+    g.name = "M_Cross";
+    g.nodes.push_back(constFloat3("a", "1,0,0"));
+    g.nodes.push_back(constFloat3("b", "0,1,0"));
+    fmt::OcGraphNode n = node("n", "Cross");
+    addPin(n, "a", "float3", false);
+    addPin(n, "b", "float3", false);
+    addPin(n, "result", "float3", true);
+    g.nodes.push_back(n);
+    g.nodes.push_back(materialOutput("out"));
+    link(g, "a", "value", "n", "a");
+    link(g, "b", "value", "n", "b");
+    link(g, "n", "result", "out", "BaseColor");
+    return g;
+}
+
+static fmt::OcGraphData reflectGraph() {
+    fmt::OcGraphData g;
+    g.domain = "material";
+    g.name = "M_Reflect";
+    g.nodes.push_back(constFloat3("i", "0.2,-0.8,0.3"));
+    g.nodes.push_back(constFloat3("nn", "0,1,0"));
+    fmt::OcGraphNode n = node("n", "Reflect");
+    addPin(n, "i", "float3", false);
+    addPin(n, "n", "float3", false);
+    addPin(n, "result", "float3", true);
+    g.nodes.push_back(n);
+    g.nodes.push_back(materialOutput("out"));
+    link(g, "i", "value", "n", "i");
+    link(g, "nn", "value", "n", "n");
+    link(g, "n", "result", "out", "BaseColor");
+    return g;
+}
+
+static fmt::OcGraphData distanceGraph() {
+    fmt::OcGraphData g;
+    g.domain = "material";
+    g.name = "M_Distance";
+    g.nodes.push_back(constFloat3("a", "0.1,0.2,0.3"));
+    g.nodes.push_back(constFloat3("b", "0.4,0.1,0.9"));
+    fmt::OcGraphNode n = node("n", "Distance");
+    addPin(n, "a", "float3", false);
+    addPin(n, "b", "float3", false);
+    addPin(n, "result", "float", true);
+    g.nodes.push_back(n);
+    g.nodes.push_back(materialOutput("out"));
+    link(g, "a", "value", "n", "a");
+    link(g, "b", "value", "n", "b");
+    link(g, "n", "result", "out", "Roughness");
+    return g;
+}
+
+static fmt::OcGraphData blendNormalsGraph() {
+    fmt::OcGraphData g;
+    g.domain = "material";
+    g.name = "M_BlendNormals";
+    g.nodes.push_back(constFloat3("a", "0,0,1"));
+    g.nodes.push_back(constFloat3("b", "0.1,0.1,0.98"));
+    fmt::OcGraphNode n = node("n", "BlendNormals");
+    addPin(n, "a", "float3", false);
+    addPin(n, "b", "float3", false);
+    addPin(n, "result", "float3", true);
+    g.nodes.push_back(n);
+    g.nodes.push_back(materialOutput("out"));
+    link(g, "a", "value", "n", "a");
+    link(g, "b", "value", "n", "b");
+    link(g, "n", "result", "out", "Normal");
+    return g;
+}
+
+// mask=xyz on a float3: the ordinary case, and the one the table-driven pass compiles through dxc.
+static fmt::OcGraphData swizzleXyzGraph() {
+    fmt::OcGraphData g;
+    g.domain = "material";
+    g.name = "M_Swizzle_xyz";
+    g.nodes.push_back(constFloat3("v", "0.2,0.4,0.6"));
+    fmt::OcGraphNode n = node("n", "Swizzle");
+    addPin(n, "x", "float3", false);
+    addPin(n, "result", "float3", true);
+    attr(n, "mask=xyz");
+    g.nodes.push_back(n);
+    g.nodes.push_back(materialOutput("out"));
+    link(g, "v", "value", "n", "x");
+    link(g, "n", "result", "out", "BaseColor");
+    return g;
+}
+
+// mask=r on a float3: a ONE-component mask, which is a float, not a float1-of-something.
+static fmt::OcGraphData swizzleRGraph() {
+    fmt::OcGraphData g;
+    g.domain = "material";
+    g.name = "M_Swizzle_r";
+    g.nodes.push_back(constFloat3("v", "0.2,0.4,0.6"));
+    fmt::OcGraphNode n = node("n", "Swizzle");
+    addPin(n, "x", "float3", false);
+    addPin(n, "result", "float", true);
+    attr(n, "mask=r");
+    g.nodes.push_back(n);
+    g.nodes.push_back(materialOutput("out"));
+    link(g, "v", "value", "n", "x");
+    link(g, "n", "result", "out", "Roughness");
+    return g;
+}
+
+// TilingOffset's own result is a float2, which cannot drive any MaterialOutput field directly (no
+// field is float2, and a float2 does not widen to a float3 -- see testWideningRules). Length is the
+// bridge: it is already proven by testItActuallyCompiles's M_Everything, is generic over its
+// input's arity, and always returns a float, which every field accepts by splatting.
+static fmt::OcGraphData tilingOffsetGraph() {
+    fmt::OcGraphData g;
+    g.domain = "material";
+    g.name = "M_TilingOffset";
+    fmt::OcGraphNode uv = node("uv", "UV");
+    addPin(uv, "uv", "float2", true);
+    g.nodes.push_back(uv);
+    fmt::OcGraphNode n = node("n", "TilingOffset");
+    addPin(n, "uv", "float2", false);
+    addPin(n, "tiling", "float2", false, "2,2");
+    addPin(n, "offset", "float2", false, "0.1,0.1");
+    addPin(n, "result", "float2", true);
+    g.nodes.push_back(n);
+    fmt::OcGraphNode len = node("len", "Length");
+    addPin(len, "x", "float2", false);
+    addPin(len, "result", "float", true);
+    g.nodes.push_back(len);
+    g.nodes.push_back(materialOutput("out"));
+    link(g, "uv", "uv", "n", "uv");
+    link(g, "n", "result", "len", "x");
+    link(g, "len", "result", "out", "Roughness");
+    return g;
+}
+
+// Same float2-result situation as TilingOffset, same Length bridge.
+static fmt::OcGraphData rotatorGraph() {
+    fmt::OcGraphData g;
+    g.domain = "material";
+    g.name = "M_Rotator";
+    fmt::OcGraphNode uv = node("uv", "UV");
+    addPin(uv, "uv", "float2", true);
+    g.nodes.push_back(uv);
+    fmt::OcGraphNode n = node("n", "Rotator");
+    addPin(n, "uv", "float2", false);
+    addPin(n, "centre", "float2", false, "0.5,0.5");
+    addPin(n, "angle", "float", false, "0.7");
+    addPin(n, "result", "float2", true);
+    g.nodes.push_back(n);
+    fmt::OcGraphNode len = node("len", "Length");
+    addPin(len, "x", "float2", false);
+    addPin(len, "result", "float", true);
+    g.nodes.push_back(len);
+    g.nodes.push_back(materialOutput("out"));
+    link(g, "uv", "uv", "n", "uv");
+    link(g, "n", "result", "len", "x");
+    link(g, "len", "result", "out", "Roughness");
+    return g;
+}
+
+// uv is deliberately left unlinked -- proving the surface-uv fallback compiles is exactly as
+// important for Noise as it is for SampleTexture, and costs nothing extra here.
+static fmt::OcGraphData noiseGraph() {
+    fmt::OcGraphData g;
+    g.domain = "material";
+    g.name = "M_Noise";
+    fmt::OcGraphNode n = node("n", "Noise");
+    addPin(n, "uv", "float2", false);
+    addPin(n, "scale", "float", false, "6");
+    addPin(n, "result", "float", true);
+    g.nodes.push_back(n);
+    g.nodes.push_back(materialOutput("out"));
+    link(g, "n", "result", "out", "Roughness");
+    return g;
+}
+
+static fmt::OcGraphData checkerGraph() {
+    fmt::OcGraphData g;
+    g.domain = "material";
+    g.name = "M_Checker";
+    fmt::OcGraphNode n = node("n", "Checker");
+    addPin(n, "uv", "float2", false);
+    addPin(n, "scale", "float", false, "6");
+    addPin(n, "result", "float", true);
+    g.nodes.push_back(n);
+    g.nodes.push_back(materialOutput("out"));
+    link(g, "n", "result", "out", "Roughness");
+    return g;
+}
+
+// slot=basecolor, uv unlinked -- the happy path this node type is proved on in the table below. The
+// bad-slot and unlinked-uv BEHAVIOUR (not just "it compiles") gets its own dedicated tests further
+// down, because those assert things about the emitted TEXT that a pass/fail table cannot express.
+static fmt::OcGraphData sampleTextureGraph() {
+    fmt::OcGraphData g;
+    g.domain = "material";
+    g.name = "M_SampleTexture";
+    fmt::OcGraphNode n = node("n", "SampleTexture");
+    addPin(n, "uv", "float2", false);
+    addPin(n, "rgb", "float3", true);
+    addPin(n, "a", "float", true);
+    addPin(n, "rgba", "float4", true);
+    attr(n, "slot=basecolor");
+    g.nodes.push_back(n);
+    g.nodes.push_back(materialOutput("out"));
+    link(g, "n", "rgb", "out", "BaseColor");
+    return g;
+}
+
+static fmt::OcGraphData fresnelGraph() {
+    fmt::OcGraphData g;
+    g.domain = "material";
+    g.name = "M_Fresnel";
+    fmt::OcGraphNode n = node("n", "Fresnel");
+    addPin(n, "power", "float", false, "3");
+    addPin(n, "result", "float", true);
+    g.nodes.push_back(n);
+    g.nodes.push_back(materialOutput("out"));
+    link(g, "n", "result", "out", "Roughness");
+    return g;
+}
+
+static fmt::OcGraphData ifGraph() {
+    fmt::OcGraphData g;
+    g.domain = "material";
+    g.name = "M_If";
+    g.nodes.push_back(constFloat("a", "0.3"));
+    g.nodes.push_back(constFloat("b", "0.6"));
+    g.nodes.push_back(constFloat3("yes", "1,0,0"));
+    g.nodes.push_back(constFloat3("no", "0,0,1"));
+    fmt::OcGraphNode n = node("n", "If");
+    addPin(n, "a", "float", false);
+    addPin(n, "b", "float", false);
+    addPin(n, "ifTrue", "float3", false);
+    addPin(n, "ifFalse", "float3", false);
+    addPin(n, "result", "float3", true);
+    g.nodes.push_back(n);
+    g.nodes.push_back(materialOutput("out"));
+    link(g, "a", "value", "n", "a");
+    link(g, "b", "value", "n", "b");
+    link(g, "yes", "value", "n", "ifTrue");
+    link(g, "no", "value", "n", "ifFalse");
+    link(g, "n", "result", "out", "BaseColor");
+    return g;
+}
+
+// Compiles ONE node case: to compileMaterialGraph, then (dxc permitting) to dxc, with `label` --
+// the node TYPE, not the graph's node id -- in front of every check this makes, so a failure names
+// what it was that failed to compile without the reader having to open the graph literal above to
+// find out.
+static void runNodeCase(Dxc& dxc, const char* label, const fmt::OcGraphData& g) {
+    const pbr::MaterialGraphBody body = pbr::compileMaterialGraph(g);
+    check(body.ok, std::string(label) + " compiles to HLSL: " + body.error);
+    if (!body.ok || !dxc.available()) return;
+    pbr::MaterialGraphEntry e;
+    e.id = 1;
+    e.name = label;
+    e.hlsl = body.hlsl;
+    std::string err;
+    const bool ok = dxc.compile(compose(pbr::materialGraphHlsl({e})), defines(true), err);
+    check(ok, std::string(label) + ": DXC compiles it: " + err);
+}
+
+using GraphBuilder = fmt::OcGraphData (*)();
+struct NodeCase { const char* label; GraphBuilder build; };
+
+// Every node type added since the original 25 -- see the big comment above for why this is a table
+// of small graphs rather than one more addition to M_Everything.
+static const NodeCase kNewNodeCases[] = {
+    {"CameraPosition", []() -> fmt::OcGraphData { return cameraPositionGraph(); }},
+    {"ObjectPosition",  []() -> fmt::OcGraphData { return objectPositionGraph(); }},
+    {"Sqrt",  []() -> fmt::OcGraphData { return unaryMathGraph("Sqrt", "0.2,0.4,0.6"); }},
+    {"Ceil",  []() -> fmt::OcGraphData { return unaryMathGraph("Ceil", "0.2,0.4,0.6"); }},
+    {"Sign",  []() -> fmt::OcGraphData { return unaryMathGraph("Sign", "0.2,0.4,0.6"); }},
+    {"Exp",   []() -> fmt::OcGraphData { return unaryMathGraph("Exp",  "0.2,0.4,0.6"); }},
+    {"Log",   []() -> fmt::OcGraphData { return unaryMathGraph("Log",  "0.2,0.4,0.6"); }},
+    {"Tan",   []() -> fmt::OcGraphData { return unaryMathGraph("Tan",  "0.2,0.4,0.6"); }},
+    {"Modulo", []() -> fmt::OcGraphData { return modGraph(); }},
+    {"Step", []() -> fmt::OcGraphData { return stepGraph(); }},
+    {"Smoothstep", []() -> fmt::OcGraphData { return smoothstepGraph(); }},
+    {"Remap", []() -> fmt::OcGraphData { return remapGraph(); }},
+    {"Cross", []() -> fmt::OcGraphData { return crossGraph(); }},
+    {"Reflect", []() -> fmt::OcGraphData { return reflectGraph(); }},
+    {"Distance", []() -> fmt::OcGraphData { return distanceGraph(); }},
+    {"BlendNormals", []() -> fmt::OcGraphData { return blendNormalsGraph(); }},
+    {"Swizzle", []() -> fmt::OcGraphData { return swizzleXyzGraph(); }},
+    {"TilingOffset", []() -> fmt::OcGraphData { return tilingOffsetGraph(); }},
+    {"Rotator", []() -> fmt::OcGraphData { return rotatorGraph(); }},
+    {"Noise", []() -> fmt::OcGraphData { return noiseGraph(); }},
+    {"Checker", []() -> fmt::OcGraphData { return checkerGraph(); }},
+    {"SampleTexture", []() -> fmt::OcGraphData { return sampleTextureGraph(); }},
+    {"Fresnel", []() -> fmt::OcGraphData { return fresnelGraph(); }},
+    {"If", []() -> fmt::OcGraphData { return ifGraph(); }},
+};
+
+static void testEveryNewNodeTypeCompiles(Dxc& dxc) {
+    AVER_INFO("=== every node type added since the original 25, each in its own graph ===");
+    for (const NodeCase& c : kNewNodeCases) runNodeCase(dxc, c.label, c.build());
+}
+
+// Counts NON-OVERLAPPING occurrences of `needle` in `hay` -- used below to prove a memoisation
+// property (one texture fetch, not two) that no pass/fail compile result can show by itself.
+static int countOccurrences(const std::string& hay, const std::string& needle) {
+    int n = 0;
+    for (usize pos = hay.find(needle); pos != std::string::npos; pos = hay.find(needle, pos + needle.size()))
+        ++n;
+    return n;
+}
+
+static void testSwizzleRules() {
+    AVER_INFO("=== Swizzle: mask width, r/g/b/a spelling, and what a bad mask says ===");
+    {
+        const pbr::MaterialGraphBody r = pbr::compileMaterialGraph(swizzleXyzGraph());
+        check(r.ok, "mask=xyz on a float3 compiles: " + r.error);
+        check(r.hlsl.find(".xyz") != std::string::npos,
+              "and emits .xyz, a float3 result: " + r.hlsl);
+    }
+    {
+        const pbr::MaterialGraphBody r = pbr::compileMaterialGraph(swizzleRGraph());
+        check(r.ok, "mask=r on a float3 compiles: " + r.error);
+        check(r.hlsl.find(".x") != std::string::npos,
+              "and emits .x -- r/g/b/a is spelled x/y/z/w in the generated HLSL, and one component "
+              "is a float, not a one-wide vector: " + r.hlsl);
+    }
+    {
+        // A float3 has no .w. The mask is well-formed (a legal letter) but the INPUT is too narrow
+        // for it, which is a different failure from an illegal letter and is checked separately.
+        fmt::OcGraphData g;
+        g.domain = "material";
+        g.nodes.push_back(constFloat3("v", "0.2,0.4,0.6"));
+        fmt::OcGraphNode n = node("badmask", "Swizzle");
+        addPin(n, "x", "float3", false);
+        addPin(n, "result", "float", true);
+        attr(n, "mask=w");
+        g.nodes.push_back(n);
+        g.nodes.push_back(materialOutput("out"));
+        link(g, "v", "value", "badmask", "x");
+        link(g, "badmask", "result", "out", "Roughness");
+        const pbr::MaterialGraphBody r = pbr::compileMaterialGraph(g);
+        check(!r.ok, "a mask reading a component the input does not have is refused, not clamped "
+                     "or wrapped");
+        check(r.error.find("badmask") != std::string::npos,
+              "and the message names the node: " + r.error);
+    }
+    {
+        // No mask= attribute at all.
+        fmt::OcGraphData g;
+        g.domain = "material";
+        g.nodes.push_back(constFloat3("v", "0.2,0.4,0.6"));
+        fmt::OcGraphNode n = node("nomask", "Swizzle");
+        addPin(n, "x", "float3", false);
+        addPin(n, "result", "float3", true);
+        g.nodes.push_back(n);
+        g.nodes.push_back(materialOutput("out"));
+        link(g, "v", "value", "nomask", "x");
+        link(g, "nomask", "result", "out", "BaseColor");
+        const pbr::MaterialGraphBody r = pbr::compileMaterialGraph(g);
+        check(!r.ok, "an absent mask= is refused rather than defaulting to something");
+        check(r.error.find("nomask") != std::string::npos, "naming the node: " + r.error);
+        check(r.error.find("mask=") != std::string::npos,
+              "and the message says what a mask looks like: " + r.error);
+    }
+}
+
+static void testSampleTextureBadSlotFails() {
+    AVER_INFO("=== SampleTexture: an unrecognised slot= ===");
+    fmt::OcGraphData g;
+    g.domain = "material";
+    fmt::OcGraphNode n = node("tex", "SampleTexture");
+    addPin(n, "uv", "float2", false);
+    addPin(n, "rgb", "float3", true);
+    attr(n, "slot=diffuse");   // not one of the material's own eight slot names
+    g.nodes.push_back(n);
+    g.nodes.push_back(materialOutput("out"));
+    link(g, "tex", "rgb", "out", "BaseColor");
+    const pbr::MaterialGraphBody r = pbr::compileMaterialGraph(g);
+    check(!r.ok, "an unrecognised slot= FAILS the compile rather than silently sampling slot 0");
+    check(r.error.find("basecolor") != std::string::npos &&
+          r.error.find("layer1normal") != std::string::npos,
+          "and the message lists every legal slot name, first to last: " + r.error);
+    check(r.error.find("diffuse") != std::string::npos,
+          "and names the value that was actually given: " + r.error);
+}
+
+static void testSampleTextureUnlinkedUvUsesSurfaceUv() {
+    AVER_INFO("=== SampleTexture: no uv link samples the surface's own uv ===");
+    fmt::OcGraphData g;
+    g.domain = "material";
+    fmt::OcGraphNode n = node("tex", "SampleTexture");
+    addPin(n, "uv", "float2", false);   // deliberately not linked
+    addPin(n, "rgb", "float3", true);
+    attr(n, "slot=basecolor");
+    g.nodes.push_back(n);
+    g.nodes.push_back(materialOutput("out"));
+    link(g, "tex", "rgb", "out", "BaseColor");
+    const pbr::MaterialGraphBody r = pbr::compileMaterialGraph(g);
+    check(r.ok, "compiles with an unlinked uv pin: " + r.error);
+    check(r.hlsl.find("averSampleSlot(0u, uv)") != std::string::npos,
+          "and samples the BARE identifier `uv`, not a float2(...) literal -- the one place this "
+          "emitter treats an unlinked pin as anything other than zero: " + r.hlsl);
+}
+
+// SampleTexture's own comment (MaterialGraphHlsl.cpp) says: "the memo in resolve() means a graph
+// reading both .rgb and .a from the same node samples once as well." resolve()'s memo is keyed by
+// (nodeId, pin) -- see its `key = nodeId + '\0' + pin` -- so that claim is true for the SAME pin
+// read twice and false for two DIFFERENT pins of the same node: SampleTexture's emitNode recomputes
+// its local `sample = averSampleSlot(...)` fresh on every call, and a second call happens whenever
+// the (node, pin) key differs, pin name included. Both halves are asserted here, against what DXC
+// actually receives, rather than trusting the comment -- which is the whole reason this test file
+// compiles through a real compiler instead of asserting on the generator's own account of itself.
+static void testSampleTextureSampleMemoisation() {
+    AVER_INFO("=== SampleTexture: one fetch per node, however many of its pins are read ===");
+    {
+        // The SAME pin (.rgb) driving two different fields: one (nodeId, pin) key, resolved once.
+        fmt::OcGraphData g;
+        g.domain = "material";
+        fmt::OcGraphNode n = node("tex", "SampleTexture");
+        addPin(n, "uv", "float2", false);
+        addPin(n, "rgb", "float3", true);
+        attr(n, "slot=basecolor");
+        g.nodes.push_back(n);
+        g.nodes.push_back(materialOutput("out"));
+        link(g, "tex", "rgb", "out", "BaseColor");
+        link(g, "tex", "rgb", "out", "Emissive");
+        const pbr::MaterialGraphBody r = pbr::compileMaterialGraph(g);
+        check(r.ok, "the same .rgb pin driving two fields compiles: " + r.error);
+        const int samples = countOccurrences(r.hlsl, "averSampleSlot");
+        check(samples == 1, "and IS memoised -- reading .rgb twice samples once, not twice -- found " +
+                             std::to_string(samples) + " call(s): " + r.hlsl);
+    }
+    {
+        // TWO DIFFERENT pins (.rgb and .a) of the same node: two (nodeId, pin) keys, resolved twice.
+        fmt::OcGraphData g;
+        g.domain = "material";
+        fmt::OcGraphNode n = node("tex", "SampleTexture");
+        addPin(n, "uv", "float2", false);
+        addPin(n, "rgb", "float3", true);
+        addPin(n, "a", "float", true);
+        attr(n, "slot=basecolor");
+        g.nodes.push_back(n);
+        g.nodes.push_back(materialOutput("out"));
+        link(g, "tex", "rgb", "out", "BaseColor");
+        link(g, "tex", "a", "out", "Opacity");
+        const pbr::MaterialGraphBody r = pbr::compileMaterialGraph(g);
+        check(r.ok, ".rgb and .a from one node both driving the surface compiles: " + r.error);
+        const int samples = countOccurrences(r.hlsl, "averSampleSlot");
+        // THIS ASSERTION USED TO READ `samples == 2`, AND THAT IS THE POINT OF IT.
+        //
+        // resolve()'s memo keys on (node, PIN), which is right everywhere else -- two pins of a
+        // Split really are two values -- but .rgb and .a are two VIEWS OF ONE FETCH, so keying per
+        // pin emitted averSampleSlot twice: two real texture reads at runtime for one texel, in the
+        // commonest material there is (albedo colour plus albedo alpha). The emitter's own comment
+        // claimed the opposite and was simply wrong. A test that reads the EMITTED TEXT is what
+        // caught it; nothing about the rendered picture would have.
+        check(samples == 1, "and is memoised ACROSS PINS -- one fetch, swizzled twice, not two "
+                            "texture reads for one texel -- found " + std::to_string(samples) +
+                            " call(s): " + r.hlsl);
+    }
+}
+
 // --------------------------------------------------------------------------------- the tests
 
 static void testDomainIsRequired() {
@@ -663,6 +1271,11 @@ int main() {
     testDispatchShape();
     testItActuallyCompiles(dxc);
     testFromParsedText(dxc);
+    testEveryNewNodeTypeCompiles(dxc);
+    testSwizzleRules();
+    testSampleTextureBadSlotFails();
+    testSampleTextureUnlinkedUvUsesSurfaceUv();
+    testSampleTextureSampleMemoisation();
 
     AVER_INFO("==================================================");
     if (g_failures == 0) AVER_INFO("=== all material graph tests passed ===");

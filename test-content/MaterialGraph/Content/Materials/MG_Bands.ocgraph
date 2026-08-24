@@ -16,22 +16,22 @@ DOMAIN material
 # partial-graph behaviour the whole AverAuthored split exists for.
 NAME MG_Bands
 
-NODE wp WorldPosition -420 -40
+NODE wp WorldPosition -760 -60
 PIN wp xyz out float3
 
-NODE rate ConstFloat3 -420 100
+NODE rate ConstFloat3 -760 160
 PIN rate value out float3 0.02,0.02,0.02
 
-NODE scaled Multiply -200 20
+NODE scaled Multiply -420 30
 PIN scaled a in float3
 PIN scaled b in float3
 PIN scaled result out float3
 
-NODE bands Frac 20 20
+NODE bands Frac -140 30
 PIN bands x in float3
 PIN bands result out float3
 
-NODE out MaterialOutput 240 -20
+NODE out MaterialOutput 160 -40
 PIN out BaseColor in float3
 PIN out Roughness in float 0.25
 

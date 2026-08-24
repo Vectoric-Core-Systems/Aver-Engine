@@ -245,6 +245,84 @@ AverMaps averBlendLayers(AverMaps m, float2 uv, float3 geoN) {
     return m;
 }
 
+// ================= what a material GRAPH can reach =================
+// These exist for generated code and are used by nothing else in this file. They are here rather
+// than emitted inline into every graph for the reason averSampleMaps is here: each one wraps a
+// conditional or a constant table that a generator would otherwise have to restate, correctly, once
+// per node instance -- and the first one it got wrong would be a material that shades subtly wrong
+// with nothing to point at.
+
+// One material map, sampled at an arbitrary UV rather than the surface's own.
+//
+// THE SLOT IS A SWITCH, NOT AN ARRAY INDEX, because the eight maps are eight separately declared
+// Texture2Ds at eight registers (see the AVER_MATERIAL_SRV block at the top of this file) and HLSL
+// has no way to index that without a resource array the root signature does not describe. The switch
+// is over a value that is CONSTANT for a given generated node, so it costs nothing at runtime: the
+// compiler folds it away entirely.
+//
+// Returns white where there is no material table at all, matching averSampleMaps' own #else branch:
+// a graph that samples a map in a build with no material SRVs gets the identity, not a compile
+// error, exactly as the stock path does.
+float4 averSampleSlot(uint slot, float2 uv) {
+#ifdef AVER_MATERIAL_SRV
+    switch (slot) {
+    case 0u: return gBaseColorMap.Sample(gMaterialSampler, uv);
+    case 1u: return gMetalRoughMap.Sample(gMaterialSampler, uv);
+    case 2u: return gNormalMap.Sample(gMaterialSampler, uv);
+    case 3u: return gOcclusionMap.Sample(gMaterialSampler, uv);
+    case 4u: return gEmissiveMap.Sample(gMaterialSampler, uv);
+    case 5u: return gL1BaseColorMap.Sample(gMaterialSampler, uv);
+    case 6u: return gL1MetalRoughMap.Sample(gMaterialSampler, uv);
+    case 7u: return gL1NormalMap.Sample(gMaterialSampler, uv);
+    default: break;
+    }
+#endif
+    return float4(1.0, 1.0, 1.0, 1.0);
+}
+
+// A hash of a 2D cell to [0,1). The usual sin-based one-liner, chosen over a bit-mixing integer hash
+// for a reason that outlives taste: this prelude compiles under FXC (SM 5.1) as well as DXC when
+// dxcompiler.dll is missing, and the integer ops a good hash wants are not uniformly available
+// there. Precision is adequate for surface detail and is not adequate for anything that has to
+// AGREE with a hash computed on the CPU -- do not use it for that.
+float averHash21(float2 p) {
+    return frac(sin(dot(p, float2(127.1, 311.7))) * 43758.5453123);
+}
+
+// Value noise on a 2D domain, smoothed with the quintic fade so its second derivative is continuous
+// and a normal derived from it does not show the lattice.
+float averValueNoise(float2 p) {
+    float2 i = floor(p);
+    float2 f = frac(p);
+    float2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    float a = averHash21(i);
+    float b = averHash21(i + float2(1.0, 0.0));
+    float c = averHash21(i + float2(0.0, 1.0));
+    float d = averHash21(i + float2(1.0, 1.0));
+    return lerp(lerp(a, b, u.x), lerp(c, d, u.x), u.y);
+}
+
+// A two-colour checker over a 2D domain, as 0 or 1.
+float averChecker(float2 p) {
+    float2 c = floor(p);
+    return frac((c.x + c.y) * 0.5) * 2.0;
+}
+
+// Rotates a UV about a centre, by an angle in RADIANS. Radians rather than degrees because every
+// other angle in a shader is, and a node that silently disagreed with sin/cos beside it would be a
+// trap; the editor is where a degrees affordance belongs if one is ever wanted.
+float2 averRotateUv(float2 uv, float2 centre, float angle) {
+    float s = sin(angle), c = cos(angle);
+    float2 d = uv - centre;
+    return centre + float2(d.x * c - d.y * s, d.x * s + d.y * c);
+}
+
+// Whiteout blend of two tangent-space normals: keeps the detail of both rather than letting the
+// second flatten the first, which is what a plain lerp does and why one is not offered.
+float3 averBlendNormals(float3 a, float3 b) {
+    return normalize(float3(a.xy + b.xy, a.z * b.z));
+}
+
 // EVERYTHING A MATERIAL AUTHORS, and nothing else. Every remaining field of AverSurface is DERIVED
 // from these by averBuildSurface below: F0 from albedo and metallic, F from F0 and the half vector,
 // kdAlbedo from albedo and metallic, ndv from the shading normal.

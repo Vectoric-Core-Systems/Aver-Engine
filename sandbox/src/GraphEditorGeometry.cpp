@@ -21,6 +21,20 @@ bool ciEquals(std::string_view a, std::string_view b) {
     return true;
 }
 
+// The vector width of the four pin-type strings materialPinTypeMatch (below, outside this anonymous
+// namespace) promotes between, or 0 for anything else (an exec pin, "bool", "int", "string", an
+// unrecognised future type, ...) so an unfamiliar type string never silently matches through the
+// scalar-splat or truncation rules -- it can still match by exact string equality, the same as it
+// always could, but never by promotion. Internal linkage: nothing outside materialPinTypeMatch has a
+// reason to ask a pin string its arity.
+int arityOfMaterialPinType(std::string_view type) {
+    if (ciEquals(type, "float")) return 1;
+    if (ciEquals(type, "float2")) return 2;
+    if (ciEquals(type, "float3")) return 3;
+    if (ciEquals(type, "float4")) return 4;
+    return 0;
+}
+
 const fmt::OcGraphNode* findNode(const fmt::OcGraphData& g, const std::string& id) {
     for (const auto& n : g.nodes)
         if (n.id == id) return &n;
@@ -219,9 +233,26 @@ bool wouldCreateCycle(const fmt::OcGraphData& graph, const std::string& sourceNo
     return false;
 }
 
+bool exactPinTypeMatch(std::string_view srcType, std::string_view dstType) {
+    return ciEquals(srcType, dstType);
+}
+
+bool materialPinTypeMatch(std::string_view srcType, std::string_view dstType) {
+    if (ciEquals(srcType, dstType)) return true;
+    const int srcArity = arityOfMaterialPinType(srcType);
+    const int dstArity = arityOfMaterialPinType(dstType);
+    // Neither a splat nor a truncation is meaningful when one side is not one of the four
+    // recognised float/floatN strings (an exec pin, most obviously) -- fall through to "refused",
+    // the same answer exactPinTypeMatch already gave for anything that wasn't an exact match.
+    if (srcArity == 0 || dstArity == 0) return false;
+    if (srcArity == 1) return true;      // a scalar splats into any width, matching widen()'s cast
+    return srcArity > dstArity;          // a wider vector truncates; float2 -> float3 stays refused
+}
+
 GraphLinkCheck canConnectPins(const fmt::OcGraphData& graph,
                                const std::string& sourceNode, const std::string& sourcePin,
-                               const std::string& destNode, const std::string& destPin) {
+                               const std::string& destNode, const std::string& destPin,
+                               PinTypeCompat typesCompatible) {
     GraphLinkCheck r;
 
     const fmt::OcGraphNode* sn = findNode(graph, sourceNode);
@@ -260,11 +291,21 @@ GraphLinkCheck canConnectPins(const fmt::OcGraphData& graph,
     // THIS ONE CHECK IS ALSO WHAT ENFORCES "AN EXEC PIN ONLY CONNECTS TO ANOTHER EXEC PIN, NEVER TO
     // DATA". Nothing exec-specific was added here on purpose: "exec" is just another pin-type string
     // (see modules/formats/include/aver/formats/OcGraph.hpp's comment on OcGraphLink), so a link from
-    // an exec output to a float/int/bool/string input already fails this same type-equality test a
-    // float-to-bool link always has. Exec pins get their own visual language (a diamond, not a
-    // circle -- see GraphEditor.cpp's colorForType/isExecPinType) so a user can tell them apart before
-    // ever attempting a bad connection, but the RULE that stops the connection is this line, unchanged.
-    if (!ciEquals(sp->type, dp->type)) {
+    // an exec output to a float/int/bool/string input already fails this same type-compatibility
+    // test a float-to-bool link always has. Exec pins get their own visual language (a diamond, not
+    // a circle -- see GraphEditor.cpp's colorForType/isExecPinType) so a user can tell them apart
+    // before ever attempting a bad connection, but the RULE that stops the connection is this line.
+    //
+    // `typesCompatible` is what makes this pluggable rather than hard-coded to exact equality --
+    // exactPinTypeMatch (the default, so every call site above this file's own test is unaffected)
+    // reproduces the exact-equality test that used to sit here directly. A caller may instead pass
+    // materialPinTypeMatch to accept the same scalar-splat/vector-truncate promotions the DOMAIN
+    // material compiler's widen() does (see this file's header comment on PinTypeCompat). EXEC PINS
+    // STAY REFUSED UNDER BOTH: materialPinTypeMatch only recognises float/float2/float3/float4 as
+    // promotable, so an exec pin on either end falls through to that predicate's own exact-equality
+    // branch too, and "exec" never equals a data type string. No predicate this file offers can turn
+    // this line into something that lets control flow reach a data pin.
+    if (!typesCompatible(sp->type, dp->type)) {
         r.reason = GraphLinkReject::TypeMismatch;
         r.message = "type mismatch: '" + sourceNode + "." + sourcePin + "' is " + sp->type
                     + ", '" + destNode + "." + destPin + "' is " + dp->type;
@@ -282,8 +323,9 @@ GraphLinkCheck canConnectPins(const fmt::OcGraphData& graph,
 
 GraphLinkCheck tryAddLink(fmt::OcGraphData& graph,
                            const std::string& sourceNode, const std::string& sourcePin,
-                           const std::string& destNode, const std::string& destPin) {
-    GraphLinkCheck check = canConnectPins(graph, sourceNode, sourcePin, destNode, destPin);
+                           const std::string& destNode, const std::string& destPin,
+                           PinTypeCompat typesCompatible) {
+    GraphLinkCheck check = canConnectPins(graph, sourceNode, sourcePin, destNode, destPin, typesCompatible);
     if (check.ok) {
         fmt::OcGraphLink link;
         link.sourceNode = sourceNode;

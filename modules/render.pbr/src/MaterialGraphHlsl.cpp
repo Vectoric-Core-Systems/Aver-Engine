@@ -248,6 +248,30 @@ struct Emitter {
         return v.expr;
     }
 
+    // A `key=value` attribute off the NODE line, or empty. The same extraTokens the gameplay
+    // catalog already carries `param=`/`class=` in -- a material node that needs to name something
+    // (which texture slot, which swizzle) says it here rather than on a pin, because it is a
+    // property of the node and not a value that can be computed.
+    std::string_view nodeAttr(const fmt::OcGraphNode& n, std::string_view key) const {
+        for (const std::string& tok : n.extraTokens) {
+            const usize eq = tok.find('=');
+            if (eq == std::string::npos) continue;
+            if (ciEquals(std::string_view(tok).substr(0, eq), key))
+                return std::string_view(tok).substr(eq + 1);
+        }
+        return {};
+    }
+
+    // The UV a sampling node reads: whatever is wired into its `uv` pin, or THE SURFACE'S OWN when
+    // nothing is. Unlinked meaning (0,0) -- what every other input pin means -- would make an
+    // unwired texture node sample one texel and return a flat colour, which looks like a broken
+    // texture rather than like the obvious default. Every material editor makes this same
+    // exception, and it is the only place in this emitter where an unlinked pin is not a literal.
+    Value uvInput(const fmt::OcGraphNode& n) {
+        if (linkInto(n.id, "uv")) return input(n, "uv", MatType::Float2);
+        return Value{"uv", MatType::Float2};
+    }
+
     // The value on one INPUT pin: whatever is linked into it, promoted; else the pin's own literal;
     // else zero.
     Value input(const fmt::OcGraphNode& n, std::string_view pin, MatType want) {
@@ -433,6 +457,184 @@ struct Emitter {
                 return Value{"0.0", MatType::Float};
             }
             return bind(n.id, pin, MatType::Float, "(" + in.expr + ")." + std::string(1, comp));
+        }
+
+        // -- more of the renderer's own knowledge --
+        if (ciEquals(ty, "CameraPosition")) return bind(n.id, pin, MatType::Float3, "gCamPos.xyz");
+        // The object's origin in world space: row 3 of its transform. Useful for anything that
+        // should vary per INSTANCE rather than per pixel -- a per-object colour, a phase offset --
+        // which a graph has no other way to reach.
+        if (ciEquals(ty, "ObjectPosition")) return bind(n.id, pin, MatType::Float3, "gWorld[3].xyz");
+
+        // -- more arithmetic --
+        if (ciEquals(ty, "Sqrt"))  return call(n, pin, "sqrt", {"x"});
+        if (ciEquals(ty, "Ceil"))  return call(n, pin, "ceil", {"x"});
+        if (ciEquals(ty, "Sign"))  return call(n, pin, "sign", {"x"});
+        if (ciEquals(ty, "Exp"))   return call(n, pin, "exp", {"x"});
+        if (ciEquals(ty, "Log"))   return call(n, pin, "log", {"x"});
+        if (ciEquals(ty, "Tan"))   return call(n, pin, "tan", {"x"});
+        if (ciEquals(ty, "Modulo")) return call(n, pin, "fmod", {"a", "b"});
+        if (ciEquals(ty, "Step"))   return call(n, pin, "step", {"edge", "x"});
+        if (ciEquals(ty, "Smoothstep")) return call(n, pin, "smoothstep", {"edge0", "edge1", "x"});
+
+        // Remap a range onto another. Emitted as arithmetic rather than as a call because HLSL has
+        // no intrinsic for it, and every author writes this by hand eventually.
+        if (ciEquals(ty, "Remap")) {
+            const MatType t = widestInput(n, {"x", "inMin", "inMax", "outMin", "outMax"});
+            const Value x  = input(n, "x", t);
+            const Value i0 = input(n, "inMin", t);
+            const Value i1 = input(n, "inMax", t);
+            const Value o0 = input(n, "outMin", t);
+            const Value o1 = input(n, "outMax", t);
+            return bind(n.id, pin, t,
+                        "(" + o0.expr + ") + (((" + x.expr + ") - (" + i0.expr + ")) / max((" +
+                        i1.expr + ") - (" + i0.expr + "), 1e-6)) * ((" + o1.expr + ") - (" +
+                        o0.expr + "))");
+        }
+
+        // -- more vector work --
+        if (ciEquals(ty, "Cross")) {
+            const Value a = input(n, "a", MatType::Float3);
+            const Value b = input(n, "b", MatType::Float3);
+            return bind(n.id, pin, MatType::Float3, "cross(" + a.expr + ", " + b.expr + ")");
+        }
+        if (ciEquals(ty, "Reflect")) {
+            const Value i = input(n, "i", MatType::Float3);
+            const Value nn = input(n, "n", MatType::Float3);
+            return bind(n.id, pin, MatType::Float3, "reflect(" + i.expr + ", " + nn.expr + ")");
+        }
+        if (ciEquals(ty, "Distance")) {
+            const MatType t = widestInput(n, {"a", "b"});
+            const Value a = input(n, "a", t);
+            const Value b = input(n, "b", t);
+            return bind(n.id, pin, MatType::Float, "distance(" + a.expr + ", " + b.expr + ")");
+        }
+        if (ciEquals(ty, "BlendNormals")) {
+            const Value a = input(n, "a", MatType::Float3);
+            const Value b = input(n, "b", MatType::Float3);
+            return bind(n.id, pin, MatType::Float3, "averBlendNormals(" + a.expr + ", " + b.expr + ")");
+        }
+
+        // An arbitrary component selection, named by a `mask=` attribute. The one node whose OUTPUT
+        // WIDTH is decided by an attribute rather than by its pins, which is exactly why the mask is
+        // validated here rather than trusted: a typo would otherwise reach dxc as a swizzle on the
+        // wrong arity and fail with a message about a generated identifier nobody wrote.
+        if (ciEquals(ty, "Swizzle")) {
+            const std::string_view mask = nodeAttr(n, "mask");
+            if (mask.empty() || mask.size() > 4) {
+                fail("node '" + n.id + "': Swizzle needs a mask= of one to four components, e.g. "
+                     "mask=xyz or mask=rrr");
+                return Value{"0.0", MatType::Float};
+            }
+            const MatType in = widestInput(n, {"x"});
+            std::string sw;
+            for (const char raw : mask) {
+                const char c = static_cast<char>(raw | 32);
+                const u32 index = c == 'x' || c == 'r' ? 0u : c == 'y' || c == 'g' ? 1u
+                                : c == 'z' || c == 'b' ? 2u : c == 'w' || c == 'a' ? 3u : 4u;
+                if (index >= 4u) {
+                    fail("node '" + n.id + "': Swizzle mask '" + std::string(mask) +
+                         "' has a component that is not x/y/z/w or r/g/b/a");
+                    return Value{"0.0", MatType::Float};
+                }
+                if (index >= arity(in)) {
+                    fail("node '" + n.id + "': Swizzle mask '" + std::string(mask) + "' reads a "
+                         "component a " + hlslType(in) + " does not have");
+                    return Value{"0.0", MatType::Float};
+                }
+                sw += "xyzw"[index];
+            }
+            return bind(n.id, pin, typeOfArity(static_cast<u32>(mask.size())),
+                        "(" + input(n, "x", in).expr + ")." + sw);
+        }
+
+        // -- UV --
+        if (ciEquals(ty, "TilingOffset")) {
+            const Value t = input(n, "tiling", MatType::Float2);
+            const Value o = input(n, "offset", MatType::Float2);
+            return bind(n.id, pin, MatType::Float2,
+                        "(" + uvInput(n).expr + ") * (" + t.expr + ") + (" + o.expr + ")");
+        }
+        if (ciEquals(ty, "Rotator")) {
+            const Value c = input(n, "centre", MatType::Float2);
+            const Value a = input(n, "angle", MatType::Float);
+            return bind(n.id, pin, MatType::Float2,
+                        "averRotateUv(" + uvInput(n).expr + ", " + c.expr + ", " + a.expr + ")");
+        }
+
+        // -- procedural --
+        if (ciEquals(ty, "Noise")) {
+            const Value s = input(n, "scale", MatType::Float);
+            return bind(n.id, pin, MatType::Float,
+                        "averValueNoise((" + uvInput(n).expr + ") * (" + s.expr + "))");
+        }
+        if (ciEquals(ty, "Checker")) {
+            const Value s = input(n, "scale", MatType::Float);
+            return bind(n.id, pin, MatType::Float,
+                        "averChecker((" + uvInput(n).expr + ") * (" + s.expr + "))");
+        }
+
+        // -- the map this material already declares, at any UV --
+        if (ciEquals(ty, "SampleTexture")) {
+            static const char* kSlotNames[8] = {"basecolor", "metalrough", "normal", "occlusion",
+                                                "emissive", "layer1basecolor", "layer1metalrough",
+                                                "layer1normal"};
+            const std::string_view want = nodeAttr(n, "slot");
+            u32 slot = 8;
+            for (u32 i = 0; i < 8; ++i) if (ciEquals(want, kSlotNames[i])) { slot = i; break; }
+            if (slot == 8) {
+                std::string known;
+                for (u32 i = 0; i < 8; ++i) { if (i) known += ", "; known += kSlotNames[i]; }
+                fail("node '" + n.id + "': SampleTexture needs a slot= naming one of the material's "
+                     "own texture slots (" + known + "); it said '" + std::string(want) + "'");
+                return Value{"0.0", MatType::Float};
+            }
+            // ONE SAMPLE, THREE OUTPUT PINS, AND THE FETCH IS MEMOISED ON THE NODE.
+            //
+            // resolve()'s own memo is keyed by (node, PIN), which is right for every other node --
+            // two pins of a Split are two different values -- but wrong here: .rgb and .a are two
+            // views of ONE texture fetch, and keying the fetch per pin emitted `averSampleSlot(...)`
+            // twice for a material reading albedo colour and albedo alpha, which is two real texture
+            // reads at runtime for one texel. This comment used to claim the opposite; the test that
+            // counts the calls found it, which is exactly what a test that reads the emitted text is
+            // for. The synthetic pin name below cannot collide with a real one -- no .ocgraph pin
+            // starts with '$' -- so the fetch is bound once and every output pin swizzles that name.
+            const std::string fetchKey = n.id + '\0' + "$fetch";
+            Value fetch;
+            if (const auto it = done.find(fetchKey); it != done.end()) {
+                fetch = it->second;
+            } else {
+                fetch = bind(n.id, "fetch", MatType::Float4,
+                             "averSampleSlot(" + std::to_string(slot) + "u, " + uvInput(n).expr + ")");
+                done[fetchKey] = fetch;
+            }
+            if (ciEquals(pin, "a"))    return bind(n.id, pin, MatType::Float,  fetch.expr + ".a");
+            if (ciEquals(pin, "rgba")) return Value{fetch.expr, MatType::Float4};
+            return bind(n.id, pin, MatType::Float3, fetch.expr + ".rgb");
+        }
+
+        // -- utility --
+        // Grazing-angle falloff, from the geometric normal and the view vector the renderer handed
+        // in. Deliberately NOT from the normal-mapped one: this runs before a graph has decided what
+        // the normal is, and reading a normal the same graph is still computing is a dependency the
+        // emitter cannot order.
+        if (ciEquals(ty, "Fresnel")) {
+            const Value p = input(n, "power", MatType::Float);
+            return bind(n.id, pin, MatType::Float,
+                        "pow(saturate(1.0 - saturate(dot(v.N, v.V))), " + p.expr + ")");
+        }
+        // A branchless select. lerp+step rather than `?:` because the condition here is a VALUE
+        // comparison over vectors of any width, and HLSL's ternary on a vector condition selects
+        // per component only where both arms are the same width -- which the widening below
+        // guarantees, but the lerp form guarantees it without depending on that reading.
+        if (ciEquals(ty, "If")) {
+            const MatType t = widestInput(n, {"ifTrue", "ifFalse"});
+            const Value a = input(n, "a", MatType::Float);
+            const Value b = input(n, "b", MatType::Float);
+            const Value yes = input(n, "ifTrue", t);
+            const Value no  = input(n, "ifFalse", t);
+            return bind(n.id, pin, t,
+                        "lerp(" + no.expr + ", " + yes.expr + ", step(" + b.expr + ", " + a.expr + "))");
         }
 
         // A NODE TYPE THIS BUILD HAS NO EMITTER FOR IS AN ERROR, not something to skip. Skipping it

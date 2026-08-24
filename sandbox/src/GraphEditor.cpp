@@ -486,8 +486,20 @@ void GraphEditor::syncEventEntry(const std::string& nodeId, const std::string& e
     if (!eventName.empty()) graph_.entryPoints.emplace_back(nodeId, eventName);
 }
 
+// Which node vocabulary the graph currently open belongs to. Read from the file's own DOMAIN
+// record, so it is the same answer the COMPILER will give when this graph is compiled -- there is
+// no second notion of domain anywhere in the editor, and there must not be: an editor that offered
+// a palette its compiler then refused would be worse than one that offered nothing.
+GraphNodeDomain GraphEditor::openGraphDomain() const {
+    return fmt::ocGraphDomainOf(graph_) == fmt::OcGraphDomain::Material ? kDomainMaterial
+                                                                        : kDomainGameplay;
+}
+
 std::string GraphEditor::addNodeFromCatalog(const std::string& typeId, Vec2 canvasPos) {
-    const GraphNodeDesc* desc = findGraphNodeDesc(typeId);
+    // DOMAIN-AWARE, because sixteen type names exist in both vocabularies with DIFFERENT PINS -- a
+    // gameplay Add takes two scalars, a material Add takes two float3s. Resolving by name alone
+    // handed a material graph the scalar shape and an author a node that fits nothing around it.
+    const GraphNodeDesc* desc = findGraphNodeDescIn(typeId, openGraphDomain());
     if (!desc) return {};
 
     pushUndo();
@@ -1252,7 +1264,16 @@ void GraphEditor::deleteSelection() {
 
 void GraphEditor::commitLink(const std::string& srcNode, const std::string& srcPin,
                               const std::string& dstNode, const std::string& dstPin) {
-    const GraphLinkCheck check = canConnectPins(graph_, srcNode, srcPin, dstNode, dstPin);
+    // THE EDITOR REFUSES EXACTLY WHAT THE COMPILER REFUSES, and no more. In a material graph a
+    // scalar splats into a float3 and a float4 truncates into one -- both are things the emitter
+    // does without comment (see widen() in MaterialGraphHlsl.cpp) -- so refusing those connections
+    // here would have the editor forbidding wiring that compiles perfectly well, which reads as the
+    // palette being broken. float2 into float3 stays refused on BOTH sides, because inventing the
+    // third component is the compiler guessing. Gameplay graphs keep exact-match, unchanged.
+    const GraphLinkCheck check = canConnectPins(graph_, srcNode, srcPin, dstNode, dstPin,
+                                                openGraphDomain() == kDomainMaterial
+                                                    ? &materialPinTypeMatch
+                                                    : &exactPinTypeMatch);
     if (!check.ok) {
         reportLinkRejection(check);
         return;
@@ -2259,8 +2280,16 @@ void GraphEditor::drawEventGraph(float dpi) {
             addComment(a, Vec2{a.x + 320.0f * dpi, a.y + 180.0f * dpi}, "Comment");
         }
         ImGui::Separator();
+        // ONLY THIS GRAPH'S OWN VOCABULARY. A material graph has no Branch, no Spawn and no
+        // CharacterMove -- those compile to IL and call the framework, and a material is arithmetic
+        // evaluated once per pixel with nothing to call. Offering them would be offering nodes whose
+        // only possible outcome is a compile error naming a node the palette itself suggested.
+        // Filtered here, at the ONE place the palette is built, rather than per category below, so a
+        // category that ends up empty for this domain does not appear at all.
+        const GraphNodeDomain domain = openGraphDomain();
         std::vector<std::string> categories;
         for (const auto& d : graphNodeCatalog()) {
+            if ((d.domain & domain) == 0u) continue;
             if (std::find(categories.begin(), categories.end(), d.category) == categories.end())
                 categories.push_back(d.category);
         }
@@ -2271,7 +2300,7 @@ void GraphEditor::drawEventGraph(float dpi) {
             if (cat == "Function") continue;
             if (ImGui::BeginMenu(cat.c_str())) {
                 for (const auto& d : graphNodeCatalog()) {
-                    if (d.category != cat) continue;
+                    if (d.category != cat || (d.domain & domain) == 0u) continue;
                     // Thin glue: everything the drop actually DOES is addNodeFromCatalog, so it can
                     // be driven by a test with no ImGui context.
                     if (ImGui::MenuItem(d.displayName.c_str()))

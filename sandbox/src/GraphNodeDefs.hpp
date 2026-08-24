@@ -52,6 +52,7 @@
 // GraphEditorGeometry.hpp's computeAttributeRows (see its own header comment for why that split is a
 // hybrid, not a fully generic key=value editor: a node TYPE still gets to say what it expects, the way
 // it already says what pins it has, but nothing the table doesn't know about is ever dropped).
+#include <cstdint>
 #include <string>
 #include <utility>
 #include <vector>
@@ -62,7 +63,11 @@ namespace aver::editor {
 // aver::fmt::OcGraphPin exactly so a catalog entry converts into a real pin with no per-field mapping.
 struct GraphPinSpec {
     std::string name;
-    std::string type;         // "float" | "int" | "bool" | "string" -- matches OcGraphPin::type
+    std::string type;         // "float" | "int" | "bool" | "string" -- matches OcGraphPin::type. A
+                               // material node's pin also uses this same free string for "float2" /
+                               // "float3" / "float4" -- see aver::pbr::MaterialGraphHlsl.cpp's
+                               // typeFromPin(), which reads exactly those spellings, plus this
+                               // header's own Material section below.
     bool isOutput = false;
     std::string defaultValue; // only meaningful for input pins; empty = none
 };
@@ -77,6 +82,39 @@ struct GraphAttributeSpec {
     std::string label; // shown in the details panel, e.g. "Class"
 };
 
+// Which .ocgraph DOMAIN(s) a node type may appear in. Mirrors aver::fmt::OcGraphDomain
+// (modules/formats/include/aver/formats/OcGraph.hpp): kDomainGameplay is a graph with no DOMAIN
+// record, or `DOMAIN gameplay`, compiled to IL by scripting/csharp/Aver.Graph/GraphCompiler.cs;
+// kDomainMaterial is `DOMAIN material`, compiled to HLSL by aver::pbr::compileMaterialGraph()
+// (modules/render.pbr/src/MaterialGraphHlsl.cpp). No flag mirrors OcGraphDomain::Unknown -- that
+// value means "a DOMAIN this build does not recognise", which is never something a catalog entry
+// is FOR; it is the absence of an answer, not a third kind of node.
+//
+// A BITMASK, NOT A COPY OF THAT ENUM. OcGraphDomain is a plain enum because a LOADED GRAPH is
+// answering a different question than a CATALOG ENTRY is: a .ocgraph file carries exactly one
+// DOMAIN record, so a graph is unambiguously gameplay or material, never both, and an enum is the
+// right shape for a value that is always exactly one thing. A palette entry answers "which
+// domain(s) is this node TYPE STRING valid in", and that is not always a single answer: ConstFloat
+// means the same thing -- a literal number -- whichever compiler reads it, so one node type can
+// belong to both at once. An enum could only ever pick one, which would force either an entry that
+// lies about the domain it left out, or -- the choice this table actually makes for every name
+// whose SHAPE genuinely differs between the two compilers, e.g. Add's scalar gameplay pins versus
+// its float3 material ones (see the Material section of buildCatalog() below) -- a second,
+// differently-shaped entry under the same type name. The bitmask makes that a choice made per node
+// type rather than forced on every one of them: a future case that really is shape-identical in
+// both domains sets kDomainBoth on ONE entry instead of adding a duplicate row that looks different
+// only in its category field.
+//
+// A PLAIN ENUM, NOT enum class, for the reason EditorKeybinds.hpp's Scope bitmask is not one
+// either: this value is only ever combined and tested with `|`/`&`, never passed somewhere its
+// implicit conversion to int would be a hazard, so enum class would buy nothing but an operator
+// overload this header has no other use for.
+enum GraphNodeDomain : std::uint32_t {
+    kDomainGameplay = 1u << 0,
+    kDomainMaterial = 1u << 1,
+    kDomainBoth     = kDomainGameplay | kDomainMaterial,
+};
+
 // One entry in the node palette / spawn table.
 struct GraphNodeDesc {
     std::string typeId;                // matches OcGraphNode::type; looked up case-insensitively
@@ -85,6 +123,14 @@ struct GraphNodeDesc {
     std::vector<GraphPinSpec> pins;    // inputs and outputs mixed; isOutput distinguishes which
     std::vector<GraphAttributeSpec> attributes; // NODE-line key=value attributes this type takes;
                                                  // empty for every type that has none (most of them).
+    // Which domain(s) this node type belongs to -- see GraphNodeDomain above. Defaults to
+    // kDomainGameplay, matching every entry that predates this field: a braced-init-list shorter
+    // than the struct's member count leaves the trailing members it did not mention at their own
+    // default member initializer, so every existing `t.push_back({...})` call above -- whether it
+    // supplied four elements, five, or anything in between -- keeps compiling and keeps meaning
+    // exactly what it meant before, with not one of those ~200 lines touched. Only the Material
+    // section at the bottom of buildCatalog() sets this explicitly.
+    GraphNodeDomain domain = kDomainGameplay;
 };
 
 namespace detail {
@@ -765,6 +811,241 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"PlayAnimation", "Play Animation", "Scene", {
         pin("entity", "int", false), pin("loop", "bool", false, "true"), pin("success", "bool", true)},
         {attr("clip", "Clip")}});
+
+    // ============================================================================================
+    // MATERIAL NODES -- DOMAIN material, compiled to HLSL by aver::pbr::compileMaterialGraph()
+    // (modules/render.pbr/src/MaterialGraphHlsl.cpp). READ THAT FILE'S emitNode() FIRST: it is the
+    // authority on every node type below, on every pin name, and on every promotion rule this table
+    // only describes; this section is the palette's VIEW of that authority, not a second definition
+    // of it. A mismatch here produces exactly the failure this whole table exists to prevent -- a
+    // node that spawns from the Add-Node menu and then refuses to compile.
+    //
+    // WHAT A MATERIAL NODE IS, AND WHY IT CAN NEVER CARRY AN EXEC PIN. Every gameplay node above
+    // describes a STEP: it may run a side effect, and it is reached by an exec pulse that arrives on
+    // one pin and leaves on another, in an order an ENTRY record and the exec wiring decide. A
+    // material node describes a VALUE, not a step. A material graph has no exec pins anywhere in it,
+    // no ENTRY point and no OUT record (see MaterialGraphHlsl.cpp's own header comment, point 1 --
+    // "IT IS PULL, NOT PUSH"), because averEvalMaterial runs once per pixel and produces one surface;
+    // "once per pixel" has no room for "and then do this". Every node below is pure data-flow:
+    // compileMaterialGraph starts at the one MaterialOutput node and walks BACKWARDS along links,
+    // emitting a node only when something downstream actually reads it, so the order code comes out
+    // in is whatever that dependency walk decides, never the order nodes were dropped on the canvas
+    // or wired left to right. There is no `exec`/`then` pair on a single entry in this section, and
+    // there never can be one for the same reason there is no Branch or Sequence in HLSL's per-pixel
+    // evaluation: "this happens before that" is not a question a pixel shader's data-flow answers.
+    //
+    // WIDTH IS NOMINAL HERE, NOT ENFORCED HERE. Every node the vocabulary generalises over width
+    // (Add, Sin, Saturate, Clamp, ...) is declared float3 below, because a colour, a direction or a
+    // position -- float3 -- is what an author reaches for one of these on first. The compiler does
+    // not actually hold a freshly spawned node to that width: emitNode's widestInput() re-derives
+    // the REAL width from whatever is actually linked into a generic node's inputs at compile time
+    // (an input that is only a literal does not count towards it -- see widestInput's own comment),
+    // so wiring a float2 UV into an Add's `a` computes at float2, not float3, whatever this table
+    // says. What this table DOES have to get exactly right, because nothing downstream re-derives
+    // it, is the pin NAMES a link or a literal is addressed by, and the DEFAULT LITERAL on a pin
+    // nothing gets wired to -- both ride on a freshly spawned node verbatim, straight from here.
+    //
+    // A KNOWN, ACCEPTED NAME COLLISION. Several material type names below -- Add, Subtract,
+    // Multiply, Divide, Min, Max, Lerp, Clamp, Saturate, Abs, Floor, Ceil, Sqrt, Sin, Cos, and
+    // ConstFloat -- are ALSO existing gameplay type names above, because both compilers independently
+    // reached for the same short verb for the same arithmetic. That is not a naming accident this
+    // table can paper over: emitNode() and GraphCompiler.cs's own switch each key off the literal
+    // node TYPE string, so a material Add must be spelled exactly "Add" for the material compiler to
+    // recognise it -- the identical string the gameplay compiler already owns for its own,
+    // differently-shaped, scalar Add. findGraphNodeDesc(typeId) has no domain parameter and returns
+    // the FIRST entry whose type matches, which for every name on that list is still the gameplay
+    // entry pushed earlier in this function; so today the Add-Node popup's Const/Math/Vector/Input
+    // categories show both a name's gameplay and material shapes side by side, and
+    // addNodeFromCatalog (GraphEditor.cpp) resolves either menu item to the SAME gameplay shape
+    // until something teaches that lookup which domain the open graph actually is. Fixing that
+    // belongs to GraphEditor.cpp, not to this table: this table's job here is to describe the
+    // material vocabulary completely and exactly, one entry per node type, the same as every
+    // gameplay entry above it. ConstFloat's shape below is worth calling out on its own -- it is
+    // byte-for-byte the SAME as the gameplay ConstFloat entry at the top of this function (one
+    // `value` output, default "0"), because a bare literal number means the same thing to both
+    // compilers. It still gets its own entry here rather than kDomainBoth on the existing one, for
+    // the identical "do not touch the ~200 existing rows" reason the domain field itself defaults to
+    // gameplay; GraphNodeDomain exists so a future cleanup that does touch that row has a value to
+    // set on it, not to force one here.
+    // ============================================================================================
+
+    // -- CONST: the vocabulary's own literals, one entry per width. Shape matches
+    //    MaterialGraphHlsl.cpp's ConstFloat/ConstFloat2/ConstFloat3/ConstFloat4 case exactly: a
+    //    single `value` output whose own default IS the constant, the same idiom the gameplay
+    //    ConstFloat entry above already established -- the literal rides on the pin, not on a
+    //    NODE-line attribute, because a PIN record already round-trips a default through load/save.
+    t.push_back({"ConstFloat",  "Const Float",  "Const", {pin("value", "float",  true, "0")},
+        {}, kDomainMaterial});
+    t.push_back({"ConstFloat2", "Const Float2", "Const", {pin("value", "float2", true, "0,0")},
+        {}, kDomainMaterial});
+    t.push_back({"ConstFloat3", "Const Float3", "Const", {pin("value", "float3", true, "0,0,0")},
+        {}, kDomainMaterial});
+    t.push_back({"ConstFloat4", "Const Float4", "Const", {pin("value", "float4", true, "0,0,0,0")},
+        {}, kDomainMaterial});
+
+    // -- INPUT: what the renderer already knows about this pixel or this object, read-only and
+    //    needing no wiring at all -- emitNode's own "what the renderer knows about this pixel"
+    //    section. UV is the surface's own UV (averSurfaceUV); the rest are xyz reads off the
+    //    vertex, the camera or the instance transform -- see MaterialGraphHlsl.cpp for exactly which
+    //    field each one binds.
+    t.push_back({"UV",             "UV",             "Input", {pin("uv",  "float2", true)}, {}, kDomainMaterial});
+    t.push_back({"WorldPosition",  "World Position",  "Input", {pin("xyz", "float3", true)}, {}, kDomainMaterial});
+    t.push_back({"WorldNormal",    "World Normal",    "Input", {pin("xyz", "float3", true)}, {}, kDomainMaterial});
+    t.push_back({"ViewDirection",  "View Direction",  "Input", {pin("xyz", "float3", true)}, {}, kDomainMaterial});
+    t.push_back({"CameraPosition", "Camera Position",  "Input", {pin("xyz", "float3", true)}, {}, kDomainMaterial});
+    t.push_back({"ObjectPosition", "Object Position",  "Input", {pin("xyz", "float3", true)}, {}, kDomainMaterial});
+
+    // -- MATH: generic-width arithmetic and the standard library over it, promoted at COMPILE TIME
+    //    to the widest of whatever is actually linked in -- see the section comment above on why
+    //    "float3" here is nominal, not enforced. Pin names a/b/result match emitNode's binary()/
+    //    call() helpers exactly.
+    t.push_back({"Add",      "Add",      "Math", {pin("a", "float3", false), pin("b", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
+    t.push_back({"Subtract", "Subtract", "Math", {pin("a", "float3", false), pin("b", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
+    t.push_back({"Multiply", "Multiply", "Math", {pin("a", "float3", false), pin("b", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
+    t.push_back({"Divide",   "Divide",   "Math", {pin("a", "float3", false), pin("b", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
+    t.push_back({"Min",      "Min",      "Math", {pin("a", "float3", false), pin("b", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
+    t.push_back({"Max",      "Max",      "Math", {pin("a", "float3", false), pin("b", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
+    // Power/Modulo -- named for what they DO, not gameplay's Pow/Mod type strings: emitNode's own
+    // switch checks `ciEquals(ty, "Power")` / `ciEquals(ty, "Modulo")` verbatim, so these exact
+    // spellings are load-bearing, not a style choice this table is free to shorten.
+    t.push_back({"Power",    "Power",    "Math", {pin("a", "float3", false), pin("b", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
+    t.push_back({"Modulo",   "Modulo",   "Math", {pin("a", "float3", false), pin("b", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
+
+    t.push_back({"Lerp", "Lerp", "Math", {
+        pin("a", "float3", false), pin("b", "float3", false), pin("t", "float", false, "0.5"),
+        pin("result", "float3", true)}, {}, kDomainMaterial});
+    t.push_back({"Clamp", "Clamp", "Math", {
+        pin("x", "float3", false), pin("lo", "float", false, "0"), pin("hi", "float", false, "1"),
+        pin("result", "float3", true)}, {}, kDomainMaterial});
+    t.push_back({"Smoothstep", "Smoothstep", "Math", {
+        pin("edge0", "float", false, "0"), pin("edge1", "float", false, "1"), pin("x", "float", false),
+        pin("result", "float", true)}, {}, kDomainMaterial});
+    t.push_back({"Step", "Step", "Math", {
+        pin("edge", "float", false, "0.5"), pin("x", "float", false), pin("result", "float", true)},
+        {}, kDomainMaterial});
+    // Remap: emitted as arithmetic rather than a call, because HLSL has no intrinsic for it -- see
+    // emitNode's own Remap comment. Five inputs, all generic-width together.
+    t.push_back({"Remap", "Remap", "Math", {
+        pin("x", "float", false), pin("inMin", "float", false, "0"), pin("inMax", "float", false, "1"),
+        pin("outMin", "float", false, "0"), pin("outMax", "float", false, "1"), pin("result", "float", true)},
+        {}, kDomainMaterial});
+
+    // The single-input standard library: one `x` in, one `result` out, both generic-width. Fourteen
+    // node types sharing one shape -- emitNode dispatches every one of these through the same call()
+    // helper, differing only in which HLSL intrinsic (or, for OneMinus, expression) it names.
+    t.push_back({"Saturate",  "Saturate",  "Math", {pin("x", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
+    t.push_back({"Abs",       "Abs",       "Math", {pin("x", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
+    t.push_back({"Frac",      "Frac",      "Math", {pin("x", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
+    t.push_back({"Floor",     "Floor",     "Math", {pin("x", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
+    t.push_back({"Ceil",      "Ceil",      "Math", {pin("x", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
+    t.push_back({"Sign",      "Sign",      "Math", {pin("x", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
+    t.push_back({"Sqrt",      "Sqrt",      "Math", {pin("x", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
+    t.push_back({"Exp",       "Exp",       "Math", {pin("x", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
+    t.push_back({"Log",       "Log",       "Math", {pin("x", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
+    t.push_back({"Sin",       "Sin",       "Math", {pin("x", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
+    t.push_back({"Cos",       "Cos",       "Math", {pin("x", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
+    t.push_back({"Tan",       "Tan",       "Math", {pin("x", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
+    t.push_back({"Normalize", "Normalize", "Math", {pin("x", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
+    t.push_back({"OneMinus",  "One Minus", "Math", {pin("x", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
+
+    // -- VECTOR: the geometry ops a shader author reaches for that gameplay's own Vec* nodes above
+    //    do not cover in this shape -- these take and return real float2/float3/float4 pins, because
+    //    a material pin genuinely IS that wide (OcGraphPin::type carries it), unlike PinType in the
+    //    gameplay/exec vocabulary, which has no vector type at all and spells a direction out as
+    //    three loose floats instead.
+    t.push_back({"Dot",      "Dot",      "Vector", {pin("a", "float3", false), pin("b", "float3", false), pin("result", "float", true)}, {}, kDomainMaterial});
+    t.push_back({"Length",   "Length",   "Vector", {pin("x", "float3", false), pin("result", "float", true)}, {}, kDomainMaterial});
+    t.push_back({"Distance", "Distance", "Vector", {pin("a", "float3", false), pin("b", "float3", false), pin("result", "float", true)}, {}, kDomainMaterial});
+    t.push_back({"Cross",    "Cross",    "Vector", {pin("a", "float3", false), pin("b", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
+    t.push_back({"Reflect",  "Reflect",  "Vector", {pin("i", "float3", false), pin("n", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
+    t.push_back({"BlendNormals", "Blend Normals", "Vector", {pin("a", "float3", false), pin("b", "float3", false), pin("result", "float3", true)}, {}, kDomainMaterial});
+
+    // Assembling and taking apart: MakeFloatN builds a wider value from loose scalars, Split is its
+    // inverse. Split's INPUT pin and its first OUTPUT pin are both named "x" -- that duplication is
+    // the vocabulary's own (emitNode's Split case reads input pin "x" and answers output pins
+    // "x"/"y"/"z"/"w"), not a typo here; isOutput is what tells the two apart, the same as every
+    // other pin pair in this table.
+    t.push_back({"MakeFloat2", "Make Float2", "Vector", {
+        pin("x", "float", false), pin("y", "float", false), pin("result", "float2", true)}, {}, kDomainMaterial});
+    t.push_back({"MakeFloat3", "Make Float3", "Vector", {
+        pin("x", "float", false), pin("y", "float", false), pin("z", "float", false),
+        pin("result", "float3", true)}, {}, kDomainMaterial});
+    t.push_back({"MakeFloat4", "Make Float4", "Vector", {
+        pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("w", "float", false),
+        pin("result", "float4", true)}, {}, kDomainMaterial});
+    t.push_back({"Split", "Split", "Vector", {
+        pin("x", "float3", false),
+        pin("x", "float", true), pin("y", "float", true), pin("z", "float", true), pin("w", "float", true)},
+        {}, kDomainMaterial});
+    // Swizzle: the one node whose OUTPUT WIDTH is an ATTRIBUTE (mask=), not a pin type -- see
+    // emitNode's own comment on why the mask is validated there rather than trusted. The declared
+    // `result` pin type below is the nominal float the vocabulary gives it; the REAL width is
+    // however many characters mask= names, one to four, decided at compile time.
+    t.push_back({"Swizzle", "Swizzle", "Vector", {pin("x", "float3", false), pin("result", "float", true)},
+        {attr("mask", "Mask")}, kDomainMaterial});
+
+    // -- UV: coordinate transforms, both reading THE SURFACE'S OWN UV when their `uv` input is left
+    //    unwired -- emitNode's uvInput(), the one place in this compiler where an unlinked pin is
+    //    not simply its literal default (see uvInput's own comment for why). The `uv` pin below still
+    //    needs to exist and be named exactly "uv" for a LINK to land on; it carries no default worth
+    //    writing, since one is never actually read.
+    t.push_back({"TilingOffset", "Tiling / Offset", "UV", {
+        pin("uv", "float2", false), pin("tiling", "float2", false, "1,1"), pin("offset", "float2", false, "0,0"),
+        pin("result", "float2", true)}, {}, kDomainMaterial});
+    t.push_back({"Rotator", "Rotator", "UV", {
+        pin("uv", "float2", false), pin("centre", "float2", false, "0.5,0.5"), pin("angle", "float", false, "0"),
+        pin("result", "float2", true)}, {}, kDomainMaterial});
+
+    // -- PROCEDURAL: the same unwired-uv-means-the-surface's-own convention as TilingOffset/Rotator
+    //    above.
+    t.push_back({"Noise", "Noise", "Procedural", {
+        pin("uv", "float2", false), pin("scale", "float", false, "8"), pin("result", "float", true)},
+        {}, kDomainMaterial});
+    t.push_back({"Checker", "Checker", "Procedural", {
+        pin("uv", "float2", false), pin("scale", "float", false, "8"), pin("result", "float", true)},
+        {}, kDomainMaterial});
+
+    // -- TEXTURE: the one sampling node -- ONE call and THREE output pins (rgb/a/rgba) off the same
+    //    sample, so a graph reading only `.a` costs one sample and one swizzle, not three (see
+    //    emitNode's own comment). slot= names which of the material's own texture slots to read --
+    //    basecolor, metalrough, normal, occlusion, emissive, layer1basecolor, layer1metalrough or
+    //    layer1normal, the exact eight emitNode's kSlotNames accepts. This table cannot validate the
+    //    slot= VALUE any more than it validates field=/class= elsewhere in the gameplay vocabulary; a
+    //    bad one is a compile-time error from compileMaterialGraph, named clearly, same as every
+    //    other attribute this mechanism carries.
+    t.push_back({"SampleTexture", "Sample Texture", "Texture", {
+        pin("uv", "float2", false),
+        pin("rgb", "float3", true), pin("a", "float", true), pin("rgba", "float4", true)},
+        {attr("slot", "Slot")}, kDomainMaterial});
+
+    // -- UTILITY --
+    t.push_back({"Fresnel", "Fresnel", "Utility", {
+        pin("power", "float", false, "5"), pin("result", "float", true)}, {}, kDomainMaterial});
+    // If: a branchless select (lerp+step under the hood -- see emitNode's own comment for why not
+    // HLSL's `?:`). `a`/`b` are the scalars compared; `ifTrue`/`ifFalse` are the generic-width arms
+    // actually returned.
+    t.push_back({"If", "If", "Utility", {
+        pin("a", "float", false), pin("b", "float", false),
+        pin("ifTrue", "float3", false), pin("ifFalse", "float3", false),
+        pin("result", "float3", true)}, {}, kDomainMaterial});
+
+    // -- OUTPUT: the one sink a material graph has. NO OUTPUT PINS AT ALL -- nothing ever reads a
+    //    MaterialOutput, by construction, since it is where the backward walk that reads everything
+    //    else in the graph starts. AND NO DEFAULT VALUE ON ANY OF ITS EIGHT INPUTS -- that emptiness
+    //    is load-bearing, not an oversight: compileMaterialGraph treats an input as DRIVEN when it is
+    //    linked OR carries a NON-EMPTY literal, so a default here would make a freshly spawned
+    //    MaterialOutput drive all eight fields the moment it exists, destroying the partial-graph
+    //    behaviour that lets a real graph say only "base colour is red" and leave roughness, the
+    //    normal map and alpha exactly what the stock material already had. See
+    //    compileMaterialGraph's own "ONLY THE FIELDS THE AUTHOR ACTUALLY DROVE" comment for the full
+    //    reasoning; this entry's job is only to not silently break it by typing a "0" into a
+    //    defaultValue some future edit adds without reading that comment first.
+    t.push_back({"MaterialOutput", "Material Output", "Output", {
+        pin("BaseColor", "float3", false), pin("Metallic", "float", false), pin("Roughness", "float", false),
+        pin("Normal", "float3", false), pin("Emissive", "float3", false), pin("Occlusion", "float", false),
+        pin("Opacity", "float", false), pin("AlphaCutoff", "float", false)},
+        {}, kDomainMaterial});
+
     return t;
 }
 
@@ -798,6 +1079,26 @@ inline const GraphNodeDesc* findGraphNodeDesc(const std::string& typeId) {
         if (detail::ciEquals(d.typeId, typeId)) return &d;
     }
     return nullptr;
+}
+
+// The same lookup, but preferring an entry that serves `domain`.
+//
+// SIXTEEN NAMES ARE IN BOTH VOCABULARIES -- Add, Multiply, Lerp, Saturate, Sin and the rest -- and
+// they are NOT the same node: the gameplay Add takes two scalars because PinType has no vector
+// types at all, while the material one takes two float3s. Resolving by name alone therefore gives a
+// material graph the scalar shape, and an author dropping Add into a material graph gets a node
+// whose pins do not fit anything around them. This is what the overload exists for.
+//
+// FALLS BACK TO THE PLAIN LOOKUP rather than returning null, deliberately. A node type that only
+// one domain declares is still the right answer for the other: an OLDER graph naming a type this
+// build has since moved between domains, or a gameplay-only node a material author is looking at in
+// a file someone hand-edited, should still draw with the pins the catalog knows rather than lose
+// them. Refusing here would turn a cosmetic mismatch into a node that cannot be drawn at all.
+inline const GraphNodeDesc* findGraphNodeDescIn(const std::string& typeId, GraphNodeDomain domain) {
+    for (const GraphNodeDesc& d : graphNodeCatalog()) {
+        if (detail::ciEquals(d.typeId, typeId) && (d.domain & domain) != 0u) return &d;
+    }
+    return findGraphNodeDesc(typeId);
 }
 
 } // namespace aver::editor

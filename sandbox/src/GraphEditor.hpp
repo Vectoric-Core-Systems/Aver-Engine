@@ -37,6 +37,7 @@
 #include "GraphEditorGeometry.hpp"
 #include "aver/formats/OcGraph.hpp"
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -50,6 +51,12 @@
 namespace aver::render::preview { struct PreviewDraw; }
 
 namespace aver::editor {
+
+// Forward-declared rather than pulling in GraphNodeDefs.hpp, which would drag the whole node
+// catalog -- ~250 entries and a function-local static vector -- into every translation unit that
+// includes this header. Legal because GraphNodeDomain fixes its underlying type; see its definition
+// in GraphNodeDefs.hpp for what the bits mean.
+enum GraphNodeDomain : std::uint32_t;
 
 // Pushes the app's current DPI scale into the graph editor. See the EXACT HOOK comment above for
 // why this exists instead of a constructor/draw parameter. Read fresh every frame by every open
@@ -148,6 +155,12 @@ public:
     // that runs" was a question no test could ask. It is the same split this file already draws
     // for the Variables panel and the component tree -- thin ImGui glue, model in the class.
     std::string addNodeFromCatalog(const std::string& typeId, Vec2 canvasPos);
+
+    // Which node vocabulary the open graph belongs to, read from its own DOMAIN record -- so it is
+    // the same answer the COMPILER gives for the same file. There is deliberately no second notion
+    // of domain anywhere in the editor: one that disagreed with the compiler would offer a palette
+    // whose nodes then failed to compile, which is worse than offering none.
+    GraphNodeDomain openGraphDomain() const;
 
     // ---- functions ----------------------------------------------------------------------------
     // A .ocgraph holds ONE event graph and any number of named FUNCTIONS. They share a file, a node

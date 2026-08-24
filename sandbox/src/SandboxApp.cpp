@@ -3439,6 +3439,23 @@ public:
     // device means "the CPU per-cluster path runs instead", logged once, never retried every frame.
     // Safe to call every frame; only the first call (with the flag on) does real work.
     void ensureLodMeshPipeline(Engine& e) {
+        // A MATERIAL GRAPH THAT APPEARED SINCE THIS PIPELINE WAS BUILT REOPENS THE LATCH, and this
+        // is the one thing that makes this path agree with the Voxi one about what a material is.
+        // PSClusterMain calls averEvalMaterial exactly as PSMainVoxi does, so a pipeline compiled
+        // before a project's graphs were registered has a switch with no arm for them -- and a mesh
+        // drawn through the cluster path would silently shade as the stock material while the SAME
+        // material on a mesh drawn the other way showed its graph. Two objects disagreeing about
+        // one .ocmat is a far worse failure than either being wrong on its own, because nothing in
+        // the picture suggests the cause is which code path drew them.
+        //
+        // Reopening rather than adding a second entry point: everything below already destroys and
+        // rebuilds what it finds, and the two flags together mean "we have tried, at this revision".
+        const u64 graphRev = pbr::materialGraphs().revision();
+        if (lodMeshPipelineTried_ && lodMeshPipelineGraphRev_ != graphRev) {
+            lodMeshPipelineTried_ = false;
+            lodMeshPipelineReady_ = false;
+        }
+        lodMeshPipelineGraphRev_ = graphRev;
         if (lodMeshPipelineTried_) return;
         // THE FLAG IS TESTED BEFORE THE LATCH IS SET, which is the opposite of what it used to do.
         // Latching first means a single call made while the flag is still false burns the one
@@ -3573,12 +3590,23 @@ public:
         //
         // AVER_MS_CLUSTER is deliberately NOT defined for it: it needs neither the cluster buffers
         // nor the AS/MS entry points, only VSOut, which is unguarded.
+        // NOT `static`, unlike every other prelude string in this function. A static would be
+        // computed on the first call and then be wrong for the rest of the process the moment a
+        // project's material graphs registered -- and this function is now re-entered exactly when
+        // that happens (see the latch at the top). The cost of rebuilding a few hundred KB of string
+        // on a pipeline rebuild is not worth a cache that can hold a stale answer.
+        //
+        // AVER_MATERIAL_GRAPH goes in the TEXT, between the shared prelude and the material one, for
+        // the reason voxiShaderPrelude gives at length: as a -D it would have to reach every shader
+        // compiled against this text, and the one that got missed would carry both the stock
+        // averEvalMaterial and the generated one.
+        const std::string& kMaterialGraphHlsl = pbr::materialGraphs().hlsl();
+        std::string kClusterPsPrelude = rhi::sharedShaderPrelude();
+        if (!kMaterialGraphHlsl.empty()) kClusterPsPrelude += "\n#define AVER_MATERIAL_GRAPH 1\n";
+        kClusterPsPrelude += pbr::materialShaderPrelude();
+        kClusterPsPrelude += kMaterialGraphHlsl;
 #if AVER_MODULE_VOXI
-        static const std::string kClusterPsPrelude =
-            std::string(rhi::sharedShaderPrelude()) + pbr::materialShaderPrelude() + voxi::giShaderPrelude();
-#else
-        static const std::string kClusterPsPrelude =
-            std::string(rhi::sharedShaderPrelude()) + pbr::materialShaderPrelude();
+        kClusterPsPrelude += voxi::giShaderPrelude();
 #endif
         // Based at THIS layout's own srvCount, so the material textures land in table 1 wherever
         // Stage 3's merge actually put it (t13 with Voxi compiled in, t4 without) -- the same call
@@ -14591,6 +14619,9 @@ private:
     // not retried every frame -- the degrade house rule 6 asks for, at the feature level.
     bool lodMeshPipelineTried_ = false;
     bool lodMeshPipelineReady_ = false;
+    // The pbr::MaterialGraphRegistry revision the cluster pipeline was last compiled against. See
+    // ensureLodMeshPipeline, which reopens its own once-only latch when this moves.
+    u64  lodMeshPipelineGraphRev_ = ~0ull;
     rhi::ShaderHandle lodMeshAsShader_ = 0, lodMeshMsShader_ = 0, lodMeshPsShader_ = 0;
     rhi::PipelineHandle lodMeshPipeline_ = 0;
     rhi::PipelineLayout lodMeshLayout_{};   // srvCount=4 (the four cluster buffers); kept so

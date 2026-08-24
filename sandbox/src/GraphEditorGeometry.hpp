@@ -13,6 +13,7 @@
 #include "aver/formats/OcGraph.hpp"
 
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -135,21 +136,58 @@ struct GraphLinkCheck {
                           // parser's own error strings (modules/formats/src/OcGraph.cpp)
 };
 
+// Can a value read from a pin typed `srcType` flow into a pin typed `dstType`? canConnectPins takes
+// one of these as its final argument instead of hard-coding a rule, so this domain-neutral geometry
+// file never has to learn the word "material" to let the editor be as permissive as one particular
+// compiler. A plain function pointer, not std::function: every predicate below is a stateless free
+// function, so there is nothing to capture and no reason to pay a std::function's indirection and
+// possible heap allocation for it -- a caller that ever needs to close over state can still supply
+// a capture-less lambda, which converts to a function pointer for free.
+using PinTypeCompat = bool (*)(std::string_view srcType, std::string_view dstType);
+
+// TODAY'S rule, and canConnectPins' default: the two pin-type strings must match exactly (case-
+// insensitively). This is ALSO what enforces "an exec pin only connects to another exec pin, never
+// to data" -- see canConnectPins' own comment above its type check for the long form of why.
+bool exactPinTypeMatch(std::string_view srcType, std::string_view dstType);
+
+// The promotion rules a `DOMAIN material` .ocgraph compiles under -- mirrored from widen() in
+// modules/render.pbr/src/MaterialGraphHlsl.cpp, not reimplemented independently of it, because the
+// whole point of this predicate is that the editor refuses exactly what the compiler would refuse
+// and nothing more. In order: exact match; else a scalar (`float`) splats into a wider float2/
+// float3/float4, matching an HLSL scalar-to-vector cast; else a wider vector truncates into a
+// narrower one (float4->float3->float2->float), matching a swizzle. A float2 into a float3 is
+// REFUSED, deliberately, same as widen(): inventing the third component is the compiler guessing,
+// and it would guess zero. Any pin-type string outside float/float2/float3/float4 -- an exec pin,
+// for instance, though a material graph's own vocabulary never has one -- is not recognised as a
+// vector width by this predicate and so can only match by the exact-equality branch above, which
+// keeps exec-to-data refused under this predicate too, with no exec-specific code here either.
+bool materialPinTypeMatch(std::string_view srcType, std::string_view dstType);
+
 // Can `sourceNode.sourcePin` (must resolve to an OUTPUT pin) connect to `destNode.destPin` (must
 // resolve to an INPUT pin)? Checks, in order: both pins exist, source is an output, dest is an input,
-// not a self-connection, dest input not already occupied, pin types match, and finally that the link
-// would not close a cycle. Reads pin types from the nodes' OWN recorded pins in `graph`, never from
-// the GraphNodeDefs catalog (see that header's note on why).
+// not a self-connection, dest input not already occupied, pin types are compatible under
+// `typesCompatible`, and finally that the link would not close a cycle. Reads pin types from the
+// nodes' OWN recorded pins in `graph`, never from the GraphNodeDefs catalog (see that header's note
+// on why).
+//
+// `typesCompatible` defaults to exactPinTypeMatch, so a caller that passes nothing (every call site
+// as of this writing) sees exactly today's exact-match behaviour, unchanged. A caller that knows its
+// graph is a DOMAIN material graph -- and only such a caller -- may pass materialPinTypeMatch instead
+// to let the editor accept the same scalar-splat and vector-truncate connections the material
+// compiler would.
 GraphLinkCheck canConnectPins(const fmt::OcGraphData& graph,
                                const std::string& sourceNode, const std::string& sourcePin,
-                               const std::string& destNode, const std::string& destPin);
+                               const std::string& destNode, const std::string& destPin,
+                               PinTypeCompat typesCompatible = exactPinTypeMatch);
 
 // Convenience wrapper: canConnectPins(), and if it passes, appends the link to graph.links. Returns
 // the same GraphLinkCheck either way so a caller can report the rejection reason without a second
-// call. Does not touch anything else (no undo recording -- that is the ImGui layer's job).
+// call. Does not touch anything else (no undo recording -- that is the ImGui layer's job). Forwards
+// `typesCompatible` straight through to canConnectPins, same default and same meaning.
 GraphLinkCheck tryAddLink(fmt::OcGraphData& graph,
                            const std::string& sourceNode, const std::string& sourcePin,
-                           const std::string& destNode, const std::string& destPin);
+                           const std::string& destNode, const std::string& destPin,
+                           PinTypeCompat typesCompatible = exactPinTypeMatch);
 
 // ---------------------------------------------------------------------------------------------------
 // Cycle detection

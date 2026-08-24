@@ -461,6 +461,109 @@ static void testLinkRules() {
     }
 }
 
+// ===================================================================== pluggable pin type checks ===
+// canConnectPins' type check takes a PinTypeCompat predicate with a default (exactPinTypeMatch) that
+// reproduces the exact-equality rule testLinkRules above already exercises end to end. These tests
+// are about the PLUGGABILITY itself: that passing materialPinTypeMatch changes exactly the cases
+// widen() (modules/render.pbr/src/MaterialGraphHlsl.cpp) changes and none of the ones it doesn't,
+// and that exec-to-data stays refused no matter which predicate is in play.
+static void testPluggablePinTypeChecks() {
+    AVER_INFO("=== pluggable pin type checks (exactPinTypeMatch / materialPinTypeMatch) ===");
+
+    // A one-node-per-type-string graph: every source/dest pair below is built from these, so a test
+    // only has to name which two pins it wants to try connecting.
+    auto makeTypedGraph = [](const char* outType, const char* inType) {
+        fmt::OcGraphData g;
+        fmt::OcGraphNode src; src.id = "src"; src.type = "Src"; src.x = 0; src.y = 0;
+        src.pins.push_back({"out", outType, true, ""});
+        g.nodes.push_back(src);
+        fmt::OcGraphNode dst; dst.id = "dst"; dst.type = "Dst"; dst.x = 200; dst.y = 0;
+        dst.pins.push_back({"in", inType, false, ""});
+        g.nodes.push_back(dst);
+        return g;
+    };
+
+    // exec -> data (and the reverse) is refused under BOTH predicates -- the property the task brief
+    // calls out by name: nothing about making the type check pluggable may let control flow reach a
+    // data pin. materialPinTypeMatch only ever promotes between float/float2/float3/float4, so an
+    // "exec" pin string falls through to that predicate's own exact-equality branch, same refusal.
+    {
+        fmt::OcGraphData g = makeTypedGraph("exec", "float3");
+        GraphLinkCheck viaDefault = canConnectPins(g, "src", "out", "dst", "in");
+        check(!viaDefault.ok && viaDefault.reason == GraphLinkReject::TypeMismatch,
+              "exec -> float3 refused under the default (exact-match) predicate");
+        GraphLinkCheck viaMaterial = canConnectPins(g, "src", "out", "dst", "in", materialPinTypeMatch);
+        check(!viaMaterial.ok && viaMaterial.reason == GraphLinkReject::TypeMismatch,
+              "exec -> float3 STILL refused under materialPinTypeMatch");
+
+        fmt::OcGraphData g2 = makeTypedGraph("float3", "exec");
+        GraphLinkCheck reverseDefault = canConnectPins(g2, "src", "out", "dst", "in");
+        check(!reverseDefault.ok && reverseDefault.reason == GraphLinkReject::TypeMismatch,
+              "float3 -> exec refused under the default predicate");
+        GraphLinkCheck reverseMaterial = canConnectPins(g2, "src", "out", "dst", "in", materialPinTypeMatch);
+        check(!reverseMaterial.ok && reverseMaterial.reason == GraphLinkReject::TypeMismatch,
+              "float3 -> exec STILL refused under materialPinTypeMatch");
+    }
+
+    // float -> float3: refused by the default predicate (today's exact-equality behaviour, unchanged
+    // by this whole feature existing), ALLOWED by materialPinTypeMatch (a scalar splats), matching
+    // widen()'s "((float3)(x))" cast exactly.
+    {
+        fmt::OcGraphData g = makeTypedGraph("float", "float3");
+        GraphLinkCheck viaDefault = canConnectPins(g, "src", "out", "dst", "in");
+        check(!viaDefault.ok && viaDefault.reason == GraphLinkReject::TypeMismatch,
+              "float -> float3 refused by the default predicate");
+        GraphLinkCheck viaMaterial = canConnectPins(g, "src", "out", "dst", "in", materialPinTypeMatch);
+        check(viaMaterial.ok, "float -> float3 ALLOWED by materialPinTypeMatch (scalar splat)");
+    }
+
+    // float4 -> float3: allowed by materialPinTypeMatch (a wider vector truncates), matching widen()'s
+    // ".xyz" swizzle. Also refused by the default predicate, for the same reason as float -> float3
+    // above -- exact equality does not know about width at all.
+    {
+        fmt::OcGraphData g = makeTypedGraph("float4", "float3");
+        GraphLinkCheck viaDefault = canConnectPins(g, "src", "out", "dst", "in");
+        check(!viaDefault.ok && viaDefault.reason == GraphLinkReject::TypeMismatch,
+              "float4 -> float3 refused by the default predicate");
+        GraphLinkCheck viaMaterial = canConnectPins(g, "src", "out", "dst", "in", materialPinTypeMatch);
+        check(viaMaterial.ok, "float4 -> float3 ALLOWED by materialPinTypeMatch (vector truncation)");
+    }
+
+    // float2 -> float3: refused by BOTH predicates. This is widen()'s own deliberate asymmetry --
+    // inventing the third component is the compiler guessing, and it would guess zero -- so the
+    // editor must keep refusing it even once the material predicate is in play, not just the default.
+    {
+        fmt::OcGraphData g = makeTypedGraph("float2", "float3");
+        GraphLinkCheck viaDefault = canConnectPins(g, "src", "out", "dst", "in");
+        check(!viaDefault.ok && viaDefault.reason == GraphLinkReject::TypeMismatch,
+              "float2 -> float3 refused by the default predicate");
+        GraphLinkCheck viaMaterial = canConnectPins(g, "src", "out", "dst", "in", materialPinTypeMatch);
+        check(!viaMaterial.ok && viaMaterial.reason == GraphLinkReject::TypeMismatch,
+              "float2 -> float3 STILL refused by materialPinTypeMatch (widening a float2 is refused)");
+    }
+
+    // The rejection message still names the two pin types, regardless of which predicate refused the
+    // link -- a caller reporting the rejection to a user should not need to know which predicate ran.
+    {
+        fmt::OcGraphData g = makeTypedGraph("float2", "float3");
+        GraphLinkCheck r = canConnectPins(g, "src", "out", "dst", "in", materialPinTypeMatch);
+        check(r.message.find("float2") != std::string::npos && r.message.find("float3") != std::string::npos,
+              "the rejection message names both pin types ('float2' and 'float3')");
+    }
+
+    // A same-width connection (float3 -> float3) is accepted under both predicates -- the ordinary
+    // case is unaffected either way, exact equality having already been satisfied before either
+    // predicate reaches its promotion rules.
+    {
+        fmt::OcGraphData g = makeTypedGraph("float3", "float3");
+        GraphLinkCheck viaDefault = canConnectPins(g, "src", "out", "dst", "in");
+        check(viaDefault.ok, "float3 -> float3 accepted by the default predicate");
+        fmt::OcGraphData g2 = makeTypedGraph("float3", "float3");
+        GraphLinkCheck viaMaterial = canConnectPins(g2, "src", "out", "dst", "in", materialPinTypeMatch);
+        check(viaMaterial.ok, "float3 -> float3 accepted by materialPinTypeMatch too");
+    }
+}
+
 // =================================================================================== cycle rules ===
 static void testCycleDetection() {
     AVER_INFO("=== cycle detection ===");
@@ -919,6 +1022,7 @@ int main() {
     testLayout();
     testHitTest();
     testLinkRules();
+    testPluggablePinTypeChecks();
     testCycleDetection();
     testCanvasTransform();
     testFrameTransform();
