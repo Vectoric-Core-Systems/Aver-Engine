@@ -55,9 +55,35 @@ bool readFileBytes(const std::string& path, std::vector<u8>& out);
 // Reads a whole file into `out` as text. False if it cannot be read.
 bool readFileText(const std::string& path, std::string& out);
 // Writes `size` bytes to the file, truncating it. False on failure.
+//
+// TRUNCATES ON OPEN, before a single byte of `data` has landed. That is fine for content this
+// process can regenerate on the next run -- OcBt.cpp's saveOcBt and OcNav.cpp's saveOcNav call
+// this directly and say why in their own comments -- and it is NOT fine for anything a crash,
+// a kill, or a full disk must not be allowed to destroy. Callers in the second category want
+// writeFileBytesAtomic/writeFileTextAtomic below, not this.
 bool writeFileBytes(const std::string& path, const void* data, usize size);
-// Writes `text` to the file, truncating it. False on failure.
+// Writes `text` to the file, truncating it. False on failure. Same truncate-on-open hazard as
+// writeFileBytes, for the same reason (it is implemented in terms of it).
 bool writeFileText(const std::string& path, const std::string& text);
+
+// Writes `size` bytes to `path` WITHOUT the truncate-on-open hazard above: the new content is
+// written to a temporary beside `path` first, and only a COMPLETE temporary is ever swapped into
+// place (see renameFile). A crash, a kill, or a full disk between the two calls this makes leaves
+// the ORIGINAL file exactly as it was -- an observer never sees a truncated or half-written file
+// at `path`, only the whole old one or the whole new one.
+//
+// THE SAME PATTERN aver::fmt::saveOcSave (modules/formats/src/OcSave.cpp) and
+// aver_settings_flush (modules/settings/src/Settings.cpp) already ship with for the player's save
+// and the settings file, lifted here so it has ONE implementation instead of being hand-rolled
+// again at every call site that turns out to need it -- which is how the level, material and
+// graph writers ended up with no rename step at all in the first place.
+//
+// A failed write reports false and leaves `path` untouched, including when `path` does not exist
+// yet (an ordinary first save): the temporary is either never created (the write into it failed)
+// or deleted again (the rename failed), so a save that fails never leaves ".tmp" litter behind.
+bool writeFileBytesAtomic(const std::string& path, const void* data, usize size);
+// Writes `text` to the file safely; see writeFileBytesAtomic for what "safely" means and why.
+bool writeFileTextAtomic(const std::string& path, const std::string& text);
 
 // Deletes a file. True if it is gone afterwards -- INCLUDING when it never existed, because "make
 // sure this is not there" is what every caller actually wants and a missing file already satisfies

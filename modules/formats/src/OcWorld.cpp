@@ -7,7 +7,6 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
-#include <fstream>
 
 namespace aver::fmt {
 using namespace aver::fmt::detail;
@@ -284,6 +283,38 @@ bool loadOcworld(const std::string& path, OcWorldData& out, std::string* err) {
     return parseOcworld(text, out, err);
 }
 
+// See the header comment for the real-project evidence behind this -- and for why it is a content
+// scan rather than a header check. Reproduces parseOcworld's own line-scan (truncate at '#', trim,
+// split on whitespace) rather than calling it, because parseOcworld's own answer (whether the file
+// "parsed") is no signal at all here: it parses every one of this repo's four real level files,
+// legacy and OCWORLD-grammar alike, and reports success for all of them.
+bool levelFileIsLegacyOcmap(const std::string& path) {
+    std::string text;
+    if (!readFileText(path, text)) return false;   // the real loader is what reports a read failure
+
+    usize pos = 0;
+    while (pos <= text.size()) {
+        usize nl = text.find('\n', pos);
+        if (nl == std::string::npos) nl = text.size();
+        const std::string_view rawLine(text.data() + pos, nl - pos);
+        pos = nl + 1;
+
+        const std::string_view line = stripTrailingSemicolon(truncateHash(rawLine));
+        if (line.empty()) continue;
+
+        const std::vector<std::string_view> t = splitWhitespace(line);
+        if (t.empty()) continue;
+        const std::string_view key = t[0];
+        // The six record kinds only OcMap.cpp's parseOcmap has a branch for -- see this header's
+        // own comment for the two real files (ElectricDreams', FirstPerson's own Default.ocmap)
+        // that rule out testing the header token instead.
+        if (equalsCI(key, "ROOT") || equalsCI(key, "CLIENT") || equalsCI(key, "SURFACE") ||
+            equalsCI(key, "GROUND") || equalsCI(key, "KILLZ") || equalsCI(key, "DEFORM"))
+            return true;
+    }
+    return false;
+}
+
 // Serialises a world to the text form. PLACE for a uniform scale, PLACEG otherwise.
 std::string writeOcworld(const OcWorldData& w) {
     std::string s;
@@ -483,11 +514,18 @@ bool saveOcworld(const std::string& path, const OcWorldData& w, std::string* err
     std::error_code ec;
     const std::filesystem::path p(path);
     if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);
-    if (!f) { if (err) *err = "could not open " + path + " for writing"; return false; }
     const std::string text = writeOcworld(w);
-    f.write(text.data(), static_cast<std::streamsize>(text.size()));
-    if (!f) { if (err) *err = "write failed for " + path; return false; }
+
+    // WRITE TO A TEMPORARY AND SWAP, via writeFileTextAtomic (aver/platform/FileSystem.hpp) -- the
+    // same pattern aver::fmt::saveOcSave (OcSave.cpp) and aver_settings_flush (Settings.cpp)
+    // already ship with, lifted to the shared platform layer. This function used to open `path`
+    // directly with ios::trunc, which zeroes the file the instant it opens -- before writeOcworld's
+    // result has landed a single byte -- so a crash, a kill, or a full disk between the open and
+    // the write destroyed the level being saved rather than merely failing to update it.
+    if (!writeFileTextAtomic(path, text)) {
+        if (err) *err = "could not write " + path;
+        return false;
+    }
     return true;
 }
 

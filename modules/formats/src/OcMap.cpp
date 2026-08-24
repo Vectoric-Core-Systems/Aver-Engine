@@ -3,6 +3,10 @@
 #include "aver/formats/detail/TextScan.hpp"
 #include "aver/platform/FileSystem.hpp"
 
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
+
 namespace aver::fmt {
 using namespace aver::fmt::detail;
 
@@ -26,6 +30,18 @@ void parseRoot(std::string_view hex, std::array<u8, 32>& out) {
     }
 }
 
+// The inverse of parseRoot just above: always the full 64 lowercase hex characters (32 bytes),
+// zero bytes included. parseRoot never fails partway and leave a short tail -- it zero-fills
+// whatever a short hex string didn't cover -- so this has nothing to omit and always writes the
+// same length parseRoot always reads.
+std::string writeRoot(const std::array<u8, 32>& root) {
+    static const char kHex[] = "0123456789abcdef";
+    std::string s;
+    s.reserve(64);
+    for (u8 b : root) { s += kHex[b >> 4]; s += kHex[b & 0xF]; }
+    return s;
+}
+
 // Token `i` as a double, or 0 when the line is shorter than that.
 f64 tokF(const std::vector<std::string_view>& t, usize i) {
     return i < t.size() ? parseF64(t[i]) : 0.0;
@@ -33,6 +49,15 @@ f64 tokF(const std::vector<std::string_view>& t, usize i) {
 // Token `i` as a string, or empty when the line is shorter than that.
 std::string tokS(const std::vector<std::string_view>& t, usize i) {
     return i < t.size() ? std::string(t[i]) : std::string();
+}
+
+// Formats a number for the text form: enough digits to round-trip, no trailing noise. The exact
+// duplicate of OcWorld.cpp's own `num` -- kept separate rather than shared because it is three
+// lines and pulling the two writers together for it would cost more coupling than it saves.
+std::string num(f64 v) {
+    char buf[40];
+    std::snprintf(buf, sizeof buf, "%.6g", v);
+    return buf;
 }
 
 } // namespace
@@ -136,6 +161,99 @@ bool loadOcmap(const std::string& path, OcMapData& out, std::string* err) {
         return false;
     }
     return parseOcmap(text, out, err);
+}
+
+// Serialises a map to the text form. Record order matches §11 of docs/formats/FORMAT_SPECS.md's
+// own worked example (identity, then ROOT/CLIENT, then the env block SURFACE/GROUND/KILLZ/SPAWN,
+// then placements) rather than parseOcmap's read order, which is free to accept records in any
+// order a hand-authored file puts them in but still has to write them out in ONE order.
+std::string writeOcmap(const OcMapData& m) {
+    std::string s;
+    s.reserve(256 + m.placements.size() * 96);
+    s += "OCMAP "; s += std::to_string(m.version); s += "\n";
+    s += "# Written by the Aver Engine editor.\n";
+
+    char idbuf[32];
+    // Same "derive from the name if the caller never set one" fallback writeOcworld uses, for the
+    // identical reason: a level created in this editor's legacy path (there is currently none, but
+    // nothing prevents one existing later) would otherwise write ID 0x0000000000000000, which
+    // ocmapIsServerValid rejects outright ("missing or zero ID"). A file that already carried a
+    // real ID -- every file this writer actually round-trips today -- keeps exactly that ID.
+    const u64 id = m.contentId ? m.contentId : makeObjectId(m.name);
+    std::snprintf(idbuf, sizeof idbuf, "0x%016llX", static_cast<unsigned long long>(id));
+    s += "ID "; s += idbuf; s += "\n";
+    s += "NAME "; s += (m.name.empty() ? std::string("untitled") : m.name); s += "\n";
+    s += "BUILD "; s += std::to_string(m.build); s += "\n";
+    s += "ALGO "; s += std::to_string(m.algo); s += "\n";
+    s += "ROOT "; s += writeRoot(m.root); s += "\n";
+    // "" means build-from-assets, written as the bare `CLIENT scene` token the format spec's own
+    // §11 example shows (`CLIENT scene  # or: CLIENT umap <path>`) -- not an empty `CLIENT umap `
+    // that would read back as a umap path of "".
+    s += "CLIENT ";
+    if (m.clientUmap.empty()) s += "scene";
+    else { s += "umap "; s += m.clientUmap; }
+    s += "\n";
+
+    if (!m.surfaces.empty()) {
+        s += "#\n";
+        for (const OcSurface& sf : m.surfaces) {
+            s += "SURFACE " + std::to_string(sf.id) + " " + sf.name + " " +
+                 num(sf.grip) + " " + num(sf.roll) + " " + num(sf.restitution) + "\n";
+        }
+    }
+    if (m.hasGround) {
+        s += "GROUND " + num(m.groundZ) + " " + std::to_string(m.groundSurface) + "\n";
+    }
+    // Unconditional, unlike GROUND/SPAWN just above and below: OcMapData carries no "was KILLZ
+    // authored" flag the way hasGround/hasSpawn do, because every real .ocmap this format was
+    // built to read has one (docs/formats/FORMAT_SPECS.md §4.3's own record catalog lists it
+    // alongside GROUND and SPAWN as ordinary env-block fields) -- killZ's -5000.0 default is a
+    // sensible fallback for a level that somehow has none, not a sentinel meaning "omit this line".
+    s += "KILLZ " + num(m.killZ) + "\n";
+    if (m.hasSpawn) {
+        s += "SPAWN " + num(m.spawnX) + " " + num(m.spawnY) + " " + num(m.spawnZ) + " " +
+             num(m.spawnYaw) + "\n";
+    }
+
+    s += "#\n";
+    for (const OcPlacement& p : m.placements) {
+        if (p.deform) {
+            // No `default` fallback needed here the way the reader's own DEFORM branch has one:
+            // parseOcmap already applied it at load time (`t.size() > 8 ? ... : "default"`), so
+            // p.material is never empty for a record that reached this writer through a round trip.
+            // A freshly-authored DEFORM placement with no material set would write an empty token
+            // and fail to round-trip -- exactly why every other writer in this codebase folds its
+            // "what does an unauthored field become" decision into the STRUCT default rather than
+            // into the writer, and OcPlacement does too (there is no separate default here to keep
+            // in sync with the reader's).
+            s += "DEFORM " + p.asset + " " +
+                 num(p.x) + " " + num(p.y) + " " + num(p.z) + " " +
+                 num(p.yaw) + " " + num(p.pitch) + " " + num(p.roll) + " " + p.material + "\n";
+        } else {
+            s += "PLACE " + p.asset + " " +
+                 num(p.x) + " " + num(p.y) + " " + num(p.z) + " " +
+                 num(p.yaw) + " " + num(p.pitch) + " " + num(p.roll) + " " + num(p.scale);
+            // OMITTED WHEN -1, matching OcPlacement's own "-1 = use the asset's own surface"
+            // contract: a placement that never named one must not come back from a save claiming
+            // surface 0, which IS a real, distinct surface (see the SURFACE table above it).
+            if (p.surface >= 0) s += " " + std::to_string(p.surface);
+            s += "\n";
+        }
+    }
+    return s;
+}
+
+// Writes a map to disk, creating parent directories.
+bool saveOcmap(const std::string& path, const OcMapData& m, std::string* err) {
+    std::error_code ec;
+    const std::filesystem::path p(path);
+    if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
+    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    if (!f) { if (err) *err = "could not open " + path + " for writing"; return false; }
+    const std::string text = writeOcmap(m);
+    f.write(text.data(), static_cast<std::streamsize>(text.size()));
+    if (!f) { if (err) *err = "write failed for " + path; return false; }
+    return true;
 }
 
 } // namespace aver::fmt

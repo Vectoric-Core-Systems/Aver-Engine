@@ -28,6 +28,7 @@
 #endif
 
 #include "aver/core/Log.hpp"
+#include "aver/platform/FileSystem.hpp"   // writeFileTextAtomic -- see save() below
 #if AVER_WITH_IMGUI
 #  include "aver/runtime/Engine.hpp"
 #  include "aver/render/preview/ActorPreview.hpp"
@@ -383,14 +384,18 @@ bool GraphEditor::save(std::string* why) {
     std::error_code ec;
     const std::filesystem::path p(path_);
     if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
-    std::ofstream f(path_, std::ios::binary | std::ios::trunc);
-    if (!f) {
-        if (why) *why = "could not open " + path_ + " for writing";
-        return false;
-    }
-    f.write(text.data(), static_cast<std::streamsize>(text.size()));
-    if (!f) {
-        if (why) *why = "write failed for " + path_;
+
+    // WRITE TO A TEMPORARY AND SWAP, via writeFileTextAtomic (aver/platform/FileSystem.hpp) -- the
+    // same pattern aver::fmt::saveOcSave (modules/formats/src/OcSave.cpp) and aver_settings_flush
+    // (modules/settings/src/Settings.cpp) already ship with, lifted to the shared platform layer.
+    // This function used to open `path_` directly with ios::trunc -- an inline duplicate of the
+    // exact bug saveOcgraph (modules/formats/src/OcGraph.cpp) had, since this editor never calls
+    // saveOcgraph and always writes here instead (see the file-header comment) -- which zeroes the
+    // file the instant it opens, before `text` has landed a single byte. A crash, a kill, or a full
+    // disk between the open and the write destroyed the graph being edited rather than merely
+    // failing to update it.
+    if (!writeFileTextAtomic(path_, text)) {
+        if (why) *why = "could not write " + path_;
         return false;
     }
     originalText_ = text; // the next save merges against what is now actually on disk

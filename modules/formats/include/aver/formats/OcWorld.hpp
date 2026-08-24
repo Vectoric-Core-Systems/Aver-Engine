@@ -371,4 +371,34 @@ std::string writeOcworld(const OcWorldData& w);
 // Writes a world to disk, creating parent directories.
 bool saveOcworld(const std::string& path, const OcWorldData& w, std::string* err = nullptr);
 
+// True when `path` uses at least one record kind only the legacy .ocmap grammar has: ROOT, CLIENT,
+// SURFACE, GROUND, KILLZ or DEFORM. A caller sees this as "does this file need loadOcmap (OcMap.hpp)
+// instead of loadOcworld below" -- the two parsers agree on NAME/ID/BUILD/ALGO/SPAWN/PLACE, so
+// nothing is lost by asking only about the six records where they diverge.
+//
+// THE HEADER LINE ALONE CANNOT ANSWER THIS, AND TESTING AGAINST THIS TREE'S OWN REAL PROJECTS IS
+// WHAT PROVES IT. A first version of this function read only the `OCMAP 1` vs `OCWORLD 1` token on
+// line one -- which sounds right (parseOcworld's own header check, `equalsCI(key, "OCWORLD") ||
+// equalsCI(key, "OCMAP")`, treats the two spellings as interchangeable, so nothing downstream of a
+// completed parse can say which one a file declared) until it is run against
+// AverProjects/ElectricDreams/Content/Maps/Default.ocmap and AverProjects/FirstPerson/Content/Maps/
+// Default.ocmap: both are hand-authored, both open and save correctly today, and both start with
+// the literal line `OCMAP 1` -- while their actual content is pure OCWORLD grammar (SUN/SKY/FOG/
+// LANDSCAPE/PCGVOLUME/SCATTER for ElectricDreams; SUN/SKY/FOG/PLACEG for FirstPerson), none of
+// which the legacy parser has any notion of at all. A header-only version of this function would
+// have misrouted both through loadOcmap and silently destroyed exactly the records this whole
+// mechanism exists to protect -- trading the demoworld.ocmap bug for a new, broader one on two
+// files that were never broken. Only OpenConstructor's demoworld.ocmap -- and any file like it --
+// actually uses ROOT/CLIENT/SURFACE/GROUND/KILLZ/DEFORM, so those six are what this asks about,
+// wherever in the file they appear, and the header token is not consulted at all.
+//
+// EXTENSION CANNOT ANSWER IT EITHER, for the identical reason isLevelFile accepts both spellings:
+// .ocmap and .ocworld are both used for levels in this tree, and a project can hold either grammar
+// under either extension.
+//
+// Scans every line rather than stopping at the first meaningful one: the six keywords this looks
+// for are never on line one of a real file (they follow NAME/ID/BUILD/ALGO), and the cost is the
+// same one loadOcworld/loadOcmap already pay to actually parse the file a moment later.
+bool levelFileIsLegacyOcmap(const std::string& path);
+
 } // namespace aver::fmt

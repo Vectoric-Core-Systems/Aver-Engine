@@ -252,6 +252,66 @@ int main() {
               "...and so is one that never existed at all");
     }
 
+    // ---- writeFileBytesAtomic / writeFileTextAtomic: the crash-safe writer ------------------------
+    //
+    // writeFileBytes/writeFileText truncate the instant they open, before a single byte of new
+    // content has landed -- fine for build output a process regenerates, and the exact bug this
+    // release fixed for the level, material and graph writers, which used to open their destination
+    // directly with ios::trunc. writeFileBytesAtomic writes to a temporary and swaps it in with
+    // renameFile instead (FileSystem.cpp), so this checks both halves of that promise: a successful
+    // write really lands, and a write that CANNOT complete leaves the original exactly as it was --
+    // never truncated, never half-written -- with no ".tmp" left behind either way.
+    {
+        const std::string target = (dir / "atomic.txt").string();
+        const std::string tmp = target + ".tmp";
+
+        // A first save: the destination does not exist yet, which must be an ordinary success and
+        // not a special case the caller has to know about.
+        check(writeFileTextAtomic(target, "first version"), "an atomic write to a new path succeeds");
+        std::string readBack;
+        check(readFileText(target, readBack) && readBack == "first version",
+              "...and the content on disk is exactly what was written");
+        check(!std::filesystem::exists(tmp, ec), "...with no '.tmp' left behind after success");
+
+        // An ordinary overwrite: the old content is fully replaced, not appended to or merged with.
+        const std::string second = "second version, and deliberately longer than the first";
+        check(writeFileTextAtomic(target, second), "an atomic write over an existing file succeeds");
+        check(readFileText(target, readBack) && readBack == second,
+              "...and the new content replaces the old one completely");
+
+        // FAILURE CASE 1: the temporary write itself cannot happen -- a directory sits where the
+        // ".tmp" file needs to go, so the writeFileBytes call inside writeFileBytesAtomic fails
+        // before any swap is attempted. This is the exact technique the task brief suggested: "a
+        // directory where a file should be".
+        std::filesystem::create_directory(tmp, ec);
+        check(!writeFileTextAtomic(target, "must never land: temp write blocked"),
+              "an atomic write fails when its own temporary path is blocked by a directory");
+        check(readFileText(target, readBack) && readBack == second,
+              "...and the ORIGINAL is untouched -- still the second version, byte for byte");
+        std::filesystem::remove(tmp, ec);
+
+        // FAILURE CASE 2: the temporary write succeeds, but the swap cannot -- something else has
+        // `target` open in a way Windows will not replace out from under. aver::File's own Read
+        // mode opens with FILE_SHARE_READ and nothing else (FileSystem.cpp's File::open), so a Read
+        // handle held on `target` is exactly that: no FILE_SHARE_DELETE means renameFile's
+        // MoveFileExW replace must fail while this handle is open.
+#if defined(_WIN32)
+        {
+            File blocker;
+            check(blocker.open(target, File::Mode::Read), "a handle is opened to block the rename");
+            check(!writeFileTextAtomic(target, "must never land: rename blocked"),
+                  "an atomic write fails when the destination cannot be replaced");
+        }   // the blocking handle closes here, before the file is inspected
+        check(readFileText(target, readBack) && readBack == second,
+              "...and the ORIGINAL is STILL untouched after the failed rename");
+        check(!std::filesystem::exists(tmp, ec),
+              "...and the temporary was cleaned up rather than left as litter");
+#else
+        AVER_WARN("   SKIP  the rename-blocked case needs a Windows share-mode handle -- unverified here");
+        ++g_skipped;
+#endif
+    }
+
     std::filesystem::remove_all(dir, ec);
 
     if (g_failures == 0 && g_skipped == 0) AVER_INFO("=== {} assertions, 0 failed ===", g_checks);

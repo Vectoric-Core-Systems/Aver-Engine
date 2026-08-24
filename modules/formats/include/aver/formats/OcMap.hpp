@@ -65,4 +65,13 @@ bool loadOcmap(const std::string& path, OcMapData& out, std::string* err = nullp
 // one placement.
 bool ocmapIsServerValid(const OcMapData& m, std::string* why = nullptr);
 
+// Serialises a map to the text form. Round-trips through parseOcmap. Added alongside loadOcmap's
+// editor call site (sandbox/src/SandboxApp.cpp): a level LOADED as OCMAP has to be SAVED as OCMAP,
+// or ROOT/CLIENT/SURFACE/GROUND/KILLZ/DEFORM survive the read only to be dropped on the very next
+// write -- which is a relocated version of the bug this pairing exists to close, not a fix for it.
+std::string writeOcmap(const OcMapData& m);
+
+// Writes a map to disk, creating parent directories.
+bool saveOcmap(const std::string& path, const OcMapData& m, std::string* err = nullptr);
+
 } // namespace aver::fmt

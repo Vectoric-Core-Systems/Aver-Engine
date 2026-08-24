@@ -869,11 +869,18 @@ bool saveOcgraph(const std::string& path, const OcGraphData& g, std::string* err
         if (in) existing.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
     }
 
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);
-    if (!f) { if (err) *err = "could not open " + path + " for writing"; return false; }
     const std::string text = writeOcgraph(g, existing);
-    f.write(text.data(), static_cast<std::streamsize>(text.size()));
-    if (!f) { if (err) *err = "write failed for " + path; return false; }
+
+    // WRITE TO A TEMPORARY AND SWAP, via writeFileTextAtomic (aver/platform/FileSystem.hpp) -- the
+    // same pattern aver::fmt::saveOcSave (OcSave.cpp) and aver_settings_flush (Settings.cpp)
+    // already ship with, lifted to the shared platform layer. This function used to open `path`
+    // directly with ios::trunc, which zeroes the file the instant it opens -- before writeOcgraph's
+    // result has landed a single byte -- so a crash, a kill, or a full disk between the open and
+    // the write destroyed the graph being saved rather than merely failing to update it.
+    if (!writeFileTextAtomic(path, text)) {
+        if (err) *err = "could not write " + path;
+        return false;
+    }
     return true;
 }
 

@@ -63,11 +63,43 @@ struct CMeshRenderer {
     f32 aabbMin[3]  = {0, 0, 0};
     f32 aabbMax[3]  = {0, 0, 0};
     i32 material    = 0;
-    u32 flags       = 1;   // bit 0: visible
+    u32 flags       = 1;   // bit 0: visible, bit 1: hidden from owner (see kMeshRendererHiddenFromOwner)
     u32 dirty       = 1;   // upload bookkeeping, set by a write and cleared by the GPU path
 };
 
 inline constexpr u32 kMeshRendererVisible = 0x1;
+
+// DRAWN FOR EVERY CAMERA EXCEPT THE ONE BELONGING TO WHATEVER ENTITY OWNS THIS MESH -- what a
+// first-person character needs for its own skinned body. A camera sitting at the character's eye
+// position is a camera sitting INSIDE that character's mesh, so with nothing to opt out, every
+// triangle the near plane is inside of fills the screen with its inward-facing surface: the
+// FirstPerson template's whole-screen dark-red-brown fill this bit exists to fix. Third person
+// pulls the camera outside the body by construction (a boom offset, not a flag), so the identical
+// character keeps showing its body from any OTHER view -- a chase camera, a spectator, another
+// player's screen -- with no second code path for "third person" to fall through, because nothing
+// there ever matches "this mesh's own owner is the one looking".
+//
+// A ZERO-SAFE DEFAULT, unlike kMeshRendererVisible just above it. World::addComponent hands back
+// zero-filled storage (see kAnimatorPaused's own comment on why that trap already cost this codebase
+// a bug), and zero here means "not hidden from anyone" -- the only sane thing an unauthored mesh
+// renderer can mean, and the same answer it already gave before this bit existed. Nothing needed to
+// change about EnsureMeshRenderer/SetVisible's explicit `flags = 1` seed for that to stay true; this
+// bit simply never needs seeding.
+//
+// OBEYED BY THE SCENE WALK, NOT BY WHETHER THE MESH DRAWS AT ALL -- see SandboxApp.cpp's own
+// scene-entity pass (the owner-hide check beside its frustum/occlusion culls) and its submitShadowOnly
+// helper, which is also what a culled-but-still-shadow-casting entity already goes through. A mesh
+// hidden from its owner is submitted to Voxi's shadow cascades, GI voxelisation and RT geometry table
+// exactly as if it had drawn -- ONLY the rasterised colour draw is skipped -- so a first-person
+// character still throws its own shadow. Losing that would trade this bug for the "shadows are
+// screen-space" one the culling fix already paid to close.
+//
+// SET FROM `COMP ... hidden=owner` in an .ocgraph's component tree (OcGraph.hpp's COMP record --
+// see GraphComponentTree.cs's ApplyKind, which is the one place that turns the authored string into
+// this bit) rather than a new component or a scene-ABI field of its own: the flag is exactly as
+// per-mesh as kMeshRendererVisible already is, so it belongs on the SAME struct that already answers
+// "does this mesh draw", not a second one an author has to remember to attach alongside it.
+inline constexpr u32 kMeshRendererHiddenFromOwner = 0x2;
 
 // A light's kind, colour, brightness and cone shaping.
 struct CLight {

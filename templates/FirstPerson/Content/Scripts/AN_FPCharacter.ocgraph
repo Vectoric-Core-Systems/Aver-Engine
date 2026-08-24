@@ -101,7 +101,19 @@ VAR gunAttached float 0
 # character therefore stands in its imported bind pose, not idling or walking -- a static, correctly
 # proportioned body being the honest deliverable today, not an animated one this importer cannot
 # produce from these particular source files without changes out of scope for a content pass.
-COMP body SkeletalMesh mesh=Meshes/Character.ocmesh material=M_Character skeleton=Skeletons/Character.ocskel scale=0.0047813,0.0047813,0.0047813
+# `hidden=owner` -- WITHOUT IT THIS TEMPLATE IS UNPLAYABLE, NOT MERELY UGLY. `view=firstperson` on
+# the CLASS line above puts the camera at this character's own eye position (AverCharacter.EnsureView),
+# which is a position INSIDE this very mesh -- Character.ocmesh's bounds enclose the whole body,
+# eyes included, by construction. A camera inside a closed mesh sees only the inward-facing surface
+# of whatever triangle it is nearest to, so every earlier version of this template filled the entire
+# screen with one dark, flat-shaded patch of the character's own skin the instant Play was pressed --
+# reproduced twice independently before this line existed, from a fresh --new-project-template
+# scaffold with no other content in the level. `hidden=owner` (kMeshRendererHiddenFromOwner,
+# Components.hpp) is this engine's fix: the body keeps drawing for every OTHER camera -- third
+# person, a spectator, another player -- and keeps casting its own shadow (the flag only skips the
+# rasterised colour draw; Voxi's shadow/GI/TLAS submission never sees the difference), and is hidden
+# only from the one camera that would otherwise be looking out through its own ribcage.
+COMP body SkeletalMesh mesh=Meshes/Character.ocmesh material=M_Character skeleton=Skeletons/Character.ocskel scale=0.0047813,0.0047813,0.0047813 hidden=owner
 
 # ---- CANVAS REGIONS ------------------------------------------------------------------------
 # One box per concern, and the node coordinates below are grouped to match.

@@ -12,6 +12,7 @@
 #include "aver/core/Hash.hpp"
 #include "aver/core/Version.hpp"
 #include "aver/formats/OcBeam.hpp"
+#include "aver/formats/OcMap.hpp"
 #include "aver/formats/OcProject.hpp"
 #include "aver/formats/OcWorld.hpp"
 #include "aver/formats/OcMesh.hpp"
@@ -3925,7 +3926,7 @@ public:
         // Scene-entity pass: draws every live entity carrying a CMeshRenderer.
         {
             scene::World& w = scene::World::instance();
-            int drawn = 0, culled = 0;
+            int drawn = 0, culled = 0, ownerHidden = 0;
 #if AVER_MODULE_TRIFACTOR
             lodStats_ = LodSelectStats{};   // this frame's counters, from zero -- see the struct comment
             lodClusterStats_ = LodClusterStats{};
@@ -4439,6 +4440,49 @@ public:
                     continue;
                 }
 #endif
+                // ---- OWNER HIDE: a first-person camera does not see its own pawn's body ------------
+                // Checked here, after both culls and before any of the colour-path work below (LOD
+                // selection, skin/soft-body substitution, material resolution) -- an entity this frame
+                // decides not to rasterise needs none of that, the same reasoning the frustum and
+                // occlusion culls just above already act on for their own reasons.
+                //
+                // ANCESTOR WALK, NOT A DIRECT-PARENT COMPARE: a COMP tree can nest (`parent=` names
+                // another COMP, per OcGraph.hpp's own COMP comment), so "this mesh's owner" is
+                // whichever entity the hierarchy chain actually roots at, which may be several hops
+                // above `ent` -- or `ent` itself, for a mesh set through `CLASS mesh=` directly on the
+                // pawn's own entity rather than through a COMP child. World::setParent already refuses
+                // a cycle (World.hpp's own comment on setParent), so this walk is guaranteed to reach
+                // kInvalidEntity and stop.
+                if ((mr->flags & scene::kMeshRendererHiddenFromOwner) && firstPersonPawn_ != scene::kInvalidEntity) {
+                    bool ownedByViewer = false;
+                    for (scene::Entity anc = ent; w.valid(anc); anc = w.parent(anc)) {
+                        if (anc == firstPersonPawn_) { ownedByViewer = true; break; }
+                    }
+                    if (ownedByViewer) {
+#if AVER_MODULE_VOXI
+                        // Still a shadow caster, still in the GI volume, still in the RT geometry
+                        // table -- see submitShadowOnly's own header comment for why skipping IT
+                        // rather than the drawMesh() call below would lose all three, trading this
+                        // bug for the "shadows are screen-space" one the culling fix already closed.
+                        // Bounds come from the same wlo/whi the frustum test above already computed;
+                        // a degenerate box (haveWorldBox false) submits with a negative radius, which
+                        // submitShadowOnly already reads as "unknown, never angular-size-cull" -- the
+                        // identical fallback a boxless entity gets from the frustum cull two
+                        // paragraphs up.
+                        submitShadowOnly(ent, it->second, wm, mr->material,
+                                         haveWorldBox
+                                             ? Vec3{(wlo.x + whi.x) * 0.5f, (wlo.y + whi.y) * 0.5f, (wlo.z + whi.z) * 0.5f}
+                                             : Vec3{0.0f, 0.0f, 0.0f},
+                                         haveWorldBox
+                                             ? 0.5f * std::sqrt((whi.x - wlo.x) * (whi.x - wlo.x) +
+                                                                 (whi.y - wlo.y) * (whi.y - wlo.y) +
+                                                                 (whi.z - wlo.z) * (whi.z - wlo.z))
+                                             : -1.0f);
+#endif
+                        ++ownerHidden;
+                        continue;
+                    }
+                }
                 const i32 mat = mr->material;
                 f32 col[4] = {0.80f, 0.80f, 0.85f, 1.0f};
                 f32 metallic = 0.0f, roughness = 0.5f;
@@ -4938,11 +4982,12 @@ public:
                               walkMs - dispatchMs, n);
                 ++sceneWalkReports_;
             }
-            if (drawn != lastSceneDrawn_ || culled != lastSceneCulled_) {
-                AVER_INFO("[Sandbox] scene-render: {} spawned CMeshRenderer entit{} drawn, {} frustum-culled",
-                          drawn, drawn == 1 ? "y" : "ies", culled);
+            if (drawn != lastSceneDrawn_ || culled != lastSceneCulled_ || ownerHidden != lastSceneOwnerHidden_) {
+                AVER_INFO("[Sandbox] scene-render: {} spawned CMeshRenderer entit{} drawn, {} frustum-culled, {} owner-hidden",
+                          drawn, drawn == 1 ? "y" : "ies", culled, ownerHidden);
                 lastSceneDrawn_ = drawn;
                 lastSceneCulled_ = culled;
+                lastSceneOwnerHidden_ = ownerHidden;
             }
 #if AVER_MODULE_TRIFACTOR
             // Greppable per the brief's "report the counters" requirement: `[LOD-SELECT]`, only when
@@ -7139,6 +7184,11 @@ private:
         scene::World& w = scene::World::instance();
         scene::Entity e = scene::kInvalidEntity;
 
+        // Reset every call, unconditionally, ahead of every early return below -- see firstPersonPawn_'s
+        // own declaration for why a value left over from a previous call is not merely wrong but
+        // dangerous (a reused entity handle picking this frame's edit-mode selection back up).
+        firstPersonPawn_ = scene::kInvalidEntity;
+
         if (aver_fw_play_state() == AVER_FW_PLAY_PLAYING) {
             const int32_t pawn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
             if (pawn == 0) return;
@@ -7164,6 +7214,13 @@ private:
 
         int32_t mode = AVER_FW_VIEW_THIRD_PERSON; float eye = 160.0f, boom = 450.0f;
         aver_fw_view(&mode, &eye, &boom);
+
+        // ONLY first person hides anything -- see firstPersonPawn_'s own declaration. Set from `e`
+        // (the pawn itself), not `ve`/the view node below: a body mesh's COMP hangs off the pawn's
+        // own entity (or an ancestor chain that ends there), never off the camera transform, so the
+        // scene walk's owner-hide check has to compare against the same entity the hierarchy actually
+        // roots at.
+        firstPersonPawn_ = (mode == AVER_FW_VIEW_FIRST_PERSON) ? e : scene::kInvalidEntity;
 
         // Prefer the view node; fall back to the pawn if it has not published one.
         const int32_t viewId = aver_fw_view_entity();
@@ -12290,6 +12347,21 @@ private:
     Vec3 camPos_{7.0f, 7.0f, 4.5f};
     f32 yaw_ = 0.0f, pitch_ = 0.0f, flySpeed_ = 800.0f, lookSpeed_ = 0.005f;   // cm/s
     bool flying_ = false;
+    // The pawn currently being viewed in FIRST PERSON this frame, or scene::kInvalidEntity otherwise
+    // -- set by drivePlayCamera(), read by the scene-entity pass's owner-hide check right beside its
+    // frustum/occlusion culls. A mesh carrying scene::kMeshRendererHiddenFromOwner (Components.hpp)
+    // skips the rasterised colour draw whenever this entity is itself, or an ancestor of it, and
+    // stays untouched -- drawn exactly as before -- for every other camera, including a THIRD-person
+    // view of the identical character: third person pulls the camera back by a boom offset rather
+    // than setting this field, so `mode != AVER_FW_VIEW_FIRST_PERSON` already leaves it
+    // kInvalidEntity below and the body draws.
+    //
+    // RESET UNCONDITIONALLY AT THE TOP OF drivePlayCamera(), never left to a stale value across an
+    // early return -- see that function's own comment for why: this codebase has already lost a
+    // session to a float unable to hold an entity handle (aver-float-cannot-hold-handles), and a
+    // handle left over from a PAST play session silently matching a REUSED handle in edit mode would
+    // be the identical shape of bug, just for a hide flag instead of a spawn value.
+    scene::Entity firstPersonPawn_ = scene::kInvalidEntity;
     // Latched during the scene pass so the outline draws after every surface is down.
     Mat4 selectionOutline_{}; rhi::MeshHandle selectionMesh_ = 0; bool hasSelection_ = false;
     f32 sunColor_[3]={1.0f,0.96f,0.9f}, sunAmbient_=1.0f;
@@ -12869,6 +12941,37 @@ private:
     // a load-time instruction and nothing on the entity records it afterwards, so without this the
     // save forced `collide = true` on everything and `nocollide` never survived a round trip.
     std::unordered_map<u32, bool> entityCollide_;
+
+    // TRUE WHILE THE OPEN LEVEL WAS LOADED THROUGH THE LEGACY OCMAP PATH (loadLegacyOcmapLevel),
+    // rather than the ordinary OCWORLD one -- see fmt::levelFileIsLegacyOcmap's own comment for why
+    // this is decided by which RECORDS the file actually uses, not by its header line or its
+    // extension. saveLevel reads it to choose which writer owns
+    // the file: a level loaded as OCMAP has to be saved as OCMAP, or ROOT/CLIENT/SURFACE/GROUND/
+    // KILLZ/DEFORM survive the read only to be dropped on the very next write, which would just
+    // relocate this bug rather than close it. Reset to false by unloadLevel, so New Level and an
+    // ordinary .ocworld opened afterwards are never mistaken for a legacy map that happened to load
+    // before them.
+    bool levelIsLegacyOcmap_ = false;
+    // THE LOADED LEVEL'S OWN LEGACY HEADER, placements stripped -- the exact levelHeader_ pattern
+    // above, generalised to the five record kinds only the OCMAP grammar has and this editor has no
+    // UI for at all: ROOT (a content hash), CLIENT (which .umap the legacy server builds from, or
+    // "scene" for build-from-assets), the SURFACE table (per-surface friction/roll/restitution),
+    // GROUND (the flat collision plane) and KILLZ. saveLevelAsOcmap starts from this and overwrites
+    // only NAME/ID/BUILD/ALGO/SPAWN and the placement list, so a field this editor cannot show
+    // still survives every save unless a person edits the file by hand.
+    fmt::OcMapData legacyMapHeader_;
+    // Which record kind each legacy-loaded entity came from (true = DEFORM, false/absent = PLACE),
+    // and that record's own field the ordinary OcWorldPlacement round trip has no room for: a
+    // PLACE's numeric SURFACE-table index (entityLegacySurface_; -1 = "the asset's own", matching
+    // OcPlacement's own default) or a DEFORM's soft-body material name (entityLegacyMaterial_, e.g.
+    // "rubber"). See loadLegacyOcmapLevel's own "MATERIAL IS DELIBERATELY LEFT EMPTY" comment for
+    // why neither reaches the entity's CMeshRenderer the way an OCWORLD placement's material does.
+    // An entity absent from entityLegacyDeform_ -- anything added while editing a legacy level --
+    // saves as an ordinary PLACE with surface -1, the same "nothing said, use the default" reading
+    // a hand-authored file omitting both tokens gets.
+    std::unordered_map<u32, bool> entityLegacyDeform_;
+    std::unordered_map<u32, i32> entityLegacySurface_;
+    std::unordered_map<u32, std::string> entityLegacyMaterial_;
     std::string upgradeStatus_;
     f32         upgradeStatusAge_ = 0.0f;   // seconds since it was set; see setUpgradeStatus
     f32  uiDemoHealth_ = 0.72f, uiDemoStamina_ = 0.44f, uiDemoScroll_ = 0.0f, uiDemoClock_ = 0.0f;
@@ -13518,6 +13621,23 @@ private:
     // buildUI's "Open Level"/"New Level" menu items).
     void loadLevel(Engine& eng, const std::string& path) {
         unloadLevel(eng);
+
+        // DISPATCH ON WHAT THE FILE ACTUALLY USES, NOT ON ITS EXTENSION OR ITS HEADER LINE -- see
+        // fmt::levelFileIsLegacyOcmap's own comment for the full reasoning, including the two real
+        // projects (ElectricDreams, FirstPerson) that rule out trusting the header token: both are
+        // hand-authored OCWORLD-grammar files that happen to start with the line `OCMAP 1`. Without
+        // this, EVERY level (both extensions: isLevelFile accepts .ocmap and .ocworld alike) went
+        // through fmt::loadOcworld below, which "succeeds" on a genuinely legacy OCMAP file --
+        // parseOcworld's own header check accepts that spelling too -- while silently skipping
+        // ROOT/CLIENT/SURFACE/GROUND/KILLZ/DEFORM, since it has no branches for any of them. Save
+        // then wrote back only what survived, reporting ok=true throughout: opening
+        // OpenConstructor's demoworld.ocmap and immediately saving it destroyed all six records
+        // with no warning anywhere.
+        if (fmt::levelFileIsLegacyOcmap(path)) {
+            loadLegacyOcmapLevel(eng, path);
+            return;
+        }
+
         fmt::OcWorldData w;
         std::string why;
         if (!fmt::loadOcworld(path, w, &why)) { AVER_WARN("[Level] {}", why); return; }
@@ -13672,6 +13792,119 @@ private:
 
         AVER_INFO("[Level] '{}' loaded from {} ({} placement(s))", w.name, path, w.placements.size());
 
+    }
+
+    // Loads a LEGACY .ocmap -- one that actually USES at least one of ROOT/CLIENT/SURFACE/GROUND/
+    // KILLZ/DEFORM, so it has to load through fmt::loadOcmap, the only parser with a branch for any
+    // of them (see fmt::levelFileIsLegacyOcmap's own comment for why loadOcworld above is the wrong
+    // loader for such a file even though it accepts one -- header line and all -- without
+    // complaint). Split out from loadLevel rather than folded into it as a mid-function branch: a
+    // legacy file has none of loadLevel's OCWORLD-only concerns -- LANDSCAPE, PCGVOLUME, WATER,
+    // SKY, GAMEMODE, class placements -- so reusing that function's body would mean guarding every
+    // one of those sections against a struct that can never carry them, rather than simply never
+    // running code that does not apply.
+    void loadLegacyOcmapLevel(Engine& eng, const std::string& path) {
+        (void)eng;   // unlike loadLevel, this path has no landscape/device work to hand it to
+        fmt::OcMapData m;
+        std::string why;
+        if (!fmt::loadOcmap(path, m, &why)) { AVER_WARN("[Level] {}", why); return; }
+
+        // CARRIED, NOT UNDERSTOOD -- see legacyMapHeader_'s own comment (member declaration) for
+        // which five record kinds this is and why. saveLevelAsOcmap starts from this and overwrites
+        // only what the editor genuinely owns, the identical levelHeader_ pattern the OCWORLD path
+        // above uses.
+        legacyMapHeader_ = m;
+        legacyMapHeader_.placements.clear();
+        levelIsLegacyOcmap_ = true;
+
+        // TRANSLATED INTO THE SHARED PLACEMENT PIPELINE, not re-implemented: world::instantiate
+        // (modules/world/include/aver/world/LevelInstance.hpp) already does everything a placement
+        // needs -- entity creation, the mesh renderer, material interning, the static body -- and is
+        // the one place that logic lives after that module's own de-duplication. A synthetic
+        // OcWorldData costs nothing to build here: OcMap.hpp's OcPlacement and OcWorld.hpp's
+        // OcWorldPlacement already agree field for field on asset/x/y/z/yaw/pitch/roll, in the same
+        // units (centimetres, degrees), so this is translation, not invention.
+        //
+        // MATERIAL IS DELIBERATELY LEFT EMPTY on every synthesised placement, PLACE and DEFORM
+        // alike. A legacy PLACE names a numeric SURFACE-table index (physics friction/roll/
+        // restitution, not a rendering material) and a DEFORM names a soft-body material like
+        // "rubber" -- neither is an .ocmat asset name, and feeding either into
+        // aver_scene_material would try to resolve a material that does not exist rather than
+        // leaving the mesh's own cooked material in place, which is what OcWorldPlacement's own
+        // "empty = the asset's own" convention already means for an ordinary PLACE with no
+        // material token. Both values are preserved for the save below through
+        // entityLegacySurface_/entityLegacyMaterial_ instead -- a value this editor cannot render
+        // but must not lose belongs beside the entity, not inside a component it would misread.
+        fmt::OcWorldData synth;
+        synth.name = m.name;
+        synth.contentId = m.contentId;
+        synth.build = m.build;
+        synth.algo = m.algo;
+        synth.hasSpawn = m.hasSpawn;
+        synth.spawnX = m.spawnX; synth.spawnY = m.spawnY; synth.spawnZ = m.spawnZ; synth.spawnYaw = m.spawnYaw;
+        synth.placements.reserve(m.placements.size());
+        for (const fmt::OcPlacement& p : m.placements) {
+            fmt::OcWorldPlacement op;
+            op.asset = p.asset;
+            op.objectId = p.objectId;   // already fnv1a64(asset) -- see OcMap.cpp's own PLACE/DEFORM branches
+            op.x = p.x; op.y = p.y; op.z = p.z;
+            op.yaw = p.yaw; op.pitch = p.pitch; op.roll = p.roll;
+            // `p.scale` is already forced to 1.0 for a DEFORM record (OcMap.cpp hardcodes it there;
+            // legacy DEFORM has no scale concept of its own), so this one line is correct for both
+            // placement kinds without a branch.
+            op.sx = op.sy = op.sz = (p.scale == 0.0 ? 1.0 : p.scale);
+            // EVERY legacy placement is a collision source in this editor's hands -- ocmapIsServerValid
+            // itself requires GROUND or at least one PLACE for exactly that reason. A DEFORM's real
+            // behaviour is a server-simulated soft body, not this static box, but nothing in this
+            // editor spawns a deformable cage at all (sandbox or otherwise), so a static box is the
+            // honest stand-in that keeps the placement visible and selectable instead of invisible --
+            // no worse than the "missing mesh" placeholder its .ocbeam asset reference already gets,
+            // and no different from what an ordinary OCWORLD PLACE with scale 1 would receive.
+            op.collide = true;
+            synth.placements.push_back(std::move(op));
+        }
+
+        world::InstantiateOptions opt;
+        const world::LevelInstance inst = world::instantiate(synth, opt);
+        levelEntities_ = inst.entities;
+#if AVER_MODULE_PHYSICS
+        levelBodies_ = inst.bodies;
+#endif
+        for (usize k = 0; k < inst.entities.size(); ++k) {
+            const scene::Entity e = inst.entities[k];
+            const fmt::OcPlacement& p = m.placements[inst.placementIndex[k]];
+            entityLabels_[static_cast<u32>(e)] = makeEntityLabel(std::string(), p.asset);
+            entityCollide_[static_cast<u32>(e)] = true;
+            // WHICH RECORD KIND THIS ENTITY CAME FROM, AND ITS OWN FIELD -- see this function's own
+            // "MATERIAL IS DELIBERATELY LEFT EMPTY" paragraph above for why these live here instead
+            // of on the entity, and entityLegacyDeform_'s own member comment for what an entity
+            // absent from these maps (anything added while editing) saves as.
+            entityLegacyDeform_[static_cast<u32>(e)] = p.deform;
+            if (p.deform) entityLegacyMaterial_[static_cast<u32>(e)] = p.material;
+            else          entityLegacySurface_[static_cast<u32>(e)] = p.surface;
+#if AVER_MODULE_PHYSICS
+            if (inst.entityBody[k] >= 0) entityBodies_[static_cast<u32>(e)] = inst.entityBody[k];
+#endif
+        }
+
+#if AVER_MODULE_SCENE
+        playerStart_ = scene::kInvalidEntity;
+        if (m.hasSpawn) {
+            playerStart_ = makePlayerStart(Vec3{static_cast<f32>(m.spawnX), static_cast<f32>(m.spawnY),
+                                                 static_cast<f32>(m.spawnZ)},
+                                            static_cast<f32>(m.spawnYaw));
+        }
+#endif
+        levelPath_ = path;
+        levelName_ = m.name;
+
+        sel_ = -1;
+        selEntity_ = scene::kInvalidEntity;
+
+        if (!synth.placements.empty()) frameCameraOn(synth);
+
+        AVER_INFO("[Level] '{}' loaded from {} ({} placement(s), legacy .ocmap)", m.name, path,
+                  m.placements.size());
     }
 
 #if AVER_MODULE_FRAMEWORK
@@ -13886,6 +14119,14 @@ private:
         levelPcgVolumes_.clear();
         levelHeader_ = fmt::OcWorldData{};
         entityCollide_.clear();
+        // The legacy OCMAP state, cleared with the rest -- see levelIsLegacyOcmap_'s own comment
+        // for why a stale `true` here would be worse than a stale levelHeader_: it would route the
+        // NEXT level's save through the wrong writer entirely, not just lose a field it carries.
+        levelIsLegacyOcmap_ = false;
+        legacyMapHeader_ = fmt::OcMapData{};
+        entityLegacyDeform_.clear();
+        entityLegacySurface_.clear();
+        entityLegacyMaterial_.clear();
         undoStack_.clear();
         redoStack_.clear();
         editToEntity_.clear();
@@ -13930,8 +14171,18 @@ private:
 #endif
     }
 
-    // Writes the level's own entities back out to an .ocworld. Spawned actors are not written.
+    // Writes the level's own entities back out to whichever format they were loaded from.
+    //
+    // THE SAVE HAS TO MATCH THE LOAD, so this is a two-line dispatch on levelIsLegacyOcmap_ ahead of
+    // everything below rather than a parallel "which writer" decision made again some other way (the
+    // path's extension, say -- exactly the signal fmt::levelFileIsLegacyOcmap's own comment explains
+    // is unreliable). levelIsLegacyOcmap_ is the answer loadLevel already computed at open time and
+    // it is the one this function has to honour: re-deriving it independently here would be a second
+    // place that decision could drift from the first, for no reason this function needs a second
+    // opinion.
     bool saveLevel(const std::string& path) {
+        if (levelIsLegacyOcmap_) return saveLevelAsOcmap(path);
+
         scene::World& world = scene::World::instance();
         // STARTS FROM WHAT THE FILE SAID, not from a default-constructed OcWorldData. Everything the
         // editor does not model -- ID, BUILD, ALGO, SPAWN, the sun's lux -- rides through untouched;
@@ -14018,6 +14269,64 @@ private:
         std::string why;
         if (!fmt::saveOcworld(path, w, &why)) { AVER_WARN("[Level] save failed: {}", why); return false; }
         AVER_INFO("[Level] saved {} placement(s) to {}", w.placements.size(), path);
+        return true;
+    }
+
+    // saveLevel's legacy-OCMAP twin -- the exact "start from what the file said, overwrite only
+    // what the editor genuinely owns" shape saveLevel itself uses against levelHeader_, here
+    // against legacyMapHeader_ (see that member's own comment for the five record kinds this
+    // carries through untouched: ROOT, CLIENT, the SURFACE table, GROUND, KILLZ).
+    bool saveLevelAsOcmap(const std::string& path) {
+        scene::World& world = scene::World::instance();
+        fmt::OcMapData m = legacyMapHeader_;
+        m.name = levelName_.empty() ? std::string("untitled") : levelName_;
+
+        // THE MARKER IS THE TRUTH WHEN THERE IS ONE -- same reasoning as saveLevel's own SPAWN
+        // handling just above, applied to the identical field on the legacy struct.
+        {
+            Vec3 sp{}; f32 sy = 0.0f;
+            if (playerStartTransform(sp, sy)) {
+                m.hasSpawn = true;
+                m.spawnX = sp.x; m.spawnY = sp.y; m.spawnZ = sp.z; m.spawnYaw = sy;
+            }
+        }
+
+        for (const scene::Entity e : levelEntities_) {
+            if (!world.valid(e)) continue;
+            const auto* loc = world.component<scene::CLocal>(e, scene::kComponentLocal);
+            if (!loc) continue;
+            fmt::OcPlacement p;
+            p.asset = world.name(e);
+            p.x = loc->xf.position.x; p.y = loc->xf.position.y; p.z = loc->xf.position.z;
+            const Vec3 euler = eulerDegFromQuat(loc->xf.rotation);
+            p.roll = euler.x; p.pitch = euler.y; p.yaw = euler.z;
+
+            const auto deformIt = entityLegacyDeform_.find(static_cast<u32>(e));
+            p.deform = deformIt != entityLegacyDeform_.end() && deformIt->second;
+            if (p.deform) {
+                const auto matIt = entityLegacyMaterial_.find(static_cast<u32>(e));
+                // "default" mirrors parseOcmap's own DEFORM fallback (OcMap.cpp), for an entity
+                // this session created rather than loaded -- there is no editor UI to author a
+                // DEFORM placement yet, so today this only ever fires for one carried straight
+                // through from the file, but the fallback keeps a future one honest anyway.
+                p.material = matIt == entityLegacyMaterial_.end() ? std::string("default") : matIt->second;
+                p.scale = 1.0;
+                p.surface = -1;
+            } else {
+                // Legacy PLACE is UNIFORM scale only -- OcPlacement has one `scale` field, not
+                // OcWorldPlacement's sx/sy/sz -- so a non-uniform edit made through this editor
+                // (there is no UI for one either, but nothing stops a future tool writing one)
+                // would lose two axes on this save regardless; .x is as good a choice as any.
+                p.scale = loc->xf.scale.x;
+                const auto surfIt = entityLegacySurface_.find(static_cast<u32>(e));
+                p.surface = surfIt == entityLegacySurface_.end() ? -1 : surfIt->second;
+            }
+            m.placements.push_back(std::move(p));
+        }
+
+        std::string why;
+        if (!fmt::saveOcmap(path, m, &why)) { AVER_WARN("[Level] save failed: {}", why); return false; }
+        AVER_INFO("[Level] saved {} placement(s) to {} (legacy .ocmap)", m.placements.size(), path);
         return true;
     }
 
@@ -14490,6 +14799,7 @@ private:
     std::unordered_set<u64> skinnedMeshIds_;
     int lastSceneDrawn_=-1;           // last scene-entity draw count, so the log line fires only on change
     int lastSceneCulled_=-1;          // and the cull count, so a frustum bug shows as a number rather than a gap
+    int lastSceneOwnerHidden_=-1;     // and the owner-hide count, so a stuck `hidden=owner` mesh shows as a number too
 #endif
 #if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
     // Per-mesh LOD ladder for virtualized-geometry selection (aver::trifactor::ClusterAdapt/
@@ -14748,9 +15058,19 @@ static bool hasExtension(const char* p, const char* ext) {
 // True for a path ending in ".ocproject", case-insensitively.
 static bool isOcproject(const char* p) { return hasExtension(p, ".ocproject"); }
 
-// True for a level file. BOTH spellings, because they are the same format: .ocmap is what a project
-// names its levels and .ocworld is the same content outside one (see OcWorld.hpp), and a person
-// double-clicking either means the same thing by it.
+// True for a path this editor will OFFER to open as a level. BOTH spellings, because a person
+// double-clicking either means the same thing by it: .ocmap is what a project conventionally names
+// its levels and .ocworld is the same editor-written content outside one (see OcWorld.hpp).
+//
+// EXTENSION ONLY DECIDES WHETHER TO TRY, NOT WHAT THE FILE ACTUALLY IS. A path that passes this
+// check can still hold either grammar underneath, and NEITHER the extension nor the file's own
+// header line settles which: AverProjects/ElectricDreams and AverProjects/FirstPerson both ship an
+// .ocmap starting with the literal line `OCMAP 1` that is nonetheless pure OCWORLD content (SUN/
+// SKY/FOG/LANDSCAPE/PCGVOLUME/SCATTER for one, SUN/SKY/FOG/PLACEG for the other), while
+// OpenConstructor's demoworld.ocmap -- same header, same extension -- genuinely needs the legacy
+// grammar. loadLevel is what tells those apart, by which records the file actually contains, before
+// deciding which of fmt::loadOcworld/fmt::loadOcmap actually reads it. See
+// fmt::levelFileIsLegacyOcmap.
 static bool isLevelFile(const char* p) {
     return hasExtension(p, ".ocmap") || hasExtension(p, ".ocworld");
 }

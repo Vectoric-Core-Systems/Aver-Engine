@@ -10,6 +10,7 @@
 
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <string>
 
@@ -836,6 +837,180 @@ static void checkOcworldLandscape() {
     }
 }
 
+// THE BUG, REPRODUCED, using the exact function the editor's loadLevel called UNCONDITIONALLY for
+// every level before this fix (parseOcworld/writeOcworld, both still here unmodified -- they are
+// exactly right for a genuine .ocworld and stay the loader for one). Fed demoworld.ocmap's own
+// content byte for byte: parseOcworld's header check accepts the OCMAP spelling without complaint
+// (`equalsCI(key, "OCWORLD") || equalsCI(key, "OCMAP")`, OcWorld.cpp), so nothing here reports
+// failure -- it just quietly keeps only what OcWorldData has room for, which is the placements
+// grammar the two formats share (PLACE) and none of ROOT/CLIENT/SURFACE/GROUND/KILLZ/DEFORM. This
+// is the "before": the same input checkOcmapRoundtrip below feeds to parseOcmap/writeOcmap and
+// gets back whole.
+static void checkOldDispatchDroppedLegacyRecords() {
+    AVER_INFO("=== the bug: loadOcworld on a legacy .ocmap silently drops six record kinds ===");
+    using namespace fmt;
+    std::string err;
+
+    OcWorldData w;
+    check(parseOcworld(
+        "OCMAP 1\n"
+        "ID 0x376B85BC4D1A03BA\n"
+        "NAME demoworld\n"
+        "BUILD 1\n"
+        "ALGO 3\n"
+        "ROOT 024529dbb250619b7e8331975f0f06b6029fff86144834dce2ed63171758a0db\n"
+        "CLIENT umap /Game/FIA_WEC/Tracks/ConstructorsTestTrack/ConstructorsTestTrack.ConstructorsTestTrack\n"
+        "SURFACE 0 tarmac 1.00 0.015 0.30\n"
+        "SURFACE 1 kerb   0.92 0.020 0.40\n"
+        "SURFACE 2 grass  0.45 0.090 0.35\n"
+        "GROUND 0.0 0\n"
+        "KILLZ -5000.0\n"
+        "DEFORM tyre_barrier.ocbeam 12000.0 800.0 0.0 90.0 0.0 0.0 rubber\n"
+        "PLACE kerb_4m 1200.0 400.0 0.0 0.0 0.0 0.0 1.000\n", w, &err),
+        "parseOcworld 'succeeds' on an OCMAP-headed file -- ok=true, exactly as the blocker reports");
+    check(w.placements.size() == 1,
+          "and the DEFORM record is simply gone -- 2 placements in the file, 1 survives (PLACE only; "
+          "parseOcworld has no DEFORM branch at all)");
+
+    const std::string lost = writeOcworld(w);
+    check(lost.find("ROOT") == std::string::npos && lost.find("CLIENT") == std::string::npos &&
+              lost.find("SURFACE") == std::string::npos && lost.find("GROUND") == std::string::npos &&
+              lost.find("KILLZ") == std::string::npos && lost.find("DEFORM") == std::string::npos,
+          "and a save through this path writes back a file with NONE of ROOT/CLIENT/SURFACE/GROUND/"
+          "KILLZ/DEFORM -- OcWorldData has no field for any of them, so there is nothing left to write");
+}
+
+// Checks fmt::writeOcmap/saveOcmap -- added alongside the editor's legacy-load dispatch
+// (sandbox/src/SandboxApp.cpp's loadLevel/saveLevel), which is what closed the actual blocker: the
+// PREVIOUS check reproduced it (fed the SAME demoworld.ocmap content to parseOcworld/writeOcworld,
+// the unconditional pre-fix path, and lost six record kinds and a placement). This checks the fix:
+// every one of those six round-trips through parseOcmap -> writeOcmap -> parseOcmap, and a second
+// write reproduces the first byte for byte, the same guarantee every other writer in this file
+// carries. The record set below is demoworld.ocmap's own, values and all (see
+// docs/formats/FORMAT_SPECS.md §4.3's own reference to it).
+static void checkOcmapRoundtrip() {
+    AVER_INFO("=== .ocmap writer / round trip ===");
+    using namespace fmt;
+    std::string err;
+
+    OcMapData m;
+    check(parseOcmap(
+        "OCMAP 1\n"
+        "ID 0x376B85BC4D1A03BA\n"
+        "NAME demoworld\n"
+        "BUILD 1\n"
+        "ALGO 3\n"
+        "ROOT 024529dbb250619b7e8331975f0f06b6029fff86144834dce2ed63171758a0db\n"
+        "CLIENT umap /Game/FIA_WEC/Tracks/ConstructorsTestTrack/ConstructorsTestTrack.ConstructorsTestTrack\n"
+        "SURFACE 0 tarmac 1.00 0.015 0.30\n"
+        "SURFACE 1 kerb   0.92 0.020 0.40\n"
+        "SURFACE 2 grass  0.45 0.090 0.35\n"
+        "GROUND 0.0 0\n"
+        "KILLZ -5000.0\n"
+        "DEFORM tyre_barrier.ocbeam 12000.0 800.0 0.0 90.0 0.0 0.0 rubber\n"
+        "PLACE kerb_4m 1200.0 400.0 0.0 0.0 0.0 0.0 1.000\n", m, &err),
+        "demoworld's own record set parses");
+    check(m.surfaces.size() == 3, "all three SURFACE rows kept");
+    check(m.hasGround && m.groundZ == 0.0 && m.groundSurface == 0, "GROUND kept");
+    check(m.killZ == -5000.0, "KILLZ kept");
+    check(m.clientUmap ==
+              "/Game/FIA_WEC/Tracks/ConstructorsTestTrack/ConstructorsTestTrack.ConstructorsTestTrack",
+          "CLIENT umap path kept");
+    check(m.placements.size() == 2 && m.placements[0].deform && !m.placements[1].deform,
+          "DEFORM and PLACE both kept, in file order");
+    check(m.placements[0].material == "rubber", "DEFORM's material kept");
+    check(m.placements[1].surface == -1, "PLACE's unauthored surface reads as -1, not 0");
+
+    const std::string text = writeOcmap(m);
+    check(text.find("ROOT 024529dbb250619b7e8331975f0f06b6029fff86144834dce2ed63171758a0db") !=
+              std::string::npos,
+          "the written text carries ROOT verbatim");
+    check(text.find("CLIENT umap /Game/FIA_WEC") != std::string::npos, "and CLIENT");
+    check(text.find("SURFACE 2 grass") != std::string::npos, "and the SURFACE table");
+    check(text.find("GROUND") != std::string::npos && text.find("KILLZ") != std::string::npos,
+          "and GROUND and KILLZ");
+    check(text.find("DEFORM") != std::string::npos, "and DEFORM");
+
+    OcMapData back;
+    check(parseOcmap(text, back, &err), "what the writer produced parses again");
+    check(back.root == m.root, "ROOT survives the round trip byte for byte");
+    check(back.clientUmap == m.clientUmap, "and CLIENT");
+    check(back.surfaces.size() == 3 && back.surfaces[2].name == "grass" &&
+              std::fabs(back.surfaces[2].grip - 0.45) < 1e-9,
+          "and every SURFACE row");
+    check(back.hasGround && back.groundZ == m.groundZ && back.groundSurface == m.groundSurface,
+          "and GROUND");
+    check(back.killZ == m.killZ, "and KILLZ");
+    check(back.placements.size() == 2 && back.placements[0].deform &&
+              back.placements[0].material == "rubber" && !back.placements[1].deform,
+          "and both placements, DEFORM's material included");
+    check(writeOcmap(back) == text, "and a second write reproduces the first byte for byte");
+}
+
+// Checks fmt::levelFileIsLegacyOcmap -- the content scan the editor's loadLevel dispatches on. The
+// extension is deliberately the SAME (.ocmap) in every case here, because the extension is exactly
+// the signal that function's own comment says cannot be trusted; the header line's spelling is
+// ALSO deliberately unhelpful in two of these cases, for the same reason -- see the "modern.ocmap"
+// and "electricDreamsShaped" cases below, which reproduce the two real files that ruled the header
+// out as a signal at all.
+static void checkLevelFileIsLegacyOcmap() {
+    AVER_INFO("=== fmt::levelFileIsLegacyOcmap ===");
+    const std::filesystem::path dir =
+        std::filesystem::temp_directory_path() / "AverFormatTest_levelHeaderSniff";
+    std::filesystem::create_directories(dir);
+
+    const std::filesystem::path legacy = dir / "legacy.ocmap";
+    {
+        std::ofstream f(legacy, std::ios::binary | std::ios::trunc);
+        f << "OCMAP 1\nNAME T\nGROUND 0 0\nKILLZ -5000\n";
+    }
+    check(fmt::levelFileIsLegacyOcmap(legacy.string()),
+          "a file using GROUND/KILLZ reads as legacy");
+
+    const std::filesystem::path modern = dir / "modern.ocmap";
+    {
+        std::ofstream f(modern, std::ios::binary | std::ios::trunc);
+        f << "OCWORLD 1\nNAME T\nPLACE m.ocmesh 0 0 0 0 0 0 1\n";
+    }
+    check(!fmt::levelFileIsLegacyOcmap(modern.string()),
+          "a file using none of the six reads as NOT legacy, OCWORLD header and all");
+
+    // THE CASE THAT MATTERS MOST: AverProjects/ElectricDreams/Content/Maps/Default.ocmap and
+    // AverProjects/FirstPerson/Content/Maps/Default.ocmap are BOTH real, both currently load and
+    // save correctly, and BOTH start with the literal line `OCMAP 1` while using nothing but
+    // OCWORLD-only records underneath (SUN/SKY/FOG plus LANDSCAPE/PCGVOLUME/SCATTER for one,
+    // SUN/SKY/FOG/PLACEG for the other). A header-only version of this function read both as
+    // legacy and would have routed them into fmt::loadOcmap, which has no branch for any of SUN/
+    // SKY/FOG/LANDSCAPE/PCGVOLUME/SCATTER/PLACEG -- silently destroying the sky, the fog, the
+    // terrain and (for FirstPerson) the ground slab itself on the very first save. This reproduces
+    // that shape in miniature and pins the fix: an OCMAP-headed file using only OCWORLD records
+    // must NOT read as legacy.
+    const std::filesystem::path electricDreamsShaped = dir / "electric_dreams_shaped.ocmap";
+    {
+        std::ofstream f(electricDreamsShaped, std::ios::binary | std::ios::trunc);
+        f << "OCMAP 1\nNAME T\nSUN elev 30 azim 90\nSKY model physical\n"
+             "FOG exp density 0.0002\nPLACEG m.ocmesh 0 0 0 0 0 0 1 1 1\n";
+    }
+    check(!fmt::levelFileIsLegacyOcmap(electricDreamsShaped.string()),
+          "an OCMAP-headed file using only SUN/SKY/FOG/PLACEG reads as NOT legacy -- the header "
+          "token is not the same question as which records the file actually uses");
+
+    // A comment line and a blank line ahead of the real records must not fool the scan -- the same
+    // tolerance parseOcworld/parseOcmap themselves have for a file that opens with either.
+    const std::filesystem::path commented = dir / "commented.ocmap";
+    {
+        std::ofstream f(commented, std::ios::binary | std::ios::trunc);
+        f << "# exported by an old tool\n\nOCMAP 1\nNAME T\nGROUND 0 0\n";
+    }
+    check(fmt::levelFileIsLegacyOcmap(commented.string()),
+          "a leading comment/blank line does not hide a legacy record further down the file");
+
+    check(!fmt::levelFileIsLegacyOcmap((dir / "does_not_exist.ocmap").string()),
+          "a file that cannot be read is NOT reported as legacy -- the real loader is what reports that failure");
+
+    std::filesystem::remove_all(dir);
+}
+
 // Runs the self-checks, then every file named on the command line. Returns the failure count.
 int main(int argc, char** argv) {
     checkFnv();
@@ -844,6 +1019,9 @@ int main(int argc, char** argv) {
     checkOcworldScatter();
     checkOcworldLandscape();
     checkOcworldWater();
+    checkOldDispatchDroppedLegacyRecords();
+    checkOcmapRoundtrip();
+    checkLevelFileIsLegacyOcmap();
     if (argc < 2) {
         AVER_INFO("usage: FormatTest <file.ocbeam|file.ocmap> [more...]");
         return g_failures;

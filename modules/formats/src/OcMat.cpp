@@ -7,7 +7,6 @@
 
 #include <cstdio>
 #include <filesystem>
-#include <fstream>
 
 namespace aver::fmt {
 using namespace aver::fmt::detail;
@@ -374,11 +373,18 @@ bool saveOcmat(const std::string& path, const pbr::MaterialDesc& d, const OcMatE
     std::error_code ec;
     const std::filesystem::path p(path);
     if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);
-    if (!f) { if (err) *err = "could not open " + path + " for writing"; return false; }
     const std::string text = writeOcmat(d, extras);
-    f.write(text.data(), static_cast<std::streamsize>(text.size()));
-    if (!f) { if (err) *err = "write failed for " + path; return false; }
+
+    // WRITE TO A TEMPORARY AND SWAP, via writeFileTextAtomic (aver/platform/FileSystem.hpp) -- the
+    // same pattern aver::fmt::saveOcSave (OcSave.cpp) and aver_settings_flush (Settings.cpp)
+    // already ship with, lifted to the shared platform layer. This function used to open `path`
+    // directly with ios::trunc, which zeroes the file the instant it opens -- before writeOcmat's
+    // result has landed a single byte -- so a crash, a kill, or a full disk between the open and
+    // the write destroyed the material being saved rather than merely failing to update it.
+    if (!writeFileTextAtomic(path, text)) {
+        if (err) *err = "could not write " + path;
+        return false;
+    }
     return true;
 }
 

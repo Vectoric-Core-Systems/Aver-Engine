@@ -181,6 +181,31 @@ bool renameFile(const std::string& from, const std::string& to) {
 #endif
 }
 
+// Writes `size` bytes to `path` by way of a temporary, so `path` itself is only ever touched by
+// the rename that swaps a COMPLETE replacement into place. See the header comment for the full
+// argument; this is that same write-to-temp-then-swap pattern aver::fmt::saveOcSave and
+// aver_settings_flush already ship with, factored out to one place.
+bool writeFileBytesAtomic(const std::string& path, const void* data, usize size) {
+    const std::string tmp = path + ".tmp";
+    // The temporary is written with the plain, truncating writeFileBytes -- truncate-on-open is
+    // harmless here because `tmp` is not a file anything else depends on; the SWAP below is what
+    // makes `path` itself safe, not this write.
+    if (!writeFileBytes(tmp, data, size)) return false;
+    if (!renameFile(tmp, path)) {
+        // The temporary is removed on a failed swap so a later attempt does not inherit a stale
+        // one and the save directory does not accumulate ".tmp" debris. `path` is untouched
+        // either way -- the rename never started, so whatever was there (or was not) still is.
+        deleteFile(tmp);
+        return false;
+    }
+    return true;
+}
+
+// Writes `text` to the file safely; see writeFileBytesAtomic.
+bool writeFileTextAtomic(const std::string& path, const std::string& text) {
+    return writeFileBytesAtomic(path, text.data(), text.size());
+}
+
 // ---- File ---------------------------------------------------------------------------------------
 
 File::~File() { close(); }

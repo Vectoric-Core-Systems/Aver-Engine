@@ -101,6 +101,24 @@ public readonly partial struct Entity
         return SetInt("CMeshRenderer.flags", visible ? (flags | MeshVisibleBit) : (flags & ~MeshVisibleBit));
     }
 
+    private const int HiddenFromOwnerBit = 0x2;   // CMeshRenderer.flags bit 1 == kMeshRendererHiddenFromOwner
+
+    /// <summary>Whether this entity's mesh is hidden from ITS OWN entity's camera -- still drawn for
+    /// every other view, and still submitted to the shadow/GI passes. See
+    /// Components.hpp's kMeshRendererHiddenFromOwner for the full reasoning and
+    /// SandboxApp.cpp's scene-entity pass for where it is obeyed. False if the entity has no mesh.</summary>
+    public bool HiddenFromOwner => (GetInt("CMeshRenderer.flags") & HiddenFromOwnerBit) != 0;
+
+    /// <summary>Sets or clears the owner-hide bit, adding a mesh renderer if absent. Graph-authored
+    /// meshes reach this through GraphComponentTree's `hidden=owner` COMP attribute; nothing else in
+    /// this codebase calls it directly today, the same as SetTags before the first COMP TAG author.</summary>
+    public bool SetHiddenFromOwner(bool hidden)
+    {
+        EnsureMeshRenderer();
+        int flags = GetInt("CMeshRenderer.flags");
+        return SetInt("CMeshRenderer.flags", hidden ? (flags | HiddenFromOwnerBit) : (flags & ~HiddenFromOwnerBit));
+    }
+
     /// <summary>Sets the drawn mesh by asset path, adding a mesh renderer if absent.</summary>
     public bool SetMesh(string meshPath)
     {

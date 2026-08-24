@@ -115,6 +115,7 @@ public static class GraphComponentTree
                     e.SetMesh(meshPath);
                 if (c.Attributes.TryGetValue("material", out string? material) && material.Length > 0)
                     e.SetMaterial(material);
+                ApplyOwnerHide(e, c);
                 break;
 
             case "skeletalmesh":
@@ -131,6 +132,7 @@ public static class GraphComponentTree
                     e.SetMaterial(skinMat);
                 if (c.Attributes.TryGetValue("skeleton", out string? skel) && skel.Length > 0)
                     e.SetInt64("CSkeletalMesh.skeleton", Assets.ObjectIdOf(skel));
+                ApplyOwnerHide(e, c);
                 break;
 
             case "animator":
@@ -248,6 +250,27 @@ public static class GraphComponentTree
             Log.Warn($"[Graph] {classNameForLog}: component '{c.Id}' declared kind Fluid, but no " +
                      "fluid-spawn provider is installed -- this build has no simulated-fluids " +
                      "module linked, so it will exist as a plain transform and simulate nothing");
+    }
+
+    // `hidden=owner` ON A Mesh OR SkeletalMesh COMPONENT: keeps this mesh drawing for every camera
+    // except the one belonging to whatever entity it is a child of -- see Components.hpp's
+    // kMeshRendererHiddenFromOwner for the whole reasoning (why zero-cost by default, why the shadow
+    // still casts) and the FirstPerson template's own `COMP body` line for the motivating case: a
+    // first-person camera sits at the character's own eye position, INSIDE its skinned body, so with
+    // nothing to opt out the character fills its own screen with the inside of its own mesh.
+    //
+    // A STRING ATTRIBUTE, NOT A BARE BOOLEAN, on purpose -- `hidden=1` would answer "hidden from
+    // whom?" with nothing, and this codebase does not have a second audience for a mesh to be hidden
+    // from today (no per-player visibility, no editor-only ghosting through this mechanism). Reading
+    // it as a string leaves room for a future `hidden=always` or similar without a second attribute
+    // key or a format change -- the same opaque-string-now, meaning-later shape `kind=` and `hidden=`'s
+    // own sibling attributes already use throughout this file. Anything other than exactly "owner"
+    // (case-insensitively) is left alone rather than guessed at: a typo should draw the mesh it always
+    // did, not silently hide it from nobody or from everybody.
+    private static void ApplyOwnerHide(Entity e, GraphComponent c)
+    {
+        if (string.Equals(c.AttrString("hidden"), "owner", StringComparison.OrdinalIgnoreCase))
+            e.SetHiddenFromOwner(true);
     }
 
     // Attached, correct, and inert -- so say so ONCE, by name, rather than letting an author conclude
