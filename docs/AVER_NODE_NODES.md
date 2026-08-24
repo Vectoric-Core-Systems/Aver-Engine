@@ -1,29 +1,62 @@
 # Aver Node — Node Reference
 
-Every node type the graph system knows, as of `41d6566`. This is the parser's own vocabulary:
-each entry below is one `case` in `OcGraphParser.AddDefaultPins`
-(`scripting/csharp/Aver.Graph/OcGraphParser.cs:606-1054`), which is the ground truth for a node's
-default pin shape — not the editor palette, not this document's prose, not an older doc. Where the
-editor's own catalog (`sandbox/src/GraphNodeDefs.hpp`, `buildCatalog()` at lines 101-330) and the
-parser might disagree, **the parser wins**; see [Parser vs. editor catalog](#parser-vs-editor-catalog)
-for how that was checked.
+Every node type the graph system knows, as of `41d6566` — **and that pin is now 179 commits stale**
+(`git log --oneline 41d6566..HEAD`, checked against the current tip). Roughly thirty of those commits
+touched `OcGraphParser.cs` directly and several add whole node families this page never picked up:
+`SaveGame`/`LoadGame` (`bc26110`), `SetSkeleton` (`d6208dc`), and the three Synapse AI nodes
+`GetSynapseTarget`/`SynapseSteer`/`GetSynapsePerception` (`e463dbc`, `c77374e`) all have `case` labels
+in the parser today and no row anywhere below — the word "synapse" does not appear in this file. Do
+not trust "every one of them has a row below" two paragraphs down without re-checking against
+`OcGraphParser.cs` yourself.
+
+This is the parser's own vocabulary: each entry below is one `case` in
+`OcGraphParser.AddDefaultPins`. At `41d6566` that switch lived at
+`scripting/csharp/Aver.Graph/OcGraphParser.cs:606-1054`; at the current tip the same method has
+drifted to **lines 866-2321** (the file grew from ~1,089 lines to 2,370), which is the ground truth
+for a node's default pin shape — not the editor palette, not this document's prose, not an older doc.
+Where the editor's own catalog (`sandbox/src/GraphNodeDefs.hpp`, `buildCatalog()` at lines 101-330 as
+of `41d6566`) and the parser might disagree, **the parser wins**; see
+[Parser vs. editor catalog](#parser-vs-editor-catalog) for how that was checked.
 
 Compile-path behaviour is read from `scripting/csharp/Aver.Graph/GraphCompiler.cs` — specifically
-`EmitNode`'s topological switch (`:332`–`:638`), the `IsExecCapable*` predicate family
-(`:2386`–`:2580`), `IsExecOnlyNodeType` (`:3002`) and `EmitPullOutput`'s side-effect refusal
-(`:3037`–`:3045`). Those line numbers were re-derived for this revision; the ones this paragraph
-used to carry pointed into a version of the file about a thousand lines shorter.
+`EmitNode`'s topological switch, the `IsExecCapable*` predicate family, `IsExecOnlyNodeType` and
+`EmitPullOutput`'s side-effect refusal. The line numbers this paragraph carried before this pass
+(`:332`–`:638`, `:2386`–`:2580`, `:3002`, `:3037`–`:3045`) were checked against the commit that wrote
+them (`a524984`) and were already wrong there — `EmitNode` was at line 358, not 332, even on that
+commit. Re-derived against the current tip instead: `EmitNode` is `:358`–`:762`, the `IsExecCapable*`
+family is `:3069`–`:3434`, `IsExecOnlyNodeType` is `:3966`, and `EmitPullOutput`'s refusal throw is
+`:4007`–`:4012`. Expect these to drift again; re-derive rather than trust them.
 
 This page is about node *shapes* — what pins a `NODE` of a given type gets and what it does. For the
 class model, `PARAM`/`VAR`, and entry points, see **[the guide](VISUAL_SCRIPTING.md)**; for the
 `.ocgraph` file grammar itself (every record's syntax, and where the C++ and C# readers disagree),
 see **[`formats/FORMAT_SPECS.md` §10a](formats/FORMAT_SPECS.md)**.
 
-**144 node types**, across 18 families — counted from `graphNodeCatalog()` rather than remembered,
-and every one of them has a row below. `git log -p` on `OcGraphParser.cs` across its full history
-shows no `case` label for a node type ever removed: every commit that touched this file added to
-the vocabulary, never subtracted from it. The count in this line has been wrong before (it said 37
-while the palette shipped 124), which is the argument for deriving it rather than typing it.
+**144 node types**, across 18 families, was the count as of `41d6566` — counted from
+`graphNodeCatalog()` rather than remembered. That count is now stale and every one of them does
+**not** have a row below: see the correction at the top of this document. `git log -p` on
+`OcGraphParser.cs` across its full history shows no `case` label for a node type ever removed: every
+commit that touched this file added to the vocabulary, never subtracted from it — which is exactly
+why a number that only ever goes up needs re-deriving on every pass rather than carried forward. The
+count in this line has been wrong before (it said 37 while the palette shipped 124, then 124 while
+the palette shipped 144), which is the argument for deriving it rather than typing it. It has not
+been re-derived against the current tip in this pass; the paragraph below gives the current
+`kDomainGameplay` count from the editor's catalog (153) as the closest available substitute, but that
+is a different source from `graphNodeCatalog()`'s parser-vocabulary count this paragraph originally
+meant, and the two are not guaranteed to agree — see the "as of `41d6566`" correction above for the
+parser side, which currently has roughly 150 `case`-group breaks in `AddDefaultPins`, close to but
+not exactly reconciled with 153 here.
+
+**`graphNodeCatalog()` stopped being one single vocabulary as of `c608621`, and a bare count from it
+is now ambiguous — read the sentence above narrowly.** Every entry in that table carries a `domain`
+bitmask (`GraphNodeDomain` in `sandbox/src/GraphNodeDefs.hpp`): `kDomainGameplay` by default, and
+`kDomainMaterial` on 56 rows that commit added for a `DOMAIN material` graph — arithmetic on a
+surface, compiled to HLSL by an entirely different C++ compiler
+(`aver::pbr::compileMaterialGraph`, `modules/render.pbr/src/MaterialGraphHlsl.cpp`), never reachable
+through `OcGraphParser.AddDefaultPins` at all. This page and every table below describe the
+`kDomainGameplay` rows only, which is what "144 node types" above has only ever meant — 153 of the
+catalog's 209 rows today. The other 56 are a different vocabulary with a different ground truth; see
+**[`MATERIALS.md`](MATERIALS.md)**, not this page, for what they are.
 
 ## Contents
 

@@ -275,6 +275,54 @@ Then `Compile C#` — the toolbar button; `Tools → Compile Scripts` is the sam
 
 ---
 
+## Phase 9b — The material graph editor tab
+
+`sandbox/src/GraphEditor.cpp`, over `modules/render.pbr/src/MaterialGraphHlsl.cpp`. This is the
+**same** `.ocgraph` editor Aver Node already uses for gameplay graphs (`assetEditors_.registerFactory
+(&editor::makeGraphEditor)`, Phase 7) — not a second tool — reading the open file's own `DOMAIN`
+record (`GraphEditor::openGraphDomain()`) to decide which of two unrelated vocabularies it is
+currently editing. The full design reasoning for that vocabulary, the `DOMAIN` record itself, and
+`GRAPHREF` is **`docs/MATERIALS.md`**; this section covers only what changes about the *tab* once the
+file it has open says `DOMAIN material`.
+
+**What opens.** Any `.ocgraph`, exactly as Phase 7 already describes. There is no second asset type
+and no second factory — the tab only starts behaving differently once the file is parsed and its
+`DOMAIN` read, which is also why the editor is never wrong about which vocabulary to offer: it asks
+the same record the compiler will.
+
+**The palette follows the domain, node for node.** The add-node popup offers only the open graph's
+own vocabulary — a material graph's palette has no `Branch` or `CharacterMove`, a gameplay graph's
+has none of the 56 material nodes — because offering a node the graph's own compiler would then
+refuse is worse than offering nothing. Sixteen names exist in **both** vocabularies with genuinely
+different pins (gameplay's `Add` takes two scalars, since `PinType` has no vector types at all; the
+material `Add` takes two `float3`s), so spawning a node resolves by *(type, domain)* together, never
+by name alone — dropping `Add` into a material graph by name alone would have handed it the scalar
+shape, a node whose pins fit nothing around it.
+
+**Wiring is checked against the domain's own type rules, not one global rule.** A gameplay graph
+keeps exact-match pin typing, unchanged. A material graph's link check mirrors the compiler's own
+widening rules (`docs/MATERIALS.md` §7) exactly: a scalar splats, a wider vector truncates, and a
+`float2` into a `float3` stays refused on both sides, because inventing the third component is the
+compiler guessing. **The editor refuses exactly what the compiler refuses, and no more** — accepting
+a wire the compiler would then fail on is a worse trap than refusing one the compiler would happily
+accept.
+
+**The Viewport tab is a sphere, not the component tree.** A material graph has no `CLASS` record and
+no components, so it gets neither the component toolbar nor the component tree — both would be
+furniture for a thing this file cannot contain, and the toolbar's own warning ("no `CLASS` record,
+so nothing spawns them") is actively misleading on a file that is not supposed to have one. What
+fills the tab instead — the sphere, how it behaves under a compile error, under `AVER_MODULE_PBR=OFF`,
+and while the graph is mid-edit — is `docs/MATERIALS.md` §8; not repeated here.
+
+**Built without the PBR module, the tab still opens.** Editing the text and wiring nodes needs no
+renderer, but the Viewport tab says plainly that there is nothing to preview rather than showing a
+blank or stale image. `render.actorpreview` links `Aver.Render.PBR.Materials` **conditionally** for
+exactly this reason — it is built in every configuration, and an earlier attempt at this feature
+named a PBR-only target unconditionally and broke the `AVER_MODULE_PBR=OFF` build outright before an
+agent building that specific configuration caught it.
+
+---
+
 ## Phase 10 — Projects: what New, Open and Upgrade write
 
 `sandbox/src/ProjectScaffold.{hpp,cpp}`; the layout itself is docs/PROJECTS.md's.

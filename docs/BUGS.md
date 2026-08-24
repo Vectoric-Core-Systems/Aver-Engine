@@ -1,4 +1,147 @@
-# Verified bug list — 2026-08-03
+# Verified bug list
+
+Two sweeps, newest first. Each entry states the triggering input, because a defect nobody can
+reproduce is a rumour.
+
+---
+
+# 0.4.0 — 2026-08-25
+
+A release sweep at `b952b8a`, 146 commits after the 0.3.0 cut. Smaller than the 2026-08-03 sweep and
+differently shaped: it went looking for what a person hits in the first five minutes, not for what a
+static reading of the tree turns up.
+
+## Fixed
+
+### 1. The FirstPerson template rendered the inside of its own character — HIGH
+`sandbox/src/SandboxApp.cpp`, `modules/scene/include/aver/scene/Components.hpp`
+
+**Trigger: New Project → FirstPerson → Play.** That is the whole reproduction, and it is the first
+thing a new user does.
+
+The character gained a visible skinned body this release. Nothing told the renderer not to draw it
+for the camera living inside its head, so the frame was a near-solid dark brown fill — the probe read
+`(44,22,14)` — with a faint triangle-normal seam the only clue it was geometry at all. The log looked
+healthy throughout: five classes declaring, a game mode beginning play with the right pawn and
+controller, `11 drawn ... over 24 entities`.
+
+Fixed with one flag bit, `kMeshRendererHiddenFromOwner`, authored as `hidden=owner` on a `COMP` line.
+The mesh still goes through `submitShadowOnly`, so it casts its shadow, voxelises into GI, and stays
+in the ray-tracing geometry table — only the raster colour draw is skipped. After: probe
+`(203,214,216)`, sky; `1 owner-hidden` in the log; Voxi's shadow census still counting it among 16
+draws. Third person is unaffected and needs no second branch.
+
+### 2. Opening a legacy `.ocmap` and saving it deleted most of it — HIGH
+`sandbox/src/SandboxApp.cpp`, `modules/formats/src/OcWorld.cpp`, `modules/formats/src/OcMap.cpp`
+
+**Trigger: open any level using `ROOT`, `CLIENT`, `SURFACE`, `GROUND`, `KILLZ` or `DEFORM`, then
+save it.**
+
+`loadLevel` called `loadOcworld` for every level. `parseOcworld` accepts an `OCMAP` header as readily
+as an `OCWORLD` one, so it never failed — but `OcWorldData` has nowhere to put those six record
+kinds and no `DEFORM` branch at all. They were dropped on load, and `saveLevel` wrote back only what
+survived. Success was reported at every step.
+
+**The fix that was nearly shipped would have been worse than the bug.** Dispatching on the header
+token is the obvious approach and it is wrong: `AverProjects/ElectricDreams/Content/Maps/Default.ocmap`
+and `AverProjects/FirstPerson/Content/Maps/Default.ocmap` both begin with the literal line `OCMAP 1`
+while their content is pure OCWORLD grammar. A header check would have routed both into the legacy
+parser and destroyed their sky, fog, terrain and PCG volumes on first save. `levelFileIsLegacyOcmap`
+scans for the six legacy-exclusive records instead, and classifies all five real level files in the
+tree correctly.
+
+### 3. Four savers truncated the destination before knowing the new content was good — MEDIUM
+`modules/formats/src/OcGraph.cpp`, `OcMat.cpp`, `OcWorld.cpp`, `sandbox/src/GraphEditor.cpp`
+
+**Trigger: lose power, crash, or fill the disk during a save.** Rare per save; not rare across a
+project's life.
+
+Each opened `std::ofstream(path, ios::trunc)` directly, so the file was destroyed at `open()`.
+`OcSave.cpp` and `Settings.cpp` already shipped the temp-then-rename dance; it is now
+`writeFileBytesAtomic` / `writeFileTextAtomic` in the platform layer and all four go through it.
+`writeFileBytes`/`writeFileText` keep their old contract on purpose — `OcBt.cpp` and `OcNav.cpp` call
+them directly and their own comments accept the truncate risk for regenerable build output.
+
+Proved by falsification: reverting the implementation to the truncating one fails exactly the three
+new assertions that check the original file survives, and no others.
+
+### 4. Raising path-tracing quality on a live view removed the GPU — HIGH
+`modules/render.pt/src/PtSceneView.cpp`, `modules/rhi.d3d12/src/D3D12Device.cpp`
+
+**Trigger: with path tracing already running, raise its quality tier — Low to Epic reaches it most
+reliably.**
+
+Resizing the accumulator rewrote the denoiser's descriptors to the new size over buffers allocated at
+the old one. The shader walked off the end and the device was lost with `DXGI_ERROR_DEVICE_HUNG`.
+It read as intermittent because whether an overrun faults depends on what is allocated past the end,
+and it read as setting-specific because the overrun scales with the size of the jump.
+
+Allocate-once-plus-describe-every-time is the pattern; look for it wherever a resource is guarded by
+`if (!handle)` and its view is written unconditionally below. **D3D12 does not reject an oversized
+view at creation without the debug layer**, so nothing between the mistake and the dead GPU said a
+word. The RHI now refuses one outright. `--pt-quality-ramp` exercises it.
+
+### 5. A lost device was fed a fresh command list every frame — MEDIUM
+`modules/runtime/src/Engine.cpp`, `modules/rhi.d3d12/src/D3D12Device.cpp`
+
+`waitFence` detected device removal and **both callers discarded the bool**. `present` then advanced
+a fence value the device could never signal. The result was the engine "crashing with no message".
+`IDevice::deviceLost()` now exists, the reason is decoded and logged once, the window title says so,
+and the frame loop stops drawing. It does not exit — nothing can recreate the device, and exiting
+would take the explanation off the screen. `--device-lost-at <N>` stages it.
+
+## Open at 0.4.0
+
+These ship. Each is listed in the release notes; the triggering input is here.
+
+- **A fluid volume pancakes.** Trigger: simulate any fluid, including at the proportions its own unit
+  calibration produces.
+- **Vulkan never writes the shadow cascade map.** `pushRenderScope` discards the caller's render
+  targets. Trigger: build with `AVER_RHI_VULKAN=ON` and look for a cascade shadow. Masked by RT
+  shadows. Off by default.
+- **GI can be dominated by one saturated emitter.** The gather clamp (`AVER_VOX_MAXRAD`, 16.0) is
+  per component, so it bounds magnitude and not hue. Trigger: three 1.8-metre pure-red spheres under
+  a 100,000-lux sun. Workaround: scale them down.
+- **Saving a level, or an animation, reloads it** over the editor's undo history, selection and
+  camera. Trigger: save.
+- **Pre-SM6 hardware or `--force-caps no-dxc` silently drops UI, skinning, fluids, particles and
+  occlusion culling**, with no message.
+- **The occlusion culler retries its failed shader compile every frame.**
+- **The Voxi voxel-grid resolution control does nothing after startup.**
+- **A legacy `.ocmap` `DEFORM` placement is shown as a small static box**, there being no
+  deformable-cage system to draw it. It round-trips faithfully.
+- **`modules/runtime.game` is a diverged twin** of the sandbox's camera and scene walk. Nothing
+  instantiates it, so it received neither this release's owner-hide fix nor the earlier
+  culling-starves-render-features fix. Dead code that looks live.
+
+## The lesson from this sweep
+
+The 2026-08-03 sweep closed with *"nothing here was caught by the gates"*. This one is worse, and it
+is about the gates themselves.
+
+On 2026-08-18, `3302f89` made ray-traced sun shadows the engine default. The gate definitions were
+last edited 2026-08-02 and the baselines recorded 2026-08-11 — both before the flip. From that
+commit, **every gate that did not name an RT flag stopped measuring the raster path** and became a
+duplicate of its `-rt` twin. `centre` duplicated `rt`, `shadow` duplicated `shadow-rt`, `penumbra`
+duplicated `penumbra-rt`. Nine of eighteen gates went blind and the oracle kept reporting
+confidently.
+
+The eighteen value mismatches on their own looked exactly like ordinary shading drift across 146
+commits, and re-recording would have frozen the collapse in permanently. The **only** thing that
+caught it was the `penumbra` invariant, which exists solely to assert that two gates measuring
+different code paths still disagree — and which `-Record` counts as a failure precisely so that a
+broken invariant cannot be recorded away.
+
+This is the second time a default flip has silently eaten the oracle; the same thing happened when
+GI became the default, and the fix then was the same `--no-gi` flags now sitting beside `--no-rt`.
+
+**A gate that names no flag measures whatever the default happens to be, which is not a fixed
+quantity.** The invariant checks are not decoration around the probe values — on this evidence they
+are the more valuable half of the oracle.
+
+---
+
+# 2026-08-03
 
 Six independent lenses swept the tree at `f0d6ca4` and produced **36 candidates**. Every one was then
 given to a separate verifier prompted to *refute* it — to default to "this claim is wrong" and go

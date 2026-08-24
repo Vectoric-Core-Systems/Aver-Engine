@@ -9,6 +9,12 @@ the `.ocgraph` file grammar itself — every record's exact syntax, and where th
 disagree — see **[`formats/FORMAT_SPECS.md` §10a](formats/FORMAT_SPECS.md)**; this page is about
 what a graph *means*, that one is about what a graph *says*.
 
+**This page is specifically about the GAMEPLAY graph.** Since the `DOMAIN` record (§1), `.ocgraph`
+is a shared grammar for two unrelated languages — gameplay, described here, and a `DOMAIN material`
+graph that shades a surface instead of driving an actor, described in
+**[`MATERIALS.md`](MATERIALS.md)**. Everything below this point — the class model, `PARAM`/`VAR`,
+entry points, the Blueprint mapping — is gameplay-only and does not apply to a material graph.
+
 Every claim below was checked against the parser, the compiler, the bridge and the level-loading
 code that actually run it, not against an earlier design doc — several already turned out to be
 stale (see the note at the bottom). Where this page shows a `.ocgraph`/`.ocworld` fragment, it is
@@ -23,6 +29,41 @@ hand-editable, and read by both a C++ reader (`modules/formats/src/OcGraph.cpp`)
 (`Aver.Graph/OcGraphParser.cs`). A graph is nodes, typed pins (`float`/`int`/`bool`/`exec`) and
 `LINK` records between them; the editor's canvas (`sandbox/src/GraphNodeDefs.hpp` drives its
 palette) is one way to produce that text, but the text is the format, not the canvas.
+
+**A graph is now written in one of two entirely different LANGUAGES, and that is a separate axis
+from the SHAPE described below.** An optional `DOMAIN <name>` record, at most one per file and
+written directly under the `OCGRAPH` magic, says which:
+
+- **`DOMAIN gameplay`, or no `DOMAIN` record at all** — everything this page describes. Nodes call
+  the framework; `GraphCompiler.cs` compiles the graph to CLR IL.
+- **`DOMAIN material`** — a different vocabulary entirely, where nodes are arithmetic on a surface
+  (UV, world position, texture samples, a BRDF's inputs) and the graph compiles to HLSL through a
+  C++ compiler, `aver::pbr::compileMaterialGraph` (`modules/render.pbr/src/MaterialGraphHlsl.cpp`).
+  See **[`MATERIALS.md`](MATERIALS.md)** — this page does not cover that vocabulary, and the class
+  model, `PARAM`/`VAR`, entry points and everything else below this line do not apply to it: a
+  material graph has no `CLASS`, no `ENTRY`, and is not spawnable.
+
+**Absent means gameplay, and an unrecognised name means neither.** That asymmetry is deliberate,
+not an oversight: every `.ocgraph` written before this record existed is a gameplay graph and has
+to keep working untouched, so a missing `DOMAIN` cannot be an error. But a file that says
+`DOMAIN sound` (say) is telling this build it is something this build has never heard of, and the
+safe reading of that is "not mine" — it maps to `OcGraphDomain::Unknown` and every consumer skips
+it, rather than falling back to gameplay and trying to compile a graph whose author explicitly
+said it was not one. Two places open EVERY `.ocgraph` under a project without being asked
+(`HostBridge.DeclareGraphClasses` and `GameApp::discoverProjectGraphs`), and both would otherwise
+have reached a material graph and tried to run it as gameplay — not hypothetical, since the two
+kinds of file live in the same `Content` tree. The name is kept verbatim rather than normalised
+(round-trips through load/save byte for byte), so an older build opening a newer project does not
+quietly rewrite a domain it does not understand. See `formats/FORMAT_SPECS.md`'s own `DOMAIN`
+entry for the record's exact grammar.
+
+**The editor has no second notion of domain.** `GraphEditor::openGraphDomain()` reads the same
+`DOMAIN` record the compiler will read, so the add-node palette, the pin-type-compatibility check
+and everything else the canvas offers is filtered to the vocabulary that graph's own compiler
+actually accepts — a material graph's palette has no `Branch` and no `CharacterMove`, and a
+gameplay graph's has none of the material vocabulary, rather than either editor offering wiring
+whose only possible outcome is a compile error naming a node the palette itself suggested. See
+`MATERIALS.md` for what that vocabulary is and how the two disagree even on names they share.
 
 **Execution is direct IL, not generated C#.** `GraphCompiler` emits CLR IL straight from the graph
 via `System.Reflection.Emit` — there is no `Graph → C# source → Roslyn` step anywhere in the

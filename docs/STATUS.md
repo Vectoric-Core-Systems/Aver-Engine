@@ -14,6 +14,20 @@ here**. Several statements below still describe the tree as it was before them; 
 writing §4o–§4s are corrected in place and say so, and the rest have not been audited. Treat any
 claim in §4–§4n about what does *not* exist as suspect until checked against the tree.
 
+**A second, later hole, opened by the 0.4.0 phase.** The header above stops at `cb1d36f` (517
+commits, 2026-08-17); it is now `b952b8a` (685 commits, 2026-08-25). The 168 commits between them
+shipped node-graph materials (a `DOMAIN material` `.ocgraph` compiles to HLSL and shades a real
+surface via `GRAPHREF` — see `docs/MATERIALS.md`), Aver.Fluids (real-unit water/fluid authoring; no
+engine doc for it yet), a Vulkan backend that now presents frames and runs the full editor, Synapse
+(AI perception + behavior trees — `docs/SYNAPSE.md`), Aver Sound (procedural node-graph audio —
+`docs/SOUND.md`), a working SaveGame/LoadGame system, animation sockets and notify events, real
+device-lost handling, and a path-tracer crash fix. None of it is folded into the numbered §4-series
+sections below — that narrative simply stops short of all of it. What this pass DID do is correct, in
+place, the specific claims those 168 commits made outright **false** rather than merely incomplete —
+mostly "Vulkan is a stub", found in §0, §2, §4c-2 and §4d (Known gaps and defects). It did not
+attempt to write the missing sections; treat §3 onward with the same suspicion the paragraph above
+already asks for.
+
 Read this first after a context compaction, then `docs/ARCHITECTURE.md` (module DAG),
 `docs/ABI.md` (every C seam, export by export), `docs/SCENE_FRAMEWORK.md` (scene + gameplay),
 `docs/MINIMUM_SPECS.md` (hardware requirements / launcher spec),
@@ -33,7 +47,11 @@ content; games live in their own folders with a `.ocproject` manifest.
 
 - **Polyglot:** C++ (core/RHI/renderer/physics), C (stable ABI), C# (.NET 10 editor +
   scripting — not built yet), Rust (asset pipeline — not built yet).
-- **Backends:** DirectX 12 (implemented), DirectX 11 + Vulkan (stubs; Vulkan OFF, no SDK).
+- **Backends:** DirectX 12 (implemented, the primary path). Vulkan constructs a real device,
+  presents frames and runs the full editor as of an 11-commit maturation pass (`df16c95`..`c97f092`,
+  `git log --oneline df16c95..c97f092` — corrected from a wrong "18" this pass found uncited and
+  could not reproduce) — OFF by default in CMake, with one known open defect (§4d item 10). DirectX
+  11 is still a stub.
 - **Coordinate contract:** centimeters, +Z up, +X forward, +Y right, left-handed,
   row-major/row-vector matrices (`v * M`).
 
@@ -56,7 +74,10 @@ coexist and neither clobbers the other**, because `scripts/gates.baseline.txt` i
 and `scripts/gates.baseline.release.txt` is the Release one, so both binaries have to exist at once
 for either baseline to mean anything. `scripts/build.bat` is the real build (PowerShell wraps it);
 run `.bat` via the PowerShell tool, not Git Bash (`cmd //c` mangling). Add `/Zc:__cplusplus`
-already set. Vulkan: `-DAVER_RHI_VULKAN=ON` once the LunarG SDK is installed.
+already set. Vulkan: `-DAVER_RHI_VULKAN=ON` — no SDK install needed any more; headers and a
+SPIR-V-capable DXC are vendored under `third_party/` (`8a3eaf5`), and the loader ships with the GPU
+driver as `vulkan-1.dll`. Still OFF by default; presents frames and runs the editor, with one known
+defect (§4d item 10).
 
 ## 2. Repo layout (key paths)
 
@@ -77,7 +98,9 @@ modules/
                              (RHIResources.hpp) + shared shader prelude + Null backend + uiWndProc
   rhi.d3d12/ Aver.RHI.D3D12  THE backend (device, swapchain, MSAA, PBR, sky, lines, mesh-shader
                              path, ImGui host, capture, the generic factory/context)
-  rhi.d3d11/ rhi.vulkan/     stubs
+  rhi.d3d11/                 stub (13 lines; `createDevice` falls through to Null)
+  rhi.vulkan/ Aver.RHI.Vulkan presents frames, runs the full editor, does instanced draws;
+                             OFF by default (AVER_RHI_VULKAN); one known defect — §4d item 10
   render.voxi/               Aver.Render.Voxi (SHARED: settings + C ABI, Core only) and
                              Aver.Render.Voxi.Renderer (STATIC: GI/shadow/RayQuery, drives Aver.RHI)
   render.pbr/                Aver.Render.PBR (SHARED, Core only) + .Materials (STATIC, Aver.RHI) — §4e
@@ -467,12 +490,15 @@ backend's `dispatchMesh` binds the right root parameters.
 
 ### The feature-absent path
 
-`IDevice::resources()` returns `nullptr` by default, and no stub backend overrides it. D3D11 and
-Vulkan never construct a device at all — their factories return `nullptr` and `createDevice` falls
-through to Null. `VoxiRenderer::init` checks the factory first, logs
-`[Voxi] init declined: backend exposes no resource factory (no GPU support)` and returns `false`;
-`shutdown()` is safe after a declined init and safe called twice. Verified by driving a Null device
-directly, not only by reading the code.
+`IDevice::resources()` returns `nullptr` by default, and the D3D11 stub does not override it — its
+factory returns `nullptr` and `createDevice` falls through to Null. **Vulkan is no longer in this
+paragraph.** Since the 11-commit maturation pass (`df16c95`..`c97f092`; see §1's correction),
+`VulkanDevice::resources()`
+returns a real `IResourceFactory` backed by an actual `VkDevice`, so it is D3D11 and Null that decline
+here now, not Vulkan. `VoxiRenderer::init` still checks the factory first for whichever backend
+genuinely has none, logs `[Voxi] init declined: backend exposes no resource factory (no GPU support)`
+and returns `false`; `shutdown()` is safe after a declined init and safe called twice. Verified by
+driving a Null device directly, not only by reading the code.
 
 ### Step 9: who decides whether a ray may be traced
 
@@ -1379,7 +1405,18 @@ numbers have gaps in them.
 
 **Renderer**
 2. **RT ambient occlusion / reflections.** The TLAS already exists, so this is mostly shader work.
-3. **Path tracing.** Declared only; would reuse the same acceleration structure.
+3. ~~**Path tracing.** Declared only; would reuse the same acceleration structure.~~ **WRONG as
+   written, corrected.** Path tracing is implemented (`PtSceneView`, §4b): a progressive,
+   still-camera reference render off the real scene's own acceleration structure, reachable from
+   `--pt-scene` at startup or the editor's own Project Settings ▸ Path Tracing ▸ Quality control at
+   any later frame. It renders static geometry only, sky-only lighting, and flat albedo — no
+   textures. A crash fixed in `a729357`: raising the quality tier on an already-running view (its
+   ladder runs 480×270 pixels at Low to 1280×720 at Epic) resized the accumulator but left the
+   denoiser's descriptor views pointing at the old, smaller allocation, which the GPU then walked off
+   the end of — `DXGI_ERROR_DEVICE_HUNG`, silent under the default no-debug-layer build.
+   `--pt-quality-ramp [N]` exists to reproduce it under verification, and `setSrvBuffer`/
+   `setUavBuffer` now refuse a view that does not fit its buffer instead of only the debug layer
+   catching it.
 4. **No temporal accumulation** on GI. With the volume rebuilt each frame this is the main remaining
    source of GI instability now that the injection race is fixed.
 5. GI is a **single volume**, not cascaded — large scenes will not fit at useful resolution.
@@ -1428,9 +1465,18 @@ numbers have gaps in them.
     performance data — it was never the missing Release build. Whoever picks this up should add the
     timer rather than only flipping the sync interval: a `--no-vsync` run measures a frame rate,
     a timer measures a frame, and the second is what a renderer needs. **New, deliberately open.**
-10. D3D11 and Vulkan backends are still **stubs** — D3D12 is the only working backend, so
-    "supports DirectX 12" is a hard requirement. Both decline cleanly: `createDevice` falls through
-    to Null, `resources()` is null, and `VoxiRenderer::init` logs and returns false.
+10. **D3D11 is still a stub — D3D12 is the only backend the shipped product requires**, so
+    "supports DirectX 12" remains the hard requirement. `createDevice` falls through to Null,
+    `resources()` is null, and `VoxiRenderer::init` logs and returns false.
+    **Vulkan is no longer in this item — it was, through `df16c95`.** Eleven commits
+    (`df16c95`..`c97f092`, re-counted this pass — the document previously said "eighteen," which
+    `git log --oneline df16c95..c97f092` does not support) took it from a 13-line stub returning
+    `nullptr` to a backend that
+    constructs a real device, presents frames, runs the full editor and does instanced draws, with
+    nothing leaking at teardown (verified — `972dac7`). It is still OFF by default in CMake
+    (`AVER_RHI_VULKAN`) and has **one known open defect**: `pushRenderScope` discards the caller's
+    render targets, so the shadow cascade map is never written on Vulkan (found while verifying
+    instanced draws, `c97f092`).
 
 **Scripting**
 11c. **`AverBehaviour` cannot reach the SCENE.** The lifecycle, the load context, the exception
