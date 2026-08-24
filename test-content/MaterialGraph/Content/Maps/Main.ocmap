@@ -1,0 +1,20 @@
+OCWORLD 1
+# Two cubes on a floor, side by side, lit by one sun. Centimetres, +X forward, +Y right, +Z up.
+#
+# The LEFT cube (-Y) is the control: M_PlainCube, no graph, shaded the way every material in this
+# engine has always been shaded. The RIGHT cube (+Y) is M_GraphCube, whose .ocmat differs from the
+# control's by exactly one GRAPHREF line. Nothing else about the two placements differs -- same mesh,
+# same scale, same height, same distance from the camera -- so any difference in the picture is the
+# graph and cannot be anything else.
+NAME MaterialGraph
+SUN dir 0.304027 0.406402 0.861629 color 1 0.98 0.92 lux 100000
+SKY model physical
+
+# The floor, its top surface exactly at z = 0. cube.ocmesh is an engine BUILT-IN unit cube spanning
+# +/-1 (no file on disk -- SandboxApp registers it under this path's hash), so a scale of S gives a
+# half-extent of S centimetres.
+PLACEG Meshes/cube.ocmesh 0 0 -10 0 0 0 600 600 10 M_PlainCube
+
+# The pair. 120 cm apart, 60 cm half-extent, sitting on the floor.
+PLACE Meshes/cube.ocmesh 0 -120 60 0 0 0 60 M_PlainCube
+PLACE Meshes/cube.ocmesh 0  120 60 0 0 0 60 M_GraphCube

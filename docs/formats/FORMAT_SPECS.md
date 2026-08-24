@@ -340,6 +340,8 @@ GRAPH{
 
 Rules: `TEX slot {guid:…|path:…} uvN colorspace` binds an `.octex` by GUID (path fallback). `PARAM` scalars/vectors are shading defaults; a material **instance** (`.ocmat` with `PARENT {guid}`) overrides only listed params (Unreal-MID-equivalent, pay-for-what-you-use). The optional `GRAPH{}` block is a small node list (evaluated by the material compiler to HLSL/SPIR-V permutations); most materials never need it. Cooked: the compiler resolves the graph to a shader-permutation key + a packed parameter block stored in a `MATL` chunk inside `.ocpak`. This deliberately avoids the UE editor-material-recompile crash (recon `arch §6`): compilation is offline, runtime just binds params + a precompiled PSO.
 
+`GRAPHREF <path>` names a `DOMAIN material` `.ocgraph` (§`OCGRAPH`) by its content-relative path — the rest of the line, so a path containing spaces is not cut short, and the same content-root convention `COMP mesh=` uses (never with the content directory on the front). It is a different mechanism from the inline `GRAPH{}` block above: `GRAPHREF` points at a graph asset a project authors and iterates on in the graph editor, while `GRAPH{}` is a small node list written inline in the material file itself. A file may carry either, both, or neither. Nothing in the `.ocmat` reader/writer resolves the path, loads the graph, or checks that it compiles — it is recorded verbatim for a loader to pass to `pbr::MaterialGraphRegistry::add`, which compiles it and returns the id that ends up in `MaterialConstants::graphId` (never round-tripped through the file itself, since the id is only stable for the current process).
+
 ---
 
 ## 8. `.ocskel` — skeletal mesh + skeleton

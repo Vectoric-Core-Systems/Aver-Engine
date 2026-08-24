@@ -142,6 +142,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #if AVER_MODULE_PBR
 #include "aver/pbr/Material.hpp"
 #include "aver/pbr/MaterialGpu.hpp"
+#include "aver/pbr/MaterialGraphRegistry.hpp"
 #include "aver/pbr/MaterialSystem.hpp"
 #include "aver/pbr/PbrShaders.hpp"
 #include "aver/formats/OcMat.hpp"
@@ -3133,6 +3134,42 @@ public:
 // material block: it returns a pbr::MaterialHandle, so the SIGNATURE needs the module, not just
 // the body. Its callers -- the level loader and loadProjectMaterials -- are both already guarded.
 #if AVER_MODULE_PBR
+    // Turns an .ocmat's GRAPHREF path into the gMaterialGraphId its constants carry. 0 for a
+    // material with no GRAPHREF, and 0 for one whose graph will not load or compile.
+    //
+    // A BROKEN GRAPH DOES NOT TAKE THE MATERIAL DOWN WITH IT. Returning 0 means the surface falls
+    // back to the stock path -- the factors and maps the same .ocmat already declares -- so an
+    // author with a half-wired graph still sees their object, in roughly the right colour, and can
+    // go on placing it while they fix the graph. Refusing the material instead would take the whole
+    // object out of the scene and make a shading mistake present as a missing asset, which is the
+    // one reading that sends someone looking in the wrong place entirely. The reason is logged
+    // either way, by MaterialGraphRegistry::add or here.
+    u32 resolveMaterialGraph(const std::string& graphRef) {
+        if (graphRef.empty()) return 0;
+        const std::string content = project_.contentDir();
+        if (content.empty()) return 0;
+
+        // CONTENT-RELATIVE, the same convention COMP mesh= uses in .ocgraph and TEX uses in this
+        // very file: a path with the content directory on the front resolves to nothing, silently,
+        // which is a mistake worth not repeating here.
+        std::string path = content + "\\" + graphRef;
+        for (char& c : path) if (c == '/') c = '\\';
+
+        // ALREADY COMPILED? Two materials naming one graph is ordinary -- a stone and a wet stone
+        // sharing a pattern -- and asking the registry first means the graph is read and compiled
+        // once, and both materials get the same id rather than two arms doing the same arithmetic.
+        if (const u32 known = pbr::materialGraphs().idOf(path)) return known;
+
+        fmt::OcGraphData g;
+        std::string err;
+        if (!fmt::loadOcgraph(path, g, &err)) {
+            AVER_ERROR("[MaterialGraph] '{}' could not be read, so the material shades as a stock "
+                       "one: {}", path, err);
+            return 0;
+        }
+        return pbr::materialGraphs().add(path, g.name, g);
+    }
+
     // Returns the material a surface token names, loading it on first use. 0 when the project has none.
     pbr::MaterialHandle materialForSurface(const std::string& name) {
         if (name.empty()) return 0;
@@ -3155,8 +3192,10 @@ public:
                 fmt::OcMatExtras extras;
                 std::string err;
                 if (!fmt::loadOcmat(path, d, &extras, &err)) { AVER_WARN("[Material] {}", err); break; }
+                d.graphId = resolveMaterialGraph(extras.graphRef);
                 h = pbr::MaterialLibrary::get().create(d);
-                if (h) AVER_INFO("[Material] '{}' loaded from {}", d.name, path);
+                if (h) AVER_INFO("[Material] '{}' loaded from {}{}", d.name, path,
+                                 d.graphId ? " (graph " + std::to_string(d.graphId) + ")" : "");
                 break;
             }
         }

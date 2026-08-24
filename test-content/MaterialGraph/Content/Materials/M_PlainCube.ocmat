@@ -1,0 +1,15 @@
+OCMAT 1
+# THE CONTROL. Every value here is identical to M_GraphCube's; the two files differ by exactly one
+# line, which is that one has a GRAPHREF and this one does not. Keep them that way -- the proof this
+# project exists to give is worth nothing if the pair drift apart for any other reason.
+SHADER standard
+BLEND opaque
+CULL back
+FLAGS twosided=0 castshadow=1
+
+PARAM baseColorFactor 0.55 0.55 0.58 1.0
+PARAM metallicFactor 0.0
+PARAM roughnessFactor 0.65
+PARAM emissiveFactor 0.0 0.0 0.0
+PARAM normalScale 1.0
+PARAM occlusionStrength 1.0

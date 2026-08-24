@@ -122,6 +122,13 @@ bool parseOcmat(std::string_view text, pbr::MaterialDesc& out, OcMatExtras* extr
         const auto after = [&line](std::string_view tok) {
             return line.substr(static_cast<usize>(tok.data() - line.data()) + tok.size());
         };
+        // GRAPH may glue its opening brace onto the keyword when the block opens on the same line
+        // ("GRAPH{", the only form the editor and every fixture in this tree write), so the token
+        // this loop sees is as often "GRAPH{" as bare "GRAPH". `graphKey` strips one trailing '{'
+        // before the GRAPH comparison further down, so that comparison can test the keyword exactly
+        // rather than by prefix -- see that branch for why the prefix test had to go.
+        const std::string_view graphKey =
+            (!key.empty() && key.back() == '{') ? key.substr(0, key.size() - 1) : key;
 
         if (equalsCI(key, "OCMAT")) {
             const i32 version = t.size() > 1 ? parseI32(t[1], 1) : 1;
@@ -163,6 +170,11 @@ bool parseOcmat(std::string_view text, pbr::MaterialDesc& out, OcMatExtras* extr
         } else if (equalsCI(key, "PARENT")) {
             const TexRefParse p = parseTexRef(after(key));
             if (p.ok) { ex.parentId = p.ref.id; ex.parentPath = p.ref.path; }
+        } else if (equalsCI(key, "GRAPHREF")) {
+            // Rest-of-line, trimmed -- NOT t[1] -- the same choice NAME makes a few branches up and
+            // DESCRIPTION makes in OcGraph.cpp, because a content path may contain spaces and a
+            // single token would cut it at the first one and point at a file that does not exist.
+            if (t.size() > 1) ex.graphRef = std::string(trim(after(key)));
         } else if (equalsCI(key, "PARAM")) {
             if (t.size() < 3) continue;
             const std::string_view p = t[1];
@@ -218,9 +230,16 @@ bool parseOcmat(std::string_view text, pbr::MaterialDesc& out, OcMatExtras* extr
                               ocmatColorSpace(slot), ocmatColorSpace(slot));
                 }
             }
-        } else if (startsWithCI(key, "GRAPH")) {
+        } else if (equalsCI(graphKey, "GRAPH")) {
             ex.hasGraph = true;
-            // The `{` may be on this line (`GRAPH{`) or the next.
+            // NARROWED FROM A PREFIX TEST. This used to be startsWithCI(key, "GRAPH"), which also
+            // matches GRAPHREF -- a real record now, parsed above -- and would silently steal its
+            // line into this brace-skipping block, discarding the referenced path with no warning at
+            // all: exactly the trap this record's own history warns about. Comparing `graphKey`
+            // rather than `key` is what lets the test stay an exact equalsCI rather than widening
+            // back to a prefix: `graphKey` has already dropped the brace that glues onto the keyword
+            // when the block opens on the same line ("GRAPH{"), which is the only form this tree's
+            // editor and fixtures write. The `{` this block skips may be on this line or the next.
             int depth = 0;
             for (const char c : line) {
                 if (c == '{') ++depth;
@@ -335,6 +354,12 @@ std::string writeOcmat(const pbr::MaterialDesc& d, const OcMatExtras* extras) {
             s += "{path:" + ex.parentPath + "}";
         }
         s += "\n";
+    }
+    if (!ex.graphRef.empty()) {
+        // Recorded verbatim, exactly as GRAPHREF was parsed -- see OcMatExtras::graphRef. Nothing in
+        // this format layer reads the referenced .ocgraph or resolves the path; a caller that wants
+        // the compiled graph goes through pbr::MaterialGraphRegistry instead.
+        s += "\nGRAPHREF " + ex.graphRef + "\n";
     }
     if (ex.hasGraph) {
         s += "\n# The GRAPH block of the source material was dropped: nothing compiles one yet, so\n"

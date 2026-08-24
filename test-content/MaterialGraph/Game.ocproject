@@ -1,0 +1,22 @@
+OCPROJECT 1
+# The material-graph proof: two cubes, identical but for one line in one .ocmat.
+#
+# It exists because "a node graph shades a surface" cannot be checked by a unit test. The emitter has
+# one (MaterialGraphTest, which hands its output to dxc), and the registry has one, and both can pass
+# while nothing reaches a pixel -- the id never packed, the pipeline never rebuilt, the shader never
+# recompiled with the generated function in it. A picture of two cubes that differ is the only thing
+# that closes that gap.
+#
+# THE SECOND CUBE IS THE CONTROL and is the whole reason this is a project rather than a screenshot.
+# M_PlainCube and M_GraphCube declare the SAME PARAM block; the only difference between them is that
+# one carries a GRAPHREF. So if the graph does nothing the two cubes are identical, and if the graph
+# broke the stock path they are both wrong together -- either way the picture says which.
+#
+# CREATEDWITH tracks the current engine version on purpose: an older value raises the project-upgrade
+# modal on load, and a modal blocks the headless run this map is meant to be driven by. NavRange's own
+# manifest says the same thing for the same reason.
+NAME MaterialGraph
+ENGINE Aver 0.3.0
+CREATEDWITH 0.3.0
+CONTENT Content
+STARTMAP Maps/Main.ocmap

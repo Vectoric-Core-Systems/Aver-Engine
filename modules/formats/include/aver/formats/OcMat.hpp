@@ -1,6 +1,7 @@
 #pragma once
 // .ocmat — the MATERIAL format (FORMAT_SPECS.md §7), text, OC dialect. Parses straight into
-// pbr::MaterialDesc; the optional GRAPH{} block is detected, reported and skipped.
+// pbr::MaterialDesc; the optional GRAPH{} block is detected, reported and skipped. A separate
+// GRAPHREF record names a compiled DOMAIN material .ocgraph by path (see OcMatExtras::graphRef).
 #include "aver/pbr/Material.hpp"
 
 #include <string>
@@ -17,6 +18,15 @@ struct OcMatExtras {
     // PARENT {guid|path}. Recorded, never applied.
     u64         parentId = 0;
     std::string parentPath;
+
+    // GRAPHREF <path>. The path to a DOMAIN material .ocgraph that shades this material, recorded
+    // here VERBATIM and relative to the project's content root -- the same convention COMP mesh=
+    // uses in .ocgraph (ActorScript.hpp's canonicalMeshPath), never with the content directory on
+    // the front. Nothing in this format layer resolves the path, loads the graph, or checks that it
+    // compiles: that is pbr::MaterialGraphRegistry::add's job, once some loader has both the graph
+    // and this path in hand and can turn one into the runtime-assigned id that MaterialDesc::graphId
+    // wants (see that field's own comment for why the id is never round-tripped through a file).
+    std::string graphRef;
 
     bool hasGraph = false;
     u32 uvSet[pbr::kTextureSlotCount] = {};   // TEX ... uvN; only uv0 reaches a shader

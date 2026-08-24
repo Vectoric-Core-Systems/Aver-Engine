@@ -34,6 +34,10 @@ add_library(Aver.Render.PBR.Materials STATIC
   # see MaterialGraphHlsl.hpp's own header comment. It borrows Aver.Formats' data types (below) and
   # calls nothing in it; the caller does the parsing.
   src/MaterialGraphHlsl.cpp
+  # The process's set of material graphs and the one function they compile to. Separate from the
+  # emitter above because the emitter is pure -- graph in, text out, no state -- and this is the
+  # bookkeeping that decides WHICH graphs exist and what id each holds.
+  src/MaterialGraphRegistry.cpp
   src/MaterialSystem.cpp
   src/PbrShaders.cpp)
 

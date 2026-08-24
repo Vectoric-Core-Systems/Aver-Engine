@@ -136,6 +136,18 @@ if(TARGET Aver.Render.PBR.Materials)
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
 
+# MaterialGraphRegistryTest -- pbr::MaterialGraphRegistry's bookkeeping: the ids it hands out, the
+# revision it bumps, and that it never recycles an id. NOT dxc: this is about the registry's own
+# state, not about whether the HLSL it assembles compiles, which MaterialGraphTest already covers --
+# see that file's header for why a real shader compiler is load-bearing there and not here.
+if(TARGET Aver.Render.PBR.Materials)
+  add_executable(MaterialGraphRegistryTest src/MaterialGraphRegistryTest.cpp)
+  target_link_libraries(MaterialGraphRegistryTest PRIVATE
+    Aver.Render.PBR.Materials Aver.Formats Aver.RHI Aver.Core Aver.Platform)
+  set_target_properties(MaterialGraphRegistryTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
 # ConvertTool -- drives the importer over a real file and writes the whole .oc* triple. Not a test:
 # a small harness so the end-to-end path can be exercised without the editor's UI.
 add_executable(ConvertTool src/ConvertTool.cpp)

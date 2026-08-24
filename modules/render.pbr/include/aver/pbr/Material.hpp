@@ -102,6 +102,16 @@ struct MaterialDesc {
     f32  layer1UvScale = 1.0f;
 
     TextureRef textures[kTextureSlotCount];
+
+    // WHICH MATERIAL GRAPH SHADES THIS, or 0 for none -- which is every material anyone has ever
+    // authored, and still most of them. See pbr::MaterialGraphRegistry.
+    //
+    // RUNTIME-ASSIGNED, UNLIKE EVERY OTHER FIELD HERE, and the distinction is worth stating because
+    // this struct is otherwise purely what a file said. What the FILE says is a PATH (.ocmat's
+    // GRAPHREF record); the id is what the registry hands back for that path in THIS process, and
+    // it means nothing in another one. So a loader fills this in after parsing, and nothing ever
+    // writes it back out to a file.
+    u32 graphId = 0;
 };
 
 // The material features the editor and the bindings may advertise.

@@ -661,6 +661,10 @@ private:
     // destroyed on the ray-tracing on/off edge as well as on a resize -- and setSettings, which is
     // where that edge is seen, is not told a resolution.
     u32  rtHistWantW_ = 0, rtHistWantH_ = 0;
+    // The pbr::MaterialGraphRegistry revision the scene pipelines were last compiled against. See
+    // prePass, which rebuilds them when it moves. ~0 so the first frame after construction cannot
+    // accidentally match a real revision.
+    u64  scenePipelineGraphRev_ = ~0ull;
     // Whether anything will EVER write the ray-traced histories under the current settings. Four
     // textures at the SCENE render size (2x RG32Float + 2x RGBA16F, so 32 bytes per pixel between
     // them -- 144 MB at this machine's 2750x1639 scene view, 225 MB at a full 3532x1987) used to be

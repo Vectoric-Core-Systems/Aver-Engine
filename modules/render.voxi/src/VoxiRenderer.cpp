@@ -4,6 +4,7 @@
 #include "aver/voxi/VoxiRenderer.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/Math.hpp"   // light-frustum fit: Vec3 / Mat4::lookAtLH
+#include "aver/pbr/MaterialGraphRegistry.hpp"
 #include "aver/pbr/MaterialSystem.hpp"
 #include "aver/pbr/PbrShaders.hpp"
 #include "aver/voxi/VoxiGiShaders.hpp"   // kGiSrvCount/kGiUavCount: the "typed twice" fix below
@@ -143,9 +144,34 @@ rhi::PipelineLayout giLayout() {
 }
 
 // Returns the prelude Voxi's HLSL compiles on top of: the RHI's shared declarations, then the
-// material system's BRDF and Aver* contract. Owned by a static, because the caller borrows it.
+// material system's BRDF and Aver* contract, then -- when the project has any -- the one
+// averEvalMaterial its material GRAPHS compile to. Owned by a static, because the caller borrows it.
+//
+// THE DEFINE IS IN THE TEXT, NOT IN THE -D LIST, and that is not a stylistic choice. AVER_MATERIAL_GRAPH
+// is what removes the stock averEvalMaterial from the material prelude so the generated one can take
+// its place; if it arrived as a -D it would have to be added to EVERY shader compiled against this
+// prelude, compute ones included, and the one that got missed would end up with both definitions and
+// fail to link with a duplicate-function error a long way from the cause. Putting it between the two
+// preludes makes it impossible to get wrong: any shader that sees the graph function also saw the
+// define that made room for it.
+//
+// REBUILT WHEN THE REGISTRY MOVES, not once per process. Materials are loaded when a PROJECT opens,
+// which is long after these pipelines are first created, so a prelude fixed at startup would never
+// contain a single graph. Keyed on the revision rather than the content so the common case -- no
+// graphs at all, which is every project that exists today -- rebuilds nothing and produces byte for
+// byte what it always did.
 const char* voxiShaderPrelude() {
-    static const std::string s = std::string(rhi::sharedShaderPrelude()) + pbr::materialShaderPrelude();
+    static std::string s;
+    static u64 built = ~0ull;
+    const u64 rev = pbr::materialGraphs().revision();
+    if (built != rev) {
+        s = std::string(rhi::sharedShaderPrelude());
+        const std::string& graphs = pbr::materialGraphs().hlsl();
+        if (!graphs.empty()) s += "\n#define AVER_MATERIAL_GRAPH 1\n";
+        s += pbr::materialShaderPrelude();
+        s += graphs;
+        built = rev;
+    }
     return s.c_str();
 }
 
@@ -504,6 +530,19 @@ void VoxiRenderer::submit(rhi::MeshHandle mesh, const f32 world[16], const f32 b
 // Runs Voxi's frame: acceleration structures, shadow map, then voxelise and filter the volume.
 void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
     if (!giReady_) return;
+    // A MATERIAL GRAPH THAT APPEARED SINCE THESE PIPELINES WERE BUILT. Materials load when a project
+    // opens, which is after createScenePipelines has already run, so without this a graph would be
+    // registered, hold a valid id, write that id into its constant block -- and be shaded by a
+    // pixel shader whose switch has no arm for it, which is silently the stock material. Checked
+    // here rather than pushed from the loader because the loader is in the editor and this is in the
+    // renderer: a pull on a revision number cannot be forgotten by a future third caller.
+    if (scenePipelineGraphRev_ != pbr::materialGraphs().revision()) {
+        scenePipelineGraphRev_ = pbr::materialGraphs().revision();
+        AVER_INFO("[Voxi] rebuilding scene pipelines for {} material graph(s)",
+                  pbr::materialGraphs().count());
+        if (!createScenePipelines(dev_->sampleCount(), dev_->backbufferFormat(), dev_->depthFormat()))
+            AVER_ERROR("[Voxi] scene pipelines could not be rebuilt for the material graphs");
+    }
     ++rtFrameIndex_;   // a pure per-frame count; see the member's own comment for why
     // Sampled at the TOP of the feature's frame, so consecutive readings are one frame apart
     // whatever the passes below do. The first sample after the warm-up is discarded with the rest.
@@ -1774,6 +1813,7 @@ void VoxiRenderer::onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rh
     if (!res_ || !giReady_) return;
     if (!createScenePipelines(sampleCount, color, depth))
         AVER_ERROR("[Voxi] scene pipelines could not be rebuilt for {} sample(s)", sampleCount);
+    scenePipelineGraphRev_ = pbr::materialGraphs().revision();
     // Remembered even when the call below decides to allocate nothing: setSettings needs a size to
     // create at if ray tracing is switched on later, and it is never told one.
     rtHistWantW_ = width;
@@ -2288,6 +2328,10 @@ bool VoxiRenderer::createPipelines() {
     // --- 6-10. everything that bakes the sample count and the target formats. ---
     const bool sceneOk = createScenePipelines(dev_->sampleCount(), dev_->backbufferFormat(),
                                               dev_->depthFormat());
+    // Recorded HERE and not inside createScenePipelines, because onRenderTargetsChanged also calls
+    // that and a resize is not a graph change; what this remembers is "the pipelines have seen this
+    // revision", and both callers leave that true.
+    scenePipelineGraphRev_ = pbr::materialGraphs().revision();
 
     return shadowPso_ && voxelPso_ && clearPso_ && mipPso_ && sceneOk;
 }

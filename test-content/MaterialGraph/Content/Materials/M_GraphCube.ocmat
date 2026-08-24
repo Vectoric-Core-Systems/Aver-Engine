@@ -1,0 +1,23 @@
+OCMAT 1
+# THE SAME MATERIAL AS M_PlainCube, PLUS ONE LINE. Every PARAM below matches that file exactly, so
+# with the GRAPHREF removed this material renders indistinguishably from the control -- which is
+# what makes the pair a proof rather than two unrelated surfaces.
+#
+# GRAPHREF names a `DOMAIN material` .ocgraph, content-relative. What it drives is BaseColor and
+# Roughness; everything the graph does not drive -- metallic, the normal, emissive, occlusion,
+# opacity -- still comes from the PARAM block below, which is the partial-graph behaviour the
+# AverAuthored split in PbrShaders.cpp exists to provide. Change baseColorFactor here and the cube
+# does NOT change, because the graph overwrote that field; change metallicFactor and it does.
+SHADER standard
+BLEND opaque
+CULL back
+FLAGS twosided=0 castshadow=1
+
+PARAM baseColorFactor 0.55 0.55 0.58 1.0
+PARAM metallicFactor 0.0
+PARAM roughnessFactor 0.65
+PARAM emissiveFactor 0.0 0.0 0.0
+PARAM normalScale 1.0
+PARAM occlusionStrength 1.0
+
+GRAPHREF Materials/MG_Bands.ocgraph

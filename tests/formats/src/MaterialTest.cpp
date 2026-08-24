@@ -181,6 +181,83 @@ static void testTolerance() {
     }
 }
 
+// Checks the GRAPHREF record: the path to a compiled DOMAIN material .ocgraph. Kept separate from
+// testFullParse's kFull fixture because kFull already carries an inline GRAPH{} block, and this
+// test needs a "both records in one file" case -- a different combination from what kFull covers.
+static void testGraphRef() {
+    AVER_INFO("=== .ocmat: GRAPHREF ===");
+    std::string err;
+
+    // A path with a space and mixed case -- read as the REST OF THE LINE, trimmed, not a single
+    // token, and not normalised in any way.
+    pbr::MaterialDesc d;
+    fmt::OcMatExtras ex;
+    check(fmt::parseOcmat("OCMAT 1\nGRAPHREF Materials/Graphs/Weathered Copper.ocgraph\n",
+                          d, &ex, &err), "GRAPHREF parses: " + err);
+    check(ex.graphRef == "Materials/Graphs/Weathered Copper.ocgraph",
+          "...and keeps its spaces and its case");
+
+    // Round trip: the writer emits it back with the path intact, and re-parsing recovers it.
+    const std::string text = fmt::writeOcmat(d, &ex);
+    check(text.find("GRAPHREF Materials/Graphs/Weathered Copper.ocgraph") != std::string::npos,
+          "the writer emits GRAPHREF with the path intact");
+    pbr::MaterialDesc back;
+    fmt::OcMatExtras backEx;
+    check(fmt::parseOcmat(text, back, &backEx, &err), "the writer's own output re-parses: " + err);
+    check(backEx.graphRef == ex.graphRef, "...and GRAPHREF survives the round trip");
+
+    // GRAPHREF and the inline GRAPH{} block are independent records -- naming both in one file is
+    // not a parse error, and neither disturbs the other.
+    pbr::MaterialDesc both;
+    fmt::OcMatExtras bothEx;
+    check(fmt::parseOcmat("OCMAT 1\n"
+                          "GRAPHREF Materials/Graphs/Weathered Copper.ocgraph\n"
+                          "PARAM metallicFactor 0.5\n"
+                          "GRAPH{\n"
+                          "  NODE 0 TexSample baseColor\n"
+                          "}\n"
+                          "PARAM roughnessFactor 0.25\n", both, &bothEx, &err),
+          "a file naming both GRAPHREF and an inline GRAPH{} block is not a parse error: " + err);
+    check(bothEx.graphRef == "Materials/Graphs/Weathered Copper.ocgraph", "...GRAPHREF still parses");
+    check(bothEx.hasGraph, "...the inline block is still detected (and so still warns -- see the "
+                           "unconditional AVER_WARN keyed off hasGraph)");
+    check(near(both.metallicFactor, 0.5f) && near(both.roughnessFactor, 0.25f),
+          "...and the GRAPH{} block still skips exactly, resuming right after it");
+
+    // THE IMPORTANT ONE: a material with no GRAPHREF at all -- every material that exists today --
+    // must write out BYTE-IDENTICALLY to what this writer produced before GRAPHREF existed. This
+    // fixture leaves every field at its MaterialDesc/OcMatExtras default except NAME, so the
+    // expected text below is exactly what writeOcmat's pre-existing code paths always produced; if
+    // adding GRAPHREF support so much as moved a newline for a material that never mentions it,
+    // this is what would catch it.
+    pbr::MaterialDesc plain;
+    fmt::OcMatExtras plainEx;
+    check(fmt::parseOcmat("OCMAT 1\nNAME M_Plain\n", plain, &plainEx, &err),
+          "a file with no GRAPHREF parses");
+    check(plainEx.graphRef.empty(), "...and graphRef stays empty");
+
+    static const char* kExpectedNoGraphRef =
+        "OCMAT 1\n"
+        "# Written by the Aver Engine editor.\n"
+        "NAME M_Plain\n"
+        "SHADER standard\n"
+        "BLEND opaque\n"
+        "CULL back\n"
+        "FLAGS twosided=0 castshadow=1 worlduv=0\n"
+        "\n"
+        "PARAM baseColorFactor 1 1 1 1\n"
+        "PARAM metallicFactor 1\n"
+        "PARAM roughnessFactor 1\n"
+        "PARAM emissiveFactor 0 0 0\n"
+        "PARAM normalScale 1\n"
+        "PARAM occlusionStrength 1\n"
+        "PARAM reflectance 0.04\n"
+        "PARAM f90 1\n"
+        "PARAM uvTiling 200\n";
+    check(fmt::writeOcmat(plain, &plainEx) == kExpectedNoGraphRef,
+          "...and the written text is byte-identical to before GRAPHREF existed");
+}
+
 // Checks packMaterial: the 80-byte block the shader reads.
 static void testPack() {
     AVER_INFO("=== material: the packed GPU block ===");
@@ -517,6 +594,7 @@ static void testScriptRewrite() {
 int main() {
     testFullParse();
     testTolerance();
+    testGraphRef();
     testPack();
     testRoundTrip();
     testBlendModes();
