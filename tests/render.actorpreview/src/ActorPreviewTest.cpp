@@ -1,10 +1,12 @@
 // The actor preview, driven against a recording RHI device rather than a GPU.
 #include "aver/render/preview/ActorPreview.hpp"
+#include "aver/render/preview/PreviewMeshCache.hpp"
 #include "aver/core/Log.hpp"
 
 #include <cmath>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace aver;
@@ -122,6 +124,10 @@ struct MockContext final : public rhi::IRenderContext {
 struct MockDevice final : public rhi::IDevice {
     MockFactory factory;
     u32 uiIds = 0;
+    // Every mesh upload, so a cache test can ask what actually reached the GPU rather than only what
+    // the cache returned. IDevice::createMesh defaults to 0, which would make "the handle is stable"
+    // trivially true and hide the very failure this records.
+    std::vector<std::pair<u32, u32>> meshUploads;   // (vertexCount, indexCount) in call order
     rhi::Backend backend() const override { return rhi::Backend::Null; }
     const char* adapterName() const override { return "recording device"; }
     rhi::IResourceFactory* resources() override { return &factory; }
@@ -129,6 +135,11 @@ struct MockDevice final : public rhi::IDevice {
     void beginFrame() override {}
     void endFrame() override {}
     u64 uiTextureId(rhi::TextureHandle) override { return ++uiIds + 1000; }
+    rhi::MeshHandle createMesh(const rhi::MeshVertex*, u32 vertexCount,
+                               const u32*, u32 indexCount) override {
+        meshUploads.emplace_back(vertexCount, indexCount);
+        return static_cast<rhi::MeshHandle>(meshUploads.size());
+    }
 };
 
 // Device with no resource factory at all, so the preview must decline.
@@ -364,6 +375,58 @@ int main() {
 
         check(!p->resize(0, 900), "a zero extent is refused rather than creating a degenerate target");
         check(p->width() == 1600 && p->height() == 900, "and the old target is still the live one");
+    }
+
+    AVER_INFO("=== caller-generated meshes ===");
+    {
+        // A REGRESSION, and a sharp one. generated() first took the vertices and indices directly,
+        // which made a caller wanting "give me the handle if you have it, and only build the shape
+        // if you don't" pass empty vectors as a probe -- indistinguishable from "I generated
+        // nothing", which this cache records as a permanent miss. The probe poisoned its own key and
+        // the real geometry that followed was never uploaded at all: the fluid component preview
+        // drew nothing, silently, with the cache reporting a perfectly ordinary miss. Taking the
+        // BUILDER instead removes the ambiguity, and these checks are about what reached the device.
+        MockDevice md;
+        PreviewMeshCache cache;
+        int builds = 0;
+        const auto buildBox = [&builds](std::vector<rhi::MeshVertex>& v, std::vector<u32>& i) {
+            ++builds;
+            v.push_back({ 0.0f, 0.0f, 0.0f, 0, 0, 1, 0, 0});
+            v.push_back({30.0f, 0.0f, 0.0f, 0, 0, 1, 1, 0});
+            v.push_back({30.0f, 40.0f, 0.0f, 0, 0, 1, 1, 1});   // 3-4-5: exactly 50 from the origin
+            i.push_back(0); i.push_back(1); i.push_back(2);
+        };
+
+        f32 radius = -1.0f;
+        const rhi::MeshHandle first = cache.generated(md, "$gen/box", buildBox, &radius);
+        check(first != 0, "a generated mesh comes back with a live handle");
+        check(builds == 1, "the builder ran once");
+        check(md.meshUploads.size() == 1 && md.meshUploads[0].first == 3 &&
+              md.meshUploads[0].second == 3,
+              "and the vertices it produced are what reached createMesh -- not an empty probe");
+        check(std::fabs(radius - 50.0f) < 0.01f,
+              "the reported radius is the furthest vertex, 3-4-5 from the origin");
+
+        radius = -1.0f;
+        const rhi::MeshHandle again = cache.generated(md, "$gen/box", buildBox, &radius);
+        check(again == first, "asking again for the same key returns the same handle");
+        check(builds == 1, "WITHOUT building the shape a second time -- the point of the callback");
+        check(md.meshUploads.size() == 1, "and without a second upload");
+        check(std::fabs(radius - 50.0f) < 0.01f, "the cached radius is reported too");
+
+        int emptyBuilds = 0;
+        const auto buildNothing = [&emptyBuilds](std::vector<rhi::MeshVertex>&, std::vector<u32>&) {
+            ++emptyBuilds;
+        };
+        check(cache.generated(md, "$gen/empty", buildNothing) == 0,
+              "a builder that produces nothing yields no handle");
+        check(cache.generated(md, "$gen/empty", buildNothing) == 0, "and still none on the next ask");
+        check(emptyBuilds == 1,
+              "which is cached as a miss, so a hopeless key is not rebuilt every frame");
+        check(md.meshUploads.size() == 1, "and nothing empty was ever handed to the device");
+
+        check(cache.generated(md, "$gen/other", buildBox) != first,
+              "a different key is a different mesh");
     }
 
     AVER_INFO("=== teardown ===");

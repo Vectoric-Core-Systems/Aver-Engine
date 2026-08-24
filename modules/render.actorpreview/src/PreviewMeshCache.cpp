@@ -139,6 +139,35 @@ rhi::MeshHandle PreviewMeshCache::capsule(rhi::IDevice& device, f32 heightCm, f3
     return handle;
 }
 
+rhi::MeshHandle PreviewMeshCache::generated(rhi::IDevice& device, const std::string& key,
+                                            const MeshBuilder& build, f32* outRadius) {
+    if (const auto it = meshes_.find(key); it != meshes_.end()) {
+        if (outRadius) {
+            const auto r = radii_.find(key);
+            *outRadius = r == radii_.end() ? 0.0f : r->second;
+        }
+        return it->second;
+    }
+    std::vector<rhi::MeshVertex> verts;
+    std::vector<u32> indices;
+    if (build) build(verts, indices);
+    if (verts.empty() || indices.empty()) {
+        // Cached as a miss rather than retried every frame, exactly as resolve() treats a bad path:
+        // a caller that generated nothing this frame will generate nothing next frame either.
+        meshes_[key] = 0;
+        radii_[key] = 0.0f;
+        if (outRadius) *outRadius = 0.0f;
+        return 0;
+    }
+    const rhi::MeshHandle handle = device.createMesh(verts.data(), static_cast<u32>(verts.size()),
+                                                     indices.data(), static_cast<u32>(indices.size()));
+    meshes_[key] = handle;
+    radii_[key] = maxRadius(verts);
+    if (outRadius) *outRadius = radii_[key];
+    if (handle) { ++loaded_; AVER_INFO("[Preview] generated '{}' -> {} verts", key, verts.size()); }
+    return handle;
+}
+
 // The cached radius for a path, or 0 if it is not cached.
 f32 PreviewMeshCache::radiusOf(std::string_view meshPath) const {
     const auto it = radii_.find(fmt::canonicalMeshPath(meshPath));

@@ -18,6 +18,9 @@
 #include "EditorTransform.hpp"
 #include "GraphEditor.hpp"
 #include "GraphNodeDefs.hpp"
+#if AVER_MODULE_FLUIDS
+#  include "aver/fluids/FluidVolume.hpp"   // the seed shell a Fluid component previews
+#endif
 #if AVER_WITH_IMGUI
 // The Viewport tab only. Behind the guard because tests/editor compiles THIS FILE with no ImGui,
 // no preview module and a three-library link -- see tests/editor/CMakeLists.txt, which says so.
@@ -2573,6 +2576,7 @@ constexpr GraphComponentKind kGraphComponentKinds[] = {
     {"Particles",    "One emitter instance, playing a .ocparticle effect."},
     {"Camera",       "Camera parameters. Stored correctly; no renderer reads CCamera yet."},
     {"Light",        "A light. Stored correctly; no renderer reads CLight yet."},
+    {"Fluid",        "A simulated fluid volume. Size comes from scale=; 1,1,1 is a 2x2x1 m pool."},
 };
 
 // The kind-specific attribute rows the details panel shows, per kind. Everything not listed here is
@@ -2631,6 +2635,25 @@ constexpr GraphComponentAttrRow kLightRows[] = {
     {"inner", "Inner cone (deg)", "0"},
     {"outer", "Outer cone (deg)", "45"},
 };
+// A fluid's SIZE is not here on purpose: it comes from the generic `scale=` row every component
+// already has (GraphComponentTree.ApplyFluid reads 100/100/50 cm per unit), so listing it again
+// would be a second place to edit one number.
+//
+// PRESET FIRST, then the two real-world values, then the raw solver knobs -- the order an author
+// reaches for them. `preset` resolves to exactly the density/viscosity pair beneath it, so a row
+// showing both is showing one value twice; that is the intent, since seeing what `water` means is
+// the point of having named it. The raw four are the escape hatch and are listed last: setting
+// `damping` while a preset or density/viscosity is also set is REFUSED at spawn (see
+// fluids::FluidScene::spawn), not silently overridden.
+constexpr GraphComponentAttrRow kFluidRows[] = {
+    {"preset",     "Preset (water/oil/honey/lava)", ""},
+    {"density",    "Density (kg/m^3)",              "998"},
+    {"viscosity",  "Viscosity (Pa*s)",              "0.001"},
+    {"compliance", "Compliance (raw)",              "1e-4"},
+    {"damping",    "Damping (raw)",                 "0.1"},
+    {"iterations", "Solver iterations (raw)",       "5"},
+    {"pressure",   "Pressure (raw, -1 = derived)",  "-1"},
+};
 constexpr GraphComponentAttrSet kGraphComponentAttrs[] = {
     {"Mesh", kMeshRows, 2},
     {"SkeletalMesh", kSkelRows, 3},
@@ -2638,6 +2661,7 @@ constexpr GraphComponentAttrSet kGraphComponentAttrs[] = {
     {"Particles", kParticleRows, 2},
     {"Camera", kCameraRows, 4},
     {"Light", kLightRows, 8},
+    {"Fluid", kFluidRows, 7},
 };
 
 // The rows for a kind, or an empty set. Case-insensitive, because the parser does not care and an
@@ -3115,6 +3139,70 @@ void GraphEditor::drawComponentDetails(float dpi) {
     ImGui::PopItemWidth();
 }
 
+// The seed shell for a Fluid component, uploaded once per distinct size and cached.
+//
+// THE SEED SHELL, NOT THE SIMULATED SURFACE, and that is a deliberate limit rather than a shortcut.
+// fluids::FluidScene draws what the solver reports, but the solver only advances inside
+// aver_phys_step, whose single non-test call site is gated on Play or a non-empty --spawn-test
+// class. In edit mode it never runs, so a preview that asked the solver for a shape would show a
+// frozen one and quietly imply the fluid does not move. generateFluidSeedShell is pure arithmetic
+// over the desc -- no solver, no device, no gate -- so it shows exactly what this component is
+// choosing (footprint, depth, subdivision density) and cannot misrepresent motion it is not
+// simulating. Stepping the solver for a preview was the alternative and was rejected: it would need
+// an ungated aver_phys_step against the one shared physics world, falsifying an invariant
+// docs/GAME-LIFT.md records as tested ("no play session -> step count 0").
+//
+// DRAWN THROUGH THE COMPONENT MATRIX, unlike the runtime path, which draws a fluid at IDENTITY.
+// Both are right for what they hold: FluidScene's buffer carries ABSOLUTE WORLD positions from the
+// solver (FluidScene.hpp's own contract), whereas a seed shell spans -halfExtent..+halfExtent about
+// the LOCAL origin (see generateFluidSeedShell's comment on why it does not bake in centreCm). So
+// the preview places it the same way it places every other component, and the desc below asks for a
+// centre of zero precisely so nothing is applied twice.
+bool GraphEditor::buildFluidPreviewMesh(Engine& e, const fmt::OcGraphComponent& c,
+                                        render::preview::PreviewDraw& out) {
+    fluids::FluidVolumeDesc fd;
+    fd.centreCm[0] = fd.centreCm[1] = fd.centreCm[2] = 0.0f;
+    // The same cm-per-unit ApplyFluid uses (GraphComponentTree.cs), so what the preview shows and
+    // what the game spawns are one number, not two that can drift.
+    f32 pos[3], rot[3], scale[3];
+    compReadTransform(c, pos, rot, scale);
+    fd.halfExtentCm[0] = 100.0f * scale[0];
+    fd.halfExtentCm[1] = 100.0f * scale[1];
+    fd.halfExtentCm[2] = 50.0f  * scale[2];
+
+    char key[96];
+    std::snprintf(key, sizeof key, "$fluid/%.2f/%.2f/%.2f/%d/%d/%d",
+                  static_cast<double>(fd.halfExtentCm[0]), static_cast<double>(fd.halfExtentCm[1]),
+                  static_cast<double>(fd.halfExtentCm[2]),
+                  fd.subdivisions[0], fd.subdivisions[1], fd.subdivisions[2]);
+    const std::string k = key;
+
+    render::preview::PreviewMeshCache& meshes = sharedPreviewMeshes();
+    // The shell is built INSIDE the cache's callback, so a size already uploaded never generates one
+    // again -- which is what keeps this off the per-frame cost of rebuilding the draw list.
+    out.mesh = meshes.generated(*e.device(), k,
+        [&fd](std::vector<rhi::MeshVertex>& verts, std::vector<u32>& indices) {
+            fluids::FluidVolume vol(fd);
+            vol.generateSeedShell();
+            const std::vector<f32>& vp = vol.positionsCm();
+            const std::vector<f32>& nrm = vol.normals();
+            const std::vector<i32>& idx = vol.indices();
+            verts.resize(vp.size() / 3);
+            for (usize i = 0; i < verts.size(); ++i) {
+                verts[i].px = vp[i * 3 + 0]; verts[i].py = vp[i * 3 + 1]; verts[i].pz = vp[i * 3 + 2];
+                verts[i].nx = nrm[i * 3 + 0]; verts[i].ny = nrm[i * 3 + 1]; verts[i].nz = nrm[i * 3 + 2];
+                verts[i].u = 0.0f; verts[i].v = 0.0f;
+            }
+            indices.assign(idx.begin(), idx.end());
+        }, &out.boundsRadius);
+    if (out.mesh == 0) return false;
+    // The same still-water blue the transparent pass settles on, so the preview and the level read
+    // as the same substance even though one of them is a static shell.
+    out.baseColor[0] = 0.10f; out.baseColor[1] = 0.30f; out.baseColor[2] = 0.36f; out.baseColor[3] = 1.0f;
+    out.roughness = 0.12f;   // the value the fluid's own transparent pass shades with
+    return true;
+}
+
 void GraphEditor::buildComponentPreview(Engine& e) {
     render::preview::ActorPreview* preview = sharedPreview(e);
     if (!preview || !e.device()) return;
@@ -3125,15 +3213,23 @@ void GraphEditor::buildComponentPreview(Engine& e) {
     std::vector<render::preview::PreviewDraw> draws;
     draws.reserve(graph_.components.size());
     for (const auto& c : graph_.components) {
-        const std::string_view meshPath = fmt::componentAttr(c, "mesh");
-        // ONLY WHAT HAS GEOMETRY. A Scene node, a Camera and an Animator have nothing to draw, and
-        // inventing a placeholder box for them would make the preview disagree with the game -- the
-        // one thing a preview must never do. Their transforms are still real; they are simply
-        // invisible here exactly as they are invisible there.
-        if (meshPath.empty()) continue;
         render::preview::PreviewDraw d;
-        d.mesh = meshes.resolve(*e.device(), meshPath, &d.boundsRadius);
-        if (d.mesh == 0) continue;   // missing or unloadable; meshes.missing() already records it
+
+        // A FLUID HAS NO MESH TO NAME, so it cannot come through the path below: its geometry is
+        // generated arithmetic (fluids::generateFluidSeedShell) rather than a file. It is the one
+        // component kind whose shape the editor has to build itself.
+        if (detail::ciEquals(c.kind, "Fluid")) {
+            if (!buildFluidPreviewMesh(e, c, d)) continue;
+        } else {
+            const std::string_view meshPath = fmt::componentAttr(c, "mesh");
+            // ONLY WHAT HAS GEOMETRY. A Scene node, a Camera and an Animator have nothing to draw,
+            // and inventing a placeholder box for them would make the preview disagree with the
+            // game -- the one thing a preview must never do. Their transforms are still real; they
+            // are simply invisible here exactly as they are invisible there.
+            if (meshPath.empty()) continue;
+            d.mesh = meshes.resolve(*e.device(), meshPath, &d.boundsRadius);
+            if (d.mesh == 0) continue;   // missing or unloadable; meshes.missing() already records it
+        }
         componentWorldMatrix(c.id, d.world);
         d.selected = (c.id == selectedComponent_);
         draws.push_back(d);

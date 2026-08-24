@@ -43,6 +43,12 @@
 #include <unordered_set>
 #include <vector>
 
+// Forward-declared rather than including ActorPreview.hpp: only one method signature below needs
+// the type, and it takes it by reference. Pulling the preview module's header into this one would
+// make every translation unit that edits a graph depend on the renderer's preview tier for a type
+// none of them name.
+namespace aver::render::preview { struct PreviewDraw; }
+
 namespace aver::editor {
 
 // Pushes the app's current DPI scale into the graph editor. See the EXACT HOOK comment above for
@@ -392,6 +398,11 @@ private:
     void drawComponentTreeNode(const std::string& id, float dpi);
     void drawComponentDetails(float dpi);
     void buildComponentPreview(Engine& e);
+    // Fills `out` with the seed shell for a Fluid component, or returns false when there is nothing
+    // to draw. See the definition for why a preview shows the SEED shell rather than the simulated
+    // surface, and why it uses the component matrix where the runtime path uses identity.
+    bool buildFluidPreviewMesh(Engine& e, const fmt::OcGraphComponent& c,
+                               render::preview::PreviewDraw& out);
 
 
     // ---- component tree state -------------------------------------------------------------------
