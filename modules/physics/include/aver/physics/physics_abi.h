@@ -226,11 +226,23 @@ AVER_PHYS_API int32_t aver_phys_overlap_get(int32_t index, int32_t* outSensor, i
 //
 // `compliance` is inverse stiffness: 0 is inextensible, larger is stretchier. `pressure` inflates a
 // closed mesh from within; 0 for cloth.
+//
+// `damping` is SoftBodyCreationSettings::mLinearDamping (1/s: dv/dt = -damping * v) and `iterations`
+// is ::mNumIterations, Jolt's own per-step solver pass count -- both newly reachable through this
+// call as of the fluids solver-knobs change; before it, every soft body this engine created got
+// Jolt's own un-named defaults with no way for a caller to ask for anything else. DEFAULTED TO
+// THOSE EXACT NUMBERS (SoftBodyCreationSettings.h's own 0.1f/5, not a number this engine chose), so
+// every call site written before this change compiles and behaves identically without editing one.
+// A `damping` below zero or an `iterations` below 1 is clamped by the implementation -- the same
+// guard already applied to a negative `compliance` above, and for `iterations` not optional: Jolt
+// divides the step by it (SoftBodyMotionProperties.cpp), so 0 there is a divide-by-zero, not merely
+// "no iterations".
 AVER_PHYS_API int32_t aver_phys_softbody_create(const float* verticesXyz, int32_t vertexCount,
                                                 const int32_t* indices, int32_t indexCount,
                                                 const float* invMasses,
                                                 float cx, float cy, float cz,
-                                                float compliance, float pressure);
+                                                float compliance, float pressure,
+                                                float damping = 0.1f, int32_t iterations = 5);
 
 // The same, plus SKINNED constraints -- soft body on a skeletal mesh.
 //

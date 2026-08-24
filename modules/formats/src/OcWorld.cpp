@@ -199,6 +199,28 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
                     wp.boundsMax[0] = parseF64(t[i+3]); wp.boundsMax[1] = parseF64(t[i+4]);
                     i += 4;
                 }
+                // The four solver knobs, each a `key value` pair rather than a bare token like
+                // `simulate` -- and each on its OWN branch here rather than folded into a shared
+                // "numeric key" helper, matching every other multi-field record in this parser
+                // (PCGVOLUME, SCATTER). An old parser reading a NEW file simply never matches any of
+                // these four `else if`s and falls out of the loop having skipped them, the same
+                // silent-skip every future token this loop has never heard of already gets -- there
+                // is no `else` clause here to make that anything other than automatic. A new parser
+                // reading an OLD file never sees these keys at all, so wp keeps its -1 "not
+                // authored" defaults, which is the whole reason OcWaterPlacement's own comment gives
+                // for choosing -1 over 0.
+                else if (equalsCI(t[i], "compliance") && i + 1 < t.size()) wp.compliance = parseF64(t[++i]);
+                else if (equalsCI(t[i], "damping")    && i + 1 < t.size()) wp.damping    = parseF64(t[++i]);
+                else if (equalsCI(t[i], "iterations") && i + 1 < t.size())
+                    wp.iterations = static_cast<i32>(parseF64(t[++i]));
+                else if (equalsCI(t[i], "pressure")   && i + 1 < t.size()) wp.pressure   = parseF64(t[++i]);
+                // THE MATERIAL LAYER, same `key value` shape as the four solver knobs just above and
+                // for the identical reasons (own branch per key, silent-skip for an old parser
+                // reading a new file or a new parser reading an old one -- see those four keys' own
+                // comment just above for the full reasoning, which applies here unchanged).
+                else if (equalsCI(t[i], "preset")     && i + 1 < t.size()) wp.preset    = std::string(t[++i]);
+                else if (equalsCI(t[i], "density")    && i + 1 < t.size()) wp.density   = parseF64(t[++i]);
+                else if (equalsCI(t[i], "viscosity")  && i + 1 < t.size()) wp.viscosity = parseF64(t[++i]);
             }
             out.waters.push_back(std::move(wp));
         } else if (equalsCI(key, "WAVE")) {
@@ -398,6 +420,23 @@ std::string writeOcworld(const OcWorldData& w) {
             // AFTER bounds, because bounds consumes the four tokens following it and a keyword
             // written between them would be read as a number.
             if (wp.simulate) s += " simulate";
+            // The four solver knobs, each written ONLY when the record actually names one -- the
+            // same "omitted means default" rule GAMEMODE, SCATTER's `volume` and PCGVOLUME's
+            // optional clauses all follow, checked against -1 rather than against a bool because
+            // OcWaterPlacement carries no separate "was this authored" flag; the sentinel IS the
+            // carrier. Each is a self-contained `key value` pair, so writing them in this order does
+            // not commit a reader to reading them in this order -- unlike `bounds`, nothing here
+            // needs to know how many tokens follow it before it can stop consuming.
+            if (wp.compliance >= 0.0) s += " compliance " + num(wp.compliance);
+            if (wp.damping    >= 0.0) s += " damping "    + num(wp.damping);
+            if (wp.iterations >= 0)   s += " iterations " + num(wp.iterations);
+            if (wp.pressure   >= 0.0) s += " pressure "   + num(wp.pressure);
+            // THE MATERIAL LAYER, written AFTER the four solver knobs -- order matters for none of
+            // these seven (unlike `bounds`, each is a self-contained `key value` pair), so this is
+            // simply parse order, matching the four knobs' own "omitted means default" rule.
+            if (!wp.preset.empty())  s += " preset "    + wp.preset;
+            if (wp.density   >= 0.0) s += " density "   + num(wp.density);
+            if (wp.viscosity >= 0.0) s += " viscosity " + num(wp.viscosity);
             s += "\n";
         }
     }

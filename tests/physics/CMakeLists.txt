@@ -35,3 +35,12 @@ add_executable(BuoyancyTest src/BuoyancyTest.cpp)
 target_link_libraries(BuoyancyTest PRIVATE Aver.Physics Aver.Core)
 set_target_properties(BuoyancyTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# FluidDampingCalibrationTest -- measures the mapping from Jolt's raw `damping` solver knob to an
+# observable decay time constant, so the fluids module's future viscosity-in-Pa*s knob can be a fit
+# against real numbers instead of an invented formula. Same discipline as SoftBodyTest and
+# BuoyancyTest above: links Aver.Physics and Aver.Core only, nothing that knows Jolt exists.
+add_executable(FluidDampingCalibrationTest src/FluidDampingCalibrationTest.cpp)
+target_link_libraries(FluidDampingCalibrationTest PRIVATE Aver.Physics Aver.Core)
+set_target_properties(FluidDampingCalibrationTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

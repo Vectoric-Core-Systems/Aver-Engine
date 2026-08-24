@@ -867,6 +867,214 @@ static void testApplyImpulseMovesNearbyVertices() {
     // for why "the far side barely moves" is not a property this pressurised shell actually has.
 }
 
+// ---- density gives a soft body REAL mass, and real mass changes how it sags ------------------------
+//
+// THE CLAIM UNDER TEST, restated from fluids::fluidParticleMassKg's own header comment
+// (modules/fluids/include/aver/fluids/FluidVolume.hpp): mass = density * enclosedVolume /
+// particleCount is REAL physics, not a fit, because Jolt's soft-body solver honours mass directly
+// through invMass (PhysicsWorld.cpp's buildSoftShared: `v.mInvMass = invMasses ? invMasses[i] :
+// 1.0f`). This restates that exact arithmetic here rather than linking Aver.Fluids to call it --
+// the same "this test links the ABI and nothing else" discipline testPressureHoldsAShellUp already
+// applies to fluidPressureFor's own formula (see this file's own opening comment) -- and checks it
+// the way a caller outside the fluids module would see it: pin one wall of a closed box shell, let
+// gravity and a soft (non-zero-compliance) edge constraint pull the rest of it down, and measure how
+// far the far wall sags.
+//
+// WHY A PINNED WALL AND NOT A FREE FALL. Under gravity ALONE, in a vacuum, every mass falls at the
+// same acceleration -- Newton's second law makes mass cancel out of a(t), so a free-falling shell's
+// TRAJECTORY carries no information about how heavy it is, and a test built on one would prove
+// nothing regardless of what invMasses said. What DOES depend on mass, for a FIXED compliance (XPBD
+// compliance is an inverse stiffness: a constraint's steady-state stretch under a steady load scales
+// with load / stiffness, same as an ordinary spring's x = F/k), is how far a constrained shell sags
+// before its own edges' stretch balances gravity's pull on that extra mass -- exactly the "denser
+// fluid has more inertia and sags harder" physics this field exists to make checkable.
+static float pinnedShellSagCm(float densityKgM3) {
+    check(aver_phys_init() == 1, "physics started");
+
+    // A smaller box than the pool tests above -- this measures a per-particle MASS effect, not a
+    // pressure/topology one, so there is no reason to pay for the pool's own 258-particle mesh.
+    const float hx = 150.0f, hy = 100.0f, hz = 50.0f;
+    const int32_t nx = 6, ny = 4, nz = 3;
+    const Shell s = makeBoxShell(hx, hy, hz, nx, ny, nz);
+
+    // mass = density * enclosedVolume / particleCount, restated from fluids::fluidParticleMassKg --
+    // enclosedVolumeM3 is the box's own 8 hx hy hz, converted out of the CENTIMETRES makeBoxShell's
+    // own arguments are in: 1 cm = 0.01 m, so 1 cm^3 = (0.01 m)^3 = 1e-6 m^3 -- the exact arithmetic
+    // check fluids::kFluidCmCubedToM3's own comment names, and the one place this whole feature is a
+    // factor of a million away from being silently wrong in either direction.
+    const float enclosedVolumeM3 = 8.0f * hx * hy * hz * 1.0e-6f;
+    const float massPerParticleKg = densityKgM3 * enclosedVolumeM3 / static_cast<float>(s.count());
+    const float invMassFree = 1.0f / massPerParticleKg;
+
+    // Pin the -X wall -- every vertex this shell's own construction put at x == -hx -- and give
+    // everything else the SAME real, density-derived inverse mass (uniform per particle, matching
+    // fluidParticleMassKg's own "one particle, one share" division). No partial pin: the whole wall,
+    // so the "far" wall measured below is unambiguously the one doing all the sagging.
+    std::vector<float> invMass(static_cast<size_t>(s.count()), invMassFree);
+    int32_t pinnedCount = 0;
+    for (int32_t i = 0; i < s.count(); ++i) {
+        if (s.verts[static_cast<size_t>(i) * 3 + 0] <= -hx + 1.0f) {
+            invMass[static_cast<size_t>(i)] = 0.0f;
+            ++pinnedCount;
+        }
+    }
+    check(pinnedCount > 0,
+          "the -X wall of the shell was pinned (" + std::to_string(pinnedCount) + " particles)");
+
+    // NO PRESSURE -- this isolates mass and compliance, which is not the fluid-pressure balance
+    // testPressureHoldsAShellUp already covers. Compliance is the fluids module's own real
+    // production value (kHeavyLiquidCompliance, FluidVolume.hpp) -- not a softened one invented for
+    // this test. Damping is NOT the production default, and MEASURABLY so: a first version of this
+    // test at kDefaultFluidDamping (0.1) actually FAILED, in the WRONG direction (3000 kg/m^3
+    // sagging 124.9 cm against 100 kg/m^3's 269.3 cm, at 3 s) -- not because mass stopped mattering,
+    // but because a pinned shell over a spring-like edge is an OSCILLATOR, and its natural frequency
+    // sqrt(k/m) falls as mass rises, so a fixed 3 s window catches different masses at different,
+    // incomparable PHASES of their own swing rather than settled. Heavier damping (1.0, i.e. a 1 s
+    // velocity-decay time constant against Jolt's own dv/dt = -damping * v) forces every mass to
+    // settle toward its OWN equilibrium stretch well inside the 6 s this test now runs, which is the
+    // regime testPressureHoldsAShellUp's own pool tests already settle in too (that one at 4 s).
+    // This is what "measured, not guessed" means for a test constant, the same discipline
+    // kFluidPressureHeadroom's own sweep comment states for a production one.
+    const int32_t body = aver_phys_softbody_create(
+        s.verts.data(), s.count(), s.indices.data(), static_cast<int32_t>(s.indices.size()),
+        invMass.data(), 0.0f, 0.0f, 0.0f, /*compliance*/ 1.0e-4f, /*pressure*/ 0.0f,
+        /*damping*/ 1.0f);
+    if (body == 0) { aver_phys_shutdown(); return -1.0f; }
+
+    std::vector<float> before(static_cast<size_t>(s.count()) * 3, 0.0f);
+    aver_phys_softbody_vertices(body, before.data(), s.count());
+
+    step(6.0f);
+
+    std::vector<float> after(static_cast<size_t>(s.count()) * 3, 0.0f);
+    aver_phys_softbody_vertices(body, after.data(), s.count());
+
+    // The +X wall -- as far from the pin as this shell reaches -- averaged over every particle on
+    // it, the same "over the whole face, not a single vertex" discipline testClothHangs' own
+    // pinnedDrop/freeDrop already use above.
+    float farSag = 0.0f;
+    int32_t farCount = 0;
+    for (int32_t i = 0; i < s.count(); ++i) {
+        if (s.verts[static_cast<size_t>(i) * 3 + 0] >= hx - 1.0f) {
+            farSag += before[static_cast<size_t>(i) * 3 + 2] - after[static_cast<size_t>(i) * 3 + 2];
+            ++farCount;
+        }
+    }
+    aver_phys_shutdown();
+    check(farCount > 0, "the +X wall (farthest from the pin) has particles to measure sag from");
+    return farCount > 0 ? farSag / static_cast<float>(farCount) : -1.0f;
+}
+
+static void testDensityChangesSagUnderGravity() {
+    AVER_INFO("-- real density gives real mass, and real mass changes how a pinned shell sags --");
+
+    // TWO RUNS AT THE SAME DENSITY FIRST -- the noise floor any REAL difference below has to clear,
+    // the identical control-before-treatment discipline testCharacterEmbeddedInPoolDoesNotMoveIt and
+    // testApplyImpulseMovesNearbyVertices already use above. aver_phys_step integrates a fixed,
+    // deterministic timestep with no randomness anywhere in this path, so two identical runs are
+    // expected to reproduce the same result up to ordinary float accumulation, not merely "close".
+    const float controlA = pinnedShellSagCm(500.0f);
+    const float controlB = pinnedShellSagCm(500.0f);
+    check(controlA >= 0.0f && controlB >= 0.0f, "both control runs produced a reading");
+    const float noiseFloor = std::abs(controlA - controlB);
+    AVER_INFO("  same density (500 kg/m^3) twice: {} cm vs {} cm sag (noise floor {} cm)",
+              controlA, controlB, noiseFloor);
+    check(noiseFloor < 0.5f,
+          "two runs at the identical density sag by the identical amount, within floating-point "
+          "noise (" + std::to_string(noiseFloor) + " cm)");
+
+    // NOW THE TREATMENT: light vs. heavy, same shell, same pin, same compliance, same everything
+    // else -- the ONLY thing that differs is densityKgM3.
+    const float light = pinnedShellSagCm(100.0f);
+    const float heavy = pinnedShellSagCm(3000.0f);
+    check(light >= 0.0f && heavy >= 0.0f, "both treatment runs produced a reading");
+    AVER_INFO("  100 kg/m^3 sagged {} cm; 3000 kg/m^3 sagged {} cm", light, heavy);
+
+    // THE DIRECTION PHYSICS PREDICTS: heavier particles pulling on the same, fixed-compliance edges
+    // stretch them further -- x = F/k with F = m g and k fixed by compliance -- so the denser shell
+    // must sag MORE, and by a margin that clears the noise floor measured above, not by a hair.
+    check(heavy > light + std::max(noiseFloor * 5.0f, 1.0f),
+          "the denser shell (3000 kg/m^3) sagged further than the lighter one (100 kg/m^3): " +
+          std::to_string(heavy) + " cm vs " + std::to_string(light) + " cm, clear of the " +
+          std::to_string(noiseFloor) + " cm noise floor");
+}
+
+// ---- an impulse wakes a body that has gone to sleep --------------------------------------------
+//
+// THE REGRESSION THIS EXISTS FOR, and it is the one that matters most for gameplay.
+// aver_phys_softbody_apply_impulse writes vertex velocities directly. That is a poke at memory, not
+// a physics event -- Jolt never sees it. So a body the solver has already put to sleep stays asleep
+// with its new velocities sitting unread, while the call cheerfully returns a positive nudged count
+// telling the caller it worked.
+//
+// WHY IT HID FOR SO LONG. Every fluid used to have unit particle mass and light damping, which
+// together kept a settled pool jittering just above Jolt's sleep threshold, so the bug could not
+// fire. Real density-scaled mass plus the damping the thicker presets map to settles a volume
+// genuinely still -- it sleeps a few seconds after spawn, and from then on a player could walk
+// through it and nothing would move. Every existing test disturbed a body that had never had time
+// to fall asleep, so none of them could see it.
+static void testImpulseWakesASleepingBody() {
+    AVER_INFO("-- an impulse wakes a body the solver has put to sleep --");
+    check(aver_phys_init() == 1, "physics started");
+    check(aver_phys_add_static_box(0, 0, -10, 20000, 20000, 10) != 0, "a large static floor exists");
+
+    const float hx = 300.0f, hy = 200.0f, hz = 60.0f;
+    const int32_t nx = 8, ny = 8, nz = 4;
+    const Shell sh = makeBoxShell(hx, hy, hz, nx, ny, nz);
+
+    // HEAVY AND HEAVILY DAMPED, which is exactly the regime the thicker presets produce: real
+    // particle mass rather than the historic 1, and damping high enough that the shell stops moving
+    // rather than idling. Both are needed -- either alone leaves enough residual motion to keep the
+    // body awake, which is why the old defaults never tripped this.
+    std::vector<float> invMasses(static_cast<size_t>(sh.count()), 1.0f / 40.0f);
+    const float pressure = 0.6f * 1.0e-4f * 2.0f * 980.0f * hz * (nx + 1) * (ny + 1) * 40.0f;
+    const int32_t body = aver_phys_softbody_create(
+        sh.verts.data(), sh.count(), sh.indices.data(), static_cast<int32_t>(sh.indices.size()),
+        invMasses.data(), 0.0f, 0.0f, hz + 5.0f, 1.0e-4f, pressure, 3.0f, 5);
+    check(body != 0, "a heavy, heavily damped shell was created");
+
+    auto maxSpeedOver = [&](float seconds) {
+        std::vector<float> a(static_cast<size_t>(sh.count()) * 3, 0.0f), b = a;
+        aver_phys_softbody_vertices(body, a.data(), sh.count());
+        const float fixed = aver_phys_fixed_step();
+        float peak = 0.0f;
+        for (float t = 0.0f; t < seconds; t += fixed) {
+            aver_phys_step(fixed);
+            aver_phys_softbody_vertices(body, b.data(), sh.count());
+            for (int32_t i = 0; i < sh.count(); ++i) {
+                float d = 0.0f;
+                for (int k = 0; k < 3; ++k) {
+                    const float e = b[static_cast<size_t>(i) * 3 + usize(k)] - a[static_cast<size_t>(i) * 3 + usize(k)];
+                    d += e * e;
+                }
+                peak = std::sqrt(d) > peak ? std::sqrt(d) : peak;
+            }
+            a = b;
+        }
+        return peak;
+    };
+
+    // Long enough for the solver to settle it AND for its sleep timer to expire.
+    step(10.0f);
+    const float quiet = maxSpeedOver(0.5f);
+    check(quiet < 0.05f, "it has genuinely gone still (peak step motion " + std::to_string(quiet) + " cm)");
+
+    const float centre[3]   = {0.0f, 0.0f, hz + 5.0f};
+    const float velocity[3] = {400.0f, 0.0f, 0.0f};
+    const int32_t nudged = aver_phys_softbody_apply_impulse(body, centre, 2000.0f, velocity, 1.0f);
+    check(nudged > 0, "the impulse reports touching " + std::to_string(nudged) + " particles");
+
+    // THE ASSERTION THE BUG FAILED. Before the fix this was 0.000 -- the velocities were written and
+    // the body, being asleep, never integrated them. A positive nudged count above proves the write
+    // happened, so a still-motionless body here isolates the wake, not the reach.
+    const float moved = maxSpeedOver(0.5f);
+    check(moved > 10.0f * (quiet + 1e-4f),
+          "and it MOVES afterwards (" + std::to_string(moved) + " cm against a quiet " +
+          std::to_string(quiet) + " cm)");
+
+    aver_phys_shutdown();
+}
+
 int main() {
     AVER_INFO("SoftBodyTest");
     testClothHangs();
@@ -875,9 +1083,11 @@ int main() {
     testSkinnedCanLeaveItsSkin();
     testHandleContract();
     testPressureHoldsAShellUp();
+    testImpulseWakesASleepingBody();
     testCharacterEmbeddedInPoolDoesNotMoveIt();
     testCharacterSweepDoesNotVisiblyMoveTheSoftBody();
     testApplyImpulseMovesNearbyVertices();
+    testDensityChangesSagUnderGravity();
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
     return g_failures;
 }

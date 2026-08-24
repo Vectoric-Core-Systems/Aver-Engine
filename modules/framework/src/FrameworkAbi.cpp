@@ -1138,4 +1138,47 @@ int32_t aver_fw_sky_clouds(int32_t* outSeed, float* outCoverage, float* outDensi
 // script can call it to hand the sky back.
 void aver_fw_clear_sky_clouds(void) { skyRequest() = SkyRequest{}; }
 
+// ---- FLUID VOLUME SPAWN, RELAYED ---------------------------------------------------------------
+// Same shape as g_saveWrite/g_animCurve above, for the same reason: only a composition root links
+// both Aver.Framework and Aver.Fluids. NOT ATOMIC, matching every other provider in this file.
+aver_fw_fluid_spawn_fn g_fluidSpawn = nullptr;
+void* g_fluidSpawnUser = nullptr;
+
+int32_t aver_fw_set_fluid_spawn_provider(aver_fw_fluid_spawn_fn fn, void* user) {
+    g_fluidSpawn = fn;
+    g_fluidSpawnUser = user;
+    return 1;
+}
+
+int32_t aver_fw_fluid_spawn(float cx, float cy, float cz, float hx, float hy, float hz,
+                            float compliance, float damping, int32_t iterations, float pressure,
+                            const char* name) {
+    if (!g_fluidSpawn) return 0;
+    return g_fluidSpawn(cx, cy, cz, hx, hy, hz, compliance, damping, iterations, pressure,
+                        name && *name ? name : "unnamed", g_fluidSpawnUser);
+}
+
+// ---- FLUID VOLUME SPAWN, WITH A MATERIAL -------------------------------------------------------
+// A second, independent provider slot beside g_fluidSpawn above -- see framework_abi.h's own MINOR
+// 4 changelog entry for why this is additive rather than a change to the pair above. Same
+// not-atomic caveat as every other provider in this file.
+aver_fw_fluid_spawn_material_fn g_fluidSpawnMaterial = nullptr;
+void* g_fluidSpawnMaterialUser = nullptr;
+
+int32_t aver_fw_set_fluid_spawn_material_provider(aver_fw_fluid_spawn_material_fn fn, void* user) {
+    g_fluidSpawnMaterial = fn;
+    g_fluidSpawnMaterialUser = user;
+    return 1;
+}
+
+int32_t aver_fw_fluid_spawn_material(float cx, float cy, float cz, float hx, float hy, float hz,
+                                     float compliance, float damping, int32_t iterations,
+                                     float pressure, float densityKgM3, float viscosityPaS,
+                                     const char* materialPreset, const char* name) {
+    if (!g_fluidSpawnMaterial) return 0;
+    return g_fluidSpawnMaterial(cx, cy, cz, hx, hy, hz, compliance, damping, iterations, pressure,
+                                densityKgM3, viscosityPaS, materialPreset ? materialPreset : "",
+                                name && *name ? name : "unnamed", g_fluidSpawnMaterialUser);
+}
+
 }  // extern "C"

@@ -2,10 +2,25 @@
 #include "aver/fluids/FluidVolume.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <string>
 
 namespace aver::fluids {
 namespace {
+
+// Case-insensitive ASCII compare, local to this file -- fluids has no dependency on Aver.Formats,
+// which is where this engine's other case-insensitive token matching (equalsCI, OcWorld.cpp) lives,
+// so this is a deliberate small duplicate rather than a missed reuse across a module boundary this
+// module does not cross.
+bool iequalsAscii(std::string_view a, std::string_view b) {
+    if (a.size() != b.size()) return false;
+    for (usize i = 0; i < a.size(); ++i) {
+        if (std::tolower(static_cast<unsigned char>(a[i])) != std::tolower(static_cast<unsigned char>(b[i])))
+            return false;
+    }
+    return true;
+}
 
 // Position along one axis at lattice index `idx` of `n` equal segments, spanning
 // [-halfExtentCm, +halfExtentCm]. `n` is always >= 1 by the time this is called --
@@ -16,7 +31,48 @@ inline f32 latticeLerp(f32 halfExtentCm, i32 idx, i32 n) {
     return -halfExtentCm + t * (2.0f * halfExtentCm);
 }
 
+// Vertex counts of the three disjoint boundary blocks generateFluidSeedShell partitions a box's
+// surface into -- see that function's own top-of-file comment for exactly what block A/B/C mean and
+// why the split is done this way at all. Factored out to ONE place so fluidShellParticleCount
+// (FluidVolume.hpp) can answer "how many particles will this shell have" from just (nx, ny, nz),
+// without walking generateFluidSeedShell's own loops to build the array first -- and so that the two
+// never have a chance to disagree: there is only one copy of this arithmetic now, not two that
+// happen to compute the same thing today.
+struct ShellBlockCounts { i32 a, b, c; };
+inline ShellBlockCounts shellBlockCounts(i32 nx, i32 ny, i32 nz) {
+    return ShellBlockCounts{2 * (ny + 1) * (nz + 1), 2 * (nx - 1) * (nz + 1), 2 * (nx - 1) * (ny - 1)};
+}
+
 } // namespace
+
+i32 fluidShellParticleCount(const FluidVolumeDesc& desc) {
+    // The same clamp generateFluidSeedShell applies, for the same reason: a subdivision count below 1
+    // is not a shell.
+    const i32 nx = std::max(1, desc.subdivisions[0]);
+    const i32 ny = std::max(1, desc.subdivisions[1]);
+    const i32 nz = std::max(1, desc.subdivisions[2]);
+    const ShellBlockCounts blocks = shellBlockCounts(nx, ny, nz);
+    return blocks.a + blocks.b + blocks.c;
+}
+
+f32 fluidParticleMassKg(const FluidVolumeDesc& desc) {
+    // <= 0, not < 0: kFluidDensityUnset is -1, but an author who typed 0 by mistake (or on purpose,
+    // meaning "massless") gets the identical fallback rather than a division that quietly produces
+    // an infinite inverse mass at the call site below. See this function's own header comment.
+    if (desc.densityKgM3 <= 0.0f) return 1.0f;
+
+    const f32 hx = std::fabs(desc.halfExtentCm[0]);
+    const f32 hy = std::fabs(desc.halfExtentCm[1]);
+    const f32 hz = std::fabs(desc.halfExtentCm[2]);
+    // cm^3 -> m^3 via kFluidCmCubedToM3 -- see that constant's own comment for the arithmetic check
+    // (1 cm = 0.01 m, so 1 cm^3 = 1e-6 m^3). 8 hx hy hz is the SAME enclosed-volume expression
+    // fluidPressureFor's own derivation uses, just read here directly off desc rather than passed in.
+    const f32 enclosedVolumeM3 = 8.0f * hx * hy * hz * kFluidCmCubedToM3;
+    const i32 particleCount = fluidShellParticleCount(desc);
+    if (particleCount <= 0 || enclosedVolumeM3 <= 0.0f) return 1.0f;   // degenerate desc: fall back
+
+    return desc.densityKgM3 * enclosedVolumeM3 / static_cast<f32>(particleCount);
+}
 
 f32 fluidPressureFor(const FluidVolumeDesc& desc, f32 gravityCmPerS2) {
     // The same clamp generateFluidSeedShell applies, for the same reason: a subdivision count below 1
@@ -27,11 +83,71 @@ f32 fluidPressureFor(const FluidVolumeDesc& desc, f32 gravityCmPerS2) {
     const f32 ny = static_cast<f32>(std::max(1, desc.subdivisions[1]) + 1);
     const f32 hz = std::fabs(desc.halfExtentCm[2]);
     const f32 g  = std::fabs(gravityCmPerS2);
-    // 2 * g * hz * nx * ny, scaled out of centimetres into the metres Jolt integrates in -- both
-    // steps derived in the header. Zero depth or zero gravity legitimately wants zero pressure, since
-    // there is nothing for it to hold up, and Jolt reads a non-positive coefficient as "no pressure
-    // at all", so neither needs a special case here.
-    return kFluidPressureHeadroom * kFluidCmToJolt * 2.0f * g * hz * nx * ny;
+    // The particle mass this shell's solver will actually use -- see fluidParticleMassKg's own
+    // comment. Exactly 1.0f whenever desc.densityKgM3 is left at kFluidDensityUnset, which is what
+    // makes this multiplication a no-op for every desc written before density existed: the formula
+    // below is bit-for-bit the pre-density one in that case, not merely close to it.
+    const f32 particleMassKg = fluidParticleMassKg(desc);
+    // 2 * g * hz * nx * ny * particleMassKg, scaled out of centimetres into the metres Jolt integrates
+    // in -- both steps derived in the header. Zero depth or zero gravity legitimately wants zero
+    // pressure, since there is nothing for it to hold up, and Jolt reads a non-positive coefficient as
+    // "no pressure at all", so neither needs a special case here.
+    return kFluidPressureHeadroom * kFluidCmToJolt * 2.0f * g * hz * nx * ny * particleMassKg;
+}
+
+// ---------------------------------------------------------------------------------------------
+// THE MATERIAL LAYER. See FluidVolume.hpp's own comments on FluidMaterial and each function below
+// for the full reasoning and the measured table; this file carries only the arithmetic.
+
+f32 fluidDampingForViscosity(f32 viscosityPaS) {
+    // Non-physical input (even water is not 0 Pa*s) gets the least-damped end of the measured
+    // range rather than NaN from log10 of a non-positive number -- see this function's own header
+    // comment for why that specific fallback, not kDefaultFluidDamping.
+    if (viscosityPaS <= 0.0f) return kDampingAnchorLow;
+
+    // Log-log (power-law) interpolation between the two measured anchors, t clamped to [0, 1] so a
+    // viscosity outside [kViscosityAnchorLowPaS, kViscosityAnchorHighPaS] CLAMPS to the nearer
+    // anchor's damping rather than extrapolating past where anything was ever measured -- see this
+    // function's own header comment for why that matters specifically for Lava().
+    const f32 t = (std::log10(viscosityPaS) - std::log10(kViscosityAnchorLowPaS)) /
+                  (std::log10(kViscosityAnchorHighPaS) - std::log10(kViscosityAnchorLowPaS));
+    const f32 tc = std::clamp(t, 0.0f, 1.0f);
+    return kDampingAnchorLow * std::pow(kDampingAnchorHigh / kDampingAnchorLow, tc);
+}
+
+std::optional<FluidMaterial> fluidMaterialPreset(std::string_view name) {
+    if (iequalsAscii(name, "water"))                                              return FluidMaterial::Water();
+    if (iequalsAscii(name, "lightoil") || iequalsAscii(name, "light oil") ||
+        iequalsAscii(name, "oil"))                                                return FluidMaterial::LightOil();
+    if (iequalsAscii(name, "honey"))                                              return FluidMaterial::Honey();
+    if (iequalsAscii(name, "lava"))                                               return FluidMaterial::Lava();
+    return std::nullopt;
+}
+
+bool fluidResolveMaterial(FluidVolumeDesc& desc, std::string* outConflict) {
+    if (!desc.material.has_value()) return true;   // nothing to resolve; today's behaviour exactly
+
+    // THE PRECEDENCE RULE -- see this function's own header comment (FluidVolume.hpp) for why this
+    // is the one place it is enforced. Compared against kDefaultFluidDamping, not a separate "was
+    // this authored" flag: FluidVolumeDesc carries none, the same convention kFluidPressureAuto and
+    // kFluidDensityUnset already use for their own fields.
+    if (desc.damping != kDefaultFluidDamping) {
+        if (outConflict) {
+            const f32 impliedDamping = fluidDampingForViscosity(desc.material->viscosityPaS);
+            *outConflict =
+                "a FluidMaterial (density=" + std::to_string(desc.material->densityKgM3) +
+                "kg/m^3, viscosity=" + std::to_string(desc.material->viscosityPaS) +
+                "Pa*s, which maps to damping=" + std::to_string(impliedDamping) +
+                ") and a separately hand-set raw damping=" + std::to_string(desc.damping) +
+                " were both given on the same fluid volume; remove one -- a material and a raw "
+                "damping cannot both win, so this spawn is refused rather than silently picking one";
+        }
+        return false;
+    }
+
+    desc.densityKgM3 = desc.material->densityKgM3;
+    desc.damping = fluidDampingForViscosity(desc.material->viscosityPaS);
+    return true;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -72,9 +188,12 @@ void generateFluidSeedShell(const FluidVolumeDesc& desc,
     const f32 hy = desc.halfExtentCm[1];
     const f32 hz = desc.halfExtentCm[2];
 
-    const i32 blockAVerts = 2 * (ny + 1) * (nz + 1);
-    const i32 blockBVerts = 2 * (nx - 1) * (nz + 1);
-    const i32 blockCVerts = 2 * (nx - 1) * (ny - 1);
+    // shellBlockCounts is the SAME arithmetic fluidShellParticleCount reads through -- see that
+    // anonymous-namespace helper's own comment for why there is only one copy of it now.
+    const ShellBlockCounts blocks = shellBlockCounts(nx, ny, nz);
+    const i32 blockAVerts = blocks.a;
+    const i32 blockBVerts = blocks.b;
+    const i32 blockCVerts = blocks.c;
     outPositionsCm.reserve(static_cast<usize>(blockAVerts + blockBVerts + blockCVerts) * 3);
 
     // Block A: both X faces, i == 0 then i == nx, each walked in full (j, k) order -- the SAME

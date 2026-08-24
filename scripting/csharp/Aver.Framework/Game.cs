@@ -3,6 +3,8 @@
 // Proprietary. See LICENSE.md at the repository root.
 // Static access to the running play session: state, singletons, lookup and world queries.
 
+using Aver.Scene;
+
 namespace Aver.Framework;
 
 /// <summary>The running play session, reached statically from any script. Read-only: the host starts and stops it.</summary>
@@ -100,6 +102,64 @@ public static class Game
             if (Actors.Get<T>(e) is { } actor)
                 yield return actor;
     }
+
+    /// <summary>Requests a simulated fluid volume centred at <paramref name="centreCm"/> (world-space
+    /// centimetres) with the given half-extent, using the solver's OWN RAW knobs -- see
+    /// FluidVolume.hpp's own FluidVolumeDesc comment for what each means and its unit. Defaults
+    /// (1.0e-4, 0.1, 5, -1) are the same numbers FluidVolumeDesc itself defaults to, so calling this
+    /// with none of the four gets the identical solver an unauthored WATER record already gets.
+    /// `pressure` below zero asks the solver to derive it from the volume's own size
+    /// (fluidPressureFor) rather than use the value passed -- the same sentinel a WATER record's own
+    /// unauthored `pressure=` already means.
+    ///
+    /// NO DENSITY OR VISCOSITY HERE -- see <see cref="SpawnFluidVolumeMaterial"/> for the layer that
+    /// takes real fluid values instead of solver knobs. This overload is the raw escape hatch, kept
+    /// reachable rather than folded into the other one, exactly as the design brief's own precedence
+    /// rule requires: a raw `damping` here and a material on the other overload are two different
+    /// requests, never silently merged.
+    ///
+    /// This is the SAME relay a graph's `COMP id Fluid ...` line spawns through (Aver.Graph's
+    /// GraphComponentTree.ApplyKind, "fluid" case) -- calling it directly from a script is the
+    /// other authoring path the relay exists for, not a second mechanism.
+    ///
+    /// QUEUED, NOT SYNCHRONOUS: the bool says a provider accepted the request, not that a volume
+    /// now simulates -- see framework_abi.h's own aver_fw_fluid_spawn comment for why it cannot
+    /// answer synchronously. Whether it actually spawned is in the host's own log. False when the
+    /// host installed no fluid-spawn provider -- a build with no simulated-fluids module linked
+    /// says so rather than pretending.</summary>
+    public static bool SpawnFluidVolume(Vec3 centreCm, Vec3 halfExtentCm, string name = "unnamed",
+                                         float compliance = 1.0e-4f, float damping = 0.1f,
+                                         int iterations = 5, float pressure = -1f) =>
+        Fw.aver_fw_fluid_spawn(centreCm.X, centreCm.Y, centreCm.Z,
+                                halfExtentCm.X, halfExtentCm.Y, halfExtentCm.Z,
+                                compliance, damping, iterations, pressure, name) != 0;
+
+    /// <summary>Same request as <see cref="SpawnFluidVolume"/>, plus the MATERIAL layer: real
+    /// density (kg/m^3) and viscosity (Pa*s) instead of typing compliance/damping directly -- see
+    /// fluids::FluidMaterial's own comment (FluidVolume.hpp) for the honest split between the two
+    /// (density real, viscosity a calibrated fit onto `damping`, some things refused outright).
+    ///
+    /// `materialPreset` ("water"/"lightoil"/"honey"/"lava", case-insensitive) WINS over
+    /// <paramref name="densityKgM3"/>/<paramref name="viscosityPaS"/> when non-empty; otherwise
+    /// either of those alone still builds a material, the other field taking FluidMaterial's own
+    /// struct default (water's own numbers). Leave all three at their defaults (empty preset,
+    /// density/viscosity below zero) to spawn with no material at all -- identical to calling
+    /// <see cref="SpawnFluidVolume"/>.
+    ///
+    /// `damping` HERE CAN STILL CONFLICT WITH A MATERIAL: this call forwards both exactly as given
+    /// and does not itself decide which wins. Giving a non-default `damping` alongside a preset or
+    /// density/viscosity REFUSES the whole spawn -- caught once, downstream, at
+    /// fluids::FluidScene::spawn (fluids::fluidResolveMaterial), the one place both this call and a
+    /// level's own WATER record converge -- rather than silently picking one here.</summary>
+    public static bool SpawnFluidVolumeMaterial(Vec3 centreCm, Vec3 halfExtentCm, string name = "unnamed",
+                                                 float compliance = 1.0e-4f, float damping = 0.1f,
+                                                 int iterations = 5, float pressure = -1f,
+                                                 float densityKgM3 = -1f, float viscosityPaS = -1f,
+                                                 string materialPreset = "") =>
+        Fw.aver_fw_fluid_spawn_material(centreCm.X, centreCm.Y, centreCm.Z,
+                                         halfExtentCm.X, halfExtentCm.Y, halfExtentCm.Z,
+                                         compliance, damping, iterations, pressure,
+                                         densityKgM3, viscosityPaS, materialPreset, name) != 0;
 
     /// <summary>Every live entity carrying all of the tag bits in <paramref name="mask"/>.</summary>
     public static IEnumerable<Entity> WithTag(uint mask)

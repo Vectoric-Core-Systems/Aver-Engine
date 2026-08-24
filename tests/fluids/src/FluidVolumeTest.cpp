@@ -356,6 +356,205 @@ static void testDerivedPressure() {
     check(near(fluids::fluidPressureFor(flat, g), 0.0f, 1e-6f), "and a shell with no depth needs none either");
 }
 
+// Case 7: fluidShellParticleCount agrees with what generateFluidSeedShell actually builds --
+// FluidVolume.hpp's own comment on fluidShellParticleCount promises this ("FluidVolumeTest checks
+// them against each other directly for that reason"), so this is that check, not a re-derivation of
+// the same arithmetic that could quietly drift alongside it.
+static void testShellParticleCountMatchesGenerator() {
+    AVER_INFO("-- fluidShellParticleCount agrees with what generateFluidSeedShell actually builds --");
+    const FluidVolumeDesc descs[] = {
+        makeDesc(0.0f, 0.0f, 0.0f, 100.0f, 100.0f, 50.0f, 1, 1, 1),
+        makeDesc(0.0f, 0.0f, 0.0f, 100.0f, 100.0f, 50.0f, 4, 3, 2),
+        makeDesc(0.0f, 0.0f, 0.0f, 300.0f, 200.0f, 60.0f, 8, 8, 4),
+    };
+    for (const auto& d : descs) {
+        std::vector<f32> pos;
+        std::vector<i32> idx;
+        generateFluidSeedShell(d, pos, idx);
+        const i32 built = static_cast<i32>(pos.size() / 3);
+        check(fluidShellParticleCount(d) == built,
+              "fluidShellParticleCount(" + std::to_string(d.subdivisions[0]) + "," +
+              std::to_string(d.subdivisions[1]) + "," + std::to_string(d.subdivisions[2]) +
+              ") = " + std::to_string(fluidShellParticleCount(d)) +
+              ", the generator actually built " + std::to_string(built));
+    }
+}
+
+// ---- density: an unset one reproduces the old mass-1 behaviour; a real one scales mass AND pressure
+static void testDensityScalesMassAndPressure() {
+    AVER_INFO("-- an unset density reproduces mass 1; a real one scales both mass and pressure --");
+
+    fluids::FluidVolumeDesc d;
+    d.halfExtentCm[0] = 300.0f; d.halfExtentCm[1] = 200.0f; d.halfExtentCm[2] = 60.0f;
+    d.subdivisions[0] = 8; d.subdivisions[1] = 8; d.subdivisions[2] = 4;
+
+    check(near(fluids::fluidParticleMassKg(d), 1.0f, 1e-6f),
+          "a desc that never asked for a density gets mass 1, today's exact behaviour");
+
+    const f32 basePressure = fluids::fluidPressureFor(d);
+
+    fluids::FluidVolumeDesc water = d;
+    water.densityKgM3 = 1000.0f;
+    const f32 massWater = fluids::fluidParticleMassKg(water);
+    // mass = density * (8 hx hy hz, in m^3) / particleCount, restated directly here rather than
+    // trusting fluidParticleMassKg to check itself against its own formula.
+    const f32 volumeM3 = 8.0f * 3.0f * 2.0f * 0.6f;   // hx=3m, hy=2m, hz=0.6m
+    const f32 expectMass = 1000.0f * volumeM3 / static_cast<f32>(fluids::fluidShellParticleCount(d));
+    check(near(massWater, expectMass, 1e-3f),
+          "water's own particle mass matches density * volume / particleCount directly (" +
+          std::to_string(massWater) + " vs " + std::to_string(expectMass) + " kg)");
+    check(massWater > 1.0f, "water's real particle mass is well above the old mass-1 stand-in (" +
+                            std::to_string(massWater) + " kg)");
+
+    fluids::FluidVolumeDesc water2x = d;
+    water2x.densityKgM3 = 2000.0f;
+    check(near(fluids::fluidParticleMassKg(water2x), 2.0f * massWater, 1e-2f),
+          "doubling density doubles the particle mass");
+
+    // THE FIX THIS FILE EXISTS TO PROVE: pressure must scale by the SAME real mass invMasses now
+    // carries, or a dense fluid puddles regardless of pressure -- see fluidPressureFor's own "WHY
+    // THIS HAD TO CHANGE" comment.
+    check(near(fluids::fluidPressureFor(water), basePressure * massWater, 1e-1f),
+          "the pressure this shell derives scales by the SAME real mass -- unset density's own "
+          "pressure times that mass, not a second, independent number");
+    check(fluids::fluidPressureFor(water) > basePressure,
+          "so a real (non-unit) density needs MORE pressure to hold the same shell up, matching "
+          "the extra weight it now actually carries");
+
+    fluids::FluidVolumeDesc zeroDensity = d;
+    zeroDensity.densityKgM3 = 0.0f;
+    check(near(fluids::fluidParticleMassKg(zeroDensity), 1.0f, 1e-6f),
+          "a density of exactly 0 (nonsensical for a fluid) falls back to mass 1, same as unset");
+}
+
+// ---- the material layer: presets, the viscosity->damping fit, and the precedence rule -----------
+
+// Case 8: the presets are just the same struct, filled -- checked against the literal numbers
+// FluidMaterial's own static factories return (design brief 5's real order-of-magnitude figures),
+// so a future edit to one of them shows up as a diff here rather than silently drifting from what
+// this file's own header comment claims they are.
+static void testMaterialPresets() {
+    AVER_INFO("-- FluidMaterial presets return the design brief's own real figures --");
+
+    const FluidMaterial water = FluidMaterial::Water();
+    check(near(water.densityKgM3, 998.0f, 1e-3f) && near(water.viscosityPaS, 1.0e-3f, 1e-9f),
+          "Water(): 998 kg/m^3, 1.0e-3 Pa*s");
+
+    const FluidMaterial oil = FluidMaterial::LightOil();
+    check(near(oil.densityKgM3, 900.0f, 1e-3f) && near(oil.viscosityPaS, 0.1f, 1e-6f),
+          "LightOil(): 900 kg/m^3, 0.1 Pa*s");
+
+    const FluidMaterial honey = FluidMaterial::Honey();
+    check(near(honey.densityKgM3, 1420.0f, 1e-3f) && near(honey.viscosityPaS, 10.0f, 1e-6f),
+          "Honey(): 1420 kg/m^3, 10.0 Pa*s -- the SAME number as kViscosityAnchorHighPaS, on purpose");
+
+    const FluidMaterial lava = FluidMaterial::Lava();
+    check(near(lava.densityKgM3, 2900.0f, 1e-3f) && near(lava.viscosityPaS, 1000.0f, 1e-3f),
+          "Lava(): 2900 kg/m^3, 1000 Pa*s");
+
+    // fluidMaterialPreset is the name -> struct lookup every consumer (SandboxApp's two provider
+    // call sites) actually uses; checked here against the SAME literal factories above, so a name
+    // silently mapping to the wrong preset would show up as a mismatch, not just a missing case.
+    auto byName = fluidMaterialPreset("HONEY");   // case-insensitive, deliberately shouted here
+    check(byName.has_value() && near(byName->densityKgM3, honey.densityKgM3, 1e-3f),
+          "fluidMaterialPreset is case-insensitive and 'HONEY' resolves to Honey()");
+    check(fluidMaterialPreset("light oil").has_value() && fluidMaterialPreset("oil").has_value(),
+          "...and LightOil answers to both 'light oil' and the bare 'oil' alias");
+    check(!fluidMaterialPreset("mercury").has_value(),
+          "an unrecognised name resolves to nothing, for the caller to report by name");
+}
+
+// Case 9: the viscosity->damping fit -- the two measured anchors land exactly on their own named
+// constants, the mapping is monotonic increasing between them (more viscous -> more damping, the
+// direction the brief's own water/honey comparison demands), and it CLAMPS rather than
+// extrapolates past either anchor -- the specific, acknowledged gap FluidMaterial::Lava()'s own
+// comment names (lava's viscosity is far past the honey anchor and must read identically to it).
+static void testViscosityDampingFit() {
+    AVER_INFO("-- fluidDampingForViscosity: the two measured anchors, monotonic between them, "
+              "clamped beyond either --");
+
+    check(near(fluidDampingForViscosity(kViscosityAnchorLowPaS), kDampingAnchorLow, 1e-4f),
+          "the water anchor (1.0e-3 Pa*s) maps to exactly kDampingAnchorLow (0.01)");
+    check(near(fluidDampingForViscosity(kViscosityAnchorHighPaS), kDampingAnchorHigh, 1e-4f),
+          "the honey anchor (10 Pa*s) maps to exactly kDampingAnchorHigh (3.0)");
+
+    // Monotonic across three points spanning the calibrated range -- SAE-10 oil's own 0.1 Pa*s
+    // (FluidMaterial::LightOil(), the geometric midpoint of the two anchors) sits strictly between.
+    const f32 dWater = fluidDampingForViscosity(1.0e-3f);
+    const f32 dOil   = fluidDampingForViscosity(0.1f);
+    const f32 dHoney = fluidDampingForViscosity(10.0f);
+    check(dWater < dOil && dOil < dHoney,
+          "damping rises monotonically from water (" + std::to_string(dWater) + ") through oil (" +
+          std::to_string(dOil) + ") to honey (" + std::to_string(dHoney) + ")");
+
+    // CLAMPED, NOT EXTRAPOLATED: lava's own 1000 Pa*s is 100x past the honey anchor, and the
+    // calibration's own reliable range ends AT that anchor (see fluidDampingForViscosity's own
+    // header comment on why damping=10.0 was excluded) -- so lava must map to the identical damping
+    // as honey, not a larger number nothing measured.
+    check(near(fluidDampingForViscosity(1000.0f), fluidDampingForViscosity(10.0f), 1e-4f),
+          "a viscosity far past the high anchor clamps to that anchor's own damping, matching "
+          "FluidMaterial::Lava()'s own acknowledged-gap comment");
+    check(near(fluidDampingForViscosity(1.0e-6f), fluidDampingForViscosity(1.0e-3f), 1e-4f),
+          "...and symmetrically below the low anchor");
+
+    check(near(fluidDampingForViscosity(0.0f), kDampingAnchorLow, 1e-6f) &&
+          near(fluidDampingForViscosity(-5.0f), kDampingAnchorLow, 1e-6f),
+          "a non-positive viscosity (not physical) falls back to the least-damped end, not NaN");
+}
+
+// Case 10: fluidResolveMaterial -- the one function the design brief's precedence rule actually
+// lives in. An unset material is a no-op; a set one overwrites density/damping; and a material
+// alongside a HAND-SET raw damping is refused outright, with desc left completely untouched --
+// never a partial application of density without damping or vice versa.
+static void testResolveMaterialPrecedence() {
+    AVER_INFO("-- fluidResolveMaterial: unset is a no-op, a set material overwrites, and a "
+              "material + hand-set damping REFUSES rather than picking a winner --");
+
+    {
+        FluidVolumeDesc d;
+        const FluidVolumeDesc before = d;
+        std::string conflict;
+        check(fluidResolveMaterial(d, &conflict) && conflict.empty(),
+              "no material set: resolves true, no conflict message");
+        check(near(d.densityKgM3, before.densityKgM3, 1e-9f) && near(d.damping, before.damping, 1e-9f),
+              "...and desc is byte-for-bit unchanged");
+    }
+    {
+        FluidVolumeDesc d;
+        d.material = FluidMaterial::Honey();
+        check(fluidResolveMaterial(d), "a material with the desc's own default damping resolves true");
+        check(near(d.densityKgM3, 1420.0f, 1e-3f), "...and density becomes the material's own");
+        check(near(d.damping, kDampingAnchorHigh, 1e-4f),
+              "...and damping becomes fluidDampingForViscosity(10.0) == kDampingAnchorHigh");
+    }
+    {
+        // THE PRECEDENCE RULE ITSELF: a material AND a hand-set raw damping on the same desc.
+        FluidVolumeDesc d;
+        d.material = FluidMaterial::Water();
+        d.damping = 0.75f;   // != kDefaultFluidDamping (0.1f): the author explicitly set this
+        const FluidVolumeDesc before = d;
+        std::string conflict;
+        check(!fluidResolveMaterial(d, &conflict),
+              "a material alongside a hand-set raw damping REFUSES (returns false)");
+        check(!conflict.empty(), "...and explains itself rather than failing silently");
+        check(conflict.find("0.75") != std::string::npos,
+              "...naming the conflicting raw value in the message (" + conflict + ")");
+        check(near(d.densityKgM3, before.densityKgM3, 1e-9f) && near(d.damping, before.damping, 1e-9f),
+              "...leaving desc completely UNCHANGED -- no partial application of density without "
+              "damping, or of damping without density");
+    }
+    {
+        // The boundary of the rule: kDefaultFluidDamping itself is NOT a conflict, since a desc that
+        // never touched damping at all reads identically to one whose author retyped the default.
+        FluidVolumeDesc d;
+        d.material = FluidMaterial::Honey();
+        d.damping = kDefaultFluidDamping;   // exactly the default -- indistinguishable from "unset"
+        check(fluidResolveMaterial(d), "damping left at exactly kDefaultFluidDamping is not a "
+                                       "conflict, matching kFluidPressureAuto's own sentinel-by-"
+                                       "default-value convention");
+    }
+}
+
 int main() {
     AVER_INFO("FluidVolumeTest");
     testClosedAndConsistentlyWound();
@@ -365,6 +564,11 @@ int main() {
     testSubdivisionScaling();
     testSeedNormalsAreOutwardAndUnitLength();
     testDerivedPressure();
+    testShellParticleCountMatchesGenerator();
+    testDensityScalesMassAndPressure();
+    testMaterialPresets();
+    testViscosityDampingFit();
+    testResolveMaterialPrecedence();
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
     return g_failures;
 }

@@ -174,15 +174,80 @@ public static class GraphComponentTree
                 WarnNothingReadsIt(classNameForLog, c, "CLight");
                 break;
 
+            case "fluid":
+                ApplyFluid(c, classNameForLog);
+                break;
+
             default:
                 // ATTACHED AS A BARE TRANSFORM, NOT DROPPED. The entity still exists, still sits where
                 // the record put it, and still answers to its name, so the rest of the tree hanging
                 // off it survives an unrecognised kind. What it does not do is happen quietly.
                 Log.Warn($"[Graph] {classNameForLog}: component '{c.Id}' has unrecognised kind '{c.Kind}' " +
                          "-- it will exist as a plain transform and draw nothing. Known kinds: Scene, " +
-                         "Mesh, SkeletalMesh, Animator, Particles, Camera, Light");
+                         "Mesh, SkeletalMesh, Animator, Particles, Camera, Light, Fluid");
                 break;
         }
+    }
+
+    // A FLUID COMPONENT AUTHORS A SOLVER REQUEST, NOT AN ECS PRESENCE. fluids::FluidScene owns no
+    // entity and reads no CWorld at all (FluidScene.hpp's own "THERE IS NO OWNING ENTITY" comment),
+    // so unlike every kind above, `e` itself is never told to draw or carry a component here -- the
+    // placeholder entity Build() already created for `c` still gets its ApplyTransform call right
+    // after this returns (so it exists and sits where the record says, for an inspector to find),
+    // but nothing the solver reads ever comes from `e`.
+    //
+    // pos= IS READ AS AN ABSOLUTE WORLD centreCm, not a parent-relative offset -- the identical
+    // "authored, not composed through a transform chain" placement SandboxApp::applyLevelWater
+    // already gives a WATER record's own centreCm. A true hierarchical placement would need this
+    // component's OWN world transform, which does not exist yet at the point ApplyKind runs
+    // (Build()'s own comment: "PASS ONE CREATES ... ApplyTransform" runs AFTER ApplyKind, and
+    // parenting runs in a second pass after that) -- reaching for the ROOT's world position instead
+    // would just as often be stale, since world matrices are propagated once per frame, after
+    // gameplay (see the composition root's own onUpdate comment), not the instant a spawn call
+    // returns. Given the desc it feeds has no rotation field at all (FluidVolumeDesc is
+    // axis-aligned only), pretending to compose a full parent transform onto it would be more
+    // fiction than the plain absolute reading this uses.
+    //
+    // scale= MULTIPLIES FluidVolumeDesc's own default half-extent (100, 100, 50 cm --
+    // FluidVolume.hpp), the identical "scale multiplies a unit shape" meaning Mesh's and
+    // SkeletalMesh's scale= already carry (Graph.cs's own GraphComponent doc: "scale multiplier"),
+    // just applied to a procedural half-extent instead of an authored mesh's bind pose. scale=1,1,1
+    // -- what an omitted scale= already defaults to -- therefore spawns the exact pool an unauthored
+    // WATER record's own FluidVolumeDesc default would.
+    private static void ApplyFluid(GraphComponent c, string classNameForLog)
+    {
+        var centreCm = new Vec3(c.Position[0], c.Position[1], c.Position[2]);
+        var halfExtentCm = new Vec3(100f * c.Scale[0], 100f * c.Scale[1], 50f * c.Scale[2]);
+        // compliance/damping/iterations/pressure fall back to FluidVolumeDesc's own defaults
+        // (kHeavyLiquidCompliance=1.0e-4f, kDefaultFluidDamping=0.1f, kDefaultFluidIterations=5,
+        // kFluidPressureAuto=-1.0f) when the record names none -- an unauthored `COMP ... Fluid`
+        // therefore simulates with the identical solver settings an unauthored WATER record gets,
+        // not a second set of made-up numbers.
+        //
+        // THE MATERIAL LAYER: `preset=`/`density=`/`viscosity=` ride the SAME relay call as the four
+        // raw knobs above (Game.SpawnFluidVolumeMaterial, not a second Kind or a second branch here)
+        // -- design brief section 6's own grammar. Their AttrFloat/AttrString fallbacks (-1, "")
+        // mean exactly "not given" on the native side too (framework_abi.h's own sentinel), so a
+        // `COMP ... Fluid` naming none of the three spawns with no material at all, identical to
+        // before this layer existed.
+        //
+        // THE PRECEDENCE CHECK IS NOT HERE. A line naming BOTH a material and a non-default
+        // `damping=` is forwarded through exactly as authored -- see
+        // Game.SpawnFluidVolumeMaterial's own doc comment for why the refusal happens once,
+        // downstream, at fluids::FluidScene::spawn, not in every place that can construct a request.
+        bool accepted = Game.SpawnFluidVolumeMaterial(
+            centreCm, halfExtentCm, $"{classNameForLog}.{c.Id}",
+            c.AttrFloat("compliance", 1.0e-4f),
+            c.AttrFloat("damping", 0.1f),
+            (int)c.AttrFloat("iterations", 5f),
+            c.AttrFloat("pressure", -1f),
+            c.AttrFloat("density", -1f),
+            c.AttrFloat("viscosity", -1f),
+            c.AttrString("preset"));
+        if (!accepted)
+            Log.Warn($"[Graph] {classNameForLog}: component '{c.Id}' declared kind Fluid, but no " +
+                     "fluid-spawn provider is installed -- this build has no simulated-fluids " +
+                     "module linked, so it will exist as a plain transform and simulate nothing");
     }
 
     // Attached, correct, and inert -- so say so ONCE, by name, rather than letting an author conclude

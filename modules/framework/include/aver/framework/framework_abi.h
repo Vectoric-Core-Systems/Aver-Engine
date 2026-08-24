@@ -37,8 +37,13 @@ extern "C" {
 #define AVER_FW_ABI_VERSION_MAJOR 1
 /* 1: added aver_fw_set_view_entity / aver_fw_view_entity. Additive only.
  * 2: added aver_fw_set_sky_clouds / aver_fw_sky_clouds / aver_fw_clear_sky_clouds. Additive only,
- *    so a host built against minor 1 links and runs unchanged against this header. */
-#define AVER_FW_ABI_VERSION_MINOR 2
+ *    so a host built against minor 1 links and runs unchanged against this header.
+ * 3: added aver_fw_set_fluid_spawn_provider / aver_fw_fluid_spawn. Additive only, same reason.
+ * 4: added aver_fw_set_fluid_spawn_material_provider / aver_fw_fluid_spawn_material -- the material
+ *    layer (real density, calibrated-fit viscosity, named presets) on top of minor 3's four raw
+ *    solver knobs. Additive only, same reason: minor 3's own pair is UNCHANGED, so a host built
+ *    against it still links and spawns exactly as before against this header. */
+#define AVER_FW_ABI_VERSION_MINOR 4
 #define AVER_FW_ABI_VERSION \
     ((AVER_FW_ABI_VERSION_MAJOR << 16) | AVER_FW_ABI_VERSION_MINOR)
 
@@ -382,6 +387,86 @@ AVER_FW_ABI int32_t aver_fw_sky_clouds(int32_t* outSeed, float* outCoverage, flo
                                        float* outWindX, float* outWindY);
 /* Drops the request, handing the sky back to the level. */
 AVER_FW_ABI void aver_fw_clear_sky_clouds(void);
+
+/* ---- FLUID VOLUME SPAWN, RELAYED ------------------------------------------------------------
+ *
+ * The framework does not know what a fluid volume is and does not link the module that does --
+ * Aver.Fluids sits beside Aver.Physics at its own tier (see modules/fluids/include/aver/fluids/
+ * FluidVolume.hpp's own header: "this module must never learn what Jolt is", and only the
+ * composition root links both). Same shape as SAVE/LOAD and ANIMATION CURVES above: a host
+ * installs a provider and this forwards.
+ *
+ * WHY THIS EXISTS: a level's WATER record (SandboxApp::applyLevelWater) and a graph's
+ * `COMP <id> Fluid ...` component (Aver.Graph's GraphComponentTree.ApplyKind, "fluid" case, via
+ * Aver.Framework's Game.SpawnFluidVolume) both need to hand a fluids::FluidVolumeDesc to
+ * fluids::FluidScene::spawn. This is the one seam a graph component or a plain C# script can
+ * cross to ask for that, without either of them linking Aver.Fluids or Aver.Physics directly.
+ * `subdivisions` is deliberately NOT a parameter here -- nobody asked for authorable mesh
+ * resolution (see FluidVolume.hpp's own FluidVolumeDesc comment); every request gets that
+ * struct's own default subdivision.
+ *
+ * QUEUED, NOT SYNCHRONOUS. The return value says a provider accepted the request, not that a
+ * volume now simulates. applyLevelWater's own latch hit this exact problem first: FluidScene is
+ * not ready() until after render features come up, and this relay can be reached from points
+ * that run before that (an actor bound while a level loads, a script's own OnBeginPlay) just as
+ * easily as from ones that run after. A provider is expected to queue the request and drain it
+ * at the same frame-safe point applyLevelWater's own request is drained, not spawn from inside
+ * the callback -- whether it actually spawned is reported by the host's own log, not by this
+ * call returning.
+ *
+ * A host that installs nothing leaves this returning 0 -- a build with no fluids module linked
+ * reports exactly that, the same as a clip with no such curve reports for aver_fw_anim_curve. */
+typedef int32_t (AVER_FW_CALL* aver_fw_fluid_spawn_fn)(
+    float cx, float cy, float cz,          /* world centre, cm */
+    float hx, float hy, float hz,          /* half-extent, cm */
+    float compliance, float damping, int32_t iterations, float pressure,
+    const char* name,                      /* a label for the host's own log; never null */
+    void* user);
+/* Installs the provider. Passing null clears it. Always returns 1. */
+AVER_FW_ABI int32_t aver_fw_set_fluid_spawn_provider(aver_fw_fluid_spawn_fn fn, void* user);
+/* Requests a fluid volume. `pressure` < 0 asks the solver to derive it from the volume's own size
+ * (fluids::kFluidPressureAuto -- the same sentinel OcWaterPlacement's own pressure field uses),
+ * matching what an unauthored `pressure=` already means on a WATER record. Returns 1 when a
+ * provider accepted the request, 0 when there is none. */
+AVER_FW_ABI int32_t aver_fw_fluid_spawn(float cx, float cy, float cz, float hx, float hy, float hz,
+                                        float compliance, float damping, int32_t iterations,
+                                        float pressure, const char* name);
+
+/* ---- FLUID VOLUME SPAWN, WITH A MATERIAL --------------------------------------------------
+ *
+ * A SECOND, ADDITIVE relay beside aver_fw_fluid_spawn above, not a replacement for it -- see this
+ * header's own MINOR 4 changelog entry. Carries the same six placement floats and the same four
+ * raw solver knobs PLUS the material layer (fluids::FluidMaterial): `densityKgM3`/`viscosityPaS`
+ * (< 0 means "not given", the same sentinel convention `pressure` already uses on the plain
+ * relay), or `materialPreset` (a name -- "water", "lightoil", "honey", "lava", case-insensitive;
+ * empty means none). A non-empty preset is resolved to its own density/viscosity by the provider,
+ * which links fluids::FluidMaterial's real presets -- this ABI carries only a name across the
+ * boundary, never a duplicated set of literal numbers, so the framework still never learns what a
+ * FluidMaterial actually contains.
+ *
+ * `damping` HERE CAN STILL CONFLICT WITH A MATERIAL, DELIBERATELY: this relay does not itself
+ * decide which one wins. An author who writes both a material (preset or density/viscosity) and a
+ * non-default `damping` on the same request is forwarded through untouched, exactly as authored --
+ * the refusal happens once, downstream, at fluids::FluidScene::spawn (the one place both this
+ * relay and a level's own WATER record converge), not here and not twice. */
+typedef int32_t (AVER_FW_CALL* aver_fw_fluid_spawn_material_fn)(
+    float cx, float cy, float cz,          /* world centre, cm */
+    float hx, float hy, float hz,          /* half-extent, cm */
+    float compliance, float damping, int32_t iterations, float pressure,
+    float densityKgM3, float viscosityPaS, /* < 0 means "not given" on either */
+    const char* materialPreset,            /* preset name, or "" for none; never null */
+    const char* name,                      /* a label for the host's own log; never null */
+    void* user);
+/* Installs the provider. Passing null clears it. Always returns 1. */
+AVER_FW_ABI int32_t aver_fw_set_fluid_spawn_material_provider(aver_fw_fluid_spawn_material_fn fn,
+                                                               void* user);
+/* Requests a fluid volume with a material. Same `pressure` sentinel as aver_fw_fluid_spawn.
+ * Returns 1 when a provider accepted the request, 0 when there is none. */
+AVER_FW_ABI int32_t aver_fw_fluid_spawn_material(float cx, float cy, float cz,
+                                                 float hx, float hy, float hz,
+                                                 float compliance, float damping, int32_t iterations,
+                                                 float pressure, float densityKgM3, float viscosityPaS,
+                                                 const char* materialPreset, const char* name);
 
 #ifdef __cplusplus
 } /* extern "C" */

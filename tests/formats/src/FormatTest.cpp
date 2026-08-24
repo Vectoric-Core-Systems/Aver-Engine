@@ -554,6 +554,114 @@ static void checkOcworldWater() {
         check(writeOcworld(back) == text, "a second write reproduces the first byte for byte");
     }
     {
+        // The four solver knobs (compliance/damping/iterations/pressure): real `key value` pairs, not
+        // bare tokens like `simulate`, appended after it -- exactly the fluids solver-knobs brief's
+        // own grammar example. Default -1 on every one means "not authored"; this record names all
+        // four, so none of that sentinel should survive the parse.
+        OcWorldData w;
+        check(parseOcworld("OCWORLD 1\nNAME T\n"
+                           "WATER name Pool level -20 bounds 200 450 800 850 simulate "
+                           "compliance 0.00003 damping 0.6 iterations 8 pressure 900\n", w, &err),
+              "a WATER record naming all four solver knobs parses");
+        check(w.waters.size() == 1, "and it is kept");
+        const OcWaterPlacement& knobbed = w.waters[0];
+        check(std::fabs(knobbed.compliance - 0.00003) < 1e-9, "compliance carries the authored value");
+        check(std::fabs(knobbed.damping - 0.6) < 1e-9, "...as does damping");
+        check(knobbed.iterations == 8, "...and iterations, kept as a whole number");
+        check(std::fabs(knobbed.pressure - 900.0) < 1e-9, "...and pressure");
+
+        const std::string text = writeOcworld(w);
+        check(text.find("compliance 3e-05 damping 0.6 iterations 8 pressure 900") != std::string::npos,
+              "the written text keeps all four, after simulate, in parse order");
+
+        OcWorldData back;
+        check(parseOcworld(text, back, &err) && back.waters.size() == 1, "and it survives the round trip");
+        check(std::fabs(back.waters[0].compliance - knobbed.compliance) < 1e-9 &&
+              std::fabs(back.waters[0].damping - knobbed.damping) < 1e-9 &&
+              back.waters[0].iterations == knobbed.iterations &&
+              std::fabs(back.waters[0].pressure - knobbed.pressure) < 1e-9,
+              "...with all four numbers intact");
+        check(writeOcworld(back) == text, "a second write reproduces the first byte for byte");
+    }
+    {
+        // THE MATERIAL LAYER (preset/density/viscosity), same grammar shape and round-trip discipline
+        // as the four solver knobs' own block just above -- `preset` alone here, as its own record.
+        OcWorldData w;
+        check(parseOcworld("OCWORLD 1\nNAME T\n"
+                           "WATER name Pool level -20 bounds 200 450 800 850 simulate preset honey\n",
+                           w, &err),
+              "a WATER record naming a material preset parses");
+        check(w.waters.size() == 1 && w.waters[0].preset == "honey",
+              "and carries the preset name verbatim");
+        check(w.waters[0].density < 0.0 && w.waters[0].viscosity < 0.0,
+              "with density/viscosity left at their -1 sentinel -- the preset carries no numbers of "
+              "its own at the format level");
+
+        const std::string text = writeOcworld(w);
+        check(text.find("preset honey") != std::string::npos,
+              "the written text keeps the preset, after the four solver knobs' own (absent) slot");
+        check(text.find("density") == std::string::npos && text.find("viscosity") == std::string::npos,
+              "and invents neither density nor viscosity for a record that named only a preset");
+
+        OcWorldData back;
+        check(parseOcworld(text, back, &err) && back.waters.size() == 1 &&
+              back.waters[0].preset == "honey", "and it survives the round trip");
+        check(writeOcworld(back) == text, "a second write reproduces the first byte for byte");
+    }
+    {
+        // Hand-typed density/viscosity, WITHOUT a preset -- the other half of the material grammar,
+        // and the case that proves `preset` and the two numeric keys are independent tokens rather
+        // than one clause that only parses together.
+        OcWorldData w;
+        check(parseOcworld("OCWORLD 1\nNAME T\n"
+                           "WATER name Tank level -20 bounds 0 0 300 200 simulate "
+                           "density 1100 viscosity 0.05\n", w, &err),
+              "a WATER record naming density and viscosity, with no preset, parses");
+        check(w.waters.size() == 1, "and is kept");
+        const OcWaterPlacement& tank = w.waters[0];
+        check(tank.preset.empty(), "...with no preset name at all");
+        check(std::fabs(tank.density - 1100.0) < 1e-9 && std::fabs(tank.viscosity - 0.05) < 1e-9,
+              "...and both numbers carried exactly as authored");
+
+        const std::string text = writeOcworld(w);
+        check(text.find("density 1100 viscosity 0.05") != std::string::npos,
+              "the written text keeps both, in parse order, and writes no `preset` token");
+        check(text.find("preset") == std::string::npos, "...since none was authored");
+
+        OcWorldData back;
+        check(parseOcworld(text, back, &err) && back.waters.size() == 1 &&
+              std::fabs(back.waters[0].density - tank.density) < 1e-9 &&
+              std::fabs(back.waters[0].viscosity - tank.viscosity) < 1e-9,
+              "and both numbers survive the round trip");
+        check(writeOcworld(back) == text, "a second write reproduces the first byte for byte");
+    }
+    {
+        // THE CASE THAT MATTERS MOST FOR A LEVEL WRITTEN BEFORE THIS CHANGE: a plain simulated record
+        // that names none of the four solver knobs -- NOR any of the three material-layer keys added
+        // alongside them -- must still parse -- with every one of them left at its "not authored"
+        // default, not at some other default that would make the format-level struct disagree with
+        // what SandboxApp::applyLevelWater actually does with an unset field -- and the writer must
+        // not invent any of the seven out of thin air on the way back out.
+        OcWorldData w;
+        check(parseOcworld("OCWORLD 1\nNAME T\n"
+                           "WATER name Pool level -20 bounds 200 450 800 850 simulate\n", w, &err),
+              "a simulated WATER record with no solver knobs still parses");
+        check(w.waters.size() == 1, "and is kept");
+        const OcWaterPlacement& plain = w.waters[0];
+        check(plain.compliance < 0.0 && plain.damping < 0.0 && plain.iterations < 0 && plain.pressure < 0.0,
+              "with all four solver knobs left at their -1 sentinel");
+        check(plain.preset.empty() && plain.density < 0.0 && plain.viscosity < 0.0,
+              "...and the material layer left equally unset: no preset name, density/viscosity at -1");
+        const std::string text = writeOcworld(w);
+        check(text.find("compliance") == std::string::npos && text.find("damping") == std::string::npos &&
+              text.find("iterations") == std::string::npos && text.find("pressure") == std::string::npos,
+              "and none of the four solver knobs written back out for a record that never named one");
+        check(text.find("preset") == std::string::npos && text.find("density") == std::string::npos &&
+              text.find("viscosity") == std::string::npos,
+              "...nor any of the three material-layer keys -- a map written before this change loads "
+              "and writes back byte-identically to how it always did");
+    }
+    {
         // THE CASE THAT MATTERS MOST FOR EVERY LEVEL THAT ALREADY EXISTS: a world with no WATER
         // record at all must parse exactly as it did before these records were added, and produce no
         // water rather than a default one.

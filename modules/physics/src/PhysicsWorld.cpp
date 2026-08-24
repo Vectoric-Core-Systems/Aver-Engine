@@ -906,10 +906,17 @@ bool buildSoftShared(JPH::SoftBodySharedSettings& settings,
     return true;
 }
 
-// Creates the body, registers the handle, returns it.
-int32_t addSoftBody(JPH::SoftBodySharedSettings* shared, const Vec3& centreCm, float pressure) {
+// Creates the body, registers the handle, returns it. `damping`/`iterations` are already clamped by
+// the caller (aver_phys_softbody_create's own guard) -- this function just assigns them, the same
+// division of labour `pressure` already has: this is the one place both create paths converge, and
+// aver_phys_softbody_create_skinned's own caller passes Jolt's un-named defaults straight through
+// rather than clamping a literal that is already known valid.
+int32_t addSoftBody(JPH::SoftBodySharedSettings* shared, const Vec3& centreCm, float pressure,
+                    float damping, int32_t iterations) {
     JPH::SoftBodyCreationSettings s(shared, toJolt(centreCm), JPH::Quat::sIdentity(), Layers::MOVING);
     s.mPressure = pressure;
+    s.mLinearDamping = damping;
+    s.mNumIterations = static_cast<JPH::uint32>(iterations);
     // The body origin stays put and the PARTICLES are what move. With this on, Jolt recentres the
     // body on its particles every step, which would make aver_phys_body_position report a moving
     // target for something the caller never moved.
@@ -931,7 +938,8 @@ int32_t aver_phys_softbody_create(const float* verticesXyz, int32_t vertexCount,
                                   const int32_t* indices, int32_t indexCount,
                                   const float* invMasses,
                                   float cx, float cy, float cz,
-                                  float compliance, float pressure) {
+                                  float compliance, float pressure,
+                                  float damping, int32_t iterations) {
     if (!g_world) return 0;
     // Ref-counted and owned by the shape from here on: Jolt keeps it alive as long as the body
     // needs it, which is why this is a Ref and not a local that goes out of scope.
@@ -939,7 +947,14 @@ int32_t aver_phys_softbody_create(const float* verticesXyz, int32_t vertexCount,
     if (!buildSoftShared(*shared, verticesXyz, vertexCount, indices, indexCount, invMasses, compliance))
         return 0;
     shared->Optimize();
-    return addSoftBody(shared, Vec3(cx, cy, cz), pressure);
+    // Clamped here, not inside addSoftBody: this is the ABI boundary, the one place an author's own
+    // number (however it was authored -- a level file, a graph, a hand-written call) first reaches
+    // this translation unit, and the physics_abi.h doc comment on this function is the contract that
+    // promises the clamp happens. See that comment for why 0 iterations specifically cannot be let
+    // through: Jolt divides the step by it.
+    const float clampedDamping = damping < 0.0f ? 0.0f : damping;
+    const int32_t clampedIterations = iterations < 1 ? 1 : iterations;
+    return addSoftBody(shared, Vec3(cx, cy, cz), pressure, clampedDamping, clampedIterations);
 }
 
 int32_t aver_phys_softbody_create_skinned(const float* verticesXyz, int32_t vertexCount,
@@ -989,8 +1004,12 @@ int32_t aver_phys_softbody_create_skinned(const float* verticesXyz, int32_t vert
     shared->Optimize();
 
     // Pressure is deliberately not offered here: a skinned body's shape is governed by the skeleton
-    // it hangs off, and inflating it as well fights that.
-    return addSoftBody(shared, Vec3(cx, cy, cz), 0.0f);
+    // it hangs off, and inflating it as well fights that. damping/iterations are new PARAMETERS on
+    // addSoftBody as of the fluids solver-knobs change, but a skinned soft body (jiggle physics on a
+    // skeletal mesh) is out of that change's scope -- passed here as Jolt's own
+    // SoftBodyCreationSettings defaults (0.1f, 5), exactly what this call already got before either
+    // field existed, so this path's behaviour is unchanged.
+    return addSoftBody(shared, Vec3(cx, cy, cz), 0.0f, 0.1f, 5);
 }
 
 int32_t aver_phys_softbody_skin(int32_t body, const float* jointMatrices, int32_t jointCount,
@@ -1091,6 +1110,33 @@ int32_t aver_phys_softbody_apply_impulse(int32_t body, const float* centreCm, fl
         v.mVelocity += (localVel - v.mVelocity) * s;
         ++nudged;
     }
+
+    // WAKING IS PART OF PUSHING, and leaving it out made this function silently do nothing to
+    // exactly the fluids it was written for. Writing mVelocity is a poke at memory, not a physics
+    // event: Jolt never sees it, so a body it has already put to sleep stays asleep with its new
+    // velocities sitting unread, and the caller gets a positive `nudged` count telling them it
+    // worked.
+    //
+    // WHY THIS SURFACED ONLY WITH REAL DENSITY. Every fluid used to have unit particle mass and the
+    // default damping, which together kept a settled pool jittering just above Jolt's sleep
+    // threshold, so the bug could not fire. Real density-scaled mass plus the damping the Honey and
+    // Lava presets map to settles a volume genuinely still -- it sleeps a few seconds after spawn,
+    // and from then on the player could walk through it and nothing would move. Two of the four
+    // shipped presets, broken in the one way that matters, and no test above this layer caught it
+    // because they all disturb a body that never had time to fall asleep.
+    //
+    // Activated unconditionally rather than only when something was nudged: a sphere that currently
+    // overlaps no vertex may well overlap one a few milliseconds later, and a sleeping body's
+    // vertices never move, so declining to wake it here is what would keep it asleep forever.
+    //
+    // THE NO-LOCK INTERFACE, AND THIS IS NOT AN OPTIMISATION. BodyInterface::ActivateBody takes a
+    // BodyLockWrite on the body it is activating (BodyInterface.cpp:213-221) -- and this function is
+    // still inside its own BodyLockWrite on that same body, taken at the top to mutate the vertices.
+    // Going through the locking interface here would have the thread wait on a per-body mutex it
+    // already holds. GetBodyInterfaceNoLock is Jolt's documented answer for exactly this position:
+    // "use with great care", meaning use it when you have already established the lock yourself,
+    // which is the case here and only here.
+    g_world->system.GetBodyInterfaceNoLock().ActivateBody(*id);
     return nudged;
 }
 

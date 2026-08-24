@@ -254,6 +254,40 @@ struct OcWaterPlacement {
     // ocean has no size to give it, and the consumer is what refuses that pairing rather than the
     // parser -- the format's job is to carry what was written, not to adjudicate it.
     bool simulate = false;
+
+    // The four solver knobs a simulated record may name -- see fluids::FluidVolumeDesc's own fields
+    // of the same names for what each one means physically. These are what actually reaches Jolt.
+    //
+    // ALL FOUR DEFAULT TO -1, meaning "not authored", the same sentinel fluids::kFluidPressureAuto
+    // already gives `pressure` for the identical reason: 0 is a real, legal value for compliance,
+    // damping and pressure (0 compliance is "inextensible", 0 damping and 0 pressure are ordinary
+    // Jolt settings), and 0 iterations divides by zero inside Jolt's own solver step -- so none of
+    // the four can use 0 as "the author wrote nothing" without colliding with a value someone might
+    // actually write. -1 has no such collision: nothing here is ever legally negative.
+    //
+    // The consumer (SandboxApp::applyLevelWater), not this struct, decides what an unauthored field
+    // becomes -- fluids::FluidVolumeDesc's own defaults, exactly what a level written before these
+    // four tokens existed already got. This struct's only job is to carry what was written.
+    f64 compliance = -1.0;
+    f64 damping    = -1.0;
+    i32 iterations = -1;
+    f64 pressure   = -1.0;
+
+    // THE MATERIAL LAYER, alongside the four raw knobs above -- see fluids::FluidMaterial's own
+    // comment (FluidVolume.hpp) for what density/viscosity mean physically (density real,
+    // viscosity a CALIBRATED FIT onto `damping` above, not a fifth thing that reaches Jolt
+    // directly -- correcting what this struct's own comment used to say, back when there was no
+    // such fit yet). `preset` names one of FluidMaterial's own presets (water/lightoil/honey/lava,
+    // case-insensitive) and wins over density/viscosity when non-empty; density/viscosity alone
+    // build a hand-typed material. EMPTY PRESET AND BOTH density/viscosity <= 0 MEANS NO MATERIAL
+    // -- the consumer, not this struct, decides what that becomes, the identical division of
+    // responsibility the four -1 knobs above already have. A record naming BOTH a material (any of
+    // the three fields below) and a non-default `damping` above is carried through exactly as
+    // written; the consumer is what refuses the conflict (fluids::fluidResolveMaterial, called from
+    // fluids::FluidScene::spawn), not this struct and not the parser.
+    std::string preset;
+    f64 density   = -1.0;
+    f64 viscosity = -1.0;
 };
 
 struct OcWorldData {

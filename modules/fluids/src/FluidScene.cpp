@@ -5,6 +5,7 @@
 #include "aver/physics/physics_abi.h"
 #include "aver/core/Log.hpp"
 
+#include <string>
 #include <vector>
 
 namespace aver::fluids {
@@ -144,7 +145,23 @@ FluidHandle FluidScene::spawn(const fluids::FluidVolumeDesc& desc, rhi::IDevice&
         return 0;
     }
 
-    Resident r(desc);
+    // THE MATERIAL LAYER RESOLVES HERE, AND ONLY HERE -- see fluids::fluidResolveMaterial's own
+    // doc comment (FluidVolume.hpp) for why this is the one call every fluid request converges on
+    // regardless of how it was authored: a WATER record via SandboxApp::applyLevelWater's direct
+    // construction, a graph's `COMP ... Fluid` line via either of the framework relay's two
+    // providers, or any future direct caller of this function. A desc that never set `material` is
+    // untouched by this (fluidResolveMaterial's own early-out), so every caller from before this
+    // layer existed spawns identically to before. A desc that DOES set `material` alongside a
+    // hand-set raw `damping` REFUSES the whole spawn rather than picking a winner -- this is the
+    // design brief's precedence rule, enforced at the one point it cannot be silently skipped.
+    fluids::FluidVolumeDesc resolved = desc;
+    std::string materialConflict;
+    if (!fluids::fluidResolveMaterial(resolved, &materialConflict)) {
+        AVER_ERROR("[Fluid] refusing to spawn: {}", materialConflict);
+        return 0;
+    }
+
+    Resident r(resolved);
     r.vol.generateSeedShell();
 
     // The render mesh's OWN coordinate frame -- what createMesh's `source` is measured in, and
@@ -199,24 +216,42 @@ FluidHandle FluidScene::spawn(const fluids::FluidVolumeDesc& desc, rhi::IDevice&
     }
 
     const fluids::FluidVolumeDesc& d = r.vol.desc();
-    // invMasses is NULL, deliberately: every particle keeps inverse mass 1, which means NOTHING IS
-    // PINNED. A pinned particle is how a flag stays attached to its pole -- exactly the wrong
-    // behaviour for a liquid, whose entire reason for existing here is that a hard enough slosh can
-    // carry it clean over the basin rim and leave it there. Pinning even the bottom ring would
-    // tether the whole body to its rest shape forever and defeat the one behaviour this module
-    // exists to allow.
+    // invMasses is UNIFORM -- every particle gets the SAME inverse mass, never 0 -- so NOTHING IS
+    // PINNED regardless of what that shared value is. A pinned particle is how a flag stays attached
+    // to its pole -- exactly the wrong behaviour for a liquid, whose entire reason for existing here
+    // is that a hard enough slosh can carry it clean over the basin rim and leave it there. Pinning
+    // even the bottom ring would tether the whole body to its rest shape forever and defeat the one
+    // behaviour this module exists to allow.
+    //
+    // The shared value itself is fluids::fluidParticleMassKg(d), inverted: 1/1.0f == 1.0f whenever
+    // d.densityKgM3 is left at fluids::kFluidDensityUnset, so this array is filled with exactly 1.0f
+    // in every slot for a desc that never asked for a real density -- bit-for-bit the same per-vertex
+    // value aver_phys_softbody_create's own `invMasses ? invMasses[i] : 1.0f` fallback already used
+    // when this was still a null pointer (PhysicsWorld.cpp's buildSoftShared). A desc that DID ask
+    // for a density gets a real per-particle mass instead: denser water sags harder under the same
+    // pressure and compliance, exactly the physics fluidPressureFor's own derivation now accounts
+    // for below.
+    const f32 particleMassKg = fluids::fluidParticleMassKg(d);
+    const std::vector<f32> invMasses(static_cast<usize>(r.vol.vertexCount()), 1.0f / particleMassKg);
     // A desc that did not name a pressure gets one derived from its own size and subdivision. Done
     // HERE rather than inside fluids::FluidVolume because this is the module that owns the moment the
     // body is created -- FluidVolume deliberately knows nothing about soft bodies -- and done at all
     // because a single constant cannot be right for two pools of different depths. See
-    // fluids::fluidPressureFor for the arithmetic.
+    // fluids::fluidPressureFor for the arithmetic -- as of the density field above, that arithmetic
+    // reads d.densityKgM3 too, so this already balances the SAME real mass invMasses just derived.
     const f32 pressure = d.pressure < 0.0f ? fluids::fluidPressureFor(d) : d.pressure;
+    // damping/iterations pass straight through, the identical "the desc already carries the real
+    // number, this call site just forwards it" shape compliance and pressure already have -- see
+    // FluidVolumeDesc's own comment on the two fields for what each does and why neither substitutes
+    // for the other, and aver_phys_softbody_create's own doc comment for the clamp this ABI call
+    // applies before either reaches Jolt.
     r.body = aver_phys_softbody_create(r.vol.seedPositionsCm().data(), r.vol.vertexCount(),
                                        r.vol.indices().data(),
                                        static_cast<int32_t>(r.vol.indices().size()),
-                                       nullptr,
+                                       invMasses.data(),
                                        d.centreCm[0], d.centreCm[1], d.centreCm[2],
-                                       d.compliance, pressure);
+                                       d.compliance, pressure, d.damping,
+                                       static_cast<int32_t>(d.iterations));
     if (!r.body) {
         AVER_WARN("[Fluid] Jolt refused to create a body for this volume; refusing it");
         retire(r);

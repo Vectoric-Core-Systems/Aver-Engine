@@ -1565,6 +1565,22 @@ public:
         // effect would see the volume one frame stale -- and on its first frame, the unposed seed
         // shell at the world origin.
         if (fluidScene_.init(*e.device())) e.device()->addRenderFeature(&fluidScene_);
+
+        // A GRAPH-AUTHORED `COMP ... Fluid` (Aver.Graph's GraphComponentTree.ApplyKind) and a
+        // plain C# script calling Game.SpawnFluidVolume both reach fluidScene_ through this one
+        // relay -- see framework_abi.h's own aver_fw_fluid_spawn comment for why it exists, and
+        // fluidSpawnProvider's own comment (below) for what installing it does. Installed here,
+        // beside fluidScene_.init() itself, rather than beside the other providers a few hundred
+        // lines down: those all answer a QUERY (an anim curve, a save path) that means nothing
+        // before this exact registration has run, and this one is no different -- fluidScene_ is
+        // the thing every request eventually reaches.
+        aver_fw_set_fluid_spawn_provider(&SandboxApp::fluidSpawnProvider, this);
+        // The material-layer relay, installed alongside the raw one above for the identical reason
+        // -- see framework_abi.h's own aver_fw_fluid_spawn_material comment (MINOR 4) and
+        // fluidSpawnMaterialProvider's own comment (below) for what it adds. Both providers push
+        // onto the SAME fluidGraphQueue_ (see that function's own comment for why one queue, not
+        // two, is correct here), so nothing about the drain in onUpdate needed to change.
+        aver_fw_set_fluid_spawn_material_provider(&SandboxApp::fluidSpawnMaterialProvider, this);
 #endif
 
         // --furnace-test: does the shading model CONSERVE ENERGY? A uniform environment of
@@ -2570,6 +2586,28 @@ public:
                 AVER_ERROR("[Water] '{}' asked to be simulated but the fluid body could not be created", nm);
             }
         }
+        // GRAPH-AUTHORED FLUID VOLUMES, drained here for the identical reason fluidWantPending_ is:
+        // fluidSpawnProvider can be invoked from a point in the frame where fluidScene_.ready() is
+        // still false (an actor bound while a level loads), so it queues instead of spawning. Every
+        // knob is logged, not just placement -- unlike fluidWantPending_'s own log two lines up,
+        // this is the one path an author can reach WITHOUT going through OcWorld's own -1-sentinel
+        // fields, so nothing upstream already proved these four numbers reached this point.
+        for (const FluidGraphRequest& req : fluidGraphQueue_) {
+            fluids::FluidHandle h = fluidScene_.spawn(req.desc, *e.device());
+            if (h) {
+                fluidGraphHandles_.push_back(h);
+                AVER_INFO("[Fluid] '{}' is SIMULATED: a {}x{}x{} cm soft body centred at ({}, {}, {}), "
+                          "compliance={}, damping={}, iterations={}, pressure={}",
+                          req.label, req.desc.halfExtentCm[0] * 2.0f, req.desc.halfExtentCm[1] * 2.0f,
+                          req.desc.halfExtentCm[2] * 2.0f, req.desc.centreCm[0], req.desc.centreCm[1],
+                          req.desc.centreCm[2], req.desc.compliance, req.desc.damping,
+                          req.desc.iterations, req.desc.pressure);
+            } else {
+                AVER_ERROR("[Fluid] '{}' asked to be simulated but the fluid body could not be created",
+                           req.label);
+            }
+        }
+        fluidGraphQueue_.clear();
         // AFTER the physics step above, and before any prePass. update() reads the solver's current
         // particle positions: run it before the step and the frame draws the previous shape, run it
         // after prePass and the bytes it stages are not copied until the frame after that.
@@ -6424,6 +6462,43 @@ private:
                 // number was kept.
                 fd.subdivisions[0] = 14;
                 fd.subdivisions[1] = 14;
+
+                // The four solver knobs, applied ONLY when this record actually named one. wp's own
+                // fields default to -1 ("not authored" -- see OcWaterPlacement's own comment for why
+                // -1 and not 0), and fd's own FluidVolumeDesc defaults are exactly what a level
+                // written before these four tokens existed already gets (kHeavyLiquidCompliance,
+                // Jolt's own 0.1/5, kFluidPressureAuto) -- so leaving an unauthored field alone here,
+                // rather than assigning wp's sentinel straight through, is what keeps an old .ocmap
+                // simulating identically to how it did before this change.
+                if (wp.compliance >= 0.0) fd.compliance = static_cast<f32>(wp.compliance);
+                if (wp.damping    >= 0.0) fd.damping    = static_cast<f32>(wp.damping);
+                if (wp.iterations >= 0)   fd.iterations = static_cast<u32>(wp.iterations);
+                if (wp.pressure   >= 0.0) fd.pressure   = static_cast<f32>(wp.pressure);
+
+                // THE MATERIAL LAYER, same "applied only when actually named" rule as the four
+                // knobs just above, and the same division of labour SandboxApp::fluidSpawnMaterialProvider
+                // gives the graph-authored path: a non-empty preset wins outright; otherwise
+                // density/viscosity each apply independently, either alone still building a
+                // material against FluidMaterial's own struct defaults for whichever field was not
+                // given. Left unset (fd.material stays std::nullopt) when the record names none of
+                // the three -- an old .ocmap, or a WATER record that only ever used the four raw
+                // knobs, reaches fluids::FluidScene::spawn identically to before this layer existed.
+                // The precedence check against a hand-set fd.damping happens THERE, not here --
+                // see fluids::fluidResolveMaterial's own comment for why that is the one place it
+                // cannot be forgotten, the WATER record's own path into it included.
+                if (!wp.preset.empty()) {
+                    if (auto mat = fluids::fluidMaterialPreset(wp.preset)) {
+                        fd.material = *mat;
+                    } else {
+                        AVER_WARN("[Water] '{}' names unknown material preset '{}'; no material applied",
+                                  wp.name.empty() ? "unnamed" : wp.name, wp.preset);
+                    }
+                } else if (wp.density >= 0.0 || wp.viscosity >= 0.0) {
+                    fluids::FluidMaterial mat;   // struct defaults are water's own numbers
+                    if (wp.density   >= 0.0) mat.densityKgM3  = static_cast<f32>(wp.density);
+                    if (wp.viscosity >= 0.0) mat.viscosityPaS = static_cast<f32>(wp.viscosity);
+                    fd.material = mat;
+                }
 
                 // LATCHED, NOT SPAWNED -- and this is the fix for the bug that made every
                 // simulated record log "the fluid body could not be created" at startup. onInit
@@ -12414,6 +12489,90 @@ private:
         return 1;
     }
 
+#if AVER_FLUIDS_SIMULATED
+    // Answers the framework's relayed fluid-spawn request (aver_fw_fluid_spawn) -- unlike animCurve
+    // just above, this cannot answer from a system singleton in one line, because the request has
+    // to reach fluidScene_, and fluidScene_.spawn() is only safe to call from onUpdate's drain (see
+    // applyLevelWater's own "LATCHED, NOT SPAWNED" comment for the exact bug -- FluidScene is not
+    // ready() until render features come up, and this relay can be reached from a point in the
+    // frame that runs before that just as easily as one that runs after, e.g. an actor bound while
+    // a level is still loading). So this QUEUES onto fluidGraphQueue_ and returns; onUpdate's own
+    // drain (right beside fluidWantPending_'s) does the actual fluidScene_.spawn() call and the
+    // logging that proves it happened.
+    //
+    // iterations is NOT clamped here -- aver_phys_softbody_create's own ABI entry
+    // (PhysicsWorld.cpp) already clamps it to >= 1 before it ever reaches Jolt, and duplicating
+    // that clamp here would just be a second place for the two to disagree if one changes.
+    static i32 fluidSpawnProvider(f32 cx, f32 cy, f32 cz, f32 hx, f32 hy, f32 hz,
+                                  f32 compliance, f32 damping, i32 iterations, f32 pressure,
+                                  const char* name, void* user) {
+        auto* self = static_cast<SandboxApp*>(user);
+        if (!self) return 0;
+        fluids::FluidVolumeDesc desc;
+        desc.centreCm[0] = cx; desc.centreCm[1] = cy; desc.centreCm[2] = cz;
+        desc.halfExtentCm[0] = hx; desc.halfExtentCm[1] = hy; desc.halfExtentCm[2] = hz;
+        desc.compliance = compliance;
+        desc.damping    = damping;
+        desc.iterations = static_cast<u32>(iterations);
+        desc.pressure   = pressure;
+        self->fluidGraphQueue_.push_back({desc, name && *name ? name : "unnamed"});
+        return 1;
+    }
+
+    // Answers the framework's material-layer relay (aver_fw_fluid_spawn_material) -- the same
+    // queue-and-drain shape as fluidSpawnProvider just above, and for the identical reason (see
+    // that function's own comment). The one thing this does that the raw provider does not: builds
+    // desc.material from whichever of materialPreset/densityKgM3/viscosityPaS was actually given.
+    //
+    // A NON-EMPTY PRESET WINS, matching framework_abi.h's own aver_fw_fluid_spawn_material comment
+    // -- resolved HERE, via fluids::fluidMaterialPreset, because this is the one native call site
+    // that links Aver.Fluids and can see FluidMaterial::Water()/::Honey()/etc.'s real numbers; an
+    // unrecognised name is reported by name and falls through to leaving desc.material unset,
+    // rather than a caller getting a silently-wrong default material.
+    //
+    // density/viscosity are read INDEPENDENTLY when there is no preset: either alone still builds a
+    // material (the other field keeps FluidMaterial's own struct default -- water's own numbers),
+    // matching the design brief's own grammar ("density=1100 viscosity=0.05" both, or either alone).
+    //
+    // THE PRECEDENCE CHECK IS DELIBERATELY NOT HERE. This only ever sets desc.material and forwards
+    // whatever damping was given (possibly the non-default kind); fluids::FluidScene::spawn (via
+    // fluids::fluidResolveMaterial) is the one place that decides whether the two conflict -- see
+    // that function's own comment for why doing it there, not here, is what makes it impossible to
+    // forget for the OTHER path (a WATER record) that never reaches this function at all.
+    static i32 fluidSpawnMaterialProvider(f32 cx, f32 cy, f32 cz, f32 hx, f32 hy, f32 hz,
+                                          f32 compliance, f32 damping, i32 iterations, f32 pressure,
+                                          f32 densityKgM3, f32 viscosityPaS, const char* materialPreset,
+                                          const char* name, void* user) {
+        auto* self = static_cast<SandboxApp*>(user);
+        if (!self) return 0;
+        fluids::FluidVolumeDesc desc;
+        desc.centreCm[0] = cx; desc.centreCm[1] = cy; desc.centreCm[2] = cz;
+        desc.halfExtentCm[0] = hx; desc.halfExtentCm[1] = hy; desc.halfExtentCm[2] = hz;
+        desc.compliance = compliance;
+        desc.damping    = damping;
+        desc.iterations = static_cast<u32>(iterations);
+        desc.pressure   = pressure;
+
+        const std::string label = name && *name ? name : "unnamed";
+        if (materialPreset && *materialPreset) {
+            if (auto mat = fluids::fluidMaterialPreset(materialPreset)) {
+                desc.material = *mat;
+            } else {
+                AVER_WARN("[Fluid] '{}' names unknown material preset '{}'; no material applied",
+                          label, materialPreset);
+            }
+        } else if (densityKgM3 > 0.0f || viscosityPaS > 0.0f) {
+            fluids::FluidMaterial mat;   // struct defaults are water's own numbers
+            if (densityKgM3  > 0.0f) mat.densityKgM3  = densityKgM3;
+            if (viscosityPaS > 0.0f) mat.viscosityPaS = viscosityPaS;
+            desc.material = mat;
+        }
+
+        self->fluidGraphQueue_.push_back({desc, label});
+        return 1;
+    }
+#endif
+
 #if AVER_MODULE_SYNAPSE_SCENE
     // Answers the framework's relayed Synapse steering-target query -- same shape as animCurve
     // immediately above, installed the same way.
@@ -12580,6 +12739,18 @@ private:
     fluids::FluidVolumeDesc fluidWantDesc_{};
     std::string fluidWantName_;
     bool fluidWantPending_ = false;
+    // GRAPH-AUTHORED FLUID REQUESTS -- fluidSpawnProvider (below) fills this from
+    // aver_fw_fluid_spawn, drained at the identical point in onUpdate fluidWantPending_ is, for the
+    // identical readiness reason (see fluidSpawnProvider's own comment). A VECTOR, not a single slot
+    // like fluidWantDesc_ above: unlike a level's one WATER record, nothing stops a class graph from
+    // declaring several `COMP ... Fluid` children, or a level combining its own WATER with a graph
+    // actor that spawns one too, so a second request arriving before the drain runs must not
+    // silently overwrite the first the way a bare field would.
+    struct FluidGraphRequest { fluids::FluidVolumeDesc desc; std::string label; };
+    std::vector<FluidGraphRequest> fluidGraphQueue_;
+    // Every handle the queue above has ever produced, so unloadLevel can despawn all of them --
+    // the same reason fluidHandle_ is despawned there, generalised from one slot to many.
+    std::vector<fluids::FluidHandle> fluidGraphHandles_;
     // The player's world position last frame, and whether that reading is trustworthy -- see the
     // aver_phys_softbody_apply_impulse call site in onUpdate for why this exists (there is no direct
     // read of the character's own physics velocity, so it is recovered by finite difference instead).
@@ -13637,6 +13808,13 @@ private:
         // immediately when the new level declares no WATER record, so a latch left standing here
         // would spawn the OLD level's volume into the new world on the very next frame.
         fluidWantPending_ = false;
+        // Same reasoning, generalised to every graph-authored volume this level's actors spawned:
+        // none of them are pushed to levelBodies_ either (fluidSpawnProvider never touches it), and
+        // a class that outlives its own level's teardown would go on sloshing in the next one the
+        // identical way an un-despawned fluidHandle_ used to.
+        for (const fluids::FluidHandle h : fluidGraphHandles_) fluidScene_.despawn(h);
+        fluidGraphHandles_.clear();
+        fluidGraphQueue_.clear();
 #endif
         hasLevelFog_ = false;
         hasLevelSun_ = false;

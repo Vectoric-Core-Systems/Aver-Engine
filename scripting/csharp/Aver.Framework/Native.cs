@@ -93,6 +93,26 @@ internal static class Fw
     [DllImport(Lib)] internal static extern void aver_fw_clear_sky_clouds();
     [DllImport(Lib)] internal static extern int  aver_fw_view_entity();
 
+    // FLUID VOLUME SPAWN, relayed -- see framework_abi.h's own aver_fw_fluid_spawn comment for why
+    // this queues rather than spawning synchronously, and for why there is no subdivisions=
+    // parameter. `name` is a label for the host's own log, not a lookup key. Used by both
+    // Aver.Graph's GraphComponentTree (a `COMP ... Fluid` line) and Game.SpawnFluidVolume (a
+    // plain C# script) -- see Game.cs for the one call site both route through.
+    [DllImport(Lib)] internal static extern int aver_fw_fluid_spawn(
+        float cx, float cy, float cz, float hx, float hy, float hz,
+        float compliance, float damping, int iterations, float pressure,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
+
+    // MATERIAL-LAYER SPAWN, relayed -- see framework_abi.h's own aver_fw_fluid_spawn_material
+    // comment (MINOR 4) for the density/viscosity/preset sentinel and preset-name semantics. A
+    // second, additive entry point beside aver_fw_fluid_spawn above, not a replacement for it.
+    [DllImport(Lib)] internal static extern int aver_fw_fluid_spawn_material(
+        float cx, float cy, float cz, float hx, float hy, float hz,
+        float compliance, float damping, int iterations, float pressure,
+        float densityKgM3, float viscosityPaS,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string materialPreset,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
+
     /// <summary>Decodes a UTF-8 string returned as a pointer; "?" if null.</summary>
     internal static string Str(IntPtr p) => Marshal.PtrToStringUTF8(p) ?? "?";
 }
