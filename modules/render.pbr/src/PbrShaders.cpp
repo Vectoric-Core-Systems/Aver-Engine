@@ -45,7 +45,10 @@ cbuffer AverMaterial : register(b2) {
     float  gSlopeBlendLo;
     float  gSlopeBlendHi;
     float  gL1UvScale;
-    float  gMatPad0;
+    // Mirrors MaterialConstants::graphId. 0 means "no graph", which is the arm the generated
+    // averEvalMaterial's `default:` takes -- see pbr::materialGraphHlsl(). Declared here, in the
+    // block every material path already binds, so a graph-shaded draw needs nothing extra bound.
+    uint   gMaterialGraphId;
 };
 
 // gMaterialFlags bits, mirroring pbr::MaterialFlag.
@@ -242,35 +245,92 @@ AverMaps averBlendLayers(AverMaps m, float2 uv, float3 geoN) {
     return m;
 }
 
-AverSurface averEvalMaterial(AverVertex v, AverLight l) {
-    float2 uv = averSurfaceUV(v);
+// EVERYTHING A MATERIAL AUTHORS, and nothing else. Every remaining field of AverSurface is DERIVED
+// from these by averBuildSurface below: F0 from albedo and metallic, F from F0 and the half vector,
+// kdAlbedo from albedo and metallic, ndv from the shading normal.
+//
+// THIS SPLIT IS WHAT LETS A NODE GRAPH DRIVE A MATERIAL WITHOUT RESTATING THE BRDF. A generated
+// averEvalMaterial starts from averStockAuthored(), overwrites only the fields its graph actually
+// drives, and hands the result to averBuildSurface -- so a graph that sets nothing but base colour
+// still gets the right F0, the right energy split and the right alpha clip, and a change to how a
+// surface is DERIVED is made in one place instead of once per generated shader. Without it, every
+// generated material would carry its own copy of the twelve lines below and would silently stop
+// matching the stock path the first time one of them changed.
+//
+// THESE ARE THE AUTHORED HALVES ONLY -- the per-material factor times the map. The per-DRAW terms
+// (gMaterial, gBaseColor, gEmissive, gShadingModel) stay in averBuildSurface, because they are the
+// renderer's to apply and not the material's to author: a graph overriding them would be overriding
+// the entity's own tint, which is not what an author asking for "red" means.
+struct AverAuthored {
+    float3 baseColor;   // linear; gBaseColorFactor.rgb * the base colour map
+    float  opacity;     // gBaseColorFactor.a * the base colour map's alpha
+    float  metallic;    // gMetallicFactor * the map, before saturate()
+    float  roughness;   // gRoughnessFactor * the map, before the 0.045 floor
+    float3 normalTS;    // tangent space; (0, 0, 1) is no perturbation
+    float3 emissive;    // gEmissiveFactor * the map
+    float  occlusion;   // the material's OWN occlusion map, before gOcclusionStrength
+    float  alphaCutoff; // read only under AVER_MAT_ALPHA_MASK
+};
+
+// What the stock material path authors: the five maps, blended by slope, times the b2 factors.
+AverAuthored averStockAuthored(float2 uv, float3 geoN) {
     AverMaps map = averSampleMaps(uv);
-    map = averBlendLayers(map, uv, v.N);
+    map = averBlendLayers(map, uv, geoN);
 
     float4 base = gBaseColorFactor * map.baseColor;
 
+    AverAuthored a;
+    a.baseColor   = base.rgb;
+    a.opacity     = base.a;
+    a.metallic    = gMetallicFactor * map.metalRough.y;
+    a.roughness   = gRoughnessFactor * map.metalRough.x;
+    a.normalTS    = map.normalTS;
+    a.emissive    = gEmissiveFactor * map.emissive;
+    a.occlusion   = map.occlusion;
+    a.alphaCutoff = gAlphaCutoff;
+    return a;
+}
+
+// Derives the whole surface from what the material authored. This is the material SYSTEM's
+// arithmetic, not any one material's, which is exactly why a graph never gets to restate it.
+AverSurface averBuildSurface(AverVertex v, AverLight l, AverAuthored a, float2 uv) {
     AverSurface s;
-    s.N = averPerturbNormal(v.N, v.wpos, uv, map.normalTS);
+    s.N = averPerturbNormal(v.N, v.wpos, uv, a.normalTS);
     s.V = v.V;
     s.H = normalize(v.V + l.direction);
-    s.metallic = saturate(gMaterial.x * gMetallicFactor * map.metalRough.y);
-    s.rough = clamp(gMaterial.y * gRoughnessFactor * map.metalRough.x, 0.045, 1.0);
-    s.alpha = gBaseColor.a * base.a;
+    s.metallic = saturate(gMaterial.x * a.metallic);
+    s.rough = clamp(gMaterial.y * a.roughness, 0.045, 1.0);
+    s.alpha = gBaseColor.a * a.opacity;
     s.model = gShadingModel;
-    s.emissive = gEmissive.rgb + gEmissiveFactor * map.emissive;
-    s.occlusion = lerp(1.0, map.occlusion, gOcclusionStrength);
+    s.emissive = gEmissive.rgb + a.emissive;
+    s.occlusion = lerp(1.0, a.occlusion, gOcclusionStrength);
     s.f90 = gMatF90;
     s.reflectance = gMatReflectance;
     s.display = gShadingModel == AVER_MODEL_UNLIT;
     s.displayColor = float4(gBaseColor.rgb, gBaseColor.a);
-    s.albedo = srgbToLin(gBaseColor.rgb) * base.rgb;
-    if (gMaterialFlags & AVER_MAT_ALPHA_MASK) clip(s.alpha - gAlphaCutoff);
+    s.albedo = srgbToLin(gBaseColor.rgb) * a.baseColor;
+    if (gMaterialFlags & AVER_MAT_ALPHA_MASK) clip(s.alpha - a.alphaCutoff);
     s.ndv = saturate(dot(s.N, v.V));
     s.F0 = lerp(gMatReflectance.xxx, s.albedo, s.metallic);
     s.F = fresnelSchlick(saturate(dot(s.H, v.V)), s.F0, s.f90);
     s.kdAlbedo = (1.0 - s.metallic) * s.albedo;
     return s;
 }
+
+// The STOCK material: b2 constants and the five maps, no graph.
+//
+// COMPILED OUT WHEN AVER_MATERIAL_GRAPH IS DEFINED, and that one define is the whole switch. A
+// caller wanting graph-driven materials compiles the prelude with it and appends its OWN
+// averEvalMaterial -- identical signature, same position in the translation unit -- immediately
+// after. Everything below this point only reads an AverSurface and never calls averEvalMaterial
+// (grep it: the three call sites are all in renderer sources, outside this prelude), so nothing
+// else here has to change and the stock path is never deleted, only not compiled.
+#ifndef AVER_MATERIAL_GRAPH
+AverSurface averEvalMaterial(AverVertex v, AverLight l) {
+    float2 uv = averSurfaceUV(v);
+    return averBuildSurface(v, l, averStockAuthored(uv, v.N), uv);
+}
+#endif
 
 // True when the surface has an authored display colour that must reach the backbuffer untouched.
 bool averDisplayColour(AverSurface s, out float4 rgba) {

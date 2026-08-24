@@ -55,7 +55,17 @@ struct MaterialConstants {
     // Layer 1's own uv scale relative to layer 0's, so a rock face can tile at a different rate to
     // the ground without needing a second uvTiling concept.
     f32 layer1UvScale;
-    f32 pad0;
+    // WHICH MATERIAL GRAPH SHADES THIS MATERIAL, or 0 for none -- which is every material that was
+    // ever authored before graphs existed, and still most of them.
+    //
+    // IT COST NOTHING TO ADD, and that is why the whole feature is shaped around it. This block is
+    // already handed to the GPU per draw (ctx.setDrawBinding(set, &constants, sizeof)), it was
+    // already 80 bytes, and the last four of them were padding nobody read. So a graph-shaded
+    // material needs no second constant buffer, no per-material pipeline, no change to the draw
+    // path and no change to this struct's size -- the generated averEvalMaterial switches on this
+    // and every id-0 material takes the arm that shades exactly as it always did. See
+    // pbr::materialGraphHlsl().
+    u32 graphId;
 };
 
 static_assert(sizeof(MaterialConstants) == 80, "the HLSL cbuffer mirrors this byte for byte");

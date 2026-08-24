@@ -118,6 +118,24 @@ if(TARGET Aver.Formats.Material)
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
 
+# MaterialGraphTest -- the .ocgraph -> HLSL material compiler, checked against a REAL SHADER
+# COMPILER rather than against an expected string.
+#
+# IT LINKS NO BACKEND AND CREATES NO DEVICE. dxcompiler.dll is loaded by name at runtime (the test
+# does its own LoadLibraryW; see the file's header for why it cannot share the engine's) and HLSL
+# compilation is pure CPU, so this runs on a machine with no adapter at all -- and SKIPS, saying so,
+# on one with no dxcompiler.dll. modules/rhi.d3d12's CMakeLists already copies that DLL into this
+# same bin/ directory, so nothing here has to arrange for it.
+#
+# Aver.RHI is the GENERIC interface, for sharedShaderPrelude() alone. Never Aver.RHI.D3D12.
+if(TARGET Aver.Render.PBR.Materials)
+  add_executable(MaterialGraphTest src/MaterialGraphTest.cpp)
+  target_link_libraries(MaterialGraphTest PRIVATE
+    Aver.Render.PBR.Materials Aver.Formats Aver.RHI Aver.Core Aver.Platform)
+  set_target_properties(MaterialGraphTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
 # ConvertTool -- drives the importer over a real file and writes the whole .oc* triple. Not a test:
 # a small harness so the end-to-end path can be exercised without the editor's UI.
 add_executable(ConvertTool src/ConvertTool.cpp)

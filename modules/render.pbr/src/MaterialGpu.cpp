@@ -44,7 +44,10 @@ MaterialConstants packMaterial(const MaterialDesc& d) {
     c.slopeBlendLo      = d.slopeBlendLo;
     c.slopeBlendHi      = d.slopeBlendHi;
     c.layer1UvScale     = d.layer1UvScale > 1e-4f ? d.layer1UvScale : 1.0f;
-    c.pad0              = 0.0f;
+    // 0 = no graph. A graph-backed material gets its id from the material system after packing,
+    // because which id a graph holds is a property of the PROCESS's set of graphs, not of the
+    // authored description this function is given.
+    c.graphId           = 0;
 
     u32 flags = 0;
     for (u32 i = 0; i < kTextureSlotCount; ++i)
