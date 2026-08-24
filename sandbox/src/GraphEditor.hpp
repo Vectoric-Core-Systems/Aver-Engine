@@ -162,6 +162,19 @@ public:
     // whose nodes then failed to compile, which is worse than offering none.
     GraphNodeDomain openGraphDomain() const;
 
+    // The Viewport tab's content for a MATERIAL graph: one sphere shaded by this graph itself. False
+    // when there is nothing to draw -- no path yet, or a graph that does not currently compile.
+    bool buildMaterialPreview(Engine& e, render::preview::PreviewDraw& out);
+
+    // The whole Viewport tab for a material graph -- the sphere and its compile state, with none of
+    // the component furniture a material graph cannot use.
+    void drawMaterialViewport(Engine& e, float dpi);
+
+    // Which material-graph id the preview sphere is shading with, and the edit count it was compiled
+    // at. Kept apart so a graph that stops compiling mid-edit keeps showing the last one that did.
+    u32 materialPreviewGraphId_ = 0;
+    i64 materialPreviewDirtyMark_ = -1;
+
     // ---- functions ----------------------------------------------------------------------------
     // A .ocgraph holds ONE event graph and any number of named FUNCTIONS. They share a file, a node
     // id namespace and a canvas coordinate space, but not a canvas: the editor shows exactly one

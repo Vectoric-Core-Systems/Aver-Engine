@@ -3450,12 +3450,20 @@ public:
         //
         // Reopening rather than adding a second entry point: everything below already destroys and
         // rebuilds what it finds, and the two flags together mean "we have tried, at this revision".
+        //
+        // GUARDED, because this function is compiled in the AVER_MODULE_PBR=OFF configuration too --
+        // its own `#if !AVER_MODULE_PBR` early-out below sits AFTER this point, so anything above it
+        // must stand on its own. Naming pbr:: here unguarded broke that build outright, which is
+        // exactly the failure mode modules/render.actorpreview/CMakeLists.txt records for its own
+        // conditional dependency; a build nobody runs locally is still a build that has to compile.
+#if AVER_MODULE_PBR
         const u64 graphRev = pbr::materialGraphs().revision();
         if (lodMeshPipelineTried_ && lodMeshPipelineGraphRev_ != graphRev) {
             lodMeshPipelineTried_ = false;
             lodMeshPipelineReady_ = false;
         }
         lodMeshPipelineGraphRev_ = graphRev;
+#endif
         if (lodMeshPipelineTried_) return;
         // THE FLAG IS TESTED BEFORE THE LATCH IS SET, which is the opposite of what it used to do.
         // Latching first means a single call made while the flag is still false burns the one

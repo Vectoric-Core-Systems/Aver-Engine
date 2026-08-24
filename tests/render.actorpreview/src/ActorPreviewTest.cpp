@@ -3,6 +3,11 @@
 #include "aver/render/preview/PreviewMeshCache.hpp"
 #include "aver/core/Log.hpp"
 
+#if AVER_MODULE_PBR
+#include "aver/pbr/MaterialGraphRegistry.hpp"
+#include "aver/formats/OcGraph.hpp"
+#endif
+
 #include <cmath>
 #include <cstring>
 #include <string>
@@ -150,6 +155,51 @@ struct NullDevice final : public rhi::IDevice {
     void beginFrame() override {}
     void endFrame() override {}
 };
+
+#if AVER_MODULE_PBR
+// Copied from tests/formats/src/MaterialGraphTest.cpp's own node()/addPin()/link() -- see its header
+// comment for why a hand-built OcGraphData, not a parsed .ocgraph fixture, is the right way to drive
+// this. Copied rather than shared because that test lives in a different module (tests/formats) and
+// this one must not link it just to borrow three small functions.
+fmt::OcGraphNode node(const char* id, const char* type) {
+    fmt::OcGraphNode n;
+    n.id = id;
+    n.type = type;
+    return n;
+}
+void addPin(fmt::OcGraphNode& n, const char* name, const char* type, bool out, const char* def = "") {
+    fmt::OcGraphPin p;
+    p.name = name;
+    p.type = type;
+    p.isOutput = out;
+    p.defaultValue = def;
+    n.pins.push_back(p);
+}
+void link(fmt::OcGraphData& g, const char* sn, const char* sp, const char* dn, const char* dp) {
+    fmt::OcGraphLink l;
+    l.sourceNode = sn;
+    l.sourcePin = sp;
+    l.destNode = dn;
+    l.destPin = dp;
+    g.links.push_back(l);
+}
+
+// The two-node graph the material-path checks below are proved on: a constant colour into
+// BaseColor, identical in shape to MaterialGraphTest.cpp's own flatColorGraph().
+fmt::OcGraphData flatColorGraph() {
+    fmt::OcGraphData g;
+    g.name = "M_ActorPreviewTest";
+    g.domain = "material";
+    fmt::OcGraphNode c = node("colour", "ConstFloat3");
+    addPin(c, "value", "float3", true, "0.85,0.16,0.10");
+    g.nodes.push_back(c);
+    fmt::OcGraphNode out = node("out", "MaterialOutput");
+    addPin(out, "BaseColor", "float3", false);
+    g.nodes.push_back(out);
+    link(g, "colour", "value", "out", "BaseColor");
+    return g;
+}
+#endif
 
 } // namespace
 
@@ -428,6 +478,77 @@ int main() {
         check(cache.generated(md, "$gen/other", buildBox) != first,
               "a different key is a different mesh");
     }
+
+#if AVER_MODULE_PBR
+    AVER_INFO("=== the material path ===");
+    {
+        const MockFactory& f = dev.factory;
+
+        // NOTHING HAS REGISTERED A GRAPH YET, in this process or anywhere earlier in this file --
+        // the two shaders and the one pipeline "what init creates" checked above are the whole
+        // story, and neither shader's recorded text mentions the material system at all. This is
+        // "a project with no graphs is completely unaffected", checked BEFORE the block below
+        // registers one so it cannot be an accident of ordering.
+        check(pbr::materialGraphs().count() == 0, "no material graph exists yet in this process");
+        for (const rhi::ShaderDesc& sd : f.shaders) {
+            const bool clean =
+                (!sd.source || std::string(sd.source).find("AVER_MATERIAL_GRAPH") == std::string::npos) &&
+                (!sd.prelude || std::string(sd.prelude).find("AVER_MATERIAL_GRAPH") == std::string::npos);
+            check(clean, "no recorded shader's source or prelude mentions AVER_MATERIAL_GRAPH");
+        }
+        check(f.pipelines.size() == 1, "and still just the one pipeline");
+
+        const usize shadersBefore = f.shaders.size();
+        const usize pipelinesBefore = f.pipelines.size();
+
+        pbr::materialGraphs().clear();
+        const u32 gid = pbr::materialGraphs().add("$test/flat", "ActorPreviewTest material",
+                                                   flatColorGraph());
+        check(gid != 0, "the test graph compiles");
+
+        std::vector<PreviewDraw> draws;
+        PreviewDraw plain;
+        plain.mesh = 1;
+        draws.push_back(plain);              // materialGraphId 0: the default every caller gets
+        PreviewDraw shaded;
+        shaded.mesh = 2;
+        shaded.materialGraphId = gid;
+        draws.push_back(shaded);
+
+        MockContext ctx;
+        p->setDrawList(draws);
+        p->prePass(ctx);
+
+        check(f.pipelines.size() == pipelinesBefore + 1,
+              "a graph registered before the frame gets its own, second, pipeline");
+        check(f.shaders.size() == shadersBefore + 2,
+              "and two more shaders: the material vertex and pixel");
+
+        const rhi::ShaderDesc& matVs = f.shaders[shadersBefore];
+        const rhi::ShaderDesc& matPs = f.shaders[shadersBefore + 1];
+        check(matVs.stage == rhi::ShaderStage::Vertex, "the first new shader is the vertex stage");
+        check(matPs.stage == rhi::ShaderStage::Pixel, "and the second is the pixel stage");
+
+        const std::string matPrelude = matPs.prelude ? matPs.prelude : "";
+        check(matPrelude.find("AVER_MATERIAL_GRAPH") != std::string::npos,
+              "the material pixel shader's prelude carries the define");
+        check(matPrelude.find("averEvalMaterial") != std::string::npos,
+              "and the graph's own generated averEvalMaterial");
+
+        const std::string matDefines = matPs.defines ? matPs.defines : "";
+        check(matDefines.find("AVER_MATERIAL_SRV=") != std::string::npos,
+              "and its ShaderDesc declares the material texture registers");
+
+        const std::vector<Call> pipe = ctx.ofKind(Call::Kind::Pipeline);
+        check(pipe.size() == 2, "two pipeline binds: the plain draw, then the graph-shaded one");
+        if (pipe.size() == 2) {
+            // Handle 1 is MockFactory's very first pipeline -- the simple one "what init creates"
+            // built, and the only pipeline that has ever existed until this block.
+            check(pipe[0].a == 1, "a draw with materialGraphId 0 still selects the simple pipeline");
+            check(pipe[1].a != pipe[0].a, "and the graph-shaded draw selects the new one");
+        }
+    }
+#endif
 
     AVER_INFO("=== teardown ===");
     {

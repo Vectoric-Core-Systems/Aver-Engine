@@ -32,6 +32,12 @@
 #  include "aver/runtime/Engine.hpp"
 #  include "aver/render/preview/ActorPreview.hpp"
 #  include "aver/render/preview/PreviewMeshCache.hpp"
+#  if AVER_MODULE_PBR
+// The material-graph registry, for the Viewport tab of a DOMAIN material graph: the preview sphere
+// is shaded by the same compiled graph the renderer uses, so the two cannot drift. Nested inside the
+// ImGui guard because tests/editor compiles this file with neither.
+#    include "aver/pbr/MaterialGraphRegistry.hpp"
+#  endif
 #endif
 
 #include <algorithm>
@@ -2910,7 +2916,55 @@ void GraphEditor::renameComponent(const std::string& id, const std::string& newI
 
 // ---------------------------------------------------------------- the tab
 
+// The Viewport tab for a material graph: the sphere, and what the graph currently compiles to.
+//
+// DELIBERATELY NOT A SECOND EDITING SURFACE. Everything an author changes about a material graph is
+// changed on the Event Graph tab, in the nodes; this tab exists to answer one question -- what does
+// it look like -- and the only other thing it says is why, when the answer is "nothing".
+void GraphEditor::drawMaterialViewport(Engine& e, float dpi) {
+    buildComponentPreview(e);
+
+    render::preview::ActorPreview* preview = sharedPreview(e);
+#if AVER_MODULE_PBR
+    // The compile error, if there is one, ABOVE the picture rather than instead of it: a graph that
+    // stopped compiling mid-edit still shows the last surface that worked (the id is kept), and an
+    // author needs to see both -- the message says what to fix, the sphere says what they had.
+    if (materialPreviewGraphId_ == 0) {
+        ImGui::TextColored(ImVec4(0.95f, 0.72f, 0.35f, 1.0f),
+                            "This graph does not compile yet -- see the log for which node.");
+    } else {
+        ImGui::TextDisabled("Material graph %u -- the same compiled surface a placed .ocmat gets.",
+                            materialPreviewGraphId_);
+    }
+#else
+    ImGui::TextDisabled("Built without the PBR module, so there is no material to preview.");
+#endif
+
+    if (!preview || !preview->uiTextureId()) {
+        ImGui::TextDisabled(preview ? "The preview has not rendered a frame yet."
+                                     : "This backend has no GPU preview.");
+        return;
+    }
+    const ImVec2 region = ImGui::GetContentRegionAvail();
+    const f32 texW = static_cast<f32>(preview->width());
+    const f32 texH = static_cast<f32>(preview->height());
+    const f32 fit = std::min(region.x / std::max(texW, 1.0f), region.y / std::max(texH, 1.0f));
+    const f32 w = std::max(texW * fit, 16.0f * dpi);
+    const f32 h = std::max(texH * fit, 16.0f * dpi);
+    ImGui::Image(static_cast<ImTextureID>(preview->uiTextureId()), ImVec2(w, h));
+}
+
 void GraphEditor::drawViewport(Engine& e, float dpi) {
+    // A MATERIAL GRAPH HAS NO COMPONENTS, so it gets neither the component toolbar nor the tree --
+    // both would be furniture for a thing this file cannot contain, and the toolbar's own warning
+    // ("no CLASS record, so nothing spawns them") is actively misleading here: a material graph is
+    // not supposed to have a CLASS record, and telling an author their material is broken because it
+    // lacks one is worse than saying nothing. The preview fills the tab instead.
+    const bool material = openGraphDomain() == kDomainMaterial;
+    if (material) {
+        drawMaterialViewport(e, dpi);
+        return;
+    }
     drawComponentToolbar(dpi);
 
     const ImVec2 avail = ImGui::GetContentRegionAvail();
@@ -3232,9 +3286,88 @@ bool GraphEditor::buildFluidPreviewMesh(Engine& e, const fmt::OcGraphComponent& 
     return true;
 }
 
+// The Viewport tab for a MATERIAL graph: one sphere, shaded by this very graph.
+//
+// A SPHERE AND NOT THE COMPONENT TREE, because a material graph has no components -- it has no
+// entities at all. What an author needs to see is the SURFACE, and a sphere is what every material
+// editor shows for the same reason: it presents every angle between the normal and the view at once,
+// so a Fresnel term, a roughness and a normal map all read on it, and a cube shows exactly six.
+//
+// COMPILED THROUGH THE SAME REGISTRY THE RENDERER USES, keyed on this file's own path -- so the
+// preview is not an approximation of what a placed material will do, it is literally the same
+// generated function taking the same case arm. If it were compiled separately the two could drift,
+// and a preview that lies is worse than no preview.
+//
+// RECOMPILED WHEN THE TEXT CHANGES, not every frame: a graph is re-registered only when the editor's
+// own dirty flag says something was edited AND the emitted text actually differs (the registry's own
+// check), so an idle editor asks nothing of the shader compiler. A graph mid-edit that does not
+// compile leaves the last good id in place and logs why, so the sphere keeps showing the last thing
+// that worked rather than going black on the way to every valid state.
+bool GraphEditor::buildMaterialPreview(Engine& e, render::preview::PreviewDraw& out) {
+#if AVER_MODULE_PBR
+    if (path_.empty()) return false;
+
+    // Re-register only when this editor has been edited since the last time we did. The registry
+    // then decides whether anything actually changed; a save-less edit that emits identical text
+    // costs one compile of the graph and no shader compile at all.
+    // THE UNDO DEPTH IS THE EDIT COUNTER, and it is the honest one available: every edit path in
+    // this file calls pushUndo() before it changes anything (the file's own comments say so at each
+    // one), so the stack's size moves exactly when the graph does and never when it does not. A bare
+    // dirty_ flag would not do -- it latches true on the first edit and stays there, so the preview
+    // would recompile once and then never again.
+    const i64 mark = static_cast<i64>(undoStack_.size()) - static_cast<i64>(redoStack_.size());
+    if (materialPreviewDirtyMark_ != mark) {
+        materialPreviewDirtyMark_ = mark;
+        const u32 id = pbr::materialGraphs().add(path_, graph_.name, graph_);
+        if (id != 0) materialPreviewGraphId_ = id;
+    }
+    if (materialPreviewGraphId_ == 0) return false;
+
+    render::preview::PreviewMeshCache& meshes = sharedPreviewMeshes();
+    out.mesh = meshes.resolve(*e.device(), "Meshes/sphere.ocmesh", &out.boundsRadius);
+    if (out.mesh == 0) return false;
+
+    // The unit sphere is radius 1; 60 makes it the size of the cubes the level editor places, which
+    // is the scale the orbit camera's own framing was tuned against.
+    for (int i = 0; i < 16; ++i) out.world[i] = 0.0f;
+    out.world[0] = out.world[5] = out.world[10] = 60.0f;
+    out.world[15] = 1.0f;
+
+    // White, because the GRAPH decides the colour. A tint here would multiply into everything the
+    // author sees (averBuildSurface applies gBaseColor) and quietly misreport their own values.
+    out.baseColor[0] = out.baseColor[1] = out.baseColor[2] = out.baseColor[3] = 1.0f;
+    out.materialGraphId = materialPreviewGraphId_;
+    return true;
+#else
+    (void)e; (void)out;
+    return false;
+#endif
+}
+
 void GraphEditor::buildComponentPreview(Engine& e) {
     render::preview::ActorPreview* preview = sharedPreview(e);
     if (!preview || !e.device()) return;
+
+    // A MATERIAL GRAPH TAKES A DIFFERENT PREVIEW ENTIRELY -- see buildMaterialPreview. It shares
+    // this feature and this tab, and nothing else with the component tree below.
+    if (openGraphDomain() == kDomainMaterial) {
+        std::vector<render::preview::PreviewDraw> draws;
+        render::preview::PreviewDraw d;
+        const bool haveSphere = buildMaterialPreview(e, d);
+        if (haveSphere) draws.push_back(d);
+        preview->setDrawList(std::move(draws));
+        // FRAMED ONLY ONCE THERE IS SOMETHING TO FRAME. frameAll() fits the camera to the CURRENT
+        // draw list, and the list is empty on the first frames -- the tab opens before the graph has
+        // been registered and its sphere resolved. Latching `previewFramed_` on one of those spends
+        // the single automatic framing on nothing at all, and the camera then sits at its default
+        // distance staring at empty space for the rest of the session, which reads as "the preview
+        // is broken" rather than "the preview has not been aimed".
+        if (!previewFramed_ && haveSphere) {
+            preview->frameAll();
+            previewFramed_ = true;
+        }
+        return;
+    }
 
     render::preview::PreviewMeshCache& meshes = sharedPreviewMeshes();
     meshes.setContentRoot(*e.device(), actorEditorContentRoot());
@@ -3274,11 +3407,13 @@ void GraphEditor::buildComponentPreview(Engine& e) {
 #else   // !AVER_WITH_IMGUI
 
 void GraphEditor::drawViewport(Engine&, float) {}
+void GraphEditor::drawMaterialViewport(Engine&, float) {}
 void GraphEditor::drawComponentToolbar(float) {}
 void GraphEditor::drawComponentTree(float) {}
 void GraphEditor::drawComponentTreeNode(const std::string&, float) {}
 void GraphEditor::drawComponentDetails(float) {}
 void GraphEditor::buildComponentPreview(Engine&) {}
+bool GraphEditor::buildMaterialPreview(Engine&, render::preview::PreviewDraw&) { return false; }
 
 #endif  // AVER_WITH_IMGUI
 

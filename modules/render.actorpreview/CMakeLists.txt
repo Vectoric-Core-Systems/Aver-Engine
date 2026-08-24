@@ -28,3 +28,21 @@ aver_add_module(Aver.Render.ActorPreview
     Aver.Formats
     Aver.Core
 )
+
+# The MATERIAL path: ActorPreview.cpp's second pipeline shades through averEvalMaterial so the
+# graph editor can preview a .ocgraph material on the sphere it edits. CONDITIONAL for the exact
+# reason the comment above named Aver.Formats.Material's own removal: Aver.Render.PBR.Materials
+# exists only when AVER_MODULE_PBR is ON, and this module is added in EVERY configuration -- naming
+# it unconditionally would put the same LNK1104 back, one target sooner. `if(TARGET ...)`, never
+# `if(AVER_MODULE_PBR)`: this is the form aver_check_module_dag() (cmake/AvModule.cmake) can prove
+# resolves in whatever configuration actually runs, rather than trusting the variable and the target
+# to agree.
+#
+# Every `#if AVER_MODULE_PBR` block in ActorPreview.cpp/.hpp is dead code, compiled to nothing, in a
+# tree where this does not run -- AVER_MODULE_PBR only ever reaches that file as the PUBLIC compile
+# definition Aver.Render.PBR.Materials carries transitively from Aver.Render.PBR (see that module's
+# own CMakeLists.txt), and PUBLIC here is what lets ActorPreviewTest.cpp see the same definition
+# without tests/render.actorpreview/CMakeLists.txt naming a single new library itself.
+if(TARGET Aver.Render.PBR.Materials)
+  target_link_libraries(Aver.Render.ActorPreview PUBLIC Aver.Render.PBR.Materials)
+endif()

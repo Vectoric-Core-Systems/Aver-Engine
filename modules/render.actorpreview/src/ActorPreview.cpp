@@ -2,6 +2,12 @@
 #include "aver/render/preview/ActorPreview.hpp"
 #include "aver/core/Log.hpp"
 
+#if AVER_MODULE_PBR
+#include "aver/pbr/MaterialGpu.hpp"
+#include "aver/pbr/MaterialGraphRegistry.hpp"
+#include "aver/pbr/PbrShaders.hpp"
+#endif
+
 #include <cmath>
 #include <cstring>
 
@@ -59,6 +65,88 @@ void perspective(f32 fovDeg, f32 aspect, f32 nearZ, f32 farZ, f32 out[16]) {
     std::memcpy(out, m, sizeof m);
 }
 
+#if AVER_MODULE_PBR
+// The prelude the material pipeline's shaders compile against: the shared RHI declarations, the
+// material system's BRDF and Aver* contract, then whatever the process's graphs currently compile
+// to. Mirrors VoxiRenderer::voxiShaderPrelude() in modules/render.voxi/src/VoxiRenderer.cpp --
+// read that comment for why AVER_MATERIAL_GRAPH is text pasted between the two preludes rather
+// than a -D (a -D would have to be repeated on every shader stage sharing this prelude, and the
+// one stage that got missed would fail to link with a duplicate-function error nowhere near the
+// cause) and for why this rebuilds on the registry's REVISION rather than once at construction or
+// on every frame: graphs load long after this feature exists, and the common case -- no graphs at
+// all, which is every project that exists today -- must rebuild nothing and cost nothing.
+const char* actorPreviewMaterialPrelude() {
+    static std::string s;
+    static u64 built = ~0ull;
+    const u64 rev = pbr::materialGraphs().revision();
+    if (built != rev) {
+        s = std::string(rhi::sharedShaderPrelude());
+        s += "\n#define AVER_MATERIAL_GRAPH 1\n";
+        s += pbr::materialShaderPrelude();
+        s += pbr::materialGraphs().hlsl();
+        built = rev;
+    }
+    return s.c_str();
+}
+
+// The material pipeline's OWN pixel entry point, built on top of actorPreviewShaderSource() rather
+// than folded into it. THAT SEPARATION IS THE WHOLE POINT: PreviewMaterialPS references AverVertex,
+// AverLight and averEvalMaterial, none of which exist unless a compile also carries
+// actorPreviewMaterialPrelude() above -- so this text must never reach the SIMPLE pipeline's compile,
+// which shares actorPreviewShaderSource() with every caller that predates this feature and must
+// keep compiling against nothing but rhi::sharedShaderPrelude(). Appending here, in a string this
+// simple pipeline's own ShaderDesc never references, is what keeps that true without a single
+// #ifdef inside the shared source -- and it is also why ActorPreviewTest can assert "no shader
+// source mentions AVER_MATERIAL_GRAPH" for the no-graph case and mean it literally: the macro name
+// never appears in ANY .source string, only in this prelude's own text.
+const char* actorPreviewMaterialShaderSource() {
+    static const std::string s = std::string(actorPreviewShaderSource()) + R"(
+// ---- the MATERIAL path: the same AverVertex/AverSurface contract PbrShaders.cpp declares, so the
+// graph editor can put a .ocgraph's own averEvalMaterial on this sphere ----
+//
+// Shaded with the EXACT SAME key light and hemisphere fill PreviewPS uses above -- not the material
+// system's own BRDF (averShadeDirect/averShadeIndirect), which PbrShaders.cpp's own tests already
+// exercise end to end. The only thing this entry point changes relative to PreviewPS is WHERE the
+// surface colour comes from: gBaseColor there, the graph's own averEvalMaterial here. Sharing the
+// lighting model is what keeps the two previews COMPARABLE side by side, rather than one reading
+// brighter or flatter because it took a different shading path.
+float4 PreviewMaterialPS(PreviewOut i) : SV_TARGET {
+    AverVertex v;
+    v.wpos = i.wpos;
+    v.N    = normalize(i.nrmWS);
+    v.V    = normalize(gPreviewEye.xyz - i.wpos);
+    // Two-sided, exactly like averVertexOf's own comment in PbrShaders.cpp: a closed preview sphere
+    // never needs this, but a future flat preview mesh (a plane, say) should not shade black on the
+    // half of it facing away from the light.
+    if (dot(v.N, v.V) < 0.0) v.N = -v.N;
+    v.uv = i.uv;
+
+    // averBuildSurface reads l.direction alone, to build the half vector H. radiance and visibility
+    // exist for averShadeDirect/averShadeIndirect, neither of which this entry point calls, so there
+    // is nothing honest to compute for them here -- they are left at the identity rather than wired
+    // to a light this shader shades with its own formula, not the BRDF's.
+    AverLight l;
+    l.direction  = normalize(gPreviewKey.xyz);
+    l.radiance   = float3(0.0, 0.0, 0.0);
+    l.visibility = 1.0;
+
+    AverSurface s = averEvalMaterial(v, l);
+
+    float ndl = saturate(dot(s.N, l.direction));
+    float up = s.N.z * 0.5 + 0.5;
+    float3 fill = lerp(gPreviewAmbient.rgb * 0.35, gPreviewAmbient.rgb, up);
+    float3 lit = s.albedo * (fill + ndl * gPreviewKey.w);
+
+    float rim = pow(1.0 - saturate(dot(s.N, v.V)), 3.0);
+    lit += gPreviewAmbient.w * rim * float3(1.0, 0.62, 0.2);
+
+    return float4(toGamma(acesTonemap(lit)), 1.0);
+}
+)";
+    return s.c_str();
+}
+#endif
+
 } // namespace
 
 // Turns the orbit, clamping pitch short of the pole.
@@ -105,6 +193,11 @@ struct PreviewOut {
     float4 pos   : SV_POSITION;
     float3 nrmWS : NORMAL;
     float3 wpos  : TEXCOORD0;
+    // ADDED FOR THE MATERIAL PATH: AverVertex (PbrShaders.cpp) carries a uv, and a graph that
+    // samples a map needs one to sample it with. PreviewPS below still ignores it -- the simple
+    // shader has no texture to sample -- so this costs it one unread interpolant, not a behaviour
+    // change.
+    float2 uv    : TEXCOORD1;
 };
 
 // Transforms a vertex to clip space and its normal to world space.
@@ -114,6 +207,9 @@ PreviewOut PreviewVS(VSIn i) {
     o.wpos  = wp.xyz;
     o.pos   = mul(wp, gPreviewViewProj);
     o.nrmWS = normalize(averTransformNormal(i.nrm, gWorld));
+    // Taken straight from VSIn, exactly like VSMain does in RHIShaders.cpp -- VSIn already carries
+    // it (every mesh in this engine does), so nothing upstream of this shader has to change.
+    o.uv    = i.uv;
     return o;
 }
 
@@ -152,6 +248,12 @@ ActorPreview::~ActorPreview() {
     if (pipeline_) res_->destroyPipeline(pipeline_);
     if (vs_) res_->destroyShader(vs_);
     if (ps_) res_->destroyShader(ps_);
+#if AVER_MODULE_PBR
+    if (materialPipeline_) res_->destroyPipeline(materialPipeline_);
+    if (materialVs_) res_->destroyShader(materialVs_);
+    if (materialPs_) res_->destroyShader(materialPs_);
+    materialFallback_.shutdown();
+#endif
     if (color_) res_->destroyTexture(color_);
     if (depth_) res_->destroyTexture(depth_);
 }
@@ -225,6 +327,97 @@ bool ActorPreview::init(rhi::IDevice& device, u32 width, u32 height) {
     AVER_INFO("[Preview] ready: {}x{} target, pipeline {}", width_, height_, pipeline_);
     return true;
 }
+
+#if AVER_MODULE_PBR
+// (Re)builds the material pipeline against pbr::materialGraphs() as it stands right now. See the
+// declaration's own comment for when this is called and why a failure keeps the old pipeline.
+bool ActorPreview::createMaterialPipeline() {
+    if (!res_) return false;
+
+    if (!materialFallback_.ready()) {
+        // Table 0 is empty on this feature -- it declares no other SRVs -- so the material's eight
+        // textures land at t0 in TABLE 1 (srvCount1 below), which is the table setDrawBinding always
+        // targets (see RHIResources.hpp's own comment on it). tableBaseRegister is therefore 0, the
+        // same "the consuming pipeline's table-0 SRV count" MaterialSystem::init() asks for.
+        if (!materialFallback_.init(*device_, 0)) {
+            AVER_ERROR("[Preview] the material fallback textures could not be created");
+            return false;
+        }
+    }
+
+    // materialShaderDefines()'s tableBaseRegister and sampler register must be the SAME two numbers
+    // the layout below declares, or the shader samples registers the root signature never bound.
+    // Stored on the instance (not a local): ShaderDesc::defines is a raw pointer, read by the
+    // backend -- and, in ActorPreviewTest, recorded and read back later -- after this function
+    // returns.
+    materialDefines_ = pbr::materialShaderDefines(/*tableBaseRegister=*/0, /*samplerRegister=*/0);
+
+    rhi::ShaderDesc vd;
+    vd.source = actorPreviewShaderSource();
+    vd.prelude = actorPreviewMaterialPrelude();
+    vd.entry = "PreviewVS";
+    vd.stage = rhi::ShaderStage::Vertex;
+    vd.defines = materialDefines_.c_str();
+    const rhi::ShaderHandle vs = res_->createShader(vd);
+
+    rhi::ShaderDesc pd = vd;
+    pd.source = actorPreviewMaterialShaderSource();
+    pd.entry = "PreviewMaterialPS";
+    pd.stage = rhi::ShaderStage::Pixel;
+    const rhi::ShaderHandle ps = res_->createShader(pd);
+
+    if (!vs || !ps) {
+        AVER_WARN("[Preview] the material shaders would not compile; keeping the last good pipeline");
+        if (vs) res_->destroyShader(vs);
+        if (ps) res_->destroyShader(ps);
+        return false;
+    }
+
+    rhi::GraphicsPipelineDesc gp;
+    gp.vs = vs;
+    gp.ps = ps;
+    gp.cull = rhi::CullMode::Back;
+    gp.depth = {true, true, rhi::CompareOp::Less};
+    gp.renderTargetCount = 1;
+    gp.renderTargets[0] = rhi::Format::RGBA8Unorm;
+    gp.depthFormat = rhi::Format::D32Float;
+    gp.sampleCount = 1;
+    gp.layout.constantDwords[rhi::kObjectConstantRegister] = rhi::kObjectConstantDwords;
+    gp.layout.constantDwords[rhi::kFeatureFrameConstantRegister] = 0;   // a root CBV, same as pipeline_
+    // The material system's eight textures (TABLE 1, so setDrawBinding reaches them) and the one
+    // sampler they all read through. Every one of the eight is an ordinary Texture2D -- SlotKind's
+    // own default -- so unlike Voxi's giLayout() there is nothing non-default to declare, and
+    // slotKindsDeclared is left false: the backend reflects the kinds out of the shader, which is
+    // exactly correct here because averStockAuthored calls averSampleMaps unconditionally, so every
+    // declared slot really is used by the shader reflection would see.
+    gp.layout.srvCount1 = pbr::kMaterialSrvCount;
+    gp.layout.samplerCount = 1;
+    gp.layout.samplers[0].filter = rhi::Filter::Anisotropic;
+    gp.layout.samplers[0].address = rhi::AddressMode::Wrap;
+    gp.layout.samplers[0].maxAnisotropy = 8;
+
+    const rhi::PipelineHandle pipe = res_->createGraphicsPipeline(gp);
+    if (!pipe) {
+        AVER_WARN("[Preview] the material pipeline would not build; keeping the last good one");
+        res_->destroyShader(vs);
+        res_->destroyShader(ps);
+        return false;
+    }
+
+    // Torn down only now that the replacement fully exists -- see the declaration's comment on why
+    // a failure above this point must leave whatever was already live untouched.
+    if (materialPipeline_) res_->destroyPipeline(materialPipeline_);
+    if (materialVs_) res_->destroyShader(materialVs_);
+    if (materialPs_) res_->destroyShader(materialPs_);
+    materialPipeline_ = pipe;
+    materialVs_ = vs;
+    materialPs_ = ps;
+    materialGraphRev_ = pbr::materialGraphs().revision();
+    AVER_INFO("[Preview] material pipeline rebuilt for {} graph(s), pipeline {}",
+              pbr::materialGraphs().count(), materialPipeline_);
+    return true;
+}
+#endif
 
 // Rebuilds the targets at a new size, keeping the old pair and returning false on failure.
 bool ActorPreview::resize(u32 width, u32 height) {
@@ -301,6 +494,21 @@ void ActorPreview::buildViewProj(f32 out[16]) const {
 void ActorPreview::prePass(rhi::IRenderContext& ctx) {
     if (!ready()) return;
 
+#if AVER_MODULE_PBR
+    // A MATERIAL GRAPH THAT APPEARED (OR CHANGED) SINCE materialPipeline_ WAS LAST BUILT. Pulled
+    // here rather than pushed from wherever a graph is authored, for the identical reason
+    // VoxiRenderer::prePass pulls the same revision number: materials load into the process-wide
+    // registry long after this feature is constructed, and a revision check that only lives in ONE
+    // renderer's prePass cannot be forgotten by a future second one. Costs nothing when no graph has
+    // ever been registered -- materialGraphs().count() is the short-circuit, so the common case (no
+    // graphs at all) never even reads the revision.
+    if (pbr::materialGraphs().count() > 0 && materialGraphRev_ != pbr::materialGraphs().revision()) {
+        if (!createMaterialPipeline())
+            AVER_WARN("[Preview] material pipeline rebuild declined; graph-shaded draws keep using "
+                     "whatever compiled last, or the simple shader if nothing ever has");
+    }
+#endif
+
     ctx.pushMarker("ActorPreview");
 
     ctx.textureBarrier(color_, everRendered_ ? rhi::ResourceState::ShaderResource
@@ -321,6 +529,7 @@ void ActorPreview::prePass(rhi::IRenderContext& ctx) {
     ctx.clearColor(color_, kChromeGrey);
 
     ctx.setPipeline(pipeline_);
+    rhi::PipelineHandle activePipeline = pipeline_;
 
     // Mirrors the PreviewFrame cbuffer field for field.
     struct Frame {
@@ -345,8 +554,50 @@ void ActorPreview::prePass(rhi::IRenderContext& ctx) {
     for (const PreviewDraw& d : draws_) {
         if (!d.mesh) continue;
 
+        // THE PIPELINE IS SELECTED BEFORE ANYTHING IS BOUND TO IT, and the order is not cosmetic.
+        //
+        // Two pipelines mean two ROOT SIGNATURES, and setting one discards every root argument bound
+        // under the other -- so a per-draw constant written before the switch is written into the
+        // outgoing signature and simply lost. The camera block at b4 was the casualty: the material
+        // sphere was transformed by a view-projection of zeroes and landed nowhere on screen, which
+        // presents as "the material pipeline draws nothing" and survived a constant-colour pixel
+        // shader, a debug-layer run with no errors at all, and every reading of the shader itself.
+        //
+        // It could not happen while there was only ONE pipeline, because the switch then ran at most
+        // once per frame and the bindings after it were the ones that counted. Adding a second is
+        // what made the ordering load-bearing.
+        //
+        // 0 -- EVERY EXISTING CALLER's value -- selects pipeline_ unchanged. A non-zero id selects
+        // the material pipeline only once one actually exists; a graph that has not compiled yet
+        // (or a PBR=OFF build, where materialPipeline_ does not exist as a member at all) quietly
+        // falls back to the simple shader rather than skipping the draw.
+        rhi::PipelineHandle wanted = pipeline_;
+#if AVER_MODULE_PBR
+        const bool wantsMaterial = d.materialGraphId != 0 && materialPipeline_ != 0;
+        if (wantsMaterial) wanted = materialPipeline_;
+#endif
+        if (wanted != activePipeline) {
+            ctx.setPipeline(wanted);
+            activePipeline = wanted;
+        }
+
         frame.ambient[3] = d.selected ? 0.9f : 0.0f;
         ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &frame, sizeof(frame));
+
+#if AVER_MODULE_PBR
+        if (wantsMaterial) {
+            // The identity material's factors, so anything the graph does NOT drive (a roughness
+            // map, an occlusion map) reads as the neutral value averStockAuthored would give a
+            // material with nothing bound -- with graphId overwritten to select this draw's graph
+            // out of the process-wide switch materialGraphHlsl() generated. The fallback BINDING SET
+            // supplies the eight identity textures the same call reads maps through, so a graph that
+            // samples one gets a defined answer (white, flat, or black, per slot) rather than an
+            // unbound descriptor.
+            pbr::MaterialConstants mc = materialFallback_.fallbackConstants();
+            mc.graphId = d.materialGraphId;
+            ctx.setDrawBinding(materialFallback_.fallbackBindingSet(), &mc, sizeof(mc));
+        }
+#endif
 
         // The b1 block the shared prelude declares, written whole.
         f32 obj[rhi::kObjectConstantDwords] = {};
