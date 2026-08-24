@@ -195,6 +195,11 @@ instead of writing C#.
 
 **Projects and the editor**
 
+- **A project scaffolded from the 0.3 FirstPerson template still renders the inside of its own
+  character.** The fix — ` hidden=owner` on the body's `COMP` line — was made in the template, and
+  upgrading a project deliberately does not go and edit graphs you own. Open your character graph,
+  find the `COMP` line for the body mesh, and add ` hidden=owner` to it. A project created fresh in
+  0.4.0 already has it.
 - **There is no packaged-game path.** `AverGame.exe` was deliberately removed in 0.3.0 and nothing
   replaced it. The editor is how a project runs. Anything in the documentation describing a
   standalone build is describing something that no longer exists.

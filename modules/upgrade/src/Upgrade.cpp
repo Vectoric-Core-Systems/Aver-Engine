@@ -106,6 +106,45 @@ bool step_0_2_to_0_3(const Context& ctx, std::string* err) {
     return true;
 }
 
+// A 0.3 PROJECT ALSO NEEDS NOTHING DONE TO IT, for the same reason and by the same rule as above.
+//
+// Every format 0.4 touched was extended in a way that makes ABSENCE the old behaviour, which is what
+// makes this step empty rather than merely unwritten:
+//   - `.ocgraph` gained a DOMAIN record naming which language the graph is written in. A file
+//     without one is a GAMEPLAY graph, which is what every 0.3 graph is. That default was chosen so
+//     no existing graph would need rewriting, and this is where that decision gets paid back.
+//   - `.ocmat` gained GRAPHREF. A material without one takes the same stock shading path it took in
+//     0.3, through code the node-graph work never modified.
+//   - `COMP ... Fluid`, `hidden=owner`, `WATER ... SIMULATED`, sockets and animation notifies are
+//     all new things a file may now say. A 0.3 file does not say them, and nothing requires it to.
+//   - `.ocbt` and `.ocsnd` are new formats. A 0.3 project contains none.
+// The legacy `.ocmap` dispatch fixed this release changes how the engine READS a level, not what a
+// level has to contain -- and it exists precisely so those files stop being rewritten wrongly.
+//
+// ONE THING IS DELIBERATELY NOT DONE HERE, and it is the interesting half of this comment.
+//
+// 0.4 fixed the FirstPerson template rendering the inside of its own character, by adding
+// `hidden=owner` to the body component in the TEMPLATE. A project someone scaffolded from the 0.3
+// template has its own copy of that graph, and this step does not go and edit it. Two reasons, and
+// the second is the real one:
+//
+//   1. It cannot be done reliably. Finding "the COMP line that is this character's body" in a graph
+//      the author has since renamed, restructured or replaced means guessing at content by
+//      convention, and a wrong guess silently hides a mesh the author wanted drawn.
+//   2. An upgrade step edits files the author owns. `step_0_1_to_0_2` did exactly that and was
+//      right to -- it repaired a reference the 0.1 PAYLOAD had shipped broken, which was our defect
+//      sitting in their directory. This is not that. The author's graph is not broken; it is
+//      missing an attribute that did not exist when they wrote it, and the fix is one word they can
+//      read and understand.
+//
+// So it is a documented manual step instead: add ` hidden=owner` to the body's COMP line. That is
+// stated in the 0.4.0 release notes rather than performed silently here.
+bool step_0_3_to_0_4(const Context& ctx, std::string* err) {
+    (void)ctx;
+    (void)err;
+    return true;
+}
+
 // EVERY STEP EVER SHIPPED, OLDEST FIRST, AND NONE OF THEM EDITED AFTER THE FACT. A project made in
 // 0.1 will still be opened years from now, and it will run exactly this function.
 const std::vector<Step> kSteps = {
@@ -115,6 +154,9 @@ const std::vector<Step> kSteps = {
     {{0, 2, 0}, {0, 3, 0},
      "Nothing to repair: 0.3's project-visible changes are all additive",
      &step_0_2_to_0_3},
+    {{0, 3, 0}, {0, 4, 0},
+     "Nothing to repair: 0.4's format changes all read an absent record as the 0.3 behaviour",
+     &step_0_3_to_0_4},
 };
 
 } // namespace
