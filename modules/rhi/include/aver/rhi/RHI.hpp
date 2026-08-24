@@ -115,6 +115,19 @@ const CapsOverride& capsOverride();
 // Applied by each backend at the end of its own capability query. Monotonically reducing.
 void clampCaps(DeviceCaps& caps);
 
+// SIMULATED DEVICE LOSS, after this many presented frames. 0 -- the default -- never fires.
+//
+// DELIBERATELY NOT A CapsOverride TOKEN, even though --force-caps is the obvious neighbour: that
+// struct says of itself that every field "only ever reduces a capability", and losing a device is
+// not a capability, it is an event. Folding it in there would have made that sentence untrue.
+//
+// WHY SIMULATE IT AT ALL. Device loss is real -- a driver timeout, a driver update, a hardware
+// fault -- and the code that handles it is the code least likely to have ever been run: reaching it
+// honestly means making a GPU disappear underneath a live process. So it is the exact shape of path
+// that rots silently and is then wrong on the one day it matters. This makes it a command line.
+void setSimulatedDeviceLoss(u32 afterPresentedFrames);
+u32  simulatedDeviceLoss();
+
 // Camera post-processing: exposure, bloom and eye adaptation.
 struct PostSettings {
     // Linear multiplier on scene radiance, applied BEFORE the tonemap. Overridden every frame by
@@ -313,6 +326,23 @@ public:
     virtual bool viewportToTexture() const { return false; }
     // The UI identifier for that texture, or 0 when the mode is off or unsupported.
     virtual u64 viewportTextureId() { return 0; }
+
+    // True once this device has been REMOVED and can no longer execute anything.
+    //
+    // WHY THIS HAS TO BE ASKABLE. A GPU can be taken away underneath a running process -- a driver
+    // timeout, a driver update, a hardware fault -- and the API does NOT report it at the call that
+    // caused it. Every later call simply fails, quietly, and the process carries on issuing work
+    // into a device that will never run any of it until something finally faults hard. That is the
+    // shape of "the engine crashed with no message", and the only way out of it is for the layer
+    // that DETECTS the removal to be able to tell the layer that drives the frame.
+    //
+    // ONE-WAY AND STICKY: nothing here recovers a lost device. Recreating one means recreating every
+    // resource every module owns, which is a feature and not an error path; this is the honest
+    // minimum, which is to stop, say so, and leave the last good frame on screen.
+    //
+    // Defaults to false so a backend that cannot lose its device -- and every mock in the tests --
+    // is unaffected without writing a line.
+    virtual bool deviceLost() const { return false; }
 
     // GPU self-test: clears a tiny offscreen target to `in` and reads the pixel back into
     // `outRGBA`. True if the read-back matches.

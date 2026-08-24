@@ -63,6 +63,9 @@ private:
     Timestep time_;
     bool exit_ = false;
     bool inFrame_ = false;
+    // Whether the one-time device-lost report has been made. See frameStep: the condition is
+    // permanent, so without this the log and the retitle would repeat for every message pump.
+    bool deviceLostHandled_ = false;
 };
 
 } // namespace aver

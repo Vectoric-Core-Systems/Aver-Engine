@@ -109,6 +109,11 @@ bool validShaderModel(u32 sm) { return sm == 51 || sm == 60 || sm == 61 || sm ==
 // The active capability override.
 const CapsOverride& capsOverride() { return g_capsOverride; }
 
+// See the declaration for why this is not a CapsOverride field.
+u32 g_simulatedDeviceLoss = 0;
+void setSimulatedDeviceLoss(u32 afterPresentedFrames) { g_simulatedDeviceLoss = afterPresentedFrames; }
+u32  simulatedDeviceLoss() { return g_simulatedDeviceLoss; }
+
 // Parses the --force-caps token list. Returns false and applies nothing on any bad token.
 bool setCapsOverride(const char* list) {
     if (!list || !*list) return true;

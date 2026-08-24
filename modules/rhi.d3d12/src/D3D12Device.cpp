@@ -1040,6 +1040,7 @@ public:
         return true;
     }
 
+    bool deviceLost() const override { return deviceLost_; }
     void beginFrame() override;
     void endFrame() override;
     void present();
@@ -1103,6 +1104,8 @@ private:
     void waitForGpu();
     // Blocks until the fence reaches `value`; false only when the device has been removed.
     bool waitFence(u64 value);
+    // Records a device removal once, with the reason decoded. See the definition.
+    bool noteDeviceRemoved(const char* where, HRESULT hr);
 
     // ---- the camera post chain (rhi::PostSettings) ----
     bool createPostPipelines();          // root signature, PSOs and the constant ring: once, at init
@@ -1462,6 +1465,10 @@ private:
     ID3D12DescriptorHeap* boundHeap_ = nullptr;
 
     bool hasSwapchain_ = false;
+    // Sticky: nothing here recreates a device. See noteDeviceRemoved and IDevice::deviceLost.
+    bool deviceLost_ = false;
+    // Counted only when rhi::simulatedDeviceLoss() is armed; see present().
+    u32  presentedFrames_ = 0;
     bool vsync_ = true;
     // Whether the swapchain was created able to tear. Fixed for its life.
     bool tearingSupported_ = false;
@@ -2890,11 +2897,16 @@ void D3D12Device::collectGpuTiming() {
 
 // Opens the frame: waits out the current backbuffer's last frame, resets recording, clears targets.
 void D3D12Device::beginFrame() {
-    if (!hasSwapchain_) return;
+    if (!hasSwapchain_ || deviceLost_) return;
     reconcileClearValue();
     frameIndex_ = swapChain_->GetCurrentBackBufferIndex();
     const u64 want = fenceValues_[frameIndex_];
-    if (want != 0) waitFence(want);
+    // THE RESULT IS ACTED ON, and discarding it was the whole bug. waitFence already detected a
+    // removed device and returned false; nobody looked, so the frame went on to reset an allocator
+    // and record a command list for a device that will never run either -- every frame, forever,
+    // each one paying waitFence's full one-second timeout slice before rediscovering the same
+    // thing. Returning here is what makes the loss cost one frame instead of every frame.
+    if (want != 0 && !waitFence(want)) return;
     allocators_[frameIndex_]->Reset();
     cmdList_->Reset(allocators_[frameIndex_].Get(), pso_.Get());
     boundRootSig_ = nullptr;
@@ -4237,6 +4249,11 @@ void D3D12Device::endFrame() {
                                    frameIndex_ * kMaxGpuStamps, tsCount_, tsReadback_.Get(),
                                    static_cast<u64>(frameIndex_) * kMaxGpuStamps * sizeof(u64));
 
+    // NOTHING IS SUBMITTED ONCE THE DEVICE IS GONE, and the reason is not politeness: beginFrame
+    // returns before resetting the command list when the device is lost, so the list here is
+    // whatever was left from the last good frame -- already closed. Closing it again and submitting
+    // it would be two API misuses stacked on top of a failure that has already been reported.
+    if (deviceLost_) return;
     cmdList_->Close();
     ID3D12CommandList* lists[] = {cmdList_.Get()};
     queue_->ExecuteCommandLists(1, lists);
@@ -4245,15 +4262,38 @@ void D3D12Device::endFrame() {
 
 // Presents the frame, signals its fence, and services a pending capture.
 void D3D12Device::present() {
-    if (!hasSwapchain_) return;
+    if (!hasSwapchain_ || deviceLost_) return;
     const bool tearing = !vsync_ && tearingSupported_;
     const UINT interval = vsync_ ? 1u : 0u;
     const UINT flags = tearing ? DXGI_PRESENT_ALLOW_TEARING : 0u;
+    // Staged loss, counted in PRESENTED frames so it is reproducible run to run. Checked before the
+    // real Present so the frame it fires on behaves exactly like one the device died during.
+    if (const u32 loseAt = simulatedDeviceLoss(); loseAt != 0 && ++presentedFrames_ >= loseAt) {
+        noteDeviceRemoved("--device-lost-at (SIMULATED, the hardware is fine)", DXGI_ERROR_DEVICE_HUNG);
+        return;
+    }
     const HRESULT pr = swapChain_->Present(tearingSupported_ ? interval : 1u, flags);
-    if (FAILED(pr))
-        AVER_ERROR("[RHI.D3D12] Present failed 0x{:08X} removed=0x{:08X}", (u32)pr, (u32)device_->GetDeviceRemovedReason());
+    // PRESENT IS WHERE A REMOVAL USUALLY SURFACES FIRST, so it is the most likely place to learn
+    // about one. It used to log and carry on, which is how a single lost device turned into a
+    // screenful of identical errors and then a hard fault somewhere else entirely.
+    if (FAILED(pr)) {
+        if (pr == DXGI_ERROR_DEVICE_REMOVED || pr == DXGI_ERROR_DEVICE_RESET) {
+            noteDeviceRemoved("Present", pr);
+            return;
+        }
+        AVER_ERROR("[RHI.D3D12] Present failed 0x{:08X} removed=0x{:08X}", (u32)pr,
+                   (u32)device_->GetDeviceRemovedReason());
+    }
 
-    queue_->Signal(fence_.Get(), ++nextFence_);
+    // THE FENCE VALUE IS ONLY ADVANCED IF THE SIGNAL WAS ACCEPTED. Writing it unconditionally --
+    // which is what this did -- records a value the GPU can never reach when the queue has already
+    // failed, and the NEXT beginFrame for this backbuffer then waits on it: a one-second stall per
+    // frame, forever, chasing a number nothing will ever signal.
+    if (FAILED(queue_->Signal(fence_.Get(), nextFence_ + 1))) {
+        noteDeviceRemoved("the present fence signal", DXGI_ERROR_DEVICE_REMOVED);
+        return;
+    }
+    ++nextFence_;
     fenceValues_[frameIndex_] = nextFence_;
 
     if (captureReq_ && captureBuf_) {
@@ -4315,6 +4355,36 @@ void D3D12Device::resize(u32 w, u32 h) {
 }
 
 // Blocks until the fence reaches `value`. Returns false only when the device is gone.
+// Records that the device has gone, exactly once, with the reason decoded.
+//
+// ONCE, because everything downstream of a removal fails too, and a per-call log would bury the one
+// line that says what actually happened under thousands that say what happened next. `where` names
+// the call that noticed, which is not the call that caused it -- a removal is discovered late by
+// construction -- but it is still the most useful thing available.
+bool D3D12Device::noteDeviceRemoved(const char* where, HRESULT hr) {
+    if (deviceLost_) return true;
+    deviceLost_ = true;
+    HRESULT reason = device_ ? device_->GetDeviceRemovedReason() : hr;
+    // A SIMULATED loss (see rhi::setSimulatedDeviceLoss) leaves a perfectly healthy device behind,
+    // so the reason it reports is S_OK and would decode as "unknown". Fall back to what the caller
+    // said in that case -- the caller is the only one who knows this was staged.
+    if (SUCCEEDED(reason)) reason = hr;
+    const char* what = "unknown";
+    switch (reason) {
+    case DXGI_ERROR_DEVICE_HUNG:      what = "the GPU stopped responding to a command this engine submitted (TDR)"; break;
+    case DXGI_ERROR_DEVICE_RESET:     what = "the driver reset the device, usually after another application hung it"; break;
+    case DXGI_ERROR_DEVICE_REMOVED:   what = "the adapter was physically removed, or its driver was updated or restarted"; break;
+    case DXGI_ERROR_DRIVER_INTERNAL_ERROR: what = "the driver failed internally"; break;
+    case DXGI_ERROR_INVALID_CALL:     what = "the runtime rejected a call outright -- run with --debug-layer, which names it"; break;
+    default: break;
+    }
+    AVER_ERROR("[RHI.D3D12] THE GPU DEVICE HAS BEEN LOST, noticed at {} (0x{:08X}): {}. Nothing "
+               "further will be drawn -- this engine cannot recreate a device, so the editor has to "
+               "be restarted. The last frame stays on screen.",
+               where, static_cast<u32>(reason), what);
+    return true;
+}
+
 bool D3D12Device::waitFence(u64 value) {
     if (!fence_ || !fenceEvent_) return true;
     if (fence_->GetCompletedValue() >= value) return true;
@@ -4324,8 +4394,7 @@ bool D3D12Device::waitFence(u64 value) {
         if (WaitForSingleObject(fenceEvent_, 1000) != WAIT_TIMEOUT) return true;
         const HRESULT removed = device_->GetDeviceRemovedReason();
         if (FAILED(removed)) {
-            AVER_ERROR("[RHI.D3D12] the device was removed while waiting for the GPU (0x{:08X})",
-                       static_cast<u32>(removed));
+            noteDeviceRemoved("a fence wait", removed);
             return false;
         }
         if (slice == 4)

@@ -153,6 +153,7 @@ void Engine::setLoadingStatus(const std::string& stage) {
 // One frame: sync swapchain to the window size, update, render, present.
 void Engine::frameStep() {
     if (!device_ || !app_ || inFrame_) return; // guard re-entrancy (timer tick vs main loop)
+
     // Presenting during a modal resize deadlocks the DWM.
     if (window_ && window_->inModalResize()) return;
     inFrame_ = true;
@@ -168,6 +169,38 @@ void Engine::frameStep() {
     time_.dt = static_cast<f32>(dt);
     time_.total += time_.dt;
     time_.frame += 1;
+
+    // A LOST DEVICE STOPS THE FRAME, and stops it HERE rather than three layers down.
+    //
+    // The RHI can detect that the GPU has been taken away -- a driver timeout, a driver update, a
+    // hardware fault -- but detecting it is worth nothing while the loop keeps calling onUpdate and
+    // onRender against it. Every one of those calls fails silently, the log fills with the
+    // consequences rather than the cause, and eventually something faults hard and the process
+    // disappears. That is what "the engine crashed with no message" was made of.
+    //
+    // NOT AN EXIT, and that is deliberate. Nothing here can recreate a device -- that means
+    // recreating every resource every module owns, which is a feature and not an error path -- so
+    // the honest behaviour is to stop drawing and leave the last good frame on screen with the
+    // window still answering the mouse. A user can read the title, read the log, and close it
+    // normally; exiting would take the explanation off the screen along with everything else.
+    //
+    // AFTER THE FRAME COUNTER, NOT BEFORE IT, and that ordering is not cosmetic: run()'s own
+    // `time_.frame >= cfg.maxFrames` is what ends an automated capture, so returning above the
+    // increment froze the counter and left every --frames N run spinning forever with no way out.
+    // A frame that draws nothing is still a frame.
+    if (device_->deviceLost()) {
+        if (!deviceLostHandled_) {
+            deviceLostHandled_ = true;
+            // The title is the only surface still available: nothing can be DRAWN any more, so an
+            // in-editor dialog is not an option, and a log line alone is invisible to anyone who
+            // did not start this from a console.
+            if (window_) window_->setTitle("Aver Engine -- GPU DEVICE LOST, restart the editor");
+            AVER_ERROR("[Engine] the GPU device was lost; rendering has stopped. The window stays "
+                       "open so this can be read -- close it and start the editor again.");
+        }
+        inFrame_ = false;
+        return;
+    }
 
     app_->onUpdate(*this, time_);
     device_->beginFrame();
