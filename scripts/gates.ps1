@@ -120,15 +120,34 @@ $Gates = @(
     #
     # Adding the flags is what keeps the recorded values UNCHANGED across that default flip: each
     # gate still renders exactly what it rendered before, it just has to name it now.
-    @{ name = 'centre';        args = @('--no-gi','--probe-rel','0.51691','0.46461') },
-    @{ name = 'ms';            args = @('--no-gi','--ms','--probe-rel','0.51691','0.46461') },
+    # --no-rt ON THE ELEVEN RASTER GATES. THIS IS THE SAME MISTAKE AS THE PARAGRAPH ABOVE, ONE
+    # DEFAULT LATER, and it is recorded here because it got all the way to a release cut before
+    # anything noticed.
+    #
+    # `3302f89` (2026-08-18) made ray-traced sun shadows the engine default. This gate list was last
+    # edited 2026-08-02 and the baselines recorded 2026-08-11 -- both BEFORE that flip -- so from
+    # 2026-08-18 every gate here that does not name an RT flag silently stopped measuring the raster
+    # path and started measuring the ray-traced one. `centre` became a duplicate of `rt`, `shadow` of
+    # `shadow-rt`, and `penumbra` of `penumbra-rt`.
+    #
+    # THE INVARIANT AT THE END OF THIS SCRIPT IS WHAT CAUGHT IT, exactly as its own comment said it
+    # would: penumbra vs penumbra-rt differed by 0, because they had become the same run. Nothing
+    # else did -- the eighteen value mismatches on their own look like ordinary shading drift, and
+    # re-recording would have frozen the collapse in and left the oracle blind to raster-vs-RayQuery
+    # disagreement permanently. Under -Record a mismatch is not a failure but a BROKEN INVARIANT is,
+    # which is the only reason that could not happen automatically.
+    #
+    # As above: naming the flag does not change what these gates render, it restores what they
+    # rendered when the baselines were recorded. A value that still moves after this is real drift.
+    @{ name = 'centre';        args = @('--no-gi','--no-rt','--probe-rel','0.51691','0.46461') },
+    @{ name = 'ms';            args = @('--no-gi','--ms','--no-rt','--probe-rel','0.51691','0.46461') },
     @{ name = 'rt';            args = @('--no-gi','--rt','--probe-rel','0.51691','0.46461') },
     @{ name = 'ms-rt';         args = @('--no-gi','--ms','--rt','--probe-rel','0.51691','0.46461') },
-    @{ name = 'gi';            args = @('--gi','--probe-rel','0.51691','0.46461') },
-    @{ name = 'ms-gi';         args = @('--ms','--gi','--probe-rel','0.51691','0.46461') },
+    @{ name = 'gi';            args = @('--gi','--no-rt','--probe-rel','0.51691','0.46461') },
+    @{ name = 'ms-gi';         args = @('--ms','--gi','--no-rt','--probe-rel','0.51691','0.46461') },
     @{ name = 'ms-rt-gi';      args = @('--ms','--rt','--gi','--probe-rel','0.51691','0.46461') },
-    @{ name = 'gi-debug';      args = @('--gi-debug','--probe-rel','0.51691','0.46461') },
-    @{ name = 'ms-gi-debug';   args = @('--ms','--gi-debug','--probe-rel','0.51691','0.46461') },
+    @{ name = 'gi-debug';      args = @('--gi-debug','--no-rt','--probe-rel','0.51691','0.46461') },
+    @{ name = 'ms-gi-debug';   args = @('--ms','--gi-debug','--no-rt','--probe-rel','0.51691','0.46461') },
     # RELATIVE, as fractions of the viewport rect, and re-picked against the current scene.
     #
     # Absolute pixels broke this oracle twice: once when the Content Browser became a drawer and grew
@@ -196,14 +215,14 @@ $Gates = @(
     # the sample slips a pixel in any direction, and the gate cannot be flipped by a subpixel wobble.
     # Only 576 pixels in the whole frame disagree at all; the two paths are bit-identical on the
     # other 4.5 million, which is itself worth knowing.
-    @{ name = 'shadow';        args = @('--no-gi','--probe-rel','0.53545','0.48536') },
+    @{ name = 'shadow';        args = @('--no-gi','--no-rt','--probe-rel','0.53545','0.48536') },
     @{ name = 'shadow-rt';     args = @('--no-gi','--rt','--probe-rel','0.53545','0.48536') },
     @{ name = 'shadow-ms-rt';  args = @('--no-gi','--ms','--rt','--probe-rel','0.53545','0.48536') },
-    @{ name = 'shadow-gi';     args = @('--gi','--probe-rel','0.53545','0.48536') },
-    @{ name = 'penumbra';      args = @('--no-gi','--probe-rel','0.57545','0.50610') },
+    @{ name = 'shadow-gi';     args = @('--gi','--no-rt','--probe-rel','0.53545','0.48536') },
+    @{ name = 'penumbra';      args = @('--no-gi','--no-rt','--probe-rel','0.57545','0.50610') },
     @{ name = 'penumbra-rt';   args = @('--no-gi','--rt','--probe-rel','0.57545','0.50610') },
-    @{ name = 'sunlit';        args = @('--no-gi','--probe-rel','0.42636','0.48536') },
-    @{ name = 'sunlit-gi';     args = @('--gi','--probe-rel','0.42636','0.48536') },
+    @{ name = 'sunlit';        args = @('--no-gi','--no-rt','--probe-rel','0.42636','0.48536') },
+    @{ name = 'sunlit-gi';     args = @('--gi','--no-rt','--probe-rel','0.42636','0.48536') },
 
     # rt-penumbra -- the only gate that samples a PARTIALLY OCCLUDED ray-traced pixel.
     #
