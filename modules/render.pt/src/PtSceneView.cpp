@@ -462,8 +462,37 @@ bool PtSceneView::ensureDenoiseResources() {
         }
     }
 
+    // THE SIZE IS PART OF THE CONDITION, and leaving it out was a device-removing bug.
+    //
+    // These two buffers used to be allocated once, on first use, guarded by `if (!denoiseBuf_[0])`
+    // alone -- while the descriptor writes at the bottom of this function are rewritten on EVERY
+    // re-arm, from `pixels`, which is recomputed from the CURRENT accumulator. That is fine for as
+    // long as the accumulator never changes size, and it stopped being fine the moment the Path
+    // Tracing quality combo started driving kAccumLadder: raising the rung on a view that had
+    // already rendered re-armed the accumulator to a bigger resolution and then pointed a
+    // 1280x720-sized view at a buffer still allocated for 480x270.
+    //
+    // WHAT THAT DOES IS NOT A WARNING. D3D12 does no synchronous bounds check when the view is
+    // created without the debug layer, so the first thing that notices is the denoise dispatch
+    // walking off the end of the allocation on the GPU: DXGI_ERROR_DEVICE_HUNG, device removed,
+    // process gone. With --debug-layer it says so precisely -- "NumElements (value = 921600) must
+    // be between 1 and 129600" -- and 921600/129600 are exactly Epic's and Low's pixel counts.
+    //
+    // IT ONLY EVER FIRED ON A RAISE, which is why it reads as intermittent and setting-specific. A
+    // cold start at any tier allocates these correctly on the first pass, and toggling the feature
+    // off and on builds a whole new PtSceneView (syncPtSceneView does make_unique), so both of
+    // those paths are clean. Only changing the rung on a LIVE view reaches the stale buffer -- and
+    // whether the resulting overrun actually faults depends on what happens to be allocated past
+    // the end of it, which is why it crashed some of the time and not all of it.
     const u32 pixels = target_.pixels();
+    if (denoiseBuf_[0] && denoisePixels_ != pixels) {
+        // destroyBuffer retires into the fenced deferred-release queue rather than freeing now, so
+        // this is safe even though a previous frame may still be reading these.
+        for (rhi::BufferHandle& b : denoiseBuf_) { if (b) res_->destroyBuffer(b); b = 0; }
+        denoiseReady_ = false;
+    }
     if (!denoiseBuf_[0]) {
+        denoisePixels_ = pixels;
         for (u32 i = 0; i < 2; ++i) {
             rhi::BufferDesc bd;
             bd.bytes = static_cast<u64>(pixels) * kPtAccumStride;   // one float4 per pixel
@@ -473,6 +502,9 @@ bool PtSceneView::ensureDenoiseResources() {
             denoiseBuf_[i] = res_->createBuffer(bd);
             if (!denoiseBuf_[i]) {
                 AVER_ERROR("[PT] scene view: could not allocate the denoise buffers");
+                // Cleared so a later call cannot see a non-zero size beside a null buffer and
+                // conclude the pair is already the right shape.
+                denoisePixels_ = 0;
                 return false;
             }
         }
@@ -667,14 +699,32 @@ void PtSceneView::prePass(rhi::IRenderContext& ctx) {
         return;
     }
 
-    // BOUNDED, PER THIS MODULE'S OWN GPU-HYGIENE RULE. One accumulate() call issues roughly
-    // (bounces+1)*samples = 5*8 = 40 RayQuery traces per pixel, over 480x270 pixels: ~5.2M traces.
+    // BOUNDED, PER THIS MODULE'S OWN GPU-HYGIENE RULE -- and the bound MOVES WITH THE RUNG, which
+    // this comment used to ignore because there was no rung when it was written.
+    //
+    // One accumulate() call issues (bounces+1)*samples = 5*8 = 40 RayQuery traces per pixel. That
+    // per-pixel figure is fixed; kAccumLadder's pixel count is not, so the traces per dispatch are:
+    //
+    //     Low 480x270   5.2M | Medium 640x360   9.2M | High 960x540  20.7M | Epic 1280x720  36.9M
+    //
     // VoxiRenderer's own ray-traced sun shadow -- the only OTHER ray-traced pass in this engine, and
     // one already characterised against a recorded TDR history on this machine -- defaults to 4 rays
     // per pixel over the FULL scene resolution (VoxiRenderer.hpp: rtShadowRays_, capped at 32
     // "because there is a recorded TDR history on this machine"): at a modest 1280x720 scene that is
-    // 4 * 921,600 = ~3.7M traces/frame. This dispatch is the same order of magnitude, not a multiple
-    // of it, and unlike the shadow pass it is NOT issued every frame once the image has converged
+    // 4 * 921,600 = ~3.7M traces/frame.
+    //
+    // SO THE TOP RUNG IS 10x THAT REFERENCE, not "the same order of magnitude" as this comment
+    // claimed while the accumulator was hardcoded at 480x270. That reading was correct for the one
+    // resolution it was written about and became stale the moment setQuality() started moving it.
+    //
+    // MEASURED, THOUGH, AND NOT A PROBLEM ON THIS HARDWARE: an Epic dispatch over a real streamed
+    // scene (889 surfaces, ~3.3M vertices) times at 3.5-9.2 ms, two to three orders of magnitude
+    // inside the ~2 s TDR window. So this is recorded as a number that GREW UNGOVERNED rather than
+    // as a present danger -- if a slower ray-tracing GPU ever does trip a timeout here, the fix is
+    // to scale kSamplesPerStep down as the rung goes up (more dispatches, same traces each) rather
+    // than to cap the resolution, since the resolution is the entire point of the ladder.
+    //
+    // Unlike the shadow pass this is NOT issued every frame once the image has converged
     // (see the kMaxSamples check above) or while the camera is moving (see the reset above, which
     // always sets d.reset=true on the FIRST call after a move, discarding whatever partial sum a
     // half-issued dispatch would otherwise smear across a new view).

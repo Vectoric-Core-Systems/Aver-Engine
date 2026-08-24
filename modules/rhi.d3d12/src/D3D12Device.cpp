@@ -5546,6 +5546,34 @@ void D3D12ResourceFactory::setSrvTlas(BindingSetHandle set, u32 slot, TlasHandle
     dev_->device_->CreateShaderResourceView(nullptr, &sv, cpuSlot(s->heapBase + slot));
 }
 
+// True when a structured view of `count` elements of `stride` starting at `firstElement` fits
+// inside the buffer it is being created over. Logs and returns false when it does not.
+//
+// WHY THIS IS CHECKED HERE AND NOT LEFT TO THE DEBUG LAYER. A view that overruns its buffer is not
+// rejected by D3D12 at CREATION time in a normal run -- there is no synchronous validation without
+// the debug layer -- so the first thing that notices is a shader reading or writing past the
+// allocation, which surfaces as DXGI_ERROR_DEVICE_HUNG and takes the process with it. That is the
+// worst possible shape for a diagnostic: it arrives later than the mistake, on a different thread,
+// with no reference to the descriptor that caused it, and only on the machines unlucky enough to
+// have something mapped past the end.
+//
+// It cost this project exactly that once already: the path tracer's denoise buffers were allocated
+// once at 480x270 and then handed a 1280x720 view when the quality rung changed, and the report that
+// came back was "sometimes path tracing crashes the engine when turning it to higher settings" --
+// with no other information available, because the only tool that named it was --debug-layer, which
+// nobody runs by default. One comparison at descriptor-write time turns that into a log line naming
+// the slot, the counts and the buffer.
+bool viewFitsBuffer(const RhiBuffer& b, u32 stride, u32 count, u32 firstElement, const char* what,
+                    u32 slot) {
+    const u64 needed = (static_cast<u64>(firstElement) + count) * stride;
+    if (needed <= b.desc.bytes) return true;
+    AVER_ERROR("[RHI.D3D12] {} slot {}: a view of {} element(s) x {} byte(s) from element {} needs "
+               "{} byte(s), but the buffer is only {} -- REFUSED. Left unchecked this is not an "
+               "error at all until a shader walks off the end of it and the device is removed.",
+               what, slot, count, stride, firstElement, needed, b.desc.bytes);
+    return false;
+}
+
 // Puts a structured-buffer SRV in a slot.
 void D3D12ResourceFactory::setSrvBuffer(BindingSetHandle set, u32 slot, BufferHandle bh,
                                         u32 stride, u32 count, u32 firstElement) {
@@ -5557,6 +5585,7 @@ void D3D12ResourceFactory::setSrvBuffer(BindingSetHandle set, u32 slot, BufferHa
         return;
     }
     if (stride == 0) { AVER_ERROR("[RHI.D3D12] setSrvBuffer with a zero stride"); return; }
+    if (!viewFitsBuffer(buffers_[bh - 1], stride, count, firstElement, "setSrvBuffer", slot)) return;
     D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
     sv.Format = DXGI_FORMAT_UNKNOWN;
     sv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
@@ -5578,6 +5607,7 @@ void D3D12ResourceFactory::setUavBuffer(BindingSetHandle set, u32 slot, BufferHa
         return;
     }
     if (stride == 0) { AVER_ERROR("[RHI.D3D12] setUavBuffer with a zero stride"); return; }
+    if (!viewFitsBuffer(buffers_[bh - 1], stride, count, firstElement, "setUavBuffer", slot)) return;
     D3D12_UNORDERED_ACCESS_VIEW_DESC uv{};
     uv.Format = DXGI_FORMAT_UNKNOWN;
     uv.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;

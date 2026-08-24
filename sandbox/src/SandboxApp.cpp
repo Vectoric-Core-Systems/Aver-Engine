@@ -2405,6 +2405,28 @@ public:
         // remove a render feature. See syncPtSceneView()'s own comment for why.
         syncPtSceneView(e.device());
 #if AVER_MODULE_VOXI
+        // --pt-quality-ramp [N]: verification-only, and it exists because THIS TRANSITION HAD A BUG
+        // NO FLAG COULD REACH. Raising the Path Tracing rung on a view that has already rendered is
+        // the one path that re-arms a live PtSceneView at a new resolution, and it used to point an
+        // over-sized descriptor at the denoiser's still-small buffers and remove the device. Every
+        // other route was clean and stayed clean: --pt N is applied once inside applyProject before
+        // frame 1, and --pt-scene-toggle-on/off builds a whole new PtSceneView each time. So the
+        // defect was reachable only by a human clicking the settings combo, which is exactly the
+        // shape of bug that reaches a user and not a test. This makes it reachable from a command
+        // line, so it can be checked again whenever the path tracer's resources move.
+        if (ptQualityRampEvery_ > 0 && --ptQualityRampCountdown_ <= 0) {
+            ptQualityRampCountdown_ = ptQualityRampEvery_;
+            voxi::Settings ramped = voxi::Renderer::get().settings();
+            const u32 rung = static_cast<u32>(ramped.pathTracing);
+            // Off is never raised INTO: the ramp exercises rung changes on a live view, and turning
+            // the feature on is the registration path --pt-scene-toggle-on already covers.
+            if (ramped.pathTracing != voxi::Quality::Off && rung < static_cast<u32>(voxi::Quality::Epic)) {
+                ramped.pathTracing = static_cast<voxi::Quality>(rung + 1);
+                voxi::Renderer::get().setSettings(ramped);
+                AVER_INFO("[PT] --pt-quality-ramp: Path Tracing raised to quality {}",
+                          static_cast<u32>(ramped.pathTracing));
+            }
+        }
         // The RUNG, reconciled on the same cadence as the registration and for the same reason:
         // --pt N, a project manifest and the settings combo all write voxi::Settings, and this is
         // the one place that want becomes a call. setQuality() is idempotent, so calling it every
@@ -5535,6 +5557,11 @@ public:
     // own comment for why the actual registration happens there and not here.
     void setPtSceneView() { ptSceneViewWantEnabled_ = true; }   // --pt-scene
     // --pt-scene-toggle-on/--pt-scene-toggle-off [N]: see ptSceneToggleOnAutoFrames_'s own comment.
+    // --pt-quality-ramp [N]: see the ramp itself in onUpdate for what it is for.
+    void setPtQualityRamp(int everyFrames) {
+        ptQualityRampEvery_ = everyFrames;
+        ptQualityRampCountdown_ = everyFrames;
+    }
     void setPtSceneToggleOnAuto(int framesIn)  { ptSceneToggleOnAutoFrames_  = framesIn; }
     void setPtSceneToggleOffAuto(int framesIn) { ptSceneToggleOffAutoFrames_ = framesIn; }
     void setSkinSceneDir(std::string d) { skinSceneDir_ = std::move(d); }          // --skin-scene-test <dir>
@@ -12767,6 +12794,9 @@ private:
     // chunkStreamAutoFrames_/droneAutoFrames_ above. Two independent countdowns from process start,
     // not "N frames after the ON one", so the caller picks values (e.g. on=5, off=15) rather than
     // this class reasoning about their order.
+    // --pt-quality-ramp [N]: 0 is off. See the ramp in onUpdate.
+    int ptQualityRampEvery_ = 0;
+    int ptQualityRampCountdown_ = 0;
     int ptSceneToggleOnAutoFrames_ = 0;
     int ptSceneToggleOffAutoFrames_ = 0;
     std::unique_ptr<aver::editor::ReflTest> refl_;
@@ -14759,7 +14789,7 @@ Application* createApplication(int argc, char** argv) {
     // right here and nothing else may override it; --mcp with no number defers to mcp.conf, resolved
     // once argument parsing is done and engineRoot() can be asked (see mcpRequested below).
     bool mcpRequested = false, mcpPortExplicit = false;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool furnaceGrid=false; f32 furnaceTilt=0.0f; bool ptFurnace=false; bool ptScene=false; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int rtRenderMode=-1; int pt=0; int ptBounces=-1; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string selectEntity; bool openLegacy=false; bool waterOn=false; f32 waterHeight=0.0f; std::string graphSelectNode; std::string graphTab; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false; bool bakeNav=false; f32 bakeNavCell=50.0f; std::string openMap;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool furnaceGrid=false; f32 furnaceTilt=0.0f; bool ptFurnace=false; bool ptScene=false; int ptQualityRamp=0; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=0; int rt=0; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int rtRenderMode=-1; int pt=0; int ptBounces=-1; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string selectEntity; bool openLegacy=false; bool waterOn=false; f32 waterHeight=0.0f; std::string graphSelectNode; std::string graphTab; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false; bool bakeNav=false; f32 bakeNavCell=50.0f; std::string openMap;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -15189,6 +15219,11 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--pt-scene")) ptScene=true;
         // --pt-scene-toggle-on/-off [N]: verification-only, see SandboxApp::ptSceneToggleOnAutoFrames_
         // for what this proves and why. Same "[N] optional, default given" shape as --chunk-stream.
+        // --pt-quality-ramp [N]: raise the Path Tracing rung one step every N frames, on a LIVE
+        // view. Verification-only, same "[N] optional, default given" shape as the toggles below.
+        else if (!std::strcmp(argv[i],"--pt-quality-ramp")) {
+            ptQualityRamp = (i+1 < argc && argv[i+1][0] != '-') ? std::atoi(argv[++i]) : 20;
+        }
         else if (!std::strcmp(argv[i],"--pt-scene-toggle-on")) {
             ptSceneToggleOn = (i+1 < argc && argv[i+1][0] != '-') ? std::atoi(argv[++i]) : 5;
         }
@@ -15507,6 +15542,7 @@ Application* createApplication(int argc, char** argv) {
     if (sunAngle > 0.0f) app->setSunAngle(sunAngle);
     if (ptFurnace) app->setPtFurnaceTest();
     if (ptScene) app->setPtSceneView();
+    if (ptQualityRamp > 0)    app->setPtQualityRamp(ptQualityRamp);
     if (ptSceneToggleOn > 0)  app->setPtSceneToggleOnAuto(ptSceneToggleOn);
     if (ptSceneToggleOff > 0) app->setPtSceneToggleOffAuto(ptSceneToggleOff);
     if (!skinSceneDir.empty()) app->setSkinSceneDir(skinSceneDir);

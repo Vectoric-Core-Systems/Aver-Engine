@@ -193,6 +193,10 @@ private:
     // that buffer and writes its own.
     rhi::PipelineHandle   denoisePso_ = 0;
     rhi::BufferHandle     denoiseBuf_[2] = {0, 0};
+    // HOW MANY PIXELS denoiseBuf_ WAS ACTUALLY ALLOCATED FOR, which is not the same question as
+    // "how many pixels does the accumulator have" the moment anything changes the quality rung.
+    // Keeping the two apart is the whole fix: see ensureDenoiseResources().
+    u32                   denoisePixels_ = 0;
     // Three sets, because the chain is accum -> A -> B -> A -> ... : the first pass RESOLVES (sum
     // divided by count) out of the two-element accumulator, and the rest ping-pong between two
     // one-element mean buffers. A binding set is read when the command EXECUTES, so these cannot
