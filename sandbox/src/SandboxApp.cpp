@@ -822,6 +822,13 @@ static bool importGltfToDir(const std::string& src, const std::string& destDir,
     return true;
 }
 
+// Forward-declared here, ahead of the class that needs them, so that SandboxApp::handleOpenRequest
+// (single-instance forwarding's receiver-side accept/decline check) can call them. Their natural
+// home and their full definitions stay where they always were -- beside the bare-arg command-line
+// classification they exist for, just above createApplication -- this is a declaration only.
+static bool isLevelFile(const char* p);
+static std::string ownerProjectOf(const std::string& mapPath);
+
 // The editor application: owns the scene, the panels, and the frame loop.
 class SandboxApp final : public Application {
 public:
@@ -1129,6 +1136,21 @@ public:
             editor::setActorEditorHooks(std::move(hooks));
         }
         window_ = e.window();
+
+        // SINGLE-INSTANCE FORWARDING, RECEIVER REGISTRATION. singleInstanceEligible_ is computed in
+        // createApplication from argc/argv (this class never sees argv itself) and is a SUPERSET of
+        // the sender's own forward-attempt gate by construction: any command line with a flag
+        // anywhere provably fails "argc==2 and argv[1] does not start with '-'", the sender's gate,
+        // so it fails this broader one too -- no separate flag bookkeeping is needed to keep the two
+        // in lockstep. A --frames capture reaches this line exactly like every other windowed launch
+        // (see Window.hpp:17's own note that even a non-activating capture window is real), but its
+        // command line always carries a flag, so singleInstanceEligible_ is false for it: it neither
+        // registers as a primary nor is ever forwarded to, and two concurrent --frames captures never
+        // even attempt to open the same named mutex.
+        if (window_ && window_->valid() && singleInstanceEligible_) {
+            Window::registerAsSingleInstancePrimary(window_->nativeHandle());
+            window_->setOpenRequestHook(&SandboxApp::onOpenRequestThunk, this);
+        }
 
 #if AVER_MODULE_MCP
         if (mcpPort_) {
@@ -2319,6 +2341,35 @@ public:
             if (!camWobbleBased_) { camWobbleBaseYaw_ = yaw_; camWobbleBased_ = true; }
             const f32 phase = 6.2831853f * (f32)(t.frame - 1) / (f32)camWobblePeriod_;
             yaw_ = camWobbleBaseYaw_ + camWobbleDeg_ * 0.01745329252f * std::sin(phase);
+        }
+        // SINGLE-INSTANCE FORWARDING, DRAIN. Polled rather than delivered as an Event: Event
+        // (Event.hpp) is a fixed POD struct with no string field, so the accepted path cannot ride
+        // the existing dispatch() callback and is latched on window_ instead -- exactly the
+        // fluidWantPending_ pattern below, drained unconditionally every frame. Safe to read this
+        // early: window_->pumpEvents() (Engine::run's frame loop, Engine.cpp) runs BEFORE onUpdate
+        // every frame, so any WM_COPYDATA this window received this frame already landed on window_
+        // by the time this line runs, and both the write (wndProc) and this read happen on the same
+        // thread -- the WM_COPYDATA send is synchronous, so there is no cross-thread race to guard.
+        if (window_ && window_->hasPendingOpenRequest()) {
+            const std::string path = window_->takePendingOpenRequest();
+            if (isLevelFile(path.c_str())) {
+                if (canUndo()) {
+                    // Cheapest honest "is anything unsaved" signal available: there is no per-level
+                    // dirty flag anywhere in this editor (unloadLevel clears undoStack_/redoStack_
+                    // unconditionally, on every path that ends a level, with no guard on either). An
+                    // empty undo stack does not PROVE nothing changed, but a non-empty one proves the
+                    // opposite, which is the direction that has to never be wrong here.
+                    forwardedOpenPrompt_ = true;
+                    forwardedOpenPath_ = path;
+                } else {
+                    loadLevel(e, path);
+                    AVER_INFO("[Sandbox] '{}' opened, forwarded from another launch", path);
+                }
+            }
+            // A forwarded BARE PROJECT with no level attached (the same .ocproject that is already
+            // open) has nothing further to do here: handleOpenRequest already confirmed it matches
+            // the live project, and Window::focus() already brought this window forward from the
+            // WM_COPYDATA receive itself.
         }
         // --pt-scene-toggle-on/-off: verification-only (see the members' own comment). Checked BEFORE
         // syncPtSceneView() so the same onUpdate() that flips the want-flag is the same one that acts
@@ -5697,6 +5748,10 @@ public:
     // <path>.ocmap given on the command line: opened INSTEAD of the project's start map.
     void setOpenMap(std::string p) { openMapPath_ = std::move(p); }
     void armBrowser(bool on) { browserActive_ = on; }   // shows the start screen
+    // Whether THIS launch's command line looked like the shell's own shape (see createApplication's
+    // computation of this, right beside the sender-side gate it is the superset of). Read once, at
+    // window_ = e.window() in onInit, to decide whether to register as a single-instance primary.
+    void setSingleInstanceEligible(bool b) { singleInstanceEligible_ = b; }
 
 private:
     // Adopts the project the browser or command line loaded, and refreshes everything keyed to it.
@@ -8533,6 +8588,62 @@ private:
 #endif
     }
 
+    // The unsaved-changes modal for a level FORWARDED from another launch (see the drain in
+    // onUpdate). Same Save/Discard/Cancel shape as drawExitPrompt just above, relabeled: this asks
+    // about the CURRENT level's undo history, not about dirty asset editors, and it opens a
+    // different level rather than exiting, so reusing exitPrompt_ and hoping the button labels
+    // carried both meanings risked a "Discard and exit" button that actually opened a file.
+    void drawForwardedOpenPrompt(Engine& e) {
+#if AVER_WITH_IMGUI
+        if (!forwardedOpenPrompt_) return;
+        constexpr const char* kTitle = "Open forwarded level?";
+        if (!ImGui::IsPopupOpen(kTitle)) ImGui::OpenPopup(kTitle);
+        const ImVec2 centre = ImGui::GetMainViewport()->GetCenter();
+        ImGui::SetNextWindowPos(centre, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowSize(ImVec2(480.0f * dpi_, 0.0f), ImGuiCond_Appearing);
+        if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+
+        ImGui::TextWrapped("'%s' was opened from outside the editor. The current level has unsaved "
+                           "changes.", std::filesystem::path(forwardedOpenPath_).filename().string().c_str());
+        ImGui::Spacing();
+        ImGui::Separator();
+
+        if (ImGui::Button("Save and open", ImVec2(150.0f * dpi_, 0.0f))) {
+            if (levelPath_.empty() || saveLevel(levelPath_)) {
+                const std::string toOpen = forwardedOpenPath_;
+                ImGui::CloseCurrentPopup();
+                forwardedOpenPrompt_ = false;
+                forwardedOpenPath_.clear();
+                loadLevel(e, toOpen);
+                AVER_INFO("[Sandbox] '{}' opened, forwarded from another launch", toOpen);
+            } else {
+                // STAY OPEN on a failed save -- same reasoning as drawExitPrompt's identical guard:
+                // proceeding anyway would discard exactly the work this prompt exists to protect.
+                AVER_ERROR("[Sandbox] could not save '{}'; the forwarded open was cancelled", levelPath_);
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Discard and open", ImVec2(150.0f * dpi_, 0.0f))) {
+            const std::string toOpen = forwardedOpenPath_;
+            AVER_WARN("[Sandbox] opening '{}' (forwarded); the current level's unsaved changes are gone",
+                      toOpen);
+            ImGui::CloseCurrentPopup();
+            forwardedOpenPrompt_ = false;
+            forwardedOpenPath_.clear();
+            loadLevel(e, toOpen);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(110.0f * dpi_, 0.0f))) {
+            ImGui::CloseCurrentPopup();
+            forwardedOpenPrompt_ = false;
+            forwardedOpenPath_.clear();
+        }
+        ImGui::EndPopup();
+#else
+        (void)e;
+#endif
+    }
+
     // Draws the modal offering to add the project files this project is missing, listing each fix.
     void drawUpgradePrompt() {
 #if AVER_WITH_IMGUI
@@ -9080,6 +9191,7 @@ private:
         tools_.drawModals(project_, dpi_);
         drawUpgradePrompt();
         drawExitPrompt(e);
+        drawForwardedOpenPrompt(e);
 
         // ---------------- status bar ----------------
         ImGui::SetNextWindowPos(ImVec2(wpos.x, wpos.y + wsize.y - statusH));
@@ -12182,6 +12294,17 @@ private:
     std::string projectPath_;        // <path>.ocproject given on the command line
     std::string openMapPath_;        // <path>.ocmap given on the command line, if any
     bool browserActive_=false;
+    // Whether THIS launch's own command line was eligible to register as the single-instance
+    // primary -- see setSingleInstanceEligible's own comment for the exact condition and why it is
+    // computed in createApplication rather than here.
+    bool singleInstanceEligible_ = false;
+    // The modal for a level FORWARDED from another launch while the current one has unsaved changes
+    // -- see the drain in onUpdate and drawForwardedOpenPrompt. Separate from exitPrompt_ rather than
+    // reusing it: exiting the editor and switching to a different level mid-session are two different
+    // destructive-if-you're-not-careful actions, and relabeling one modal to mean both risked a user
+    // reading "Discard and exit" while what is about to happen is "Discard and open a DIFFERENT level".
+    bool        forwardedOpenPrompt_ = false;
+    std::string forwardedOpenPath_;
     rhi::TextureHandle logoTexture_=0;   // 0 when logo.png was absent or undecodable
     rhi::TextureHandle fileIconsTexture_=0;     // the Content Browser file-type sprite sheet (4 tiles)
     u64 fileIconsUiId_=0;
@@ -13030,6 +13153,52 @@ private:
         ImGui::End();
     }
 #endif  // AVER_WITH_IMGUI
+
+    // Window::OpenRequestHook trampoline. A raw function pointer (see Window.hpp) has nowhere to
+    // carry `this`, so it carries `user` instead -- the same shape as RenderTickFn's own thunk
+    // (Engine::renderTickThunk) and for the identical reason.
+    static bool onOpenRequestThunk(void* user, const char* path) {
+        return static_cast<SandboxApp*>(user)->handleOpenRequest(path);
+    }
+
+    // ACCEPT or DECLINE a path forwarded from another launch. Runs SYNCHRONOUSLY on the sender's
+    // blocking SendMessageTimeout (see OpenRequestHook's own comment in Window.hpp), so this is
+    // deliberately just the cheap half -- a directory walk plus a filesystem equivalence check, no
+    // ImGui, no world mutation. The actual load happens later, drained in onUpdate, off this call
+    // stack entirely.
+    //
+    // FOREIGN PROJECT: DECLINE, DON'T HALF-SWITCH. applyProject (see its own comment) is reachable
+    // only from the startup browser -- armBrowser has exactly two call sites, onInit's own
+    // command-line branch and the browser's Open action, and neither is reachable once the frame
+    // loop is running a level. There is no code path today that reloads a DIFFERENT project's
+    // materials, meshes and script host mid-session, so a mismatch here has to decline rather than
+    // attempt a switch this build genuinely cannot perform. Declining leaves the sender to fall
+    // through and build its own Application/Engine exactly as if this primary did not exist --  no
+    // second process is ever spawned BY the receiver; the original one, still alive, simply
+    // continues.
+    //
+    // project_.manifestPath, NOT projectPath_. projectPath_ (see its own comment) is set exactly
+    // once, from the command line, in onInit -- it goes stale the moment a project is opened or
+    // switched through the in-editor browser, which project_ (set fresh by every applyProject call,
+    // command-line-triggered or not) never does. Comparing against projectPath_ here would have
+    // reported "foreign" for a project that is genuinely the live one, any time the browser rather
+    // than argv put it there.
+    //
+    // std::filesystem::equivalent rather than a string compare: ownerProjectOf's return and
+    // project_.manifestPath can differ in case or in '/' vs '\\' even when they name the identical
+    // file (NTFS itself does not care), and equivalent() is the standard library's own answer to
+    // "do these two paths refer to the same file", which a byte-for-byte compare is not.
+    bool handleOpenRequest(const char* path) {
+        const std::string owner = ownerProjectOf(path);
+        // ownerProjectOf, unmodified, also answers correctly for a bare .ocproject argument: its
+        // directory scan finds THAT FILE among its own siblings, so `owner` ends up equal to `path`
+        // itself, and comparing it against project_.manifestPath needs no separate case for "the
+        // forwarded thing IS a project, not a level".
+        if (owner.empty()) return false;
+        std::error_code ec;
+        if (!std::filesystem::equivalent(owner, project_.manifestPath, ec) || ec) return false;
+        return true;
+    }
 
     // Loads an .ocworld into the world as ordinary scene entities: transform, mesh and name.
     //
@@ -14833,6 +15002,47 @@ Application* createApplication(int argc, char** argv) {
             else                           beam    = argv[i];
         }
     }
+
+    // SINGLE-INSTANCE FORWARDING, SENDER-SIDE GATE. Placed right here -- after the bare-arg loop has
+    // classified argv[1], before anything below resolves openMap's owning project or constructs a
+    // SandboxApp -- so the condition below can read `project`/`openMap` exactly as the loop left
+    // them: set by the SAME bare-arg branch just above, from the SAME single argument.
+    //
+    //     argc == 2 && argv[1][0] != '-' && (!project.empty() || !openMap.empty())
+    //
+    // THIS GATE IS DELIBERATELY THE NARROWEST THING THAT COULD WORK, and it has to stay that way.
+    // This engine's entire gate-sweep, headless-import and project-scaffold workflow launches MANY
+    // Sandbox.exe processes, routinely concurrently: --frames captures, --import-gltf, --new-project-
+    // template. Every one of those is a flag-bearing command line, so argv[1][0]!='-' alone already
+    // excludes all of them -- but it is argc==2 on top of that which is load-bearing: without it, a
+    // perfectly ordinary capture like `Sandbox.exe level.ocmap --frames 600 --no-vsync` (argc==4,
+    // argv[1]="level.ocmap" does not start with '-') would satisfy a laxer check and get forwarded to
+    // -- or, worse, treated as eligible to receive forwards itself -- some other running instance, and
+    // two concurrent --frames captures would start interfering with each other's output. That is a
+    // worse bug than the one this feature fixes even if double-clicking works perfectly, so the gate
+    // reads argc/argv[1][0] ONLY, before a single flag is parsed, and admits nothing else.
+    //
+    // (!project.empty() || !openMap.empty()) excludes a bare .ocbeam, which the loop above sorts into
+    // `beam`: .ocbeam has no file association to honor (scripts/register-filetype.ps1 registers only
+    // .ocproject/.ocmap/.ocworld), so there is nothing here for it to forward TO even if it wanted to.
+    if (argc == 2 && argv[1][0] != '-' && (!project.empty() || !openMap.empty())) {
+        // Resolved to absolute before it ever leaves this process: the receiving process's working
+        // directory has no reason to match this one's, and ownerProjectOf/equivalent() on the far
+        // side need a path that names the same file there as it does here.
+        std::error_code ec;
+        const std::filesystem::path abs = std::filesystem::absolute(argv[1], ec);
+        const std::string forwardPath = ec ? std::string(argv[1]) : abs.string();
+        if (Window::forwardToSingleInstancePrimary(forwardPath)) {
+            AVER_INFO("[Sandbox] '{}' handed to the running editor instance; this process exits",
+                      forwardPath);
+            std::exit(0);
+        }
+        // Every other outcome -- no primary running, a primary that DECLINED because a different
+        // project is open, or a timed-out send -- means the same thing: fall through and build this
+        // process's own Application/Engine exactly as a bare launch with no other instance running
+        // would. Nothing below this point needs to know a forward was even attempted.
+    }
+
     // Before the engine creates a device: the backend queries the hardware inside Engine::run.
     if (forceCaps && !rhi::setCapsOverride(forceCaps))
         AVER_ERROR("[Sandbox] --force-caps '{}' was rejected; running on the UNCLAMPED device", forceCaps);
@@ -14848,6 +15058,17 @@ Application* createApplication(int argc, char** argv) {
     }
 
     auto* app = new SandboxApp(frames, headless, beam, shot, tool);
+    // SINGLE-INSTANCE FORWARDING, RECEIVER-SIDE GATE. A SUPERSET of the sender gate just above by
+    // construction: that gate additionally requires (!project.empty() || !openMap.empty()), so every
+    // command line the sender gate admits already satisfies this one, but not the reverse -- a bare
+    // .ocbeam (argc==2, no leading '-', but classified into `beam`) is eligible to BECOME a primary
+    // here even though it was excluded from attempting to forward above, which is intentional: this
+    // process still deserves to be the thing a LATER .ocmap/.ocproject double-click reaches, even
+    // though its own launch had nothing to forward. Reading only argc/argv[1][0] keeps this in
+    // lockstep with the sender gate automatically -- any command line with a flag anywhere fails
+    // "argc==2 and argv[1] does not start with '-'" outright, so it fails this too, with no separate
+    // per-flag bookkeeping required to keep the two gates from drifting apart.
+    app->setSingleInstanceEligible(argc == 1 || (argc == 2 && argv[1][0] != '-'));
     if (!openMap.empty()) app->setOpenMap(openMap);
     app->setPost(exposure, bloom, autoExposure);
     app->applyCaptureExposureRule(autoExposure);

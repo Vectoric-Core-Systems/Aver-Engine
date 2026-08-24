@@ -52,6 +52,59 @@ public:
     void setMessageHook(MessageHook h) { messageHook_ = h; }
     MessageHook messageHook() const { return messageHook_; }
 
+    // A file forwarded here by another instance's launch, delivered as WM_COPYDATA (see the Win32
+    // single-instance IPC further down, and the sender/receiver gates in SandboxApp.cpp's
+    // createApplication/onInit). Runs SYNCHRONOUSLY on the calling thread of the SENDER's blocking
+    // SendMessageTimeout, so it must stay cheap -- a string compare against the live project's path
+    // is the entire intended budget -- and must not touch per-frame UI state, which may be mid-frame
+    // on the receiving side when this fires. Returns true to ACCEPT (the receiver then records the
+    // path and takes focus; the sender exits without ever opening its own window) or false to
+    // DECLINE (the sender falls through and opens its own instance, exactly as if there were no
+    // primary at all).
+    //
+    // Carries a user pointer, unlike MessageHook: MessageHook's only real implementation
+    // (rhi::uiWndProc) is a stateless wrapper around ImGui's single global context, but this always
+    // has to reach one specific SandboxApp instance's live project -- the same reason RenderTickFn
+    // takes a user pointer instead of assuming a singleton.
+    using OpenRequestHook = bool (*)(void* user, const char* path);
+    void setOpenRequestHook(OpenRequestHook h, void* user) { openRequestHook_ = h; openRequestHookUser_ = user; }
+    OpenRequestHook openRequestHook() const { return openRequestHook_; }
+    void* openRequestHookUser() const { return openRequestHookUser_; }
+
+    // Brings this window to the foreground, restoring it first if it is minimized. The only caller
+    // is the WM_COPYDATA receive in Win32Window.cpp, once OpenRequestHook has accepted: a forwarded
+    // level should not silently load behind whatever else has the user's attention.
+    void focus();
+
+    // A path OpenRequestHook accepted, polled once a frame from SandboxApp::onUpdate exactly like
+    // fluidWantPending_ (see that member's own comment for the identical reasoning): Event
+    // (Event.hpp) is a fixed POD struct with no string field, so a path cannot ride the existing
+    // dispatch() callback and is latched here instead.
+    bool hasPendingOpenRequest() const { return hasPendingOpenRequest_; }
+    std::string takePendingOpenRequest() { hasPendingOpenRequest_ = false; return std::move(pendingOpenRequest_); }
+    // Called only from Win32Window.cpp's WM_COPYDATA handler, once OpenRequestHook has accepted.
+    void setPendingOpenRequest(std::string path) { pendingOpenRequest_ = std::move(path); hasPendingOpenRequest_ = true; }
+
+    // Win32 single-instance forwarding: a named mutex as the "is a primary alive" existence check,
+    // paired with a same-lifetime named file mapping that carries the primary's HWND. Both are
+    // kernel objects Windows releases automatically when the owning process exits for ANY reason,
+    // crash included -- so "is a primary alive" and "where do I send it" self-heal with zero polling
+    // or staleness code. Static because both operate on OS-global named objects rather than on any
+    // one Window instance -- forwardToSingleInstancePrimary in particular is called before this
+    // process has created a Window of its own. See Win32Window.cpp for why this pair and not a named
+    // pipe or the (opt-in, MCP-module-gated) MCP bridge.
+    //
+    // registerAsSingleInstancePrimary publishes `hwnd` as the target other launches should forward
+    // to. It is a silent no-op if a primary already exists: exactly one process ever holds the
+    // mutex's true (first) ownership, and this does not contest that.
+    static void registerAsSingleInstancePrimary(void* hwnd);
+    // Attempts to hand `path` to a running primary. True means a primary ACCEPTED it and the caller
+    // should exit without creating its own window. False covers every other outcome -- no primary,
+    // a primary that DECLINED (a different project is open), or a timed-out send -- and all of them
+    // mean the same thing: proceed and open your own instance, exactly as if this call had not been
+    // made at all.
+    static bool forwardToSingleInstancePrimary(const std::string& path);
+
     // Render-tick callback, invoked while the OS is running a modal move/size loop.
     using RenderTickFn = void (*)(void* user);
     void setRenderTick(RenderTickFn fn, void* user) { renderTick_ = fn; renderTickUser_ = user; }
@@ -84,6 +137,10 @@ private:
     EventCallback callback_ = nullptr;
     void* callbackUser_ = nullptr;
     MessageHook messageHook_ = nullptr;
+    OpenRequestHook openRequestHook_ = nullptr;
+    void* openRequestHookUser_ = nullptr;
+    bool hasPendingOpenRequest_ = false;
+    std::string pendingOpenRequest_;
     RenderTickFn renderTick_ = nullptr;
     void* renderTickUser_ = nullptr;
     bool modalSize_ = false;
