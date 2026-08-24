@@ -14,7 +14,7 @@
 #include <cmath>
 #include <cstddef>
 
-namespace aver::water {
+namespace aver::fluids {
 
 // One Gerstner wave's authored parameters.
 //
@@ -188,4 +188,4 @@ inline f32 snapWorldToGridCm(f32 worldCm, f32 cellSizeCm) {
     return std::floor(worldCm / cell) * cell;
 }
 
-} // namespace aver::water
+} // namespace aver::fluids

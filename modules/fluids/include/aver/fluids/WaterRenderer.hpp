@@ -6,13 +6,13 @@
 // discipline VoxiRenderer and ParticleRenderer both document: this file may never include a backend
 // header.
 #pragma once
-#include "aver/water/GerstnerWave.hpp"
+#include "aver/fluids/GerstnerWave.hpp"
 #include "aver/rhi/RHI.hpp"
 #include "aver/rhi/RHIResources.hpp"
 
 #include <cstddef>
 
-namespace aver::water {
+namespace aver::fluids {
 
 // Draws one Gerstner-displaced ocean grid, recentred under the camera every frame without ever
 // re-uploading its geometry. See the class body's own comment for why that is safe and, unlike
@@ -145,4 +145,4 @@ private:
     rhi::Format bakedDepthFmt_ = rhi::Format::Unknown;
 };
 
-} // namespace aver::water
+} // namespace aver::fluids

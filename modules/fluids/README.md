@@ -1,15 +1,15 @@
-# Aver.Water  (`modules/water`)
+# Aver.Fluids  (`modules/water`)
 
 - **Language:** C++
 - **Depends on:** Core, RHI
-- **Option:** `AVER_MODULE_WATER` (ON)
+- **Option:** `AVER_MODULE_FLUIDS` (ON)
 
 Water in three parts, of which this module is two.
 
 | Part | Where | Why there |
 | --- | --- | --- |
-| **Surface** — Gerstner waves, drawn in the transparent pass | `include/aver/water/GerstnerWave.hpp`, `WaterRenderer.hpp` | An `rhi::IRenderFeature`, the same shape `ParticleRenderer` uses: depth-tested, depth-write off, blended over the opaque scene. |
-| **Underwater** — the fog override when the camera is below the surface | `include/aver/water/Underwater.hpp` | A pure function over `rhi::SkyAtmosphere`. It touches no device, so it is checkable with no GPU. |
+| **Surface** — Gerstner waves, drawn in the transparent pass | `include/aver/fluids/GerstnerWave.hpp`, `WaterRenderer.hpp` | An `rhi::IRenderFeature`, the same shape `ParticleRenderer` uses: depth-tested, depth-write off, blended over the opaque scene. |
+| **Underwater** — the fog override when the camera is below the surface | `include/aver/fluids/Underwater.hpp` | A pure function over `rhi::SkyAtmosphere`. It touches no device, so it is checkable with no GPU. |
 | **Buoyancy** — things float | **NOT HERE.** `modules/physics/src/Buoyancy.*` | It is Jolt's `ApplyBuoyancyImpulse`, and this module must never learn what Jolt is. `modules/physics` keeps `JPH::` private to its own target, which is what makes the physics backend swappable at all. The two halves meet in the composition root and nowhere else. |
 
 ## The wave math is separable, on purpose

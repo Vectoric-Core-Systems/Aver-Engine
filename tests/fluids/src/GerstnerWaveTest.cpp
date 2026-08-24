@@ -1,8 +1,8 @@
 // GerstnerWave.hpp's wave math, against numbers this test computes for itself. CPU-only: no RHI, no
 // device, no window -- runnable in the same headless-suite style as ParticleSystemTest and
 // SoftBodyTest (see tests/water/CMakeLists.txt's own comment on why this target links Aver.Core
-// only, never Aver.Water).
-#include "aver/water/GerstnerWave.hpp"
+// only, never Aver.Fluids).
+#include "aver/fluids/GerstnerWave.hpp"
 
 #include "aver/core/Log.hpp"
 
@@ -10,7 +10,7 @@
 #include <string>
 
 using namespace aver;
-using namespace aver::water;
+using namespace aver::fluids;
 
 static int g_checks = 0;
 static int g_failures = 0;

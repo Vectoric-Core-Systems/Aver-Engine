@@ -7,7 +7,7 @@
 // a helper used before it is written compiles in C++ and fails in DXC, AT RUNTIME, on a build that
 // reported success (WaterShaders.hpp's own comment makes the identical point, quoting PtShaders.hpp
 // before it).
-namespace aver::render {
+namespace aver::fluids {
 
 inline constexpr const char* kFluidHLSL = R"(
 // ---- the per-feature frame block --------------------------------------------------------------
@@ -54,7 +54,7 @@ VSFluidOut VSFluid(VSFluidIn i) {
     // analytic surface that has no other source of either (averGerstnerDisplace). This mesh's
     // position and normal are ALREADY the answer: FluidScene stages ABSOLUTE WORLD-SPACE positions
     // and per-vertex normals RECOMPUTED THIS FRAME from the deformed Jolt soft-body shape
-    // (water::FluidVolume::updateFromSimulation, called once per frame by FluidScene::update, before
+    // (fluids::FluidVolume::updateFromSimulation, called once per frame by FluidScene::update, before
     // this draw ever runs -- see FluidScene.hpp's own header comment for why this buffer is drawn
     // with an IDENTITY world matrix rather than one built here). Deriving a second normal from the
     // geometry, the way an analytic wave surface must, would throw away the one signal the physics
@@ -186,4 +186,4 @@ float4 PSFluid(VSFluidOut i) : SV_Target {
 }
 )";
 
-} // namespace aver::render
+} // namespace aver::fluids

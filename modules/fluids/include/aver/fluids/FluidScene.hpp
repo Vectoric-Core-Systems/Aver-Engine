@@ -1,5 +1,5 @@
 #pragma once
-// The join between a water::FluidVolume's simulation and the rasteriser -- the one place in this
+// The join between a fluids::FluidVolume's simulation and the rasteriser -- the one place in this
 // engine that is allowed to know both what water is and what the physics solver is. See this
 // module's CMakeLists.txt for why that has to be true of exactly one place and why this is it.
 //
@@ -12,7 +12,7 @@
 // name:
 //
 //   THE GEOMETRY IS PROCEDURAL, NOT AN ASSET. A soft body softens something a level author modelled
-//   and exported; a fluid volume's shell is generated arithmetic (water::generateFluidSeedShell),
+//   and exported; a fluid volume's shell is generated arithmetic (fluids::generateFluidSeedShell),
 //   built directly from a FluidVolumeDesc. There is nothing to decode, nothing to cache by id, and
 //   therefore no dependency on Aver.Formats at all.
 //
@@ -42,13 +42,13 @@
 // joining" needs an actual particle system, not this.
 #include "aver/rhi/RHI.hpp"
 #include "aver/rhi/RHIResources.hpp"
-#include "aver/water/FluidVolume.hpp"
+#include "aver/fluids/FluidVolume.hpp"
 #include "aver/core/Types.hpp"
 
 #include <unordered_map>
 #include <vector>
 
-namespace aver::render {
+namespace aver::fluids {
 
 // Frames the GPU may have in flight. Same constant, same reasoning, as SoftBodyScene's own
 // kSoftBodyFramesInFlight -- writeBuffer is immediate and unsynchronised, and this engine keeps this
@@ -85,7 +85,7 @@ public:
     // buffer's contents move from local to world space the moment simulation starts, and see
     // createSkinTargetMesh's own comment for why showing a not-yet-posed rest shape for one frame is
     // this engine's existing, accepted convention rather than a new gap opened here.
-    FluidHandle spawn(const water::FluidVolumeDesc& desc, rhi::IDevice& dev);
+    FluidHandle spawn(const fluids::FluidVolumeDesc& desc, rhi::IDevice& dev);
 
     // Tears down one volume's physics and GPU state immediately. A no-op for an unknown or
     // already-despawned handle.
@@ -104,7 +104,7 @@ public:
     //
     // elapsedSeconds IS THE COMPOSITION ROOT'S Timestep::total (seconds since engine start), handed
     // in rather than measured internally with its own clock, for a reason found by inspection, not
-    // assumption: water::WaterRenderer already has an identical-shaped elapsedSeconds_ clock, fed by
+    // assumption: fluids::WaterRenderer already has an identical-shaped elapsedSeconds_ clock, fed by
     // its own WaterRenderer::tick(dtSeconds) -- and grep over sandbox/src/SandboxApp.cpp shows that
     // method is NEVER CALLED from anywhere, so the ocean's own wave clock has stood frozen at 0 since
     // that feature shipped (see the memory note this session left on it). This class does not repeat
@@ -121,7 +121,7 @@ public:
     // SoftBodyScene::drawHandle documents.
     //
     // DRAW WITH AN IDENTITY WORLD MATRIX. Once update() has run for a handle at least once, the
-    // vertex buffer this returns holds water::FluidVolume::positionsCm() verbatim -- WORLD-space,
+    // vertex buffer this returns holds fluids::FluidVolume::positionsCm() verbatim -- WORLD-space,
     // because that is what the physics ABI returns and what FluidVolume's own contract promises a
     // renderer ("what a renderer draws", in FluidVolume.hpp's own words). A soft body's buffer needs
     // an entity's world matrix on top because softBodyPackVertices deliberately converts back to
@@ -137,7 +137,7 @@ public:
     // second handle table of its own.
     int32_t physicsBody(FluidHandle h) const;
 
-    const char* name() const override { return "Aver.Render.Fluid.Scene"; }
+    const char* name() const override { return "Aver.Fluids.Scene"; }
     // The copy happens in prePass, which is the only hook that runs before the scene pass reads the
     // buffer it writes -- update() has no IRenderContext to issue a barrier or a copy with.
     void prePass(rhi::IRenderContext& ctx) override;
@@ -175,9 +175,9 @@ private:
     // fluid volume's shape is authored once, per instance, by its own desc, and shared by nothing
     // else.
     struct Resident {
-        explicit Resident(const water::FluidVolumeDesc& desc) : vol(desc) {}
+        explicit Resident(const fluids::FluidVolumeDesc& desc) : vol(desc) {}
 
-        water::FluidVolume vol;
+        fluids::FluidVolume vol;
 
         // Built by THIS module's own createMesh call, unlike SoftBodyScene's `source`, which belongs
         // to the host's asset cache -- see retire()'s own comment for what that ownership costs.
@@ -233,4 +233,4 @@ private:
     f32 elapsedSeconds_ = 0.0f;
 };
 
-} // namespace aver::render
+} // namespace aver::fluids

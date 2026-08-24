@@ -125,15 +125,15 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
 #include "aver/particles/ParticleEffectLibrary.hpp"
 #include "aver/particles/ParticleRenderer.hpp"
-#if AVER_MODULE_WATER
+#if AVER_MODULE_FLUIDS
 #if AVER_MODULE_RENDER_SOFTBODY
 #  include "aver/render/SoftBodyScene.hpp"
 #endif
-#if AVER_MODULE_RENDER_FLUID
-#  include "aver/render/FluidScene.hpp"
+#if AVER_FLUIDS_SIMULATED
+#  include "aver/fluids/FluidScene.hpp"
 #endif
-#  include "aver/water/WaterRenderer.hpp"
-#  include "aver/water/Underwater.hpp"
+#  include "aver/fluids/WaterRenderer.hpp"
+#  include "aver/fluids/Underwater.hpp"
 #endif
 #include "aver/particles/ParticleSystem.hpp"
 #include "aver/formats/OcParticle.hpp"
@@ -1546,13 +1546,13 @@ public:
         }
 #endif
 
-#if AVER_MODULE_RENDER_FLUID
+#if AVER_FLUIDS_SIMULATED
         // Registered unconditionally, spawned only if a level asks for it. A render feature with
         // nothing resident does nothing per frame, and registering here rather than at the first
         // spawn keeps feature order identical between a level with fluid and one without.
         //
         // ON RENDER_FLUID ALONE, outside the scene block above, because that is what this module
-        // actually depends on: its CMakeLists names Aver.Water and Aver.Physics, and neither
+        // actually depends on: its CMakeLists names Aver.Fluids and Aver.Physics, and neither
         // Aver.Scene nor the soft-body renderer. This used to sit INSIDE softBodyScene_->init()'s
         // success branch, where a soft-body failure took the fluid down with it for no reason -- and
         // where a build with SCENE off (which forces RENDER_SOFTBODY off, see the root CMakeLists)
@@ -2015,7 +2015,7 @@ public:
             AVER_ERROR("[Particles] renderer unavailable on this device");
         }
 
-#if AVER_MODULE_WATER
+#if AVER_MODULE_FLUIDS
         // Water, registered on the same terms as everything else here: if init fails the editor is
         // unaffected and simply has no water, because HLSL is compiled at RUNTIME and can fail on a
         // machine whose build was perfectly green.
@@ -2026,7 +2026,7 @@ public:
                 // surface reads as water the moment it appears instead of needing to be authored
                 // before it looks like anything. Wavelengths are deliberately not multiples of one
                 // another -- equal or harmonic ones re-phase into a visibly repeating tile.
-                water::GerstnerWave waves[4];
+                fluids::GerstnerWave waves[4];
                 const f32 dirs[4][2] = {{1.0f, 0.15f}, {0.6f, -0.8f}, {-0.3f, 0.95f}, {-0.85f, -0.5f}};
                 const f32 lengths[4] = {1450.0f, 890.0f, 520.0f, 310.0f};
                 const f32 amps[4]    = {34.0f, 19.0f, 9.0f, 4.5f};
@@ -2044,10 +2044,18 @@ public:
                 // THE SIMULATED SURFACE IS THE SAME NUMBER AS THE RENDERED ONE. Two independent
                 // heights would drift and the drift would look like broken buoyancy rather than
                 // like a mismatch, so the plane is set from waterRenderer_'s own level.
+                // GUARDED ON PHYSICS, not just on fluids. Rendering a surface and giving things
+                // something to float on are different capabilities: this block is reached whenever
+                // the fluids module is present, but aver_phys_set_water_plane only exists when the
+                // solver does. A tree with fluids on and physics off drew water and failed to link
+                // here -- true before the module merge too, under the old AVER_MODULE_WATER name,
+                // and found by actually configuring that combination rather than by reading.
+#if AVER_MODULE_PHYSICS
                 const f32 normal[3]  = {0.0f, 0.0f, 1.0f};
                 const f32 current[3] = {0.0f, 0.0f, 0.0f};
                 aver_phys_set_water_plane(waterRenderer_.waterLevelCm(), normal,
                                           1.0f, 0.5f, 0.05f, current);
+#endif
                 AVER_INFO("[Water] surface and buoyancy plane at z = {} cm", waterHeightCm_);
             } else {
                 AVER_ERROR("[Water] renderer unavailable on this device");
@@ -2539,7 +2547,7 @@ public:
             aver_fw_tick(AVER_FW_TICK_POST_PHYSICS, t.dt);
         }
 #endif
-#if AVER_MODULE_RENDER_FLUID
+#if AVER_FLUIDS_SIMULATED
         // THE ONE PLACE A FLUID VOLUME IS EVER SPAWNED. applyLevelWater only latches what the level
         // asked for; this drains it. See that function for why the request cannot be honoured where
         // it is made -- in short, it is reached from three call sites across two different frame
@@ -2581,9 +2589,9 @@ public:
         // that state before it is gone for the frame.
         //
         // AVER_MODULE_FRAMEWORK alone, not AVER_MODULE_PHYSICS on top: CMakeLists.txt already forces
-        // AVER_MODULE_RENDER_FLUID off whenever AVER_MODULE_PHYSICS is off (see the "fluid drawing
+        // AVER_FLUIDS_SIMULATED off whenever AVER_MODULE_PHYSICS is off (see the "fluid drawing
         // needs water and physics" rule), so physics being present is already guaranteed by the outer
-        // #if AVER_MODULE_RENDER_FLUID this whole block sits inside. Framework is not implied the same
+        // #if AVER_FLUIDS_SIMULATED this whole block sits inside. Framework is not implied the same
         // way -- a fluid volume needs no scene entity and no framework at all, per FluidScene's own
         // CMakeLists.txt comment -- so this is the one piece of the gate that still has to be spelled
         // out, and it also drags AVER_MODULE_SCENE in for free (CMakeLists.txt forces FRAMEWORK off
@@ -2910,10 +2918,10 @@ public:
         // the override back into it would make the effect accumulate every frame the camera spent
         // below the surface, and a level saved from that state would carry underwater fog as its
         // authored weather.
-#if AVER_MODULE_WATER
+#if AVER_MODULE_FLUIDS
         if (waterAttached_) {
             const rhi::SkyAtmosphere wet =
-                water::applyUnderwaterFog(sky_, camPos_.z, waterRenderer_.waterLevelCm(), waterFog_);
+                fluids::applyUnderwaterFog(sky_, camPos_.z, waterRenderer_.waterLevelCm(), waterFog_);
             e.device()->setSkyAtmosphere(wet);
         } else
 #endif
@@ -3705,7 +3713,7 @@ public:
         // and no transparency -- see the git history of this file for that block. It no longer is:
         // FluidScene now overrides rhi::IRenderFeature::transparentPass and draws its own current
         // drawMesh for every live volume itself (modules/render.fluid/src/FluidScene.cpp), the exact
-        // seam particles::ParticleRenderer and water::WaterRenderer already draw themselves through,
+        // seam particles::ParticleRenderer and fluids::WaterRenderer already draw themselves through,
         // with real Fresnel-weighted water shading instead of a constant colour (FluidShaders.hpp).
         // Nothing needs to happen at this call site any more, which is also LESS COUPLING in this
         // composition root than before: SandboxApp no longer has to know this feature draws a mesh at
@@ -5062,7 +5070,7 @@ public:
         editor::shutdownActorEditors();
     editor::shutdownAnimEditors();
         setMouseCaptured(false);
-#if AVER_MODULE_RENDER_FLUID
+#if AVER_FLUIDS_SIMULATED
         // BEFORE aver_phys_shutdown below, and explicitly rather than leaving it to ~FluidScene: the
         // member's destructor runs after onShutdown returns, by which point the solver is gone and
         // retiring a live volume would call aver_phys_remove_body into a shut-down physics system
@@ -6338,7 +6346,7 @@ private:
     }
 #endif
 
-#if AVER_MODULE_WATER
+#if AVER_MODULE_FLUIDS
     // Turns a level's WATER/WAVE records into an actual surface, and into the buoyancy plane under it.
     //
     // A LEVEL BEATS THE COMMAND LINE, and a level that authored nothing leaves --water exactly as it
@@ -6365,7 +6373,7 @@ private:
             AVER_WARN("[Water] the level declares {} WATER records; only '{}' is rendered",
                       levelHeader_.waters.size(), wp.name.empty() ? "unnamed" : wp.name);
 
-#if AVER_MODULE_RENDER_FLUID
+#if AVER_FLUIDS_SIMULATED
         // A SIMULATED RECORD IS NOT A GERSTNER SURFACE, and taking both paths would draw two waters
         // in the same hole fighting over the same depth. So this returns rather than falling
         // through: the soft body IS the water for this record.
@@ -6382,7 +6390,7 @@ private:
                 // NO DESPAWN HERE any more. loadLevel always runs unloadLevel first, and that is
                 // where teardown lives now -- it is the one site every path that ends a level goes
                 // through, including File > New Level, which never calls this function at all.
-                water::FluidVolumeDesc fd;
+                fluids::FluidVolumeDesc fd;
                 // The shell fills the authored footprint, and hangs BELOW the surface line rather
                 // than straddling it: `level` is where the water's top sits, so the body's centre is
                 // half its depth under that. Depth is the shallower of a sensible pool depth and the
@@ -6448,12 +6456,12 @@ private:
 #endif
         // The waves belonging to this surface: the ones that name it, plus the ones that name nothing
         // at all -- which the format defines as meaning the FIRST declared water, and this is it.
-        water::GerstnerWave waves[water::kMaxGerstnerWaves];
+        fluids::GerstnerWave waves[fluids::kMaxGerstnerWaves];
         size_t n = 0;
         size_t skipped = 0;
         for (const fmt::OcGerstnerWave& gw : levelHeader_.waves) {
             if (!gw.water.empty() && gw.water != wp.name) continue;
-            if (n >= water::kMaxGerstnerWaves) { ++skipped; continue; }
+            if (n >= fluids::kMaxGerstnerWaves) { ++skipped; continue; }
             // The one narrowing from the format's f64 to the runtime's f32, at the boundary, exactly
             // where OcScatterSpecies' own comment says such a narrowing belongs.
             waves[n].dirX         = static_cast<f32>(gw.dirX);
@@ -6465,7 +6473,7 @@ private:
         }
         if (skipped)
             AVER_WARN("[Water] '{}' declares {} waves; the renderer takes {} and the rest are dropped",
-                      wp.name.empty() ? "unnamed" : wp.name, n + skipped, water::kMaxGerstnerWaves);
+                      wp.name.empty() ? "unnamed" : wp.name, n + skipped, fluids::kMaxGerstnerWaves);
 
         if (!waterAttached_) {
             if (!waterRenderer_.init(*eng.device())) {
@@ -6495,9 +6503,13 @@ private:
 
         // The same single number for both, for the reason the startup path states: two independent
         // heights would drift, and the drift would read as broken buoyancy rather than as a mismatch.
+        // Physics-guarded for the reason the startup path above states: a level may author water
+        // in a build with no solver to float anything in it.
+#if AVER_MODULE_PHYSICS
         const f32 normal[3]  = {0.0f, 0.0f, 1.0f};
         const f32 current[3] = {0.0f, 0.0f, 0.0f};
         aver_phys_set_water_plane(waterRenderer_.waterLevelCm(), normal, 1.0f, 0.5f, 0.05f, current);
+#endif
 
         AVER_INFO("[Water] level surface '{}' at z = {} cm with {} wave(s){}",
                   wp.name.empty() ? "unnamed" : wp.name, wp.levelCm, n,
@@ -12372,9 +12384,9 @@ private:
     // particle renderer with no emitters draws nothing, whereas a water plane is an infinite sheet
     // that would appear in every level ever opened, including ones whose author has never heard of
     // it. --water <heightCm> is the opt-in.
-#if AVER_MODULE_WATER
-    water::WaterRenderer waterRenderer_;
-    water::UnderwaterFogTuning waterFog_{};
+#if AVER_MODULE_FLUIDS
+    fluids::WaterRenderer waterRenderer_;
+    fluids::UnderwaterFogTuning waterFog_{};
     bool  waterAttached_ = false;
 #endif
     // These two stay OUTSIDE the guard: the flag is parsed either way, so a build without the
@@ -12556,16 +12568,16 @@ private:
     // save from what the file actually said, and overwriting only what the editor genuinely owns,
     // fixes all of those at once -- and keeps fixing them for any field added to the format later,
     // which enumerating them one by one would not.
-#if AVER_MODULE_RENDER_FLUID
+#if AVER_FLUIDS_SIMULATED
     // The simulated half of water, kept beside the analytic renderer rather than inside it: a WATER
     // record is either a Gerstner surface or a soft body, never both, and which one a level gets is
     // decided in applyLevelWater.
-    render::FluidScene fluidScene_;
-    render::FluidHandle fluidHandle_ = 0;
+    fluids::FluidScene fluidScene_;
+    fluids::FluidHandle fluidHandle_ = 0;
     // What a level ASKED for, and whether that ask is still outstanding. applyLevelWater fills these
     // three and returns; the drain in onUpdate is what actually spawns. The name rides along only so
     // the log line naming the water can be written where the spawn succeeds or fails.
-    water::FluidVolumeDesc fluidWantDesc_{};
+    fluids::FluidVolumeDesc fluidWantDesc_{};
     std::string fluidWantName_;
     bool fluidWantPending_ = false;
     // The player's world position last frame, and whether that reading is trustworthy -- see the
@@ -13254,7 +13266,7 @@ private:
             AVER_INFO("[Level] carrying {} PCGVOLUME record(s) through the editor unchanged",
                       levelPcgVolumes_.size());
 
-#if AVER_MODULE_WATER
+#if AVER_MODULE_FLUIDS
         // AND THE LEVEL'S OWN WATER, if it authored any. Placed here rather than beside the PCGVOLUME
         // carry above because this is the first point at which levelHeader_ holds the WATER/WAVE
         // records the file declared.
@@ -13608,7 +13620,7 @@ private:
         for (const int32_t b : levelBodies_) aver_phys_remove_body(b);
         levelBodies_.clear();
 #endif
-#if AVER_MODULE_RENDER_FLUID
+#if AVER_FLUIDS_SIMULATED
         // THE ONLY teardown site for a simulated volume, and it belongs here rather than in
         // applyLevelWater: this is what every path that ends a level runs, including File > New
         // Level, which never calls applyLevelWater at all. Without it a simulated pool outlived its

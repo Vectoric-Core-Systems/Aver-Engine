@@ -154,9 +154,8 @@ option(AVER_MODULE_OCCLUSION "Occlusion module: hierarchical-Z pyramid + two-pas
 # (scene::CParticleEmitter drives it), unlike Occlusion/AverSR, which is why the force-off guard
 # beside AVER_MODULE_FRAMEWORK's exists just below -- see it for what happens with the scene off.
 option(AVER_MODULE_PARTICLES "Particle system: CPU-simulated billboard particles, depth-tested against the scene" ON)
-option(AVER_MODULE_WATER "Water: a Gerstner-wave surface drawn in the transparent pass, and the underwater fog override" ON)
+option(AVER_MODULE_FLUIDS "Fluids: the analytic Gerstner surface, the underwater fog override, and soft-body fluid volumes" ON)
 option(AVER_MODULE_RENDER_SOFTBODY "Draw meshes whose vertices come from a simulated soft body" ON)
-option(AVER_MODULE_RENDER_FLUID "Simulate a water volume as a soft body and draw the deforming surface" ON)
 
 if(MSVC)
   add_compile_options(/W4 /permissive- /MP /utf-8 /Zc:__cplusplus /EHsc)
@@ -342,24 +341,19 @@ if(AVER_MODULE_RENDER_SOFTBODY)
   add_subdirectory(modules/render.softbody)
 endif()
 
-# Fluid drawing. Needs the WATER module (for the volume it simulates) and PHYSICS (for the solver
-# that does the simulating) -- it is the one place that knows both, which is exactly why it exists
-# as its own module rather than as glue in a composition root. Force-disabled without either, for
-# the same reason soft-body drawing is just above: a missing dependency should turn a feature off,
-# not fail the configure.
-if(AVER_MODULE_RENDER_FLUID AND (NOT AVER_MODULE_WATER OR NOT AVER_MODULE_PHYSICS))
-  message(STATUS "Aver: fluid drawing needs water and physics - forcing AVER_MODULE_RENDER_FLUID=OFF")
-  set(AVER_MODULE_RENDER_FLUID OFF)
-endif()
-if(AVER_MODULE_RENDER_FLUID)
-  add_subdirectory(modules/render.fluid)
-endif()
-if(AVER_MODULE_WATER)
+# The SIMULATED half of Aver.Fluids is not a switch of its own any more. It used to be
+# AVER_MODULE_RENDER_FLUID, a separate module and a separate option that had to be force-disabled
+# here whenever water or physics was missing; now it is one module that decides internally, adding
+# FluidScene.cpp and defining AVER_FLUIDS_SIMULATED only when AVER_MODULE_PHYSICS is on (see
+# modules/fluids/CMakeLists.txt for why the physics dependency is scoped rather than inherited).
+# Deriving it there rather than declaring an option here is what makes the two impossible to
+# disagree: a user cannot ask for simulated fluids in a tree with no solver to simulate them.
+if(AVER_MODULE_FLUIDS)
   # NOT force-disabled by AVER_MODULE_SCENE the way particles is, and deliberately: a particle
   # emitter is a scene component so particles cannot exist without a world, whereas water in this
   # slice is one global plane the host owns. It builds in a scene-less tree, which is also what
   # keeps its wave math testable with no world at all.
-  add_subdirectory(modules/water)         # optional: the water surface feature + underwater fog
+  add_subdirectory(modules/fluids)        # optional: analytic surface, underwater fog, fluid volumes
 endif()
 if(AVER_MODULE_PARTICLES)
   add_subdirectory(modules/particles)     # optional: CPU particle simulation + the billboard renderer
@@ -530,8 +524,8 @@ if(AVER_BUILD_TESTS)
     # same reasoning tests/occlusion and tests/trifactor give for their own CPU-only suites.
     add_subdirectory(tests/particles)
   endif()
-  if(AVER_MODULE_WATER)
-    add_subdirectory(tests/water)
+  if(AVER_MODULE_FLUIDS)
+    add_subdirectory(tests/fluids)
   endif()
   if(AVER_MODULE_RENDER_SOFTBODY)
     add_subdirectory(tests/render.softbody)

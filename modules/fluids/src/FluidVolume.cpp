@@ -1,10 +1,10 @@
 // Builds the seed shell and holds the simulated shape a renderer reads back. See FluidVolume.hpp.
-#include "aver/water/FluidVolume.hpp"
+#include "aver/fluids/FluidVolume.hpp"
 
 #include <algorithm>
 #include <cmath>
 
-namespace aver::water {
+namespace aver::fluids {
 namespace {
 
 // Position along one axis at lattice index `idx` of `n` equal segments, spanning
@@ -290,4 +290,4 @@ void FluidVolume::recomputeNormals() {
     }
 }
 
-} // namespace aver::water
+} // namespace aver::fluids

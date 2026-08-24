@@ -2,7 +2,7 @@
 // the placement/normal bookkeeping FluidVolume::generateSeedShell layers on top of it. CPU-only, no
 // RHI device, no window, no physics solver -- this exercises exactly the "(a)" half of
 // FluidVolume.hpp's own two-halves comment, never updateFromSimulation's solver-fed half, because
-// there is no solver here to hand it simulated vertices from. Links Aver.Water because FluidVolume.cpp
+// there is no solver here to hand it simulated vertices from. Links Aver.Fluids because FluidVolume.cpp
 // is a real .cpp (unlike header-only GerstnerWave.hpp), and through it Aver.RHI -- the same link shape
 // UnderwaterFogTest.cpp uses for the same reason: a struct and some plain arithmetic, never a device.
 //
@@ -12,7 +12,7 @@
 // per-face winding table has been worked out algebraically but "not been checked by running anything",
 // and that a wrong entry in it would still pass a closedness check alone -- so closedness and winding
 // are checked here as two separate properties over the same edge set, not folded into one.
-#include "aver/water/FluidVolume.hpp"
+#include "aver/fluids/FluidVolume.hpp"
 
 #include "aver/core/Log.hpp"
 
@@ -24,7 +24,7 @@
 #include <vector>
 
 using namespace aver;
-using namespace aver::water;
+using namespace aver::fluids;
 
 static int g_checks = 0;
 static int g_failures = 0;
@@ -313,17 +313,17 @@ static void testSeedNormalsAreOutwardAndUnitLength() {
 static void testDerivedPressure() {
     AVER_INFO("-- the pressure a shell needs is derived from the shell --");
 
-    water::FluidVolumeDesc d;
+    fluids::FluidVolumeDesc d;
     d.halfExtentCm[0] = 300.0f; d.halfExtentCm[1] = 200.0f; d.halfExtentCm[2] = 60.0f;
     d.subdivisions[0] = 8; d.subdivisions[1] = 8; d.subdivisions[2] = 4;
 
-    check(water::FluidVolumeDesc{}.pressure == water::kFluidPressureAuto,
+    check(fluids::FluidVolumeDesc{}.pressure == fluids::kFluidPressureAuto,
           "a desc asks for a derived pressure unless its author says otherwise");
 
     const f32 g = 980.0f;
-    const f32 expect = water::kFluidPressureHeadroom * water::kFluidCmToJolt *
+    const f32 expect = fluids::kFluidPressureHeadroom * fluids::kFluidCmToJolt *
                        2.0f * g * 60.0f * 9.0f * 9.0f;
-    check(near(water::fluidPressureFor(d, g), expect, 1e-3f),
+    check(near(fluids::fluidPressureFor(d, g), expect, 1e-3f),
           "it is 2 g hz (sx+1)(sy+1), in Jolt's metres");
 
     // IN METRES. Independent of the closed form above: a 6 x 4 x 1.2 m box of particles weighing one
@@ -332,28 +332,28 @@ static void testDerivedPressure() {
     const f32 volumeM3 = 6.0f * 4.0f * 1.2f;
     const f32 topAreaM2 = 6.0f * 4.0f;
     const f32 topMass = 9.0f * 9.0f;
-    const f32 fromUnits = water::kFluidPressureHeadroom * (g / 100.0f) * volumeM3 * topMass / topAreaM2;
-    check(near(water::fluidPressureFor(d, g), fromUnits, 1e-2f),
+    const f32 fromUnits = fluids::kFluidPressureHeadroom * (g / 100.0f) * volumeM3 * topMass / topAreaM2;
+    check(near(fluids::fluidPressureFor(d, g), fromUnits, 1e-2f),
           "and it balances that shell's own weight when everything is read in metres");
 
     // DEPTH, NOT FOOTPRINT. Widening a pool adds enclosed volume and top area in the same proportion;
     // deepening it adds only volume. A constant could express neither.
-    water::FluidVolumeDesc wide = d;   wide.halfExtentCm[0] *= 3.0f;
-    water::FluidVolumeDesc deep = d;   deep.halfExtentCm[2] *= 3.0f;
-    check(near(water::fluidPressureFor(wide, g), water::fluidPressureFor(d, g), 1e-3f),
+    fluids::FluidVolumeDesc wide = d;   wide.halfExtentCm[0] *= 3.0f;
+    fluids::FluidVolumeDesc deep = d;   deep.halfExtentCm[2] *= 3.0f;
+    check(near(fluids::fluidPressureFor(wide, g), fluids::fluidPressureFor(d, g), 1e-3f),
           "three times as wide needs the same pressure");
-    check(near(water::fluidPressureFor(deep, g), 3.0f * water::fluidPressureFor(d, g), 1e-1f),
+    check(near(fluids::fluidPressureFor(deep, g), 3.0f * fluids::fluidPressureFor(d, g), 1e-1f),
           "three times as deep needs three times the pressure");
 
     // A finer top grid puts more particles -- and so more mass -- on the same footprint.
-    water::FluidVolumeDesc fine = d;   fine.subdivisions[0] = 17; fine.subdivisions[1] = 17;
-    check(water::fluidPressureFor(fine, g) > water::fluidPressureFor(d, g),
+    fluids::FluidVolumeDesc fine = d;   fine.subdivisions[0] = 17; fine.subdivisions[1] = 17;
+    check(fluids::fluidPressureFor(fine, g) > fluids::fluidPressureFor(d, g),
           "a finer top grid weighs more and needs more");
 
-    check(near(water::fluidPressureFor(d, 0.0f), 0.0f, 1e-6f),
+    check(near(fluids::fluidPressureFor(d, 0.0f), 0.0f, 1e-6f),
           "no gravity, no pressure -- there is nothing to hold up");
-    water::FluidVolumeDesc flat = d;   flat.halfExtentCm[2] = 0.0f;
-    check(near(water::fluidPressureFor(flat, g), 0.0f, 1e-6f), "and a shell with no depth needs none either");
+    fluids::FluidVolumeDesc flat = d;   flat.halfExtentCm[2] = 0.0f;
+    check(near(fluids::fluidPressureFor(flat, g), 0.0f, 1e-6f), "and a shell with no depth needs none either");
 }
 
 int main() {

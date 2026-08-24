@@ -1,13 +1,13 @@
 // See FluidScene.hpp for the whole design. What follows is spawn/despawn/update/prePass, the private
 // retire() they share, and the one small packing helper both spawn() and update() call.
-#include "aver/render/FluidScene.hpp"
+#include "aver/fluids/FluidScene.hpp"
 #include "FluidShaders.hpp"
 #include "aver/physics/physics_abi.h"
 #include "aver/core/Log.hpp"
 
 #include <vector>
 
-namespace aver::render {
+namespace aver::fluids {
 
 namespace {
 
@@ -137,7 +137,7 @@ void FluidScene::retire(Resident& r) {
     r.source = 0;
 }
 
-FluidHandle FluidScene::spawn(const water::FluidVolumeDesc& desc, rhi::IDevice& dev) {
+FluidHandle FluidScene::spawn(const fluids::FluidVolumeDesc& desc, rhi::IDevice& dev) {
     if (!ready_) return 0;
     if (live_.size() >= kMaxResident) {
         AVER_WARN("[Fluid] resident cap ({}) reached; refusing a new volume", kMaxResident);
@@ -198,7 +198,7 @@ FluidHandle FluidScene::spawn(const water::FluidVolumeDesc& desc, rhi::IDevice& 
         return 0;
     }
 
-    const water::FluidVolumeDesc& d = r.vol.desc();
+    const fluids::FluidVolumeDesc& d = r.vol.desc();
     // invMasses is NULL, deliberately: every particle keeps inverse mass 1, which means NOTHING IS
     // PINNED. A pinned particle is how a flag stays attached to its pole -- exactly the wrong
     // behaviour for a liquid, whose entire reason for existing here is that a hard enough slosh can
@@ -206,11 +206,11 @@ FluidHandle FluidScene::spawn(const water::FluidVolumeDesc& desc, rhi::IDevice& 
     // tether the whole body to its rest shape forever and defeat the one behaviour this module
     // exists to allow.
     // A desc that did not name a pressure gets one derived from its own size and subdivision. Done
-    // HERE rather than inside water::FluidVolume because this is the module that owns the moment the
+    // HERE rather than inside fluids::FluidVolume because this is the module that owns the moment the
     // body is created -- FluidVolume deliberately knows nothing about soft bodies -- and done at all
     // because a single constant cannot be right for two pools of different depths. See
-    // water::fluidPressureFor for the arithmetic.
-    const f32 pressure = d.pressure < 0.0f ? water::fluidPressureFor(d) : d.pressure;
+    // fluids::fluidPressureFor for the arithmetic.
+    const f32 pressure = d.pressure < 0.0f ? fluids::fluidPressureFor(d) : d.pressure;
     r.body = aver_phys_softbody_create(r.vol.seedPositionsCm().data(), r.vol.vertexCount(),
                                        r.vol.indices().data(),
                                        static_cast<int32_t>(r.vol.indices().size()),
@@ -468,4 +468,4 @@ void FluidScene::transparentPass(rhi::IRenderContext& ctx) {
     ctx.popMarker();
 }
 
-} // namespace aver::render
+} // namespace aver::fluids

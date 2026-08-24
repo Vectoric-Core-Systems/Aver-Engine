@@ -33,7 +33,7 @@
 
 #include <vector>
 
-namespace aver::water {
+namespace aver::fluids {
 
 // Inverse stiffness of the seed shell's own edge constraints, NOT zero -- unlike Jolt's own default
 // and aver::scene::CSoftBody::compliance's "sane default" of 0 (Components.hpp: inextensible), which
@@ -221,4 +221,4 @@ private:
     std::vector<f32> normals_;
 };
 
-} // namespace aver::water
+} // namespace aver::fluids

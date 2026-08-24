@@ -7,7 +7,7 @@
 #
 # DEPENDS ON Aver.Physics, which is the one thing worth noticing on this line: it means the soft
 # body's SIMULATION and its DRAWING are joined here rather than in a composition root. That is the
-# opposite of the split Aver.Water makes, and the reason is that there is nothing to decouple -- the
+# opposite of the split Aver.Fluids makes, and the reason is that there is nothing to decouple -- the
 # vertices this module uploads have no source other than the physics module, so pretending otherwise
 # would buy an indirection with no second implementer behind it.
 aver_add_module(Aver.Render.SoftBody

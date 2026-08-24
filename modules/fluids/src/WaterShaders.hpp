@@ -7,7 +7,7 @@
 // load-bearing: HLSL has no forward declarations, so a helper used before it is written compiles in
 // C++ and fails in DXC, AT RUNTIME, on a build that reported success (PtShaders.hpp's own comment
 // makes the identical point).
-namespace aver::water {
+namespace aver::fluids {
 
 inline constexpr const char* kWaterHLSL = R"(
 // ---- the per-feature frame block --------------------------------------------------------------
@@ -15,7 +15,7 @@ inline constexpr const char* kWaterHLSL = R"(
 // reserved-register table), a root CBV like PathTracer's PtFrame (PtShaders.hpp) and every other
 // feature-frame block in this engine.
 //
-// MIRRORS aver::water::WaterRenderer.cpp's WaterFrameCB struct FIELD FOR FIELD -- that struct is
+// MIRRORS aver::fluids::WaterRenderer.cpp's WaterFrameCB struct FIELD FOR FIELD -- that struct is
 // the SOURCE OF TRUTH for this layout (the same discipline PerFrameCB/PostCB use, just in reverse:
 // there the C++ struct comment points at the HLSL cbuffer it mirrors; here the HLSL cbuffer points
 // back at the C++ struct, because WaterRenderer.cpp is what actually fills these bytes every frame).
@@ -61,7 +61,7 @@ struct VSWaterOut {
     float3 worldNrm : TEXCOORD1;
 };
 
-// PORTED BY HAND from modules/water/include/aver/water/GerstnerWave.hpp's gerstnerDisplaceCm --
+// PORTED BY HAND from modules/water/include/aver/fluids/GerstnerWave.hpp's gerstnerDisplaceCm --
 // there is NO shared-source mechanism between C++ and HLSL anywhere in this engine (every shader in
 // this codebase is a raw string literal compiled at runtime; see shaders/README.md's own admission
 // that the aver-shaderc tool it describes does not exist, and RHIShaders.cpp's kColorHlsl for the
@@ -191,4 +191,4 @@ float4 PSWater(VSWaterOut i) : SV_Target {
 }
 )";
 
-} // namespace aver::water
+} // namespace aver::fluids

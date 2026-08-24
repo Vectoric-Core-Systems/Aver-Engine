@@ -191,11 +191,11 @@ struct OcLandscapePlacement {
 };
 
 // One authored Gerstner wave, contributing to a WATER record's swell. Mirrors
-// aver::water::GerstnerWave (modules/water/include/aver/water/GerstnerWave.hpp) field for field --
+// aver::fluids::GerstnerWave (modules/water/include/aver/fluids/GerstnerWave.hpp) field for field --
 // direction, wavelength, amplitude, steepness -- but keeps f64 here rather than that struct's f32,
 // the same "narrowing happens once, at the format -> runtime conversion, not here" rule
 // OcScatterSpecies states above. Aver.Formats cannot include GerstnerWave.hpp regardless: it depends
-// on Core/Platform/Assets only (modules/formats/CMakeLists.txt's DEPS), and Aver.Water is not among
+// on Core/Platform/Assets only (modules/formats/CMakeLists.txt's DEPS), and Aver.Fluids is not among
 // them, so this struct is a deliberate duplicate rather than a missed reuse.
 //
 // A SEPARATE RECORD, cross-referenced to its WATER by NAME, rather than embedded inline on the

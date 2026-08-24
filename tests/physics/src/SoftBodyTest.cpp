@@ -409,7 +409,7 @@ static void testPressureHoldsAShellUp() {
     const Shell s = makeBoxShell(hx, hy, hz, nx, ny, nz);
     check(s.count() > 0 && !s.indices.empty(), "a closed box shell was built");
 
-    // 0.6 * 2 g hz (nx+1)(ny+1) in Jolt's metres -- water::fluidPressureFor's own formula, restated
+    // 0.6 * 2 g hz (nx+1)(ny+1) in Jolt's metres -- fluids::fluidPressureFor's own formula, restated
     // here because this test links the ABI and nothing else (see this file's opening comment). Kept
     // in step with that function by the two bounds below, which fail if either drifts.
     const float pressure = 0.6f * 1.0e-4f * 2.0f * 980.0f * hz * (nx + 1) * (ny + 1);

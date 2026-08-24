@@ -2,7 +2,7 @@
 // device, no window, no GPU. It constructs SkyAtmosphere by value (a plain struct with in-class
 // defaults) and calls the function directly, exactly as Underwater.hpp's own header comment
 // describes the module boundary.
-#include "aver/water/Underwater.hpp"
+#include "aver/fluids/Underwater.hpp"
 
 #include "aver/core/Log.hpp"
 #include "aver/rhi/RHI.hpp"
@@ -54,12 +54,12 @@ static rhi::SkyAtmosphere makeAuthored() {
 // field was set, so padding matches on both sides per the VoxiRenderer precedent cited above.
 static void testAboveWaterIsIdentity() {
     const rhi::SkyAtmosphere authored = makeAuthored();
-    const water::UnderwaterFogTuning tuning{};
+    const fluids::UnderwaterFogTuning tuning{};
     const f32 waterLevelCm = 0.0f;
     const f32 cameraZCm = waterLevelCm + tuning.fadeBandCm + 10000.0f;   // well clear of the band
 
     rhi::SkyAtmosphere result{};
-    result = water::applyUnderwaterFog(authored, cameraZCm, waterLevelCm, tuning);
+    result = fluids::applyUnderwaterFog(authored, cameraZCm, waterLevelCm, tuning);
 
     check(std::memcmp(&result, &authored, sizeof(rhi::SkyAtmosphere)) == 0,
           "well above the fade band returns the authored SkyAtmosphere untouched, byte for byte");
@@ -70,11 +70,11 @@ static void testAboveWaterIsIdentity() {
 // no height field on purpose -- see the anchoring rationale in Underwater.hpp's own comment.
 static void testWellBelowIsFullOverride() {
     const rhi::SkyAtmosphere authored = makeAuthored();
-    const water::UnderwaterFogTuning tuning{};
+    const fluids::UnderwaterFogTuning tuning{};
     const f32 waterLevelCm = 0.0f;
     const f32 cameraZCm = waterLevelCm - tuning.fadeBandCm - 10000.0f;   // well clear of the band
 
-    const rhi::SkyAtmosphere result = water::applyUnderwaterFog(authored, cameraZCm, waterLevelCm, tuning);
+    const rhi::SkyAtmosphere result = fluids::applyUnderwaterFog(authored, cameraZCm, waterLevelCm, tuning);
 
     check(near(result.fogColor[0], tuning.color[0]) && near(result.fogColor[1], tuning.color[1]) &&
               near(result.fogColor[2], tuning.color[2]),
@@ -94,11 +94,11 @@ static void testWellBelowIsFullOverride() {
 // blend fraction rather than only the degenerate waterLevelCm==0 case.
 static void testAtSurfaceIsExactlyHalfway() {
     const rhi::SkyAtmosphere authored = makeAuthored();
-    const water::UnderwaterFogTuning tuning{};
+    const fluids::UnderwaterFogTuning tuning{};
     const f32 waterLevelCm = 500.0f;
     const f32 cameraZCm = waterLevelCm;
 
-    const rhi::SkyAtmosphere result = water::applyUnderwaterFog(authored, cameraZCm, waterLevelCm, tuning);
+    const rhi::SkyAtmosphere result = fluids::applyUnderwaterFog(authored, cameraZCm, waterLevelCm, tuning);
 
     check(near(result.fogColor[0], (authored.fogColor[0] + tuning.color[0]) * 0.5f), "at the surface, fogColor.r is exactly halfway");
     check(near(result.fogColor[1], (authored.fogColor[1] + tuning.color[1]) * 0.5f), "...fogColor.g is exactly halfway");
@@ -127,7 +127,7 @@ static void testSweepIsMonotonic() {
     // the band each field must equal what the author wrote, at the bottom it must equal the tuning.
     // A swap exchanges those two, and no amount of smoothness in between hides it.
     const rhi::SkyAtmosphere authored = makeAuthored();
-    const water::UnderwaterFogTuning tuning{};
+    const fluids::UnderwaterFogTuning tuning{};
     const f32 waterLevelCm = 0.0f;
     const f32 topCm = waterLevelCm + tuning.fadeBandCm * 2.0f;      // starts outside the band
     const f32 bottomCm = waterLevelCm - tuning.fadeBandCm * 2.0f;   // ends outside the band
@@ -164,7 +164,7 @@ static void testSweepIsMonotonic() {
         const f32 t = static_cast<f32>(i) / static_cast<f32>(kSteps);
         const f32 cameraZCm = topCm + (bottomCm - topCm) * t;
         const rhi::SkyAtmosphere result =
-            water::applyUnderwaterFog(authored, cameraZCm, waterLevelCm, tuning);
+            fluids::applyUnderwaterFog(authored, cameraZCm, waterLevelCm, tuning);
         if (i == 0) atTop = result;
         if (i == kSteps) atBottom = result;
         for (size_t f = 0; f < kFieldCount; ++f) {
@@ -191,7 +191,7 @@ static void testSweepIsMonotonic() {
               " is still exactly what the author wrote");
     }
     const rhi::SkyAtmosphere fullyUnder =
-        water::applyUnderwaterFog(authored, waterLevelCm - tuning.fadeBandCm * 4.0f,
+        fluids::applyUnderwaterFog(authored, waterLevelCm - tuning.fadeBandCm * 4.0f,
                                   waterLevelCm, tuning);
     for (size_t f = 0; f < kFieldCount; ++f) {
         check(std::abs(kFields[f].get(atBottom) - kFields[f].get(fullyUnder)) < 1e-6f,

@@ -3,7 +3,7 @@
 // one place this file's geometry strategy diverges from ParticleRenderer.cpp's ring-buffer
 // precedent -- everything else here (pipeline shape, draw sequence, marker) follows that precedent
 // as closely as the two features' actual differences allow.
-#include "aver/water/WaterRenderer.hpp"
+#include "aver/fluids/WaterRenderer.hpp"
 #include "WaterShaders.hpp"
 
 #include "aver/core/Log.hpp"
@@ -12,7 +12,7 @@
 #include <string>
 #include <vector>
 
-namespace aver::water {
+namespace aver::fluids {
 namespace {
 
 // ---------------------------------------------------------------------------------------------
@@ -143,13 +143,13 @@ bool WaterRenderer::init(rhi::IDevice& dev) {
     // one -- exactly the property this class's header comment argues makes a static upload correct
     // here even though ParticleRenderer treats Upload as something to re-write every frame.
     vbd.kind = rhi::BufferKind::Upload;
-    vbd.debugName = "Aver.Water grid vertices";
+    vbd.debugName = "Aver.Fluids grid vertices";
     gridVb_ = res_->createBuffer(vbd);
 
     rhi::BufferDesc ibd;
     ibd.bytes = static_cast<u64>(indices.size()) * sizeof(u32);
     ibd.kind = rhi::BufferKind::Upload;
-    ibd.debugName = "Aver.Water grid indices";
+    ibd.debugName = "Aver.Fluids grid indices";
     gridIb_ = res_->createBuffer(ibd);
 
     if (!gridVb_ || !gridIb_) {
@@ -402,7 +402,7 @@ void WaterRenderer::transparentPass(rhi::IRenderContext& ctx) {
     // Viewport, scissor and the scene colour+depth targets are ALL already set -- the
     // transparentPass contract (RHIResources.hpp) -- so nothing here touches any of them; only the
     // pipeline, the constant buffer and the (already-uploaded, never-changing) grid are ours.
-    ctx.pushMarker("Aver.Water");
+    ctx.pushMarker("Aver.Fluids");
     ctx.setPipeline(pso_);
     ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb, sizeof(cb));
     ctx.setVertexBuffer(gridVb_, sizeof(WaterVertex));
@@ -411,4 +411,4 @@ void WaterRenderer::transparentPass(rhi::IRenderContext& ctx) {
     ctx.popMarker();
 }
 
-} // namespace aver::water
+} // namespace aver::fluids

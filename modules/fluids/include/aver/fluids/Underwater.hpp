@@ -1,5 +1,5 @@
 #pragma once
-// The underwater half of Aver.Water: a pure function that swaps an authored rhi::SkyAtmosphere's
+// The underwater half of Aver.Fluids: a pure function that swaps an authored rhi::SkyAtmosphere's
 // fog parameters for underwater ones as the camera crosses the water surface, with a short blend
 // band so the swap does not pop.
 //
@@ -12,7 +12,7 @@
 #include "aver/core/Types.hpp"
 #include "aver/rhi/RHI.hpp"
 
-namespace aver::water {
+namespace aver::fluids {
 
 // The underwater look this slice ships with. Every numeric default here is an UNVALIDATED STARTING
 // POINT, not a measured value -- there is no equivalent of the furnace/SH-integral oracles the sky
@@ -63,4 +63,4 @@ rhi::SkyAtmosphere applyUnderwaterFog(const rhi::SkyAtmosphere& authored,
                                        f32 waterLevelCm,
                                        const UnderwaterFogTuning& tuning);
 
-}   // namespace aver::water
+}   // namespace aver::fluids

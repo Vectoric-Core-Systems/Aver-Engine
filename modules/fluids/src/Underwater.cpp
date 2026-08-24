@@ -1,11 +1,11 @@
-﻿// Implementation of aver::water::applyUnderwaterFog. Kept in its own .cpp rather than made
-// header-only -- the function has a natural single home (it compiles once into Aver.Water, not
+﻿// Implementation of aver::fluids::applyUnderwaterFog. Kept in its own .cpp rather than made
+// header-only -- the function has a natural single home (it compiles once into Aver.Fluids, not
 // once per translation unit that happens to include the header), matching how the rest of this
 // codebase treats a .cpp as the default and header-only as the exception for things that must be
 // inlined (small accessors, templates) rather than the norm.
-#include "aver/water/Underwater.hpp"
+#include "aver/fluids/Underwater.hpp"
 
-namespace aver::water {
+namespace aver::fluids {
 namespace {
 
 // Linear interpolation, spelled out locally rather than pulled from <algorithm>/Math.hpp: this file
@@ -62,4 +62,4 @@ rhi::SkyAtmosphere applyUnderwaterFog(const rhi::SkyAtmosphere& authored,
     return result;
 }
 
-}   // namespace aver::water
+}   // namespace aver::fluids
