@@ -2569,7 +2569,7 @@ public:
         // Guarded on RENDER_FLUID alone for the same reason the registration is: the draw call in
         // onRender carries that guard and no other, so any wider guard here produces a build that
         // draws a mesh nothing ever writes to.
-        fluidScene_.update();
+        fluidScene_.update(t.total);
 
 #if AVER_MODULE_FRAMEWORK
         // THE FALLBACK for a gap in Jolt's own soft-body update, not this engine's: a fluid volume's
@@ -3701,22 +3701,24 @@ public:
             if (i == sel_) selectionOutline_ = w, selectionMesh_ = o.mesh, hasSelection_ = true;
         }
 
-#if AVER_MODULE_RENDER_FLUID
-        // The simulated fluid, drawn like any other opaque mesh -- which is the point. The analytic
-        // water surface issues its own ctx.drawIndexed in the transparent pass and is therefore
-        // invisible to the shadow cascades, the ray-tracing TLAS and GI voxelisation; going through
-        // drawMesh instead puts this surface in the scene's actual light.
+        // The simulated fluid used to be drawn here, like any other opaque mesh, with a flat colour
+        // and no transparency -- see the git history of this file for that block. It no longer is:
+        // FluidScene now overrides rhi::IRenderFeature::transparentPass and draws its own current
+        // drawMesh for every live volume itself (modules/render.fluid/src/FluidScene.cpp), the exact
+        // seam particles::ParticleRenderer and water::WaterRenderer already draw themselves through,
+        // with real Fresnel-weighted water shading instead of a constant colour (FluidShaders.hpp).
+        // Nothing needs to happen at this call site any more, which is also LESS COUPLING in this
+        // composition root than before: SandboxApp no longer has to know this feature draws a mesh at
+        // all, exactly as it already does not know that about ParticleRenderer or WaterRenderer.
         //
-        // AN IDENTITY WORLD MATRIX, and that is a contract rather than laziness: FluidScene stages
-        // absolute world-space positions into the vertex buffer every frame, because that is the
-        // space the solver reports its particles in. Passing the volume's centre here as well would
-        // translate it twice.
-        if (const rhi::MeshHandle fluidMesh = fluidScene_.drawHandle(fluidHandle_)) {
-            const Mat4 identity{};
-            const f32 fluidCol[4] = {0.16f, 0.42f, 0.55f, 1.0f};
-            e.device()->drawMesh(fluidMesh, &identity.m[0][0], fluidCol, 0.0f, 0.12f);
-        }
-#endif
+        // THE TRADE THIS ACCEPTS, stated because the block it replaces stated the opposite reason for
+        // existing: going through the opaque drawMesh path made the fluid visible to the shadow
+        // cascades, the ray-tracing TLAS and GI voxelisation, the same way any other opaque mesh is.
+        // transparentPass runs alongside WaterRenderer's own ocean surface, which is invisible to all
+        // three for the identical reason (RHIResources.hpp's own transparentPass comment: it is a
+        // blended pass drawn AFTER the opaque scene and the deferred sky, not folded into it) -- so
+        // the pool now gives up the same things the ocean already does, in exchange for looking like
+        // water instead of tinted plastic.
 
 #if AVER_MODULE_LANDSCAPE
         // The landscape pass: one direct select()+draw() call, the same hand-rolled shape as the
@@ -6395,6 +6397,25 @@ private:
                 fd.halfExtentCm[0] = halfX;
                 fd.halfExtentCm[1] = halfY;
                 fd.halfExtentCm[2] = halfZ;
+                // OVERRIDES FluidVolumeDesc's own {8,8,4} default HERE, at the one call site that
+                // ever spawns a fluid volume a player can see and enter, rather than raising that
+                // struct's own default -- a level-authored pool is exactly the case the struct's own
+                // comment already reasons about ("a shallow pool's silhouette reads mostly from its
+                // horizontal sloshing"), but a struct default is shared by every future caller,
+                // including ones this measurement says nothing about (a decorative puddle, a dozen
+                // small fountains) that should not all inherit a heavier solver cost this session
+                // measured for ONE specific 6x4m pool. 14x14 horizontal (was 8x8, so ~75cm cells
+                // become ~43x29cm) is the finer top face WaterPerf's baseline screenshot called for;
+                // Z stays at the struct's own 4, per that same comment's reasoning that vertical
+                // detail on a shallow pool is rarely camera-visible and this session's own screenshots
+                // never suggested otherwise. Both GPU/CPU frame cost (measured, see the session
+                // report this comment's commit belongs to) and shell integrity (SoftBodyTest's own
+                // testPressureHoldsAShellUp headroom constant was swept AT 8x8x4 specifically, so a
+                // different subdivision is NOT covered by that sweep and was re-checked by hand here
+                // against this exact pool, not assumed to still hold) were verified before this
+                // number was kept.
+                fd.subdivisions[0] = 14;
+                fd.subdivisions[1] = 14;
 
                 // LATCHED, NOT SPAWNED -- and this is the fix for the bug that made every
                 // simulated record log "the fluid body could not be created" at startup. onInit
