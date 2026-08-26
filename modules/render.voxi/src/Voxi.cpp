@@ -335,17 +335,36 @@ u32 Renderer::rtShadowDenoiseForQuality(Quality q) {
         default:              return 0;
     }
 }
-// See rtShadowRaysForQuality for the measurements behind these.
+// See rtShadowRaysForQuality for the measurements behind the ray-count rungs. The tile rungs below
+// have their own history: see the LOW WAS 4 paragraph.
+//
+// 1 AT EVERY RUNG NOW, Low included: every pixel traces every frame, which is bit-identical to no
+// denoiser at all -- no tiling, no reprojected history, no temporal blend. Anything above 1 reuses a
+// reprojected sample for most pixels, and reprojection is what makes a shadow appear to trail the
+// thing casting it while the camera moves. It is nearly free on this scene regardless of tile width
+// (18.19 ms at tile 1 against 18.36 ms at tile 2, inside the noise), because amortisation saturates
+// early at one ray per pixel -- there was never real frame time on the table for any rung to trade.
+//
+// LOW WAS 4, "one traced pixel per 4x4, the widest amortisation that pays." That reasoning measured
+// only frame-time cost, on a still camera, and concluded the widest tile the clamp allows was free
+// money. It was free money -- 22.94 ms (tile 1) vs 22.80 ms (tile 4), moving-camera medians, is noise
+// -- but a still-camera benchmark cannot see what the tile actually spends: shadows visibly trailing
+// the camera during Play-in-Editor, on the ONE tier that shipped with it. This is the same trap that
+// already caught giUpdateInterval above (a still-camera benchmark reads amortisation as free because
+// the thing it costs, motion, is exactly what it doesn't measure) and it is not a coincidence that it
+// caught this knob the same way -- both are temporal-history amortisations, and both hide their cost
+// from a benchmark that never pans. Re-measured this session with a wobbling camera against the
+// ground-crop diff the giUpdateInterval work established: tile 1 vs tile 2 alone reproduces 0.80% of
+// pixels over threshold from the reprojected-shadow trail, and tile 2 vs tile 4 adds only another
+// 0.04% on top -- the artifact is already fully present at tile 2, so there is no partial-credit rung
+// between "visible trail" and "none". Low is 1 now for the same reason Medium already was: the frame
+// time was never real, and this was the one Low-specific amortisation that bought a visible fault
+// rather than a latency nobody could see (see giUpdateIntervalForQuality and voxelResolutionForQuality
+// above for the two that are real and stay).
 u32 Renderer::rtPixelsPerRayTileForQuality(Quality q) {
     switch (q) {
         case Quality::Off:    return 1;
-        case Quality::Low:    return 4;   // one traced pixel per 4x4, the widest amortisation that pays
-        // 1 FROM MEDIUM UPWARDS: every pixel traces every frame, which is bit-identical to no denoiser
-        // at all -- no tiling, no reprojected history, no temporal blend. Anything above 1 reuses a
-        // reprojected sample for most pixels, and reprojection is what makes a shadow appear to trail
-        // the thing casting it while the camera moves. It is nearly free here anyway (18.19 ms at
-        // tile 1 against 18.36 ms at tile 2, inside the noise), because amortisation saturates early
-        // at one ray per pixel. Low is the only rung that still trades lag for frame time.
+        case Quality::Low:    return 1;
         case Quality::Medium: return 1;
         case Quality::High:   return 1;
         case Quality::Epic:   return 1;

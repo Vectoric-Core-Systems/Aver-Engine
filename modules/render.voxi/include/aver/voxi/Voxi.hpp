@@ -132,16 +132,16 @@ struct Settings {
     // while rayTracing != Quality::Off; it does nothing to the voxel cone-trace GI cost below, which
     // is governed instead by giUpdateInterval.
     //
-    // ALSO DERIVED FROM rayTracing on a tier change: Low 4, Medium 1, High 1, Epic 1. Defaulting to
-    // 1 for the same by-construction reason rtShadowRays defaults to 1 -- Medium's rung, because
-    // Medium is the default tier.
+    // DERIVED FROM rayTracing on a tier change: 1 at every rung -- Low, Medium, High, Epic. Defaulting
+    // to 1 for the same by-construction reason rtShadowRays defaults to 1 -- Medium's rung, because
+    // Medium is the default tier, and now every other rung's rung as well. It was not always every
+    // rung; see LOW WAS 4 below for why that changed.
     //
-    // MEDIUM IS 1, WHICH MEANS NO DENOISING BY DEFAULT. 1 is "every pixel traces every frame", which
-    // the paragraph above calls bit-identical to no denoiser at all: no tiling, no reprojected
-    // history, no temporal blend. What you see is what was traced this frame. It costs more than the
-    // amortised rungs and it is the honest default for a renderer people are evaluating, because a
-    // temporal denoiser hides its own artefacts as readily as the tracer's. Low still amortises, at
-    // tile 4, for anyone who wants the frame back.
+    // ALL FOUR TIERS ARE 1, WHICH MEANS NO TEMPORAL DENOISING ANYWHERE. 1 is "every pixel traces every
+    // frame", which the paragraph above calls bit-identical to no denoiser at all: no tiling, no
+    // reprojected history, no temporal blend. What you see is what was traced this frame. It costs
+    // more than the amortised rungs and it is the honest default for a renderer people are evaluating,
+    // because a temporal denoiser hides its own artefacts as readily as the tracer's.
     //
     // Measured, so the ladder is not guesswork. Release build, ElectricDreams, windowed at 1600x900,
     // --no-vsync, --frames 200, whole-frame median: rays 1 / tile 4 = 18.26 ms, rays 1 / tile 2 =
@@ -151,9 +151,25 @@ struct Settings {
     // NOTE THE SHAPE, because it is what makes tile 1 defensible as the default rather than merely
     // preferable: the three tile widths at one ray span 0.23 ms -- they are the same number inside
     // the run-to-run noise -- while going from one ray to four costs 4.95 ms. Amortisation saturates
-    // immediately and the ray count is where all of the money is, so the temporal history was buying
-    // no frame time in exchange for the latency it introduced. One scene at one resolution; a heavier
-    // one may well disagree, which is what Low's tile 4 is still there for.
+    // immediately and the ray count is where all of the money is; the temporal history was never
+    // buying real frame time on this scene, at any tile width.
+    //
+    // LOW WAS 4, "the widest amortisation that pays," reasoned from exactly the still-camera table
+    // above: since tile cost is noise, take the widest tile the clamp allows and bank whatever the
+    // noise floor grudgingly gives up. That reasoning measured frame-time cost and only frame-time
+    // cost, on a still camera -- and a still camera cannot see what a temporal-history amortisation
+    // actually spends. It spends motion: with the camera moving, shadows visibly trail the thing
+    // casting them, and Low was the one tier that shipped it. Measured this session with a wobbling
+    // camera against a ground-crop pixel diff: tile 1 vs tile 4 differs 0.14 ms moving / 0.09 ms
+    // static (noise, matching the still-camera table above), while the visible trail is already 0.80%
+    // of pixels over threshold at tile 1 vs tile 2 alone, and tile 2 vs tile 4 adds only another
+    // 0.04% on top of that -- the artifact is fully present by tile 2, so there is no partial-credit
+    // rung between "visible trail" and "none" to fall back to. Low is 1 now for the same reason Medium
+    // already was above: the frame time this bought was never real, and it was the one Low-specific
+    // amortisation that traded a fault anyone moving the camera can see for milliseconds nobody could
+    // measure. giUpdateInterval below and voxelResolution above both stay at Low's wider rungs -- each
+    // costs real, measured time under motion and neither one produces a visible artifact at any
+    // width tested.
     u32 rtPixelsPerRayTile = 1;
 
     // How many frames apart the GI volume is re-voxelised: 1 (the default) revoxelises and re-filters
