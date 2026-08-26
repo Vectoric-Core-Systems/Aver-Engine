@@ -5,6 +5,97 @@ reproduce is a rumour.
 
 ---
 
+# 0.5.0 — in progress, 2026-08-27
+
+A six-lens sweep across rendering, physics/fluids, audio/animation, formats/save, graph/scripting and
+the editor, each finding then given to a reproducer and to a separate pass told to refute it. Three
+candidates were killed on that second pass — two as already-documented behaviour (`docs/ABI.md:1067`
+states the character inner-body contact gap is deliberate; `docs/AVER_NODE_NODES.md:662` already
+describes the SphereCast emitter gap) and one as failing the bar: a real observation about code that
+produces no wrong output.
+
+## Fixed
+
+### 1. The audio device was never opened by the runtime — HIGH
+`sandbox/src/SandboxApp.cpp`, fixed in `6d07e9d`
+
+**Trigger: press Play on any level whose graph calls PlaySound, in a process where the Sound Editor's
+preview button was never pressed.**
+
+`aver_audio_init` had exactly one caller in the tree: that preview button. Every entry point in
+`audio_abi.h` gates on the `g_started` flag only it sets, so `aver_audio_play` returned 0 and did
+nothing. **0.4.0 shipped six Aver Node audio nodes and release notes saying the mixer finally had
+callers; the nodes called an ABI whose device was shut.**
+
+`aver_audio_collect`, which reclaims finished voices, had the same single caller — opening the device
+without also wiring that would have traded silence for a fixed budget of 64 sounds per session, which
+is worse because it works at first.
+
+### 2. saveOcmap truncated its destination — HIGH
+`modules/formats/src/OcMap.cpp`, fixed in `914f7fb`
+
+**Trigger: save a level loaded from a legacy `.ocmap`, then crash or fill the disk mid-write.**
+
+Written with `ios::trunc` **in the same commit (`e0ff3d3`) that converted its four siblings away from
+it** — one change removing the pattern while another introduced a fresh instance. Each was internally
+consistent; only the pair was wrong, which is why reviewing either alone would not have caught it.
+
+### 3. AVR1's chunk-directory bound wrapped — HIGH
+`modules/formats/src/Avr1.cpp:253`, fixed in `914f7fb`
+
+**Trigger: open any AVR1 container whose `dirOffset` is near 2^64 with a small `chunkCount`.**
+
+`dirOffset + chunkCount*40 > size` is unguarded 64-bit addition; it wraps to a small number, passes,
+and the directory Reader starts at `bytes + dirOffset`. The sibling check twenty lines below was
+already fixed and carries a comment explaining the mechanism — **the sweep that wrote it stopped one
+check short inside the function it was correcting.** The header CRC is no defence; it is computed
+over whatever the file says.
+
+The regression test took three attempts, and that is the useful part: asserting only
+`!parseAvr1(...)` passed against the bug (the parse still fails, later and by accident, when the
+Reader walks off its own end), and the first crafted offset never actually wrapped. Only asserting
+the *failure reason*, with an offset that genuinely overflows, tells the fix from its absence.
+
+### 4. The PlayerStart marker outlived its level — HIGH
+`sandbox/src/SandboxApp.cpp`, fixed in `a309a8f`
+
+**Trigger: place a Player Start, then File > New Level, then Add > Player Start.**
+
+The marker is deliberately transient and not in `levelEntities_`, so `unloadLevel`'s destroy loop
+could not reach it. `loadLevel` reassigns it on the way in, which hid this for every path that ends
+one level by opening another — leaving it visible only on the path that ends a level without opening
+one. The stale marker kept rendering, and Add > Player Start selected it instead of creating a new
+one, so the new level could not be given a spawn at all.
+
+### 5. Low tier's shadow-tile amortisation — HIGH (reported as flicker)
+`modules/render.voxi/src/Voxi.cpp`, fixed in `e9a7667` — see the 0.4.0 section's own lesson.
+
+### 6. The viewport hint drew over any open drawer — MEDIUM
+`sandbox/src/SandboxApp.cpp`, fixed in `55f5998`
+
+**Trigger: open any drawer and look at its bottom ~70 px.**
+
+The hint anchors to `vpY_ + vpH_`, and `vpH_` is not reduced when a drawer opens — a drawer is an
+overlay, not a dock split. Cosmetic over the Content Browser; over the new Console it covered the
+**input line**, and since the overlay is `NoInputs` the box could still be typed into blind.
+
+## Open
+
+- **The GI voxelisation gate ignores compute-skinned pose changes** — MEDIUM.
+  `modules/render.voxi/src/VoxiRenderer.cpp:806-832`. `giDrawsKey()` hashes mesh handle, world
+  transform and material but never the vertex buffer a compute skin pass writes, and `submit` applies
+  no `meshVertexBuffer` filter. Once an animated character's world transform stops changing, the gate
+  reports "unchanged" forever and its contribution to indirect light freezes at that pose.
+  `PtSceneView::submitDraw` and Voxi's own BLAS cache both check `meshVertexBuffer` for exactly this
+  reason; the GI gate is the one that does not.
+
+  **Deliberately not fixed blind.** The obvious repair — treat any skinned draw as "changed" — forces
+  revoxelisation every frame in any scene containing a character, which is precisely the ~10.5 ms
+  saving `giUpdateInterval` was measured to buy. The right shape is probably to fall back to the
+  interval schedule rather than skipping indefinitely, but that wants a measurement first.
+
+---
+
 # 0.4.0 — 2026-08-25
 
 A release sweep at `b952b8a`, 146 commits after the 0.3.0 cut. Smaller than the 2026-08-03 sweep and
