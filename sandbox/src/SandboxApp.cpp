@@ -14364,6 +14364,29 @@ private:
         scene::World& world = scene::World::instance();
         for (const scene::Entity e : levelEntities_) if (world.valid(e)) world.destroy(e);
         levelEntities_.clear();
+#if AVER_MODULE_SCENE
+        // THE PLAYERSTART MARKER, and it needs its own line here for exactly the reason it is not in
+        // levelEntities_ in the first place. It is deliberately transient -- see its declaration --
+        // so that saving does not emit it as a PLACE record alongside the SPAWN record it mirrors.
+        // The consequence is that the loop directly above cannot reach it, and nothing else did:
+        // loadLevel reassigns playerStart_ on its way in, which hid this for every path that ends
+        // one level by opening another, and left it visible only on the path that ends a level
+        // without opening one -- File > New Level.
+        //
+        // What that cost: the previous level marker kept rendering in the new empty level, and
+        // Toolbar > Add > Player Start found playerStart_ still live and SELECTED the stale entity
+        // instead of creating a new one, so the new level could not be given a spawn point at all.
+        //
+        // Same shape, same place, same reasoning as the simulated fluid volume torn down further
+        // down this function -- whose own comment records it outliving its level and going on
+        // sloshing inside the next one. Anything a level owns but levelEntities_ does not hold has
+        // to be released here by name.
+        if (playerStart_ != scene::kInvalidEntity) {
+            if (world.valid(playerStart_)) world.destroy(playerStart_);
+            playerStart_ = scene::kInvalidEntity;
+        }
+        playerStartYaw_ = 0.0f;
+#endif
         entityLabels_.clear();
         labelCounts_.clear();
         entityBodies_.clear();
