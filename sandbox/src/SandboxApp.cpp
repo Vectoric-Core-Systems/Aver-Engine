@@ -13,6 +13,15 @@
 #include "aver/core/Version.hpp"
 #include "aver/formats/OcBeam.hpp"
 #include "aver/formats/OcMap.hpp"
+#if AVER_SOUND_EDITOR_AUDIO
+// THE NAME IS HISTORICAL AND NOW UNDERSELLS ITSELF. sandbox/CMakeLists.txt defines this whenever
+// Aver.Audio.Abi is linked into this binary -- it means "this build has the mixer seam", not "the
+// sound editor wants audio". It was named when SoundEditor's preview button was the only thing in
+// the editor that opened a device, which is exactly the state of affairs the block below exists to
+// end. Worth renaming to AVER_SANDBOX_AUDIO; not renamed here because tests/editor deliberately
+// leaves it undefined and that target's behaviour should not change in a bug fix.
+#  include "aver/audio/audio_abi.h"
+#endif
 #include "aver/formats/OcProject.hpp"
 #include "aver/formats/OcWorld.hpp"
 #include "aver/formats/OcMesh.hpp"
@@ -1189,6 +1198,33 @@ public:
             AVER_INFO("[Sandbox] physics started (fixed step {:.4f}s)", aver_phys_fixed_step());
         } else {
             AVER_WARN("[Sandbox] physics failed to start - gameplay will not collide");
+        }
+#endif
+
+#if AVER_SOUND_EDITOR_AUDIO
+        // NOTHING IN THE RUNTIME HAD EVER OPENED THE AUDIO DEVICE, which made every PlaySound in
+        // every graph a silent no-op during Play.
+        //
+        // aver_audio_init was reachable from exactly one place in the whole tree: the Sound
+        // Editor's preview button. Its own comment there says "the editor has never opened the
+        // device for anything else, so this is where it happens" -- accurate, and the reason the
+        // gap survived. Every entry point in audio_abi.h gates on the g_started flag that only
+        // aver_audio_init sets, so aver_audio_play and aver_audio_play_at returned 0 and did
+        // nothing. A game made a sound only if the author had happened to open the .ocsnd tab and
+        // press preview earlier in the same process.
+        //
+        // That is the shape this codebase keeps producing and has a name for: built through every
+        // layer -- mixer, WASAPI device, 24-export C seam, six Aver Node nodes, a C# wrapper -- and
+        // called by nothing. The six nodes shipped in 0.4.0 and were described in its release notes
+        // as connecting the mixer to gameplay. They connect to an ABI whose device was shut.
+        //
+        // 0 IS NOT AN ERROR. The ABI defines it as "no output device", and logs that itself; a
+        // machine with no sound card is expected to run silent rather than fail to start. So this
+        // reports success and stays quiet on the silent path rather than warning like physics does
+        // -- no audio hardware is a fact about the machine, no collision is a broken engine.
+        if (aver_audio_init()) {
+            AVER_INFO("[Sandbox] audio started ({} Hz, {} channel(s))",
+                      aver_audio_sample_rate(), aver_audio_channels());
         }
 #endif
 
@@ -2890,6 +2926,22 @@ public:
         //
         // nav_ may be empty or a frame stale (loadNavForLevel/navBakeCheck poll from onRender, not
         // here) -- AgentSystem::tick treats that as "wait for a grid", not an error.
+#if AVER_SOUND_EDITOR_AUDIO
+        // RECLAIM FINISHED VOICES, EVERY FRAME, PLAY OR NOT.
+        //
+        // The second half of the same gap: aver_audio_collect had the same single caller as
+        // aver_audio_init -- the Sound Editor's preview loop -- so a voice started by a graph was
+        // never reclaimed and its slot was held until the mixer ran out of them. Opening the device
+        // without this would have traded silence for a fixed budget of sounds per session, which is
+        // a worse bug because it works at first.
+        //
+        // NOT GATED ON PLAY, unlike the gameplay systems below. Collection is bookkeeping over
+        // voices that have already finished, and voices outlive a play session: pressing Stop does
+        // not silence what is mid-playback, and the Sound Editor's preview runs with no play
+        // session at all. Gating this would leak exactly the voices that finish after Stop. It
+        // no-ops when the device was never opened.
+        aver_audio_collect();
+#endif
         if (!spawnTestClass_.empty() || aver_fw_play_state() == AVER_FW_PLAY_PLAYING) {
             synapse::agentSystem().tick(scene::World::instance(), &nav_);
             // Same gate, same "after flush" reasoning -- a perceiver's sight check reads this
@@ -5262,6 +5314,12 @@ public:
 #endif
 #if AVER_MODULE_PHYSICS
         aver_phys_shutdown();
+#endif
+#if AVER_SOUND_EDITOR_AUDIO
+        // Stops the mixer, releases the device and forgets every loaded sound. Idempotent, and a
+        // no-op when the device was never opened -- so a build with no output device, or one that
+        // never reached the init above, is unaffected.
+        aver_audio_shutdown();
 #endif
 #if AVER_WITH_IMGUI
         if (logoTexture_ || compileIconTexture_ || fileIconsTexture_ || folderIconsTexture_) {
