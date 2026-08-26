@@ -1041,6 +1041,7 @@ public:
     }
 
     bool deviceLost() const override { return deviceLost_; }
+    GpuTimingReport gpuTiming() const override;
     void beginFrame() override;
     void endFrame() override;
     void present();
@@ -2893,6 +2894,28 @@ void D3D12Device::collectGpuTiming() {
                   tsAccumFrameMs_ / n, tsAccumFrames_, line, (tsAccumFrameMs_ - topLevelMs) / n);
     }
     ++tsReports_;
+}
+
+// Public mirror of tsAccum_ for a caller outside this file (the command console's frame-time
+// breakdown -- see IDevice::gpuTiming's own comment for the two-frames-old rationale and the
+// by-value return). A STRAIGHT COPY, not a rebuild: tsAccum_ is already the flat, parent-indexed
+// tree GpuTimingNode mirrors, so this just divides each node's accumulated ms by the frame count
+// -- the same averaging collectGpuTiming's own AVER_INFO line does -- and copies label/parent
+// across unchanged. kNoAccumParent and GpuTimingNode::kNoParent are the same sentinel value
+// (0xFFFFFFFFu), so a top-level node's parent needs no remapping either.
+GpuTimingReport D3D12Device::gpuTiming() const {
+    GpuTimingReport report;
+    // `supported` is the capability axis: false here means this device cannot report timings at
+    // all (timestamp queries unavailable on this adapter), independent of whether any frame has
+    // been collected yet -- see GpuTimingReport's own comment on why the two are kept apart.
+    report.supported = tsEnabled_;
+    if (!tsEnabled_ || tsAccumFrames_ == 0) return report;
+    report.framesAccumulated = tsAccumFrames_;
+    const f64 n = static_cast<f64>(tsAccumFrames_);
+    report.nodes.reserve(tsAccum_.size());
+    for (const GpuAccum& a : tsAccum_)
+        report.nodes.push_back(GpuTimingNode{a.label, a.ms / n, a.parent});
+    return report;
 }
 
 // Opens the frame: waits out the current backbuffer's last frame, resets recording, clears targets.

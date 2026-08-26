@@ -9,6 +9,7 @@
 #include "aver/rhi/RHIResources.hpp"
 
 #include <cstddef>
+#include <string>
 #include <vector>
 
 namespace aver::rhi {
@@ -238,6 +239,45 @@ struct SkyAtmosphere {
     void sunAngles(f32& elevationDeg, f32& azimuthDeg) const;
 };
 
+// One node of a per-pass GPU timing report -- the public mirror of D3D12Device's private
+// GpuAccum tree (see that struct's own comment for why it is a tree keyed by (label, parent)
+// rather than a flat list). FLAT AND PARENT-INDEXED, not an owning nested structure: the source
+// data is already exactly this shape, so returning it flat is a straight copy, and a caller that
+// wants indentation (the console, formatting this the way collectGpuTiming's own log line does)
+// walks it with the same O(n) children-list pass collectGpuTiming already builds each report.
+//
+// `ms` is INCLUSIVE -- itself plus everything nested under it, matching what a begin/end
+// timestamp pair actually measures. A caller wanting the pass's OWN time subtracts its direct
+// children's `ms`, exactly as collectGpuTiming's Appender does when it prints "(excl ...)".
+struct GpuTimingNode {
+    // A span index used as "this node is top-level" -- the same sentinel value D3D12Device's
+    // private kNoAccumParent uses, so copying GpuAccum into this type needs no remapping pass.
+    static constexpr u32 kNoParent = 0xFFFFFFFFu;
+    std::string label;
+    f64 ms = 0;              // inclusive, averaged across framesAccumulated frames
+    u32 parent = kNoParent;  // index into the SAME report's `nodes`, or kNoParent
+};
+
+// A snapshot of one device's per-pass GPU timing, as of the last frame it collected one.
+//
+// TWO INDEPENDENT "NO DATA" AXES, deliberately not collapsed into one empty result:
+//   - `supported` is the CAPABILITY axis. False means this backend cannot report timings at all
+//     -- Vulkan has no equivalent machinery yet (see its own comment), and a D3D12 device with
+//     GPU timing disabled (tsEnabled_ false, e.g. timestamp queries unavailable on this adapter)
+//     reports the same way. `nodes` is always empty when this is false.
+//   - `nodes` empty (or `framesAccumulated` 0) with `supported` true is the CONTENT axis: an
+//     enabled backend that simply has not accumulated a span yet -- frame 0, or every span this
+//     frame was dropped (see tsDropped_'s own comment). The console needs to tell "ask again
+//     later" apart from "this device will never answer", which is exactly what these two together
+//     say and a single bool could not.
+struct GpuTimingReport {
+    bool supported = false;
+    // Averaged over this many frames since boot (see D3D12Device::tsAccumFrames_'s own comment on
+    // why an average, not one sampled frame). 0 when nothing has been collected yet.
+    u32 framesAccumulated = 0;
+    std::vector<GpuTimingNode> nodes;
+};
+
 // One GPU device: frame loop, scene state, immediate drawing, capture and in-window UI.
 class IDevice {
 public:
@@ -343,6 +383,27 @@ public:
     // Defaults to false so a backend that cannot lose its device -- and every mock in the tests --
     // is unaffected without writing a line.
     virtual bool deviceLost() const { return false; }
+
+    // Per-pass GPU timing, for a caller that wants to know where the frame's time went (the
+    // command console's frame-time breakdown is the first one) without going through the periodic
+    // AVER_INFO log a backend may print on its own.
+    //
+    // TWO FRAMES OLD, ON PURPOSE. The GPU timestamps this reports were resolved from a readback
+    // slice that only becomes readable once the GPU has caught up to it, which beginFrame fences
+    // on before collecting -- see D3D12Device's own per-pass-timing comment. Reading "this frame's"
+    // own timings would mean blocking on the GPU to ask how fast the GPU was, which would create
+    // the very stall it reports. A caller that polls this once a frame is reading a rolling average
+    // a couple of frames behind the frame it's currently driving, not a live number.
+    //
+    // RETURNED BY VALUE, not a reference into backend state: the source data mutates every single
+    // beginFrame (new spans folded in, occasionally reallocated), so a reference handed out here
+    // would be dangling or stale by the next frame. This is a snapshot -- a dozen or so short-label
+    // nodes, cheap to copy -- safe for the caller to hold onto for as long as it likes.
+    //
+    // Defaults to an unsupported/empty report (GpuTimingReport::supported == false, `nodes` empty)
+    // so a backend that has not implemented this -- Vulkan (no equivalent machinery yet), D3D11,
+    // Null, and every test mock -- is unaffected without writing a line, same as deviceLost() above.
+    virtual GpuTimingReport gpuTiming() const { return {}; }
 
     // GPU self-test: clears a tiny offscreen target to `in` and reads the pixel back into
     // `outRGBA`. True if the read-back matches.
