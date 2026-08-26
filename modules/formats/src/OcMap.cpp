@@ -5,7 +5,6 @@
 
 #include <cstdio>
 #include <filesystem>
-#include <fstream>
 
 namespace aver::fmt {
 using namespace aver::fmt::detail;
@@ -248,11 +247,27 @@ bool saveOcmap(const std::string& path, const OcMapData& m, std::string* err) {
     std::error_code ec;
     const std::filesystem::path p(path);
     if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);
-    if (!f) { if (err) *err = "could not open " + path + " for writing"; return false; }
     const std::string text = writeOcmap(m);
-    f.write(text.data(), static_cast<std::streamsize>(text.size()));
-    if (!f) { if (err) *err = "write failed for " + path; return false; }
+
+    // WRITE TO A TEMPORARY AND SWAP, via writeFileTextAtomic (aver/platform/FileSystem.hpp) -- the
+    // same pattern saveOcworld, saveOcgraph, saveOcmat and GraphEditor::save all use.
+    //
+    // THIS WRITER WAS ADDED IN THE SAME COMMIT THAT MADE THE OTHER FOUR ATOMIC, and was written
+    // with the ios::trunc shape they were being converted AWAY from -- two changes landing in
+    // parallel, one removing a pattern while the other introduced a fresh instance of it. Worth
+    // recording because the failure mode is invisible to review of either change alone: each was
+    // internally consistent, and only the pair was wrong.
+    //
+    // What it costs is the same thing it cost everywhere else: ios::trunc zeroes the destination
+    // the instant it opens, before writeOcmap's result has landed a byte, so a crash or a full disk
+    // between the open and the write destroys the level rather than failing to update it. That
+    // matters more here than for most savers, because the files this one writes are LEGACY maps --
+    // the records it preserves (ROOT, CLIENT, SURFACE, GROUND, KILLZ, DEFORM) exist precisely
+    // because something old still depends on them, and are the least likely to have a backup.
+    if (!writeFileTextAtomic(path, text)) {
+        if (err) *err = "could not write " + path;
+        return false;
+    }
     return true;
 }
 
