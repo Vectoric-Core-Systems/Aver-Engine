@@ -101,6 +101,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "EditorPrefs.hpp"
 #include "EditorIcons.hpp"
 #include "EditorKeybinds.hpp"
+#include "EditorConsole.hpp"
 #include "EditorEntitySnapshot.hpp"
 #include "aver/platform/DirectoryWatcher.hpp"
 #if AVER_HAVE_ROSLYN
@@ -510,7 +511,7 @@ static const char* kSculptToolNames[4] = {"Raise", "Lower", "Smooth", "Flatten"}
 #endif
 
 // Which bottom drawer is up. Only one at a time.
-enum class Drawer { None, Content, Log };
+enum class Drawer { None, Content, Log, Console };
 
 #if AVER_WITH_IMGUI
 // Fixed editor chrome (toolbar / status bar / dock host): no decoration, never steals focus.
@@ -5554,9 +5555,12 @@ public:
     // Opens a drawer fully open on startup, optionally in a Content subfolder. --drawer.
     void setDrawerOpen(int which, std::string sub) {
         if (!which) return;
-        drawer_ = drawerShown_ = which == 2 ? Drawer::Log : Drawer::Content;
+        drawer_ = drawerShown_ = which == 2 ? Drawer::Log : which == 3 ? Drawer::Console : Drawer::Content;
         drawerAnim_ = 1.0f;
         drawerStartSub_ = std::move(sub);
+        // NOT routed through consoleFocusPending_ (toggleDrawer's own arm): this path is --drawer's
+        // startup hook, whose only real caller is a screenshot/capture script that wants the panel
+        // shown, not the input line stealing keyboard focus out from under it.
     }
     void setFocusScript(bool b) { tools_.armNewScript(b); }  // --new-script
     void setFocusTools(bool b) { tools_.armToolsMenu(b); }   // --tools-menu
@@ -9006,11 +9010,17 @@ private:
             return;
         }
 
-        // Drawer shortcuts: Ctrl+Space toggles the Content Browser, Escape closes an open drawer.
+        // Drawer shortcuts: Ctrl+Space toggles the Content Browser, ` toggles the Console, Escape
+        // closes an open drawer. All three are gated on the SAME !WantTextInput guard, which is why
+        // ` cannot OPEN the console while some other text field has focus elsewhere in the editor --
+        // and once the console's own input line has focus, WantTextInput is what swallows further `
+        // presses too, exactly the existing Ctrl+Space behaviour for Content. Esc still closes the
+        // console from inside it with zero extra code, so this isn't a new inconsistency.
         {
             const ImGuiIO& io = ImGui::GetIO();
             if (!io.WantTextInput && !io.WantCaptureKeyboard) {
                 if (keybinds_.pressed(editor::CommandId::DrawerToggleContent, io)) toggleDrawer(Drawer::Content);
+                if (keybinds_.pressed(editor::CommandId::DrawerToggleConsole, io)) toggleDrawer(Drawer::Console);
                 if (drawer_ != Drawer::None && !ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel) &&
                     keybinds_.pressed(editor::CommandId::DrawerDismiss, io))
                     drawer_ = Drawer::None;
@@ -9108,6 +9118,8 @@ private:
                 uiReg_.track("window.contentBrowser");
                 if (ImGui::MenuItem("Output Log", nullptr, drawer_ == Drawer::Log)) toggleDrawer(Drawer::Log);
                 uiReg_.track("window.outputLogDup");
+                if (ImGui::MenuItem("Console", "`", drawer_ == Drawer::Console)) toggleDrawer(Drawer::Console);
+                uiReg_.track("window.console");
                 if (ImGui::MenuItem("World Settings", nullptr, showWorldSettings_))
                     showWorldSettings_ = !showWorldSettings_;
                 uiReg_.track("window.worldSettings");
@@ -9500,10 +9512,13 @@ private:
             if (on) ImGui::PopStyleColor();
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
         };
-        ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), wsize.x - 250.0f*dpi_));
+        // 250 -> 340: widened for the third (Console) button below; the other two keep their spot.
+        ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), wsize.x - 340.0f*dpi_));
         drawerButton("Content Browser", Drawer::Content, "Show the Content Browser  (Ctrl+Space)");
         ImGui::SameLine();
         drawerButton("Output Log", Drawer::Log, "Show the Output Log");
+        ImGui::SameLine();
+        drawerButton("Console", Drawer::Console, "Show the Console  (`)");
         ImGui::End();
         ImGui::PopStyleVar(2);
 #else
@@ -9545,6 +9560,151 @@ private:
         if (logAutoScroll_ && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4.0f)
             ImGui::SetScrollHereY(1.0f);
         ImGui::EndChild();
+    }
+
+    // The command console: a REPL over editor::consoleCatalog() (help/frametime/get/set/vars --
+    // EditorConsole.hpp). `e` is threaded through exactly the way drawDrawer(Engine&) already threads
+    // it into every other drawer-body method that needs it (drawStatusBar reaches e.device() the same
+    // way just above this in the file).
+    //
+    // ITS OWN SCROLLBACK, NOT logLines_: see the comment on consoleLines_'s own declaration. The
+    // level->colour switch below is copied from drawOutputLog's (Error=red, Warn=amber, Trace=dim,
+    // Info=default) rather than shared, because the two loops differ in exactly one place (no level
+    // filter here) and factoring four lines into a helper for one caller was not worth the indirection.
+    void drawConsole(Engine& e) {
+        // Hands this frame's device to EditorConsole.hpp's post.* variable table, which cannot reach
+        // Engine& itself (ConsoleVar::read takes no arguments -- see its own file comment for why).
+        editor::setConsoleDevice(e.device());
+
+        if (ImGui::SmallButton("Clear")) consoleLines_.clear();
+        ImGui::SameLine();
+        ImGui::Checkbox("Auto-scroll", &consoleAutoScroll_);
+        ImGui::Separator();
+
+        const f32 inputLineH = ImGui::GetFrameHeightWithSpacing();
+        ImGui::BeginChild("##consolescroll", ImVec2(0, -inputLineH), false, ImGuiWindowFlags_HorizontalScrollbar);
+        {
+            for (const LogLine& ln : consoleLines_) {
+                ImVec4 col;
+                switch (ln.level) {
+                    case LogLevel::Error: col = ImVec4(0.95f, 0.40f, 0.38f, 1.0f); break;
+                    case LogLevel::Warn:  col = ImVec4(0.95f, 0.78f, 0.35f, 1.0f); break;
+                    case LogLevel::Trace: col = ImVec4(0.55f, 0.57f, 0.62f, 1.0f); break;
+                    default:              col = ImVec4(0.82f, 0.84f, 0.88f, 1.0f); break;
+                }
+                ImGui::PushStyleColor(ImGuiCol_Text, col);
+                ImGui::TextUnformatted(ln.text.c_str());
+                ImGui::PopStyleColor();
+            }
+        }
+        if (consoleAutoScroll_ && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4.0f)
+            ImGui::SetScrollHereY(1.0f);
+        ImGui::EndChild();
+
+        if (consoleFocusPending_) { ImGui::SetKeyboardFocusHere(); consoleFocusPending_ = false; }
+        ImGui::SetNextItemWidth(-1.0f);
+        const bool submitted = ImGui::InputText("##consoleinput", consoleInput_, sizeof(consoleInput_),
+            ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackHistory |
+            ImGuiInputTextFlags_CallbackCompletion, &SandboxApp::consoleInputCallback, this);
+        if (submitted && consoleInput_[0] != '\0') {
+            runConsoleLine(e, consoleInput_);
+            consoleHistory_.emplace_back(consoleInput_);
+            consoleHistoryPos_ = -1;
+            consoleInput_[0] = '\0';
+            ImGui::SetKeyboardFocusHere(-1);   // keep focus in the input box after Enter
+        }
+    }
+
+    // Splits on whitespace, echoes the line into consoleLines_ as a REPL transcript would, looks the
+    // first token up in editor::consoleCatalog() case-insensitively, and dispatches. UNKNOWN COMMAND
+    // is the one error message the console itself synthesizes -- by definition no handler exists yet
+    // to say it more specifically (see EditorConsole.hpp's own comment on this).
+    //
+    // NO QUOTING SUPPORT: an argument containing a space cannot be expressed. Documented as a known
+    // limit rather than solved -- neither frametime nor get/set/vars ever needs one (a variable name
+    // and a value are each one token).
+    void runConsoleLine(Engine& e, const std::string& line) {
+        consoleLines_.push_back({LogLevel::Info, "> " + line});
+        if (consoleLines_.size() > kMaxConsoleLines) consoleLines_.pop_front();
+
+        std::vector<std::string> tokens;
+        {
+            std::string cur;
+            for (char c : line) {
+                if (std::isspace(static_cast<unsigned char>(c))) { if (!cur.empty()) { tokens.push_back(cur); cur.clear(); } }
+                else cur.push_back(c);
+            }
+            if (!cur.empty()) tokens.push_back(cur);
+        }
+        if (tokens.empty()) return;
+
+        const editor::ConsoleCommandDesc* cmd = editor::findCommand(tokens[0]);
+        auto print = [this](LogLevel lvl, std::string text) {
+            consoleLines_.push_back({lvl, std::move(text)});
+            if (consoleLines_.size() > kMaxConsoleLines) consoleLines_.pop_front();
+        };
+        if (!cmd) {
+            print(LogLevel::Error, "Unknown command '" + tokens[0] + "'. Type 'help' for a list.");
+            return;
+        }
+        const std::vector<std::string> args(tokens.begin() + 1, tokens.end());
+        cmd->handler(*this, e, args, print);
+    }
+
+    // ImGui InputText callback: Up/Down walks consoleHistory_, Tab completes a command name against
+    // editor::consoleCatalog(). Same pattern imgui_demo.cpp's own Console example uses.
+    static int consoleInputCallback(ImGuiInputTextCallbackData* data) {
+        SandboxApp* self = static_cast<SandboxApp*>(data->UserData);
+        if (data->EventFlag == ImGuiInputTextFlags_CallbackHistory) {
+            // consoleHistory_ is most-recent-LAST, so `last` is the newest entry and index 0 is the
+            // oldest. Up walks toward older entries (decreasing index), Down toward newer ones
+            // (increasing index) and back out to the blank line once it walks past the newest.
+            if (self->consoleHistory_.empty()) return 0;
+            const int last = static_cast<int>(self->consoleHistory_.size()) - 1;
+            int pos = self->consoleHistoryPos_;
+            if (data->EventKey == ImGuiKey_UpArrow) {
+                if (pos < 0) pos = last;        // first Up press: jump to the newest entry
+                else if (pos > 0) --pos;
+            } else if (data->EventKey == ImGuiKey_DownArrow) {
+                if (pos < 0) return 0;          // already at the blank line; nothing newer to recall
+                ++pos;
+                if (pos > last) {               // walked past the newest: back to the blank line
+                    self->consoleHistoryPos_ = -1;
+                    data->DeleteChars(0, data->BufTextLen);
+                    return 0;
+                }
+            } else {
+                return 0;
+            }
+            self->consoleHistoryPos_ = pos;
+            data->DeleteChars(0, data->BufTextLen);
+            data->InsertChars(0, self->consoleHistory_[static_cast<size_t>(pos)].c_str());
+        } else if (data->EventFlag == ImGuiInputTextFlags_CallbackCompletion) {
+            // Complete the FIRST token only (a command name); args are never completed in v1.
+            const char* bufStart = data->Buf;
+            const char* wordEnd = data->Buf + data->CursorPos;
+            const char* wordStart = wordEnd;
+            while (wordStart > bufStart && !std::isspace(static_cast<unsigned char>(wordStart[-1]))) --wordStart;
+            if (wordStart != bufStart) return 0;   // only completes the command name, not an argument
+            const std::string_view prefix(wordStart, static_cast<size_t>(wordEnd - wordStart));
+            std::vector<const editor::ConsoleCommandDesc*> matches;
+            for (const editor::ConsoleCommandDesc& c : editor::consoleCatalog())
+                if (c.name.size() >= prefix.size() &&
+                    std::equal(prefix.begin(), prefix.end(), c.name.begin(),
+                               [](char a, char b){ return std::tolower((unsigned char)a) == std::tolower((unsigned char)b); }))
+                    matches.push_back(&c);
+            if (matches.size() == 1) {
+                data->DeleteChars(static_cast<int>(wordStart - bufStart), static_cast<int>(wordEnd - wordStart));
+                data->InsertChars(data->CursorPos, matches[0]->name.c_str());
+                data->InsertChars(data->CursorPos, " ");
+            } else if (matches.size() > 1) {
+                std::string list = "Candidates:";
+                for (const editor::ConsoleCommandDesc* m : matches) list += " " + m->name;
+                self->consoleLines_.push_back({LogLevel::Info, list});
+                if (self->consoleLines_.size() > kMaxConsoleLines) self->consoleLines_.pop_front();
+            }
+        }
+        return 0;
     }
 
     // One root the Content Browser mounts.
@@ -11269,13 +11429,16 @@ private:
         const f32 target = drawer_ == Drawer::None ? 0.0f : 1.0f;
         drawerAnim_ += (target - drawerAnim_) * (1.0f - std::exp(-drawerRate_ * dt));
         if (drawer_ != Drawer::None) drawerShown_ = drawer_;
-        if (drawer_ == Drawer::None && drawerAnim_ < 0.004f) { drawerAnim_ = 0.0f; return; }
+        if (drawer_ == Drawer::None && drawerAnim_ < 0.004f) { drawerAnim_ = 0.0f; drawerPixelH_ = 0.0f; return; }
 
         const ImGuiViewport* mv = ImGui::GetMainViewport();
         const ImVec2 wpos = mv->WorkPos, wsize = mv->WorkSize;
         const f32 statusH = 26.0f * dpi_;
         const f32 fullH = (wsize.y - statusH) * drawerFrac_;
         const f32 h = fullH * drawerAnim_;
+        // PUBLISHED FOR THE VIEWPORT HINT, which is anchored to the viewport's own bottom edge and
+        // would otherwise draw straight through an open drawer -- see drawerPixelH_'s declaration.
+        drawerPixelH_ = h;
 
         ImGui::SetNextWindowPos(ImVec2(wpos.x, wpos.y + wsize.y - statusH - h));
         ImGui::SetNextWindowSize(ImVec2(wsize.x, h));
@@ -11299,18 +11462,21 @@ private:
                                             ImGui::GetColorU32(ImGuiCol_Separator), 1.0f);
 
         if (fontMedium_) ImGui::PushFont(fontMedium_, 0.0f);
-        ImGui::TextUnformatted(drawerShown_ == Drawer::Log ? "Output Log" : "Content Browser");
+        ImGui::TextUnformatted(drawerShown_ == Drawer::Log ? "Output Log" :
+                                drawerShown_ == Drawer::Console ? "Console" : "Content Browser");
         if (fontMedium_) ImGui::PopFont();
         ImGui::SameLine();
-        ImGui::TextDisabled(drawerShown_ == Drawer::Content ? "(Ctrl+Space or Esc to dismiss)" : "(Esc to dismiss)");
+        ImGui::TextDisabled(drawerShown_ == Drawer::Content ? "(Ctrl+Space or Esc to dismiss)" :
+                             drawerShown_ == Drawer::Console ? "(` or Esc to dismiss)" : "(Esc to dismiss)");
         ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), wsize.x - 34.0f * dpi_));
         if (ImGui::Button("X")) drawer_ = Drawer::None;
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Close the drawer");
         ImGui::Separator();
 
         if (ImGui::GetContentRegionAvail().y > ImGui::GetFrameHeight()) {
-            if (drawerShown_ == Drawer::Log) drawOutputLog();
-            else                             drawContentBrowser();
+            if (drawerShown_ == Drawer::Log)          drawOutputLog();
+            else if (drawerShown_ == Drawer::Console) drawConsole(e);
+            else                                       drawContentBrowser();
         }
         ImGui::End();
         ImGui::PopStyleVar(2);
@@ -11320,6 +11486,11 @@ private:
     void toggleDrawer(Drawer d) {
         drawer_ = (drawer_ == d) ? Drawer::None : d;
         if (drawer_ != Drawer::None) drawerRaise_ = true;
+        // Arms the input line's SetKeyboardFocusHere() for the NEXT drawConsole call. Gated on this
+        // flag rather than ImGui::IsWindowAppearing(), because the ##drawer window does not newly
+        // "appear" when switching FROM Content/Log TO Console -- it may already be visible. The flag
+        // targets "the user just chose Console specifically", which IsWindowAppearing cannot tell.
+        if (drawer_ == Drawer::Console) consoleFocusPending_ = true;
     }
 
     // Reads every editor preference into the members that back the widgets.
@@ -11332,6 +11503,7 @@ private:
         drawerRate_         = prefFloat("drawers.slideRate",             drawerRate_);
         logAutoScroll_      = prefBool ("outputLog.autoScroll",          logAutoScroll_);
         logLevelFilter_     = prefInt  ("outputLog.levelFilter",         logLevelFilter_);
+        consoleAutoScroll_  = prefBool ("console.autoScroll",            consoleAutoScroll_);
         showGrid_           = prefBool ("viewport.showGrid",             showGrid_);
         wireframe_          = prefBool ("viewport.wireframe",            wireframe_);
         flySpeed_           = prefFloat("viewport.flySpeed",             flySpeed_);
@@ -11366,6 +11538,7 @@ private:
         setPrefFloat("drawers.slideRate",            drawerRate_);
         setPrefBool ("outputLog.autoScroll",         logAutoScroll_);
         setPrefInt  ("outputLog.levelFilter",        logLevelFilter_);
+        setPrefBool ("console.autoScroll",           consoleAutoScroll_);
         setPrefBool ("viewport.showGrid",            showGrid_);
         setPrefBool ("viewport.wireframe",           wireframe_);
         setPrefFloat("viewport.flySpeed",            flySpeed_);
@@ -12157,7 +12330,23 @@ private:
         }
         ImGui::End();
 
-        ImGui::SetNextWindowPos(ImVec2(vpX_+pad, vpY_+vpH_-pad), ImGuiCond_Always, ImVec2(0,1));
+        // RAISED BY THE OPEN DRAWER'S HEIGHT, and this is a fix rather than a nicety.
+        //
+        // This hint anchors to the VIEWPORT's bottom edge (vpY_ + vpH_), but vpH_ is not reduced when
+        // a drawer opens -- the drawer is an overlay window laid over the bottom of the frame, not a
+        // dock split that resizes the viewport. So the hint kept its old position and the drawer was
+        // simply drawn under it, leaving the hint sitting on top of the drawer's last ~70 px.
+        //
+        // That is cosmetic for the Content Browser and the Output Log, whose bottom row is just more
+        // content. It is NOT cosmetic for the Console, whose bottom row is its INPUT LINE: the one
+        // control the whole tab exists for was invisible underneath this. The overlay is NoInputs, so
+        // clicks and keystrokes always reached the box -- it could be typed into blind, which is
+        // arguably worse than it not working at all.
+        //
+        // drawerPixelH_ is the drawer's ANIMATED height, not its target, so the hint slides up and
+        // down with it instead of jumping. Zero when no drawer is open, which restores the original
+        // position exactly.
+        ImGui::SetNextWindowPos(ImVec2(vpX_+pad, vpY_+vpH_-pad-drawerPixelH_), ImGuiCond_Always, ImVec2(0,1));
         ImGui::SetNextWindowBgAlpha(0.35f);
         ImGui::Begin("##vphint", nullptr, f | ImGuiWindowFlags_NoInputs);
 #if AVER_MODULE_LANDSCAPE
@@ -12567,6 +12756,12 @@ private:
     bool spawnTestDone_=false;       // the spawn is one-shot, done on the first frame scripts are ready
     int32_t spawnTestEntity_=0;      // the spawned test entity, destroyed a few frames later
     int spawnTestFrames_=0;          // frames since the test spawn, so the destroy is one-shot too
+    // The open drawer's CURRENT animated height in pixels, 0 when closed. Written by drawDrawer,
+    // read by the viewport hint so it can sit above the drawer rather than on top of it. Kept as a
+    // published value rather than recomputed at the hint's own site because the height depends on
+    // drawerAnim_, drawerFrac_ and the status-bar height, and a second copy of that arithmetic would
+    // be one more thing to keep in step.
+    f32  drawerPixelH_=0.0f;
     bool playTest_=false;            // --play-test: headless begin_play -> tick -> end_play trigger
     bool playTestBegun_=false;       // begin_play has fired (one-shot, once a GameMode class is declared)
     int  playTestWait_=0;            // frames spent waiting for a GameMode class before giving up
@@ -14750,6 +14945,17 @@ private:
     std::deque<LogLine> logLines_;
     bool                logAutoScroll_ = true;
     int                 logLevelFilter_ = 0;      // 0 = all, 1 = Info+, 2 = Warn+
+    // Console: its OWN scrollback, never logLines_ -- see EditorConsole.hpp's file comment and
+    // drawConsole's own comment for why sharing the engine-wide log firehose would defeat the point
+    // of a REPL transcript. Touched only from the UI thread inside drawConsole(), so unlike
+    // logLines_ it needs no mutex.
+    static constexpr size_t kMaxConsoleLines = 2000;
+    std::deque<LogLine>      consoleLines_;
+    bool                      consoleAutoScroll_ = true;
+    bool                      consoleFocusPending_ = false;   // armed by toggleDrawer(Console)
+    char                      consoleInput_[256] = {};
+    std::vector<std::string>  consoleHistory_;                // command strings, most-recent-last
+    int                       consoleHistoryPos_ = -1;         // -1 = not currently recalling history
     // Content Browser: the folder whose files are listed, and the Import modal's source-path field.
     std::string         cbSelectedDir_;           // empty -> the content root
     char                importPath_[512] = {};
@@ -15435,10 +15641,11 @@ Application* createApplication(int argc, char** argv) {
             keybindTestMode = argv[++i];
             keybindTestAuto = (i+1 < argc && argv[i+1][0] != '-') ? std::atoi(argv[++i]) : 10;
         }
-        // --drawer log|content[:<sub>] opens a bottom drawer, optionally in a Content subfolder.
+        // --drawer log|content[:<sub>]|console opens a bottom drawer, optionally in a Content
+        // subfolder. `console` takes no :<sub> (drawerSub stays unused for it, same as for `log`).
         else if (!std::strcmp(argv[i],"--drawer") && i+1<argc) {
             const char* v = argv[++i];
-            drawerOpen = !std::strcmp(v,"log") ? 2 : 1;
+            drawerOpen = !std::strcmp(v,"log") ? 2 : !std::strcmp(v,"console") ? 3 : 1;
             if (const char* colon = std::strchr(v, ':')) drawerSub = colon + 1;
         }
         else if (!std::strcmp(argv[i],"--msaa") && i+1<argc) msaa=std::atoi(argv[++i]);

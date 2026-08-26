@@ -31,7 +31,7 @@ constexpr KeyName kKeyNames[] = {
     {ImGuiKey_F5,"F5"},{ImGuiKey_F6,"F6"},{ImGuiKey_F7,"F7"},{ImGuiKey_F8,"F8"},
     {ImGuiKey_F9,"F9"},{ImGuiKey_F10,"F10"},{ImGuiKey_F11,"F11"},{ImGuiKey_F12,"F12"},
     {ImGuiKey_Delete,"Delete"},{ImGuiKey_Tab,"Tab"},{ImGuiKey_Space,"Space"},
-    {ImGuiKey_Escape,"Escape"},
+    {ImGuiKey_Escape,"Escape"},{ImGuiKey_GraveAccent,"`"},
 };
 
 const char* keyName(ImGuiKey k) {
@@ -54,6 +54,10 @@ ImGuiKey nameToKey(std::string_view s) {
 //   PlayStop                  -- `IsKeyPressed(ImGuiKey_Escape,false)`, gated on a play session
 //   DrawerDismiss             -- `IsKeyPressed(ImGuiKey_Escape,false)`, gated on a drawer being open
 //   DrawerToggleContent       -- `io.KeyCtrl && IsKeyPressed(ImGuiKey_Space,false)`
+//   DrawerToggleConsole       -- NEW command, not a transcription: the Console tab has no prior
+//                                hardcoded site. Backtick/grave, unmodified -- the Source/Quake/
+//                                Unreal console convention, distinct from Ctrl+Space so the two can't
+//                                collide.
 //   EditDelete                -- `IsKeyPressed(ImGuiKey_Delete,false)`, no modifier gating at all
 //   EditUndo                  -- `io.KeyCtrl && IsKeyPressed(ImGuiKey_Z,false) && !io.KeyShift`
 //   EditRedo                  -- `io.KeyCtrl && IsKeyPressed(ImGuiKey_Y,false)` (Shift unchecked)
@@ -74,6 +78,7 @@ constexpr std::array<KeybindDef, kCommandCount> kDefs = {{
     {CommandId::PlayStop,         "play.stop",         "Stop Play Session",    {ImGuiKey_Escape, false,false,false}, kScopePlaySession, false,false, false},
     {CommandId::DrawerDismiss,       "drawer.dismiss",       "Dismiss Drawer",          {ImGuiKey_Escape, false,false,false}, kScopeDrawerOpen, false,false, false},
     {CommandId::DrawerToggleContent, "drawer.toggleContent", "Toggle Content Browser",  {ImGuiKey_Space,  true, false,false}, kScopeGlobalUI,   true, false, false},
+    {CommandId::DrawerToggleConsole, "drawer.toggleConsole", "Toggle Console",          {ImGuiKey_GraveAccent, false,false,false}, kScopeGlobalUI, false,false, false},
     {CommandId::EditDelete, "edit.delete", "Delete",    {ImGuiKey_Delete, false,false,false}, kViewportScope, false,false, false},
     {CommandId::EditUndo,   "edit.undo",   "Undo",      {ImGuiKey_Z,      true, false,false}, kViewportScope, true, true,  false},
     {CommandId::EditRedo,   "edit.redo",   "Redo",      {ImGuiKey_Y,      true, false,false}, kViewportScope, true, false, false},

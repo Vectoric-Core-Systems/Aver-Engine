@@ -34,7 +34,7 @@ enum class CommandId : u8 {
     SculptRaise, SculptLower, SculptSmooth, SculptFlatten,
     ModeToggleLandscape, ViewFrameSelected,
     PlayReleaseMouse, PlayStop,
-    DrawerDismiss, DrawerToggleContent,
+    DrawerDismiss, DrawerToggleContent, DrawerToggleConsole,
     EditDelete, EditUndo, EditRedo, EditCopy, EditPaste, EditDuplicate,
     Count
 };
