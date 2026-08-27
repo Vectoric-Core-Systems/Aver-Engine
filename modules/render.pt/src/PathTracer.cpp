@@ -24,6 +24,31 @@ constexpr u32 kGroup = 8;
 constexpr u32 kShaderModel = 65;
 constexpr u32 kRayTracingTier = 11;
 
+// RESOURCE BINDING TIER IS DELIBERATELY NOT CHECKED HERE, and this note exists so that stays a
+// decision rather than becoming an oversight someone "fixes" prematurely.
+//
+// The engine as a whole is explicitly not bindless -- RHIResources.hpp:3, a Resource Binding Tier 1
+// commitment that protects the MINIMUM tier (D3D12 FL 11_0: Kepler, GCN 1.0, Haswell). This tracer
+// is gated far above that, to DXR 1.1 hardware, every generation of which reports Binding Tier 3.
+// So the tracer COULD use descriptor indexing without raising the engine's floor, because it is
+// already gated to hardware that has it.
+//
+// It does not need it yet. The integrator binds a fixed four SRVs and one UAV (kSrvCount/kUavCount
+// above) -- TLAS, vertices, indices, instances -- which Tier 1 satisfies comfortably. Adding a
+// resourceBindingTier >= 3 requirement TODAY would refuse the path tracer on hardware where it
+// currently runs correctly, buying nothing.
+//
+// IT BECOMES REQUIRED THE MOMENT MATERIALS DO. Sampling an arbitrary material's textures at a ray
+// hit is precisely what needs an unbounded, dynamically-indexed table; that work is what should add
+// the check, next to the feature that depends on it, so the refusal names a real reason. The
+// capability is already queried (DeviceCaps::resourceBindingTier) and already clampable for testing
+// (CapsOverride::maxResourceBindingTier, the `tier1` token in --force-caps), so nothing has to be
+// built first -- only used.
+//
+// Until then the honest statement is: this tracer requires DXR 1.1 and SM 6.5, and happens to run
+// only on hardware that would also support bindless. That is a coincidence of GPU generations, not
+// an invariant this file enforces.
+
 // MIRRORS cbuffer PtFrame in kPathTracerHLSL, field for field. A shifted field here reads a camera
 // basis as a sample count -- silently, and only in the rendered image.
 struct FrameCB {
