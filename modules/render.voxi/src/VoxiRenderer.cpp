@@ -806,6 +806,11 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
 u64 VoxiRenderer::giDrawsKey() const {
     u64 key = 1469598103934665603ull;
     for (const Draw& d : drawsPrev_) {
+        // SKINNED MESHES ARE NOT IN THIS KEY BECAUSE THEY ARE NOT IN THE VOLUME -- see the matching
+        // skip in voxelizePass, which this has to agree with exactly. Hashing a draw the pass does
+        // not inject would force rebuilds that recompute an identical volume, which is the gate's
+        // whole cost and none of its benefit.
+        if (dev_ && dev_->meshVertexBuffer(d.mesh)) continue;
         key ^= static_cast<u64>(d.mesh);
         key *= 1099511628211ull;
         for (u32 i = 0; i < 16; ++i) {
@@ -1692,9 +1697,35 @@ void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx) {
     // they last held, and the grid would under-voxelise on that device only.
     const Vec3 volCentre{center_[0], center_[1], center_[2]};
     const f32 volRadius = (extent_ > 1.0f ? extent_ : 1.0f) * 1.7320508f;
-    u32 voxelSubmitted = 0, voxelCulled = 0;
+    u32 voxelSubmitted = 0, voxelCulled = 0, voxelSkinned = 0;
 
     for (const Draw& d : drawsPrev_) {
+        // A COMPUTE-SKINNED MESH IS EXCLUDED, DELIBERATELY, AND THIS IS A TRADE RATHER THAN A FIX.
+        //
+        // giDrawsKey hashes mesh handle, world transform and material -- never the vertex buffer a
+        // skinning dispatch rewrites every frame. So once an animated character's TRANSFORM settles,
+        // the gate reports "unchanged" for as long as it stands there, the volume is never rebuilt,
+        // and the character's contribution to indirect light stays frozen at whatever pose happened
+        // to be current during the last rebuild. Measured on a real rig: 2 rebuilt / 62 skipped of
+        // 64 ticks straight through a pose transition.
+        //
+        // This is the same defect the BLAS cache above already carries a comment about ("the
+        // character moves and the shadow does not, and nothing in the raster image shows it"), and
+        // it was fixed there by rebuilding that mesh's structure every frame. THAT REMEDY IS NOT
+        // AVAILABLE HERE. Voxelisation is not per-mesh: there is one volume, and treating a skinned
+        // draw as always-changed forces a FULL revoxelisation every frame any character is on
+        // screen. Measured, that costs the ~96% of GI rebuilds this gate currently avoids in steady
+        // state, on top of the 17.3 ms GI already costs while skipping them -- unaffordable for a
+        // contribution that is small to begin with.
+        //
+        // So the honest interim state is absence rather than a silent freeze: a skinned character
+        // bounces no indirect light, which is wrong in a way that is consistent, documented, visible
+        // in the census below, and matches what PtSceneView::submitDraw already does for the same
+        // reason. Frozen-at-a-stale-pose is wrong in a way nothing reports.
+        //
+        // THE REAL FIX IS PARTIAL REVOXELISATION -- injecting one mesh's region without rebuilding
+        // the whole volume -- which voxelizePass does not support today. Until it does, this.
+        if (dev_ && dev_->meshVertexBuffer(d.mesh)) { ++voxelSkinned; continue; }
         if (d.boundsRadius >= 0.0f && dist(Vec3{d.boundsCentre[0], d.boundsCentre[1], d.boundsCentre[2]},
                                             volCentre) > volRadius + d.boundsRadius) { ++voxelCulled; continue; }
         ++voxelSubmitted;
@@ -1718,9 +1749,14 @@ void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx) {
     // "culled 0", the draws are arriving with boundsRadius < 0 and the cull is a no-op.
     if ((voxelCullLogs_ & (voxelCullLogs_ + 1)) == 0) {
         const u32 considered = voxelSubmitted + voxelCulled;
-        AVER_INFO("[Voxi] voxelize {} draw(s), culled {} outside the volume ({:.0f}%)",
+        // voxelSkinned is reported separately and NOT folded into `considered`: it is not a cull,
+        // it is a capability gap, and averaging it into a cull percentage would hide exactly the
+        // number someone debugging missing indirect light needs to see.
+        AVER_INFO("[Voxi] voxelize {} draw(s), culled {} outside the volume ({:.0f}%), "
+                  "{} skinned draw(s) excluded (they contribute no GI -- see voxelizePass)",
                   voxelSubmitted, voxelCulled,
-                  considered ? 100.0 * static_cast<f64>(voxelCulled) / static_cast<f64>(considered) : 0.0);
+                  considered ? 100.0 * static_cast<f64>(voxelCulled) / static_cast<f64>(considered) : 0.0,
+                  voxelSkinned);
     }
     ++voxelCullLogs_;
 

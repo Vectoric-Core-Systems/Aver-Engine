@@ -5662,7 +5662,7 @@ public:
     void setPtFurnaceTest() { furnaceTest_ = true; ptFurnaceTest_ = true; }        // --pt-furnace
     // --pt-scene seeds the WANT flag syncPtSceneView() reconciles every frame; see that function's
     // own comment for why the actual registration happens there and not here.
-    void setPtSceneView() { ptSceneViewWantEnabled_ = true; }   // --pt-scene
+    void setPtSceneView() { ptSceneViewWantEnabled_ = true; ptSceneViewFromCli_ = true; }   // --pt-scene
     // --pt-scene-toggle-on/--pt-scene-toggle-off [N]: see ptSceneToggleOnAutoFrames_'s own comment.
     // --pt-quality-ramp [N]: see the ramp itself in onUpdate for what it is for.
     void setPtQualityRamp(int everyFrames) {
@@ -6833,8 +6833,40 @@ private:
         // silently turns off a view --pt-scene, a toggle-test flag, or the settings combo itself
         // already asked for this session; reading the CLAMPED vx.settings() (not local `s`) means a
         // manifest requesting PT on hardware that cannot run it does not try to register it anyway.
-        if (project_.pathTracing >= 0)
-            ptSceneViewWantEnabled_ = (vx.settings().pathTracing != voxi::Quality::Off);
+        //
+        // A COMMAND-LINE FLAG OUTRANKS THE MANIFEST, AND NEITHER IS ALLOWED TO BE SILENT.
+        //
+        // The paragraph above guarded the case where RENDER.PATHTRACING is ABSENT. It did not guard
+        // the case where it is PRESENT and says Off: that overwrote the want flag with no log line,
+        // so `--pt-scene` against such a project rendered raster while the flag claimed otherwise
+        // and nothing anywhere said so. Every measurement taken that way is wrong in the direction
+        // that looks plausible, which is the expensive kind. A project's own manifest saying Off is
+        // exactly the situation someone passes --pt-scene to override.
+        //
+        // Precedence is the same as everywhere else here: an explicit CLI flag is a deliberate,
+        // one-session instruction and wins over stored project state. The settings combo and the
+        // toggle-test flags are NOT covered by ptSceneViewFromCli_ on purpose -- those are live
+        // edits made after load, and a project opened mid-session should apply its own manifest
+        // over them, which is what the unguarded assignment below still does.
+        if (project_.pathTracing >= 0) {
+            const bool want = (vx.settings().pathTracing != voxi::Quality::Off);
+            if (ptSceneViewFromCli_ && !want) {
+                // ASSERTED, not merely left alone. An earlier version of this branch only declined
+                // to write the manifest value, which is not the same thing: anything that had set the flag false
+                // in between -- another project applied mid-session, a toggle-test flag -- left the
+                // view off while this line claimed the command line had won. A message that says
+                // what did not happen is worse than no message.
+                ptSceneViewWantEnabled_ = true;
+                AVER_WARN("[Project] RENDER.PATHTRACING in {} asks for Path Tracing Off, but "
+                          "--pt-scene was given -- the command line wins and the path-traced view "
+                          "stays on", project_.manifestPath);
+            } else {
+                if (want != ptSceneViewWantEnabled_)
+                    AVER_INFO("[Project] RENDER.PATHTRACING {} the path-traced view",
+                              want ? "enables" : "disables");
+                ptSceneViewWantEnabled_ = want;
+            }
+        }
         AVER_INFO("[Project] applied render settings from {}", project_.manifestPath);
     }
 
@@ -13111,6 +13143,12 @@ private:
     // syncPtSceneView()'s failure branch): this flag, and PT's registration, must keep working with
     // AVER_MODULE_VOXI off, since --pt-scene has never needed Voxi and still must not.
     bool ptSceneViewWantEnabled_ = false;
+    // --pt-scene WAS GIVEN ON THE COMMAND LINE. Sticky for the session, and separate from the want
+    // flag above because the want flag is written by four different things (the CLI, the settings
+    // combo, the toggle-test flags, and a project manifest) and the question this answers is which
+    // ONE of them asked -- see applyProjectRenderSettings, where a manifest used to silently
+    // outrank a flag a human typed.
+    bool ptSceneViewFromCli_ = false;
     bool ptSceneViewUnavailable_ = false;   // init() refused once this session -- stop re-asking
     // --pt-scene-toggle-on/--pt-scene-toggle-off [N]: VERIFICATION ONLY. Simulates a human flipping
     // the Path Tracing settings-page Quality combo N frames into a bounded run, so a --frames capture can
