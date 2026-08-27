@@ -5928,6 +5928,23 @@ public:
                        aver::f32 outAlbedo[3]) -> bool {
                     if (!set || !constants || bytes != sizeof(pbr::MaterialConstants)) return false;
                     pbr::MaterialSystem& ms = voxiRenderer_.materials();
+                    // THIS EARLY RETURN IS WHY THE VIEW RE-ARMS TWICE ON A STATIC SCENE, and the
+                    // mechanism is worth recording because it looks like a bug in the tracer and is
+                    // not. Until the material system is ready this resolves nothing, so PtSurface
+                    // takes the draw ordinary base colour instead. When ready() flips, the albedo
+                    // every surface reports CHANGES -- and albedo is hashed by drawsKey(), so the
+                    // snapshot key moves and PtSceneView re-arms, resetting the accumulator.
+                    //
+                    // Measured on FirstPerson: two re-arms in the first frames of a completely
+                    // static scene with a fixed camera, costing a few frames out of the ~204 a
+                    // convergence takes. It used to cost more than that -- every re-arm also leaked
+                    // a TLAS, which PathTracer::addScene no longer does.
+                    //
+                    // NOT FIXED HERE because a fix belongs in the CONTRACT, not this lambda: false
+                    // currently means both not-ready-yet and not-ours/un-authored, and PtSceneView
+                    // cannot defer arming on the first without also deferring on the second, which
+                    // would be forever for any level with an un-authored material. Distinguishing
+                    // them is a change to AlbedoResolver signature, not a line here.
                     if (!ms.ready()) return false;
                     if (set == ms.fallbackBindingSet()) return false;   // un-authored: keep the look's colour
                     if (!ms.ownsBindingSet(set)) return false;          // not one of ours at all

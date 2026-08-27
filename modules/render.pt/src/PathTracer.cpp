@@ -110,11 +110,14 @@ void PathTracer::shutdown() {
         // process exit and became a per-toggle leak once a live editor could shut down and re-init a
         // PathTracer repeatedly.
         for (const auto& [mesh, b] : blasCache_) if (b) res_->destroyBlas(b);
-        // TLAS handles are NOT released here, or anywhere in this file: the RHI has no destroyTlas at
-        // all (see IResourceFactory), so every TLAS this object ever built leaks for the life of the
-        // DEVICE, not just of this object -- see resetScene()'s own comment for the identical,
-        // pre-existing, ACCEPTED gap. Not a new cost, only a more visible one now that shutdown() can
-        // run many times in one process instead of once.
+        // THE TLAS STILL CANNOT BE RELEASED: the RHI has no destroyTlas at all (see
+        // IResourceFactory -- BLAS has one, TLAS does not), so what this object allocated outlives
+        // it, for the life of the DEVICE. What changed is the COUNT: addScene now reuses one handle
+        // and grows it by doubling, so a session leaks O(log n) of them rather than one per re-arm.
+        // Removing the last of it needs a real destroyTlas added to the RHI, which is a wider change
+        // than this module.
+        tlas_ = 0;
+        tlasCapacity_ = 0;
         if (pipeline_)    res_->destroyPipeline(pipeline_);
         if (cs_)          res_->destroyShader(cs_);
     }
@@ -148,7 +151,23 @@ u32 PathTracer::addSurface(const PtSurface& s) {
 u32 PathTracer::addScene(const u32* surfaceIds, u32 count) {
     Scene s;
     s.surfaces.assign(surfaceIds, surfaceIds + count);
-    if (res_) s.tlas = res_->createTlas(count ? count : 1);
+    if (res_) {
+        // REUSED, NOT RECREATED -- see tlas_'s declaration for why this used to leak one handle per
+        // re-arm. Grows to the next power of two so a snapshot that gains a single instance does not
+        // allocate again; shrinks never, because a smaller TLAS buys nothing and every allocation
+        // here is permanent until the device goes.
+        const u32 need = count ? count : 1;
+        if (!tlas_ || tlasCapacity_ < need) {
+            u32 cap = tlasCapacity_ ? tlasCapacity_ : 1;
+            while (cap < need) cap <<= 1;
+            const rhi::TlasHandle grown = res_->createTlas(cap);
+            // A failed grow keeps the old handle rather than dropping to zero: too small is a
+            // degraded scene, but zero is no scene at all, and prepare() would then build nothing
+            // while reporting success.
+            if (grown) { tlas_ = grown; tlasCapacity_ = cap; }
+        }
+        s.tlas = tlas_;
+    }
     scenes_.push_back(std::move(s));
     return static_cast<u32>(scenes_.size() - 1);
 }
@@ -420,8 +439,10 @@ void PathTracer::resetScene() {
         // record per SURFACE, and the surface set is exactly what changes.
         if (instanceBuf_) res_->destroyBuffer(instanceBuf_);
         // BLAS handles are NOT released here either, for the same reason.
-        // TLAS handles are still not released at all -- see this method's own header comment for
-        // why that is a known, accepted leak for the intended caller.
+        // THE TLAS IS KEPT, DELIBERATELY, and that is the point of the change: clearing scenes_
+        // below drops the Scene that referenced it, but tlas_ itself survives so the next addScene
+        // reuses it instead of allocating another one that can never be freed. See tlas_'s own
+        // declaration for what that used to cost.
     }
     instanceBuf_ = 0;
     surfaces_.clear();

@@ -179,6 +179,27 @@ private:
     std::vector<PtSurface> surfaces_;
     std::vector<Instance>  instances_;
     std::vector<Scene>     scenes_;
+    // ONE TLAS, REUSED ACROSS RE-ARMS, GROWN ONLY WHEN A SNAPSHOT NEEDS MORE ROOM THAN EVERY
+    // PREVIOUS ONE. Voxi's own pattern (VoxiRenderer.cpp: createTlas(kMaxDraws) once at init, then
+    // buildTlas into it every frame), arrived at here for a sharper reason than tidiness.
+    //
+    // addScene used to call createTlas(count) on EVERY re-arm, sized to that snapshot exactly. The
+    // RHI has no destroyTlas -- BLAS has one, TLAS does not -- so each of those leaked for the life
+    // of the DEVICE. resetScene()'s own comment called that known and accepted, on the stated
+    // grounds that this is "a reference view that re-arms on a genuine STATIC scene change, which
+    // for a level that has finished streaming is rare to never".
+    //
+    // THAT PREMISE IS FALSE AND WAS MEASURED FALSE: the view re-arms three times in the first three
+    // frames of a completely static scene with a fixed camera, and drawsKey() re-arms it again on
+    // any dynamic-draw change. "Rare to never" was describing an intent, not the behaviour.
+    //
+    // Growing rather than fixing at a cap keeps this module free of PtSceneView's kMaxInstances --
+    // a library should not inherit its caller's limit -- and rounding up to a power of two stops a
+    // snapshot that grows by one instance from allocating again. A grow still leaks the old handle,
+    // because it still cannot be destroyed; what changes is that this now happens O(log n) times in
+    // a session instead of once per re-arm.
+    rhi::TlasHandle        tlas_ = 0;
+    u32                    tlasCapacity_ = 0;
     // GEOMETRY IS PER MESH, NOT PER SURFACE, and this is the difference between a re-arm costing
     // 20ms and costing two and a half SECONDS.
     //
