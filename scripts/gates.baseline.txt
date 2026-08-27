@@ -76,7 +76,7 @@ baseline | penumbra | 49,51,55
 baseline | penumbra-rt | 18,25,35
 baseline | sunlit | 89,85,82
 baseline | sunlit-gi | 88,82,75
-baseline | rt-penumbra | 18,25,35
+baseline | rt-penumbra | 58,58,61
 no-rt | centre | 60,22,14
 no-rt | ms | 60,22,14
 no-rt | rt | 60,22,14
@@ -94,7 +94,7 @@ no-rt | penumbra | 49,51,55
 no-rt | penumbra-rt | 49,51,55
 no-rt | sunlit | 89,85,82
 no-rt | sunlit-gi | 88,82,75
-no-rt | rt-penumbra | 18,25,35
+no-rt | rt-penumbra | 87,84,82
 no-ms | centre | 60,22,14
 no-ms | ms | 60,22,14
 no-ms | rt | 65,25,18
@@ -112,7 +112,7 @@ no-ms | penumbra | 49,51,55
 no-ms | penumbra-rt | 18,25,35
 no-ms | sunlit | 89,85,82
 no-ms | sunlit-gi | 88,82,75
-no-ms | rt-penumbra | 18,25,35
+no-ms | rt-penumbra | 58,58,61
 sm60 | centre | 60,22,14
 sm60 | ms | 60,22,14
 sm60 | rt | 60,22,14
@@ -130,7 +130,7 @@ sm60 | penumbra | 49,51,55
 sm60 | penumbra-rt | 49,51,55
 sm60 | sunlit | 89,85,82
 sm60 | sunlit-gi | 88,82,75
-sm60 | rt-penumbra | 18,25,35
+sm60 | rt-penumbra | 87,84,82
 tier1-no-typed-uav | centre | 60,22,14
 tier1-no-typed-uav | ms | 60,22,14
 tier1-no-typed-uav | rt | 65,25,18
@@ -148,7 +148,7 @@ tier1-no-typed-uav | penumbra | 49,51,55
 tier1-no-typed-uav | penumbra-rt | 18,25,35
 tier1-no-typed-uav | sunlit | 89,85,82
 tier1-no-typed-uav | sunlit-gi | 88,82,75
-tier1-no-typed-uav | rt-penumbra | 18,25,35
+tier1-no-typed-uav | rt-penumbra | 58,58,61
 no-cons-raster | centre | 60,22,14
 no-cons-raster | ms | 60,22,14
 no-cons-raster | rt | 65,25,18
@@ -166,7 +166,7 @@ no-cons-raster | penumbra | 49,51,55
 no-cons-raster | penumbra-rt | 18,25,35
 no-cons-raster | sunlit | 89,85,82
 no-cons-raster | sunlit-gi | 88,82,75
-no-cons-raster | rt-penumbra | 18,25,35
+no-cons-raster | rt-penumbra | 58,58,61
 all-off | centre | 60,22,14
 all-off | ms | 60,22,14
 all-off | rt | 60,22,14
@@ -184,7 +184,7 @@ all-off | penumbra | 49,51,55
 all-off | penumbra-rt | 49,51,55
 all-off | sunlit | 89,85,82
 all-off | sunlit-gi | 88,82,75
-all-off | rt-penumbra | 18,25,35
+all-off | rt-penumbra | 87,84,82
 no-dxc | centre | 60,22,14
 no-dxc | ms | 60,22,14
 no-dxc | rt | 60,22,14
@@ -202,7 +202,7 @@ no-dxc | penumbra | 49,51,55
 no-dxc | penumbra-rt | 49,51,55
 no-dxc | sunlit | 89,85,82
 no-dxc | sunlit-gi | 88,82,75
-no-dxc | rt-penumbra | 18,25,35
+no-dxc | rt-penumbra | 87,84,82
 warp | centre | 60,22,14
 warp | ms | 60,22,14
 warp | rt | 65,25,18
@@ -220,4 +220,4 @@ warp | penumbra | 49,50,55
 warp | penumbra-rt | 18,25,35
 warp | sunlit | 89,85,82
 warp | sunlit-gi | 88,82,75
-warp | rt-penumbra | 18,25,35
+warp | rt-penumbra | 58,58,61

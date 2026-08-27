@@ -247,7 +247,31 @@ $Gates = @(
     # The probe is expressed at a PIXEL CENTRE (1510.5/2750, 856.5/1639) rather than at the pixel
     # index. vpW*u truncates, so 0.54909 lands on 1509 and reads the umbra -- one pixel away and the
     # gate silently measures the wrong thing, which cost a full diagnosis to notice.
-    @{ name = 'rt-penumbra';   args = @('--no-gi','--rt','--sun-angle','8.0','--probe-rel','0.5492727','0.5225747') }
+    # RE-PICKED 2026-08-27, and re-picked rather than re-recorded, which is the whole point.
+    #
+    # This gate had gone GREEN AND BLIND. Its recorded value was 18,25,35 -- bit-identical to
+    # `shadow`, i.e. full umbra -- so the one gate that exists to sample a PARTIALLY OCCLUDED
+    # ray-traced pixel was sampling a fully occluded one and passing. Re-recording would have frozen
+    # that in again: the probe was in the wrong place, and a recorder faithfully records whatever the
+    # probe is looking at.
+    #
+    # WHY IT MOVED. The old fraction (0.5492727, 0.5225747) was chosen when the shadow edge sat
+    # there. This release's lighting work -- the fog composite rewrite and the sky-SH ambient among
+    # them -- moved the edge out from under it, which is exactly the drift the header's own
+    # "RE-PICKED, not merely re-recorded" note warns about for the centre probes.
+    #
+    # HOW THE NEW ONE WAS CHOSEN, by the gate's own original criterion rather than by eye: capture
+    # the same flags with --rt and with --no-rt, and take the pixel of largest DISAGREEMENT between
+    # the PCF cascade and RayQuery, scored on the WEAKEST cell of its 3x3 so a sub-pixel slip cannot
+    # collapse it. The winner disagrees by 76 across the entire 3x3 (the old probe disagreed by 0),
+    # and its own 3x3 is UNIFORM at 58,58,61 -- so a slip in any direction reads the same value, even
+    # though the wider 7x7 is dithered by the stochastic sampling, which at one ray per pixel it
+    # unavoidably is.
+    #
+    # AND IT IS GENUINELY PARTIAL: 58,58,61 sits between this scene's umbra (18,25,35) and its
+    # sunlit value (89,85,82), a little over halfway. That is the property the gate is named for and
+    # had lost.
+    @{ name = 'rt-penumbra';   args = @('--no-gi','--rt','--sun-angle','8.0','--probe-rel','0.5672727','0.5149481') }
 )
 
 # Each configuration is a device this machine can be made to look like. `--force-caps` is
