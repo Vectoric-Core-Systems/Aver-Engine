@@ -5119,7 +5119,26 @@ public:
         }
 #endif
         // Selection outline: an enlarged wireframe shell over both passes, interactive runs only.
-        if (hasSelection_ && maxFrames_ == 0) {
+        //
+        // NOT ISSUED AT ALL WHILE A FEATURE HAS TAKEN THE SCENE OVER, and the reason is not that it
+        // would be wasted -- it is that it would be CAPTURED.
+        //
+        // IDevice::drawMesh hands every draw to every registered feature BEFORE it honours
+        // suppressesScene, deliberately: a suppressing feature is usually suppressing precisely
+        // because it is building its own scene from those submissions. PtSceneView is one, and its
+        // submitDraw filters on exactly one thing -- whether the mesh's vertices are compute-written
+        // -- because that is the only distinction it can make. It has no concept of wireframe state
+        // or editor chrome.
+        //
+        // So this draw, an orange shell scaled up 2-12% around the selected mesh, was being folded
+        // into the path tracer's accumulated scene as a second, solid, slightly oversized copy of
+        // whatever you had selected. Filtering it inside drawMesh is not possible: by the time the
+        // call arrives, the fact that it is chrome rather than geometry has been lost.
+        //
+        // The outline being invisible under path tracing is separate and INTENDED -- the Quality
+        // combo's own tooltip says the view "SUPPRESSES the raster view entirely while on". This
+        // does not restore it; it stops the suppressed draw from contaminating what replaced it.
+        if (hasSelection_ && maxFrames_ == 0 && !e.device()->sceneSuppressed()) {
             static constexpr f32 kSelect[4] = {1.0f, 0.62f, 0.12f, 1.0f};   // selection orange
             const Vec3 sp{selectionOutline_.m[3][0], selectionOutline_.m[3][1], selectionOutline_.m[3][2]};
             const f32 camDist = (sp - camPos_).size();

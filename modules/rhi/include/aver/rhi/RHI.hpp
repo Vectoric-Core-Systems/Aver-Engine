@@ -384,6 +384,22 @@ public:
     // is unaffected without writing a line.
     virtual bool deviceLost() const { return false; }
 
+    // TRUE WHEN SOME REGISTERED FEATURE HAS TAKEN THE SCENE OVER -- the path-traced reference view
+    // being the one that does today. Exists so a CALLER can decide not to issue a draw at all,
+    // which is a different question from the one drawMesh already answers internally.
+    //
+    // WHY A CALLER NEEDS TO ASK. drawMesh submits to every feature BEFORE it honours suppression,
+    // and that order is deliberate: a suppressing feature is usually suppressing precisely because
+    // it is building its own scene out of those submissions, so skipping submitDraw would starve it.
+    // The consequence is that an EDITOR-ONLY draw -- a selection outline, a gizmo, anything that is
+    // chrome rather than scene -- is still handed to a feature that has no way to tell chrome from
+    // geometry, and gets baked into its output. Filtering inside drawMesh cannot fix that: by then
+    // the information that this draw is chrome is gone.
+    //
+    // Defaults to false, like deviceLost() above, so a backend that registers no features and every
+    // mock in the tests is unaffected without writing a line.
+    virtual bool sceneSuppressed() const { return false; }
+
     // Per-pass GPU timing, for a caller that wants to know where the frame's time went (the
     // command console's frame-time breakdown is the first one) without going through the periodic
     // AVER_INFO log a backend may print on its own.

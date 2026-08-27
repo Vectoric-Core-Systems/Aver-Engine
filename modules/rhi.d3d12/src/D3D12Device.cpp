@@ -1041,6 +1041,12 @@ public:
     }
 
     bool deviceLost() const override { return deviceLost_; }
+    // The same predicate drawMesh applies internally, exposed so a caller can skip issuing a draw
+    // it knows to be editor chrome. See IDevice::sceneSuppressed.
+    bool sceneSuppressed() const override {
+        for (const IRenderFeature* f : features_) if (f->suppressesScene()) return true;
+        return false;
+    }
     GpuTimingReport gpuTiming() const override;
     void beginFrame() override;
     void endFrame() override;

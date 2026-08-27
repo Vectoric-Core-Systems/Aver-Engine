@@ -1349,6 +1349,18 @@ public:
     IRenderContext* renderContext() override;
     void addRenderFeature(IRenderFeature* f) override;
     void removeRenderFeature(IRenderFeature* f) override;
+    // The same predicate drawMesh applies internally (VulkanDevice.cpp, the suppressesScene early
+    // return), exposed so a caller can decline to issue a draw it knows to be editor chrome rather
+    // than scene geometry. See IDevice::sceneSuppressed for why the filter cannot live in drawMesh.
+    //
+    // IMPLEMENTED HERE RATHER THAN LEFT ON THE DEFAULT even though this backend is off by default:
+    // the default returns false, which would silently mean "nothing is suppressing" on a backend
+    // whose drawMesh has the identical suppression path -- a divergence that would only surface as
+    // a rendering difference between backends, which is the hardest kind to notice.
+    bool sceneSuppressed() const override {
+        for (const IRenderFeature* f : features_) if (f->suppressesScene()) return true;
+        return false;
+    }
     // Non-owning, exactly like addRenderFeature/removeRenderFeature just above -- see
     // D3D12Device::setUpscaler's own comment (D3D12Device.cpp) for the invariant this preserves:
     // null is the PERMANENT default (nothing here ever assigns upscaler_ on its own), and every
