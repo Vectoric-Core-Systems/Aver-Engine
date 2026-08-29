@@ -4768,6 +4768,15 @@ void D3D12Device::endFrame() {
     // is looking for, so the sky fills the missed pixels and leaves every hit alone. Testing the
     // wrong flag here is what left that mode with no clouds, no atmosphere and no sun.
     if (skyEnabled_ && !frameSuppressed_) {
+        // NESTED SPANS, REVERSING A DELIBERATE DECISION, and the reason is a measurement rather than
+        // a preference. "sky+post+ui" measured 8.2ms -- 46% of the frame, the largest span in it --
+        // and it is one opaque bucket covering the sky dome, the blended replay, the post chain, the
+        // overlay AND ImGui's own draw. A number that conflates a fullscreen atmosphere march with an
+        // editor's UI compositing cannot rank anything: at 2750x1639 with a docked editor, the UI may
+        // BE most of it, in which case there is no rendering win in here at all and looking for one
+        // is wasted. Four children make that decidable. Exclusive time on the parent then reports
+        // whatever is genuinely left over.
+        beginGpuSpan("sky dome");
         cmdList_->RSSetViewports(1, &sceneVp);
         cmdList_->RSSetScissorRects(1, &sceneSc);
         bindGraphicsRoot(rootSig_.Get());
@@ -4776,6 +4785,7 @@ void D3D12Device::endFrame() {
         boundPso_ = skyPso_.Get();
         cmdList_->IASetVertexBuffers(0, 0, nullptr);
         cmdList_->DrawInstanced(3, 1, 0, 0);
+        endGpuSpan();   // "sky dome"
     }
 
     // ---- THE BLENDED-MESH FLUSH ----
@@ -4810,6 +4820,12 @@ void D3D12Device::endFrame() {
     // counter nothing reads, or a span nothing else in this pass tree has either, would be asymmetry
     // for its own sake rather than something this change actually needs.
     if (!blendedDraws_.empty() && rhiContext_ && !frameSuppressed_) {
+        // THE LAST UNATTRIBUTED PIECE, AND IT TURNED OUT TO BE THE BIGGEST. With the sky dome,
+        // post chain, overlay and ImGui all split out of "sky+post+ui", that span STILL reported
+        // 4.7ms exclusive -- more than those four put together -- and this replay was the only
+        // unmarked thing left inside it. Naming it turns "the sky-and-post bucket is expensive"
+        // into "the glass is expensive", which is a different problem with a different fix.
+        beginGpuSpan("blended replay");
         // Only the FIRST feature that overridesScenePipeline() is ever asked, exactly the assumption
         // the opaque walk two screens below and drawMeshDepthPrepass above both already make (this
         // engine has never shipped two features overriding the scene pipeline at once). `blended` is
@@ -4929,6 +4945,7 @@ void D3D12Device::endFrame() {
             }
             fovValid_ = false;   // see the block comment above for why this is hygiene, not a fix
         }
+        endGpuSpan();   // "blended replay"
     }
 
     // ---- THE TRANSPARENT PASS ----
@@ -4970,9 +4987,12 @@ void D3D12Device::endFrame() {
         for (IRenderFeature* f : features_) f->transparentPass(*rhiContext_);
     }
 
+    beginGpuSpan("post chain");
     runPostChain(bb);
+    endGpuSpan();   // "post chain"
 
     // ---- overlay features, on the tonemapped backbuffer ----
+    beginGpuSpan("overlay");
     if (rhiContext_ && !features_.empty()) {
         D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtvHeap_->GetCPUDescriptorHandleForHeapStart();
         rtv.ptr += static_cast<SIZE_T>(frameIndex_) * rtvSize_;
@@ -5006,11 +5026,17 @@ void D3D12Device::endFrame() {
     // uiActive_ is false in a build with no UI backend installed -- a game, or an editor tree
     // configured AVER_ENABLE_UI=OFF -- so this is a no-op there, same as the block it replaces always
     // was under #if AVER_WITH_IMGUI, just decided at runtime instead of at compile time.
+    endGpuSpan();   // "overlay" -- closed here rather than at the block above, so the span covers
+                    // every overlay feature and nothing else; ImGui gets its own below.
     if (uiActive_ && uiBackend_) {
+        // THE ONE THAT DECIDES WHETHER ANY OF THIS IS A RENDERING COST. If "editor UI" dominates,
+        // the 8.2ms parent is mostly a docked ImGui at 2750x1639 and a game build never pays it.
+        beginGpuSpan("editor UI");
         D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtvHeap_->GetCPUDescriptorHandleForHeapStart();
         rtv.ptr += static_cast<SIZE_T>(frameIndex_) * rtvSize_;
         cmdList_->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
         boundHeap_ = uiBackend_->render(cmdList_.Get());
+        endGpuSpan();   // "editor UI"
     }
     if (captureReq_ && captureBuf_) {
         auto toCopy = transition(bb, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);

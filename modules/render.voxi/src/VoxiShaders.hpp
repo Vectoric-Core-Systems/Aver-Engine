@@ -1522,8 +1522,26 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
         float4 sceneSpec    = traceCone(i.wpos, R, specAperture);
         // Bounded for the reason coneTracedIndirect is. The sky term is left alone: skyColor is
         // not a gather out of the volume and carries no runaway of its own.
-        ind4.specular       = min(sceneSpec.rgb * gVoxelParams.y, AVER_VOX_MAXRAD) +
-                              skyColor(R) * (1.0 - sceneSpec.a);
+        // THE SKY TERM IS SKIPPED WHERE THE CONE ALREADY SAW A WALL. HLSL does not short-circuit a
+        // multiply: skyColor(R) * (1 - sceneSpec.a) ran the full 32-step atmosphere march even when
+        // the cone came back fully occluded and the result was scaled to nothing. This is the
+        // rough > 0.75 branch -- concrete, cloth, unpolished stone, which is most of a real scene --
+        // so that was the common case paying for a value it then multiplied away.
+        //
+        // THE SAME SHAPE, AND THE SAME FIX, AS averFogInscatter'S OWN THRESHOLD, whose comment
+        // records what it was worth there: "scene draw 8.9ms -> 1.3ms ... 85% of the scene pass and
+        // 41% of the entire frame". That one gates on w > 0.01 and argues the skipped contribution is
+        // under one 8-bit step, so a pixel crossing the threshold cannot band. The argument holds
+        // identically here because the weight is the same kind of quantity -- a [0,1] coverage -- and
+        // the term it scales is bounded radiance.
+        //
+        // 0.004, NOT 0.01, and the difference is deliberate: this weight multiplies a sky that can be
+        // far brighter than the fog reference, so the same visual error needs a tighter cutoff. At
+        // 0.004 the dropped term is at most 0.4% of a sky sample, which stays under a code at 8 bits
+        // for any sky this engine can produce short of the furnace.
+        const float skyWeight = 1.0 - sceneSpec.a;
+        ind4.specular       = min(sceneSpec.rgb * gVoxelParams.y, AVER_VOX_MAXRAD);
+        if (skyWeight > 0.004) ind4.specular += skyColor(R) * skyWeight;
     } else {
         ind4.specular       = skyColor(R);
     }
@@ -2176,8 +2194,26 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         // lobe regardless of which pass is asking.
         float  specAperture = clamp(s.rough * 0.5 + 0.02, 0.02, 0.4);
         float4 sceneSpec    = traceCone(wpos, R, specAperture);
-        ind.specular        = min(sceneSpec.rgb * gVoxelParams.y, AVER_VOX_MAXRAD) +
-                              skyColor(R) * (1.0 - sceneSpec.a);
+        // THE SKY TERM IS SKIPPED WHERE THE CONE ALREADY SAW A WALL. HLSL does not short-circuit a
+        // multiply: skyColor(R) * (1 - sceneSpec.a) ran the full 32-step atmosphere march even when
+        // the cone came back fully occluded and the result was scaled to nothing. This is the
+        // rough > 0.75 branch -- concrete, cloth, unpolished stone, which is most of a real scene --
+        // so that was the common case paying for a value it then multiplied away.
+        //
+        // THE SAME SHAPE, AND THE SAME FIX, AS averFogInscatter'S OWN THRESHOLD, whose comment
+        // records what it was worth there: "scene draw 8.9ms -> 1.3ms ... 85% of the scene pass and
+        // 41% of the entire frame". That one gates on w > 0.01 and argues the skipped contribution is
+        // under one 8-bit step, so a pixel crossing the threshold cannot band. The argument holds
+        // identically here because the weight is the same kind of quantity -- a [0,1] coverage -- and
+        // the term it scales is bounded radiance.
+        //
+        // 0.004, NOT 0.01, and the difference is deliberate: this weight multiplies a sky that can be
+        // far brighter than the fog reference, so the same visual error needs a tighter cutoff. At
+        // 0.004 the dropped term is at most 0.4% of a sky sample, which stays under a code at 8 bits
+        // for any sky this engine can produce short of the furnace.
+        const float skyWeight = 1.0 - sceneSpec.a;
+        ind.specular        = min(sceneSpec.rgb * gVoxelParams.y, AVER_VOX_MAXRAD);
+        if (skyWeight > 0.004) ind.specular += skyColor(R) * skyWeight;
     } else {
         ind.specular        = skyColor(R);
     }
