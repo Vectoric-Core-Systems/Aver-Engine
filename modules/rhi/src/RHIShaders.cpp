@@ -2,6 +2,9 @@
 // structures it feeds, the colour-space helpers, the sky and the camera post.
 #include "aver/rhi/RHIResources.hpp"
 #include "aver/rhi/RHI.hpp"
+#include "aver/rhi/ShaderFiles.hpp"
+
+#include "aver/core/Log.hpp"
 
 #include <cmath>
 #include <string>
@@ -61,7 +64,7 @@ void blackbodySrgb(f32 kelvin, f32 outRgb[3]) {
 namespace {
 
 // Colour space and tonemapping, shared by the scene prelude and the post chain.
-const char* kColorHlsl = R"(
+const char* kColorHlslEmbedded = R"(
 // ACES filmic tonemap fit.
 float3 acesTonemap(float3 x){ return saturate((x*(2.51*x+0.03))/(x*(2.43*x+0.59)+0.14)); }
 // Encodes linear colour to gamma 2.2.
@@ -83,6 +86,35 @@ float3 averInverseTonemap(float3 y) {
 float averLuminance(float3 c){ return dot(c, float3(0.2126, 0.7152, 0.0722)); }
 )";
 
+
+// THE EMBEDDED COPY ABOVE IS THE ORACLE, NOT THE SOURCE, AND ONLY FOR AS LONG AS THIS MOVE TAKES.
+//
+// Moving four and a half thousand lines of HLSL out of C++ literals is a text move, and a text move
+// has exactly one failure worth fearing: the file and the literal differ by something invisible --
+// a trailing space, a lost blank line, a CRLF -- and the shader still compiles while quietly saying
+// something else. Screenshots cannot see that reliably; the run-to-run noise floor in this engine is
+// thousands of bytes.
+//
+// So the two are compared BYTE FOR BYTE at first use. If they match, the compiled shader is
+// necessarily identical and no rendering test is needed for the extraction step at all. If they do
+// not, this says which file and by how much, and falls back to the literal so the engine still runs
+// while it is sorted out. Once every block is moved and this has been seen to pass, the literals and
+// this function go, and shaderFile() is called directly.
+const std::string& colorHlsl() {
+    static const std::string s = [] {
+        const std::string& fromFile = shaderFile("color.hlsli");
+        const std::string  embedded = kColorHlslEmbedded;
+        if (fromFile == embedded) {
+            AVER_INFO("[RHI.Shaders] color.hlsli matches its embedded copy ({} bytes)", embedded.size());
+            return fromFile;
+        }
+        AVER_ERROR("[RHI.Shaders] color.hlsli DIFFERS from the embedded copy (file {} bytes, embedded "
+                   "{} bytes) -- using the embedded one. The extraction is wrong, not the shader.",
+                   fromFile.size(), embedded.size());
+        return embedded;
+    }();
+    return s;
+}
 } // namespace
 
 // The HLSL below hardcodes these; the C++ side reads the constants. Neither can move alone.
@@ -96,7 +128,7 @@ static_assert(kFeatureFrameConstantRegister == 4, "ClusterFrameCB in the cluster
 
 // The shared HLSL prelude. Composed once and cached for the life of the process.
 const char* sharedShaderPrelude() {
-    static const std::string s = std::string(kColorHlsl) + R"(
+    static const std::string s = colorHlsl() + R"(
 // The engine's per-frame block. MIRRORS PerFrameCB field for field.
 cbuffer PerFrame : register(b0) {
     float4x4 gViewProj;
@@ -1148,7 +1180,7 @@ std::string meshGeometryDefines(const PipelineLayout& layout) {
 
 // The camera post chain's HLSL. Composed once and cached.
 const char* postShaderSource() {
-    static const std::string s = std::string(kColorHlsl) + R"(
+    static const std::string s = colorHlsl() + R"(
 // ================= the camera post chain =================
 
 // Constants for every pass in the chain.
