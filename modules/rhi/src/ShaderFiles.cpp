@@ -56,6 +56,25 @@ usize reloadShaderFiles() {
 
 u64 shaderFileRevision() { return g_revision; }
 
+// See the header. Caches under a distinct key so the verified and unverified accessors cannot
+// disagree about what "name" holds.
+const std::string& verifiedShaderFile(std::string_view name, const char* embedded) {
+    static std::map<std::string, std::string, std::less<>> checked;
+    if (const auto it = checked.find(name); it != checked.end()) return it->second;
+
+    const std::string& fromFile = shaderFile(name);
+    std::string expected = embedded ? embedded : "";
+    normaliseNewlines(expected);
+    if (!fromFile.empty() && fromFile == expected) {
+        AVER_INFO("[RHI.Shaders] {} matches its embedded copy ({} bytes)", name, expected.size());
+        return checked.emplace(std::string(name), fromFile).first->second;
+    }
+    AVER_ERROR("[RHI.Shaders] {} DIFFERS from the embedded copy (file {} bytes, embedded {} bytes) "
+               "-- using the embedded one. The extraction is wrong, not the shader.",
+               name, fromFile.size(), expected.size());
+    return checked.emplace(std::string(name), std::move(expected)).first->second;
+}
+
 const std::string& shaderFile(std::string_view name) {
     if (const auto it = g_cache.find(name); it != g_cache.end()) return it->second;
 

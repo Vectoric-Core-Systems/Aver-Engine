@@ -42,6 +42,22 @@ namespace aver::rhi {
 // two errors describing one cause is better than an abort that describes none.
 const std::string& shaderFile(std::string_view name);
 
+// MIGRATION SCAFFOLDING, and it is meant to be deleted.
+//
+// Returns shaderFile(name), having first proved it equals `embedded` byte for byte -- the literal it
+// is replacing. Moving thousands of lines of HLSL out of C++ has exactly one failure worth fearing:
+// the file and the literal differ by something invisible (a trailing space, a lost blank line, a
+// CRLF) and the shader still COMPILES while quietly saying something else. Screenshots cannot see
+// that; this engine's frame-to-frame noise floor is thousands of bytes.
+//
+// A match means the compiled shader is necessarily identical, so no rendering test is owed for the
+// extraction itself. A mismatch is logged with both sizes and FALLS BACK TO THE LITERAL, so the
+// engine keeps running while it is sorted out rather than rendering something subtly wrong.
+//
+// Once every block has been moved and seen to match, the literals and this function go, and callers
+// use shaderFile() directly. If you are reading this and the literals are gone, delete it.
+const std::string& verifiedShaderFile(std::string_view name, const char* embedded);
+
 // Points shaderFile() at a directory to read from BEFORE `<executableDir>/shaders/`.
 //
 // For iterating on shaders without rebuilding: aim it at the source tree and the next reload picks
