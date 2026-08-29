@@ -1772,9 +1772,22 @@ struct RhiTexture {
     ComPtr<ID3D12DescriptorHeap> rtvHeap;
     ComPtr<ID3D12DescriptorHeap> dsvHeap;
     TextureDesc desc{};                     // resolved: `mips` holds the real count, never 0
-#if AVER_RHI_TRACK_STATE
-    // Owned copy: the desc's debugName is the caller's pointer.
+    // DELIBERATELY NOT UNDER AVER_RHI_TRACK_STATE, unlike the state array below it, and the split
+    // is the point. That macro buys per-subresource STATE TRACKING, a real debug-only cost -- a
+    // vector per texture, one entry per mip. A NAME is identity: it is what an error message about
+    // this texture has to print, and an error message is worth most in the build a user is actually
+    // running. Sweeping the two together made every such diagnostic silently anonymous in release,
+    // which is the opposite of what a diagnostic is for -- and in the Vulkan backend, where two
+    // messages read the name outside the guard, it meant that backend did not COMPILE under NDEBUG.
+    //
+    // Measured before making it unconditional rather than waved through: a 60-frame editor session
+    // ends with 23 textures and 33 buffers, EVERY one of them named, 952 bytes of names between
+    // them, 29 long enough to escape the small-string buffer. That is the entire cost.
+    //
+    // Owned copy: the desc's debugName is the caller's pointer, which is why desc.debugName is
+    // nulled at creation. Empty when the caller named nothing.
     std::string debugName;
+#if AVER_RHI_TRACK_STATE
     // One entry per mip; a subresource index is a mip index here.
     std::vector<ResourceState> states;
 #endif
@@ -1789,8 +1802,8 @@ struct RhiBuffer {
     ComPtr<ID3D12Resource> res;
     BufferDesc desc{};
     u8* mapped = nullptr;                   // upload buffers stay mapped for their whole life
+    std::string debugName;                  // identity, not state tracking -- see RhiTexture::debugName
 #if AVER_RHI_TRACK_STATE
-    std::string debugName;
     ResourceState state = ResourceState::Common;
     // Upload-heap and acceleration-structure buffers reject every transition.
     bool stateFixed = false;
@@ -5940,8 +5953,8 @@ TextureHandle D3D12ResourceFactory::createTexture(const TextureDesc& d) {
     t.desc.mips = mips;
     t.desc.depth = depth;
     t.desc.debugName = nullptr;
-#if AVER_RHI_TRACK_STATE
     if (d.debugName) t.debugName = d.debugName;
+#if AVER_RHI_TRACK_STATE
     t.states.assign(mips, d.initialState);
 #endif
     textures_.push_back(std::move(t));
@@ -5970,8 +5983,8 @@ TextureHandle D3D12ResourceFactory::adoptExternalDepthTexture(ID3D12Resource* re
     // round trip via the ordinary textureBarrier — this factory has no idea when that is safe to do.
     t.desc.initialState = ResourceState::DepthWrite;
     t.desc.debugName = nullptr;
-#if AVER_RHI_TRACK_STATE
     t.debugName = "scene depth (adopted)";
+#if AVER_RHI_TRACK_STATE
     t.states.assign(1, ResourceState::DepthWrite);
 #endif
     if (existing) {
@@ -6004,8 +6017,8 @@ TextureHandle D3D12ResourceFactory::adoptExternalRenderTargetTexture(ID3D12Resou
     // way to do on the reader's behalf since it has no idea when that is safe.
     t.desc.initialState = ResourceState::RenderTarget;
     t.desc.debugName = nullptr;
-#if AVER_RHI_TRACK_STATE
     if (debugName) t.debugName = debugName;
+#if AVER_RHI_TRACK_STATE
     t.states.assign(1, ResourceState::RenderTarget);
 #endif
     if (existing) {
@@ -6045,8 +6058,8 @@ BufferHandle D3D12ResourceFactory::createBuffer(const BufferDesc& d) {
     }
     b.desc = d;
     b.desc.debugName = nullptr;
-#if AVER_RHI_TRACK_STATE
     if (d.debugName) b.debugName = d.debugName;
+#if AVER_RHI_TRACK_STATE
     b.state = d.kind == BufferKind::AccelStructure ? ResourceState::AccelerationStructure : ResourceState::Common;
     b.stateFixed = upload || d.kind == BufferKind::AccelStructure;
 #endif

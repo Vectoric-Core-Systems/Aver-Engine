@@ -1845,8 +1845,8 @@ TextureHandle VulkanResourceFactory::createTexture(const TextureDesc& d) {
     t.desc.mips = mips;
     t.desc.depth = depth;
     t.desc.debugName = nullptr;
-#if AVER_RHI_TRACK_STATE
     if (d.debugName) t.debugName = d.debugName;
+#if AVER_RHI_TRACK_STATE
     t.states.assign(mips, d.initialState);
 #endif
     textures_.push_back(std::move(t));
@@ -1907,8 +1907,8 @@ TextureHandle VulkanResourceFactory::adoptExternalDepthTexture(VkImage image, Vk
     // exactly as the D3D12 comment this mirrors says.
     t.desc.initialState = ResourceState::DepthWrite;
     t.desc.debugName = nullptr;
-#if AVER_RHI_TRACK_STATE
     t.debugName = "scene depth (adopted)";
+#if AVER_RHI_TRACK_STATE
     t.states.assign(1, ResourceState::DepthWrite);
 #endif
 
@@ -1966,8 +1966,8 @@ BufferHandle VulkanResourceFactory::createBuffer(const BufferDesc& d) {
                               // hardware is not expected to need it -- flagged, not silently assumed.
     }
     b.desc.debugName = nullptr;
-#if AVER_RHI_TRACK_STATE
     if (d.debugName) b.debugName = d.debugName;
+#if AVER_RHI_TRACK_STATE
     b.state = (d.kind == BufferKind::AccelStructure) ? ResourceState::AccelerationStructure : ResourceState::Common;
     b.stateFixed = upload || d.kind == BufferKind::AccelStructure;
 #endif

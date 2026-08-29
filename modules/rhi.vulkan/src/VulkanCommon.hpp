@@ -974,8 +974,16 @@ struct RhiTexture {
     VkImageView dsvView = VK_NULL_HANDLE;    // depth-attachment view, when ResourceBind::DepthStencil (or isDepthFormatVk)
     std::vector<VkImageView> uavViews;       // one storage-image view per mip, built lazily by setUav
     TextureDesc desc{};                      // resolved: `mips` holds the real count, never 0
-#if AVER_RHI_TRACK_STATE
+    // OUTSIDE AVER_RHI_TRACK_STATE, unlike `states` below -- see D3D12's RhiTexture::debugName for
+    // the reasoning and the measured cost. THIS BACKEND IS WHERE THE MISTAKE SHOWED UP: textureBarrier
+    // and uavBarrierTexture both name the texture in their null-VkImage error, and the comment above
+    // the first one says why -- the validation layer reports the failure at the barrier and not at
+    // whatever left the image null, so the name is "the difference between a one-line fix and a hunt".
+    // The field was on the wrong side of a macro that has nothing to do with naming, so those two
+    // messages did not compile at all under NDEBUG and Aver.RHI.Vulkan had never been built Release.
+    // Moving the field is the whole fix; neither message needed changing.
     std::string debugName;                   // owned copy: the desc's debugName is the caller's pointer
+#if AVER_RHI_TRACK_STATE
     std::vector<ResourceState> states;       // one entry per mip; a subresource index is a mip index here
 #endif
     // The descriptor handed to the UI, cast to u64 -- see uiDescriptor()'s own note that this stays
@@ -1002,8 +1010,8 @@ struct RhiBuffer {
     BufferDesc desc{};
     u8* mapped = nullptr;          // Upload/Readback-kind buffers stay mapped for their whole life
     bool coherent = false;         // see ConstantRing::coherent's identical note
+    std::string debugName;         // identity, not state tracking -- see RhiTexture::debugName
 #if AVER_RHI_TRACK_STATE
-    std::string debugName;
     ResourceState state = ResourceState::Common;
     bool stateFixed = false;       // Upload-heap-equivalent and AccelStructure-kind buffers reject every transition
 #endif
