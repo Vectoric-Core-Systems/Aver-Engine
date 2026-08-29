@@ -81,6 +81,10 @@ public static class Pbr
     [DllImport(Lib)] private static extern int aver_pbr_set_normal_scale(int m, float v);
     [DllImport(Lib)] private static extern float aver_pbr_get_occlusion_strength(int m);
     [DllImport(Lib)] private static extern int aver_pbr_set_occlusion_strength(int m, float v);
+    [DllImport(Lib)] private static extern float aver_pbr_get_ior(int m);
+    [DllImport(Lib)] private static extern int aver_pbr_set_ior(int m, float v);
+    [DllImport(Lib)] private static extern float aver_pbr_get_transmission(int m);
+    [DllImport(Lib)] private static extern int aver_pbr_set_transmission(int m, float v);
     [DllImport(Lib)] private static extern float aver_pbr_get_subsurface_weight(int m);
     [DllImport(Lib)] private static extern int aver_pbr_set_subsurface_weight(int m, float v);
     [DllImport(Lib)] private static extern float aver_pbr_get_subsurface_radius(int m);
@@ -201,6 +205,35 @@ public static class Pbr
         {
             get => aver_pbr_get_occlusion_strength(Handle);
             set => aver_pbr_set_occlusion_strength(Handle, value);
+        }
+
+        /// <summary>
+        /// Refractive index of the substrate. 1.0 is vacuum and the floor; water is about 1.33,
+        /// window glass about 1.5, diamond about 2.42.
+        ///
+        /// Read by the shading path in two places, so this is not a stored-and-ignored number:
+        /// it sets the critical angle for total internal reflection, and it is the physical quantity
+        /// <see cref="Reflectance"/> is derived from — writing one without the other can describe a
+        /// substance that does not exist.
+        /// </summary>
+        public float Ior
+        {
+            get => aver_pbr_get_ior(Handle);
+            set => aver_pbr_set_ior(Handle, value);
+        }
+
+        /// <summary>
+        /// [0,1] how optically see-through the substrate is, independent of where the camera stands.
+        /// It pulls blended coverage down toward (1 - transmission) before the view-angle Fresnel
+        /// term lifts it back at grazing angles, and it scales the diffuse lobe so a transmissive
+        /// surface does not also scatter its full base colour back at the viewer.
+        ///
+        /// This is NOT refraction: light does not bend passing through the surface.
+        /// </summary>
+        public float Transmission
+        {
+            get => aver_pbr_get_transmission(Handle);
+            set => aver_pbr_set_transmission(Handle, value);
         }
 
         /// <summary>

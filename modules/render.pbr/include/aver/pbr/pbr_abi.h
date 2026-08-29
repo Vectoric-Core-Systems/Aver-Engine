@@ -100,6 +100,23 @@ AVER_PBR_ABI float   aver_pbr_get_reflectance(aver_pbr_material m);
 AVER_PBR_ABI int32_t aver_pbr_set_reflectance(aver_pbr_material m, float v);
 AVER_PBR_ABI float   aver_pbr_get_f90(aver_pbr_material m);
 AVER_PBR_ABI int32_t aver_pbr_set_f90(aver_pbr_material m, float v);
+/* The dielectric transmission pair. ior is the refractive index, floored at 1.0 (vacuum) and
+ * ceilinged well past diamond; transmission is how optically see-through the substrate is, in [0,1].
+ *
+ * BOTH REACHED THE GPU LONG BEFORE THEY REACHED THIS HEADER, which is the reason they are being
+ * added now rather than when they were introduced: a field with a parser, a writer, a GPU packing
+ * and a shader consumer but no ABI is one a script cannot read or write at all. ior in particular
+ * now has real consumers -- averTotalInternalReflection in PbrShaders.cpp keys the critical angle
+ * off it -- so authoring it from script is no longer a theoretical want.
+ *
+ * NEITHER IS CLAMPED ON THIS PATH, exactly like reflectance/f90/subsurface above: commit() calls
+ * touch(), not sanitise(). An out-of-range value written here survives until the next load or pack
+ * clamps it. That is the existing contract of every scalar setter in this file, not a new hazard,
+ * but it is worth knowing before driving ior from a slider. */
+AVER_PBR_ABI float   aver_pbr_get_ior(aver_pbr_material m);
+AVER_PBR_ABI int32_t aver_pbr_set_ior(aver_pbr_material m, float v);
+AVER_PBR_ABI float   aver_pbr_get_transmission(aver_pbr_material m);
+AVER_PBR_ABI int32_t aver_pbr_set_transmission(aver_pbr_material m, float v);
 /* Subsurface wrap weight (0 = feature off) and back-scatter lobe width, both in [0,1]. This is a
  * cheap wrap-diffuse approximation, not a BSSRDF: no transport across the mesh, no per-texel
  * thickness, no separate scatter colour (the transmitted light is tinted by baseColorFactor). */

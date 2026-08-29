@@ -30,6 +30,10 @@ public sealed class MaterialBuilder
     private float _reflectance = 0.04f;
     private float _f90 = 1f;
     private float _uvTiling = 100f;
+    // 1.5 and 0 are MaterialDesc's own defaults, so a builder that never touches them emits nothing
+    // and the .ocmat text is unchanged.
+    private float _ior = 1.5f;
+    private float _transmission;
     private float _subsurfaceWeight;
     private float _subsurfaceRadius;
 
@@ -87,6 +91,22 @@ public sealed class MaterialBuilder
     /// view-dependent back-scatter lobe tinted by <see cref="BaseColor"/>. See MaterialDesc for the
     /// full explanation of what this approximates and what it does not.
     /// </summary>
+    /// <summary>
+    /// Refractive index of the substrate: 1.0 vacuum, ~1.33 water, ~1.5 window glass, ~2.42 diamond.
+    /// Sets the critical angle for total internal reflection, and is the quantity
+    /// <see cref="Reflectance"/> is physically derived from — setting one without the other can
+    /// describe a substance that does not exist.
+    /// </summary>
+    public MaterialBuilder Ior(float v) { _ior = v; return this; }
+
+    /// <summary>
+    /// [0,1] how optically see-through the substrate is. Pulls blended coverage toward
+    /// (1 - transmission) before the view-angle Fresnel lifts it back, and scales the diffuse lobe so
+    /// a transmissive surface does not also scatter its full base colour back at the viewer.
+    /// NOT refraction: light does not bend passing through.
+    /// </summary>
+    public MaterialBuilder Transmission(float v) { _transmission = v; return this; }
+
     public MaterialBuilder SubsurfaceWeight(float v) { _subsurfaceWeight = v; return this; }
 
     /// <summary>
@@ -174,6 +194,11 @@ public sealed class MaterialBuilder
         // meaningful to round-trip. Matches modules/formats/src/OcMat.cpp's writer exactly, including
         // subsurfaceRadius riding along unconditionally once weight is set -- it is meaningless
         // without the weight that gates it, so there is no separate "opt in radius alone" case.
+        // OPT-IN, like the subsurface block below and for the same reason: writing "PARAM ior 1.5"
+        // into every material in the tree would diff every fixture to record a value that was already
+        // the default. Compared against the defaults declared above, not against 0.
+        if (_ior != 1.5f)          s.Append("PARAM ior ").Append(Num(_ior)).Append('\n');
+        if (_transmission > 0f)    s.Append("PARAM transmission ").Append(Num(_transmission)).Append('\n');
         if (_subsurfaceWeight > 0f)
         {
             s.Append("PARAM subsurfaceWeight ").Append(Num(_subsurfaceWeight)).Append('\n');

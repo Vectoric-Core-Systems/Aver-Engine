@@ -411,6 +411,20 @@ float aver_pbr_get_f90(aver_pbr_material m) {
 int32_t aver_pbr_set_f90(aver_pbr_material m, float v) {
     MaterialDesc* d = edit(m); if (!d) return 0; d->f90 = v; return commit(m);
 }
+float aver_pbr_get_ior(aver_pbr_material m) {
+    // 1.5 rather than 0 on a bad handle: it is MaterialDesc::ior's own default, and an ior of zero is
+    // not a dim material, it is a nonsensical one that would drive the TIR test to nonsense too.
+    const MaterialDesc* d = read(m); return d ? d->ior : 1.5f;
+}
+int32_t aver_pbr_set_ior(aver_pbr_material m, float v) {
+    MaterialDesc* d = edit(m); if (!d) return 0; d->ior = v; return commit(m);
+}
+float aver_pbr_get_transmission(aver_pbr_material m) {
+    const MaterialDesc* d = read(m); return d ? d->transmission : 0.0f;
+}
+int32_t aver_pbr_set_transmission(aver_pbr_material m, float v) {
+    MaterialDesc* d = edit(m); if (!d) return 0; d->transmission = v; return commit(m);
+}
 float aver_pbr_get_subsurface_weight(aver_pbr_material m) {
     const MaterialDesc* d = read(m); return d ? d->subsurfaceWeight : 0.0f;
 }
