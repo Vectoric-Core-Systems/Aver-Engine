@@ -52,10 +52,22 @@ cbuffer AverMaterial : register(b2) {
 
     // Mirrors MaterialConstants::ior/transmission -- see that struct's comment for why the two
     // fields are not independent, and averBuildSurface below for the one thing gTransmission
-    // currently feeds (the AVER_MAT_ALPHA_BLEND coverage term). gIor is no longer unread: it sets the
-    // critical angle in averTotalInternalReflection. Both are copied into AverAuthored rather than
-    // read directly at their use sites, so a material graph can drive either per pixel; still nothing
-    // here does refraction.
+    // currently feeds (the AVER_MAT_ALPHA_BLEND coverage term).
+    //
+    // gIor IS READ BY NOTHING, and this comment used to claim otherwise -- it said gIor "is no
+    // longer unread: it sets the critical angle in averTotalInternalReflection". That was true
+    // while the total-internal-reflection override existed; the override was removed because it
+    // could not fire legitimately from a rasterised back face (see averBuildSurface's alpha branch
+    // for the Snell argument and the measured cost), and this line went back to being false with it.
+    // The honest state: ior is authored, packed, transported to the GPU and copied into
+    // AverAuthored, and no shading term consumes it. The physically correct consumer is F0 --
+    // F0 = ((1-n)/(1+n))^2 -- which today is authored SEPARATELY as `reflectance`, so a material
+    // can state an ior and a reflectance that contradict each other (M_Glass.ocmat's own comment
+    // warns about exactly that and keeps them in sync by hand). Deriving one from the other would
+    // change F0 for every material that does not already agree, so it is a decision, not a tidy-up.
+    //
+    // Both are copied into AverAuthored rather than read directly at their use sites, so a material
+    // graph can drive either per pixel; still nothing here does refraction.
     float  gIor;
     float  gTransmission;
     // EXPLICIT PADDING, MIRRORING MaterialConstants::_pad0/_pad1. Not load-bearing for THIS cbuffer
@@ -428,34 +440,6 @@ AverAuthored averStockAuthored(float2 uv, float3 geoN) {
     return a;
 }
 
-// Derives the whole surface from what the material authored. This is the material SYSTEM's
-// arithmetic, not any one material's, which is exactly why a graph never gets to restate it.
-// TOTAL INTERNAL REFLECTION: does a ray leaving this surface have anywhere to go?
-//
-// Snell's law says n1 sin(t1) = n2 sin(t2). Leaving a denser medium for air, n1 = ior and n2 = 1,
-// so sin(t2) = ior * sin(t1) -- and once that product exceeds 1 there is NO refracted direction
-// that satisfies the equation. Nothing is transmitted at all; every photon reflects. That is the
-// mirrored underside of a swimming pool, and the bright edge along the inside of a glass block.
-//
-// WHY THIS CANNOT BE LEFT TO THE FRESNEL TERM, which is the tempting shortcut. Schlick's
-// approximation is a fit to the Fresnel equations for light entering a DENSER medium; it rises
-// toward 1 only as the view grazes, and it has no knowledge of a critical angle because in the
-// entering direction there ISN'T one. Feeding it a steeper curve to "look like" TIR gets the shape
-// wrong in the one place it matters: real TIR switches to a perfect mirror ABRUPTLY at the critical
-// angle (48.8 degrees for water, 41.8 for glass) and stays there, rather than easing in over the
-// last few degrees before grazing.
-//
-// EXITING ONLY. Entering a denser medium can never total-internally-reflect -- the refracted ray
-// always exists -- which is why this is gated on backFace and is identically false for every
-// front-facing pixel in the engine.
-bool averTotalInternalReflection(float ndv, float ior, bool exiting) {
-    if (!exiting) return false;
-    // sin^2(t1) from cos(t1); ndv is dot(N, V) with N already flipped to face the eye, so it is
-    // cos(t1) of the ray on its way out.
-    float sin2t1 = saturate(1.0 - ndv * ndv);
-    // sin^2(t2) = (n1/n2)^2 sin^2(t1), with n2 = 1 (air). Past 1 there is no solution: TIR.
-    return (ior * ior) * sin2t1 > 1.0;
-}
 
 AverSurface averBuildSurface(AverVertex v, AverLight l, AverAuthored a, float2 uv) {
     AverSurface s;
@@ -572,12 +556,38 @@ AverSurface averBuildSurface(AverVertex v, AverLight l, AverAuthored a, float2 u
         // already agrees), and luminance is the principled reduction for the rarer case of a
         // translucent, partially metallic surface where F0 is tinted and the channels disagree.
         float fresnelLum = dot(viewFresnel, float3(0.2126, 0.7152, 0.0722));
-        // TOTAL INTERNAL REFLECTION OVERRIDES THE FRESNEL TERM OUTRIGHT, rather than being blended
-        // with it. Past the critical angle the transmitted fraction is not small, it is ZERO -- so
-        // the surface reads as a full mirror and its coverage is complete, whatever the authored
-        // transmission said. gIor finally has a consumer here: it has ridden along in this cbuffer
-        // since it was added, read by nothing (see its declaration's own comment, which says so).
-        if (averTotalInternalReflection(s.ndv, a.ior, s.backFace)) fresnelLum = 1.0;
+        // THERE IS NO TOTAL-INTERNAL-REFLECTION OVERRIDE HERE, AND THERE CANNOT BE ONE, which is a
+        // correction: there WAS one, gated on s.backFace, and it turned every pane of glass in the
+        // engine into a dark slab at 41 degrees off normal.
+        //
+        // TIR needs the ray to be INSIDE the denser medium already. The test used backFace as the
+        // proxy for that, and backFace does not mean it. On a two-sided pane -- and glass is
+        // routinely CULL none, because you walk round it -- backFace is true for the far surface of
+        // the pane as seen from OUTSIDE, which is an ordinary air-to-glass view with the normal
+        // flipped to face the eye. It is also true for a genuine inside-the-medium view. The two
+        // are indistinguishable from a pixel shader, and only the second one can total-internally-
+        // reflect.
+        //
+        // SNELL FORBIDS THE FIRST OUTRIGHT, so this is not a tuning question. Light reaching that
+        // far surface got in through the front one, refracting TOWARD the normal on the way:
+        // sin(t_inside) = sin(t_outside)/n, so t_inside maxes out at asin(1/n) -- 41.1 degrees at
+        // n = 1.52 -- which IS the critical angle. The internal angle can equal it and never exceed
+        // it. A parallel-sided pane viewed from outside cannot produce TIR at any view angle.
+        //
+        // WHAT IT COST, measured on PTTest's glass rail at grazing incidence: the pane read
+        // 127,140,141 against a 203,215,215 background -- a dark sheet where a mirror belongs --
+        // and 174,187,188 with the override gone. The override fired from ndv < 0.753, so it
+        // covered most of the viewing hemisphere, and because it slammed alpha to 1 it replaced the
+        // background with whatever the glass's own reflection happened to be. Face-on was
+        // unaffected (195,206,206 either way), which is why this read as "dark patches" appearing
+        // at an angle rather than as glass being wrong everywhere.
+        //
+        // THE REAL TEST LOOKS LIKE modules/fluids/src/WaterShaders.hpp'S, and that one is correct
+        // and untouched: `bool underwater = gCamPos.z < gWaterState.x` asks whether the EYE is
+        // inside the medium, using the one piece of geometry that answers it, and only then applies
+        // the same critical-angle maths. A material has no equivalent -- there is no per-pixel fact
+        // that says which side of a closed surface the camera is on -- so glass gets ordinary view
+        // Fresnel here, and that is the honest answer rather than a plausible-looking wrong one.
         s.alpha = lerp(baseAlpha, 1.0, saturate(fresnelLum));
     }
 
