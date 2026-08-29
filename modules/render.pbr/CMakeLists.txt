@@ -50,9 +50,8 @@ target_link_libraries(Aver.Render.PBR.Materials PUBLIC Aver.Core Aver.RHI Aver.R
 
 set_target_properties(Aver.Render.PBR.Materials PROPERTIES FOLDER "modules")
 
-# HLSL beside the executable, refreshed on every build. Mirrors modules/rhi/CMakeLists.txt --
+# HLSL beside the executable. Deployed through a stamp with the .hlsl files as DEPENDS, NOT a
+# POST_BUILD command: POST_BUILD runs on a RELINK, and a shader-only edit relinks nothing, so
+# the old text stayed deployed and silently kept being compiled. Mirrors modules/rhi/CMakeLists.txt --
 # see ShaderFiles.hpp for why bin/shaders is the only path a shipped build looks at.
-add_custom_command(TARGET Aver.Render.PBR.Materials POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E copy_directory
-          "${CMAKE_CURRENT_SOURCE_DIR}/shaders" "${CMAKE_BINARY_DIR}/bin/shaders"
-  COMMENT "Aver.Render.PBR.Materials: shaders -> bin/shaders")
+aver_deploy_shaders(Aver.Render.PBR.Materials "${CMAKE_CURRENT_SOURCE_DIR}/shaders")

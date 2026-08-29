@@ -96,3 +96,43 @@ function(aver_check_module_dag)
   endif()
   message(STATUS "Aver: module DAG check passed -- every Aver.* link edge resolves in this configuration")
 endfunction()
+
+# ---------------------------------------------------------------------------------------------
+# aver_deploy_shaders(<target> <dir>) -- copy a module's .hlsl/.hlsli into <build>/bin/shaders.
+#
+# WHY THIS IS NOT A POST_BUILD COMMAND, which is what all three call sites used to be and what the
+# obvious reading of "refreshed on every build" suggests. A POST_BUILD command runs when its TARGET
+# is relinked, and a .hlsl file is not a source of any target -- so editing a shader made nothing
+# out of date, the library did not relink, the copy never ran, and bin/shaders kept the PREVIOUS
+# build's text. The binary then compiled a shader the source tree no longer contained.
+#
+# That failed silently and in the worst possible direction: a shader edit appeared to do nothing,
+# which reads exactly like "the change had no visual effect" rather than "the change was never
+# deployed". It cost a full falsification cycle to notice -- a deliberately broken shader term
+# rendered a correct picture, which is precisely the signature this repository has already been
+# burned by twice (see ShaderFiles.hpp on the static-cache version of the same lie).
+#
+# The fix is a real dependency edge. The .hlsl files become DEPENDS of a custom command with an
+# OUTPUT stamp, so the build graph knows the stamp is stale when any of them changes, and a custom
+# target the library depends on forces it to be considered every build. Ninja then reruns the copy
+# for a shader-only edit -- and, just as importantly, does NOT rerun it when nothing changed.
+function(aver_deploy_shaders target dir)
+    file(GLOB _av_shader_files CONFIGURE_DEPENDS "${dir}/*.hlsl" "${dir}/*.hlsli")
+    if(NOT _av_shader_files)
+        message(FATAL_ERROR "aver_deploy_shaders(${target}): no shaders in ${dir}. A module that "
+                            "deploys nothing is a silent gap -- the shader loader would fall back "
+                            "to an empty string and DXC would blame the missing declarations.")
+    endif()
+    set(_av_stamp "${CMAKE_CURRENT_BINARY_DIR}/${target}.shaders.stamp")
+    add_custom_command(
+        OUTPUT  "${_av_stamp}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/bin/shaders"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_av_shader_files} "${CMAKE_BINARY_DIR}/bin/shaders"
+        COMMAND ${CMAKE_COMMAND} -E touch "${_av_stamp}"
+        DEPENDS ${_av_shader_files}
+        COMMENT "${target}: shaders -> bin/shaders"
+        VERBATIM)
+    add_custom_target(${target}.Shaders DEPENDS "${_av_stamp}")
+    add_dependencies(${target} ${target}.Shaders)
+    set_target_properties(${target}.Shaders PROPERTIES FOLDER "modules/shaders")
+endfunction()
