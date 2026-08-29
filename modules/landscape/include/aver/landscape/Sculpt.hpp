@@ -22,6 +22,15 @@ struct BrushParams {
     f32 strength = 200.0f;      // cm/sample applied at the brush centre at full weight (amount = 1)
     BrushMode mode = BrushMode::Raise;
     f32 flattenTargetCm = 0.0f;
+
+    // Edge softness, 0..1. The radial weight was a fixed smoothstep with no way to reach it, which
+    // made every brush in the editor the same shape -- fine for blocking terrain out, wrong for
+    // cutting a road edge or building a ridge, where a hard rim is the entire point.
+    //
+    // 1 is that original smoothstep, so a caller that never sets this gets exactly the previous
+    // behaviour. 0 is a hard disc: full weight to the rim, nothing past it. Values between raise the
+    // curve toward a plateau, widening the flat top and narrowing the shoulder.
+    f32 falloff = 1.0f;
 };
 
 // The inclusive sample-space rectangle a brush can reach, clamped to the section's grid.

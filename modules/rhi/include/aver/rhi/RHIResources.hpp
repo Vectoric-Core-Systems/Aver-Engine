@@ -35,6 +35,20 @@ enum class Format : u8 {
     R32Uint,      // the only typed format D3D12 guarantees UAV atomics on
     D32Float,     // depth-stencil view format
     R32Typeless,  // aliased depth: DSV sees D32Float, SRV sees R32Float
+    // Two-channel half-float. Scene-resolution screen-space motion vectors are the first consumer
+    // -- see IDevice::gBufferVelocityTexture in RHI.hpp for the exact units (texels/frame,
+    // destination minus source) -- and the reason this is RG rather than RGBA16F's four channels
+    // truncated to two: a fourth, unused channel would be 2 bytes/pixel of pure padding across
+    // every pixel of a target that already exists only because bandwidth was being counted (see
+    // that feature's own task brief: ~54 MB at 2750x1639 for all three new targets together).
+    RG16F,
+    // 10-10-10-2 unorm. Packs a world-space normal (xyz) and a roughness (w) into 4 bytes/pixel --
+    // see IDevice::gBufferNormalRoughnessTexture for the exact encoding (xyz maps [-1,1] to [0,1];
+    // w is roughness, already [0,1], stored as-is). NOT an RGBA8Unorm: 8 bits per normal component
+    // bands visibly on a smoothly curved surface under directional light, which is exactly the
+    // artifact a G-buffer feeding a denoiser or a temporal filter cannot afford to introduce
+    // upstream of the very passes meant to clean an image up, not add a new defect to it.
+    RGB10A2Unorm,
     // Block-compressed, 4x4 texel blocks.
     BC1Unorm,
     BC1UnormSrgb,
@@ -443,6 +457,31 @@ struct TlasInstance {
     //
     // 24 BITS: DXR declares it as a bitfield, so a larger value is rejected rather than truncated.
     u32         instanceId = 0;
+
+    // Per-instance behaviour, as TlasInstanceFlags below.
+    //
+    // AT THE INSTANCE, NOT THE GEOMETRY, and that choice is the reason a translucent surface can cast
+    // a shadow at all here. createBlas hardcodes D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE (and Vulkan's
+    // VK_GEOMETRY_OPAQUE_BIT_KHR) on every geometry it builds, which tells the hardware it may skip
+    // any-hit entirely -- so a Proceed() loop would never be handed a candidate to inspect. The
+    // instance-level ForceNonOpaque flag OVERRIDES that geometry flag for this instance only, which
+    // means opaque geometry keeps the fast path untouched and only the panes that need interception
+    // pay for it. Changing createBlas instead would have made every mesh in the scene non-opaque.
+    u32         flags = 0;
+};
+
+// TlasInstance::flags. Values match D3D12_RAYTRACING_INSTANCE_FLAGS, and the Vulkan backend maps
+// them to the corresponding VkGeometryInstanceFlagBitsKHR rather than assuming the numbers agree.
+enum TlasInstanceFlags : u32 {
+    TlasInstanceFlag_None                = 0,
+    TlasInstanceFlag_TriangleCullDisable = 1u << 0,
+    TlasInstanceFlag_TriangleFrontCcw    = 1u << 1,
+    // Makes every hit on this instance a CANDIDATE rather than a commit, so an inline RayQuery's
+    // Proceed() loop can look at the material and decide. This is what a tinted, attenuated shadow
+    // needs: the ray must be able to pass THROUGH a pane, multiplying transmittance as it goes,
+    // instead of stopping at the first triangle.
+    TlasInstanceFlag_ForceOpaque         = 1u << 2,
+    TlasInstanceFlag_ForceNonOpaque      = 1u << 3,
 };
 // The largest value TlasInstance::instanceId can carry.
 constexpr u32 kMaxTlasInstanceId = 0xFFFFFFu;
@@ -746,11 +785,33 @@ public:
     // Starts a frame's scene submission, so a feature can replay geometry into its own passes.
     virtual void beginScene() {}
     // One scene draw with its whole per-draw shading state. `drawConstants` is BORROWED.
+    //
+    // `blended` marks a TRANSLUCENT draw -- one the backend is about to capture for its own sorted,
+    // blend-enabled replay rather than send down the opaque path (see IDevice::setDrawBlended). It
+    // is offered here rather than withheld because THE RIGHT ANSWER DIFFERS PER FEATURE, and only
+    // the feature knows it:
+    //
+    //   - A RASTER feature should ignore it. Voxelising a pane of glass makes it block indirect
+    //     light; putting it in the sun-shadow cascade makes it cast a solid black shadow; putting it
+    //     in the ray-tracing acceleration structure makes every reflection of it opaque. All three
+    //     are worse than the surface being absent, which is why VoxiRenderer drops these.
+    //   - A PATH TRACER must NOT ignore it. A dielectric is the one thing a path tracer models
+    //     properly -- Fresnel-weighted reflection and refraction with real total internal reflection
+    //     -- and a path tracer that cannot see the glass in the scene it is tracing is not a
+    //     reference for anything. PtSceneView takes these and marks the instance dielectric.
+    //
+    // WITHHOLDING IT WAS THE FIRST DESIGN AND IT WAS WRONG. Blended draws originally returned from
+    // drawMesh BEFORE this loop, which excluded them from every feature at once -- correct for the
+    // three raster consumers above and silently fatal for the path tracer, which then traced a scene
+    // with the glass simply missing. One flag, each feature deciding, is the fix.
+    //
+    // DEFAULTED so an override that does not name the parameter behaves exactly as it did.
     virtual void submitDraw(MeshHandle mesh, const f32 world[16], const f32 baseColor[4],
                             f32 metallic, f32 roughness, BindingSetHandle drawBinding,
-                            const void* drawConstants, u32 drawConstantBytes) {
+                            const void* drawConstants, u32 drawConstantBytes,
+                            bool blended = false) {
         (void)mesh; (void)world; (void)baseColor; (void)metallic; (void)roughness;
-        (void)drawBinding; (void)drawConstants; (void)drawConstantBytes;
+        (void)drawBinding; (void)drawConstants; (void)drawConstantBytes; (void)blended;
     }
 
     // Runs before the scene's render targets are bound — for passes that own their own targets.
@@ -764,8 +825,17 @@ public:
     // why it is auto-consumed rather than sticky). DEFAULTED so every pre-existing caller and every
     // OTHER override compiles and behaves exactly as before: a feature that never looks at the third
     // argument returns the identical pipeline it always did, prepass or not.
-    virtual PipelineHandle scenePipeline(bool meshShaders, bool wireframe, bool depthPrepassed = false) const {
-        (void)meshShaders; (void)wireframe; (void)depthPrepassed; return 0;
+    //
+    // `blended` asks for the SAME shading through an alpha-blend blend state with depth-write off --
+    // the pipeline a translucent material needs. It is never combined with `depthPrepassed`: a
+    // blended draw writes no depth, so there is nothing for a prepass to have written, and
+    // IDevice::drawMesh never routes one down the prepass path (see setDrawBlended). Returning 0 for
+    // it is a legitimate answer meaning "this feature has no blended variant"; the backend then
+    // DROPS the draw rather than silently drawing it opaque, because an opaque pane of glass is a
+    // worse failure than a missing one and a great deal harder to attribute.
+    virtual PipelineHandle scenePipeline(bool meshShaders, bool wireframe, bool depthPrepassed = false,
+                                         bool blended = false) const {
+        (void)meshShaders; (void)wireframe; (void)depthPrepassed; (void)blended; return 0;
     }
     // The DEPTH-ONLY pipeline for a same-frame depth prepass. A caller pairs this with
     // scenePipeline(..., depthPrepassed=true) for the SAME instance later in the frame: this one
@@ -784,6 +854,16 @@ public:
 
     // Whether this feature draws the scene GEOMETRY itself, so the device's own drawMesh path
     // should stand aside. Says nothing about the rest of the frame -- see suppressesWholeFrame.
+    //
+    // ONLY THE FIRST CLAIMANT IN REGISTRATION ORDER PAINTS (D3D12Device/VulkanDevice::beginFrame,
+    // which returns at it). Two features answering true is therefore a real configuration, not an
+    // impossible one, and it is silently decided by the order the host happened to register them in.
+    // That cost a whole raster-versus-ray-driven performance comparison: PtSceneView answered true
+    // unconditionally, so turning ray-driven OFF did not fall back to the rasteriser at all -- it
+    // handed the frame to the path tracer, whose fullscreen blit then measured as "the raster path"
+    // at 0.1ms while every drawMesh() was being dropped. The backends now LOG the collision and name
+    // the winner; a feature that cannot paint this frame should answer false rather than rely on
+    // losing the race.
     virtual bool suppressesScene() const { return false; }
 
     // Whether the suppression above extends to EVERYTHING ELSE IN THE FRAME: the sky pass, the
@@ -861,8 +941,14 @@ enum class UpscalerNeeds : u32 {
     // Scene-resolution depth, same frame, same format as the scene's own depth buffer.
     Depth         = 1u << 0,
     // Scene-resolution, screen-space motion in texels/frame (RG; destination texel minus source
-    // texel). Nothing in this engine produces this today -- FSR2/3 and DLSS both need it; the
-    // built-in upscaler does not ask for it.
+    // texel). UPDATE, now that a producer exists where none did before: IDevice::
+    // gBufferVelocityTexture() (RHI.hpp) writes exactly this quantity, in exactly this layout --
+    // but ONLY while IDevice::setGBufferEnabled(true) is in effect, which defaults to OFF, so an
+    // upscaler asking for this flag against an unmodified build still gets nothing, precisely as
+    // before this existed. Turning the G-buffer on and copying its velocity texture into
+    // UpscalerInput::motionVectors below is deliberately NOT done here -- that wiring is the next
+    // step, not this one (see docs/rendering/DENOISING.md) -- so FSR2/3 and DLSS still cannot be
+    // driven by this flag today even though the data they would need can now be produced.
     MotionVectors = 1u << 1,
     // The sub-pixel offset THIS frame's scene was rendered with, so a temporal accumulator can
     // un-jitter a sample before blending it into history. Nothing jitters the camera today either.

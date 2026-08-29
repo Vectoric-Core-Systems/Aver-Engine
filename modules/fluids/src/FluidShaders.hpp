@@ -3,7 +3,11 @@
 // The fluid surface's HLSL, following WaterShaders.hpp's exact convention: a raw string literal
 // compiled as the TAIL of rhi::sharedShaderPrelude(), which already declares PerFrame at b0
 // (gViewProj, gCamPos, gLightDir/gLightColor among its fields) plus srgbToLin/toGamma/averSunRadiance
-// and the rest of kColorHlsl. Declaration order is load-bearing: HLSL has no forward declarations, so
+// and the rest of kColorHlsl -- AND, since sharedShaderPrelude() is one shared string, skyColor/
+// averSkyIrradiance and plainFresnelSchlick/plainDistGGX/plainGeomSchlick (RHIShaders.cpp, everything
+// it defines before its own #if AVER_MS block). PSFluid below reaches for skyColor and the GGX
+// helpers the same way PSWater does -- see WaterShaders.hpp's own comment on envReflection for why
+// that needs no new binding. Declaration order is load-bearing: HLSL has no forward declarations, so
 // a helper used before it is written compiles in C++ and fails in DXC, AT RUNTIME, on a build that
 // reported success (WaterShaders.hpp's own comment makes the identical point, quoting PtShaders.hpp
 // before it).
@@ -21,7 +25,11 @@ inline constexpr const char* kFluidHLSL = R"(
 // why a field renamed or reordered on one side of this boundary is a silent, image-only bug and not a
 // build error: there is no shared-source mechanism between C++ and HLSL anywhere in this engine).
 cbuffer FluidFrame : register(b4) {
-    float4 gFluidTime;   // x = elapsedSeconds (Timestep::total, threaded through update()); yzw unused
+    float4 gFluidTime;      // x = elapsedSeconds (Timestep::total, threaded through update()); y = the
+                            // volume's FLOOR in world Z, cm (desc.centreCm.z - desc.halfExtentCm.z),
+                            // which is how deep the column below a surface pixel is; zw unused
+    float4 gFluidExtinct;   // rgb = extinction coefficient per CENTIMETRE; a unused
+    float4 gFluidBody;      // rgb = in-scattered body colour; a unused
 };
 
 // ---- the vertex stage ---------------------------------------------------------------------------
@@ -150,39 +158,123 @@ float4 PSFluid(VSFluidOut i) : SV_Target {
     const float kFresnelExponent = 2.0;
     float fresnel = kFresnelF0 + (1.0 - kFresnelF0) * pow(1.0 - NdotV, kFresnelExponent);
 
-    // WaterRenderer.hpp's own DEFAULT shallowColor_/deepColor_ (that header's own comment calls them
-    // "linear; unvalidated placeholders, see README.md") -- reused VERBATIM here rather than
-    // re-derived, on the reasoning that a swimming pool and the ocean grid are the SAME SUBSTANCE and
-    // ought to read as one, and that the tuning pass after this change should have ONE pair of
-    // numbers to move, not two that can silently drift apart from each other.
-    const float3 kDeepColor    = float3(0.02, 0.10, 0.14);
-    const float3 kShallowColor = float3(0.10, 0.30, 0.36);
-    float3 colorLinear = lerp(kDeepColor, kShallowColor, fresnel);
-
-    // Blinn-Phong sun glitter, the identical shape PSWater uses -- gLightDir/gLightColor are already
-    // in the shared PerFrame block at b0, so no new light data is needed. The shininess exponent is
-    // not a physically derived quantity; it is the value WaterShaders.hpp settled on for "reads as a
-    // highlight, not a mirror," ported unchanged rather than re-tuned for a pool this change never
-    // measured against a reference image.
-    const float kSpecularShininess = 128.0;
     float3 L = normalize(gLightDir.xyz);
-    float3 H = normalize(L + V);
-    float specular = pow(saturate(dot(N, H)), kSpecularShininess) * fresnel;
-    colorLinear += averSunRadiance() * specular;
+    float3 R = reflect(-V, N);
 
-    // Straight (NOT premultiplied) alpha, driven by the same Fresnel term -- ported unchanged from
-    // PSWater as a starting point for the tuning phase, not re-derived for this pool's own depth or
-    // material. kAlphaBase is the floor at NdotV=1 (looking straight down, most transparent);
-    // kAlphaFresnelRange is how much a grazing view adds on top of that floor.
-    const float kAlphaBase = 0.08;
-    const float kAlphaFresnelRange = 0.40;
-    float alpha = saturate(kAlphaBase + kAlphaFresnelRange * fresnel);
+    // ---- THE MIRROR TERM: an ACTUAL reflection, exactly PSWater's fix (WaterShaders.hpp), applied
+    // to the same substance. This pool's pipeline compiles against rhi::sharedShaderPrelude() too
+    // (FluidScene::init), so skyColor(R) -- the identical dome function PbrShaders/VoxiShaders/PSWater
+    // all reflect off -- is reachable here for free, the same discovery PSWater's own comment makes
+    // at length: nothing needed binding, the function was already sitting in the prelude this file
+    // already compiled against.
+    //
+    // kShallowColor tints that reflection rather than replacing it -- WaterRenderer.hpp's own default
+    // shallowColor_ value, reused VERBATIM (not re-derived) on the same reasoning this file already
+    // gave for kDeepColor below: a pool and the open ocean are the SAME SUBSTANCE, so the tuning pass
+    // this change leaves open should have ONE pair of numbers to move for both, not two that can
+    // silently drift apart.
+    // UNTINTED, and that is a correction. What stood here multiplied the reflection by
+    // kShallowColor = (0.05, 0.35, 0.45), i.e. it threw away 95% of the red and over half the blue
+    // of whatever the surface was reflecting. A dielectric's Fresnel reflection is ACHROMATIC -- F0
+    // for water is 0.02 in all three channels, which is exactly what `fresnel` below already is --
+    // so the sky arrives at the eye with the sky's own colour, not the water's. Tinting it made the
+    // one term that should have lit the surface at grazing angles the darkest thing in the frame,
+    // which is a large part of why a pool read as a dark sheet from every angle but straight down.
+    // The body colour below is where the water's own colour belongs, and now lives.
+    float3 envReflection = skyColor(R) * fresnel;
+
+    // GGX sun glitter, PSWater's identical Cook-Torrance formula (plainDistGGX/plainGeomSchlick,
+    // RHIShaders.cpp -- this engine's one GGX, reachable here for the same reason skyColor is) in
+    // place of a fixed Blinn-Phong exponent -- see PSWater's own comment for why a fixed exponent
+    // cannot express slope-dependent glitter at all.
+    //
+    // ROUGHNESS IS WIDER HERE THAN PSWater's 0.045, and DELIBERATELY, for the SAME underlying reason
+    // kFresnelExponent above is 2.0 instead of PSWater's 5.0: this mesh is the 8x8x4 soft-body shell
+    // (FluidVolumeDesc's own comment), flat-shaded across a handful of large facets whose normals can
+    // differ by tens of degrees between neighbours as the sim sloshes. A tight GGX lobe reads that
+    // facet-to-facet jump as a sparkly, swimming highlight -- the specular-side version of the exact
+    // blotchy-Fresnel artifact kFresnelExponent's own comment measured and fixed. Widening the lobe is
+    // the equivalent fix for the highlight. UNLIKE kFresnelExponent, this number is NOT measured
+    // against a reference screenshot -- it is reasoned by the same analogy, not verified the same way
+    // -- so treat it as a starting point for the open tuning pass, not a settled constant.
+    const float kFluidRoughness = 0.15;
+    float3 H = normalize(L + V);
+    float ndl = saturate(dot(N, L));
+    float ndh = saturate(dot(N, H));
+    float ggxA = kFluidRoughness * kFluidRoughness;
+    float ggxK = kFluidRoughness + 1.0; ggxK = ggxK * ggxK / 8.0;
+    float D = plainDistGGX(ndh, ggxA);
+    float G = plainGeomSchlick(NdotV, ggxK) * plainGeomSchlick(ndl, ggxK);
+    float specBRDF = (D * G * fresnel) / max(4.0 * NdotV * ndl, 1e-4);
+    float3 sunGlitter = specBRDF * averSunRadiance() * ndl;
+
+    float3 specular = envReflection + sunGlitter;
+
+    // BEER-LAMBERT THROUGH THE WATER COLUMN, replacing a flat constant that could not describe a pool.
+    //
+    // What stood here was `kDeepColor * (1 - fresnel)` against `alpha = 0.08 + 0.40 * fresnel`: a
+    // single hardcoded navy weighted by VIEW ANGLE and nothing else. It has no term for how much
+    // water the eye actually looked through, so a pool could not get bluer toward its deep end, could
+    // not show its floor through the shallows, and read as one flat dark sheet from every angle that
+    // was not grazing -- which is exactly how it looked. The colour was also unreachable: it was a
+    // compiled literal here, a duplicate of WaterRenderer.hpp's own default, and WaterRenderer's
+    // setColors has zero callers in the tree, so no level could ever have changed either copy.
+    //
+    // Real water is not a coloured sheet, it is a VOLUME that absorbs. Absorption is exponential in
+    // path length and strongly per-channel -- red dies within a metre or so, blue survives tens of
+    // metres, and that difference is the whole reason water reads cyan and reads DEEPER cyan the
+    // further you look through it. One exp() gets all of that; no amount of tuning a constant does.
+    float floorZ  = gFluidTime.y;
+    float depthCm = max(i.worldPos.z - floorZ, 0.0);
+    // The SLANT path, not the vertical depth: light reaching the eye from the floor crossed
+    // depth/|V.z| of water, so a shallow view angle looks through far more of it than a top-down one.
+    // Clamped at 0.15 because the true grazing limit is an infinite path -- and it does not matter,
+    // since fresnel has taken the surface to a mirror by then and the body term is being multiplied
+    // by (1 - fresnel) anyway.
+    float pathCm  = depthCm / max(abs(V.z), 0.15);
+    float3 T      = exp(-gFluidExtinct.rgb * pathCm);   // transmittance of the column, per channel
+    float  Tavg   = dot(T, float3(1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0));
+
+    // The composite this is building, through the PremultipliedAlpha blend state
+    // (out = src + dst * (1 - a)), is:
+    //
+    //     out = F * reflection  +  (1 - F) * [ body * (1 - T)  +  background * T ]
+    //
+    // so the coverage the blend needs is a = 1 - (1 - F) * T, and everything else rides in src.
+    // `specular` above is ALREADY Fresnel-weighted (envReflection multiplies by fresnel, and the sun
+    // glitter's BRDF carries it too), so it is the F * reflection term as-is.
+    //
+    // ONE APPROXIMATION, stated rather than hidden: the blend has a single scalar alpha, so the
+    // BACKGROUND can only be attenuated by the average transmittance, while the body colour added on
+    // top keeps its full per-channel (1 - T). The chromatic part of the absorption therefore lands in
+    // what the water ADDS rather than in what it removes. Getting the removal per-channel as well
+    // needs a scene-colour SRV this pass does not have -- IRenderContext::copyTexture exists and is
+    // proven (ThumbnailCache is its one caller), so that is a real follow-up, not a dead end.
+    // THE COLUMN IS LIT, and treating gFluidBody as a finished radiance rather than a scattering
+    // albedo was the other half of the darkness. In-scattered light is albedo TIMES the light that
+    // actually reached the water; a constant cannot track the sun going down, the sky changing, or
+    // the scene's exposure, so a pool lit by a bright noon sky came out the same dim navy as one at
+    // dusk. Zenith sky plus a sun term weighted by its own elevation is the cheap, correct shape:
+    // it is what illuminates a horizontal body of water, and it costs one extra skyColor call.
+    float3 inLight = skyColor(float3(0.0, 0.0, 1.0)) + averSunRadiance() * saturate(L.z) * 0.25;
+    float3 diffuse = (1.0 - fresnel) * gFluidBody.rgb * inLight * (1.0 - T);
+    float  alpha   = saturate(1.0 - (1.0 - fresnel) * Tavg);
 
     // Deliberately NOT calling averApplyFog -- see PSWater's identical comment in WaterShaders.hpp:
     // this is a blended surface sitting in front of pixels the opaque forward pass already fogged,
     // and fogging it a second time would double-apply the same atmosphere to the one surface that is,
     // itself, meant to read as the atmosphere's reflective boundary.
-    return float4(colorLinear, alpha);
+
+    // PREMULTIPLIED, not straight -- see FluidScene.cpp's blend-state comment, and PSWater's identical
+    // fix in WaterShaders.hpp, for the full argument: `specular` must reach the framebuffer at full
+    // strength however transparent this pool is authored to be.
+    //
+    // `diffuse` is NO LONGER multiplied by alpha here, and that is the change, not an oversight. It
+    // used to be a body colour needing to be weighted by coverage; it is now the light actually
+    // scattered back out of the column, (1 - F) * body * (1 - T), which is already an absolute
+    // radiance. Multiplying it by alpha as well would attenuate it twice -- once in its own (1 - T),
+    // once in the coverage derived from that same T.
+    return float4(specular + diffuse, alpha);
 }
 )";
 

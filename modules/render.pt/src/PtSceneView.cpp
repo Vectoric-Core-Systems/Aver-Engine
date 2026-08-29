@@ -266,7 +266,7 @@ void PtSceneView::beginScene() {
 
 void PtSceneView::submitDraw(rhi::MeshHandle mesh, const f32 world[16], const f32 baseColor[4],
                              f32 metallic, f32 roughness, rhi::BindingSetHandle drawBinding,
-                             const void* drawConstants, u32 drawConstantBytes) {
+                             const void* drawConstants, u32 drawConstantBytes, bool blended) {
     (void)metallic; (void)roughness;
     if (mesh == 0) return;
     // STATIC ONLY -- see the class comment's GEOMETRY point. Same predicate
@@ -296,11 +296,13 @@ void PtSceneView::submitDraw(rhi::MeshHandle mesh, const f32 world[16], const f3
     // red (0.86,0.20,0.16) box and a grey (0.48,0.50,0.55) wall, both painted only through
     // surfaceLooks_, traced IDENTICALLY pale blue-grey, differing only by shading.
     //
-    // Nor is the block's SIZE an identity. sizeof(MaterialConstants) is 80 bytes and nothing in the RHI
-    // stops another feature leaving an unrelated 80-byte block sticky in the same slot; it would be
-    // read as a material, silently, and the only symptom would be a wrong colour. The size test held
-    // only because every producer today happens to bind a real material -- an invariant nothing
-    // enforces and no build would catch breaking.
+    // Nor is the block's SIZE an identity. Nothing in the RHI stops another feature leaving an
+    // unrelated, same-sized block sticky in the same slot (and MaterialConstants' own size has
+    // already moved once, as fields were added -- pinning this comment to whatever byte count is
+    // current today would just go stale again); it would be read as a material, silently, and the
+    // only symptom would be a wrong colour. The size test held only because every producer today
+    // happens to bind a real material -- an invariant nothing enforces and no build would catch
+    // breaking.
     //
     // So the question goes to the HOST, which is the only layer that knows what it bound (see
     // setAlbedoResolver, and LandscapeRenderer::setSurfaceBinding for the same division of labour).
@@ -316,6 +318,17 @@ void PtSceneView::submitDraw(rhi::MeshHandle mesh, const f32 world[16], const f3
         d.albedo[1] = baseColor[1];
         d.albedo[2] = baseColor[2];
     }
+
+    // ACCEPT BLENDED DRAWS -- CONTRACT (A)'s WHOLE POINT (see IRenderFeature::submitDraw's own
+    // comment). VoxiRenderer, the other consumer of this same flag, drops these on purpose: a raster
+    // feature has no correct thing to do with a translucent surface (voxelising it blocks indirect
+    // light it should transmit, shadowing it makes an opaque shadow, an acceleration structure makes
+    // every reflection of it solid). A path tracer is the opposite case -- Fresnel-weighted
+    // reflection and refraction is the one thing this integrator can model CORRECTLY for a
+    // dielectric, and dropping the draw would mean tracing a scene with the glass silently missing.
+    // See the class comment's MATERIALS point for why the IOR is a fixed constant and not the real
+    // material's own value.
+    d.ior = blended ? kDefaultGlassIor : 0.0f;
     draws_.push_back(d);
 }
 
@@ -336,6 +349,16 @@ u64 PtSceneView::drawsKey() const {
         for (u32 i = 0; i < 3; ++i) {
             u32 bits = 0;
             std::memcpy(&bits, &d.albedo[i], sizeof(bits));
+            key ^= static_cast<u64>(bits);
+            key *= 1099511628211ull;
+        }
+        // ior HAS TO BE PART OF THIS HASH, not just world/albedo: a draw toggling between opaque and
+        // blended (a material authored translucent, or a debug toggle) changes what this view must
+        // trace it as, and a key that could not see that would leave the OLD scene's material kind
+        // in the accumulator until some UNRELATED change happened to force a re-arm.
+        {
+            u32 bits = 0;
+            std::memcpy(&bits, &d.ior, sizeof(bits));
             key ^= static_cast<u64>(bits);
             key *= 1099511628211ull;
         }
@@ -401,6 +424,7 @@ bool PtSceneView::rebuildScene(rhi::IRenderContext& ctx) {
         s.mesh = d.mesh;
         std::memcpy(s.world, d.world, sizeof(s.world));
         std::memcpy(s.albedo, d.albedo, sizeof(s.albedo));
+        s.ior = d.ior;
         ids.push_back(pt_.addSurface(s));
     }
     if (dropped && !dropCapLogged_) {

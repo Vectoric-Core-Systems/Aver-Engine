@@ -47,6 +47,10 @@ MaterialConstants packMaterial(const MaterialDesc& d) {
     // 0 = no graph, which is the arm the generated averEvalMaterial's `default:` takes. See
     // MaterialDesc::graphId for why the DESCRIPTION carries a runtime-assigned number at all.
     c.graphId           = d.graphId;
+    c.ior               = d.ior;
+    c.transmission      = d.transmission;
+    // c._pad0/_pad1 stay at the zero the `MaterialConstants c{};` above already gave them; nothing
+    // reads them, so there is nothing to assign.
 
     u32 flags = 0;
     for (u32 i = 0; i < kTextureSlotCount; ++i)
@@ -60,6 +64,11 @@ MaterialConstants packMaterial(const MaterialDesc& d) {
                                   MaterialFlag_Layer1NormalMap)))
         flags |= MaterialFlag_SlopeBlend;
     if (d.uvMode == UvMode::WorldAligned) flags |= MaterialFlag_WorldAlignedUv;
+    // POSITIVE sense (set when it DOES cast), so a material packed before this bit existed -- every
+    // one of them, with a zero in bit 13 -- would read as "casts nothing" if the sense were
+    // inverted. castShadow defaults to true, so the positive spelling is the one that agrees with
+    // the default for anything that predates the flag.
+    if (d.castShadow) flags |= MaterialFlag_CastShadow;
     c.flags = flags;
 
     // Reciprocal once per upload rather than per pixel. A tiling of zero or less collapses to zero

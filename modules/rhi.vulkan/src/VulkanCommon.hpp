@@ -1696,6 +1696,10 @@ private:
     // IRenderFeature::suppressesWholeFrame. Kept in lockstep with the D3D12 backend deliberately --
     // a sky that appears on one backend and not the other is the worst shape of bug this repo has.
     bool frameSuppressed_ = false;
+    // Last logged outcome of beginFrame's scene-claim race, so the warning fires on a CHANGE rather
+    // than every frame. Compared, never dereferenced. Mirrors D3D12Device's pair of the same name.
+    const IRenderFeature* lastSuppressWinner_ = nullptr;
+    u32                   lastSuppressClaimants_ = 0;
     SkyAtmosphere sky_{};
     bool wireframe_ = false;
     bool lineDepth_ = true;

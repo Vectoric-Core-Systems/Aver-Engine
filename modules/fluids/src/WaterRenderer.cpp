@@ -276,15 +276,30 @@ bool WaterRenderer::buildPipeline(u32 sampleCount, rhi::Format color, rhi::Forma
     gd.depth.test = true;
     gd.depth.write = false;
 
-    // Straight (non-premultiplied) alpha -- DELIBERATELY NOT ParticleRenderer's convention.
-    // ParticlePS premultiplies rgb by alpha itself (packPremultiplied in ParticleRenderer.cpp) and is
-    // drawn with BlendMode::PremultipliedAlpha to match; PSWater (WaterShaders.hpp) outputs a real,
-    // un-premultiplied alpha straight out of the Fresnel term with colorLinear NOT scaled by it. Using
-    // AlphaBlend here is consequently the CORRECT pairing for this shader's actual output, not an
-    // inconsistency with particles to "fix" by copy-pasting PremultipliedAlpha -- doing that would
-    // double-apply alpha to colorLinear (the blend state's src.rgb*src.a on top of an rgb the shader
-    // never divided out) and darken the water at every grazing angle.
-    gd.blend = rhi::BlendMode::AlphaBlend;
+    // PREMULTIPLIED alpha -- REVERSED from this pipeline's own prior choice, and the reason is worth
+    // stating precisely because this file used to argue the opposite conclusion at this exact line.
+    //
+    // The OLD PSWater output straight alpha: colorLinear = lerp(deepColor, shallowColor, fresnel) plus
+    // a Blinn-Phong highlight, never divided by or otherwise scaled against alpha, so AlphaBlend's
+    // `src.rgb*src.a + dst.rgb*(1-src.a)` was the correct composite for THAT rgb. The defect was never
+    // in the blend math; it was that the rgb being blended had no real reflection in it to protect --
+    // a flat shallowColor constant loses nothing important by being scaled down at low alpha, because
+    // it was never anything but decoration.
+    //
+    // PSWater now outputs a genuine specular term (skyColor(R) mirror reflection plus GGX sun
+    // glitter, WaterShaders.hpp's `specular`) that must land at FULL strength however transparent the
+    // surface is authored to be: a pane of water set to alpha=0.2 still reflects the sky at 100%
+    // strength in real life, exactly the glass defect this whole shading contract (see this module's
+    // brief) exists to fix. Straight AlphaBlend would multiply that reflection by alpha too, which is
+    // the ORIGINAL "flat cartoon" complaint reproducing itself one level deeper the moment a real
+    // reflection existed to attenuate. Premultiplied alpha (rgb = specular + diffuse*alpha, a = alpha
+    // -- PSWater's own final line) sends `specular` through the blend state's ONE(rgb) + INV_SRC_ALPHA
+    // (dst) unattenuated, and only the transmitted body colour (`diffuse`, already multiplied into rgb
+    // by the shader) shrinks with coverage. This is the identical trade ParticleRenderer already made
+    // for the identical reason (packPremultiplied, ParticleRenderer.cpp) -- the two pipelines converge
+    // here not because one was copying the other's convention without cause, but because both now
+    // shade something whose bright term must survive transparency.
+    gd.blend = rhi::BlendMode::PremultipliedAlpha;
 
     // None, not Back: the camera can be above OR below the surface (see Underwater.hpp's whole
     // reason to exist), and underwater must still see the plane from below -- a culled pipeline would

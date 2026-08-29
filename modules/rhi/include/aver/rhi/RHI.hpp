@@ -581,6 +581,39 @@ public:
     // all -- is exactly today's behaviour everywhere this is not explicitly threaded through.
     virtual void setNextDrawPrepassed(bool prepassed) { (void)prepassed; }
 
+    // ---- translucency: the blended-mesh path ----
+    //
+    // Marks every subsequent drawMesh() as TRANSLUCENT until a caller says otherwise. STICKY, like
+    // setDrawBinding and unlike setNextDrawPrepassed just above, and for the same reason
+    // setDrawBinding is: this is a property of the MATERIAL a caller is currently drawing with, not
+    // of one upcoming draw. beginFrame resets it to false, so a caller that never touches it gets
+    // exactly today's behaviour on every draw.
+    //
+    // WHAT A TRUE FLAG ACTUALLY CHANGES, because it is more than a blend state. A blended draw
+    // leaves the opaque path completely, at the very top of drawMesh, BEFORE the IRenderFeature
+    // submitDraw loop -- so a translucent mesh is not voxelised, not put in the ray-tracing
+    // acceleration structure, not drawn into the shadow cascade, and not depth-prepassed. The device
+    // captures it instead, and replays every captured draw sorted BACK-TO-FRONT after the deferred
+    // sky and before IRenderFeature::transparentPass, through
+    // scenePipeline(..., blended = true).
+    //
+    // THE ORDERING IS THE WHOLE POINT AND IT IS NOT NEGOTIABLE. Drawing a blended mesh where the
+    // opaque ones are drawn puts it BEFORE the deferred sky, whose own depth-EQUAL opaque fill then
+    // overwrites it -- the identical failure the particle pass was moved to fix; see
+    // D3D12Device::endFrame's comment at the sky draw. A caller cannot fix this by sorting its own
+    // draw list, because the sky is not in that list. Hence the capture.
+    //
+    // WHAT IT COSTS, stated rather than discovered later: excluded from the acceleration structure
+    // means glass casts no ray-traced shadow and does not appear in a reflection; excluded from
+    // voxelisation means it contributes no GI bounce. Those are the correct FIRST answers -- a pane
+    // of glass that casts a solid black shadow is a worse artefact than one that casts none -- but
+    // they are approximations, not physics, and a later pass that wants coloured transmission
+    // shadows will have to put translucent draws back into the structure with a material flag the
+    // any-hit shader can read.
+    virtual void setDrawBlended(bool blended) { (void)blended; }
+    // What setDrawBlended last set, for a caller that saves and restores it around a nested draw.
+    virtual bool drawBlended() const { return false; }
+
     // Unlit line geometry (grid, gizmos): per-vertex colour, drawn as a line list.
     virtual LineHandle createLineMesh(const LineVertex* verts, u32 count) { (void)verts; (void)count; return 0; }
     virtual void drawLines(LineHandle mesh, const f32 world[16]) { (void)mesh; (void)world; }
@@ -646,6 +679,122 @@ public:
     // no depth buffer to give at all. 0 before the first swapchain resize has run, exactly like every
     // other size-dependent target this interface exposes.
     virtual TextureHandle sceneDepthTexture() { return 0; }
+
+    // ---------------------------------------------------------------------------------------
+    // G-buffer: velocity, view-space depth, and world normal+roughness, written ALONGSIDE the
+    // ordinary forward scene pass at scene resolution -- three extra render targets and nothing
+    // else, added here rather than replacing anything the scene pass already produces.
+    //
+    // WHY THIS EXISTS. Aver is a FORWARD renderer: PSMainVoxi returns a single SV_TARGET, so a
+    // shaded pixel's normal, roughness and depth exist only in that one shader invocation's own
+    // registers and are gone the instant it returns -- never in a texture any LATER pass, compute
+    // or otherwise, can read. That single gap blocks, simultaneously: the vendored FidelityFX
+    // Denoiser (third_party/fidelityfx-denoiser -- its README lists FFX_DNSR_Shadows_ReadDepth /
+    // ReadNormals / ReadVelocity / ReadPreviousDepth as callbacks the HOST must supply, and today
+    // the honest answer to each is "no"), FSR2/3, TAA, and screen-space reflections -- every one of
+    // them is a compute pass that needs to read what a previous pass saw, and until now nothing
+    // could hand it that. It is also why today's temporal reprojection is WRONG for a moving
+    // object: it reprojects THIS frame's world position through LAST frame's camera (gPrevViewProj
+    // in VoxiShaders.hpp), which is only correct for geometry that did not move between frames --
+    // fixing that fully needs a per-instance previous transform this G-buffer does not carry (see
+    // RtInstance's own comment in VoxiRenderer.hpp), but the per-pixel velocity below is the piece
+    // every consumer in the list above needs regardless, and it is what this declares.
+    //
+    // See docs/rendering/DENOISING.md for the fuller design writeup this slice is drawn from.
+    //
+    // ADDITIVE AND DEFAULTED, THE WHOLE WAY DOWN. setGBufferEnabled defaults to OFF, and every
+    // accessor below defaults to its own "nothing here" value (0 for a texture, false/true for the
+    // bools, chosen as whichever is the SAFE reading for a caller that forgot to check
+    // gBufferEnabled() first). A build that never calls setGBufferEnabled(true) -- which is every
+    // build today, since nothing yet does -- allocates none of these three targets, records no
+    // extra writes, and renders a frame BIT-IDENTICAL to one from before this declaration existed.
+    // That is not a nicety: a render-gate oracle (18 gates x 9 configurations) and 89 headless
+    // suites both assume it, and a backend that allocates or writes any of this while reporting
+    // gBufferEnabled() == false would fail both without the failure pointing at why.
+    //
+    // WHO IMPLEMENTS WHAT. This class only declares the surface. Deciding how the three targets are
+    // populated -- which pass writes them, whether that is a same-frame prepass or folded into the
+    // existing forward pass's pixel shader, how a Vulkan backend mid-bring-up stages the work -- is
+    // the backend's call, not this header's; every method here is a virtual with an inert default
+    // specifically so a backend that has not done that work yet keeps compiling and keeps behaving
+    // exactly as it does today.
+    virtual void setGBufferEnabled(bool on) { (void)on; }
+    virtual bool gBufferEnabled() const { return false; }
+
+    // Scene-resolution screen-space motion, Format::RG16F. UNITS: TEXELS PER FRAME, DESTINATION
+    // TEXEL MINUS SOURCE TEXEL -- for a surface point shaded at THIS frame's pixel (x, y), the
+    // stored (vx, vy) satisfies (x, y) - (vx, vy) == the pixel that SAME surface point occupied
+    // LAST frame. This is deliberately the identical convention UpscalerNeeds::MotionVectors
+    // already documents (RHIResources.hpp): FSR2/3, DLSS, and FFX_DNSR_Shadows_ReadVelocity all
+    // read texel-space motion in this direction, and a G-buffer that disagreed with the upscaler
+    // seam's own documented meaning would make "motion vectors" mean two different things
+    // depending on which consumer asked -- exactly the kind of unit mismatch that never shows up
+    // as a compile error or a crash, only as history that reprojects to the wrong pixel.
+    //
+    // 0 when gBufferEnabled() is false or this backend has not implemented the G-buffer -- the same
+    // "absent, not garbage" contract sceneDepthTexture() above already uses. A caller must check
+    // gBufferEnabled() (or simply treat a 0 handle as "nothing to read") rather than assume a
+    // non-zero handle whenever the G-buffer is on; see this method family's own top comment for why
+    // every accessor here defaults to an unambiguous "nothing here" value.
+    virtual TextureHandle gBufferVelocityTexture() { return 0; }
+
+    // Scene-resolution depth, Format::R32Float. UNITS: VIEW-SPACE LINEAR DEPTH -- the shaded
+    // point's Z in camera/view space, equivalently clip-space W before the perspective divide --
+    // and DELIBERATELY NOT the post-projection [0,1] value sceneDepthTexture()'s own depth-stencil
+    // buffer holds. Those two quantities are related by a projection-dependent, NON-LINEAR
+    // remapping (the classic "depth precision" curve), so a consumer that samples this texture and
+    // treats it as ordinary [0,1] depth gets a number wrong by a different factor at every pixel --
+    // not a crash, not an obviously bad image, just quietly incorrect reprojection and reconstructed
+    // world positions. FFX_DNSR_Shadows_ReadDepth / ReadPreviousDepth and any future SSR pass both
+    // want THIS linear form because it is what makes reconstructing a view-space position from a
+    // screen UV a single division rather than an un-projection through the full projection matrix.
+    //
+    // 0 when gBufferEnabled() is false or unimplemented, matching gBufferVelocityTexture() above.
+    virtual TextureHandle gBufferViewZTexture() { return 0; }
+
+    // Scene-resolution normal and roughness, Format::RGB10A2Unorm. xyz: the shaded surface's
+    // WORLD-SPACE (not view-space, not tangent-space) normal, ENCODED from its real range of
+    // [-1, 1] into the unorm-storable range [0, 1] via n*0.5 + 0.5 -- a reader must decode with
+    // n*2 - 1 before using it as a direction, and a reader that forgets the decode gets a vector
+    // that LOOKS plausible (still roughly unit-length-ish, still roughly pointing outward) while
+    // being wrong at every pixel, which is exactly the shape of bug that survives a casual visual
+    // check. w: perceptual roughness, already [0, 1], stored as-is with no further transform -- it
+    // gets only 2 bits of the format's 10/10/10/2 split, which is deliberately coarse: this channel
+    // is read by a denoiser's edge-stopping weight (FFX_DNSR_Shadows_ReadNormals reads roughness
+    // alongside the normal for exactly that), never by anything doing actual PBR shading with it,
+    // so 2-bit banding here costs nothing a consumer of this field would notice.
+    //
+    // 0 when gBufferEnabled() is false or unimplemented, matching the two accessors above.
+    virtual TextureHandle gBufferNormalRoughnessTexture() { return 0; }
+
+    // Previous frame's view-projection -- ROW-MAJOR, ROW-VECTOR, the SAME convention setCamera's
+    // own `viewProj` argument uses above -- valid whenever gBufferEnabled() is true. EVERY temporal
+    // consumer of the three textures above needs this: each is a snapshot of ONE frame, and
+    // reprojecting that snapshot against accumulated history (FFX_DNSR_Shadows_
+    // GetReprojectionMatrix's own job, and this method's direct answer to it) is meaningless
+    // without knowing what camera the frame being reprojected FROM was rendered with. False when
+    // the G-buffer is off or this backend has not implemented it, leaving `outPrevViewProj`
+    // untouched -- the same "ask before you trust it" contract camera() above already uses, and for
+    // the same reason: a caller that skips the check and reads untouched memory as a matrix will
+    // not get a crash, it will get a plausible-looking wrong reprojection.
+    virtual bool gBufferPrevViewProj(f32 outPrevViewProj[16]) const { (void)outPrevViewProj; return false; }
+
+    // True when the three textures above -- and gBufferPrevViewProj, which is meaningless without
+    // them -- do NOT describe a continuous previous frame: the first frame the G-buffer was
+    // enabled, a camera cut, a level load, a change of render resolution, or anything else that
+    // makes "reproject against last frame" produce nonsense rather than merely one frame of stale
+    // data. EVERY temporal consumer must ask this rather than infer it, because getting it wrong is
+    // not a crash and not even reliably visible in isolation -- it is ONE BAD FRAME immediately
+    // after every cut, exactly the shape of defect a single still-frame screenshot review never
+    // catches and a person actually moving the camera always will (this engine's own broken
+    // per-object reprojection, above, is a standing example of a temporal bug nobody noticed until
+    // something moved).
+    //
+    // Defaults to TRUE -- the conservative answer, "assume history is invalid" -- so a caller that
+    // correctly checks this before trusting history, but talks to a backend that has not
+    // implemented the G-buffer at all, drops one frame of temporal reuse rather than silently
+    // accumulating against a previous frame that was never actually rendered into these targets.
+    virtual bool gBufferHistoryInvalid() const { return true; }
 };
 
 // Converts a colour temperature in Kelvin to LINEAR sRGB, normalised so the brightest channel is 1.

@@ -295,7 +295,11 @@ def tool_run(args):
 
     grep = args.get("grep")
     matched = [l.strip() for l in lines if re.search(grep, l)] if grep else []
-    errors = [l.strip() for l in lines if "[ERROR" in l or "[FATAL" in l]
+    # Tags come from levelTag() in modules/core/src/Log.cpp, printed as "[TAG ] message".
+    # "[CRIT" was added when the Critical level was: without it, the one severity that means "this
+    # process may be about to die" was the only one that appeared in NO summary here -- it matched
+    # neither the error nor the warning pattern and vanished silently from every gate run.
+    errors = [l.strip() for l in lines if "[ERROR" in l or "[CRIT" in l or "[FATAL" in l]
     warns = [l.strip() for l in lines if "[WARN" in l]
 
     return {

@@ -399,3 +399,17 @@ endif()
 if(TARGET Aver.Save)
   target_link_libraries(Sandbox PRIVATE Aver.Save)
 endif()
+
+# /bigobj on SandboxApp.cpp specifically.
+#
+# NOT a tuning flag: without it MSVC fails outright with C1128, "number of sections exceeded object
+# file format limit". The COFF object format caps a translation unit at 65,536 sections, and this one
+# file -- the whole editor, every panel, every tool, in one TU -- crossed it. Scoped to the single
+# source that needs it rather than the whole target, so the limit being hit again elsewhere stays a
+# visible event rather than something this line quietly absorbs.
+#
+# The real fix is splitting SandboxApp.cpp up, which is a much larger change than whatever edit
+# happens to be the one that tips it over.
+if(MSVC)
+  set_source_files_properties(src/SandboxApp.cpp PROPERTIES COMPILE_OPTIONS "/bigobj")
+endif()

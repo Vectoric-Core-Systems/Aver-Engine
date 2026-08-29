@@ -19,7 +19,11 @@ RaytracingAccelerationStructure gPtScene : register(t0);
 // MIRRORS rhi::MeshVertex byte for byte; the stride is handed to setSrvBuffer and nothing checks it.
 struct PtVertex   { float3 pos; float3 nrm; float2 uv; };
 // MIRRORS pt::PtInstance: 64 + 4 + 4 + 12 + 4 = 88 bytes, packed tightly with natural alignment.
-struct PtInstance { float4x4 objectToWorld; uint firstIndex; uint firstVertex; float3 albedo; uint pad; };
+// The last field used to be a spare `pad`; it is now `ior`, read as 0.0 for an ordinary Lambertian
+// surface and as a real index of refraction (>0) for a smooth dielectric -- see PtSurface::ior
+// (PathTracer.hpp) for why that single float carries both the kind and the value with no separate
+// flag and no bit-packing.
+struct PtInstance { float4x4 objectToWorld; uint firstIndex; uint firstVertex; float3 albedo; float ior; };
 
 StructuredBuffer<PtVertex>   gPtVerts     : register(t1);
 StructuredBuffer<uint>       gPtIndices   : register(t2);
@@ -52,17 +56,23 @@ cbuffer PtFrame : register(b4) {
 };
 
 // THE DELIBERATE DEFECTS. They are shipped, not commented out, because a check that has never been
-// shown failing proves nothing -- and the two failures below are the exact arithmetic mistakes a
-// cosine-weighted Lambertian estimator is prone to, each with a known wrong answer:
+// shown failing proves nothing -- and the three failures below are the exact arithmetic mistakes
+// each estimator is prone to, each with a known wrong answer:
 //
-//   TIMES_PI  the estimator scaled by PI, which is also what dropping the 1/PI out of the
-//             Lambertian BRDF does. An albedo-1 furnace then reads PI*L instead of L.
-//   NO_COSINE the cosine of the rendering equation dropped from the numerator while the
-//             cosine-weighted pdf stays in the denominator. The estimator becomes albedo/cos,
-//             whose mean over that pdf is 2*albedo, so the furnace reads 2L.
-#define PT_DEFECT_NONE      0
-#define PT_DEFECT_TIMES_PI  1
-#define PT_DEFECT_NO_COSINE 2
+//   TIMES_PI    the LAMBERTIAN estimator scaled by PI, which is also what dropping the 1/PI out of
+//               the BRDF does. An albedo-1 furnace then reads PI*L instead of L.
+//   NO_COSINE   the cosine of the rendering equation dropped from the LAMBERTIAN numerator while the
+//               cosine-weighted pdf stays in the denominator. The estimator becomes albedo/cos,
+//               whose mean over that pdf is 2*albedo, so the furnace reads 2L.
+//   DIELECTRIC_NO_PDF_CANCEL   ptScatterDielectric's Fresnel term applied a SECOND time, as a
+//               multiplicative weight on top of already having been the reflect/refract branch
+//               PROBABILITY. The two are the same number and must cancel to exactly 1 -- this
+//               defect leaves them uncancelled, so a non-absorbing dielectric furnace reads
+//               L*(F0^2 + (1-F0)^2) instead of L. See PtFurnaceTest.cpp for the derivation.
+#define PT_DEFECT_NONE                     0
+#define PT_DEFECT_TIMES_PI                 1
+#define PT_DEFECT_NO_COSINE                2
+#define PT_DEFECT_DIELECTRIC_NO_PDF_CANCEL 3
 
 // ---- sampling ----------------------------------------------------------------------------------
 
@@ -163,8 +173,17 @@ float3 ptEnvironment(float3 dir) { return skyColor(dir); }
 // grows one here too, this is the function that would need the disc-sampling loop that file already
 // has.
 //
-// COSTS ONE EXTRA RayQuery PER HIT, ALWAYS AGAINST THE SAME gPtScene ALREADY BOUND AT t0 -- no new
-// SRV, no new register, no new dependency: this module still links only Aver.RHI and Aver.Core.
+// COSTS ONE EXTRA RayQuery PER DIFFUSE HIT, ALWAYS AGAINST THE SAME gPtScene ALREADY BOUND AT t0 --
+// no new SRV, no new register, no new dependency: this module still links only Aver.RHI and
+// Aver.Core.
+//
+// NOT CALLED AT ALL FOR A DIELECTRIC HIT -- gated at the call site in CSPathTrace, not in here, so a
+// diffuse hit's cost and result are completely unchanged by the dielectric's existence. The formula
+// below is albedo/PI * N.L * sunRadiance, which is the irradiance a LAMBERTIAN surface reflects
+// toward the camera; a smooth dielectric has no diffuse lobe for that formula to be estimating, and
+// a delta BSDF has exactly zero probability of a BRDF-sampled bounce landing on the sun regardless
+// (same reasoning as the "why this does not double-count" note above) -- so there is no compensating
+// term missing, only a term that would not apply.
 float3 ptDirectSun(float3 hitPos, float3 nWS, float3 albedo, float bias, float tMax) {
     float3 L = normalize(gLightDir.xyz);   // "direction TO light" -- see PerFrame in the prelude
     float ndl = dot(nWS, L);
@@ -192,10 +211,20 @@ float3 ptDirectSun(float3 hitPos, float3 nWS, float3 albedo, float bias, float t
 }
 
 // Traces one ray and resolves the surface it hit. False means the ray left the scene.
-bool ptTrace(float3 org, float3 dir, out float3 hitPos, out float3 nWS, out float3 albedo) {
-    hitPos = org;
-    nWS    = float3(0, 0, 1);
-    albedo = float3(0, 0, 0);
+//
+// `entering` IS THE ONE BIT THIS USED TO THROW AWAY. The two-sided flip below always turns nWS to
+// face against the incoming ray -- correct for a Lambertian hit, which only ever cares which side is
+// visible -- but it collapses "hit the front" and "hit the back" into the same output, and a
+// refraction cannot pick n1/n2 versus n2/n1 (entering the medium vs leaving it) without that
+// distinction. Recovered here, from the SAME comparison the flip already made, so a diffuse caller
+// that never reads it gets the identical nWS it always did.
+bool ptTrace(float3 org, float3 dir, out float3 hitPos, out float3 nWS, out float3 albedo,
+            out float ior, out bool entering) {
+    hitPos   = org;
+    nWS      = float3(0, 0, 1);
+    albedo   = float3(0, 0, 0);
+    ior      = 0.0;
+    entering = true;
 
     RayDesc r;
     r.Origin    = org;
@@ -221,18 +250,26 @@ bool ptTrace(float3 org, float3 dir, out float3 hitPos, out float3 nWS, out floa
     float3 w = float3(1.0 - bary.x - bary.y, bary.x, bary.y);
     float3 nObj = normalize(gPtVerts[i0].nrm * w.x + gPtVerts[i1].nrm * w.y + gPtVerts[i2].nrm * w.z);
     // Rotation only. The engine is row-vector, so a direction is the vector times the upper 3x3.
-    nWS = normalize(mul(float4(nObj, 0.0), inst.objectToWorld).xyz);
+    float3 nGeom = normalize(mul(float4(nObj, 0.0), inst.objectToWorld).xyz);
     // TWO-SIDED, on purpose. The furnace's claim is about geometry, and a surface that is dark from
     // behind would make the answer depend on which way a triangle was wound -- turning an authoring
     // mistake into an energy failure and hiding a real one.
-    if (dot(nWS, dir) > 0.0) nWS = -nWS;
+    //
+    // `entering` is recorded from EXACTLY the condition the flip below used to apply unconditionally
+    // (dot(nGeom, dir) > 0 means the ray struck the side the mesh's own winding calls the back, so
+    // the flip fires and entering is false); nWS ends up bit-identical to the old single-line version
+    // either way, since `entering ? nGeom : -nGeom` IS that flip, just with its condition named.
+    entering = !(dot(nGeom, dir) > 0.0);
+    nWS = entering ? nGeom : -nGeom;
 
     hitPos = org + dir * q.CommittedRayT();
     albedo = inst.albedo;
+    ior    = inst.ior;
     return true;
 }
 
-// One scatter event: the throughput multiplier for bouncing into `dir` off a surface with `albedo`.
+// One scatter event: the throughput multiplier for bouncing into `dir` off a LAMBERTIAN surface with
+// `albedo`. See ptScatterDielectric below for the other material kind this file supports.
 //
 // WRITTEN OUT IN FULL, AND THAT IS THE POINT. For cosine-weighted sampling the 1/PI of the
 // Lambertian BRDF, the cosine of the rendering equation and the cos/PI of the pdf cancel exactly,
@@ -251,6 +288,93 @@ float3 ptScatter(float3 albedo, float cosTheta, uint defect) {
     if (defect == PT_DEFECT_TIMES_PI)  weight *= PI;
     if (defect == PT_DEFECT_NO_COSINE) weight = brdf / max(pdf, 1e-9);
     return weight;
+}
+
+// One scatter event off a SMOOTH DIELECTRIC: Fresnel decides, STOCHASTICALLY rather than by
+// blending, between specular reflection and refraction; Snell's law gives the refracted direction;
+// total internal reflection falls out of the SAME formula rather than needing its own branch, and
+// the weight is exactly 1 on whichever branch is taken -- a delta lobe has no continuous pdf to
+// write out the way ptScatter's cosine/PI does, only the discrete probability of the choice, and
+// that probability IS the Fresnel weight, so the two cancel. See PT_DEFECT_DIELECTRIC_NO_PDF_CANCEL
+// for what leaving them uncancelled looks like.
+//
+// SCHLICK, NOT THE FULL FRESNEL DIELECTRIC EQUATIONS. Every angle Schlick needs (cosI, and cosT
+// where it applies) is already in hand from the refraction test below; unpolarised light is exactly
+// Schlick's own assumption; and it is within about 1% of the full equations everywhere except very
+// close to the critical angle on the low-index side, where it overshoots (Schlick 1994). The choice
+// costs nothing for the energy-conservation claim this file checks -- that claim holds for ANY
+// reflectance function returning a value in [0,1], because it rests on the stochastic choice
+// cancelling its own probability, not on which curve computed that probability. A caller that later
+// wants %-accurate grazing highlights on rough glass can swap this formula without touching anything
+// else here.
+//
+// `entering` is exactly what ptTrace recovered: true when the ray arrives from the side the mesh's
+// winding calls the front (n1 = 1 air, n2 = ior), false on the reverse (n1 = ior, n2 = 1 air). One
+// IOR describes the WHOLE interface; which side counts as air depends only on which way the ray is
+// travelling through it.
+//
+// WEIGHT IS 1, NOT `albedo`. This models a CLEAR, non-absorbing dielectric -- ordinary window glass,
+// not smoked or tinted -- so nothing here scatters a fraction of the light diffusely as well as
+// specularly. A future tinted-glass material would need to fold an absorption term into the
+// transmitted branch's weight and would need to say so as plainly as this comment does; it is not
+// modelled today, and pretending otherwise would be exactly the kind of approximation this codebase
+// has been burned by leaving undocumented.
+void ptScatterDielectric(float3 dir, float3 nWS, bool entering, float ior, uint defect,
+                         inout uint rng, out float3 outDir, out float3 weight) {
+    const float n1 = entering ? 1.0 : ior;
+    const float n2 = entering ? ior : 1.0;
+    const float eta = n1 / n2;
+
+    // nWS already faces against dir (ptTrace's own invariant, unconditional on entering/exiting), so
+    // -dot(dir, nWS) is cosI directly. Clamped only against float error introduced by the normalize()
+    // calls upstream at exact grazing incidence -- a real input never drives this outside [0,1].
+    const float cosI  = clamp(-dot(dir, nWS), 0.0, 1.0);
+    const float sin2T = eta * eta * (1.0 - cosI * cosI);
+    // TOTAL INTERNAL REFLECTION, HANDLED BY THE SAME LINE THAT WOULD OTHERWISE TAKE sqrt() OF A
+    // NEGATIVE NUMBER. There is no separate TIR code path to remember to write: forcing reflectance
+    // to 1 here means the stochastic choice below always lands in the reflect branch, which is
+    // exactly what a real dielectric does past the critical angle.
+    const bool tir = sin2T > 1.0;
+
+    float reflectance;
+    float3 refrDir = float3(0, 0, 0);
+    if (tir) {
+        reflectance = 1.0;
+    } else {
+        const float cosT = sqrt(1.0 - sin2T);
+        const float r0raw = (n1 - n2) / (n1 + n2);
+        const float r0 = r0raw * r0raw;
+        // Schlick's grazing-angle term is measured on the LOW-INDEX side of the interface: cosI when
+        // entering (air, the low-index side, is where the incident ray already is), cosT when
+        // exiting (air is now on the FAR side, and cosT is the angle the ray makes there). Using cosI
+        // unconditionally is the common shortcut and is wrong on the way out -- it under-states
+        // reflectance at exactly the shallow exit angle where real glass goes bright.
+        const float grazing = entering ? cosI : cosT;
+        const float x  = 1.0 - grazing;
+        const float x2 = x * x;
+        reflectance = r0 + (1.0 - r0) * x2 * x2 * x;
+        // Standard vector refraction (Snell's law in vector form): with nWS facing against dir,
+        // t = eta*dir + (eta*cosI - cosT)*nWS. Explicitly normalized as insurance against the float
+        // error sqrt() can introduce, the same reason nObj/nGeom above are.
+        refrDir = normalize(eta * dir + (eta * cosI - cosT) * nWS);
+    }
+
+    // ONE RAY PER HIT, chosen with probability `reflectance`, not both terms summed. Summing would
+    // need two rays (and normally two recursive calls) to stay unbiased; the stochastic choice gets
+    // the same expected value from one, which is what a path tracer that only ever carries one
+    // `dir`/`throughput` per path needs.
+    const float xi = ptRand(rng);
+    if (xi < reflectance) {
+        outDir = reflect(dir, nWS);
+        weight = (defect == PT_DEFECT_DIELECTRIC_NO_PDF_CANCEL)
+                     ? float3(reflectance, reflectance, reflectance)
+                     : float3(1, 1, 1);
+    } else {
+        outDir = refrDir;
+        weight = (defect == PT_DEFECT_DIELECTRIC_NO_PDF_CANCEL)
+                     ? float3(1.0 - reflectance, 1.0 - reflectance, 1.0 - reflectance)
+                     : float3(1, 1, 1);
+    }
 }
 
 // ---- the integrator ----------------------------------------------------------------------------
@@ -289,21 +413,41 @@ void CSPathTrace(uint3 tid : SV_DispatchThreadID) {
         // tracer collect nothing at all and read 0 rather than L.
         [loop] for (uint b = 0; b <= bounce; ++b) {
             float3 hitPos, nWS, albedo;
-            if (!ptTrace(org, dir, hitPos, nWS, albedo)) {
+            float ior; bool entering;
+            if (!ptTrace(org, dir, hitPos, nWS, albedo, ior, entering)) {
                 radiance += throughput * ptEnvironment(dir);
                 escaped += 1.0;
                 break;
             }
 
-            // DIRECT LIGHT, AT EVERY HIT, INCLUDING THE LAST ONE THE BOUNCE BUDGET ALLOWS. See
-            // ptDirectSun's own comment for why this is the fix for sky-only lighting: it is a
-            // next-event shadow ray, not a bounce, so it does not compete with the escaped-fraction
-            // identity PtFurnaceTest checks below -- that identity is about what `radiance` collects
-            // on a MISS, and this line only ever runs on a HIT. It also costs the furnace test
-            // nothing to check: averSunRadiance() (RHIShaders.cpp) returns exactly 0 whenever the
-            // furnace is on and the sun is off, which is every configuration PtFurnaceTest actually
-            // asserts a number for, so this term is provably zero there, not just empirically small.
-            radiance += throughput * ptDirectSun(hitPos, nWS, albedo, bias, gPtTrace.y);
+            // KIND IS ior > 0, NOT A SEPARATE FIELD -- see PtSurface::ior (PathTracer.hpp) for why
+            // that sentinel needs no bit-packing and loses no precision versus a quantised kind+ior
+            // pair squeezed into the same word.
+            const bool dielectric = ior > 0.0;
+
+            // DIRECT LIGHT, AT EVERY DIFFUSE HIT, INCLUDING THE LAST ONE THE BOUNCE BUDGET ALLOWS --
+            // BUT NEVER AT A DIELECTRIC ONE. See ptDirectSun's own comment for why this is the fix
+            // for sky-only lighting on a Lambertian surface, and for why a smooth dielectric has no
+            // diffuse lobe for that same next-event estimate to be approximating: gated here, not
+            // inside ptDirectSun, so a diffuse hit's cost and result are unchanged. It is a next-event
+            // shadow ray, not a bounce, so it does not compete with the escaped-fraction identity
+            // PtFurnaceTest checks below -- that identity is about what `radiance` collects on a MISS,
+            // and this line only ever runs on a HIT. It also costs the furnace test nothing to check:
+            // averSunRadiance() (RHIShaders.cpp) returns exactly 0 whenever the furnace is on and the
+            // sun is off, which is every configuration PtFurnaceTest actually asserts a number for, so
+            // this term is provably zero there, not just empirically small.
+            //
+            // A KNOWN, STATED APPROXIMATION THIS DOES NOT FIX: ptDirectSun's own shadow ray (fired
+            // from a DIFFUSE hit behind a pane of glass) still treats the glass as a fully opaque
+            // occluder -- RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH stops at the first triangle hit at
+            // all, dielectric or not. A surface seen only through glass renders fully sun-shadowed
+            // rather than dimmed by however much the pane actually transmits. Fixing that needs the
+            // shadow ray itself to reason about transmission (or ignore dielectric hits outright),
+            // which is a real, separable piece of follow-up work, not a consequence of anything this
+            // change gets to skip quietly.
+            if (!dielectric) {
+                radiance += throughput * ptDirectSun(hitPos, nWS, albedo, bias, gPtTrace.y);
+            }
 
             // Out of bounces. The path is TRUNCATED and contributes no further INDIRECT light,
             // which is why the escaped count above is read back: at a finite bounce count the
@@ -314,12 +458,28 @@ void CSPathTrace(uint3 tid : SV_DispatchThreadID) {
             // a bounce that might never happen.)
             if (b == bounce) break;
 
-            float3 d = ptCosineHemisphere(nWS, ptRand(rng), ptRand(rng));
-            float cosTheta = dot(d, nWS);
-            if (!(cosTheta > 0.0)) break;
+            float3 d, weight;
+            if (dielectric) {
+                // Always produces a valid direction -- reflection or refraction, with total internal
+                // reflection folded into the reflection branch -- so there is no failure case here
+                // to break out of the loop for, unlike the Lambertian branch's cosTheta guard below.
+                ptScatterDielectric(dir, nWS, entering, ior, defect, rng, d, weight);
+            } else {
+                d = ptCosineHemisphere(nWS, ptRand(rng), ptRand(rng));
+                float cosTheta = dot(d, nWS);
+                if (!(cosTheta > 0.0)) break;
+                weight = ptScatter(albedo, cosTheta, defect);
+            }
 
-            throughput *= ptScatter(albedo, cosTheta, defect);
-            org = hitPos + nWS * bias;
+            throughput *= weight;
+            // THE BIAS OFFSET FOLLOWS THE NEW RAY, NOT UNCONDITIONALLY THE FACING NORMAL. A diffuse
+            // bounce and a specular REFLECTION both continue on the nWS side of the surface (dot(d,
+            // nWS) > 0 by construction) -- exactly where the old `nWS * bias` always put them, so this
+            // is bit-identical for both of those. A REFRACTED ray is the one direction that does not:
+            // it continues THROUGH the interface onto the -nWS side, and offsetting it along +nWS
+            // would push the new origin back into the surface it just crossed instead of away from it.
+            float3 offsetN = dot(d, nWS) > 0.0 ? nWS : -nWS;
+            org = hitPos + offsetN * bias;
             dir = d;
             depth = b + 1;
         }

@@ -113,6 +113,13 @@ void MaterialSystem::shutdown() {
         if (*t) res_->destroyTexture(*t);
         *t = 0;
     }
+    // Not GPU resources -- just CPU-side bookkeeping -- but left non-empty they would answer
+    // gpuMaterialCount()/gpuMaterialTable() with a stale table from a device that no longer exists,
+    // and ready() cannot warn a caller who reads those two inline getters directly instead of
+    // checking it first. Clearing them makes "0 rows" the honest answer for the gap between this
+    // shutdown() and whatever update() eventually re-populates the table after the next init().
+    gpuIndexOf_.clear();
+    gpuTable_.clear();
     res_ = nullptr;
 }
 
@@ -230,27 +237,44 @@ MaterialSystem::Entry& MaterialSystem::entryFor(MaterialHandle h) {
     return entries_.emplace(h, e).first->second;
 }
 
-// Re-uploads every dirty material and retires the sets of destroyed ones.
+// Re-uploads every dirty material, retires the sets of destroyed ones, and rebuilds the dense GPU
+// material table gpuMaterialTable()/gpuMaterialIndex() read. All three jobs share the one walk over
+// MaterialLibrary's enumeration below because that enumeration order IS the table's row order (row 0
+// is the fallback, rows 1..n follow lib.at(0..n-1)) -- a second walk elsewhere to build the table
+// would just be a second place this could disagree with the first.
 void MaterialSystem::update() {
     if (!res_) return;
     MaterialLibrary& lib = MaterialLibrary::get();
 
+    const u32 n = lib.count();
+    std::vector<MaterialConstants> table;
+    table.reserve(n + 1u);
+    table.push_back(fallbackConstants_);   // row 0, always -- see gpuMaterialTable()'s own comment
+    std::unordered_map<MaterialHandle, u32> indexOf;
+    indexOf.reserve(n);
+
     // Reading the flag clears it, so this is the one consumer. Driven off the library's own
     // enumeration, because a material created this frame has no entry yet.
-    const u32 n = lib.count();
     for (u32 i = 0; i < n; ++i) {
         const MaterialHandle h = lib.at(i);
         if (!h) continue;
         const bool dirty = lib.consumeDirty(h);
         auto it = entries_.find(h);
-        if (it == entries_.end()) { entryFor(h); continue; }   // freshly built, already current
-        if (!dirty) continue;
-        const MaterialDesc* d = lib.desc(h);
-        if (!d) continue;
-        it->second.constants = packMaterial(*d);
-        // retryFailed: this material CHANGED, which is exactly when a texture it names that was
-        // missing before may now exist -- a fresh import, a file copied in, a corrected path.
-        if (it->second.set) writeSlots(*d, it->second.set, true);
+        if (it == entries_.end()) {
+            entryFor(h);                     // freshly built, already current
+            it = entries_.find(h);
+        } else if (dirty) {
+            const MaterialDesc* d = lib.desc(h);
+            if (d) {
+                it->second.constants = packMaterial(*d);
+                // retryFailed: this material CHANGED, which is exactly when a texture it names that
+                // was missing before may now exist -- a fresh import, a file copied in, a corrected
+                // path.
+                if (it->second.set) writeSlots(*d, it->second.set, true);
+            }
+        }
+        indexOf.emplace(h, static_cast<u32>(table.size()));
+        table.push_back(it->second.constants);
     }
 
     // Destruction is deferred by RHI contract, so retiring mid-frame is safe.
@@ -259,6 +283,28 @@ void MaterialSystem::update() {
         if (it->second.set) res_->destroyBindingSet(it->second.set);
         it = entries_.erase(it);
     }
+
+    // The table's LAYOUT changed -- a create or a destroy since the last call, not merely an edit to
+    // a material already on it -- exactly when the handle-to-row mapping itself differs from what it
+    // held before. Comparing the two maps directly is simpler and harder to get wrong than tracking
+    // every insert/erase by hand as the loop above goes: std::unordered_map::operator== already
+    // compares by CONTENT (every key present in both, with equal values), not bucket order or size
+    // alone, which is exactly "did any material's row move" and nothing more or less than that.
+    if (indexOf != gpuIndexOf_) ++gpuRevision_;
+    gpuIndexOf_.swap(indexOf);
+    gpuTable_.swap(table);
+}
+
+// `h`'s row in gpuMaterialTable() as of the last update(), or 0 (the fallback row) for a handle this
+// call has never placed there -- a zero/stale handle, or one whose Entry (if any) was only ever built
+// lazily by bindingSet()/constants() and has not yet been through an update() call. Deliberately does
+// NOT go through entryFor(): like ownsBindingSet(), this answers a question about the CURRENT table,
+// and materialising an Entry (or a row) as a side effect of asking would be wrong for the same reason
+// it would be wrong there.
+u32 MaterialSystem::gpuMaterialIndex(MaterialHandle h) const {
+    if (!res_ || !h) return 0;
+    const auto it = gpuIndexOf_.find(h);
+    return it != gpuIndexOf_.end() ? it->second : 0;
 }
 
 // The binding set a draw of `h` uses. Falls back for an unknown or stale handle.

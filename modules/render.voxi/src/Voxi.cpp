@@ -196,6 +196,59 @@ const char* Renderer::featureName(Feature f) {
     }
 }
 
+// THE PER-PIXEL DIFFUSE GATHER'S CONE COUNT -- the GI setting that actually costs anything, and
+// until this ladder existed the one number globalIllumination did not touch. globalIllumination
+// already derived voxelResolution and giUpdateInterval below, both of which move the volume BUILD
+// (measured at 0.4-0.5 ms); the per-pixel GATHER, measured at 1.3 ms and by far the larger half,
+// was a hardcoded six for every tier. Turning GI down bought almost nothing, and turning it up to
+// High made the frame SLOWER with no way to spend the extra budget (6.0 -> 6.4 ms: a bigger volume
+// to sample, same number of samples). See Settings::giCones in Voxi.hpp for the field itself.
+//
+// (NOTE ON WHERE THIS COMMENT USED TO LIVE: this block sat above voxelResolutionForQuality until it
+// was corrected -- giConesForQuality was inserted ahead of that function without moving that
+// function's own VRAM-table comment down with it, leaving the table describing voxel grid memory
+// attached to a function about cone count, and voxelResolutionForQuality with no comment at all.
+// Fixed by relocating the VRAM table to its own function below, where it has sat unnoticed for one
+// stage of this feature's history -- see the house rule this violated: trace the code, not the
+// comment above it.)
+//
+// MEDIUM IS SIX, WHICH IS WHAT EVERY TIER USED TO TRACE. The default rung is deliberately the old
+// hardcoded number: this ladder changes what the LADDER does, not what a default project looks
+// like, and the struct default must equal the default tier's rung or the derivation never fires at
+// all (it only runs on a tier CHANGE).
+//
+// Low buys speed and High/Epic spend it -- about 0.22 ms per cone, first measured by bisecting the
+// gather pass directly. The gather is a weighted AVERAGE, normalised by the sum of the cosine
+// weights, so changing the count changes how well the hemisphere is sampled rather than how bright
+// the result is: fewer cones is a coarser estimate of the same quantity, not a darker one.
+//
+// MEASURED AGAINST THE LADDER ITSELF, not just the isolated pass: FirstPerson range, scene draw per
+// tier -- Low (3 cones) 3.3 ms, Medium (6) 4.0 ms, High (9) 4.6 ms, Epic (13) 5.4 ms. A 2.1 ms
+// spread across 10 cones is 0.21 ms/cone, an independent confirmation of the 0.22 ms/cone bisection
+// above from a second experiment that agrees with the first.
+//
+// A NUMBER DELIBERATELY NOT REPEATED HERE, because this file cannot back it: a comment elsewhere in
+// this tree (VoxiShaders.hpp, PSRayDriven's cost investigation, a file this one does not own) states
+// "a prior measurement found dropping to two cones moved a probe by 2/255" and reads that as room to
+// cut further below Low's 3-cone rung. That claim predates this ladder -- whatever it measured, it
+// measured against the OLD behaviour, six hardcoded cones at every tier, not against the 3-cone Low
+// rung this file now actually ships -- and neither the bisection nor the FirstPerson table above
+// reproduces or contradicts it, because neither was run to test a two-cone rung. Restating it here
+// as settled would be exactly the trap this project's own memory keeps a standing note against
+// (aver-unbacked-verification.md): a described test result nobody re-ran against the code as it
+// stands today. If two cones is ever proposed as a rung below Low, it needs its own probe capture
+// against THIS derivation, not a number carried over from before the derivation existed.
+u32 Renderer::giConesForQuality(Quality q) {
+    switch (q) {
+        case Quality::Off:    return 6;   // inert: nothing gathers with GI off
+        case Quality::Low:    return 3;
+        case Quality::Medium: return 6;
+        case Quality::High:   return 9;
+        case Quality::Epic:   return 13;
+        default:              return 6;
+    }
+}
+
 // The voxel grid edge each GI quality tier resolves to (see setSettings for when this actually
 // applies). Doubling the edge is an 8x jump in both memory and per-voxel GPU cost -- the volume is
 // resolution CUBED -- so this ladder is deliberately conservative: Medium keeps the long-standing
@@ -208,26 +261,6 @@ const char* Renderer::featureName(Feature f) {
 //   Medium    (128):  ~50 MB   (today's fixed default, unchanged)
 //   High      (256):  ~400 MB
 //   Epic      (512):  ~3.2 GB  -- by far the steepest rung; only for a GPU with gigabytes to spare
-// MEDIUM IS SIX, WHICH IS WHAT EVERY TIER USED TO TRACE. The default rung is deliberately the old
-// hardcoded number: this commit changes what the LADDER does, not what a default project looks
-// like, and the struct default must equal the default tier's rung or the derivation never fires
-// at all (it only runs on a tier CHANGE).
-//
-// Low buys speed and High/Epic spend it -- about 0.22 ms per cone. The gather is a weighted
-// AVERAGE, normalised by the sum of the cosine weights, so changing the count changes how well
-// the hemisphere is sampled rather than how bright the result is: fewer cones is a coarser
-// estimate of the same quantity, not a darker one.
-u32 Renderer::giConesForQuality(Quality q) {
-    switch (q) {
-        case Quality::Off:    return 6;   // inert: nothing gathers with GI off
-        case Quality::Low:    return 3;
-        case Quality::Medium: return 6;
-        case Quality::High:   return 9;
-        case Quality::Epic:   return 13;
-        default:              return 6;
-    }
-}
-
 u32 Renderer::voxelResolutionForQuality(Quality q) {
     switch (q) {
         case Quality::Off:
@@ -282,28 +315,43 @@ u32 Renderer::rtShadowRaysForQuality(Quality q) {
     }
 }
 
-// ZERO ON EVERY RUNG, ON PURPOSE, and this is not a placeholder that someone forgot to fill in.
+// RAY-DRIVEN RENDERING IS 1 AT EVERY RUNG THAT RUNS RAY TRACING AT ALL -- Low, Medium, High, Epic
+// -- BY EXPLICIT PRODUCT DECISION: this is now the default render path (the user's name for it is
+// "the Wavefront Primary rays model"), not an experiment a quality preset has to avoid switching
+// on behind the author's back. That decision replaces the one this comment used to record, which
+// was the opposite.
 //
-// The spatial filter this selects is being landed in stages, and this stage is the SETTING ALONE:
-// nothing reads the value yet, so the whole change is provably incapable of moving a pixel. The
-// rung that turns it on arrives with the filter it selects, in the same commit, measured against
-// the penumbra probe -- not before it, where it would be an untested default.
-//
-// It still has to exist NOW rather than later, because Settings::rtShadowDenoise defaults to 0 and
-// the derivation only fires on a tier CHANGE. A field whose default disagrees with its default
-// tier's rung never reaches that rung, and this file has already shipped that bug twice (giUpdate-
-// Interval, in both directions). Declaring the mapping at 0 everywhere keeps the two in agreement
-// by construction from the first commit, so the day a rung becomes non-zero is a one-line change
-// with nothing else to remember.
-// RAY-DRIVEN RENDERING IS OFF AT EVERY RUNG, and will stay that way until it is measured against
-// the 9.2 ms raster baseline recorded in Settings::rtRenderMode's own comment. A quality preset
-// that silently switched which thing finds the first surface would change every pixel of a
-// project that only asked for prettier shadows.
+// OFF STAYS 0, and must: a primary ray is traced through the same DXR 1.1 acceleration structure
+// the RT sun shadow already requires (see status(Feature::RayTracing) above, and setSettings's
+// forced clamp to Off when the device fails that gate) -- there is no BVH to traverse without it.
+// Quality::Off means "no ray tracing", so answering 1 there would not be a cautious choice, it
+// would be INCOHERENT: the renderer would have to detect and refuse its own default at runtime
+// instead of the setting simply never claiming a mode the device has no path to run. Every other
+// rung already implies that hardware is present and already pays for one kind of BVH traversal
+// (the sun shadow); paying for a second kind (primary visibility) is coherent everywhere ray
+// tracing itself is.
 //
 // It exists NOW rather than later for the same reason rtShadowDenoiseForQuality does: the
 // derivation only fires on a tier CHANGE, so the function and the struct default have to agree
-// from the first commit or the field never reaches the rung it claims.
-u32 Renderer::rtRenderModeForQuality(Quality) { return 0; }
+// from the first commit or the field never reaches the rung it claims. THE CHECK: Settings::
+// rayTracing defaults to Quality::Medium, Settings::rtRenderMode defaults to 1, and
+// rtRenderModeForQuality(Quality::Medium) below is 1 -- the struct default and the default tier's
+// own rung agree, by construction, the same way voxelResolution's 128 agrees with Medium.
+u32 Renderer::rtRenderModeForQuality(Quality q) {
+    switch (q) {
+        // No ray-tracing hardware path is guaranteed here -- there is nothing to traverse, and
+        // claiming 1 would be a mode the renderer has no way to actually run.
+        case Quality::Off:    return 0;
+        case Quality::Low:    return 1;
+        case Quality::Medium: return 1;
+        case Quality::High:   return 1;
+        case Quality::Epic:   return 1;
+        // An unknown tier must not silently swap which thing finds the first surface out from
+        // under a caller who did not ask for that; fall back to the path every version of this
+        // engine before this setting ran.
+        default:              return 0;
+    }
+}
 
 // THE PATH-TRACING LADDER. Off is 1 -- one hit and direct lighting, which is ray tracing and not
 // path tracing at all -- and every rung above it buys bounces. The struct default is 1 and the
@@ -325,14 +373,63 @@ u32 Renderer::ptBouncesForQuality(Quality q) {
     }
 }
 
+// THE RT SHADOW SPATIAL-FILTER RUNGS. Zero at every tier until ray-driven primary visibility
+// (rtRenderMode) became the default render path and took the raster path's 4x MSAA with it -- see
+// Settings::rtShadowDenoise in Voxi.hpp for the full account of why that flipped the trade. What
+// follows is why EACH rung landed where it did, not just that they moved off zero.
+//
+// COST IS NOT THE DISCRIMINATOR HERE, AND SAYING SO ONCE SAVES REPEATING IT FOUR TIMES: the filter
+// is a Gaussian gather whose tap count is (2*radius+1)^2, measured at +0.02 ms for the full 49-tap
+// radius-3 kernel against +1.69 ms for one more traced ray (VoxiRenderer.cpp) -- about eighty-five
+// times cheaper than the ray it stands in for, at the WIDEST rung the clamp allows. Every radius
+// below 3 costs less still. So unlike rtShadowRays or giCones, this ladder is not buying frame time
+// by asking for less at any rung; what actually varies by tier is how much raw noise there is to
+// hide, and how much of the measured motion drift is worth risking to hide it.
+//
+// LOW, MEDIUM AND HIGH SHARE RADIUS 2. Low and Medium both trace exactly one ray (see
+// rtShadowRaysForQuality above), so their raw shadow term is the same hard dither Settings::
+// rtShadowDenoise's "THE PROBLEM IT IS FOR" describes -- there is no basis in this file for
+// treating them differently on THIS knob, and the sibling shadow knobs already agree: rtShadowRays
+// and rtPixelsPerRayTile both set Low equal to Medium for the identical reason (see
+// rtPixelsPerRayTileForQuality's "LOW WAS 4" history for why Low's old habit of taking the cheaper,
+// noisier rung was abandoned specifically for shadow quality). High traces two rays -- real
+// variance reduction over one, but nowhere near the sixteen-ray convergence this file has an actual
+// measurement for -- so it is still solidly in "needs real help" territory and gets the same radius
+// rather than an invented intermediate value this file has no measurement to justify.
+//
+// EPIC IS 1, NOT 2 AND NOT 0. Epic already spends four rays specifically to be the closest this
+// renderer gets to ground truth without path tracing (see ptBouncesForQuality and
+// giUpdateIntervalForQuality's own Epic rungs for the same instinct applied elsewhere in this
+// file) -- its raw signal has measurably less variance to begin with, so the marginal noise this
+// filter would still remove is smaller while the drift it risks is not: drift scales with radius,
+// not with how many rays fed the centre sample. 1 keeps a light touch on Epic's residual noise
+// without reaching for the wider kernel the noisier tiers need. It is deliberately not 0: Epic's
+// four rays still carry real per-pixel variance (nothing in this file's measurements converges
+// below sixteen), and switching the filter off entirely on the one tier that already pays the most
+// would be refusing an almost-free improvement out of a symmetry with rtPixelsPerRayTile that does
+// not actually apply here. That knob went to 1 everywhere because widening it bought NOTHING real --
+// its measured frame-time "saving" was noise, so refusing the drift it risked cost nothing in
+// return. This filter is the opposite shape: it has no frame-time saving to weigh either way at any
+// radius (see COST IS NOT THE DISCRIMINATOR above), only a real noise-reduction benefit against a
+// real drift risk, both scaling with radius -- so the honest choice at Epic is the smallest radius
+// that still buys a real improvement over 0, not the smallest number that happens to match a
+// different knob's unrelated reason for landing on 1.
+//
+// NONE OF THE FOUR RUNGS REACH THE CLAMP'S MAXIMUM OF 3. Radius 3 is where "within one code of the
+// sixteen-ray answer" was measured (VoxiShaders.hpp, rtShadowSpatial) -- but it is also where the
+// wobble-drift measurement tops out, at the worst end of the 12-to-32-code range recorded there.
+// Buying the last increment of stillness-accuracy at the largest recorded motion cost is not a
+// trade this file should make silently, by default, on every tier; 3 stays reachable through an
+// explicit override for whoever wants it, the same way an explicit voxelResolution request already
+// overrides its own tier's derived rung.
 u32 Renderer::rtShadowDenoiseForQuality(Quality q) {
     switch (q) {
         case Quality::Off:    return 0;   // RT is not running; the filter has nothing to filter
-        case Quality::Low:    return 0;
-        case Quality::Medium: return 0;
-        case Quality::High:   return 0;
-        case Quality::Epic:   return 0;
-        default:              return 0;
+        case Quality::Low:    return 2;
+        case Quality::Medium: return 2;
+        case Quality::High:   return 2;
+        case Quality::Epic:   return 1;
+        default:              return 0;   // an unknown tier must not silently start smearing shadows
     }
 }
 // See rtShadowRaysForQuality for the measurements behind the ray-count rungs. The tile rungs below

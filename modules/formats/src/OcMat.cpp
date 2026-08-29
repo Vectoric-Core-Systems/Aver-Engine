@@ -187,6 +187,23 @@ bool parseOcmat(std::string_view text, pbr::MaterialDesc& out, OcMatExtras* extr
             else if (equalsCI(p, "occlusionStrength"))    out.occlusionStrength = tokF(t, 2, out.occlusionStrength);
             else if (equalsCI(p, "reflectance"))          out.reflectance       = tokF(t, 2, out.reflectance);
             else if (equalsCI(p, "f90"))                  out.f90               = tokF(t, 2, out.f90);
+            // Index of refraction. 1.0 (vacuum) is the physical floor -- glass is ~1.5, water ~1.33,
+            // diamond ~2.42 -- so a value below it is repaired UP to 1.0 rather than kept as authored
+            // or silently dropped to the struct default (1.5f, MaterialDesc::ior): the same "clamp,
+            // don't reject" idiom slopeBlend's swapped lo/hi already uses a few branches up, chosen so
+            // a typo reads back as the nearest *true* statement ("does not refract") instead of vanishing.
+            else if (equalsCI(p, "ior")) {
+                const f32 v = tokF(t, 2, out.ior);
+                out.ior = v < 1.0f ? 1.0f : v;
+            }
+            // Dielectric transmission weight: 0 is the opaque default, 1 is fully transmissive (clear
+            // glass). Belongs in [0,1] by definition, so it is clamped into range rather than passed
+            // through -- an out-of-range PARAM is an authoring mistake, and storing e.g. 1.4 would let
+            // that mistake reach the renderer as a value nothing else in this format ever produces.
+            else if (equalsCI(p, "transmission")) {
+                const f32 v = tokF(t, 2, out.transmission);
+                out.transmission = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+            }
             else if (equalsCI(p, "alphaCutoff"))          out.alphaCutoff       = tokF(t, 2, out.alphaCutoff);
             // World centimetres per tile; a non-positive value is dropped.
             // slopeBlend <lo> <hi> [layer1UvScale] -- turns the second layer on and says across
@@ -311,6 +328,11 @@ std::string writeOcmat(const pbr::MaterialDesc& d, const OcMatExtras* extras) {
     s += "PARAM occlusionStrength " + num(d.occlusionStrength) + "\n";
     s += "PARAM reflectance "       + num(d.reflectance)       + "\n";
     s += "PARAM f90 "               + num(d.f90)               + "\n";
+    // Unconditional, like reflectance/f90 just above and unlike slopeBlend below: these are always-
+    // present scalars with meaningful defaults (ior 1.5, transmission 0 -- see MaterialDesc), not a
+    // mode a material opts into, so there is no "unstated" case to protect by omitting them.
+    s += "PARAM ior "               + num(d.ior)               + "\n";
+    s += "PARAM transmission "      + num(d.transmission)      + "\n";
     s += "PARAM uvTiling "          + num(d.uvTiling)          + "\n";
     // OMITTED WHEN OFF, unlike every PARAM above it, and deliberately: the others are always-present
     // scalars with meaningful defaults, while this one is a MODE. Writing `slopeBlend 0.55 0.8` into

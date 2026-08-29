@@ -135,14 +135,15 @@ void PathTracer::shutdown() {
         // process exit and became a per-toggle leak once a live editor could shut down and re-init a
         // PathTracer repeatedly.
         for (const auto& [mesh, b] : blasCache_) if (b) res_->destroyBlas(b);
-        // THE TLAS STILL CANNOT BE RELEASED: the RHI has no destroyTlas at all (see
+        // THE TLASES STILL CANNOT BE RELEASED: the RHI has no destroyTlas at all (see
         // IResourceFactory -- BLAS has one, TLAS does not), so what this object allocated outlives
-        // it, for the life of the DEVICE. What changed is the COUNT: addScene now reuses one handle
-        // and grows it by doubling, so a session leaks O(log n) of them rather than one per re-arm.
-        // Removing the last of it needs a real destroyTlas added to the RHI, which is a wider change
-        // than this module.
-        tlas_ = 0;
-        tlasCapacity_ = 0;
+        // it, for the life of the DEVICE. What changed is the COUNT: addScene reuses a handle PER
+        // SCENE SLOT and grows it by doubling, so a session leaks O(log n) per slot rather than one
+        // per re-arm. Dropping the vectors here forgets the handles rather than freeing them, which
+        // is all that can be done; removing the last of it needs a real destroyTlas added to the
+        // RHI, a wider change than this module.
+        tlasPool_.clear();
+        tlasPoolCap_.clear();
         if (pipeline_)    res_->destroyPipeline(pipeline_);
         if (cs_)          res_->destroyShader(cs_);
     }
@@ -177,21 +178,27 @@ u32 PathTracer::addScene(const u32* surfaceIds, u32 count) {
     Scene s;
     s.surfaces.assign(surfaceIds, surfaceIds + count);
     if (res_) {
-        // REUSED, NOT RECREATED -- see tlas_'s declaration for why this used to leak one handle per
-        // re-arm. Grows to the next power of two so a snapshot that gains a single instance does not
+        // REUSED PER SLOT, NOT RECREATED, AND NOT SHARED BETWEEN SCENES -- see tlasPool_'s
+        // declaration for both halves of that. Reuse is what stops a re-arm leaking a handle; the
+        // per-slot part is what stops five simultaneous scenes all tracing the same geometry.
+        //
+        // Grows to the next power of two so a snapshot that gains a single instance does not
         // allocate again; shrinks never, because a smaller TLAS buys nothing and every allocation
         // here is permanent until the device goes.
+        const usize slot = scenes_.size();
+        if (tlasPool_.size() <= slot) { tlasPool_.resize(slot + 1, 0); tlasPoolCap_.resize(slot + 1, 0); }
+
         const u32 need = count ? count : 1;
-        if (!tlas_ || tlasCapacity_ < need) {
-            u32 cap = tlasCapacity_ ? tlasCapacity_ : 1;
+        if (!tlasPool_[slot] || tlasPoolCap_[slot] < need) {
+            u32 cap = tlasPoolCap_[slot] ? tlasPoolCap_[slot] : 1;
             while (cap < need) cap <<= 1;
             const rhi::TlasHandle grown = res_->createTlas(cap);
             // A failed grow keeps the old handle rather than dropping to zero: too small is a
             // degraded scene, but zero is no scene at all, and prepare() would then build nothing
             // while reporting success.
-            if (grown) { tlas_ = grown; tlasCapacity_ = cap; }
+            if (grown) { tlasPool_[slot] = grown; tlasPoolCap_[slot] = cap; }
         }
-        s.tlas = tlas_;
+        s.tlas = tlasPool_[slot];
     }
     scenes_.push_back(std::move(s));
     return static_cast<u32>(scenes_.size() - 1);
@@ -239,8 +246,9 @@ bool PathTracer::prepare() {
         Instance& inst = instances_[i];
         std::memcpy(inst.objectToWorld, surfaces_[i].world, sizeof(inst.objectToWorld));
         std::memcpy(inst.albedo, surfaces_[i].albedo, sizeof(inst.albedo));
+        inst.ior = surfaces_[i].ior;
         // The SHARED rows: every surface on this mesh reads the same geometry. What stays per
-        // surface is objectToWorld and albedo, right here.
+        // surface is objectToWorld, albedo and ior, right here.
         inst.firstVertex = row.firstVertex;
         inst.firstIndex  = row.firstIndex;
     }
@@ -464,10 +472,11 @@ void PathTracer::resetScene() {
         // record per SURFACE, and the surface set is exactly what changes.
         if (instanceBuf_) res_->destroyBuffer(instanceBuf_);
         // BLAS handles are NOT released here either, for the same reason.
-        // THE TLAS IS KEPT, DELIBERATELY, and that is the point of the change: clearing scenes_
-        // below drops the Scene that referenced it, but tlas_ itself survives so the next addScene
-        // reuses it instead of allocating another one that can never be freed. See tlas_'s own
-        // declaration for what that used to cost.
+        // THE TLAS POOL IS KEPT, DELIBERATELY, and that is the point of the change: clearing
+        // scenes_ below drops the Scenes that referenced them, but tlasPool_ itself survives, so the
+        // next round of addScene() calls reuses slot 0, slot 1, ... in the same order instead of
+        // allocating structures that can never be freed. See tlasPool_'s own declaration for what
+        // that used to cost, and for why the pool is per SLOT rather than a single shared handle.
     }
     instanceBuf_ = 0;
     surfaces_.clear();

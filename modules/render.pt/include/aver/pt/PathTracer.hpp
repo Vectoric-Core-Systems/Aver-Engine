@@ -1,6 +1,8 @@
 #pragma once
 // A brute-force path tracer: cosine-weighted hemisphere sampling, N bounces, progressive
-// accumulation into a linear float buffer.
+// accumulation into a linear float buffer. Every surface is Lambertian EXCEPT one flagged dielectric
+// (PtSurface::ior > 0), which gets a smooth Fresnel-weighted reflect/refract BSDF instead -- see
+// ptScatterDielectric in PtShaders.hpp and PtFurnaceTest.cpp's dielectric energy-conservation checks.
 //
 // It is a COMPUTE pass over an RWStructuredBuffer<float4> rather than a texture, for two reasons
 // that are both about being checkable. Format has no RGBA32F, and a structured buffer needs no
@@ -28,7 +30,12 @@ constexpr u32 kPtAccumStride = 16;
 
 // A deliberate arithmetic fault in the estimator, shipped so the furnace can be shown FAILING.
 // See the PT_DEFECT_* block in the shader for what each one is and what it must read.
-enum class PtDefect : u32 { None = 0, TimesPi = 1, NoCosine = 2 };
+//
+// DielectricNoPdfCancel is the third one, and it targets ptScatterDielectric rather than ptScatter:
+// applying the Fresnel term a SECOND time as a multiplicative weight, on top of already having used
+// it as the reflect/refract branch PROBABILITY -- the discrete-choice equivalent of NoCosine
+// forgetting that the pdf it divides by is the same cosine it just sampled with.
+enum class PtDefect : u32 { None = 0, TimesPi = 1, NoCosine = 2, DielectricNoPdfCancel = 3 };
 
 // One surface the tracer can hit: a mesh, where it is, and what it reflects.
 struct PtSurface {
@@ -36,6 +43,19 @@ struct PtSurface {
     // ENGINE convention: row-major / row-vector, cm, +Z up. Handed to TlasInstance untouched.
     f32 world[16] = {1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  0, 0, 0, 1};
     f32 albedo[3] = {1, 1, 1};
+    // 0.0 (the default) means OPAQUE LAMBERTIAN -- every existing addSurface() caller that never
+    // touches this field keeps the exact diffuse-only behaviour it always had. Any value > 0 means a
+    // SMOOTH DIELECTRIC with that index of refraction (ordinary glass ~1.5, water ~1.33, diamond
+    // ~2.42): Fresnel-weighted reflection/refraction in ptScatterDielectric, not the Lambertian
+    // ptScatter.
+    //
+    // THERE IS NO SEPARATE "kind" FIELD. No real dielectric has an IOR of exactly 0 (vacuum/air is
+    // 1.0, and nothing physical refracts light with zero bend), so the field's own absence already
+    // says "this is not a dielectric" -- which is what lets the HLSL mirror (PtInstance) keep its
+    // spare `pad` u32 doing this job, reinterpreted as a float, with NO bit-packing of two values
+    // into one word and NO precision lost to quantising the IOR into a handful of bits. See
+    // PathTracer::Instance for the mirrored field.
+    f32 ior = 0.0f;
 };
 
 // The pinhole camera primary rays are generated from. Carried in the pass's own constants rather
@@ -156,12 +176,17 @@ private:
     // MIRRORS the HLSL PtInstance. 64 + 4 + 4 + 12 + 4; a structured buffer packs tightly with
     // natural alignment, so this is 88 bytes on both sides -- and the stride handed to
     // setSrvBuffer must agree with it or every instance after the first reads its neighbour.
+    //
+    // THE LAST FOUR BYTES USED TO BE A SPARE `u32 pad`, existing only to keep this 88 and its
+    // static_assert true. Reinterpreted as a float IOR instead of adding a new field -- see
+    // PtSurface::ior for why 0.0 doubling as "not a dielectric" needs no separate kind flag and no
+    // quantisation, and why that is preferred here over growing the ABI.
     struct Instance {
         f32 objectToWorld[16];
         u32 firstIndex = 0;
         u32 firstVertex = 0;
         f32 albedo[3] = {1, 1, 1};
-        u32 pad = 0;
+        f32 ior = 0.0f;
     };
     static_assert(sizeof(Instance) == 88, "PtInstance is the HLSL PtInstance ABI");
 
@@ -198,8 +223,23 @@ private:
     // snapshot that grows by one instance from allocating again. A grow still leaks the old handle,
     // because it still cannot be destroyed; what changes is that this now happens O(log n) times in
     // a session instead of once per re-arm.
-    rhi::TlasHandle        tlas_ = 0;
-    u32                    tlasCapacity_ = 0;
+    // A POOL, INDEXED BY SCENE ORDINAL -- NOT ONE SHARED HANDLE, and the difference is a real bug
+    // this used to have. The first version of the reuse fix kept a single `tlas_` and assigned it to
+    // EVERY Scene (`s.tlas = tlas_`), which is correct only while there is one scene at a time --
+    // which is exactly what PtSceneView does, so nothing caught it. PtFurnaceTest holds FIVE scenes
+    // simultaneously (an open quad, a half-albedo quad, a five-walled cave, and two dielectric
+    // quads), and every one of them aliased the same acceleration structure: whichever scene was
+    // built last was the scene every configuration actually traced. The furnace reported it as a
+    // cave whose paths all escaped in one bounce, which reads as a lighting bug and is a resource
+    // bug.
+    //
+    // Slot N belongs to the Nth addScene() call after a reset. resetScene() clears `scenes_` but
+    // KEEPS this pool, so a re-arm reuses the same handles in the same order and the leak this fix
+    // exists to prevent stays prevented -- a session still allocates O(log n) per scene rather than
+    // one per re-arm. Capacities are tracked per slot for the same reason they were tracked at all:
+    // a slot only reallocates when the scene in it outgrows what is already there.
+    std::vector<rhi::TlasHandle> tlasPool_;
+    std::vector<u32>             tlasPoolCap_;
     // GEOMETRY IS PER MESH, NOT PER SURFACE, and this is the difference between a re-arm costing
     // 20ms and costing two and a half SECONDS.
     //

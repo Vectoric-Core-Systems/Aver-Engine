@@ -85,6 +85,23 @@ struct MaterialDesc {
     f32 reflectance         = 0.04f;   // F0 of the dielectric base
     f32 f90                 = 1.0f;    // F(90); 1.0 is the textbook Schlick term
 
+    // Index of refraction and how much light passes straight through rather than being absorbed or
+    // diffusely scattered. NOT INDEPENDENT OF reflectance ABOVE: F0 = ((1-ior)/(1+ior))^2, and 1.5 is
+    // exactly the ior for which 0.04 is already the right F0 -- ordinary soda-lime glass. Change one
+    // of the pair without the other and the surface's Fresnel curve stops matching its own stated
+    // base reflectance; nothing here derives one from the other automatically, so an author (or a
+    // future .ocmat importer) that sets ior alone and expects reflectance to follow will be wrong.
+    f32 ior          = 1.5f;
+    // 0 = opaque as far as this field goes, which is every material authored before it existed. Read
+    // only where it matters -- see MaterialConstants::transmission and averBuildSurface's
+    // AVER_MAT_ALPHA_BLEND branch in PbrShaders.cpp, which pulls the blended coverage down toward
+    // (1 - transmission) before the view-Fresnel term lifts it back at grazing angles. NOT YET READ
+    // BY THE BRDF ITSELF: this only reshapes alpha compositing, exactly like reflectance/f90 already
+    // did before this change -- there is still no refraction, and light does not actually bend
+    // passing through a transmissive surface. Say that here rather than let someone assume otherwise
+    // from the field's name.
+    f32 transmission = 0.0f;
+
     AlphaMode alphaMode   = AlphaMode::Opaque;
     f32       alphaCutoff = 0.5f;   // read only under AlphaMode::Mask
     bool      twoSided    = false;
@@ -113,6 +130,44 @@ struct MaterialDesc {
     // writes it back out to a file.
     u32 graphId = 0;
 };
+
+// ------------------------------------------------------- the one translucency test, and its answer
+//
+// THERE WAS NO CANONICAL PREDICATE, and that is why these exist. `alphaMode == AlphaMode::Blend` was
+// spelled out at six separate sites in four shapes -- the editor's colour walk, its depth-prepass
+// walk, a SECOND independent shadow exclusion for off-screen casters, the packaged game's walk, the
+// GPU flag packer, and the path tracer (which additionally ignored the authored `ior` and substituted
+// a hardcoded constant). Six copies of a rule is six chances for one of them to drift, and one of
+// them had already drifted: the off-screen caster path excluded blended draws for its own reasons,
+// so a culled pane behaved differently from a visible one.
+//
+// Every one of those files already includes this header, so putting the test here costs no new
+// dependency edge.
+
+// True when light passes through this surface in any amount: authored translucency, OR measurable
+// transmission on a material that is nominally opaque.
+//
+// NOT "is the blend mode Blend". Transmission is a SUBSTRATE property -- it describes what the
+// material is made of, not how the rasteriser composites it -- and an opaque-blended material may
+// legitimately author it. Keying the rule on the authored field rather than the blend mode is what
+// keeps this from being a special case for a thing called "glass".
+AVER_PBR_API bool isTranslucent(const MaterialDesc& d);
+
+// The RGB fraction of sunlight ONE crossing of this surface lets through. {1,1,1} means it casts no
+// shadow at all; {0,0,0} means it casts a solid one.
+//
+// The rule, entirely in terms of authored fields:
+//   castShadow == false            -> {1,1,1}. This is the field's FIRST consumer: it has a parser, a
+//                                     writer, a C ABI, a C# property, four test assertions and four
+//                                     doc entries, and until now `packMaterial` never forwarded it,
+//                                     so it changed no pixel anywhere.
+//   otherwise  k = max(1 - baseColorFactor.a, transmission)
+//              T = baseColorFactor.rgb * k
+//
+// So a clear pane attenuates a little and tints not at all; a blue pane at alpha 0.2 passes 0.8 of
+// the sun, blue-tinted; and an opaque material authored with transmission > 0 casts a partial shadow
+// too. AlphaMode::Mask stays binary and is handled by the depth-prepass clip, not here.
+AVER_PBR_API void shadowTransmittance(const MaterialDesc& d, f32 outRgb[3]);
 
 // The material features the editor and the bindings may advertise.
 enum class Feature : u32 {

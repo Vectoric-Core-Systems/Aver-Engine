@@ -37,6 +37,12 @@ void sanitise(MaterialDesc& d) {
     // Both are reflectances. F0 above 1 makes (f90 - F0) negative in the Schlick term.
     d.reflectance       = std::clamp(d.reflectance, 0.0f, 1.0f);
     d.f90               = std::clamp(d.f90, 0.0f, 1.0f);
+    // Floored at 1.0 (vacuum); nothing in this engine models a surface less dense than the medium
+    // it sits in. Ceiling is generous headroom past diamond's ~2.42, not a physical limit -- wide
+    // enough that a mis-typed value clamps to something plausible instead of silently producing a
+    // negative or NaN reflectance somewhere a future derivation reads it.
+    d.ior               = std::clamp(d.ior, 1.0f, 4.0f);
+    d.transmission      = std::clamp(d.transmission, 0.0f, 1.0f);
     d.alphaCutoff       = std::clamp(d.alphaCutoff, 0.0f, 1.0f);
     if (static_cast<u32>(d.alphaMode) > static_cast<u32>(AlphaMode::Blend)) d.alphaMode = AlphaMode::Opaque;
 }
@@ -48,6 +54,27 @@ void eraseHandle(std::vector<MaterialHandle>& v, MaterialHandle h) {
 }
 
 } // namespace
+
+// See Material.hpp for why these live here rather than being re-spelled at each call site.
+bool isTranslucent(const MaterialDesc& d) {
+    return d.alphaMode == AlphaMode::Blend || d.transmission > 0.0f;
+}
+
+void shadowTransmittance(const MaterialDesc& d, f32 outRgb[3]) {
+    // castShadow wins outright, and it is checked FIRST rather than folded into the arithmetic: an
+    // author who ticked it off means "this thing casts nothing", not "scale its shadow by something".
+    if (!d.castShadow) { outRgb[0] = outRgb[1] = outRgb[2] = 1.0f; return; }
+
+    // max(), not a sum or a product, of the two independent ways a surface can be see-through:
+    // coverage (baseColorFactor.a) and substrate transmission. They are alternative descriptions of
+    // the same physical fact, and an author who sets both means the more transmissive of the two --
+    // multiplying them would make a pane that is 90% transparent by BOTH measures nearly opaque.
+    const f32 a = std::clamp(d.baseColorFactor[3], 0.0f, 1.0f);
+    const f32 t = std::clamp(d.transmission, 0.0f, 1.0f);
+    const f32 k = std::max(1.0f - a, t);
+    for (int i = 0; i < 3; ++i)
+        outRgb[i] = std::clamp(d.baseColorFactor[i], 0.0f, 1.0f) * k;
+}
 
 MaterialLibrary::MaterialLibrary() : impl_(new Impl) {}
 MaterialLibrary::~MaterialLibrary() { delete impl_; }
@@ -162,10 +189,35 @@ Status MaterialLibrary::status(Feature f) {
         case Feature::EmissiveMap:
         case Feature::AlphaMask:
             return Status::Ready;
-        // Stored, not rendered: blending needs a blend state and a back-to-front draw order, both
-        // of which belong to the renderer.
+        // Both pieces this used to be missing now exist in the renderer: IDevice::setDrawBlended
+        // (aver/rhi/RHI.hpp) captures a blended drawMesh call instead of submitting it through the
+        // normal opaque path, and IDevice::endFrame sorts that per-frame list BACK-TO-FRONT by
+        // camera distance and replays it through scenePipeline(..., blended=true) -- with a real
+        // blend state, depth-test on and depth-write off -- after the deferred sky draw and before
+        // the transparent (particle) pass. PbrShaders.cpp's averBuildSurface also now raises alpha
+        // toward 1 with the view Fresnel term under this same flag, so a blended dielectric reads as
+        // glass rather than as uniformly-dimmed fog. That is the feature: alpha blending is Ready.
+        //
+        // WHAT STILL DOES NOT WORK, so a caller does not read "Ready" as "physically correct glass":
+        //   - a blended draw is captured and replayed OUTSIDE IRenderFeature::submitDraw, which is
+        //     the same loop that voxelises geometry, inserts it into the ray-tracing acceleration
+        //     structure and feeds the shadow cascade. A blended surface is therefore never voxelised,
+        //     never in the TLAS and never in the shadow map: it casts no ray-traced shadow, is absent
+        //     from ray-traced reflections, and contributes no GI bounce. These are the SAME exclusion
+        //     for the SAME reason a translucent mesh is skipped by drawMesh's opaque path in the
+        //     first place -- see the contract at IDevice::setDrawBlended's declaration -- not
+        //     separate oversights to fix later.
+        //   - MaterialDesc now HAS ior/transmission (packed into MaterialConstants alongside
+        //     everything else), but the only place either is read is averBuildSurface's alpha
+        //     computation: transmission pulls blended coverage toward (1 - transmission) before the
+        //     view-Fresnel term lifts it back at grazing angles, and ior is carried for completeness
+        //     without being read by anything yet. So there is STILL no refraction and no light
+        //     actually passes through the surface; what this status covers is alpha COMPOSITING (a
+        //     weighted blend of the surface colour over whatever was drawn before it, with coverage
+        //     shaped by transmission), not physical transmission. A window that should bend the view
+        //     of what is behind it will not -- it will only show a translucent, unbent copy.
         case Feature::AlphaBlend:
-            return Status::NotImplemented;
+            return Status::Ready;
         default:
             return Status::Unsupported;
     }

@@ -1024,6 +1024,21 @@ void VulkanRenderContext::buildTlas(TlasHandle h, const TlasInstance* instances,
         // backend never builds (VK_KHR_ray_query only, no VK_KHR_ray_tracing_pipeline; see the
         // contract's note on which extension the engine's inline RayQuery shaders actually need).
         id.instanceCustomIndex = instances[i].instanceId;
+        // MAPPED, NOT CAST. The engine's TlasInstanceFlags values were chosen to match D3D12's, and
+        // VkGeometryInstanceFlagBitsKHR happens to use the same bit positions today -- but "happens
+        // to" is not a contract between two vendors' headers, and a silent divergence here would put
+        // a wrong flag on every instance with nothing to grep for. Written out so the two are only
+        // ever equal on purpose.
+        VkGeometryInstanceFlagsKHR vkFlags = 0;
+        if (instances[i].flags & TlasInstanceFlag_TriangleCullDisable)
+            vkFlags |= VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+        if (instances[i].flags & TlasInstanceFlag_TriangleFrontCcw)
+            vkFlags |= VK_GEOMETRY_INSTANCE_TRIANGLE_FRONT_COUNTERCLOCKWISE_BIT_KHR;
+        if (instances[i].flags & TlasInstanceFlag_ForceOpaque)
+            vkFlags |= VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
+        if (instances[i].flags & TlasInstanceFlag_ForceNonOpaque)
+            vkFlags |= VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR;
+        id.flags = vkFlags;
         VkAccelerationStructureDeviceAddressInfoKHR addrInfo{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR};
         addrInfo.accelerationStructure = b->as;
         id.accelerationStructureReference = dev_->api().GetAccelerationStructureDeviceAddressKHR(dev_->vkDevice(), &addrInfo);

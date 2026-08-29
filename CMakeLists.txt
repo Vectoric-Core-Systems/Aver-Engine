@@ -431,6 +431,28 @@ endif()
 # which actually builds them, can decide it.
 aver_check_module_dag()
 
+# AverCrashReporter -- the separate process that displays a crash report.
+#
+# DECLARED HERE, UNCONDITIONALLY, and not with the other tools/ executables, which is a deliberate
+# break from that pattern rather than an oversight. Every other tool (AverAssetC, MakeFoliage,
+# MakeSamples...) is wired up inside tests/formats/CMakeLists.txt, which only runs under
+# if(AVER_BUILD_TESTS) below. That is fine for an asset compiler. It is wrong for a crash reporter:
+# configuring with -DAVER_BUILD_TESTS=OFF would produce a Sandbox.exe that installs crash handlers,
+# writes crash folders, and then tries to launch a reporter that was never built -- the failure mode
+# being silence at exactly the moment the user most needs to be told something.
+#
+# LINKS NOTHING FROM THE ENGINE. Not Aver.Core, not Aver.Platform, nothing. It has to still work when
+# the engine does not, and the only way to be certain of that is to share no code with it. Win32 and
+# the CRT only; see the file's own header comment.
+add_executable(AverCrashReporter tools/AverCrashReporter.cpp)
+set_target_properties(AverCrashReporter PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+if(MSVC)
+  # A GUI subsystem app: it must not flash a console window when the engine spawns it, and it is
+  # spawned DETACHED_PROCESS precisely so it outlives the crash. main() is still the entry point --
+  # /ENTRY:mainCRTStartup keeps the standard signature rather than forcing a WinMain.
+  target_link_options(AverCrashReporter PRIVATE /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup)
+endif()
+
 if(AVER_BUILD_TESTS)
   # Needs Aver.Runtime.Game, so it only exists when the game runtime is built.
   if(AVER_BUILD_GAME AND TARGET Aver.Framework)

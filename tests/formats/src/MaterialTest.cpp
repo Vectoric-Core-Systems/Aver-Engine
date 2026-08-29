@@ -253,18 +253,94 @@ static void testGraphRef() {
         "PARAM occlusionStrength 1\n"
         "PARAM reflectance 0.04\n"
         "PARAM f90 1\n"
+        "PARAM ior 1.5\n"
+        "PARAM transmission 0\n"
         "PARAM uvTiling 200\n";
     check(fmt::writeOcmat(plain, &plainEx) == kExpectedNoGraphRef,
-          "...and the written text is byte-identical to before GRAPHREF existed");
+          "...and the written text is byte-identical to before GRAPHREF existed"
+          " (updated for PARAM ior/transmission, which now always appear too)");
 }
 
-// Checks packMaterial: the 80-byte block the shader reads.
+// PARAM ior and PARAM transmission: index of refraction and dielectric transmission weight, added
+// so a .ocmat can author glass. Kept out of kFull/testFullParse deliberately -- kFull is reused by
+// testRoundTrip and by the byte-exact fixture in testGraphRef, and this is exactly the kind of change
+// that byte-exact fixture exists to catch, so it gets its own isolated text instead.
+//
+// THE DISCRIMINATING PART: before this PARAM branch existed, "ior"/"transmission" were unrecognised
+// keys, and an unrecognised PARAM name is SILENTLY DROPPED (see the PARAM branch's final `else` --
+// there isn't one, which is the bug). Parsing never failed and never warned; d.ior/d.transmission
+// simply stayed at the MaterialDesc defaults (1.5f / 0.0f). So asserting the SPECIFIC values below,
+// chosen to differ from both defaults, is what makes this test fail against the pre-fix parser: a
+// pre-fix build would read back 1.5 and 0.0 no matter what the file said, not 1.8 and 0.85.
+static void testDielectric() {
+    AVER_INFO("=== .ocmat: PARAM ior / transmission ===");
+    std::string err;
+
+    pbr::MaterialDesc d;
+    check(fmt::parseOcmat("OCMAT 1\nNAME M_Glass\nPARAM ior 1.8\nPARAM transmission 0.85\n",
+                          d, nullptr, &err), "a material with ior/transmission parses: " + err);
+    check(near(d.ior, 1.8f), "ior is read, not left at the 1.5 default");
+    check(near(d.transmission, 0.85f), "transmission is read, not left at the 0.0 default");
+
+    // Round trip: unconditional emission (matching reflectance/f90's convention, not slopeBlend's
+    // conditional one -- see writeOcmat) plus a re-parse that recovers the same values.
+    const std::string text = fmt::writeOcmat(d, nullptr);
+    check(text.find("PARAM ior 1.8") != std::string::npos, "the writer emits PARAM ior");
+    check(text.find("PARAM transmission 0.85") != std::string::npos,
+          "the writer emits PARAM transmission");
+    pbr::MaterialDesc back;
+    check(fmt::parseOcmat(text, back, nullptr, &err), "the writer's own output re-parses: " + err);
+    check(near(back.ior, d.ior) && near(back.transmission, d.transmission),
+          "both survive the round trip");
+
+    // A header-only file loads the glTF-adjacent defaults this format already promises for every
+    // other factor (see testTolerance's "header-only file loads as the defaults").
+    pbr::MaterialDesc def;
+    check(fmt::parseOcmat("OCMAT 1\n", def, nullptr, &err), "a header-only file loads");
+    check(near(def.ior, 1.5f), "...ior defaults to 1.5 (MaterialDesc's own default, not this format's)");
+    check(near(def.transmission, 0.0f), "...transmission defaults to fully opaque");
+
+    // REPAIRED, NOT PASSED THROUGH. 1.0 is vacuum, so an authored ior below it is not a value this
+    // format should ever hand to a renderer; it is clamped up to 1.0 rather than kept as typed or
+    // silently reverted to the 1.5 default -- either of which this assertion would catch (0.4 != 1.0,
+    // and 1.5 != 1.0).
+    pbr::MaterialDesc lo;
+    check(fmt::parseOcmat("OCMAT 1\nPARAM ior 0.4\n", lo, nullptr, &err),
+          "a sub-vacuum ior parses, rather than failing the file");
+    check(near(lo.ior, 1.0f), "...but is clamped up to 1.0, not kept at 0.4 or reverted to 1.5");
+
+    // Same idiom for transmission's upper bound: [0,1] by definition, so 1.4 is clamped to 1.0 rather
+    // than stored raw (which this assertion would also catch: 1.4 != 1.0).
+    pbr::MaterialDesc hi;
+    check(fmt::parseOcmat("OCMAT 1\nPARAM transmission 1.4\n", hi, nullptr, &err),
+          "an over-1 transmission parses, rather than failing the file");
+    check(near(hi.transmission, 1.0f), "...but is clamped down to 1.0, not kept at 1.4");
+
+    // And the lower bound: a negative transmission is clamped to 0, exercised alongside a nonzero
+    // ior on the same line so a build that dropped the PARAM entirely (leaving both at their
+    // defaults) cannot pass this by coincidence -- ior 1.9 is not 1.5, whatever transmission does.
+    pbr::MaterialDesc neg;
+    check(fmt::parseOcmat("OCMAT 1\nPARAM ior 1.9\nPARAM transmission -0.3\n", neg, nullptr, &err),
+          "a negative transmission parses, rather than failing the file");
+    check(near(neg.ior, 1.9f), "...ior alongside it still reads correctly");
+    check(near(neg.transmission, 0.0f), "...but transmission is clamped up to 0, not kept negative");
+}
+
+// Checks packMaterial: the 96-byte block the shader reads.
 static void testPack() {
     AVER_INFO("=== material: the packed GPU block ===");
-    // 80 since the second (slope-blended) layer was added: 64 plus slopeBlendLo/Hi, layer1UvScale
-    // and one pad. THIS CHECK EARNED ITS KEEP -- it is what caught the size change, and the reason
-    // it matters is that PbrShaders.cpp's `cbuffer AverMaterial` mirrors this struct BY HAND.
-    check(sizeof(pbr::MaterialConstants) == 80, "MaterialConstants is still 80 bytes");
+    // 96 since `ior` and `transmission` were added: 80 (itself 64 plus slopeBlendLo/Hi,
+    // layer1UvScale and one pad, when the slope-blended second layer landed) plus those two floats,
+    // plus two pad floats to stay 16-byte aligned.
+    //
+    // THIS CHECK EARNED ITS KEEP TWICE NOW -- it is what caught both size changes, and the reason it
+    // matters is that PbrShaders.cpp's `cbuffer AverMaterial` mirrors this struct BY HAND. A
+    // mismatch there does not fail to build: it silently shifts every field after the insertion
+    // point, so a material's roughness starts reading its neighbour's bytes and the image goes
+    // subtly wrong with nothing to grep for. Note this is a RUNTIME check rather than a
+    // static_assert, which is why the 80 -> 96 growth compiled clean and would have failed the suite
+    // instead -- keep it that way, since the point is to be told, not to be stopped.
+    check(sizeof(pbr::MaterialConstants) == 96, "MaterialConstants is 96 bytes");
     check(sizeof(pbr::MaterialConstants) % 16 == 0, "...and a legal constant-buffer size");
 
     pbr::MaterialDesc d;
@@ -289,6 +365,80 @@ static void testPack() {
     check((c.flags & pbr::MaterialFlag_NormalMap) != 0, "a path-bound slot sets its flag");
     check((c.flags & pbr::MaterialFlag_EmissiveMap) != 0, "an id-bound slot sets its flag too");
     check((c.flags & pbr::MaterialFlag_BaseColorMap) == 0, "an unbound slot does not");
+
+    // THE TRANSPARENCY FIELDS ACTUALLY SURVIVING THE PACK, which nothing asserted before.
+    //
+    // This block exists because the gap was real and load-bearing: `transmission` was copied into
+    // MaterialConstants by exactly one line, and deleting that line left the whole suite green while
+    // every transmissive material in the engine silently lost its transmission. A field that reaches
+    // the GPU through one unasserted assignment is a field that will one day stop reaching it.
+    pbr::MaterialDesc g;
+    g.baseColorFactor[0] = 0.86f; g.baseColorFactor[1] = 0.93f;
+    g.baseColorFactor[2] = 0.88f; g.baseColorFactor[3] = 0.12f;
+    g.transmission = 0.92f;
+    g.ior          = 1.52f;
+    g.alphaMode    = pbr::AlphaMode::Blend;
+    g.alphaCutoff  = 0.25f;
+    c = pbr::packMaterial(g);
+    check(near(c.transmission, 0.92f), "transmission survives packMaterial");
+    check(near(c.ior, 1.52f), "ior survives packMaterial");
+    check(near(c.alphaCutoff, 0.25f), "alphaCutoff survives packMaterial");
+    check(near(c.baseColorFactor[3], 0.12f), "baseColorFactor.a is NOT sRGB-decoded, only rgb is");
+    check((c.flags & pbr::MaterialFlag_AlphaBlend) != 0, "BLEND translucent sets AlphaBlend");
+    check((c.flags & pbr::MaterialFlag_AlphaMask) == 0, "...and not AlphaMask");
+
+    // castShadow, whose ONLY consumer is the flag bit checked here -- see MaterialGpu.hpp.
+    check((c.flags & pbr::MaterialFlag_CastShadow) != 0, "castShadow defaults to true and is packed");
+    g.castShadow = false;
+    c = pbr::packMaterial(g);
+    check((c.flags & pbr::MaterialFlag_CastShadow) == 0, "castShadow=0 clears the bit");
+}
+
+// The one translucency predicate, and the shadow transmittance derived from it.
+static void testTranslucency() {
+    AVER_INFO("=== material: isTranslucent / shadowTransmittance ===");
+
+    pbr::MaterialDesc opaque;
+    check(!pbr::isTranslucent(opaque), "a default material is not translucent");
+
+    // THE CASE THAT MAKES THIS NOT A GLASS SPECIAL CASE: transmission on an OPAQUE blend mode.
+    pbr::MaterialDesc opaqueTransmissive;
+    opaqueTransmissive.transmission = 0.5f;
+    check(pbr::isTranslucent(opaqueTransmissive),
+          "transmission alone makes a material translucent, whatever its blend mode");
+
+    pbr::MaterialDesc blended;
+    blended.alphaMode = pbr::AlphaMode::Blend;
+    check(pbr::isTranslucent(blended), "BLEND translucent is translucent with no transmission set");
+
+    f32 t[3] = {0, 0, 0};
+
+    // castShadow off means it casts NOTHING, whatever else it says.
+    pbr::MaterialDesc noShadow;
+    noShadow.castShadow = false;
+    noShadow.baseColorFactor[0] = noShadow.baseColorFactor[1] = noShadow.baseColorFactor[2] = 0.0f;
+    noShadow.baseColorFactor[3] = 1.0f;   // fully opaque black: would cast a SOLID shadow otherwise
+    pbr::shadowTransmittance(noShadow, t);
+    check(near(t[0], 1.0f) && near(t[1], 1.0f) && near(t[2], 1.0f),
+          "castShadow=0 passes all light, even on an opaque black material");
+
+    // A solid material blocks everything.
+    pbr::MaterialDesc solid;
+    solid.baseColorFactor[3] = 1.0f;
+    pbr::shadowTransmittance(solid, t);
+    check(near(t[0], 0.0f) && near(t[1], 0.0f) && near(t[2], 0.0f), "an opaque material blocks all light");
+
+    // A tinted pane: k = max(1 - 0.12, 0.92) = 0.92, tinted by the base colour.
+    pbr::MaterialDesc glass;
+    glass.alphaMode = pbr::AlphaMode::Blend;
+    glass.baseColorFactor[0] = 0.5f; glass.baseColorFactor[1] = 1.0f;
+    glass.baseColorFactor[2] = 0.5f; glass.baseColorFactor[3] = 0.12f;
+    glass.transmission = 0.92f;
+    pbr::shadowTransmittance(glass, t);
+    check(near(t[0], 0.46f), "tinted: red is halved by the base colour");
+    check(near(t[1], 0.92f), "tinted: green passes at the full k");
+    check(near(t[2], 0.46f), "tinted: blue is halved too");
+    check(t[0] < t[1], "AND THE SHADOW IS ACTUALLY TINTED, not merely dimmed");
 }
 
 // Writes a parsed material back out and re-parses it.
@@ -595,7 +745,9 @@ int main() {
     testFullParse();
     testTolerance();
     testGraphRef();
+    testDielectric();
     testPack();
+    testTranslucency();
     testRoundTrip();
     testBlendModes();
     testMipChain();

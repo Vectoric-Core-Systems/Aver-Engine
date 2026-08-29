@@ -11,6 +11,13 @@ namespace {
 
 constexpr f64 kPi = 3.14159265358979323846;
 
+// THE TWO IORS THE DIELECTRIC FURNACE CHECKS ARE RUN AT. Not one, because the energy-conservation
+// claim is "whatever the IOR" (PtFurnaceTest.hpp), and a single IOR could not tell a correct
+// implementation apart from one that merely happens to balance at that particular value. Glass and
+// diamond span a wide F0 range (0.04 vs ~0.17) while both staying physically ordinary numbers.
+constexpr f32 kGlassIor   = 1.5f;
+constexpr f32 kDiamondIor = 2.42f;
+
 // The flat quad the single-bounce configurations stand on. Large enough that no primary ray from
 // the probe camera comes near an edge, so "every path bounces once and leaves" is a property of the
 // geometry rather than of where the camera happens to point.
@@ -75,6 +82,14 @@ bool PtFurnaceTest::init(rhi::IDevice& dev) {
     configs_[kOpenTimesPi]    = {"open/albedo-1/xPI",       0, 0,  4, PtDefect::TimesPi,  0};
     configs_[kOpenNoCosine]   = {"open/albedo-1/no-cos",    0, 0,  4, PtDefect::NoCosine, 0};
     configs_[kOpenHalfAlbedo] = {"open/albedo-0.5/correct", 1, 0,  4, PtDefect::None,     0};
+    // SCENES 3 AND 4 ARE THE SAME QUAD MESH AS SCENE 0, made dielectric instead of Lambertian --
+    // see buildGeometry() below. Same camera (0), same 4-bounce budget: a dielectric hit here always
+    // resolves and escapes on its first attempt (see the single-bounce check in evaluate()), so the
+    // bound is generous headroom, not a load-bearing choice.
+    configs_[kOpenDielectricGlass]   = {"open/dielectric-1.5/correct",         3, 0, 4, PtDefect::None, 0};
+    configs_[kOpenDielectricDiamond] = {"open/dielectric-2.42/correct",        4, 0, 4, PtDefect::None, 0};
+    configs_[kOpenDielectricDefect]  = {"open/dielectric-1.5/no-pdf-cancel",   3, 0, 4,
+                                        PtDefect::DielectricNoPdfCancel,       0};
     configs_[kCaveShallow]    = {"cave/4-bounce/correct",   2, 1,  4, PtDefect::None,     0};
     configs_[kCaveDeep]       = {"cave/32-bounce/correct",  2, 1, 32, PtDefect::None,     0};
     // THE DETERMINISM PAIR RUNS IN THE CAVE, NOT ON THE QUAD, AND THAT IS THE SECOND ATTEMPT.
@@ -166,13 +181,24 @@ bool PtFurnaceTest::buildGeometry() {
     u32 cave[5];
     for (u32 i = 0; i < 5; ++i) { s.mesh = meshes_[1 + i]; cave[i] = pt_.addSurface(s); }
 
-    // THREE ACCELERATION STRUCTURES, not one scene with everything spread out. "The quad is far
+    // THE DIELECTRIC SURFACES, on the SAME quad mesh `open` already stands on. An energy check about
+    // reflection and refraction needs no new geometry, only a different material on geometry this
+    // file already built -- see PtFurnaceTest.hpp for why two IORs and not one.
+    s.mesh = quad;
+    s.ior = kGlassIor;
+    const u32 glass = pt_.addSurface(s);
+    s.ior = kDiamondIor;
+    const u32 diamond = pt_.addSurface(s);
+
+    // FIVE ACCELERATION STRUCTURES, not one scene with everything spread out. "The quad is far
     // enough from the cave that a bounce off it never reaches" is a probability argument, and the
-    // single-bounce claim below must not rest on one: in scene 0 there is literally nothing else
-    // for a ray to hit.
-    pt_.addScene(&open, 1);
-    pt_.addScene(&half, 1);
-    pt_.addScene(cave, 5);
+    // single-bounce claim below must not rest on one: in scenes 0, 3 and 4 there is literally
+    // nothing else for a ray to hit.
+    pt_.addScene(&open, 1);      // scene 0
+    pt_.addScene(&half, 1);      // scene 1
+    pt_.addScene(cave, 5);       // scene 2
+    pt_.addScene(&glass, 1);     // scene 3
+    pt_.addScene(&diamond, 1);   // scene 4
     return pt_.prepare();
 }
 
@@ -357,7 +383,86 @@ void PtFurnaceTest::evaluate() {
           "Halving the albedo must halve the reading exactly. L means the albedo was ignored, "
           "L/4 means it was applied twice.");
 
-    // ---- 5. more than one bounce, where the answer is L times what escaped ----
+    // ---- 5. the dielectric: a different BSDF, the same energy claim ----
+    // Everything below rests on the SAME single-bounce premise as check 1 above, re-verified for
+    // this material kind rather than assumed to carry over: a smooth dielectric only has two
+    // outgoing directions (reflect, refract), and on a lone flat quad BOTH of them leave the scene
+    // immediately, so this should ALSO read exactly 1 escape and 1 bounce per path. If it did not --
+    // say, a refracted ray re-hitting the same quad from underneath because the bias offset pushed
+    // it the wrong way -- the checks below would be measuring a multi-bounce scene while believing
+    // it was single-bounce, the same failure mode check 1 exists to rule out for the Lambertian case.
+    const Result& glassR = results_[kOpenDielectricGlass];
+    if (glassR.escapeFraction() != 1.0 || glassR.meanBounces() != 1.0) {
+        ++failures_;
+        AVER_ERROR("[PT] furnace INCONCLUSIVE: the dielectric open scene escaped on {:.6f} of paths "
+                   "at {:.6f} bounces each, and both must be exactly 1 for the identity below to mean "
+                   "what it claims", glassR.escapeFraction(), glassR.meanBounces());
+    }
+
+    // THE CLAIM ITSELF: for a NON-ABSORBING dielectric, energy in equals energy out regardless of
+    // IOR. Every path either reflects or refracts with weight exactly 1 (the Fresnel probability of
+    // whichever branch was taken and the Fresnel weight applied on it are the SAME number, and they
+    // cancel), and a uniform environment returns the same L down either escape direction -- so the
+    // reading needs no reflectance value to be known, only that reflect+refract are weighted to
+    // conserve energy between them. Checked at two IORs (see kGlassIor/kDiamondIor) because a single
+    // one could not distinguish a correct implementation from one that happens to balance only there.
+    check("open/dielectric-1.5/correct ", glassR.mean(0), L, 1e-4,
+          "A non-absorbing dielectric must return exactly the environment radiance, whatever its "
+          "IOR: reflection and refraction are chosen with the exact probabilities their own Fresnel "
+          "weights need to cancel to 1. A reading away from L means energy is being lost or invented "
+          "at the interface.");
+    check("open/dielectric-2.42/correct", results_[kOpenDielectricDiamond].mean(0), L, 1e-4,
+          "The identical claim at a much higher IOR (diamond, F0 ~0.17 against glass's 0.04) -- "
+          "this is what backs the word 'whatever' in the claim above rather than leaving it "
+          "asserted at one convenient value.");
+
+    // ---- 6. ...and shown FAILING, the same way checks 2/3 justify check 1 above ----
+    // THE DEFECT: the Fresnel term applied a SECOND time as a multiplicative weight, on top of
+    // already having been the branch probability. Per PATH the estimator becomes reflectance^2 (if
+    // the reflect branch, chosen w.p. reflectance, was taken) or (1-reflectance)^2 (if refract,
+    // chosen w.p. 1-reflectance) times L; since the environment is uniform this holds regardless of
+    // which direction was actually sampled, so the EXPECTED reading is exactly
+    // L * (reflectance^2 + (1-reflectance)^2) -- strictly less than L for any reflectance strictly
+    // between 0 and 1 (the parabola's minimum, 0.5, is at reflectance=0.5; it approaches 1 only at
+    // the endpoints). The probe camera looks almost straight down (tanHalfFov 0.1, ~5.7 degrees of
+    // spread), so reflectance is Schlick's F0 to within about 1e-10 relative across the whole probe,
+    // which is what makes an EXACT expected value possible here rather than only a "must not equal
+    // L" statement.
+    //
+    // THE TOLERANCE IS 5e-3 AND NOT 1e-4, AND THAT IS ARITHMETIC RATHER THAN A CLIMBDOWN. It first
+    // shipped at 1e-4 by analogy with the correct-dielectric checks above, and failed at 5.2e-4
+    // relative -- which is not a bug in the estimator, it is the estimator's own noise floor.
+    //
+    // The distinction the 1e-4 checks rely on is VARIANCE, not exactness. A CORRECT dielectric path
+    // carries weight exactly 1 down whichever branch it takes, and a uniform environment returns L
+    // down both, so every path reads precisely L and the accumulator has ZERO variance -- 1e-4 there
+    // is really just a float-rounding allowance. THIS estimator is the opposite: the two branches
+    // return DIFFERENT values (F*L when it reflects, (1-F)*L when it refracts), so the mean is
+    // correct but each path is a coin flip and the accumulator has genuine Monte Carlo spread.
+    //
+    //     F0 = 0.04, so per path X is 0.04L with p = 0.04 and 0.96L with p = 0.96
+    //     E[X]   = F0^2 + (1-F0)^2                  = 0.9232 L
+    //     E[X^2] = F0^3 + (1-F0)^3                  = 0.8848 L^2
+    //     Var    = 0.8848 - 0.9232^2               = 0.03250 L^2   ->  SD = 0.1803 L
+    //     SE     = SD / sqrt(131072 paths)         = 4.98e-4 L     ->  5.4e-4 relative to the mean
+    //
+    // The observed 5.2e-4 was ONE standard error. A tolerance below an estimator's standard error is
+    // not a strict check, it is a check that fails at random, and the sample count here is fixed by
+    // the probe grid rather than raisable to shrink it. 5e-3 is about nine sigma: still two orders
+    // tighter than the 0.10 the no-cosine check needs, and nowhere near loose enough to accept the
+    // reading this exists to reject (a working double-count guard reads L, which is 8.3% away --
+    // 150 sigma).
+    const f64 r0 = ((1.0 - static_cast<f64>(kGlassIor)) / (1.0 + static_cast<f64>(kGlassIor))) *
+                   ((1.0 - static_cast<f64>(kGlassIor)) / (1.0 + static_cast<f64>(kGlassIor)));
+    const f64 expectedDefect = (r0 * r0 + (1.0 - r0) * (1.0 - r0)) * L;
+    check("open/dielectric-1.5/no-pdf-cancel", results_[kOpenDielectricDefect].mean(0), expectedDefect,
+          5e-3,
+          "The defect applies the Fresnel term a second time as a multiplicative weight instead of "
+          "letting it cancel against the branch probability it already was -- the discrete-choice "
+          "counterpart of PT_DEFECT_NO_COSINE forgetting the pdf it must divide back out. A reading "
+          "at L means the oracle cannot see a double-counted Fresnel weight either.");
+
+    // ---- 7. more than one bounce, where the answer is L times what escaped ----
     // The identity is exact and needs NO baseline: both sides come out of the same paths. A path
     // that ran out of bounces contributes nothing, so a finite bounce count reads low BY EXACTLY
     // the truncated fraction -- and a stray PI would break the identity rather than shifting both
@@ -389,7 +494,7 @@ void PtFurnaceTest::evaluate() {
               L > 0.0 ? results_[kCaveShallow].mean(0) / L : 0.0,
               L > 0.0 ? results_[kCaveDeep].mean(0) / L : 0.0, shallow, deep);
 
-    // ---- 6. determinism ----
+    // ---- 8. determinism ----
     // Whether the block being compared can DISTINGUISH two sample streams at all. It has to be
     // asked: on the open quad it cannot -- a correct albedo-1 furnace has zero variance and every
     // pixel reads exactly L no matter what was drawn -- and a bit-exact comparison of a constant
@@ -431,9 +536,10 @@ void PtFurnaceTest::evaluate() {
     passed_ = failures_ == 0;
     if (passed_)
         AVER_INFO("[PT] FURNACE PASS: the integrator reads L to 1e-4 in an albedo-1 furnace, L/2 at "
-                  "albedo 0.5, and L times the escaped fraction inside an enclosure -- and the two "
-                  "deliberately broken estimators beside it read PI*L and 2L, so the oracle is "
-                  "known to be able to see both");
+                  "albedo 0.5, L times the escaped fraction inside an enclosure, and L again from a "
+                  "non-absorbing dielectric at two different IORs -- and the three deliberately "
+                  "broken estimators beside them read PI*L, 2L and L*(F0^2+(1-F0)^2), so the oracle "
+                  "is known to be able to see all three");
     else
         AVER_ERROR("[PT] FURNACE FAIL: {} of the checks above did not hold", failures_);
 }

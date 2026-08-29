@@ -105,6 +105,13 @@ struct Settings {
     // Cost is LINEAR in this and independent of the march length -- measured at about 0.22 ms per
     // cone, with the 24-step loop bound unreachable at the diffuse aperture because the cones exit
     // early. So this is the one GI number worth putting on a ladder.
+    //
+    // ON THE LADDER NOW: Low 3, Medium 6, High 9, Epic 13. See giConesForQuality in Voxi.cpp for the
+    // per-rung reasoning and the measured per-tier cost (FirstPerson range, scene draw: Low 3.3 ms
+    // through Epic 5.4 ms, 0.21 ms/cone, confirming the 0.22 ms/cone figure above from a second
+    // experiment) -- and for why a "two cones moved a probe by 2/255" claim living elsewhere in this
+    // tree is deliberately not repeated here as settled: it predates this ladder and was never
+    // re-measured against it.
     u32 giCones         = 6;
     f32 giIntensity     = 1.0f;
     f32 giMaxDistance   = 4000.0f;  // centimetres
@@ -199,10 +206,11 @@ struct Settings {
     // Low still amortises at 8, which is where the trade belongs: not on the default tier.
     u32 giUpdateInterval = 1;
 
-    // SPATIAL denoise radius for the ray-traced sun shadow, in pixels. 0 (the default) is off and
-    // is exactly today's behaviour: the shadow term is whatever this pixel's own rays returned,
-    // unfiltered. N > 0 averages a (2N+1)^2 neighbourhood of the shadow history, weighted by how
-    // well each neighbour's stored depth agrees with this pixel's surface plane.
+    // SPATIAL denoise radius for the ray-traced sun shadow, in pixels. 0 is off: the shadow term is
+    // whatever this pixel's own rays returned, unfiltered. N > 0 averages a (2N+1)^2 neighbourhood
+    // of the shadow history, weighted by how well each neighbour's stored depth agrees with this
+    // pixel's surface plane. The default is 2, not 0 -- see WHY 0 WAS THE HONEST DEFAULT below for
+    // why that changed.
     //
     // WHY THIS EXISTS, AND WHY IT IS NOT THE TILE KNOB ABOVE. rtPixelsPerRayTile amortises over
     // TIME: a pixel reuses a reprojected value it computed frames ago. That converges beautifully
@@ -221,32 +229,80 @@ struct Settings {
     // are already sampling different parts of the same receiver, and their mean is a real area
     // estimate rather than a blur.
     //
-    // DERIVED FROM rayTracing on a tier change, like the two knobs above, and 0 for every tier
-    // today so the default tier's rung and this default agree by construction. That agreement is
-    // the whole contract: derivation only fires when the tier CHANGES, so a struct default that
-    // contradicts its own tier never reaches the rung it claims -- a trap this file has already
-    // fallen into in both directions with giUpdateInterval.
-    u32 rtShadowDenoise = 0;
+    // WHY 0 WAS THE HONEST DEFAULT, AND WHY IT ISN'T ANY MORE. This stayed 0 at every tier while
+    // rasterisation (PSMainVoxi) was the default primary-visibility path, because PSMainVoxi ran at
+    // this struct's own MSAA default of 4x and a smoothing filter stacked on an already-antialiased
+    // image is redundant polish, not a fix -- the honest thing to ship as a default was raw, unhidden
+    // noise, because a filter can smear as readily as it can clean up, and there was no evaluated hole
+    // to justify accepting that risk. Same philosophy rtPixelsPerRayTile states outright a few dozen
+    // lines above: "a temporal denoiser hides its own artefacts as readily as the tracer's." It was
+    // sound while it was written.
+    //
+    // RAY-DRIVEN PRIMARY VISIBILITY (Settings::rtRenderMode, default 1) CHANGED THE TRADE, not the
+    // philosophy. The ray pass is one fullscreen triangle with no per-triangle coverage, so it always
+    // runs at a single sample regardless of Settings::msaa (see rtRenderMode's own "WHAT DEFAULTING TO
+    // IT TRADES AWAY" list) -- there is no antialiasing pass quietly softening anything any more. At
+    // one ray per pixel, which is what Low, Medium and High all trace at least, the raw sun-shadow
+    // term is a hard 0 or 1 (see THE PROBLEM IT IS FOR, above): with 4x MSAA gone, that dithering is
+    // now the whole picture rather than a texture MSAA's resolve used to quietly soften at every
+    // silhouette. Leaving the filter off no longer shows an evaluator the renderer's honest raw
+    // fidelity; it shows them a defect a filter this cheap (+0.02 ms at the widest rung the clamp
+    // allows, against +1.69 ms for one more traced ray -- VoxiRenderer.cpp) already fixes to within
+    // one code of a sixteen-ray reference on a still camera.
+    //
+    // WHAT IS ACCEPTED IN EXCHANGE, HONESTLY, rather than left for someone to discover by eye: the
+    // gather centre is reprojected through LAST frame's camera to stay aligned with the shadow history
+    // texture (rtShadowSpatial, VoxiShaders.hpp), so under camera motion it can walk slightly off the
+    // true receiving surface. Measured with a six-degree wobble: 12 to 32 codes of extra darkening,
+    // increasing with radius. That is a real, bounded smear -- not the unbounded "collapses to flat
+    // fully-shadowed" failure rtPixelsPerRayTile's old Low=4 rung produced -- but it is not nothing,
+    // and a benchmark that never pans cannot see it: this project has already been burned twice by
+    // exactly that blind spot (giUpdateInterval's camera-trail lag, rtPixelsPerRayTile's Low=4 rung).
+    // Any future change to these rungs must be checked against a MOVING-camera penumbra probe, not a
+    // parked one, before it ships.
+    //
+    // DERIVED FROM rayTracing on a tier change, like the two knobs above: Low 2, Medium 2, High 2,
+    // Epic 1. See rtShadowDenoiseForQuality in Voxi.cpp for the per-rung reasoning. THE DEFAULT IS 2
+    // BECAUSE THE DEFAULT TIER IS Medium -- the derivation only fires when the tier CHANGES, so a
+    // struct default that contradicts its own tier never reaches the rung it claims -- a trap this
+    // file has already fallen into in both directions with giUpdateInterval.
+    u32 rtShadowDenoise = 2;
 
-    // ---- ray-driven rendering (experimental) -----------------------------------------------
-    // WHICH THING FINDS THE FIRST SURFACE: 0 = the rasteriser (every version of this engine so
-    // far), 1 = a primary ray per pixel. Everything downstream of that first hit is unchanged --
-    // PSMainVoxi already traces the sun shadow, evaluates the material and traces a reflection in
-    // ONE pixel-shader invocation (VoxiShaders.hpp:781-826), so this is not "fusing passes", it is
-    // swapping out the one stage that is still fixed-function.
+    // ---- ray-driven rendering ---------------------------------------------------------------
+    // WHICH THING FINDS THE FIRST SURFACE: 0 = the rasteriser (every version of this engine
+    // before this setting existed), 1 = a primary ray per pixel. Everything downstream of that
+    // first hit is unchanged -- PSMainVoxi already traces the sun shadow, evaluates the material
+    // and traces a reflection in ONE pixel-shader invocation (VoxiShaders.hpp:781-826), so this is
+    // not "fusing passes", it is swapping out the one stage that is still fixed-function.
     //
     // MEASURED BEFORE IT WAS BUILT, which is why the number to beat is written down here:
     // ElectricDreams at 4x MSAA, 2750x1639, Release -- raster primary visibility plus material
     // shading is 9.2 ms of `scene draw` with RT and GI off, and one additional shadow ray costs
     // 1.6 ms at the same resolution. A primary ray has to fit inside that difference to be worth
-    // having. It also gives up hardware early-Z, which discards an occluded fragment before the
-    // expensive shader ever runs and which a ray has no equivalent of -- you pay the traversal to
-    // find out the hit was hidden.
+    // having.
     //
-    // 0 FOR EVERY TIER, deliberately: this is opt-in while it is experimental, and the struct
-    // default agrees with every rung by construction. See rtShadowDenoise above for why that
-    // agreement is load-bearing rather than tidy.
-    u32 rtRenderMode = 0;
+    // 1 FOR EVERY TIER THAT CAN RUN IT, now -- BY EXPLICIT PRODUCT DECISION, not an experiment
+    // left behind a flag. The user calls this "the Wavefront Primary rays model" and has decided
+    // it is the default render path. See rtRenderModeForQuality for the one tier that still
+    // answers 0 (Off, because there is no ray-tracing hardware path to assume there) and why
+    // answering 1 there instead would be incoherent rather than merely wrong.
+    //
+    // WHAT DEFAULTING TO IT TRADES AWAY, written down here rather than left for someone to
+    // rediscover by eye, because whoever turns this on deserves to know what they traded:
+    //   - HARDWARE EARLY-Z. Rasterisation can discard an occluded fragment before its shader ever
+    //     runs, for free. A ray has no equivalent -- it pays the full BVH traversal to discover
+    //     the same hit was hidden, on every pixel, every frame.
+    //   - MSAA. The ray pass is one fullscreen triangle -- there is no per-triangle coverage for
+    //     hardware multisampling to resolve, so it always runs at a single sample. The raster path
+    //     it replaces runs at this struct's own default of 4x (see Settings::msaa above). The
+    //     image is visibly noisier per pixel as a direct result, independent of and in addition to
+    //     the RT sun-shadow speckle documented elsewhere.
+    //   - TEXTURE. The primary ray returns flat albedo per instance; nothing in that path samples
+    //     a texture yet. A rasterised frame does.
+    // None of that is softened here because it does not need to be: it is the honest cost of a
+    // primary ray today, and it now applies to everyone by default rather than to whoever went
+    // looking for a switch.
+    u32 rtRenderMode = 1;
 
     // ---- path tracing -----------------------------------------------------------------------
     // WHERE RAY TRACING ENDS AND PATH TRACING BEGINS, because this file already draws that line
@@ -308,8 +364,9 @@ public:
     static u32 rtShadowRaysForQuality(Quality q);
     static u32 rtPixelsPerRayTileForQuality(Quality q);
     static u32 rtShadowDenoiseForQuality(Quality q);
-    // 0 for every tier -- ray-driven PRIMARY VISIBILITY is opt-in, not something a quality preset
-    // turns on behind the author's back while it is still experimental.
+    // 1 for every tier that runs ray tracing at all, 0 for Off -- ray-driven PRIMARY VISIBILITY is
+    // the default render path now, not an opt-in a quality preset must avoid switching on. See the
+    // definition in Voxi.cpp for why Off is the one tier that still answers 0.
     static u32 rtRenderModeForQuality(Quality q);
     // Derived from the PATH TRACING tier, not the ray-tracing one. See Settings::ptBounces.
     static u32 ptBouncesForQuality(Quality q);

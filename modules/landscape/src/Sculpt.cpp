@@ -71,8 +71,19 @@ BrushRect applyBrush(fmt::OcLandData& d, const BrushParams& p, f32 amount) {
 
             // Smoothstep falloff: 1 at the centre, 0 at the rim, and flat-topped near the centre --
             // unlike a linear falloff this does not leave a visible cone tip under the cursor.
-            const f32 t = dist / p.radiusCm;
-            const f32 falloff = 1.0f - t*t*(3.0f - 2.0f*t);
+            //
+            // NOW SHAPED BY p.falloff, which was not previously expressible. The smoothstep is
+            // evaluated over a REMAPPED radius: everything inside (1 - falloff) of the rim gets full
+            // weight, and the shoulder is compressed into what remains. At falloff = 1 the remap is
+            // the identity and this is bit-for-bit the original curve, which is what lets the new
+            // parameter default to the old behaviour rather than changing every existing caller. At
+            // falloff = 0 the shoulder has zero width and the brush is a hard disc.
+            const f32 t    = dist / p.radiusCm;
+            const f32 soft = p.falloff < 0.0f ? 0.0f : (p.falloff > 1.0f ? 1.0f : p.falloff);
+            // The plateau ends at (1 - soft); past it, s runs 0..1 across the shoulder.
+            const f32 s = soft <= 1e-4f ? (t >= 1.0f ? 1.0f : 0.0f)
+                                        : (t <= 1.0f - soft ? 0.0f : (t - (1.0f - soft)) / soft);
+            const f32 falloff = 1.0f - s*s*(3.0f - 2.0f*s);
             const f32 w = falloff * amount;
             if (w <= 0.0f) continue;
 

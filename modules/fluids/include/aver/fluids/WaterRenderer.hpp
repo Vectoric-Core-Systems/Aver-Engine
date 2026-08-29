@@ -70,6 +70,12 @@ public:
     // -- the general shape D3D12Device's own "log once" warnings use.
     void setWaves(const GerstnerWave* waves, size_t count);
 
+    // `shallowRGB` tints the REAL reflected sky/sun (skyColor(R), the same dome PbrShaders/
+    // VoxiShaders reflect off every other surface) rather than replacing it with a flat colour --
+    // PSWater's own comment (WaterShaders.hpp) has the full argument, and this is the field this
+    // class's own header comment on shallowColor_/deepColor_ below describes precisely. `deepRGB` is
+    // the water body's own transmitted colour, still what the eye reads looking straight down through
+    // an undisturbed surface.
     void setColors(const f32 shallowRGB[3], const f32 deepRGB[3]);
 
     // Places the grid over a horizontal rectangle instead of letting it recentre under the camera --
@@ -134,7 +140,13 @@ private:
     f32 boundsMinXCm_ = 0.0f, boundsMinYCm_ = 0.0f;
     f32 boundsMaxXCm_ = 0.0f, boundsMaxYCm_ = 0.0f;
 
-    f32 shallowColor_[3] = {0.05f, 0.35f, 0.45f};   // linear; unvalidated placeholders, see README.md
+    // shallowColor_ TINTS the real reflected sky (WaterShaders.hpp's envReflection); it no longer
+    // stands in for the sky outright the way it did before this pass. deepColor_ is the water body's
+    // transmitted colour, weighted by (1 - fresnel) rather than lerped against shallowColor_ (see
+    // PSWater's own comment). Both values are unretouched from before this pass -- still linear,
+    // still unvalidated placeholders per README.md -- because this change fixes what they MEAN, not
+    // what they ARE; a real tuning pass against a screenshot is still open work.
+    f32 shallowColor_[3] = {0.05f, 0.35f, 0.45f};
     f32 deepColor_[3]    = {0.01f, 0.05f, 0.12f};
 
     f32 elapsedSeconds_ = 0.0f;

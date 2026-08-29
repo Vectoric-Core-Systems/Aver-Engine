@@ -20,6 +20,7 @@
 #include "GameMath.hpp"
 
 #include <cmath>
+#include <unordered_set>
 
 namespace aver::game {
 
@@ -107,8 +108,23 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
         f32 metallic = 0.0f, roughness = 0.5f;
 
         u32 authored = 0;
+        // Whether this entity's resolved material takes the blended draw path near the end of this
+        // loop. Only an AUTHORED .ocmat can ever set this true: a built-in SurfaceLook (three floats
+        // plus metal/rough -- see GameContent.cpp's registerBuiltins) has no BLEND record at all, and
+        // neither does the flat-gray fallback, so the `else`/`else if` below never touches it. Read
+        // straight from MaterialLibrary rather than trusting a value cached anywhere on GameContent,
+        // because the library is the one place an .ocmat's alphaMode can change after load (the
+        // material editor writes through it), and a cached copy would survive a hot-reload the mesh
+        // itself did not.
+        bool blended = false;
 #if AVER_MODULE_PBR && AVER_MODULE_SCENE
         authored = content.authoredFor(mr->material);
+        if (authored) {
+            // The packaged game's copy of the same rule. BOTH ROOTS OR NEITHER -- a predicate the
+            // editor honours and the game does not is this repo's most-repeated defect shape.
+            if (const pbr::MaterialDesc* d = pbr::MaterialLibrary::get().desc(authored))
+                blended = pbr::isTranslucent(*d);
+        }
 #endif
         if (authored) {
             // An AUTHORED material supplies its own colour and its own metal/rough through the
@@ -120,6 +136,31 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
         } else if (const GameContent::SurfaceLook* look = content.lookFor(mr->material)) {
             col[0] = look->col[0]; col[1] = look->col[1]; col[2] = look->col[2];
             metallic = look->metallic; roughness = look->roughness;
+        } else if (mr->material != 0) {
+            // Neither an authored .ocmat nor a built-in SurfaceLook claimed this entity's named
+            // surface -- it is about to draw the flat 0.80/0.80/0.85 gray fallback above with no
+            // record anywhere that anything went wrong. This is EXACTLY the failure a prior
+            // investigation traced to a parity gap between this table and the editor's: three names
+            // (M_Foliage, M_Bark, M_Rock) were registered in sandbox/src/SandboxApp.cpp but not here,
+            // so a level authored in the editor rendered its intended colour there and silently fell
+            // through to gray the moment the packaged game ran it. That specific gap is closed in
+            // GameContent.cpp's registerBuiltins now, but nothing stops the next one -- a look added
+            // to the editor's table and never mirrored into this one reproduces the identical silent
+            // failure. This warning is the backstop for that.
+            //
+            // ONE-SHOT, and function-local rather than a member on GameContent (which this file does
+            // not own): drawWorld runs every frame for every visible entity, so without a latch a
+            // level with a single unresolved surface used by fifty placements would log fifty lines
+            // EVERY FRAME rather than once, ever. Keyed on the interned token so the check is one
+            // hash-set lookup, not a string compare; reported by NAME via aver_scene_material_name
+            // because the token's value is process-startup-order dependent (scene_abi.h's own
+            // comment on that function) and means nothing to a person reading the log.
+            static std::unordered_set<i32> warnedUnresolvedMaterials;
+            if (warnedUnresolvedMaterials.insert(mr->material).second) {
+                AVER_WARN("[Game] surface '{}' has no authored .ocmat and no built-in look; "
+                          "rendering the flat gray fallback (0.80, 0.80, 0.85) instead",
+                          aver_scene_material_name(mr->material));
+            }
         }
 
 #if AVER_MODULE_PBR && AVER_MODULE_VOXI
@@ -141,6 +182,25 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
         if (skinning) {
             if (const rhi::MeshHandle sk = skinning->drawHandle(ent)) drawHandle = sk;
         }
+
+        // STICKY on the device (RHI.hpp's setDrawBlended comment), so it is set on EVERY draw here,
+        // not only when true. Skipping the false case would leave a translucent entity's flag set
+        // for whatever opaque entity this walk visits next -- that next mesh would silently take the
+        // blended path too: no ray-traced shadow, no GI bounce, no shadow-cascade write, and drawn
+        // through scenePipeline(..., blended=true) instead of the ordinary opaque pipeline, purely
+        // because it happened to be drawn after a pane of glass.
+        //
+        // NO DEPTH-PREPASS GUARD NEEDED HERE, and that is a fact about this file rather than about
+        // translucency: drawWorld never calls setNextDrawPrepassed or drawMeshDepthPrepass at all --
+        // this is the packaged-game walk, not SandboxApp.cpp's editor loop with its `prepassEligible`
+        // exclusion list (SandboxApp.cpp, search "depth prepass phase"). setDrawBlended's own
+        // contract already guarantees a blended draw is "never depth-prepassed" regardless, because
+        // the device captures it at the very top of drawMesh, before the same submitDraw loop a
+        // prepass would also have to be skipped ahead of. If a depth-prepass walk is ever added to
+        // this file, it must exclude exactly the entities `blended` is true for here, the same way
+        // SandboxApp.cpp's prepassEligible excludes skinned and GPU-cluster-dispatched ones -- stated
+        // here so that addition does not have to rediscover it.
+        device.setDrawBlended(blended);
         device.drawMesh(drawHandle, &wm.m[0][0], col, metallic, roughness);
         ++drawn;
     }

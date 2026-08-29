@@ -49,6 +49,20 @@ cbuffer AverMaterial : register(b2) {
     // averEvalMaterial's `default:` takes -- see pbr::materialGraphHlsl(). Declared here, in the
     // block every material path already binds, so a graph-shaded draw needs nothing extra bound.
     uint   gMaterialGraphId;
+
+    // Mirrors MaterialConstants::ior/transmission -- see that struct's comment for why the two
+    // fields are not independent, and averBuildSurface below for the one thing gTransmission
+    // currently feeds (the AVER_MAT_ALPHA_BLEND coverage term). gIor rides along unread by anything
+    // in this file; nothing here does refraction.
+    float  gIor;
+    float  gTransmission;
+    // EXPLICIT PADDING, MIRRORING MaterialConstants::_pad0/_pad1. Not load-bearing for THIS cbuffer
+    // -- HLSL rounds a constant buffer's footprint up to its last 16-byte register regardless of
+    // what is declared in it, so gIor/gTransmission alone would already reserve through byte 96 on
+    // the GPU. It is declared anyway so this block keeps mirroring MaterialConstants field for
+    // field, byte offset for byte offset, which is the whole discipline this comment block is
+    // asking of whoever edits either side next.
+    float2 _matPad;
 };
 
 // gMaterialFlags bits, mirroring pbr::MaterialFlag.
@@ -65,6 +79,9 @@ cbuffer AverMaterial : register(b2) {
 #define AVER_MAT_L1_METALROUGH  (1u << 10)
 #define AVER_MAT_L1_NORMAL      (1u << 11)
 #define AVER_MAT_SLOPE_BLEND    (1u << 12)
+// MaterialDesc::castShadow. Mirrors MaterialFlag_CastShadow; read by rtShadow's traversal loop in
+// VoxiShaders.hpp, which is the field's first and only consumer anywhere in the engine.
+#define AVER_MAT_CAST_SHADOW    (1u << 13)
 
 // Shading model ids. The id arrives per draw in gShadingModel and is dispatched by a uniform switch.
 #define AVER_MODEL_STANDARD 0u   // metallic / roughness, Cook-Torrance GGX
@@ -391,7 +408,96 @@ AverSurface averBuildSurface(AverVertex v, AverLight l, AverAuthored a, float2 u
     s.ndv = saturate(dot(s.N, v.V));
     s.F0 = lerp(gMatReflectance.xxx, s.albedo, s.metallic);
     s.F = fresnelSchlick(saturate(dot(s.H, v.V)), s.F0, s.f90);
-    s.kdAlbedo = (1.0 - s.metallic) * s.albedo;
+    // TRANSMISSION REMOVES LIGHT FROM THE DIFFUSE LOBE, and until this line it did not.
+    //
+    // gTransmission is how much light passes THROUGH the substrate instead of scattering back out of
+    // it. Light that went through cannot also come back as diffuse -- the two are the same photons,
+    // and a material that both transmits 92% and diffusely reflects its full base colour is emitting
+    // energy it never received. Every other use of transmission in this file was on s.alpha
+    // (coverage) alone, so the diffuse lobe kept its full albedo no matter how see-through the author
+    // said the surface was.
+    //
+    // MEASURED, on PTTest's M_Glass (baseColorFactor 0.86 0.93 0.88 0.12, transmission 0.92) over the
+    // dark pool. Probing one pixel of pane against the water beside it, and bisecting this function's
+    // output to attribute the pale wash:
+    //     full output ......... 103,124,130
+    //     specular removed .....  99,120,125   -> the whole specular term is FOUR codes
+    //     coverage only ........  27,56,84     -> vs 0.88 * water(32,69,94) = 28,61,83. Correct.
+    // so `diffuse * s.alpha` alone contributed (72,64,41) -- a warm wash five times the size of the
+    // reflection, on a pane authored to be 92% transmissive. That is the "milky, cartoonish glass"
+    // this whole exercise started from, and it is not the reflection, the Fresnel, the alpha or the
+    // blend state: all four were verified correct first. It is a diffuse lobe nobody dimmed.
+    //
+    // (1 - gTransmission), matching glTF KHR_materials_transmission, which splits the same budget the
+    // same way. NOT gated on AVER_MAT_ALPHA_BLEND: an opaque material may author transmission too --
+    // it is a substrate property, not a blend mode -- and this must stay one rule rather than a glass
+    // special case. It is a no-op for every material authored before the field existed, because
+    // MaterialDesc::transmission defaults to 0.
+    s.kdAlbedo = (1.0 - s.metallic) * s.albedo * (1.0 - saturate(gTransmission));
+
+    // FRESNEL-AWARE ALPHA FOR BLENDED SURFACES. Plain "over" compositing --
+    // dst = src.rgb*alpha + dst.rgb*(1-alpha) -- treats alpha as one UNIFORM attenuation and so
+    // applies it to the specular reflection exactly as hard as to everything else. Real dielectrics
+    // do not attenuate uniformly: the Fresnel term climbs toward 1 at grazing incidence, so a glass
+    // pane goes from nearly invisible face-on to nearly a mirror edge-on, hiding whatever is behind
+    // it. This is not a cosmetic nicety -- without it, a pane authored at a usefully transparent
+    // alpha of ~0.2 would draw ITS OWN REFLECTION at 20% strength, which is too dim to read as a
+    // reflection at all and instead reads as a smudge: the glass looks like dirty plastic, not glass.
+    //
+    // Raising alpha toward 1 by the same view-angle Fresnel term this file already computes fixes it
+    // with no second BRDF: at grazing incidence the term approaches 1, alpha follows it to 1, and the
+    // blended draw becomes fully opaque there -- correctly, because at grazing incidence virtually
+    // all the light reaching the eye from that pixel IS the reflection and there is nothing left to
+    // blend the background into. Face-on, the term sits near s.reflectance (glass is commonly ~0.04)
+    // and alpha stays close to its authored value.
+    //
+    // GATED ON AVER_MAT_ALPHA_BLEND so this is provably a no-op for every material that does not ask
+    // for it: unless the bit is set, execution never enters the branch below, so s.alpha for an
+    // opaque or masked material is exactly the two lines above it always was (gBaseColor.a *
+    // a.opacity, optionally clip()'d) and nothing downstream changes. That is also why the render is
+    // bit-identical for every material authored today and not merely intended to be: Material.cpp
+    // reported Feature::AlphaBlend as Status::NotImplemented until this same change, so nothing ever
+    // shipped a material that both set this bit AND expected a renderer to act on it -- the bit has
+    // only ever been inert storage in content authored so far.
+    if (gMaterialFlags & AVER_MAT_ALPHA_BLEND) {
+        // TRANSMISSION SETS THE FLOOR FIRST; FRESNEL LIFTS IT SECOND -- and not the other way round.
+        // gTransmission > 0 is an author's statement that this surface is OPTICALLY see-through: a
+        // fact about the substrate that holds regardless of where the camera is standing. That has
+        // to be applied before anything view-dependent touches alpha, so it reads as a FLOOR the
+        // view term then lifts away from, not as one more multiplier competing with it.
+        //
+        // Doing it in the other order -- Fresnel first, transmission second -- would let a highly
+        // transmissive pane's own grazing-angle brightening get pulled back down by the transmission
+        // term afterwards, which is backwards: the reason real glass reads nearly opaque at a shallow
+        // angle is that the Fresnel reflection is real light actually reaching the eye, and the
+        // substrate's transmission has no say over light that never entered it in the first place.
+        // Transmission describes the SUBSTRATE; Fresnel describes the VIEW ANGLE; the view angle has
+        // to be the last word because it is the last thing standing between the surface and the eye.
+        //
+        // lerp toward (1 - gTransmission) rather than multiplying s.alpha by it: at gTransmission ==
+        // 1 the author has declared the surface fully see-through, and the target of 0 coverage wins
+        // outright regardless of whatever alpha was separately authored -- a transmission of 1 on an
+        // alpha-0.9 pane should not leave it reading 90% solid. At gTransmission == 0 the lerp weight
+        // is zero and s.alpha passes through completely unchanged, which is what keeps this whole
+        // branch a no-op for every material authored before this field existed (their transmission
+        // defaults to 0 -- see MaterialDesc::transmission).
+        float baseAlpha = lerp(s.alpha, 1.0 - gTransmission, saturate(gTransmission));
+
+        // s.F above is evaluated at the HALF VECTOR for the current light's direct specular term, so
+        // it swings with every light in the scene and with l.direction, which is a poor knob for
+        // something that must describe how mirror-like the surface reads to the CAMERA regardless of
+        // lighting. The VIEW-angle Fresnel -- fresnelSchlick at s.ndv, i.e. dot(N, V) -- is what
+        // answers that: it depends on nothing but the surface and the eye, so it is stable across
+        // every light in the draw and across an unlit scene too.
+        float3 viewFresnel = fresnelSchlick(s.ndv, s.F0, s.f90);
+        // Reduced to a scalar by luminance, not by picking a channel: F0 is achromatic for the
+        // dielectrics this exists for (F0 = gMatReflectance.xxx when metallic is 0, so every channel
+        // already agrees), and luminance is the principled reduction for the rarer case of a
+        // translucent, partially metallic surface where F0 is tinted and the channels disagree.
+        float fresnelLum = dot(viewFresnel, float3(0.2126, 0.7152, 0.0722));
+        s.alpha = lerp(baseAlpha, 1.0, saturate(fresnelLum));
+    }
+
     return s;
 }
 
@@ -455,37 +561,128 @@ float averSpecularOcclusion(float ndv, float ao, float rough) {
     return saturate(pow(abs(ndv) + ao, exp2(-16.0 * rough - 1.0)) - 1.0 + ao);
 }
 
+// ================= shared BRDF terms: ONE copy of the maths, three consumers =================
+// averShadeDirect and averShadeIndirect below are the ORIGINAL accumulating entry points, unchanged
+// in what they compute or in what order they add it -- every renderer that shades an opaque surface
+// through them gets exactly the radiance it always did. averShadeSplit, further down, calls the same
+// two helpers and keeps their outputs in separate registers instead of summing them, which is what a
+// PREMULTIPLIED-ALPHA blended draw needs (see the shading contract at the top of this file and
+// averBlendedOutput's own comment). Splitting happened HERE, at the helper boundary, rather than by
+// writing a second copy of either lobe's arithmetic, so a future change to the BRDF or to the
+// multiscatter compensation is made once and every consumer sees it.
+
+// Cook-Torrance GGX for one light, returned as its two UNWEIGHTED lobes (before the light's own
+// radiance/NdotL/visibility are multiplied in) plus the NdotL both callers need. Splitting the
+// return here, rather than after the light term is applied, is what lets averShadeDirect reconstruct
+// `(diffuseLobe + specularLobe) * l.radiance * ndl * l.visibility` -- THE EXACT ORIGINAL EXPRESSION,
+// same grouping, same order -- so its output is provably unaffected by this function existing at all.
+void averDirectTerms(AverSurface s, AverLight l, out float3 diffuseLobe, out float3 specularLobe,
+                     out float ndl) {
+    float a = s.rough * s.rough;
+    ndl = saturate(dot(s.N, l.direction));
+    float D = distGGX(saturate(dot(s.N, s.H)), a);
+    float V = visSmithCorrelated(s.ndv, ndl, a);
+    float3 spec = D * V * s.F;
+    // ENERGY LOST TO MASKING, PUT BACK. A single-scatter GGX lobe drops every ray the
+    // microsurface would have bounced a second time, and the loss grows with roughness: a white
+    // metal at roughness 1 returned 45% of the light it received, measured in this engine's own
+    // white furnace before this line existed. The compensation is the standard single-term
+    // approximation and it reuses the split-sum term the indirect path already computes -- see
+    // averIndirectTerms, which corrects the same loss for the environment.
+    float2 dfg = averEnvBRDF(s.ndv, s.rough);
+    // Ess -- THE SUM -- NOT dfg.x. dfg.x is only the SCALE half of "F0*scale + bias"; what this
+    // compensation inverts is the single-scatter DIRECTIONAL ALBEDO, which is what the pair sums
+    // to. Using dfg.x alone looks nearly right head-on (0.452 against 0.450 at roughness 1) and
+    // comes apart at grazing incidence: there the fit sends the scale term toward 0.077 while the
+    // sum stays near 0.97, so 1/scale drove the factor to THIRTEEN. Terrain is seen at grazing
+    // angles across most of a frame, and it read about 15% too bright everywhere until this was
+    // tracked down -- bisected to this one line by compiling the three parts of the change out
+    // one at a time.
+    float  Ess = max(dfg.x + dfg.y, 1e-3);
+    spec *= 1.0 + s.F0 * (1.0 / Ess - 1.0);
+    diffuseLobe  = s.kdAlbedo / PI;
+    specularLobe = spec;
+}
+
 // Adds one light's direct contribution: Cook-Torrance GGX, with NdotL and visibility applied.
 float3 averShadeDirect(float3 radiance, AverSurface s, AverLight l) {
     switch (s.model) {
     case AVER_MODEL_UNLIT:
         return radiance;
     default: {
-        float a = s.rough * s.rough;
-        float ndl = saturate(dot(s.N, l.direction));
-        float D = distGGX(saturate(dot(s.N, s.H)), a);
-        float V = visSmithCorrelated(s.ndv, ndl, a);
-        float3 spec = D * V * s.F;
-        // ENERGY LOST TO MASKING, PUT BACK. A single-scatter GGX lobe drops every ray the
-        // microsurface would have bounced a second time, and the loss grows with roughness: a white
-        // metal at roughness 1 returned 45% of the light it received, measured in this engine's own
-        // white furnace before this line existed. The compensation is the standard single-term
-        // approximation and it reuses the split-sum term the indirect path already computes -- see
-        // averShadeIndirect, which corrects the same loss for the environment.
-        float2 dfg = averEnvBRDF(s.ndv, s.rough);
-        // Ess -- THE SUM -- NOT dfg.x. dfg.x is only the SCALE half of "F0*scale + bias"; what this
-        // compensation inverts is the single-scatter DIRECTIONAL ALBEDO, which is what the pair sums
-        // to. Using dfg.x alone looks nearly right head-on (0.452 against 0.450 at roughness 1) and
-        // comes apart at grazing incidence: there the fit sends the scale term toward 0.077 while the
-        // sum stays near 0.97, so 1/scale drove the factor to THIRTEEN. Terrain is seen at grazing
-        // angles across most of a frame, and it read about 15% too bright everywhere until this was
-        // tracked down -- bisected to this one line by compiling the three parts of the change out
-        // one at a time.
-        float  Ess = max(dfg.x + dfg.y, 1e-3);
-        spec *= 1.0 + s.F0 * (1.0 / Ess - 1.0);
-        return radiance + (s.kdAlbedo / PI + spec) * l.radiance * ndl * l.visibility;
+        float3 diffuseLobe, specularLobe;
+        float  ndl;
+        averDirectTerms(s, l, diffuseLobe, specularLobe, ndl);
+        return radiance + (diffuseLobe + specularLobe) * l.radiance * ndl * l.visibility;
     }
     }
+}
+
+// The four terms averShadeIndirect sums, returned UNSUMMED rather than pre-combined into a
+// diffuse/specular pair: float addition is not associative, and averShadeIndirect's own bit-for-bit
+// output is the one thing this refactor is not allowed to move, so it has to add these four in
+// EXACTLY the sequence it always did rather than in two pre-grouped batches. averShadeSplit, which
+// has no prior output to match, sums the same four terms into its two buckets instead -- see its own
+// comment for why that makes it the one place in this pair that is a documented approximation rather
+// than a provable identity.
+void averIndirectTerms(AverSurface s, AverIndirect ind,
+                       out float3 specEnv, out float3 diffAmbient, out float3 diffBounce) {
+    // THE SPLIT SUM, WITH THE MULTIPLE SCATTERING PUT BACK (Fdez-Aguera). The old form was
+    // `ind.specular * (F0*dfg.x + dfg.y)` plus a full-strength diffuse term, which is wrong in
+    // two directions at once and this engine's white furnace measured both:
+    //
+    //   - a white METAL kept only 45% of its energy at roughness 1 (97% at 0.05), because the
+    //     light GGX loses to masking was never returned;
+    //   - a DIELECTRIC read 1.5-4.5% too BRIGHT, because the diffuse lobe was handed the whole
+    //     albedo while the specular lobe took its reflectance off the top of the same budget.
+    //
+    // Both are the same omission: the split sum accounts for one bounce off the microsurface and
+    // nothing else, so the energy balance never closes. Ess is what a single bounce returns, Ems
+    // is what it dropped, Favg is the Fresnel averaged over the hemisphere, and Fms*Ems sums every
+    // further bounce. kD is then what is genuinely left for diffuse -- which is what makes the
+    // dielectric stop over-reading, with no separate fudge for it.
+    //
+    // Worked through by hand before it was written and then confirmed in the furnace: every cell
+    // of the 6x3 roughness/metallic grid lands on 1.000 rather than 0.45-1.045.
+    float2 dfg    = averEnvBRDF(s.ndv, s.rough);
+    float3 FssEss = s.F0 * dfg.x + dfg.y;
+    float  Ess    = dfg.x + dfg.y;
+    float  Ems    = 1.0 - Ess;
+    // The 1/21 is the analytic hemispherical average of the Schlick term, not a tuned number.
+    float3 Favg   = s.F0 + (1.0 - s.F0) / 21.0;
+    // Guarded because Ems*Favg reaches 1 only when a single bounce returns nothing at all, and a
+    // division by zero here would paint NaN across every rough pixel in the frame.
+    float3 FmsEms = Ems * FssEss * Favg / max(1.0 - Ems * Favg, 1e-4);
+
+    // WHAT THE DIFFUSE LOBE LOSES IS THE DIELECTRIC RELECTANCE, NOT THE BLENDED ONE. The diffuse
+    // lobe belongs to the dielectric substrate -- a metal has none, which is what kdAlbedo's own
+    // (1 - metallic) factor already expresses. Subtracting the METAL-blended FssEss from it as
+    // well charges the substrate for reflectance it never had, and the furnace caught it: taking
+    // the blended term dropped metallic 0.5 from 1.005 to 0.757 while both pure ends stayed at
+    // 1.000. Recomputing the pair against the dielectric F0 restores it to 0.98.
+    //
+    // INTERMEDIATE METALLIC STILL DOES NOT CLOSE, and no arrangement of these terms makes it.
+    // "Half metal" is not a material; it is a blend of PARAMETERS, and the multiple-scatter series
+    // is strongly non-linear in F0 -- a surface at F0 = 0.52 returns much less than the mean of one
+    // at 0.04 and one at 1.0. The physical claim this code makes is at the two ENDS, which now
+    // measure 1.000 across every roughness. The middle is a documented approximation.
+    float3 F0d     = s.reflectance.xxx;
+    float3 FssEssD = F0d * dfg.x + dfg.y;
+    float3 FavgD   = F0d + (1.0 - F0d) / 21.0;
+    float3 FmsEmsD = Ems * FssEssD * FavgD / max(1.0 - Ems * FavgD, 1e-4);
+    float3 kD      = s.kdAlbedo * saturate(1.0 - FssEssD - FmsEmsD);
+
+    // Occlusion is applied per lobe now: AO answers a hemisphere question and belongs with the
+    // diffuse terms, while the specular lobe gets averSpecularOcclusion. Sending raw AO into a
+    // mirror cost 21% of its energy in the furnace with GI on -- measured against the same grid.
+    float  diffOcc = ind.occlusion * s.occlusion;
+    float  specOcc = averSpecularOcclusion(s.ndv, ind.occlusion, s.rough);
+
+    // FssEss multiplies RADIANCE (the reflection); everything else multiplies IRRADIANCE (the
+    // sky and the bounce), which is why they are not folded into one factor.
+    specEnv     = FssEss * ind.specular * specOcc;
+    diffAmbient = (FmsEms + kD) * ind.ambient * ind.ambientScale * diffOcc;
+    diffBounce  = kD * ind.diffuse;
 }
 
 // Adds ambient, bounce, environment specular and self-emission, in that order.
@@ -494,66 +691,83 @@ float3 averShadeIndirect(float3 radiance, AverSurface s, AverIndirect ind) {
     case AVER_MODEL_UNLIT:
         return radiance + s.emissive;
     default: {
-        // THE SPLIT SUM, WITH THE MULTIPLE SCATTERING PUT BACK (Fdez-Aguera). The old form was
-        // `ind.specular * (F0*dfg.x + dfg.y)` plus a full-strength diffuse term, which is wrong in
-        // two directions at once and this engine's white furnace measured both:
-        //
-        //   - a white METAL kept only 45% of its energy at roughness 1 (97% at 0.05), because the
-        //     light GGX loses to masking was never returned;
-        //   - a DIELECTRIC read 1.5-4.5% too BRIGHT, because the diffuse lobe was handed the whole
-        //     albedo while the specular lobe took its reflectance off the top of the same budget.
-        //
-        // Both are the same omission: the split sum accounts for one bounce off the microsurface and
-        // nothing else, so the energy balance never closes. Ess is what a single bounce returns, Ems
-        // is what it dropped, Favg is the Fresnel averaged over the hemisphere, and Fms*Ems sums every
-        // further bounce. kD is then what is genuinely left for diffuse -- which is what makes the
-        // dielectric stop over-reading, with no separate fudge for it.
-        //
-        // Worked through by hand before it was written and then confirmed in the furnace: every cell
-        // of the 6x3 roughness/metallic grid lands on 1.000 rather than 0.45-1.045.
-        float2 dfg    = averEnvBRDF(s.ndv, s.rough);
-        float3 FssEss = s.F0 * dfg.x + dfg.y;
-        float  Ess    = dfg.x + dfg.y;
-        float  Ems    = 1.0 - Ess;
-        // The 1/21 is the analytic hemispherical average of the Schlick term, not a tuned number.
-        float3 Favg   = s.F0 + (1.0 - s.F0) / 21.0;
-        // Guarded because Ems*Favg reaches 1 only when a single bounce returns nothing at all, and a
-        // division by zero here would paint NaN across every rough pixel in the frame.
-        float3 FmsEms = Ems * FssEss * Favg / max(1.0 - Ems * Favg, 1e-4);
-
-        // WHAT THE DIFFUSE LOBE LOSES IS THE DIELECTRIC RELECTANCE, NOT THE BLENDED ONE. The diffuse
-        // lobe belongs to the dielectric substrate -- a metal has none, which is what kdAlbedo's own
-        // (1 - metallic) factor already expresses. Subtracting the METAL-blended FssEss from it as
-        // well charges the substrate for reflectance it never had, and the furnace caught it: taking
-        // the blended term dropped metallic 0.5 from 1.005 to 0.757 while both pure ends stayed at
-        // 1.000. Recomputing the pair against the dielectric F0 restores it to 0.98.
-        //
-        // INTERMEDIATE METALLIC STILL DOES NOT CLOSE, and no arrangement of these terms makes it.
-        // "Half metal" is not a material; it is a blend of PARAMETERS, and the multiple-scatter series
-        // is strongly non-linear in F0 -- a surface at F0 = 0.52 returns much less than the mean of one
-        // at 0.04 and one at 1.0. The physical claim this code makes is at the two ENDS, which now
-        // measure 1.000 across every roughness. The middle is a documented approximation.
-        float3 F0d     = s.reflectance.xxx;
-        float3 FssEssD = F0d * dfg.x + dfg.y;
-        float3 FavgD   = F0d + (1.0 - F0d) / 21.0;
-        float3 FmsEmsD = Ems * FssEssD * FavgD / max(1.0 - Ems * FavgD, 1e-4);
-        float3 kD      = s.kdAlbedo * saturate(1.0 - FssEssD - FmsEmsD);
-
-        // Occlusion is applied per lobe now: AO answers a hemisphere question and belongs with the
-        // diffuse terms, while the specular lobe gets averSpecularOcclusion. Sending raw AO into a
-        // mirror cost 21% of its energy in the furnace with GI on -- measured against the same grid.
-        float  diffOcc = ind.occlusion * s.occlusion;
-        float  specOcc = averSpecularOcclusion(s.ndv, ind.occlusion, s.rough);
-
-        // FssEss multiplies RADIANCE (the reflection); everything else multiplies IRRADIANCE (the
-        // sky and the bounce), which is why they are not folded into one factor.
-        radiance += FssEss * ind.specular * specOcc;
-        radiance += (FmsEms + kD) * ind.ambient * ind.ambientScale * diffOcc;
-        radiance += kD * ind.diffuse;
+        float3 specEnv, diffAmbient, diffBounce;
+        averIndirectTerms(s, ind, specEnv, diffAmbient, diffBounce);
+        // Four separate += in the SAME order averIndirectTerms' comment promises, not
+        // `radiance + (specEnv + diffAmbient + diffBounce + s.emissive)`: IEEE 754 addition is not
+        // associative, and re-grouping these four terms is exactly the kind of change that would make
+        // this function's own claim to being untouched false.
+        radiance += specEnv;
+        radiance += diffAmbient;
+        radiance += diffBounce;
         radiance += s.emissive;
         return radiance;
     }
     }
+}
+
+// Shades exactly as averShadeDirect + averShadeIndirect together do, but keeps the two lobes apart
+// instead of summing them -- see the shading contract at the top of this file for why a translucent
+// surface needs that: PREMULTIPLIED-ALPHA COMPOSITING WANTS SPECULAR AT FULL STRENGTH AND DIFFUSE
+// WEIGHTED BY COVERAGE, and a single accumulated radiance has already forgotten which photons left the
+// microsurface at the reflection angle and which were diffusely re-emitted by the time it is computed.
+//
+// BOTH averDirectTerms AND averIndirectTerms ARE THE SAME CODE averShadeDirect/averShadeIndirect call
+// -- there is exactly one copy of this BRDF, and an opaque draw run through this function computes
+// the identical lobes from the identical expressions those two do. What is NOT identical, and cannot
+// be while keeping that one copy, is the ORDER the terms are finally added in: the direct lobe's
+// output is the exact original grouping (see averShadeDirect), but the indirect side sums its four
+// terms into two buckets here instead of averShadeIndirect's fixed four-term sequence, and IEEE 754
+// addition is not associative -- summing the same values in a different grouping can move the last
+// bit of the result. That is a genuine, understood approximation, stated here rather than left for
+// someone to find by diffing a furnace capture against this path. It is also why the INVARIANT this
+// file guarantees is stated about averShadeDirect/averShadeIndirect themselves (untouched, calling
+// these same helpers, same grouping, therefore bit-identical to before this change) and not about
+// this function matching them past the last ULP -- the two claims are different, and only the first
+// one is actually provable from the source.
+void averShadeSplit(AverSurface s, AverLight l, AverIndirect ind, out float3 diffuse, out float3 specular) {
+    switch (s.model) {
+    case AVER_MODEL_UNLIT:
+        // averShadeDirect contributes nothing on the unlit path (its own switch returns `radiance`
+        // untouched) and averShadeIndirect adds only `s.emissive` -- so an unlit surface has no
+        // specular lobe at all, and its one "diffuse" contribution, in the coverage-weighted sense
+        // averBlendedOutput gives that word, is its authored emissive colour.
+        diffuse  = s.emissive;
+        specular = 0.0;
+        return;
+    default: {
+        float3 dDiffuse, dSpecular;
+        float  ndl;
+        averDirectTerms(s, l, dDiffuse, dSpecular, ndl);
+        float3 lightTerm = l.radiance * ndl * l.visibility;
+        diffuse  = dDiffuse * lightTerm;
+        specular = dSpecular * lightTerm;
+
+        float3 specEnv, diffAmbient, diffBounce;
+        averIndirectTerms(s, ind, specEnv, diffAmbient, diffBounce);
+        specular += specEnv;
+        diffuse  += diffAmbient;
+        diffuse  += diffBounce;
+        diffuse  += s.emissive;
+        return;
+    }
+    }
+}
+
+// Packs a blended surface for a PREMULTIPLIED-ALPHA blend state (rhi::BlendMode::PremultipliedAlpha
+// -- SrcBlend=ONE, DestBlend=INV_SRC_ALPHA), which is the whole fix the shading contract exists for:
+// straight "over" blending would multiply `specular` by s.alpha along with everything else, so a pane
+// authored at a usefully transparent alpha of 0.2 would show its own reflection at 20% strength
+// instead of the full strength a real dielectric reflects at regardless of how much it transmits.
+//
+//     rgb = specular + diffuse * s.alpha ;  a = s.alpha
+//
+// diffuse already carries emissive and the ambient/bounce terms (see averShadeSplit), so folding it
+// through s.alpha here is what makes a thin, mostly-transmissive pane emit and diffusely tint
+// proportionally less while its reflection stays full strength -- exactly the asymmetry that made
+// straight-alpha glass read as tinted plastic instead of glass in the first place.
+float4 averBlendedOutput(AverSurface s, float3 diffuse, float3 specular) {
+    return float4(specular + diffuse * s.alpha, s.alpha);
 }
 )";
 }
