@@ -181,13 +181,46 @@ def run_powershell(script, timeout):
 # tools
 # --------------------------------------------------------------------------------------------------
 
+# WHICH CONFIG THIS BUILT, SAID OUT LOUD, and an unknown argument refused rather than dropped.
+#
+# `release` is a BOOLEAN and always has been. A caller who says config="Release" -- a spelling this
+# tool never had -- used to get silence: the unknown key was ignored, build.ps1's -Config defaulted
+# to Debug, and cmake was handed -DCMAKE_BUILD_TYPE=Debug for whatever tree build_dir named. Point
+# that at build-release and it does not just build the wrong thing, it RECONFIGURES the cache, so
+# every later build and every measurement taken from that tree is Debug until someone notices.
+# Nobody noticed for a whole session: an unoptimised binary is not slow enough to be obviously
+# wrong, and the tool's own output said "[build] OK -> build-release\bin", which is true and
+# useless. It also explains a Release-only compile error in modules/rhi.vulkan surviving unseen --
+# scripts/module-matrix.ps1 hard-codes CMAKE_BUILD_TYPE=Debug too, so nothing in this repo's normal
+# workflow produces an NDEBUG build at all.
+#
+# So: `config` is accepted as the string spelling, anything else is REFUSED by name, and the result
+# always reports the config and tree that were actually used. Same principle as aver_run's
+# binary_provenance -- a result that does not say what it did cannot be told from one that did the
+# wrong thing.
+_BUILD_KNOWN_ARGS = {"release", "config", "build_dir", "cmake_args", "target", "description"}
+_BUILD_CONFIGS = ("Debug", "Release", "RelWithDebInfo", "MinSizeRel")
+
 def tool_build(args):
-    release = bool(args.get("release"))
+    unknown = sorted(k for k in args if k not in _BUILD_KNOWN_ARGS)
+    if unknown:
+        return {"ok": False, "error": "unknown argument(s) %s -- this tool takes release (bool), "
+                                      "config (%s), build_dir, cmake_args. Refused rather than "
+                                      "ignored, because a dropped config silently builds Debug."
+                                      % (", ".join(unknown), "|".join(_BUILD_CONFIGS))}
+    config = args.get("config")
+    if config is not None:
+        match = [c for c in _BUILD_CONFIGS if c.lower() == str(config).lower()]
+        if not match:
+            return {"ok": False, "error": "config %r is not one of %s" % (config, ", ".join(_BUILD_CONFIGS))}
+        config = match[0]
+    elif args.get("release"):
+        config = "Release"
+    else:
+        config = "Debug"
     extra = args.get("cmake_args") or []
     build_dir = args.get("build_dir")
-    cmd = "./scripts/build.ps1"
-    if release:
-        cmd += " -Release"
+    cmd = "./scripts/build.ps1 -Config %s" % config
     if build_dir:
         cmd += ' -BuildDir "%s"' % build_dir
     for a in extra:
@@ -202,6 +235,8 @@ def tool_build(args):
     return {
         "ok": code == 0,
         "exit": code,
+        "config": config,
+        "build_dir": build_dir or ("build-release" if config != "Debug" else "build"),
         "status": tail[-1] if tail else "(no [build] line)",
         "errors": errors[:40],
         "warning_count": len(warnings),
@@ -556,7 +591,10 @@ TOOLS = [
                        "Ninja progress dropped. Optional Release, build_dir and extra CMake args (e.g. "
                        "-DAVER_MODULE_LANDSCAPE=OFF to check a configuration still builds).",
         "inputSchema": {"type": "object", "properties": {
-            "release": {"type": "boolean"},
+            "release": {"type": "boolean", "description": "shorthand for config Release"},
+            "config": {"type": "string", "enum": list(_BUILD_CONFIGS),
+                       "description": "CMAKE_BUILD_TYPE. Reconfigures the tree named by build_dir, "
+                                      "so naming the wrong one flips that tree for every later build."},
             "build_dir": {"type": "string"},
             "cmake_args": {"type": "array", "items": {"type": "string"}},
         }},
