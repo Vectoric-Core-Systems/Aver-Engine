@@ -241,6 +241,27 @@ _REFUSED_FLAGS = {
     "--headless": "pointless here -- a headless run cannot produce the screenshot this tool exists for",
 }
 
+# WHAT A RUN FROM HERE DOES *NOT* SEE: THE USER'S editor.ini.
+#
+# When this server is hosted inside a packaged (MSIX) app, every process it spawns inherits that
+# package identity, and Windows redirects %LOCALAPPDATA% for the whole subtree. Sandbox.exe then
+# reads and writes
+#     AppData/Local/Packages/<package>/LocalCache/Local/AverEngine/editor.ini
+# instead of AppData/Local/AverEngine/editor.ini -- a copy-on-write shadow of the real file.
+#
+# It is a nasty one because NOTHING LOOKS WRONG. The engine logs the unredirected path it asked
+# for ("[Prefs] 37 setting(s) from C:/Users/.../AppData/Local/AverEngine/editor.ini"), the key
+# count matches, and the shadow starts life as a byte-for-byte copy. It only diverges once the two
+# are edited apart -- and then a preference the user has set is simply absent from every run made
+# here, with no warning and no diff to notice.
+#
+# It cost an hour: a stored render scale that killed the editor on the user's machine could not be
+# reproduced through this tool, and the same binary with the same argv reproduced it instantly from
+# a shell. The shell is outside the package; this is not.
+#
+# SO: ANYTHING THAT DEPENDS ON A PERSISTED EDITOR PREFERENCE MUST BE RUN FROM A SHELL, not from
+# here. Flags are unaffected -- they are argv, and argv is not redirected -- which is why the gates,
+# which pass every setting they care about explicitly, are sound.
 def tool_run(args):
     frames = int(args.get("frames", 40))
     if frames <= 0:

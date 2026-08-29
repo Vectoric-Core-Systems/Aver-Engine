@@ -2959,6 +2959,32 @@ public:
         // on it, rather than costing a whole extra frame of lag for no reason.
         if (ptSceneToggleOnAutoFrames_  > 0 && --ptSceneToggleOnAutoFrames_  == 0) ptSceneViewWantEnabled_ = true;
         if (ptSceneToggleOffAutoFrames_ > 0 && --ptSceneToggleOffAutoFrames_ == 0) ptSceneViewWantEnabled_ = false;
+        // Clears the render-scale crash cookie once this session has PROVEN the scale is survivable.
+        // See the prefs-apply site for the whole mechanism. Thirty frames, not one: the device loss
+        // this guards against is noticed at Present, so a single frame is not evidence of anything.
+        if (renderScaleCookieArmed_ && t.frame >= 30) {
+            renderScaleCookieArmed_ = false;
+            editor::setPrefBool("display.renderScalePending", false);
+            editor::flushEditorPrefs();
+        }
+#if AVER_MODULE_SR
+        // --aversr-cycle [N]: verification-only, and it exists because THIS TRANSITION HAD A BUG.
+        // Turning AverSR on and then OFF again crashed the editor: the Off branch of
+        // applyAverSrQuality reset the unique_ptr while the device still held the raw pointer
+        // applyUpscalerSlot had given it, so the next composite called execute() on freed memory.
+        // The CLI could not reach it -- --aversr only ever ATTACHES -- so nothing in the tree
+        // exercised the one path a user reaches by clicking the combo twice.
+        //
+        // Modelled on --pt-scene-toggle-on/-off directly above and --pt-quality-ramp below, both of
+        // which exist for the same reason: a transition nobody could reproduce headlessly stayed
+        // broken until a flag could drive it.
+        if (averSrCycleFrames_ > 0 && --averSrCycleFrames_ == 0) {
+            AVER_INFO("[AverSR] --aversr-cycle: Performance -> Off, the transition that used to crash");
+            applyAverSrQuality(e.device(), aver::sr::Quality::Performance);
+            applyAverSrQuality(e.device(), aver::sr::Quality::Off);
+            AVER_INFO("[AverSR] --aversr-cycle: survived the round trip");
+        }
+#endif
         // BEFORE device_->beginFrame() (see Engine::frameStep()) -- the only safe place to add or
         // remove a render feature. See syncPtSceneView()'s own comment for why.
         syncPtSceneView(e.device());
@@ -6465,6 +6491,9 @@ public:
     }
     void setPtSceneToggleOnAuto(int framesIn)  { ptSceneToggleOnAutoFrames_  = framesIn; }
     void setPtSceneToggleOffAuto(int framesIn) { ptSceneToggleOffAutoFrames_ = framesIn; }
+#if AVER_MODULE_SR
+    void setAverSrCycleAuto(int framesIn) { averSrCycleFrames_ = framesIn; }   // --aversr-cycle [N]
+#endif
     void setSkinSceneDir(std::string d) { skinSceneDir_ = std::move(d); }          // --skin-scene-test <dir>
 #if AVER_MODULE_SYNAPSE
     void setBakeNavOnStart(f32 cellCm) { navBakeOnStart_ = true; navBakeCell_ = cellCm; }   // --bake-nav [cm]
@@ -6652,9 +6681,34 @@ public:
     // already edits. Off resets the scale to native and drops any constructed upscaler, so switching
     // back to Off is bit-identical to never having touched the combo at all.
     void applyAverSrQuality(rhi::IDevice* dev, aver::sr::Quality q) {
+        // NAMED, because a render scale of 0.67 turned up at startup that nothing on the command
+        // line, in the project manifest or in editor.ini had asked for, and this is the only code in
+        // the tree that can produce that particular number (renderScaleFor(Quality::Quality)). If it
+        // is this function, this line proves it; if this line never prints and the scale still moves,
+        // it is not, and the search goes elsewhere. Cheap either way -- it fires only on an explicit
+        // quality change, never per frame.
+        AVER_INFO("[AverSR] applyAverSrQuality({}) -> render scale {:.4f}",
+                  static_cast<int>(q), aver::sr::renderScaleFor(q));
         averSrQuality_ = q;
         if (!dev) return;
         if (q == aver::sr::Quality::Off) {
+            // DETACH BEFORE DESTROY. The device holds a RAW pointer to this upscaler, handed over by
+            // applyUpscalerSlot; averSrUpscaler_.reset() frees the object underneath it. Resetting
+            // first left D3D12Device::upscaler_ dangling and the next frame's composite called
+            // execute() on freed memory -- turning AverSR ON and then OFF again crashed the editor.
+            //
+            // THE GUARD FOR THIS ALREADY EXISTED AND HAD NO CALLERS. clearAverSrUpscaler's own
+            // comment says "Detaches before destruction, so the device can never hold a dangling
+            // upscaler", and the teardown path a few hundred lines up carries a comment describing
+            // this same bug ("--edge-aa's first --frames run crashed (SIGSEGV) AT PROCESS EXIT")
+            // and fixing it INLINE rather than by calling the helper. So the shutdown case was
+            // closed and this one, the only case a user can reach from the UI, was left open.
+            //
+            // applyUpscalerSlot rather than setUpscaler(nullptr): averSrQuality_ is already Off by
+            // the line above, so the slot resolves to edge-AA if that is on and to nullptr if not.
+            // Clearing the slot outright would silently switch --edge-aa off as a side effect of
+            // turning AverSR off, which is the kind of coupling that seam exists to prevent.
+            applyUpscalerSlot(dev);
             averSrUpscaler_.reset();
             dev->setRenderScale(1.0f);
             return;
@@ -13244,8 +13298,50 @@ private:
 
         if (prefsDevice_ && prefsDevice_->vsyncCanDisable())
             prefsDevice_->setVSync(prefBool("display.vsync", prefsDevice_->vsync()));
-        if (prefsDevice_ && renderScaleOverride_ == 1.0f)   // --render-scale on the command line wins
-            prefsDevice_->setRenderScale(prefFloat("display.renderScale", prefsDevice_->renderScale()));
+        // A STORED RENDER SCALE IS APPLIED BEHIND A CRASH COOKIE, because applying one below 1
+        // can lose the GPU device -- and a persisted setting that kills the device at startup is a
+        // trap with NO WAY OUT FROM INSIDE THE EDITOR. It is applied during prefs load, the device
+        // dies before a frame is presented, and every relaunch repeats it. Escaping meant hand-editing
+        // %LOCALAPPDATA%/AverEngine/editor.ini, which nobody should have to work out; one evening was
+        // already lost to exactly that, after the AverSR combo persisted a 0.67 that then bricked
+        // every subsequent launch.
+        //
+        // WHY A COOKIE AND NOT A HANDLER. Engine::frameStep returns as soon as device_->deviceLost()
+        // is true -- BEFORE app_->onUpdate() -- so nothing app-side runs again after the loss and
+        // there is no "on device lost, undo it" hook to hang this on. The only thing that survives a
+        // dead device, or a hard kill, is what was already written to disk. So the flag goes down
+        // BEFORE the risky call and is cleared thirty frames later, once presenting has demonstrably
+        // worked (see onUpdate). Finding it still set at startup means the last attempt did not
+        // survive, whatever killed it.
+        //
+        // The scale is reset to 1 rather than merely skipped, so the editor comes back in a state the
+        // user can see and change, instead of silently ignoring a preference the UI still shows.
+        //
+        // THE UNDERLYING BUG IS FIXED -- D3D12Device::setRenderScale now parks the value and rebuilds
+        // at the top of the next beginFrame, so the prefs load can no longer free targets a recording
+        // command list has bound. This stays anyway. It costs one bool in an ini file, it is the only
+        // thing that can rescue a user whose editor.ini was written by a build that HAD the bug, and
+        // it does not depend on being right about which rebuild is unsafe: anything that kills the
+        // device before frame 30 with a stored scale in play gets caught the same way.
+        if (prefsDevice_ && renderScaleOverride_ == 1.0f) {   // --render-scale on the command line wins
+            const f32 stored = prefFloat("display.renderScale", prefsDevice_->renderScale());
+            if (stored == 1.0f) {
+                prefsDevice_->setRenderScale(stored);         // early-outs; costs nothing
+            } else if (prefBool("display.renderScalePending", false)) {
+                AVER_CRITICAL("[Sandbox] the last launch did not survive a stored render scale of "
+                              "{:.2f} -- resetting display.renderScale to 1. Set it again if that "
+                              "was not the cause; the scale itself is the thing that needs fixing.",
+                              stored);
+                setPrefFloat("display.renderScale", 1.0f);
+                setPrefBool("display.renderScalePending", false);
+                flushEditorPrefs();
+            } else {
+                setPrefBool("display.renderScalePending", true);
+                flushEditorPrefs();   // ON DISK BEFORE THE DEVICE IS RISKED -- the whole point
+                renderScaleCookieArmed_ = true;
+                prefsDevice_->setRenderScale(stored);
+            }
+        }
 
         keybinds_.loadFromPrefs();
     }
@@ -14982,6 +15078,13 @@ private:
     int ptQualityRampCountdown_ = 0;
     int ptSceneToggleOnAutoFrames_ = 0;
     int ptSceneToggleOffAutoFrames_ = 0;
+    // True while a stored non-unity render scale is on trial this session; see the prefs-apply site.
+    bool renderScaleCookieArmed_ = false;
+#if AVER_MODULE_SR
+    // --aversr-cycle [N]: drive the on-then-off transition that used to free the upscaler out from
+    // under the device. Verification-only; 0 means never.
+    int averSrCycleFrames_ = 0;
+#endif
     std::unique_ptr<aver::editor::ReflTest> refl_;
     int  reflBeaconIndex_ = -1;   // which objects_ entry the schedule shows and hides
     rhi::MeshHandle unitCubeMesh_ = 0;   // the editor's own unit cube, half-extent 1
@@ -17283,7 +17386,7 @@ Application* createApplication(int argc, char** argv) {
     // right here and nothing else may override it; --mcp with no number defers to mcp.conf, resolved
     // once argument parsing is done and engineRoot() can be asked (see mcpRequested below).
     bool mcpRequested = false, mcpPortExplicit = false;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool furnaceGrid=false; f32 furnaceTilt=0.0f; bool ptFurnace=false; bool ptScene=false; int deviceLostAt=0; int ptQualityRamp=0; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=-1; int rt=-1; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int rtRenderMode=-1; int pt=-1; int ptBounces=-1; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string selectEntity; bool openLegacy=false; bool waterOn=false; f32 waterHeight=0.0f; std::string graphSelectNode; std::string graphTab; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false; bool bakeNav=false; f32 bakeNavCell=50.0f; std::string openMap; bool gbuffer=false; std::string gbufferDebug; std::string crashTest; std::string startMode;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool furnaceGrid=false; f32 furnaceTilt=0.0f; bool ptFurnace=false; bool ptScene=false; int deviceLostAt=0; int ptQualityRamp=0; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int aversrCycle=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=-1; int rt=-1; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int rtRenderMode=-1; int pt=-1; int ptBounces=-1; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string selectEntity; bool openLegacy=false; bool waterOn=false; f32 waterHeight=0.0f; std::string graphSelectNode; std::string graphTab; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false; bool bakeNav=false; f32 bakeNavCell=50.0f; std::string openMap; bool gbuffer=false; std::string gbufferDebug; std::string crashTest; std::string startMode;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -17775,6 +17878,11 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--pt-scene-toggle-off")) {
             ptSceneToggleOff = (i+1 < argc && argv[i+1][0] != '-') ? std::atoi(argv[++i]) : 15;
         }
+        // --aversr-cycle [N]: turn AverSR on and straight off again at frame N. Verification-only,
+        // and it reproduces a real crash -- see SandboxApp::averSrCycleFrames_.
+        else if (!std::strcmp(argv[i],"--aversr-cycle")) {
+            aversrCycle = (i+1 < argc && argv[i+1][0] != '-') ? std::atoi(argv[++i]) : 30;
+        }
         else if (!std::strcmp(argv[i],"--skin-scene-test") && i+1<argc) skinSceneDir=argv[++i];
         // --bake-nav [cellCm]: bake this level's navigation once at startup and write its
         // .ocnav. Deferred to a frame rather than run at init, because the bake samples PHYSICS
@@ -18145,6 +18253,9 @@ Application* createApplication(int argc, char** argv) {
     if (ptQualityRamp > 0)    app->setPtQualityRamp(ptQualityRamp);
     if (ptSceneToggleOn > 0)  app->setPtSceneToggleOnAuto(ptSceneToggleOn);
     if (ptSceneToggleOff > 0) app->setPtSceneToggleOffAuto(ptSceneToggleOff);
+#if AVER_MODULE_SR
+    if (aversrCycle > 0) app->setAverSrCycleAuto(aversrCycle);
+#endif
     if (!skinSceneDir.empty()) app->setSkinSceneDir(skinSceneDir);
 #if AVER_MODULE_SYNAPSE
     if (bakeNav) app->setBakeNavOnStart(bakeNavCell);

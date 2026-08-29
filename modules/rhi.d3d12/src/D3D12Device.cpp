@@ -1606,14 +1606,58 @@ private:
     // (sceneWidth_ == width_, so v * sceneWidth_ / width_ == v).
     u32 scaleToSceneW(u32 v) const { return width_  ? static_cast<u32>((static_cast<u64>(v) * sceneWidth_)  / width_)  : v; }
     u32 scaleToSceneH(u32 v) const { return height_ ? static_cast<u32>((static_cast<u64>(v) * sceneHeight_) / height_) : v; }
+    // DEFERRED TO A FRAME BOUNDARY, ALWAYS. Applying a scale change where it is asked for destroys
+    // and recreates the depth buffer, the MSAA colour target and the post chain -- and callers ask
+    // from inside a frame. The editor's own preference load is the case that proved it: it runs from
+    // buildUI(), which onRender() calls between the device's beginFrame() and endFrame(), so the
+    // command list for THAT frame had already bound the very resources rebuildSceneTargets went on to
+    // free. endFrame then closed and presented a command list referencing dead resources, and the
+    // device was removed AT PRESENT -- which is exactly where the loss was reported.
+    //
+    // The tell was that --render-scale on the command line worked fine at the identical value: it
+    // applies from onInit, outside any frame. Same function, same scale, same targets; only the
+    // timing differed.
+    //
+    // waitForGpu() inside rebuildSceneTargets does NOT save this. It drains work already SUBMITTED;
+    // it says nothing about a command list still being recorded on the CPU, which is what the caller
+    // is in the middle of.
+    //
+    // So the value is parked and applied at the top of the next beginFrame, before anything records.
+    // Unconditional rather than gated on an "am I mid-frame" flag: no caller should have to know, and
+    // a rule with no exceptions cannot be got wrong by the next one.
     void setRenderScale(f32 scale) override {
+        const f32 asked = scale;
         scale = std::fmax(0.25f, std::fmin(1.0f, scale));
-        if (scale == renderScale_) return;
-        renderScale_ = scale;
-        if (!hasSwapchain_) return;   // applied next createSwapchainResources
+        const f32 effective = pendingRenderScaleValid_ ? pendingRenderScale_ : renderScale_;
+        if (scale == effective) return;
+        // Before a swapchain exists there is no frame to be inside and nothing to rebuild --
+        // createSwapchainResources sizes itself off renderScale_ when it runs.
+        if (!hasSwapchain_) {
+            AVER_INFO("[RHI.D3D12] setRenderScale: {:.4f} -> {:.4f} (asked {:.4f}), before the swapchain",
+                      renderScale_, scale, asked);
+            renderScale_ = scale;
+            return;
+        }
+        AVER_INFO("[RHI.D3D12] setRenderScale: {:.4f} -> {:.4f} (asked {:.4f}), applied next frame",
+                  effective, scale, asked);
+        pendingRenderScale_ = scale;
+        pendingRenderScaleValid_ = true;
+    }
+    // Reports what the last caller ASKED FOR, not what is currently resident, so a read-back
+    // immediately after a set sees the value it just wrote rather than the old one for one frame.
+    f32 pendingOrCurrentRenderScale() const {
+        return pendingRenderScaleValid_ ? pendingRenderScale_ : renderScale_;
+    }
+    void applyPendingRenderScale() {
+        if (!pendingRenderScaleValid_) return;
+        pendingRenderScaleValid_ = false;
+        if (pendingRenderScale_ == renderScale_) return;
+        renderScale_ = pendingRenderScale_;
         rebuildSceneTargets();
     }
-    f32 renderScale() const override { return renderScale_; }
+    f32  pendingRenderScale_ = 1.0f;
+    bool pendingRenderScaleValid_ = false;
+    f32 renderScale() const override { return pendingOrCurrentRenderScale(); }
     // Tears down and rebuilds every target sized off sceneWidth_/sceneHeight_ after renderScale_
     // changes with a swapchain already live -- the same set resize() rebuilds, minus the swapchain
     // itself and the present-space viewport texture, neither of which renderScale_ touches.
@@ -3353,6 +3397,11 @@ GpuTimingReport D3D12Device::gpuTiming() const {
 // Opens the frame: waits out the current backbuffer's last frame, resets recording, clears targets.
 void D3D12Device::beginFrame() {
     if (!hasSwapchain_ || deviceLost_) return;
+    // FIRST, BEFORE ANYTHING RECORDS. A render-scale change frees and recreates the depth buffer, the
+    // MSAA colour target and the post chain; doing that while a command list is mid-recording is what
+    // removed the device at Present. setRenderScale parks the value; this is the frame boundary where
+    // acting on it is safe. See setRenderScale's own comment for the full account.
+    applyPendingRenderScale();
     reconcileClearValue();
     frameIndex_ = swapChain_->GetCurrentBackBufferIndex();
     const u64 want = fenceValues_[frameIndex_];
