@@ -189,6 +189,14 @@ struct AverSurface {
     // subsurface term identically zero rather than merely small. PSRayDriven hand-builds this struct
     // and must set them too; HLSL does not zero a struct for you.
     float  sssWeight, sssRadius;
+#ifdef AVER_LAYERED_BSDF
+    // ON THE SURFACE, NOT READ FROM THE CBUFFER AT THE USE SITE, and that is not a style choice.
+    // PSRayDriven (VoxiShaders' ray-driven primary pass) has NO material cbuffer bound -- a ray hit
+    // does not carry one -- so it hand-builds this struct from gRtMaterials instead. A coat term that
+    // reached for gCoatWeight would read whatever the cbuffer last held, i.e. another material's coat,
+    // on every ray-driven pixel. sssWeight/sssRadius above are on the surface for exactly this reason.
+    float  coatWeight, coatRough, coatF0;
+#endif
     // Carried through from AverVertex -- see its own comment. Read only by the transmissive branch
     // below, for total internal reflection.
     bool   backFace;
@@ -492,6 +500,13 @@ AverSurface averBuildSurface(AverVertex v, AverLight l, AverAuthored a, float2 u
     // the pin -- the defect this whole struct exists to prevent.
     s.sssWeight = saturate(a.subsurfaceWeight);
     s.sssRadius = saturate(a.subsurfaceRadius);
+#ifdef AVER_LAYERED_BSDF
+    // Gated on the flag, so a material that never authored a coat carries a zero weight and every
+    // coat term below is identically zero -- the same shape the subsurface pair uses.
+    s.coatWeight = (gMaterialFlags & AVER_MAT_COAT) ? saturate(gCoatWeight)    : 0.0;
+    s.coatRough  = (gMaterialFlags & AVER_MAT_COAT) ? saturate(gCoatRoughness) : 0.0;
+    s.coatF0     = (gMaterialFlags & AVER_MAT_COAT) ? saturate(gCoatF0)        : 0.0;
+#endif
 
     // FRESNEL-AWARE ALPHA FOR BLENDED SURFACES. Plain "over" compositing --
     // dst = src.rgb*alpha + dst.rgb*(1-alpha) -- treats alpha as one UNIFORM attenuation and so
@@ -859,10 +874,9 @@ void averIndirectTerms(AverSurface s, AverIndirect ind,
     // deliberately NOT added: the masking loss it corrects scales with roughness, and a coat's typical
     // roughness (car paint, 0.05-0.3) makes it small. That is a stated approximation, in the same
     // style as the intermediate-metallic case this file already documents -- not an oversight.
-    if (gMaterialFlags & AVER_MAT_COAT) {
+    if (s.coatWeight > 0.0) {
         float3 coatEnv; float baseAtten;
-        averCoatTerms(s, ind, saturate(gCoatWeight), saturate(gCoatRoughness), saturate(gCoatF0),
-                      coatEnv, baseAtten);
+        averCoatTerms(s, ind, s.coatWeight, s.coatRough, s.coatF0, coatEnv, baseAtten);
         specEnv     *= baseAtten;
         diffAmbient *= baseAtten;
         diffBounce  *= baseAtten;

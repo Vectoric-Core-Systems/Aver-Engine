@@ -463,6 +463,16 @@ void VoxiRenderer::setSettings(const Settings& s) {
     rtShadowDenoise_ = s.rtShadowDenoise;
     rtRenderMode_    = s.rtRenderMode;
     ptBounces_       = s.ptBounces;
+    // LATCHED, not assigned. The pipelines this decides the shape of are built once; a later change
+    // would leave the member disagreeing with the shaders actually compiled, which is worse than
+    // ignoring it. Said out loud when it happens rather than dropped silently.
+    if (!layeredBsdfLatched_) {
+        layeredBsdf_ = (s.layeredBsdf != Quality::Off);
+        layeredBsdfLatched_ = true;
+    } else if (layeredBsdf_ != (s.layeredBsdf != Quality::Off)) {
+        AVER_WARN("[Voxi] layeredBsdf changed after the pipelines were built; it takes effect on the "
+                  "next project load. The shaders compiled for this session are unchanged.");
+    }
     setGiUpdateInterval(s.giUpdateInterval);
 
     // Guarded on a real size: before the first onRenderTargetsChanged there is nothing to create at,
@@ -981,7 +991,11 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
         // Filled in by buildGeometryTable, which is what knows where each mesh landed.
         ri.firstIndex = 0;
         ri.firstVertex = 0;
-        // materialIndex is a PLACEHOLDER here -- buildMaterialTable() overwrites every element of
+        // materialIndex is a PLACEHOLDER here -- and buildMaterialTable() MUST therefore run before
+        // buildGeometryTable(), which is what uploads this array. That ordering is load-bearing and
+        // was wrong once; see the call site's own comment for what it cost.
+        //
+        // buildMaterialTable() overwrites every element of
         // rtInstanceData_ once this whole loop (and rtInstanceMatKey_, pushed below in lockstep)
         // has run and the FULL set of distinct materials this build names is known. It cannot be
         // resolved to a final dense index per-draw, here, because that index depends on the sorted
@@ -1119,16 +1133,28 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     // Base ray bias in centimetres, scaled by view distance in the shader. Small enough not to
     // detach a contact shadow, large enough that a surface does not intersect its own rays.
     cb_.rtParams[2] = 0.05f;
+    // MATERIAL TABLE FIRST, AND THE ORDER IS THE WHOLE POINT. buildGeometryTable() below is what
+    // UPLOADS rtInstanceData_ to the GPU (its writeBuffer of rtInstances_), and buildMaterialTable()
+    // is what fills in every rtInstanceData_[i].materialIndex -- which the per-draw loop leaves at a
+    // placeholder 0, as its own comment there says. Called the other way round, as this stood until
+    // now, the upload carried the PLACEHOLDER and the fix-up landed on a CPU copy nobody read again:
+    // every ray hit in ray-driven mode indexed gRtMaterials[0], the fallback row.
+    //
+    // That was silent for as long as it existed, because RtInstance carries albedo/metallic/roughness
+    // per-draw and those are what the eye checks -- a cube still came out the right colour. What came
+    // from the fallback instead of the material was everything else on the row: reflectance, f90,
+    // ior, transmission, the subsurface pair, graphId. Found while asking why a coat authored at
+    // weight 1 changed nothing in the default render mode and everything in the others.
+    //
+    // Nothing forces the old order: buildMaterialTable reads only matConstantsByKey and the keys the
+    // per-draw loop recorded, and touches no geometry. Its result is not gated into a cb_ flag the
+    // way geometry is, because every index it assigns is valid whether or not the GPU upload below
+    // succeeds -- there is no "read it or don't" toggle for a hit's OWN material.
+    buildMaterialTable(matConstantsByKey);
     // w > 0.5 tells the lit pass it may trace a reflection ray. It is only true when the flat
     // geometry table is actually there, because a reflection that hits geometry it cannot look up
     // would read a neighbour's triangle rather than fail visibly.
     cb_.rtParams[3] = buildGeometryTable(ctx) ? 1.0f : 0.0f;
-    // Not gated into a cb_ flag the way geometry is above: every rtInstanceData_[i].materialIndex
-    // this call assigns is a valid dense index into rtMaterialData_ whether or not the GPU upload
-    // below actually succeeds (see buildMaterialTable's own comment on its return value) -- there is
-    // no equivalent "read it or don't" toggle for a ray hit's OWN material the way there is for
-    // whether it may additionally trace a reflection ray.
-    buildMaterialTable(matConstantsByKey);
     if (!rtLogged_) {
         AVER_INFO("[Voxi] RayQuery active ({} instances, {} bottom-level structures)",
                   static_cast<u32>(inst.size()), static_cast<u32>(blas_.size()));
@@ -2781,8 +2807,16 @@ bool VoxiRenderer::createPipelines() {
     const rhi::PipelineLayout gi = giLayout();
     // Raster pipelines declare the material table, so their shaders are told which registers it
     // landed at. The compute ones must not be told: they declare no second table.
-    const std::string matDefs = pbr::materialShaderDefines(gi.srvCount, kMaterialSamplerSlot);
+    const std::string matDefs = pbr::materialShaderDefines(gi.srvCount, kMaterialSamplerSlot,
+                                                          layeredBsdf_);
     auto rasterDefs = [&](const char* extra) { return extra ? matDefs + ";" + extra : matDefs; };
+
+    // Which SHADING VARIANT this session's pipelines were compiled for, said once, at the only place
+    // that decides it. The layered BSDF cannot be toggled after this point (see setSettings' latch),
+    // so a run that renders no coat has exactly two possible causes -- the variant is Off, or no
+    // material authored one -- and this line settles the first without a debugger.
+    AVER_INFO("[Voxi] scene pipelines compiling with the {} shading model",
+              layeredBsdf_ ? "LAYERED (base BRDF + coat lobe)" : "standard BRDF");
 
     // --- 1. shadow map: depth only, from the sun ---
     if (const rhi::ShaderHandle vs = compile("VSShadow", rhi::ShaderStage::Vertex, kBaseSm, rasterDefs(nullptr).c_str())) {
@@ -2992,7 +3026,8 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     ShaderScope compile(*res_);
     const rhi::PipelineLayout gi = giLayout();
     // Every pipeline here is a raster one, so every shader is told the material registers.
-    const std::string matDefs = pbr::materialShaderDefines(gi.srvCount, kMaterialSamplerSlot);
+    const std::string matDefs = pbr::materialShaderDefines(gi.srvCount, kMaterialSamplerSlot,
+                                                          layeredBsdf_);
     auto rasterDefs = [&](const char* extra) { return extra ? matDefs + ";" + extra : matDefs; };
 
     // --- 6. debug: raymarch the volume to screen (shares the prelude's fullscreen triangle). ---

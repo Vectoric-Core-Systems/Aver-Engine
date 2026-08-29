@@ -159,8 +159,11 @@ static std::string compose(const std::string& generated) {
 
 // t0.. for the eight material maps and s0 for their sampler: any consistent map does, since nothing
 // here builds a root signature to disagree with.
+// layeredBsdf=false: these tests compile material GRAPHS, and the coat is not graph-drivable yet.
+// When it is, this wants a second pass with it on -- a graph that drives a coat pin and a shader
+// compiled without the lobe is a combination that must fail loudly rather than shade flat.
 static std::string defines(bool graph) {
-    std::string d = pbr::materialShaderDefines(0, 0);
+    std::string d = pbr::materialShaderDefines(0, 0, /*layeredBsdf=*/false);
     if (graph) d += ";AVER_MATERIAL_GRAPH=1";
     return d;
 }

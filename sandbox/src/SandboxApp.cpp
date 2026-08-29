@@ -2234,6 +2234,22 @@ public:
                         objects_.push_back(o);
                     }
                 }
+                // THE PLATES NORMALLY HAVE NO MATERIAL AT ALL. They are built after the
+                // makeMaterialFor() pass above, so they draw through the fallback path with their
+                // metallic/roughness passed per-draw. That is how every furnace measurement to date
+                // was taken, and giving them materials unconditionally would move all of them.
+                //
+                // So: only when a coat is asked for, because a coat needs somewhere to live. The
+                // furnace's oracle is INTRA-FRAME -- a plate must be indistinguishable from the
+                // background beside it -- so it does not matter that a coated run took a different
+                // path to get there than an uncoated one. Nothing is being compared across runs.
+                if (coatWeight_ > 0.0f) {
+                    for (MeshObj& o : objects_) makeMaterialFor(o);
+                    AVER_INFO("[Furnace] grid plates given materials so the coat has somewhere to "
+                              "live (coat {:.2f} rough {:.2f} f0 {:.3f}); an uncoated run still uses "
+                              "the per-draw fallback path and reads exactly what it always did.",
+                              coatWeight_, coatRough_, coatF0_);
+                }
                 AVER_INFO("[Furnace] grid: 6 roughness x 3 metallic at albedo 1, L = {}",
                           sky_.furnaceRadiance);
             }
@@ -4315,7 +4331,12 @@ public:
         // AVER_CLUSTER_PS_DEBUG=0 is the real shader; 1..7 isolate one input each when this path
         // renders wrong. See ClusterMaterialShader.hpp for what each one proved.
         std::string psDefs =
-            pbr::materialShaderDefines(lodMeshLayout_.srvCount, kClusterMaterialSamplerSlot) +
+            // The cluster path assembles its OWN defines string, separately from VoxiRenderer's --
+            // which is exactly why materialShaderDefines takes this as a required argument. Read
+            // from the live settings rather than latched here: this string is rebuilt per compile,
+            // and Voxi's own latch is what actually decides what the session's shaders contain.
+            pbr::materialShaderDefines(lodMeshLayout_.srvCount, kClusterMaterialSamplerSlot,
+                                       voxi::Renderer::get().settings().layeredBsdf != voxi::Quality::Off) +
             ";AVER_CLUSTER_PS_DEBUG=0";
 #if AVER_MODULE_VOXI
         // AVER_CLUSTER_VOXI=1 is what switches PSClusterMain from the neutral sun.visibility=1.0 /
@@ -4479,6 +4500,12 @@ public:
         d.name            = o.name;
         d.metallicFactor  = o.metallic;
         d.roughnessFactor = o.roughness;
+        // --coat only. Zero otherwise, which leaves MaterialFlag_Coat clear in packMaterial and the
+        // coat term unreachable even in a build that compiled it -- so this line cannot change a
+        // default run.
+        d.coatWeight      = coatWeight_;
+        d.coatRoughness   = coatRough_;
+        d.coatF0          = coatF0_;
         o.material = pbr::MaterialLibrary::get().create(d);
         if (!o.material) { AVER_WARN("[Sandbox] no material for '{}'; it will draw with the fallback", o.name); return; }
         o.metallic = o.roughness = 1.0f;
@@ -6636,6 +6663,7 @@ public:
     void setRtRenderMode(int n) { rtRenderModeOverride_ = n; }                  // --rt-render-mode 0|1
     void setPtBounces(int n) { ptBouncesOverride_ = n; }                        // --pt-bounces N
     void setLayeredBsdf(int n) { layeredBsdfOverride_ = n; }                    // --layered-bsdf N
+    void setCoat(f32 w, f32 r, f32 f0) { coatWeight_=w; coatRough_=r; coatF0_=f0; }   // --coat W [R] [F0]
     void setGiUpdateInterval(int n) { giUpdateIntervalOverride_ = n; }          // --gi-update-interval N
     void setRenderScale(f32 s) { renderScaleOverride_ = s; }                    // --render-scale F
 #if AVER_MODULE_SR
@@ -14764,6 +14792,9 @@ private:
     int  rtRenderModeOverride_=-1;    // --rt-render-mode 0|1 (-1 = flag not given)
     int  ptBouncesOverride_=-1;       // --pt-bounces N (-1 = flag not given)
     int  layeredBsdfOverride_=-1;     // --layered-bsdf N (-1 = flag not given)
+    f32  coatWeight_=0.0f;            // --coat W [R] [F0]: 0 = flag not given, and no coat anywhere
+    f32  coatRough_=0.1f;
+    f32  coatF0_=0.04f;
     int  giUpdateIntervalOverride_=0; // --gi-update-interval N: GI revoxelise interval (0 = flag not given)
     f32  renderScaleOverride_=1.0f;  // --render-scale F: scene render resolution as a fraction of present, clamped [0.25,1]
 #if AVER_MODULE_SR
@@ -17438,7 +17469,7 @@ Application* createApplication(int argc, char** argv) {
     // right here and nothing else may override it; --mcp with no number defers to mcp.conf, resolved
     // once argument parsing is done and engineRoot() can be asked (see mcpRequested below).
     bool mcpRequested = false, mcpPortExplicit = false;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; std::string shaderSourceDir; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool furnaceGrid=false; f32 furnaceTilt=0.0f; bool ptFurnace=false; bool ptScene=false; int deviceLostAt=0; int ptQualityRamp=0; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int aversrCycle=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=-1; int rt=-1; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int rtRenderMode=-1; int pt=-1; int ptBounces=-1; int layeredBsdf=-1; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string selectEntity; bool openLegacy=false; bool waterOn=false; f32 waterHeight=0.0f; std::string graphSelectNode; std::string graphTab; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false; bool bakeNav=false; f32 bakeNavCell=50.0f; std::string openMap; bool gbuffer=false; std::string gbufferDebug; std::string crashTest; std::string startMode;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; std::string shaderSourceDir; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool furnaceGrid=false; f32 furnaceTilt=0.0f; bool ptFurnace=false; bool ptScene=false; int deviceLostAt=0; int ptQualityRamp=0; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int aversrCycle=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=-1; int rt=-1; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int rtRenderMode=-1; int pt=-1; int ptBounces=-1; int layeredBsdf=-1; f32 coatWeight=0.0f; f32 coatRough=0.1f; f32 coatF0=0.04f; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string selectEntity; bool openLegacy=false; bool waterOn=false; f32 waterHeight=0.0f; std::string graphSelectNode; std::string graphTab; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false; bool bakeNav=false; f32 bakeNavCell=50.0f; std::string openMap; bool gbuffer=false; std::string gbufferDebug; std::string crashTest; std::string startMode;
     for (int i=1;i<argc;++i){
         // HANDLED BEFORE THE else-if CHAIN BELOW, AND NOT BY PREFERENCE: adding one more `else if`
         // to that chain takes MSVC past its nesting limit -- "fatal error C1061: compiler limit:
@@ -17447,9 +17478,25 @@ Application* createApplication(int argc, char** argv) {
         // it does not push the next person into the same wall.
         //
         // --layered-bsdf N: 0=Off 1=Low 2=Medium 3=High 4=Epic. Off is the standard BRDF, unchanged.
-        // Reports NotImplemented until the coat lobe lands, so setSettings clamps it back to Off and
-        // says so once -- the flag is real, the shading is not, and neither pretends otherwise.
+        //
+        // ON ITS OWN THIS FLAG CHANGES NOTHING VISIBLE, and that is correct rather than a hedge:
+        // it selects a shader variant that can evaluate a coat, and every material in every existing
+        // project authors coatWeight 0. Pair it with --coat below to see the lobe do something.
         if (!std::strcmp(argv[i],"--layered-bsdf") && i+1<argc) { layeredBsdf=std::atoi(argv[++i]); continue; }
+
+        // --coat <weight> [roughness] [f0]: give the EDITOR'S OWN placeholder materials a coat.
+        //
+        // WHY A FLAG RATHER THAN AN AUTHORED ASSET. The coat needs a material that sets it, and the
+        // two things worth measuring are both on scenes the editor builds in C++ rather than loads
+        // from disk: the default Floor/Cube (does the lobe change any pixel at all?) and the
+        // --furnace-grid plates (does it change any pixel it should not?). Authoring a .ocmat would
+        // test the parser, which MaterialTest already does, and not the shading.
+        if (!std::strcmp(argv[i],"--coat") && i+1<argc) {
+            coatWeight = (f32)std::atof(argv[++i]);
+            if (i+1<argc && argv[i+1][0] != '-') coatRough = (f32)std::atof(argv[++i]);
+            if (i+1<argc && argv[i+1][0] != '-') coatF0    = (f32)std::atof(argv[++i]);
+            continue;
+        }
 
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -18318,6 +18365,7 @@ Application* createApplication(int argc, char** argv) {
     if (furnaceTest) app->setFurnaceTest();
     if (furnaceSun) app->setFurnaceSun();
     if (furnaceGrid) app->setFurnaceGrid();
+    if (coatWeight > 0.0f) app->setCoat(coatWeight, coatRough, coatF0);
     if (furnaceTilt != 0.0f) app->setFurnaceTilt(furnaceTilt);
     if (sunAngle > 0.0f) app->setSunAngle(sunAngle);
     if (ptFurnace) app->setPtFurnaceTest();

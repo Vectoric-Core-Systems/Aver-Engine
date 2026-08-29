@@ -351,7 +351,14 @@ bool ActorPreview::createMaterialPipeline() {
     // Stored on the instance (not a local): ShaderDesc::defines is a raw pointer, read by the
     // backend -- and, in ActorPreviewTest, recorded and read back later -- after this function
     // returns.
-    materialDefines_ = pbr::materialShaderDefines(/*tableBaseRegister=*/0, /*samplerRegister=*/0);
+    // NO COAT IN THE PREVIEW, and it is a stated limitation rather than an oversight. This module
+    // links Aver.Core and the RHI, not Aver.Render.Voxi, so it cannot see voxi::Settings to know
+    // whether the project asked for a layered BSDF -- and reaching for that dependency to light one
+    // preview sphere would couple the material-graph editor to the scene renderer. The consequence,
+    // said plainly: a coated material previews WITHOUT its coat. Wiring it means giving this module
+    // a way to be told the setting, not a way to go and read it.
+    materialDefines_ = pbr::materialShaderDefines(/*tableBaseRegister=*/0, /*samplerRegister=*/0,
+                                                  /*layeredBsdf=*/false);
 
     rhi::ShaderDesc vd;
     vd.source = actorPreviewShaderSource();

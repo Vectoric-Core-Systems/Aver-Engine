@@ -405,6 +405,14 @@ private:
     // ray-driven primary visibility; whether it is HONOURED is rayDrivenActive(), which also
     // requires the device and the pipeline to have cooperated.
     u32 rtRenderMode_ = 0;
+    // Whether the coat lobe is compiled into this process's material pipelines.
+    //
+    // LATCHED AT THE FIRST setSettings AND NEVER AGAIN, which is the design and not an accident:
+    // this renderer builds twenty-odd raster PSOs at init, through DXC at runtime with no disk
+    // cache, so honouring a later change would mean recompiling all of them mid-session. The value
+    // is a project-level decision; changing it takes a project reload. See voxi::Settings.
+    bool layeredBsdf_ = false;
+    bool layeredBsdfLatched_ = false;
     // Settings::ptBounces. Spent only while pathTracingWanted() -- see where cb_.ptBounceParams
     // is filled, which is the one place that decision is made.
     u32 ptBounces_ = 1;

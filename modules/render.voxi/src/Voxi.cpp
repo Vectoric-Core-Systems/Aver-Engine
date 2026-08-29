@@ -181,19 +181,17 @@ Status Renderer::status(Feature f) const {
                 return Status::Unsupported;
             return Status::Ready;
         case Feature::LayeredBsdf:
-            // NotImplemented, and it will say so in the UI until the lobe exists.
+            // Ready as of the commit that added averCoatTerms and wired AVER_LAYERED_BSDF into the
+            // material define string. Before that this returned NotImplemented and the clamp below
+            // pinned the setting to Off -- deliberately, so a combo could not change a persisted
+            // value and alter nothing.
             //
-            // The setting, its ladder, its manifest field and its clamp are all real from this commit;
-            // the shading is not. Reporting Ready here would put a combo in front of someone that
-            // changes a persisted, C#-scriptable value and alters not one pixel -- which is exactly
-            // what Feature::PathTracing did in reverse for a long time (see its arm above: it returned
-            // NotImplemented unconditionally long after a real path tracer existed, leaving its combo
-            // permanently grey and clamping the setting to Off on every device forever). One arm of
-            // this switch lying in each direction is enough history to learn from.
-            //
-            // There is nothing device-dependent to check yet. When the lobe lands this needs a real
-            // capability gate or an honest statement that it has none.
-            return Status::NotImplemented;
+            // NO DEVICE GATE, and that is a claim rather than an omission: the coat is arithmetic in
+            // a pixel shader built from the same split-sum helpers the base BRDF already uses. It
+            // needs no ray tracing, no mesh shaders, no compute, no shader model above what every
+            // material-shaded draw already requires. If a future layer needs something the device
+            // may not have, THIS is where the check goes.
+            return Status::Ready;
         default: return Status::Unsupported;
     }
 }

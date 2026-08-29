@@ -1977,6 +1977,16 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     s.backFace  = false;
     s.sssWeight = (mat.flags & AVER_MAT_SUBSURFACE) ? saturate(mat.subsurfaceWeight) : 0.0;
     s.sssRadius = (mat.flags & AVER_MAT_SUBSURFACE) ? saturate(mat.subsurfaceRadius) : 0.0;
+#ifdef AVER_LAYERED_BSDF
+    // THE COAT NEEDS EXPLICIT LINES HERE. This pass zero-inits the surface and then hand-sets every
+    // field, so a new one defaults to 0 for free -- which is the right OFF state for a weight, and
+    // would therefore have looked correct while silently meaning "no material in this scene has a
+    // coat in ray-driven mode". Read from the ray hit's own material, exactly as the two lines above
+    // do, because this pass has no material cbuffer to read.
+    s.coatWeight = (mat.flags & AVER_MAT_COAT) ? saturate(mat.coatWeight)    : 0.0;
+    s.coatRough  = (mat.flags & AVER_MAT_COAT) ? saturate(mat.coatRoughness) : 0.0;
+    s.coatF0     = (mat.flags & AVER_MAT_COAT) ? saturate(mat.coatF0)        : 0.0;
+#endif
     // Identical shape to averBuildSurface's own F0 (PbrShaders.cpp: `lerp(gMatReflectance.xxx,
     // s.albedo, s.metallic)`), with `mat.reflectance` standing in for `gMatReflectance` -- the same
     // per-material value, read from this pass's own material buffer instead of the raster path's
