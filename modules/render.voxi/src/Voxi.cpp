@@ -31,7 +31,13 @@ void Renderer::setSettings(const Settings& s) {
         const u32 bit = 1u << static_cast<u32>(f);
         if (refusalLogged_ & bit) return;
         refusalLogged_ |= bit;
-        AVER_INFO("[Voxi] {} was requested but this device cannot run it ({}); it stays off",
+        // THE DEVICE IS NOT ALWAYS AT FAULT, and saying it is sends the reader to the wrong place.
+        // Unsupported means this GPU cannot; NotImplemented means the engine does not, on any GPU.
+        // The old wording blamed hardware for both, so a NotImplemented feature read as "your card is
+        // too old" -- someone could reasonably go shopping over a line of missing code.
+        AVER_INFO(status(f) == Status::NotImplemented
+                      ? "[Voxi] {} was requested but this engine does not implement it yet ({}); it stays off"
+                      : "[Voxi] {} was requested but this device cannot run it ({}); it stays off",
                   featureName(f), statusText(f));
     };
 

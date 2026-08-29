@@ -2480,6 +2480,7 @@ public:
             if (rtShadowDenoiseOverride_ >= 0) k.rtShadowDenoise = static_cast<u32>(rtShadowDenoiseOverride_);
             if (rtRenderModeOverride_    >= 0) k.rtRenderMode    = static_cast<u32>(rtRenderModeOverride_);
             if (ptBouncesOverride_       >= 0) k.ptBounces       = static_cast<u32>(ptBouncesOverride_);
+            if (layeredBsdfOverride_     >= 0) k.layeredBsdf     = static_cast<voxi::Quality>(layeredBsdfOverride_);
             if (rtPixelsPerRayOverride_ > 0) k.rtPixelsPerRayTile = static_cast<u32>(rtPixelsPerRayOverride_);
             else if (rtPixelsPerRayOverride_ < 0)
                 AVER_WARN("[Sandbox] --rt-pixels-per-ray {} is not a tile edge; the default of {} stands",
@@ -6634,6 +6635,7 @@ public:
     void setRtShadowDenoise(int n) { rtShadowDenoiseOverride_ = n; }            // --rt-shadow-denoise N
     void setRtRenderMode(int n) { rtRenderModeOverride_ = n; }                  // --rt-render-mode 0|1
     void setPtBounces(int n) { ptBouncesOverride_ = n; }                        // --pt-bounces N
+    void setLayeredBsdf(int n) { layeredBsdfOverride_ = n; }                    // --layered-bsdf N
     void setGiUpdateInterval(int n) { giUpdateIntervalOverride_ = n; }          // --gi-update-interval N
     void setRenderScale(f32 s) { renderScaleOverride_ = s; }                    // --render-scale F
 #if AVER_MODULE_SR
@@ -7737,6 +7739,7 @@ private:
         if (project_.rtShadowDenoise    >= 0) s.rtShadowDenoise    = static_cast<u32>(project_.rtShadowDenoise);
         if (project_.rtRenderMode       >= 0) s.rtRenderMode       = static_cast<u32>(project_.rtRenderMode);
         if (project_.ptBounces          >= 0) s.ptBounces          = static_cast<u32>(project_.ptBounces);
+        if (project_.layeredBsdf        >= 0) s.layeredBsdf        = static_cast<voxi::Quality>(project_.layeredBsdf);
         vx.setSettings(s);   // clamps to this device; the manifest keeps what was asked for
 
         // ---- THE COMMAND LINE OUTRANKS THE MANIFEST, AND UNTIL NOW IT DID NOT ----
@@ -7784,6 +7787,7 @@ private:
             take(rtRenderModeOverride_,    k.rtRenderMode,       "--rt-render-mode");
             take(rtShadowDenoiseOverride_, k.rtShadowDenoise,    "--rt-shadow-denoise");
             take(ptBouncesOverride_,       k.ptBounces,          "--pt-bounces");
+            take(layeredBsdfOverride_,     reinterpret_cast<u32&>(k.layeredBsdf), "--layered-bsdf");
             if (rtRaysOverride_ > 0)         take(rtRaysOverride_,        k.rtShadowRays,      "--rt-rays");
             if (rtPixelsPerRayOverride_ > 0) take(rtPixelsPerRayOverride_, k.rtPixelsPerRayTile, "--rt-pixels-per-ray");
             // A SECOND setSettings CALL, deliberately, and for the reason the startup path already
@@ -7863,6 +7867,7 @@ private:
         project_.rtShadowDenoise    = static_cast<int>(requested.rtShadowDenoise);
         project_.rtRenderMode       = static_cast<int>(requested.rtRenderMode);
         project_.ptBounces          = static_cast<int>(requested.ptBounces);
+        project_.layeredBsdf        = static_cast<int>(requested.layeredBsdf);
         projectDirty_ = true;
     }
 #else
@@ -7890,6 +7895,7 @@ private:
         if (project_.rtShadowDenoise    < 0) project_.rtShadowDenoise    = static_cast<int>(d.rtShadowDenoise);
         if (project_.rtRenderMode       < 0) project_.rtRenderMode       = static_cast<int>(d.rtRenderMode);
         if (project_.ptBounces          < 0) project_.ptBounces          = static_cast<int>(d.ptBounces);
+        if (project_.layeredBsdf        < 0) project_.layeredBsdf        = static_cast<int>(d.layeredBsdf);
 #endif
         std::string why;
         if (saveProjectManifest(&why)) AVER_INFO("[Project] --save-project wrote the manifest");
@@ -14757,6 +14763,7 @@ private:
     int  rtShadowDenoiseOverride_=-1; // --rt-shadow-denoise N: spatial radius (-1 = flag not given)
     int  rtRenderModeOverride_=-1;    // --rt-render-mode 0|1 (-1 = flag not given)
     int  ptBouncesOverride_=-1;       // --pt-bounces N (-1 = flag not given)
+    int  layeredBsdfOverride_=-1;     // --layered-bsdf N (-1 = flag not given)
     int  giUpdateIntervalOverride_=0; // --gi-update-interval N: GI revoxelise interval (0 = flag not given)
     f32  renderScaleOverride_=1.0f;  // --render-scale F: scene render resolution as a fraction of present, clamped [0.25,1]
 #if AVER_MODULE_SR
@@ -17431,8 +17438,19 @@ Application* createApplication(int argc, char** argv) {
     // right here and nothing else may override it; --mcp with no number defers to mcp.conf, resolved
     // once argument parsing is done and engineRoot() can be asked (see mcpRequested below).
     bool mcpRequested = false, mcpPortExplicit = false;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; std::string shaderSourceDir; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool furnaceGrid=false; f32 furnaceTilt=0.0f; bool ptFurnace=false; bool ptScene=false; int deviceLostAt=0; int ptQualityRamp=0; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int aversrCycle=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=-1; int rt=-1; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int rtRenderMode=-1; int pt=-1; int ptBounces=-1; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string selectEntity; bool openLegacy=false; bool waterOn=false; f32 waterHeight=0.0f; std::string graphSelectNode; std::string graphTab; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false; bool bakeNav=false; f32 bakeNavCell=50.0f; std::string openMap; bool gbuffer=false; std::string gbufferDebug; std::string crashTest; std::string startMode;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; std::string shaderSourceDir; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool furnaceGrid=false; f32 furnaceTilt=0.0f; bool ptFurnace=false; bool ptScene=false; int deviceLostAt=0; int ptQualityRamp=0; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int aversrCycle=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=-1; int rt=-1; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int rtRenderMode=-1; int pt=-1; int ptBounces=-1; int layeredBsdf=-1; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string selectEntity; bool openLegacy=false; bool waterOn=false; f32 waterHeight=0.0f; std::string graphSelectNode; std::string graphTab; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false; bool bakeNav=false; f32 bakeNavCell=50.0f; std::string openMap; bool gbuffer=false; std::string gbufferDebug; std::string crashTest; std::string startMode;
     for (int i=1;i<argc;++i){
+        // HANDLED BEFORE THE else-if CHAIN BELOW, AND NOT BY PREFERENCE: adding one more `else if`
+        // to that chain takes MSVC past its nesting limit -- "fatal error C1061: compiler limit:
+        // blocks nested too deeply". The chain is long enough that it is now full. Anything added
+        // from here on wants this shape instead: match, consume, `continue`. It reads no worse and
+        // it does not push the next person into the same wall.
+        //
+        // --layered-bsdf N: 0=Off 1=Low 2=Medium 3=High 4=Epic. Off is the standard BRDF, unchanged.
+        // Reports NotImplemented until the coat lobe lands, so setSettings clamps it back to Off and
+        // says so once -- the flag is real, the shading is not, and neither pretends otherwise.
+        if (!std::strcmp(argv[i],"--layered-bsdf") && i+1<argc) { layeredBsdf=std::atoi(argv[++i]); continue; }
+
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
             const std::string loc = argv[++i], nm = argv[++i];
@@ -18234,6 +18252,7 @@ Application* createApplication(int argc, char** argv) {
     app->setRtShadowDenoise(rtShadowDenoise);
     app->setRtRenderMode(rtRenderMode);
     app->setPtBounces(ptBounces);
+    if (layeredBsdf >= 0) app->setLayeredBsdf(layeredBsdf);
     app->setPtOverride(pt);
     app->setGiUpdateInterval(giUpdateInterval);
     app->setRtForceOff(noRt);

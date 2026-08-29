@@ -70,6 +70,8 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
             if (t.size() > 1) out.rayTracing = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.PATHTRACING")) {
             if (t.size() > 1) out.pathTracing = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.LAYEREDBSDF")) {
+            if (t.size() > 1) out.layeredBsdf = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.VOXELRES")) {
             if (t.size() > 1) out.voxelResolution = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.GIINTENSITY")) {
@@ -154,7 +156,7 @@ bool isOwnedKey(std::string_view line) {
         "RENDER.GI", "RENDER.RAYTRACING", "RENDER.PATHTRACING",
         "RENDER.VOXELRES", "RENDER.GIINTENSITY", "RENDER.GIDISTANCE",
         "RENDER.RTSHADOWRAYS", "RENDER.RTPIXELSPERRAY", "RENDER.RTSHADOWDENOISE",
-        "RENDER.RTRENDERMODE", "RENDER.PTBOUNCES",
+        "RENDER.RTRENDERMODE", "RENDER.PTBOUNCES", "RENDER.LAYEREDBSDF",
     };
     const std::vector<std::string_view> t = splitWhitespace(l);
     if (t.empty()) return false;
@@ -190,6 +192,7 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     appendKey(owned, "RENDER.RTSHADOWDENOISE", d.rtShadowDenoise);
     appendKey(owned, "RENDER.RTRENDERMODE", d.rtRenderMode);
     appendKey(owned, "RENDER.PTBOUNCES", d.ptBounces);
+    appendKey(owned, "RENDER.LAYEREDBSDF", d.layeredBsdf);
 
     if (trim(existing).empty()) {
         std::string out = "OCPROJECT " + std::to_string(d.version > 0 ? d.version : 1) + "\n";
