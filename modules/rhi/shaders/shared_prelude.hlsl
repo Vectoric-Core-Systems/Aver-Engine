@@ -1,6 +1,6 @@
 
 // The engine's per-frame block. MIRRORS PerFrameCB field for field.
-cbuffer PerFrame : register(b0) {
+cbuffer PerFrame : register(AVER_CB_JOIN(b, AVER_FRAME_CB)) {
     float4x4 gViewProj;
     float4x4 gInvViewProj;
     float4   gCamPos;      // xyz
@@ -50,7 +50,7 @@ cbuffer PerFrame : register(b0) {
     float4   gSkySh[9];
 };
 // The per-draw block: transform plus shading constants. 32 dwords, matching kObjectConstantDwords.
-cbuffer PerObject : register(b1) {
+cbuffer PerObject : register(AVER_CB_JOIN(b, AVER_OBJECT_CB)) {
     float4x4 gWorld;
     float4   gBaseColor;
     float4   gMaterial;      // x=metallic, y=roughness, z=unlit(0/1) for plainShadeSurface only
@@ -797,9 +797,8 @@ SkyOut VSky(uint id : SV_VertexID) {
 struct MeshVtx { float3 pos; float3 nrm; float2 uv; };
 StructuredBuffer<MeshVtx> gVerts   : register(AVER_REG_JOIN(t, AVER_MS_VTX_REG));
 ByteAddressBuffer         gIndices : register(AVER_REG_JOIN(t, AVER_MS_IDX_REG));
-cbuffer MeshCB : register(b5) { uint gTriCount; uint3 _msPad; };
+cbuffer MeshCB : register(AVER_CB_JOIN(b, AVER_MESH_GEOM_CB)) { uint gTriCount; uint3 _msPad; };
 
-#define AVER_MS_TRIS 64
 
 // Triangles this group owns.
 uint msTriCount(uint gid) { return min(AVER_MS_TRIS, gTriCount - gid * AVER_MS_TRIS); }
@@ -877,7 +876,7 @@ StructuredBuffer<MeshVtxC> gVertsC : register(AVER_MSC_JOIN(t, AVER_MS_VTX_REG))
 // it may not under-provide what a shader reads, and this shader reads nothing there at all.
 
 // How many clusters this dispatch covers -- dispatchMeshClusters' clusterCount argument.
-cbuffer ClusterCountCB : register(b5) { uint gClusterCount; uint3 _mscPad; };
+cbuffer ClusterCountCB : register(AVER_CB_JOIN(b, AVER_MESH_GEOM_CB)) { uint gClusterCount; uint3 _mscPad; };
 
 // Per-instance data the amplification shader needs beyond gWorld/gViewProj/gCamPos (already reachable
 // from PerObject/PerFrame, b1/b0, since every declared root parameter is ALL-stage visible): the
@@ -888,7 +887,7 @@ cbuffer ClusterCountCB : register(b5) { uint gClusterCount; uint3 _mscPad; };
 // aver::trifactor::Frustum::fromViewProj this design is told to reuse unchanged. Uploading the planes
 // rather than re-deriving them per GPU thread means the GPU test runs against the identical six
 // numbers the CPU reference tested against, not a second formula that merely agrees with it.
-cbuffer ClusterFrameCB : register(b4) {
+cbuffer ClusterFrameCB : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     float  gBudgetPx;
     float  gProjScale;
     float  gWorldScale;
@@ -896,7 +895,6 @@ cbuffer ClusterFrameCB : register(b4) {
     float4 gFrustumPlane[6];
 };
 
-#define AVER_MSC_GROUP 32
 #define AVER_MSC_MAX_VERTS 64
 #define AVER_MSC_MAX_TRIS 124
 

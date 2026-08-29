@@ -83,14 +83,47 @@ const std::string& colorHlsl() {
 }
 } // namespace
 
-// The HLSL below hardcodes these; the C++ side reads the constants. Neither can move alone.
-static_assert(kMeshShaderTrisPerGroup == 64, "AVER_MS_TRIS in the prelude is written out as 64");
-static_assert(kMeshGeometryConstantRegister == 5, "MeshCB in the prelude is written out as b5");
-static_assert(kObjectConstantRegister == 1, "PerObject in the prelude is written out as b1");
+// THESE ARE NOW THE ONLY COPY. shaderConstantsHlsl() below emits each of them as a #define that the
+// prelude uses, so the shader no longer writes any of these numbers out and cannot disagree with
+// the C++. The asserts are kept, but their job has changed: they no longer stand in for a coupling
+// (there is a real one now), they PIN VALUES OTHER CODE DEPENDS ON -- a root signature laid out
+// elsewhere, a backend that uploads 32 dwords. Change one and the assert asks whether you meant to.
+static_assert(kMeshShaderTrisPerGroup == 64, "AVER_MS_TRIS is emitted from this");
+static_assert(kMeshGeometryConstantRegister == 5, "MeshCB in the prelude derives its register from this");
+static_assert(kObjectConstantRegister == 1, "PerObject in the prelude derives its register from this");
 static_assert(kObjectConstantDwords == 32,
               "PerObject below is 32 dwords: world 16, base colour 4, material 4, model 4, emissive 4");
-static_assert(kClusterAmplificationGroupSize == 32, "AVER_MSC_GROUP in the cluster shader is written out as 32");
-static_assert(kFeatureFrameConstantRegister == 4, "ClusterFrameCB in the cluster shader is written out as b4");
+static_assert(kClusterAmplificationGroupSize == 32, "AVER_MSC_GROUP is emitted from this");
+static_assert(kFeatureFrameConstantRegister == 4, "ClusterFrameCB derives its register from this");
+
+// THE CONSTANTS THE HLSL AND THE C++ BOTH DEPEND ON, EMITTED FROM THE C++ SO THERE IS ONE COPY.
+//
+// These used to be written out as bare numbers in the shader text, with static_asserts below
+// standing in for a real coupling: "The HLSL below hardcodes these; the C++ side reads the
+// constants. Neither can move alone." That was defensible while the HLSL lived in this file, three
+// lines from the asserts. It stopped being defensible the moment the shader moved to
+// shaders/shared_prelude.hlsl -- a register number edited THERE is now edited in a different file,
+// in a different language, with nothing to notice. Moving the text opened that gap, so moving the
+// text has to close it.
+//
+// Prepended to the prelude, so every shader compiled through it sees these before its first line.
+// The JOIN pair is the same trick PbrShaders.cpp already uses to put a register number behind a
+// macro (register(AVER_MAT_JOIN(t, AVER_MATERIAL_SRV))) -- register(b1) will not accept a macro
+// directly, but register(AVER_CB_JOIN(b, AVER_OBJECT_CB)) will.
+std::string shaderConstantsHlsl() {
+    std::string s;
+    s += "#define AVER_CB_JOIN2(a, b) a##b\n";
+    s += "#define AVER_CB_JOIN(a, b) AVER_CB_JOIN2(a, b)\n";
+    s += "#define AVER_FRAME_CB "           + std::to_string(kEngineFrameConstantRegister) + "\n";
+    s += "#define AVER_OBJECT_CB "          + std::to_string(kObjectConstantRegister) + "\n";
+    s += "#define AVER_DRAW_CB "            + std::to_string(kDrawConstantRegister) + "\n";
+    s += "#define AVER_FEATURE_FRAME_CB "   + std::to_string(kFeatureFrameConstantRegister) + "\n";
+    s += "#define AVER_MESH_GEOM_CB "       + std::to_string(kMeshGeometryConstantRegister) + "\n";
+    s += "#define AVER_OBJECT_DWORDS "      + std::to_string(kObjectConstantDwords) + "\n";
+    s += "#define AVER_MS_TRIS "            + std::to_string(kMeshShaderTrisPerGroup) + "\n";
+    s += "#define AVER_MSC_GROUP "          + std::to_string(kClusterAmplificationGroupSize) + "\n";
+    return s;
+}
 
 // The shared HLSL prelude: colour helpers, the constant-buffer layouts the backend uploads, the
 // vertex structures, the sky and the plain surface shading. Read from shaders/, composed once and
@@ -104,7 +137,7 @@ const char* sharedShaderPrelude() {
     static std::string s;
     static u64 built = ~0ull;
     if (built != shaderFileRevision()) {
-        s = colorHlsl() + shaderFile("shared_prelude.hlsl");
+        s = shaderConstantsHlsl() + colorHlsl() + shaderFile("shared_prelude.hlsl");
         built = shaderFileRevision();
     }
     return s.c_str();
