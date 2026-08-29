@@ -256,7 +256,25 @@ float4 PSFluid(VSFluidOut i) : SV_Target {
     // the scene's exposure, so a pool lit by a bright noon sky came out the same dim navy as one at
     // dusk. Zenith sky plus a sun term weighted by its own elevation is the cheap, correct shape:
     // it is what illuminates a horizontal body of water, and it costs one extra skyColor call.
-    float3 inLight = skyColor(float3(0.0, 0.0, 1.0)) + averSunRadiance() * saturate(L.z) * 0.25;
+    // averSkyIrradiance, NOT skyColor, AND IT IS BOTH CHEAPER AND MORE CORRECT.
+    //
+    // skyColor(0,0,1) is a single ray straight up, and under the physical sky that is a 32-step
+    // atmosphere march -- run per fragment, for a direction that cannot vary per fragment or per
+    // pool within a frame. PSFluid was therefore marching the atmosphere TWICE for every water
+    // pixel: once for the reflection direction R, which genuinely varies, and once for this, which
+    // does not. The engine had already hit this exact shape and fixed it elsewhere; this call was
+    // simply never revisited.
+    //
+    // MORE CORRECT because the light entering a water column comes from the whole hemisphere above
+    // it, not from the zenith alone. averSkyIrradiance is that hemisphere integral, carried in the
+    // nine sky SH coefficients baked once per frame on the CPU -- about twenty ALU, no march, and
+    // azimuth-aware under the physical atmosphere where a single upward ray is not. It returns a
+    // MEAN RADIANCE (the PI is already divided out -- see its own comment), so the units here are
+    // unchanged and the sun term below still adds as it did.
+    //
+    // It also inherits two behaviours this line used to get from skyColor for free: the furnace
+    // returns its uniform L, and an AUTHORED sky falls back to the cheap dome rather than the SH.
+    float3 inLight = averSkyIrradiance(float3(0.0, 0.0, 1.0)) + averSunRadiance() * saturate(L.z) * 0.25;
     float3 diffuse = (1.0 - fresnel) * gFluidBody.rgb * inLight * (1.0 - T);
     float  alpha   = saturate(1.0 - (1.0 - fresnel) * Tavg);
 
