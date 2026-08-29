@@ -51,6 +51,10 @@ MaterialConstants packMaterial(const MaterialDesc& d) {
     c.transmission      = d.transmission;
     c.subsurfaceWeight  = d.subsurfaceWeight;
     c.subsurfaceRadius  = d.subsurfaceRadius;
+    c.coatWeight        = d.coatWeight;
+    c.coatRoughness     = d.coatRoughness;
+    c.coatF0            = d.coatF0;
+    c._coatPad          = 0.0f;   // assigned, not left to the {} above -- see the note below
     // The two floats above are what _pad0/_pad1 used to be. The struct carries no padding now, so
     // every one of its members is assigned here rather than some being left at the zero the
     // `MaterialConstants c{};` above gives them -- if a field is ever added back without a line in
@@ -76,6 +80,9 @@ MaterialConstants packMaterial(const MaterialDesc& d) {
     // Keyed on the WEIGHT alone: a radius with no weight scatters nothing, and letting it set the
     // flag would pay for the shader's subsurface branch to compute a zero.
     if (d.subsurfaceWeight > 0.0f) flags |= MaterialFlag_Subsurface;
+    // Same reasoning as subsurface above: the WEIGHT alone decides. A coat roughness or F0 with no
+    // weight coats nothing, and letting either set the flag would pay for the lobe to compute zero.
+    if (d.coatWeight > 0.0f) flags |= MaterialFlag_Coat;
     c.flags = flags;
 
     // Reciprocal once per upload rather than per pixel. A tiling of zero or less collapses to zero

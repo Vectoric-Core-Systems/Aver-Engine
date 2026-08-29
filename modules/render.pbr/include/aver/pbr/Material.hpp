@@ -123,6 +123,26 @@ struct MaterialDesc {
     f32 subsurfaceWeight = 0.0f;   // [0,1] how far light wraps past the terminator; 0 = off
     f32 subsurfaceRadius = 0.0f;   // [0,1] thickness proxy; widens the back-light lobe
 
+    // ---- the coat: a second specular layer over everything above ----
+    // A CLEAR LACQUER ON TOP OF THE BASE MATERIAL, which is what a car body, a varnished table, a
+    // phone back or a wet stone all are: a smooth dielectric film over something rougher and often
+    // coloured. The base keeps its own metallic/roughness response; the coat adds a second, usually
+    // much smoother, GGX lobe over it and attenuates what shows through by its own Fresnel.
+    //
+    // ALL THREE DEFAULT TO OFF, so every material authored before this shades bit-identically --
+    // packMaterial only sets MaterialFlag_Coat when coatWeight > 0, and the shader term is behind
+    // that flag, so there is nothing to compute and nothing to round differently.
+    //
+    // READ ONLY WHEN Settings::layeredBsdf IS NOT Off. These are authored per material, but whether
+    // the renderer evaluates them at all is a project-wide decision -- see voxi::Settings for why
+    // that switch is global and why it is not live-switchable.
+    //
+    // coatF0 is authored rather than derived from a coat IOR, which is the same split baseColor's
+    // `reflectance` already has. Worth knowing it is a split: 0.04 is IOR 1.5, ordinary lacquer.
+    f32 coatWeight    = 0.0f;   // [0,1] how much coat there is; 0 = no coat, and the flag stays clear
+    f32 coatRoughness = 0.0f;   // [0,1] the coat's own roughness, independent of the base's
+    f32 coatF0        = 0.04f;  // normal-incidence reflectance of the coat film itself
+
     AlphaMode alphaMode   = AlphaMode::Opaque;
     f32       alphaCutoff = 0.5f;   // read only under AlphaMode::Mask
     bool      twoSided    = false;

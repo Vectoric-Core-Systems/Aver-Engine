@@ -1,5 +1,6 @@
 // Golden test for the material asset path: the .ocmat reader and writer, the packed GPU block,
 // the mip filter, and the C# material-script rewriter. CPU only; no GPU is touched.
+#include <cstddef>
 #include "aver/formats/OcMat.hpp"
 #include "aver/formats/MaterialScript.hpp"
 #include "aver/formats/Texture.hpp"
@@ -424,8 +425,34 @@ static void testPack() {
     // subtly wrong with nothing to grep for. Note this is a RUNTIME check rather than a
     // static_assert, which is why the 80 -> 96 growth compiled clean and would have failed the suite
     // instead -- keep it that way, since the point is to be told, not to be stopped.
-    check(sizeof(pbr::MaterialConstants) == 96, "MaterialConstants is 96 bytes");
+    check(sizeof(pbr::MaterialConstants) == 112, "MaterialConstants is 112 bytes");
     check(sizeof(pbr::MaterialConstants) % 16 == 0, "...and a legal constant-buffer size");
+
+    // ---- THE FIELD LAYOUT, NOT JUST THE TOTAL ----
+    //
+    // The size check above catches a field ADDED to one mirror and not the others. It cannot catch a
+    // field REORDERED, or two fields of the same type swapped, because the total does not move -- and
+    // that is the failure with no symptom to grep for: every value stays a plausible float, just the
+    // wrong one, and a material reads its neighbour's roughness.
+    //
+    // THERE ARE THREE HAND-MAINTAINED COPIES of this struct and nothing has ever tied their ORDER
+    // together: the C++ here, `cbuffer AverMaterial` in modules/render.pbr/shaders/
+    // material_prelude.hlsl, and `struct RtMaterial` in modules/render.voxi/shaders/voxi.hlsl (the
+    // ray-traced path's own copy, which is easy to forget precisely because it is in another module).
+    //
+    // Offsets are asserted rather than derived, so this fails when someone moves a field without
+    // moving it in the shaders too. When it fails, fix all three; do not just update the number.
+    check(offsetof(pbr::MaterialConstants, baseColorFactor)  ==  0, "baseColorFactor at 0");
+    check(offsetof(pbr::MaterialConstants, flags)            == 48, "flags at 48");
+    check(offsetof(pbr::MaterialConstants, slopeBlendLo)     == 64, "slopeBlendLo at 64");
+    check(offsetof(pbr::MaterialConstants, graphId)          == 76, "graphId at 76");
+    check(offsetof(pbr::MaterialConstants, ior)              == 80, "ior at 80");
+    check(offsetof(pbr::MaterialConstants, transmission)     == 84, "transmission at 84");
+    check(offsetof(pbr::MaterialConstants, subsurfaceWeight) == 88, "subsurfaceWeight at 88");
+    check(offsetof(pbr::MaterialConstants, subsurfaceRadius) == 92, "subsurfaceRadius at 92");
+    check(offsetof(pbr::MaterialConstants, coatWeight)       == 96, "coatWeight at 96");
+    check(offsetof(pbr::MaterialConstants, coatRoughness)    == 100, "coatRoughness at 100");
+    check(offsetof(pbr::MaterialConstants, coatF0)           == 104, "coatF0 at 104");
 
     pbr::MaterialDesc d;
     pbr::MaterialConstants c = pbr::packMaterial(d);

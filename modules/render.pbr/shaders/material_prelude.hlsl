@@ -71,6 +71,12 @@ cbuffer AverMaterial : register(b2) {
     // no padding left on either side.
     float  gSubsurfaceWeight;
     float  gSubsurfaceRadius;
+    // The coat row. MIRRORS MaterialConstants::coatWeight/coatRoughness/coatF0/_coatPad, in that
+    // order -- the block is 112 bytes and this is the row that took it there.
+    float  gCoatWeight;
+    float  gCoatRoughness;
+    float  gCoatF0;
+    float  _gCoatPad;
 };
 
 // gMaterialFlags bits, mirroring pbr::MaterialFlag.
@@ -91,6 +97,7 @@ cbuffer AverMaterial : register(b2) {
 // VoxiShaders.hpp, which is the field's first and only consumer anywhere in the engine.
 #define AVER_MAT_CAST_SHADOW    (1u << 13)
 #define AVER_MAT_SUBSURFACE     (1u << 14)
+#define AVER_MAT_COAT           (1u << 15)
 
 // Shading model ids. The id arrives per draw in gShadingModel and is dispatched by a uniform switch.
 #define AVER_MODEL_STANDARD 0u   // metallic / roughness, Cook-Torrance GGX

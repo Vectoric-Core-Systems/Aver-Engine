@@ -36,6 +36,10 @@ enum MaterialFlag : u32 {
     // subsurface term compiles out entirely for the overwhelming majority of materials that do not
     // want it -- the same shape every other optional term in this block uses.
     MaterialFlag_Subsurface          = 1u << 14,
+
+    // Set when coatWeight > 0, for the reason stated one field up: a flag, not a branch on the
+    // float, so the coat lobe compiles out for every material that never asked for one.
+    MaterialFlag_Coat                = 1u << 15,
 };
 
 // The packed per-material GPU constant block. MIRRORS the HLSL `cbuffer AverMaterial` in
@@ -103,9 +107,33 @@ struct MaterialConstants {
     // and the cluster path all share.
     f32 subsurfaceWeight;
     f32 subsurfaceRadius;
+
+    // ---- the coat, and the growth to 112 the block above said was coming ----
+    //
+    // THIS IS THE FIELD THAT SPENT THE LAST OF IT. The comment above ends "the next field added here
+    // grows the block to 112 and every GPU mirror of it has to be revisited". This is that field, and
+    // they were: the HLSL cbuffer in PbrShaders.cpp, RtMaterial in VoxiShaders.hpp, packMaterial in
+    // MaterialGpu.cpp, both static_asserts below and the runtime one in tests/formats.
+    //
+    // 112 AND NOT 128: three floats and one pad is exactly one 16-byte row, which is the smallest
+    // legal growth. Reserving a second row "for the next lobe" would be inventing a requirement --
+    // sheen and anisotropy have different shapes and neither is designed yet, so the row they need is
+    // not knowable now and a guessed one would be either wrong or wasted.
+    //
+    // CHEAP TO CARRY, AND THAT IS CHECKED RATHER THAN ASSUMED: kMaxDrawConstantBytes is 256
+    // (RHIResources.hpp), enforced in both backends, so at 112 there are still 144 bytes of headroom
+    // at the register every material-shaded draw already binds. No new binding, no new descriptor,
+    // nothing to plumb. The cost when the layered BSDF is off is 16 more bytes per material on an
+    // upload that already happens -- not zero, and not worth pretending is.
+    //
+    // Read only where MaterialFlag_Coat is set, which packMaterial only sets when coatWeight > 0.
+    f32 coatWeight;      // [0,1]; 0 is off and every coat term is then identically zero
+    f32 coatRoughness;   // [0,1]; the coat has its own GGX lobe, independent of the base
+    f32 coatF0;          // normal-incidence reflectance of the coat itself; 0.04 is ordinary lacquer
+    f32 _coatPad;        // keeps the row 16 bytes; not read anywhere
 };
 
-static_assert(sizeof(MaterialConstants) == 96, "the HLSL cbuffer mirrors this byte for byte");
+static_assert(sizeof(MaterialConstants) == 112, "the HLSL cbuffer mirrors this byte for byte");
 static_assert(sizeof(MaterialConstants) % 16 == 0, "must be a legal constant-buffer size");
 
 // Packs the authored description into the block the GPU reads. A slot counts as bound when either

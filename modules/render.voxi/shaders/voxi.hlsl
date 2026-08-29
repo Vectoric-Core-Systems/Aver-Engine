@@ -149,6 +149,13 @@ struct RtMaterial {
     // _pad0/_pad1 this used to declare. Same order, same offsets: the struct still ends at 96 bytes.
     float  subsurfaceWeight;
     float  subsurfaceRadius;
+    // The coat row, same order as MaterialConstants and as the cbuffer in material_prelude.hlsl.
+    // THREE hand-maintained copies of one struct, with only the byte count checked -- see
+    // tests/formats/src/MaterialTest.cpp for the field-layout check that now guards the order.
+    float  coatWeight;
+    float  coatRoughness;
+    float  coatF0;
+    float  _coatPad;
 };
 // SLOT t9 IS A GUESS, LOUDLY. This is table 0's next free SRV slot after t8 -- kGiSrvCount
 // (VoxiGiShaders.hpp), currently 9, would need to become 10 to declare it here, and table 1 (the
