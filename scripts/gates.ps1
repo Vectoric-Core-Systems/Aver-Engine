@@ -148,6 +148,18 @@ $Gates = @(
     @{ name = 'ms-rt-gi';      args = @('--ms','--rt','--gi','--probe-rel','0.51691','0.46461') },
     @{ name = 'gi-debug';      args = @('--gi-debug','--no-rt','--probe-rel','0.51691','0.46461') },
     @{ name = 'ms-gi-debug';   args = @('--ms','--gi-debug','--no-rt','--probe-rel','0.51691','0.46461') },
+    # THE LAYERED BSDF, which needs a coat authored or it proves nothing. --layered-bsdf alone
+    # selects a shader variant; every material in the editor's placeholder scene authors coatWeight
+    # 0, so the variant renders identically to the standard BRDF and a gate on the flag by itself
+    # would pass forever while measuring nothing. --coat gives the placeholder materials a coat so
+    # the lobe has something to do.
+    #
+    # PAIRED ON PURPOSE. `layered-off` runs the SAME --coat with the option off, so the two rows
+    # must differ from each other. If they ever agree, the option has stopped reaching the shading
+    # and both rows still pass on their own baselines -- the exact way nine gates once turned into
+    # duplicates of their -rt twins without a single one going red.
+    @{ name = 'layered-off';   args = @('--no-gi','--no-rt','--coat','1.0','--probe-rel','0.51691','0.46461') },
+    @{ name = 'layered-coat';  args = @('--no-gi','--no-rt','--coat','1.0','--layered-bsdf','3','--probe-rel','0.51691','0.46461') },
     # RELATIVE, as fractions of the viewport rect, and re-picked against the current scene.
     #
     # Absolute pixels broke this oracle twice: once when the Content Browser became a drawer and grew
