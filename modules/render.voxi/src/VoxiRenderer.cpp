@@ -206,22 +206,16 @@ rhi::PipelineLayout giLayout() {
 // byte what it always did.
 // Voxi's shader body, read from shaders/voxi.hlsl.
 //
-// THE ACCESSOR IS HERE AND NOT IN VoxiShaders.hpp ON PURPOSE. That header is a text container, and
-// tests/render.voxi/src/VoxiRtSeqTest.cpp includes it directly to strstr the shader source -- its
-// own CMakeLists says "It links Aver.Core and nothing else". Putting rhi::verifiedShaderFile in the
-// header would drag Aver.RHI into a test that deliberately depends on nothing but Core: the same
-// coupling this module splits itself in two to avoid (see the Aver.Render.Voxi /
-// Aver.Render.Voxi.Renderer split). The renderer already links Aver.RHI; the header should not.
-//
-// kVoxiHLSL stays the migration ORACLE -- verifiedShaderFile proves the file equals it byte for
-// byte. WHEN THE LITERAL IS DELETED, VoxiRtSeqTest MUST READ THE FILE INSTEAD: plain file I/O
-// against AVER_REPO_ROOT, the way tests/repo/src/SeparationTest.cpp already reads source, so it
-// still needs no RHI. That is a real follow-up, not a detail -- the test exists to keep a C++
-// mirror tied to the shader text, and it cannot do that against a literal that no longer exists.
+// THE ACCESSOR IS HERE AND NOT IN VoxiShaders.hpp ON PURPOSE. That header was where the shader text
+// lived; tests/render.voxi/src/VoxiRtSeqTest.cpp reaches for the same source to assert its C++
+// mirror still matches, and its CMakeLists says "It links Aver.Core and nothing else". Putting
+// rhi::shaderFile in the header would drag Aver.RHI into a test that deliberately depends on nothing
+// but Core -- the same coupling this module splits itself into two targets to avoid. The test now
+// reads modules/render.voxi/shaders/voxi.hlsl directly through AVER_REPO_ROOT, needing neither.
 const char* voxiHlsl() {
     // No static: the loader owns the cache and reloadShaderFiles() clears it. A static here would
     // survive a reload and hand back the shader that was read at startup for the rest of the run.
-    return rhi::verifiedShaderFile("voxi.hlsl", voxi::kVoxiHLSL).c_str();
+    return rhi::shaderFile("voxi.hlsl").c_str();
 }
 
 const char* voxiShaderPrelude() {

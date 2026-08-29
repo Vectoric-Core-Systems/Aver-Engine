@@ -56,44 +56,6 @@ usize reloadShaderFiles() {
 
 u64 shaderFileRevision() { return g_revision; }
 
-// See the header for what this is for. Two behaviours worth stating, both learned by wiring hot
-// reload up against it:
-//
-// IT KEEPS NO CACHE OF ITS OWN. An earlier version did, and reloadShaderFiles() could not clear it --
-// so a reload silently had no effect on any file that had been verified, which is every file that
-// matters. shaderFile() owns the one cache; this only decides what to hand back.
-//
-// IT ONLY COMPARES BEFORE THE FIRST RELOAD. The oracle exists to prove the EXTRACTION was faithful --
-// that the file reproduces the literal it replaced, byte for byte, at startup. After a deliberate
-// edit, the file is SUPPOSED to differ; that is the entire point of --shader-source. Continuing to
-// compare would make every hot-reload edit fail the check and get silently replaced by the embedded
-// copy, i.e. hot reload that appears to work and changes nothing. So: verify at revision 0, trust
-// the file after that.
-const std::string& verifiedShaderFile(std::string_view name, const char* embedded) {
-    const std::string& fromFile = shaderFile(name);
-    if (g_revision != 0) return fromFile;   // a reload happened: the file is the authority now
-
-    static std::map<std::string, bool, std::less<>> reported;
-    if (reported.find(name) != reported.end()) return fromFile;
-    reported.emplace(std::string(name), true);
-
-    std::string expected = embedded ? embedded : "";
-    normaliseNewlines(expected);
-    if (!fromFile.empty() && fromFile == expected) {
-        AVER_INFO("[RHI.Shaders] {} matches its embedded copy ({} bytes)", name, expected.size());
-        return fromFile;
-    }
-    // THE FILE WINS, and it is not a close call. The alternative -- fall back to the literal so the
-    // engine certainly renders what it did yesterday -- silently discards an edit someone made to
-    // the file, which is now the real source. During this migration the literal is the copy, not the
-    // original. So: use the file, and say loudly that the literal beside it has gone stale.
-    AVER_ERROR("[RHI.Shaders] {} DIFFERS from its embedded copy (file {} bytes, embedded {} bytes). "
-               "USING THE FILE. Either the extraction was wrong, or the file was edited and the "
-               "literal is now stale -- update the literal or delete it.",
-               name, fromFile.size(), expected.size());
-    return fromFile;
-}
-
 const std::string& shaderFile(std::string_view name) {
     if (const auto it = g_cache.find(name); it != g_cache.end()) return it->second;
 
