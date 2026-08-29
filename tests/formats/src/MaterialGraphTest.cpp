@@ -168,6 +168,14 @@ static std::string defines(bool graph) {
     return d;
 }
 
+// The SAME defines with the layered BSDF compiled in. Separate rather than a defaulted parameter so
+// that every existing call site keeps saying which variant it means at the call.
+static std::string definesLayered(bool graph) {
+    std::string d = pbr::materialShaderDefines(0, 0, /*layeredBsdf=*/true);
+    if (graph) d += ";AVER_MATERIAL_GRAPH=1";
+    return d;
+}
+
 // --------------------------------------------------------------------------------- graph builders
 
 static fmt::OcGraphNode node(const char* id, const char* type) {
@@ -886,6 +894,35 @@ static void testOnlyDrivenFieldsAreWritten() {
           "the literal reaches the emitted text");
 }
 
+// The coat pins, which are the reason the whole AverAuthored indirection exists: a value the surface
+// build reads off the CONSTANT BUFFER is a value no graph can ever drive. The coat lobe shipped
+// reading gCoatWeight, which worked perfectly for the stock material and would have silently ignored
+// every graph that drove the pin -- so this test exists to keep it reading `a.` forever.
+static void testCoatPinsAreDrivable() {
+    AVER_INFO("=== the coat pins ===");
+    fmt::OcGraphData g;
+    g.domain = "material";
+    fmt::OcGraphNode c = node("w", "ConstFloat");
+    addPin(c, "value", "float", true, "0.75");
+    g.nodes.push_back(c);
+    fmt::OcGraphNode outn = materialOutput("out");
+    addPin(outn, "CoatWeight", "float", false);
+    g.nodes.push_back(outn);
+    link(g, "w", "value", "out", "CoatWeight");
+
+    const pbr::MaterialGraphBody r = pbr::compileMaterialGraph(g);
+    check(r.ok, "a graph driving CoatWeight compiles: " + r.error);
+    check(r.hlsl.find("a.coatWeight") != std::string::npos,
+          "and it writes a.coatWeight -- the AUTHORED field, not the cbuffer, or no graph could "
+          "ever drive the coat");
+    check(r.hlsl.find("0.75") != std::string::npos, "the literal reaches the emitted text");
+    // The other two pins must be absent, for the same reason roughness is absent above: a graph
+    // that drives one coat field must not silently zero the two it never mentioned.
+    check(r.hlsl.find("a.coatRoughness") == std::string::npos,
+          "a pin the author never drove is NOT written, so the material's own coat roughness stands");
+    check(r.hlsl.find("a.coatF0") == std::string::npos, "nor is coatF0");
+}
+
 static void testUnknownNodeFails() {
     AVER_INFO("=== a node this build cannot shade ===");
     fmt::OcGraphData g = flatColorGraph();
@@ -1038,6 +1075,37 @@ static void testItActuallyCompiles(Dxc& dxc) {
     e.hlsl = body.hlsl;
     const bool withGraph = dxc.compile(compose(pbr::materialGraphHlsl({e})), defines(true), err);
     check(withGraph, "and DXC COMPILES IT: " + err);
+
+    // THE COAT GRAPH, COMPILED BOTH WAYS, and the second half is the one that would have caught the
+    // mistake this was designed around. The generated text writes `a.coatWeight` whether or not the
+    // layered BSDF is compiled in, because the pins exist unconditionally. Had AverAuthored carried
+    // those fields behind #ifdef AVER_LAYERED_BSDF -- the obvious way to write it -- this graph
+    // would compile under one render setting and fail under the other, at runtime, on a machine
+    // that is not this one. Both variants are compiled here so that stays impossible.
+    {
+        fmt::OcGraphData g;
+        g.domain = "material";
+        fmt::OcGraphNode c = node("w", "ConstFloat");
+        addPin(c, "value", "float", true, "0.75");
+        g.nodes.push_back(c);
+        fmt::OcGraphNode outn = materialOutput("out");
+        addPin(outn, "CoatWeight", "float", false);
+        g.nodes.push_back(outn);
+        link(g, "w", "value", "out", "CoatWeight");
+
+        const pbr::MaterialGraphBody cb = pbr::compileMaterialGraph(g);
+        check(cb.ok, "the coat graph compiles to HLSL: " + cb.error);
+        pbr::MaterialGraphEntry ce;
+        ce.id = 7;
+        ce.name = "M_Coat";
+        ce.hlsl = cb.hlsl;
+        const std::string composed = compose(pbr::materialGraphHlsl({ce}));
+        const bool off = dxc.compile(composed, defines(true), err);
+        check(off, "a graph driving CoatWeight compiles with the layered BSDF OFF -- the pins are "
+                   "unconditional, so the value is written and simply never read: " + err);
+        const bool on = dxc.compile(composed, definesLayered(true), err);
+        check(on, "and with it ON, where the coat lobe actually reads it: " + err);
+    }
 
     // A graph exercising every emitter, so the whole vocabulary is checked by a real compiler
     // rather than by the shape of the emitted string.
@@ -1266,6 +1334,7 @@ int main() {
     testDomainIsRequired();
     testOutputNodeIsRequired();
     testOnlyDrivenFieldsAreWritten();
+    testCoatPinsAreDrivable();
     testUnknownNodeFails();
     testCycleIsCaught();
     testWideningRules();

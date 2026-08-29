@@ -1053,7 +1053,14 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         // The dielectric pair. Driving Transmission from a mask is one mesh that is a clear window
         // with a frosted band, or a bottle with an opaque label, instead of two meshes and two
         // materials. Ior is per-pixel for the same reason, though it moves far less often.
-        pin("Ior", "float", false), pin("Transmission", "float", false)},
+        pin("Ior", "float", false), pin("Transmission", "float", false),
+        // The coat, and this is where a coat stops being three numbers and starts being a surface:
+        // a weight mask makes one material polished where an object is handled and bare where it is
+        // worn, and a roughness mask puts a clear panel and a scuffed edge on the same car-paint
+        // material. Present whether or not the layered BSDF is compiled in -- AverAuthored carries
+        // the fields unconditionally so a graph does not stop compiling when the setting changes.
+        pin("CoatWeight", "float", false), pin("CoatRoughness", "float", false),
+        pin("CoatF0", "float", false)},
         {}, kDomainMaterial});
 
     return t;

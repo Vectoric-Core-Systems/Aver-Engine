@@ -417,6 +417,15 @@ struct AverAuthored {
     // is how one mesh becomes a window with a frosted band, or a bottle with a label.
     float  ior;
     float  transmission;
+    // THE COAT TRIPLE IS NOT BEHIND AVER_LAYERED_BSDF, and that is deliberate even though the only
+    // thing that reads it is. Putting it behind the define would make the shape of AverAuthored --
+    // and therefore the generated material-graph HLSL, which assigns into it by field name --
+    // depend on a render setting. A graph compiled for one setting would then fail to compile under
+    // the other, at runtime, on someone else's machine. Three floats a dead-code pass removes when
+    // nothing reads them is the cheaper half of that trade by a wide margin.
+    float  coatWeight;
+    float  coatRoughness;
+    float  coatF0;
 };
 
 // What the stock material path authors: the five maps, blended by slope, times the b2 factors.
@@ -442,6 +451,11 @@ AverAuthored averStockAuthored(float2 uv, float3 geoN) {
     a.subsurfaceRadius = (gMaterialFlags & AVER_MAT_SUBSURFACE) ? saturate(gSubsurfaceRadius) : 0.0;
     a.ior              = gIor;
     a.transmission     = gTransmission;
+    // Gated here once, like subsurface above, and for the same reason: a graph driving the pin
+    // writes after this and must not then be vetoed by the flag.
+    a.coatWeight       = (gMaterialFlags & AVER_MAT_COAT) ? saturate(gCoatWeight)    : 0.0;
+    a.coatRoughness    = (gMaterialFlags & AVER_MAT_COAT) ? saturate(gCoatRoughness) : 0.0;
+    a.coatF0           = (gMaterialFlags & AVER_MAT_COAT) ? saturate(gCoatF0)        : 0.0;
     return a;
 }
 
@@ -501,11 +515,17 @@ AverSurface averBuildSurface(AverVertex v, AverLight l, AverAuthored a, float2 u
     s.sssWeight = saturate(a.subsurfaceWeight);
     s.sssRadius = saturate(a.subsurfaceRadius);
 #ifdef AVER_LAYERED_BSDF
-    // Gated on the flag, so a material that never authored a coat carries a zero weight and every
-    // coat term below is identically zero -- the same shape the subsurface pair uses.
-    s.coatWeight = (gMaterialFlags & AVER_MAT_COAT) ? saturate(gCoatWeight)    : 0.0;
-    s.coatRough  = (gMaterialFlags & AVER_MAT_COAT) ? saturate(gCoatRoughness) : 0.0;
-    s.coatF0     = (gMaterialFlags & AVER_MAT_COAT) ? saturate(gCoatF0)        : 0.0;
+    // FROM THE AUTHORED STRUCT, for the reason stated on subsurface a few lines up: reading
+    // gCoatWeight here would work identically for the stock material and silently ignore every
+    // material graph that drove the pin. It read the cbuffer when the lobe first landed, before the
+    // pins existed, which is exactly the defect that comment warns about -- so it is fixed here
+    // rather than left as a second precedent for doing it wrong.
+    //
+    // averStockAuthored already applied AVER_MAT_COAT, so a material with no coat arrives as zero
+    // and every coat term below is identically zero.
+    s.coatWeight = saturate(a.coatWeight);
+    s.coatRough  = saturate(a.coatRoughness);
+    s.coatF0     = saturate(a.coatF0);
 #endif
 
     // FRESNEL-AWARE ALPHA FOR BLENDED SURFACES. Plain "over" compositing --
@@ -799,7 +819,12 @@ void averCoatTerms(AverSurface s, AverIndirect ind, float coatWeight, float coat
     // describes how mirror-like the coat is to the CAMERA, which is a property of the surface and the
     // eye and nothing else -- the same argument averBuildSurface's alpha branch makes for its own use
     // of a view-angle Fresnel.
-    baseAttenuation = 1.0 - fresnelSchlick(s.ndv, coatF0, 1.0) * coatWeight;
+    // .x EXPLICITLY. fresnelSchlick returns float3 for a float3 F0, and a scalar coatF0 promotes to
+    // three identical channels -- so this was assigning a float3 to a float and relying on the
+    // implicit truncation to pick a channel that happens to be right. DXC warns about it, correctly:
+    // the day someone gives the coat a coloured F0, the truncation silently keeps only red. Taking
+    // .x says the coat is a colourless dielectric film, which is what a clear coat is.
+    baseAttenuation = 1.0 - fresnelSchlick(s.ndv, coatF0, 1.0).x * coatWeight;
 }
 #endif   // AVER_LAYERED_BSDF
 
