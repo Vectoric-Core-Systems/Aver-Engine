@@ -118,7 +118,8 @@ float4 PreviewMaterialPS(PreviewOut i) : SV_TARGET {
     // Two-sided, exactly like averVertexOf's own comment in PbrShaders.cpp: a closed preview sphere
     // never needs this, but a future flat preview mesh (a plane, say) should not shade black on the
     // half of it facing away from the light.
-    if (dot(v.N, v.V) < 0.0) v.N = -v.N;
+    v.backFace = dot(v.N, v.V) < 0.0;
+    if (v.backFace) v.N = -v.N;
     v.uv = i.uv;
 
     // averBuildSurface reads l.direction alone, to build the half vector H. radiance and visibility

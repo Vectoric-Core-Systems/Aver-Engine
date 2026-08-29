@@ -12427,6 +12427,16 @@ private:
         // 0..0.2 covers water (~0.02) through gemstone (~0.17).
         changed |= ImGui::SliderFloat("Reflectance", &d->reflectance, 0.0f, 0.2f, "%.3f");
         changed |= ImGui::SliderFloat("Grazing (f90)", &d->f90, 0.0f, 1.0f);
+        // WEIGHT is the on/off: 0 skips the wrap-diffuse and back-scatter terms entirely (see
+        // MaterialFlag_Subsurface in MaterialGpu.cpp), so RADIUS -- which only widens the
+        // back-scatter lobe those terms produce -- has nothing to widen until Weight is above 0.
+        // Disabling it at 0 keeps the panel from offering a control that would silently do nothing.
+        changed |= ImGui::SliderFloat("Subsurface Weight", &d->subsurfaceWeight, 0.0f, 1.0f);
+        ImGui::BeginDisabled(d->subsurfaceWeight <= 0.0f);
+        changed |= ImGui::SliderFloat("Subsurface Radius", &d->subsurfaceRadius, 0.0f, 1.0f);
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Only does anything when Subsurface Weight is above 0.");
         changed |= ImGui::DragFloat3("Emissive", d->emissiveFactor, 0.01f, 0.0f, 32.0f);
 
         ImGui::Separator();

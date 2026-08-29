@@ -663,6 +663,8 @@ constexpr OutputField kOutputFields[] = {
     {"Occlusion",   "occlusion",   MatType::Float},
     {"Opacity",     "opacity",     MatType::Float},
     {"AlphaCutoff", "alphaCutoff", MatType::Float},
+    {"SubsurfaceWeight", "subsurfaceWeight", MatType::Float},
+    {"SubsurfaceRadius", "subsurfaceRadius", MatType::Float},
 };
 
 } // namespace

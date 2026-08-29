@@ -1274,7 +1274,7 @@ void VoxiRenderer::setGiCacheDir(const std::string& dir) {
     giCacheDir_ = dir;
     // A new directory means a new project: whatever was tried against the old one says nothing.
     giCacheTried_ = false;
-    giCacheTriedKey_ = 0;
+    giCacheTriedKey_ = fmt::GiCacheKey{};
 }
 
 // The key describing the volume as it stands after takeGiSnapshot.
@@ -1363,9 +1363,9 @@ bool VoxiRenderer::giCacheRestore(rhi::IRenderContext& ctx) {
 
     // ONCE PER KEY. A miss must not re-open the same absent file on every rebuild -- and rebuilds
     // are exactly the frames already doing the most work.
-    if (giCacheTried_ && giCacheTriedKey_ == key.drawsKey) return false;
+    if (giCacheTried_ && giCacheTriedKey_ == key) return false;
     giCacheTried_ = true;
-    giCacheTriedKey_ = key.drawsKey;
+    giCacheTriedKey_ = key;
 
     fmt::GiCacheEntry entry;
     const std::string path = giCacheDir_ + "\\" + fmt::giCacheFileName(key);

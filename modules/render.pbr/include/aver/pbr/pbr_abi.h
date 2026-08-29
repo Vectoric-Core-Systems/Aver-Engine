@@ -100,6 +100,13 @@ AVER_PBR_ABI float   aver_pbr_get_reflectance(aver_pbr_material m);
 AVER_PBR_ABI int32_t aver_pbr_set_reflectance(aver_pbr_material m, float v);
 AVER_PBR_ABI float   aver_pbr_get_f90(aver_pbr_material m);
 AVER_PBR_ABI int32_t aver_pbr_set_f90(aver_pbr_material m, float v);
+/* Subsurface wrap weight (0 = feature off) and back-scatter lobe width, both in [0,1]. This is a
+ * cheap wrap-diffuse approximation, not a BSSRDF: no transport across the mesh, no per-texel
+ * thickness, no separate scatter colour (the transmitted light is tinted by baseColorFactor). */
+AVER_PBR_ABI float   aver_pbr_get_subsurface_weight(aver_pbr_material m);
+AVER_PBR_ABI int32_t aver_pbr_set_subsurface_weight(aver_pbr_material m, float v);
+AVER_PBR_ABI float   aver_pbr_get_subsurface_radius(aver_pbr_material m);
+AVER_PBR_ABI int32_t aver_pbr_set_subsurface_radius(aver_pbr_material m, float v);
 
 /* ---- blending and sidedness ---- */
 AVER_PBR_ABI int32_t aver_pbr_get_alpha_mode(aver_pbr_material m);

@@ -31,6 +31,11 @@ enum MaterialFlag : u32 {
     // A ray-traced shadow is the first thing in this engine that can honour it, because it is the
     // first shadow path that consults the material at all.
     MaterialFlag_CastShadow          = 1u << 13,
+
+    // Set when subsurfaceWeight > 0. A FLAG RATHER THAN A BRANCH ON THE FLOAT so the shader's
+    // subsurface term compiles out entirely for the overwhelming majority of materials that do not
+    // want it -- the same shape every other optional term in this block uses.
+    MaterialFlag_Subsurface          = 1u << 14,
 };
 
 // The packed per-material GPU constant block. MIRRORS the HLSL `cbuffer AverMaterial` in
@@ -71,10 +76,11 @@ struct MaterialConstants {
     // to this struct's size -- the generated averEvalMaterial switches on this and every id-0
     // material takes the arm that shades exactly as it always did. See pbr::materialGraphHlsl().
     //
-    // THAT FREE LUNCH IS SPENT. graphId used the last of the space the compiler was packing for free;
-    // ior/transmission below needed a real 16 bytes more, which is why the struct grew to 96. Whoever
-    // adds the NEXT field has _pad0/_pad1's 8 bytes to spend before this has to grow again -- see
-    // their own comment.
+    // THAT FREE LUNCH IS SPENT, AND SO IS THE PADDING AFTER IT. graphId used the last of the space
+    // the compiler was packing for free; ior/transmission below needed a real 16 bytes more, which is
+    // why the struct grew to 96; and subsurfaceWeight/subsurfaceRadius have since spent the 8 bytes of
+    // explicit padding that arrival left over. There is no slack left. The next field added to this
+    // struct takes it to 112 and obliges whoever adds it to revisit every GPU mirror.
     u32 graphId;
 
     // ---- dielectric transmission, read only where AVER_MAT_ALPHA_BLEND is set ----
@@ -85,14 +91,18 @@ struct MaterialConstants {
     f32 ior;
     f32 transmission;
 
-    // EXPLICIT PADDING, READ BY NOTHING. ior and transmission above land the struct's real content at
-    // 88 bytes; a constant buffer's size must still be a multiple of 16, and unlike graphId's arrival
-    // (which fit inside bytes the compiler was already reserving) there was no such room left, so
-    // these two floats are what buys the alignment back. Named and sized explicitly rather than left
-    // as an implicit compiler tail, so the byte count is visible here instead of only in the
-    // static_assert below. 8 bytes of headroom for the next field before 96 has to become 112.
-    f32 _pad0;
-    f32 _pad1;
+    // ---- subsurface, and the headroom this block reserved ----
+    // These two floats ARE the 8 bytes the padding above used to hold. The comment that stood here
+    // said "8 bytes of headroom for the next field before 96 has to become 112"; this is that next
+    // field, and it fits exactly, so sizeof stays 96 and both static_asserts below are unchanged
+    // rather than re-derived. There is now NO padding left: the next field added here grows the
+    // block to 112 and every GPU mirror of it has to be revisited.
+    //
+    // Mirrors MaterialDesc::subsurfaceWeight/subsurfaceRadius; read by averDirectTerms in
+    // PbrShaders.cpp under AVER_MAT_SUBSURFACE, which is the one BRDF the raster path, PSMainVoxi
+    // and the cluster path all share.
+    f32 subsurfaceWeight;
+    f32 subsurfaceRadius;
 };
 
 static_assert(sizeof(MaterialConstants) == 96, "the HLSL cbuffer mirrors this byte for byte");

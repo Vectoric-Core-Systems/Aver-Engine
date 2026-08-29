@@ -102,6 +102,27 @@ struct MaterialDesc {
     // from the field's name.
     f32 transmission = 0.0f;
 
+    // ---- subsurface scattering ----
+    // WRAP DIFFUSE PLUS A BACK-LIGHT LOBE, AND NOT ONE PHOTON MORE. Both default to 0, so every
+    // material authored before this existed shades bit-identically and the gate baselines do not
+    // move until something opts in.
+    //
+    // WHAT THIS IS NOT, stated here rather than left to be inferred from the word "subsurface":
+    // it is not a BSSRDF. Light does not travel THROUGH the mesh -- there is no transport from where
+    // a photon enters to where it leaves, so a lit ear does not glow on the far side of a head. It
+    // is a per-pixel approximation evaluated at ONE surface point, which is why it costs two floats
+    // and no passes. What it does buy is the thing whose absence reads as "plastic": light wrapping
+    // slightly past the terminator, and a rim that brightens when the sun is behind the object.
+    //
+    // NO SEPARATE SCATTER TINT, deliberately. MaterialConstants had exactly 8 spare bytes (its own
+    // comment says so: "8 bytes of headroom for the next field before 96 has to become 112"), and
+    // two floats spend them exactly. A third float for an authored RGB tint would grow the block to
+    // 112 and force every one of its GPU mirrors to be re-derived. The transmitted light is tinted
+    // by baseColorFactor instead, which is right for skin, wax, marble and leaves -- the cases this
+    // is for -- and wrong only where the interior colour differs from the surface colour.
+    f32 subsurfaceWeight = 0.0f;   // [0,1] how far light wraps past the terminator; 0 = off
+    f32 subsurfaceRadius = 0.0f;   // [0,1] thickness proxy; widens the back-light lobe
+
     AlphaMode alphaMode   = AlphaMode::Opaque;
     f32       alphaCutoff = 0.5f;   // read only under AlphaMode::Mask
     bool      twoSided    = false;

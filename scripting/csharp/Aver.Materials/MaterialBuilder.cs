@@ -30,6 +30,8 @@ public sealed class MaterialBuilder
     private float _reflectance = 0.04f;
     private float _f90 = 1f;
     private float _uvTiling = 100f;
+    private float _subsurfaceWeight;
+    private float _subsurfaceRadius;
 
     private readonly Dictionary<Slot, string> _textures = new();
 
@@ -78,6 +80,20 @@ public sealed class MaterialBuilder
 
     /// <summary>Reflectance at grazing incidence. Below 1 tames the rim on rough surfaces.</summary>
     public MaterialBuilder F90(float v) { _f90 = v; return this; }
+
+    /// <summary>
+    /// Wrap-diffuse weight, [0,1]: how far light bends past the terminator. 0 is the feature's own
+    /// off switch -- not a BSSRDF, no transport across the mesh, just a wider diffuse wrap plus a
+    /// view-dependent back-scatter lobe tinted by <see cref="BaseColor"/>. See MaterialDesc for the
+    /// full explanation of what this approximates and what it does not.
+    /// </summary>
+    public MaterialBuilder SubsurfaceWeight(float v) { _subsurfaceWeight = v; return this; }
+
+    /// <summary>
+    /// Thickness proxy, [0,1], that widens the back-scatter lobe -- what makes a leaf or an ear light
+    /// up when the sun is behind it. Meaningless while <see cref="SubsurfaceWeight"/> is 0.
+    /// </summary>
+    public MaterialBuilder SubsurfaceRadius(float v) { _subsurfaceRadius = v; return this; }
 
     /// <summary>World centimetres per texture tile. Only meaningful with <see cref="WorldUv"/> on.</summary>
     public MaterialBuilder Tiling(float centimetres) { _uvTiling = centimetres; return this; }
@@ -152,6 +168,17 @@ public sealed class MaterialBuilder
         s.Append("PARAM reflectance ").Append(Num(_reflectance)).Append('\n');
         s.Append("PARAM f90 ").Append(Num(_f90)).Append('\n');
         s.Append("PARAM uvTiling ").Append(Num(_uvTiling)).Append('\n');
+        // OMITTED WHEN OFF, unlike every PARAM above: subsurfaceWeight 0 is not merely a number but
+        // the feature's own off switch (MaterialGpu.cpp's packMaterial sets MaterialFlag_Subsurface
+        // exactly when this is > 0), so a material that never asked for the wrap term has nothing
+        // meaningful to round-trip. Matches modules/formats/src/OcMat.cpp's writer exactly, including
+        // subsurfaceRadius riding along unconditionally once weight is set -- it is meaningless
+        // without the weight that gates it, so there is no separate "opt in radius alone" case.
+        if (_subsurfaceWeight > 0f)
+        {
+            s.Append("PARAM subsurfaceWeight ").Append(Num(_subsurfaceWeight)).Append('\n');
+            s.Append("PARAM subsurfaceRadius ").Append(Num(_subsurfaceRadius)).Append('\n');
+        }
 
         if (_textures.Count > 0)
         {

@@ -159,7 +159,30 @@ VSWaterOut VSWater(VSWaterIn i) {
 float4 PSWater(VSWaterOut i) : SV_Target {
     float3 N = normalize(i.worldNrm);
     float3 V = normalize(gCamPos.xyz - i.worldPos);
-    float NdotV = saturate(dot(N, V));
+
+    // ---- WHICH SIDE OF THE SURFACE THE EYE IS ON ---------------------------------------------------
+    //
+    // This pipeline is CullMode::None precisely so the plane is still drawn from below (see
+    // WaterRenderer::buildPipeline's own comment, which says "underwater must still see the plane
+    // from below"), so this shader really does run with the camera under the water -- and until now
+    // it had no idea. The mesh normal always points UP, so from below dot(N, V) is NEGATIVE, the
+    // saturate clamped it to 0, and Schlick at NdotV = 0 returns 1.
+    //
+    // THE CONSEQUENCE WAS A BUG, not merely an approximation: seen from underwater the surface read
+    // as a perfect mirror AT EVERY ANGLE, including straight up. Looking up from under real water you
+    // see the whole sky compressed into a bright cone -- Snell's window -- and a mirror everywhere
+    // outside it. The window was missing entirely because the angle it depends on was being clamped
+    // away before anything could ask about it.
+    //
+    // gWaterState.x is the water level in world Z (see VSWater, which builds worldPos as
+    // float3(disp.x, disp.y, gWaterState.x + disp.z)), so this is a straight comparison, no new
+    // constant and no cbuffer change.
+    bool underwater = gCamPos.z < gWaterState.x;
+    // Flipped to face the eye, so NdotV is the true cosine of the incidence angle on whichever side
+    // is being looked at. Above water this is N unchanged, which is what keeps every above-water
+    // pixel in the engine bit-identical to before this block existed.
+    float3 Nv = underwater ? -N : N;
+    float NdotV = saturate(dot(Nv, V));
 
     // Schlick's approximation, F0 = 0.02 -- the standard value for the air/water interface (water's
     // IOR of about 1.33 gives F0 = ((1-1.33)/(1+1.33))^2 ~= 0.02), NOT a value tuned against this
@@ -168,6 +191,25 @@ float4 PSWater(VSWaterOut i) : SV_Target {
     // mostly the colour underneath. UNCHANGED by this pass; only what fresnel WEIGHTS, below, changed.
     float F0 = 0.02;
     float fresnel = F0 + (1.0 - F0) * pow(1.0 - NdotV, 5.0);
+
+    // ---- TOTAL INTERNAL REFLECTION, i.e. Snell's window --------------------------------------------
+    //
+    // Leaving water for air, Snell gives sin(t2) = 1.333 * sin(t1), and beyond sin(t1) = 1/1.333 there
+    // is no solution -- no refracted ray exists and every photon reflects. That critical angle is
+    // 48.6 degrees from vertical, and it is why the underside of a water surface is a mirror except
+    // for a circular window straight overhead.
+    //
+    // SCHLICK CANNOT PRODUCE THIS AND IS NOT ASKED TO. The approximation above is a fit for light
+    // ENTERING the denser medium, where no critical angle exists; it approaches 1 only as the view
+    // grazes. Real TIR switches to a perfect mirror ABRUPTLY at 48.6 degrees and stays there. So the
+    // test is a separate one and it OVERRIDES the fit rather than blending with it.
+    //
+    // Above water this branch is not entered at all, so nothing that has ever been rendered changes.
+    if (underwater) {
+        const float kWaterIor = 1.333;
+        // sin^2(t1) from cos(t1); past sin^2(t2) = 1 there is no transmitted direction.
+        if ((kWaterIor * kWaterIor) * saturate(1.0 - NdotV * NdotV) > 1.0) fresnel = 1.0;
+    }
 
     float3 L = normalize(gLightDir.xyz);
     float3 R = reflect(-V, N);

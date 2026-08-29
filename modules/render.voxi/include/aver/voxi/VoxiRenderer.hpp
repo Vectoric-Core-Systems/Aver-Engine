@@ -885,7 +885,21 @@ private:
     // the same thing by construction rather than by two implementations agreeing.
     std::string giCacheDir_;
     // Tried once per key, hit or miss: a miss must not re-read the same absent file every rebuild.
-    u64  giCacheTriedKey_ = 0;
+    //
+    // THE WHOLE KEY, and it used to be giCacheKey().drawsKey -- one sixth of it. giCacheFileName
+    // hashes ALL SIX fields, so a memo keyed on the draw list alone said "already tried" about a
+    // DIFFERENT FILE than the one it had tried. Once a draw set had been looked up, no other volume
+    // for those same draws was ever read again for the rest of the run.
+    //
+    // That is the common case rather than a corner. giSnapshotUnchanged rejects on a changed volume
+    // CENTRE (reject 2), which is exactly what a camera moving through a STATIC level does: the
+    // rebuild fires, giCacheRestore is called, and it returned false without opening anything --
+    // revoxelising from scratch a volume this same session may have written minutes earlier. The
+    // cache was doing its job on the first bake of a level and silently nothing after it.
+    //
+    // Keying on the whole key restores the property stated directly above: the memo is about a FILE,
+    // and the file name is the whole key.
+    fmt::GiCacheKey giCacheTriedKey_{};
     bool giCacheTried_ = false;
     // READBACK IS NOT IMMEDIATE. The copy is a GPU command; its results are only there once the GPU
     // has passed it. So a bake schedules the copy, waits kGiCacheReadbackDelay frames -- longer than

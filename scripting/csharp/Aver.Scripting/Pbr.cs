@@ -81,6 +81,10 @@ public static class Pbr
     [DllImport(Lib)] private static extern int aver_pbr_set_normal_scale(int m, float v);
     [DllImport(Lib)] private static extern float aver_pbr_get_occlusion_strength(int m);
     [DllImport(Lib)] private static extern int aver_pbr_set_occlusion_strength(int m, float v);
+    [DllImport(Lib)] private static extern float aver_pbr_get_subsurface_weight(int m);
+    [DllImport(Lib)] private static extern int aver_pbr_set_subsurface_weight(int m, float v);
+    [DllImport(Lib)] private static extern float aver_pbr_get_subsurface_radius(int m);
+    [DllImport(Lib)] private static extern int aver_pbr_set_subsurface_radius(int m, float v);
 
     [DllImport(Lib)] private static extern int aver_pbr_get_alpha_mode(int m);
     [DllImport(Lib)] private static extern int aver_pbr_set_alpha_mode(int m, int mode);
@@ -197,6 +201,29 @@ public static class Pbr
         {
             get => aver_pbr_get_occlusion_strength(Handle);
             set => aver_pbr_set_occlusion_strength(Handle, value);
+        }
+
+        /// <summary>
+        /// [0,1] how far light wraps past the terminator. 0 turns the approximation off entirely —
+        /// see <see cref="SubsurfaceRadius"/> for what the pair together can and cannot do.
+        /// </summary>
+        public float SubsurfaceWeight
+        {
+            get => aver_pbr_get_subsurface_weight(Handle);
+            set => aver_pbr_set_subsurface_weight(Handle, value);
+        }
+
+        /// <summary>
+        /// [0,1] thickness PROXY that widens the back-scatter lobe — light entering the far side of
+        /// the mesh and travelling toward the eye, which is what makes a leaf or an ear light up when
+        /// the sun is behind it. Not a BSSRDF: no transport across the mesh, no per-texel thickness,
+        /// no wavelength dependence. The transmitted light is tinted by <see cref="BaseColorFactor"/>;
+        /// there is no separate scatter colour to set.
+        /// </summary>
+        public float SubsurfaceRadius
+        {
+            get => aver_pbr_get_subsurface_radius(Handle);
+            set => aver_pbr_set_subsurface_radius(Handle, value);
         }
 
         public PbrAlphaMode AlphaMode

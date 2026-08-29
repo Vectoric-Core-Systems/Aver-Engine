@@ -49,8 +49,12 @@ MaterialConstants packMaterial(const MaterialDesc& d) {
     c.graphId           = d.graphId;
     c.ior               = d.ior;
     c.transmission      = d.transmission;
-    // c._pad0/_pad1 stay at the zero the `MaterialConstants c{};` above already gave them; nothing
-    // reads them, so there is nothing to assign.
+    c.subsurfaceWeight  = d.subsurfaceWeight;
+    c.subsurfaceRadius  = d.subsurfaceRadius;
+    // The two floats above are what _pad0/_pad1 used to be. The struct carries no padding now, so
+    // every one of its members is assigned here rather than some being left at the zero the
+    // `MaterialConstants c{};` above gives them -- if a field is ever added back without a line in
+    // this function, it ships as a silent zero.
 
     u32 flags = 0;
     for (u32 i = 0; i < kTextureSlotCount; ++i)
@@ -69,6 +73,9 @@ MaterialConstants packMaterial(const MaterialDesc& d) {
     // inverted. castShadow defaults to true, so the positive spelling is the one that agrees with
     // the default for anything that predates the flag.
     if (d.castShadow) flags |= MaterialFlag_CastShadow;
+    // Keyed on the WEIGHT alone: a radius with no weight scatters nothing, and letting it set the
+    // flag would pay for the shader's subsurface branch to compute a zero.
+    if (d.subsurfaceWeight > 0.0f) flags |= MaterialFlag_Subsurface;
     c.flags = flags;
 
     // Reciprocal once per upload rather than per pixel. A tiling of zero or less collapses to zero

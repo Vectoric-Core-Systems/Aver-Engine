@@ -315,7 +315,7 @@ OCMAT 1
 SHADER standard            # standard | unlit | clearcoat | glass | decal
 BLEND opaque               # opaque | masked <cutoff> | translucent | additive
 CULL back                  # back | front | none
-FLAGS twosided=0 castshadow=1
+FLAGS twosided=0 castshadow=1 worlduv=0    # worlduv=1: planar world-space UVs, not the mesh's own
 
 PARAM baseColorFactor 1.0 1.0 1.0 1.0
 PARAM metallicFactor 1.0
@@ -323,12 +323,29 @@ PARAM roughnessFactor 0.45
 PARAM emissiveFactor 0.0 0.0 0.0
 PARAM normalScale 1.0
 PARAM occlusionStrength 1.0
+PARAM reflectance 0.04              # F0 of the dielectric base
+PARAM f90 1.0                       # F(90); 1.0 is the textbook Schlick term
+PARAM ior 1.5                       # soda-lime glass; see the ior/reflectance note below
+PARAM transmission 0.0              # 0 opaque .. 1 fully transmissive; alpha compositing only
+PARAM uvTiling 200.0                # world CENTIMETRES per tile; read only under FLAGS worlduv=1
+
+# Optional: a second material layer blended in by world-normal slope (what makes terrain read as
+# more than one surface). Off unless this line is present.
+# PARAM slopeBlend 0.55 0.80 1.0    # lo hi [layer1UvScale] -- lo is the STEEPER end
+
+# Optional: light wrapping past the terminator and back-scattering toward the eye when the light is
+# behind the surface (skin, wax, leaves). Off unless subsurfaceWeight is present and > 0.
+# PARAM subsurfaceWeight 0.6        # [0,1] how far light wraps past the terminator; 0 = off
+# PARAM subsurfaceRadius 0.4        # [0,1] thickness proxy; widens the back-scatter lobe
 
 TEX baseColor   {guid:0x…}  uv0 sRGB
 TEX metalRough  {guid:0x…}  uv0 linear     # B=metallic, G=roughness (glTF MR)
 TEX normal      {guid:0x…}  uv0 normal
 TEX emissive    {guid:0x…}  uv0 sRGB
 TEX occlusion   {guid:0x…}  uv0 linear
+# TEX layer1BaseColor   {guid:0x…}  uv0 sRGB    # the slopeBlend layer; sampled only where it is on
+# TEX layer1MetalRough  {guid:0x…}  uv0 linear
+# TEX layer1Normal      {guid:0x…}  uv0 normal
 
 # Optional custom node graph (only for SHADER custom)
 GRAPH{
@@ -339,6 +356,14 @@ GRAPH{
 ```
 
 Rules: `TEX slot {guid:…|path:…} uvN colorspace` binds an `.octex` by GUID (path fallback). `PARAM` scalars/vectors are shading defaults; a material **instance** (`.ocmat` with `PARENT {guid}`) overrides only listed params (Unreal-MID-equivalent, pay-for-what-you-use). The optional `GRAPH{}` block is a small node list (evaluated by the material compiler to HLSL/SPIR-V permutations); most materials never need it. Cooked: the compiler resolves the graph to a shader-permutation key + a packed parameter block stored in a `MATL` chunk inside `.ocpak`. This deliberately avoids the UE editor-material-recompile crash (recon `arch §6`): compilation is offline, runtime just binds params + a precompiled PSO.
+
+`reflectance`, `f90`, `ior` and `transmission` are always-present scalars, not a mode a material opts into — `writeOcmat` emits all four unconditionally, right alongside `baseColorFactor` and the other glTF factors above, because every material has a physically-reasonable default for them (F0 `0.04`, F90 `1.0`, `ior 1.5`, `transmission 0`) rather than an unstated case worth protecting by omission. `ior` and `reflectance` are **not independent**: F0 = ((1−ior)/(1+ior))^2, and `1.5` is exactly the ior for which `0.04` is already the right F0 — ordinary soda-lime glass. Changing one without the other leaves the surface's Fresnel curve disagreeing with its own stated base reflectance; nothing in the reader derives one from the other automatically. `transmission` is **not yet read by the BRDF itself** — it only reshapes alpha compositing (the `AVER_MAT_ALPHA_BLEND` branch pulls blended coverage toward `1 − transmission` before the view-Fresnel term lifts it back at grazing angles), so there is still no refraction and light does not bend passing through a transmissive surface. All four are clamped on load: `reflectance`/`f90` to `[0,1]` (both are reflectances; F0 above 1 makes the Schlick term's `f90 − F0` go negative), `ior` to `[1,4]` (floored at 1.0, vacuum — nothing here models a surface less dense than the medium it sits in; the ceiling is headroom past diamond's ~2.42, not a physical limit), `transmission` to `[0,1]` by definition.
+
+`alphaCutoff` can also be written as `PARAM alphaCutoff <v>`, independently of the `<cutoff>` on the `BLEND masked` line above. Both spellings assign the same field with no ordering guard between them, so whichever line appears **later** in the file wins and the parser gives no warning when both are present. Because `BLEND` conventionally precedes the `PARAM` block (as in the example above), a `PARAM alphaCutoff` line in its usual position quietly overrides whatever `BLEND masked <cutoff>` declared — the two are one field parsed twice, not a primary value and a fallback. The engine's own writer never emits the `PARAM` form; it always encodes the cutoff through `BLEND masked <cutoff>`, so the alternate spelling exists for hand-authored or imported files, not for round-tripping.
+
+`PARAM slopeBlend <lo> <hi> [layer1UvScale]` turns on the material's second layer and says across which slope band it fades in: `lo`/`hi` are world-normal Z (`1` flat ground, `0` a vertical face), and `lo` is the **steeper** end. A backwards pair (`lo > hi`) is repaired by swapping rather than rejected — the same clamp-don't-reject idiom `ior` above already uses — because feeding an inverted range to the shader's smoothstep would produce silent garbage rather than a value that at least means something. `layer1UvScale`, third and optional, only takes effect when positive; omit it, or give a non-positive value, to tile layer 1 at the same scale as layer 0. Unlike `reflectance`/`f90`/`ior`/`transmission` above, this line is **omitted entirely when off** — `writeOcmat` only emits it `if (d.slopeBlend)` — because writing `PARAM slopeBlend 0.55 0.8` into a material with no second layer would claim a feature it does not have, and re-reading it would turn the mode on for a material that never asked for it. The three `layer1*` `TEX` slots (`layer1BaseColor` sRGB, `layer1MetalRough` linear, `layer1Normal` normal — the same colour-space-per-slot rule as their layer-0 counterparts) are meaningful only once `slopeBlend` is on; the reader does not refuse them on a material that has it off, they are simply never sampled. `FLAGS worlduv` and `PARAM uvTiling` are a separate, unrelated axis: `worlduv=1` switches sampling to a planar world-space projection instead of the mesh's own UVs (`worlduv=0`, the default, is `UvMode::Mesh`), tiled every `uvTiling` world **centimetres**. `uvTiling` is read only when `worlduv=1`, and a non-positive value is dropped rather than accepted — the same positivity guard `layer1UvScale` uses.
+
+`subsurfaceWeight` and `subsurfaceRadius` add a wrap-diffuse-plus-back-scatter approximation, deliberately **not a BSSRDF**: there is no light transport across the mesh, no per-texel thickness, and no separate scatter colour — the transmitted light is tinted by `baseColorFactor` instead, which is right for skin, wax, marble and leaves (the cases this is for) and wrong only where the interior colour differs from the surface colour (see the long comment on the fields themselves in `Material.hpp` for the full story). `subsurfaceWeight` `[0,1]` is how far light wraps past the terminator, `0` the feature-off default that every material authored before this existed keeps; `subsurfaceRadius` `[0,1]` is a thickness *proxy* that widens the back-scatter lobe — the effect that makes a lit ear or leaf glow when the sun is behind it. Both are clamped to `[0,1]` in the parser itself, the same defensive clamp `transmission` above uses and for the same reason: an authored `1.4` would otherwise reach the renderer as a magnitude this format never produces. Like `slopeBlend`, the pair is **omitted from the file entirely when off** — `writeOcmat` emits both lines together only `if (d.subsurfaceWeight > 0.0f)` — but for a sharper reason than `slopeBlend`'s byte-stability argument: `subsurfaceWeight > 0` is exactly the condition `MaterialGpu.cpp`'s `packMaterial` uses to set `MaterialFlag_Subsurface`, so `0` is not merely an unremarkable default but the feature's own off switch, and writing `PARAM subsurfaceWeight 0` into a material that never asked for the wrap term would parse back to the same state while turning every pre-existing `.ocmat` in this tree into a diff for a line that carries no information beyond "not in use." `subsurfaceRadius` rides along unconditionally on that one line because it is meaningless without the weight that gates it. Shaded end to end behind `AVER_MAT_SUBSURFACE` in `PbrShaders.cpp`/`VoxiShaders.hpp`.
 
 `GRAPHREF <path>` names a `DOMAIN material` `.ocgraph` (§`OCGRAPH`) by its content-relative path — the rest of the line, so a path containing spaces is not cut short, and the same content-root convention `COMP mesh=` uses (never with the content directory on the front). It is a different mechanism from the inline `GRAPH{}` block above: `GRAPHREF` points at a graph asset a project authors and iterates on in the graph editor, while `GRAPH{}` is a small node list written inline in the material file itself. A file may carry either, both, or neither. Nothing in the `.ocmat` reader/writer resolves the path, loads the graph, or checks that it compiles — it is recorded verbatim for a loader to pass to `pbr::MaterialGraphRegistry::add`, which compiles it and returns the id that ends up in `MaterialConstants::graphId` (never round-tripped through the file itself, since the id is only stable for the current process).
 

@@ -151,6 +151,16 @@ std::string materialConfigureChain(const pbr::MaterialDesc& d, const OcMatExtras
     if (!same(d.reflectance, kDefReflectance))       line(".Reflectance(" + num(d.reflectance) + ")");
     if (!same(d.f90, kDefF90))                       line(".F90(" + num(d.f90) + ")");
 
+    // OMITTED WHEN OFF, same reasoning as OcMat.cpp's writer (see its comment): subsurfaceWeight 0 is
+    // the feature's own off switch, not a default worth stating, so a material that never asked for
+    // the wrap term gets no .Subsurface... calls at all. subsurfaceRadius is emitted unconditionally
+    // once weight is set -- it is meaningless without the weight that gates it -- so a Save-to-C#
+    // round trip never silently drops an authored radius by treating it as "still default".
+    if (d.subsurfaceWeight > 0.0f) {
+        line(".SubsurfaceWeight(" + num(d.subsurfaceWeight) + ")");
+        line(".SubsurfaceRadius(" + num(d.subsurfaceRadius) + ")");
+    }
+
     for (u32 i = 0; i < pbr::kTextureSlotCount; ++i) {
         const pbr::TextureRef& r = d.textures[i];
         if (r.path.empty()) continue;

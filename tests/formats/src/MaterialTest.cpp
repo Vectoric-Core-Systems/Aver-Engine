@@ -326,6 +326,90 @@ static void testDielectric() {
     check(near(neg.transmission, 0.0f), "...but transmission is clamped up to 0, not kept negative");
 }
 
+// PARAM subsurfaceWeight and PARAM subsurfaceRadius: the wrap-diffuse-plus-back-scatter
+// approximation (see Material.hpp's long comment on what it is and is not). Kept out of
+// kFull/testFullParse for exactly the reason testDielectric gives for ior/transmission -- kFull
+// feeds testRoundTrip and the byte-exact fixture in testGraphRef, and this is precisely the kind of
+// addition that fixture exists to catch -- so it gets its own isolated text here too.
+//
+// THE DISCRIMINATING PART, same shape as testDielectric: before this PARAM branch existed,
+// "subsurfaceWeight"/"subsurfaceRadius" were unrecognised keys and an unrecognised PARAM name is
+// silently dropped, so d.subsurfaceWeight/d.subsurfaceRadius would stay at the MaterialDesc default
+// of 0.0f no matter what the file said. Asserting the specific nonzero values below is what makes
+// this test fail against a pre-fix parser, which would read back 0/0 regardless.
+static void testSubsurface() {
+    AVER_INFO("=== .ocmat: PARAM subsurfaceWeight / subsurfaceRadius ===");
+    std::string err;
+
+    pbr::MaterialDesc d;
+    check(fmt::parseOcmat("OCMAT 1\nNAME M_Skin\nPARAM subsurfaceWeight 0.6\nPARAM subsurfaceRadius 0.35\n",
+                          d, nullptr, &err), "a material with subsurfaceWeight/subsurfaceRadius parses: " + err);
+    check(near(d.subsurfaceWeight, 0.6f), "subsurfaceWeight is read, not left at the 0.0 default");
+    check(near(d.subsurfaceRadius, 0.35f), "subsurfaceRadius is read, not left at the 0.0 default");
+
+    // Round trip. UNLIKE ior/transmission's unconditional emission just above in this file's other
+    // test, this pair is written CONDITIONALLY -- the same convention slopeBlend uses, and for the
+    // same reason (see writeOcmat's comment on the subsurfaceWeight line): the weight is the
+    // feature's own off switch, not merely a number, so a material that stated it must get the line
+    // back and a material that never mentioned it must not gain one. A nonzero weight round-trips
+    // here; the "never mentioned it" case is the assertion below this one.
+    const std::string text = fmt::writeOcmat(d, nullptr);
+    check(text.find("PARAM subsurfaceWeight 0.6") != std::string::npos,
+          "the writer emits PARAM subsurfaceWeight when the material asked for it");
+    check(text.find("PARAM subsurfaceRadius 0.35") != std::string::npos,
+          "the writer emits PARAM subsurfaceRadius alongside it");
+    pbr::MaterialDesc back;
+    check(fmt::parseOcmat(text, back, nullptr, &err), "the writer's own output re-parses: " + err);
+    check(near(back.subsurfaceWeight, d.subsurfaceWeight) && near(back.subsurfaceRadius, d.subsurfaceRadius),
+          "both survive the round trip");
+
+    // A header-only file loads the feature in its OFF state -- 0.0, exactly like every material
+    // authored before this pair existed (Material.hpp: "every material authored before this existed
+    // shades bit-identically").
+    pbr::MaterialDesc def;
+    check(fmt::parseOcmat("OCMAT 1\n", def, nullptr, &err), "a header-only file loads");
+    check(near(def.subsurfaceWeight, 0.0f), "...subsurfaceWeight defaults to 0, the feature's own off switch");
+    check(near(def.subsurfaceRadius, 0.0f), "...subsurfaceRadius defaults to 0 too");
+
+    // THE WRITTEN-ABSENCE CASE, which testDielectric has no equivalent of because ior/transmission
+    // are unconditional: a material that never asked for the wrap term must not gain a
+    // "PARAM subsurfaceWeight 0" line it never authored. That line would carry no information beyond
+    // "not in use" and would turn every pre-existing .ocmat fixture into a diff the moment this field
+    // was added -- see writeOcmat's comment on why this is opt-in like slopeBlend, not like
+    // reflectance/f90/ior/transmission.
+    const std::string offText = fmt::writeOcmat(def, nullptr);
+    check(offText.find("subsurfaceWeight") == std::string::npos,
+          "a material with subsurfaceWeight 0 writes NO subsurface line at all");
+    check(offText.find("subsurfaceRadius") == std::string::npos,
+          "...neither half of the pair appears, not even alone");
+
+    // Clamped from BOTH directions, same idiom as testDielectric's ior/transmission bounds: both
+    // fields are [0,1] by definition (see Material.hpp), so an authored value outside that range is
+    // clamped rather than kept raw -- which the assertions below would catch (1.4 != 1.0, 2.0 != 1.0).
+    // The upper bound needs no extra discriminator: 1.0 already differs from the 0.0 default, so a
+    // build that dropped the PARAM entirely could not pass this by coincidence.
+    pbr::MaterialDesc hi;
+    check(fmt::parseOcmat("OCMAT 1\nPARAM subsurfaceWeight 1.4\nPARAM subsurfaceRadius 2.0\n",
+                          hi, nullptr, &err),
+          "an over-1 subsurfaceWeight/subsurfaceRadius parses, rather than failing the file");
+    check(near(hi.subsurfaceWeight, 1.0f), "...subsurfaceWeight is clamped down to 1.0, not kept at 1.4");
+    check(near(hi.subsurfaceRadius, 1.0f), "...subsurfaceRadius is clamped down to 1.0, not kept at 2.0");
+
+    // The lower bound is the harder case: 0 is BOTH the correctly-clamped result and the MaterialDesc
+    // default, so a build that silently failed to recognise these two PARAM names would read back
+    // exactly the same 0/0 that correct clamping produces. PARAM ior rides along on the same file,
+    // unrelated to subsurface entirely, purely as the discriminator testDielectric's own negative-
+    // transmission case uses for the identical reason: ior 1.9 is not its 1.5 default, so it proves
+    // this file was parsed line by line rather than abandoned, whatever the subsurface fields do.
+    pbr::MaterialDesc lo;
+    check(fmt::parseOcmat("OCMAT 1\nPARAM ior 1.9\nPARAM subsurfaceWeight -0.3\nPARAM subsurfaceRadius -1.0\n",
+                          lo, nullptr, &err),
+          "a negative subsurfaceWeight/subsurfaceRadius parses, rather than failing the file");
+    check(near(lo.ior, 1.9f), "...ior alongside it still reads correctly, so the file was not simply dropped");
+    check(near(lo.subsurfaceWeight, 0.0f), "...but subsurfaceWeight is clamped up to 0, not kept negative");
+    check(near(lo.subsurfaceRadius, 0.0f), "...and subsurfaceRadius is clamped up to 0 too");
+}
+
 // Checks packMaterial: the 96-byte block the shader reads.
 static void testPack() {
     AVER_INFO("=== material: the packed GPU block ===");
@@ -392,6 +476,29 @@ static void testPack() {
     g.castShadow = false;
     c = pbr::packMaterial(g);
     check((c.flags & pbr::MaterialFlag_CastShadow) == 0, "castShadow=0 clears the bit");
+
+    // subsurfaceWeight/subsurfaceRadius surviving the pack, and MaterialFlag_Subsurface tracking the
+    // WEIGHT alone -- same shape as the transmission block above, and the same reason it matters:
+    // packMaterial assigns both fields by hand (MaterialGpu.cpp's own comment: "every one of its
+    // members is assigned here rather than some being left at the zero the `MaterialConstants c{}`
+    // above gives them"), so a deleted assignment line would silently zero the GPU-side value while
+    // this suite stayed green.
+    check((c.flags & pbr::MaterialFlag_Subsurface) == 0,
+          "subsurfaceWeight defaults to 0.0 and packs with MaterialFlag_Subsurface clear");
+    g.subsurfaceWeight = 0.6f;
+    g.subsurfaceRadius = 0.35f;
+    c = pbr::packMaterial(g);
+    check(near(c.subsurfaceWeight, 0.6f), "subsurfaceWeight survives packMaterial");
+    check(near(c.subsurfaceRadius, 0.35f), "subsurfaceRadius survives packMaterial");
+    check((c.flags & pbr::MaterialFlag_Subsurface) != 0,
+          "subsurfaceWeight > 0 sets MaterialFlag_Subsurface (bit 14)");
+
+    // KEYED ON THE WEIGHT ALONE (packMaterial's own comment): a radius with no weight scatters
+    // nothing, so the flag must stay clear even though the radius is still nonzero here.
+    g.subsurfaceWeight = 0.0f;
+    c = pbr::packMaterial(g);
+    check((c.flags & pbr::MaterialFlag_Subsurface) == 0,
+          "subsurfaceWeight=0 clears the bit even with subsurfaceRadius still set to 0.35");
 }
 
 // The one translucency predicate, and the shadow transmittance derived from it.
@@ -746,6 +853,7 @@ int main() {
     testTolerance();
     testGraphRef();
     testDielectric();
+    testSubsurface();
     testPack();
     testTranslucency();
     testRoundTrip();

@@ -204,6 +204,19 @@ bool parseOcmat(std::string_view text, pbr::MaterialDesc& out, OcMatExtras* extr
                 const f32 v = tokF(t, 2, out.transmission);
                 out.transmission = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
             }
+            // Subsurface wrap weight: 0 is the feature-off default, 1 wraps light all the way past
+            // the terminator. Belongs in [0,1] by definition -- same reasoning as transmission just
+            // above -- so it is clamped rather than passed through; an authored 1.4 would reach the
+            // renderer as a magnitude this format never otherwise produces.
+            else if (equalsCI(p, "subsurfaceWeight")) {
+                const f32 v = tokF(t, 2, out.subsurfaceWeight);
+                out.subsurfaceWeight = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+            }
+            // Thickness proxy for the same back-scatter lobe; also [0,1], clamped for the same reason.
+            else if (equalsCI(p, "subsurfaceRadius")) {
+                const f32 v = tokF(t, 2, out.subsurfaceRadius);
+                out.subsurfaceRadius = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+            }
             else if (equalsCI(p, "alphaCutoff"))          out.alphaCutoff       = tokF(t, 2, out.alphaCutoff);
             // World centimetres per tile; a non-positive value is dropped.
             // slopeBlend <lo> <hi> [layer1UvScale] -- turns the second layer on and says across
@@ -341,6 +354,18 @@ std::string writeOcmat(const pbr::MaterialDesc& d, const OcMatExtras* extras) {
     if (d.slopeBlend)
         s += "PARAM slopeBlend " + num(d.slopeBlendLo) + " " + num(d.slopeBlendHi) + " "
            + num(d.layer1UvScale) + "\n";
+    // OMITTED WHEN OFF, same reasoning as slopeBlend just above and NOT the same reasoning as
+    // ior/transmission further up: subsurfaceWeight 0 is not merely a number but the feature's own
+    // off switch (MaterialGpu.cpp's packMaterial sets MaterialFlag_Subsurface exactly when this is
+    // > 0), so a material that never asked for the wrap term has nothing meaningful to round-trip.
+    // Writing "PARAM subsurfaceWeight 0" into every pre-existing .ocmat would still parse back to the
+    // same off state, but it would turn every material in this tree's test fixtures into a diff the
+    // instant this field was added, for a line that carries no information beyond "not in use" --
+    // the same byte-stability argument that keeps slopeBlend opt-in. subsurfaceRadius rides along
+    // unconditionally on this one line because it is meaningless without the weight that gates it.
+    if (d.subsurfaceWeight > 0.0f)
+        s += "PARAM subsurfaceWeight " + num(d.subsurfaceWeight) + "\n"
+             "PARAM subsurfaceRadius " + num(d.subsurfaceRadius) + "\n";
 
     bool anyTex = false;
     for (u32 i = 0; i < pbr::kTextureSlotCount; ++i) {

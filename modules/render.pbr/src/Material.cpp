@@ -44,6 +44,8 @@ void sanitise(MaterialDesc& d) {
     d.ior               = std::clamp(d.ior, 1.0f, 4.0f);
     d.transmission      = std::clamp(d.transmission, 0.0f, 1.0f);
     d.alphaCutoff       = std::clamp(d.alphaCutoff, 0.0f, 1.0f);
+    d.subsurfaceWeight  = std::clamp(d.subsurfaceWeight, 0.0f, 1.0f);
+    d.subsurfaceRadius  = std::clamp(d.subsurfaceRadius, 0.0f, 1.0f);
     if (static_cast<u32>(d.alphaMode) > static_cast<u32>(AlphaMode::Blend)) d.alphaMode = AlphaMode::Opaque;
 }
 
@@ -408,6 +410,18 @@ float aver_pbr_get_f90(aver_pbr_material m) {
 }
 int32_t aver_pbr_set_f90(aver_pbr_material m, float v) {
     MaterialDesc* d = edit(m); if (!d) return 0; d->f90 = v; return commit(m);
+}
+float aver_pbr_get_subsurface_weight(aver_pbr_material m) {
+    const MaterialDesc* d = read(m); return d ? d->subsurfaceWeight : 0.0f;
+}
+int32_t aver_pbr_set_subsurface_weight(aver_pbr_material m, float v) {
+    MaterialDesc* d = edit(m); if (!d) return 0; d->subsurfaceWeight = v; return commit(m);
+}
+float aver_pbr_get_subsurface_radius(aver_pbr_material m) {
+    const MaterialDesc* d = read(m); return d ? d->subsurfaceRadius : 0.0f;
+}
+int32_t aver_pbr_set_subsurface_radius(aver_pbr_material m, float v) {
+    MaterialDesc* d = edit(m); if (!d) return 0; d->subsurfaceRadius = v; return commit(m);
 }
 float aver_pbr_get_occlusion_strength(aver_pbr_material m) {
     const MaterialDesc* d = read(m); return d ? d->occlusionStrength : 0.0f;

@@ -152,7 +152,10 @@ struct RtMaterial {
     uint   graphId;
     float  ior;
     float  transmission;
-    float2 _matPad;            // mirrors MaterialConstants::_pad0/_pad1; read by nothing, ever
+    // These two mirror MaterialConstants::subsurfaceWeight/subsurfaceRadius, which spent the
+    // _pad0/_pad1 this used to declare. Same order, same offsets: the struct still ends at 96 bytes.
+    float  subsurfaceWeight;
+    float  subsurfaceRadius;
 };
 // SLOT t9 IS A GUESS, LOUDLY. This is table 0's next free SRV slot after t8 -- kGiSrvCount
 // (VoxiGiShaders.hpp), currently 9, would need to become 10 to declare it here, and table 1 (the
@@ -1918,6 +1921,17 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     s.ndv      = saturate(dot(s.N, s.V));
     s.f90      = mat.f90;
     s.reflectance = mat.reflectance;
+    // HAND-SET, BECAUSE THIS SURFACE IS HAND-BUILT. averBuildSurface reads these off the material
+    // cbuffer, but a ray hit has no material cbuffer bound -- the same reason reflectance is carried
+    // here rather than read back off gMatReflectance, two lines up. HLSL does not zero-initialise a
+    // struct, so omitting them would feed averDirectTerms whatever was on the stack.
+    // A PRIMARY RAY LEAVES THE EYE, so its first hit is always a front face as far as this test is
+    // concerned. The ray-driven path does not carry a refracted ray into the medium and back out,
+    // so there is no exit interface for it to shade and TIR cannot arise -- stated here rather than
+    // left as an uninitialised bool that happens to read false.
+    s.backFace  = false;
+    s.sssWeight = (mat.flags & AVER_MAT_SUBSURFACE) ? saturate(mat.subsurfaceWeight) : 0.0;
+    s.sssRadius = (mat.flags & AVER_MAT_SUBSURFACE) ? saturate(mat.subsurfaceRadius) : 0.0;
     // Identical shape to averBuildSurface's own F0 (PbrShaders.cpp: `lerp(gMatReflectance.xxx,
     // s.albedo, s.metallic)`), with `mat.reflectance` standing in for `gMatReflectance` -- the same
     // per-material value, read from this pass's own material buffer instead of the raster path's
@@ -2335,6 +2349,12 @@ AverVertex voxelVertexOf(VoxOut i) {
     v.wpos = i.wpos;
     v.N    = normalize(i.nrm);
     v.V    = float3(0, 0, 0);
+    // FALSE, AND NOT MERELY UNSET. There is no camera in a voxelisation pass -- V is exactly zero
+    // above -- so "is the eye inside this surface" has no answer here. False is the answer that
+    // makes the TIR test below inert, which is correct: a voxel bake records how a surface emits
+    // and reflects, not how it looks from a viewpoint that does not exist. HLSL leaves a struct
+    // member uninitialised, so this must be written rather than assumed.
+    v.backFace = false;
     v.uv   = i.uv;
     return v;
 }

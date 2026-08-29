@@ -62,7 +62,11 @@ cbuffer AverMaterial : register(b2) {
     // the GPU. It is declared anyway so this block keeps mirroring MaterialConstants field for
     // field, byte offset for byte offset, which is the whole discipline this comment block is
     // asking of whoever edits either side next.
-    float2 _matPad;
+    // These two ARE the bytes _matPad used to declare -- MaterialConstants spent its _pad0/_pad1 on
+    // them, and this block mirrors that struct field for field, byte offset for byte offset. There is
+    // no padding left on either side.
+    float  gSubsurfaceWeight;
+    float  gSubsurfaceRadius;
 };
 
 // gMaterialFlags bits, mirroring pbr::MaterialFlag.
@@ -82,6 +86,7 @@ cbuffer AverMaterial : register(b2) {
 // MaterialDesc::castShadow. Mirrors MaterialFlag_CastShadow; read by rtShadow's traversal loop in
 // VoxiShaders.hpp, which is the field's first and only consumer anywhere in the engine.
 #define AVER_MAT_CAST_SHADOW    (1u << 13)
+#define AVER_MAT_SUBSURFACE     (1u << 14)
 
 // Shading model ids. The id arrives per draw in gShadingModel and is dispatched by a uniform switch.
 #define AVER_MODEL_STANDARD 0u   // metallic / roughness, Cook-Torrance GGX
@@ -110,6 +115,14 @@ struct AverVertex {
     float3 N;    // unit surface normal, world space
     float3 V;    // unit vector towards the camera; EXACTLY zero where there is no camera
     float2 uv;   // surface parameterisation
+    // TRUE WHERE THE GEOMETRIC NORMAL POINTED AWAY AND WAS FLIPPED, i.e. this pixel is the BACK of
+    // the surface -- the eye is inside the volume the front face encloses.
+    //
+    // averVertexOf has always computed this, used it to flip the normal, and then thrown it away.
+    // Keeping it is the entire plumbing cost of total internal reflection: TIR only happens on the
+    // way OUT of the denser medium, so a shader with no way to know which side it is on cannot
+    // express it at all, however good its Fresnel term is.
+    bool backFace;
 };
 
 // One light's contribution as the renderer resolved it.
@@ -139,7 +152,8 @@ AverVertex averVertexOf(VSOut i) {
     // material-shaded draw never goes through the plain path, and foliage is exactly what the
     // material path is for: a one-sheet leaf drawn with culling off shades its back side black
     // without this.
-    if (dot(v.N, v.V) < 0.0) v.N = -v.N;
+    v.backFace = dot(v.N, v.V) < 0.0;
+    if (v.backFace) v.N = -v.N;
     v.uv   = i.uv;
     return v;
 }
@@ -160,6 +174,13 @@ struct AverSurface {
     // raster one: with no material bound the global is not 0.04, the diffuse lobe stopped being
     // charged for the specular reflectance it takes off the top, and the surface read too bright.
     float  reflectance;
+    // Subsurface, both 0 where the material did not ask for it -- which makes averDirectTerms'
+    // subsurface term identically zero rather than merely small. PSRayDriven hand-builds this struct
+    // and must set them too; HLSL does not zero a struct for you.
+    float  sssWeight, sssRadius;
+    // Carried through from AverVertex -- see its own comment. Read only by the transmissive branch
+    // below, for total internal reflection.
+    bool   backFace;
     float  alpha;
     float  occlusion;    // the material's OWN occlusion map, distinct from the renderer's AO
     uint   model;        // AVER_MODEL_*
@@ -365,6 +386,13 @@ struct AverAuthored {
     float3 emissive;    // gEmissiveFactor * the map
     float  occlusion;   // the material's OWN occlusion map, before gOcclusionStrength
     float  alphaCutoff; // read only under AVER_MAT_ALPHA_MASK
+    // AUTHORED, NOT READ STRAIGHT OFF THE CBUFFER, and that is the whole point of them living here.
+    // Everything in this struct is a value a material GRAPH may override per pixel; a field the
+    // surface build reads from the constant buffer directly is a field no graph can ever drive.
+    // Subsurface is exactly where per-pixel authoring earns its keep -- a thickness mask driving the
+    // radius is the difference between a uniformly waxy object and one whose thin parts glow.
+    float  subsurfaceWeight;
+    float  subsurfaceRadius;
 };
 
 // What the stock material path authors: the five maps, blended by slope, times the b2 factors.
@@ -383,11 +411,43 @@ AverAuthored averStockAuthored(float2 uv, float3 geoN) {
     a.emissive    = gEmissiveFactor * map.emissive;
     a.occlusion   = map.occlusion;
     a.alphaCutoff = gAlphaCutoff;
+    // GATED HERE, ONCE. Below this point nothing re-tests the flag: a graph that drives these pins
+    // writes them after the stock path has run, and it would be wrong for the flag to then veto a
+    // value the author explicitly asked for.
+    a.subsurfaceWeight = (gMaterialFlags & AVER_MAT_SUBSURFACE) ? saturate(gSubsurfaceWeight) : 0.0;
+    a.subsurfaceRadius = (gMaterialFlags & AVER_MAT_SUBSURFACE) ? saturate(gSubsurfaceRadius) : 0.0;
     return a;
 }
 
 // Derives the whole surface from what the material authored. This is the material SYSTEM's
 // arithmetic, not any one material's, which is exactly why a graph never gets to restate it.
+// TOTAL INTERNAL REFLECTION: does a ray leaving this surface have anywhere to go?
+//
+// Snell's law says n1 sin(t1) = n2 sin(t2). Leaving a denser medium for air, n1 = ior and n2 = 1,
+// so sin(t2) = ior * sin(t1) -- and once that product exceeds 1 there is NO refracted direction
+// that satisfies the equation. Nothing is transmitted at all; every photon reflects. That is the
+// mirrored underside of a swimming pool, and the bright edge along the inside of a glass block.
+//
+// WHY THIS CANNOT BE LEFT TO THE FRESNEL TERM, which is the tempting shortcut. Schlick's
+// approximation is a fit to the Fresnel equations for light entering a DENSER medium; it rises
+// toward 1 only as the view grazes, and it has no knowledge of a critical angle because in the
+// entering direction there ISN'T one. Feeding it a steeper curve to "look like" TIR gets the shape
+// wrong in the one place it matters: real TIR switches to a perfect mirror ABRUPTLY at the critical
+// angle (48.8 degrees for water, 41.8 for glass) and stays there, rather than easing in over the
+// last few degrees before grazing.
+//
+// EXITING ONLY. Entering a denser medium can never total-internally-reflect -- the refracted ray
+// always exists -- which is why this is gated on backFace and is identically false for every
+// front-facing pixel in the engine.
+bool averTotalInternalReflection(float ndv, float ior, bool exiting) {
+    if (!exiting) return false;
+    // sin^2(t1) from cos(t1); ndv is dot(N, V) with N already flipped to face the eye, so it is
+    // cos(t1) of the ray on its way out.
+    float sin2t1 = saturate(1.0 - ndv * ndv);
+    // sin^2(t2) = (n1/n2)^2 sin^2(t1), with n2 = 1 (air). Past 1 there is no solution: TIR.
+    return (ior * ior) * sin2t1 > 1.0;
+}
+
 AverSurface averBuildSurface(AverVertex v, AverLight l, AverAuthored a, float2 uv) {
     AverSurface s;
     s.N = averPerturbNormal(v.N, v.wpos, uv, a.normalTS);
@@ -434,6 +494,14 @@ AverSurface averBuildSurface(AverVertex v, AverLight l, AverAuthored a, float2 u
     // special case. It is a no-op for every material authored before the field existed, because
     // MaterialDesc::transmission defaults to 0.
     s.kdAlbedo = (1.0 - s.metallic) * s.albedo * (1.0 - saturate(gTransmission));
+    // GATED ON THE FLAG, not on the float, so the whole subsurface branch folds away for every
+    // material that does not want it.
+    s.backFace  = v.backFace;
+    // FROM THE AUTHORED STRUCT, not from the cbuffer. Reading gSubsurfaceWeight here instead would
+    // work identically for the stock material and silently ignore every material graph that drove
+    // the pin -- the defect this whole struct exists to prevent.
+    s.sssWeight = saturate(a.subsurfaceWeight);
+    s.sssRadius = saturate(a.subsurfaceRadius);
 
     // FRESNEL-AWARE ALPHA FOR BLENDED SURFACES. Plain "over" compositing --
     // dst = src.rgb*alpha + dst.rgb*(1-alpha) -- treats alpha as one UNIFORM attenuation and so
@@ -495,6 +563,12 @@ AverSurface averBuildSurface(AverVertex v, AverLight l, AverAuthored a, float2 u
         // already agrees), and luminance is the principled reduction for the rarer case of a
         // translucent, partially metallic surface where F0 is tinted and the channels disagree.
         float fresnelLum = dot(viewFresnel, float3(0.2126, 0.7152, 0.0722));
+        // TOTAL INTERNAL REFLECTION OVERRIDES THE FRESNEL TERM OUTRIGHT, rather than being blended
+        // with it. Past the critical angle the transmitted fraction is not small, it is ZERO -- so
+        // the surface reads as a full mirror and its coverage is complete, whatever the authored
+        // transmission said. gIor finally has a consumer here: it has ridden along in this cbuffer
+        // since it was added, read by nothing (see its declaration's own comment, which says so).
+        if (averTotalInternalReflection(s.ndv, gIor, s.backFace)) fresnelLum = 1.0;
         s.alpha = lerp(baseAlpha, 1.0, saturate(fresnelLum));
     }
 
@@ -576,8 +650,13 @@ float averSpecularOcclusion(float ndv, float ao, float rough) {
 // return here, rather than after the light term is applied, is what lets averShadeDirect reconstruct
 // `(diffuseLobe + specularLobe) * l.radiance * ndl * l.visibility` -- THE EXACT ORIGINAL EXPRESSION,
 // same grouping, same order -- so its output is provably unaffected by this function existing at all.
+// SUBSURFACE IS A FOURTH OUTPUT, NOT PART OF diffuseLobe, and that is the whole reason this
+// signature changed. Both callers multiply diffuseLobe by ndl, and ndl is ZERO exactly where
+// subsurface light is the only thing there is -- past the terminator. Folding the term into the
+// diffuse lobe would therefore multiply the effect by zero precisely where it is the effect.
+// subsurfaceLobe carries its own angular dependence and must NOT be scaled by ndl.
 void averDirectTerms(AverSurface s, AverLight l, out float3 diffuseLobe, out float3 specularLobe,
-                     out float ndl) {
+                     out float3 subsurfaceLobe, out float ndl) {
     float a = s.rough * s.rough;
     ndl = saturate(dot(s.N, l.direction));
     float D = distGGX(saturate(dot(s.N, s.H)), a);
@@ -602,6 +681,28 @@ void averDirectTerms(AverSurface s, AverLight l, out float3 diffuseLobe, out flo
     spec *= 1.0 + s.F0 * (1.0 / Ess - 1.0);
     diffuseLobe  = s.kdAlbedo / PI;
     specularLobe = spec;
+
+    // ---- subsurface: wrapped diffuse + view-dependent back-scatter ----
+    //
+    // TWO TERMS, AND ONLY THE EXTRA. The caller already pays kdAlbedo/PI * ndl, so the wrap term
+    // contributes the DIFFERENCE between a wrapped N.L and the plain one; at weight 0 the wrapped
+    // form reduces to (ndl + 0) / 1 == ndl, the difference is exactly 0, and this is bit-identical
+    // to the code before it existed. That identity is why the term is written as a difference
+    // rather than as a replacement lobe.
+    //
+    // The (1+w)^2 denominator is the energy normalisation, not a fudge: widening the lobe without
+    // it hands the surface more light than fell on it, and skin authored at weight 1 would read as
+    // emissive.
+    //
+    // The second term is light that entered the far side and travelled toward the eye, so it is
+    // keyed on dot(V, -L) rather than on the normal -- that is what makes an ear or a leaf light up
+    // when the sun is BEHIND it, which is the whole visual point. Radius sharpens or widens it:
+    // a thin surface transmits a tight forward beam, a thick one a broad wash.
+    float sssW = s.sssWeight;
+    float ndlWrap = saturate((dot(s.N, l.direction) + sssW) / ((1.0 + sssW) * (1.0 + sssW)));
+    float wrapExtra = max(ndlWrap - ndl, 0.0);
+    float backScatter = pow(saturate(dot(s.V, -l.direction)), lerp(12.0, 2.0, s.sssRadius)) * s.sssRadius;
+    subsurfaceLobe = s.kdAlbedo / PI * (wrapExtra + backScatter * sssW);
 }
 
 // Adds one light's direct contribution: Cook-Torrance GGX, with NdotL and visibility applied.
@@ -610,10 +711,13 @@ float3 averShadeDirect(float3 radiance, AverSurface s, AverLight l) {
     case AVER_MODEL_UNLIT:
         return radiance;
     default: {
-        float3 diffuseLobe, specularLobe;
+        float3 diffuseLobe, specularLobe, subsurfaceLobe;
         float  ndl;
-        averDirectTerms(s, l, diffuseLobe, specularLobe, ndl);
-        return radiance + (diffuseLobe + specularLobe) * l.radiance * ndl * l.visibility;
+        averDirectTerms(s, l, diffuseLobe, specularLobe, subsurfaceLobe, ndl);
+        // NOT scaled by ndl -- see averDirectTerms. Still scaled by visibility: subsurface light
+        // comes from the sun, so a surface in shadow does not glow.
+        return radiance + (diffuseLobe + specularLobe) * l.radiance * ndl * l.visibility
+                        + subsurfaceLobe * l.radiance * l.visibility;
     }
     }
 }
@@ -736,12 +840,16 @@ void averShadeSplit(AverSurface s, AverLight l, AverIndirect ind, out float3 dif
         specular = 0.0;
         return;
     default: {
-        float3 dDiffuse, dSpecular;
+        float3 dDiffuse, dSpecular, dSubsurface;
         float  ndl;
-        averDirectTerms(s, l, dDiffuse, dSpecular, ndl);
+        averDirectTerms(s, l, dDiffuse, dSpecular, dSubsurface, ndl);
         float3 lightTerm = l.radiance * ndl * l.visibility;
         diffuse  = dDiffuse * lightTerm;
         specular = dSpecular * lightTerm;
+        // Subsurface is DIFFUSE for the purposes of this split, and carries no ndl -- see
+        // averDirectTerms. It joins the diffuse bucket so a blended surface composites it with the
+        // coverage the diffuse half gets rather than with the specular half's full strength.
+        diffuse += dSubsurface * l.radiance * l.visibility;
 
         float3 specEnv, diffAmbient, diffBounce;
         averIndirectTerms(s, ind, specEnv, diffAmbient, diffBounce);
