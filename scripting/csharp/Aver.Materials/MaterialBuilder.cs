@@ -36,6 +36,9 @@ public sealed class MaterialBuilder
     private float _transmission;
     private float _subsurfaceWeight;
     private float _subsurfaceRadius;
+    private float _coatWeight;
+    private float _coatRoughness;
+    private float _coatF0 = 0.04f;   // the field default, so an unset coat emits nothing
 
     private readonly Dictionary<Slot, string> _textures = new();
 
@@ -114,6 +117,18 @@ public sealed class MaterialBuilder
     /// up when the sun is behind it. Meaningless while <see cref="SubsurfaceWeight"/> is 0.
     /// </summary>
     public MaterialBuilder SubsurfaceRadius(float v) { _subsurfaceRadius = v; return this; }
+
+    /// <summary>
+    /// [0,1] clear coat over the base material -- car paint, varnish, a wet stone. 0 is no coat.
+    /// Whether the renderer evaluates it is a project-wide setting (RENDER.LAYEREDBSDF), not this.
+    /// </summary>
+    public MaterialBuilder CoatWeight(float v) { _coatWeight = v; return this; }
+
+    /// <summary>[0,1] the coat film's own roughness. Meaningless while <see cref="CoatWeight"/> is 0.</summary>
+    public MaterialBuilder CoatRoughness(float v) { _coatRoughness = v; return this; }
+
+    /// <summary>Normal-incidence reflectance of the coat film; 0.04 (IOR 1.5) is ordinary lacquer.</summary>
+    public MaterialBuilder CoatF0(float v) { _coatF0 = v; return this; }
 
     /// <summary>World centimetres per texture tile. Only meaningful with <see cref="WorldUv"/> on.</summary>
     public MaterialBuilder Tiling(float centimetres) { _uvTiling = centimetres; return this; }
@@ -203,6 +218,19 @@ public sealed class MaterialBuilder
         {
             s.Append("PARAM subsurfaceWeight ").Append(Num(_subsurfaceWeight)).Append('\n');
             s.Append("PARAM subsurfaceRadius ").Append(Num(_subsurfaceRadius)).Append('\n');
+        }
+
+        // Gated on the weight, and emitting all three together, exactly as OcMat.cpp's writer does.
+        // THE TWO WRITERS MUST AGREE and nothing checks that they do -- this class's own remarks say
+        // so ("The grammar has a second writer in modules/formats/src/OcMat.cpp; the two must",
+        // "agree"). An unrecognised PARAM is silently dropped by the parser, so a key emitted here
+        // and not handled there produces a material that is quietly missing its coat, with no error
+        // anywhere. Adding a PARAM in one place and not the other is the whole failure mode.
+        if (_coatWeight > 0f)
+        {
+            s.Append("PARAM coatWeight ").Append(Num(_coatWeight)).Append('\n');
+            s.Append("PARAM coatRoughness ").Append(Num(_coatRoughness)).Append('\n');
+            s.Append("PARAM coatF0 ").Append(Num(_coatF0)).Append('\n');
         }
 
         if (_textures.Count > 0)

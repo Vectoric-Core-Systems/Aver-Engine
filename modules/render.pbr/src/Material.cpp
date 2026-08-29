@@ -437,6 +437,26 @@ float aver_pbr_get_subsurface_radius(aver_pbr_material m) {
 int32_t aver_pbr_set_subsurface_radius(aver_pbr_material m, float v) {
     MaterialDesc* d = edit(m); if (!d) return 0; d->subsurfaceRadius = v; return commit(m);
 }
+float aver_pbr_get_coat_weight(aver_pbr_material m) {
+    const MaterialDesc* d = read(m); return d ? d->coatWeight : 0.0f;
+}
+int32_t aver_pbr_set_coat_weight(aver_pbr_material m, float v) {
+    MaterialDesc* d = edit(m); if (!d) return 0; d->coatWeight = v; return commit(m);
+}
+float aver_pbr_get_coat_roughness(aver_pbr_material m) {
+    const MaterialDesc* d = read(m); return d ? d->coatRoughness : 0.0f;
+}
+int32_t aver_pbr_set_coat_roughness(aver_pbr_material m, float v) {
+    MaterialDesc* d = edit(m); if (!d) return 0; d->coatRoughness = v; return commit(m);
+}
+// Defaults to 0.04 rather than 0 on a bad handle: 0.04 is the field's own default (IOR 1.5),
+// and a getter that returns 0 for "no material" would read as a coat with no reflectance.
+float aver_pbr_get_coat_f0(aver_pbr_material m) {
+    const MaterialDesc* d = read(m); return d ? d->coatF0 : 0.04f;
+}
+int32_t aver_pbr_set_coat_f0(aver_pbr_material m, float v) {
+    MaterialDesc* d = edit(m); if (!d) return 0; d->coatF0 = v; return commit(m);
+}
 float aver_pbr_get_occlusion_strength(aver_pbr_material m) {
     const MaterialDesc* d = read(m); return d ? d->occlusionStrength : 0.0f;
 }

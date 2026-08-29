@@ -396,6 +396,39 @@ static void testSubsurface() {
     check(near(hi.subsurfaceWeight, 1.0f), "...subsurfaceWeight is clamped down to 1.0, not kept at 1.4");
     check(near(hi.subsurfaceRadius, 1.0f), "...subsurfaceRadius is clamped down to 1.0, not kept at 2.0");
 
+    // ---- the coat: written only when on, read back exactly, clamped at both ends ----
+    //
+    // THE ROUND TRIP IS THE POINT. An unrecognised PARAM key is SILENTLY DROPPED by parseOcmat --
+    // no error, no warning, the key simply vanishes -- so a writer that emits a name the parser does
+    // not handle produces a material quietly missing its coat with nothing anywhere to grep for.
+    // Writing then parsing is the only check that catches that, and there are TWO writers to keep
+    // honest: this one and scripting/csharp/Aver.Materials/MaterialBuilder.cs, whose own remarks say
+    // "the two must agree" and which nothing else verifies.
+    check(offText.find("coatWeight") == std::string::npos,
+          "a material with coatWeight 0 writes NO coat line at all");
+
+    pbr::MaterialDesc coated;
+    coated.coatWeight    = 0.8f;
+    coated.coatRoughness = 0.15f;
+    coated.coatF0        = 0.05f;
+    const std::string coatText = fmt::writeOcmat(coated, nullptr);
+    check(coatText.find("PARAM coatWeight") != std::string::npos, "an authored coat writes coatWeight");
+    check(coatText.find("PARAM coatRoughness") != std::string::npos, "...and coatRoughness");
+    check(coatText.find("PARAM coatF0") != std::string::npos, "...and coatF0");
+
+    pbr::MaterialDesc coatBack;
+    check(fmt::parseOcmat(coatText, coatBack, nullptr, &err), "the coat it wrote parses back");
+    check(near(coatBack.coatWeight, 0.8f),    "...coatWeight survives the round trip");
+    check(near(coatBack.coatRoughness, 0.15f),"...coatRoughness survives the round trip");
+    check(near(coatBack.coatF0, 0.05f),       "...coatF0 survives the round trip");
+
+    pbr::MaterialDesc coatHi;
+    check(fmt::parseOcmat("OCMAT 1\nPARAM coatWeight 1.6\nPARAM coatRoughness 3.0\n",
+                          coatHi, nullptr, &err),
+          "an over-1 coatWeight/coatRoughness parses, rather than failing the file");
+    check(near(coatHi.coatWeight, 1.0f),    "...coatWeight is clamped down to 1.0, not kept at 1.6");
+    check(near(coatHi.coatRoughness, 1.0f), "...coatRoughness is clamped down to 1.0, not kept at 3.0");
+
     // The lower bound is the harder case: 0 is BOTH the correctly-clamped result and the MaterialDesc
     // default, so a build that silently failed to recognise these two PARAM names would read back
     // exactly the same 0/0 that correct clamping produces. PARAM ior rides along on the same file,

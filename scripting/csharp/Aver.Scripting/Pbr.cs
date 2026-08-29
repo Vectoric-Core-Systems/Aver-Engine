@@ -87,6 +87,12 @@ public static class Pbr
     [DllImport(Lib)] private static extern int aver_pbr_set_transmission(int m, float v);
     [DllImport(Lib)] private static extern float aver_pbr_get_subsurface_weight(int m);
     [DllImport(Lib)] private static extern int aver_pbr_set_subsurface_weight(int m, float v);
+    [DllImport(Lib)] private static extern float aver_pbr_get_coat_weight(int m);
+    [DllImport(Lib)] private static extern int aver_pbr_set_coat_weight(int m, float v);
+    [DllImport(Lib)] private static extern float aver_pbr_get_coat_roughness(int m);
+    [DllImport(Lib)] private static extern int aver_pbr_set_coat_roughness(int m, float v);
+    [DllImport(Lib)] private static extern float aver_pbr_get_coat_f0(int m);
+    [DllImport(Lib)] private static extern int aver_pbr_set_coat_f0(int m, float v);
     [DllImport(Lib)] private static extern float aver_pbr_get_subsurface_radius(int m);
     [DllImport(Lib)] private static extern int aver_pbr_set_subsurface_radius(int m, float v);
 
@@ -244,6 +250,40 @@ public static class Pbr
         {
             get => aver_pbr_get_subsurface_weight(Handle);
             set => aver_pbr_set_subsurface_weight(Handle, value);
+        }
+
+        /// <summary>
+        /// [0,1] how much clear coat sits over the base material — car paint, varnish, a wet stone.
+        /// 0 turns the whole coat off: no flag, no lobe, nothing computed.
+        ///
+        /// Authored per material, but whether the renderer evaluates it at all is a PROJECT-wide
+        /// decision (RENDER.LAYEREDBSDF). Setting this on a project whose layered BSDF is off stores
+        /// the value and changes nothing on screen.
+        /// </summary>
+        public float CoatWeight
+        {
+            get => aver_pbr_get_coat_weight(Handle);
+            set => aver_pbr_set_coat_weight(Handle, value);
+        }
+
+        /// <summary>
+        /// [0,1] the coat film's own roughness, independent of the base's. Car paint is near 0;
+        /// a satin lacquer is higher.
+        /// </summary>
+        public float CoatRoughness
+        {
+            get => aver_pbr_get_coat_roughness(Handle);
+            set => aver_pbr_set_coat_roughness(Handle, value);
+        }
+
+        /// <summary>
+        /// Normal-incidence reflectance of the coat film. 0.04 is IOR 1.5 — ordinary lacquer — and is
+        /// the default. Distinct from <see cref="Reflectance"/>, which is the BASE material's F0.
+        /// </summary>
+        public float CoatF0
+        {
+            get => aver_pbr_get_coat_f0(Handle);
+            set => aver_pbr_set_coat_f0(Handle, value);
         }
 
         /// <summary>

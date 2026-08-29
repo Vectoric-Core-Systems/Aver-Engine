@@ -217,6 +217,23 @@ bool parseOcmat(std::string_view text, pbr::MaterialDesc& out, OcMatExtras* extr
                 const f32 v = tokF(t, 2, out.subsurfaceRadius);
                 out.subsurfaceRadius = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
             }
+            // ---- the coat: a clear film over the base material ----
+            // Clamped into [0,1] like the two above, and for the same reason -- a weight outside that
+            // range is an authoring slip, and letting it through gives a lobe that adds energy.
+            else if (equalsCI(p, "coatWeight")) {
+                const f32 v = tokF(t, 2, out.coatWeight);
+                out.coatWeight = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+            }
+            else if (equalsCI(p, "coatRoughness")) {
+                const f32 v = tokF(t, 2, out.coatRoughness);
+                out.coatRoughness = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+            }
+            // Normal-incidence reflectance of the coat film. Clamped to [0,1] as a reflectance must
+            // be; 0.04 (IOR 1.5) is ordinary lacquer and is the default when the key is absent.
+            else if (equalsCI(p, "coatF0")) {
+                const f32 v = tokF(t, 2, out.coatF0);
+                out.coatF0 = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+            }
             else if (equalsCI(p, "alphaCutoff"))          out.alphaCutoff       = tokF(t, 2, out.alphaCutoff);
             // World centimetres per tile; a non-positive value is dropped.
             // slopeBlend <lo> <hi> [layer1UvScale] -- turns the second layer on and says across
@@ -366,6 +383,13 @@ std::string writeOcmat(const pbr::MaterialDesc& d, const OcMatExtras* extras) {
     if (d.subsurfaceWeight > 0.0f)
         s += "PARAM subsurfaceWeight " + num(d.subsurfaceWeight) + "\n"
              "PARAM subsurfaceRadius " + num(d.subsurfaceRadius) + "\n";
+
+    // Gated on coatWeight for exactly the reason stated above, and the other two ride along with it:
+    // a roughness or an F0 with no weight describes a coat that is not there.
+    if (d.coatWeight > 0.0f)
+        s += "PARAM coatWeight " + num(d.coatWeight)    + "\n"
+             "PARAM coatRoughness " + num(d.coatRoughness) + "\n"
+             "PARAM coatF0 " + num(d.coatF0)        + "\n";
 
     bool anyTex = false;
     for (u32 i = 0; i < pbr::kTextureSlotCount; ++i) {

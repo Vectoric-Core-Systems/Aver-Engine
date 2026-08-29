@@ -122,6 +122,12 @@ AVER_PBR_ABI int32_t aver_pbr_set_transmission(aver_pbr_material m, float v);
  * thickness, no separate scatter colour (the transmitted light is tinted by baseColorFactor). */
 AVER_PBR_ABI float   aver_pbr_get_subsurface_weight(aver_pbr_material m);
 AVER_PBR_ABI int32_t aver_pbr_set_subsurface_weight(aver_pbr_material m, float v);
+AVER_PBR_ABI float   aver_pbr_get_coat_weight(aver_pbr_material m);
+AVER_PBR_ABI int32_t aver_pbr_set_coat_weight(aver_pbr_material m, float v);
+AVER_PBR_ABI float   aver_pbr_get_coat_roughness(aver_pbr_material m);
+AVER_PBR_ABI int32_t aver_pbr_set_coat_roughness(aver_pbr_material m, float v);
+AVER_PBR_ABI float   aver_pbr_get_coat_f0(aver_pbr_material m);
+AVER_PBR_ABI int32_t aver_pbr_set_coat_f0(aver_pbr_material m, float v);
 AVER_PBR_ABI float   aver_pbr_get_subsurface_radius(aver_pbr_material m);
 AVER_PBR_ABI int32_t aver_pbr_set_subsurface_radius(aver_pbr_material m, float v);
 
