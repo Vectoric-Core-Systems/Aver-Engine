@@ -535,10 +535,33 @@ float rtShadowSpatial(float centre, float3 wpos, float3 N, float2 pixel, float c
     // steps. Matched to rtReflectionSpatial's kernel deliberately -- two filters over the same
     // geometry with different shapes is a difference someone will eventually have to explain.
     //
-    // THIS CHANGES NOTHING SHIPPED TODAY, and that is worth stating rather than assuming: the radius
-    // comes from Settings::rtShadowDenoise, whose rtShadowDenoiseForQuality returns 0 at EVERY tier
-    // including Epic, so the early return above fires everywhere and none of this executes. It makes
-    // the dial worth turning; it does not turn it.
+    // THIS IS LIVE AT EVERY REAL TIER, AND THE COMMENT THAT USED TO SIT HERE SAID THE OPPOSITE.
+    //
+    // It claimed the change shipped inert, on the grounds that rtShadowDenoiseForQuality returns 0 at
+    // every tier so the early return above fires everywhere. That was simply false, and checkable in
+    // one file: Voxi.cpp returns 2 for Low, Medium and High and 1 for Epic -- only Off and an unknown
+    // tier return 0 -- and Voxi.hpp defaults the struct field to 2 because the DEFAULT TIER IS Medium.
+    // So the radius is 2 out of the box and this kernel runs on every frame that traces a shadow.
+    //
+    // MEASURED, because it was caught by the oracle rather than by reading: re-recording the gates
+    // moved 15 values, and these three in all five ray-tracing-capable configurations, WARP included:
+    //
+    //   penumbra-rt   33,39,48 -> 62,64,66      partially occluded, much brighter
+    //   rt-penumbra   91,88,85 -> 96,93,89      partially occluded, brighter
+    //   ms-rt-gi      52,19,13 -> 38,15,11      the same sunVis feeding the GI-composited path
+    //
+    // and moved shadow-rt/shadow-ms-rt NOT AT ALL. That split is the signature of a reweighting and
+    // is what makes the mechanism legible: in full umbra every accepted tap already reads 0, so any
+    // weighting averages to 0 and the value is pinned. In a penumbra the old flat kernel dragged the
+    // estimate toward far, more-occluded neighbours; the Gaussian discounts them (0.135 at distance
+    // 2, 0.018 at the corner, sigma = 1), so partial shadow lightens. Bit-identical across hardware
+    // and the WARP software rasteriser, over a record and an independent verify pass -- deterministic,
+    // not flaky.
+    //
+    // THE LESSON IS THE FALSE CLAIM, NOT THE FILTER. A change asserted to be inert is a change nobody
+    // reviews as a visual one. If this kernel is ever the wrong choice, that is a judgement to make on
+    // a capture -- but it must be made, and the sentence that used to be here prevented it from being
+    // asked at all.
     const float sigma  = max((float)radius * 0.5, 0.5);
     const float inv2s2 = 1.0 / (2.0 * sigma * sigma);
 
