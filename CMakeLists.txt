@@ -495,6 +495,10 @@ if(AVER_BUILD_TESTS)
   # The editor's preferences store. Unconditional: it depends only on Core and Platform, and its
   # failure mode -- a setting that silently does not persist -- is one nobody ever reports.
   add_subdirectory(tests/editor)
+  # The engine/project boundary. Unconditional, and links only Aver.Core, because what it checks is a
+  # property of the SOURCE TREE rather than of any module: that no game content sits in the engine and
+  # that one file knows where projects live. docs/PROJECTS.md asserts both in prose; this decides them.
+  add_subdirectory(tests/repo)
   # The Roslyn backend, checked against the scanner it falls back from. Unconditional like its module;
   # the test itself skips when averdesign is not staged.
   add_subdirectory(tests/formats.roslyn)
