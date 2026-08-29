@@ -1507,7 +1507,13 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
         bool specHit = false;
         float3 refl = rtReflectionTemporal(i.wpos, N, R, L, i.pos.xy, s.rough,
                                            rtDzdx, rtDzdy, specHit);
-        ind4.specular = lerp(specHit ? refl : skyColor(R), skyColor(R),
+        // ONE skyColor(R), NOT TWO. Both operands of this lerp asked for the same value with the
+        // same argument, and skyColor is a 32-step atmosphere march under a physical sky -- each
+        // step evaluating a Chapman-function sun transmittance. Whether DXC common-subexpressions it
+        // away is not something to leave to chance for a term priced that high, and naming it costs
+        // nothing. Bit-identical output: the same value, read twice instead of computed twice.
+        const float3 skyR = skyColor(R);
+        ind4.specular = lerp(specHit ? refl : skyR, skyR,
                              smoothstep(0.5, 0.75, s.rough));
     } else
 #endif
@@ -1702,7 +1708,28 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {
         // A miss is the sky at the far plane. Depth 1, not 0 -- this engine's projection is not
         // reversed, and writing 0 here would put the sky in front of everything drawn after it.
-        o.col   = float4(skyColor(dir), 1.0);
+        //
+        // skyColorFull, NOT skyColor, AND THE DIFFERENCE IS A WHOLE-SCREEN ATMOSPHERE MARCH.
+        //
+        // This colour is thrown away in every frame that draws a sky. The deferred sky dome runs
+        // right after this pass (D3D12Device.cpp, gated on skyEnabled_ && !frameSuppressed_), it is
+        // a fullscreen triangle with DepthFunc EQUAL against exactly the 1.0 written on the line
+        // below, and it is OPAQUE -- so it overwrites every one of these pixels and none of the
+        // others. That is not incidental, it is the mechanism the dome was deliberately switched to
+        // frameSuppressed_ to get: see its own comment, which records that testing the wrong flag
+        // there "left that mode with no clouds, no atmosphere and no sun".
+        //
+        // So the dome is the RICHER sky -- clouds, atmosphere, sun disc -- and this write is a
+        // placeholder for the case where there is no dome at all. Paying for a per-pixel atmosphere
+        // march to produce a value that is unconditionally overwritten is the most expensive way to
+        // compute nothing, and it got that expensive the moment skyColor started honouring the
+        // physical model: the march was measured at up to 41% of a frame in this engine's own notes.
+        //
+        // WHAT CHANGES, precisely, so this is not a silent behaviour edit: with a sky enabled --
+        // every normal frame -- nothing changes at all, because the pixel is overwritten either way.
+        // With the sky DISABLED, the ray-driven background is the authored gradient rather than a
+        // marched atmosphere, which is what this line produced before skyColor was changed today.
+        o.col   = float4(skyColorFull(dir), 1.0);
         o.depth = 1.0;
 #if AVER_GBUFFER
         // A miss is the sky at the far plane -- there is no real surface here, so there is no true
@@ -2133,7 +2160,13 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         bool specHit = false;
         float3 refl = rtReflectionTemporal(wpos, N, R, L, i.pos.xy, s.rough,
                                            rdReflDzdx, rdReflDzdy, specHit);
-        ind.specular = lerp(specHit ? refl : skyColor(R), skyColor(R),
+        // ONE skyColor(R), NOT TWO. Both operands of this lerp asked for the same value with the
+        // same argument, and skyColor is a 32-step atmosphere march under a physical sky -- each
+        // step evaluating a Chapman-function sun transmittance. Whether DXC common-subexpressions it
+        // away is not something to leave to chance for a term priced that high, and naming it costs
+        // nothing. Bit-identical output: the same value, read twice instead of computed twice.
+        const float3 skyR = skyColor(R);
+        ind.specular = lerp(specHit ? refl : skyR, skyR,
                             smoothstep(0.5, 0.75, s.rough));
     } else if (gVoxelParams.w > 0.5) {
         // PSMainVoxi's OWN voxel-cone fallback, for exactly the surfaces PSMainVoxi itself would also

@@ -421,10 +421,6 @@ float3 skyColorFull(float3 dir)
     return lerp(above, averGroundRadiance(), g);
 }
 // The dome, as every shading path names it.
-float3 skyColor(float3 dir){
-    if (averFurnaceOn()) return averFurnaceL();
-    return skyColorFull(dir);
-}
 
 // The sky along one view ray, marched through the physical model.
 //
@@ -565,6 +561,39 @@ float3 averSkyPhysical(float3 dir) {
     // same haze colour the sky immediately above the horizon is already drawing, so there is no seam
     // to paper over with a second blend.
     return sky;
+}
+
+// skyColor lives BELOW averSkyPhysical, not beside skyColorFull where it reads more naturally,
+// because it now calls it and HLSL has no forward declarations -- a function must be defined
+// before the line that uses it or the runtime DXC compile fails, on a build that reported
+// success. Moved rather than duplicated.
+float3 skyColor(float3 dir){
+    if (averFurnaceOn()) return averFurnaceL();
+    // THE SKY A MIRROR SEES IS THE SKY YOU SEE, and until now it provably was not.
+    //
+    // SkyModel::Physical is the DEFAULT (RHI.hpp), so the dome on screen is a marched atmosphere:
+    // azimuth-aware, brighter toward the sun, Rayleigh-graded. This function -- the one EVERY
+    // reflection in the engine falls back to, for glass, water, metal and the ray-traced reflection
+    // miss -- returned averSkyAbove instead: lerp(horizon, zenith, f(dir.z)). Elevation only. No
+    // azimuth term at all.
+    //
+    // So a near-mirror reflected a smooth vertical gradient while the sky behind it had structure,
+    // and the two did not match. That is the whole reason authored glass in this engine has read as
+    // flat tinted plastic no matter how correct its Fresnel was: the reflection was real, weighted
+    // properly and undimmed by alpha -- it was a reflection of NOTHING. Diagnosed from a PTTest
+    // capture, not from the code: the panes were uniform sheets under a visibly graded sky.
+    //
+    // GATED ON averAtmoOn(), the same switch averFogInscatter already branches on a few lines below,
+    // so an authored sky keeps the authored dome in its reflections and nothing changes for it.
+    //
+    // THE COST IS A MARCH, AND IT IS NOT FREE. This file records averSkyPhysical measuring 85% of
+    // the scene pass and 41% of the frame before the fog path learned to defer it behind a w > 0.01
+    // threshold. There is no equivalent threshold available here: a reflection either needs the sky
+    // or does not, and the caller already decided that. Measure the frame before and after rather
+    // than assuming this is small -- and if it is not, the answer is a cheaper directional
+    // approximation of the same atmosphere, not a return to a gradient that does not match the sky.
+    if (averAtmoOn()) return averSkyPhysical(dir);
+    return skyColorFull(dir);
 }
 
 // ---- fog ---------------------------------------------------------------------------------------
