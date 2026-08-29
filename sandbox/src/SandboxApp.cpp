@@ -12427,6 +12427,40 @@ private:
         // 0..0.2 covers water (~0.02) through gemstone (~0.17).
         changed |= ImGui::SliderFloat("Reflectance", &d->reflectance, 0.0f, 0.2f, "%.3f");
         changed |= ImGui::SliderFloat("Grazing (f90)", &d->f90, 0.0f, 1.0f);
+
+        // IOR AND REFLECTANCE ARE THE SAME PHYSICAL FACT TWICE, which is why this control reports the
+        // disagreement instead of quietly letting the two drift. F0 = ((1-n)/(1+n))^2, so 1.52 glass
+        // implies 0.0426; a surface whose reflectance says one substance and whose ior says another
+        // reflects an amount its own refraction calls impossible, and the error is invisible until
+        // someone looks at a grazing angle or crosses the critical angle.
+        //
+        // REPORTED, NOT ENFORCED. Clamping reflectance to the ior would take away a knob authors
+        // legitimately reach for -- a thin film or a coated lens really does deviate -- so the panel
+        // says what physics expects and leaves the choice.
+        changed |= ImGui::SliderFloat("IOR", &d->ior, 1.0f, 2.5f, "%.3f");
+        {
+            const float n  = d->ior <= 0.0f ? 1.0f : d->ior;
+            const float f0 = ((1.0f - n) / (1.0f + n)) * ((1.0f - n) / (1.0f + n));
+            if (std::fabs(f0 - d->reflectance) > 0.005f) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(1.00f, 0.62f, 0.15f, 1.0f), "= F0 %.3f", f0);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("This IOR implies Reflectance %.3f, but it is set to %.3f.\n"
+                                      "Deliberate for a coated or thin-film surface; a mistake otherwise.",
+                                      f0, d->reflectance);
+            }
+        }
+        // Transmission is the SUBSTRATE's property and applies whether or not the material is
+        // blended: it scales the diffuse lobe (a transmissive surface must not also scatter its full
+        // base colour back at you) and, on a blended material, pulls coverage toward 1 - transmission.
+        changed |= ImGui::SliderFloat("Transmission", &d->transmission, 0.0f, 1.0f);
+        if (d->transmission > 0.0f && d->alphaMode != pbr::AlphaMode::Blend) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(1.00f, 0.62f, 0.15f, 1.0f), "(opaque)");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Transmission still dims the diffuse lobe here, but this material is\n"
+                                  "not BLEND translucent, so nothing will be visible THROUGH it.");
+        }
         // WEIGHT is the on/off: 0 skips the wrap-diffuse and back-scatter terms entirely (see
         // MaterialFlag_Subsurface in MaterialGpu.cpp), so RADIUS -- which only widens the
         // back-scatter lobe those terms produce -- has nothing to widen until Weight is above 0.

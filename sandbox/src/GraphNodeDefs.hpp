@@ -1031,7 +1031,7 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
 
     // -- OUTPUT: the one sink a material graph has. NO OUTPUT PINS AT ALL -- nothing ever reads a
     //    MaterialOutput, by construction, since it is where the backward walk that reads everything
-    //    else in the graph starts. AND NO DEFAULT VALUE ON ANY OF ITS TEN INPUTS -- that emptiness
+    //    else in the graph starts. AND NO DEFAULT VALUE ON ANY OF ITS TWELVE INPUTS -- that emptiness
     //    is load-bearing, not an oversight: compileMaterialGraph treats an input as DRIVEN when it is
     //    linked OR carries a NON-EMPTY literal, so a default here would make a freshly spawned
     //    MaterialOutput drive all eight fields the moment it exists, destroying the partial-graph
@@ -1049,7 +1049,11 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         // subsurface read correctly is a MASK -- thin parts of a mesh scatter more than thick ones.
         // Driving SubsurfaceRadius from a texture is the difference between a uniformly waxy object
         // and one whose ears and fingers light up. Same no-default rule as every pin above.
-        pin("SubsurfaceWeight", "float", false), pin("SubsurfaceRadius", "float", false)},
+        pin("SubsurfaceWeight", "float", false), pin("SubsurfaceRadius", "float", false),
+        // The dielectric pair. Driving Transmission from a mask is one mesh that is a clear window
+        // with a frosted band, or a bottle with an opaque label, instead of two meshes and two
+        // materials. Ior is per-pixel for the same reason, though it moves far less often.
+        pin("Ior", "float", false), pin("Transmission", "float", false)},
         {}, kDomainMaterial});
 
     return t;

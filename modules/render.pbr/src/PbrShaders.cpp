@@ -52,8 +52,10 @@ cbuffer AverMaterial : register(b2) {
 
     // Mirrors MaterialConstants::ior/transmission -- see that struct's comment for why the two
     // fields are not independent, and averBuildSurface below for the one thing gTransmission
-    // currently feeds (the AVER_MAT_ALPHA_BLEND coverage term). gIor rides along unread by anything
-    // in this file; nothing here does refraction.
+    // currently feeds (the AVER_MAT_ALPHA_BLEND coverage term). gIor is no longer unread: it sets the
+    // critical angle in averTotalInternalReflection. Both are copied into AverAuthored rather than
+    // read directly at their use sites, so a material graph can drive either per pixel; still nothing
+    // here does refraction.
     float  gIor;
     float  gTransmission;
     // EXPLICIT PADDING, MIRRORING MaterialConstants::_pad0/_pad1. Not load-bearing for THIS cbuffer
@@ -393,6 +395,11 @@ struct AverAuthored {
     // radius is the difference between a uniformly waxy object and one whose thin parts glow.
     float  subsurfaceWeight;
     float  subsurfaceRadius;
+    // The dielectric pair, here for the same reason subsurface is: a value read straight off the
+    // constant buffer is a value no material GRAPH can ever drive. Driving transmission from a mask
+    // is how one mesh becomes a window with a frosted band, or a bottle with a label.
+    float  ior;
+    float  transmission;
 };
 
 // What the stock material path authors: the five maps, blended by slope, times the b2 factors.
@@ -416,6 +423,8 @@ AverAuthored averStockAuthored(float2 uv, float3 geoN) {
     // value the author explicitly asked for.
     a.subsurfaceWeight = (gMaterialFlags & AVER_MAT_SUBSURFACE) ? saturate(gSubsurfaceWeight) : 0.0;
     a.subsurfaceRadius = (gMaterialFlags & AVER_MAT_SUBSURFACE) ? saturate(gSubsurfaceRadius) : 0.0;
+    a.ior              = gIor;
+    a.transmission     = gTransmission;
     return a;
 }
 
@@ -493,7 +502,7 @@ AverSurface averBuildSurface(AverVertex v, AverLight l, AverAuthored a, float2 u
     // it is a substrate property, not a blend mode -- and this must stay one rule rather than a glass
     // special case. It is a no-op for every material authored before the field existed, because
     // MaterialDesc::transmission defaults to 0.
-    s.kdAlbedo = (1.0 - s.metallic) * s.albedo * (1.0 - saturate(gTransmission));
+    s.kdAlbedo = (1.0 - s.metallic) * s.albedo * (1.0 - saturate(a.transmission));
     // GATED ON THE FLAG, not on the float, so the whole subsurface branch folds away for every
     // material that does not want it.
     s.backFace  = v.backFace;
@@ -549,7 +558,7 @@ AverSurface averBuildSurface(AverVertex v, AverLight l, AverAuthored a, float2 u
         // is zero and s.alpha passes through completely unchanged, which is what keeps this whole
         // branch a no-op for every material authored before this field existed (their transmission
         // defaults to 0 -- see MaterialDesc::transmission).
-        float baseAlpha = lerp(s.alpha, 1.0 - gTransmission, saturate(gTransmission));
+        float baseAlpha = lerp(s.alpha, 1.0 - a.transmission, saturate(a.transmission));
 
         // s.F above is evaluated at the HALF VECTOR for the current light's direct specular term, so
         // it swings with every light in the scene and with l.direction, which is a poor knob for
@@ -568,7 +577,7 @@ AverSurface averBuildSurface(AverVertex v, AverLight l, AverAuthored a, float2 u
         // the surface reads as a full mirror and its coverage is complete, whatever the authored
         // transmission said. gIor finally has a consumer here: it has ridden along in this cbuffer
         // since it was added, read by nothing (see its declaration's own comment, which says so).
-        if (averTotalInternalReflection(s.ndv, gIor, s.backFace)) fresnelLum = 1.0;
+        if (averTotalInternalReflection(s.ndv, a.ior, s.backFace)) fresnelLum = 1.0;
         s.alpha = lerp(baseAlpha, 1.0, saturate(fresnelLum));
     }
 
