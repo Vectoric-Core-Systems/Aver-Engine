@@ -58,3 +58,10 @@ disables the pass entirely, 4 is the unmodified default). For isolating shadowPa
 real quality setting -- do not wire this to the editor or a project manifest.")
 target_compile_definitions(Aver.Render.Voxi.Renderer PRIVATE
     AVER_VOXI_SHADOW_CASCADE_LIMIT=${AVER_VOXI_SHADOW_CASCADE_LIMIT})
+
+# HLSL beside the executable, refreshed on every build. Mirrors modules/rhi/CMakeLists.txt --
+# see ShaderFiles.hpp for why bin/shaders is the only path a shipped build looks at.
+add_custom_command(TARGET Aver.Render.Voxi.Renderer POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+          "${CMAKE_CURRENT_SOURCE_DIR}/shaders" "${CMAKE_BINARY_DIR}/bin/shaders"
+  COMMENT "Aver.Render.Voxi.Renderer: shaders -> bin/shaders")

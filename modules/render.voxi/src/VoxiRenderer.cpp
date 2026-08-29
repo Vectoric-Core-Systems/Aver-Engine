@@ -10,6 +10,7 @@
 #include "aver/voxi/VoxiGiShaders.hpp"   // kGiSrvCount/kGiUavCount: the "typed twice" fix below
 
 #include "VoxiShaders.hpp"
+#include "aver/rhi/ShaderFiles.hpp"
 
 #include <algorithm>
 #include <cfloat>
@@ -203,6 +204,25 @@ rhi::PipelineLayout giLayout() {
 // contain a single graph. Keyed on the revision rather than the content so the common case -- no
 // graphs at all, which is every project that exists today -- rebuilds nothing and produces byte for
 // byte what it always did.
+// Voxi's shader body, read from shaders/voxi.hlsl.
+//
+// THE ACCESSOR IS HERE AND NOT IN VoxiShaders.hpp ON PURPOSE. That header is a text container, and
+// tests/render.voxi/src/VoxiRtSeqTest.cpp includes it directly to strstr the shader source -- its
+// own CMakeLists says "It links Aver.Core and nothing else". Putting rhi::verifiedShaderFile in the
+// header would drag Aver.RHI into a test that deliberately depends on nothing but Core: the same
+// coupling this module splits itself in two to avoid (see the Aver.Render.Voxi /
+// Aver.Render.Voxi.Renderer split). The renderer already links Aver.RHI; the header should not.
+//
+// kVoxiHLSL stays the migration ORACLE -- verifiedShaderFile proves the file equals it byte for
+// byte. WHEN THE LITERAL IS DELETED, VoxiRtSeqTest MUST READ THE FILE INSTEAD: plain file I/O
+// against AVER_REPO_ROOT, the way tests/repo/src/SeparationTest.cpp already reads source, so it
+// still needs no RHI. That is a real follow-up, not a detail -- the test exists to keep a C++
+// mirror tied to the shader text, and it cannot do that against a literal that no longer exists.
+const char* voxiHlsl() {
+    static const std::string s = rhi::verifiedShaderFile("voxi.hlsl", voxi::kVoxiHLSL);
+    return s.c_str();
+}
+
 const char* voxiShaderPrelude() {
     static std::string s;
     static u64 built = ~0ull;
@@ -242,7 +262,7 @@ struct ShaderScope {
     rhi::ShaderHandle operator()(const char* entry, rhi::ShaderStage stage, u32 sm,
                                  const char* defines) {
         rhi::ShaderDesc sd;
-        sd.source  = kVoxiHLSL;
+        sd.source  = voxiHlsl();
         sd.prelude = voxiShaderPrelude();
         sd.entry   = entry;
         sd.stage   = stage;
