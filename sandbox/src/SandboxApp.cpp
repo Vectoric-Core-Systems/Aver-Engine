@@ -13855,6 +13855,38 @@ private:
             ImGui::BeginDisabled(st != Status::Ready);
             if (ImGui::Checkbox("Use mesh shaders", &s.meshShaders)) changed = true;
             ImGui::EndDisabled();
+
+            ImGui::Separator();
+            // THE LAYERED BSDF LIVES ON THIS PAGE, not on one of its own, because it is not a
+            // feature that renders something extra -- it changes what EVERY material-shaded draw
+            // computes, which is the same kind of statement MSAA and mesh shaders make.
+            //
+            // IT DOES NOT TAKE EFFECT UNTIL THE PROJECT IS RELOADED, and that is said on the control
+            // rather than left to be discovered. Off compiles the coat lobe out entirely, so the two
+            // settings are two different sets of shaders; VoxiRenderer builds those once and latches
+            // which it built (see its setSettings). A live toggle would mean doubling a 20+ PSO
+            // matrix at startup for every project, including the ones that never turn this on --
+            // which is exactly the cost this design exists to avoid.
+            const Status lst = vx.status(Feature::LayeredBsdf);
+            ImGui::TextUnformatted(Renderer::featureName(Feature::LayeredBsdf));
+            featureStatusBadge(vx, Feature::LayeredBsdf);
+            ImGui::BeginDisabled(lst != Status::Ready);
+            int lq = static_cast<int>(s.layeredBsdf);
+            const char* lqs[] = {"Off","Low","Medium","High","Epic"};
+            if (ImGui::Combo("Shading model", &lq, lqs, 5)) {
+                s.layeredBsdf = static_cast<Quality>(lq);
+                changed = true;
+            }
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Off is the standard BRDF. Any other setting adds a clear-coat lobe "
+                                  "over the base for materials that author one -- a material with "
+                                  "coat weight 0 renders identically either way.");
+            // Compared against what the RENDERER latched, not against the last value this combo
+            // wrote, so it is still shown after the settings window is closed and reopened.
+            if ((s.layeredBsdf != Quality::Off) != voxiRenderer_.layeredBsdfActive())
+                ImGui::TextWrapped("Takes effect when the project is reloaded; the shaders compiled "
+                                   "for this session are unchanged.");
         }
 
         if (page == 2) {

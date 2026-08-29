@@ -104,6 +104,12 @@ public:
     void setGiUpdateInterval(u32 n);
     u32  giUpdateInterval() const { return giUpdateInterval_; }
 
+    // WHAT THE SHADERS WERE ACTUALLY COMPILED FOR, which is not the same question as what
+    // Settings::layeredBsdf currently holds. The setting can be changed at any time; the pipelines
+    // were built once, and this reports what they contain. The editor compares the two to decide
+    // whether to say a reload is needed -- see the Shading model combo on the Rendering page.
+    bool layeredBsdfActive() const { return layeredBsdf_; }
+
     // Turns on the frame-period report. See rtShadowRays_ for what it is for and what it is not.
     void setFrameTimeReport(bool on) { frameTimeReport_ = on; }
 
