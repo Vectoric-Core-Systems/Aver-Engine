@@ -104,10 +104,17 @@ AVER_PBR_ABI int32_t aver_pbr_set_f90(aver_pbr_material m, float v);
  * ceilinged well past diamond; transmission is how optically see-through the substrate is, in [0,1].
  *
  * BOTH REACHED THE GPU LONG BEFORE THEY REACHED THIS HEADER, which is the reason they are being
- * added now rather than when they were introduced: a field with a parser, a writer, a GPU packing
- * and a shader consumer but no ABI is one a script cannot read or write at all. ior in particular
- * now has real consumers -- averTotalInternalReflection in PbrShaders.cpp keys the critical angle
- * off it -- so authoring it from script is no longer a theoretical want.
+ * added now rather than when they were introduced: a field with a parser, a writer and a GPU
+ * packing but no ABI is one a script cannot read or write at all.
+ *
+ * WHAT IOR ACTUALLY DRIVES TODAY: NOTHING IN THE SHADING. This comment used to say it keyed the
+ * critical angle for total internal reflection, via averTotalInternalReflection in PbrShaders.cpp.
+ * That function no longer exists -- it was removed because a parallel-sided pane viewed from outside
+ * CANNOT total-internally-reflect: Snell bounds the internal angle at asin(1/n), which is the
+ * critical angle itself, so the test could never fire for the case it was written for. ior is
+ * parsed, packed, uploaded, exposed here, and drivable from a material graph pin; it is read by no
+ * shading term. Stated rather than quietly left, because a stale "this has real consumers" is worse
+ * than no comment -- it is what made the claim survive in three separate files.
  *
  * NEITHER IS CLAMPED ON THIS PATH, exactly like reflectance/f90/subsurface above: commit() calls
  * touch(), not sanitise(). An out-of-range value written here survives until the next load or pack

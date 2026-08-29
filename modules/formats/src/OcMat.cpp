@@ -256,6 +256,18 @@ bool parseOcmat(std::string_view text, pbr::MaterialDesc& out, OcMatExtras* extr
                 const f32 v = tokF(t, 2, out.uvTiling);
                 if (v > 0.0f) out.uvTiling = v;
             }
+            // AN UNRECOGNISED PARAM IS SAID OUT LOUD, matching what TEX already does for an unknown
+            // slot a few lines below. Until now this chain simply ended, so `PARAM coatWieght 1.0`
+            // -- or any key from a newer engine than the one reading the file -- was dropped in
+            // total silence and the material rendered with the default, which looks exactly like a
+            // shading bug and is nothing of the kind.
+            //
+            // A WARNING RATHER THAN A PARSE FAILURE, deliberately: an older engine opening a newer
+            // .ocmat should still load the material it can understand. Loud, and not fatal.
+            else {
+                AVER_WARN("[ocmat] unknown PARAM '{}' — ignored. Either it is a typo, or this file "
+                          "was written by a newer engine than the one reading it.", std::string(p));
+            }
         } else if (equalsCI(key, "TEX")) {
             if (t.size() < 3) continue;
             TextureSlot slot{};

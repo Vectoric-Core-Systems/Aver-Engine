@@ -217,10 +217,16 @@ public static class Pbr
         /// Refractive index of the substrate. 1.0 is vacuum and the floor; water is about 1.33,
         /// window glass about 1.5, diamond about 2.42.
         ///
-        /// Read by the shading path in two places, so this is not a stored-and-ignored number:
-        /// it sets the critical angle for total internal reflection, and it is the physical quantity
-        /// <see cref="Reflectance"/> is derived from — writing one without the other can describe a
-        /// substance that does not exist.
+        /// NOT read by any shading term today, and this doc used to claim two consumers it does not
+        /// have. It said ior sets the critical angle for total internal reflection: the function
+        /// that did so was removed, because a parallel-sided pane seen from outside can never total-
+        /// internally-reflect (Snell bounds the internal angle at asin(1/n), the critical angle
+        /// itself). And it said <see cref="Reflectance"/> is derived from ior: it is not — the two
+        /// are authored independently, and nothing reconciles them.
+        ///
+        /// It is parsed, packed, uploaded and drivable from a material graph pin, so setting it is
+        /// not lost; it simply does not change what you see yet. Set <see cref="Reflectance"/> for
+        /// that.
         /// </summary>
         public float Ior
         {

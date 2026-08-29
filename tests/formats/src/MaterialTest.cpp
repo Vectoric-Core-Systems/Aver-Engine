@@ -127,6 +127,19 @@ static void testTolerance() {
           "PARAM uvTiling 0 is tolerated");
     check(d.uvTiling > 0.0f, "...but not stored: the default survives");
 
+    // AN UNRECOGNISED PARAM LOADS AND WARNS, exactly as the unknown TEX slot above does. Both
+    // halves matter. The parse must SUCCEED, so an older engine can open a material written by a
+    // newer one and keep the keys it does understand. And the warning must exist: until it did,
+    // this chain simply ended, so a typo like `coatWieght` was dropped in total silence and the
+    // material rendered with the default -- which looks exactly like a shading bug and is not one.
+    //
+    // The message goes to the log rather than to `err`, so what is asserted here is the contract:
+    // it loads, it does not fail, and it leaves the value alone rather than half-applying it.
+    check(fmt::parseOcmat("OCMAT 1\nPARAM coatWieght 0.9\n", d, nullptr, &err),
+          "a file with an unrecognised PARAM still LOADS -- forward compatibility");
+    check(d.coatWeight == 0.0f,
+          "...and the misspelled key stored nothing, so the default stands");
+
     // The SECOND LAYER: three texture slots plus the slope band they fade in across. This is what
     // lets terrain be rock on cliffs and litter on flats without the landscape owning a shader.
     {

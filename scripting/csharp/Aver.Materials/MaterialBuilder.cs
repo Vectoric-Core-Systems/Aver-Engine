@@ -2,6 +2,7 @@
 // Developed by Vectoric-Core-Systems. All rights reserved.
 // Proprietary. See LICENSE.md at the repository root.
 // Declares one material and emits the .ocmat text the engine reads.
+using System;
 using System.Globalization;
 using System.Text;
 
@@ -173,7 +174,19 @@ public sealed class MaterialBuilder
         foreach (string c in _comments) s.Append("# ").Append(c).Append('\n');
 
         s.Append("NAME ").Append(_name).Append('\n');
-        s.Append("SHADER ").Append(_shader == Shading.Standard ? "standard" : "standard").Append('\n');
+        // BOTH ARMS OF THE TERNARY THIS REPLACES WERE "standard". Harmless while Shading has one
+        // member, and a silent data-loss bug the moment it has two: a material authored with a
+        // second shading model would emit "standard" and nobody would be told. A switch that throws
+        // on an unhandled member turns that into a loud failure at the moment the member is added,
+        // which is the only moment anyone can act on it.
+        s.Append("SHADER ").Append(_shader switch
+        {
+            Shading.Standard => "standard",
+            _ => throw new NotSupportedException(
+                     $"MaterialBuilder cannot write Shading.{_shader} -- this writer and the "
+                     + "grammar in modules/formats/src/OcMat.cpp must both learn a new shading "
+                     + "model before one can be authored."),
+        }).Append('\n');
 
         s.Append("BLEND ");
         s.Append(_blend switch
