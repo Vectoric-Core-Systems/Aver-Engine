@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <deque>      // pipelines_ -- see its declaration for why it is not a vector
 #include <string>
 #include <utility>
 #include <vector>
@@ -2028,7 +2029,32 @@ private:
     std::vector<RhiTexture>    textures_;
     std::vector<RhiBuffer>     buffers_;
     std::vector<RhiShader>     shaders_;
-    std::vector<RhiPipeline>   pipelines_;
+    // std::deque, NOT std::vector, AND THE ODD ONE OUT AMONG ITS NEIGHBOURS ON PURPOSE.
+    //
+    // D3D12RenderContext::setPipeline caches a raw `const RhiPipeline* pipe_` -- &pipelines_[h-1] --
+    // and reads root-parameter indices back through it for the rest of the pass: setBindingSet,
+    // setConstants, setConstantBuffer, applyDrawBinding, drawMeshInstanced, dispatchMeshFor,
+    // dispatchMeshClusters and dispatch all dereference it. Those indices go straight into
+    // SetGraphicsRootDescriptorTable and friends, so a stale read does not fault -- it feeds the
+    // driver a plausible-looking root parameter that belongs to nothing, and the command list is
+    // already recorded by the time anyone finds out.
+    //
+    // A vector's push_back relocates every element when it grows, and pipelines ARE created while a
+    // command list is recording. Measured, not assumed: an ordinary 60-frame editor run relocates
+    // this table twelve times, and on the twelfth -- the 95th pipeline, capacity 94 -> 141 -- the
+    // context is holding a pipe_ that the relocation has just freed. Same result on every run. What
+    // saves it today is only that the next setPipeline overwrites pipe_ before anything reads it;
+    // nothing enforces that ordering, and OcclusionCuller::ensureSized creates three PSOs from
+    // inside the per-frame entity walk whenever the scene resolution changes.
+    //
+    // deque::push_back never invalidates pointers or references to existing elements (it invalidates
+    // iterators, and nothing here holds one across a push_back), so the cached pointer simply cannot
+    // go stale. The alternative -- re-resolving the handle at every read -- means touching nine call
+    // sites and trusting the tenth to remember; this makes the mistake impossible instead.
+    //
+    // Its neighbours below stay vectors deliberately: nothing caches a raw element pointer into any
+    // of them across a call that could grow them, which is the whole of the hazard.
+    std::deque<RhiPipeline>    pipelines_;
     std::vector<RhiBindingSet> bindingSets_;
     std::vector<RhiBlas>       blases_;
     std::vector<RhiTlas>       tlases_;

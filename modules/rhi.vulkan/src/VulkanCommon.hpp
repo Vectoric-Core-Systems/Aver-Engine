@@ -101,6 +101,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstring>
+#include <deque>      // pipelines_ -- see its declaration for why it is not a vector
 #include <functional>
 #include <cstdlib>
 #include <string>
@@ -2003,7 +2004,21 @@ private:
     std::vector<RhiTexture>    textures_;
     std::vector<RhiBuffer>     buffers_;
     std::vector<RhiShader>     shaders_;
-    std::vector<RhiPipeline>   pipelines_;
+    // std::deque, NOT std::vector -- the same reason, and the same defect, as its D3D12 twin.
+    // VulkanRenderContext caches a raw `const RhiPipeline* pipe_` from &pipelines_[h-1] and reads
+    // descriptor-set and push-constant indices back through it for the rest of the recording, so a
+    // push_back that reallocates the table while a command buffer is open leaves it pointing at
+    // freed memory. There are FOUR growth sites here rather than D3D12's two.
+    //
+    // Measured on the D3D12 side, where the backend can actually be run: an ordinary 60-frame
+    // editor session relocates that table twelve times, and one of those relocations happens while
+    // a pipeline is bound. Nothing about that is D3D12-specific -- it is the container.
+    //
+    // Fixed here at the same time deliberately. This backend is OFF by default (AVER_RHI_VULKAN),
+    // so the bug is not reachable in a stock build, and it has therefore had no chance to announce
+    // itself; leaving a known defect in the copy nobody runs is how the two backends drift.
+    // Compile-verified with -DAVER_RHI_VULKAN=ON; NOT run, because this backend has no editor UI.
+    std::deque<RhiPipeline>    pipelines_;
     std::vector<RhiBindingSet> bindingSets_;
     std::vector<RhiBlas>       blases_;
     std::vector<RhiTlas>       tlases_;
