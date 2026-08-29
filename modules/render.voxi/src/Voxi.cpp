@@ -57,6 +57,16 @@ void Renderer::setSettings(const Settings& s) {
         n.meshShaders = false;
     }
 
+    // Clamped exactly like the four above it, and for the same reason -- a setting that a device or a
+    // half-built feature cannot honour must not keep a value that says otherwise. While
+    // status(LayeredBsdf) is NotImplemented this pins the field to Off, so nothing downstream has to
+    // ask whether the value it is reading is real, and a project manifest carrying a stale rung is
+    // reported once by refuse() rather than acted on.
+    if (status(Feature::LayeredBsdf) != Status::Ready) {
+        if (n.layeredBsdf != Quality::Off) refuse(Feature::LayeredBsdf);
+        n.layeredBsdf = Quality::Off;
+    }
+
     // Quality tiers used to leave voxelResolution completely alone -- selecting Epic cost nothing
     // extra because nothing read the tier to size the grid. When the caller changes the GI tier and
     // leaves voxelResolution exactly as it already was -- the common case: the editor's Quality
@@ -164,6 +174,20 @@ Status Renderer::status(Feature f) const {
             if (device_.meshShaderTier == 0 || device_.shaderModel < 65 || !device_.dxcAvailable)
                 return Status::Unsupported;
             return Status::Ready;
+        case Feature::LayeredBsdf:
+            // NotImplemented, and it will say so in the UI until the lobe exists.
+            //
+            // The setting, its ladder, its manifest field and its clamp are all real from this commit;
+            // the shading is not. Reporting Ready here would put a combo in front of someone that
+            // changes a persisted, C#-scriptable value and alters not one pixel -- which is exactly
+            // what Feature::PathTracing did in reverse for a long time (see its arm above: it returned
+            // NotImplemented unconditionally long after a real path tracer existed, leaving its combo
+            // permanently grey and clamping the setting to Off on every device forever). One arm of
+            // this switch lying in each direction is enough history to learn from.
+            //
+            // There is nothing device-dependent to check yet. When the lobe lands this needs a real
+            // capability gate or an honest statement that it has none.
+            return Status::NotImplemented;
         default: return Status::Unsupported;
     }
 }
@@ -192,6 +216,7 @@ const char* Renderer::featureName(Feature f) {
         case Feature::RayTracing:         return "Ray Tracing";
         case Feature::PathTracing:        return "Path Tracing";
         case Feature::MeshShaders:        return "Mesh Shaders";
+        case Feature::LayeredBsdf:        return "Layered BSDF";
         default: return "?";
     }
 }

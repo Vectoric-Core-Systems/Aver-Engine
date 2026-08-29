@@ -25,7 +25,8 @@ enum class Msaa : u32 { Off = 1, X2 = 2, X4 = 4, X8 = 8 };
 enum class Quality : u32 { Off = 0, Low = 1, Medium = 2, High = 3, Epic = 4 };
 
 // The features Voxi owns settings for.
-enum class Feature : u32 { Msaa = 0, GlobalIllumination, RayTracing, PathTracing, MeshShaders, Count };
+enum class Feature : u32 { Msaa = 0, GlobalIllumination, RayTracing, PathTracing, MeshShaders,
+                          LayeredBsdf, Count };
 
 // Whether a feature is usable: implemented and supported, declared but not implemented yet, or
 // refused by the device.
@@ -82,6 +83,23 @@ struct Settings {
     // is still the renderer's defect, and it is tracked. Nothing about it is hardware-specific.
     Quality rayTracing         = Quality::Medium;
     Quality pathTracing        = Quality::Off;
+
+    // A LAYERED BSDF ALONGSIDE THE STANDARD BRDF, not instead of it. Off is today's
+    // metallic-roughness Cook-Torrance response, byte for byte; the rungs above it add a coat lobe
+    // over the existing base and, later, further layers.
+    //
+    // A Quality rather than a bool because the layers genuinely ladder: a coat evaluated with its own
+    // GGX and split-sum environment term is not free, and a project should be able to ask for the
+    // cheap version. Off is not "the feature is broken", it is a real, supported, and currently
+    // default answer -- the same shape pathTracing has.
+    //
+    // NOT LIVE-SWITCHABLE, and that is a deliberate limitation rather than an oversight.
+    // VoxiRenderer builds twenty-odd raster PSOs at init, compiled through DXC at runtime with no
+    // disk cache; compiling a second matrix for a layered variant would double that on every launch
+    // of every project, including ones that never turn this on. So the value is read once, before
+    // the pipelines are built, and changing it takes a project reload. Making it free when Off
+    // matters more than making it instant.
+    Quality layeredBsdf        = Quality::Off;
     bool    meshShaders        = false;
 
     // Cubic voxel grid edge; the volume's memory and per-voxel GPU cost are both O(this^3). Defaults
