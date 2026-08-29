@@ -468,6 +468,10 @@ if(AVER_BUILD_TESTS)
   add_subdirectory(tests/render.ui)
   # The actor preview, for the same reason and by the same means.
   add_subdirectory(tests/render.actorpreview)
+  # The layered BSDF's coat lobe. Unconditional, like the PBR material system it belongs to, and
+  # needed because "does this coat add energy" is a question about arithmetic that a rendered image
+  # cannot answer -- a plate 3% too bright still looks like a plate.
+  add_subdirectory(tests/render.pbr)
   # Unconditional, like the module.
   add_subdirectory(tests/audio)
   # The atmosphere model. Unconditional because Aver.RHI always exists, and needed because the sky

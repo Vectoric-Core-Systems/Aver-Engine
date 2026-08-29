@@ -745,6 +745,49 @@ float3 averShadeDirect(float3 radiance, AverSurface s, AverLight l) {
 // has no prior output to match, sums the same four terms into its two buckets instead -- see its own
 // comment for why that makes it the one place in this pair that is a documented approximation rather
 // than a provable identity.
+#ifdef AVER_LAYERED_BSDF
+// ================= THE COAT: a second specular layer over everything the base returns =================
+//
+// A clear film on top of the base material -- car paint, varnish, a wet stone. The base keeps its own
+// metallic/roughness response; the coat adds a smoother GGX lobe over it and ATTENUATES what shows
+// through by its own Fresnel, which is the only thing that makes this energy-conserving rather than
+// energy-adding.
+//
+// COMPILED ONLY UNDER AVER_LAYERED_BSDF. A project whose Settings::layeredBsdf is Off gets a shader
+// with none of this in it -- not a branch that evaluates to zero, no register pressure, nothing. That
+// is what makes "costs nothing when off" a fact about the compiled code rather than a hope.
+//
+// ONE FACTOR OF (1 - Fc), NOT TWO, AND IT IS THE WHOLE CORRECTION. The obvious composition attenuates
+// by (1 - Fc(ndv)) twice, once for light entering the coat and once for it leaving. That is right for
+// a transmitted path through a slab and WRONG here: averEnvBRDF already integrates the full
+// hemisphere-to-eye response, so a second factor charges the base twice for the same interface. It was
+// written that way first and tests/render.pbr/src/CoatEnergyTest.cpp caught it -- a furnace plate
+// visibly darker than its background at every roughness -- before any of this reached a GPU.
+//
+// The arithmetic below is mirrored in that test, which also asserts this function exists. If you
+// change the composition here, change it there; the test reads this file and will say so if you do not.
+void averCoatTerms(AverSurface s, AverIndirect ind, float coatWeight, float coatRough, float coatF0,
+                   out float3 coatEnv, out float baseAttenuation) {
+    coatEnv = 0.0;
+    baseAttenuation = 1.0;
+    if (coatWeight <= 0.0) return;
+
+    // The coat's own environment lobe, through the same split-sum fit the base uses -- averEnvBRDF is
+    // not re-derived for the coat, it is the same function asked about a different roughness.
+    float2 cdfg = averEnvBRDF(s.ndv, coatRough);
+    float  cEnv = coatF0 * cdfg.x + cdfg.y;
+    // averSpecularOcclusion for the same reason the base gets it: a smooth lobe gathers from a narrow
+    // cone and must not be dimmed by a hemisphere-shaped answer.
+    coatEnv = cEnv * coatWeight * ind.specular * averSpecularOcclusion(s.ndv, ind.occlusion, coatRough);
+
+    // What the base is allowed to return. fresnelSchlick at the VIEW angle, not the half vector: this
+    // describes how mirror-like the coat is to the CAMERA, which is a property of the surface and the
+    // eye and nothing else -- the same argument averBuildSurface's alpha branch makes for its own use
+    // of a view-angle Fresnel.
+    baseAttenuation = 1.0 - fresnelSchlick(s.ndv, coatF0, 1.0) * coatWeight;
+}
+#endif   // AVER_LAYERED_BSDF
+
 void averIndirectTerms(AverSurface s, AverIndirect ind,
                        out float3 specEnv, out float3 diffAmbient, out float3 diffBounce) {
     // THE SPLIT SUM, WITH THE MULTIPLE SCATTERING PUT BACK (Fdez-Aguera). The old form was
@@ -803,6 +846,29 @@ void averIndirectTerms(AverSurface s, AverIndirect ind,
     specEnv     = FssEss * ind.specular * specOcc;
     diffAmbient = (FmsEms + kD) * ind.ambient * ind.ambientScale * diffOcc;
     diffBounce  = kD * ind.diffuse;
+
+#ifdef AVER_LAYERED_BSDF
+    // THE COAT GOES ON LAST, over everything the base just computed, and takes its share out of all
+    // three terms rather than only the specular one. Light stopped at the coat's surface never reaches
+    // the base at all -- not its mirror, not its diffuse, not its bounce -- so attenuating only the
+    // specular would let a coated surface keep more diffuse than an uncoated one, which is energy from
+    // nowhere.
+    //
+    // The multi-scatter block above is untouched and still applies to the base exactly as before; the
+    // coat is layered on after it, not folded into it. A coat's own multi-scatter compensation is
+    // deliberately NOT added: the masking loss it corrects scales with roughness, and a coat's typical
+    // roughness (car paint, 0.05-0.3) makes it small. That is a stated approximation, in the same
+    // style as the intermediate-metallic case this file already documents -- not an oversight.
+    if (gMaterialFlags & AVER_MAT_COAT) {
+        float3 coatEnv; float baseAtten;
+        averCoatTerms(s, ind, saturate(gCoatWeight), saturate(gCoatRoughness), saturate(gCoatF0),
+                      coatEnv, baseAtten);
+        specEnv     *= baseAtten;
+        diffAmbient *= baseAtten;
+        diffBounce  *= baseAtten;
+        specEnv     += coatEnv;
+    }
+#endif
 }
 
 // Adds ambient, bounce, environment specular and self-emission, in that order.
