@@ -51,8 +51,13 @@ const std::string& shaderFile(std::string_view name);
 // that; this engine's frame-to-frame noise floor is thousands of bytes.
 //
 // A match means the compiled shader is necessarily identical, so no rendering test is owed for the
-// extraction itself. A mismatch is logged with both sizes and FALLS BACK TO THE LITERAL, so the
-// engine keeps running while it is sorted out rather than rendering something subtly wrong.
+// extraction itself. A mismatch is logged loudly and THE FILE IS STILL USED: the file is the real
+// source now, and falling back to the literal would silently discard an edit someone made to it.
+//
+// The comparison only runs before the first reloadShaderFiles(). After a deliberate edit the file is
+// SUPPOSED to differ -- that is what --shader-source is for -- so continuing to compare would make
+// every hot-reload edit fail and get replaced by the embedded copy: hot reload that appears to work
+// and changes nothing.
 //
 // Once every block has been moved and seen to match, the literals and this function go, and callers
 // use shaderFile() directly. If you are reading this and the literals are gone, delete it.

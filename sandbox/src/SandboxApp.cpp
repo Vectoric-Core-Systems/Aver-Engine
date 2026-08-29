@@ -6,6 +6,8 @@
 #include "aver/platform/Splash.hpp"
 #include "aver/platform/FileSystem.hpp"
 #include "aver/platform/Image.hpp"
+#include "aver/platform/DirectoryWatcher.hpp"
+#include "aver/rhi/ShaderFiles.hpp"
 #include "aver/rhi/RHI.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/CrashReport.hpp"
@@ -2962,6 +2964,45 @@ public:
         // Clears the render-scale crash cookie once this session has PROVEN the scale is survivable.
         // See the prefs-apply site for the whole mechanism. Thirty frames, not one: the device loss
         // this guards against is noticed at Present, so a single frame is not evidence of anything.
+        // --shader-source: pick up an HLSL edit without restarting.
+        //
+        // KNOWN LIMIT, MEASURED: only the FIRST edit of a run is delivered. aver::DirectoryWatcher
+        // reports one event and then goes quiet -- three plain appends seven seconds apart produced
+        // exactly one `poll: rescan=0 events=1` and nothing after. The wiring below is not the
+        // problem; the same poll keeps running for the rest of the frame budget and sees nothing.
+        // This module had NO consumers before this call site, and tests/platform/src/WatcherTest.cpp
+        // drains events in a loop inside a single settle window -- it never asks for a second change
+        // minutes later, which is the case a shader-editing session is made of. Fix the watcher and
+        // this becomes real hot reload with no change here.
+        //
+        // THIS FUNCTION ONLY EVER BUMPS AN INTEGER. rhi::reloadShaderFiles() drops the text cache and
+        // increments a revision; it touches no GPU object. VoxiRenderer::prePass notices the revision
+        // moved and rebuilds its pipelines THERE, at a point in the frame where that is safe. Doing
+        // the rebuild here, or worse on the watcher thread, would free pipelines a command list is
+        // recording against -- the same shape as the stored render scale that removed the device at
+        // Present earlier in this file's history.
+        //
+        // Started lazily on the first update rather than in onInit so it costs nothing at all for the
+        // overwhelmingly common case of no flag. Any event is treated the same: one edit can arrive
+        // as Created, Modified or Renamed depending on how the editor writes, and all three mean the
+        // same thing here -- re-read.
+        if (!shaderSourceDir_.empty()) {
+            if (!shaderWatch_.watching()) {
+                if (shaderWatch_.start(shaderSourceDir_))
+                    AVER_INFO("[Sandbox] watching {} for shader edits", shaderSourceDir_);
+                else
+                    shaderSourceDir_.clear();   // start() logged why; do not retry every frame
+            } else {
+                std::vector<aver::FileEvent> events;
+                const bool rescan = shaderWatch_.poll(events);
+                if (rescan || !events.empty()) {
+                    for (const aver::FileEvent& e : events)
+                        AVER_INFO("[Sandbox] shader file changed: {}", e.path);
+                    if (aver::rhi::reloadShaderFiles() > 0)
+                        AVER_INFO("[Sandbox] shaders will recompile on the next frame's prePass");
+                }
+            }
+        }
         if (renderScaleCookieArmed_ && t.frame >= 30) {
             renderScaleCookieArmed_ = false;
             editor::setPrefBool("display.renderScalePending", false);
@@ -6495,6 +6536,8 @@ public:
     void setAverSrCycleAuto(int framesIn) { averSrCycleFrames_ = framesIn; }   // --aversr-cycle [N]
 #endif
     void setSkinSceneDir(std::string d) { skinSceneDir_ = std::move(d); }          // --skin-scene-test <dir>
+    // --shader-source <dir>: watch a shader source tree and reload without restarting.
+    void setShaderSourceDir(std::string d) { shaderSourceDir_ = std::move(d); }
 #if AVER_MODULE_SYNAPSE
     void setBakeNavOnStart(f32 cellCm) { navBakeOnStart_ = true; navBakeCell_ = cellCm; }   // --bake-nav [cm]
 
@@ -15018,7 +15061,9 @@ private:
     std::unique_ptr<aver::render::SoftBodyScene> softBodyScene_;
 #endif
 #endif
-    std::string skinSceneDir_;    // --skin-scene-test <dir>: where the cooked rig lives
+    std::string skinSceneDir_;
+    std::string shaderSourceDir_;                 // --shader-source <dir>, empty = off
+    aver::DirectoryWatcher shaderWatch_;    // --skin-scene-test <dir>: where the cooked rig lives
     std::unique_ptr<aver::editor::SkinSceneTest> skinScene_;
     bool particleTest_ = false;   // --particle-test: a dust cloud straddling an opaque occluder, so
                                    // the transparent pass's own depth test shows in one screenshot
@@ -17386,7 +17431,7 @@ Application* createApplication(int argc, char** argv) {
     // right here and nothing else may override it; --mcp with no number defers to mcp.conf, resolved
     // once argument parsing is done and engineRoot() can be asked (see mcpRequested below).
     bool mcpRequested = false, mcpPortExplicit = false;
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool furnaceGrid=false; f32 furnaceTilt=0.0f; bool ptFurnace=false; bool ptScene=false; int deviceLostAt=0; int ptQualityRamp=0; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int aversrCycle=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=-1; int rt=-1; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int rtRenderMode=-1; int pt=-1; int ptBounces=-1; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string selectEntity; bool openLegacy=false; bool waterOn=false; f32 waterHeight=0.0f; std::string graphSelectNode; std::string graphTab; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false; bool bakeNav=false; f32 bakeNavCell=50.0f; std::string openMap; bool gbuffer=false; std::string gbufferDebug; std::string crashTest; std::string startMode;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; std::string shaderSourceDir; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool furnaceGrid=false; f32 furnaceTilt=0.0f; bool ptFurnace=false; bool ptScene=false; int deviceLostAt=0; int ptQualityRamp=0; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int aversrCycle=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=-1; int rt=-1; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int rtRenderMode=-1; int pt=-1; int ptBounces=-1; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string selectEntity; bool openLegacy=false; bool waterOn=false; f32 waterHeight=0.0f; std::string graphSelectNode; std::string graphTab; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false; bool bakeNav=false; f32 bakeNavCell=50.0f; std::string openMap; bool gbuffer=false; std::string gbufferDebug; std::string crashTest; std::string startMode;
     for (int i=1;i<argc;++i){
         // --new-project <location> <name> scaffolds a project and exits, touching no device.
         if (!std::strcmp(argv[i],"--new-project") && i+2<argc) {
@@ -17827,6 +17872,15 @@ Application* createApplication(int argc, char** argv) {
         else if (!std::strcmp(argv[i],"--backend") && i+1<argc) backendName=argv[++i];
         else if (!std::strcmp(argv[i],"--debug-layer")) debugLayer=true;
         else if (!std::strcmp(argv[i],"--scripts") && i+1<argc) scriptsDir=argv[++i];
+        // --shader-source <dir>: read HLSL from this tree instead of bin/shaders, and reload it when
+        // it changes. Applied HERE, during parsing, because the first shaderFile() happens while the
+        // renderer builds its pipelines -- setting it later would be read after the fact and do
+        // nothing. Opt-in by design: see ShaderFiles.hpp on why a shipped build must never prefer a
+        // source tree it was merely built from.
+        else if (!std::strcmp(argv[i],"--shader-source") && i+1<argc) {
+            shaderSourceDir = argv[++i];
+            aver::rhi::setShaderSourceDir(shaderSourceDir);
+        }
         else if (!std::strcmp(argv[i],"--spawn-test") && i+1<argc) spawnTest=argv[++i];
         else if (!std::strcmp(argv[i],"--play-test")) playTest=true;
         else if (!std::strcmp(argv[i],"--skin-test")) skinTest=true;
@@ -18257,6 +18311,7 @@ Application* createApplication(int argc, char** argv) {
     if (aversrCycle > 0) app->setAverSrCycleAuto(aversrCycle);
 #endif
     if (!skinSceneDir.empty()) app->setSkinSceneDir(skinSceneDir);
+    if (!shaderSourceDir.empty()) app->setShaderSourceDir(shaderSourceDir);
 #if AVER_MODULE_SYNAPSE
     if (bakeNav) app->setBakeNavOnStart(bakeNavCell);
 #else

@@ -101,19 +101,9 @@ float averLuminance(float3 c){ return dot(c, float3(0.2126, 0.7152, 0.0722)); }
 // while it is sorted out. Once every block is moved and this has been seen to pass, the literals and
 // this function go, and shaderFile() is called directly.
 const std::string& colorHlsl() {
-    static const std::string s = [] {
-        const std::string& fromFile = shaderFile("color.hlsli");
-        const std::string  embedded = kColorHlslEmbedded;
-        if (fromFile == embedded) {
-            AVER_INFO("[RHI.Shaders] color.hlsli matches its embedded copy ({} bytes)", embedded.size());
-            return fromFile;
-        }
-        AVER_ERROR("[RHI.Shaders] color.hlsli DIFFERS from the embedded copy (file {} bytes, embedded "
-                   "{} bytes) -- using the embedded one. The extraction is wrong, not the shader.",
-                   fromFile.size(), embedded.size());
-        return embedded;
-    }();
-    return s;
+    // No static of its own: verifiedShaderFile returns a reference into the loader's cache,
+    // which reloadShaderFiles() clears. Caching here would outlive that and go stale.
+    return verifiedShaderFile("color.hlsli", kColorHlslEmbedded);
 }
 } // namespace
 
@@ -1169,7 +1159,17 @@ void MSClusterMain(uint gid : SV_GroupID, uint gtid : SV_GroupThreadID,
 )";
 
 const char* sharedShaderPrelude() {
-    static const std::string s = colorHlsl() + verifiedShaderFile("shared_prelude.hlsl", kSharedPreludeEmbedded);
+    // REBUILT WHEN THE SHADER FILES MOVE. A plain function-local static is initialised ONCE, which
+    // made hot reload a convincing lie: the watcher fired, the cache dropped, the pipelines were
+    // rebuilt -- and every one of them recompiled this same stale text, so a deliberately broken
+    // shader produced no error and a correct picture. Keyed on the revision, like
+    // voxiShaderPrelude() already keys on the material-graph one.
+    static std::string s;
+    static u64 built = ~0ull;
+    if (built != shaderFileRevision()) {
+        s = colorHlsl() + verifiedShaderFile("shared_prelude.hlsl", kSharedPreludeEmbedded);
+        built = shaderFileRevision();
+    }
     return s.c_str();
 }
 
@@ -1375,7 +1375,17 @@ float4 PSComposite(AverPostVSOut i) : SV_TARGET {
 )";
 
 const char* postShaderSource() {
-    static const std::string s = colorHlsl() + verifiedShaderFile("post.hlsl", kPostEmbedded);
+    // REBUILT WHEN THE SHADER FILES MOVE. A plain function-local static is initialised ONCE, which
+    // made hot reload a convincing lie: the watcher fired, the cache dropped, the pipelines were
+    // rebuilt -- and every one of them recompiled this same stale text, so a deliberately broken
+    // shader produced no error and a correct picture. Keyed on the revision, like
+    // voxiShaderPrelude() already keys on the material-graph one.
+    static std::string s;
+    static u64 built = ~0ull;
+    if (built != shaderFileRevision()) {
+        s = colorHlsl() + verifiedShaderFile("post.hlsl", kPostEmbedded);
+        built = shaderFileRevision();
+    }
     return s.c_str();
 }
 

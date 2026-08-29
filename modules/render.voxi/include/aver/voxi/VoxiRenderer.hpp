@@ -991,6 +991,13 @@ private:
     // prePass, which rebuilds them when it moves. ~0 so the first frame after construction cannot
     // accidentally match a real revision.
     u64  scenePipelineGraphRev_ = ~0ull;
+    // The shader-file revision these pipelines were compiled from. Same shape and the same reason as
+    // scenePipelineGraphRev_ above: a PULL on a number, so a future caller cannot forget to push.
+    // STAMPED WHERE THE PIPELINES ARE BUILT, not left at a sentinel. ~0 here meant the very first
+    // prePass saw ~0 != 0 and rebuilt every scene pipeline once, on every launch, for nothing --
+    // caught by reading a hot-reload log that said "shader files changed (revision 0)" before
+    // anything had changed.
+    u64  scenePipelineShaderRev_ = 0;
     // Whether anything will EVER write the ray-traced histories under the current settings. Four
     // textures at the SCENE render size (2x RG32Float + 2x RGBA16F, so 32 bytes per pixel between
     // them -- 144 MB at this machine's 2750x1639 scene view, 225 MB at a full 3532x1987) used to be

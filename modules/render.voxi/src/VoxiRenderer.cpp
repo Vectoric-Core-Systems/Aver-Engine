@@ -219,14 +219,17 @@ rhi::PipelineLayout giLayout() {
 // still needs no RHI. That is a real follow-up, not a detail -- the test exists to keep a C++
 // mirror tied to the shader text, and it cannot do that against a literal that no longer exists.
 const char* voxiHlsl() {
-    static const std::string s = rhi::verifiedShaderFile("voxi.hlsl", voxi::kVoxiHLSL);
-    return s.c_str();
+    // No static: the loader owns the cache and reloadShaderFiles() clears it. A static here would
+    // survive a reload and hand back the shader that was read at startup for the rest of the run.
+    return rhi::verifiedShaderFile("voxi.hlsl", voxi::kVoxiHLSL).c_str();
 }
 
 const char* voxiShaderPrelude() {
     static std::string s;
     static u64 built = ~0ull;
-    const u64 rev = pbr::materialGraphs().revision();
+    // BOTH revisions, because either can move independently: a project can register a material
+    // graph, and --shader-source can rewrite the prelude underneath it.
+    const u64 rev = pbr::materialGraphs().revision() * 1000003ull + rhi::shaderFileRevision();
     if (built != rev) {
         s = std::string(rhi::sharedShaderPrelude());
         const std::string& graphs = pbr::materialGraphs().hlsl();
@@ -724,6 +727,23 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
                   pbr::materialGraphs().count());
         if (!createScenePipelines(dev_->sampleCount(), dev_->backbufferFormat(), dev_->depthFormat()))
             AVER_ERROR("[Voxi] scene pipelines could not be rebuilt for the material graphs");
+    }
+    // A SHADER FILE THAT CHANGED ON DISK SINCE THESE PIPELINES WERE COMPILED.
+    //
+    // Deliberately in prePass, beside the material-graph check and for the identical reason: this is
+    // a safe point to recompile and rebuild, and a pull on a revision cannot be forgotten by a
+    // future caller the way a push can. It is ALSO the only safe point. Rebuilding GPU objects from
+    // wherever a file-watcher thread happens to fire would free things a command list is in the
+    // middle of recording -- the exact failure that removed the device at Present when a stored
+    // render scale rebuilt its targets from inside a frame (see D3D12Device::setRenderScale). The
+    // watcher only ever bumps an integer; every GPU consequence happens here.
+    if (scenePipelineShaderRev_ != rhi::shaderFileRevision()) {
+        scenePipelineShaderRev_ = rhi::shaderFileRevision();
+        AVER_INFO("[Voxi] rebuilding scene pipelines: shader files changed (revision {})",
+                  scenePipelineShaderRev_);
+        if (!createScenePipelines(dev_->sampleCount(), dev_->backbufferFormat(), dev_->depthFormat()))
+            AVER_ERROR("[Voxi] scene pipelines could not be rebuilt from the changed shader files -- "
+                       "the previous pipelines are still bound, so the last good shader keeps drawing");
     }
     ++rtFrameIndex_;   // a pure per-frame count; see the member's own comment for why
     // Sampled at the TOP of the feature's frame, so consecutive readings are one frame apart
@@ -2356,6 +2376,7 @@ void VoxiRenderer::onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rh
     if (!createScenePipelines(sampleCount, color, depth))
         AVER_ERROR("[Voxi] scene pipelines could not be rebuilt for {} sample(s)", sampleCount);
     scenePipelineGraphRev_ = pbr::materialGraphs().revision();
+    scenePipelineShaderRev_ = rhi::shaderFileRevision();   // same reason as the line above
     // Remembered even when the call below decides to allocate nothing: setSettings needs a size to
     // create at if ray tracing is switched on later, and it is never told one.
     rtHistWantW_ = width;
@@ -2935,6 +2956,7 @@ bool VoxiRenderer::createPipelines() {
     // that and a resize is not a graph change; what this remembers is "the pipelines have seen this
     // revision", and both callers leave that true.
     scenePipelineGraphRev_ = pbr::materialGraphs().revision();
+    scenePipelineShaderRev_ = rhi::shaderFileRevision();   // same reason as the line above
 
     return shadowPso_ && voxelPso_ && clearPso_ && mipPso_ && sceneOk;
 }
