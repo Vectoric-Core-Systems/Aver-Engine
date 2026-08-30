@@ -3909,7 +3909,12 @@ IDevice* createVulkanDevice(const DeviceDesc& desc) {
 } // namespace aver::rhi::detail
 
 
-namespace aver::rhi {
+// aver::rhi::vkb, NOT aver::rhi. These define members of vkb::VulkanResourceFactory and
+// vkb::VulkanRenderContext, and the vkb namespace closed further up this file -- so opening a bare
+// aver::rhi here put the definitions where those class names do not resolve at all. The backend
+// stopped compiling the moment these were added, and nothing noticed because AVER_RHI_VULKAN is
+// OFF by default: the tree everyone builds does not contain this file.
+namespace aver::rhi::vkb {
 
 // ---- the ray path's bindless texture table: DECLINED on this backend, for now ----
 //
@@ -3933,4 +3938,4 @@ u32 VulkanResourceFactory::bindlessTableCapacity(BindlessTableHandle) const { re
 
 void VulkanRenderContext::setBindlessTable(BindlessTableHandle) {}
 
-} // namespace aver::rhi
+} // namespace aver::rhi::vkb
