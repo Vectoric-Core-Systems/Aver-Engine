@@ -1908,9 +1908,9 @@ float2 averGBufferVelocity(float3 wpos) {
 // The Voxi lit pixel shader. Voxi supplies light transport only — sun visibility, sky, bounce —
 // and the material shades it. Returns linear radiance; the post chain tonemaps.
 #if AVER_GBUFFER
-GBufferOut PSMainVoxi(VSOut i, bool averIsFrontFace : SV_IsFrontFace) {
+GBufferOut PSMainVoxi(VSOut i) {
 #else
-float4 PSMainVoxi(VSOut i, bool averIsFrontFace : SV_IsFrontFace) : SV_TARGET {
+float4 PSMainVoxi(VSOut i) : SV_TARGET {
 #endif
     float3 N = normalize(i.nrmWS);
     float3 L = normalize(gLightDir.xyz);
@@ -2149,13 +2149,19 @@ float4 PSMainVoxi(VSOut i, bool averIsFrontFace : SV_IsFrontFace) : SV_TARGET {
         //
         // M_Glass authors twosided=1 on purpose (you walk around the rail), so both faces shade and
         // the back one was applying absorption for a path length taken from the scene's depth. That
-        // is why an 8 cm pane read like a metre of bottle glass face-on. M_Water never showed it
-        // because it authors twosided=0 and only ever shades one face -- which is exactly the kind
-        // of difference that makes a bug look like it belongs to one material.
+        // is why an 8 cm pane read like a metre of bottle glass face-on.
+        //
+        // s.backFace, NOT SV_IsFrontFace, AND THE DIFFERENCE IS A BUG I SHIPPED. SV_IsFrontFace is
+        // winding-dependent; s.backFace is `dot(N, V) < 0` computed in averVertexOf, which is the
+        // geometric question actually being asked -- is the ray entering this medium. The fluid box
+        // winds the other way from the cube, so the winding test called the pool's visible top
+        // surface a BACK face and silently switched water absorption off entirely. This file already
+        // carried the rule ("dot(N, V), not SV_IsFrontFace: averVertexOf already computes it that
+        // way and states why") a few hundred lines up, and I used the other one anyway.
         //
         // Absorbing once, on entry, is also the physically right count: light crossing a pane is
         // attenuated by its thickness once, not once per surface it passes through.
-        if (gAttenuationDistance > 0.0 && averIsFrontFace) {
+        if (gAttenuationDistance > 0.0 && !s.backFace) {
             // Measured ONCE and used twice: the absorption needs it for Beer-Lambert, and the
             // refraction needs it to know how far along the bent path the ray travels before it
             // leaves. Tracing it a second time would be the same ray for the same answer.
