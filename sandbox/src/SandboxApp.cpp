@@ -7892,6 +7892,27 @@ private:
             take(layeredBsdfOverride_,     reinterpret_cast<u32&>(k.layeredBsdf), "--layered-bsdf");
             if (rtRaysOverride_ > 0)         take(rtRaysOverride_,        k.rtShadowRays,      "--rt-rays");
             if (rtPixelsPerRayOverride_ > 0) take(rtPixelsPerRayOverride_, k.rtPixelsPerRayTile, "--rt-pixels-per-ray");
+            // THE THIRD INSTANCE, and it is the one the comment above predicted: "fixing one flag
+            // and not the rule left every other RENDER.* knob carrying the same bug". --no-gi and
+            // --no-rt are BOOLEANS (giForceOff_ / rtForceOff_), not the -1-sentinel integers `take`
+            // understands, so closing the rule for the integers closed it for eight cases out of ten
+            // and left these two behind.
+            //
+            // What that cost, measured today: on a project whose manifest says RENDER.RAYTRACING 4,
+            // `--no-rt` was silently discarded and the run reported "rt active" while claiming to be
+            // an RT-off control. The A/B built on it said ray tracing cost -0.3 ms -- it appeared to
+            // make the frame FASTER to turn it on -- when the real answer was 6.7 ms. An override
+            // that fails silently does not merely fail to help; it manufactures a wrong conclusion
+            // and hands it to you with a straight face.
+            const auto forceOff = [&](bool want, voxi::Quality& dst, const char* name) {
+                if (!want || dst == voxi::Quality::Off) return;
+                AVER_INFO("[Sandbox] {}: the command line asked for Off and the project manifest for "
+                          "{}; the command line wins", name, static_cast<int>(dst));
+                dst = voxi::Quality::Off;
+                overridden = true;
+            };
+            forceOff(giForceOff_, k.globalIllumination, "--no-gi");
+            forceOff(rtForceOff_, k.rayTracing,         "--no-rt");
             // A SECOND setSettings CALL, deliberately, and for the reason the startup path already
             // documents at its own two-call site: no TIER changes here, so the tier-derivation rule
             // cannot fire and cannot overwrite these explicit knobs the way it would if they were
