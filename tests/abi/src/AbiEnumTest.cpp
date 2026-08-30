@@ -151,6 +151,207 @@ static std::map<std::string, long long> csMembers(const std::string& text, const
 
 // ------------------------------------------------------------------ the groups
 
+// -------------------------------------------------------------- signatures
+
+// THE OTHER HALF OF THIS BOUNDARY. Everything above compares NUMBERS. The rest of what crosses into
+// C# is FUNCTION SIGNATURES -- 53 of them across the physics and audio ABIs -- and P/Invoke checks
+// none of it. Marshalling is purely positional: the CLR takes the managed signature at face value,
+// pushes arguments in that order, and jumps. There is no export-table comparison that could
+// disagree, no mangling to mismatch, nothing at load time that reads the C declaration at all.
+//
+// So inserting a parameter, widening one, or swapping two of the same type compiles cleanly on both
+// sides and produces a running program that moves the wrong numbers: a script reading velocity where
+// mass belongs, a raycast normal landing in the point slot. The audit that prompted this found the
+// two lists in exact agreement today -- this exists so they stay that way.
+//
+// A SOURCE-LEVEL CHECK, AND ITS LIMIT STATED PLAINLY. The stronger test is a managed round-trip
+// against the real DLL, which would catch things text cannot. It also needs a dotnet toolchain, the
+// built native DLL and a runtime, and this repo's one managed test project is wired into no
+// CMakeLists, no script and no MCP tool. Reading both declarations catches arity, type and
+// return-type drift with none of that, in the suite that actually runs. What it cannot catch is a
+// rename applied to both sides at once -- which is a refactor, not a drift.
+struct Signature {
+    std::string              ret;
+    std::vector<std::string> types;
+    std::vector<std::string> names;
+};
+
+// A POINTER IS A POINTER, however each language spells it. C's `float*`, C#'s `float[]` and C#'s
+// `out int` are the same thing at the call site -- an address -- so all three normalise to `T*`.
+// Getting this wrong in the obvious direction (treating `out int` as a value `int`) reports three
+// false mismatches on a file that is correct, which is exactly what the first draft of this did.
+static std::string canonType(std::string t) {
+    // `out`/`ref` ARE the pointer -- they do not merely decorate the type. Stripping them like a
+    // qualifier turns `out int` into a value `int`, which is what made the first run of this suite
+    // report four false mismatches against a header that was correct.
+    bool ptr = (t.find("out ") != std::string::npos) || (t.find("ref ") != std::string::npos);
+    for (const char* q : {"const ", "out ", "ref ", "in ", "unsafe "}) {
+        const std::string s = q;
+        for (size_t p = t.find(s); p != std::string::npos; p = t.find(s)) t.erase(p, s.size());
+    }
+    for (size_t p = t.find('*'); p != std::string::npos; p = t.find('*')) { t.erase(p, 1); ptr = true; }
+    for (size_t p = t.find("[]"); p != std::string::npos; p = t.find("[]")) { t.erase(p, 2); ptr = true; }
+    while (!t.empty() && (t.front() == ' ' || t.front() == '\t')) t.erase(t.begin());
+    while (!t.empty() && (t.back()  == ' ' || t.back()  == '\t')) t.pop_back();
+
+    if (t == "int32_t")  t = "int";
+    if (t == "uint32_t") t = "uint";
+    if (t == "int64_t")  t = "long";
+    if (t == "uint64_t") t = "ulong";
+    if (t == "uint8_t")  t = "byte";
+    if (t == "string") { t = "char"; ptr = true; }   // C# string <-> const char*
+    return ptr ? t + "*" : t;
+}
+
+// Splits a parameter list into (type, name) pairs. `void` and an empty list are both no parameters.
+static void splitParams(std::string list, Signature& sig) {
+    // C# puts marshalling attributes INSIDE the parameter list --
+    // `[MarshalAs(UnmanagedType.LPUTF8Str)] string utf8Path` -- and they can contain their own
+    // commas, so they come out before anything is split. `[]` is left alone: that is an array, and
+    // erasing it would silently turn `float[]` into a by-value float.
+    for (size_t p = list.find('['); p != std::string::npos; p = list.find('[', p)) {
+        if (p + 1 < list.size() && list[p + 1] == ']') { p += 2; continue; }
+        const size_t e = list.find(']', p);
+        if (e == std::string::npos) break;
+        list.erase(p, e - p + 1);
+    }
+    if (list.empty() || list == "void") return;
+    size_t start = 0;
+    while (start <= list.size()) {
+        size_t comma = list.find(',', start);
+        if (comma == std::string::npos) comma = list.size();
+        std::string one = list.substr(start, comma - start);
+        const bool last = (comma == list.size());
+        start = comma + 1;
+
+        while (!one.empty() && (one.back()  == ' ' || one.back()  == '\t')) one.pop_back();
+        while (!one.empty() && (one.front() == ' ' || one.front() == '\t')) one.erase(one.begin());
+        if (!one.empty()) {
+            // the final whitespace-or-star separated token is the name, everything before it the type
+            const size_t sp = one.find_last_of(" \t*");
+            std::string type = (sp == std::string::npos) ? one : one.substr(0, sp + 1);
+            std::string name = (sp == std::string::npos) ? std::string() : one.substr(sp + 1);
+            sig.types.push_back(canonType(type));
+            sig.names.push_back(normalise(name));
+        }
+        if (last) break;
+    }
+}
+
+// Collapses runs of whitespace, so a declaration wrapped across three lines reads like a one-liner.
+static std::string flatten(const std::string& s) {
+    std::string out;
+    bool space = false;
+    for (char c : s) {
+        if (c == '\n' || c == '\r' || c == '\t' || c == ' ') { space = true; continue; }
+        if (space && !out.empty()) out += ' ';
+        space = false;
+        out += c;
+    }
+    return out;
+}
+
+// Every `<apiMacro> <ret> <prefix>name(params);` in a C header. Comments come out first: these
+// declarations carry doc comments that would otherwise land inside a parameter list.
+static std::map<std::string, Signature> cSignatures(std::string text, const std::string& apiMacro,
+                                                    const std::string& prefix) {
+    for (size_t p = text.find("/*"); p != std::string::npos; p = text.find("/*")) {
+        const size_t e = text.find("*/", p);
+        if (e == std::string::npos) { text.erase(p); break; }
+        text.erase(p, e - p + 2);
+    }
+    for (size_t p = text.find("//"); p != std::string::npos; p = text.find("//")) {
+        const size_t e = text.find('\n', p);
+        text.erase(p, (e == std::string::npos ? text.size() : e) - p);
+    }
+
+    std::map<std::string, Signature> out;
+    for (size_t p = text.find(apiMacro); p != std::string::npos; p = text.find(apiMacro, p + 1)) {
+        const size_t semi = text.find(';', p);
+        const size_t open = text.find('(', p);
+        if (semi == std::string::npos || open == std::string::npos || open > semi) continue;
+        const size_t close = text.rfind(')', semi);
+        if (close == std::string::npos || close < open) continue;
+
+        const std::string head = flatten(text.substr(p + apiMacro.size(), open - p - apiMacro.size()));
+        const size_t sp = head.find_last_of(" \t*");
+        if (sp == std::string::npos) continue;
+        const std::string name = head.substr(sp + 1);
+        if (name.rfind(prefix, 0) != 0) continue;
+
+        Signature sig;
+        sig.ret = canonType(head.substr(0, sp + 1));
+        splitParams(flatten(text.substr(open + 1, close - open - 1)), sig);
+        out[name] = sig;
+    }
+    return out;
+}
+
+// Every `static extern <ret> <prefix>name(params)` in a .cs file.
+static std::map<std::string, Signature> csSignatures(const std::string& text, const std::string& prefix) {
+    const std::string kw = "static extern";
+    std::map<std::string, Signature> out;
+    for (size_t p = text.find(kw); p != std::string::npos; p = text.find(kw, p + 1)) {
+        const size_t open = text.find('(', p);
+        if (open == std::string::npos) continue;
+        // THE MATCHING PAREN, NOT THE FIRST ONE. A marshalling attribute brings its own parentheses
+        // into the parameter list -- `([MarshalAs(UnmanagedType.LPUTF8Str)] string utf8Path)` -- so
+        // the first `)` closes MarshalAs, not the function, and the list gets truncated mid-attribute.
+        size_t close = std::string::npos;
+        for (size_t i = open, depth = 0; i < text.size(); ++i) {
+            if (text[i] == '(') ++depth;
+            else if (text[i] == ')') { if (--depth == 0) { close = i; break; } }
+            else if (text[i] == ';' && depth == 0) break;
+        }
+        if (close == std::string::npos) continue;
+
+        const std::string head = flatten(text.substr(p + kw.size(), open - p - kw.size()));
+        const size_t sp = head.find_last_of(" \t*");
+        if (sp == std::string::npos) continue;
+        const std::string name = head.substr(sp + 1);
+        if (name.rfind(prefix, 0) != 0) continue;
+
+        Signature sig;
+        sig.ret = canonType(head.substr(0, sp + 1));
+        splitParams(flatten(text.substr(open + 1, close - open - 1)), sig);
+        out[name] = sig;
+    }
+    return out;
+}
+
+struct Abi {
+    const char* label;
+    const char* header;
+    const char* apiMacro;
+    const char* csFile;
+    const char* prefix;
+};
+
+static const Abi kAbis[] = {
+    {"physics ABI", "modules/physics/include/aver/physics/physics_abi.h", "AVER_PHYS_API",
+     "scripting/csharp/Aver.Framework/Physics.cs", "aver_phys_"},
+    {"audio ABI",   "modules/audio.abi/include/aver/audio/audio_abi.h",   "AVER_AUDIO_API",
+     "scripting/csharp/Aver.Framework/Audio.cs",   "aver_audio_"},
+};
+
+// A DOCUMENTED, DELIBERATE DIVERGENCE. Parameter NAMES are compared because types alone cannot see
+// the failure this check most wants to catch: swapping two same-typed arguments, which is nearly
+// every argument in these functions -- aver_phys_body_set_velocity takes three bare floats. One pair
+// genuinely differs and is correct, the C header spelling contact_get's out-params outBodyA/outBodyB
+// where the C# says outA/outB. Waiving that one costs two lines and keeps the name check strict
+// everywhere else, which is worth far more than dropping it because of a single rename.
+struct NameWaiver { const char* fn; const char* cName; const char* csName; };
+static const NameWaiver kNameWaivers[] = {
+    {"aver_phys_contact_get", "outbodya", "outa"},
+    {"aver_phys_contact_get", "outbodyb", "outb"},
+};
+
+static bool waivedName(const std::string& fn, const std::string& a, const std::string& b) {
+    for (const NameWaiver& w : kNameWaivers)
+        if (fn == w.fn && a == w.cName && b == w.csName) return true;
+    return false;
+}
+
 struct Group {
     const char* label;       // what to call it in the log
     const char* header;      // repo-relative C header
@@ -190,7 +391,7 @@ static const Group kGroups[] = {
 };
 
 int main() {
-    AVER_INFO("=== the C ABI's constants and their C# mirrors ===");
+    AVER_INFO("=== the C ABI's constants, signatures and their C# mirrors ===");
 
 #ifndef AVER_REPO_ROOT
     AVER_WARN("=== SKIPPED: built without AVER_REPO_ROOT ===");
@@ -233,7 +434,69 @@ int main() {
         }
     }
 
-    if (g_failures == 0) AVER_INFO("=== every ABI constant matches its C# mirror ===");
+
+    // ------------------------------------------------ function signatures
+    for (const Abi& a : kAbis) {
+        std::string hdr, cs;
+        if (!readText(root + a.header, hdr)) { check(false, std::string(a.label) + ": cannot read " + a.header); continue; }
+        if (!readText(root + a.csFile, cs))  { check(false, std::string(a.label) + ": cannot read " + a.csFile); continue; }
+
+        const std::map<std::string, Signature> c = cSignatures(hdr, a.apiMacro, a.prefix);
+        const std::map<std::string, Signature> m = csSignatures(cs, a.prefix);
+
+        // Same rule as the constant groups above: a parse that finds nothing must FAIL. Rename the
+        // export macro or move the .cs file and every comparison below succeeds vacuously.
+        check(!c.empty(), std::string(a.label) + ": found C exports behind " + a.apiMacro);
+        check(!m.empty(), std::string(a.label) + ": found C# imports of " + a.prefix + "*");
+        if (c.empty() || m.empty()) continue;
+
+        size_t mirrored = 0;
+        for (const auto& [name, sm] : m) {
+            const auto it = c.find(name);
+            // A C# import with no C export is not drift, it is a guaranteed
+            // EntryPointNotFoundException the first time that function is called.
+            if (it == c.end()) {
+                check(false, std::string(a.label) + ": C# imports '" + name + "', which the header does not export");
+                continue;
+            }
+            ++mirrored;
+            const Signature& sc = it->second;
+
+            check(sc.ret == sm.ret,
+                  std::string(a.label) + ": " + name + " returns " + sc.ret + " / " + sm.ret);
+
+            if (sc.types.size() != sm.types.size()) {
+                check(false, std::string(a.label) + ": " + name + " takes " +
+                             std::to_string(sc.types.size()) + " parameter(s) in C and " +
+                             std::to_string(sm.types.size()) + " in C#");
+                continue;   // positions are meaningless once the counts differ
+            }
+
+            bool sameTypes = true, sameNames = true;
+            for (size_t i = 0; i < sc.types.size(); ++i) {
+                if (sc.types[i] != sm.types[i]) {
+                    sameTypes = false;
+                    check(false, std::string(a.label) + ": " + name + " parameter " + std::to_string(i) +
+                                 " is " + sc.types[i] + " in C and " + sm.types[i] + " in C#");
+                }
+                if (sc.names[i] != sm.names[i] && !waivedName(name, sc.names[i], sm.names[i])) {
+                    sameNames = false;
+                    check(false, std::string(a.label) + ": " + name + " parameter " + std::to_string(i) +
+                                 " is named " + sc.names[i] + " in C and " + sm.names[i] + " in C#" +
+                                 " -- if this is a deliberate rename, waive it; if the arguments moved, this is the bug");
+                }
+            }
+            if (sameTypes && sameNames)
+                check(true, std::string(a.label) + ": " + name + " (" + std::to_string(sc.types.size()) + " params)");
+        }
+
+        // Not every export is bound -- C# reaches the subset scripts need -- so an unbound export is
+        // reported, not failed. The count moving is still worth seeing in the log.
+        check(mirrored > 0, std::string(a.label) + ": " + std::to_string(mirrored) + " of " +
+                            std::to_string(c.size()) + " C export(s) are mirrored in C#");
+    }
+
+    if (g_failures == 0) AVER_INFO("=== every ABI constant and signature matches its C# mirror ===");
     else                 AVER_ERROR("=== {} ABI mirror assertion(s) failed ===", g_failures);
     return g_failures == 0 ? 0 : 1;
 #endif
