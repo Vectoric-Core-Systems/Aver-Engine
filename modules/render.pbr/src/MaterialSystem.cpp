@@ -198,9 +198,14 @@ void MaterialSystem::writeSlots(const MaterialDesc& d, rhi::BindingSetHandle set
     };
     static_assert(sizeof(fallback) / sizeof(fallback[0]) == kTextureSlotCount,
                   "every TextureSlot needs a fallback; a short list zero-fills and binds nothing");
+    std::array<rhi::TextureHandle, kTextureSlotCount> effective{};
     for (u32 i = 0; i < kTextureSlotCount; ++i) {
         const ResolvedTexture r = resolveTexture(d.textures[i], static_cast<TextureSlot>(i), retryFailed);
-        res_->setSrv(set, i, r.handle ? r.handle : fallback[i]);
+        const rhi::TextureHandle bound = r.handle ? r.handle : fallback[i];
+        res_->setSrv(set, i, bound);
+        // Recorded from the SAME expression that binds it, on the same line of reasoning, so the two
+        // cannot drift into disagreeing about what this slot holds.
+        effective[i] = bound;
         if (static_cast<TextureSlot>(i) != TextureSlot::BaseColor) continue;
         // baseColorFactor TIMES the texture mean, which is what the pixel shader computes too --
         // the factor is a multiplier over the sampled texel, not an alternative to it. With no
@@ -215,6 +220,14 @@ void MaterialSystem::writeSlots(const MaterialDesc& d, rhi::BindingSetHandle set
         if (r.handle) for (int c = 0; c < 3; ++c) avg[c] *= r.averageLinear[c];
         setAverage_[set] = avg;
     }
+    setTextures_[set] = effective;
+}
+
+// The effective texture in every slot of `set`; see the header for why fallbacks are included.
+const std::array<rhi::TextureHandle, kTextureSlotCount>* MaterialSystem::textures(
+        rhi::BindingSetHandle set) const {
+    const auto it = setTextures_.find(set);
+    return it == setTextures_.end() ? nullptr : &it->second;
 }
 
 // The entry for `h`, built and filled on first use.

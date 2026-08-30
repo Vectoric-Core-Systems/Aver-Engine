@@ -124,6 +124,26 @@ StructuredBuffer<RtInstance> gRtInstances : register(t5);
 // ior/transmission) are still declared, in order, for exactly that reason: HLSL has no partial
 // StructuredBuffer element, so leaving any of them out would silently misalign every field that
 // follows it, not just drop the one that was skipped.
+#ifdef AVER_RT_BINDLESS
+// THE RAY PATH'S TEXTURE ARRAY, in register space 1 so it cannot collide with any t-register the
+// two ordinary descriptor tables, the mesh geometry SRVs or the instanced world matrices already
+// claim in space 0. The size must match PipelineLayout::bindlessTextureCount exactly -- the root
+// signature declares a range of that length and a shader declaring more would read past it.
+//
+// A fixed size rather than an unbounded array: a fixed range serialises under root signature
+// version 1.0, which is what this backend builds.
+//
+// THE LENGTH COMES FROM C++, not from a literal here. It must equal the root signature's declared
+// range exactly -- a shader declaring more would index past what the table actually reserved, which
+// is the out-of-bounds descriptor read this whole design is careful about. Same reason the register
+// numbers in the shared prelude are emitted rather than written: two copies of a number drift.
+#ifndef AVER_RT_TEX_CAPACITY
+#error "AVER_RT_TEX_CAPACITY must be defined by the pipeline that declares the bindless table"
+#endif
+Texture2D gRtTextures[AVER_RT_TEX_CAPACITY] : register(t0, space1);
+#define AVER_TEX_UNBOUND 0xFFFFFFFFu
+#endif
+
 struct RtMaterial {
     float4 baseColorFactor;   // rgb LINEAR already -- see MaterialConstants::baseColorFactor's own
                                // comment; no srgbToLin needed on the read side, unlike the raster
@@ -1965,7 +1985,30 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // which in the PTTest range is the floor, the walls, the crates and the red targets -- shaded
     // as the fallback's white, while the rasteriser drew them correctly. Reported as "everything is
     // white", and correctly attributed by the user to the ray path having a hardcoded dependency.
+#ifdef AVER_RT_BINDLESS
+    // THE BASE-COLOUR TEXTURE, which is the entire point of this variant. Same composition the
+    // raster path uses -- the factor MULTIPLIES the sampled texel rather than replacing it -- so a
+    // material with no texture reduces to exactly the line below and the two paths agree.
+    //
+    // SampleLevel(0), NEVER Sample(): a pixel shader's implicit derivatives describe how the SCREEN
+    // coordinate changes between neighbouring pixels, and in a fullscreen ray pass neighbouring
+    // pixels may have hit different triangles, different objects, or nothing at all. The derivative
+    // is therefore meaningless and the mip it selects is garbage at every silhouette. Mip 0 is wrong
+    // in the other direction -- it minifies and aliases in the distance -- but it is wrong
+    // PREDICTABLY, and ray differentials are a later stage.
+    //
+    // NonUniformResourceIndex because neighbouring pixels genuinely hit different materials; without
+    // it the hardware may broadcast one lane's index across the wave and every pixel in that wave
+    // samples one material's texture.
+    float3 texAlbedo = 1.0;
+    if (mat.texIndex[0] != AVER_TEX_UNBOUND) {
+        texAlbedo = gRtTextures[NonUniformResourceIndex(mat.texIndex[0])]
+                        .SampleLevel(gMaterialSampler, hitUV, 0).rgb;
+    }
+    s.albedo   = inst.albedo * mat.baseColorFactor.rgb * texAlbedo;
+#else
     s.albedo   = inst.albedo * mat.baseColorFactor.rgb;
+#endif
     s.metallic = saturate(inst.metallic * mat.metallicFactor);
     s.rough    = clamp(inst.roughness * mat.roughnessFactor, 0.045, 1.0);   // averEvalMaterial's own floor
     s.ndv      = saturate(dot(s.N, s.V));

@@ -1877,6 +1877,14 @@ public:
     ShaderHandle     createShader(const ShaderDesc& d) override;
     PipelineHandle   createGraphicsPipeline(const GraphicsPipelineDesc& d) override;
     PipelineHandle   createComputePipeline(const ComputePipelineDesc& d) override;
+    // NOT IMPLEMENTED ON THIS BACKEND YET, and refused out loud rather than stubbed silently.
+    // DeviceCaps::rtBindlessTextures already gates every caller, and this backend sets that bit
+    // from real descriptor-indexing features -- so reaching these at all means the gate was
+    // bypassed, which is worth a log rather than a quiet zero. See the Vulkan parity stage.
+    BindlessTableHandle createBindlessTextureTable(u32 capacity) override;
+    void destroyBindlessTextureTable(BindlessTableHandle h) override;
+    bool setBindlessTexture(BindlessTableHandle h, u32 index, TextureHandle t) override;
+    u32  bindlessTableCapacity(BindlessTableHandle h) const override;
     BindingSetHandle createBindingSet(const BindingSetDesc& d) override;
     BlasHandle       createBlas(MeshHandle mesh) override;
     TlasHandle       createTlas(u32 maxInstances) override;
@@ -2065,6 +2073,7 @@ public:
     void clearDepth(TextureHandle depth, f32 value) override;
     void clearColor(TextureHandle target, const f32 color[4]) override;
     void setBindingSet(BindingSetHandle set, u32 table) override;
+    void setBindlessTable(BindlessTableHandle table) override;
     void setConstants(u32 slot, const void* data, u32 dwords) override;
     void setConstantBuffer(u32 slot, const void* data, u32 bytes) override;
     void setDrawBinding(BindingSetHandle set, const void* constants, u32 bytes) override;

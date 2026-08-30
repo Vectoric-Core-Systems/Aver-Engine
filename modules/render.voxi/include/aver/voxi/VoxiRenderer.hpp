@@ -516,6 +516,15 @@ private:
     // One buffer per frame in flight breaks the overlap. Three, matching PcgVolume's readback
     // window, so this does not have to be re-derived if the device ever triple buffers.
     static constexpr u32 kRtInstanceRing = 3;
+
+    // How many DISTINCT textures a ray hit can sample from. Fixed rather than grown on demand: the
+    // range is baked into every root signature that declares it, so growing it means rebuilding
+    // pipelines mid-session, which this renderer only ever does at a safe point anyway.
+    //
+    // 4096 because it is generous against real projects (ElectricDreams resolves tens) while
+    // costing 4096 of the shared 65536-descriptor heap -- 6% of it, for the one feature that cannot
+    // work without a large contiguous range. Exhaustion refuses and logs; it does not wrap.
+    static constexpr u32 kRtTextureCapacity = 4096;
     rhi::BufferHandle rtInstances_[kRtInstanceRing] = {};
     u32               rtInstanceSlot_ = 0;
     // What the table was built from. Rebuilt only when this changes, because concatenating every
@@ -555,6 +564,33 @@ private:
     // needs the identical ring for the SAME reason on the rare build where content changes at all --
     // "rare" bought no exemption from the race, only a lower chance of hitting it by accident, which
     // is precisely the kind of bug that survives testing and ships.
+    // ---- the bindless texture table a ray hit samples through ----
+    //
+    // ONE TABLE FOR THE WHOLE SCENE, append-only for the life of the device. A material's textures
+    // are resolved once by MaterialSystem and live until shutdown, so an index handed out here stays
+    // valid; nothing frees a slot mid-session. That is a real limitation rather than a claim of
+    // permanence -- a project that loaded more than kRtTextureCapacity DISTINCT textures would
+    // exhaust it, and the refusal is logged and the affected slots fall back to their factor colour
+    // rather than sampling a neighbour's texture.
+    //
+    // Keyed on rhi::TextureHandle, not on material: the same texture shared by forty materials
+    // occupies one slot, which is the difference between a table sized for materials and one sized
+    // for images.
+    // Makes one texture resident in the table below; see the .cpp for the append-only rule.
+    u32  residentTexture(rhi::TextureHandle h);
+    // Creates that table on first need, once.
+    void ensureTextureTable();
+
+    // The TEXTURED ray-driven pipeline. Separate from rayDrivenPso_ because the bindless range is
+    // part of the root signature: preferred when it exists, and rayDrivenPso_ is the fallback.
+    rhi::PipelineHandle rayDrivenTexPso_ = 0;
+
+    rhi::BindlessTableHandle rtTexTable_ = 0;
+    std::unordered_map<rhi::TextureHandle, u32> rtTexIndex_;
+    u32  rtTexNext_ = 0;
+    bool rtTexTableTried_ = false;   // so a failed creation is attempted once, not every build
+    bool rtTexLogged_ = false;
+
     rhi::BufferHandle rtMaterials_[kRtInstanceRing] = {};
     u32  rtMaterialSlot_ = 0;       // which ring slot is currently bound (last written, or still valid)
     u32  rtMaterialCapacity_ = 0;   // elements the ring's buffers were sized for

@@ -19,6 +19,7 @@ using PipelineHandle   = u32;
 using BindingSetHandle = u32;
 using BlasHandle       = u32;
 using TlasHandle       = u32;
+using BindlessTableHandle = u32;   // the ray path's texture array; see createBindlessTextureTable
 
 // ---------------------------------------------------------------- formats & resources
 
@@ -271,6 +272,12 @@ struct PipelineLayout {
     //
     // Leave slotKindsDeclared false and the backend falls back to reflection, which is correct for
     // any layout whose shaders use every slot they declare. It warns when it has to guess.
+    // Non-zero appends ONE more descriptor table to the root signature, holding this many texture
+    // SRVs in REGISTER SPACE 1 -- its own space so it cannot collide with any t-register the two
+    // ordinary tables above already claim, and appended last so every layout that leaves this at 0
+    // serialises byte-identically to before this field existed. Part of the root-signature cache
+    // key; see sameLayout in the D3D12 backend.
+    u32 bindlessTextureCount = 0;
     bool slotKindsDeclared = false;
     SlotKind srvKinds[kMaxBindingSlots]  = {};   // table 0
     SlotKind uavKinds[kMaxBindingSlots]  = {};
@@ -499,6 +506,34 @@ public:
     virtual ShaderHandle     createShader(const ShaderDesc& d) = 0;
     virtual PipelineHandle   createGraphicsPipeline(const GraphicsPipelineDesc& d) = 0;
     virtual PipelineHandle   createComputePipeline(const ComputePipelineDesc& d) = 0;
+    // ---- the ray path's bindless texture table ----
+    //
+    // A FIXED-SIZE ARRAY OF TEXTURE SRVs a shader may index by a value it COMPUTED, rather than by
+    // a register the pipeline bound. This is the one exception to the "explicit descriptor tables,
+    // NOT bindless" rule at the top of this file, and it is deliberately not an extension of
+    // BindingSetDesc: that path hard-refuses anything past kMaxBindingSlots (16) and every raster
+    // pipeline in the engine depends on it staying exactly as small and explicit as it is.
+    //
+    // WHY IT EXISTS. A ray hit has no "current draw", so there is no per-material descriptor table
+    // to bind -- one fullscreen pass shades every material in the scene. The raster path keeps its
+    // per-draw tables, which are cheaper and work on the FL 11_0 floor; only shaders gated behind
+    // DeviceCaps::rtBindlessTextures (DXR 1.1, hence always binding tier 3) may use this.
+    //
+    // FIXED capacity, not unbounded: a fixed range serialises under root signature version 1.0 and
+    // needs no VARIABLE_DESCRIPTOR_COUNT on Vulkan. Slots past what a scene fills stay null, which
+    // is why a sampler reading an unwritten slot gets zeros rather than undefined memory.
+    virtual BindlessTableHandle createBindlessTextureTable(u32 capacity) = 0;
+    virtual void destroyBindlessTextureTable(BindlessTableHandle h) = 0;
+
+    // Writes one texture into one slot. RETURNS FALSE AND LOGS rather than writing out of range --
+    // an index past the table is how this engine has already hung a GPU once (a view sized for less
+    // than the buffer behind it), and a bad index here is read by a shader with no bounds check at
+    // all. The caller is expected to record kUnboundTexture for a refused slot, not to ignore this.
+    virtual bool setBindlessTexture(BindlessTableHandle h, u32 index, TextureHandle t) = 0;
+
+    // The capacity the table was created with, or 0 for an invalid handle.
+    virtual u32 bindlessTableCapacity(BindlessTableHandle h) const = 0;
+
     virtual BindingSetHandle createBindingSet(const BindingSetDesc& d) = 0;
     // Builds the acceleration structure for one uploaded mesh.
     virtual BlasHandle       createBlas(MeshHandle mesh) = 0;
@@ -589,6 +624,11 @@ public:
 
     // Binds a set to one of the pipeline's declared tables.
     virtual void setBindingSet(BindingSetHandle set, u32 table = 0) = 0;
+
+    // Binds the ray path's bindless texture table for the pipelines that declared one
+    // (PipelineLayout::bindlessTextureCount). A no-op on a pipeline that did not, so a caller does
+    // not have to know which variant is bound. Sticky, like setBindingSet.
+    virtual void setBindlessTable(BindlessTableHandle table) = 0;
     // Root constants at a logical slot. Always overwrites the whole declared block.
     virtual void setConstants(u32 slot, const void* data, u32 dwords) = 0;
     // Transient per-frame constants, suballocated from the upload ring and bound as a root CBV.

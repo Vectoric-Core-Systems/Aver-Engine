@@ -56,6 +56,11 @@ struct MockFactory final : public rhi::IResourceFactory {
         return static_cast<rhi::PipelineHandle>(pipelines.size());
     }
     rhi::PipelineHandle createComputePipeline(const rhi::ComputePipelineDesc&) override { return 0; }
+    // The ray path's bindless table plays no part in these tests; refuse rather than pretend.
+    rhi::BindlessTableHandle createBindlessTextureTable(u32) override { return 0; }
+    void destroyBindlessTextureTable(rhi::BindlessTableHandle) override {}
+    bool setBindlessTexture(rhi::BindlessTableHandle, u32, rhi::TextureHandle) override { return false; }
+    u32  bindlessTableCapacity(rhi::BindlessTableHandle) const override { return 0; }
     rhi::BindingSetHandle createBindingSet(const rhi::BindingSetDesc& d) override {
         sets.push_back(d);
         srvSlot0.push_back(0);
@@ -110,6 +115,7 @@ struct MockContext final : public rhi::IRenderContext {
     void clearDepth(rhi::TextureHandle, f32) override {}
     void clearColor(rhi::TextureHandle, const f32[4]) override {}
     void setBindingSet(rhi::BindingSetHandle s, u32 table) override { calls.push_back({Call::Kind::BindingSet, s, table}); }
+    void setBindlessTable(rhi::BindlessTableHandle) override {}
     void setConstants(u32 slot, const void*, u32 dwords) override { calls.push_back({Call::Kind::Constants, slot, dwords}); }
     void setConstantBuffer(u32, const void*, u32) override {}
     void drawMesh(rhi::MeshHandle) override {}

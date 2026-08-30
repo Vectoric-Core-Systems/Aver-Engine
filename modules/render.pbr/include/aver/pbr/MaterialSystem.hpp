@@ -53,6 +53,17 @@ public:
 
     // The binding set a draw of `h` uses. An unknown or stale handle gets the fallback.
     rhi::BindingSetHandle bindingSet(MaterialHandle h);
+
+    // THE EFFECTIVE TEXTURE IN EVERY SLOT of a binding set, fallbacks included, or nullptr for a
+    // set this system did not build. Exists for the ray path, which cannot bind a per-draw
+    // descriptor table and instead needs the handles themselves so it can put them in its own
+    // bindless array.
+    //
+    // EFFECTIVE, not authored: a slot the material never set reports the identity texture that
+    // writeSlots actually bound, not 0. That is what makes the ray path sample the same thing the
+    // raster path does without needing a branch per slot -- and an unset normal map sampling flat
+    // (128,128,255) is the whole reason those fallbacks exist.
+    const std::array<rhi::TextureHandle, kTextureSlotCount>* textures(rhi::BindingSetHandle set) const;
     // The constant block a draw of `h` uses. An unknown or stale handle gets the fallback.
     const MaterialConstants& constants(MaterialHandle h);
 
@@ -197,6 +208,9 @@ private:
     std::unordered_map<std::string, std::array<f32, 3>> cacheAverage_;
     // Per binding set: baseColorFactor times its base-colour texture's mean, filled by writeSlots.
     std::unordered_map<rhi::BindingSetHandle, std::array<f32, 3>> setAverage_;
+    // Per binding set, the handle writeSlots actually bound into each slot. Same keying and same
+    // lifetime as setAverage_ above.
+    std::unordered_map<rhi::BindingSetHandle, std::array<rhi::TextureHandle, kTextureSlotCount>> setTextures_;
     u32 failedResolves_ = 0;
 
     TextureResolver resolve_ = nullptr;

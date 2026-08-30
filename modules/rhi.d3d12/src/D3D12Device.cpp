@@ -1831,6 +1831,7 @@ struct RhiPipeline {
     bool amplification = false;
     // One entry per declarable table; -1 where the layout declared nothing for it.
     i32  srvParam[kBindingTableCount] = {-1, -1}, uavParam[kBindingTableCount] = {-1, -1};
+    i32  bindlessParam = -1;   // -1 = this pipeline declared no bindless table
     // The first shader register each table covers.
     u32  srvBaseRegister[kBindingTableCount] = {};
     i32  slotParam[kMaxConstantSlots] = {-1, -1, -1, -1, -1};
@@ -1877,6 +1878,15 @@ struct RhiTlas {
 };
 
 // A root signature plus the parameter indices it was built with; shared by identical layouts.
+// The ray path's bindless texture array: `capacity` contiguous descriptors in the shared heap.
+// Suballocated by the SAME allocRange() every binding set uses, so it is not a second allocator --
+// it is one more customer of the existing one, and it shows up in the same exhaustion message.
+struct RhiBindlessTable {
+    u32  heapBase = 0;
+    u32  capacity = 0;
+    bool alive = false;
+};
+
 struct RootSigEntry {
     PipelineLayout layout{};
     bool mesh = false;
@@ -1889,6 +1899,7 @@ struct RootSigEntry {
     i32 slotParam[kMaxConstantSlots] = {-1, -1, -1, -1, -1};
     i32 msVertexParam = -1, msIndexParam = -1, msCountParam = -1;
     i32 instanceWorldParam = -1;
+    i32 bindlessParam = -1;
 };
 
 // A destroyed object the GPU may still be reading. Released once the fence passes, never sooner.
@@ -1905,6 +1916,10 @@ bool sameSampler(const SamplerDesc& a, const SamplerDesc& b) {
 bool sameLayout(const PipelineLayout& a, const PipelineLayout& b) {
     if (a.srvCount != b.srvCount || a.uavCount != b.uavCount || a.samplerCount != b.samplerCount) return false;
     if (a.srvCount1 != b.srvCount1 || a.uavCount1 != b.uavCount1) return false;
+    // Part of the key. Without this a bindless variant and a non-bindless one with otherwise
+    // identical counts would share a cached root signature, and whichever built first would decide
+    // whether the table exists -- silently, for both.
+    if (a.bindlessTextureCount != b.bindlessTextureCount) return false;
     for (u32 i = 0; i < kMaxConstantSlots; ++i) if (a.constantDwords[i] != b.constantDwords[i]) return false;
     for (u32 i = 0; i < a.samplerCount && i < 4; ++i) if (!sameSampler(a.samplers[i], b.samplers[i])) return false;
     return true;
@@ -1948,6 +1963,14 @@ public:
     ShaderHandle     createShader(const ShaderDesc& d) override;
     PipelineHandle   createGraphicsPipeline(const GraphicsPipelineDesc& d) override;
     PipelineHandle   createComputePipeline(const ComputePipelineDesc& d) override;
+    BindlessTableHandle createBindlessTextureTable(u32 capacity) override;
+    void destroyBindlessTextureTable(BindlessTableHandle h) override;
+    bool setBindlessTexture(BindlessTableHandle h, u32 index, TextureHandle t) override;
+    u32  bindlessTableCapacity(BindlessTableHandle h) const override;
+    // Where the table starts in the shared heap; the render context needs it to set the root table.
+    u32  bindlessHeapBase(BindlessTableHandle h) const {
+        return (h == 0 || h > bindlessTables_.size()) ? 0u : bindlessTables_[h - 1].heapBase;
+    }
     BindingSetHandle createBindingSet(const BindingSetDesc& d) override;
     BlasHandle       createBlas(MeshHandle mesh) override;
     TlasHandle       createTlas(u32 maxInstances) override;
@@ -2069,6 +2092,7 @@ private:
     // of them across a call that could grow them, which is the whole of the hazard.
     std::deque<RhiPipeline>    pipelines_;
     std::vector<RhiBindingSet> bindingSets_;
+    std::vector<RhiBindlessTable> bindlessTables_;
     std::vector<RhiBlas>       blases_;
     std::vector<RhiTlas>       tlases_;
     std::vector<RootSigEntry>  rootSigs_;
@@ -2092,6 +2116,7 @@ public:
     void clearDepth(TextureHandle depth, f32 value) override;
     void clearColor(TextureHandle target, const f32 color[4]) override;
     void setBindingSet(BindingSetHandle set, u32 table) override;
+    void setBindlessTable(BindlessTableHandle table) override;
     void setConstants(u32 slot, const void* data, u32 dwords) override;
     void setConstantBuffer(u32 slot, const void* data, u32 bytes) override;
     void setDrawBinding(BindingSetHandle set, const void* constants, u32 bytes) override;
@@ -5695,7 +5720,8 @@ const RootSigEntry* D3D12ResourceFactory::rootSignature(const PipelineLayout& la
 
     D3D12_DESCRIPTOR_RANGE ranges[2 * kBindingTableCount] = {};
     // +3 for the mesh geometry SRVs/count, +1 more for the instanced-draw world-matrix SRV.
-    D3D12_ROOT_PARAMETER params[2 * kBindingTableCount + kMaxConstantSlots + 4] = {};
+    // +3 mesh, +1 instanced, +1 bindless.
+    D3D12_ROOT_PARAMETER params[2 * kBindingTableCount + kMaxConstantSlots + 5] = {};
     u32 n = 0;
     const u32 srvCounts[kBindingTableCount] = {layout.srvCount, layout.srvCount1};
     const u32 uavCounts[kBindingTableCount] = {layout.uavCount, layout.uavCount1};
@@ -5760,6 +5786,29 @@ const RootSigEntry* D3D12ResourceFactory::rootSignature(const PipelineLayout& la
         params[n].Descriptor.ShaderRegister = declaredSrvCount(layout) + (mesh ? 2 : 0);
         e.instanceWorldParam = static_cast<i32>(n++);
     }
+    // THE BINDLESS TEXTURE TABLE, APPENDED LAST AND IN REGISTER SPACE 1.
+    //
+    // Last, so every layout that leaves bindlessTextureCount at 0 -- which is every raster pipeline
+    // in the engine, including all of them on the FL 11_0 minimum-spec path -- serialises to exactly
+    // the bytes it did before this branch existed. Nothing above this line reads the new field.
+    //
+    // Space 1, so the range cannot collide with any t-register the two ordinary tables, the mesh
+    // geometry SRVs or the instanced world-matrix SRV have already claimed in space 0. Those
+    // registers are assigned by arithmetic over declaredSrvCount() and are frozen by both the RHI
+    // header and the shader prelude; putting a 4096-entry range anywhere in that space would mean
+    // re-deriving all of it. A separate space costs nothing and cannot alias.
+    D3D12_DESCRIPTOR_RANGE bindlessRange{};
+    if (layout.bindlessTextureCount) {
+        bindlessRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        bindlessRange.NumDescriptors = layout.bindlessTextureCount;
+        bindlessRange.BaseShaderRegister = 0;
+        bindlessRange.RegisterSpace = 1;
+        params[n].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        params[n].DescriptorTable.NumDescriptorRanges = 1;
+        params[n].DescriptorTable.pDescriptorRanges = &bindlessRange;
+        e.bindlessParam = static_cast<i32>(n++);
+    }
+
     for (u32 i = 0; i < n; ++i) params[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     D3D12_STATIC_SAMPLER_DESC samplers[4] = {};
@@ -6192,6 +6241,7 @@ PipelineHandle D3D12ResourceFactory::createGraphicsPipeline(const GraphicsPipeli
     p.mesh = d.ms != 0;
     p.amplification = d.as != 0;
     for (u32 t = 0; t < kBindingTableCount; ++t) { p.srvParam[t] = rs->srvParam[t]; p.uavParam[t] = rs->uavParam[t]; }
+    p.bindlessParam = rs->bindlessParam;
     p.srvBaseRegister[1] = d.layout.srvCount;
     p.msVertexParam = rs->msVertexParam;
     p.msIndexParam = rs->msIndexParam;
@@ -6317,6 +6367,7 @@ PipelineHandle D3D12ResourceFactory::createComputePipeline(const ComputePipeline
     p.compute = true;
     p.rootSig = rs->sig.Get();
     for (u32 t = 0; t < kBindingTableCount; ++t) { p.srvParam[t] = rs->srvParam[t]; p.uavParam[t] = rs->uavParam[t]; }
+    p.bindlessParam = rs->bindlessParam;
     p.srvBaseRegister[1] = d.layout.srvCount;
     for (u32 i = 0; i < kMaxConstantSlots; ++i) { p.slotParam[i] = rs->slotParam[i]; p.slotDwords[i] = d.layout.constantDwords[i]; }
 
@@ -6329,6 +6380,81 @@ PipelineHandle D3D12ResourceFactory::createComputePipeline(const ComputePipeline
 }
 
 // Reserves a descriptor range for a binding set, null-fills it, and returns its handle.
+// ---- the ray path's bindless texture table ----
+
+BindlessTableHandle D3D12ResourceFactory::createBindlessTextureTable(u32 capacity) {
+    collect();
+    if (capacity == 0) { AVER_ERROR("[RHI.D3D12] createBindlessTextureTable with capacity 0"); return 0; }
+    RhiBindlessTable t;
+    t.capacity = capacity;
+    if (!allocRange(capacity, t.heapBase)) {
+        // allocRange already named the heap and the shortfall. Say what was being asked for, since
+        // this is by far the largest single request anything in the engine makes of that heap.
+        AVER_ERROR("[RHI.D3D12] bindless texture table of {} descriptors did not fit; ray-traced "
+                   "texturing will stay off and the flat-albedo path will be used instead", capacity);
+        return 0;
+    }
+    // EVERY SLOT NULL-FILLED BEFORE ANYTHING IS BOUND. A descriptor table is validated as a whole
+    // when it is bound, not per-slot on use, so one uninitialised descriptor anywhere in the range
+    // is a device-removal risk even if no shader ever indexes it. The same reason nullFill() exists
+    // for ordinary binding sets.
+    D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+    sv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    sv.Texture2D.MipLevels = 1;
+    for (u32 i = 0; i < capacity; ++i)
+        dev_->device_->CreateShaderResourceView(nullptr, &sv, cpuSlot(t.heapBase + i));
+    t.alive = true;
+    bindlessTables_.push_back(t);
+    AVER_INFO("[RHI.D3D12] bindless texture table: {} descriptors at heap slot {}", capacity, t.heapBase);
+    return static_cast<BindlessTableHandle>(bindlessTables_.size());
+}
+
+void D3D12ResourceFactory::destroyBindlessTextureTable(BindlessTableHandle h) {
+    if (h == 0 || h > bindlessTables_.size()) return;
+    RhiBindlessTable& t = bindlessTables_[h - 1];
+    if (!t.alive) return;
+    t.alive = false;
+    // Through the SAME deferred path a binding set uses: the GPU may still be reading this range
+    // from a frame in flight, and returning it to the free list now would let the next allocation
+    // overwrite descriptors that are still being sampled.
+    pendingRanges_.push_back({t.heapBase, t.capacity, retireFence()});
+}
+
+u32 D3D12ResourceFactory::bindlessTableCapacity(BindlessTableHandle h) const {
+    if (h == 0 || h > bindlessTables_.size()) return 0;
+    return bindlessTables_[h - 1].alive ? bindlessTables_[h - 1].capacity : 0;
+}
+
+bool D3D12ResourceFactory::setBindlessTexture(BindlessTableHandle h, u32 index, TextureHandle th) {
+    if (h == 0 || h > bindlessTables_.size() || !bindlessTables_[h - 1].alive) {
+        AVER_ERROR("[RHI.D3D12] setBindlessTexture with an invalid table handle");
+        return false;
+    }
+    RhiBindlessTable& t = bindlessTables_[h - 1];
+    // REFUSED, NOT CLAMPED, NOT WRAPPED. Writing past the range would land a descriptor in whatever
+    // binding set was allocated after it, which is read by a completely unrelated draw -- and this
+    // engine has already lost a device to exactly this shape of error (a view that did not fit the
+    // resource behind it). The caller records the slot as unbound and the shader falls back.
+    if (index >= t.capacity) {
+        AVER_ERROR("[RHI.D3D12] setBindlessTexture index {} past the table's {} slots -- refused. "
+                   "The material keeps its factor colour instead of a texture.", index, t.capacity);
+        return false;
+    }
+    RhiTexture* tex = texture(th);
+    if (!tex) { AVER_ERROR("[RHI.D3D12] setBindlessTexture with an invalid texture handle"); return false; }
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+    sv.Format = toDxgiSrvFormat(tex->desc.format);
+    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    sv.Texture2D.MostDetailedMip = 0;
+    sv.Texture2D.MipLevels = tex->desc.mips;
+    dev_->device_->CreateShaderResourceView(tex->res.Get(), &sv, cpuSlot(t.heapBase + index));
+    return true;
+}
+
 BindingSetHandle D3D12ResourceFactory::createBindingSet(const BindingSetDesc& d) {
     collect();
     const u32 count = d.srvCount + d.uavCount;
@@ -6997,6 +7123,29 @@ void D3D12RenderContext::setBindingSet(BindingSetHandle set, u32 table) {
         if (pipe_->compute) dev_->cmdList_->SetComputeRootDescriptorTable(static_cast<UINT>(pipe_->uavParam[table]), h);
         else                dev_->cmdList_->SetGraphicsRootDescriptorTable(static_cast<UINT>(pipe_->uavParam[table]), h);
     }
+}
+
+// Binds the ray path's bindless texture table, for a pipeline that declared one.
+void D3D12RenderContext::setBindlessTable(BindlessTableHandle table) {
+    if (!pipe_ || !dev_->cmdList_) { AVER_ERROR("[RHI.D3D12] setBindlessTable before setPipeline"); return; }
+    // A DELIBERATE NO-OP on a pipeline without one, rather than an error: the caller binds this
+    // once per pass and should not have to know which PSO variant the renderer picked this frame.
+    if (pipe_->bindlessParam < 0) return;
+    const u32 cap = res_->bindlessTableCapacity(table);
+    if (cap == 0) { AVER_ERROR("[RHI.D3D12] setBindlessTable with an invalid table handle"); return; }
+
+    // The heap must be bound before the table can be, exactly as setBindingSet does it -- a pass
+    // that binds this WITHOUT ever calling setBindingSet (a fullscreen ray pass may well not) would
+    // otherwise set a root table against whatever heap the last caller left bound.
+    ID3D12DescriptorHeap* const heap = res_->heap_.Get();
+    if (dev_->boundHeap_ != heap) {
+        ID3D12DescriptorHeap* heaps[] = {heap};
+        dev_->cmdList_->SetDescriptorHeaps(1, heaps);
+        dev_->boundHeap_ = heap;
+    }
+    const D3D12_GPU_DESCRIPTOR_HANDLE h = res_->gpuSlot(res_->bindlessHeapBase(table));
+    if (pipe_->compute) dev_->cmdList_->SetComputeRootDescriptorTable(static_cast<UINT>(pipe_->bindlessParam), h);
+    else                dev_->cmdList_->SetGraphicsRootDescriptorTable(static_cast<UINT>(pipe_->bindlessParam), h);
 }
 
 // Writes root constants into a slot the pipeline declared as root constants.

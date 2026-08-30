@@ -3907,3 +3907,30 @@ IDevice* createVulkanDevice(const DeviceDesc& desc) {
 }
 
 } // namespace aver::rhi::detail
+
+
+namespace aver::rhi {
+
+// ---- the ray path's bindless texture table: DECLINED on this backend, for now ----
+//
+// Declined rather than stubbed to a silent zero. Every caller is already gated on
+// DeviceCaps::rtBindlessTextures, which VulkanDevice sets only when the descriptor-indexing
+// features are genuinely present AND enabled -- so arriving here means something bypassed that
+// gate, and the useful behaviour is to say so once and let the flat-albedo path take over, exactly
+// as it does on a device without the capability.
+
+BindlessTableHandle VulkanResourceFactory::createBindlessTextureTable(u32 capacity) {
+    AVER_WARN("[RHI.Vulkan] bindless texture tables are not implemented on this backend yet "
+              "({} descriptors requested); ray-traced texturing stays off here", capacity);
+    return 0;
+}
+
+void VulkanResourceFactory::destroyBindlessTextureTable(BindlessTableHandle) {}
+
+bool VulkanResourceFactory::setBindlessTexture(BindlessTableHandle, u32, TextureHandle) { return false; }
+
+u32 VulkanResourceFactory::bindlessTableCapacity(BindlessTableHandle) const { return 0; }
+
+void VulkanRenderContext::setBindlessTable(BindlessTableHandle) {}
+
+} // namespace aver::rhi

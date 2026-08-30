@@ -151,7 +151,11 @@ void giTableKinds(rhi::SlotKind* srv, rhi::SlotKind* uav) {
 }
 
 // Returns the pipeline layout every Voxi raster pipeline declares.
-rhi::PipelineLayout giLayout() {
+// `bindlessTextures` non-zero appends the ray path's texture array as ONE more root parameter, in
+// its own register space. EVERY EXISTING CALLER PASSES 0 and gets the identical root signature it
+// got before this parameter existed -- which is the whole point of a defaulted argument here rather
+// than a second function: there is one layout, and one place that decides its shape.
+rhi::PipelineLayout giLayout(u32 bindlessTextures = 0) {
     rhi::PipelineLayout l{};
     // t0 volume, t1 shadow map, t2 acceleration structure, then the flat geometry a reflection
     // ray reads after a hit: t3 vertices, t4 indices, t5 instances, t6 ray-traced shadow history,
@@ -184,6 +188,7 @@ rhi::PipelineLayout giLayout() {
     // from reflecting, and reflecting is what got t2 wrong.
     l.slotKindsDeclared = true;
     giTableKinds(l.srvKinds, l.uavKinds);
+    l.bindlessTextureCount = bindlessTextures;
     return l;
 }
 
@@ -410,7 +415,7 @@ void VoxiRenderer::shutdown() {
     scenePso_ = sceneMsPso_ = sceneRtPso_ = sceneMsRtPso_ = 0;
     sceneBlendedPso_ = sceneMsBlendedPso_ = sceneRtBlendedPso_ = sceneMsRtBlendedPso_ = 0;
     depthPrepassPso_ = scenePsoPrepassed_ = sceneRtPsoPrepassed_ = 0;
-    rayDrivenPso_ = 0;
+    rayDrivenPso_ = rayDrivenTexPso_ = 0;
     sceneGbufPso_ = sceneMsGbufPso_ = sceneRtGbufPso_ = sceneMsRtGbufPso_ = 0;
     sceneBlendedGbufPso_ = sceneMsBlendedGbufPso_ = sceneRtBlendedGbufPso_ = sceneMsRtBlendedGbufPso_ = 0;
     scenePsoPrepassedGbuf_ = sceneRtPsoPrepassedGbuf_ = 0;
@@ -1025,6 +1030,19 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
                 // Real per-material bytes, captured at submit time -- reflectance, f90, flags,
                 // emissive factor, all of it, not just the three floats RtInstance already carried.
                 std::memcpy(&mc, d.mat, sizeof(mc));
+
+                // AND ITS TEXTURES, which the raster path reaches through a per-draw descriptor
+                // table a ray hit has no equivalent of. Resolved to indices into the one bindless
+                // table the ray shader can index by a value it computed.
+                //
+                // From the binding set rather than from MaterialDesc, so what the ray path samples
+                // is exactly what writeSlots BOUND -- identity fallbacks included. A slot the
+                // material never set therefore samples flat white / flat normal on both paths
+                // instead of needing a per-slot branch in the shader.
+                if (const auto* tex = materials_.textures(d.matSet)) {
+                    for (u32 t = 0; t < pbr::kTextureSlotCount; ++t)
+                        mc.texIndex[t] = residentTexture((*tex)[t]);
+                }
             } else {
                 // No authored constant block exists for this draw, so one is built from the SAME
                 // colour/metal/rough the raster path already shades this exact surface with,
@@ -1150,6 +1168,9 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     // per-draw loop recorded, and touches no geometry. Its result is not gated into a cb_ flag the
     // way geometry is, because every index it assigns is valid whether or not the GPU upload below
     // succeeds -- there is no "read it or don't" toggle for a hit's OWN material.
+    // Before the table is built, because buildMaterialTable is what asks residentTexture() for
+    // indices and a null table would make every one of them unbound.
+    ensureTextureTable();
     buildMaterialTable(matConstantsByKey);
     // w > 0.5 tells the lit pass it may trace a reflection ray. It is only true when the flat
     // geometry table is actually there, because a reflection that hits geometry it cannot look up
@@ -1866,6 +1887,49 @@ bool VoxiRenderer::buildGeometryTable(rhi::IRenderContext& ctx) {
 // not approximate, and cheap at the sizes this system documents itself as living at ("tens, not
 // thousands" of resident materials, MaterialSystem.hpp) -- a memcmp over a few KB, once per build,
 // against re-encoding that same comparison into a hash for no real saving.
+// Makes one texture resident in the ray path's bindless table and returns its index, or
+// pbr::kUnboundTexture if it could not be made resident.
+//
+// APPEND-ONLY AND MEMOISED. The same texture asked for twice returns the same index, which is what
+// keeps the table sized by distinct IMAGES rather than by materials -- forty materials sharing one
+// albedo occupy one slot. Nothing is ever freed: see the table's own declaration comment for why
+// that is safe for a session and what it costs.
+u32 VoxiRenderer::residentTexture(rhi::TextureHandle h) {
+    if (!h || !rtTexTable_) return pbr::kUnboundTexture;
+    if (const auto it = rtTexIndex_.find(h); it != rtTexIndex_.end()) return it->second;
+    if (rtTexNext_ >= kRtTextureCapacity) {
+        // Said ONCE. A scene past the ceiling would otherwise log per material per build, which
+        // buries the one line that matters under thousands of copies of itself.
+        if (!rtTexLogged_) {
+            rtTexLogged_ = true;
+            AVER_WARN("[Voxi] ray-traced texture table full at {} distinct textures; further "
+                      "materials keep their factor colour instead of sampling. Raise "
+                      "kRtTextureCapacity if a real project needs more.", kRtTextureCapacity);
+        }
+        return pbr::kUnboundTexture;
+    }
+    const u32 index = rtTexNext_;
+    // THE RHI IS ASKED, NOT TOLD. setBindlessTexture refuses an out-of-range index rather than
+    // writing past the table, and a refusal must leave the slot unbound rather than advancing the
+    // cursor over a descriptor that was never written.
+    if (!res_->setBindlessTexture(rtTexTable_, index, h)) return pbr::kUnboundTexture;
+    ++rtTexNext_;
+    rtTexIndex_.emplace(h, index);
+    return index;
+}
+
+// Creates the bindless texture table on first need. Once: a failure is remembered so a device that
+// cannot provide one is not asked again every single build.
+void VoxiRenderer::ensureTextureTable() {
+    if (rtTexTableTried_ || !res_) return;
+    rtTexTableTried_ = true;
+    if (!caps_.rtBindlessTextures) return;   // silent: the caps line already said so once
+    rtTexTable_ = res_->createBindlessTextureTable(kRtTextureCapacity);
+    if (!rtTexTable_)
+        AVER_WARN("[Voxi] no bindless texture table; ray hits will shade from material factors "
+                  "alone, as they did before textured ray hits existed");
+}
+
 bool VoxiRenderer::buildMaterialTable(const std::unordered_map<u64, pbr::MaterialConstants>& matConstantsByKey) {
     // Distinct keys, sorted -- see this function's own header comment for why sorted rather than
     // insertion order. std::map over the same data would give this for free, but the table is
@@ -2371,9 +2435,17 @@ void VoxiRenderer::scenePass(rhi::IRenderContext& ctx) {
         rhi::ScopedGpuStat rayStat(ctx, "Voxi ray-driven primary");
         // See pickGbuf()'s own comment: ray-driven mode never goes through scenePipeline(), so this
         // is the one call site that has to ask for its G-buffer twin directly.
-        ctx.setPipeline(pickGbuf(rayDrivenPso_, rayDrivenGbufPso_));
+        // THE TEXTURED PIPELINE WHEN THERE IS ONE. Only for the non-G-buffer path: the G-buffer twin
+        // writes velocity/view-Z/normals, none of which a base-colour texture changes, so it is not
+        // worth a second variant until a later stage needs one -- and pickGbuf() must keep returning
+        // a pair that agree about their root signature.
+        const bool textured = rayDrivenTexPso_ != 0 && !dev_->gBufferEnabled();
+        ctx.setPipeline(textured ? rayDrivenTexPso_ : pickGbuf(rayDrivenPso_, rayDrivenGbufPso_));
         ctx.setBindingSet(bindings_);
         ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
+        // A no-op on the untextured pipeline, which declares no bindless table -- so this does not
+        // need to be inside the branch above.
+        ctx.setBindlessTable(rtTexTable_);
         ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb_, sizeof(cb_));
         ctx.drawFullscreen();
         return;
@@ -3017,7 +3089,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     debugPso_ = scenePso_ = sceneMsPso_ = sceneRtPso_ = sceneMsRtPso_ = 0;
     sceneBlendedPso_ = sceneMsBlendedPso_ = sceneRtBlendedPso_ = sceneMsRtBlendedPso_ = 0;
     depthPrepassPso_ = scenePsoPrepassed_ = sceneRtPsoPrepassed_ = 0;
-    rayDrivenPso_ = 0;
+    rayDrivenPso_ = rayDrivenTexPso_ = 0;
     sceneGbufPso_ = sceneMsGbufPso_ = sceneRtGbufPso_ = sceneMsRtGbufPso_ = 0;
     sceneBlendedGbufPso_ = sceneMsBlendedGbufPso_ = sceneRtBlendedGbufPso_ = sceneMsRtBlendedGbufPso_ = 0;
     scenePsoPrepassedGbuf_ = sceneRtPsoPrepassedGbuf_ = 0;
@@ -3155,6 +3227,48 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     // A WARNING, NOT AN ERROR, and the mode simply does not engage: rayDrivenActive() requires the
     // pipeline, so a device that cannot compile this keeps rasterising rather than going black.
     if (rtOk && !rayDrivenPso_) AVER_WARN("[Voxi] ray-driven primary-visibility pass unavailable");
+
+    // THE TEXTURED VARIANT, a second PSO rather than a branch inside the first. The bindless table
+    // is a root-signature difference, so it CANNOT be a runtime toggle -- a pipeline either declares
+    // the range or it does not, and declaring it on every device would put an unbounded-ish
+    // descriptor range in front of hardware the engine still supports without one.
+    //
+    // Built only when the device reports it AND the table actually exists. Both halves matter: caps
+    // says the hardware could, ensureTextureTable() says the descriptors were really reserved, and
+    // a scene that fails the second keeps the flat-albedo pipeline above -- which itself falls back
+    // to the rasteriser. Three levels of fallback, none of them a black screen.
+    ensureTextureTable();
+    if (rtOk && rtTexTable_) {
+        const rhi::PipelineLayout giTex = giLayout(kRtTextureCapacity);
+        // Emitted, not written twice: the shader's array length and this layout's declared range
+        // are the same number and must stay that way. giLayout() above and this string are the only
+        // two places kRtTextureCapacity is read.
+        const std::string bindlessDefs = "AVER_RT=1;AVER_RT_BINDLESS=1;AVER_RT_TEX_CAPACITY=" +
+                                         std::to_string(kRtTextureCapacity);
+        // The SAME material defines: giTex differs from gi only in bindlessTextureCount, which is a
+        // root-signature fact and not a register the material prelude cares about.
+        const rhi::ShaderHandle vskyTex = compile("VSky", rhi::ShaderStage::Vertex, kBaseSm,
+                                                  rasterDefs(bindlessDefs.c_str()).c_str());
+        const rhi::ShaderHandle psTex = compile("PSRayDriven", rhi::ShaderStage::Pixel, 65,
+                                                rasterDefs(bindlessDefs.c_str()).c_str());
+        if (vskyTex && psTex) {
+            rhi::GraphicsPipelineDesc p;
+            p.vs = vskyTex; p.ps = psTex;
+            p.layout = giTex;
+            p.cull = rhi::CullMode::None;
+            p.depth = {true, true, rhi::CompareOp::Always};
+            p.renderTargetCount = 1;
+            p.renderTargets[0] = color;
+            p.depthFormat = depth;
+            p.sampleCount = sampleCount;
+            rayDrivenTexPso_ = res_->createGraphicsPipeline(p);
+        }
+        if (!rayDrivenTexPso_)
+            AVER_WARN("[Voxi] textured ray-driven pass unavailable; hits will shade from material "
+                      "factors alone");
+        else
+            AVER_INFO("[Voxi] textured ray-driven pass ready ({} texture slots)", kRtTextureCapacity);
+    }
 
     // PSRayDriven's own G-buffer twin: RayDrivenGBufferOut adds SV_DEPTH to the same four targets
     // sceneGbuf already describes, so the desc is built the same way rayDrivenPso_'s own desc was
