@@ -877,6 +877,17 @@ public:
                                          bool blended = false) const {
         (void)meshShaders; (void)wireframe; (void)depthPrepassed; (void)blended; return 0;
     }
+
+    // The bindless texture table the pipelines returned above expect to have bound, or 0 for a
+    // feature whose pipelines declare none.
+    //
+    // WHY THE BACKEND HAS TO ASK. A blended draw is CAPTURED and replayed by the device, after the
+    // deferred sky -- see scenePipeline's own comment. The feature is not on the stack at that
+    // moment, so it cannot bind anything itself, and the device does not own the table. It asks,
+    // exactly as it already asks for the pipeline. Returning 0 is answered by setBindlessTable
+    // being a no-op on a pipeline that declared no range, so a feature that has no table and a
+    // pipeline that wants none cost one virtual call between them.
+    virtual BindlessTableHandle sceneBindlessTable() const { return 0; }
     // The DEPTH-ONLY pipeline for a same-frame depth prepass. A caller pairs this with
     // scenePipeline(..., depthPrepassed=true) for the SAME instance later in the frame: this one
     // writes depth (test=Less, write=true, matching scenePipeline()'s own default depth state

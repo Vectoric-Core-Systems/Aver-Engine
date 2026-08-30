@@ -185,6 +185,7 @@ public:
     rhi::PipelineHandle depthPrepassPipeline() const override;
 
     // True while the debug view replaces the scene, including the backend's line draws.
+    rhi::BindlessTableHandle sceneBindlessTable() const override;
     bool suppressesScene() const override;
     // ONLY the debug raymarch owns the whole frame. Ray-driven mode replaces how the first
     // surface is found and nothing else -- the sky, the gizmos and the particles in that frame are
@@ -584,6 +585,10 @@ private:
     // The TEXTURED ray-driven pipeline. Separate from rayDrivenPso_ because the bindless range is
     // part of the root signature: preferred when it exists, and rayDrivenPso_ is the fallback.
     rhi::PipelineHandle rayDrivenTexPso_ = 0;
+    // The TEXTURED blended (glass) variant: PSMainVoxi compiled with the bindless table declared,
+    // so a reflection seen IN a windowpane samples the reflected surface's texture. Preferred over
+    // sceneRtBlendedPso_ whenever it built and the G-buffer is off.
+    rhi::PipelineHandle sceneRtBlendedTexPso_ = 0;
 
     rhi::BindlessTableHandle rtTexTable_ = 0;
     std::unordered_map<rhi::TextureHandle, u32> rtTexIndex_;

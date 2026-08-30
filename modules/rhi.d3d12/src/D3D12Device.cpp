@@ -5054,6 +5054,12 @@ void D3D12Device::endFrame() {
                                                std::memcmp(fovCb_.data(), cb, cbBytes) == 0));
                 if (!same) {
                     rhiContext_->setPipeline(blendedPso);
+                    // The owner's bindless texture table, if its blended pipeline declared one.
+                    // A no-op when it did not, so this is unconditional rather than a second
+                    // capability question -- see IRenderFeature::sceneBindlessTable for why the
+                    // device asks at all instead of the feature binding it: the feature is not on
+                    // the stack during a replay it does not drive.
+                    rhiContext_->setBindlessTable(owner->sceneBindlessTable());
                     if (bs) rhiContext_->setBindingSet(bs, 0);
                     if (haveCb) rhiContext_->setConstantBuffer(kFeatureFrameConstantRegister, cb, cbBytes);
                     fovPso_ = blendedPso; fovSet_ = bs; fovCbBytes_ = haveCb ? cbBytes : 0;

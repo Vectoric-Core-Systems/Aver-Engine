@@ -416,6 +416,7 @@ void VoxiRenderer::shutdown() {
     sceneBlendedPso_ = sceneMsBlendedPso_ = sceneRtBlendedPso_ = sceneMsRtBlendedPso_ = 0;
     depthPrepassPso_ = scenePsoPrepassed_ = sceneRtPsoPrepassed_ = 0;
     rayDrivenPso_ = rayDrivenTexPso_ = 0;
+    sceneRtBlendedTexPso_ = 0;
     sceneGbufPso_ = sceneMsGbufPso_ = sceneRtGbufPso_ = sceneMsRtGbufPso_ = 0;
     sceneBlendedGbufPso_ = sceneMsBlendedGbufPso_ = sceneRtBlendedGbufPso_ = sceneMsRtBlendedGbufPso_ = 0;
     scenePsoPrepassedGbuf_ = sceneRtPsoPrepassedGbuf_ = 0;
@@ -2416,6 +2417,10 @@ bool VoxiRenderer::overridesScenePipeline() const { return giReady_; }
 // True while the debug view replaces the scene, including the backend's line draws.
 // TWO REASONS TO REPLACE THE SCENE, and they are not interchangeable -- see shadowHistoryActive()
 // in the header, which asks only about the first.
+// The table the blended pipeline above expects bound. The device asks during its replay, because
+// this feature is not on the stack then -- see IRenderFeature::sceneBindlessTable.
+rhi::BindlessTableHandle VoxiRenderer::sceneBindlessTable() const { return rtTexTable_; }
+
 bool VoxiRenderer::suppressesScene() const { return debugViewActive() || rayDrivenActive(); }
 
 // The debug raymarch paints every pixel from the voxel volume and has no depth to test against, so
@@ -2687,6 +2692,11 @@ rhi::PipelineHandle VoxiRenderer::scenePipeline(bool meshShaders, bool wireframe
     // the caller drops the draw for -- see createScenePipelines' AVER_WARN at the blended-twins step
     // for where that would have been logged.
     if (blended) {
+        // THE TEXTURED VARIANT FIRST, when there is one. Not for the mesh-shader or G-buffer
+        // permutations: neither has a textured twin, and pickGbuf must keep returning a pair that
+        // agree about their root signature.
+        if (rtActive_ && sceneRtBlendedTexPso_ && !meshShaders && !dev_->gBufferEnabled())
+            return sceneRtBlendedTexPso_;
         if (rtActive_)
             return pickGbuf(meshShaders && sceneMsRtBlendedPso_ ? sceneMsRtBlendedPso_ : sceneRtBlendedPso_,
                             meshShaders && sceneMsRtBlendedGbufPso_ ? sceneMsRtBlendedGbufPso_
@@ -3090,6 +3100,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     sceneBlendedPso_ = sceneMsBlendedPso_ = sceneRtBlendedPso_ = sceneMsRtBlendedPso_ = 0;
     depthPrepassPso_ = scenePsoPrepassed_ = sceneRtPsoPrepassed_ = 0;
     rayDrivenPso_ = rayDrivenTexPso_ = 0;
+    sceneRtBlendedTexPso_ = 0;
     sceneGbufPso_ = sceneMsGbufPso_ = sceneRtGbufPso_ = sceneMsRtGbufPso_ = 0;
     sceneBlendedGbufPso_ = sceneMsBlendedGbufPso_ = sceneRtBlendedGbufPso_ = sceneMsRtBlendedGbufPso_ = 0;
     scenePsoPrepassedGbuf_ = sceneRtPsoPrepassedGbuf_ = 0;
@@ -3268,6 +3279,36 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
                       "factors alone");
         else
             AVER_INFO("[Voxi] textured ray-driven pass ready ({} texture slots)", kRtTextureCapacity);
+
+        // AND THE BLENDED VARIANT, which is the one that reaches GLASS.
+        //
+        // A blended draw never goes through PSRayDriven at all -- the device captures it and replays
+        // it after the deferred sky through scenePipeline(..., blended=true), which is PSMainVoxi.
+        // So the bindless table being present on the ray-driven pipeline did nothing whatsoever for
+        // a windowpane: gRtTextures did not exist in the pipeline painting it, rtReflection's
+        // #ifdef compiled to the flat path, and every reflection in glass stayed Lambertian paint
+        // against a world whose directly-viewed surfaces are textured.
+        //
+        // Same layout, same defines, same PSMainVoxi -- only the blend state and the declared
+        // bindless range differ from sceneRtBlendedPso_ built below.
+        const rhi::ShaderHandle vsMainTex = compile("VSMain", rhi::ShaderStage::Vertex, kBaseSm,
+                                                    rasterDefs(bindlessDefs.c_str()).c_str());
+        const rhi::ShaderHandle psMainTex = compile("PSMainVoxi", rhi::ShaderStage::Pixel, 65,
+                                                    rasterDefs(bindlessDefs.c_str()).c_str());
+        if (vsMainTex && psMainTex) {
+            rhi::GraphicsPipelineDesc p = scene;
+            p.vs = vsMainTex; p.ps = psMainTex;
+            p.layout = giTex;
+            p.blend = rhi::BlendMode::PremultipliedAlpha;   // see sceneBlendedPso_ for why
+            p.depth.test = true;
+            p.depth.write = false;
+            sceneRtBlendedTexPso_ = res_->createGraphicsPipeline(p);
+        }
+        if (!sceneRtBlendedTexPso_)
+            AVER_WARN("[Voxi] textured blended (glass) variant unavailable; reflections in glass "
+                      "will stay flat");
+        else
+            AVER_INFO("[Voxi] textured blended (glass) variant ready");
     }
 
     // PSRayDriven's own G-buffer twin: RayDrivenGBufferOut adds SV_DEPTH to the same four targets
