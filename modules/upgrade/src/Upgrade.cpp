@@ -145,6 +145,34 @@ bool step_0_3_to_0_4(const Context& ctx, std::string* err) {
     return true;
 }
 
+// A 0.4 PROJECT ALSO NEEDS NOTHING DONE TO IT, by the same rule again -- but the reasoning has to
+// be redone rather than inherited, because "the last two were empty" is not an argument.
+//
+// What 0.5 changed, and why absence is the old behaviour in every case:
+//   - MaterialConstants grew 96 -> 112 bytes for the clear coat. That struct is a GPU upload, never
+//     serialised; nothing on disk describes it. No format bump, no migration -- see MaterialGpu.hpp.
+//   - `.ocmat` gained PARAM coatWeight / coatRoughness / coatF0. A 0.4 material states none, and
+//     parseOcmat's defaults (0, 0, 0.04) are exactly "no coat", which is what a 0.4 material meant.
+//   - MaterialOutput gained CoatWeight / CoatRoughness / CoatF0 pins. A 0.4 graph drives none of
+//     them, and compileMaterialGraph only writes the fields an author actually drove.
+//   - `.ocproject` gained RENDER.LAYEREDBSDF. Absent parses to -1, "not stated", which leaves the
+//     setting at its struct default of Off -- the standard BRDF, i.e. 0.4's shading exactly.
+//   - `.ocproject` gained MODULES and REQUIRES. A 0.4 manifest has neither. MODULES is descriptive
+//     and gets stamped on the next save; REQUIRES absent means the project demands no module, which
+//     is the only thing a 0.4 project could have meant.
+//
+// THE RENDER FIX IN THIS RELEASE IS NOT A MIGRATION, and it is worth saying why, because it is the
+// largest visible change 0.5 makes. Ray-driven mode was shading every hit with the fallback material
+// (buildGeometryTable uploaded the instance array before buildMaterialTable filled in materialIndex).
+// Projects made in 0.4 will look DIFFERENT in 0.5 -- correct, where they were wrong. That is a
+// change to how the engine reads a scene, not to what a scene has to contain, so there is nothing
+// in anyone's directory to repair.
+bool step_0_4_to_0_5(const Context& ctx, std::string* err) {
+    (void)ctx;
+    (void)err;
+    return true;
+}
+
 // EVERY STEP EVER SHIPPED, OLDEST FIRST, AND NONE OF THEM EDITED AFTER THE FACT. A project made in
 // 0.1 will still be opened years from now, and it will run exactly this function.
 const std::vector<Step> kSteps = {
@@ -157,6 +185,9 @@ const std::vector<Step> kSteps = {
     {{0, 3, 0}, {0, 4, 0},
      "Nothing to repair: 0.4's format changes all read an absent record as the 0.3 behaviour",
      &step_0_3_to_0_4},
+    {{0, 4, 0}, {0, 5, 0},
+     "Nothing to repair: 0.5's format changes are additive, and the coat reads absent as no coat",
+     &step_0_4_to_0_5},
 };
 
 } // namespace
