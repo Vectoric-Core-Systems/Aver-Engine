@@ -471,7 +471,7 @@ static void testPack() {
     // subtly wrong with nothing to grep for. Note this is a RUNTIME check rather than a
     // static_assert, which is why the 80 -> 96 growth compiled clean and would have failed the suite
     // instead -- keep it that way, since the point is to be told, not to be stopped.
-    check(sizeof(pbr::MaterialConstants) == 112, "MaterialConstants is 112 bytes");
+    check(sizeof(pbr::MaterialConstants) == 144, "MaterialConstants is 144 bytes");
     check(sizeof(pbr::MaterialConstants) % 16 == 0, "...and a legal constant-buffer size");
 
     // ---- THE FIELD LAYOUT, NOT JUST THE TOTAL ----
@@ -499,6 +499,21 @@ static void testPack() {
     check(offsetof(pbr::MaterialConstants, coatWeight)       == 96, "coatWeight at 96");
     check(offsetof(pbr::MaterialConstants, coatRoughness)    == 100, "coatRoughness at 100");
     check(offsetof(pbr::MaterialConstants, coatF0)           == 104, "coatF0 at 104");
+
+    // The bindless texture-index block. Checked at its offset like every field above, and then
+    // checked for CONTENT too, because this is the one field where a plausible-looking zero is the
+    // dangerous value: 0 is a real index into the ray path's texture table, so a material that
+    // never got resident textures must carry kUnboundTexture rather than a default-constructed 0,
+    // or it samples whatever landed in slot 0 and looks like a content bug rather than a code one.
+    check(offsetof(pbr::MaterialConstants, texIndex)         == 112, "texIndex at 112");
+    {
+        const pbr::MaterialConstants fresh = pbr::packMaterial(pbr::MaterialDesc{});
+        bool allUnbound = true;
+        for (u32 i = 0; i < pbr::kTextureSlotCount; ++i)
+            if (fresh.texIndex[i] != pbr::kUnboundTexture) allUnbound = false;
+        check(allUnbound, "...and packMaterial leaves every slot UNBOUND, not 0");
+        check(pbr::kUnboundTexture != 0u, "...which means something, because 0 is a valid index");
+    }
 
     pbr::MaterialDesc d;
     pbr::MaterialConstants c = pbr::packMaterial(d);

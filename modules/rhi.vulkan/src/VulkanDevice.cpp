@@ -820,6 +820,34 @@ bool VulkanDevice::init(const DeviceDesc& desc) {
     api_.GetPhysicalDeviceFeatures2(physicalDevice_, &f2);
     v12.bufferDeviceAddress = VK_TRUE;   // already confirmed supported above
     v12.timelineSemaphore = VK_TRUE;
+
+    // THE THREE BITS THE RAY PATH'S BINDLESS TEXTURE TABLE NEEDS, required explicitly rather than
+    // left to chance. v12 came back from GetPhysicalDeviceFeatures2 carrying every bit the device
+    // SUPPORTS and is then handed to vkCreateDevice as the set to ENABLE, so these would very
+    // likely have been enabled incidentally -- which is exactly the kind of thing that works on the
+    // machine it was written on and fails on a driver that reports them differently.
+    //
+    //   runtimeDescriptorArray                      -- index an array whose size the shader does not know
+    //   shaderSampledImageArrayNonUniformIndexing   -- index it by a value that VARIES ACROSS THE WAVE,
+    //                                                  which is the whole point: neighbouring pixels hit
+    //                                                  different materials
+    //   descriptorBindingPartiallyBound             -- leave holes. Our table is fixed-N with unbound
+    //                                                  slots by construction (kUnboundTexture), so without
+    //                                                  this the validation layer rejects the set.
+    bindlessCapable_ = v12.runtimeDescriptorArray &&
+                       v12.shaderSampledImageArrayNonUniformIndexing &&
+                       v12.descriptorBindingPartiallyBound;
+    if (bindlessCapable_) {
+        v12.runtimeDescriptorArray                    = VK_TRUE;
+        v12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+        v12.descriptorBindingPartiallyBound           = VK_TRUE;
+    } else {
+        // Cleared for the same reason the mesh-shader bits below are: an unsupported bit left set
+        // in the struct handed to vkCreateDevice is a device-creation failure, not a quiet no.
+        v12.runtimeDescriptorArray                    = VK_FALSE;
+        v12.shaderSampledImageArrayNonUniformIndexing = VK_FALSE;
+        v12.descriptorBindingPartiallyBound           = VK_FALSE;
+    }
     v13.dynamicRendering = VK_TRUE;
     v13.synchronization2 = VK_TRUE;
     const bool meshShaderFeaturesOk = !wantMeshShader || (meshFeat.taskShader && meshFeat.meshShader);
@@ -1162,8 +1190,14 @@ void VulkanDevice::queryCaps() {
     // feature bits this backend does not otherwise rely on.
     caps_.resourceBindingTier = 0;
 
+    // NOT DERIVED FROM resourceBindingTier, which is hardcoded 0 just above and could never carry
+    // this. Vulkan answers the same question with descriptor-indexing feature bits instead, decided
+    // at device creation (see bindlessCapable_). Ray tracing is still required, so --force-caps
+    // no-rt disables this here exactly as it does on D3D12 -- hence reading the CLAMPED tier below.
+
     const DeviceCaps hw = caps_;
     clampCaps(caps_);
+    caps_.rtBindlessTextures = caps_.rayTracingTier >= 11 && bindlessCapable_;
     AVER_INFO("[RHI.Vulkan] caps: MSAA {}x, RT tier {}, SM {}, mesh-shader tier {}, DXC {}, cons-raster {}, binding tier {}",
               caps_.maxMsaaSamples, caps_.rayTracingTier, caps_.shaderModel,
               caps_.meshShaderTier, caps_.dxcAvailable, caps_.conservativeRaster, caps_.resourceBindingTier);

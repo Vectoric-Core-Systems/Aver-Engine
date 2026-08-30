@@ -83,6 +83,13 @@ MaterialConstants packMaterial(const MaterialDesc& d) {
     // Same reasoning as subsurface above: the WEIGHT alone decides. A coat roughness or F0 with no
     // weight coats nothing, and letting either set the flag would pay for the lobe to compute zero.
     if (d.coatWeight > 0.0f) flags |= MaterialFlag_Coat;
+
+    // EVERY SLOT UNBOUND UNTIL SOMETHING RESIDENT-IFIES IT. packMaterial works from a MaterialDesc
+    // alone and has no idea where (or whether) a texture landed in the ray path's bindless table --
+    // that is the renderer's business, and it fills these in when it uploads the RT material table.
+    // Defaulting them here means a material that never reaches that path still carries a defined
+    // "no texture" rather than an index into whatever happened to be at 0.
+    for (u32 i = 0; i < kTextureSlotCount; ++i) c.texIndex[i] = kUnboundTexture;
     c.flags = flags;
 
     // Reciprocal once per upload rather than per pixel. A tiling of zero or less collapses to zero

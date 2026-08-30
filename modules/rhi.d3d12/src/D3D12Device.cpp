@@ -2468,10 +2468,27 @@ void D3D12Device::queryCaps() {
     }
     const DeviceCaps hw = caps_;
     clampCaps(caps_);
+
+    // DERIVED AFTER THE CLAMP, ON PURPOSE. --force-caps no-rt exists so the non-RT fallback can be
+    // exercised on hardware that does not need it; deriving this before the clamp would leave the
+    // bit set while rayTracingTier read 0, and the one flag whose whole job is to disable this path
+    // would not disable it. Reading the clamped value means every existing override already covers
+    // the new bit and no new --force-caps token is needed to falsify it.
+    //
+    // Tier 1_1 is the floor because that is what the ray-driven path itself already demands, and
+    // any device offering it is D3D12_RESOURCE_BINDING_TIER_3 -- checked rather than assumed, since
+    // being wrong here means an out-of-bounds descriptor index rather than a missing feature.
+    caps_.rtBindlessTextures = caps_.rayTracingTier >= 11 && caps_.resourceBindingTier >= 3;
+    if (caps_.rayTracingTier >= 11 && caps_.resourceBindingTier < 3)
+        AVER_WARN("[RHI.D3D12] DXR 1.1 with resource binding tier {} -- not the tier 3 this path "
+                  "assumes, so ray-traced texturing stays off. Please report this device.",
+                  caps_.resourceBindingTier);
+
     AVER_INFO("[RHI.D3D12] caps: MSAA {}x, RT tier {}, SM {}, mesh-shader tier {}, DXC {}, cons-raster {}, binding tier {}",
               caps_.maxMsaaSamples, caps_.rayTracingTier, caps_.shaderModel,
               caps_.meshShaderTier, caps_.dxcAvailable, caps_.conservativeRaster,
               caps_.resourceBindingTier);
+    AVER_INFO("[RHI.D3D12] ray-traced bindless textures: {}", caps_.rtBindlessTextures ? "yes" : "no");
     if (capsOverride().active)
         AVER_WARN("[RHI.D3D12] caps CLAMPED by --force-caps; the hardware reports MSAA {}x, RT tier {}, SM {}, mesh-shader tier {}, DXC {}, cons-raster {}, binding tier {}",
                   hw.maxMsaaSamples, hw.rayTracingTier, hw.shaderModel, hw.meshShaderTier,

@@ -91,6 +91,19 @@ struct DeviceCaps {
     u32 meshShaderTier = 0;          // 0 = none, 1 = Tier 1 (D3D12 Ultimate)
     bool dxcAvailable = false;       // DXIL compiler present (needed for SM 6.x)
     u32 resourceBindingTier = 0;     // 0 = unknown, 1/2/3 = D3D12_RESOURCE_BINDING_TIER_N
+
+    // Whether a shader may index a large texture ARRAY by a value it computed -- what texturing a
+    // ray hit needs, because one fullscreen pass shades every material and cannot bind a descriptor
+    // table per draw the way the raster path does.
+    //
+    // A SEPARATE BIT FROM resourceBindingTier, NOT DERIVED FROM IT, and that is deliberate on both
+    // backends. RHIResources.hpp opens by promising "explicit descriptor tables, NOT bindless",
+    // because the engine floor is FL 11_0 (binding tier 1). That promise still holds for every
+    // raster pipeline; this bit says only that the RAY-TRACED path, which already demands DXR 1.1
+    // and SM 6.5 and therefore hardware that is always binding tier 3, may use one. Deriving it
+    // from resourceBindingTier would also be wrong on Vulkan, where that field is hardcoded to 0
+    // by design and could never carry this.
+    bool rtBindlessTextures = false;
 };
 
 // A development clamp on what a device REPORTS, so capability-gated fallback paths can be run on

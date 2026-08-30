@@ -1818,6 +1818,11 @@ private:
     // ---- ray tracing: VK_KHR_acceleration_structure + VK_KHR_ray_query present ----
     bool rtSupported_ = false;
 
+    // Whether the descriptor-indexing features the ray path's bindless texture table needs were
+    // both SUPPORTED and ENABLED at device creation. Recorded there because that is the only place
+    // that knows; read by queryCaps to set DeviceCaps::rtBindlessTextures.
+    bool bindlessCapable_ = false;
+
     bool hasSwapchain_ = false;
     bool vsync_ = true;
     bool tearingSupported_ = false;   // VK_PRESENT_MODE_IMMEDIATE_KHR present in the surface's list; fixed for the swapchain's life

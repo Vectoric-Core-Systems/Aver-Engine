@@ -156,6 +156,11 @@ struct RtMaterial {
     float  coatRoughness;
     float  coatF0;
     float  _coatPad;
+
+    // MIRRORS MaterialConstants::texIndex, in TextureSlot order: BaseColor, MetalRough, Normal,
+    // Occlusion, Emissive, Layer1BaseColor, Layer1MetalRough, Layer1Normal. 0xFFFFFFFF is "no
+    // texture in this slot" -- not 0, which is a real index. Unread until the bindless table lands.
+    uint   texIndex[8];
 };
 // SLOT t9 IS A GUESS, LOUDLY. This is table 0's next free SRV slot after t8 -- kGiSrvCount
 // (VoxiGiShaders.hpp), currently 9, would need to become 10 to declare it here, and table 1 (the

@@ -131,9 +131,30 @@ struct MaterialConstants {
     f32 coatRoughness;   // [0,1]; the coat has its own GGX lobe, independent of the base
     f32 coatF0;          // normal-incidence reflectance of the coat itself; 0.04 is ordinary lacquer
     f32 _coatPad;        // keeps the row 16 bytes; not read anywhere
+
+    // ---- where each texture lives in the ray path's bindless table ----
+    //
+    // ONE u32 PER TextureSlot, in slot order, so slot N is texIndex[N] with no mapping table. The
+    // RASTER PATH DOES NOT READ THESE and never will: it binds a per-material descriptor table per
+    // draw and addresses its textures by register, which is cheaper and works on tier-1 hardware.
+    // These exist for the one case that cannot do that -- a ray hit, where a single fullscreen pass
+    // shades every material in the scene and has no per-draw table to bind.
+    //
+    // kUnboundTexture, not 0, for absent. Zero is a REAL index into the table (whatever landed
+    // there first), so a zero-initialised material would silently sample another material's
+    // base colour rather than fall back -- the kind of wrong that looks like a content bug.
+    u32 texIndex[kTextureSlotCount];
 };
 
-static_assert(sizeof(MaterialConstants) == 112, "the HLSL cbuffer mirrors this byte for byte");
+// No texture in that slot. Deliberately not 0; see MaterialConstants::texIndex.
+inline constexpr u32 kUnboundTexture = 0xFFFFFFFFu;
+
+// SIZED FROM THE ENUM, so adding a TextureSlot is a compile error here rather than a silent
+// mismatch against the HLSL mirror. 8 is asserted separately because the 144-byte figure below
+// depends on it: a ninth slot is a deliberate decision about the constant-buffer size, not a
+// change to wave through.
+static_assert(kTextureSlotCount == 8, "texIndex sizing and the 144-byte block below assume 8 slots");
+static_assert(sizeof(MaterialConstants) == 144, "the HLSL cbuffer mirrors this byte for byte");
 static_assert(sizeof(MaterialConstants) % 16 == 0, "must be a legal constant-buffer size");
 
 // Packs the authored description into the block the GPU reads. A slot counts as bound when either

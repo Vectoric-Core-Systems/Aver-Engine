@@ -77,6 +77,18 @@ cbuffer AverMaterial : register(b2) {
     float  gCoatRoughness;
     float  gCoatF0;
     float  _gCoatPad;
+
+    // MIRRORS MaterialConstants::texIndex, and DECLARED HERE EVEN THOUGH THE RASTER PATH NEVER
+    // READS IT. The C++ struct is uploaded whole to b2, and MaterialGpu.hpp asserts this cbuffer
+    // mirrors it "byte for byte"; a shorter cbuffer would happen to work (the tail is simply never
+    // addressed) while quietly making that assertion false, which is how the next person to add a
+    // field lands it at the wrong offset. One block, one layout, everywhere.
+    //
+    // The raster path resolves its textures through a per-draw descriptor table bound by register,
+    // which is cheaper and works on tier-1 hardware. These indices exist for the ray path, which
+    // shades every material in one pass and has no per-draw table to bind.
+    uint4  gTexIndex0;   // slots 0..3: BaseColor, MetalRough, Normal, Occlusion
+    uint4  gTexIndex1;   // slots 4..7: Emissive, Layer1BaseColor, Layer1MetalRough, Layer1Normal
 };
 
 // gMaterialFlags bits, mirroring pbr::MaterialFlag.
