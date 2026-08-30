@@ -413,3 +413,7 @@ endif()
 if(MSVC)
   set_source_files_properties(src/SandboxApp.cpp PROPERTIES COMPILE_OPTIONS "/bigobj")
 endif()
+
+# The editor's own two shaders (the cluster PS and the G-buffer debug view). The same stamp
+# mechanism the modules use -- aver_deploy_shaders takes any target, executables included.
+aver_deploy_shaders(Sandbox "${CMAKE_CURRENT_SOURCE_DIR}/shaders")
