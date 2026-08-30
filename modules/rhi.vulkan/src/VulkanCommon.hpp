@@ -95,6 +95,7 @@
 #include <vulkan/vulkan.h>   // vendored at third_party/vulkan-headers/include, v1.3.296, Apache-2.0
 
 #include "aver/rhi/RHI.hpp"
+#include "aver/rhi/FrameConstants.hpp"
 #include "VulkanRegisterMap.hpp"
 #include "aver/core/Log.hpp"
 
@@ -855,48 +856,12 @@ struct ConstantAllocation {
 };
 
 // ================================================================================================
-// 6. Per-frame / per-draw CPU-side structs. PerFrameCB is a BYTE-FOR-BYTE copy of
-//    D3D12Device.cpp's own PerFrameCB (which itself must mirror `cbuffer PerFrame` in the shared
-//    HLSL prelude field for field) — copied here rather than re-derived, per the contract scout's
-//    explicit warning that a single stray float here is a silent cross-backend shading divergence
-//    no compiler catches.
+// 6. Per-draw CPU-side structs.
+//    PerFrameCB and PostCB USED TO BE HAND-COPIED HERE from D3D12Device.cpp -- this file said so
+//    itself, warning that "a single stray float here is a silent cross-backend shading divergence
+//    no compiler catches". Both are now defined once in aver/rhi/FrameConstants.hpp, which the two
+//    backends include, so that divergence is no longer expressible.
 // ================================================================================================
-struct PerFrameCB {
-    f32 viewProj[16];
-    f32 invViewProj[16];
-    f32 camPos[4];
-    f32 lightDir[4];
-    f32 lightColor[4];
-    f32 ambient[4];
-    f32 skyZenith[4];
-    f32 skyHorizon[4];
-    f32 fogColor[4];
-    f32 skyParams[4];
-    f32 groundColor[4];
-    f32 fogParams[4];
-    f32 cloudParams[4];
-    f32 cloudMotion[4];
-    f32 atmoRayleigh[4];
-    f32 atmoMie[4];
-    f32 atmoOzone[4];
-    f32 atmoPlanet[4];
-    f32 atmoTune[4];
-    f32 atmoSunE0[4];
-    f32 fogInscatterRef[4];
-    f32 furnace[4];
-    f32 skySh[9][4];     // nine L2 SH coefficients of the sky, rgb; w unused
-};
-// Constants for every post pass. Byte-for-byte mirror of D3D12Device.cpp's PostCB, which itself
-// mirrors `cbuffer AverPost : register(b0)` in rhi::postShaderSource().
-struct PostCB {
-    f32 tone[4];
-    f32 dst[4];
-    f32 src[4];
-    f32 adapt[4];
-    f32 limit[4];
-    f32 misc[4];
-};
-static_assert(sizeof(PostCB) == 96, "the HLSL cbuffer mirrors this byte for byte");
 
 // Per-draw binding table 1 plus its b2 constant block, copied from the caller. Identical in shape
 // to D3D12Device.cpp's private DrawBinding; defined here (not per-class) because both
