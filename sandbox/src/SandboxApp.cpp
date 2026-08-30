@@ -2983,14 +2983,28 @@ public:
         // this guards against is noticed at Present, so a single frame is not evidence of anything.
         // --shader-source: pick up an HLSL edit without restarting.
         //
-        // KNOWN LIMIT, MEASURED: only the FIRST edit of a run is delivered. aver::DirectoryWatcher
-        // reports one event and then goes quiet -- three plain appends seven seconds apart produced
-        // exactly one `poll: rescan=0 events=1` and nothing after. The wiring below is not the
-        // problem; the same poll keeps running for the rest of the frame budget and sees nothing.
-        // This module had NO consumers before this call site, and tests/platform/src/WatcherTest.cpp
-        // drains events in a loop inside a single settle window -- it never asks for a second change
-        // minutes later, which is the case a shader-editing session is made of. Fix the watcher and
-        // this becomes real hot reload with no change here.
+        // THAT "KNOWN LIMIT" WAS A MEASUREMENT ARTIFACT, AND THIS IS WHAT IT ACTUALLY WAS.
+        //
+        // This comment used to say, as established fact, that only the FIRST edit of a run is ever
+        // delivered -- that aver::DirectoryWatcher reports one event and then goes quiet, evidenced
+        // by three appends seven seconds apart producing exactly one event. Every part of that
+        // observation was real. The conclusion drawn from it was not.
+        //
+        // `--frames 900 --no-vsync` runs for about TWELVE SECONDS (measured: 900 frames, 12.0 s,
+        // 75 fps). Three appends seven seconds apart span twenty-one. The second and third edits
+        // were made after the process had already exited, so of course nothing reported them.
+        // Re-running those exact conditions reproduces the symptom precisely -- one event, silence
+        // after -- with the log line `stopped after 900 frame(s)` sitting between append one and
+        // append two.
+        //
+        // Re-measured with a run long enough to outlive the edits (--frames 9000, five edits nine
+        // seconds apart, using Add-Content, Set-Content AND Copy-Item -Force): ALL FIVE were
+        // delivered, each one dropping the shader cache and bumping the revision that makes
+        // VoxiRenderer::prePass rebuild. Hot reload works and has always worked.
+        //
+        // tests/platform/src/WatcherTest.cpp now covers the shape that was suspected -- change,
+        // drain, idle for seconds, change again, twice -- so the claim cannot be re-made without
+        // something actually failing first.
         //
         // THIS FUNCTION ONLY EVER BUMPS AN INTEGER. rhi::reloadShaderFiles() drops the text cache and
         // increments a revision; it touches no GPU object. VoxiRenderer::prePass notices the revision

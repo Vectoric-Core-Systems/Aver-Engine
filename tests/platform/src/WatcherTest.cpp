@@ -161,6 +161,50 @@ int main() {
         check(evs.empty(), "an idle watcher reports NOTHING at all");
     }
 
+    // THE EDITING-SESSION SHAPE, and the one this file never tested. Every case above changes
+    // something and drains it IMMEDIATELY, so the watcher is never asked to survive a period of
+    // quiet and then report again -- which is what an editor does: you change a shader, look at it
+    // for ten seconds, change it again.
+    //
+    // WRITTEN TO REPRODUCE A REPORTED DEFECT, AND IT DID NOT. The report was that the watcher
+    // delivers only the first change of a run: a 900-frame --shader-source session with three
+    // appends seven seconds apart logged exactly one event and nothing after. The observation
+    // was real; the cause was not the watcher. 900 frames at --no-vsync is about twelve seconds,
+    // and three appends seven seconds apart span twenty-one -- the last two were made after the
+    // process had already exited.
+    //
+    // The case is kept anyway, because it is the shape nothing else in this file covers: every
+    // other block changes something and drains it IMMEDIATELY, which is not what an editing
+    // session looks like. If the watcher ever does go quiet after a stretch of idle, this says so.
+    {
+        std::vector<FileEvent> evs;
+        write(root / "session.hlsl", "// first edit\n");
+        check(drain(w, evs), "the first edit does not overflow");
+        check(findFor(evs, "session.hlsl") != nullptr, "the FIRST edit is reported");
+
+        // Idle well past the settle window. An editing session is mostly idle, and this is the only
+        // thing separating this case from the ones above.
+        std::vector<FileEvent> idle;
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+        check(drain(w, idle, 200), "the idle stretch does not overflow");
+        check(idle.empty(), "and reports nothing, because nothing happened");
+
+        std::vector<FileEvent> second;
+        write(root / "session.hlsl", "// second edit, after three idle seconds\n");
+        check(drain(w, second), "the second edit does not overflow");
+        check(findFor(second, "session.hlsl") != nullptr,
+              "the SECOND edit, after several seconds of quiet, is reported too");
+
+        // A third, because two could be a coincidence and the report was of three appends.
+        std::vector<FileEvent> third;
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+        (void)drain(w, third, 200);
+        third.clear();
+        write(root / "session.hlsl", "// third edit\n");
+        check(drain(w, third), "the third edit does not overflow");
+        check(findFor(third, "session.hlsl") != nullptr, "and so is the THIRD");
+    }
+
     {
         w.stop();
         check(!w.watching(), "watching() is false after stop()");
