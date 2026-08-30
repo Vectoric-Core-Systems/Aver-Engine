@@ -5,6 +5,7 @@
 // and the generic resource factory and render context. Hand-rolled D3D12 structs (no d3dx12.h).
 #include "aver/rhi/RHI.hpp"
 #include "aver/rhi/FrameConstants.hpp"
+#include "aver/rhi/DxcShaderInclude.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/CrashReport.hpp"
 
@@ -174,8 +175,13 @@ public:
             L"-HV", L"2021",
         };
         for (const std::wstring& d : wDefines) { args.push_back(L"-D"); args.push_back(d.c_str()); }
+        // A REAL INCLUDE HANDLER where this passed nullptr, so a .hlsl can #include another instead of
+        // relying on the caller having concatenated the right preludes in the right order. Backed by
+        // rhi::shaderFile(), not DXC's default filesystem one -- see DxcShaderInclude.hpp for why that
+        // distinction is load-bearing (--shader-source, the cache, CRLF normalisation, hot reload).
+        DxcShaderInclude includes(utils_.Get());
         ComPtr<IDxcResult> result;
-        HRESULT hr = compiler_->Compile(&buf, args.data(), static_cast<UINT32>(args.size()), nullptr, IID_PPV_ARGS(&result));
+        HRESULT hr = compiler_->Compile(&buf, args.data(), static_cast<UINT32>(args.size()), &includes, IID_PPV_ARGS(&result));
         if (SUCCEEDED(hr)) result->GetStatus(&hr);
         if (FAILED(hr)) {
             ComPtr<IDxcBlobUtf8> errs;
