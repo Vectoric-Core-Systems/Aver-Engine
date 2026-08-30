@@ -1846,14 +1846,28 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
         bool specHit = false;
         float3 refl = rtReflectionTemporal(i.wpos, N, R, L, i.pos.xy, s.rough,
                                            rtDzdx, rtDzdy, specHit);
-        // ONE skyColor(R), NOT TWO. Both operands of this lerp asked for the same value with the
-        // same argument, and skyColor is a 32-step atmosphere march under a physical sky -- each
-        // step evaluating a Chapman-function sun transmittance. Whether DXC common-subexpressions it
-        // away is not something to leave to chance for a term priced that high, and naming it costs
-        // nothing. Bit-identical output: the same value, read twice instead of computed twice.
-        const float3 skyR = skyColor(R);
-        ind4.specular = lerp(specHit ? refl : skyR, skyR,
-                             smoothstep(0.5, 0.75, s.rough));
+        // ONE skyColor(R), NOT TWO, AND NOW NOT ALWAYS ONE. Both operands of this lerp ask for the
+        // same value with the same argument, and skyColor is a 32-step atmosphere march under a
+        // physical sky -- each step evaluating a Chapman-function sun transmittance. Naming it once
+        // rather than trusting DXC to common-subexpression a term priced that high was the first
+        // half of this; the guard is the second.
+        //
+        // WHEN THE MARCH IS PURE WASTE: smoothstep(0.5, 0.75, rough) is EXACTLY 0 for any surface at
+        // or below 0.5 roughness, so for a ray that HIT something the lerp reduces to `refl` and the
+        // sky it just marched is multiplied by zero. Water, glass, chrome and wet stone are all in
+        // that band, which is exactly the population that grew when water became a blended material:
+        // measured on the PTTest pool, the blended replay went 18.9 -> 15.9 ms and the whole frame
+        // 44.86 -> 41.78. Nothing on screen changes, because the term removed was multiplied by 0.
+        //
+        // STILL ONE CALL, AND THAT IS NOT A STYLE POINT. An earlier attempt at this guard split the
+        // lerp into two branches that each called skyColor(R), which cost 13% (8.15 -> 9.26 ms): a
+        // divergent wave executes both sides, so "avoiding" the march by branching around it ran it
+        // twice instead. The shape below has exactly one call site, guarded, and the guard is false
+        // only where the result is provably unused.
+        const float skyW = smoothstep(0.5, 0.75, s.rough);
+        float3 skyR = float3(0.0, 0.0, 0.0);
+        if (!specHit || skyW > 0.0) skyR = skyColor(R);
+        ind4.specular = lerp(specHit ? refl : skyR, skyR, skyW);
     } else
 #endif
     if (gVoxelParams.w > 0.5) {
@@ -2656,14 +2670,19 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         bool specHit = false;
         float3 refl = rtReflectionTemporal(wpos, N, R, L, i.pos.xy, s.rough,
                                            rdReflDzdx, rdReflDzdy, specHit);
-        // ONE skyColor(R), NOT TWO. Both operands of this lerp asked for the same value with the
-        // same argument, and skyColor is a 32-step atmosphere march under a physical sky -- each
-        // step evaluating a Chapman-function sun transmittance. Whether DXC common-subexpressions it
-        // away is not something to leave to chance for a term priced that high, and naming it costs
-        // nothing. Bit-identical output: the same value, read twice instead of computed twice.
-        const float3 skyR = skyColor(R);
-        ind.specular = lerp(specHit ? refl : skyR, skyR,
-                            smoothstep(0.5, 0.75, s.rough));
+        // THE SAME GUARD PSMainVoxi's twin carries, and for the same reason -- see that block, a few
+        // hundred lines up, for the full account including the 13% regression an earlier two-call
+        // version of it cost. smoothstep(0.5, 0.75, rough) is exactly 0 at or below 0.5 roughness, so
+        // for a ray that HIT something the lerp reduces to `refl` and the marched sky is multiplied
+        // by zero.
+        //
+        // THIS ONE IS THE WHOLE SCREEN, not just the blended surfaces: PSRayDriven answers primary
+        // visibility for every pixel in the default render mode, so every smooth surface in the frame
+        // was paying a 32-step atmosphere march it then discarded.
+        const float skyW = smoothstep(0.5, 0.75, s.rough);
+        float3 skyR = float3(0.0, 0.0, 0.0);
+        if (!specHit || skyW > 0.0) skyR = skyColor(R);
+        ind.specular = lerp(specHit ? refl : skyR, skyR, skyW);
     } else if (gVoxelParams.w > 0.5) {
         // PSMainVoxi's OWN voxel-cone fallback, for exactly the surfaces PSMainVoxi itself would also
         // fall back for (rough > 0.75, or ray tracing unavailable) -- see that function's identical
