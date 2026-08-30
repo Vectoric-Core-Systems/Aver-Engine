@@ -134,6 +134,37 @@ struct Settings {
     f32 giIntensity     = 1.0f;
     f32 giMaxDistance   = 4000.0f;  // centimetres
 
+    // ---- refraction: how a translucent surface BENDS what is behind it ----
+    //
+    // Absorption (attenuationColor) decides what COLOUR survives a medium; refraction decides where
+    // it comes FROM. They are independent: glass is green because of iron and distorts because
+    // ior != 1, and a pane can do either without the other. This is the second half, and it is only
+    // reachable at all because the blended pass now has the scene behind it as a texture.
+    //
+    //   Off (0)          the background is sampled straight through -- what shipped before this.
+    //   ScreenSpace (1)  the sample is OFFSET by the refracted view direction, scaled by the
+    //                    ray-measured thickness. Nearly free, since it reuses the backdrop copy.
+    //                    Its limit is the copy's: the offset can reach off-screen or pick up
+    //                    something in FRONT of the glass, because a screen-space image only holds
+    //                    what the camera saw. refractionEdgeFade exists to hide that.
+    //   RayTraced (2)    a refracted ray is traced through the TLAS and its HIT POINT is projected
+    //                    back to screen to choose the sample. That fixes the geometry -- the bend
+    //                    follows real surfaces rather than a flat screen offset -- and costs a ray
+    //                    on the path that is already the frame's bottleneck.
+    //
+    // ON A LADDER, AND THE DEFAULT MATCHES THE DEFAULT TIER'S RUNG. refractionForQuality derives
+    // this from rayTracing (Off->Off, Low/Medium->ScreenSpace, High/Epic->RayTraced), and the
+    // derivation fires only on a TIER CHANGE -- so `= 1` here must equal the Medium rung or the
+    // derivation would never run on a default-configured device and the ladder would be dead code.
+    u32 refractionMode     = 1;
+    // Multiplies the offset. 1.0 is the physical bend for the material's own ior; below that trades
+    // correctness for calm, above it exaggerates. A knob rather than a constant because the honest
+    // answer depends on how thick the authored geometry is relative to the scene.
+    f32 refractionStrength = 1.0f;
+    // How far from the screen edge the offset is faded out, as a fraction of the smaller dimension.
+    // 0 disables the fade and lets the artefact show, which is occasionally what you want to see.
+    f32 refractionEdgeFade = 0.15f;
+
     // ---- ray-traced sun shadow: rays per trace, and how many pixels amortise one trace ----
     // Occlusion rays per pixel, when this pixel traces this frame. Clamped to
     // [1, VoxiRenderer::kMaxShadowRays].
@@ -373,6 +404,7 @@ public:
     static u32 voxelResolutionForQuality(Quality q);
     // Total cones for the diffuse gather, including the axial one. See Settings::giCones.
     static u32 giConesForQuality(Quality q);
+    static u32 refractionForQuality(Quality q);
     // Returns the revoxelisation interval a GI quality tier resolves to, derived by setSettings on a
     // tier change under exactly the same "only if the caller left it untouched" rule as the grid edge
     // above. Epic is 1 -- always fresh -- so the top tier's indirect light is unchanged by this.

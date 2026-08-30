@@ -1232,13 +1232,79 @@ bool averBlendBackdropValid(out float2 invSize) {
 //
 // Falls back to the scalar composite when no backdrop is bound, which is the honest answer rather
 // than sampling black and calling it absorption.
+// WHERE THE BACKGROUND IS READ FROM, once the surface is allowed to bend it.
+//
+// Absorption decides what COLOUR survives the medium; refraction decides where it comes FROM. This
+// is the second half, and gIor is its first reader -- that uniform has been uploaded and unread
+// since it was added, which its own declaration comment says out loud.
+//
+// Returns the UV to sample the backdrop at. gGiParams.y is the mode, .z the strength, .w the edge
+// fade (see Settings::refractionMode and its neighbours for the ladder these come off).
+float2 averRefractedBackdropUV(AverSurface s, float3 wpos, float thicknessCm,
+                               float2 invSize, float2 screenPos) {
+    const float2 uv0  = screenPos * invSize;
+    const uint   mode = (uint)(gGiParams.y + 0.5);
+    if (mode == 0u || gGiParams.z <= 0.0) return uv0;
+
+    // TOTAL INTERNAL REFLECTION IS A REAL ANSWER, not an error: past the critical angle there is no
+    // transmitted ray at all, and HLSL's refract() returns 0 to say so. Sampling straight through is
+    // the honest fallback -- the alternative, normalising a zero vector, is a NaN that would spread.
+    const float  eta = 1.0 / max(gIor, 1.0001);
+    const float3 R   = refract(-s.V, s.N, eta);
+    if (dot(R, R) < 1e-6) return uv0;
+
+    // Where the bent ray leaves the medium, one thickness along the bent path rather than the
+    // straight one -- which is the whole point, and is why this needs the ray-measured thickness
+    // rather than an authored constant.
+    float3 target = wpos + R * max(thicknessCm, 0.0);
+
+#if AVER_RT
+    // RAY-TRACED: follow the bent ray to what it ACTUALLY reaches and project THAT. The screen-space
+    // mode below can only ever offset within the image the camera already captured; this finds real
+    // geometry, so the distortion follows surfaces instead of sliding pixels around. It still reads
+    // colour from the backdrop -- shading the hit properly would mean a second full material
+    // evaluation on the frame's most expensive pass -- so a hit that was off-screen or occluded
+    // still resolves to whatever the backdrop holds there. Honest limit, much better geometry.
+    if (mode >= 2u) {
+        RayDesc rr;
+        rr.Origin = target;
+        rr.Direction = R;
+        rr.TMin = 0.0;
+        rr.TMax = 100000.0;
+        RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> rq;
+        rq.TraceRayInline(gScene, RAY_FLAG_FORCE_OPAQUE, AVER_RT_MASK_OPAQUE, rr);
+        rq.Proceed();
+        if (rq.CommittedStatus() == COMMITTED_TRIANGLE_HIT)
+            target = target + R * rq.CommittedRayT();
+    }
+#endif
+
+    const float4 clip = mul(float4(target, 1.0), gViewProj);
+    if (clip.w <= 1e-4) return uv0;               // behind the eye: nothing sensible to sample
+    const float2 ndc = clip.xy / clip.w;
+    float2 uvR = float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+
+    // THE EDGE FADE, and it is not cosmetic. The backdrop only holds what the camera saw, so an
+    // offset that walks off the screen samples nothing meaningful and one that walks onto a
+    // FOREGROUND object shows that object through the glass. Fading the offset back to zero near
+    // the border turns both into a soft loss of refraction rather than a hard wrong pixel.
+    const float fadePx = max(gGiParams.w, 0.0);
+    float edge = 1.0;
+    if (fadePx > 0.0) {
+        const float2 d = min(uvR, 1.0 - uvR);     // distance to the nearest border, in UV
+        edge = saturate(min(d.x, d.y) / fadePx);
+    }
+    return lerp(uv0, uvR, saturate(gGiParams.z) * edge);
+}
+
 float4 averBlendedOutputBackdrop(AverSurface s, float3 diffuse, float3 specular, float3 T,
-                                 float2 screenPos) {
+                                 float2 screenPos, float3 wpos, float thicknessCm) {
     float2 invSize;
     if (!averBlendBackdropValid(invSize))
         return averBlendedOutputVolume(s, diffuse, specular, T);
 
-    const float3 bg    = gBlendBackdrop.SampleLevel(gMaterialSampler, screenPos * invSize, 0).rgb;
+    const float2 uv    = averRefractedBackdropUV(s, wpos, thicknessCm, invSize, screenPos);
+    const float3 bg    = gBlendBackdrop.SampleLevel(gMaterialSampler, uv, 0).rgb;
     const float  alpha = saturate(s.alpha);
     return float4(specular + diffuse * alpha + bg * (1.0 - alpha) * (T - 1.0), alpha);
 }
@@ -2060,15 +2126,18 @@ float4 PSMainVoxi(VSOut i, bool averIsFrontFace : SV_IsFrontFace) : SV_TARGET {
         // Absorbing once, on entry, is also the physically right count: light crossing a pane is
         // attenuated by its thickness once, not once per surface it passes through.
         if (gAttenuationDistance > 0.0 && averIsFrontFace) {
+            // Measured ONCE and used twice: the absorption needs it for Beer-Lambert, and the
+            // refraction needs it to know how far along the bent path the ray travels before it
+            // leaves. Tracing it a second time would be the same ray for the same answer.
+            const float volThick = averVolumeThickness(i.wpos, N, -s.V);
             const float3 volT = averVolumeTransmittance(
-                gAttenuationColor, gAttenuationDistance,
-                averVolumeThickness(i.wpos, N, -s.V));
+                gAttenuationColor, gAttenuationDistance, volThick);
             // THE BACKDROP PATH, which is what lets attenuationColor's HUE reach the picture at all.
         // averBlendedOutputVolume (the fallback inside this call) can only make the surface go
         // opaque faster in the channels it absorbs; it cannot tint the background, because one
         // blend alpha is one number. i.pos.xy is SV_Position in pixels, which is the screen
         // coordinate the copy is indexed by.
-        outc = averBlendedOutputBackdrop(s, dif, spc, volT, i.pos.xy);
+        outc = averBlendedOutputBackdrop(s, dif, spc, volT, i.pos.xy, i.wpos, volThick);
         } else
 #endif
         outc = averBlendedOutput(s, dif, spc);

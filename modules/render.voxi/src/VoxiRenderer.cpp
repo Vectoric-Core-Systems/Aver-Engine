@@ -798,6 +798,15 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
     cb_.voxelParams[0] = static_cast<f32>(voxelResBuilt_);
     cb_.voxelParams[1] = settings_.giIntensity;
     cb_.giParams[0]    = static_cast<f32>(settings_.giCones);
+    // REFRACTION RIDES giParams' SPARE COMPONENTS. Only .x was ever used, so .yzw were three floats
+    // already crossing to the GPU every frame in a row the HLSL mirror already declares -- taking
+    // them costs no layout change, and this constant block is mirrored by hand in more than one
+    // place (see MaterialConstants' own note on what a silent offset mistake costs). If a fourth
+    // refraction knob is ever needed, that is the moment to add a row and update every mirror in
+    // one change, not to start borrowing from a second unrelated float4.
+    cb_.giParams[1]    = static_cast<f32>(settings_.refractionMode);
+    cb_.giParams[2]    = settings_.refractionStrength;
+    cb_.giParams[3]    = settings_.refractionEdgeFade;
     cb_.voxelParams[2] = settings_.giMaxDistance;
     // gates the cone trace -- see setConeTraceEnabled's own comment for why that toggle is ANDed in
     // here rather than folded into giEnabled(): this is the one place a caller doing the A/B

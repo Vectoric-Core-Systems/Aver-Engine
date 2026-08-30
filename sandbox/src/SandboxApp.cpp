@@ -2448,6 +2448,12 @@ public:
             else if (rtPixelsPerRayOverride_ < 0)
                 AVER_WARN("[Sandbox] --rt-pixels-per-ray {} is not a tile edge; the default of {} stands",
                           rtPixelsPerRayOverride_, k.rtPixelsPerRayTile);
+            // Refraction's knobs go in the SECOND call for the reason the block above spells out:
+            // a tier is changing in the first, and refractionMode is tier-derived, so setting it
+            // there would be indistinguishable from not setting it and the tier would win.
+            if (refractionOverride_ >= 0)          k.refractionMode = static_cast<u32>(refractionOverride_);
+            if (refractionStrengthOverride_ >= 0.0f) k.refractionStrength = refractionStrengthOverride_;
+            if (refractionFadeOverride_ >= 0.0f)     k.refractionEdgeFade = refractionFadeOverride_;
             if (giUpdateIntervalOverride_ > 0) k.giUpdateInterval = static_cast<u32>(giUpdateIntervalOverride_);
             else if (giUpdateIntervalOverride_ < 0)
                 AVER_WARN("[Sandbox] --gi-update-interval {} is not a frame count; the default of {} stands",
@@ -6989,6 +6995,10 @@ public:
     // --rd-ablate: forwarded to voxiRenderer_ BEFORE init(), because it becomes a shader define and
     // the pipelines are compiled once there. Setting it later would be silently inert.
     void setRayDrivenAblation(int m) { rdAblate_ = m; }
+    // --refraction / --refraction-strength / --refraction-fade. -1 in any of them means "not given".
+    void setRefractionOverrides(int mode, f32 strength, f32 fade) {
+        refractionOverride_ = mode; refractionStrengthOverride_ = strength; refractionFadeOverride_ = fade;
+    }
     void setMsOverride(bool on) { msOverride_ = on; }                           // --ms
     void setProbe(u32 x, u32 y) { probeX_ = x; probeY_ = y; }                    // --probe X Y
     void setProbeRel(f32 u, f32 v) { probeU_ = u; probeV_ = v; }                 // --probe-rel U V
@@ -7898,6 +7908,10 @@ private:
             take(rtOverride_, reinterpret_cast<u32&>(k.rayTracing),         "--rt");
             take(ptOverride_, reinterpret_cast<u32&>(k.pathTracing),        "--pt");
             take(rtRenderModeOverride_,    k.rtRenderMode,       "--rt-render-mode");
+            // Wired in from the start rather than after it bites: this is the third knob-shaped
+            // feature added since that rule was written, and the previous two both had to be fixed
+            // afterwards (--pt-scene in e2830db, --no-rt/--no-gi in fac36a3).
+            take(refractionOverride_,      k.refractionMode,     "--refraction");
             take(rtShadowDenoiseOverride_, k.rtShadowDenoise,    "--rt-shadow-denoise");
             take(ptBouncesOverride_,       k.ptBounces,          "--pt-bounces");
             take(layeredBsdfOverride_,     reinterpret_cast<u32&>(k.layeredBsdf), "--layered-bsdf");
@@ -14963,6 +14977,9 @@ private:
     std::unique_ptr<aver::sr::FxaaResolve> edgeAaUpscaler_;
 #endif
     int  rdAblate_=0;                // --rd-ablate: AVER_RD_ABLATE for PSRayDriven, 0 = normal
+    int  refractionOverride_=-1;     // --refraction: -1 not given, else the mode
+    f32  refractionStrengthOverride_=-1.0f;
+    f32  refractionFadeOverride_=-1.0f;
     bool frameTimeReport_=false;     // --frame-time: report the frame period, to price the above
     bool msOverride_=false;          // --ms: force the mesh shader geometry path
     u32  probeX_=0, probeY_=0;       // --probe X Y: absolute capture pixel (0 = viewport centre)
@@ -17633,8 +17650,18 @@ Application* createApplication(int argc, char** argv) {
     // Removes ONE term from the ray-driven pixel shader so its cost can be attributed by difference
     // -- see AVER_RD_ABLATE in voxi.hlsl. Every non-zero value renders a deliberately WRONG frame.
     int rdAblate = 0;
-    for (int i = 1; i + 1 < argc; ++i)
-        if (!std::strcmp(argv[i], "--rd-ablate")) rdAblate = std::atoi(argv[i + 1]);
+    // REFRACTION: the tier picks a mode, these override it. -1 is "not given", the same sentinel
+    // every other render override in this file uses, because `take()` in applyProjectRenderSettings
+    // tests for exactly that -- a 0-means-absent sentinel would make `--refraction 0` (turn it OFF)
+    // silently undiscardable, which is the bug that block's own comment was written about.
+    int refraction = -1;
+    f32 refractionStrength = -1.0f, refractionFade = -1.0f;
+    for (int i = 1; i + 1 < argc; ++i) {
+        if (!std::strcmp(argv[i], "--rd-ablate"))            rdAblate = std::atoi(argv[i + 1]);
+        if (!std::strcmp(argv[i], "--refraction"))           refraction = std::atoi(argv[i + 1]);
+        if (!std::strcmp(argv[i], "--refraction-strength"))  refractionStrength = (f32)std::atof(argv[i + 1]);
+        if (!std::strcmp(argv[i], "--refraction-fade"))      refractionFade = (f32)std::atof(argv[i + 1]);
+    }
 
     u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; std::string shaderSourceDir; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool furnaceGrid=false; f32 furnaceTilt=0.0f; bool ptFurnace=false; bool ptScene=false; int deviceLostAt=0; int ptQualityRamp=0; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int aversrCycle=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=-1; int rt=-1; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int rtRenderMode=-1; int pt=-1; int ptBounces=-1; int layeredBsdf=-1; f32 coatWeight=0.0f; f32 coatRough=0.1f; f32 coatF0=0.04f; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string selectEntity; bool openLegacy=false; bool waterOn=false; f32 waterHeight=0.0f; std::string graphSelectNode; std::string graphTab; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false; bool bakeNav=false; f32 bakeNavCell=50.0f; std::string openMap; bool gbuffer=false; std::string gbufferDebug; std::string crashTest; std::string startMode;
     for (int i=1;i<argc;++i){
@@ -18471,6 +18498,7 @@ Application* createApplication(int argc, char** argv) {
     app->setGiUpdateInterval(giUpdateInterval);
     app->setRtForceOff(noRt);
     app->setRayDrivenAblation(rdAblate);
+    app->setRefractionOverrides(refraction, refractionStrength, refractionFade);
     app->setCamWobble(camWobbleDeg, camWobblePeriod);
     app->setRenderScale(renderScale);
     if (!aversrArg.empty()) {
