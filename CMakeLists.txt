@@ -503,6 +503,12 @@ if(AVER_BUILD_TESTS)
   # property of the SOURCE TREE rather than of any module: that no game content sits in the engine and
   # that one file knows where projects live. docs/PROJECTS.md asserts both in prose; this decides them.
   add_subdirectory(tests/repo)
+  # The C ABI's integer constants against the C# enums that restate them. Unconditional and
+  # Aver.Core-only for the same reason tests/repo is: it reads the headers and the .cs files as
+  # SOURCE rather than exercising either side, so it needs no device and no .NET SDK. It lives here
+  # rather than as a managed test because a native *Test.exe is the only thing this repo actually
+  # runs -- Aver.Graph.Tests is wired into nothing and must be invoked by hand.
+  add_subdirectory(tests/abi)
   # The Roslyn backend, checked against the scanner it falls back from. Unconditional like its module;
   # the test itself skips when averdesign is not staged.
   add_subdirectory(tests/formats.roslyn)
