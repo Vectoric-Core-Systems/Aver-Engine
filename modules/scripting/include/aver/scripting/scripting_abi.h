@@ -22,6 +22,11 @@ extern "C" {
 #define AVER_SCRIPT_LOG_INFO  1
 #define AVER_SCRIPT_LOG_WARN  2
 #define AVER_SCRIPT_LOG_ERROR 3
+/* Appended, never inserted: these are bare integers on both sides of an ABI boundary, so a value
+   added in the middle silently renumbers every level for any bridge built against an older header.
+   FATAL does not return on the engine side -- it writes a crash report and terminates the process. */
+#define AVER_SCRIPT_LOG_CRITICAL 4
+#define AVER_SCRIPT_LOG_FATAL 5
 
 /* Writes one managed log line into the engine's log. */
 typedef void(__cdecl* aver_script_log_fn)(int32_t level, const char* utf8Message);

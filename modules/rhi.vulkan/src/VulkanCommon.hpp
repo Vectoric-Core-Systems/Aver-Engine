@@ -101,6 +101,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstring>
+#include <deque>      // pipelines_ -- see its declaration for why it is not a vector
 #include <functional>
 #include <cstdlib>
 #include <string>
@@ -973,8 +974,16 @@ struct RhiTexture {
     VkImageView dsvView = VK_NULL_HANDLE;    // depth-attachment view, when ResourceBind::DepthStencil (or isDepthFormatVk)
     std::vector<VkImageView> uavViews;       // one storage-image view per mip, built lazily by setUav
     TextureDesc desc{};                      // resolved: `mips` holds the real count, never 0
-#if AVER_RHI_TRACK_STATE
+    // OUTSIDE AVER_RHI_TRACK_STATE, unlike `states` below -- see D3D12's RhiTexture::debugName for
+    // the reasoning and the measured cost. THIS BACKEND IS WHERE THE MISTAKE SHOWED UP: textureBarrier
+    // and uavBarrierTexture both name the texture in their null-VkImage error, and the comment above
+    // the first one says why -- the validation layer reports the failure at the barrier and not at
+    // whatever left the image null, so the name is "the difference between a one-line fix and a hunt".
+    // The field was on the wrong side of a macro that has nothing to do with naming, so those two
+    // messages did not compile at all under NDEBUG and Aver.RHI.Vulkan had never been built Release.
+    // Moving the field is the whole fix; neither message needed changing.
     std::string debugName;                   // owned copy: the desc's debugName is the caller's pointer
+#if AVER_RHI_TRACK_STATE
     std::vector<ResourceState> states;       // one entry per mip; a subresource index is a mip index here
 #endif
     // The descriptor handed to the UI, cast to u64 -- see uiDescriptor()'s own note that this stays
@@ -1001,8 +1010,8 @@ struct RhiBuffer {
     BufferDesc desc{};
     u8* mapped = nullptr;          // Upload/Readback-kind buffers stay mapped for their whole life
     bool coherent = false;         // see ConstantRing::coherent's identical note
+    std::string debugName;         // identity, not state tracking -- see RhiTexture::debugName
 #if AVER_RHI_TRACK_STATE
-    std::string debugName;
     ResourceState state = ResourceState::Common;
     bool stateFixed = false;       // Upload-heap-equivalent and AccelStructure-kind buffers reject every transition
 #endif
@@ -1349,6 +1358,18 @@ public:
     IRenderContext* renderContext() override;
     void addRenderFeature(IRenderFeature* f) override;
     void removeRenderFeature(IRenderFeature* f) override;
+    // The same predicate drawMesh applies internally (VulkanDevice.cpp, the suppressesScene early
+    // return), exposed so a caller can decline to issue a draw it knows to be editor chrome rather
+    // than scene geometry. See IDevice::sceneSuppressed for why the filter cannot live in drawMesh.
+    //
+    // IMPLEMENTED HERE RATHER THAN LEFT ON THE DEFAULT even though this backend is off by default:
+    // the default returns false, which would silently mean "nothing is suppressing" on a backend
+    // whose drawMesh has the identical suppression path -- a divergence that would only surface as
+    // a rendering difference between backends, which is the hardest kind to notice.
+    bool sceneSuppressed() const override {
+        for (const IRenderFeature* f : features_) if (f->suppressesScene()) return true;
+        return false;
+    }
     // Non-owning, exactly like addRenderFeature/removeRenderFeature just above -- see
     // D3D12Device::setUpscaler's own comment (D3D12Device.cpp) for the invariant this preserves:
     // null is the PERMANENT default (nothing here ever assigns upscaler_ on its own), and every
@@ -1684,6 +1705,10 @@ private:
     // IRenderFeature::suppressesWholeFrame. Kept in lockstep with the D3D12 backend deliberately --
     // a sky that appears on one backend and not the other is the worst shape of bug this repo has.
     bool frameSuppressed_ = false;
+    // Last logged outcome of beginFrame's scene-claim race, so the warning fires on a CHANGE rather
+    // than every frame. Compared, never dereferenced. Mirrors D3D12Device's pair of the same name.
+    const IRenderFeature* lastSuppressWinner_ = nullptr;
+    u32                   lastSuppressClaimants_ = 0;
     SkyAtmosphere sky_{};
     bool wireframe_ = false;
     bool lineDepth_ = true;
@@ -1793,6 +1818,11 @@ private:
     // ---- ray tracing: VK_KHR_acceleration_structure + VK_KHR_ray_query present ----
     bool rtSupported_ = false;
 
+    // Whether the descriptor-indexing features the ray path's bindless texture table needs were
+    // both SUPPORTED and ENABLED at device creation. Recorded there because that is the only place
+    // that knows; read by queryCaps to set DeviceCaps::rtBindlessTextures.
+    bool bindlessCapable_ = false;
+
     bool hasSwapchain_ = false;
     bool vsync_ = true;
     bool tearingSupported_ = false;   // VK_PRESENT_MODE_IMMEDIATE_KHR present in the surface's list; fixed for the swapchain's life
@@ -1847,6 +1877,14 @@ public:
     ShaderHandle     createShader(const ShaderDesc& d) override;
     PipelineHandle   createGraphicsPipeline(const GraphicsPipelineDesc& d) override;
     PipelineHandle   createComputePipeline(const ComputePipelineDesc& d) override;
+    // NOT IMPLEMENTED ON THIS BACKEND YET, and refused out loud rather than stubbed silently.
+    // DeviceCaps::rtBindlessTextures already gates every caller, and this backend sets that bit
+    // from real descriptor-indexing features -- so reaching these at all means the gate was
+    // bypassed, which is worth a log rather than a quiet zero. See the Vulkan parity stage.
+    BindlessTableHandle createBindlessTextureTable(u32 capacity) override;
+    void destroyBindlessTextureTable(BindlessTableHandle h) override;
+    bool setBindlessTexture(BindlessTableHandle h, u32 index, TextureHandle t) override;
+    u32  bindlessTableCapacity(BindlessTableHandle h) const override;
     BindingSetHandle createBindingSet(const BindingSetDesc& d) override;
     BlasHandle       createBlas(MeshHandle mesh) override;
     TlasHandle       createTlas(u32 maxInstances) override;
@@ -1987,7 +2025,21 @@ private:
     std::vector<RhiTexture>    textures_;
     std::vector<RhiBuffer>     buffers_;
     std::vector<RhiShader>     shaders_;
-    std::vector<RhiPipeline>   pipelines_;
+    // std::deque, NOT std::vector -- the same reason, and the same defect, as its D3D12 twin.
+    // VulkanRenderContext caches a raw `const RhiPipeline* pipe_` from &pipelines_[h-1] and reads
+    // descriptor-set and push-constant indices back through it for the rest of the recording, so a
+    // push_back that reallocates the table while a command buffer is open leaves it pointing at
+    // freed memory. There are FOUR growth sites here rather than D3D12's two.
+    //
+    // Measured on the D3D12 side, where the backend can actually be run: an ordinary 60-frame
+    // editor session relocates that table twelve times, and one of those relocations happens while
+    // a pipeline is bound. Nothing about that is D3D12-specific -- it is the container.
+    //
+    // Fixed here at the same time deliberately. This backend is OFF by default (AVER_RHI_VULKAN),
+    // so the bug is not reachable in a stock build, and it has therefore had no chance to announce
+    // itself; leaving a known defect in the copy nobody runs is how the two backends drift.
+    // Compile-verified with -DAVER_RHI_VULKAN=ON; NOT run, because this backend has no editor UI.
+    std::deque<RhiPipeline>    pipelines_;
     std::vector<RhiBindingSet> bindingSets_;
     std::vector<RhiBlas>       blases_;
     std::vector<RhiTlas>       tlases_;
@@ -2021,6 +2073,7 @@ public:
     void clearDepth(TextureHandle depth, f32 value) override;
     void clearColor(TextureHandle target, const f32 color[4]) override;
     void setBindingSet(BindingSetHandle set, u32 table) override;
+    void setBindlessTable(BindlessTableHandle table) override;
     void setConstants(u32 slot, const void* data, u32 dwords) override;
     void setConstantBuffer(u32 slot, const void* data, u32 bytes) override;
     void setDrawBinding(BindingSetHandle set, const void* constants, u32 bytes) override;

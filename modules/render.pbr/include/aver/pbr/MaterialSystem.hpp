@@ -7,6 +7,7 @@
 #include <string>
 #include <array>
 #include <unordered_map>
+#include <vector>
 
 // The GPU residency of the material library: one binding set and one packed constant block per
 // material, plus the identity textures every unset slot falls back to.
@@ -52,6 +53,17 @@ public:
 
     // The binding set a draw of `h` uses. An unknown or stale handle gets the fallback.
     rhi::BindingSetHandle bindingSet(MaterialHandle h);
+
+    // THE EFFECTIVE TEXTURE IN EVERY SLOT of a binding set, fallbacks included, or nullptr for a
+    // set this system did not build. Exists for the ray path, which cannot bind a per-draw
+    // descriptor table and instead needs the handles themselves so it can put them in its own
+    // bindless array.
+    //
+    // EFFECTIVE, not authored: a slot the material never set reports the identity texture that
+    // writeSlots actually bound, not 0. That is what makes the ray path sample the same thing the
+    // raster path does without needing a branch per slot -- and an unset normal map sampling flat
+    // (128,128,255) is the whole reason those fallbacks exist.
+    const std::array<rhi::TextureHandle, kTextureSlotCount>* textures(rhi::BindingSetHandle set) const;
     // The constant block a draw of `h` uses. An unknown or stale handle gets the fallback.
     const MaterialConstants& constants(MaterialHandle h);
 
@@ -86,6 +98,73 @@ public:
     // Separate from update() on purpose: update() runs every frame, and retrying a missing file every
     // frame is the cost the negative cache exists to avoid.
     u32 forgetFailedResolves();
+
+    // ---- dense GPU material table ----
+    // A consumer that shades from a NUMBER rather than a MaterialHandle -- a ray hit walking an
+    // instance buffer, which has no room for a 4-byte handle-with-generation next to its geometry
+    // indices, only for a small dense index -- cannot use bindingSet()/constants() at all: those are
+    // per-draw binding-table lookups, not something a StructuredBuffer<MaterialConstants> read at an
+    // arbitrary GPU thread can index. This is that other shape of the same data: every live
+    // material's MaterialConstants, packed contiguously in one array a caller uploads as-is.
+    //
+    // ALL THREE ACCESSORS BELOW ARE READ ONLY, and none of them force GPU residency the way
+    // bindingSet()/constants() do (those build an Entry, including a binding set, on first ask this
+    // system has never been asked to draw a material before). A material nobody has drawn yet still
+    // gets a row here the next time update() runs, because the row order is driven off
+    // MaterialLibrary's own enumeration, not off who has asked for a binding set.
+
+    // `h`'s row in gpuMaterialTable(), or 0 (the fallback/identity material's row -- see
+    // gpuMaterialTable() below) for a zero, stale, or otherwise-unrecognised handle. Exactly the
+    // same "unknown handle gets the fallback" rule bindingSet()/constants() already apply.
+    //
+    // STABLE ONLY BETWEEN ONE update() CALL AND THE NEXT -- see gpuMaterialRevision() for why, and
+    // for how a caller that needs to hold an index (or a buffer built from gpuMaterialTable())
+    // across more than one frame learns whether it is still correct. Named `gpuMaterialIndex`
+    // rather than reusing pbr::materialIndex() (Material.hpp) on purpose: that free function decodes
+    // a HANDLE's own encoded slot, a completely different number that survives exactly as long as
+    // the handle itself does. This one is a GPU row, current for one frame, and confusing the two
+    // would hand a ray hit the wrong material with no way to notice.
+    u32 gpuMaterialIndex(MaterialHandle h) const;
+
+    // How many rows gpuMaterialTable() holds: 0 before update() has ever run, otherwise
+    // 1 + MaterialLibrary::count() as of the last call (row 0 is always the fallback material, so
+    // the "+1" is not the live count moving under a caller that reads it between update() calls).
+    u32 gpuMaterialCount() const { return static_cast<u32>(gpuTable_.size()); }
+
+    // Row 0 is always fallbackConstants() -- the identity material -- so gpuMaterialIndex()'s
+    // fallback answer of 0 is always safe to read without a bounds check on the consuming side.
+    // Rows 1..gpuMaterialCount()-1 are every live material, in MaterialLibrary's own dense
+    // enumeration order (its count()/at()) as of the last update(). A caller builds its
+    // StructuredBuffer<MaterialConstants> by copying gpuMaterialCount() elements starting here --
+    // the exact shape IResourceFactory::setSrvBuffer already expects (a pointer, a stride of
+    // sizeof(MaterialConstants), and a count), the same recipe already used for the ray-tracing
+    // instance and vertex tables. Valid only until the next call to update() or shutdown(); this
+    // system owns the storage, a caller does not keep the pointer.
+    const MaterialConstants* gpuMaterialTable() const { return gpuTable_.data(); }
+
+    // Bumped by update() exactly when the SET of live materials changed since the PREVIOUS
+    // update() -- a create, a destroy, or (because MaterialLibrary::destroy() compacts its dense
+    // list to keep count()/at() dense) a destroy that shifted every LATER material's row down by
+    // one, without that material itself having changed at all. touch()/MaterialLibrary::update() on
+    // a material's own factors or textures never moves its row, only its CONTENTS at the row it
+    // already has, so an ordinary edit does not bump this.
+    //
+    // THIS IS HOW A CONSUMER LEARNS AN INDEX WENT STALE. Nothing else does: gpuMaterialIndex()'s
+    // answer for a given handle, and the layout of gpuMaterialTable(), are only guaranteed to agree
+    // with each other and with the GPU-side geometry that was built to match them between one
+    // update() and the next. A consumer that caches an index (or a buffer built from
+    // gpuMaterialTable()) across a frame boundary without checking this counter first risks reading
+    // a DIFFERENT material's row after a create/destroy reshuffled the table -- and that is not a
+    // crash, it is one object silently wearing another object's colour, metalness and roughness,
+    // which is exactly the failure this system exists to prevent for the per-DRAW path
+    // (bindingSet()/constants() never have this problem, because a draw always looks its material up
+    // by handle, fresh, every time). The robust pattern -- and the one this codebase already uses
+    // for the instance table itself, see VoxiRenderer::buildAccelerationStructures rebuilding
+    // RtInstance from source every call rather than caching anything across frames -- is to rebuild
+    // the index and the buffer fresh every frame and never read this at all. It exists for a
+    // consumer that wants to SKIP that rebuild when nothing changed, and that consumer must check it
+    // first every time, not just the first time.
+    u32 gpuMaterialRevision() const { return gpuRevision_; }
 
 private:
     // One material's GPU residency.
@@ -129,10 +208,29 @@ private:
     std::unordered_map<std::string, std::array<f32, 3>> cacheAverage_;
     // Per binding set: baseColorFactor times its base-colour texture's mean, filled by writeSlots.
     std::unordered_map<rhi::BindingSetHandle, std::array<f32, 3>> setAverage_;
+    // Per binding set, the handle writeSlots actually bound into each slot. Same keying and same
+    // lifetime as setAverage_ above.
+    std::unordered_map<rhi::BindingSetHandle, std::array<rhi::TextureHandle, kTextureSlotCount>> setTextures_;
     u32 failedResolves_ = 0;
 
     TextureResolver resolve_ = nullptr;
     void*           resolveUser_ = nullptr;
+
+    // The dense GPU material table (see gpuMaterialTable() above) and its handle-to-row index,
+    // rebuilt together by update() from the SAME walk over MaterialLibrary's enumeration so they can
+    // never disagree with each other. gpuIndexOf_ is deliberately a SEPARATE map from entries_
+    // rather than one more field bolted onto Entry: entries_ can hold a handle that has never been
+    // through update() at all (bindingSet()/constants() build one lazily, on first ask, for a
+    // material nobody has drawn yet), and such an entry must answer gpuMaterialIndex() with the
+    // fallback row 0, not with a stale or never-set number that happens to live in the same struct.
+    // Keying the row lookup off its own map, populated ONLY by update(), makes that the only place
+    // a handle can appear in it, so "not in gpuIndexOf_" and "not on this frame's table" are the
+    // same fact instead of two facts that a future edit could pull apart.
+    std::unordered_map<MaterialHandle, u32> gpuIndexOf_;
+    std::vector<MaterialConstants> gpuTable_;
+    // See gpuMaterialRevision(): bumped by update() only when gpuIndexOf_'s CONTENT (not merely its
+    // size) differs from what it held before that call.
+    u32 gpuRevision_ = 0;
 };
 
 } // namespace aver::pbr

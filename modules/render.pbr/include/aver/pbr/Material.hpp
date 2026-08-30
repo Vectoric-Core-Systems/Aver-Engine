@@ -85,6 +85,64 @@ struct MaterialDesc {
     f32 reflectance         = 0.04f;   // F0 of the dielectric base
     f32 f90                 = 1.0f;    // F(90); 1.0 is the textbook Schlick term
 
+    // Index of refraction and how much light passes straight through rather than being absorbed or
+    // diffusely scattered. NOT INDEPENDENT OF reflectance ABOVE: F0 = ((1-ior)/(1+ior))^2, and 1.5 is
+    // exactly the ior for which 0.04 is already the right F0 -- ordinary soda-lime glass. Change one
+    // of the pair without the other and the surface's Fresnel curve stops matching its own stated
+    // base reflectance; nothing here derives one from the other automatically, so an author (or a
+    // future .ocmat importer) that sets ior alone and expects reflectance to follow will be wrong.
+    f32 ior          = 1.5f;
+    // 0 = opaque as far as this field goes, which is every material authored before it existed. Read
+    // only where it matters -- see MaterialConstants::transmission and averBuildSurface's
+    // AVER_MAT_ALPHA_BLEND branch in PbrShaders.cpp, which pulls the blended coverage down toward
+    // (1 - transmission) before the view-Fresnel term lifts it back at grazing angles. NOT YET READ
+    // BY THE BRDF ITSELF: this only reshapes alpha compositing, exactly like reflectance/f90 already
+    // did before this change -- there is still no refraction, and light does not actually bend
+    // passing through a transmissive surface. Say that here rather than let someone assume otherwise
+    // from the field's name.
+    f32 transmission = 0.0f;
+
+    // ---- subsurface scattering ----
+    // WRAP DIFFUSE PLUS A BACK-LIGHT LOBE, AND NOT ONE PHOTON MORE. Both default to 0, so every
+    // material authored before this existed shades bit-identically and the gate baselines do not
+    // move until something opts in.
+    //
+    // WHAT THIS IS NOT, stated here rather than left to be inferred from the word "subsurface":
+    // it is not a BSSRDF. Light does not travel THROUGH the mesh -- there is no transport from where
+    // a photon enters to where it leaves, so a lit ear does not glow on the far side of a head. It
+    // is a per-pixel approximation evaluated at ONE surface point, which is why it costs two floats
+    // and no passes. What it does buy is the thing whose absence reads as "plastic": light wrapping
+    // slightly past the terminator, and a rim that brightens when the sun is behind the object.
+    //
+    // NO SEPARATE SCATTER TINT, deliberately. MaterialConstants had exactly 8 spare bytes (its own
+    // comment says so: "8 bytes of headroom for the next field before 96 has to become 112"), and
+    // two floats spend them exactly. A third float for an authored RGB tint would grow the block to
+    // 112 and force every one of its GPU mirrors to be re-derived. The transmitted light is tinted
+    // by baseColorFactor instead, which is right for skin, wax, marble and leaves -- the cases this
+    // is for -- and wrong only where the interior colour differs from the surface colour.
+    f32 subsurfaceWeight = 0.0f;   // [0,1] how far light wraps past the terminator; 0 = off
+    f32 subsurfaceRadius = 0.0f;   // [0,1] thickness proxy; widens the back-light lobe
+
+    // ---- the coat: a second specular layer over everything above ----
+    // A CLEAR LACQUER ON TOP OF THE BASE MATERIAL, which is what a car body, a varnished table, a
+    // phone back or a wet stone all are: a smooth dielectric film over something rougher and often
+    // coloured. The base keeps its own metallic/roughness response; the coat adds a second, usually
+    // much smoother, GGX lobe over it and attenuates what shows through by its own Fresnel.
+    //
+    // ALL THREE DEFAULT TO OFF, so every material authored before this shades bit-identically --
+    // packMaterial only sets MaterialFlag_Coat when coatWeight > 0, and the shader term is behind
+    // that flag, so there is nothing to compute and nothing to round differently.
+    //
+    // READ ONLY WHEN Settings::layeredBsdf IS NOT Off. These are authored per material, but whether
+    // the renderer evaluates them at all is a project-wide decision -- see voxi::Settings for why
+    // that switch is global and why it is not live-switchable.
+    //
+    // coatF0 is authored rather than derived from a coat IOR, which is the same split baseColor's
+    // `reflectance` already has. Worth knowing it is a split: 0.04 is IOR 1.5, ordinary lacquer.
+    f32 coatWeight    = 0.0f;   // [0,1] how much coat there is; 0 = no coat, and the flag stays clear
+    f32 coatRoughness = 0.0f;   // [0,1] the coat's own roughness, independent of the base's
+    f32 coatF0        = 0.04f;  // normal-incidence reflectance of the coat film itself
+
     AlphaMode alphaMode   = AlphaMode::Opaque;
     f32       alphaCutoff = 0.5f;   // read only under AlphaMode::Mask
     bool      twoSided    = false;
@@ -113,6 +171,44 @@ struct MaterialDesc {
     // writes it back out to a file.
     u32 graphId = 0;
 };
+
+// ------------------------------------------------------- the one translucency test, and its answer
+//
+// THERE WAS NO CANONICAL PREDICATE, and that is why these exist. `alphaMode == AlphaMode::Blend` was
+// spelled out at six separate sites in four shapes -- the editor's colour walk, its depth-prepass
+// walk, a SECOND independent shadow exclusion for off-screen casters, the packaged game's walk, the
+// GPU flag packer, and the path tracer (which additionally ignored the authored `ior` and substituted
+// a hardcoded constant). Six copies of a rule is six chances for one of them to drift, and one of
+// them had already drifted: the off-screen caster path excluded blended draws for its own reasons,
+// so a culled pane behaved differently from a visible one.
+//
+// Every one of those files already includes this header, so putting the test here costs no new
+// dependency edge.
+
+// True when light passes through this surface in any amount: authored translucency, OR measurable
+// transmission on a material that is nominally opaque.
+//
+// NOT "is the blend mode Blend". Transmission is a SUBSTRATE property -- it describes what the
+// material is made of, not how the rasteriser composites it -- and an opaque-blended material may
+// legitimately author it. Keying the rule on the authored field rather than the blend mode is what
+// keeps this from being a special case for a thing called "glass".
+AVER_PBR_API bool isTranslucent(const MaterialDesc& d);
+
+// The RGB fraction of sunlight ONE crossing of this surface lets through. {1,1,1} means it casts no
+// shadow at all; {0,0,0} means it casts a solid one.
+//
+// The rule, entirely in terms of authored fields:
+//   castShadow == false            -> {1,1,1}. This is the field's FIRST consumer: it has a parser, a
+//                                     writer, a C ABI, a C# property, four test assertions and four
+//                                     doc entries, and until now `packMaterial` never forwarded it,
+//                                     so it changed no pixel anywhere.
+//   otherwise  k = max(1 - baseColorFactor.a, transmission)
+//              T = baseColorFactor.rgb * k
+//
+// So a clear pane attenuates a little and tints not at all; a blue pane at alpha 0.2 passes 0.8 of
+// the sun, blue-tinted; and an opaque material authored with transmission > 0 casts a partial shadow
+// too. AlphaMode::Mask stays binary and is handled by the depth-prepass clip, not here.
+AVER_PBR_API void shadowTransmittance(const MaterialDesc& d, f32 outRgb[3]);
 
 // The material features the editor and the bindings may advertise.
 enum class Feature : u32 {

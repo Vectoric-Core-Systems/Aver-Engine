@@ -43,6 +43,7 @@ Every third-party component is chosen for a permissive license. This table is th
 | Lightmap UV atlas | **xatlas** | MIT | Static lightmap unwrap |
 | CPU ray tracing (lightmap bake) | **Intel Embree** | Apache-2.0 | Offline GI/AO baker |
 | Denoise (offline bakes) | **Intel Open Image Denoise (OIDN)** | Apache-2.0 | Clean baked lightmaps |
+| Denoise (real-time RT) | **hand-written**, in `VoxiShaders.hpp` | — | See **[DENOISING.md](DENOISING.md)**: NVIDIA NRD was investigated 2026-08-27 and refused on licence *and* on missing inputs. FidelityFX Denoiser is MIT and blocked by the same missing inputs. **The gate on all of them is motion vectors plus a thin G-buffer**, which is the same thing FSR 2/3 and TAA are waiting behind. |
 | Texture block compression | **bc7enc_rdo / bcdec** or **ISPC Texture Compressor** or **Compressonator** | MIT/PD / MIT / MIT | BC1–BC7 for `.octex` |
 | Streamable/transcodable textures | **Basis Universal** | Apache-2.0 | Optional `.octex` supercompression |
 | Image decode (PNG/JPEG) | **stb_image** | Public domain | Asset pipeline (embedded glTF PBR) |

@@ -8,7 +8,7 @@
 // relational check of any kind can see one. Only a comparison against a known number can, and only
 // if the number is read out of a float buffer rather than off a tonemapped, exposed 8-bit pixel.
 //
-// SIX CONFIGURATIONS, and two of them are DELIBERATELY BROKEN:
+// NINE CONFIGURATIONS, and three of them are DELIBERATELY BROKEN:
 //
 //   open/albedo-1/correct    a single flat quad, so every path bounces exactly ONCE and escapes.
 //                            Must read L, and the measured mean bounce count is what PROVES the
@@ -18,13 +18,30 @@
 //   open/albedo-1/no-cos     the same, with the cosine of the rendering equation dropped while the
 //                            cosine-weighted pdf stays. Must read 2L.
 //   open/albedo-0.5/correct  must read L/2, which is what says the albedo multiplies once.
+//   open/dielectric-1.5/correct    the SAME quad, made a smooth non-absorbing dielectric (ordinary
+//                            glass, ior 1.5) instead of Lambertian. Must ALSO read L exactly: every
+//                            path either reflects or refracts with weight exactly 1 (the Fresnel
+//                            probability of the branch taken and the Fresnel weight ON that branch
+//                            are the same number and cancel), and a UNIFORM environment returns the
+//                            same L whichever branch a path takes -- so the identity needs no
+//                            reflectance value to be known, only that reflect+refract are weighted
+//                            to conserve energy between them.
+//   open/dielectric-2.42/correct    the identical claim at a much higher IOR (diamond, F0 ~0.17
+//                            instead of glass's 0.04). Checked at two IORs, not one, because that is
+//                            what backs the word "whatever" in "whatever the IOR" above -- a single
+//                            IOR could not distinguish a correct implementation from one that merely
+//                            happens to cancel at 1.5.
+//   open/dielectric-1.5/no-pdf-cancel   the glass configuration with the Fresnel term applied a
+//                            SECOND time, as a multiplicative weight on top of already having been
+//                            the branch probability. Must read L*(F0^2 + (1-F0)^2), strictly less
+//                            than L -- see PtFurnaceTest.cpp for the derivation.
 //   cave/4-bounce/correct    a box open on one face, so paths bounce several times and some run
 //                            out. Must read L times the fraction that ESCAPED -- measured by the
 //                            same paths, so the identity needs no baseline and no analytic model.
 //   cave/32-bounce/correct   the same box with the truncation pushed out of the way: the escaped
 //                            fraction goes to ~1 and the reading goes to L.
 //
-// The two deliberate defects are the whole reason this is worth anything. A check that has never
+// The three deliberate defects are the whole reason this is worth anything. A check that has never
 // been shown FAILING proves nothing, so they are shipped and run on every invocation: if
 // open/xPI does not read PI*L, the oracle itself is broken and says so.
 //
@@ -70,6 +87,9 @@ private:
         kOpenTimesPi,
         kOpenNoCosine,
         kOpenHalfAlbedo,
+        kOpenDielectricGlass,      // ior 1.5, correct -- must read L
+        kOpenDielectricDiamond,    // ior 2.42, correct -- must ALSO read L ("whatever the IOR")
+        kOpenDielectricDefect,     // ior 1.5, PT_DEFECT_DIELECTRIC_NO_PDF_CANCEL
         kCaveShallow,
         kCaveDeep,
         kSeedFirst,     // the first sample block, traced on the FIRST accumulation frame

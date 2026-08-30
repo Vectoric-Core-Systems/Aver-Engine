@@ -161,6 +161,86 @@ int main() {
         check(evs.empty(), "an idle watcher reports NOTHING at all");
     }
 
+    // THE EDITING-SESSION SHAPE, and the one this file never tested. Every case above changes
+    // something and drains it IMMEDIATELY, so the watcher is never asked to survive a period of
+    // quiet and then report again -- which is what an editor does: you change a shader, look at it
+    // for ten seconds, change it again.
+    //
+    // WRITTEN TO REPRODUCE A REPORTED DEFECT, AND IT DID NOT. The report was that the watcher
+    // delivers only the first change of a run: a 900-frame --shader-source session with three
+    // appends seven seconds apart logged exactly one event and nothing after. The observation
+    // was real; the cause was not the watcher. 900 frames at --no-vsync is about twelve seconds,
+    // and three appends seven seconds apart span twenty-one -- the last two were made after the
+    // process had already exited.
+    //
+    // The case is kept anyway, because it is the shape nothing else in this file covers: every
+    // other block changes something and drains it IMMEDIATELY, which is not what an editing
+    // session looks like. If the watcher ever does go quiet after a stretch of idle, this says so.
+    {
+        std::vector<FileEvent> evs;
+        write(root / "session.hlsl", "// first edit\n");
+        check(drain(w, evs), "the first edit does not overflow");
+        check(findFor(evs, "session.hlsl") != nullptr, "the FIRST edit is reported");
+
+        // Idle well past the settle window. An editing session is mostly idle, and this is the only
+        // thing separating this case from the ones above.
+        std::vector<FileEvent> idle;
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+        check(drain(w, idle, 200), "the idle stretch does not overflow");
+        check(idle.empty(), "and reports nothing, because nothing happened");
+
+        std::vector<FileEvent> second;
+        write(root / "session.hlsl", "// second edit, after three idle seconds\n");
+        check(drain(w, second), "the second edit does not overflow");
+        check(findFor(second, "session.hlsl") != nullptr,
+              "the SECOND edit, after several seconds of quiet, is reported too");
+
+        // A third, because two could be a coincidence and the report was of three appends.
+        std::vector<FileEvent> third;
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+        (void)drain(w, third, 200);
+        third.clear();
+        write(root / "session.hlsl", "// third edit\n");
+        check(drain(w, third), "the third edit does not overflow");
+        check(findFor(third, "session.hlsl") != nullptr, "and so is the THIRD");
+    }
+
+    // A WORKER THAT DIES MUST STOP CLAIMING TO WATCH. died()'s own contract says so in as many
+    // words: "WITHOUT THIS A DEAD WATCHER IS INDISTINGUISHABLE FROM A QUIET ONE", and it names the
+    // consequence -- hot reload stops silently for the rest of the session, because
+    // DirectoryWatcher::watching() is what the caller re-arms on.
+    //
+    // The abnormal exits are real I/O failures and no test against a real directory can provoke
+    // one, which is precisely why some of them stayed wrong: nothing could reach them.
+    // AVER_WATCHER_KILL_AFTER makes the worker leave through the same break a failed overlapped
+    // read takes. Same idea as --crash-test and --device-lost-at elsewhere in this engine.
+    {
+        _putenv_s("AVER_WATCHER_KILL_AFTER", "1");
+        // OUTSIDE `root`, not a subdirectory of it. AVER_WATCHER_KILL_AFTER is read from the
+        // environment, so it applies to every watcher in this process -- and `w` above is watching
+        // `root` RECURSIVELY, so a write inside it would give `w` a batch too and kill that watcher
+        // as a side effect of testing this one. Separate trees keep the two independent.
+        DirectoryWatcher dying;
+        const std::filesystem::path dyingRoot =
+            root.parent_path() / ("aver-watch-dying-" + std::to_string(static_cast<long>(AVER_TEST_PID)));
+        std::filesystem::remove_all(dyingRoot, ec);
+        std::filesystem::create_directories(dyingRoot, ec);
+        check(dying.start(dyingRoot.string()), "a second watcher starts on its own directory");
+        check(dying.watching(), "and reports that it is watching");
+
+        std::vector<FileEvent> evs;
+        write(dyingRoot / "trigger.txt", "// provoke one batch, then the worker leaves\n");
+        (void)drain(dying, evs, kSettleWaitMs);
+
+        check(!dying.watching(),
+              "a watcher whose worker died reports watching() == false, so the caller re-arms "
+              "instead of believing a corpse");
+        _putenv_s("AVER_WATCHER_KILL_AFTER", "");
+        check(w.watching(), "and the OTHER watcher, on its own tree, is untouched by that death");
+        dying.stop();
+        std::filesystem::remove_all(dyingRoot, ec);
+    }
+
     {
         w.stop();
         check(!w.watching(), "watching() is false after stop()");

@@ -9,7 +9,8 @@
 // indirect light, with no cheats and no denoiser hiding the noise.
 //
 // WHAT IT IS: a reference view, not a render mode. It suppresses the raster scene while registered
-// (rhi::IRenderFeature::suppressesScene() is unconditionally true) and draws its own accumulator
+// and able to paint (rhi::IRenderFeature::suppressesScene(), which used to be unconditionally true
+// and is now gated on the same four terms scenePass() checks -- see there) and draws its accumulator
 // instead of it, at a small FIXED resolution independent of the swapchain, accumulating a bounded
 // number of samples every still frame and resetting the moment the camera moves or the STATIC draw
 // list changes -- an image that keeps accumulating across a camera move is not a reference image, it
@@ -38,8 +39,18 @@
 //   - MATERIALS. PtSurface carries one flat linear albedo, produced by the host's AlbedoResolver
 //     when it recognises the draw's binding, and by the legacy per-draw base colour otherwise (which
 //     is also what every draw gets when no resolver is installed at all). No textures are sampled,
-//     no metallic/roughness (the integrator is pure Lambertian), no emissive. A textured material
-//     renders as its flat, decoded base colour.
+//     no metallic/roughness, no emissive. A textured OPAQUE material renders as its flat, decoded
+//     base colour and is traced as pure Lambertian, exactly as before.
+//
+//     A BLENDED DRAW (submitDraw's `blended` flag, see IRenderFeature's own contract) is now
+//     ACCEPTED rather than dropped, and marked a smooth, non-absorbing DIELECTRIC -- see
+//     PtSurface::ior and PtShaders.hpp's ptScatterDielectric. ITS IOR IS A SINGLE FIXED CONSTANT
+//     (kDefaultGlassIor), NOT THE REAL MATERIAL'S, and that is a stated approximation, not an
+//     oversight: this module links only Core and the GENERIC RHI (see CMakeLists.txt) and so cannot
+//     read pbr::MaterialConstants::ior out of drawConstants any more than it can read baseColorFactor
+//     without AlbedoResolver's help. A future IorResolver mirroring AlbedoResolver's own shape would
+//     let the host vary it per material; until one exists, every pane of glass in a traced scene
+//     reads as ordinary soda-lime glass regardless of what its author actually set.
 //   - PERFORMANCE. No denoiser, no importance sampling of lights, no spectral anything, not
 //     real-time. It is a progressive, still-camera-only reference; see kAccumWidth/kAccumHeight/
 //     kMaxBounces/kSamplesPerStep/kMaxSamples below for the bounded numbers it stays inside.
@@ -85,13 +96,27 @@ public:
     void beginScene() override;
     void submitDraw(rhi::MeshHandle mesh, const f32 world[16], const f32 baseColor[4],
                     f32 metallic, f32 roughness, rhi::BindingSetHandle drawBinding,
-                    const void* drawConstants, u32 drawConstantBytes) override;
+                    const void* drawConstants, u32 drawConstantBytes, bool blended) override;
     void prePass(rhi::IRenderContext& ctx) override;
-    // Unconditional: this feature IS the reference view whenever it is registered at all. Whether it
-    // ever runs is decided by the CALLER choosing whether to register it (see the class comment),
-    // not by a runtime toggle here -- there is exactly one registered instance and it always replaces
-    // the scene, the same shape PtFurnaceTest's registration already uses for "on at all == on".
-    bool suppressesScene() const override { return true; }
+    // On whenever this feature is registered AND can actually paint. Registration is still the real
+    // switch -- the caller decides (see the class comment), not a runtime toggle here.
+    //
+    // WHY THIS IS NOT SIMPLY `return true`, which is what it was: suppressesScene() is a PROMISE to
+    // paint the whole scene, and scenePass() below opens with the exact same four-way guard and
+    // silently returns when it fails. The two disagreeing means the backend drops every drawMesh()
+    // for the frame (D3D12Device::drawMesh) and then nothing paints in their place -- a cleared
+    // target, from a feature that said it had this covered. Testing the same condition in both
+    // places is what makes the promise honest; the guard in scenePass() is now a belt-and-braces
+    // repeat rather than the only check.
+    //
+    // Read LIVE, once per drawMesh() call, all through onRender() -- so every term here has to be
+    // stable across a frame. All four are: target_ and sceneReady_ are written by rebuildScene()
+    // from prePass(), which runs before any drawMesh(), and the two present handles are built once
+    // in init()/onRenderTargetsChanged(). See SandboxApp::syncPtSceneView's comment on why the
+    // REGISTRATION itself is likewise only ever mutated from onUpdate().
+    bool suppressesScene() const override {
+        return presentPso_ && presentSet_ && sceneReady_ && target_.valid();
+    }
     void scenePass(rhi::IRenderContext& ctx) override;
     void onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rhi::Format depth,
                                 u32 width, u32 height) override;
@@ -109,6 +134,10 @@ private:
         rhi::MeshHandle mesh = 0;
         f32 world[16];
         f32 albedo[3];
+        // 0.0 = opaque Lambertian (every draw the backend never marked `blended`); kDefaultGlassIor
+        // for a blended one. See PtSurface::ior for why one field carries both the kind and the
+        // value, and this class's own MATERIALS comment for why the value is a fixed constant.
+        f32 ior = 0.0f;
     };
     std::vector<Draw> draws_, drawsPrev_;
 
@@ -251,6 +280,12 @@ private:
     // EXACT count, with no headroom, so an unbounded snapshot would try to build one BLAS per
     // instance with no limit.
     static constexpr u32 kMaxInstances = 4096;
+
+    // THE FIXED IOR EVERY BLENDED DRAW GETS, ordinary soda-lime glass -- see the class comment's
+    // MATERIALS point for why this is one constant rather than the real material's own value: this
+    // module has no path to pbr::MaterialConstants::ior without linking render.pbr, the same reason
+    // AlbedoResolver exists as a callback instead of this module reading baseColorFactor itself.
+    static constexpr f32 kDefaultGlassIor = 1.5f;
 
     // THE LADDER the Path Tracing quality combo drives. Four rungs, 16:9, each roughly double the
     // pixels of the one below.

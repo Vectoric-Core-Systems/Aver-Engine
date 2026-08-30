@@ -115,6 +115,154 @@ std::string GameContent::resolveAnimAsset(u64 id, void* user) {
 
 #if AVER_MODULE_SCENE
 
+namespace {
+
+// Appends an axis-aligned box of INDEPENDENT per-axis half-extents (hx,hy,hz), yawed by yawDeg around
+// Z and placed at (cx,cy,cz). GameMath.hpp's appendBox is fixed to a symmetric cube (one h for all
+// three axes, no rotation) because that is all a placed-in-a-level box ever needed; the drone's arms
+// are long and thin and pointed at the four diagonals, and its body/skids/struts are axis-aligned
+// boxes of yet other aspect ratios, so one generalised generator replaces four bespoke ones. The face
+// table below is copied verbatim from appendBox -- same corners, same winding, same per-face normals
+// -- with the per-axis extents and the yaw rotation as the only additions. yawDeg=0 makes this an
+// axis-aligned anisotropic box; hx=hy=hz with yawDeg=0 reproduces appendBox exactly (true by
+// construction, same face table and corner order -- not separately asserted here).
+//
+// A SECOND COPY of sandbox/src/SandboxApp.cpp's own appendBoxYaw (read, not shared -- that file
+// belongs to another agent), the same trade GameMath.hpp already makes for appendBox/appendSphere:
+// one generator, needed by both the editor and the runtime, copied instead of promoted to a shared
+// header because that header is outside this change's file ownership.
+void appendBoxYaw(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx,
+                   f32 cx, f32 cy, f32 cz, f32 hx, f32 hy, f32 hz, f32 yawDeg) {
+    const f32 rad = yawDeg * kDegToRad;
+    const f32 cs = std::cos(rad), sn = std::sin(rad);
+    // Rotates a LOCAL (lx,ly,lz) around Z. A pure rotation has determinant +1, so it changes nothing
+    // about winding or handedness -- every face below stays CCW-outward exactly as appendBox left it.
+    auto rotZ = [cs, sn](f32 lx, f32 ly, f32 lz, f32& ox, f32& oy, f32& oz) {
+        ox = lx * cs - ly * sn; oy = lx * sn + ly * cs; oz = lz;
+    };
+    const f32 p[8][3] = {{-hx,-hy,-hz},{hx,-hy,-hz},{hx,hy,-hz},{-hx,hy,-hz},
+                         {-hx,-hy,hz},{hx,-hy,hz},{hx,hy,hz},{-hx,hy,hz}};
+    struct Face { f32 n[3]; int c[4]; };
+    const Face faces[6] = {{{1,0,0},{1,2,6,5}},{{-1,0,0},{0,4,7,3}},{{0,1,0},{3,7,6,2}},
+                           {{0,-1,0},{0,1,5,4}},{{0,0,1},{4,5,6,7}},{{0,0,-1},{0,3,2,1}}};
+    const f32 quadUV[4][2] = {{0,0},{1,0},{1,1},{0,1}};
+    for (const Face& f : faces) {
+        f32 nx = 0.0f, ny = 0.0f, nz = 0.0f; rotZ(f.n[0], f.n[1], f.n[2], nx, ny, nz);
+        const u32 b = static_cast<u32>(v.size());
+        for (int k = 0; k < 4; ++k) {
+            const f32* c = p[f.c[k]];
+            f32 wx = 0.0f, wy = 0.0f, wz = 0.0f; rotZ(c[0], c[1], c[2], wx, wy, wz);
+            v.push_back({cx+wx, cy+wy, cz+wz, nx, ny, nz, quadUV[k][0], quadUV[k][1]});
+        }
+        idx.push_back(b); idx.push_back(b+1); idx.push_back(b+2);
+        idx.push_back(b); idx.push_back(b+2); idx.push_back(b+3);
+    }
+}
+
+// Appends a capped cylinder standing along +Z, centred at (cx,cy,cz) -- the drone's motor pods and
+// rotor discs. Flat-shaded per face like appendBox/appendBoxYaw, not smooth-shaded like appendSphere:
+// at the segment counts a rotor pod uses (8-10) a smoothed normal would look indistinguishable from a
+// faceted one, so this reuses the "duplicate vertices, exact face normal" convention every other
+// hand-built primitive already follows rather than adding a second shading convention. A second copy
+// of SandboxApp.cpp's own appendCylinderZ, for the same file-ownership reason as appendBoxYaw above.
+void appendCylinderZ(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx,
+                      f32 cx, f32 cy, f32 cz, f32 radius, f32 halfHeight, u32 segments) {
+    for (u32 s = 0; s < segments; ++s) {
+        const f32 a0 = kTwoPi * static_cast<f32>(s) / static_cast<f32>(segments);
+        const f32 a1 = kTwoPi * static_cast<f32>(s + 1) / static_cast<f32>(segments);
+        const f32 x0 = std::cos(a0), y0 = std::sin(a0);
+        const f32 x1 = std::cos(a1), y1 = std::sin(a1);
+        // Side quad: both edges get the SAME flat normal -- the averaged (renormalised) radial
+        // direction of the two -- the same "one normal per face" rule appendBox uses, just computed
+        // rather than hand-written because the direction depends on which segment this is.
+        f32 nx = x0 + x1, ny = y0 + y1;
+        const f32 nl = std::sqrt(nx * nx + ny * ny);
+        if (nl > 1e-6f) { nx /= nl; ny /= nl; }
+        const u32 b = static_cast<u32>(v.size());
+        v.push_back({cx + x0 * radius, cy + y0 * radius, cz - halfHeight, nx, ny, 0, 0, 0});
+        v.push_back({cx + x1 * radius, cy + y1 * radius, cz - halfHeight, nx, ny, 0, 1, 0});
+        v.push_back({cx + x1 * radius, cy + y1 * radius, cz + halfHeight, nx, ny, 0, 1, 1});
+        v.push_back({cx + x0 * radius, cy + y0 * radius, cz + halfHeight, nx, ny, 0, 0, 1});
+        idx.push_back(b); idx.push_back(b+1); idx.push_back(b+2);
+        idx.push_back(b); idx.push_back(b+2); idx.push_back(b+3);
+        // Top (+Z) and bottom (-Z) caps, each a single fan triangle for this segment's wedge -- cheap
+        // at these segment counts (an 8-10 sided cap still reads as round) and it keeps the caps flat-
+        // shaded too, instead of introducing yet another normal convention for just two faces.
+        const u32 ct = static_cast<u32>(v.size());
+        v.push_back({cx, cy, cz + halfHeight, 0, 0, 1, 0.5f, 0.5f});
+        v.push_back({cx + x0 * radius, cy + y0 * radius, cz + halfHeight, 0, 0, 1, x0*0.5f+0.5f, y0*0.5f+0.5f});
+        v.push_back({cx + x1 * radius, cy + y1 * radius, cz + halfHeight, 0, 0, 1, x1*0.5f+0.5f, y1*0.5f+0.5f});
+        idx.push_back(ct); idx.push_back(ct+1); idx.push_back(ct+2);
+        const u32 cb = static_cast<u32>(v.size());
+        v.push_back({cx, cy, cz - halfHeight, 0, 0, -1, 0.5f, 0.5f});
+        v.push_back({cx + x1 * radius, cy + y1 * radius, cz - halfHeight, 0, 0, -1, x1*0.5f+0.5f, y1*0.5f+0.5f});
+        v.push_back({cx + x0 * radius, cy + y0 * radius, cz - halfHeight, 0, 0, -1, x0*0.5f+0.5f, y0*0.5f+0.5f});
+        idx.push_back(cb); idx.push_back(cb+1); idx.push_back(cb+2);
+    }
+}
+
+// Appends a placeholder quadcopter, built from appendBoxYaw/appendCylinderZ, for the "the drone [has]
+// a box, the drone should be like UE's default drone" complaint against the old drone spawn (a bare
+// unit cube -- see SandboxApp.cpp's setDroneEnabled). 420 triangles: a central body, four arms out to
+// the corners each ending in a motor-pod hub and a rotor disc, and a pair of landing skids on struts.
+//
+// NORMALISED THE SAME WAY THE UNIT CUBE AND UNIT SPHERE ARE: nothing in this mesh goes past 1.0 from
+// the origin, so a PLACEG scale on "Meshes/drone.ocmesh" means the same half-extent-in-centimetres
+// thing it means on the cube. UNLIKE the isotropic cube and sphere, though, this shape is NOT the same
+// size along every axis -- it is a flat quadcopter, not a cube -- so "1.0" is reached only at the four
+// rotor-tip diagonals (kArmROuter + kDiscRadius = 0.80 + 0.20 = 1.00 exactly); the straight per-axis
+// reach is smaller (about 0.7657 along X or Y alone, since a disc centred on a 45-degree line does not
+// project its full radius onto either axis), and the vertical reach is smaller again (about 0.16 up,
+// 0.22 down). Recorded precisely at the registration site (search "droneId" in registerBuiltins,
+// below) rather than assumed to be the cube/sphere's -1..1 box.
+//
+// MATCHED, vertex-for-vertex convention (winding, normal style, units), by SandboxApp.cpp's own
+// appendDrone. See appendBoxYaw's header comment, above, for why this is a copy and not a shared call.
+void appendDrone(std::vector<rhi::MeshVertex>& v, std::vector<u32>& idx) {
+    // Central body: a squarish box, flatter than it is wide -- real quadcopter chassis proportions.
+    constexpr f32 kBodyHX = 0.26f, kBodyHY = 0.26f, kBodyHZ = 0.15f;
+    appendBoxYaw(v, idx, 0, 0, 0, kBodyHX, kBodyHY, kBodyHZ, 0.0f);
+
+    // Four arms, out to the corners (45/135/225/315 degrees), each ending in a motor pod and a rotor
+    // disc -- see this function's own header comment for why kArmROuter + kDiscRadius is exactly 1.0.
+    constexpr f32 kArmAngleDeg[4] = {45.0f, 135.0f, 225.0f, 315.0f};
+    constexpr f32 kArmRInner = 0.34f;  // just inside the body's own corner (0.26*sqrt2 = 0.368) -- no seam
+    constexpr f32 kArmROuter = 0.80f;  // hub distance from the drone's centre
+    constexpr f32 kArmHalfLen = (kArmROuter - kArmRInner) * 0.5f;
+    constexpr f32 kArmCenterR = (kArmROuter + kArmRInner) * 0.5f;
+    constexpr f32 kArmHalfWidth = 0.045f, kArmHalfThick = 0.032f;
+    constexpr f32 kHubRadius = 0.11f, kHubHalfHeight = 0.05f, kHubCenterZ = 0.08f;
+    constexpr f32 kDiscRadius = 0.20f, kDiscHalfHeight = 0.014f, kDiscCenterZ = 0.14f;
+    for (f32 deg : kArmAngleDeg) {
+        const f32 rad = deg * kDegToRad;
+        const f32 armX = kArmCenterR * std::cos(rad), armY = kArmCenterR * std::sin(rad);
+        appendBoxYaw(v, idx, armX, armY, 0.0f, kArmHalfLen, kArmHalfWidth, kArmHalfThick, deg);
+
+        const f32 hubX = kArmROuter * std::cos(rad), hubY = kArmROuter * std::sin(rad);
+        appendCylinderZ(v, idx, hubX, hubY, kHubCenterZ, kHubRadius, kHubHalfHeight, 8);
+        // The rotor disc stands in for the swept area of a spinning prop that a static placeholder
+        // mesh cannot animate -- a flat approximation, stated here rather than left for someone to
+        // wonder why a "propeller" never turns.
+        appendCylinderZ(v, idx, hubX, hubY, kDiscCenterZ, kDiscRadius, kDiscHalfHeight, 10);
+    }
+
+    // A pair of landing skids plus the four short struts that stand them off the body's underside.
+    constexpr f32 kSkidHalfLen = 0.30f, kSkidHalfWidth = 0.02f, kSkidHalfThick = 0.018f;
+    constexpr f32 kSkidY = 0.20f, kSkidZ = -0.20f;
+    appendBoxYaw(v, idx, 0.0f,  kSkidY, kSkidZ, kSkidHalfLen, kSkidHalfWidth, kSkidHalfThick, 0.0f);
+    appendBoxYaw(v, idx, 0.0f, -kSkidY, kSkidZ, kSkidHalfLen, kSkidHalfWidth, kSkidHalfThick, 0.0f);
+
+    constexpr f32 kStrutHalfX = 0.02f, kStrutHalfY = 0.02f, kStrutHalfZ = 0.016f;
+    // Midpoint between the body's underside (-kBodyHZ = -0.15) and the skid's top (kSkidZ +
+    // kSkidHalfThick = -0.182).
+    constexpr f32 kStrutX = 0.16f, kStrutZ = -0.166f;
+    for (f32 sx : {-kStrutX, kStrutX})
+        for (f32 sy : {-kSkidY, kSkidY})
+            appendBoxYaw(v, idx, sx, sy, kStrutZ, kStrutHalfX, kStrutHalfY, kStrutHalfZ, 0.0f);
+}
+
+} // namespace
+
 void GameContent::registerBuiltins(rhi::IDevice& device) {
     // FROZEN: the unit cube stays half-extent 1. A .ocworld PLACEG scale is a half-extent in
     // centimetres applied to this mesh, so changing it silently resizes every placed box in every
@@ -143,18 +291,87 @@ void GameContent::registerBuiltins(rhi::IDevice& device) {
         sceneMeshes_[id] = device.createMesh(v.data(), (u32)v.size(), i.data(), (u32)i.size());
         meshBounds_[id]  = unitBounds;
     }
+    {
+        // Third built-in: the quadcopter appendDrone (above) builds, for the graph-driven drone actor
+        // (SandboxApp.cpp's setDroneEnabled) that used to spawn as a bare unit cube.
+        //
+        // MUST STAY IN STEP WITH sandbox/src/SandboxApp.cpp's OWN copy of this same registration
+        // (search "droneId" there) -- exactly the discipline this file's surfaceLooks_ table already
+        // calls out for M_Foliage/M_Bark/M_Rock, a few lines down, and the same kind of bug (a
+        // built-in the editor has that the runtime does not, or vice versa) if it drifts.
+        std::vector<rhi::MeshVertex> v; std::vector<u32> i;
+        appendDrone(v, i);
+        const u64 id = fnv1a64(std::string_view("Meshes/drone.ocmesh"));
+        sceneMeshes_[id] = device.createMesh(v.data(), (u32)v.size(), i.data(), (u32)i.size());
+        // NOT unitBounds: appendDrone is not isotropic (see its own comment for the exact per-axis
+        // reach), so recording the cube/sphere's -1..1 box here would be roughly six times too tall
+        // and would silently defeat the frustum cull the comment over this function already exists to
+        // fix -- for a different reason (loose rather than missing) than the one that comment
+        // describes. Padded a few thousandths beyond the generator's own exact numbers (X/Y tip reach
+        // 0.765685..., top 0.154, skid bottom -0.218) rather than trimmed to them -- a bound must
+        // never be tighter than the geometry it describes.
+        meshBounds_[id] = {Vec3{-0.78f, -0.78f, -0.22f}, Vec3{0.78f, 0.78f, 0.16f}};
+    }
 
     // The named surfaces gameplay can ask for, with the editor's exact values.
+    //
+    // THIS TABLE MUST STAY IN STEP WITH sandbox/src/SandboxApp.cpp's OWN look()/surfaceLooks_ BLOCK
+    // (search "The named surfaces gameplay can ask for" there), and there is nothing that enforces
+    // that beyond this comment and the one over there. A VERIFIED PARITY BUG lived here until this
+    // edit: the editor's table names TEN surfaces, this one named only SEVEN -- M_Foliage, M_Bark
+    // and M_Rock were missing entirely. A level authored in the editor using one of those three,
+    // with no backing .ocmat, rendered its intended colour in the editor and fell through to the
+    // flat 0.80/0.80/0.85 gray fallback (see GameRender.cpp's drawWorld) the moment the packaged
+    // game ran the SAME level -- with nothing in the log to say why, until GameRender.cpp's
+    // one-shot "no authored .ocmat and no built-in look" warning was added alongside this fix.
+    // Whoever adds an eleventh name to the editor's table and forgets this one reproduces exactly
+    // that bug, silently, again.
     auto look = [this](const char* name, f32 r, f32 g, f32 b, f32 metal, f32 rough) {
         surfaceLooks_[aver_scene_material(0, name)] = SurfaceLook{{r, g, b}, metal, rough};
     };
     look("M_Floor",  0.22f, 0.23f, 0.26f, 0.02f, 0.85f);
     look("M_Wall",   0.48f, 0.50f, 0.55f, 0.03f, 0.72f);
+    // A GENERIC SURFACE IN THE ENGINE'S OWN DEFAULT PALETTE, alongside M_Floor/M_Wall/M_Metal above
+    // -- not an entry that exists because one project asked for it. Every name in this table is a
+    // common architectural surface the engine is willing to give a sensible look to when a level
+    // names it and no .ocmat defines it.
+    //
+    // It was added after a scene naming it fell through to the flat {0.80,0.80,0.85} fallback and
+    // rendered as undifferentiated near-white -- which got reported as a lighting bug when it was
+    // content resolving to nothing, identically in BOTH render paths. That is the failure mode this
+    // whole table exists to prevent, and concrete was simply a hole in it.
+    //
+    // KEEP THIS TABLE AND GameContent.cpp/SandboxApp.cpp IN STEP -- they have diverged before.
+    look("M_Concrete", 0.55f, 0.54f, 0.51f, 0.00f, 0.88f);
     look("M_Trim",   0.30f, 0.33f, 0.38f, 0.35f, 0.45f);
     look("M_Crate",  0.62f, 0.44f, 0.22f, 0.02f, 0.78f);
     look("M_Target", 0.86f, 0.20f, 0.16f, 0.05f, 0.40f);
     look("M_Metal",  0.55f, 0.57f, 0.60f, 0.85f, 0.28f);
     look("M_Accent", 0.95f, 0.66f, 0.15f, 0.30f, 0.35f);
+    // Copied verbatim from sandbox/src/SandboxApp.cpp's table (read, not edited -- that file
+    // belongs to another agent). Ordinary outdoor vocabulary, not tied to any one demo project;
+    // see that file's own comment on why a former "M_Foliage" scatter default was removed and
+    // these three names were kept anyway.
+    look("M_Foliage", 0.16f, 0.42f, 0.14f, 0.00f, 0.85f);
+    look("M_Bark",    0.35f, 0.24f, 0.15f, 0.00f, 0.85f);
+    look("M_Rock",    0.42f, 0.40f, 0.37f, 0.05f, 0.80f);
+    // M_Glass -- NOT VERIFIED AGAINST THE EDITOR'S TABLE, unlike the three above. The editor agent
+    // is adding its own translucent-material wiring to SandboxApp.cpp concurrently with this edit,
+    // and this file cannot see that in-progress change; these values (near-white, non-metal, near-
+    // mirror-smooth) are this session's best guess at what a built-in "glass" look should be, not a
+    // copy of a read value. CROSS-CHECK THIS ENTRY against SandboxApp.cpp's table once that edit
+    // lands, the way M_Foliage/M_Bark/M_Rock were just cross-checked above.
+    //
+    // A SEPARATE, MORE IMPORTANT LIMITATION: SurfaceLook (GameContent.hpp) has no alphaMode field
+    // at all -- it is a colour and a metal/rough pair, nothing else. GameRender.cpp's
+    // drawWorld only ever sets device.setDrawBlended(true) for an AUTHORED .ocmat whose alphaMode
+    // reads AlphaMode::Blend (pbr::MaterialLibrary::desc()); a built-in look, this one included, can
+    // never trigger the blended path. A level using "M_Glass" with no backing .ocmat therefore
+    // renders an OPAQUE near-white cube, not glass -- an improvement over the flat gray default (and
+    // over the one-shot "no built-in look" warning this would otherwise trip), but still opaque.
+    // Actual translucency needs an authored M_Glass.ocmat with BLEND set; this entry is a fallback
+    // for the case where one was never authored, not a substitute for authoring one.
+    look("M_Glass", 0.95f, 0.97f, 0.98f, 0.00f, 0.05f);
 
     AVER_INFO("[Mesh] {} built-in primitive(s), {} named surface(s)", sceneMeshes_.size(), surfaceLooks_.size());
 }

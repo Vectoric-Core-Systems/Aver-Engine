@@ -435,11 +435,18 @@ bool FluidScene::buildPipeline(u32 sampleCount, rhi::Format color, rhi::Format d
     // a hardcoded 1, rebuilt here whenever onRenderTargetsChanged reports it changed.
     gd.sampleCount = sampleCount;
 
-    // Straight (non-premultiplied) alpha, matching PSFluid's own output exactly -- see
-    // FluidShaders.hpp's comment on why this is the correct pairing, ported from WaterRenderer.cpp's
-    // identical reasoning: PremultipliedAlpha would double-apply alpha to a shader that never
-    // multiplies its own rgb by it, darkening the surface at every grazing angle.
-    gd.blend = rhi::BlendMode::AlphaBlend;
+    // PREMULTIPLIED alpha -- REVERSED from this pipeline's own prior choice, matching
+    // WaterRenderer.cpp's identical reversal and for the identical reason: see that file's own
+    // blend-state comment for the full argument. PSFluid (FluidShaders.hpp) used to output straight
+    // alpha over a flat deep/shallow lerp, which AlphaBlend composited correctly because nothing in
+    // that rgb needed protecting from attenuation. PSFluid now outputs a real specular term --
+    // skyColor(R) mirror reflection plus GGX sun glitter, exactly PSWater's fix applied to the same
+    // substance -- that must reach the framebuffer at full strength however transparent this pool is
+    // authored to be. Straight AlphaBlend would multiply that reflection by alpha, reproducing the
+    // "flat cartoon" defect one level deeper. Premultiplied (rgb = specular + diffuse*alpha, a = alpha
+    // -- PSFluid's own final line) sends `specular` through unattenuated and lets only the transmitted
+    // body colour shrink with coverage.
+    gd.blend = rhi::BlendMode::PremultipliedAlpha;
 
     pso_ = res_->createGraphicsPipeline(gd);
 
@@ -478,13 +485,42 @@ void FluidScene::transparentPass(rhi::IRenderContext& ctx) {
     // from SOMEWHERE, and why that number is elapsedSeconds_ rather than a fresh clock of this
     // method's own). Four floats, one upload, once per frame -- not per resident, since every live
     // pool shares the same clock.
-    const float fluidFrame[4] = {elapsedSeconds_, 0.0f, 0.0f, 0.0f};
     ctx.pushMarker("Aver.Fluid");
     ctx.setPipeline(pso_);
-    ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, fluidFrame, sizeof(fluidFrame));
     for (auto& kv : live_) {
         const Resident& r = kv.second;
         if (!r.drawMesh) continue;   // this handle's spawn() never finished building a drawable mesh
+
+        // PER-RESIDENT NOW, not once for the whole pass, and the reason is the floor depth below:
+        // two pools of different depths shade differently, so a single upload before the loop would
+        // have given every pool the first one's column. The clock is still shared; only the geometry
+        // term varies. One extra 48-byte root-constant write per pool per frame.
+        //
+        // EXTINCTION, per centimetre, for clear water. The per-metre coefficients are roughly
+        // (0.45, 0.09, 0.035) -- red is absorbed more than an order of magnitude faster than blue,
+        // which is the entire reason water reads cyan and reads more cyan the deeper you look. These
+        // are the physical numbers divided by 100 for this engine's centimetre world units, not a
+        // look tuned by eye: at this pool's 120 cm depth they give a transmittance of about
+        // (0.58, 0.90, 0.96) straight down, i.e. the floor is clearly visible with a slight teal
+        // cast, which is what a clean swimming pool actually looks like.
+        //
+        // BODY COLOUR is the light scattered back OUT of the column rather than absorbed by it --
+        // what makes a pool read cyan even above a white floor. Distinct from extinction: one is what
+        // the water removes, the other is what it adds.
+        //
+        // Both are still constants HERE rather than authored, and that is a known gap, not a
+        // decision: the WATER record carries no colour token at all (OcWorld.hpp's OcWaterPlacement
+        // has no such field), so there is nothing to read them from yet. They are at least in one
+        // place now, and reaching the GPU through a buffer, instead of being compiled literals
+        // duplicated across two shaders.
+        const fluids::FluidVolumeDesc& d = r.vol.desc();
+        const float floorZ = d.centreCm[2] - d.halfExtentCm[2];
+        const float fluidFrame[12] = {
+            elapsedSeconds_, floorZ,  0.0f,    0.0f,
+            0.0045f,         0.0009f, 0.00035f, 0.0f,
+            0.03f,           0.32f,   0.38f,    0.0f,
+        };
+        ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, fluidFrame, sizeof(fluidFrame));
 
         // meshGeometry(), not r.vertices/r.source directly: it is the one place this RHI already
         // resolves a MeshHandle to the buffers and counts a raw draw call needs, and it is what every

@@ -47,7 +47,11 @@ int main(int argc, char** argv) {
 #endif
 
     if (argc > 1 && std::strcmp(argv[1], "--defines") == 0) {
-        std::string defs = aver::pbr::materialShaderDefines(kClusterSrvCount, kSamplerSlot);
+        // layeredBsdf=false: this tool dumps the shader TEXT for reading, and has no project to ask
+        // whether one wanted a coat. Dumping the unlayered form is the honest default -- pass a flag
+        // here if the layered variant ever needs dumping too.
+        std::string defs = aver::pbr::materialShaderDefines(kClusterSrvCount, kSamplerSlot,
+                                                            /*layeredBsdf=*/false);
 #if AVER_MODULE_VOXI
         defs += ";AVER_CLUSTER_VOXI=1;" +
                 aver::voxi::giShaderDefines(kClusterGiSrvBase, kClusterGiSamplerBase, kClusterGiFrameRegister);

@@ -24,6 +24,31 @@ constexpr u32 kGroup = 8;
 constexpr u32 kShaderModel = 65;
 constexpr u32 kRayTracingTier = 11;
 
+// RESOURCE BINDING TIER IS DELIBERATELY NOT CHECKED HERE, and this note exists so that stays a
+// decision rather than becoming an oversight someone "fixes" prematurely.
+//
+// The engine as a whole is explicitly not bindless -- RHIResources.hpp:3, a Resource Binding Tier 1
+// commitment that protects the MINIMUM tier (D3D12 FL 11_0: Kepler, GCN 1.0, Haswell). This tracer
+// is gated far above that, to DXR 1.1 hardware, every generation of which reports Binding Tier 3.
+// So the tracer COULD use descriptor indexing without raising the engine's floor, because it is
+// already gated to hardware that has it.
+//
+// It does not need it yet. The integrator binds a fixed four SRVs and one UAV (kSrvCount/kUavCount
+// above) -- TLAS, vertices, indices, instances -- which Tier 1 satisfies comfortably. Adding a
+// resourceBindingTier >= 3 requirement TODAY would refuse the path tracer on hardware where it
+// currently runs correctly, buying nothing.
+//
+// IT BECOMES REQUIRED THE MOMENT MATERIALS DO. Sampling an arbitrary material's textures at a ray
+// hit is precisely what needs an unbounded, dynamically-indexed table; that work is what should add
+// the check, next to the feature that depends on it, so the refusal names a real reason. The
+// capability is already queried (DeviceCaps::resourceBindingTier) and already clampable for testing
+// (CapsOverride::maxResourceBindingTier, the `tier1` token in --force-caps), so nothing has to be
+// built first -- only used.
+//
+// Until then the honest statement is: this tracer requires DXR 1.1 and SM 6.5, and happens to run
+// only on hardware that would also support bindless. That is a coincidence of GPU generations, not
+// an invariant this file enforces.
+
 // MIRRORS cbuffer PtFrame in kPathTracerHLSL, field for field. A shifted field here reads a camera
 // basis as a sample count -- silently, and only in the rendered image.
 struct FrameCB {
@@ -110,11 +135,15 @@ void PathTracer::shutdown() {
         // process exit and became a per-toggle leak once a live editor could shut down and re-init a
         // PathTracer repeatedly.
         for (const auto& [mesh, b] : blasCache_) if (b) res_->destroyBlas(b);
-        // TLAS handles are NOT released here, or anywhere in this file: the RHI has no destroyTlas at
-        // all (see IResourceFactory), so every TLAS this object ever built leaks for the life of the
-        // DEVICE, not just of this object -- see resetScene()'s own comment for the identical,
-        // pre-existing, ACCEPTED gap. Not a new cost, only a more visible one now that shutdown() can
-        // run many times in one process instead of once.
+        // THE TLASES STILL CANNOT BE RELEASED: the RHI has no destroyTlas at all (see
+        // IResourceFactory -- BLAS has one, TLAS does not), so what this object allocated outlives
+        // it, for the life of the DEVICE. What changed is the COUNT: addScene reuses a handle PER
+        // SCENE SLOT and grows it by doubling, so a session leaks O(log n) per slot rather than one
+        // per re-arm. Dropping the vectors here forgets the handles rather than freeing them, which
+        // is all that can be done; removing the last of it needs a real destroyTlas added to the
+        // RHI, a wider change than this module.
+        tlasPool_.clear();
+        tlasPoolCap_.clear();
         if (pipeline_)    res_->destroyPipeline(pipeline_);
         if (cs_)          res_->destroyShader(cs_);
     }
@@ -148,7 +177,29 @@ u32 PathTracer::addSurface(const PtSurface& s) {
 u32 PathTracer::addScene(const u32* surfaceIds, u32 count) {
     Scene s;
     s.surfaces.assign(surfaceIds, surfaceIds + count);
-    if (res_) s.tlas = res_->createTlas(count ? count : 1);
+    if (res_) {
+        // REUSED PER SLOT, NOT RECREATED, AND NOT SHARED BETWEEN SCENES -- see tlasPool_'s
+        // declaration for both halves of that. Reuse is what stops a re-arm leaking a handle; the
+        // per-slot part is what stops five simultaneous scenes all tracing the same geometry.
+        //
+        // Grows to the next power of two so a snapshot that gains a single instance does not
+        // allocate again; shrinks never, because a smaller TLAS buys nothing and every allocation
+        // here is permanent until the device goes.
+        const usize slot = scenes_.size();
+        if (tlasPool_.size() <= slot) { tlasPool_.resize(slot + 1, 0); tlasPoolCap_.resize(slot + 1, 0); }
+
+        const u32 need = count ? count : 1;
+        if (!tlasPool_[slot] || tlasPoolCap_[slot] < need) {
+            u32 cap = tlasPoolCap_[slot] ? tlasPoolCap_[slot] : 1;
+            while (cap < need) cap <<= 1;
+            const rhi::TlasHandle grown = res_->createTlas(cap);
+            // A failed grow keeps the old handle rather than dropping to zero: too small is a
+            // degraded scene, but zero is no scene at all, and prepare() would then build nothing
+            // while reporting success.
+            if (grown) { tlasPool_[slot] = grown; tlasPoolCap_[slot] = cap; }
+        }
+        s.tlas = tlasPool_[slot];
+    }
     scenes_.push_back(std::move(s));
     return static_cast<u32>(scenes_.size() - 1);
 }
@@ -195,8 +246,9 @@ bool PathTracer::prepare() {
         Instance& inst = instances_[i];
         std::memcpy(inst.objectToWorld, surfaces_[i].world, sizeof(inst.objectToWorld));
         std::memcpy(inst.albedo, surfaces_[i].albedo, sizeof(inst.albedo));
+        inst.ior = surfaces_[i].ior;
         // The SHARED rows: every surface on this mesh reads the same geometry. What stays per
-        // surface is objectToWorld and albedo, right here.
+        // surface is objectToWorld, albedo and ior, right here.
         inst.firstVertex = row.firstVertex;
         inst.firstIndex  = row.firstIndex;
     }
@@ -420,8 +472,11 @@ void PathTracer::resetScene() {
         // record per SURFACE, and the surface set is exactly what changes.
         if (instanceBuf_) res_->destroyBuffer(instanceBuf_);
         // BLAS handles are NOT released here either, for the same reason.
-        // TLAS handles are still not released at all -- see this method's own header comment for
-        // why that is a known, accepted leak for the intended caller.
+        // THE TLAS POOL IS KEPT, DELIBERATELY, and that is the point of the change: clearing
+        // scenes_ below drops the Scenes that referenced them, but tlasPool_ itself survives, so the
+        // next round of addScene() calls reuses slot 0, slot 1, ... in the same order instead of
+        // allocating structures that can never be freed. See tlasPool_'s own declaration for what
+        // that used to cost, and for why the pool is per SLOT rather than a single shared handle.
     }
     instanceBuf_ = 0;
     surfaces_.clear();

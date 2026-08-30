@@ -2,6 +2,7 @@
 // Developed by Vectoric-Core-Systems. All rights reserved.
 // Proprietary. See LICENSE.md at the repository root.
 // Declares one material and emits the .ocmat text the engine reads.
+using System;
 using System.Globalization;
 using System.Text;
 
@@ -30,6 +31,15 @@ public sealed class MaterialBuilder
     private float _reflectance = 0.04f;
     private float _f90 = 1f;
     private float _uvTiling = 100f;
+    // 1.5 and 0 are MaterialDesc's own defaults, so a builder that never touches them emits nothing
+    // and the .ocmat text is unchanged.
+    private float _ior = 1.5f;
+    private float _transmission;
+    private float _subsurfaceWeight;
+    private float _subsurfaceRadius;
+    private float _coatWeight;
+    private float _coatRoughness;
+    private float _coatF0 = 0.04f;   // the field default, so an unset coat emits nothing
 
     private readonly Dictionary<Slot, string> _textures = new();
 
@@ -79,6 +89,48 @@ public sealed class MaterialBuilder
     /// <summary>Reflectance at grazing incidence. Below 1 tames the rim on rough surfaces.</summary>
     public MaterialBuilder F90(float v) { _f90 = v; return this; }
 
+    /// <summary>
+    /// Wrap-diffuse weight, [0,1]: how far light bends past the terminator. 0 is the feature's own
+    /// off switch -- not a BSSRDF, no transport across the mesh, just a wider diffuse wrap plus a
+    /// view-dependent back-scatter lobe tinted by <see cref="BaseColor"/>. See MaterialDesc for the
+    /// full explanation of what this approximates and what it does not.
+    /// </summary>
+    /// <summary>
+    /// Refractive index of the substrate: 1.0 vacuum, ~1.33 water, ~1.5 window glass, ~2.42 diamond.
+    /// Sets the critical angle for total internal reflection, and is the quantity
+    /// <see cref="Reflectance"/> is physically derived from — setting one without the other can
+    /// describe a substance that does not exist.
+    /// </summary>
+    public MaterialBuilder Ior(float v) { _ior = v; return this; }
+
+    /// <summary>
+    /// [0,1] how optically see-through the substrate is. Pulls blended coverage toward
+    /// (1 - transmission) before the view-angle Fresnel lifts it back, and scales the diffuse lobe so
+    /// a transmissive surface does not also scatter its full base colour back at the viewer.
+    /// NOT refraction: light does not bend passing through.
+    /// </summary>
+    public MaterialBuilder Transmission(float v) { _transmission = v; return this; }
+
+    public MaterialBuilder SubsurfaceWeight(float v) { _subsurfaceWeight = v; return this; }
+
+    /// <summary>
+    /// Thickness proxy, [0,1], that widens the back-scatter lobe -- what makes a leaf or an ear light
+    /// up when the sun is behind it. Meaningless while <see cref="SubsurfaceWeight"/> is 0.
+    /// </summary>
+    public MaterialBuilder SubsurfaceRadius(float v) { _subsurfaceRadius = v; return this; }
+
+    /// <summary>
+    /// [0,1] clear coat over the base material -- car paint, varnish, a wet stone. 0 is no coat.
+    /// Whether the renderer evaluates it is a project-wide setting (RENDER.LAYEREDBSDF), not this.
+    /// </summary>
+    public MaterialBuilder CoatWeight(float v) { _coatWeight = v; return this; }
+
+    /// <summary>[0,1] the coat film's own roughness. Meaningless while <see cref="CoatWeight"/> is 0.</summary>
+    public MaterialBuilder CoatRoughness(float v) { _coatRoughness = v; return this; }
+
+    /// <summary>Normal-incidence reflectance of the coat film; 0.04 (IOR 1.5) is ordinary lacquer.</summary>
+    public MaterialBuilder CoatF0(float v) { _coatF0 = v; return this; }
+
     /// <summary>World centimetres per texture tile. Only meaningful with <see cref="WorldUv"/> on.</summary>
     public MaterialBuilder Tiling(float centimetres) { _uvTiling = centimetres; return this; }
 
@@ -122,7 +174,19 @@ public sealed class MaterialBuilder
         foreach (string c in _comments) s.Append("# ").Append(c).Append('\n');
 
         s.Append("NAME ").Append(_name).Append('\n');
-        s.Append("SHADER ").Append(_shader == Shading.Standard ? "standard" : "standard").Append('\n');
+        // BOTH ARMS OF THE TERNARY THIS REPLACES WERE "standard". Harmless while Shading has one
+        // member, and a silent data-loss bug the moment it has two: a material authored with a
+        // second shading model would emit "standard" and nobody would be told. A switch that throws
+        // on an unhandled member turns that into a loud failure at the moment the member is added,
+        // which is the only moment anyone can act on it.
+        s.Append("SHADER ").Append(_shader switch
+        {
+            Shading.Standard => "standard",
+            _ => throw new NotSupportedException(
+                     $"MaterialBuilder cannot write Shading.{_shader} -- this writer and the "
+                     + "grammar in modules/formats/src/OcMat.cpp must both learn a new shading "
+                     + "model before one can be authored."),
+        }).Append('\n');
 
         s.Append("BLEND ");
         s.Append(_blend switch
@@ -152,6 +216,35 @@ public sealed class MaterialBuilder
         s.Append("PARAM reflectance ").Append(Num(_reflectance)).Append('\n');
         s.Append("PARAM f90 ").Append(Num(_f90)).Append('\n');
         s.Append("PARAM uvTiling ").Append(Num(_uvTiling)).Append('\n');
+        // OMITTED WHEN OFF, unlike every PARAM above: subsurfaceWeight 0 is not merely a number but
+        // the feature's own off switch (MaterialGpu.cpp's packMaterial sets MaterialFlag_Subsurface
+        // exactly when this is > 0), so a material that never asked for the wrap term has nothing
+        // meaningful to round-trip. Matches modules/formats/src/OcMat.cpp's writer exactly, including
+        // subsurfaceRadius riding along unconditionally once weight is set -- it is meaningless
+        // without the weight that gates it, so there is no separate "opt in radius alone" case.
+        // OPT-IN, like the subsurface block below and for the same reason: writing "PARAM ior 1.5"
+        // into every material in the tree would diff every fixture to record a value that was already
+        // the default. Compared against the defaults declared above, not against 0.
+        if (_ior != 1.5f)          s.Append("PARAM ior ").Append(Num(_ior)).Append('\n');
+        if (_transmission > 0f)    s.Append("PARAM transmission ").Append(Num(_transmission)).Append('\n');
+        if (_subsurfaceWeight > 0f)
+        {
+            s.Append("PARAM subsurfaceWeight ").Append(Num(_subsurfaceWeight)).Append('\n');
+            s.Append("PARAM subsurfaceRadius ").Append(Num(_subsurfaceRadius)).Append('\n');
+        }
+
+        // Gated on the weight, and emitting all three together, exactly as OcMat.cpp's writer does.
+        // THE TWO WRITERS MUST AGREE and nothing checks that they do -- this class's own remarks say
+        // so ("The grammar has a second writer in modules/formats/src/OcMat.cpp; the two must",
+        // "agree"). An unrecognised PARAM is silently dropped by the parser, so a key emitted here
+        // and not handled there produces a material that is quietly missing its coat, with no error
+        // anywhere. Adding a PARAM in one place and not the other is the whole failure mode.
+        if (_coatWeight > 0f)
+        {
+            s.Append("PARAM coatWeight ").Append(Num(_coatWeight)).Append('\n');
+            s.Append("PARAM coatRoughness ").Append(Num(_coatRoughness)).Append('\n');
+            s.Append("PARAM coatF0 ").Append(Num(_coatF0)).Append('\n');
+        }
 
         if (_textures.Count > 0)
         {

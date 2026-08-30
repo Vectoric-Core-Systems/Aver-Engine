@@ -5,6 +5,264 @@ reproduce is a rumour.
 
 ---
 
+# 0.5.0 — in progress, 2026-08-27
+
+A six-lens sweep across rendering, physics/fluids, audio/animation, formats/save, graph/scripting and
+the editor, each finding then given to a reproducer and to a separate pass told to refute it. Three
+candidates were killed on that second pass — two as already-documented behaviour (`docs/ABI.md:1067`
+states the character inner-body contact gap is deliberate; `docs/AVER_NODE_NODES.md:662` already
+describes the SphereCast emitter gap) and one as failing the bar: a real observation about code that
+produces no wrong output.
+
+## Fixed
+
+### 1. The audio device was never opened by the runtime — HIGH
+`sandbox/src/SandboxApp.cpp`, fixed in `6d07e9d`
+
+**Trigger: press Play on any level whose graph calls PlaySound, in a process where the Sound Editor's
+preview button was never pressed.**
+
+`aver_audio_init` had exactly one caller in the tree: that preview button. Every entry point in
+`audio_abi.h` gates on the `g_started` flag only it sets, so `aver_audio_play` returned 0 and did
+nothing. **0.4.0 shipped six Aver Node audio nodes and release notes saying the mixer finally had
+callers; the nodes called an ABI whose device was shut.**
+
+`aver_audio_collect`, which reclaims finished voices, had the same single caller — opening the device
+without also wiring that would have traded silence for a fixed budget of 64 sounds per session, which
+is worse because it works at first.
+
+### 2. saveOcmap truncated its destination — HIGH
+`modules/formats/src/OcMap.cpp`, fixed in `914f7fb`
+
+**Trigger: save a level loaded from a legacy `.ocmap`, then crash or fill the disk mid-write.**
+
+Written with `ios::trunc` **in the same commit (`e0ff3d3`) that converted its four siblings away from
+it** — one change removing the pattern while another introduced a fresh instance. Each was internally
+consistent; only the pair was wrong, which is why reviewing either alone would not have caught it.
+
+### 3. AVR1's chunk-directory bound wrapped — HIGH
+`modules/formats/src/Avr1.cpp:253`, fixed in `914f7fb`
+
+**Trigger: open any AVR1 container whose `dirOffset` is near 2^64 with a small `chunkCount`.**
+
+`dirOffset + chunkCount*40 > size` is unguarded 64-bit addition; it wraps to a small number, passes,
+and the directory Reader starts at `bytes + dirOffset`. The sibling check twenty lines below was
+already fixed and carries a comment explaining the mechanism — **the sweep that wrote it stopped one
+check short inside the function it was correcting.** The header CRC is no defence; it is computed
+over whatever the file says.
+
+The regression test took three attempts, and that is the useful part: asserting only
+`!parseAvr1(...)` passed against the bug (the parse still fails, later and by accident, when the
+Reader walks off its own end), and the first crafted offset never actually wrapped. Only asserting
+the *failure reason*, with an offset that genuinely overflows, tells the fix from its absence.
+
+### 4. The PlayerStart marker outlived its level — HIGH
+`sandbox/src/SandboxApp.cpp`, fixed in `a309a8f`
+
+**Trigger: place a Player Start, then File > New Level, then Add > Player Start.**
+
+The marker is deliberately transient and not in `levelEntities_`, so `unloadLevel`'s destroy loop
+could not reach it. `loadLevel` reassigns it on the way in, which hid this for every path that ends
+one level by opening another — leaving it visible only on the path that ends a level without opening
+one. The stale marker kept rendering, and Add > Player Start selected it instead of creating a new
+one, so the new level could not be given a spawn at all.
+
+### 5. Low tier's shadow-tile amortisation — HIGH (reported as flicker)
+`modules/render.voxi/src/Voxi.cpp`, fixed in `e9a7667` — see the 0.4.0 section's own lesson.
+
+### 6. The viewport hint drew over any open drawer — MEDIUM
+`sandbox/src/SandboxApp.cpp`, fixed in `55f5998`
+
+**Trigger: open any drawer and look at its bottom ~70 px.**
+
+The hint anchors to `vpY_ + vpH_`, and `vpH_` is not reduced when a drawer opens — a drawer is an
+overlay, not a dock split. Cosmetic over the Content Browser; over the new Console it covered the
+**input line**, and since the overlay is `NoInputs` the box could still be typed into blind.
+
+### 7. Every `RENDER.*` command-line override was silently discarded by the project manifest — HIGH
+`sandbox/src/SandboxApp.cpp` (`applyProjectRenderSettings`), fixed in the working tree, not yet
+committed at time of writing.
+
+**Trigger: pass any `RENDER.*` CLI override — e.g. `--rt-render-mode 0` — against a project manifest
+that sets the same key.** The flag is accepted, parsed, and then thrown away with no diagnostic.
+
+CLI overrides (`rtRenderModeOverride_` and eight siblings covering GI quality, ray tracing, path
+tracing, voxel resolution, GI intensity/max distance, shadow rays, pixels-per-ray-tile and shadow
+denoise) are applied exactly **once, at startup**, before any project is open.
+`applyProjectRenderSettings` runs **later** — every time a project opens — and every line in it
+unconditionally copied the manifest's `RENDER.*` value over whatever the flags had just set. It ran
+after startup by construction, so it always won, and it logged nothing, so nobody watching the
+console had any reason to suspect the flag they typed had been overwritten minutes earlier.
+
+**It does not corrupt an image, it corrupts measurements — that is what makes it worse than an
+ordinary rendering bug.** A whole raster-versus-ray-driven investigation set `--rt-render-mode 0` for
+its raster half against a project manifest pinning `RENDER.RTRENDERMODE 1`, got mode 1 both times,
+and reported the two paths as **"pixel-identical" and "at performance parity."** Both conclusions
+were confidently published and both were wrong for the same reason: there was only ever one render
+path in that comparison. It cost a real all-white shading bug (the ray-driven path was building its
+surface from `mat.baseColorFactor` alone instead of multiplying it against the per-draw value, the
+way the raster shader does) being argued away as noise, for as long as the flag bug stood between the
+person testing and the renderer they thought they were testing.
+
+**The "~3x per-frame cost gap" this entry originally also claimed has itself been retracted.** Fixing
+the flag produced a *second* wrong number rather than a right one, because two further defects stood
+behind it — see "Three features, one scene, and nobody said who won" below. The measured figures, once
+all three were fixed, are the opposite of the reported ones: ray-driven is **1.9x faster** than the
+rasteriser on that range, not 3x slower.
+
+**This is the second time this exact defect has been fixed, not the first.** The first instance was
+`--pt-scene`, fixed in `e2830db` ("a manifest that silently outranked the command line") by making
+that one flag sticky against the manifest. That fix repaired the instance and left the rule
+unrepaired: every other `RENDER.*` knob kept the identical bug, because each was its own `if` inside
+`applyProjectRenderSettings`, not an application of a shared precedence rule. This fix closes the
+rule instead: the manifest still applies first (so an untouched flag still gets the manifest's
+value), then every override variable is re-diffed against what the manifest just set, and any
+disagreement is reapplied **and logged** —
+`[Sandbox] --rt-render-mode: the command line asked for 0 and the project manifest for 1; the command
+line wins` — before the frame that renders with it. The equivalent gap in the path-tracing want-flag
+(a manifest explicitly stating `RENDER.PATHTRACING` Off used to silently beat `--pt-scene` with no
+message at all) was closed the same session, by the same rule.
+
+**The lesson, stated generally so it does not need a third instance:** when a flag exists so a human
+standing at the keyboard can override recorded state, the override must be applied **last**, or
+reasserted after whatever would otherwise clobber it — and a disagreement between the two must be
+**logged**, not silently resolved in either direction. Silence is the only thing that turns a
+one-line precedence bug into hours of confidently wrong measurement; a single log line would have
+made the original raster-vs-ray-driven comparison self-correcting the first time someone read the
+console. See `SESSION-STATE.md` for which numbers from that investigation are now retracted and what
+the corrected ones are.
+
+- **Transmission never left the alpha channel, so glass scattered light it had already let through**
+  — HIGH, fixed 2026-08-29. Authored glass rendered as a flat, milky, ~80%-opaque wash that hid the
+  pool beneath it and looked identical from every angle — the "translucent things look terrible and
+  cartoonish" complaint. `PARAM transmission 0.92` reached the GPU correctly and was read in exactly
+  one place: `PbrShaders.cpp:456`, where it floors `s.alpha`. **Nothing ever reduced the diffuse
+  lobe.** A pane authored 92% transmissive still scattered its full base colour back at the camera —
+  the same photons counted twice, once through the substrate and once off it.
+
+  **Bisected, not reasoned about**, because four earlier candidates for this were all wrong. Probing
+  one pixel of pane against the water beside it and cutting `averBlendedOutput` down term by term:
+
+  | output | probe | attribution |
+  |---|---|---|
+  | full | `103,124,130` | — |
+  | specular removed | `99,120,125` | the whole specular term is **4 codes** |
+  | coverage only | `27,56,84` | vs `0.88 * water(32,69,94)` = `28,61,83` — **correct** |
+
+  So `s.alpha`, the Fresnel lift on it, and the premultiplied blend state were all verified correct
+  first, and the specular reflection was never the problem. `diffuse * s.alpha` alone contributed
+  `(72,64,41)` — a warm wash five times the size of the reflection. After scaling `kdAlbedo` by
+  `(1 - transmission)` (matching glTF `KHR_materials_transmission`): `41,70,95` against bare water
+  `32,69,94`, i.e. a nearly-clear pane with a faint reflective lift.
+
+  **The view-angle Fresnel came back with it**, which is the level's own stated acceptance test
+  (`Default.ocmap`: *"nearly clear looked at square, nearly a mirror looked at down its length. If
+  those two views look the same, the view-angle Fresnel is not reaching the shader and that is the
+  bug"*). Same pane, near-normal vs grazing: **before** `194,206,209` / `178,192,196` — flat, and
+  slightly the wrong way. **After** `81,97,112` / `120,128,125` — bluer and seeing through at normal
+  incidence, brighter and neutral-sky at grazing. It had been flat because both angles were saturating
+  past display white, not because the Fresnel term was missing.
+
+  Applied in **two** places on purpose — `PbrShaders.cpp`'s `averBuildSurface` and its ray-hit twin at
+  `VoxiShaders.hpp`'s `averEvalMaterial` — because a rule the rasteriser honours and primary rays do
+  not is the defect shape this tree keeps rediscovering. Gated on the **material field**, not on the
+  blend mode: an opaque material may legitimately author transmission, and it is a substrate property.
+  A strict no-op for every material authored before the field existed (`transmission` defaults to 0);
+  `M_Glass.ocmat` in PTTest is currently the only material in any project that sets it.
+
+  **Still open, and visible in the same captures:** a translucent surface casts no shadow at all.
+
+- **Three features, one scene, and nobody said who won** — HIGH, fixed 2026-08-29. The entry above
+  said the lesson was stated generally "so it does not need a third instance". It got one anyway, in
+  a different mechanism, and it invalidated the replacement measurement as thoroughly as the first
+  bug invalidated the original. Three defects, all in the same family — *a switch that silently does
+  something other than what it says*:
+
+  1. **`PtSceneView::suppressesScene()` returned `true` unconditionally** (`PtSceneView.hpp`). Only
+     the FIRST claimant in registration order paints (`D3D12Device::beginFrame` returns at it), and
+     `drawMesh` then early-returns for every object. On a project whose manifest sets
+     `RENDER.PATHTRACING` — PTTest does — turning ray-driven off did **not** fall back to the
+     rasteriser: Voxi stopped claiming, the path tracer was next in line, and the "raster" half of the
+     comparison presented a fullscreen path-traced blit while rasterising nothing. It now tests the
+     same four terms `scenePass` already guarded on, so it can no longer suppress the scene and then
+     paint nothing either.
+  2. **`--gi 0`, `--rt 0` and `--pt 0` were silent no-ops.** The sentinel for "flag absent" was `0`,
+     which is also `Quality::Off`, so the Off rung was unreachable from the command line and the
+     path-traced view could not be turned off at all. The limitation was *written down in a comment*
+     rather than fixed — twice, at both the startup site and in `applyProjectRenderSettings`. Worse,
+     `--gi` and `--rt` parsed no numeric form whatsoever, so `--gi 2` set High and left `2` to fall
+     through to the positional handler. All three now use `-1` and take an optional tier;
+     `--no-gi`/`--no-rt` stay as the shorter spelling.
+  3. **No GPU marker existed on the raster path's own pixel shading.** The 3x compared
+     `Voxi ray-driven primary` — a real, named, correctly-nested span — against `scene draw`'s
+     leftover exclusive time, which is not the same category of number. `raster scene draws` now
+     brackets the opaque walk in `SandboxApp::onRender`.
+
+  **The tell was in the printed output the whole time, again.** `scene draw 0.1ms (excl 0.0ms)`:
+  exclusive is inclusive minus the sum of children, so a span with no children prints them equal.
+  `excl 0.0` against `0.1` inclusive means a child consumed all of it — i.e. the raster draws cost
+  under 0.05ms, which is impossible for sixteen objects at Epic-tier GI. The number said "raster did
+  not run" and was read as "raster is fast".
+
+  **The general fix, since naming the rule evidently was not enough:** the backends now log who is
+  painting the scene, on change, **including the single-claimant case** — which is the one that
+  actually cost the measurement, and which a "warn only on conflict" check would have missed:
+  `[RHI.D3D12] 'Aver.PathTracer.SceneView' is painting the scene; the rasteriser's drawMesh calls are
+  being dropped. Any 'scene draw' timing below is that feature, not raster.` A feature that cannot
+  paint this frame should answer `false` rather than rely on losing a race it cannot see.
+
+## Open
+
+- **The GI voxelisation gate ignores compute-skinned pose changes** — MEDIUM.
+  `modules/render.voxi/src/VoxiRenderer.cpp:806-832`. `giDrawsKey()` hashes mesh handle, world
+  transform and material but never the vertex buffer a compute skin pass writes, and `submit` applies
+  no `meshVertexBuffer` filter. Once an animated character's world transform stops changing, the gate
+  reports "unchanged" forever and its contribution to indirect light freezes at that pose.
+  `PtSceneView::submitDraw` and Voxi's own BLAS cache both check `meshVertexBuffer` for exactly this
+  reason; the GI gate is the one that does not.
+
+  **Deliberately not fixed blind.** The obvious repair — treat any skinned draw as "changed" — forces
+  revoxelisation every frame in any scene containing a character, which is precisely the ~10.5 ms
+  saving `giUpdateInterval` was measured to buy. The right shape is probably to fall back to the
+  interval schedule rather than skipping indefinitely, but that wants a measurement first.
+
+- **`--refl-test` FAILS, and has been failing** — MEDIUM, found 2026-08-27.
+
+  **Trigger: `Sandbox.exe --refl-test --frames 120`.** The engine's own reflection oracle reports:
+
+  ```
+  [ERROR] [Refl] FAIL (not global): hiding a beacon 5200 cm away -- 4.3x outside the voxel volume --
+  changed no mirror pixel under RAY TRACING (largest 0.0353)
+  ```
+
+  The test builds a near-mirror quad (metallic 1, roughness 0.03) and a bright green beacon 5200 cm
+  away — 4.3x outside the voxel volume — then hides the beacon and asserts that a ray-traced
+  reflection notices, because a ray, unlike a cone trace, has no volume bound. Nine of nine probes
+  read back in all four phases and not one moved by more than 0.0353.
+
+  **Falsified against the reflection work landed the same day**, which is why it is filed as
+  pre-existing rather than as a regression: the tree was reverted to `5657ba1`'s `VoxiShaders.hpp`,
+  rebuilt, and re-run. It failed identically there (0.0353 at HEAD versus 0.0431 after the change —
+  the new code is marginally *more* responsive, not less).
+
+  The beacon **is** in the geometry table (`ray-traced reflection table: 2 instances`), so the two
+  candidate explanations are that the probes do not land where the beacon's reflection actually
+  falls — the same class of defect as the `rt-penumbra` probe that sat on flat ground for weeks — or
+  that something really does bound the ray. **Screen the probe placement first**; a failing oracle
+  whose probes are in the wrong place is a broken oracle, not a broken renderer, and this one has
+  been reporting FAIL loudly enough that nobody has been reading it.
+
+- **The spatial shadow denoiser is a permanent no-op in the shipped product** — LOW, found
+  2026-08-27. `modules/render.voxi/src/Voxi.cpp`. `rtShadowDenoiseForQuality` returns **0 at every
+  tier including Epic**, and radius 0 hits `rtShadowSpatial`'s early return, so the filter — loop,
+  weights, cost and all — never executes in anything shipped. Same for
+  `rtPixelsPerRayTileForQuality`, which returns 1 everywhere, forcing `tileBits = 0` and killing the
+  temporal ray-reuse path. Not a defect in the code, which is correct; a defect in the ladder that
+  drives it. Turning either on is a measurement rather than a code change, and it must be taken
+  against a **moving** camera. See `docs/rendering/DENOISING.md`.
+
+---
+
 # 0.4.0 — 2026-08-25
 
 A release sweep at `b952b8a`, 146 commits after the 0.3.0 cut. Smaller than the 2026-08-03 sweep and
@@ -284,6 +542,12 @@ buffer.
 - **`Win32DirectoryWatcher.cpp:148`** — the worker exited on three failure paths without recording
   anything, and `watching()` tests only that the backend object exists. Hot reload stopped silently
   for the rest of the session. **The backend now reports `died()` and `watching()` honours it.**
+  *(2026-08-30: that fix covered ONE of the three. The wait-failure exit and the generic
+  overlapped-read-failure exit both still left the loop with `died_` untouched, so `watching()` kept
+  answering true for a dead worker — the exact thing `died()` exists to prevent, still live in two
+  of the three places its own comment named. Every exit now goes through one `noteExit()` that
+  decides by asking whether a stop was actually requested. Reachable from a test at last via
+  `AVER_WATCHER_KILL_AFTER`, and `WatcherTest` fails without the fix.)*
 - **`McpBridge.cpp:528`** — every `abi` command ran its dispatcher twice, once in `pump()` and again
   in the host's apply callback, while the reply described only the first. **No longer forwarded.**
 - **`McpBridge.cpp:482`** — `stop()` closed the listener but not the accepted connection, which was a

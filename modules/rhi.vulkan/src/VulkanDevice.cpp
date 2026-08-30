@@ -820,6 +820,34 @@ bool VulkanDevice::init(const DeviceDesc& desc) {
     api_.GetPhysicalDeviceFeatures2(physicalDevice_, &f2);
     v12.bufferDeviceAddress = VK_TRUE;   // already confirmed supported above
     v12.timelineSemaphore = VK_TRUE;
+
+    // THE THREE BITS THE RAY PATH'S BINDLESS TEXTURE TABLE NEEDS, required explicitly rather than
+    // left to chance. v12 came back from GetPhysicalDeviceFeatures2 carrying every bit the device
+    // SUPPORTS and is then handed to vkCreateDevice as the set to ENABLE, so these would very
+    // likely have been enabled incidentally -- which is exactly the kind of thing that works on the
+    // machine it was written on and fails on a driver that reports them differently.
+    //
+    //   runtimeDescriptorArray                      -- index an array whose size the shader does not know
+    //   shaderSampledImageArrayNonUniformIndexing   -- index it by a value that VARIES ACROSS THE WAVE,
+    //                                                  which is the whole point: neighbouring pixels hit
+    //                                                  different materials
+    //   descriptorBindingPartiallyBound             -- leave holes. Our table is fixed-N with unbound
+    //                                                  slots by construction (kUnboundTexture), so without
+    //                                                  this the validation layer rejects the set.
+    bindlessCapable_ = v12.runtimeDescriptorArray &&
+                       v12.shaderSampledImageArrayNonUniformIndexing &&
+                       v12.descriptorBindingPartiallyBound;
+    if (bindlessCapable_) {
+        v12.runtimeDescriptorArray                    = VK_TRUE;
+        v12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+        v12.descriptorBindingPartiallyBound           = VK_TRUE;
+    } else {
+        // Cleared for the same reason the mesh-shader bits below are: an unsupported bit left set
+        // in the struct handed to vkCreateDevice is a device-creation failure, not a quiet no.
+        v12.runtimeDescriptorArray                    = VK_FALSE;
+        v12.shaderSampledImageArrayNonUniformIndexing = VK_FALSE;
+        v12.descriptorBindingPartiallyBound           = VK_FALSE;
+    }
     v13.dynamicRendering = VK_TRUE;
     v13.synchronization2 = VK_TRUE;
     const bool meshShaderFeaturesOk = !wantMeshShader || (meshFeat.taskShader && meshFeat.meshShader);
@@ -1162,8 +1190,14 @@ void VulkanDevice::queryCaps() {
     // feature bits this backend does not otherwise rely on.
     caps_.resourceBindingTier = 0;
 
+    // NOT DERIVED FROM resourceBindingTier, which is hardcoded 0 just above and could never carry
+    // this. Vulkan answers the same question with descriptor-indexing feature bits instead, decided
+    // at device creation (see bindlessCapable_). Ray tracing is still required, so --force-caps
+    // no-rt disables this here exactly as it does on D3D12 -- hence reading the CLAMPED tier below.
+
     const DeviceCaps hw = caps_;
     clampCaps(caps_);
+    caps_.rtBindlessTextures = caps_.rayTracingTier >= 11 && bindlessCapable_;
     AVER_INFO("[RHI.Vulkan] caps: MSAA {}x, RT tier {}, SM {}, mesh-shader tier {}, DXC {}, cons-raster {}, binding tier {}",
               caps_.maxMsaaSamples, caps_.rayTracingTier, caps_.shaderModel,
               caps_.meshShaderTier, caps_.dxcAvailable, caps_.conservativeRaster, caps_.resourceBindingTier);
@@ -2241,13 +2275,64 @@ void VulkanDevice::drawMesh(MeshHandle mesh, const f32 world[16], const f32 colo
     nextDrawPrepassed_ = false;
     if (!hasSwapchain_ || mesh == 0 || mesh > meshes_.size()) return;
     if (!meshes_[mesh - 1].alive) return;
+    // `blended` explicit and false: unlike D3D12Device, this backend never sets drawBlended_ true in
+    // the first place (see the comment on the D3D12-only gap just below), so every draw that reaches
+    // this call site is opaque by construction -- writing the false out loud says so, rather than
+    // leaning on IRenderFeature::submitDraw's default to make that true by accident, matching the same
+    // reasoning the explicit `false` a few lines down (scenePipeline's own blended argument) already
+    // applies for this exact call site.
     for (IRenderFeature* f : features_)
-        f->submitDraw(mesh, world, color, metallic, roughness, drawBinding_.set, drawBinding_.constants, drawBinding_.bytes);
+        f->submitDraw(mesh, world, color, metallic, roughness, drawBinding_.set, drawBinding_.constants, drawBinding_.bytes, /*blended=*/false);
     for (IRenderFeature* f : features_) if (f->suppressesScene()) return;
 
+    // TRANSLUCENT MESHES ARE D3D12-ONLY TODAY. IDevice::setDrawBlended (RHI.hpp:613) is the seam a
+    // caller uses to mark a draw translucent, but VulkanDevice does not override it -- the base
+    // class's default is a no-op setter and a drawBlended() that always answers false (RHI.hpp:
+    // 613-615). Concretely: nothing in this file ever captures a blended draw into a per-frame list
+    // the way D3D12Device::drawMesh does, so a caller that calls setDrawBlended(true) and then draws
+    // a glass mesh here gets exactly the SAME opaque path every other mesh takes, below -- msActive_
+    // ? dispatchMeshFor : drawMesh, through whichever pipeline scenePipeline() or the backend's own
+    // fallback PSO hands back. That pipeline's blend state is itself hardcoded opaque -- the fixed
+    // `VkPipelineColorBlendAttachmentState blendAtt{}` this file builds for scenePso_/wirePso_ (around
+    // line 1321) and again for meshPso_ (around line 1490) never sets blendEnable, so it stays
+    // VK_FALSE, and neither call site reads a BlendMode of any kind -- so the draw is not merely
+    // mis-classified, it is rendered WRONG: a pane of glass paints fully opaque instead of vanishing
+    // or being dropped. Stated plainly because it is wrong but VISIBLE, not silently absent: a
+    // screenshot shows a solid pane where glass was meant to be, which is at least discoverable, but
+    // there is no log line or assert here to catch it automatically -- this comment is the only
+    // record of the gap until (c) below is done.
+    //
+    // The 4th argument below is passed explicitly as `false` (never `prepassed`'s neighbour, always
+    // opaque) purely so the opaque intent reads at the call site rather than relying on the
+    // parameter's default -- this is the ONLY caller of scenePipeline() in this backend, and it never
+    // asks for the blended variant no matter what a feature's `overridesScenePipeline` override
+    // might otherwise be willing to hand back.
+    //
+    // WHAT REAL SUPPORT WOULD TAKE, so the next person does not have to re-derive it: (a) override
+    // setDrawBlended/drawBlended here with a real sticky bool, reset in beginFrame the same as
+    // D3D12Device's; (b) give drawMesh a branch that diverts AFTER the submitDraw loop above, not
+    // instead of it -- D3D12Device::drawMesh runs that loop with blended=true for every blended draw
+    // before it captures anything, precisely so a feature that wants to see a translucent instance
+    // (the path tracer, which is supposed to accept one -- see IRenderFeature::submitDraw's own
+    // comment, RHIResources.hpp) still gets it; only the BACKEND's own opaque consumers past that
+    // point -- the scenePipeline walk here, and through it voxelisation/TLAS/shadow/prepass -- are
+    // what a blended mesh must skip. So the divert belongs where the opaque scenePipeline walk
+    // would otherwise start (roughly where this very comment sits today), appending
+    // {mesh, world, color, metallic, roughness, drawBinding_} to a new per-frame vector instead of
+    // running that walk; (c) in endFrame, after the sky draw (VulkanDevice's sky PSO is depth-EQUAL no-write,
+    // same hazard D3D12Device::endFrame's own comment documents -- drawing blended before the sky
+    // would have the sky's opaque fill paint over it) and before the transparentPass loop, sort that
+    // vector back-to-front by camera distance and replay each entry through
+    // scenePipeline(meshShaders, wireframe_, false, true) with a blend pipeline variant that does not
+    // exist yet -- scenePso_/wirePso_/meshPso_ are each built (createPipeline() around line 1321,
+    // initMeshShaders() around line 1490) with exactly one hardcoded-opaque
+    // VkPipelineColorBlendAttachmentState apiece, so a second PSO with blendEnable=VK_TRUE
+    // (toVkBlendAttachment already knows how to build one correctly for BlendMode::AlphaBlend,
+    // VulkanResourceFactory.cpp:500-528) would need to be added alongside each, plus a
+    // depth-write-off VkPipelineDepthStencilStateCreateInfo variant to pair with it.
     for (IRenderFeature* f : features_) {
         if (!f->overridesScenePipeline() || !rhiContext_) continue;
-        const PipelineHandle fp = f->scenePipeline(msActive_ && meshPso_, wireframe_, prepassed);
+        const PipelineHandle fp = f->scenePipeline(msActive_ && meshPso_, wireframe_, prepassed, false);
         if (!fp) break;
         rhiContext_->setPipeline(fp);
         if (const BindingSetHandle bs = f->sceneBindingSet()) rhiContext_->setBindingSet(bs, 0);
@@ -2529,11 +2614,37 @@ void VulkanDevice::beginFrame() {
 
     sceneSuppressed_ = false;
     frameSuppressed_ = false;
+    IRenderFeature* winner = nullptr;
+    u32 claimants = 0;
     for (IRenderFeature* f : features_) {
         if (!f->suppressesScene()) continue;
-        if (rhiContext_) f->scenePass(*rhiContext_);
+        ++claimants;
+        if (!winner) winner = f;
+    }
+    // Kept in step with D3D12Device::beginFrame, which carries the full account of why this exists:
+    // only the first claimant paints, registration order decides it, and nothing said so -- including
+    // in the SINGLE-claimant case, which is the one that actually cost a measurement.
+    // See IRenderFeature::suppressesScene.
+    if (winner != lastSuppressWinner_ || claimants != lastSuppressClaimants_) {
+        if (claimants > 1)
+            AVER_WARN("[RHI.Vulkan] {} render features claim the whole scene; '{}' wins on "
+                      "registration order and the others will not paint. The rasteriser draws "
+                      "NOTHING while this holds -- if you are comparing render paths, this is not "
+                      "the comparison you think it is.", claimants, winner->name());
+        else if (winner)
+            AVER_INFO("[RHI.Vulkan] '{}' is painting the scene; the rasteriser's drawMesh calls are "
+                      "being dropped. Any 'scene draw' timing below is that feature, not raster.",
+                      winner->name());
+        else if (lastSuppressWinner_)
+            AVER_INFO("[RHI.Vulkan] the rasteriser is painting the scene again; no feature is "
+                      "suppressing it.");
+    }
+    lastSuppressWinner_    = winner;
+    lastSuppressClaimants_ = claimants;
+    if (winner) {
+        if (rhiContext_) winner->scenePass(*rhiContext_);
         sceneSuppressed_ = true;
-        if (f->suppressesWholeFrame()) frameSuppressed_ = true;
+        if (winner->suppressesWholeFrame()) frameSuppressed_ = true;
         return;
     }
     // Unlike D3D12Device::beginFrame, nothing is bound here as a "default" pipeline: every draw
@@ -3796,3 +3907,30 @@ IDevice* createVulkanDevice(const DeviceDesc& desc) {
 }
 
 } // namespace aver::rhi::detail
+
+
+namespace aver::rhi {
+
+// ---- the ray path's bindless texture table: DECLINED on this backend, for now ----
+//
+// Declined rather than stubbed to a silent zero. Every caller is already gated on
+// DeviceCaps::rtBindlessTextures, which VulkanDevice sets only when the descriptor-indexing
+// features are genuinely present AND enabled -- so arriving here means something bypassed that
+// gate, and the useful behaviour is to say so once and let the flat-albedo path take over, exactly
+// as it does on a device without the capability.
+
+BindlessTableHandle VulkanResourceFactory::createBindlessTextureTable(u32 capacity) {
+    AVER_WARN("[RHI.Vulkan] bindless texture tables are not implemented on this backend yet "
+              "({} descriptors requested); ray-traced texturing stays off here", capacity);
+    return 0;
+}
+
+void VulkanResourceFactory::destroyBindlessTextureTable(BindlessTableHandle) {}
+
+bool VulkanResourceFactory::setBindlessTexture(BindlessTableHandle, u32, TextureHandle) { return false; }
+
+u32 VulkanResourceFactory::bindlessTableCapacity(BindlessTableHandle) const { return 0; }
+
+void VulkanRenderContext::setBindlessTable(BindlessTableHandle) {}
+
+} // namespace aver::rhi

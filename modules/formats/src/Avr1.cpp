@@ -250,7 +250,22 @@ bool parseAvr1(const u8* bytes, usize size, Avr1File& out, std::string* why) {
     if (fileSize != size)
         return fail(why, "AVR1: FileSize says " + std::to_string(fileSize) + " but the file is " +
                          std::to_string(size));
-    if (dirOffset + u64(chunkCount) * 40 > size) return fail(why, "AVR1: chunk directory runs past the end");
+    // SUBTRACTION, NOT ADDITION -- the same rearrangement, for the same reason, as the off/onDisk
+    // check twenty lines below, whose comment spells the mechanism out. `dirOffset` is a u64 read
+    // straight out of the file, so `dirOffset + chunkCount*40` WRAPS: a dirOffset near 2^64-1 with
+    // a small chunkCount sums to a tiny number, sails under `size`, and the Reader below then
+    // starts at `bytes + dirOffset` -- far outside the mapping.
+    //
+    // THIS IS A LEFTOVER FROM THE OVERFLOW SWEEP THAT FIXED ITS NEIGHBOUR. docs/BUGS.md says of
+    // that sweep, in its own words, that every binary reader in modules/formats should be swept for
+    // this pattern at once rather than one bug report at a time -- and then the sweep stopped one
+    // check short, inside the very function it had just corrected. The header CRC is no defence:
+    // it is computed over whatever the file says, so a crafted file carries a valid one.
+    //
+    // chunkCount is u32 and 40 is small, so `u64(chunkCount) * 40` cannot itself overflow; only the
+    // sum could, which is what moving dirOffset to the other side removes.
+    if (dirOffset > size || u64(chunkCount) * 40 > size - dirOffset)
+        return fail(why, "AVR1: chunk directory runs past the end");
 
     out.chunks.clear();
     out.chunks.reserve(chunkCount);

@@ -100,6 +100,43 @@ AVER_PBR_ABI float   aver_pbr_get_reflectance(aver_pbr_material m);
 AVER_PBR_ABI int32_t aver_pbr_set_reflectance(aver_pbr_material m, float v);
 AVER_PBR_ABI float   aver_pbr_get_f90(aver_pbr_material m);
 AVER_PBR_ABI int32_t aver_pbr_set_f90(aver_pbr_material m, float v);
+/* The dielectric transmission pair. ior is the refractive index, floored at 1.0 (vacuum) and
+ * ceilinged well past diamond; transmission is how optically see-through the substrate is, in [0,1].
+ *
+ * BOTH REACHED THE GPU LONG BEFORE THEY REACHED THIS HEADER, which is the reason they are being
+ * added now rather than when they were introduced: a field with a parser, a writer and a GPU
+ * packing but no ABI is one a script cannot read or write at all.
+ *
+ * WHAT IOR ACTUALLY DRIVES TODAY: NOTHING IN THE SHADING. This comment used to say it keyed the
+ * critical angle for total internal reflection, via averTotalInternalReflection in PbrShaders.cpp.
+ * That function no longer exists -- it was removed because a parallel-sided pane viewed from outside
+ * CANNOT total-internally-reflect: Snell bounds the internal angle at asin(1/n), which is the
+ * critical angle itself, so the test could never fire for the case it was written for. ior is
+ * parsed, packed, uploaded, exposed here, and drivable from a material graph pin; it is read by no
+ * shading term. Stated rather than quietly left, because a stale "this has real consumers" is worse
+ * than no comment -- it is what made the claim survive in three separate files.
+ *
+ * NEITHER IS CLAMPED ON THIS PATH, exactly like reflectance/f90/subsurface above: commit() calls
+ * touch(), not sanitise(). An out-of-range value written here survives until the next load or pack
+ * clamps it. That is the existing contract of every scalar setter in this file, not a new hazard,
+ * but it is worth knowing before driving ior from a slider. */
+AVER_PBR_ABI float   aver_pbr_get_ior(aver_pbr_material m);
+AVER_PBR_ABI int32_t aver_pbr_set_ior(aver_pbr_material m, float v);
+AVER_PBR_ABI float   aver_pbr_get_transmission(aver_pbr_material m);
+AVER_PBR_ABI int32_t aver_pbr_set_transmission(aver_pbr_material m, float v);
+/* Subsurface wrap weight (0 = feature off) and back-scatter lobe width, both in [0,1]. This is a
+ * cheap wrap-diffuse approximation, not a BSSRDF: no transport across the mesh, no per-texel
+ * thickness, no separate scatter colour (the transmitted light is tinted by baseColorFactor). */
+AVER_PBR_ABI float   aver_pbr_get_subsurface_weight(aver_pbr_material m);
+AVER_PBR_ABI int32_t aver_pbr_set_subsurface_weight(aver_pbr_material m, float v);
+AVER_PBR_ABI float   aver_pbr_get_coat_weight(aver_pbr_material m);
+AVER_PBR_ABI int32_t aver_pbr_set_coat_weight(aver_pbr_material m, float v);
+AVER_PBR_ABI float   aver_pbr_get_coat_roughness(aver_pbr_material m);
+AVER_PBR_ABI int32_t aver_pbr_set_coat_roughness(aver_pbr_material m, float v);
+AVER_PBR_ABI float   aver_pbr_get_coat_f0(aver_pbr_material m);
+AVER_PBR_ABI int32_t aver_pbr_set_coat_f0(aver_pbr_material m, float v);
+AVER_PBR_ABI float   aver_pbr_get_subsurface_radius(aver_pbr_material m);
+AVER_PBR_ABI int32_t aver_pbr_set_subsurface_radius(aver_pbr_material m, float v);
 
 /* ---- blending and sidedness ---- */
 AVER_PBR_ABI int32_t aver_pbr_get_alpha_mode(aver_pbr_material m);

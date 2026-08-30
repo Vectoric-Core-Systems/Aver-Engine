@@ -9,6 +9,7 @@
 #include "aver/rhi/RHIResources.hpp"
 
 #include <cstddef>
+#include <string>
 #include <vector>
 
 namespace aver::rhi {
@@ -90,6 +91,19 @@ struct DeviceCaps {
     u32 meshShaderTier = 0;          // 0 = none, 1 = Tier 1 (D3D12 Ultimate)
     bool dxcAvailable = false;       // DXIL compiler present (needed for SM 6.x)
     u32 resourceBindingTier = 0;     // 0 = unknown, 1/2/3 = D3D12_RESOURCE_BINDING_TIER_N
+
+    // Whether a shader may index a large texture ARRAY by a value it computed -- what texturing a
+    // ray hit needs, because one fullscreen pass shades every material and cannot bind a descriptor
+    // table per draw the way the raster path does.
+    //
+    // A SEPARATE BIT FROM resourceBindingTier, NOT DERIVED FROM IT, and that is deliberate on both
+    // backends. RHIResources.hpp opens by promising "explicit descriptor tables, NOT bindless",
+    // because the engine floor is FL 11_0 (binding tier 1). That promise still holds for every
+    // raster pipeline; this bit says only that the RAY-TRACED path, which already demands DXR 1.1
+    // and SM 6.5 and therefore hardware that is always binding tier 3, may use one. Deriving it
+    // from resourceBindingTier would also be wrong on Vulkan, where that field is hardcoded to 0
+    // by design and could never carry this.
+    bool rtBindlessTextures = false;
 };
 
 // A development clamp on what a device REPORTS, so capability-gated fallback paths can be run on
@@ -238,6 +252,45 @@ struct SkyAtmosphere {
     void sunAngles(f32& elevationDeg, f32& azimuthDeg) const;
 };
 
+// One node of a per-pass GPU timing report -- the public mirror of D3D12Device's private
+// GpuAccum tree (see that struct's own comment for why it is a tree keyed by (label, parent)
+// rather than a flat list). FLAT AND PARENT-INDEXED, not an owning nested structure: the source
+// data is already exactly this shape, so returning it flat is a straight copy, and a caller that
+// wants indentation (the console, formatting this the way collectGpuTiming's own log line does)
+// walks it with the same O(n) children-list pass collectGpuTiming already builds each report.
+//
+// `ms` is INCLUSIVE -- itself plus everything nested under it, matching what a begin/end
+// timestamp pair actually measures. A caller wanting the pass's OWN time subtracts its direct
+// children's `ms`, exactly as collectGpuTiming's Appender does when it prints "(excl ...)".
+struct GpuTimingNode {
+    // A span index used as "this node is top-level" -- the same sentinel value D3D12Device's
+    // private kNoAccumParent uses, so copying GpuAccum into this type needs no remapping pass.
+    static constexpr u32 kNoParent = 0xFFFFFFFFu;
+    std::string label;
+    f64 ms = 0;              // inclusive, averaged across framesAccumulated frames
+    u32 parent = kNoParent;  // index into the SAME report's `nodes`, or kNoParent
+};
+
+// A snapshot of one device's per-pass GPU timing, as of the last frame it collected one.
+//
+// TWO INDEPENDENT "NO DATA" AXES, deliberately not collapsed into one empty result:
+//   - `supported` is the CAPABILITY axis. False means this backend cannot report timings at all
+//     -- Vulkan has no equivalent machinery yet (see its own comment), and a D3D12 device with
+//     GPU timing disabled (tsEnabled_ false, e.g. timestamp queries unavailable on this adapter)
+//     reports the same way. `nodes` is always empty when this is false.
+//   - `nodes` empty (or `framesAccumulated` 0) with `supported` true is the CONTENT axis: an
+//     enabled backend that simply has not accumulated a span yet -- frame 0, or every span this
+//     frame was dropped (see tsDropped_'s own comment). The console needs to tell "ask again
+//     later" apart from "this device will never answer", which is exactly what these two together
+//     say and a single bool could not.
+struct GpuTimingReport {
+    bool supported = false;
+    // Averaged over this many frames since boot (see D3D12Device::tsAccumFrames_'s own comment on
+    // why an average, not one sampled frame). 0 when nothing has been collected yet.
+    u32 framesAccumulated = 0;
+    std::vector<GpuTimingNode> nodes;
+};
+
 // One GPU device: frame loop, scene state, immediate drawing, capture and in-window UI.
 class IDevice {
 public:
@@ -343,6 +396,43 @@ public:
     // Defaults to false so a backend that cannot lose its device -- and every mock in the tests --
     // is unaffected without writing a line.
     virtual bool deviceLost() const { return false; }
+
+    // TRUE WHEN SOME REGISTERED FEATURE HAS TAKEN THE SCENE OVER -- the path-traced reference view
+    // being the one that does today. Exists so a CALLER can decide not to issue a draw at all,
+    // which is a different question from the one drawMesh already answers internally.
+    //
+    // WHY A CALLER NEEDS TO ASK. drawMesh submits to every feature BEFORE it honours suppression,
+    // and that order is deliberate: a suppressing feature is usually suppressing precisely because
+    // it is building its own scene out of those submissions, so skipping submitDraw would starve it.
+    // The consequence is that an EDITOR-ONLY draw -- a selection outline, a gizmo, anything that is
+    // chrome rather than scene -- is still handed to a feature that has no way to tell chrome from
+    // geometry, and gets baked into its output. Filtering inside drawMesh cannot fix that: by then
+    // the information that this draw is chrome is gone.
+    //
+    // Defaults to false, like deviceLost() above, so a backend that registers no features and every
+    // mock in the tests is unaffected without writing a line.
+    virtual bool sceneSuppressed() const { return false; }
+
+    // Per-pass GPU timing, for a caller that wants to know where the frame's time went (the
+    // command console's frame-time breakdown is the first one) without going through the periodic
+    // AVER_INFO log a backend may print on its own.
+    //
+    // TWO FRAMES OLD, ON PURPOSE. The GPU timestamps this reports were resolved from a readback
+    // slice that only becomes readable once the GPU has caught up to it, which beginFrame fences
+    // on before collecting -- see D3D12Device's own per-pass-timing comment. Reading "this frame's"
+    // own timings would mean blocking on the GPU to ask how fast the GPU was, which would create
+    // the very stall it reports. A caller that polls this once a frame is reading a rolling average
+    // a couple of frames behind the frame it's currently driving, not a live number.
+    //
+    // RETURNED BY VALUE, not a reference into backend state: the source data mutates every single
+    // beginFrame (new spans folded in, occasionally reallocated), so a reference handed out here
+    // would be dangling or stale by the next frame. This is a snapshot -- a dozen or so short-label
+    // nodes, cheap to copy -- safe for the caller to hold onto for as long as it likes.
+    //
+    // Defaults to an unsupported/empty report (GpuTimingReport::supported == false, `nodes` empty)
+    // so a backend that has not implemented this -- Vulkan (no equivalent machinery yet), D3D11,
+    // Null, and every test mock -- is unaffected without writing a line, same as deviceLost() above.
+    virtual GpuTimingReport gpuTiming() const { return {}; }
 
     // GPU self-test: clears a tiny offscreen target to `in` and reads the pixel back into
     // `outRGBA`. True if the read-back matches.
@@ -504,6 +594,39 @@ public:
     // all -- is exactly today's behaviour everywhere this is not explicitly threaded through.
     virtual void setNextDrawPrepassed(bool prepassed) { (void)prepassed; }
 
+    // ---- translucency: the blended-mesh path ----
+    //
+    // Marks every subsequent drawMesh() as TRANSLUCENT until a caller says otherwise. STICKY, like
+    // setDrawBinding and unlike setNextDrawPrepassed just above, and for the same reason
+    // setDrawBinding is: this is a property of the MATERIAL a caller is currently drawing with, not
+    // of one upcoming draw. beginFrame resets it to false, so a caller that never touches it gets
+    // exactly today's behaviour on every draw.
+    //
+    // WHAT A TRUE FLAG ACTUALLY CHANGES, because it is more than a blend state. A blended draw
+    // leaves the opaque path completely, at the very top of drawMesh, BEFORE the IRenderFeature
+    // submitDraw loop -- so a translucent mesh is not voxelised, not put in the ray-tracing
+    // acceleration structure, not drawn into the shadow cascade, and not depth-prepassed. The device
+    // captures it instead, and replays every captured draw sorted BACK-TO-FRONT after the deferred
+    // sky and before IRenderFeature::transparentPass, through
+    // scenePipeline(..., blended = true).
+    //
+    // THE ORDERING IS THE WHOLE POINT AND IT IS NOT NEGOTIABLE. Drawing a blended mesh where the
+    // opaque ones are drawn puts it BEFORE the deferred sky, whose own depth-EQUAL opaque fill then
+    // overwrites it -- the identical failure the particle pass was moved to fix; see
+    // D3D12Device::endFrame's comment at the sky draw. A caller cannot fix this by sorting its own
+    // draw list, because the sky is not in that list. Hence the capture.
+    //
+    // WHAT IT COSTS, stated rather than discovered later: excluded from the acceleration structure
+    // means glass casts no ray-traced shadow and does not appear in a reflection; excluded from
+    // voxelisation means it contributes no GI bounce. Those are the correct FIRST answers -- a pane
+    // of glass that casts a solid black shadow is a worse artefact than one that casts none -- but
+    // they are approximations, not physics, and a later pass that wants coloured transmission
+    // shadows will have to put translucent draws back into the structure with a material flag the
+    // any-hit shader can read.
+    virtual void setDrawBlended(bool blended) { (void)blended; }
+    // What setDrawBlended last set, for a caller that saves and restores it around a nested draw.
+    virtual bool drawBlended() const { return false; }
+
     // Unlit line geometry (grid, gizmos): per-vertex colour, drawn as a line list.
     virtual LineHandle createLineMesh(const LineVertex* verts, u32 count) { (void)verts; (void)count; return 0; }
     virtual void drawLines(LineHandle mesh, const f32 world[16]) { (void)mesh; (void)world; }
@@ -569,6 +692,122 @@ public:
     // no depth buffer to give at all. 0 before the first swapchain resize has run, exactly like every
     // other size-dependent target this interface exposes.
     virtual TextureHandle sceneDepthTexture() { return 0; }
+
+    // ---------------------------------------------------------------------------------------
+    // G-buffer: velocity, view-space depth, and world normal+roughness, written ALONGSIDE the
+    // ordinary forward scene pass at scene resolution -- three extra render targets and nothing
+    // else, added here rather than replacing anything the scene pass already produces.
+    //
+    // WHY THIS EXISTS. Aver is a FORWARD renderer: PSMainVoxi returns a single SV_TARGET, so a
+    // shaded pixel's normal, roughness and depth exist only in that one shader invocation's own
+    // registers and are gone the instant it returns -- never in a texture any LATER pass, compute
+    // or otherwise, can read. That single gap blocks, simultaneously: the vendored FidelityFX
+    // Denoiser (third_party/fidelityfx-denoiser -- its README lists FFX_DNSR_Shadows_ReadDepth /
+    // ReadNormals / ReadVelocity / ReadPreviousDepth as callbacks the HOST must supply, and today
+    // the honest answer to each is "no"), FSR2/3, TAA, and screen-space reflections -- every one of
+    // them is a compute pass that needs to read what a previous pass saw, and until now nothing
+    // could hand it that. It is also why today's temporal reprojection is WRONG for a moving
+    // object: it reprojects THIS frame's world position through LAST frame's camera (gPrevViewProj
+    // in VoxiShaders.hpp), which is only correct for geometry that did not move between frames --
+    // fixing that fully needs a per-instance previous transform this G-buffer does not carry (see
+    // RtInstance's own comment in VoxiRenderer.hpp), but the per-pixel velocity below is the piece
+    // every consumer in the list above needs regardless, and it is what this declares.
+    //
+    // See docs/rendering/DENOISING.md for the fuller design writeup this slice is drawn from.
+    //
+    // ADDITIVE AND DEFAULTED, THE WHOLE WAY DOWN. setGBufferEnabled defaults to OFF, and every
+    // accessor below defaults to its own "nothing here" value (0 for a texture, false/true for the
+    // bools, chosen as whichever is the SAFE reading for a caller that forgot to check
+    // gBufferEnabled() first). A build that never calls setGBufferEnabled(true) -- which is every
+    // build today, since nothing yet does -- allocates none of these three targets, records no
+    // extra writes, and renders a frame BIT-IDENTICAL to one from before this declaration existed.
+    // That is not a nicety: a render-gate oracle (18 gates x 9 configurations) and 89 headless
+    // suites both assume it, and a backend that allocates or writes any of this while reporting
+    // gBufferEnabled() == false would fail both without the failure pointing at why.
+    //
+    // WHO IMPLEMENTS WHAT. This class only declares the surface. Deciding how the three targets are
+    // populated -- which pass writes them, whether that is a same-frame prepass or folded into the
+    // existing forward pass's pixel shader, how a Vulkan backend mid-bring-up stages the work -- is
+    // the backend's call, not this header's; every method here is a virtual with an inert default
+    // specifically so a backend that has not done that work yet keeps compiling and keeps behaving
+    // exactly as it does today.
+    virtual void setGBufferEnabled(bool on) { (void)on; }
+    virtual bool gBufferEnabled() const { return false; }
+
+    // Scene-resolution screen-space motion, Format::RG16F. UNITS: TEXELS PER FRAME, DESTINATION
+    // TEXEL MINUS SOURCE TEXEL -- for a surface point shaded at THIS frame's pixel (x, y), the
+    // stored (vx, vy) satisfies (x, y) - (vx, vy) == the pixel that SAME surface point occupied
+    // LAST frame. This is deliberately the identical convention UpscalerNeeds::MotionVectors
+    // already documents (RHIResources.hpp): FSR2/3, DLSS, and FFX_DNSR_Shadows_ReadVelocity all
+    // read texel-space motion in this direction, and a G-buffer that disagreed with the upscaler
+    // seam's own documented meaning would make "motion vectors" mean two different things
+    // depending on which consumer asked -- exactly the kind of unit mismatch that never shows up
+    // as a compile error or a crash, only as history that reprojects to the wrong pixel.
+    //
+    // 0 when gBufferEnabled() is false or this backend has not implemented the G-buffer -- the same
+    // "absent, not garbage" contract sceneDepthTexture() above already uses. A caller must check
+    // gBufferEnabled() (or simply treat a 0 handle as "nothing to read") rather than assume a
+    // non-zero handle whenever the G-buffer is on; see this method family's own top comment for why
+    // every accessor here defaults to an unambiguous "nothing here" value.
+    virtual TextureHandle gBufferVelocityTexture() { return 0; }
+
+    // Scene-resolution depth, Format::R32Float. UNITS: VIEW-SPACE LINEAR DEPTH -- the shaded
+    // point's Z in camera/view space, equivalently clip-space W before the perspective divide --
+    // and DELIBERATELY NOT the post-projection [0,1] value sceneDepthTexture()'s own depth-stencil
+    // buffer holds. Those two quantities are related by a projection-dependent, NON-LINEAR
+    // remapping (the classic "depth precision" curve), so a consumer that samples this texture and
+    // treats it as ordinary [0,1] depth gets a number wrong by a different factor at every pixel --
+    // not a crash, not an obviously bad image, just quietly incorrect reprojection and reconstructed
+    // world positions. FFX_DNSR_Shadows_ReadDepth / ReadPreviousDepth and any future SSR pass both
+    // want THIS linear form because it is what makes reconstructing a view-space position from a
+    // screen UV a single division rather than an un-projection through the full projection matrix.
+    //
+    // 0 when gBufferEnabled() is false or unimplemented, matching gBufferVelocityTexture() above.
+    virtual TextureHandle gBufferViewZTexture() { return 0; }
+
+    // Scene-resolution normal and roughness, Format::RGB10A2Unorm. xyz: the shaded surface's
+    // WORLD-SPACE (not view-space, not tangent-space) normal, ENCODED from its real range of
+    // [-1, 1] into the unorm-storable range [0, 1] via n*0.5 + 0.5 -- a reader must decode with
+    // n*2 - 1 before using it as a direction, and a reader that forgets the decode gets a vector
+    // that LOOKS plausible (still roughly unit-length-ish, still roughly pointing outward) while
+    // being wrong at every pixel, which is exactly the shape of bug that survives a casual visual
+    // check. w: perceptual roughness, already [0, 1], stored as-is with no further transform -- it
+    // gets only 2 bits of the format's 10/10/10/2 split, which is deliberately coarse: this channel
+    // is read by a denoiser's edge-stopping weight (FFX_DNSR_Shadows_ReadNormals reads roughness
+    // alongside the normal for exactly that), never by anything doing actual PBR shading with it,
+    // so 2-bit banding here costs nothing a consumer of this field would notice.
+    //
+    // 0 when gBufferEnabled() is false or unimplemented, matching the two accessors above.
+    virtual TextureHandle gBufferNormalRoughnessTexture() { return 0; }
+
+    // Previous frame's view-projection -- ROW-MAJOR, ROW-VECTOR, the SAME convention setCamera's
+    // own `viewProj` argument uses above -- valid whenever gBufferEnabled() is true. EVERY temporal
+    // consumer of the three textures above needs this: each is a snapshot of ONE frame, and
+    // reprojecting that snapshot against accumulated history (FFX_DNSR_Shadows_
+    // GetReprojectionMatrix's own job, and this method's direct answer to it) is meaningless
+    // without knowing what camera the frame being reprojected FROM was rendered with. False when
+    // the G-buffer is off or this backend has not implemented it, leaving `outPrevViewProj`
+    // untouched -- the same "ask before you trust it" contract camera() above already uses, and for
+    // the same reason: a caller that skips the check and reads untouched memory as a matrix will
+    // not get a crash, it will get a plausible-looking wrong reprojection.
+    virtual bool gBufferPrevViewProj(f32 outPrevViewProj[16]) const { (void)outPrevViewProj; return false; }
+
+    // True when the three textures above -- and gBufferPrevViewProj, which is meaningless without
+    // them -- do NOT describe a continuous previous frame: the first frame the G-buffer was
+    // enabled, a camera cut, a level load, a change of render resolution, or anything else that
+    // makes "reproject against last frame" produce nonsense rather than merely one frame of stale
+    // data. EVERY temporal consumer must ask this rather than infer it, because getting it wrong is
+    // not a crash and not even reliably visible in isolation -- it is ONE BAD FRAME immediately
+    // after every cut, exactly the shape of defect a single still-frame screenshot review never
+    // catches and a person actually moving the camera always will (this engine's own broken
+    // per-object reprojection, above, is a standing example of a temporal bug nobody noticed until
+    // something moved).
+    //
+    // Defaults to TRUE -- the conservative answer, "assume history is invalid" -- so a caller that
+    // correctly checks this before trusting history, but talks to a backend that has not
+    // implemented the G-buffer at all, drops one frame of temporal reuse rather than silently
+    // accumulating against a previous frame that was never actually rendered into these targets.
+    virtual bool gBufferHistoryInvalid() const { return true; }
 };
 
 // Converts a colour temperature in Kelvin to LINEAR sRGB, normalised so the brightest channel is 1.

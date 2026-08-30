@@ -79,11 +79,19 @@ bool fileThere(const std::wstring& path) {
 // Writes a managed log line into the engine log. Handed to the bridge at bootstrap.
 void __cdecl managedLog(int32_t level, const char* utf8Message) {
     const char* m = utf8Message ? utf8Message : "";
+    // EVERY level spelled out, and the default kept as Info for genuinely unknown codes only. The
+    // default is a real hazard here rather than a tidy fallback: it does not fail, it DOWNGRADES --
+    // a script calling Log.Critical through an ABI code this switch did not know would have arrived
+    // in the engine log as an ordinary Info line, which is worse than a crash because it looks like
+    // it worked. AVER_FATAL is deliberately last and terminates: managed code asking for Fatal gets
+    // Fatal, including the crash report.
     switch (level) {
-        case AVER_SCRIPT_LOG_TRACE: AVER_TRACE("{}", m); break;
-        case AVER_SCRIPT_LOG_WARN:  AVER_WARN("{}", m);  break;
-        case AVER_SCRIPT_LOG_ERROR: AVER_ERROR("{}", m); break;
-        default:                    AVER_INFO("{}", m);  break;
+        case AVER_SCRIPT_LOG_TRACE:    AVER_TRACE("{}", m);    break;
+        case AVER_SCRIPT_LOG_WARN:     AVER_WARN("{}", m);     break;
+        case AVER_SCRIPT_LOG_ERROR:    AVER_ERROR("{}", m);    break;
+        case AVER_SCRIPT_LOG_CRITICAL: AVER_CRITICAL("{}", m); break;
+        case AVER_SCRIPT_LOG_FATAL:    AVER_FATAL("{}", m);           // does not return
+        default:                       AVER_INFO("{}", m);     break;
     }
 }
 

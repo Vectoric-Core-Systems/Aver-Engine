@@ -3,11 +3,13 @@
 # It links Aver.Core and nothing else. The property under test is arithmetic -- that a sample's
 # position does not depend on how many samples are being taken -- and arithmetic is exactly what a
 # rendered image cannot decide: a shadow sampled by a completely different set of rays still looks
-# like a shadow. The test reaches into the module's src/ for VoxiShaders.hpp, which is where the
-# HLSL it asserts against lives.
+# like a shadow. The HLSL it asserts against is read from modules/render.voxi/shaders/voxi.hlsl.
 add_executable(VoxiRtSeqTest src/VoxiRtSeqTest.cpp)
 target_link_libraries(VoxiRtSeqTest PRIVATE Aver.Core)
-target_include_directories(VoxiRtSeqTest PRIVATE ${CMAKE_SOURCE_DIR}/modules/render.voxi/src)
+# AVER_REPO_ROOT, not an include path: the HLSL this asserts against is a FILE now
+# (modules/render.voxi/shaders/voxi.hlsl), not a raw string literal in a header, so the test reads it
+# rather than compiling it in. Same define tests/repo and tests/editor already use to reach the tree.
+target_compile_definitions(VoxiRtSeqTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
 set_target_properties(VoxiRtSeqTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # GiCacheTest -- the .cache derived-data entry a GI volume is baked into.

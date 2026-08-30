@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(AverEngine VERSION 0.4.0 LANGUAGES C CXX RC)
+project(AverEngine VERSION 0.5.0 LANGUAGES C CXX RC)
 
 # ---------------------------------------------------------------------------
 # Aver Engine — permissively-licensed, modular 3D engine (see docs/ARCHITECTURE.md).
@@ -431,6 +431,28 @@ endif()
 # which actually builds them, can decide it.
 aver_check_module_dag()
 
+# AverCrashReporter -- the separate process that displays a crash report.
+#
+# DECLARED HERE, UNCONDITIONALLY, and not with the other tools/ executables, which is a deliberate
+# break from that pattern rather than an oversight. Every other tool (AverAssetC, MakeFoliage,
+# MakeSamples...) is wired up inside tests/formats/CMakeLists.txt, which only runs under
+# if(AVER_BUILD_TESTS) below. That is fine for an asset compiler. It is wrong for a crash reporter:
+# configuring with -DAVER_BUILD_TESTS=OFF would produce a Sandbox.exe that installs crash handlers,
+# writes crash folders, and then tries to launch a reporter that was never built -- the failure mode
+# being silence at exactly the moment the user most needs to be told something.
+#
+# LINKS NOTHING FROM THE ENGINE. Not Aver.Core, not Aver.Platform, nothing. It has to still work when
+# the engine does not, and the only way to be certain of that is to share no code with it. Win32 and
+# the CRT only; see the file's own header comment.
+add_executable(AverCrashReporter tools/AverCrashReporter.cpp)
+set_target_properties(AverCrashReporter PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+if(MSVC)
+  # A GUI subsystem app: it must not flash a console window when the engine spawns it, and it is
+  # spawned DETACHED_PROCESS precisely so it outlives the crash. main() is still the entry point --
+  # /ENTRY:mainCRTStartup keeps the standard signature rather than forcing a WinMain.
+  target_link_options(AverCrashReporter PRIVATE /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup)
+endif()
+
 if(AVER_BUILD_TESTS)
   # Needs Aver.Runtime.Game, so it only exists when the game runtime is built.
   if(AVER_BUILD_GAME AND TARGET Aver.Framework)
@@ -446,6 +468,10 @@ if(AVER_BUILD_TESTS)
   add_subdirectory(tests/render.ui)
   # The actor preview, for the same reason and by the same means.
   add_subdirectory(tests/render.actorpreview)
+  # The layered BSDF's coat lobe. Unconditional, like the PBR material system it belongs to, and
+  # needed because "does this coat add energy" is a question about arithmetic that a rendered image
+  # cannot answer -- a plate 3% too bright still looks like a plate.
+  add_subdirectory(tests/render.pbr)
   # Unconditional, like the module.
   add_subdirectory(tests/audio)
   # The atmosphere model. Unconditional because Aver.RHI always exists, and needed because the sky
@@ -473,6 +499,10 @@ if(AVER_BUILD_TESTS)
   # The editor's preferences store. Unconditional: it depends only on Core and Platform, and its
   # failure mode -- a setting that silently does not persist -- is one nobody ever reports.
   add_subdirectory(tests/editor)
+  # The engine/project boundary. Unconditional, and links only Aver.Core, because what it checks is a
+  # property of the SOURCE TREE rather than of any module: that no game content sits in the engine and
+  # that one file knows where projects live. docs/PROJECTS.md asserts both in prose; this decides them.
+  add_subdirectory(tests/repo)
   # The Roslyn backend, checked against the scanner it falls back from. Unconditional like its module;
   # the test itself skips when averdesign is not staged.
   add_subdirectory(tests/formats.roslyn)

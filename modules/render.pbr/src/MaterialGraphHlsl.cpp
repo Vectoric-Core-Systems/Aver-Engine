@@ -663,6 +663,21 @@ constexpr OutputField kOutputFields[] = {
     {"Occlusion",   "occlusion",   MatType::Float},
     {"Opacity",     "opacity",     MatType::Float},
     {"AlphaCutoff", "alphaCutoff", MatType::Float},
+    {"SubsurfaceWeight", "subsurfaceWeight", MatType::Float},
+    {"SubsurfaceRadius", "subsurfaceRadius", MatType::Float},
+    {"Ior",          "ior",          MatType::Float},
+    {"Transmission", "transmission", MatType::Float},
+    // THE COAT, drivable per pixel. This is where a coat earns a graph rather than three numbers on
+    // the material: a weight mask is the difference between a uniformly lacquered object and one
+    // that is polished where it is handled and bare where it is worn, and a roughness mask is how a
+    // single car-paint material carries both the clear panel and the scuffed edge.
+    //
+    // These three pins exist whether or not the layered BSDF is compiled in. AverAuthored carries
+    // the fields unconditionally on purpose (see its own comment), so a graph authored with the
+    // option on still compiles with it off -- the values are simply written and never read.
+    {"CoatWeight",    "coatWeight",    MatType::Float},
+    {"CoatRoughness", "coatRoughness", MatType::Float},
+    {"CoatF0",        "coatF0",        MatType::Float},
 };
 
 } // namespace

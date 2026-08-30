@@ -81,6 +81,20 @@ public static class Pbr
     [DllImport(Lib)] private static extern int aver_pbr_set_normal_scale(int m, float v);
     [DllImport(Lib)] private static extern float aver_pbr_get_occlusion_strength(int m);
     [DllImport(Lib)] private static extern int aver_pbr_set_occlusion_strength(int m, float v);
+    [DllImport(Lib)] private static extern float aver_pbr_get_ior(int m);
+    [DllImport(Lib)] private static extern int aver_pbr_set_ior(int m, float v);
+    [DllImport(Lib)] private static extern float aver_pbr_get_transmission(int m);
+    [DllImport(Lib)] private static extern int aver_pbr_set_transmission(int m, float v);
+    [DllImport(Lib)] private static extern float aver_pbr_get_subsurface_weight(int m);
+    [DllImport(Lib)] private static extern int aver_pbr_set_subsurface_weight(int m, float v);
+    [DllImport(Lib)] private static extern float aver_pbr_get_coat_weight(int m);
+    [DllImport(Lib)] private static extern int aver_pbr_set_coat_weight(int m, float v);
+    [DllImport(Lib)] private static extern float aver_pbr_get_coat_roughness(int m);
+    [DllImport(Lib)] private static extern int aver_pbr_set_coat_roughness(int m, float v);
+    [DllImport(Lib)] private static extern float aver_pbr_get_coat_f0(int m);
+    [DllImport(Lib)] private static extern int aver_pbr_set_coat_f0(int m, float v);
+    [DllImport(Lib)] private static extern float aver_pbr_get_subsurface_radius(int m);
+    [DllImport(Lib)] private static extern int aver_pbr_set_subsurface_radius(int m, float v);
 
     [DllImport(Lib)] private static extern int aver_pbr_get_alpha_mode(int m);
     [DllImport(Lib)] private static extern int aver_pbr_set_alpha_mode(int m, int mode);
@@ -197,6 +211,98 @@ public static class Pbr
         {
             get => aver_pbr_get_occlusion_strength(Handle);
             set => aver_pbr_set_occlusion_strength(Handle, value);
+        }
+
+        /// <summary>
+        /// Refractive index of the substrate. 1.0 is vacuum and the floor; water is about 1.33,
+        /// window glass about 1.5, diamond about 2.42.
+        ///
+        /// NOT read by any shading term today, and this doc used to claim two consumers it does not
+        /// have. It said ior sets the critical angle for total internal reflection: the function
+        /// that did so was removed, because a parallel-sided pane seen from outside can never total-
+        /// internally-reflect (Snell bounds the internal angle at asin(1/n), the critical angle
+        /// itself). And it said <see cref="Reflectance"/> is derived from ior: it is not — the two
+        /// are authored independently, and nothing reconciles them.
+        ///
+        /// It is parsed, packed, uploaded and drivable from a material graph pin, so setting it is
+        /// not lost; it simply does not change what you see yet. Set <see cref="Reflectance"/> for
+        /// that.
+        /// </summary>
+        public float Ior
+        {
+            get => aver_pbr_get_ior(Handle);
+            set => aver_pbr_set_ior(Handle, value);
+        }
+
+        /// <summary>
+        /// [0,1] how optically see-through the substrate is, independent of where the camera stands.
+        /// It pulls blended coverage down toward (1 - transmission) before the view-angle Fresnel
+        /// term lifts it back at grazing angles, and it scales the diffuse lobe so a transmissive
+        /// surface does not also scatter its full base colour back at the viewer.
+        ///
+        /// This is NOT refraction: light does not bend passing through the surface.
+        /// </summary>
+        public float Transmission
+        {
+            get => aver_pbr_get_transmission(Handle);
+            set => aver_pbr_set_transmission(Handle, value);
+        }
+
+        /// <summary>
+        /// [0,1] how far light wraps past the terminator. 0 turns the approximation off entirely —
+        /// see <see cref="SubsurfaceRadius"/> for what the pair together can and cannot do.
+        /// </summary>
+        public float SubsurfaceWeight
+        {
+            get => aver_pbr_get_subsurface_weight(Handle);
+            set => aver_pbr_set_subsurface_weight(Handle, value);
+        }
+
+        /// <summary>
+        /// [0,1] how much clear coat sits over the base material — car paint, varnish, a wet stone.
+        /// 0 turns the whole coat off: no flag, no lobe, nothing computed.
+        ///
+        /// Authored per material, but whether the renderer evaluates it at all is a PROJECT-wide
+        /// decision (RENDER.LAYEREDBSDF). Setting this on a project whose layered BSDF is off stores
+        /// the value and changes nothing on screen.
+        /// </summary>
+        public float CoatWeight
+        {
+            get => aver_pbr_get_coat_weight(Handle);
+            set => aver_pbr_set_coat_weight(Handle, value);
+        }
+
+        /// <summary>
+        /// [0,1] the coat film's own roughness, independent of the base's. Car paint is near 0;
+        /// a satin lacquer is higher.
+        /// </summary>
+        public float CoatRoughness
+        {
+            get => aver_pbr_get_coat_roughness(Handle);
+            set => aver_pbr_set_coat_roughness(Handle, value);
+        }
+
+        /// <summary>
+        /// Normal-incidence reflectance of the coat film. 0.04 is IOR 1.5 — ordinary lacquer — and is
+        /// the default. Distinct from <see cref="Reflectance"/>, which is the BASE material's F0.
+        /// </summary>
+        public float CoatF0
+        {
+            get => aver_pbr_get_coat_f0(Handle);
+            set => aver_pbr_set_coat_f0(Handle, value);
+        }
+
+        /// <summary>
+        /// [0,1] thickness PROXY that widens the back-scatter lobe — light entering the far side of
+        /// the mesh and travelling toward the eye, which is what makes a leaf or an ear light up when
+        /// the sun is behind it. Not a BSSRDF: no transport across the mesh, no per-texel thickness,
+        /// no wavelength dependence. The transmitted light is tinted by <see cref="BaseColorFactor"/>;
+        /// there is no separate scatter colour to set.
+        /// </summary>
+        public float SubsurfaceRadius
+        {
+            get => aver_pbr_get_subsurface_radius(Handle);
+            set => aver_pbr_set_subsurface_radius(Handle, value);
         }
 
         public PbrAlphaMode AlphaMode

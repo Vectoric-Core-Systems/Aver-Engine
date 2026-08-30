@@ -41,13 +41,14 @@ struct ProjectDesc {
     int rtShadowDenoise    = -1; // RENDER.RTSHADOWDENOISE  SPATIAL filter radius in pixels, [0,3]
     int rtRenderMode       = -1; // RENDER.RTRENDERMODE     0 = raster primary, 1 = ray-driven
     int ptBounces          = -1; // RENDER.PTBOUNCES        PATH tracing: bounces after the first hit, [1,8]
+    int layeredBsdf        = -1; // RENDER.LAYEREDBSDF      0=Off 1=Low 2=Medium 3=High 4=Epic
 
     // True when the manifest stated at least one RENDER.* key.
     bool hasRenderSettings() const {
         return giQuality >= 0 || rayTracing >= 0 || pathTracing >= 0 ||
                voxelResolution > 0 || giIntensity >= 0.0f || giMaxDistance >= 0.0f ||
                rtShadowRays >= 0 || rtPixelsPerRayTile >= 0 || rtShadowDenoise >= 0 ||
-               rtRenderMode >= 0 || ptBounces >= 0;
+               rtRenderMode >= 0 || ptBounces >= 0 || layeredBsdf >= 0;
     }
 
     std::string dir;                    // absolute directory the manifest lives in

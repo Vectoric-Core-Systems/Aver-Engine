@@ -3,7 +3,12 @@
 // The water surface's HLSL, following PbrShaders.cpp/RHIShaders.cpp's exact convention: a raw
 // string literal compiled as the TAIL of rhi::sharedShaderPrelude(), which already declares
 // PerFrame at b0 (gViewProj, gLightDir/gLightColor among its fields -- see RHIShaders.cpp's own
-// cbuffer PerFrame block) plus srgbToLin/toGamma and the rest of kColorHlsl. Declaration order is
+// cbuffer PerFrame block) plus srgbToLin/toGamma and the rest of kColorHlsl -- AND, since
+// sharedShaderPrelude() is one shared string, everything else RHIShaders.cpp defines before its own
+// #if AVER_MS block: skyColor/averSkyIrradiance (the sky every other reflective surface in this
+// engine reads) and plainFresnelSchlick/plainDistGGX/plainGeomSchlick (this engine's one GGX
+// implementation). PSWater below reaches for all of them without binding anything new -- see its own
+// comment at envReflection for why that is a real fix and not a coincidence. Declaration order is
 // load-bearing: HLSL has no forward declarations, so a helper used before it is written compiles in
 // C++ and fails in DXC, AT RUNTIME, on a build that reported success (PtShaders.hpp's own comment
 // makes the identical point).
@@ -48,8 +53,16 @@ cbuffer WaterFrame : register(b4) {
     // bounds. See WaterRenderer.cpp's transparentPass for why scaling the grid onto the bounds, rather
     // than clipping fragments outside them, is what makes a small pool look like a pool.
     float4 gWaterState;
-    float4 gShallowColor;   // rgb, linear; a unused
-    float4 gDeepColor;      // rgb, linear; a unused
+    // A TINT on the real reflected sky, not a flat replacement for it -- see PSWater's own comment
+    // at envReflection below for why this is a real change in KIND, not a repainted constant. rgb,
+    // linear; a unused. Left at WaterRenderer.hpp's own unretouched default (that header's own
+    // "unvalidated placeholders" note): this pass fixes what colour MEANS here, not what it IS.
+    float4 gShallowColor;
+    // The water BODY's own colour: what the eye reads looking straight through the surface, in the
+    // absence of any actual refraction or scene-depth sampling (README.md's "No soft shoreline"
+    // note). PSWater below weights this by (1 - fresnel) rather than using it at full strength --
+    // see that function's own comment for the energy-split argument. rgb, linear; a unused.
+    float4 gDeepColor;
 };
 
 // ---- the vertex stage ---------------------------------------------------------------------------
@@ -146,39 +159,130 @@ VSWaterOut VSWater(VSWaterIn i) {
 float4 PSWater(VSWaterOut i) : SV_Target {
     float3 N = normalize(i.worldNrm);
     float3 V = normalize(gCamPos.xyz - i.worldPos);
-    float NdotV = saturate(dot(N, V));
+
+    // ---- WHICH SIDE OF THE SURFACE THE EYE IS ON ---------------------------------------------------
+    //
+    // This pipeline is CullMode::None precisely so the plane is still drawn from below (see
+    // WaterRenderer::buildPipeline's own comment, which says "underwater must still see the plane
+    // from below"), so this shader really does run with the camera under the water -- and until now
+    // it had no idea. The mesh normal always points UP, so from below dot(N, V) is NEGATIVE, the
+    // saturate clamped it to 0, and Schlick at NdotV = 0 returns 1.
+    //
+    // THE CONSEQUENCE WAS A BUG, not merely an approximation: seen from underwater the surface read
+    // as a perfect mirror AT EVERY ANGLE, including straight up. Looking up from under real water you
+    // see the whole sky compressed into a bright cone -- Snell's window -- and a mirror everywhere
+    // outside it. The window was missing entirely because the angle it depends on was being clamped
+    // away before anything could ask about it.
+    //
+    // gWaterState.x is the water level in world Z (see VSWater, which builds worldPos as
+    // float3(disp.x, disp.y, gWaterState.x + disp.z)), so this is a straight comparison, no new
+    // constant and no cbuffer change.
+    bool underwater = gCamPos.z < gWaterState.x;
+    // Flipped to face the eye, so NdotV is the true cosine of the incidence angle on whichever side
+    // is being looked at. Above water this is N unchanged, which is what keeps every above-water
+    // pixel in the engine bit-identical to before this block existed.
+    float3 Nv = underwater ? -N : N;
+    float NdotV = saturate(dot(Nv, V));
 
     // Schlick's approximation, F0 = 0.02 -- the standard value for the air/water interface (water's
     // IOR of about 1.33 gives F0 = ((1-1.33)/(1+1.33))^2 ~= 0.02), NOT a value tuned against this
     // engine's own image: at grazing angles (NdotV -> 0) the surface reads almost fully reflective,
     // and looking straight down (NdotV -> 1) it reads close to F0 -- barely reflective at all,
-    // mostly the colour underneath.
+    // mostly the colour underneath. UNCHANGED by this pass; only what fresnel WEIGHTS, below, changed.
     float F0 = 0.02;
     float fresnel = F0 + (1.0 - F0) * pow(1.0 - NdotV, 5.0);
 
-    // Straight-down views read toward deepColor (transparent-reading, little reflected sky); grazing
-    // views read toward shallowColor (more reflective-reading) -- shallowColor/deepColor are named
-    // for the visual effect this lerp produces, not for an actual depth measurement, since this
-    // slice does not sample scene depth at all (see modules/water/README.md's own "No soft
-    // shoreline" note).
-    float3 colorLinear = lerp(gDeepColor.rgb, gShallowColor.rgb, fresnel);
+    // ---- TOTAL INTERNAL REFLECTION, i.e. Snell's window --------------------------------------------
+    //
+    // Leaving water for air, Snell gives sin(t2) = 1.333 * sin(t1), and beyond sin(t1) = 1/1.333 there
+    // is no solution -- no refracted ray exists and every photon reflects. That critical angle is
+    // 48.6 degrees from vertical, and it is why the underside of a water surface is a mirror except
+    // for a circular window straight overhead.
+    //
+    // SCHLICK CANNOT PRODUCE THIS AND IS NOT ASKED TO. The approximation above is a fit for light
+    // ENTERING the denser medium, where no critical angle exists; it approaches 1 only as the view
+    // grazes. Real TIR switches to a perfect mirror ABRUPTLY at 48.6 degrees and stays there. So the
+    // test is a separate one and it OVERRIDES the fit rather than blending with it.
+    //
+    // Above water this branch is not entered at all, so nothing that has ever been rendered changes.
+    if (underwater) {
+        const float kWaterIor = 1.333;
+        // sin^2(t1) from cos(t1); past sin^2(t2) = 1 there is no transmitted direction.
+        if ((kWaterIor * kWaterIor) * saturate(1.0 - NdotV * NdotV) > 1.0) fresnel = 1.0;
+    }
 
-    // A single specular highlight from the already-available directional light (gLightDir/
-    // gLightColor, both declared in the shared PerFrame block at b0 -- no new light data needed,
-    // exactly as this file's own top-of-class WaterRenderer.hpp comment promises). Blinn-Phong, not
-    // a full BRDF: water's specular lobe is what the eye actually reads as "sun glitter", and this
-    // surface has no roughness/metallic authoring of its own to drive anything more elaborate.
     float3 L = normalize(gLightDir.xyz);
-    float3 H = normalize(L + V);
-    float specular = pow(saturate(dot(N, H)), 128.0) * fresnel;
-    colorLinear += averSunRadiance() * specular;
+    float3 R = reflect(-V, N);
 
-    // Alpha ALSO comes from the Fresnel term -- near-grazing angles read more opaque/reflective,
-    // straight-down views read more transparent toward deepColor -- and is a STRAIGHT (not
-    // premultiplied) alpha: WaterRenderer.cpp built its pipeline with BlendMode::AlphaBlend, not
-    // ParticleRenderer's PremultipliedAlpha, and this is WHY -- see that file's own comment at the
-    // blend-state line for the full explanation of why copy-pasting particles' convention here would
-    // be wrong, not merely different.
+    // ---- THE MIRROR TERM: an ACTUAL reflection, not a constant -------------------------------------
+    // This is the whole "cartoonish" complaint: skyColor(dir) is the identical dome function every
+    // other reflective surface in this engine already reads for its environment term (PbrShaders.cpp's
+    // envSpec, VoxiShaders.hpp's ind4.specular -- both `skyColor(R)`), and it was reachable from HERE
+    // for free the entire time. WaterRenderer::init compiles this shader with sd.prelude =
+    // rhi::sharedShaderPrelude() (WaterRenderer.cpp) -- the SAME string PbrShaders/VoxiShaders build
+    // on, cbuffer PerFrame and skyColor/gSkyZenith/gSkyHorizon/gSkySh included -- so nothing new had to
+    // be bound to reach it; the prior version of this function simply never called it. (The physical
+    // atmosphere's marched sky, averSkyPhysical, is deliberately NOT what's reached for here: skyColor
+    // is "the dome, as every shading path names it" per that function's own comment in RHIShaders.cpp,
+    // and reflections everywhere else in this engine read that same name, not the marched variant --
+    // matching that convention, not inventing a third.)
+    //
+    // gShallowColor TINTS this reflection instead of replacing it -- the one place this pass keeps
+    // gShallowColor's original role (the colour a grazing view used to read) rather than discarding
+    // it outright: a grazing view still reads gShallowColor's hue, it now reads it as a cast over the
+    // real sky/sun instead of as the whole answer.
+    float3 envReflection = skyColor(R) * gShallowColor.rgb * fresnel;
+
+    // ---- sun glitter: GGX, not Blinn-Phong ----------------------------------------------------------
+    // pow(saturate(dot(N,H)), 128.0) drew the identical highlight shape at every slope this surface's
+    // waves ever take -- a fixed exponent has no roughness behind it, so it cannot narrow or widen with
+    // anything. Real sun glitter on water is exactly a GGX/Trowbridge-Reitz lobe: brighter and tighter
+    // looking straight into the sun's own reflection, broader and dimmer off-axis. Built from
+    // plainDistGGX/plainGeomSchlick (RHIShaders.cpp) -- part of the SAME rhi::sharedShaderPrelude()
+    // this file already compiles against, per the comment above -- rather than a second, hand-rolled
+    // GGX: this is the one GGX implementation the furnace test already measures, not a shader-local
+    // copy that could quietly drift from it.
+    //
+    // kWaterRoughness is not a free artistic knob: 0.045 is plainShadeSurface's own floor
+    // (`clamp(gMaterial.y, 0.045, 1.0)`, RHIShaders.cpp) -- the smoothest surface this engine's own
+    // shading already supports anywhere. Calm water is exactly that surface, not a smoother one
+    // invented here -- reusing this engine's existing floor keeps the highlight's width consistent
+    // with every other "very smooth" material already on screen, rather than picking a second,
+    // unrelated tightness for this one surface.
+    const float kWaterRoughness = 0.045;
+    float3 H = normalize(L + V);
+    float ndl = saturate(dot(N, L));
+    float ndh = saturate(dot(N, H));
+    float ggxA = kWaterRoughness * kWaterRoughness;
+    float ggxK = kWaterRoughness + 1.0; ggxK = ggxK * ggxK / 8.0;
+    float D = plainDistGGX(ndh, ggxA);
+    float G = plainGeomSchlick(NdotV, ggxK) * plainGeomSchlick(ndl, ggxK);
+    // Cook-Torrance direct specular, plainShadeSurface's own `spec` line -- fresnel (computed above,
+    // F0=0.02) stands in for that line's coloured F term, since water has no albedo/metallic Fresnel
+    // of its own to derive one from.
+    float specBRDF = (D * G * fresnel) / max(4.0 * NdotV * ndl, 1e-4);
+    float3 sunGlitter = specBRDF * averSunRadiance() * ndl;
+
+    // Both reflection terms are the SPECULAR half of this surface: real light this dielectric bounces
+    // straight back at the viewer, at whatever strength Fresnel/GGX say it should, regardless of how
+    // transparent the surface is authored to be -- see this pipeline's blend-state comment
+    // (WaterRenderer.cpp) for why that independence is the entire point of moving to premultiplied
+    // alpha below.
+    float3 specular = envReflection + sunGlitter;
+
+    // gDeepColor is the water BODY's own colour -- what the eye reads looking straight through the
+    // surface, in the absence of any actual refraction or scene-depth sampling (README.md's "No soft
+    // shoreline" note). Weighted by (1 - fresnel), NOT used at full strength: fresnel is the fraction
+    // of light this surface already sent back as the mirror term above, so what remains to carry the
+    // body colour is whatever fresnel did NOT reflect -- the same energy split a real Fresnel
+    // transmission makes, just without the refraction bend this engine does not model.
+    float3 diffuse = gDeepColor.rgb * (1.0 - fresnel);
+
+    // Alpha is STILL driven by fresnel, unchanged in shape from before this pass: a grazing view is
+    // (per the mirror term above) almost entirely reflection with almost nothing transmitted, so the
+    // background it would otherwise show through should be almost entirely replaced -- alpha -> 1.
+    // Looking straight down, the surface is mostly transmissive, so alpha sits near its floor and the
+    // background survives underneath the small amount of body tint and glint this pixel adds on top.
     float alpha = saturate(0.15 + 0.85 * fresnel);
 
     // Deliberately NOT calling averApplyFog here. Water is itself a blended surface sitting in front
@@ -187,7 +291,14 @@ float4 PSWater(VSWaterOut i) : SV_Target {
     // plane's own colour on top of that would double-apply the same atmosphere to the one surface
     // that is, itself, meant to read as the atmosphere's reflective boundary. Considered and
     // rejected, not an oversight -- see modules/water/README.md's own note.
-    return float4(colorLinear, alpha);
+
+    // PREMULTIPLIED, not straight -- see WaterRenderer.cpp's blend-state comment for the full argument
+    // this replaces (that comment used to argue the OPPOSITE choice, for the old straight-alpha output
+    // this function no longer produces). rgb is the reflection at full strength plus the transmitted
+    // body colour weighted by coverage; a is that same coverage. A straight-alpha composite would
+    // multiply `specular` by alpha too, attenuating the one term that must not depend on how
+    // transparent this water is authored to be -- exactly the defect this whole pass exists to fix.
+    return float4(specular + diffuse * alpha, alpha);
 }
 )";
 

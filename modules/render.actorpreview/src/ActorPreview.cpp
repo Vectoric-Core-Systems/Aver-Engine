@@ -118,7 +118,8 @@ float4 PreviewMaterialPS(PreviewOut i) : SV_TARGET {
     // Two-sided, exactly like averVertexOf's own comment in PbrShaders.cpp: a closed preview sphere
     // never needs this, but a future flat preview mesh (a plane, say) should not shade black on the
     // half of it facing away from the light.
-    if (dot(v.N, v.V) < 0.0) v.N = -v.N;
+    v.backFace = dot(v.N, v.V) < 0.0;
+    if (v.backFace) v.N = -v.N;
     v.uv = i.uv;
 
     // averBuildSurface reads l.direction alone, to build the half vector H. radiance and visibility
@@ -350,7 +351,14 @@ bool ActorPreview::createMaterialPipeline() {
     // Stored on the instance (not a local): ShaderDesc::defines is a raw pointer, read by the
     // backend -- and, in ActorPreviewTest, recorded and read back later -- after this function
     // returns.
-    materialDefines_ = pbr::materialShaderDefines(/*tableBaseRegister=*/0, /*samplerRegister=*/0);
+    // NO COAT IN THE PREVIEW, and it is a stated limitation rather than an oversight. This module
+    // links Aver.Core and the RHI, not Aver.Render.Voxi, so it cannot see voxi::Settings to know
+    // whether the project asked for a layered BSDF -- and reaching for that dependency to light one
+    // preview sphere would couple the material-graph editor to the scene renderer. The consequence,
+    // said plainly: a coated material previews WITHOUT its coat. Wiring it means giving this module
+    // a way to be told the setting, not a way to go and read it.
+    materialDefines_ = pbr::materialShaderDefines(/*tableBaseRegister=*/0, /*samplerRegister=*/0,
+                                                  /*layeredBsdf=*/false);
 
     rhi::ShaderDesc vd;
     vd.source = actorPreviewShaderSource();

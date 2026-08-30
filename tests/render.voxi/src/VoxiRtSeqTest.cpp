@@ -18,7 +18,8 @@
 // the HLSL, not the compiled shader. Nothing in this process runs DXC or a GPU. The mirror is tied
 // to the shader by the source assertions at the bottom, which read the shader text the renderer
 // actually compiles and fail if the expression drifts from the one modelled here.
-#include "VoxiShaders.hpp"
+#include <fstream>
+#include <sstream>
 
 #include "aver/core/Log.hpp"
 
@@ -129,14 +130,44 @@ f32 minSeparation(Generator gen, u32 n, f32 ang0) {
 //
 // What ties the mirror above to the shader below it. Everything else here would keep passing if the
 // HLSL changed underneath it.
+// THE SHADER TEXT, READ FROM THE FILE THE RENDERER ACTUALLY COMPILES.
+//
+// This used to strstr voxi::kVoxiHLSL, a C++ raw string literal in VoxiShaders.hpp. The HLSL now
+// lives in modules/render.voxi/shaders/voxi.hlsl and that literal is gone, so reading it here would
+// be reading nothing. A test that ties a C++ mirror to shader text has to follow the text.
+//
+// Read through AVER_REPO_ROOT rather than linking anything: the point of this suite is that it needs
+// no GPU and no RHI (see its CMakeLists -- "It links Aver.Core and nothing else"), and reaching for
+// rhi::shaderFile() to get a string would trade that away for nothing. Same approach
+// tests/repo/src/SeparationTest.cpp already uses to read source.
+//
+// AN UNREADABLE FILE MUST FAIL, NOT SKIP. Every assertion below is a substring search, so an empty
+// string would make all of them "pass" by finding nothing to object to -- the exact shape of a test
+// that proves nothing while reporting success.
+const std::string& hlslText() {
+    static const std::string s = [] {
+        const std::string path = std::string(AVER_REPO_ROOT) + "/modules/render.voxi/shaders/voxi.hlsl";
+        std::ifstream f(path, std::ios::binary);
+        if (!f) {
+            AVER_ERROR("[VoxiRtSeq] cannot read {} -- every source assertion below would pass "
+                       "vacuously against an empty string, so this is a failure, not a skip.", path);
+            return std::string();
+        }
+        std::ostringstream ss;
+        ss << f.rdbuf();
+        return ss.str();
+    }();
+    return s;
+}
+
 bool hlslHas(const char* needle) {
-    return std::strstr(voxi::kVoxiHLSL, needle) != nullptr;
+    return hlslText().find(needle) != std::string::npos;
 }
 
 // The text of a shader function, from its signature to the first line that closes it. Used to argue
 // about what a function CANNOT see, which is a claim the whole-file search cannot make.
 std::string hlslBody(const char* signature) {
-    const char* start = std::strstr(voxi::kVoxiHLSL, signature);
+    const char* start = std::strstr(hlslText().c_str(), signature);
     if (!start) return {};
     const char* end = std::strstr(start, "\n}");
     return end ? std::string(start, static_cast<usize>(end - start)) : std::string(start);

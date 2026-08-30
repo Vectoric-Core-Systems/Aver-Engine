@@ -34,6 +34,7 @@ Sandbox.exe
 # Exchange feature invokes this one out of process on a real user's machine, so it has to be present
 # in every edition -- unconditional, the same as Sandbox.exe itself.
 AverAssetC.exe
+AverCrashReporter.exe
 
 # The C-seam DLLs the editor load-time links. Listed individually rather than as Aver.*.dll on
 # purpose: that glob would also sweep the dead root-level Aver.Scripting.dll (see below), and it

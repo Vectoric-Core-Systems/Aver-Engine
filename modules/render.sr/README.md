@@ -48,14 +48,28 @@ the `[AverSR]` log tag — the same code path as a tree with no AverSR in it.
   screen-space motion vectors, depth, exposure and a camera-cut reset signal as whole-frame data —
   none of which exists yet outside Voxi's ray-traced-shadow-only reprojection. See
   `docs/AVERSR.md` "Prerequisites".
-- **Backend wiring — still the real gap.** `IDevice` does **not** yet have a
-  `setUpscaler`/`upscaler()` hook — checked again this phase against
-  `modules/rhi/include/aver/rhi/RHI.hpp`, unchanged. Sandbox now constructs a real
-  `SpatialUpscaler` and holds it (see "Who links this module" above) and its own
-  `--render-scale`-driven resize is real and measured, but nothing calls
-  `SpatialUpscaler::execute()`: no backend's composite/present step reads an upscaler off the
-  device and calls it instead of its own bilinear resize. The pixels a non-`Off` AverSR level
-  produces today are that backend resize, not AverSR's resample. Closing this needs a
+- **Backend wiring — DONE, and this section said otherwise for far too long.** The paragraph that
+  stood here declared `IDevice` had no `setUpscaler`/`upscaler()` hook and that nothing called
+  `SpatialUpscaler::execute()`, and it said it had been "checked again this phase". Both halves are
+  false and were false when written down most recently:
+
+      modules/rhi/include/aver/rhi/RHI.hpp:322   virtual void setUpscaler(IUpscaler* u)
+      modules/rhi/include/aver/rhi/RHI.hpp:323   virtual IUpscaler* upscaler() const
+      modules/rhi.d3d12/src/D3D12Device.cpp:4630 upscaler_->execute(*rhiContext_, in, presentHdrTex_);
+
+  The D3D12 composite runs the resample in HDR before the tonemap, and VulkanDevice mirrors it. A
+  non-`Off` level produces AverSR's own Catmull-Rom pixels, not a backend bilinear stretch.
+
+  WHY THIS MATTERED RATHER THAN BEING A TYPO. The editor's own AverSR tooltip repeated the same
+  claim, so the one control that meaningfully reduces frame time on a high-DPI display told anyone
+  who hovered it that it did nothing. MEASURED, PTTest at 2750x1639: the ray-driven primary pass --
+  the largest single span in the frame -- goes 5.0ms at Off to 2.3 / 1.7 / 1.3ms at Quality /
+  Balanced / Performance. A feature is not shipped while the thing describing it says it is not.
+
+  This is the third stale "X is not implemented" claim found in this tree in one day, after a
+  shadow-denoiser comment asserting an inert change that was live at every tier, and a sky function
+  documented as unread that two paths consumed. The pattern is worth more attention than any one of
+  them: none was a code bug, and all three hid working behaviour. Closing the ORIGINAL gap needed a
   `setUpscaler`/`upscaler()` pair on `IDevice` (default no-op, so every existing backend is
   unchanged by construction) AND a backend's composite step reading it — concretely
   `modules/rhi.d3d12/src/D3D12Device.cpp`'s composite pass (see its own comment starting "dst is

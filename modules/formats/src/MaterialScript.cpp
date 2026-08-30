@@ -13,6 +13,7 @@ namespace {
 // Defaults mirroring pbr::MaterialDesc and the C# MaterialBuilder. A value equal to one is not written.
 constexpr f32 kDefMetallic = 1.0f, kDefRoughness = 1.0f, kDefNormalScale = 1.0f;
 constexpr f32 kDefOcclusion = 1.0f, kDefReflectance = 0.04f, kDefF90 = 1.0f, kDefTiling = 100.0f;
+constexpr f32 kDefIor = 1.5f;
 
 // True when two floats agree to 1e-6.
 bool same(f32 a, f32 b) { return std::fabs(a - b) <= 1.0e-6f; }
@@ -150,6 +151,22 @@ std::string materialConfigureChain(const pbr::MaterialDesc& d, const OcMatExtras
     if (!same(d.occlusionStrength, kDefOcclusion))   line(".OcclusionStrength(" + num(d.occlusionStrength) + ")");
     if (!same(d.reflectance, kDefReflectance))       line(".Reflectance(" + num(d.reflectance) + ")");
     if (!same(d.f90, kDefF90))                       line(".F90(" + num(d.f90) + ")");
+    // WITHOUT THESE TWO LINES, Save-to-C# SILENTLY DESTROYS AN AUTHORED GLASS. The chain this
+    // function generates is what the .ocmat is regenerated from, so a field the chain omits is a
+    // field that survives in the text right up until someone presses the button. ior and transmission
+    // reached the parser, the writer, the GPU and the shaders without ever reaching here.
+    if (!same(d.ior, kDefIor))                       line(".Ior(" + num(d.ior) + ")");
+    if (d.transmission > 0.0f)                       line(".Transmission(" + num(d.transmission) + ")");
+
+    // OMITTED WHEN OFF, same reasoning as OcMat.cpp's writer (see its comment): subsurfaceWeight 0 is
+    // the feature's own off switch, not a default worth stating, so a material that never asked for
+    // the wrap term gets no .Subsurface... calls at all. subsurfaceRadius is emitted unconditionally
+    // once weight is set -- it is meaningless without the weight that gates it -- so a Save-to-C#
+    // round trip never silently drops an authored radius by treating it as "still default".
+    if (d.subsurfaceWeight > 0.0f) {
+        line(".SubsurfaceWeight(" + num(d.subsurfaceWeight) + ")");
+        line(".SubsurfaceRadius(" + num(d.subsurfaceRadius) + ")");
+    }
 
     for (u32 i = 0; i < pbr::kTextureSlotCount; ++i) {
         const pbr::TextureRef& r = d.textures[i];

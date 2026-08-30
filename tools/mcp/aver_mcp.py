@@ -181,13 +181,46 @@ def run_powershell(script, timeout):
 # tools
 # --------------------------------------------------------------------------------------------------
 
+# WHICH CONFIG THIS BUILT, SAID OUT LOUD, and an unknown argument refused rather than dropped.
+#
+# `release` is a BOOLEAN and always has been. A caller who says config="Release" -- a spelling this
+# tool never had -- used to get silence: the unknown key was ignored, build.ps1's -Config defaulted
+# to Debug, and cmake was handed -DCMAKE_BUILD_TYPE=Debug for whatever tree build_dir named. Point
+# that at build-release and it does not just build the wrong thing, it RECONFIGURES the cache, so
+# every later build and every measurement taken from that tree is Debug until someone notices.
+# Nobody noticed for a whole session: an unoptimised binary is not slow enough to be obviously
+# wrong, and the tool's own output said "[build] OK -> build-release\bin", which is true and
+# useless. It also explains a Release-only compile error in modules/rhi.vulkan surviving unseen --
+# scripts/module-matrix.ps1 hard-codes CMAKE_BUILD_TYPE=Debug too, so nothing in this repo's normal
+# workflow produces an NDEBUG build at all.
+#
+# So: `config` is accepted as the string spelling, anything else is REFUSED by name, and the result
+# always reports the config and tree that were actually used. Same principle as aver_run's
+# binary_provenance -- a result that does not say what it did cannot be told from one that did the
+# wrong thing.
+_BUILD_KNOWN_ARGS = {"release", "config", "build_dir", "cmake_args", "target", "description"}
+_BUILD_CONFIGS = ("Debug", "Release", "RelWithDebInfo", "MinSizeRel")
+
 def tool_build(args):
-    release = bool(args.get("release"))
+    unknown = sorted(k for k in args if k not in _BUILD_KNOWN_ARGS)
+    if unknown:
+        return {"ok": False, "error": "unknown argument(s) %s -- this tool takes release (bool), "
+                                      "config (%s), build_dir, cmake_args. Refused rather than "
+                                      "ignored, because a dropped config silently builds Debug."
+                                      % (", ".join(unknown), "|".join(_BUILD_CONFIGS))}
+    config = args.get("config")
+    if config is not None:
+        match = [c for c in _BUILD_CONFIGS if c.lower() == str(config).lower()]
+        if not match:
+            return {"ok": False, "error": "config %r is not one of %s" % (config, ", ".join(_BUILD_CONFIGS))}
+        config = match[0]
+    elif args.get("release"):
+        config = "Release"
+    else:
+        config = "Debug"
     extra = args.get("cmake_args") or []
     build_dir = args.get("build_dir")
-    cmd = "./scripts/build.ps1"
-    if release:
-        cmd += " -Release"
+    cmd = "./scripts/build.ps1 -Config %s" % config
     if build_dir:
         cmd += ' -BuildDir "%s"' % build_dir
     for a in extra:
@@ -202,6 +235,8 @@ def tool_build(args):
     return {
         "ok": code == 0,
         "exit": code,
+        "config": config,
+        "build_dir": build_dir or ("build-release" if config != "Debug" else "build"),
         "status": tail[-1] if tail else "(no [build] line)",
         "errors": errors[:40],
         "warning_count": len(warnings),
@@ -241,6 +276,27 @@ _REFUSED_FLAGS = {
     "--headless": "pointless here -- a headless run cannot produce the screenshot this tool exists for",
 }
 
+# WHAT A RUN FROM HERE DOES *NOT* SEE: THE USER'S editor.ini.
+#
+# When this server is hosted inside a packaged (MSIX) app, every process it spawns inherits that
+# package identity, and Windows redirects %LOCALAPPDATA% for the whole subtree. Sandbox.exe then
+# reads and writes
+#     AppData/Local/Packages/<package>/LocalCache/Local/AverEngine/editor.ini
+# instead of AppData/Local/AverEngine/editor.ini -- a copy-on-write shadow of the real file.
+#
+# It is a nasty one because NOTHING LOOKS WRONG. The engine logs the unredirected path it asked
+# for ("[Prefs] 37 setting(s) from C:/Users/.../AppData/Local/AverEngine/editor.ini"), the key
+# count matches, and the shadow starts life as a byte-for-byte copy. It only diverges once the two
+# are edited apart -- and then a preference the user has set is simply absent from every run made
+# here, with no warning and no diff to notice.
+#
+# It cost an hour: a stored render scale that killed the editor on the user's machine could not be
+# reproduced through this tool, and the same binary with the same argv reproduced it instantly from
+# a shell. The shell is outside the package; this is not.
+#
+# SO: ANYTHING THAT DEPENDS ON A PERSISTED EDITOR PREFERENCE MUST BE RUN FROM A SHELL, not from
+# here. Flags are unaffected -- they are argv, and argv is not redirected -- which is why the gates,
+# which pass every setting they care about explicitly, are sound.
 def tool_run(args):
     frames = int(args.get("frames", 40))
     if frames <= 0:
@@ -295,7 +351,11 @@ def tool_run(args):
 
     grep = args.get("grep")
     matched = [l.strip() for l in lines if re.search(grep, l)] if grep else []
-    errors = [l.strip() for l in lines if "[ERROR" in l or "[FATAL" in l]
+    # Tags come from levelTag() in modules/core/src/Log.cpp, printed as "[TAG ] message".
+    # "[CRIT" was added when the Critical level was: without it, the one severity that means "this
+    # process may be about to die" was the only one that appeared in NO summary here -- it matched
+    # neither the error nor the warning pattern and vanished silently from every gate run.
+    errors = [l.strip() for l in lines if "[ERROR" in l or "[CRIT" in l or "[FATAL" in l]
     warns = [l.strip() for l in lines if "[WARN" in l]
 
     return {
@@ -531,7 +591,10 @@ TOOLS = [
                        "Ninja progress dropped. Optional Release, build_dir and extra CMake args (e.g. "
                        "-DAVER_MODULE_LANDSCAPE=OFF to check a configuration still builds).",
         "inputSchema": {"type": "object", "properties": {
-            "release": {"type": "boolean"},
+            "release": {"type": "boolean", "description": "shorthand for config Release"},
+            "config": {"type": "string", "enum": list(_BUILD_CONFIGS),
+                       "description": "CMAKE_BUILD_TYPE. Reconfigures the tree named by build_dir, "
+                                      "so naming the wrong one flips that tree for every later build."},
             "build_dir": {"type": "string"},
             "cmake_args": {"type": "array", "items": {"type": "string"}},
         }},

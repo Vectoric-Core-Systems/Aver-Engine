@@ -101,6 +101,56 @@ int main() {
             fmt::Avr1File junk;
             check(!fmt::parseAvr1(bad.data(), bad.size(), junk, &why), "truncated file refused");
         }
+        {
+            // A DIRECTORY OFFSET THAT WRAPS, which is the one shape a bounds check written as an
+            // addition cannot see. `dirOffset + chunkCount*40 > size` overflows for a dirOffset near
+            // 2^64: the sum lands on a small number, compares under `size`, and the directory Reader
+            // is then pointed at `bytes + dirOffset` -- far outside the mapping. Rearranging it to
+            // `dirOffset > size || chunkCount*40 > size - dirOffset` is what makes it visible.
+            //
+            // THE CRC HAS TO BE RECOMPUTED OR THIS TEST PASSES FOR THE WRONG REASON. parseAvr1
+            // checks the header CRC before it looks at any header field, so a naively corrupted
+            // dirOffset is refused as "header CRC mismatch" -- the assertion below would go green
+            // against the buggy bounds check too, which is worse than having no test at all. So this
+            // writes a *valid* file that happens to be hostile, exactly as a crafted one would be:
+            // the CRC is no defence here because it is computed over whatever the file says.
+            //
+            // Header layout, from writeAvr1: dirOffset is the u64 at 0x18, HeaderCrc the u32 at
+            // 0x3C, covering bytes 0x00..0x3B. FileSize (0x20) is left alone so the file-size check
+            // above still passes and execution actually reaches the bound under test.
+            std::vector<u8> bad = bytes;
+            // MUST EXCEED 2^64 - chunkCount*40, or it does not wrap and the buggy check catches
+            // it honestly. Two chunks * 40 = 80 bytes of directory, so 2^64-16 + 80 wraps to 64 --
+            // comfortably under the file size, which is what lets it sail through an addition.
+            // (A first attempt used 2^64-256, which sums to 2^64-176 and never wraps at all; the
+            // test passed against the bug until the fix was reverted and it kept passing.)
+            const u64 wrapping = 0xFFFFFFFFFFFFFFF0ull;
+            for (int i = 0; i < 8; ++i) bad[0x18 + usize(i)] = u8((wrapping >> (8 * i)) & 0xFF);
+
+            // CRC32C (Castagnoli), the same polynomial Avr1.cpp uses. Restated here rather than
+            // shared because that implementation lives in an anonymous namespace, and a test that
+            // reached into it would stop being a test of the file format.
+            u32 crc = 0xFFFFFFFFu;
+            for (usize i = 0; i < 60; ++i) {
+                crc ^= bad[i];
+                for (int k = 0; k < 8; ++k) crc = (crc & 1) ? (0x82F63B78u ^ (crc >> 1)) : (crc >> 1);
+            }
+            crc ^= 0xFFFFFFFFu;
+            for (int i = 0; i < 4; ++i) bad[0x3C + usize(i)] = u8((crc >> (8 * i)) & 0xFF);
+
+            // ASSERT THE REASON, NOT JUST THE BOOLEAN, and this is the whole point of the test.
+            // With the wrapping check in place the parse still FAILS -- just later and by accident,
+            // when the directory Reader walks off its own end and reports a truncated entry. A test
+            // that only asserted !parseAvr1 went green against the bug it was written to catch,
+            // which was verified by reverting the fix and watching it pass. The bound under test is
+            // the one that names the directory, so that is what has to be checked.
+            fmt::Avr1File junk;
+            why.clear();
+            const bool refused = !fmt::parseAvr1(bad.data(), bad.size(), junk, &why);
+            check(refused, "a chunk-directory offset that WRAPS is refused");
+            check(why.find("chunk directory runs past the end") != std::string::npos,
+                  "...by the directory bound itself, not incidentally by the Reader downstream: " + why);
+        }
     }
 
     AVER_INFO("=== string table ===");

@@ -1031,7 +1031,7 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
 
     // -- OUTPUT: the one sink a material graph has. NO OUTPUT PINS AT ALL -- nothing ever reads a
     //    MaterialOutput, by construction, since it is where the backward walk that reads everything
-    //    else in the graph starts. AND NO DEFAULT VALUE ON ANY OF ITS EIGHT INPUTS -- that emptiness
+    //    else in the graph starts. AND NO DEFAULT VALUE ON ANY OF ITS TWELVE INPUTS -- that emptiness
     //    is load-bearing, not an oversight: compileMaterialGraph treats an input as DRIVEN when it is
     //    linked OR carries a NON-EMPTY literal, so a default here would make a freshly spawned
     //    MaterialOutput drive all eight fields the moment it exists, destroying the partial-graph
@@ -1043,7 +1043,24 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"MaterialOutput", "Material Output", "Output", {
         pin("BaseColor", "float3", false), pin("Metallic", "float", false), pin("Roughness", "float", false),
         pin("Normal", "float3", false), pin("Emissive", "float3", false), pin("Occlusion", "float", false),
-        pin("Opacity", "float", false), pin("AlphaCutoff", "float", false)},
+        pin("Opacity", "float", false), pin("AlphaCutoff", "float", false),
+        // Subsurface, and the reason it is worth a pin rather than only a material constant: the
+        // scalar in the .ocmat is one number for a whole object, while the thing that actually makes
+        // subsurface read correctly is a MASK -- thin parts of a mesh scatter more than thick ones.
+        // Driving SubsurfaceRadius from a texture is the difference between a uniformly waxy object
+        // and one whose ears and fingers light up. Same no-default rule as every pin above.
+        pin("SubsurfaceWeight", "float", false), pin("SubsurfaceRadius", "float", false),
+        // The dielectric pair. Driving Transmission from a mask is one mesh that is a clear window
+        // with a frosted band, or a bottle with an opaque label, instead of two meshes and two
+        // materials. Ior is per-pixel for the same reason, though it moves far less often.
+        pin("Ior", "float", false), pin("Transmission", "float", false),
+        // The coat, and this is where a coat stops being three numbers and starts being a surface:
+        // a weight mask makes one material polished where an object is handled and bare where it is
+        // worn, and a roughness mask puts a clear panel and a scuffed edge on the same car-paint
+        // material. Present whether or not the layered BSDF is compiled in -- AverAuthored carries
+        // the fields unconditionally so a graph does not stop compiling when the setting changes.
+        pin("CoatWeight", "float", false), pin("CoatRoughness", "float", false),
+        pin("CoatF0", "float", false)},
         {}, kDomainMaterial});
 
     return t;

@@ -47,6 +47,18 @@ MaterialConstants packMaterial(const MaterialDesc& d) {
     // 0 = no graph, which is the arm the generated averEvalMaterial's `default:` takes. See
     // MaterialDesc::graphId for why the DESCRIPTION carries a runtime-assigned number at all.
     c.graphId           = d.graphId;
+    c.ior               = d.ior;
+    c.transmission      = d.transmission;
+    c.subsurfaceWeight  = d.subsurfaceWeight;
+    c.subsurfaceRadius  = d.subsurfaceRadius;
+    c.coatWeight        = d.coatWeight;
+    c.coatRoughness     = d.coatRoughness;
+    c.coatF0            = d.coatF0;
+    c._coatPad          = 0.0f;   // assigned, not left to the {} above -- see the note below
+    // The two floats above are what _pad0/_pad1 used to be. The struct carries no padding now, so
+    // every one of its members is assigned here rather than some being left at the zero the
+    // `MaterialConstants c{};` above gives them -- if a field is ever added back without a line in
+    // this function, it ships as a silent zero.
 
     u32 flags = 0;
     for (u32 i = 0; i < kTextureSlotCount; ++i)
@@ -60,6 +72,24 @@ MaterialConstants packMaterial(const MaterialDesc& d) {
                                   MaterialFlag_Layer1NormalMap)))
         flags |= MaterialFlag_SlopeBlend;
     if (d.uvMode == UvMode::WorldAligned) flags |= MaterialFlag_WorldAlignedUv;
+    // POSITIVE sense (set when it DOES cast), so a material packed before this bit existed -- every
+    // one of them, with a zero in bit 13 -- would read as "casts nothing" if the sense were
+    // inverted. castShadow defaults to true, so the positive spelling is the one that agrees with
+    // the default for anything that predates the flag.
+    if (d.castShadow) flags |= MaterialFlag_CastShadow;
+    // Keyed on the WEIGHT alone: a radius with no weight scatters nothing, and letting it set the
+    // flag would pay for the shader's subsurface branch to compute a zero.
+    if (d.subsurfaceWeight > 0.0f) flags |= MaterialFlag_Subsurface;
+    // Same reasoning as subsurface above: the WEIGHT alone decides. A coat roughness or F0 with no
+    // weight coats nothing, and letting either set the flag would pay for the lobe to compute zero.
+    if (d.coatWeight > 0.0f) flags |= MaterialFlag_Coat;
+
+    // EVERY SLOT UNBOUND UNTIL SOMETHING RESIDENT-IFIES IT. packMaterial works from a MaterialDesc
+    // alone and has no idea where (or whether) a texture landed in the ray path's bindless table --
+    // that is the renderer's business, and it fills these in when it uploads the RT material table.
+    // Defaulting them here means a material that never reaches that path still carries a defined
+    // "no texture" rather than an index into whatever happened to be at 0.
+    for (u32 i = 0; i < kTextureSlotCount; ++i) c.texIndex[i] = kUnboundTexture;
     c.flags = flags;
 
     // Reciprocal once per upload rather than per pixel. A tiling of zero or less collapses to zero

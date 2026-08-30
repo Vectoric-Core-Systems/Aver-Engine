@@ -9,6 +9,8 @@ C:\Users\User\Documents\
 ├── Aver Engine\                 ← THE ENGINE (this repo). No game content lives here.
 │   ├── modules\  abi\  tools\  editor\  shaders\
 │   ├── sandbox\                 ← an engine SAMPLE, not a game project
+│   ├── templates\               ← starter templates the engine COPIES into a new project
+│   ├── test-content\            ← fixtures the suites open; miniature projects on purpose
 │   └── tests\                   ← format-conformance vectors only
 │
 └── Aver Projects\               ← projects root (sibling; never inside the engine)
@@ -118,3 +120,26 @@ AUTHOR OpenConstructor Team
 - Tools (Rust cookers, C# editor) operate on a *project path*, not the engine tree.
 - The `sandbox/` app stays in the engine only because it's an engine-development sample
   with no game content — the moment real content exists, it belongs in a project.
+
+## How the separation is kept — `SeparationTest`
+
+Everything above is a claim about the tree, and a claim about a tree drifts. `tests/repo/`
+builds **`SeparationTest`**, which runs with the ordinary suite sweep and decides it by
+reading the source rather than trusting it:
+
+- **No game asset outside a sanctioned root.** Any `.ocmap`/`.ocmesh`/`.ocmat`/`.ocgraph`/…
+  must be under `templates/`, `test-content/`, `content/` or the managed graph fixtures.
+- **No `.ocproject` outside `test-content/`.** A manifest in the tree is the strongest form
+  of the same defect: it puts a whole *project* in the engine.
+- **Only `sandbox/src/ProjectBrowser.cpp` may know where projects live.** It is the screen
+  that asks the user to pick one, so it carries `documentsDir() + "\\Aver Projects"` and the
+  example path. No other engine source may bake in an absolute path or name that folder.
+
+Comments are lexed away first, on purpose. Around ninety comments in the tree name a
+project — "measured on ElectricDreams at 2750×1639" — and that is where a *measurement*
+came from, which is worth keeping. Only string literals are searched, because a literal is
+something the engine can act on.
+
+All three rules were confirmed by planting a violation and watching each one fail, and its
+own vacuity guards fail if `ProjectBrowser.cpp` ever stops carrying the convention — so the
+checks cannot go green by having nothing left to look at.
