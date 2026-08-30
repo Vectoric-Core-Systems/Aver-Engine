@@ -16,6 +16,23 @@ bool g_started = false;
 std::unordered_map<std::string, aver::audio::SoundHandle> g_byPath;
 std::unordered_map<aver::audio::SoundHandle, std::string> g_paths;
 
+// THE MACROS AND THE ENUM, PINNED. audio::Bus (Sound.hpp) and the AVER_AUDIO_BUS_* constants
+// (audio_abi.h) are the same four values written twice, and busOf below folds anything it does not
+// recognise into Sfx -- deliberately, because an ABI must not trust its caller, but it means a DRIFT
+// between these two lists cannot announce itself. Reorder the enum without editing the macros and
+// every managed SetBusVolume(1, ...) meant for Music keeps compiling and starts moving whatever
+// landed in that slot, with no error anywhere.
+//
+// This file is the one translation unit that includes both, so the check costs nothing and lives
+// where a change to either would be compiled.
+static_assert(AVER_AUDIO_BUS_SFX   == static_cast<int32_t>(aver::audio::Bus::Sfx),   "audio_abi.h mirrors audio::Bus");
+static_assert(AVER_AUDIO_BUS_MUSIC == static_cast<int32_t>(aver::audio::Bus::Music), "audio_abi.h mirrors audio::Bus");
+static_assert(AVER_AUDIO_BUS_VOICE == static_cast<int32_t>(aver::audio::Bus::Voice), "audio_abi.h mirrors audio::Bus");
+static_assert(AVER_AUDIO_BUS_UI    == static_cast<int32_t>(aver::audio::Bus::Ui), "audio_abi.h mirrors audio::Bus");
+// The count is pinned too, so ADDING a bus to the enum without adding its macro fails here rather
+// than silently routing the new bus to Sfx.
+static_assert(static_cast<int32_t>(aver::audio::Bus::Count) == 4, "a new bus needs an AVER_AUDIO_BUS_* macro and a busOf case");
+
 // Maps an AVER_AUDIO_BUS_* constant to a Bus. Anything unknown is Sfx.
 aver::audio::Bus busOf(int32_t b) {
     switch (b) {
