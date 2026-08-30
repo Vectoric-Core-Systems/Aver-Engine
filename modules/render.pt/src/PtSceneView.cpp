@@ -566,6 +566,44 @@ void PtSceneView::prePass(rhi::IRenderContext& ctx) {
         haveCam_ = true;
         sampleCursor_ = 0;
         convergedLogged_ = false;
+        if (!camResetLogged_) { camResetLogged_ = true;
+            AVER_INFO("[PT] scene view: accumulation restarted (camera or scene changed)"); }
+    }
+
+    // ---- 2b. HAS THE LIGHTING CHANGED? Nothing asked this until now. ----
+    //
+    // accumulate() packs only the CAMERA into its constants; the lighting reaches the integrator
+    // through the shared per-frame block inside the shader (ptEnvironment -> skyColor, and
+    // gLightDir for the sun). So a sun that moves mid-accumulation silently blends old-lighting and
+    // new-lighting samples into one running mean -- no reset, no warning, and an image that is a
+    // time-average of two different times of day while claiming to be a reference.
+    //
+    // THE RECIPE IS VoxiRenderer::giSnapshotUnchanged'S, DELIBERATELY, including both traps it
+    // already paid for:
+    //   ZERO-INITIALISE THEN COPY-ASSIGN. skyAtmosphere() returns by value and SkyAtmosphere opens
+    //   with a bool followed by padding; memcmp on a raw returned copy compares that padding, which
+    //   is unspecified, and the comparison then fails every single time.
+    //   CLOUDTIME IS A CLOCK. It counts accumulated seconds, so it differs on every tick by
+    //   construction; left in, this would reset the accumulator every frame and convergence would
+    //   never be reached.
+    // Comparing the remaining BYTES rather than a chosen field list is what keeps this correct when
+    // a field is added to SkyAtmosphere later.
+    if (dev_) {
+        rhi::SkyAtmosphere nowSky{};
+        nowSky = dev_->skyAtmosphere();
+        rhi::SkyAtmosphere wasSky{};
+        wasSky = sky_;
+        nowSky.cloudTime = wasSky.cloudTime = 0.0f;
+        if (!haveSky_ || std::memcmp(&nowSky, &wasSky, sizeof(nowSky)) != 0) {
+            const bool first = !haveSky_;
+            sky_ = dev_->skyAtmosphere();
+            haveSky_ = true;
+            if (!first) {
+                sampleCursor_ = 0;
+                convergedLogged_ = false;
+                AVER_INFO("[PT] scene view: accumulation restarted (sun/sky changed)");
+            }
+        }
     }
 
     // ---- 3. accumulate one bounded step, unless this image has already converged ----
