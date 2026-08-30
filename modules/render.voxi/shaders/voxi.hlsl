@@ -1061,7 +1061,48 @@ float3 rtReflection(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, flo
     float3 direct = averSunRadiance() * saturate(dot(nWS, L)) * shadow / PI;
     float3 ambient = averSkyIrradiance(nWS) * gAmbient.r;
     hit = true;
-    return inst.albedo * (direct + ambient);
+
+    // WHAT THE REFLECTED SURFACE'S ALBEDO ACTUALLY IS.
+    //
+    // `inst.albedo` is the per-draw FLAT colour. Until the primary path started sampling textures
+    // that was at least consistent -- everything was flat. It is not consistent any more: a scene
+    // whose directly-viewed surfaces carry real base-colour maps, reflected as untextured Lambertian
+    // paint, is exactly the mismatch that reads as "the reflection is fake".
+    //
+    // Everything needed is already here: the hit resolved inst.materialIndex, gRtMaterials is bound,
+    // the barycentrics and the three vertices are in hand, and averRtSurfaceUV/averRtSampleSlot are
+    // the same helpers the primary hit uses -- so a reflected surface and a directly-viewed one
+    // resolve their UV the same way, world-aligned materials included.
+    float3 reflAlbedo = inst.albedo;
+#ifdef AVER_RT_BINDLESS
+    {
+        const RtMaterial rmat = gRtMaterials[inst.materialIndex];
+        const float2 meshUV = gRtVerts[i0].uv * w.x + gRtVerts[i1].uv * w.y + gRtVerts[i2].uv * w.z;
+        const float2 ruv    = averRtSurfaceUV(rmat, inst, hitPos, nWS, meshUV);
+
+        // A CONE FOOTPRINT, NOT MIP 0. Zero gradients degrade to SampleLevel(0), and mip-0 sampling
+        // in this pass was measured as a THROUGHPUT problem, not merely a quality one -- proper mip
+        // selection took the whole frame 11.96 -> 8.14 ms on ElectricDreams. A reflection ray has no
+        // screen derivatives at all, but it does have a cone: the lobe half-angle is tanCone and the
+        // ray travelled CommittedRayT, so the footprint on the hit surface is their product. Rougher
+        // reflections therefore read wider mips, which is free denoising rather than a compromise.
+        const float  rad = max(tanCone, 1e-3) * q.CommittedRayT();
+        // The same up-vector trick this function already uses to build its cone basis a few dozen
+        // lines up, applied to the hit normal instead of R. Two orthogonal in-plane directions are
+        // all averRtUvGrad needs -- it projects them through the surface's own position-to-UV map.
+        const float3 rup = abs(nWS.z) < 0.9 ? float3(0, 0, 1) : float3(1, 0, 0);
+        const float3 rt  = normalize(cross(rup, nWS));
+        const float3 rb  = cross(nWS, rt);
+        float2 rgx, rgy;
+        averRtUvGrad(rmat, inst, nWS,
+                     gRtVerts[i0].pos, gRtVerts[i1].pos, gRtVerts[i2].pos,
+                     gRtVerts[i0].uv,  gRtVerts[i1].uv,  gRtVerts[i2].uv,
+                     rt * rad, rb * rad, rgx, rgy);
+        reflAlbedo *= averRtSampleSlot(rmat, 0, ruv, rgx, rgy, float4(1, 1, 1, 1)).rgb
+                    * rmat.baseColorFactor.rgb;
+    }
+#endif
+    return reflAlbedo * (direct + ambient);
 }
 
 // Reprojects wpos through LAST frame's camera to sample the reflection history there. False when
