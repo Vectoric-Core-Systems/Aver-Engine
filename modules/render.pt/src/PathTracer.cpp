@@ -7,6 +7,7 @@
 #include "PtShaders.hpp"
 
 #include <cstring>
+#include "aver/rhi/ShaderFiles.hpp"   // this pass's HLSL is a deployed file
 
 namespace aver::pt {
 
@@ -49,7 +50,7 @@ constexpr u32 kRayTracingTier = 11;
 // only on hardware that would also support bindless. That is a coincidence of GPU generations, not
 // an invariant this file enforces.
 
-// MIRRORS cbuffer PtFrame in kPathTracerHLSL, field for field. A shifted field here reads a camera
+// MIRRORS cbuffer PtFrame in rhi::shaderFile("pt_pathtrace.hlsl").c_str(), field for field. A shifted field here reads a camera
 // basis as a sample count -- silently, and only in the rendered image.
 struct FrameCB {
     f32 origin[4];
@@ -90,7 +91,7 @@ bool PathTracer::init(rhi::IDevice& dev) {
     }
 
     rhi::ShaderDesc sd;
-    sd.source  = kPathTracerHLSL;
+    sd.source  = rhi::shaderFile("pt_pathtrace.hlsl").c_str();
     // The engine's own declarations, which is where PI, skyColor and the averFurnace* contract come
     // from. Taking the environment from the shipped prelude rather than a private constant is what
     // makes the furnace a measurement of the engine and not of a test rig.
