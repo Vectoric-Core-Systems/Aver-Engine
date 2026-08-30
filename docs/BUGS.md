@@ -542,6 +542,12 @@ buffer.
 - **`Win32DirectoryWatcher.cpp:148`** — the worker exited on three failure paths without recording
   anything, and `watching()` tests only that the backend object exists. Hot reload stopped silently
   for the rest of the session. **The backend now reports `died()` and `watching()` honours it.**
+  *(2026-08-30: that fix covered ONE of the three. The wait-failure exit and the generic
+  overlapped-read-failure exit both still left the loop with `died_` untouched, so `watching()` kept
+  answering true for a dead worker — the exact thing `died()` exists to prevent, still live in two
+  of the three places its own comment named. Every exit now goes through one `noteExit()` that
+  decides by asking whether a stop was actually requested. Reachable from a test at last via
+  `AVER_WATCHER_KILL_AFTER`, and `WatcherTest` fails without the fix.)*
 - **`McpBridge.cpp:528`** — every `abi` command ran its dispatcher twice, once in `pump()` and again
   in the host's apply callback, while the reply described only the first. **No longer forwarded.**
 - **`McpBridge.cpp:482`** — `stop()` closed the listener but not the accepted connection, which was a

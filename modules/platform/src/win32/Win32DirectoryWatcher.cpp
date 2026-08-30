@@ -135,6 +135,45 @@ private:
     // Waits 50 ms. Returns false if a stop was requested while throttling.
     bool throttle() { return WaitForSingleObject(stop_, 50) == WAIT_TIMEOUT; }
 
+    // Has a stop actually been asked for? This is what separates a deliberate shutdown from a
+    // failure, and every abnormal exit below is judged by it rather than by which branch it is in.
+    bool stopRequested() const { return stop_ && WaitForSingleObject(stop_, 0) == WAIT_OBJECT_0; }
+
+    // ONE PLACE THAT DECIDES A WATCH IS DEAD, called on EVERY path out of the loop.
+    //
+    // The loop used to set died_ on exactly one of its several exits -- the one where
+    // ReadDirectoryChangesW itself refused to be issued -- and left the loop silently on the
+    // others. died()'s own contract in WatchBackend.hpp names the consequence precisely: "WITHOUT
+    // THIS A DEAD WATCHER IS INDISTINGUISHABLE FROM A QUIET ONE". watching() would keep answering
+    // true, so the caller's `if (!watching()) start()` re-arm never fires, drain() keeps returning
+    // an empty queue, and hot reload is over for the session with nothing said.
+    //
+    // Routing every exit through here means a new exit added later cannot forget: the only way to
+    // leave without recording is to not call this, which is now visibly the odd one out.
+    void noteExit(const char* why) {
+        if (stopRequested()) return;   // asked for; not a death
+        died_.store(true, std::memory_order_release);
+        AVER_WARN("[Watcher] '{}' stopped watching: {}. Hot reload is over for this session unless "
+                  "the caller re-arms.", root_, why);
+    }
+
+    // TEST-ONLY: leave the worker loop through a failure exit after N completed batches.
+    //
+    // The abnormal exits below are all real I/O failures -- a handle yanked away, a wait that fails
+    // -- and there is no way to provoke one from a test against a real directory. That is exactly
+    // why they were wrong for so long: nothing could reach them. This is the same reasoning the
+    // engine already applies with --crash-test and --device-lost-at, which exist to drive paths
+    // nothing else can. Off unless the variable is set, so a shipped build never reads it twice.
+    // READ PER BACKEND, NOT ONCE PER PROCESS. A function-local static would be initialised by
+    // whichever watcher happened to start first and then answer for every later one -- which is
+    // exactly how the first version of this hook silently did nothing, because the test sets the
+    // variable after an earlier watcher in the same process has already run.
+    static int killAfterBatches() {
+        usize len = 0; char buf[16]{};
+        if (getenv_s(&len, buf, sizeof(buf), "AVER_WATCHER_KILL_AFTER") != 0 || len == 0) return 0;
+        return atoi(buf);
+    }
+
     // Worker loop: issues reads, waits, and parses each completed batch until stopped.
     void run() {
         bool armedOnce = false;
@@ -164,22 +203,30 @@ private:
             HANDLE waits[2] = {overlapped_.hEvent, stop_};
             const DWORD w = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
             if (w != WAIT_OBJECT_0) {
+                // THIS BRANCH COVERS TWO VERY DIFFERENT THINGS and used to treat them the same:
+                // w == WAIT_OBJECT_0 + 1 is the stop event, the ordinary shutdown; WAIT_FAILED is a
+                // real failure. Both exited here without a word. noteExit tells them apart by
+                // asking whether a stop was actually requested.
                 CancelIoEx(dir_, &overlapped_);
                 DWORD ignored = 0;
                 GetOverlappedResult(dir_, &overlapped_, &ignored, TRUE);
+                noteExit(w == WAIT_FAILED ? "the change wait failed" : "the wait ended unexpectedly");
                 break;
             }
 
             DWORD bytes = 0;
             if (!GetOverlappedResult(dir_, &overlapped_, &bytes, FALSE)) {
                 const DWORD err = GetLastError();
-                if (err == ERROR_OPERATION_ABORTED) break;
+                // ABORTED is what CancelIoEx produces during shutdown, so it is usually not a death
+                // -- but it is only "usually", and noteExit is what decides, not this branch.
+                if (err == ERROR_OPERATION_ABORTED) { noteExit("the read was aborted"); break; }
                 if (err == ERROR_NOTIFY_ENUM_DIR) {
                     flagOverflow("the OS notification buffer overflowed");
-                    if (!throttle()) break;
+                    if (!throttle()) break;   // stop requested during the throttle; not a death
                     continue;
                 }
-                AVER_WARN("[Watcher] overlapped read failed ({}); watch stopped", (u32)err);
+                AVER_WARN("[Watcher] overlapped read failed ({})", (u32)err);
+                noteExit("an overlapped read failed");
                 break;
             }
 
@@ -187,6 +234,16 @@ private:
             if (bytes == 0) { flagOverflow("the OS returned an empty change buffer"); continue; }
 
             parse(bytes);
+
+            // TEST-ONLY, and deliberately placed so it leaves through the SAME break an overlapped
+            // read failure takes -- a hook that exited by its own private route would prove nothing
+            // about the route that actually matters.
+            if (const int kill = killAfterBatches(); kill > 0 && ++batches_ >= kill) {
+                AVER_WARN("[Watcher] AVER_WATCHER_KILL_AFTER={}: leaving the worker loop as a failed "
+                          "overlapped read would", kill);
+                noteExit("a simulated overlapped-read failure");
+                break;
+            }
         }
     }
 
@@ -248,6 +305,7 @@ private:
     std::vector<DWORD> buffer_;
     std::string root_;
     bool recursive_ = true;
+    int  batches_ = 0;       // completed batches, for the test hook only
     std::thread thread_;
 
     std::mutex mutex_;

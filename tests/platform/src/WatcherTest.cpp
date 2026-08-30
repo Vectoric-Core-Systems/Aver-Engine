@@ -205,6 +205,42 @@ int main() {
         check(findFor(third, "session.hlsl") != nullptr, "and so is the THIRD");
     }
 
+    // A WORKER THAT DIES MUST STOP CLAIMING TO WATCH. died()'s own contract says so in as many
+    // words: "WITHOUT THIS A DEAD WATCHER IS INDISTINGUISHABLE FROM A QUIET ONE", and it names the
+    // consequence -- hot reload stops silently for the rest of the session, because
+    // DirectoryWatcher::watching() is what the caller re-arms on.
+    //
+    // The abnormal exits are real I/O failures and no test against a real directory can provoke
+    // one, which is precisely why some of them stayed wrong: nothing could reach them.
+    // AVER_WATCHER_KILL_AFTER makes the worker leave through the same break a failed overlapped
+    // read takes. Same idea as --crash-test and --device-lost-at elsewhere in this engine.
+    {
+        _putenv_s("AVER_WATCHER_KILL_AFTER", "1");
+        // OUTSIDE `root`, not a subdirectory of it. AVER_WATCHER_KILL_AFTER is read from the
+        // environment, so it applies to every watcher in this process -- and `w` above is watching
+        // `root` RECURSIVELY, so a write inside it would give `w` a batch too and kill that watcher
+        // as a side effect of testing this one. Separate trees keep the two independent.
+        DirectoryWatcher dying;
+        const std::filesystem::path dyingRoot =
+            root.parent_path() / ("aver-watch-dying-" + std::to_string(static_cast<long>(AVER_TEST_PID)));
+        std::filesystem::remove_all(dyingRoot, ec);
+        std::filesystem::create_directories(dyingRoot, ec);
+        check(dying.start(dyingRoot.string()), "a second watcher starts on its own directory");
+        check(dying.watching(), "and reports that it is watching");
+
+        std::vector<FileEvent> evs;
+        write(dyingRoot / "trigger.txt", "// provoke one batch, then the worker leaves\n");
+        (void)drain(dying, evs, kSettleWaitMs);
+
+        check(!dying.watching(),
+              "a watcher whose worker died reports watching() == false, so the caller re-arms "
+              "instead of believing a corpse");
+        _putenv_s("AVER_WATCHER_KILL_AFTER", "");
+        check(w.watching(), "and the OTHER watcher, on its own tree, is untouched by that death");
+        dying.stop();
+        std::filesystem::remove_all(dyingRoot, ec);
+    }
+
     {
         w.stop();
         check(!w.watching(), "watching() is false after stop()");
