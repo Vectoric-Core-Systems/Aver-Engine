@@ -9,6 +9,7 @@
 // not compiled. See the honestState this session reports alongside this file for the specific
 // places that could not be checked any other way.
 #include "VulkanCommon.hpp"
+#include "aver/rhi/ShaderFiles.hpp"   // scene.hlsl is loaded, not compiled in
 #include "aver/rhi/vulkan/UiBackend.hpp"
 
 #include <cstdlib>
@@ -55,150 +56,21 @@ constexpr u32 kHistogramDownscale = 4;
 // PipelineLayout -- see that constant's own comment). -D'd into the AVER_MS block the same way.
 constexpr u32 kMeshSrvBase = 3;
 
-// ---- the backend's own scene/sky/line HLSL, mirroring D3D12Device.cpp's private kShaderHLSL ----
-// D3D12Device.cpp's copy is anonymous-namespace text with no external linkage anywhere this module
-// could reach, so this is a second, independently-owned copy of the SAME engine shading code (not
-// third-party content -- it is this repository's own rendering logic), kept identical so the two
-// backends render the same picture. If PSky's cloud march or PSLine's tonemap ever changes on the
-// D3D12 side, this copy needs the same edit; there is no way to share the string across the two
-// modules without a third one neither currently depends on, which is a bigger change than this
-// pass's scope.
-const char* kVulkanSceneHLSL = R"(
-float4 PSMainPlain(VSOut i) : SV_TARGET { return plainShadeSurface(i, 1.0, float3(0,0,0), 1.0); }
-
-float averHash13(float3 p) {
-    p = frac(p * 0.1031);
-    p += dot(p, p.yzx + 33.33);
-    return frac((p.x + p.y) * p.z);
-}
-float averValueNoise(float3 x) {
-    float3 i = floor(x);
-    float3 f = frac(x);
-    f = f * f * (3.0 - 2.0 * f);
-    float n000 = averHash13(i + float3(0,0,0)), n100 = averHash13(i + float3(1,0,0));
-    float n010 = averHash13(i + float3(0,1,0)), n110 = averHash13(i + float3(1,1,0));
-    float n001 = averHash13(i + float3(0,0,1)), n101 = averHash13(i + float3(1,0,1));
-    float n011 = averHash13(i + float3(0,1,1)), n111 = averHash13(i + float3(1,1,1));
-    return lerp(lerp(lerp(n000, n100, f.x), lerp(n010, n110, f.x), f.y),
-                lerp(lerp(n001, n101, f.x), lerp(n011, n111, f.x), f.y), f.z);
-}
-float averCloudSigma() {
-    const float kOpticalDepthAtFull = 9.0;
-    return gCloudParams.y * kOpticalDepthAtFull / max(gCloudParams.w - gCloudParams.z, 1.0);
-}
-float averCloudDensity(float3 wpos, bool detail) {
-    float bottom = gCloudParams.z, top = gCloudParams.w;
-    float h = saturate((wpos.z - bottom) / max(top - bottom, 1.0));
-    float shape = saturate(h * 4.0) * saturate((1.0 - h) * 1.6);
-    if (shape <= 0.001) return 0.0;
-    float3 p = (wpos + float3(gCloudMotion.xy, 0.0)) * gCloudMotion.z;
-    float cover = 1.0 - gCloudParams.x;
-    float nLow = averValueNoise(p * 0.41) * 0.25;
-    const float bestCase = nLow + (detail ? 0.9 : 0.75);
-    if (bestCase <= cover) return 0.0;
-    float n = averValueNoise(p) * 0.6 + nLow;
-    if (detail) n += averValueNoise(p * 3.17) * 0.3;
-    else        n += 0.15;
-    float d = saturate((n - cover) / max(1.0 - cover, 1e-3));
-    return d * shape;
-}
-float averHG(float ct, float g) {
-    float g2 = g * g;
-    return (1.0 - g2) / (4.0 * PI * pow(max(1.0 + g2 - 2.0 * g * ct, 1e-4), 1.5));
-}
-float4 averCloudLayer(float3 ro, float3 rd, float3 sunDir, float3 sunColour, out float outDist) {
-    outDist = 0.0;
-    if (gCloudMotion.w < 0.5) return float4(0, 0, 0, 1);
-    float bottom = gCloudParams.z, top = gCloudParams.w;
-    float t0, t1;
-    if (rd.z > 1e-4) {
-        if (ro.z > top) return float4(0, 0, 0, 1);
-        t0 = max((bottom - ro.z) / rd.z, 0.0);
-        t1 = (top - ro.z) / rd.z;
-    } else if (rd.z < -1e-4) {
-        if (ro.z < bottom) return float4(0, 0, 0, 1);
-        t0 = max((top - ro.z) / rd.z, 0.0);
-        t1 = (bottom - ro.z) / rd.z;
-    } else {
-        if (ro.z < bottom || ro.z > top) return float4(0, 0, 0, 1);
-        t0 = 0.0; t1 = (top - bottom) * 64.0;
-    }
-    const int kSteps = 16;
-    float featureSize = 1.0 / max(gCloudMotion.z, 1e-9);
-    t1 = min(t1, t0 + kSteps * featureSize * 0.35);
-    if (t1 <= t0) return float4(0, 0, 0, 1);
-    float dt = (t1 - t0) / kSteps;
-    float jitter = averHash13(rd * 811.7);
-    float t = t0 + dt * jitter;
-    float sigma = averCloudSigma();
-    float3 scattered = 0.0;
-    float transmittance = 1.0;
-    float phase = averHG(dot(rd, sunDir), 0.85);
-    float distWeight = 0.0;
-    float3 ambientTop = averAtmoOn() ? averSkyPhysical(float3(0, 0, 1)) : skyColorFull(float3(0, 0, 1));
-    [loop] for (int i = 0; i < kSteps; ++i) {
-        if (transmittance < 0.02) break;
-        float3 p = ro + rd * t;
-        float d = averCloudDensity(p, true);
-        if (d > 0.001) {
-            float lt = 0.0;
-            float lstep = (top - bottom) * 0.375;
-            [unroll] for (int j = 0; j < 2; ++j) {
-                float3 lp = p + sunDir * (lstep * (j + 0.5));
-                lt += averCloudDensity(lp, false) * lstep;
-            }
-            float sunT = exp(-lt * sigma);
-            float hN = saturate((p.z - bottom) / max(top - bottom, 1.0));
-            float3 lit = sunColour * sunT * phase * 0.6 + ambientTop * lerp(0.12, 0.55, hN * hN) * 3.0;
-            float stepT = exp(-d * dt * sigma);
-            float w = transmittance * (1.0 - stepT);
-            scattered += w * lit;
-            outDist += w * t;
-            distWeight += w;
-            transmittance *= stepT;
-        }
-        t += dt;
-    }
-    outDist = distWeight > 1e-6 ? outDist / distWeight : t0;
-    return float4(scattered, transmittance);
-}
-float4 PSky(SkyOut i) : SV_TARGET {
-    float4 far = mul(float4(i.ndc, 1.0, 1.0), gInvViewProj);
-    float3 ray = normalize(far.xyz / far.w - gCamPos.xyz);
-    float3 L = normalize(gLightDir.xyz);
-    float3 sky = averAtmoOn() ? averSkyPhysical(ray) : skyColor(ray);
-    float sd = saturate(dot(ray, L));
-    float3 sunC = srgbToLin(gLightColor.rgb) * gSkyParams.z;
-    float cosR = gSkyParams.w;
-    float disk = smoothstep(cosR - 0.0004, cosR + 0.0002, sd);
-    sky += sunC * disk * 14.0;
-    if (!averAtmoOn()) sky += sunC * pow(sd, 12.0) * 0.30;
-    float cloudDist;
-    float4 cloud = averCloudLayer(gCamPos.xyz, ray, L, sunC, cloudDist);
-    if (averAtmoOn() && cloud.a < 0.999) {
-        float3 aerialT;
-        float3 aerialIn = averAtmoAerial(gCamPos.xyz + ray * cloudDist, aerialT);
-        cloud.rgb = cloud.rgb * aerialT + aerialIn * (1.0 - cloud.a);
-    }
-    sky = sky * cloud.a + cloud.rgb;
-    return float4(sky, 1.0);
-}
-struct LVSIn  { float3 pos : POSITION; float3 col : COLOR; };
-struct LVSOut { float4 pos : SV_POSITION; float3 col : COLOR; };
-LVSOut VSLine(LVSIn i) {
-    LVSOut o;
-    float4 wp = mul(float4(i.pos, 1.0), gWorld);
-    o.pos = mul(wp, gViewProj);
-    o.col = i.col;
-    return o;
-}
-float4 PSLine(LVSOut i) : SV_TARGET { return float4(averInverseTonemap(srgbToLin(i.col)), 1.0); }
-)";
+// The scene/sky/line shading now lives in modules/rhi/shaders/scene.hlsl, loaded through
+// rhi::shaderFile() and shared by both backends -- see that file for why it stopped being two
+// hand-synced copies.
 
 // The prelude and this backend's own shaders, joined once. Vulkan-side twin of D3D12Device.cpp's
 // sceneShaderSource().
+// Keyed on shaderFileRevision() for the reason D3D12's twin states: a plain static made hot reload
+// recompile stale text forever.
 const std::string& sceneShaderSource() {
-    static const std::string src = std::string(sharedShaderPrelude()) + kVulkanSceneHLSL;
+    static std::string src;
+    static u64 built = ~0ull;
+    if (built != shaderFileRevision()) {
+        src = std::string(sharedShaderPrelude()) + shaderFile("scene.hlsl");
+        built = shaderFileRevision();
+    }
     return src;
 }
 
