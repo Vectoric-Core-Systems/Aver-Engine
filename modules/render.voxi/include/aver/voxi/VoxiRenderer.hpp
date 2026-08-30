@@ -701,6 +701,24 @@ private:
     // comment. This tracker is the ready-to-connect other half; wiring it is the next build's job,
     // gated on that coordinated ABI change landing in VoxiShaders.hpp.
     //
+    // OFF UNTIL SOMETHING READS IT, and this is the switch the comment above means by "wiring it is
+    // the next build's job". Every map operation below runs once per draw per frame to produce
+    // rtInstancePrevWorld_, which -- as that comment states plainly -- is never bound to a
+    // descriptor. A repo-wide grep agrees: the only read of the vector is `.size()` in the one-time
+    // memory log. So the whole tracker is, today, work whose sole output is discarded.
+    //
+    // A CONSTANT RATHER THAN A DELETION, deliberately. This is not dead code that nobody meant; it is
+    // a carefully reasoned half of a feature whose other half needs a coordinated RtInstance ABI
+    // change that another agent owns. Deleting it would throw away the population gate, the ordinal
+    // scheme and the two-map swap, all of which are correct and all of which would have to be
+    // rediscovered. Flipping this to true is step one of finishing the job; until then the compiler
+    // removes the cost entirely.
+    //
+    // MEASURE BEFORE BELIEVING IT MATTERS: on PTTest (20 entities) the frame is GPU-bound with the
+    // CPU scene walk at 0.0 ms, so this buys nothing there. It is a per-draw cost, so what it is
+    // worth scales with the draw count, not with this scene.
+    static constexpr bool kTrackPrevTransforms = false;
+
     // Groups by (mesh, drawBinding). FNV-1a, matching giDrawsKey()/buildGeometryTable's own mixing
     // constants so a reader who already knows those two recognises the recipe rather than learning a
     // third one.

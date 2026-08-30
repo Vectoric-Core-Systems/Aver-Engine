@@ -902,11 +902,13 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     // change to the identity scheme -- the two questions ("does this instance have geometry to trace
     // yet" and "did the SET of instances submitted this build change") are independent, and only the
     // second is what the trust gate below needs to answer.
-    prevGroupCountThisBuild_.clear();
-    prevGroupOrdinal_.clear();
-    nextTransformByKey_.clear();
-    for (const Draw& d : drawsPrev_)
-        ++prevGroupCountThisBuild_[prevTransformGroupKey(d.mesh, d.matSet)];
+    if constexpr (kTrackPrevTransforms) {
+        prevGroupCountThisBuild_.clear();
+        prevGroupOrdinal_.clear();
+        nextTransformByKey_.clear();
+        for (const Draw& d : drawsPrev_)
+            ++prevGroupCountThisBuild_[prevTransformGroupKey(d.mesh, d.matSet)];
+    }
 
     for (const Draw& d : drawsPrev_) {
         // ---- previous-transform tracking, pass 2: this draw's ordinal within its group ----
@@ -915,9 +917,12 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
         // different things depending on which pass is asking. Only the STORE below (after the BLAS
         // check) is conditional on survival, so rtInstancePrevWorld_ lines up index-for-index with
         // rtInstanceData_ the same way rtInstanceMesh_ already does.
-        const u64 prevGroupKey = prevTransformGroupKey(d.mesh, d.matSet);
-        const u32 prevOrdinal  = prevGroupOrdinal_[prevGroupKey]++;
-        u64 prevInstKey = prevGroupKey ^ static_cast<u64>(prevOrdinal);
+        u64 prevGroupKey = 0, prevInstKey = 0;
+        if constexpr (kTrackPrevTransforms) {
+            prevGroupKey = prevTransformGroupKey(d.mesh, d.matSet);
+            const u32 prevOrdinal = prevGroupOrdinal_[prevGroupKey]++;
+            prevInstKey = prevGroupKey ^ static_cast<u64>(prevOrdinal);
+        }
         prevInstKey *= 1099511628211ull;
 
         auto it = blas_.find(d.mesh);
@@ -1073,35 +1078,41 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
         // new key" and "group population changed" fall through to the identical else branch: this
         // instance's OWN current transform reported back as "previous", i.e. the honest zero-velocity
         // answer for either an instance that did not exist last build or one that was merely skipped.
-        const auto lastCountIt = prevGroupCountLastBuild_.find(prevGroupKey);
-        const bool trustGroup = lastCountIt != prevGroupCountLastBuild_.end() &&
-                                lastCountIt->second == prevGroupCountThisBuild_[prevGroupKey];
-        std::array<f32, 16> prevWorld;
-        const auto foundIt = trustGroup ? prevTransformByKey_.find(prevInstKey)
-                                         : prevTransformByKey_.end();
-        if (foundIt != prevTransformByKey_.end()) {
-            prevWorld = foundIt->second;
-        } else {
-            std::memcpy(prevWorld.data(), d.world, sizeof(prevWorld));
+        if constexpr (kTrackPrevTransforms) {
+            const auto lastCountIt = prevGroupCountLastBuild_.find(prevGroupKey);
+            const bool trustGroup = lastCountIt != prevGroupCountLastBuild_.end() &&
+                                    lastCountIt->second == prevGroupCountThisBuild_[prevGroupKey];
+            std::array<f32, 16> prevWorld;
+            const auto foundIt = trustGroup ? prevTransformByKey_.find(prevInstKey)
+                                             : prevTransformByKey_.end();
+            if (foundIt != prevTransformByKey_.end()) {
+                prevWorld = foundIt->second;
+            } else {
+                std::memcpy(prevWorld.data(), d.world, sizeof(prevWorld));
+            }
+            rtInstancePrevWorld_.push_back(prevWorld);
         }
-        rtInstancePrevWorld_.push_back(prevWorld);
 
         // This build's OWN transform becomes "last build's answer" the next time this key is seen --
         // staged into nextTransformByKey_ now, swapped into prevTransformByKey_ whole once the loop
         // finishes (see below), never written in place: an instance dropped from the scene between
         // builds must not leave its old transform sitting under a key some unrelated later instance
         // could reuse.
-        std::array<f32, 16> curWorld;
-        std::memcpy(curWorld.data(), d.world, sizeof(curWorld));
-        nextTransformByKey_[prevInstKey] = curWorld;
+        if constexpr (kTrackPrevTransforms) {
+            std::array<f32, 16> curWorld;
+            std::memcpy(curWorld.data(), d.world, sizeof(curWorld));
+            nextTransformByKey_[prevInstKey] = curWorld;
+        }
     }
     // Commits this build's previous-transform bookkeeping so the NEXT build compares against it --
     // done here, unconditionally, whether or not any instance actually survived the BLAS filter
     // below. A build where nothing survived (inst empty) correctly clears both maps to empty rather
     // than leaving a stale generation behind: there is nothing left to remember a "previous" answer
     // for, and an empty map is the honest state to resync from whenever something reappears.
-    prevGroupCountLastBuild_ = std::move(prevGroupCountThisBuild_);
-    prevTransformByKey_ = std::move(nextTransformByKey_);
+    if constexpr (kTrackPrevTransforms) {
+        prevGroupCountLastBuild_ = std::move(prevGroupCountThisBuild_);
+        prevTransformByKey_ = std::move(nextTransformByKey_);
+    }
 
     // The memory-cost report (task item 3), said ONCE and sized from the REAL instance count this
     // build actually reached rather than a number that will drift the moment kMaxDraws or the
