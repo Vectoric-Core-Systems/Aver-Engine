@@ -142,6 +142,7 @@ StructuredBuffer<RtInstance> gRtInstances : register(t5);
 #endif
 Texture2D gRtTextures[AVER_RT_TEX_CAPACITY] : register(t0, space1);
 #define AVER_TEX_UNBOUND 0xFFFFFFFFu
+
 #endif
 
 struct RtMaterial {
@@ -182,6 +183,117 @@ struct RtMaterial {
     // texture in this slot" -- not 0, which is a real index. Unread until the bindless table lands.
     uint   texIndex[8];
 };
+
+#ifdef AVER_RT_BINDLESS
+// One material map at a ray hit, or `fallback` where the material bound nothing.
+//
+// SampleLevel, NEVER Sample, and this is not a preference. A pixel shader's implicit derivatives
+// describe how the SCREEN coordinate changes between neighbouring pixels; in a fullscreen ray pass
+// the neighbour may have hit a different triangle, a different object, or nothing. The derivative is
+// meaningless there and the mip it picks is garbage at every silhouette. Mip 0 aliases in the
+// distance -- wrong, but wrong PREDICTABLY -- and ray-differential SampleGrad is a later stage.
+//
+// NonUniformResourceIndex because neighbouring pixels genuinely hit different materials. Without it
+// the hardware may broadcast one lane's index across the wave, and every pixel in it samples one
+// material's texture.
+float4 averRtSampleSlot(RtMaterial mat, uint slot, float2 uv, float4 fallback) {
+    const uint idx = mat.texIndex[slot];
+    if (idx == AVER_TEX_UNBOUND) return fallback;
+    return gRtTextures[NonUniformResourceIndex(idx)].SampleLevel(gMaterialSampler, uv, 0);
+}
+
+// The texture coordinate a ray hit is sampled at: the mesh's own UV, or a planar projection when
+// the material asks for world-aligned UV.
+//
+// A RAY HIT NEEDS THIS AS MUCH AS A FRAGMENT DOES, and the first version of this path did not have
+// it -- it sampled every material at the mesh UV. On a mesh whose UVs are unrelated to its intended
+// projection (PTTest's floor and concrete both set worlduv=1 and rely entirely on it) that samples
+// the texture at essentially arbitrary coordinates, and the surface reads as noise rather than as
+// the material. It went unnoticed because the scene it was first measured on, ElectricDreams
+// terrain, does not set the flag.
+//
+// Mirrors averSurfaceUV in material_prelude.hlsl exactly, with inst.objectToWorld standing in for
+// gWorld -- the same rows, the same dominant-axis choice, the same tiles-per-centimetre scale.
+float2 averRtSurfaceUV(RtMaterial mat, RtInstance inst, float3 wpos, float3 N, float2 meshUV) {
+    if (!(mat.flags & AVER_MAT_WORLD_UV)) return meshUV;
+    const float3 ax = normalize(inst.objectToWorld[0].xyz);
+    const float3 ay = normalize(inst.objectToWorld[1].xyz);
+    const float3 az = normalize(inst.objectToWorld[2].xyz);
+    const float3 d  = wpos - inst.objectToWorld[3].xyz;
+    const float3 op = float3(dot(d, ax), dot(d, ay), dot(d, az));
+    const float3 on = float3(dot(N, ax), dot(N, ay), dot(N, az));
+    const float3 a  = abs(on);
+    const float2 pp = (a.z >= a.x && a.z >= a.y) ? op.xy
+                    : ((a.x >= a.y) ? op.yz : op.xz);
+    return pp * mat.uvTilesPerCm;
+}
+
+// A tangent frame for a ray hit, solved from the triangle's own positions and UVs.
+//
+// THE RASTER PATH CANNOT BE REUSED HERE. averPerturbNormal solves its frame from ddx/ddy of world
+// position and UV, which is exactly the screen-derivative trick that is invalid at a ray hit. And
+// there is no vertex tangent to fall back on: RtVertex is pos+normal+uv, and no tangent stream
+// exists anywhere in this engine -- docs/formats/FORMAT_SPECS.md claims .ocmesh carries a MikkTSpace
+// QTangent, but normalToQTangent() takes only a normal and computes a shortest-arc rotation, so the
+// stream has never held a real tangent.
+//
+// So it is derived per triangle, which is the textbook solve and is CONSTANT across the face --
+// slightly flatter than a per-vertex interpolated frame on curved surfaces, and exact on the flat
+// ones normal maps are mostly used on.
+float3 averRtPerturbNormal(RtMaterial mat, RtInstance inst, float3 N, float3 nTS,
+                           float3 p0, float3 p1, float3 p2,
+                           float2 t0, float2 t1, float2 t2) {
+    float3 T, B;
+
+    if (mat.flags & AVER_MAT_WORLD_UV) {
+        // THE FRAME MUST MATCH THE PARAMETRISATION IT SAMPLES. A world-aligned material's UV comes
+        // from a planar projection onto two of the object's own axes, and has nothing to do with the
+        // mesh's UVs -- so solving a tangent from those UVs would give a frame rotated arbitrarily
+        // against the texture it is about to apply, which is a normal map lighting from the wrong
+        // direction rather than an obvious failure.
+        //
+        // Same axes and the same dominant-axis choice averRtSurfaceUV makes, so the two cannot
+        // disagree about which plane this surface is projected onto.
+        const float3 ax = normalize(inst.objectToWorld[0].xyz);
+        const float3 ay = normalize(inst.objectToWorld[1].xyz);
+        const float3 az = normalize(inst.objectToWorld[2].xyz);
+        const float3 a  = abs(float3(dot(N, ax), dot(N, ay), dot(N, az)));
+        if (a.z >= a.x && a.z >= a.y) { T = ax; B = ay; }        // uv = op.xy
+        else if (a.x >= a.y)          { T = ay; B = az; }        // uv = op.yz
+        else                          { T = ax; B = az; }        // uv = op.xz
+    } else {
+        const float3 e1 = p1 - p0, e2 = p2 - p0;
+        const float2 d1 = t1 - t0, d2 = t2 - t0;
+        const float  r  = d1.x * d2.y - d2.x * d1.y;
+
+        // DEGENERATE UVs ARE COMMON, not exotic: a face with all three UVs equal (an untextured or
+        // collapsed shell) gives r == 0, and dividing by it produces NaN that propagates through the
+        // whole shade and paints a pixel that looks like a lighting bug. Mirrors averPerturbNormal's
+        // own `if (m <= 0.0) return N;`.
+        if (abs(r) < 1e-12) return N;
+
+        const float3 tObj = (e1 * d2.y - e2 * d1.y) / r;
+        const float3 bObj = (e2 * d1.x - e1 * d2.x) / r;
+        // Row-vector multiply, the same convention the shading normal uses.
+        T = mul(float4(tObj, 0.0), inst.objectToWorld).xyz;
+        B = mul(float4(bObj, 0.0), inst.objectToWorld).xyz;
+    }
+
+    if (dot(T, T) <= 0.0) return N;
+
+    // Gram-Schmidt against the SHADING normal, so the frame stays orthonormal where the interpolated
+    // normal has been bent away from the triangle's own plane.
+    T = normalize(T - N * dot(N, T));
+    if (!(dot(T, T) > 0.0)) return N;
+
+    // Handedness taken from the solved bitangent rather than assumed: a mirrored UV shell has the
+    // opposite one, and guessing lights half of a symmetrical model from the wrong side.
+    const float3 Bo = cross(N, T);
+    B = Bo * (dot(Bo, B) < 0.0 ? -1.0 : 1.0);
+
+    return normalize(T * nTS.x + B * nTS.y + N * nTS.z);
+}
+#endif
 // SLOT t9 IS A GUESS, LOUDLY. This is table 0's next free SRV slot after t8 -- kGiSrvCount
 // (VoxiGiShaders.hpp), currently 9, would need to become 10 to declare it here, and table 1 (the
 // material TEXTURE table) is BASED on that count and auto-rebases from t9 to t10 the moment it does
@@ -1986,31 +2098,105 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // as the fallback's white, while the rasteriser drew them correctly. Reported as "everything is
     // white", and correctly attributed by the user to the ray path having a hardcoded dependency.
 #ifdef AVER_RT_BINDLESS
-    // THE BASE-COLOUR TEXTURE, which is the entire point of this variant. Same composition the
-    // raster path uses -- the factor MULTIPLIES the sampled texel rather than replacing it -- so a
-    // material with no texture reduces to exactly the line below and the two paths agree.
+    // THE FULL STOCK MATERIAL AT A RAY HIT: all eight maps, the slope-blended second layer, and a
+    // normal-mapped shading normal. Composed exactly as the raster path composes it -- every factor
+    // MULTIPLIES its sampled texel rather than replacing it -- so a material with no textures at all
+    // reduces to the untextured branch below and the two paths agree by construction.
     //
-    // SampleLevel(0), NEVER Sample(): a pixel shader's implicit derivatives describe how the SCREEN
-    // coordinate changes between neighbouring pixels, and in a fullscreen ray pass neighbouring
-    // pixels may have hit different triangles, different objects, or nothing at all. The derivative
-    // is therefore meaningless and the mip it selects is garbage at every silhouette. Mip 0 is wrong
-    // in the other direction -- it minifies and aliases in the distance -- but it is wrong
-    // PREDICTABLY, and ray differentials are a later stage.
-    //
-    // NonUniformResourceIndex because neighbouring pixels genuinely hit different materials; without
-    // it the hardware may broadcast one lane's index across the wave and every pixel in that wave
-    // samples one material's texture.
-    float3 texAlbedo = 1.0;
-    if (mat.texIndex[0] != AVER_TEX_UNBOUND) {
-        texAlbedo = gRtTextures[NonUniformResourceIndex(mat.texIndex[0])]
-                        .SampleLevel(gMaterialSampler, hitUV, 0).rgb;
+    // The fallbacks are the identity values averSampleMaps uses for a material with no table, so an
+    // unbound slot costs one compare and changes nothing.
+    // THE EFFECTIVE UV, which for a world-aligned material is nothing like the mesh's own.
+    const float2 uvS = averRtSurfaceUV(mat, inst, wpos, N, hitUV);
+    float4 mapBase  = averRtSampleSlot(mat, 0, uvS, float4(1, 1, 1, 1));
+    float4 mapMR    = averRtSampleSlot(mat, 1, uvS, float4(1, 1, 1, 1));
+    float3 mapNrm   = averRtSampleSlot(mat, 2, uvS, float4(0.5, 0.5, 1, 1)).xyz * 2.0 - 1.0;
+    float  mapOcc   = averRtSampleSlot(mat, 3, uvS, float4(1, 1, 1, 1)).r;
+    float3 mapEmis  = averRtSampleSlot(mat, 4, uvS, float4(0, 0, 0, 1)).rgb;
+    // glTF packs occlusion in R, roughness in G, metallic in B -- the same unpack averSampleMaps does.
+    float2 metalRough = float2(mapMR.g, mapMR.b);
+    float3 normalTS   = float3(mapNrm.xy * mat.normalScale, mapNrm.z);
+
+    // THE SECOND LAYER, blended by SLOPE off the GEOMETRIC normal -- not the normal-mapped one.
+    // averBlendLayers' own comment gives the reason and it is worth repeating rather than diverging
+    // from: the question is "is this part of the terrain a cliff", which is a property of the
+    // surface, and feeding a normal map into it makes the layer choice flicker with every bump.
+    // geoN here is N BEFORE any perturbation, which is exactly what the raster path passes.
+    if (mat.flags & AVER_MAT_SLOPE_BLEND) {
+        const float flat01 = saturate(abs(N.z));
+        const float lw = 1.0 - smoothstep(mat.slopeBlendLo, mat.slopeBlendHi, flat01);
+        if (lw > 0.001) {
+            const float2 uv1 = uvS * mat.layer1UvScale;
+            if (mat.texIndex[5] != AVER_TEX_UNBOUND)
+                mapBase = lerp(mapBase, averRtSampleSlot(mat, 5, uv1, mapBase), lw);
+            if (mat.texIndex[6] != AVER_TEX_UNBOUND) {
+                const float4 mr1 = averRtSampleSlot(mat, 6, uv1, mapMR);
+                metalRough = lerp(metalRough, float2(mr1.g, mr1.b), lw);
+            }
+            if (mat.texIndex[7] != AVER_TEX_UNBOUND) {
+                const float3 n1 = averRtSampleSlot(mat, 7, uv1, float4(0.5, 0.5, 1, 1)).xyz * 2.0 - 1.0;
+                normalTS = normalize(lerp(normalTS, float3(n1.xy * mat.normalScale, n1.z), lw));
+            }
+        }
     }
-    s.albedo   = inst.albedo * mat.baseColorFactor.rgb * texAlbedo;
+
+    // NORMAL MAPPING LAST, and only when a map was actually bound: with no map, normalTS is the
+    // identity (0,0,1) and perturbing by it is a no-op that still costs a tangent solve.
+    // NORMAL MAPPING IS OFF, AND THAT IS A MEASURED DECISION RATHER THAN AN OMISSION.
+    //
+    // The frame below is written, correct as far as it has been tested, and demonstrably not ready.
+    // Mean absolute difference against the raster path over the whole viewport:
+    //
+    //                              base colour only   + these slots, no normals   + normal mapping
+    //   PTTest (authored flats)          32.08                17.23                    18.21
+    //   ElectricDreams (terrain)          6.06                 7.48                    17.19
+    //
+    // So it costs a little on authored surfaces and is catastrophic on terrain -- worse there than
+    // having no textures at all. What is already ruled out by measurement, so nobody repeats it:
+    // the frame IS orthonormal (feeding nTS = (0,0,1) reproduces the unperturbed normal exactly);
+    // the map decodes correctly (its Z reads saturated positive); normalScale is 1.0; and it is not
+    // the layer-1 blend, which changes nothing when disabled on its own.
+    //
+    // The leading suspect is that the frame is ROTATED WITHIN THE TANGENT PLANE -- nTS = (0,0,1)
+    // returning N proves only that T and B are perpendicular to N, not that T points along +U. The
+    // other live possibility is that the landscape does not perturb in the raster path either, in
+    // which case raster is the wrong reference for terrain and this needs a flat authored surface
+    // with a known-good normal map to judge against.
+    //
+    // Flip to 1 to measure it; do not ship it at 1 until terrain is explained.
+#define AVER_RT_NORMAL_MAPPING 0
+#if AVER_RT_NORMAL_MAPPING
+    if (mat.texIndex[2] != AVER_TEX_UNBOUND || mat.texIndex[7] != AVER_TEX_UNBOUND) {
+        s.N = averRtPerturbNormal(mat, inst, N, normalTS,
+                                  gRtVerts[i0].pos, gRtVerts[i1].pos, gRtVerts[i2].pos,
+                                  gRtVerts[i0].uv,  gRtVerts[i1].uv,  gRtVerts[i2].uv);
+        // The perturbed normal must still face the ray, for the same reason the geometric one is
+        // flipped above: a normal map can tip a grazing normal past the horizon, and shading from
+        // behind produces a black rim that looks like a shadow bug.
+        if (dot(s.N, dir) > 0.0) s.N = -s.N;
+    }
+#endif
+
+    s.albedo    = inst.albedo * mat.baseColorFactor.rgb * mapBase.rgb;
+    s.emissive  = mat.emissiveFactor * mapEmis;
+    // THROUGH occlusionStrength, exactly as averBuildSurface does it:
+    //   s.occlusion = lerp(1.0, a.occlusion, gOcclusionStrength)
+    // Applying the map at full strength instead -- which this line did at first -- darkened the
+    // ElectricDreams terrain from 111,101,96 to 73,72,76 against a raster reference of 104,102,100,
+    // i.e. it moved the ray path FURTHER from raster while adding a feature meant to close the gap.
+    s.occlusion = lerp(1.0, mapOcc, mat.occlusionStrength);
 #else
     s.albedo   = inst.albedo * mat.baseColorFactor.rgb;
 #endif
+#ifdef AVER_RT_BINDLESS
+    // metalRough carries the SAMPLED pair, unpacked glTF-style above: .x is roughness (green),
+    // .y is metallic (blue). Multiplied onto the factors exactly as averStockAuthored does, so an
+    // unbound map contributes its identity 1.0 and the result is the untextured line below.
+    s.metallic = saturate(inst.metallic  * mat.metallicFactor  * metalRough.y);
+    s.rough    = clamp(inst.roughness * mat.roughnessFactor * metalRough.x, 0.045, 1.0);
+#else
     s.metallic = saturate(inst.metallic * mat.metallicFactor);
     s.rough    = clamp(inst.roughness * mat.roughnessFactor, 0.045, 1.0);   // averEvalMaterial's own floor
+#endif
     s.ndv      = saturate(dot(s.N, s.V));
     s.f90      = mat.f90;
     s.reflectance = mat.reflectance;
@@ -2054,7 +2240,10 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     s.kdAlbedo = (1.0 - s.metallic) * s.albedo * (1.0 - saturate(mat.transmission));
     s.model    = AVER_MODEL_STANDARD;
     s.alpha    = 1.0;
+#ifndef AVER_RT_BINDLESS
+    // The textured variant sampled a real occlusion map above; this default would overwrite it.
     s.occlusion = 1.0;
+#endif
 
     AverLight sun;
     sun.direction  = L;
