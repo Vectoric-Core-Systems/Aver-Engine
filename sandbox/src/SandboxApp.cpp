@@ -6908,6 +6908,45 @@ public:
     // in the RHI before this feature sees heavy toggling in practice.
     void syncPtSceneView(rhi::IDevice* dev) {
         if (!dev) return;
+
+        // ---- NOTHING TRACES FOR A VIEWER THAT CANNOT SEE IT ----
+        //
+        // The path-traced view and ray-driven primary visibility are two ways to paint the same
+        // pixels, and only one can win the device's suppressesScene() election. In ray-driven mode
+        // VoxiRenderer wins -- which is verifiable rather than asserted: with --rt-render-mode 0 the
+        // path tracer DOES paint (the frame comes out 54% different, and costs 7.8ms because it
+        // suppresses the raster scene), and in mode 1 the frame is what the ray-driven pass drew.
+        //
+        // But PtSceneView::prePass accumulates regardless of who wins, because prePass runs BEFORE
+        // the election. Measured on PTTest: 8 samples/pixel/frame for 200 frames, ~9ms each, to
+        // converge an image that is then thrown away. Registration is the switch this class's own
+        // header says it is, so the honest place to stop it is here, before it exists at all.
+        //
+        // AN EXPLICIT --pt-scene IS NOT SILENTLY IGNORED. It is told what happened and what to do,
+        // because "I asked for the path-traced view and got the ray-driven one with no message" is
+        // exactly the class of silence this file has been bitten by before.
+        // suppressesScene(), NOT rayDrivenActive() -- the latter is private, and this is the better
+        // question anyway: it is the exact predicate the device's own election reads, so this cannot
+        // drift from the thing it is trying to predict.
+        const bool rayDrivenPaints = voxiRenderer_.suppressesScene();
+        if (rayDrivenPaints && ptSceneViewWantEnabled_) {
+            if (!ptSceneViewYieldLogged_) {
+                ptSceneViewYieldLogged_ = true;
+                if (ptSceneViewFromCli_)
+                    AVER_WARN("[PT] --pt-scene was given, but ray-driven primary visibility is "
+                              "painting the scene and wins the election -- the path-traced image "
+                              "would never be shown, so it is not being traced. Add "
+                              "--rt-render-mode 0 to actually see it.");
+                else
+                    AVER_INFO("[PT] the path-traced view is not being traced: ray-driven primary "
+                              "visibility is painting the scene, so its image would never be "
+                              "shown. --rt-render-mode 0 hands the frame back to it.");
+            }
+            ptSceneViewWantEnabled_ = false;
+        } else if (!rayDrivenPaints) {
+            ptSceneViewYieldLogged_ = false;   // re-arm the message if the mode changes back
+        }
+
         if (ptSceneViewWantEnabled_ == (ptSceneView_ != nullptr)) return;
 
         if (ptSceneViewWantEnabled_) {
@@ -14977,6 +15016,7 @@ private:
     std::unique_ptr<aver::sr::FxaaResolve> edgeAaUpscaler_;
 #endif
     int  rdAblate_=0;                // --rd-ablate: AVER_RD_ABLATE for PSRayDriven, 0 = normal
+    bool ptSceneViewYieldLogged_=false;   // say once, per mode change, that the PT view yielded
     int  refractionOverride_=-1;     // --refraction: -1 not given, else the mode
     f32  refractionStrengthOverride_=-1.0f;
     f32  refractionFadeOverride_=-1.0f;
