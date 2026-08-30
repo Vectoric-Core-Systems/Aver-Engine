@@ -2460,6 +2460,14 @@ public:
             // clamping voxi::Renderer::setSettings just applied.
             voxiRenderer_.setSettings(voxi::Renderer::get().settings());
             if (frameTimeReport_) voxiRenderer_.setFrameTimeReport(true);
+            // Before init() below, which is where the pipelines -- and therefore the shader defines
+            // this changes -- are actually compiled.
+            if (rdAblate_) {
+                voxiRenderer_.setRayDrivenAblation(static_cast<u32>(rdAblate_));
+                AVER_WARN("[Sandbox] --rd-ablate {}: the ray-driven frame is DELIBERATELY WRONG. "
+                          "This is a stopwatch for attributing PSRayDriven's cost, not a quality "
+                          "setting -- see AVER_RD_ABLATE in voxi.hlsl.", rdAblate_);
+            }
             if (voxiRenderer_.init(*e.device())) {
                 e.device()->addRenderFeature(&voxiRenderer_);
                 voxiAttached_ = true;
@@ -6978,6 +6986,9 @@ public:
     }
 
     void setFrameTimeReport(bool on) { frameTimeReport_ = on; }                 // --frame-time
+    // --rd-ablate: forwarded to voxiRenderer_ BEFORE init(), because it becomes a shader define and
+    // the pipelines are compiled once there. Setting it later would be silently inert.
+    void setRayDrivenAblation(int m) { rdAblate_ = m; }
     void setMsOverride(bool on) { msOverride_ = on; }                           // --ms
     void setProbe(u32 x, u32 y) { probeX_ = x; probeY_ = y; }                    // --probe X Y
     void setProbeRel(f32 u, f32 v) { probeU_ = u; probeV_ = v; }                 // --probe-rel U V
@@ -14951,6 +14962,7 @@ private:
     bool edgeAaEnabled_ = false;
     std::unique_ptr<aver::sr::FxaaResolve> edgeAaUpscaler_;
 #endif
+    int  rdAblate_=0;                // --rd-ablate: AVER_RD_ABLATE for PSRayDriven, 0 = normal
     bool frameTimeReport_=false;     // --frame-time: report the frame period, to price the above
     bool msOverride_=false;          // --ms: force the mesh shader geometry path
     u32  probeX_=0, probeY_=0;       // --probe X Y: absolute capture pixel (0 = viewport centre)
@@ -17613,6 +17625,17 @@ Application* createApplication(int argc, char** argv) {
     // right here and nothing else may override it; --mcp with no number defers to mcp.conf, resolved
     // once argument parsing is done and engineRoot() can be asked (see mcpRequested below).
     bool mcpRequested = false, mcpPortExplicit = false;
+    // --rd-ablate N, PARSED IN ITS OWN LOOP RATHER THAN THE CHAIN BELOW, and that is not a style
+    // choice: the else-if chain that handles every other flag is already AT MSVC's block-nesting
+    // limit (C1061), and adding one more branch to it fails the build outright. Anything new lands
+    // here instead until that chain is broken up.
+    //
+    // Removes ONE term from the ray-driven pixel shader so its cost can be attributed by difference
+    // -- see AVER_RD_ABLATE in voxi.hlsl. Every non-zero value renders a deliberately WRONG frame.
+    int rdAblate = 0;
+    for (int i = 1; i + 1 < argc; ++i)
+        if (!std::strcmp(argv[i], "--rd-ablate")) rdAblate = std::atoi(argv[i + 1]);
+
     u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; std::string shaderSourceDir; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool furnaceGrid=false; f32 furnaceTilt=0.0f; bool ptFurnace=false; bool ptScene=false; int deviceLostAt=0; int ptQualityRamp=0; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int aversrCycle=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=-1; int rt=-1; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int rtRenderMode=-1; int pt=-1; int ptBounces=-1; int layeredBsdf=-1; f32 coatWeight=0.0f; f32 coatRough=0.1f; f32 coatF0=0.04f; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string selectEntity; bool openLegacy=false; bool waterOn=false; f32 waterHeight=0.0f; std::string graphSelectNode; std::string graphTab; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false; bool bakeNav=false; f32 bakeNavCell=50.0f; std::string openMap; bool gbuffer=false; std::string gbufferDebug; std::string crashTest; std::string startMode;
     for (int i=1;i<argc;++i){
         // HANDLED BEFORE THE else-if CHAIN BELOW, AND NOT BY PREFERENCE: adding one more `else if`
@@ -18447,6 +18470,7 @@ Application* createApplication(int argc, char** argv) {
     app->setPtOverride(pt);
     app->setGiUpdateInterval(giUpdateInterval);
     app->setRtForceOff(noRt);
+    app->setRayDrivenAblation(rdAblate);
     app->setCamWobble(camWobbleDeg, camWobblePeriod);
     app->setRenderScale(renderScale);
     if (!aversrArg.empty()) {

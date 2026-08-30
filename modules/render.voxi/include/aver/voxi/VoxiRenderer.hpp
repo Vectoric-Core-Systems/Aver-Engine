@@ -111,6 +111,12 @@ public:
     bool layeredBsdfActive() const { return layeredBsdf_; }
 
     // Turns on the frame-period report. See rtShadowRays_ for what it is for and what it is not.
+    // MEASUREMENT ONLY -- see AVER_RD_ABLATE's own block in voxi.hlsl for what each value removes and
+    // why a timestamp cannot answer this question. Must be set BEFORE init(), because it becomes a
+    // shader define and the pipelines are compiled once there. Any non-zero value renders a
+    // deliberately WRONG frame; it exists to be timed, never to be shipped or wired to a quality tier.
+    void setRayDrivenAblation(u32 mode) { rdAblate_ = mode; }
+
     void setFrameTimeReport(bool on) { frameTimeReport_ = on; }
 
     // The largest ray count accepted. Not a hardware limit: there is a recorded TDR history on this
@@ -445,6 +451,7 @@ private:
     // It exists because "the cost is linear in the ray count" was an assertion with no instrument
     // behind it. Changing exactly one thing and re-reading the same number is a measurement; a
     // profiler capture that cannot be checked into the repository is not.
+    u32  rdAblate_ = 0;            // --rd-ablate: AVER_RD_ABLATE for PSRayDriven, 0 = normal
     bool frameTimeReport_ = false;
     u64  frameTimeLastNs_ = 0;          // steady_clock, nanoseconds; 0 = no previous frame
     u32  frameTimeSeen_ = 0;            // frames sampled, including the discarded warm-up

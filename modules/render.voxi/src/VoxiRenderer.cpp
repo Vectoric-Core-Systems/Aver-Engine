@@ -3205,6 +3205,11 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     if (msOk && !sceneMsGbufPso_) AVER_WARN("[Voxi] mesh-shader G-buffer scene variant unavailable");
 
     // RayQuery replaces the shadow-map lookup with an exact occlusion ray: a second PS at SM 6.5.
+    // Appended to the ray-driven pixel shader's defines only. Empty in every normal build, so the
+    // shader text and therefore the DXIL cache key are untouched unless a measurement asks.
+    const auto rdAblateDefs = [&]() -> std::string {
+        return rdAblate_ ? (";AVER_RD_ABLATE=" + std::to_string(rdAblate_)) : std::string();
+    };
     const rhi::ShaderHandle psRt = rtOk ? compile("PSMainVoxi", rhi::ShaderStage::Pixel, 65, rasterDefs("AVER_RT=1").c_str()) : 0;
     if (vsMain && psRt) {
         rhi::GraphicsPipelineDesc p = scene;
@@ -3233,7 +3238,8 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     // and the test Always -- there is no prior depth for a fullscreen pass to test against, and
     // Less would reject every pixel against a cleared far-plane buffer.
     const rhi::ShaderHandle psRayDriven =
-        rtOk ? compile("PSRayDriven", rhi::ShaderStage::Pixel, 65, rasterDefs("AVER_RT=1").c_str()) : 0;
+        rtOk ? compile("PSRayDriven", rhi::ShaderStage::Pixel, 65,
+                       rasterDefs((std::string("AVER_RT=1") + rdAblateDefs()).c_str()).c_str()) : 0;
     if (vsky && psRayDriven) {
         rhi::GraphicsPipelineDesc p;
         p.vs = vsky; p.ps = psRayDriven;
@@ -3272,7 +3278,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
         const rhi::ShaderHandle vskyTex = compile("VSky", rhi::ShaderStage::Vertex, kBaseSm,
                                                   rasterDefs(bindlessDefs.c_str()).c_str());
         const rhi::ShaderHandle psTex = compile("PSRayDriven", rhi::ShaderStage::Pixel, 65,
-                                                rasterDefs(bindlessDefs.c_str()).c_str());
+                                                rasterDefs((bindlessDefs + rdAblateDefs()).c_str()).c_str());
         if (vskyTex && psTex) {
             rhi::GraphicsPipelineDesc p;
             p.vs = vskyTex; p.ps = psTex;
@@ -3328,7 +3334,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     // share -- see rayDrivenPso_'s own block for why Always/write-on replaces Less/write-on here).
     const rhi::ShaderHandle psRayDrivenGbuf =
         rtOk ? compile("PSRayDriven", rhi::ShaderStage::Pixel, 65,
-                       rasterDefs("AVER_RT=1;AVER_GBUFFER=1").c_str())
+                       rasterDefs((std::string("AVER_RT=1;AVER_GBUFFER=1") + rdAblateDefs()).c_str()).c_str())
              : 0;
     if (vsky && psRayDrivenGbuf) {
         rhi::GraphicsPipelineDesc p;

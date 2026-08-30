@@ -215,9 +215,44 @@ struct RtMaterial {
 // NonUniformResourceIndex because neighbouring pixels genuinely hit different materials. Without it
 // the hardware may broadcast one lane's index across the wave, and every pixel in it samples one
 // material's texture.
+// ---- AVER_RD_ABLATE: A MEASUREMENT SWITCH, NOT A FEATURE ----------------------------------------
+//
+// WHY THIS EXISTS. The ray-driven primary path costs about 6.7 ms of a 14.55 ms frame on PTTest --
+// measured, by taking the same camera through the raster path (7.82 ms) with ray tracing left fully
+// on in both. It is strongly pixel-bound: quarter the pixels and it drops to 9.00 ms, while raster
+// barely moves. But NOTHING said which term inside this shader spends it, and every RT quality dial
+// is inert against it (--rt-rays 4/2/1 gives 14.49/14.46/14.44, and --rt 2 is SLOWER than --rt 4).
+//
+// YOU CANNOT TIMESTAMP INSIDE A PIXEL SHADER. GPU spans bracket draws, not terms, so the only way to
+// attribute cost within one shader is to remove a term and re-measure. Each value below neutralises
+// exactly one, keeping the shader compiling and the surrounding code identical, so the difference
+// between two runs is that term and nothing else.
+//
+// THE OUTPUT IS WRONG ON PURPOSE for every non-zero value. This is not a quality ladder and must
+// never be wired to one: an ablated frame is a broken frame that happens to be timeable. 0 is the
+// only value that renders correctly, and it is the default in every build that does not ask.
+//
+// HOW TO READ THE RESULT: the terms should roughly ADD UP to the gap between the normal frame and
+// the raster floor. If they do not -- if ablating everything does not approach 7.82 ms -- then the
+// ablation is not measuring what it claims and the numbers are void. Check that before believing
+// any single line of the table.
+#ifndef AVER_RD_ABLATE
+#define AVER_RD_ABLATE 0
+#endif
+#define AVER_RD_ABL_NONE    0
+#define AVER_RD_ABL_SHADOW  1   // the sun-visibility ray (rtShadowTemporal)
+#define AVER_RD_ABL_GI      2   // the diffuse cone gather (coneTracedIndirect)
+#define AVER_RD_ABL_REFL    3   // the mirror ray (rtReflectionTemporal)
+#define AVER_RD_ABL_SKY     4   // the atmosphere march (skyColor) in the reflection branch
+#define AVER_RD_ABL_TEX     5   // material texture sampling
+#define AVER_RD_ABL_ALL     6   // all of the above at once -- the method check
+
 float4 averRtSampleSlot(RtMaterial mat, uint slot, float2 uv, float2 gx, float2 gy, float4 fallback) {
     const uint idx = mat.texIndex[slot];
     if (idx == AVER_TEX_UNBOUND) return fallback;
+#if AVER_RD_ABLATE == AVER_RD_ABL_TEX || AVER_RD_ABLATE == AVER_RD_ABL_ALL
+    return fallback;   // ablated: the slot is bound, but nothing is sampled
+#endif
 #if AVER_RT_SAMPLEGRAD
     // SampleGrad with a footprint this pass DERIVED, rather than SampleLevel(0). Zero gradients
     // degrade to mip 0 exactly, so a degenerate triangle or a material whose gradient could not be
@@ -2262,7 +2297,11 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // plus the handful of extra matrix multiplies the footprint above costs, not a difference in
     // what the shadow itself does. It is keyed by pixel, and this pass covers the same pixel grid,
     // so the history buffer means the same thing here as it does there.
+#if AVER_RD_ABLATE == AVER_RD_ABL_SHADOW || AVER_RD_ABLATE == AVER_RD_ABL_ALL
+    float sunVis = 1.0;   // ablated: fully lit, no ray
+#else
     float sunVis = rtShadowTemporal(wpos, N, L, i.pos.xy, dpx, dpy, (uint)max(gRtParams.y, 1.0));
+#endif
 
     // Lambertian exitant radiance, with the /PI on the direct term -- see rtReflection's own
     // comment for what omitting it cost last time (every sunlit surface 3.14x too bright, which
@@ -2603,7 +2642,11 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // between them, let alone optimising against it.
     float rdAo  = 1.0;
     ind.diffuse = 0.0;
+#if AVER_RD_ABLATE == AVER_RD_ABL_GI || AVER_RD_ABLATE == AVER_RD_ABL_ALL
+    // ablated: no cone gather
+#else
     if (gVoxelParams.w > 0.5) ind.diffuse = coneTracedIndirect(wpos, N, rdAo);
+#endif
 
     // ---- ENVIRONMENT SPECULAR: A REAL MIRROR RAY NOW, GATED THE SAME WAY PSMainVoxi GATES ONE ----
     //
@@ -2673,8 +2716,12 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         const float rdReflDzdx = mul(float4(rdRayDx, 0.0), gViewProj).w;
         const float rdReflDzdy = mul(float4(rdRayDy, 0.0), gViewProj).w;
         bool specHit = false;
+#if AVER_RD_ABLATE == AVER_RD_ABL_REFL || AVER_RD_ABLATE == AVER_RD_ABL_ALL
+        float3 refl = float3(0.0, 0.0, 0.0);   // ablated: no mirror ray
+#else
         float3 refl = rtReflectionTemporal(wpos, N, R, L, i.pos.xy, s.rough,
                                            rdReflDzdx, rdReflDzdy, specHit);
+#endif
         // THE SAME GUARD PSMainVoxi's twin carries, and for the same reason -- see that block, a few
         // hundred lines up, for the full account including the 13% regression an earlier two-call
         // version of it cost. smoothstep(0.5, 0.75, rough) is exactly 0 at or below 0.5 roughness, so
@@ -2686,7 +2733,11 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         // was paying a 32-step atmosphere march it then discarded.
         const float skyW = smoothstep(0.5, 0.75, s.rough);
         float3 skyR = float3(0.0, 0.0, 0.0);
+#if AVER_RD_ABLATE == AVER_RD_ABL_SKY || AVER_RD_ABLATE == AVER_RD_ABL_ALL
+        // ablated: no atmosphere march
+#else
         if (!specHit || skyW > 0.0) skyR = skyColor(R);
+#endif
         ind.specular = lerp(specHit ? refl : skyR, skyR, skyW);
     } else if (gVoxelParams.w > 0.5) {
         // PSMainVoxi's OWN voxel-cone fallback, for exactly the surfaces PSMainVoxi itself would also
