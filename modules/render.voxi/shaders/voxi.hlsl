@@ -254,12 +254,26 @@ struct RtMaterial {
 #define AVER_RD_ABL_REFL    3   // the mirror ray (rtReflectionTemporal)
 #define AVER_RD_ABL_SKY     4   // the atmosphere march (skyColor) in the reflection branch
 #define AVER_RD_ABL_TEX     5   // material texture sampling
-#define AVER_RD_ABL_ALL     6   // all of the above at once -- the method check
+// ALL = shadow + GI + reflection + sky. NOT textures, and that exclusion is the fix to a method
+// check this harness previously FAILED. Ablating textures makes averRtSampleSlot return its
+// fallback, so metalRough reads 1.0 and the surface's roughness jumps to the material factor --
+// past the `s.rough <= 0.75` gate on the reflection branch. Mode 5 therefore does not merely remove
+// texture sampling, it REROUTES the shader onto the voxel-cone fallback, which is why combining it
+// with the others made the frame SLOWER than removing the sky alone and why the deltas refused to
+// add up. A term that moves a branch condition cannot be summed with terms that do not.
+#define AVER_RD_ABL_ALL     6   // shadow + GI + reflection + sky -- the method check
+// 7 IS NOT LIKE THE OTHERS: it does not remove a term, it restores ACCEPT_FIRST_HIT_AND_END_SEARCH
+// on the sun-shadow ray. That flag was deliberately dropped so a pane of glass could ATTENUATE a
+// shadow instead of stopping it, and the shadow ray's own comment asks for the cost of that decision
+// to be measured before anyone assumes it is small. This is that stopwatch. It KNOWINGLY BREAKS
+// tinted shadows through glass -- a pane becomes a wall again -- so like every other non-zero value
+// here it renders a deliberately wrong frame and must never be wired to a quality tier.
+#define AVER_RD_ABL_SHADOW_FIRSTHIT 7
 
 float4 averRtSampleSlot(RtMaterial mat, uint slot, float2 uv, float2 gx, float2 gy, float4 fallback) {
     const uint idx = mat.texIndex[slot];
     if (idx == AVER_TEX_UNBOUND) return fallback;
-#if AVER_RD_ABLATE == AVER_RD_ABL_TEX || AVER_RD_ABLATE == AVER_RD_ABL_ALL
+#if AVER_RD_ABLATE == AVER_RD_ABL_TEX
     return fallback;   // ablated: the slot is bound, but nothing is sampled
 #endif
 #if AVER_RT_SAMPLEGRAD
@@ -631,7 +645,14 @@ float rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3
         // that never meet a pane at all. Measure it before assuming it is small.
         RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
         // BOTH LANES: this is the one ray that wants to see translucent geometry.
+#if AVER_RD_ABLATE == AVER_RD_ABL_SHADOW_FIRSTHIT
+        // Measurement only -- see AVER_RD_ABL_SHADOW_FIRSTHIT. Opaque lane only and stop at the first
+        // thing touched, which is what this ray did before transmissive shadows existed.
+        q.TraceRayInline(gScene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_FORCE_OPAQUE,
+                         AVER_RT_MASK_OPAQUE, r);
+#else
         q.TraceRayInline(gScene, RAY_FLAG_NONE, AVER_RT_MASK_ALL, r);
+#endif
 
         float3 through = float3(1, 1, 1);   // running transmittance along this ray
         // Bounded: a ray that somehow finds a great many translucent surfaces must not spin. Eight
