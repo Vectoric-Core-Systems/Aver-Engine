@@ -558,10 +558,15 @@ static_assert(sizeof(PostCB) == 96, "the HLSL cbuffer mirrors this byte for byte
 constexpr u32 kPostConstantRingBytes = 16 * 1024;
 
 // The one description of rhi::MeshVertex to D3D12; every input-assembler pipeline shares it.
+// offsetof, NOT 0/12/24. Vulkan's twin already derives these (VulkanCommon.hpp's
+// vertexAttributes), and the asymmetry was the bug waiting to happen: reordering MeshVertex's six
+// non-position floats keeps every existing static_assert green and keeps VULKAN correct, while these
+// literals go on pointing at the old bytes -- the NORMAL semantic reading what is now UV, garbled
+// shading on D3D12 only. Derived, the two backends cannot disagree about a layout they share.
 constexpr D3D12_INPUT_ELEMENT_DESC kMeshInputLayout[] = {
-    {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-    {"NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
-    {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(MeshVertex, px), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    {"NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, offsetof(MeshVertex, nx), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+    {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, offsetof(MeshVertex, u),  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
 };
 constexpr UINT kMeshInputLayoutCount = sizeof(kMeshInputLayout) / sizeof(kMeshInputLayout[0]);
 

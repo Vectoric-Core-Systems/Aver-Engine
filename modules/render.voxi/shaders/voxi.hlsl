@@ -2,7 +2,12 @@
 // Feature-owned frame constants, at the register RHIResources.hpp reserves for a render feature.
 #define AVER_SHADOW_CASCADES 4
 
-cbuffer VoxiFrame : register(b4) {
+// register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)), not a literal b4. rhi::
+// kFeatureFrameConstantRegister is the one definition and shaderConstantsHlsl() emits it as
+// that #define; ClusterFrameCB in shared_prelude.hlsl already binds this way. A literal here
+// keeps compiling against the OLD slot the day that constant is renumbered, while the C++
+// binds the new one -- and its static_assert exists precisely to make renumbering deliberate.
+cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     float4   gVoxelOrigin; // xyz = volume min corner, w = 1/volumeWorldSize
     float4   gVoxelParams; // x = resolution, y = intensity, z = maxDistance, w = enabled|debug<<1
     // One per cascade, tightest first: world space into that cascade's own [-1,1] clip box.

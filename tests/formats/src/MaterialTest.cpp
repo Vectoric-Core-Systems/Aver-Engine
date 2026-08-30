@@ -488,9 +488,27 @@ static void testPack() {
     //
     // Offsets are asserted rather than derived, so this fails when someone moves a field without
     // moving it in the shaders too. When it fails, fix all three; do not just update the number.
+    // EVERY FIELD, not the section boundaries. This list used to hold 14 of the struct's 26 offsets,
+    // which sounds thorough and left the single most dangerous stretch unguarded: emissiveFactor
+    // through alphaCutoff is SIX CONSECUTIVE SAME-TYPED FLOATS. Swap metallicFactor and
+    // roughnessFactor in one of the three mirrors and the size never moves, the build succeeds, every
+    // suite here passes, and every material in the engine shades with its metallic and roughness
+    // exchanged. That is exactly the failure this block's own comment describes; it just was not
+    // checking for it. A gap in a guard is worse than no guard, because it is read as coverage.
     check(offsetof(pbr::MaterialConstants, baseColorFactor)  ==  0, "baseColorFactor at 0");
+    check(offsetof(pbr::MaterialConstants, emissiveFactor)   == 16, "emissiveFactor at 16");
+    check(offsetof(pbr::MaterialConstants, metallicFactor)   == 28, "metallicFactor at 28");
+    check(offsetof(pbr::MaterialConstants, roughnessFactor)  == 32, "roughnessFactor at 32");
+    check(offsetof(pbr::MaterialConstants, normalScale)      == 36, "normalScale at 36");
+    check(offsetof(pbr::MaterialConstants, occlusionStrength) == 40, "occlusionStrength at 40");
+    check(offsetof(pbr::MaterialConstants, alphaCutoff)      == 44, "alphaCutoff at 44");
     check(offsetof(pbr::MaterialConstants, flags)            == 48, "flags at 48");
+    check(offsetof(pbr::MaterialConstants, reflectance)      == 52, "reflectance at 52");
+    check(offsetof(pbr::MaterialConstants, f90)              == 56, "f90 at 56");
+    check(offsetof(pbr::MaterialConstants, uvTilesPerCm)     == 60, "uvTilesPerCm at 60");
     check(offsetof(pbr::MaterialConstants, slopeBlendLo)     == 64, "slopeBlendLo at 64");
+    check(offsetof(pbr::MaterialConstants, slopeBlendHi)     == 68, "slopeBlendHi at 68");
+    check(offsetof(pbr::MaterialConstants, layer1UvScale)    == 72, "layer1UvScale at 72");
     check(offsetof(pbr::MaterialConstants, graphId)          == 76, "graphId at 76");
     check(offsetof(pbr::MaterialConstants, ior)              == 80, "ior at 80");
     check(offsetof(pbr::MaterialConstants, transmission)     == 84, "transmission at 84");
@@ -499,6 +517,10 @@ static void testPack() {
     check(offsetof(pbr::MaterialConstants, coatWeight)       == 96, "coatWeight at 96");
     check(offsetof(pbr::MaterialConstants, coatRoughness)    == 100, "coatRoughness at 100");
     check(offsetof(pbr::MaterialConstants, coatF0)           == 104, "coatF0 at 104");
+    // Checked even though nothing reads it: _coatPad is what keeps the coat row 16 bytes, and the
+    // HLSL mirrors have no such field -- they rely on uint4 TexIndex0 being pushed to the next row
+    // automatically. The two agree, for different reasons, so the C++ side's reason is worth pinning.
+    check(offsetof(pbr::MaterialConstants, _coatPad)         == 108, "_coatPad at 108");
 
     // The bindless texture-index block. Checked at its offset like every field above, and then
     // checked for CONTENT too, because this is the one field where a plausible-looking zero is the

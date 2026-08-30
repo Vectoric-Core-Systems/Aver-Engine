@@ -67,7 +67,14 @@ file(GLOB AVER_BRIDGE_SOURCES CONFIGURE_DEPENDS
   # Aver.Graph (GraphHost, the graph compiler, the .ocgraph parser): referenced by the bridge so
   # HostBridge's GraphLoad/GraphTick/GraphUnload can host a compiled graph per entity.
   ${AVER_CSHARP_DIR}/Aver.Graph/*.cs
-  ${AVER_CSHARP_DIR}/Aver.Graph/*.csproj)
+  ${AVER_CSHARP_DIR}/Aver.Graph/*.csproj
+  # Aver.UI, which the bridge references (Aver.Scripting.Bridge.csproj) so [AverHud] resolves out of
+  # the BRIDGE's context -- and which was MISSING from this glob. That is the same defect the note at
+  # the top of this block records for Physics.cs and EnhancedInput.cs: a referenced project whose
+  # sources are not a dependency means editing Hud.cs restages nothing, and the running editor keeps
+  # the previous build with no sign anything was skipped.
+  ${AVER_CSHARP_DIR}/Aver.UI/*.cs
+  ${AVER_CSHARP_DIR}/Aver.UI/*.csproj)
 
 set(AVER_BRIDGE_OUTPUTS
   ${AVER_BRIDGE_DIR}/Aver.Scripting.Bridge.dll

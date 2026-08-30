@@ -27,7 +27,12 @@ inline constexpr const char* kWaterHLSL = R"(
 // A field added, removed or reordered on ONE side without the other reads a camera basis as a
 // wavelength -- silently, and only in the rendered image, exactly the FrameCB comment in
 // PathTracer.cpp warns about for its own cbuffer.
-cbuffer WaterFrame : register(b4) {
+// register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)), not a literal b4. rhi::
+// kFeatureFrameConstantRegister is the one definition and shaderConstantsHlsl() emits it as
+// that #define; ClusterFrameCB in shared_prelude.hlsl already binds this way. A literal here
+// keeps compiling against the OLD slot the day that constant is renumbered, while the C++
+// binds the new one -- and its static_assert exists precisely to make renumbering deliberate.
+cbuffer WaterFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     // waveDirSteep[i] = {dirX, dirZ, steepness, unused}. dirX/dirZ are NOT pre-normalised (matches
     // GerstnerWave.hpp's own struct comment) -- normalised below, in HLSL, exactly where
     // GerstnerWave.hpp normalises them in C++.

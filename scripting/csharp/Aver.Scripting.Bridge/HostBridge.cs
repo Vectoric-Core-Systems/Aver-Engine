@@ -11,6 +11,11 @@ using System.Text;
 
 using Aver.Framework;
 using Aver.Graph;
+// Assets.ObjectIdOf -- the ONE managed spelling of the engine's fnv1a64. This file used to carry a
+// private copy of the algorithm, which is the thing an asset id must never have two of: Hash.hpp's
+// own comment says it "must match the C# side's spelling in Aver.Scene/Native.cs", and a third
+// spelling here made that sentence untrue.
+using Aver.Scene;
 
 namespace Aver.Scripting.Bridge;
 
@@ -135,7 +140,7 @@ public static class HostBridge
         while (walk != 0 && visited.Add(walk))
         {
             string name = Fw.Str(Fw.aver_fw_class_name(walk));
-            if (s_classes.TryGetValue(unchecked((long)Fnv1a64(name)), out ClassInfo? info))
+            if (s_classes.TryGetValue(Assets.ObjectIdOf(name), out ClassInfo? info))
                 return info.Type;
             walk = Fw.aver_fw_class_parent(walk);
         }
@@ -639,7 +644,7 @@ public static class HostBridge
                 // A warning rather than a refusal: the last-wins behaviour is aver_fw_class_declare's
                 // own (it is idempotent by name), it is deterministic here, and refusing both would
                 // turn a rename-in-progress into a level that cannot load at all.
-                long classKey = unchecked((long)Fnv1a64(graph.ClassName));
+                long classKey = Assets.ObjectIdOf(graph.ClassName);
                 if (s_graphClasses.TryGetValue(classKey, out GraphClassInfo prior))
                     Emit((int)Log.Level.Warn,
                          $"[Graph] class '{graph.ClassName}' is declared by more than one graph: "
@@ -1226,7 +1231,7 @@ public static class HostBridge
             Emit((int)Log.Level.Warn,
                  $"[Scripting] class '{name}' did not seal - check its parent '{parent}' is a declared class");
 
-        s_classes[unchecked((long)Fnv1a64(name))] =
+        s_classes[Assets.ObjectIdOf(name)] =
             new ClassInfo { Type = type, Ticks = builder.WantsTick, TickGroup = builder.TickGroupId, RegistryName = name, Handle = c };
     }
 
@@ -1267,20 +1272,6 @@ public static class HostBridge
         if (typeof(AverGameMode).IsAssignableFrom(type)) return "GameMode";
         if (typeof(AverGameInstance).IsAssignableFrom(type)) return "GameInstance";
         return "Actor";
-    }
-
-    // FNV-1a 64-bit over the UTF-8 bytes: must stay byte-for-byte the native aver::fnv1a64 (Hash.hpp).
-    private static ulong Fnv1a64(string s)
-    {
-        const ulong offset = 0xcbf29ce484222325UL;
-        const ulong prime = 1099511628211UL;
-        ulong h = offset;
-        foreach (byte b in Encoding.UTF8.GetBytes(s))
-        {
-            h ^= b;
-            h *= prime;
-        }
-        return h;
     }
 
     // Disables one actor and says which hook threw.
