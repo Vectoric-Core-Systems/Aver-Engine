@@ -1064,7 +1064,16 @@ float3 rtReflection(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, flo
     RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
     // Opaque lane only -- see AVER_RT_MASK_OPAQUE. A single Proceed() cannot correctly traverse
     // past a non-opaque candidate, and this ray has no reason to want one.
-    q.TraceRayInline(gScene, RAY_FLAG_NONE, AVER_RT_MASK_OPAQUE, r);
+    // FORCE_OPAQUE IS FREE HERE, AND PROVABLY A NO-OP. createBlas marks every geometry it builds
+    // D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE (D3D12Device.cpp), and the only thing that can un-opaque an
+    // instance is TlasInstanceFlag_ForceNonOpaque, which VoxiRenderer sets ONLY on the translucent
+    // lane -- the lane this ray's AVER_RT_MASK_OPAQUE excludes. So no candidate this ray can ever see
+    // is non-opaque, and saying so lets the hardware skip any-hit bookkeeping entirely.
+    //
+    // NOT on the shadow ray (this file, the rtShadow query): that one masks AVER_RT_MASK_ALL on
+    // purpose so a pane of glass can attenuate it, and forcing opaque there would make every pane a
+    // wall -- which is the exact behaviour its own comment says was removed.
+    q.TraceRayInline(gScene, RAY_FLAG_FORCE_OPAQUE, AVER_RT_MASK_OPAQUE, r);
     q.Proceed();
     if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) return 0.0;
 
@@ -2287,7 +2296,16 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
     // Opaque lane only -- see AVER_RT_MASK_OPAQUE. A single Proceed() cannot correctly traverse
     // past a non-opaque candidate, and this ray has no reason to want one.
-    q.TraceRayInline(gScene, RAY_FLAG_NONE, AVER_RT_MASK_OPAQUE, r);
+    // FORCE_OPAQUE IS FREE HERE, AND PROVABLY A NO-OP. createBlas marks every geometry it builds
+    // D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE (D3D12Device.cpp), and the only thing that can un-opaque an
+    // instance is TlasInstanceFlag_ForceNonOpaque, which VoxiRenderer sets ONLY on the translucent
+    // lane -- the lane this ray's AVER_RT_MASK_OPAQUE excludes. So no candidate this ray can ever see
+    // is non-opaque, and saying so lets the hardware skip any-hit bookkeeping entirely.
+    //
+    // NOT on the shadow ray (this file, the rtShadow query): that one masks AVER_RT_MASK_ALL on
+    // purpose so a pane of glass can attenuate it, and forcing opaque there would make every pane a
+    // wall -- which is the exact behaviour its own comment says was removed.
+    q.TraceRayInline(gScene, RAY_FLAG_FORCE_OPAQUE, AVER_RT_MASK_OPAQUE, r);
     q.Proceed();
 
     if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {
@@ -2970,7 +2988,8 @@ RayDrivenOut PSRayDriven(SkyOut i) {
 
         RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> qb;
         // Opaque lane only -- see AVER_RT_MASK_OPAQUE.
-        qb.TraceRayInline(gScene, RAY_FLAG_NONE, AVER_RT_MASK_OPAQUE, rb);
+        // Same proof as the primary ray above: this mask cannot see a non-opaque candidate.
+        qb.TraceRayInline(gScene, RAY_FLAG_FORCE_OPAQUE, AVER_RT_MASK_OPAQUE, rb);
         qb.Proceed();
 
         if (qb.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {
