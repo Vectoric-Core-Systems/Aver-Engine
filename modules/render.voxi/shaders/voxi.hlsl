@@ -143,6 +143,12 @@ StructuredBuffer<RtInstance> gRtInstances : register(t5);
 Texture2D gRtTextures[AVER_RT_TEX_CAPACITY] : register(t0, space1);
 #define AVER_TEX_UNBOUND 0xFFFFFFFFu
 
+// Ray-differential mip selection. 1 = SampleGrad from a footprint this pass derives; 0 = the mip-0
+// SampleLevel the textured path shipped with. See averRtUvGrad for where the footprint comes from.
+#ifndef AVER_RT_SAMPLEGRAD
+#define AVER_RT_SAMPLEGRAD 1
+#endif
+
 #endif
 
 struct RtMaterial {
@@ -196,10 +202,80 @@ struct RtMaterial {
 // NonUniformResourceIndex because neighbouring pixels genuinely hit different materials. Without it
 // the hardware may broadcast one lane's index across the wave, and every pixel in it samples one
 // material's texture.
-float4 averRtSampleSlot(RtMaterial mat, uint slot, float2 uv, float4 fallback) {
+float4 averRtSampleSlot(RtMaterial mat, uint slot, float2 uv, float2 gx, float2 gy, float4 fallback) {
     const uint idx = mat.texIndex[slot];
     if (idx == AVER_TEX_UNBOUND) return fallback;
+#if AVER_RT_SAMPLEGRAD
+    // SampleGrad with a footprint this pass DERIVED, rather than SampleLevel(0). Zero gradients
+    // degrade to mip 0 exactly, so a degenerate triangle or a material whose gradient could not be
+    // solved lands on the old behaviour rather than on something undefined.
+    return gRtTextures[NonUniformResourceIndex(idx)].SampleGrad(gMaterialSampler, uv, gx, gy);
+#else
     return gRtTextures[NonUniformResourceIndex(idx)].SampleLevel(gMaterialSampler, uv, 0);
+#endif
+}
+
+// The UV-space footprint of one pixel's primary ray, for SampleGrad.
+//
+// WHY THIS IS NOT ddx(uv)/ddy(uv). A pixel shader's implicit derivatives describe the SCREEN
+// coordinate; in a fullscreen ray pass the neighbouring lane may have hit a different triangle, a
+// different object, or nothing, so those derivatives are meaningless here. What IS available is
+// rdRayDx/rdRayDy -- the neighbouring pixels' own primary rays, reconstructed analytically from
+// gInvViewProj and scaled by this ray's hitT, already built in this shader for the shadow disc.
+// That is a real world-space footprint; this turns it into a UV-space one.
+void averRtUvGrad(RtMaterial mat, RtInstance inst, float3 N,
+                  float3 p0, float3 p1, float3 p2,
+                  float2 t0, float2 t1, float2 t2,
+                  float3 dx, float3 dy,
+                  out float2 gx, out float2 gy) {
+    gx = 0.0;
+    gy = 0.0;
+
+    if (mat.flags & AVER_MAT_WORLD_UV) {
+        // A WORLD-ALIGNED MATERIAL'S GRADIENT LIVES IN A DIFFERENT SPACE, and using the mesh-UV
+        // Jacobian for it would compute a perfectly precise gradient of the wrong function. Its UV
+        // is a planar projection of world position, so the differential is just that same projection
+        // of the world delta -- no Jacobian to invert at all. Same axes and dominant-axis choice as
+        // averRtSurfaceUV, or the gradient would describe a different plane from the sample.
+        const float3 ax = normalize(inst.objectToWorld[0].xyz);
+        const float3 ay = normalize(inst.objectToWorld[1].xyz);
+        const float3 az = normalize(inst.objectToWorld[2].xyz);
+        const float3 a  = abs(float3(dot(N, ax), dot(N, ay), dot(N, az)));
+        if (a.z >= a.x && a.z >= a.y) {
+            gx = float2(dot(dx, ax), dot(dx, ay));
+            gy = float2(dot(dy, ax), dot(dy, ay));
+        } else if (a.x >= a.y) {
+            gx = float2(dot(dx, ay), dot(dx, az));
+            gy = float2(dot(dy, ay), dot(dy, az));
+        } else {
+            gx = float2(dot(dx, ax), dot(dx, az));
+            gy = float2(dot(dy, ax), dot(dy, az));
+        }
+        gx *= mat.uvTilesPerCm;
+        gy *= mat.uvTilesPerCm;
+        return;
+    }
+
+    // Mesh UV: invert the triangle's own position-to-UV map. T and B here are dP/du and dP/dv,
+    // deliberately UNNORMALISED -- their lengths are centimetres per UV unit, which is exactly the
+    // scale being inverted.
+    const float3 e1 = p1 - p0, e2 = p2 - p0;
+    const float2 d1 = t1 - t0, d2 = t2 - t0;
+    const float  r  = d1.x * d2.y - d2.x * d1.y;
+    if (abs(r) < 1e-12) return;   // degenerate UVs: no footprint, so mip 0, as before
+
+    const float3 T = mul(float4((e1 * d2.y - e2 * d1.y) / r, 0.0), inst.objectToWorld).xyz;
+    const float3 B = mul(float4((e2 * d1.x - e1 * d2.x) / r, 0.0), inst.objectToWorld).xyz;
+
+    // Dual basis of (T, B, N): the rows of the inverse. A world delta in the tangent plane projects
+    // onto these to give its (du, dv).
+    const float3 cbn = cross(B, N);
+    const float3 cnt = cross(N, T);
+    const float  det = dot(T, cbn);
+    if (abs(det) < 1e-12) return;   // T parallel to B: no usable frame
+
+    gx = float2(dot(cbn, dx), dot(cnt, dx)) / det;
+    gy = float2(dot(cbn, dy), dot(cnt, dy)) / det;
 }
 
 // The texture coordinate a ray hit is sampled at: the mesh's own UV, or a planar projection when
@@ -2107,11 +2183,19 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // unbound slot costs one compare and changes nothing.
     // THE EFFECTIVE UV, which for a world-aligned material is nothing like the mesh's own.
     const float2 uvS = averRtSurfaceUV(mat, inst, wpos, N, hitUV);
-    float4 mapBase  = averRtSampleSlot(mat, 0, uvS, float4(1, 1, 1, 1));
-    float4 mapMR    = averRtSampleSlot(mat, 1, uvS, float4(1, 1, 1, 1));
-    float3 mapNrm   = averRtSampleSlot(mat, 2, uvS, float4(0.5, 0.5, 1, 1)).xyz * 2.0 - 1.0;
-    float  mapOcc   = averRtSampleSlot(mat, 3, uvS, float4(1, 1, 1, 1)).r;
-    float3 mapEmis  = averRtSampleSlot(mat, 4, uvS, float4(0, 0, 0, 1)).rgb;
+    // ...and the footprint one pixel covers in that same UV space, from the ray differentials this
+    // shader already built for the shadow disc.
+    float2 uvGx, uvGy;
+    averRtUvGrad(mat, inst, N,
+                 gRtVerts[i0].pos, gRtVerts[i1].pos, gRtVerts[i2].pos,
+                 gRtVerts[i0].uv,  gRtVerts[i1].uv,  gRtVerts[i2].uv,
+                 rdRayDx, rdRayDy, uvGx, uvGy);
+
+    float4 mapBase  = averRtSampleSlot(mat, 0, uvS, uvGx, uvGy, float4(1, 1, 1, 1));
+    float4 mapMR    = averRtSampleSlot(mat, 1, uvS, uvGx, uvGy, float4(1, 1, 1, 1));
+    float3 mapNrm   = averRtSampleSlot(mat, 2, uvS, uvGx, uvGy, float4(0.5, 0.5, 1, 1)).xyz * 2.0 - 1.0;
+    float  mapOcc   = averRtSampleSlot(mat, 3, uvS, uvGx, uvGy, float4(1, 1, 1, 1)).r;
+    float3 mapEmis  = averRtSampleSlot(mat, 4, uvS, uvGx, uvGy, float4(0, 0, 0, 1)).rgb;
     // glTF packs occlusion in R, roughness in G, metallic in B -- the same unpack averSampleMaps does.
     float2 metalRough = float2(mapMR.g, mapMR.b);
     float3 normalTS   = float3(mapNrm.xy * mat.normalScale, mapNrm.z);
@@ -2127,13 +2211,13 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         if (lw > 0.001) {
             const float2 uv1 = uvS * mat.layer1UvScale;
             if (mat.texIndex[5] != AVER_TEX_UNBOUND)
-                mapBase = lerp(mapBase, averRtSampleSlot(mat, 5, uv1, mapBase), lw);
+                mapBase = lerp(mapBase, averRtSampleSlot(mat, 5, uv1, uvGx * mat.layer1UvScale, uvGy * mat.layer1UvScale, mapBase), lw);
             if (mat.texIndex[6] != AVER_TEX_UNBOUND) {
-                const float4 mr1 = averRtSampleSlot(mat, 6, uv1, mapMR);
+                const float4 mr1 = averRtSampleSlot(mat, 6, uv1, uvGx * mat.layer1UvScale, uvGy * mat.layer1UvScale, mapMR);
                 metalRough = lerp(metalRough, float2(mr1.g, mr1.b), lw);
             }
             if (mat.texIndex[7] != AVER_TEX_UNBOUND) {
-                const float3 n1 = averRtSampleSlot(mat, 7, uv1, float4(0.5, 0.5, 1, 1)).xyz * 2.0 - 1.0;
+                const float3 n1 = averRtSampleSlot(mat, 7, uv1, uvGx * mat.layer1UvScale, uvGy * mat.layer1UvScale, float4(0.5, 0.5, 1, 1)).xyz * 2.0 - 1.0;
                 normalTS = normalize(lerp(normalTS, float3(n1.xy * mat.normalScale, n1.z), lw));
             }
         }
