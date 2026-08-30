@@ -451,6 +451,8 @@ private:
     // It exists because "the cost is linear in the ray count" was an assertion with no instrument
     // behind it. Changing exactly one thing and re-reading the same number is a measurement; a
     // profiler capture that cannot be checked into the repository is not.
+    // The backdrop handle currently bound at t10, so a re-bind only happens when it moves.
+    rhi::TextureHandle boundBackdrop_ = 0;
     u32  rdAblate_ = 0;            // --rd-ablate: AVER_RD_ABLATE for PSRayDriven, 0 = normal
     bool frameTimeReport_ = false;
     u64  frameTimeLastNs_ = 0;          // steady_clock, nanoseconds; 0 = no previous frame

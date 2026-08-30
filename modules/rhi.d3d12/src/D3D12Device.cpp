@@ -738,6 +738,7 @@ public:
     // reason as renderContext()/resources() just below: it calls into D3D12ResourceFactory, whose
     // complete type is not visible yet at this point in the file.
     TextureHandle sceneDepthTexture() override;
+    TextureHandle sceneColorBackdropTexture() override { return blendBackdropTex_; }
 
     // ---- G-buffer: velocity + view-space depth + normal/roughness -- see IDevice's own comment
     // block (RHI.hpp) for the full contract. OUT-OF-LINE for the identical reason sceneDepthTexture
@@ -1588,6 +1589,12 @@ private:
     // for in.color. A per-frame CopyResource fills this. Scene resolution, RGBA16F, SRV only.
     TextureHandle sceneColorTex_ = 0;
     u32           sceneColorTexW_ = 0, sceneColorTexH_ = 0;
+    // The blended pass's backdrop -- see IDevice::sceneColorBackdropTexture for why it exists.
+    // Created UNCONDITIONALLY, unlike sceneColorTex_ above, which only the upscaler path needs.
+    TextureHandle blendBackdropTex_ = 0;
+    u32           blendBackdropW_ = 0, blendBackdropH_ = 0;
+    bool          blendBackdropMsaaWarned_ = false;
+    bool          blendBackdropCopyLogged_ = false;
     // AverSR's output: HDR (pre-tonemap) at PRESENT resolution. The upscale runs on radiance and
     // PSComposite then tonemaps an image that is already the right size, so its own resample
     // becomes 1:1 and neither the shader nor its pipeline changes.
@@ -4192,8 +4199,10 @@ void D3D12Device::releasePostTargets() {
     if (D3D12ResourceFactory* f = rhiFactory_) {
         if (sceneColorTex_) { f->destroyTexture(sceneColorTex_); sceneColorTex_ = 0; }
         if (presentHdrTex_) { f->destroyTexture(presentHdrTex_); presentHdrTex_ = 0; }
+        if (blendBackdropTex_) { f->destroyTexture(blendBackdropTex_); blendBackdropTex_ = 0; }
     }
     sceneColorTexW_ = sceneColorTexH_ = presentHdrTexW_ = presentHdrTexH_ = 0;
+    blendBackdropW_ = blendBackdropH_ = 0;
     bloomMips_ = bloomW_ = bloomH_ = 0;
     postReady_ = false;
 }
@@ -4279,6 +4288,21 @@ bool D3D12Device::createPostTargets() {
     // hand rhiFactory_->texture(0) to a writeTriple that dereferences it, and crash createPostTargets
     // on the DEFAULT path. (That exact null-deref was in the design this follows; an adversarial
     // review caught it before it was written.)
+    // THE BLENDED PASS'S BACKDROP, created whether or not anything upscales -- glass needs it in every
+    // configuration. Same shape as the AverSR alias below (SRV only, a CopyResource fills it), for
+    // the same underlying reason: `scene` is a raw ComPtr with no TextureHandle, and a binding set
+    // needs one. See IDevice::sceneColorBackdropTexture for what it is for.
+    if (D3D12ResourceFactory* f = rhiFactory_) {
+        TextureDesc bdz;
+        bdz.width = sceneWidth_; bdz.height = sceneHeight_;
+        bdz.format = fromDxgiFormat(kSceneColorFormat);
+        bdz.bind = ResourceBind::ShaderResource;
+        bdz.initialState = ResourceState::ShaderResource;
+        bdz.debugName = "Blended.Backdrop";
+        blendBackdropTex_ = f->createTexture(bdz);
+        blendBackdropW_ = sceneWidth_; blendBackdropH_ = sceneHeight_;
+    }
+
     if (upscaler_) {
         if (D3D12ResourceFactory* f = rhiFactory_) {
             // #1: a factory-created ALIAS of the scene colour. `scene` above is a raw ComPtr from
@@ -4791,6 +4815,56 @@ void D3D12Device::endFrame() {
         // 4.7ms exclusive -- more than those four put together -- and this replay was the only
         // unmarked thing left inside it. Naming it turns "the sky-and-post bucket is expensive"
         // into "the glass is expensive", which is a different problem with a different fix.
+        // ---- THE BACKDROP COPY, and it happens HERE for a reason ----------------------------
+        //
+        // Inside the "are there blended draws" guard, so a frame with no translucency pays nothing;
+        // and BEFORE the first translucent draw, so what it captures is the opaque scene exactly.
+        //
+        // FROM msaaColor_, NOT `scene`. `scene` (declared above) is the RESOLVE DESTINATION, and the
+        // resolve has not run yet at this point in endFrame -- it happens after this replay, which is
+        // the whole reason glass can be composited over the scene at all. Copying `scene` here would
+        // capture last frame's resolve, or nothing.
+        //
+        // SINGLE-SAMPLE ONLY. Under MSAA the scene target is multisampled and CopyResource into a
+        // single-sample texture is invalid; a ResolveSubresource would be the answer, but resolving
+        // mid-pass to feed a shader that then draws back into the unresolved target is a bigger
+        // change than this one, so the backdrop is simply unavailable there and the shader falls
+        // back to its scalar composite. Said once rather than every frame.
+        if (blendBackdropTex_ && rhiFactory_ && msaaColor_) {
+            if (RhiTexture* bt = rhiFactory_->texture(blendBackdropTex_)) {
+                if (bt->res) {
+                    // MSAA IS 4x BY DEFAULT ON THIS DEVICE, so the single-sample-only version of this
+                    // was a feature that never ran for anybody. A multisampled target cannot be
+                    // CopyResource'd into a single-sample texture -- it has to be RESOLVED -- and the
+                    // resolve is what the backdrop wants anyway, since the shader samples it once per
+                    // pixel and has no use for per-sample data.
+                    const bool ms = sampleCount_ > 1;
+                    const D3D12_RESOURCE_STATES srcTo = ms ? D3D12_RESOURCE_STATE_RESOLVE_SOURCE
+                                                           : D3D12_RESOURCE_STATE_COPY_SOURCE;
+                    const D3D12_RESOURCE_STATES dstTo = ms ? D3D12_RESOURCE_STATE_RESOLVE_DEST
+                                                           : D3D12_RESOURCE_STATE_COPY_DEST;
+                    D3D12_RESOURCE_BARRIER pre[2] = {
+                        transition(msaaColor_.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, srcTo),
+                        transition(bt->res.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, dstTo),
+                    };
+                    cmdList_->ResourceBarrier(2, pre);
+                    if (ms) cmdList_->ResolveSubresource(bt->res.Get(), 0, msaaColor_.Get(), 0,
+                                                         kSceneColorFormat);
+                    else    cmdList_->CopyResource(bt->res.Get(), msaaColor_.Get());
+                    D3D12_RESOURCE_BARRIER post[2] = {
+                        transition(msaaColor_.Get(), srcTo, D3D12_RESOURCE_STATE_RENDER_TARGET),
+                        transition(bt->res.Get(), dstTo, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+                    };
+                    cmdList_->ResourceBarrier(2, post);
+                    if (!blendBackdropCopyLogged_) {
+                        blendBackdropCopyLogged_ = true;
+                        AVER_INFO("[RHI.D3D12] blended backdrop: {} {}x{} from the scene target",
+                                  ms ? "resolved" : "copied", blendBackdropW_, blendBackdropH_);
+                    }
+                }
+            }
+        }
+
         beginGpuSpan("blended replay");
         // Only the FIRST feature that overridesScenePipeline() is ever asked, exactly the assumption
         // the opaque walk two screens below and drawMeshDepthPrepass above both already make (this

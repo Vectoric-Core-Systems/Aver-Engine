@@ -93,6 +93,15 @@ SamplerComparisonState    gShadowSamp : register(s1);
 // which is compiled without ray tracing, so a declaration inside the guard would vanish exactly
 // where it is needed. Shares gShadowSamp -- same comparison state, different texture.
 Texture2D<float>          gGiShadowTex : register(t8);
+// THE OPAQUE SCENE, COPIED BEFORE TRANSLUCENCY REPLAYS -- see IDevice::sceneColorBackdropTexture.
+// It exists so a blended surface can tint what is behind it PER CHANNEL. Hardware blending gives one
+// scalar (1 - src.a) for the destination, and volume absorption is per-channel by definition, so
+// without this a pane of glass can only get darker with depth, never greener.
+//
+// MAY BE NULL-FILLED: before the first resize, under MSAA (the copy is invalid from a multisampled
+// target), or on a backend that does not implement it. averBlendBackdropValid() below is how a
+// caller asks, and every use falls back to the scalar composite when it says no.
+Texture2D<float4>         gBlendBackdrop : register(t10);
 
 #if AVER_RT
 // DXR 1.1 inline ray tracing: traced from the pixel shader, no state objects or binding tables.
@@ -1180,6 +1189,60 @@ float3 rtReflection(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, flo
 // Returns 0 when nothing is hit, which averVolumeTransmittance reads as "no path through the
 // medium" and answers with full transmission. That is the right failure: an unbounded volume should
 // not absorb infinitely, it should absorb nothing until someone gives it a boundary.
+// Is a real backdrop bound? A null-filled Texture2D reports zero dimensions, and that is the only
+// signal available from inside the shader -- the alternative is threading a validity flag through a
+// constant buffer, which would mean finding or inventing a spare component for something the
+// descriptor already tells us. Tested rather than assumed: forcing the null case (MSAA on, where the
+// device cannot take the copy) and confirming glass falls back instead of going black is part of
+// this feature's verification.
+bool averBlendBackdropValid(out float2 invSize) {
+    uint w = 0, h = 0;
+    gBlendBackdrop.GetDimensions(w, h);
+    const bool ok = (w > 0u && h > 0u);
+    invSize = ok ? (1.0 / float2((float)w, (float)h)) : float2(0.0, 0.0);
+    return ok;
+}
+
+// THE VOLUME COMPOSITE, WITH THE BACKGROUND AS A CORRECTION RATHER THAN A REPLACEMENT.
+//
+// What we want, physically, is the surface's own light plus what survived the medium:
+//
+//     final = specular + diffuse*alpha + dst * T * (1 - alpha)
+//
+// and the hardware, in premultiplied alpha, gives `final = src.rgb + dst * (1 - src.a)`. Setting
+// src.a = alpha and solving for src.rgb:
+//
+//     src.rgb = specular + diffuse*alpha + bg * (1 - alpha) * (T - 1)
+//
+// THE LAST TERM IS THE WHOLE TRICK, and it is why this reads as a subtraction. (T - 1) is negative,
+// so it removes exactly the light the medium absorbed, per channel -- the thing one blend alpha
+// cannot express. The hardware still adds the REAL destination afterwards.
+//
+// TWO PROPERTIES THIS BUYS, both deliberate:
+//
+//   T == 1 MAKES THE CORRECTION EXACTLY ZERO, so a material with no volume composites
+//   bit-for-bit as it did before this existed. That is what the no-absorption regression check
+//   leans on: it is an identity, not an approximation that happens to be close.
+//
+//   STACKED TRANSLUCENCY DEGRADES GENTLY. `bg` is the scene copied BEFORE any translucent draw, so
+//   for a second layer it is stale -- but it is used only in the correction, while the base
+//   composite still blends against the true `dst`. Replacing the background outright (alpha = 1)
+//   would have made the nearer pane erase the farther one entirely. This map puts glass over water
+//   on purpose, so that is not a hypothetical.
+//
+// Falls back to the scalar composite when no backdrop is bound, which is the honest answer rather
+// than sampling black and calling it absorption.
+float4 averBlendedOutputBackdrop(AverSurface s, float3 diffuse, float3 specular, float3 T,
+                                 float2 screenPos) {
+    float2 invSize;
+    if (!averBlendBackdropValid(invSize))
+        return averBlendedOutputVolume(s, diffuse, specular, T);
+
+    const float3 bg    = gBlendBackdrop.SampleLevel(gMaterialSampler, screenPos * invSize, 0).rgb;
+    const float  alpha = saturate(s.alpha);
+    return float4(specular + diffuse * alpha + bg * (1.0 - alpha) * (T - 1.0), alpha);
+}
+
 float averVolumeThickness(float3 wpos, float3 N, float3 viewDir) {
     RayDesc r;
     // The SAME bias the reflection ray uses, and for the same reason -- a ray starting exactly on the
@@ -1984,7 +2047,12 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
             const float3 volT = averVolumeTransmittance(
                 gAttenuationColor, gAttenuationDistance,
                 averVolumeThickness(i.wpos, N, -s.V));
-            outc = averBlendedOutputVolume(s, dif, spc, volT);
+            // THE BACKDROP PATH, which is what lets attenuationColor's HUE reach the picture at all.
+        // averBlendedOutputVolume (the fallback inside this call) can only make the surface go
+        // opaque faster in the channels it absorbs; it cannot tint the background, because one
+        // blend alpha is one number. i.pos.xy is SV_Position in pixels, which is the screen
+        // coordinate the copy is indexed by.
+        outc = averBlendedOutputBackdrop(s, dif, spc, volT, i.pos.xy);
         } else
 #endif
         outc = averBlendedOutput(s, dif, spc);

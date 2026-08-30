@@ -693,6 +693,31 @@ public:
     // other size-dependent target this interface exposes.
     virtual TextureHandle sceneDepthTexture() { return 0; }
 
+    // THE OPAQUE SCENE, COPIED, SO A TRANSLUCENT SURFACE CAN READ WHAT IS BEHIND IT.
+    //
+    // WHY THIS HAS TO EXIST. Hardware alpha blending attenuates the destination by ONE scalar
+    // (1 - src.a), which cannot differ per channel. Volume absorption is Beer-Lambert and is
+    // per-channel by definition -- glass is green because iron passes green and eats red, and the
+    // effect grows with path length. So a blended surface can be made to go DARKER with depth by
+    // raising its alpha, but it can never TINT what is behind it. That is the whole reason glass in
+    // this engine could not show the green edge that real glass shows.
+    //
+    // The way out is to hand the shader the background as a texture, so it does the composite itself
+    // instead of leaving it to one blend factor. This returns a copy of the scene colour taken just
+    // BEFORE the blended draws replay -- the same trick the AverSR path already uses to give the
+    // upscaler a TextureHandle for a raw render target.
+    //
+    // ONE COPY, TAKEN ONCE. A second translucent layer therefore samples a background that does not
+    // include the first: glass over water reads the water's own backdrop, not the water. That is the
+    // standard trade (UE's distortion pass makes it too) and it is the price of this approach over
+    // per-channel destination blending, which D3D12 cannot offer here because the blended pass binds
+    // four render targets when the G-buffer is on and dual-source blending requires exactly one.
+    //
+    // 0 when unavailable, and the shader must fall back to the scalar composite when it is: before
+    // the first resize, on a backend that has not implemented it, and under MSAA, where the scene
+    // target is multisampled and a plain CopyResource into a single-sample texture is invalid.
+    virtual TextureHandle sceneColorBackdropTexture() { return 0; }
+
     // ---------------------------------------------------------------------------------------
     // G-buffer: velocity, view-space depth, and world normal+roughness, written ALONGSIDE the
     // ordinary forward scene pass at scene resolution -- three extra render targets and nothing

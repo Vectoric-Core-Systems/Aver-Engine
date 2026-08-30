@@ -114,7 +114,11 @@ void giSamplers(rhi::PipelineLayout& l) {
 // caller's register math either way. Bumping kGiSrvCount ITSELF instead would have been the wrong
 // fix: every register past it in a file this change was never asked to touch (SandboxApp.cpp) would
 // have silently rebased right along with it.
-constexpr u32 kVoxiSrvCount = kGiSrvCount + 1;
+// NOW TWO WIDER, and the reasoning above is unchanged -- t10 is the blended pass's backdrop (the
+// opaque scene, copied before translucency replays, so glass can tint what is behind it per channel
+// instead of through one blend alpha). Like t9 it is Voxi's own slot: bindGiResources() still fills
+// only the cluster path's first two, so SandboxApp.cpp's register math is untouched by this.
+constexpr u32 kVoxiSrvCount = kGiSrvCount + 2;
 
 // What KIND of resource each of table 0's slots holds. Declared once, here, and read by both
 // giLayout() (for every pipeline) and createVoxelVolume()'s BindingSetDesc (for the set those
@@ -139,12 +143,16 @@ void giTableKinds(rhi::SlotKind* srv, rhi::SlotKind* uav) {
     // through RtInstance::materialIndex (gRtMaterials in VoxiShaders.hpp). Same null-fill-until-built
     // story as t3..t5 above -- see buildMaterialTable().
     srv[9] = rhi::SlotKind::StructuredBuffer;       // t9 dense per-frame material constants
+    // t10: the opaque scene copied just before the blended replay (IDevice::sceneColorBackdropTexture).
+    // Null until the device has one -- before the first resize, under MSAA, or on a backend that does
+    // not implement it -- and the shader tests for that rather than assuming.
+    srv[10] = rhi::SlotKind::Texture2D;             // t10 blended backdrop
     uav[0] = rhi::SlotKind::Texture3D;              // u0 volume mip 0
     uav[1] = rhi::SlotKind::Texture3D;              // u1 injection accumulator
     uav[2] = rhi::SlotKind::Texture2D;              // u2 ray-traced shadow history (write)
     uav[3] = rhi::SlotKind::Texture2D;              // u3 ray-traced reflection history (write)
-    static_assert(kVoxiSrvCount == 10 && kGiSrvCount == 9 && kGiUavCount == 4,
-                  "giTableKinds fills exactly kVoxiSrvCount (== kGiSrvCount + 1) SRVs and "
+    static_assert(kVoxiSrvCount == 11 && kGiSrvCount == 9 && kGiUavCount == 4,
+                  "giTableKinds fills exactly kVoxiSrvCount (== kGiSrvCount + 2) SRVs and "
                   "kGiUavCount UAVs; widen the right constant if this changes again -- kGiSrvCount "
                   "itself only if SandboxApp.cpp's cluster-path reservation is being widened too, "
                   "in the same change");
@@ -769,6 +777,18 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
         // reaches shutdown still leaves a number behind.
         if (frameTimeMs_.size() && frameTimeMs_.size() % 120 == 0) reportFrameTime("running");
     }
+    // t10, THE BLENDED BACKDROP. Re-bound only when the handle actually changes -- the device
+    // recreates it on resize, and setSrv every frame for a handle that has not moved is descriptor
+    // churn for nothing. A 0 handle (before the first resize, under MSAA, or a backend without one)
+    // leaves the slot null-filled, which is exactly what the shader's own guard expects.
+    if (dev_ && bindings_) {
+        const rhi::TextureHandle bd = dev_->sceneColorBackdropTexture();
+        if (bd != boundBackdrop_) {
+            boundBackdrop_ = bd;
+            if (bd) res_->setSrv(bindings_, 10, bd);
+        }
+    }
+
     materials_.update();
     const f32 size = extent_ * 2.0f;
     cb_.voxelOrigin[0] = center_[0] - extent_;
