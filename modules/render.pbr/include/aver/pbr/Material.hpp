@@ -102,6 +102,40 @@ struct MaterialDesc {
     // from the field's name.
     f32 transmission = 0.0f;
 
+    // ---- volume absorption: what the INTERIOR of a transmissive material does to light ----
+    //
+    // glTF's KHR_materials_volume, and the natural companion to the KHR_materials_transmission split
+    // `transmission` above already implements. `transmission` says light passes THROUGH the surface;
+    // these two say what happens to it on the way across the inside.
+    //
+    // WHY THIS IS NOT A TINT. A coloured sheet removes the same fraction of each channel however far
+    // you look through it. A volume removes light exponentially in distance and per channel -- red
+    // dies within about a metre of water, blue survives tens of metres -- which is the entire reason
+    // water reads cyan and reads DEEPER cyan the further you look through it, why thick glass goes
+    // green at its edges, and why a thin sliver of jade is pale where a block is saturated. One
+    // exp() gets all of that; no amount of tuning a constant colour does, because the constant
+    // cannot know the distance.
+    //
+    // attenuationColor is the transmittance after light has travelled exactly attenuationDistance
+    // through the medium, so the extinction the shader wants is
+    //     extinction = -log(attenuationColor) / attenuationDistance
+    // and the transmittance over an arbitrary path is exp(-extinction * thickness). Authoring it as
+    // "the colour at a known distance" rather than as a raw extinction coefficient is glTF's choice
+    // and it is the right one: an artist can see a colour, and nobody can see a reciprocal centimetre.
+    //
+    // ZERO IS OFF, not "infinitely dense". glTF's own default is an infinite attenuationDistance,
+    // which is the same thing said in a way that does not survive a zero-initialised struct -- and a
+    // zero-initialised material must mean "no volume", because every material authored before this
+    // existed has these bytes as zero and must shade bit-identically. The shader gates on
+    // attenuationDistance > 0, which is also why this costs no MaterialFlag bit: the off state is
+    // already representable in the data.
+    //
+    // DISTANCE IS IN CENTIMETRES, this engine's world unit throughout -- see uvTilesPerCm and
+    // FluidVolume's halfExtentCm for the same convention. Water is roughly
+    // attenuationColor (0.30, 0.73, 0.80) at attenuationDistance 100.
+    f32 attenuationColor[3] = {1.0f, 1.0f, 1.0f};   // transmittance at exactly attenuationDistance
+    f32 attenuationDistance = 0.0f;                 // cm; <= 0 disables volume absorption entirely
+
     // ---- subsurface scattering ----
     // WRAP DIFFUSE PLUS A BACK-LIGHT LOBE, AND NOT ONE PHOTON MORE. Both default to 0, so every
     // material authored before this existed shades bit-identically and the gate baselines do not

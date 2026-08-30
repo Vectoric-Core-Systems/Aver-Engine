@@ -89,6 +89,14 @@ cbuffer AverMaterial : register(b2) {
     // shades every material in one pass and has no per-draw table to bind.
     uint4  gTexIndex0;   // slots 0..3: BaseColor, MetalRough, Normal, Occlusion
     uint4  gTexIndex1;   // slots 4..7: Emissive, Layer1BaseColor, Layer1MetalRough, Layer1Normal
+
+    // Volume absorption, mirroring MaterialConstants::attenuationColor/attenuationDistance -- the
+    // row that took the block from 144 to 160. gAttenuationColor is the transmittance after exactly
+    // gAttenuationDistance CENTIMETRES of the medium; gAttenuationDistance <= 0 means the material
+    // has no volume at all, which is every material authored before this row existed. Read only
+    // through averVolumeTransmittance below.
+    float3 gAttenuationColor;
+    float  gAttenuationDistance;
 };
 
 // gMaterialFlags bits, mirroring pbr::MaterialFlag.
@@ -117,6 +125,34 @@ cbuffer AverMaterial : register(b2) {
 
 // Schlick Fresnel. f90 is the grazing-angle reflectance.
 float3 fresnelSchlick(float ct, float3 F0, float f90){ return F0 + (f90-F0)*pow(saturate(1.0-ct),5.0); }
+
+// ---- volume absorption: Beer-Lambert across a known thickness ----
+//
+// THE ONE IMPLEMENTATION BOTH PATHS CALL. The raster blended branch reads its material from
+// `cbuffer AverMaterial` and PSRayDriven reads its own RtMaterial out of a StructuredBuffer, so
+// this takes the two values as PARAMETERS and reads no global. That is not style: a ray hit has NO
+// material cbuffer bound (see the note further down this file), so a shared helper that reached for
+// gAttenuationColor would silently shade every ray-driven pixel with whatever material the last
+// raster draw happened to leave in b2. That exact mistake has already been made in this tree once.
+//
+// attenuationColor is the transmittance after `attenuationDistance` centimetres, so the extinction
+// is -log(colour)/distance and the transmittance over `thicknessCm` is exp(-extinction * thickness).
+// Written as a pow() of the ratio, which is the same function with one fewer transcendental and no
+// intermediate that can overflow:
+//     exp(log(c) * (t / d))  ==  pow(c, t / d)
+//
+// RETURNS float3(1,1,1) -- perfect transmission, i.e. no volume -- for any material that did not
+// author one, which is every material that predates this row. Guarding on distance <= 0 rather than
+// on a flag bit is deliberate: the off state is representable in the data itself, so a
+// zero-initialised material is already correct and no MaterialFlag had to be spent.
+float3 averVolumeTransmittance(float3 attenuationColor, float attenuationDistance, float thicknessCm) {
+    if (attenuationDistance <= 0.0) return float3(1.0, 1.0, 1.0);
+    // Negative thickness means the caller could not measure one (a ray that found no exit, a depth
+    // sample behind the near plane); treat it as "no path through the medium" rather than letting a
+    // negative exponent AMPLIFY the light, which is the failure mode that looks like a glowing pool.
+    const float t = max(thicknessCm, 0.0);
+    return pow(max(attenuationColor, 1e-4), t / attenuationDistance);
+}
 // GGX normal distribution. Takes alpha (rough*rough).
 float distGGX(float ndh, float a){ float a2=a*a; float d=ndh*ndh*(a2-1.0)+1.0; return a2/(PI*d*d+1e-6); }
 

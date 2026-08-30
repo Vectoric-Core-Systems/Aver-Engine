@@ -188,6 +188,14 @@ struct RtMaterial {
     // Occlusion, Emissive, Layer1BaseColor, Layer1MetalRough, Layer1Normal. 0xFFFFFFFF is "no
     // texture in this slot" -- not 0, which is a real index. Unread until the bindless table lands.
     uint   texIndex[8];
+
+    // Volume absorption, mirroring MaterialConstants::attenuationColor/attenuationDistance -- the row
+    // that took the block from 144 to 160. Same order and same offsets as the C++ struct and as
+    // `cbuffer AverMaterial` in material_prelude.hlsl; tests/formats/src/MaterialTest.cpp asserts the
+    // offsets so a field moved in one copy and not the other two fails the suite rather than shading
+    // a material with its neighbour's bytes.
+    float3 attenuationColor;
+    float  attenuationDistance;
 };
 
 #ifdef AVER_RT_BINDLESS

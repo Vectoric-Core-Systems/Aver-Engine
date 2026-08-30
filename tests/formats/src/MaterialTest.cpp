@@ -471,7 +471,7 @@ static void testPack() {
     // subtly wrong with nothing to grep for. Note this is a RUNTIME check rather than a
     // static_assert, which is why the 80 -> 96 growth compiled clean and would have failed the suite
     // instead -- keep it that way, since the point is to be told, not to be stopped.
-    check(sizeof(pbr::MaterialConstants) == 144, "MaterialConstants is 144 bytes");
+    check(sizeof(pbr::MaterialConstants) == 160, "MaterialConstants is 160 bytes");
     check(sizeof(pbr::MaterialConstants) % 16 == 0, "...and a legal constant-buffer size");
 
     // ---- THE FIELD LAYOUT, NOT JUST THE TOTAL ----
@@ -506,6 +506,18 @@ static void testPack() {
     // never got resident textures must carry kUnboundTexture rather than a default-constructed 0,
     // or it samples whatever landed in slot 0 and looks like a content bug rather than a code one.
     check(offsetof(pbr::MaterialConstants, texIndex)         == 112, "texIndex at 112");
+    // The volume-absorption row, appended after texIndex when the block grew 144 -> 160. Offsets
+    // asserted for the same reason as every field above: three hand-maintained mirrors, and a field
+    // moved in one of them shades a material with its neighbour's bytes rather than failing to build.
+    check(offsetof(pbr::MaterialConstants, attenuationColor)    == 144, "attenuationColor at 144");
+    check(offsetof(pbr::MaterialConstants, attenuationDistance) == 156, "attenuationDistance at 156");
+    {
+        // ZERO IS THE OFF STATE, and the whole no-flag-bit design rests on it: a default material
+        // must carry a distance of 0 so averVolumeTransmittance returns exactly 1 and every material
+        // authored before this row existed shades bit-identically.
+        const pbr::MaterialConstants fresh = pbr::packMaterial(pbr::MaterialDesc{});
+        check(fresh.attenuationDistance == 0.0f, "...and a default material has NO volume");
+    }
     {
         const pbr::MaterialConstants fresh = pbr::packMaterial(pbr::MaterialDesc{});
         bool allUnbound = true;
