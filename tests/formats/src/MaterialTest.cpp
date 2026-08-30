@@ -691,6 +691,38 @@ static void testRoundTrip() {
 
     check(text.find("uv0 sRGB") != std::string::npos, "base colour is written sRGB");
     check(text.find("uv1 normal") != std::string::npos, "the normal slot is written 'normal'");
+
+    // ---- volume absorption round-trips, and is OPT-IN in the output ----
+    //
+    // kFull authors no volume, so the writer must emit neither PARAM -- the same byte-stability rule
+    // subsurface and the coat already follow. Writing "attenuationDistance 0" into every material
+    // would turn every fixture in this tree into a diff for a line meaning "not in use".
+    check(text.find("attenuationDistance") == std::string::npos,
+          "a material with no volume writes no attenuation PARAMs");
+    check(b.attenuationDistance == 0.0f, "...and re-parses with no volume");
+
+    // Now one that DOES author a volume. Checked by writing and re-parsing rather than by parsing a
+    // literal, because the failure this guards is a writer that emits a token the parser does not
+    // accept -- which a one-directional test cannot see.
+    {
+        pbr::MaterialDesc v = a;
+        v.attenuationColor[0] = 0.15f; v.attenuationColor[1] = 0.85f; v.attenuationColor[2] = 0.35f;
+        v.attenuationDistance = 12.5f;
+        const std::string vtext = fmt::writeOcmat(v, &exA);
+        check(vtext.find("PARAM attenuationDistance") != std::string::npos,
+              "an authored volume IS written");
+        pbr::MaterialDesc w;
+        std::string verr;
+        if (!fmt::parseOcmat(vtext, w, nullptr, &verr)) {
+            AVER_ERROR("   re-parse of an authored volume failed: {}", verr);
+            ++g_failures;
+        } else {
+            check(near(w.attenuationDistance, 12.5f), "attenuationDistance round-trips");
+            check(near(w.attenuationColor[0], 0.15f) && near(w.attenuationColor[1], 0.85f)
+               && near(w.attenuationColor[2], 0.35f),
+                  "attenuationColor round-trips all three channels, in order");
+        }
+    }
 }
 
 // Checks each BLEND mode through parse and write.

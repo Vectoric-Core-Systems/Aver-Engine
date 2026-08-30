@@ -1113,6 +1113,53 @@ float3 rtReflection(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, flo
     return reflAlbedo * (direct + ambient);
 }
 
+// How far a view ray travels INSIDE a volume before something stops it, in centimetres.
+//
+// WHAT THIS IS FOR. averVolumeTransmittance needs a path length, and a blended surface has no idea
+// how thick it is -- it is one fragment on one face. The old fluid shader guessed, with
+// `depthCm / max(abs(V.z), 0.15)` measured from a CONSTANT floor height (FluidShaders.hpp), which is
+// a depth below the surface only on the TOP face of a box. On a side face it is height up the wall,
+// and at pitch 0 the clamp turns it into an ~8.7 m path, so the side of a pool came out fully opaque
+// and bright. That is the whole reason the PTTest pit read as a blown-out white slab. A ray does not
+// have to guess: it measures.
+//
+// FORCE_OPAQUE, DELIBERATELY, and this is the one flag that makes a single Proceed() correct here.
+// Translucent instances are in the structure as FORCE_NON_OPAQUE (see the mask comment at the top of
+// this file), so an ordinary traversal would stop AT a candidate without committing it and this
+// function would answer with whatever CommittedStatus happened to hold. FORCE_OPAQUE overrides that
+// per-instance flag for this ray only: traversal commits the nearest hit in either lane and returns
+// false from Proceed(), which is exactly the question being asked -- "what is the first thing along
+// this ray, of any kind".
+//
+// BOTH LANES, because both can end the path. The volume's own BACK FACE ends it (that is the exit
+// point of a convex body), and so does any opaque object sitting INSIDE the volume -- a rock in a
+// pool, the pool's own floor. Taking the nearest of the two is what makes absorption respond to real
+// geometry instead of to an authored box height, which is the property the old formula could not
+// have at any amount of tuning.
+//
+// Returns 0 when nothing is hit, which averVolumeTransmittance reads as "no path through the
+// medium" and answers with full transmission. That is the right failure: an unbounded volume should
+// not absorb infinitely, it should absorb nothing until someone gives it a boundary.
+float averVolumeThickness(float3 wpos, float3 N, float3 viewDir) {
+    RayDesc r;
+    // The SAME bias the reflection ray uses, and for the same reason -- a ray starting exactly on the
+    // surface it just shaded re-hits it at t≈0 and reports a thickness of zero. Pushed along the view
+    // direction rather than along N: this ray is deliberately heading INTO the surface, so offsetting
+    // along the normal would push it out of the very volume it is trying to measure.
+    const float bias = max(gRtParams.z, 1e-4) * (1.0 + length(wpos - gCamPos.xyz) * 5e-4);
+    r.Origin    = wpos + viewDir * bias;
+    r.Direction = viewDir;
+    r.TMin      = 0.0;
+    r.TMax      = 100000.0;
+
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
+    q.TraceRayInline(gScene, RAY_FLAG_FORCE_OPAQUE,
+                     AVER_RT_MASK_OPAQUE | AVER_RT_MASK_TRANSLUCENT, r);
+    q.Proceed();
+    if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) return 0.0;
+    return q.CommittedRayT() + bias;
+}
+
 // Reprojects wpos through LAST frame's camera to sample the reflection history there. False when
 // not usable: off-screen, behind last frame's near plane, no hit recorded there (stored.a <= 0 --
 // see gRtReflHist's own comment for the miss sentinel), or a depth mismatch (disocclusion) -- the
@@ -1835,7 +1882,28 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
         // instead of full. sceneBlendedPso_'s PremultipliedAlpha blend state is what makes packing it
         // this way the correct thing to hand the ROP rather than a number that needs a different
         // blend equation to come out right.
-        float4 outc = averBlendedOutput(s, dif, spc);
+        // THE VOLUME, where one is authored. gAttenuationDistance <= 0 is the off state every
+        // material carried before that row existed, so this whole block compiles to a compare and a
+        // branch nobody takes for ordinary glass -- and averBlendedOutputVolume reduces to
+        // averBlendedOutput exactly at T = 1 regardless, so the two are the same function for a
+        // surface with no interior.
+        //
+        // MEASURED WITH A RAY, NOT DERIVED FROM AN AUTHORED HEIGHT. See averVolumeThickness for why:
+        // a fragment on a face has no idea how thick its own body is, and the formula that guessed
+        // is what made the PTTest pool a bright opaque slab from every angle but straight down.
+        // Behind AVER_RT because the ray is: without ray tracing there is no structure to measure
+        // against, so the surface keeps exactly today's volumeless composite rather than a fabricated
+        // thickness.
+        float4 outc;
+#if AVER_RT
+        if (gAttenuationDistance > 0.0) {
+            const float3 volT = averVolumeTransmittance(
+                gAttenuationColor, gAttenuationDistance,
+                averVolumeThickness(i.wpos, N, -s.V));
+            outc = averBlendedOutputVolume(s, dif, spc, volT);
+        } else
+#endif
+        outc = averBlendedOutput(s, dif, spc);
 
         // ---- THE FOG DECISION ----
         //

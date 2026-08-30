@@ -1046,3 +1046,49 @@ void averShadeSplit(AverSurface s, AverLight l, AverIndirect ind, out float3 dif
 float4 averBlendedOutput(AverSurface s, float3 diffuse, float3 specular) {
     return float4(specular + diffuse * s.alpha, s.alpha);
 }
+
+// The same composite, for a surface that also has a VOLUME behind it.
+//
+// `T` is the per-channel transmittance across the path the light actually travelled through the
+// medium -- averVolumeTransmittance of a measured thickness, not of an authored guess.
+//
+// THE DERIVATION, since the alpha is not obvious. The blend state is PremultipliedAlpha, so the
+// framebuffer computes out = src + dst * (1 - a). Background light must survive with weight
+// (1 - s.alpha) * T instead of (1 - s.alpha), which fixes the coverage:
+//     a = 1 - (1 - s.alpha) * Tavg
+// and nothing else changes: the medium REMOVES light, it does not add any.
+//
+// IT REDUCES EXACTLY TO THE FUNCTION ABOVE WHEN THERE IS NO VOLUME. At T = 1 the added term is zero
+// and a collapses to s.alpha, so a material that authors no attenuationDistance composites
+// bit-identically to before this existed -- which is what keeps every existing blended draw, glass
+// included, off the gate baselines. At T = 0 it goes fully opaque with full diffuse, which is a
+// column deep enough to swallow everything behind it.
+//
+// ONE LIMITATION, STATED RATHER THAN HIDDEN, and it is the same one the fluid shader documented
+// before it: the hardware blend carries a single SCALAR alpha, so the background can only be
+// attenuated by the AVERAGE transmittance. attenuationColor therefore controls HOW FAST a volume
+// goes opaque with depth -- which is the dominant cue, and the one the old fluid shader could not
+// have at all -- but its HUE does not yet tint what is behind the surface. A volume's own colour
+// comes from its authored base colour meanwhile, exactly as the fluid shader's gFluidBody did.
+//
+// Per-channel removal genuinely needs the background, and there are two ways to get it: a
+// scene-colour SRV (IRenderContext::copyTexture exists and is proven, one caller today), or a
+// per-channel destination blend factor -- INV_SRC_COLOR multiplies dst by (1 - src.rgb) per channel.
+// The second is nearly free but changes the blend state for every blended draw, so neither is a
+// change to make in passing. Both are real follow-ups; neither is a dead end.
+float4 averBlendedOutputVolume(AverSurface s, float3 diffuse, float3 specular, float3 T) {
+    const float Tavg  = dot(T, float3(1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0));
+    const float alpha = saturate(1.0 - (1.0 - s.alpha) * Tavg);
+    // The SAME composite as averBlendedOutput, with the volume-corrected coverage in place of the
+    // surface's own. That is the whole change, and it is deliberately not more than that.
+    //
+    // WHAT WAS TRIED AND IS WRONG, recorded so it is not re-attempted: adding an in-scattering term
+    // `diffuse * (1 - s.alpha) * (1 - T)`. It reads plausibly -- the medium fills in as the
+    // background is absorbed -- but (1 - T) is LARGEST in the channel the medium absorbs MOST, so a
+    // green-transmitting glass gains red and blue. It is the complement of the right colour. Measured
+    // on an 8 cm M_Glass pane authored (0.15, 0.85, 0.35) at 4 cm: the pane darkened by (29, 28, 27),
+    // i.e. uniformly, with no green anywhere -- the tint cancelling itself against the term meant to
+    // produce it. glTF's volume is pure ABSORPTION: it has no scattering albedo, so there is nothing
+    // for a correct in-scattering term to be made of.
+    return float4(specular + diffuse * alpha, alpha);
+}
