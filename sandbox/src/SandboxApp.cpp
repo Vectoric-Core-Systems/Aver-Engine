@@ -3255,6 +3255,10 @@ public:
         if (fluidWantPending_) {
             fluidWantPending_ = false;
             fluidHandle_ = fluidScene_.spawn(fluidWantDesc_, *e.device());
+            // Keyed by the handle the spawn just produced. Recorded even when empty, so the draw
+            // site's lookup distinguishes "this volume names no material" from "this volume is not
+            // one applyLevelWater latched" without either being a special case.
+            if (fluidHandle_) fluidSurfaceMaterial_[fluidHandle_] = fluidWantSurfaceMaterial_;
             const char* nm = fluidWantName_.empty() ? "unnamed" : fluidWantName_.c_str();
             if (fluidHandle_) {
                 AVER_INFO("[Water] '{}' is SIMULATED: a {}x{}x{} cm soft body centred at ({}, {}, {})",
@@ -4574,24 +4578,127 @@ public:
             if (i == sel_) selectionOutline_ = w, selectionMesh_ = o.mesh, hasSelection_ = true;
         }
 
-        // The simulated fluid used to be drawn here, like any other opaque mesh, with a flat colour
-        // and no transparency -- see the git history of this file for that block. It no longer is:
-        // FluidScene now overrides rhi::IRenderFeature::transparentPass and draws its own current
-        // drawMesh for every live volume itself (modules/render.fluid/src/FluidScene.cpp), the exact
-        // seam particles::ParticleRenderer and fluids::WaterRenderer already draw themselves through,
-        // with real Fresnel-weighted water shading instead of a constant colour (FluidShaders.hpp).
-        // Nothing needs to happen at this call site any more, which is also LESS COUPLING in this
-        // composition root than before: SandboxApp no longer has to know this feature draws a mesh at
-        // all, exactly as it already does not know that about ParticleRenderer or WaterRenderer.
+        // ---- the simulated fluid, drawn like every other surface in the level ----
         //
-        // THE TRADE THIS ACCEPTS, stated because the block it replaces stated the opposite reason for
-        // existing: going through the opaque drawMesh path made the fluid visible to the shadow
-        // cascades, the ray-tracing TLAS and GI voxelisation, the same way any other opaque mesh is.
-        // transparentPass runs alongside WaterRenderer's own ocean surface, which is invisible to all
-        // three for the identical reason (RHIResources.hpp's own transparentPass comment: it is a
-        // blended pass drawn AFTER the opaque scene and the deferred sky, not folded into it) -- so
-        // the pool now gives up the same things the ocean already does, in exchange for looking like
-        // water instead of tinted plastic.
+        // IT IS BACK HERE, AND THE ROUND TRIP IS THE POINT. This block once drew the fluid as an
+        // ORDINARY OPAQUE mesh with a flat colour; it was then moved out to
+        // FluidScene::transparentPass, which bought real water shading at the cost of the pool
+        // becoming invisible to the shadow cascades, the TLAS and GI voxelisation -- "looking like
+        // water instead of tinted plastic", as the comment that stood here put it. That trade was
+        // against the OPAQUE path, which was the only one that existed at the time.
+        //
+        // The TRANSLUCENT lane has since arrived, and it is not the same bargain.
+        // VoxiRenderer::submitDraw: "NO LONGER DROPPED OUTRIGHT -- it now takes the translucent lane:
+        // into the ray-tracing acceleration structure marked non-opaque". So a blended draw is in the
+        // TLAS, sorted back-to-front against the glass, shadowed, fogged, and shaded by the ordinary
+        // material path -- while still staying out of the two DEPTH-ONLY passes (the cascade and the
+        // GI shadow map) that could never express a transmittance anyway. There is no longer any
+        // reason for water to own a pipeline, a pair of shaders and a constant buffer of its own.
+        //
+        // WHY BEING IN THE TLAS IS LOAD-BEARING RATHER THAN A BONUS: averVolumeThickness traces from
+        // the shaded point to the volume's own back face to get a real path length. A surface that is
+        // not in the structure has no back face to find, so the absorption that makes water read as
+        // water is only available to a draw that arrives through here.
+// AVER_FLUIDS_SIMULATED, not AVER_MODULE_FLUIDS: fluidScene_ itself only exists under the narrower
+// define (fluids AND physics), so the wider guard would build a draw call against a member that is
+// not declared. The registration and the update() drain both carry this same guard for the same
+// reason -- see their own comments.
+#if AVER_FLUIDS_SIMULATED
+        {
+            // NOT GATED ON hideEditorScene, and that gate is what made this block draw nothing the
+            // first time it was written. hideEditorScene_ is `playSessionActive() ||
+            // !levelEntities_.empty()`, i.e. "a real level is loaded, so stop drawing the editor's
+            // placeholder floor and cube" -- so copying the guard from the objects_ loop just above
+            // hid the water in exactly the case that matters, and only in that case. A fluid volume
+            // is authored level content like any PLACEG surface, not an editor placeholder; it stays
+            // visible through Play for the same reason the landscape below does.
+            //
+            // Every live volume: the level's own WATER record and anything a graph spawned. Drawn in
+            // handle order and NOT sorted here -- the device captures blended draws and replays them
+            // sorted back-to-front itself (D3D12Device::endFrame), which is strictly better than the
+            // unordered unordered_map walk transparentPass used to do.
+            const auto drawOneFluid = [&](fluids::FluidHandle h) {
+                const rhi::MeshHandle fm = fluidScene_.drawHandle(h);
+                if (!fm) return;
+
+                // THE SURFACE MATERIAL, resolved through the SAME two steps every other surface in a
+                // level uses: aver_scene_material() interns the authored name, surfaceMaterials_ maps
+                // that id to a live pbr::MaterialLibrary handle. Resolved at DRAW time rather than
+                // latched at spawn, because a volume can be spawned before its project's materials
+                // have finished loading (applyLevelWater latches, the onUpdate drain spawns), and a
+                // handle captured too early would be a permanent zero.
+                u32 authored = 0;
+#if AVER_MODULE_PBR
+                if (const auto nm = fluidSurfaceMaterial_.find(h);
+                    nm != fluidSurfaceMaterial_.end() && !nm->second.empty()) {
+                    const i32 mid = aver_scene_material(0, nm->second.c_str());
+                    if (const auto it = surfaceMaterials_.find(mid); it != surfaceMaterials_.end())
+                        authored = it->second;
+                    else {
+                        // ONCE PER NAME, matching the scene loop's own warning for the same mistake.
+                        // A WATER record naming a material nobody authored is otherwise silent, and
+                        // this exact silence -- PTTest naming M_Concrete with no .ocmat behind it --
+                        // has already cost this tree a multi-day renderer investigation.
+                        static std::unordered_set<std::string> s_warned;
+                        if (s_warned.insert(nm->second).second)
+                            AVER_WARN("[Water] volume {} names surface material '{}' but no .ocmat by "
+                                      "that name was loaded; drawing the fallback look", h, nm->second);
+                    }
+                }
+#endif
+                // Neutralised to 1.0 where a material carries the value, exactly as the scene loop
+                // does it: an authored material's own factors multiply these, so anything but 1.0
+                // here would tint the material a second time.
+                // THE FALLBACK LOOK, for a WATER record that names no .ocmat. The ALPHA is the
+                // load-bearing part: averBuildSurface computes `s.alpha = gBaseColor.a * a.opacity`,
+                // so this per-draw alpha is what a draw with no authored material has to supply. Left
+                // at 1.0 it would put an opaque lid over the pool -- which is precisely the "tinted
+                // plastic" outcome the comment above warns this block once produced, and it would
+                // have looked like the migration failing rather than like a missing material.
+                // Roughness 0.10 because water is smooth; metallic 0 because it is a dielectric.
+                f32 col[4]   = {0.35f, 0.55f, 0.62f, 0.35f};
+                f32 metallic = 0.0f, roughness = 0.10f;
+                bool blended = true;
+#if AVER_MODULE_PBR
+                if (authored) {
+                    col[0] = col[1] = col[2] = 1.0f;
+                    metallic = roughness = 1.0f;
+                    if (const pbr::MaterialDesc* d = pbr::MaterialLibrary::get().desc(authored))
+                        blended = pbr::isTranslucent(*d);
+                }
+#endif
+#if AVER_MODULE_PBR && AVER_MODULE_VOXI
+                // setDrawBinding is STICKY, so it is stated before every draw rather than set once.
+                if (pbr::MaterialSystem& ms = voxiRenderer_.materials(); ms.ready())
+                    e.device()->setDrawBinding(ms.bindingSet(authored), &ms.constants(authored),
+                                               sizeof(pbr::MaterialConstants));
+#endif
+                // BLENDED EVEN WITH NO AUTHORED MATERIAL. `blended` starts true and only an authored
+                // OPAQUE material can turn it off: water with no .ocmat must still composite over the
+                // pool floor rather than draw as a solid lid, which is what an opaque fallback would
+                // give. An author who genuinely wants opaque water can say so in the .ocmat.
+                e.device()->setDrawBlended(blended);
+
+                // A REAL TRANSLATION, NOT IDENTITY, and the difference is a sorting bug rather
+                // than a placement one. The buffer is mesh-LOCAL about the volume's centre (see
+                // packFluidVerts), so this matrix both places it and -- the part that is easy to miss
+                // -- gives the blended flush something true to sort by: D3D12Device orders blended
+                // draws back-to-front on world[12..14], so a pool handed an identity matrix claims to
+                // sit at the world ORIGIN and can composite on the wrong side of a glass pane it is
+                // plainly in front of. Any level whose pool is not authored at (0,0,0) hits that.
+                f32 origin[3] = {0.0f, 0.0f, 0.0f};
+                fluidScene_.volumeOrigin(h, origin);
+                Mat4 fw = Mat4::identity();
+                fw.m[3][0] = origin[0];
+                fw.m[3][1] = origin[1];
+                fw.m[3][2] = origin[2];
+                e.device()->drawMesh(fm, &fw.m[0][0], col, metallic, roughness);
+            };
+
+            if (fluidHandle_) drawOneFluid(fluidHandle_);
+            for (const fluids::FluidHandle h : fluidGraphHandles_) drawOneFluid(h);
+        }
+#endif
 
 #if AVER_MODULE_LANDSCAPE
         // The landscape pass: one direct select()+draw() call, the same hand-rolled shape as the
@@ -7648,26 +7755,32 @@ private:
                 // knobs just above, and the same division of labour SandboxApp::fluidSpawnMaterialProvider
                 // gives the graph-authored path: a non-empty preset wins outright; otherwise
                 // density/viscosity each apply independently, either alone still building a
-                // material against FluidMaterial's own struct defaults for whichever field was not
+                // material against FluidPhysicsMaterial's own struct defaults for whichever field was not
                 // given. Left unset (fd.material stays std::nullopt) when the record names none of
                 // the three -- an old .ocmap, or a WATER record that only ever used the four raw
                 // knobs, reaches fluids::FluidScene::spawn identically to before this layer existed.
                 // The precedence check against a hand-set fd.damping happens THERE, not here --
-                // see fluids::fluidResolveMaterial's own comment for why that is the one place it
+                // see fluids::fluidResolvePhysicsMaterial's own comment for why that is the one place it
                 // cannot be forgotten, the WATER record's own path into it included.
                 if (!wp.preset.empty()) {
-                    if (auto mat = fluids::fluidMaterialPreset(wp.preset)) {
+                    if (auto mat = fluids::fluidPhysicsMaterialPreset(wp.preset)) {
                         fd.material = *mat;
                     } else {
                         AVER_WARN("[Water] '{}' names unknown material preset '{}'; no material applied",
                                   wp.name.empty() ? "unnamed" : wp.name, wp.preset);
                     }
                 } else if (wp.density >= 0.0 || wp.viscosity >= 0.0) {
-                    fluids::FluidMaterial mat;   // struct defaults are water's own numbers
+                    fluids::FluidPhysicsMaterial mat;   // struct defaults are water's own numbers
                     if (wp.density   >= 0.0) mat.densityKgM3  = static_cast<f32>(wp.density);
                     if (wp.viscosity >= 0.0) mat.viscosityPaS = static_cast<f32>(wp.viscosity);
                     fd.material = mat;
                 }
+
+                // THE SURFACE MATERIAL, which is a different question entirely from the three lines
+                // above and is deliberately not folded in with them: those decide how the volume
+                // MOVES (particle mass and Jolt damping); this decides how it LOOKS. Carried as a
+                // name to the draw site -- see fluidSurfaceMaterial_ for why it is not resolved here.
+                fluidWantSurfaceMaterial_ = wp.material;
 
                 // LATCHED, NOT SPAWNED -- and this is the fix for the bug that made every
                 // simulated record log "the fluid body could not be created" at startup. onInit
@@ -15027,18 +15140,18 @@ private:
     // desc.material from whichever of materialPreset/densityKgM3/viscosityPaS was actually given.
     //
     // A NON-EMPTY PRESET WINS, matching framework_abi.h's own aver_fw_fluid_spawn_material comment
-    // -- resolved HERE, via fluids::fluidMaterialPreset, because this is the one native call site
-    // that links Aver.Fluids and can see FluidMaterial::Water()/::Honey()/etc.'s real numbers; an
+    // -- resolved HERE, via fluids::fluidPhysicsMaterialPreset, because this is the one native call site
+    // that links Aver.Fluids and can see FluidPhysicsMaterial::Water()/::Honey()/etc.'s real numbers; an
     // unrecognised name is reported by name and falls through to leaving desc.material unset,
     // rather than a caller getting a silently-wrong default material.
     //
     // density/viscosity are read INDEPENDENTLY when there is no preset: either alone still builds a
-    // material (the other field keeps FluidMaterial's own struct default -- water's own numbers),
+    // material (the other field keeps FluidPhysicsMaterial's own struct default -- water's own numbers),
     // matching the design brief's own grammar ("density=1100 viscosity=0.05" both, or either alone).
     //
     // THE PRECEDENCE CHECK IS DELIBERATELY NOT HERE. This only ever sets desc.material and forwards
     // whatever damping was given (possibly the non-default kind); fluids::FluidScene::spawn (via
-    // fluids::fluidResolveMaterial) is the one place that decides whether the two conflict -- see
+    // fluids::fluidResolvePhysicsMaterial) is the one place that decides whether the two conflict -- see
     // that function's own comment for why doing it there, not here, is what makes it impossible to
     // forget for the OTHER path (a WATER record) that never reaches this function at all.
     static i32 fluidSpawnMaterialProvider(f32 cx, f32 cy, f32 cz, f32 hx, f32 hy, f32 hz,
@@ -15057,14 +15170,14 @@ private:
 
         const std::string label = name && *name ? name : "unnamed";
         if (materialPreset && *materialPreset) {
-            if (auto mat = fluids::fluidMaterialPreset(materialPreset)) {
+            if (auto mat = fluids::fluidPhysicsMaterialPreset(materialPreset)) {
                 desc.material = *mat;
             } else {
                 AVER_WARN("[Fluid] '{}' names unknown material preset '{}'; no material applied",
                           label, materialPreset);
             }
         } else if (densityKgM3 > 0.0f || viscosityPaS > 0.0f) {
-            fluids::FluidMaterial mat;   // struct defaults are water's own numbers
+            fluids::FluidPhysicsMaterial mat;   // struct defaults are water's own numbers
             if (densityKgM3  > 0.0f) mat.densityKgM3  = densityKgM3;
             if (viscosityPaS > 0.0f) mat.viscosityPaS = viscosityPaS;
             desc.material = mat;
@@ -15271,6 +15384,16 @@ private:
     // Every handle the queue above has ever produced, so unloadLevel can despawn all of them --
     // the same reason fluidHandle_ is despawned there, generalised from one slot to many.
     std::vector<fluids::FluidHandle> fluidGraphHandles_;
+    // WHICH .ocmat EACH LIVE VOLUME'S SURFACE USES, by handle. A NAME rather than a resolved
+    // pbr::MaterialHandle, because applyLevelWater latches a spawn that the onUpdate drain performs
+    // later -- possibly before the project's materials have finished loading -- so a handle resolved
+    // at latch time could be a permanent zero. The draw site resolves the name every frame instead,
+    // which costs one hash lookup and cannot go stale. Empty (or absent) means "no authored
+    // material", which draws the fallback look rather than refusing to draw.
+    std::unordered_map<fluids::FluidHandle, std::string> fluidSurfaceMaterial_;
+    // Latched alongside fluidWantDesc_ by applyLevelWater, moved into the map above once the drain
+    // has a handle to key it by.
+    std::string fluidWantSurfaceMaterial_;
     // The player's world position last frame, and whether that reading is trustworthy -- see the
     // aver_phys_softbody_apply_impulse call site in onUpdate for why this exists (there is no direct
     // read of the character's own physics velocity, so it is recovered by finite difference instead).
@@ -16543,7 +16666,11 @@ private:
         // levelBodies_, and removing it directly would double-free once FluidScene::retire removes
         // it too. despawn() needs no device, which is what keeps the (void)eng at the top of this
         // function honest.
-        if (fluidHandle_) { fluidScene_.despawn(fluidHandle_); fluidHandle_ = 0; }
+        if (fluidHandle_) {
+            fluidSurfaceMaterial_.erase(fluidHandle_);
+            fluidScene_.despawn(fluidHandle_);
+            fluidHandle_ = 0;
+        }
         // Cleared for the "simulated level -> level with no water" case: applyLevelWater returns
         // immediately when the new level declares no WATER record, so a latch left standing here
         // would spawn the OLD level's volume into the new world on the very next frame.
@@ -16552,7 +16679,10 @@ private:
         // none of them are pushed to levelBodies_ either (fluidSpawnProvider never touches it), and
         // a class that outlives its own level's teardown would go on sloshing in the next one the
         // identical way an un-despawned fluidHandle_ used to.
-        for (const fluids::FluidHandle h : fluidGraphHandles_) fluidScene_.despawn(h);
+        for (const fluids::FluidHandle h : fluidGraphHandles_) {
+            fluidSurfaceMaterial_.erase(h);
+            fluidScene_.despawn(h);
+        }
         fluidGraphHandles_.clear();
         fluidGraphQueue_.clear();
 #endif

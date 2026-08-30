@@ -220,6 +220,10 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
                 else if (equalsCI(t[i], "preset")     && i + 1 < t.size()) wp.preset    = std::string(t[++i]);
                 else if (equalsCI(t[i], "density")    && i + 1 < t.size()) wp.density   = parseF64(t[++i]);
                 else if (equalsCI(t[i], "viscosity")  && i + 1 < t.size()) wp.viscosity = parseF64(t[++i]);
+                // THE SURFACE MATERIAL -- an .ocmat name, NOT a solver preset. `preset` two lines up
+                // is the physics one; see OcWaterPlacement::material's own comment for why the two
+                // are kept apart so deliberately.
+                else if (equalsCI(t[i], "material")   && i + 1 < t.size()) wp.material  = std::string(t[++i]);
             }
             out.waters.push_back(std::move(wp));
         } else if (equalsCI(key, "WAVE")) {
@@ -468,6 +472,11 @@ std::string writeOcworld(const OcWorldData& w) {
             if (!wp.preset.empty())  s += " preset "    + wp.preset;
             if (wp.density   >= 0.0) s += " density "   + num(wp.density);
             if (wp.viscosity >= 0.0) s += " viscosity " + num(wp.viscosity);
+            // The SURFACE material, last, and gated on non-empty like `preset` for the same reason:
+            // a record that names none must round-trip without gaining a token. Written after
+            // `preset` deliberately, so a human reading the line meets the solver material and the
+            // render material in the same order the struct declares them.
+            if (!wp.material.empty()) s += " material " + wp.material;
             s += "\n";
         }
     }

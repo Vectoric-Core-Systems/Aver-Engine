@@ -120,14 +120,23 @@ public:
     // one -- draw the entity's authored placeholder instead of nothing, the same convention
     // SoftBodyScene::drawHandle documents.
     //
-    // DRAW WITH AN IDENTITY WORLD MATRIX. Once update() has run for a handle at least once, the
-    // vertex buffer this returns holds fluids::FluidVolume::positionsCm() verbatim -- WORLD-space,
-    // because that is what the physics ABI returns and what FluidVolume's own contract promises a
-    // renderer ("what a renderer draws", in FluidVolume.hpp's own words). A soft body's buffer needs
-    // an entity's world matrix on top because softBodyPackVertices deliberately converts back to
-    // mesh-local first; this buffer was never converted, so applying any further translation or
-    // rotation at draw time would move it a second time.
+    // DRAW WITH A TRANSLATION OF volumeOrigin(), NOT IDENTITY -- corrected, and the correction was
+    // a real bug rather than tidying. This buffer holds mesh-LOCAL positions about the volume's
+    // centre, exactly as softBodyPackVertices produces for a soft body and for the same reason: the
+    // blended draw flush sorts back-to-front by the world matrix's TRANSLATION, so a mesh handed an
+    // identity matrix claims to sit at the world origin and composites against other translucent
+    // surfaces in the wrong order.
     rhi::MeshHandle drawHandle(FluidHandle h) const;
+
+    // WHERE drawHandle()'s BUFFER IS ANCHORED: the volume's authored centre in world centimetres,
+    // which is exactly the translation a caller must put in the world matrix it draws with. False
+    // for an unknown or despawned handle, leaving `out` untouched.
+    //
+    // THE BUFFER IS MESH-LOCAL, NOT WORLD. It used to be absolute world space, drawn with an
+    // identity matrix -- which places the mesh correctly and sorts it WRONG, because the blended
+    // flush orders draws by the world matrix's translation and identity says "the origin". See
+    // packFluidVerts for the full account.
+    bool volumeOrigin(FluidHandle h, f32 out[3]) const;
 
     // The aver_phys_softbody_* handle behind this volume, or ZERO for an unknown/despawned handle or
     // one whose body creation failed (see spawn()'s own comment on that outcome). Exists for a
@@ -142,17 +151,13 @@ public:
     // buffer it writes -- update() has no IRenderContext to issue a barrier or a copy with.
     void prePass(rhi::IRenderContext& ctx) override;
 
-    // Draws every live volume's CURRENT drawMesh as a depth-tested, alpha-blended water surface --
-    // the seam rhi::IRenderFeature::transparentPass exists for (RHIResources.hpp's own comment calls
-    // it "A SEAM, not a special case: any feature may implement it"), and the exact seam
-    // particles::ParticleRenderer already proves out. THIS REPLACES THE COMPOSITION ROOT'S OWN
-    // drawMesh CALL for this feature: sandbox/src/SandboxApp.cpp used to hand fluidScene_.drawHandle()
-    // to the ordinary OPAQUE draw path with a flat colour, which is what this override exists to fix,
-    // and it is also less coupling in the composition root either way -- SandboxApp no longer needs
-    // to know this feature draws itself at all, the same way it already does not know ParticleRenderer
-    // or WaterRenderer draw themselves. See FluidShaders.hpp for the pixel shader and FluidScene.cpp's
-    // own comment at this method for what it does and does not read from each resident.
-    void transparentPass(rhi::IRenderContext& ctx) override;
+    // NO transparentPass OVERRIDE, AND THAT IS DELIBERATE. This class used to draw its own volumes
+    // through that seam with its own pipeline and shaders, which is what kept water out of the
+    // ray-tracing structure, out of the sun's shadow term, out of fog and out of back-to-front
+    // sorting against the glass. The composition root now draws drawHandle() through
+    // setDrawBlended() + drawMesh() with an authored .ocmat instead, so a fluid volume is an
+    // ordinary translucent mesh. What is left here is what the header always claimed this class was
+    // modelled on -- SoftBodyScene: produce the geometry, let the renderer shade it.
 
     // Rebuilds pso_ to bake the scene target's current sample count and formats -- the same
     // DECIDED-1 rule ParticleRenderer::onRenderTargetsChanged and WaterRenderer::onRenderTargetsChanged

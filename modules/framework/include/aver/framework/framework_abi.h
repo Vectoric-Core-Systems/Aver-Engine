@@ -436,13 +436,13 @@ AVER_FW_ABI int32_t aver_fw_fluid_spawn(float cx, float cy, float cz, float hx, 
  *
  * A SECOND, ADDITIVE relay beside aver_fw_fluid_spawn above, not a replacement for it -- see this
  * header's own MINOR 4 changelog entry. Carries the same six placement floats and the same four
- * raw solver knobs PLUS the material layer (fluids::FluidMaterial): `densityKgM3`/`viscosityPaS`
+ * raw solver knobs PLUS the material layer (fluids::FluidPhysicsMaterial): `densityKgM3`/`viscosityPaS`
  * (< 0 means "not given", the same sentinel convention `pressure` already uses on the plain
  * relay), or `materialPreset` (a name -- "water", "lightoil", "honey", "lava", case-insensitive;
  * empty means none). A non-empty preset is resolved to its own density/viscosity by the provider,
- * which links fluids::FluidMaterial's real presets -- this ABI carries only a name across the
+ * which links fluids::FluidPhysicsMaterial's real presets -- this ABI carries only a name across the
  * boundary, never a duplicated set of literal numbers, so the framework still never learns what a
- * FluidMaterial actually contains.
+ * FluidPhysicsMaterial actually contains.
  *
  * `damping` HERE CAN STILL CONFLICT WITH A MATERIAL, DELIBERATELY: this relay does not itself
  * decide which one wins. An author who writes both a material (preset or density/viscosity) and a

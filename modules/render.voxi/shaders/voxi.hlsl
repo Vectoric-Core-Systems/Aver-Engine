@@ -1752,6 +1752,36 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     if (gVoxelParams.w > 0.5) ind = coneTracedIndirect(i.wpos, N, ao);
 
     AverVertex vtx = averVertexOf(i);
+
+    // ---- a single-sided BLENDED surface draws ONE layer, not every face it owns ----
+    //
+    // THE SCENE PIPELINE DOES NOT CULL. `scene.cull = rhi::CullMode::None` (VoxiRenderer.cpp:3133)
+    // and every blended twin is built from that desc without reassigning it, so a closed volume
+    // rasterises ALL of its faces. For an OPAQUE mesh that is invisible -- the depth test discards
+    // the far ones -- but a blended draw writes no depth, so each surviving face composites its own
+    // alpha and the layers multiply. A box of water therefore came out roughly four coats thick:
+    // measured, a surface authored at alpha 0.02 still DARKENED the pit behind it, from (50.7, 51.4,
+    // 49.2) with no water at all to (36.6, 41.9, 46.1). A single 2% layer cannot do that; four can.
+    //
+    // GATED ON THE AUTHORED FLAG, WHICH IS THE WHOLE POINT. `twosided` has been parseable since the
+    // format existed and no shader has ever read it (grep AVER_MAT_TWO_SIDED: this is its first
+    // consumer). M_Glass sets twosided=1 deliberately -- "glass is routinely CULL none, because you
+    // walk round it", as the TIR comment further down this file puts it -- so a pane is untouched by
+    // this and keeps compositing both of its faces exactly as it does today. A water volume sets
+    // twosided=0 and gets one layer. The author decides; the renderer stops overriding them.
+    //
+    // BLENDED ONLY, deliberately narrow. Opaque geometry already gets correct single-layer results
+    // from the depth test, and single-sided opaque content drawn with culling off (a floor seen from
+    // below, a foliage sheet) has relied on CullMode::None for as long as it has existed. Restricting
+    // the discard to the blended lane fixes exactly what is broken and can regress nothing else.
+    //
+    // dot(N, V), not SV_IsFrontFace: averVertexOf already computes it that way and states why, and
+    // this reuses that answer rather than adding a second, differently-derived notion of "backwards"
+    // that could disagree with the normal flip sitting immediately beside it.
+    if ((gMaterialFlags & AVER_MAT_ALPHA_BLEND) && !(gMaterialFlags & AVER_MAT_TWO_SIDED) &&
+        vtx.backFace)
+        clip(-1);
+
     AverLight sun;
     sun.direction  = L;
     sun.radiance   = averSunRadiance();

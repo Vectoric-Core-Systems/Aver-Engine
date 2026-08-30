@@ -25,14 +25,28 @@ constexpr u32 kMaxResident = 64;
 // because both of those are already done by the time either caller reaches this -- see spawn()'s and
 // update()'s own comments for why. `out` is resized to match; UVs are written as zero rather than
 // left uninitialised, since this shell has no source parameterisation to carry across.
+//
+// originCm, WHEN GIVEN, IS SUBTRACTED, and that is what keeps the buffer in the mesh-LOCAL frame the
+// rest of this engine assumes. The seed shell is already built about local (0,0,0)
+// (FluidVolume.cpp: "LOCAL + centre = WORLD"), but the SOLVER hands its particles back in absolute
+// world space, so update() has to put them back. This buffer used to be left in world space and
+// drawn with an identity matrix -- which renders correctly and sorts WRONG: the blended flush orders
+// draws by world[12..14] (D3D12Device.cpp:5006-5013), and an identity matrix's translation is the
+// world ORIGIN, so a pool authored anywhere else sorted as though it sat at (0,0,0) and could
+// composite on the wrong side of a glass pane it was plainly in front of.
+//
+// Normals are NOT offset: a translation does not rotate them.
 void packFluidVerts(const std::vector<f32>& positionsCm, const std::vector<f32>& normals,
-                    std::vector<rhi::MeshVertex>& out) {
+                    std::vector<rhi::MeshVertex>& out, const f32* originCm = nullptr) {
+    const f32 ox = originCm ? originCm[0] : 0.0f;
+    const f32 oy = originCm ? originCm[1] : 0.0f;
+    const f32 oz = originCm ? originCm[2] : 0.0f;
     const size_t n = positionsCm.size() / 3;
     out.resize(n);
     for (size_t i = 0; i < n; ++i) {
-        out[i].px = positionsCm[i * 3 + 0];
-        out[i].py = positionsCm[i * 3 + 1];
-        out[i].pz = positionsCm[i * 3 + 2];
+        out[i].px = positionsCm[i * 3 + 0] - ox;
+        out[i].py = positionsCm[i * 3 + 1] - oy;
+        out[i].pz = positionsCm[i * 3 + 2] - oz;
         out[i].nx = normals[i * 3 + 0];
         out[i].ny = normals[i * 3 + 1];
         out[i].nz = normals[i * 3 + 2];
@@ -146,18 +160,18 @@ FluidHandle FluidScene::spawn(const fluids::FluidVolumeDesc& desc, rhi::IDevice&
         return 0;
     }
 
-    // THE MATERIAL LAYER RESOLVES HERE, AND ONLY HERE -- see fluids::fluidResolveMaterial's own
+    // THE MATERIAL LAYER RESOLVES HERE, AND ONLY HERE -- see fluids::fluidResolvePhysicsMaterial's own
     // doc comment (FluidVolume.hpp) for why this is the one call every fluid request converges on
     // regardless of how it was authored: a WATER record via SandboxApp::applyLevelWater's direct
     // construction, a graph's `COMP ... Fluid` line via either of the framework relay's two
     // providers, or any future direct caller of this function. A desc that never set `material` is
-    // untouched by this (fluidResolveMaterial's own early-out), so every caller from before this
+    // untouched by this (fluidResolvePhysicsMaterial's own early-out), so every caller from before this
     // layer existed spawns identically to before. A desc that DOES set `material` alongside a
     // hand-set raw `damping` REFUSES the whole spawn rather than picking a winner -- this is the
     // design brief's precedence rule, enforced at the one point it cannot be silently skipped.
     fluids::FluidVolumeDesc resolved = desc;
     std::string materialConflict;
-    if (!fluids::fluidResolveMaterial(resolved, &materialConflict)) {
+    if (!fluids::fluidResolvePhysicsMaterial(resolved, &materialConflict)) {
         AVER_ERROR("[Fluid] refusing to spawn: {}", materialConflict);
         return 0;
     }
@@ -357,7 +371,10 @@ void FluidScene::update(f32 elapsedSeconds) {
         // drawHandle()'s own comment for why the composition root draws this buffer with an identity
         // world matrix -- so vol.positionsCm() is used exactly as FluidVolume already produced it,
         // in WORLD space, with no conversion and no second normal computation.
-        packFluidVerts(r.vol.positionsCm(), r.vol.normals(), packed);
+        // The solver's positions are ABSOLUTE WORLD; the mesh's frame is local about the volume's
+        // centre, the same frame spawn() seeded it in. See packFluidVerts for why that difference
+        // matters to sorting rather than only to placement.
+        packFluidVerts(r.vol.positionsCm(), r.vol.normals(), packed, r.vol.desc().centreCm);
 
         r.ringSlot = (r.ringSlot + 1) % kFluidFramesInFlight;
         const rhi::BufferHandle stage = r.staging[r.ringSlot];
@@ -377,6 +394,16 @@ void FluidScene::update(f32 elapsedSeconds) {
 rhi::MeshHandle FluidScene::drawHandle(FluidHandle h) const {
     const auto it = live_.find(h);
     return it == live_.end() ? 0 : it->second.drawMesh;
+}
+
+bool FluidScene::volumeOrigin(FluidHandle h, f32 out[3]) const {
+    const auto it = live_.find(h);
+    if (it == live_.end()) return false;
+    const fluids::FluidVolumeDesc& d = it->second.vol.desc();
+    out[0] = d.centreCm[0];
+    out[1] = d.centreCm[1];
+    out[2] = d.centreCm[2];
+    return true;
 }
 
 int32_t FluidScene::physicsBody(FluidHandle h) const {
@@ -506,74 +533,14 @@ void FluidScene::onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rhi:
     buildPipeline(sampleCount, color, depth);
 }
 
-void FluidScene::transparentPass(rhi::IRenderContext& ctx) {
-    if (!ready_ || !pso_ || !dev_ || live_.empty()) return;
-
-    // Viewport, scissor and the scene colour+depth targets are ALL already set -- the
-    // transparentPass contract (RHIResources.hpp) -- so nothing here touches any of them; only the
-    // pipeline and each resident's own geometry are ours.
-    //
-    // A DELIBERATELY TINY PER-FRAME CONSTANT BUFFER, unlike WaterRenderer's 192-byte WaterFrame at
-    // the same register. VSFluid still displaces nothing and still reads worldPos/worldNrm straight
-    // off the staged mesh (see update()'s own comment) -- that reasoning has not changed. What
-    // changed is PSFluid: it now perturbs its shading normal with a small animated ripple to give the
-    // coarse 8x8 shell a surface detail no amount of Fresnel/colour tuning could add (see
-    // FluidShaders.hpp's own comment on gFluidTime for why a moving pattern needs a moving number
-    // from SOMEWHERE, and why that number is elapsedSeconds_ rather than a fresh clock of this
-    // method's own). Four floats, one upload, once per frame -- not per resident, since every live
-    // pool shares the same clock.
-    ctx.pushMarker("Aver.Fluid");
-    ctx.setPipeline(pso_);
-    for (auto& kv : live_) {
-        const Resident& r = kv.second;
-        if (!r.drawMesh) continue;   // this handle's spawn() never finished building a drawable mesh
-
-        // PER-RESIDENT NOW, not once for the whole pass, and the reason is the floor depth below:
-        // two pools of different depths shade differently, so a single upload before the loop would
-        // have given every pool the first one's column. The clock is still shared; only the geometry
-        // term varies. One extra 48-byte root-constant write per pool per frame.
-        //
-        // EXTINCTION, per centimetre, for clear water. The per-metre coefficients are roughly
-        // (0.45, 0.09, 0.035) -- red is absorbed more than an order of magnitude faster than blue,
-        // which is the entire reason water reads cyan and reads more cyan the deeper you look. These
-        // are the physical numbers divided by 100 for this engine's centimetre world units, not a
-        // look tuned by eye: at this pool's 120 cm depth they give a transmittance of about
-        // (0.58, 0.90, 0.96) straight down, i.e. the floor is clearly visible with a slight teal
-        // cast, which is what a clean swimming pool actually looks like.
-        //
-        // BODY COLOUR is the light scattered back OUT of the column rather than absorbed by it --
-        // what makes a pool read cyan even above a white floor. Distinct from extinction: one is what
-        // the water removes, the other is what it adds.
-        //
-        // Both are still constants HERE rather than authored, and that is a known gap, not a
-        // decision: the WATER record carries no colour token at all (OcWorld.hpp's OcWaterPlacement
-        // has no such field), so there is nothing to read them from yet. They are at least in one
-        // place now, and reaching the GPU through a buffer, instead of being compiled literals
-        // duplicated across two shaders.
-        const fluids::FluidVolumeDesc& d = r.vol.desc();
-        const float floorZ = d.centreCm[2] - d.halfExtentCm[2];
-        const float fluidFrame[12] = {
-            elapsedSeconds_, floorZ,  0.0f,    0.0f,
-            0.0045f,         0.0009f, 0.00035f, 0.0f,
-            0.03f,           0.32f,   0.38f,    0.0f,
-        };
-        ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, fluidFrame, sizeof(fluidFrame));
-
-        // meshGeometry(), not r.vertices/r.source directly: it is the one place this RHI already
-        // resolves a MeshHandle to the buffers and counts a raw draw call needs, and it is what every
-        // other feature drawing outside the ordinary drawMesh() path already goes through (PathTracer,
-        // VoxiRenderer -- see meshGeometry()'s own doc comment: "this is what a RAY needs and a raster
-        // draw never did", equally true of a raster draw issued from OUTSIDE drawMesh(), which is
-        // exactly this one).
-        rhi::BufferHandle vb = 0, ib = 0;
-        u32 vertexCount = 0, indexCount = 0;
-        if (!dev_->meshGeometry(r.drawMesh, &vb, &ib, &vertexCount, &indexCount) || !vb || !ib)
-            continue;
-        ctx.setVertexBuffer(vb, sizeof(rhi::MeshVertex));
-        ctx.setIndexBuffer(ib, rhi::Format::R32Uint);
-        ctx.drawIndexed(indexCount, 0, 0);
-    }
-    ctx.popMarker();
-}
+// transparentPass IS GONE, AND THE ABSENCE IS THE FEATURE. This class used to bind its own pipeline
+// and issue its own drawIndexed here, which is what kept water out of the TLAS, out of the shadow
+// term, out of fog and out of back-to-front sorting -- everything IDevice::drawMesh already arranges
+// for any other surface. sandbox/src/SandboxApp.cpp now draws drawHandle() through setDrawBlended()
+// + drawMesh() with a real .ocmat, so a fluid volume is an ordinary translucent mesh and this class
+// is what its own header always said it was modelled on: SoftBodyScene, a feature that produces
+// GEOMETRY and lets the composition root decide how it is shaded.
+//
+// Deleted rather than left as an empty override, so nothing can quietly start drawing here again.
 
 } // namespace aver::fluids

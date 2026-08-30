@@ -610,6 +610,44 @@ static void checkOcworldWater() {
         check(writeOcworld(back) == text, "a second write reproduces the first byte for byte");
     }
     {
+        // THE SURFACE MATERIAL, which is a THIRD thing this record calls "material" and the only one
+        // that decides how the water LOOKS. `preset` is the SOLVER's material (density + viscosity);
+        // `material` names an .ocmat. They are independent tokens and a record may carry both, which
+        // is exactly what this case proves -- a level wanting honey that also LOOKS like honey has
+        // to say both, because the preset has never carried an appearance.
+        OcWorldData w;
+        check(parseOcworld("OCWORLD 1\nNAME T\n"
+                           "WATER name Pool level -20 bounds 200 450 800 850 simulate "
+                           "preset honey material M_Honey\n", w, &err),
+              "a WATER record naming BOTH a solver preset and a surface material parses");
+        check(w.waters.size() == 1, "and is kept");
+        check(w.waters[0].preset == "honey", "the solver preset is unchanged by the new token");
+        check(w.waters[0].material == "M_Honey", "and the surface material is carried verbatim");
+
+        const std::string text = writeOcworld(w);
+        check(text.find("material M_Honey") != std::string::npos, "the written text keeps it");
+        check(text.find("preset honey") != std::string::npos, "...alongside the preset, not instead");
+
+        OcWorldData back;
+        check(parseOcworld(text, back, &err) && back.waters.size() == 1 &&
+              back.waters[0].material == "M_Honey" && back.waters[0].preset == "honey",
+              "and both survive the round trip");
+        check(writeOcworld(back) == text, "a second write reproduces the first byte for byte");
+    }
+    {
+        // A record naming NO surface material must not GAIN one. Same byte-stability rule every
+        // optional token here already follows: every .ocworld written before this token existed has
+        // to round-trip unchanged, or adding the field turns every level in the tree into a diff.
+        OcWorldData w;
+        check(parseOcworld("OCWORLD 1\nNAME T\n"
+                           "WATER name Pool level -20 bounds 200 450 800 850 simulate\n", w, &err),
+              "a WATER record with no surface material parses");
+        check(w.waters.size() == 1 && w.waters[0].material.empty(), "and carries an empty material");
+        const std::string text = writeOcworld(w);
+        check(text.find("material") == std::string::npos,
+              "and the writer invents no material token for it");
+    }
+    {
         // Hand-typed density/viscosity, WITHOUT a preset -- the other half of the material grammar,
         // and the case that proves `preset` and the two numeric keys are independent tokens rather
         // than one clause that only parses together.

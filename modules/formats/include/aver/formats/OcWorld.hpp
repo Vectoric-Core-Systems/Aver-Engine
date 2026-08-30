@@ -273,21 +273,38 @@ struct OcWaterPlacement {
     i32 iterations = -1;
     f64 pressure   = -1.0;
 
-    // THE MATERIAL LAYER, alongside the four raw knobs above -- see fluids::FluidMaterial's own
+    // THE MATERIAL LAYER, alongside the four raw knobs above -- see fluids::FluidPhysicsMaterial's own
     // comment (FluidVolume.hpp) for what density/viscosity mean physically (density real,
     // viscosity a CALIBRATED FIT onto `damping` above, not a fifth thing that reaches Jolt
     // directly -- correcting what this struct's own comment used to say, back when there was no
-    // such fit yet). `preset` names one of FluidMaterial's own presets (water/lightoil/honey/lava,
+    // such fit yet). `preset` names one of FluidPhysicsMaterial's own presets (water/lightoil/honey/lava,
     // case-insensitive) and wins over density/viscosity when non-empty; density/viscosity alone
     // build a hand-typed material. EMPTY PRESET AND BOTH density/viscosity <= 0 MEANS NO MATERIAL
     // -- the consumer, not this struct, decides what that becomes, the identical division of
     // responsibility the four -1 knobs above already have. A record naming BOTH a material (any of
     // the three fields below) and a non-default `damping` above is carried through exactly as
-    // written; the consumer is what refuses the conflict (fluids::fluidResolveMaterial, called from
+    // written; the consumer is what refuses the conflict (fluids::fluidResolvePhysicsMaterial, called from
     // fluids::FluidScene::spawn), not this struct and not the parser.
     std::string preset;
     f64 density   = -1.0;
     f64 viscosity = -1.0;
+
+    // THE SURFACE MATERIAL -- a THIRD thing this record calls "material", and the only one that
+    // decides how the water LOOKS. Names an .ocmat under Content/Materials, exactly as a PLACEG
+    // line's trailing material token does, and resolves through the same
+    // aver_scene_material -> surfaceMaterials_ path every other surface in a level uses.
+    //
+    // DO NOT CONFUSE IT WITH `preset` ABOVE, and the collision is why this comment is long.
+    // `preset`/`density`/`viscosity` are the SOLVER's material: two floats that become particle mass
+    // and Jolt damping (fluids::FluidPhysicsMaterial, renamed from FluidPhysicsMaterial precisely so these
+    // two ideas stop sharing a word). They carry no colour, no roughness, no IOR, no texture, and
+    // naming the preset "honey" has never made anything look like honey -- the appearance was a pair
+    // of compile-time C++ literals in the fluid shader that no level could reach.
+    //
+    // EMPTY MEANS NO AUTHORED MATERIAL, and the consumer decides what that becomes -- the identical
+    // division of responsibility every other optional field here already has. A water surface with
+    // no material draws with the engine's fallback look rather than refusing to draw.
+    std::string material;
 };
 
 struct OcWorldData {
