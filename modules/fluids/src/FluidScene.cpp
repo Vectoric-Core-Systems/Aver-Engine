@@ -5,6 +5,7 @@
 #include "aver/physics/physics_abi.h"
 #include "aver/core/Log.hpp"
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -313,6 +314,40 @@ void FluidScene::update(f32 elapsedSeconds) {
         // simulating it.
         r.vol.updateFromSimulation(physicsXyz.data(), got);
 
+        // WHERE THE SHELL ACTUALLY IS, versus where it was authored to be.
+        //
+        // A soft body is free to go anywhere the solver takes it, and nothing downstream notices: the
+        // mesh is drawn from whatever positions come back, so a volume that has escaped its authored
+        // box renders happily over whatever it now covers. That is not hypothetical -- it is how the
+        // PTTest pool came to paint the pit's concrete walls white, which read for a whole session as
+        // a renderer bug (a "blown-out pit interior", plus scattered dark pixels that were really the
+        // wall showing through) and cost a full bisect of the texturing work to attribute correctly.
+        //
+        // The authored box is desc.centreCm +/- desc.halfExtentCm (FluidVolume.hpp:182-187). A little
+        // overshoot is normal and expected -- pressure inflates the shell and the surface oscillates --
+        // so this only says what the numbers are and lets the reader judge; it deliberately does not
+        // warn on a threshold nobody has calibrated.
+        {
+            const std::vector<f32>& p = r.vol.positionsCm();
+            if (p.size() >= 3 && (updates_ & (updates_ + 1)) == 0) {
+                f32 lo[3] = {p[0], p[1], p[2]}, hi[3] = {p[0], p[1], p[2]};
+                for (usize v = 3; v + 2 < p.size(); v += 3)
+                    for (int a = 0; a < 3; ++a) {
+                        lo[a] = std::min(lo[a], p[v + static_cast<usize>(a)]);
+                        hi[a] = std::max(hi[a], p[v + static_cast<usize>(a)]);
+                    }
+                const fluids::FluidVolumeDesc& d = r.vol.desc();
+                AVER_INFO("[Fluid] volume {} shell bounds after {} update(s): "
+                          "x [{:.1f} {:.1f}] y [{:.1f} {:.1f}] z [{:.1f} {:.1f}] cm; "
+                          "authored x [{:.1f} {:.1f}] y [{:.1f} {:.1f}] z [{:.1f} {:.1f}]",
+                          h, updates_,
+                          lo[0], hi[0], lo[1], hi[1], lo[2], hi[2],
+                          d.centreCm[0] - d.halfExtentCm[0], d.centreCm[0] + d.halfExtentCm[0],
+                          d.centreCm[1] - d.halfExtentCm[1], d.centreCm[1] + d.halfExtentCm[1],
+                          d.centreCm[2] - d.halfExtentCm[2], d.centreCm[2] + d.halfExtentCm[2]);
+            }
+        }
+
         // Packed straight from FluidVolume's own positions and normals, NOT through
         // render::softBodyPackVertices. That helper exists to solve two problems neither apply here:
         // it recomputes normals by re-walking the index buffer and accumulating face normals, which
@@ -335,6 +370,8 @@ void FluidScene::update(f32 elapsedSeconds) {
         }
         r.stagedThisFrame = true;
     }
+
+    ++updates_;
 }
 
 rhi::MeshHandle FluidScene::drawHandle(FluidHandle h) const {

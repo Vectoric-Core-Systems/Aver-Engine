@@ -231,6 +231,11 @@ private:
     // first frame's ripple offset from t=0 is indistinguishable from any other phase, since the ripple
     // pattern has no "start" a player could notice.
     f32 elapsedSeconds_ = 0.0f;
+
+    // How many times update() has read a body back, purely so the shell-bounds check below can log
+    // on a power-of-two cadence (1, 2, 4, 8 ...) rather than every frame -- the same
+    // (n & (n + 1)) == 0 shape VoxiRenderer's own translucent-draw census uses.
+    u64 updates_ = 0;
 };
 
 } // namespace aver::fluids
