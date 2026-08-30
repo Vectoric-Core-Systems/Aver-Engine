@@ -78,8 +78,17 @@ const std::string& shaderFile(std::string_view name) {
     }
 
     if (!loaded) {
-        AVER_ERROR("[RHI.Shaders] cannot read '{}' -- tried {}. The shader that needs it will fail "
-                   "to compile and DXC will say which declarations are missing.",
+        // NAME THE CAUSE, NOT ONLY THE SYMPTOM. This used to say the shader "will fail to compile
+        // and DXC will say which declarations are missing" -- true, and precisely why the real
+        // failure hid for so long: a file-not-found surfaced as a COMPILE error about missing
+        // declarations, which reads like a broken shader rather than a broken install. A packaged
+        // payload shipped dxcompiler.dll and no .hlsl at all (scripts/payload.allowlist had no
+        // shaders entry until it was added), and this line described the consequence rather than
+        // the cause every time.
+        AVER_ERROR("[RHI.Shaders] cannot read '{}' -- tried {}. The next DXC error will blame "
+                   "missing declarations; the real cause is this file. Either the build tree never "
+                   "deployed it (aver_deploy_shaders), a --shader-source directory is missing it, "
+                   "or a packaged payload did not ship shaders/.",
                    name, tried);
         text.clear();
     } else {
