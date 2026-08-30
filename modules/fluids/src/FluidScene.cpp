@@ -1,7 +1,6 @@
 // See FluidScene.hpp for the whole design. What follows is spawn/despawn/update/prePass, the private
 // retire() they share, and the one small packing helper both spawn() and update() call.
 #include "aver/fluids/FluidScene.hpp"
-#include "FluidShaders.hpp"
 #include "aver/physics/physics_abi.h"
 #include "aver/core/Log.hpp"
 
@@ -70,45 +69,17 @@ bool FluidScene::init(rhi::IDevice& dev) {
         return ready_;
     }
 
-    // The transparentPass shaders and pipeline -- compiled here, best-effort, the identical
-    // two-step pattern ParticleRenderer::init and WaterRenderer::init both follow: this call uses
-    // whatever sample count/formats the device reports right now, and onRenderTargetsChanged rebuilds
-    // against the real scene target's shape the moment the device calls it (before the first real
-    // frame). A failure here is logged and left alone rather than propagated to `ready_` -- see this
-    // class's own header comment on vs_/ps_/pso_ for why the physics half of this feature must not go
-    // inert just because its draw half could not compile.
-    rhi::ShaderDesc sd;
-    sd.source = kFluidHLSL;
-    sd.prelude = rhi::sharedShaderPrelude();
-    sd.entry = "VSFluid";
-    sd.stage = rhi::ShaderStage::Vertex;
-    vs_ = res_->createShader(sd);
-    sd.entry = "PSFluid";
-    sd.stage = rhi::ShaderStage::Pixel;
-    ps_ = res_->createShader(sd);
-    if (!vs_ || !ps_) {
-        AVER_ERROR("[Fluid] the fluid surface shaders failed to compile; every volume this run will "
-                   "spawn and simulate but draw nothing");
-    } else {
-        buildPipeline(dev.sampleCount(), dev.backbufferFormat(), dev.depthFormat());
-    }
-
+    // NO SHADERS AND NO PIPELINE. This class used to compile VSFluid/PSFluid here and build its own
+    // PSO, because it drew its own volumes through IRenderFeature::transparentPass. It does not draw
+    // anything any more -- the composition root draws drawHandle() as an ordinary translucent mesh
+    // with an authored .ocmat -- so there is nothing here to compile and nothing to keep in step with
+    // the scene target's sample count and formats.
     return ready_;
 }
 
 void FluidScene::shutdown() {
     for (auto& kv : live_) retire(kv.second);
     live_.clear();
-    if (res_) {
-        res_->destroyPipeline(pso_);
-        res_->destroyShader(vs_);
-        res_->destroyShader(ps_);
-    }
-    pso_ = 0;
-    vs_ = ps_ = 0;
-    bakedSampleCount_ = 1;
-    bakedColorFmt_ = rhi::Format::Unknown;
-    bakedDepthFmt_ = rhi::Format::Unknown;
     dev_ = nullptr;
     res_ = nullptr;
     ready_ = false;
@@ -285,14 +256,11 @@ void FluidScene::despawn(FluidHandle h) {
     live_.erase(it);
 }
 
-void FluidScene::update(f32 elapsedSeconds) {
-    // Stored unconditionally, even on the !ready_ early-out below (a device the caller never
-    // finished initialising), rather than left at whatever update() last saw: transparentPass
-    // separately no-ops without pso_, so there is no failure mode this ordering could paper over,
-    // and skipping the store on the early-out path would leave gFluidTime frozen from whichever
-    // frame LAST called update() with ready_ true, which is a strictly worse answer than "matches
-    // this frame's real clock" for a feature that draws nothing until it is ready anyway.
-    elapsedSeconds_ = elapsedSeconds;
+void FluidScene::update() {
+    // NO CLOCK PARAMETER ANY MORE. This took the composition root's Timestep::total purely to fill
+    // gFluidTime for PSFluid's decorative ripple -- a detail the fluid shader drew that the solver
+    // never computed. Both are gone: an authored .ocmat gets surface detail from a normal map, which
+    // is the same answer every other surface in the engine already uses.
     if (!ready_) return;
 
     // Reused across every resident this call rather than allocated per-volume: each buffer's
@@ -434,104 +402,7 @@ void FluidScene::prePass(rhi::IRenderContext& ctx) {
     }
 }
 
-bool FluidScene::buildPipeline(u32 sampleCount, rhi::Format color, rhi::Format depth) {
-    if (!res_ || !vs_ || !ps_) return false;
 
-    res_->destroyPipeline(pso_);
-    pso_ = 0;
-
-    rhi::GraphicsPipelineDesc gd;
-    gd.vs = vs_;
-    gd.ps = ps_;
-
-    // A root CBV at b(kFeatureFrameConstantRegister) -- "zero means root CBV" per PipelineLayout's
-    // own comment -- carrying ONLY an elapsed-seconds clock for PSFluid's ripple perturbation
-    // (FluidShaders.hpp's cbuffer FluidFrame). This is new since this pipeline was first built: the
-    // original version of this method had no per-frame block at all, on the reasoning (still true
-    // for the colours and the Fresnel/specular constants) that nothing PSFluid read varied per frame
-    // or per volume. A moving ripple is the one exception -- animation is, by definition, a value
-    // that must change frame to frame -- so unlike WaterFrame at 192 bytes of wave/grid state, this
-    // is the smallest thing that could possibly go in that slot.
-    gd.layout.constantDwords[rhi::kFeatureFrameConstantRegister] = 0;
-
-    // gd.vertexLayout is left at its default (empty), which the backend reads as "the engine's own
-    // MeshVertex" (GraphicsPipelineDesc::vertexLayout's own doc comment, RHIResources.hpp) rather
-    // than a custom layout -- see FluidShaders.hpp's own comment on VSFluidIn for why that is not
-    // optional here: rhi::Format has no three-component float entry, so a custom VertexLayout could
-    // not describe this mesh's float3 POSITION0/NORMAL0 even if this pipeline wanted one to. This is
-    // exactly the buffer drawMesh's own opaque pipeline already reads (both are rhi::MeshVertex,
-    // stride 32), so binding it here needs no conversion, no second copy, and no new vertex format.
-
-    // DEPTH-TESTED, DEPTH-WRITE OFF -- the transparentPass contract (RHIResources.hpp) and the exact
-    // state ParticleRenderer::buildPipelines and WaterRenderer::buildPipeline both use. Write MUST
-    // stay off: a blended surface that also wrote depth would occlude anything a LATER transparent
-    // draw this same frame tried to put behind it, and would corrupt whatever runs after
-    // transparentPass and reads the scene depth buffer as it was left (D3D12Device.cpp's own comment
-    // at the transparentPass call site spells out the historical bug this guards against).
-    gd.depth.test = true;
-    gd.depth.write = false;
-
-    // BACK, and the difference from WaterRenderer matters more than it looks. That renderer draws a
-    // single-layer GRID: culling is irrelevant to it, and None is right there because the camera can
-    // sit on either side of one sheet of ocean. This mesh is not a sheet -- it is a CLOSED BOX, the
-    // soft-body shell FluidVolume generates, with six faces enclosing a volume.
-    //
-    // Drawn unculled, every pixel of the top surface also blends the far interior walls and the
-    // bottom face stacked behind it: three or four layers of 15-100% alpha compositing over each
-    // other. Measured on the FirstPerson pool, that is exactly what it looked like -- a saturated
-    // cyan slab with dark blotches where face count changed, reading as coloured glass rather than
-    // as water, and showing the box's own side planes as distinct facets through the surface. One
-    // layer is what a water surface IS; the rest is the inside of a bag nobody should be seeing.
-    //
-    // The enterable-pool case that argued for None is real but is not solved by disabling culling:
-    // a camera under the surface sees the shell's underside, which is back-facing, so None makes it
-    // visible at the cost of breaking the ordinary above-water view that every player has all the
-    // time. That trade is the wrong way round, and underwater rendering needs its own treatment
-    // (Underwater.hpp) rather than a culling mode that degrades the common case to half-serve the
-    // rare one.
-    gd.cull = rhi::CullMode::Back;
-
-    gd.renderTargetCount = 1;
-    gd.renderTargets[0] = color;
-    gd.depthFormat = depth;
-    // MSAA IS BAKED INTO THE PIPELINE AT CREATION, the same DECIDED-1 rule ParticleRenderer's and
-    // WaterRenderer's own buildPipeline(s) comments cite: the scene target's ACTUAL sample count, not
-    // a hardcoded 1, rebuilt here whenever onRenderTargetsChanged reports it changed.
-    gd.sampleCount = sampleCount;
-
-    // PREMULTIPLIED alpha -- REVERSED from this pipeline's own prior choice, matching
-    // WaterRenderer.cpp's identical reversal and for the identical reason: see that file's own
-    // blend-state comment for the full argument. PSFluid (FluidShaders.hpp) used to output straight
-    // alpha over a flat deep/shallow lerp, which AlphaBlend composited correctly because nothing in
-    // that rgb needed protecting from attenuation. PSFluid now outputs a real specular term --
-    // skyColor(R) mirror reflection plus GGX sun glitter, exactly PSWater's fix applied to the same
-    // substance -- that must reach the framebuffer at full strength however transparent this pool is
-    // authored to be. Straight AlphaBlend would multiply that reflection by alpha, reproducing the
-    // "flat cartoon" defect one level deeper. Premultiplied (rgb = specular + diffuse*alpha, a = alpha
-    // -- PSFluid's own final line) sends `specular` through unattenuated and lets only the transmitted
-    // body colour shrink with coverage.
-    gd.blend = rhi::BlendMode::PremultipliedAlpha;
-
-    pso_ = res_->createGraphicsPipeline(gd);
-
-    bakedSampleCount_ = sampleCount;
-    bakedColorFmt_ = color;
-    bakedDepthFmt_ = depth;
-
-    if (pso_) {
-        AVER_INFO("[Fluid] transparent-pass pipeline (re)built: {}x MSAA", sampleCount);
-    } else {
-        AVER_ERROR("[Fluid] transparent-pass pipeline build failed at {}x MSAA", sampleCount);
-    }
-    return pso_ != 0;
-}
-
-void FluidScene::onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rhi::Format depth,
-                                        u32 width, u32 height) {
-    (void)width; (void)height;
-    if (sampleCount == bakedSampleCount_ && color == bakedColorFmt_ && depth == bakedDepthFmt_) return;
-    buildPipeline(sampleCount, color, depth);
-}
 
 // transparentPass IS GONE, AND THE ABSENCE IS THE FEATURE. This class used to bind its own pipeline
 // and issue its own drawIndexed here, which is what kept water out of the TLAS, out of the shadow

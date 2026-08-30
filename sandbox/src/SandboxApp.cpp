@@ -3298,7 +3298,7 @@ public:
         // Guarded on RENDER_FLUID alone for the same reason the registration is: the draw call in
         // onRender carries that guard and no other, so any wider guard here produces a build that
         // draws a mesh nothing ever writes to.
-        fluidScene_.update(t.total);
+        fluidScene_.update();
 
 #if AVER_MODULE_FRAMEWORK
         // THE FALLBACK for a gap in Jolt's own soft-body update, not this engine's: a fluid volume's
