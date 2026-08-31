@@ -137,9 +137,12 @@ public:
     // submit, the cluster path, the packaged game -- keeps its exact behaviour without being touched.
     // Only submitDraw's blended branch passes true. See Draw::translucent for what the flag costs a
     // draw and what it buys it.
+    // `hiddenFromOwner` DEFAULTS FALSE for the same reason `translucent` does: every existing
+    // caller keeps its exact behaviour untouched. Only the editor's owner-hide branch passes true.
     void submit(rhi::MeshHandle mesh, const f32 world[16], const f32 baseColor[4],
                 f32 metallic, f32 roughness, rhi::BindingSetHandle drawBinding,
-                const void* drawConstants, u32 drawConstantBytes, bool translucent = false);
+                const void* drawConstants, u32 drawConstantBytes, bool translucent = false,
+                bool hiddenFromOwner = false);
     // `blended` is the one thing this override has to look at that submit() itself never sees, and
     // it has to look at it BEFORE anything reaches draws_/drawsPrev_, not after -- everything
     // downstream of that list treats membership in it as "this is opaque scene geometry": voxelizePass
@@ -796,6 +799,19 @@ private:
         // drawsPrev_ and a parallel list would mean four walk sites each needing to remember to visit
         // it. One flag tested in one place per pass cannot be forgotten by a fifth pass added later.
         bool translucent = false;
+
+        // HIDDEN FROM ITS OWNER: in everything, out of the ray-driven primary ray alone.
+        //
+        // The peer of `translucent` above and the exact complement of it: that flag keeps a draw in
+        // the TLAS and out of the depth-only passes; this one keeps a draw in every pass it already
+        // reached -- shadow cascade, GI voxelisation, reflections, bounce rays -- and removes it
+        // from ONE traversal, the primary visibility ray, because that ray begins inside this
+        // mesh. See AVER_RT_MASK_OWNER_HIDDEN in voxi.hlsl for why the fix belongs in the instance
+        // mask rather than in whether the instance exists.
+        //
+        // A FLAG ON THE DRAW, for the reason `translucent` gives directly above: the alternative is
+        // a parallel list every pass has to remember to visit.
+        bool hiddenFromOwner = false;
     };
     std::vector<Draw> draws_, drawsPrev_;
 

@@ -5174,7 +5174,7 @@ public:
             // matching the "must not vanish" rule the frustum cull itself follows.
             constexpr f32 kMinCasterAngle = 0.02f;   // radians (~1.1 degrees)
             auto submitShadowOnly = [&](scene::Entity sEnt, rhi::MeshHandle baseMesh, const Mat4& sWm, i32 sMat,
-                                        const Vec3& sCentre, f32 sRadius) {
+                                        const Vec3& sCentre, f32 sRadius, bool sHiddenFromOwner) {
                 if (sRadius >= 0.0f) {
                     const f32 dx = sCentre.x - camPos_.x, dy = sCentre.y - camPos_.y, dz = sCentre.z - camPos_.z;
                     const f32 dsq = dx * dx + dy * dy + dz * dz;
@@ -5252,7 +5252,11 @@ public:
                     mb = sizeof(pbr::MaterialConstants);
                 }
 #endif
-                voxiRenderer_.submit(m, &sWm.m[0][0], c, metal, rough, ms, mc, mb);
+                // translucent=false, then the owner-hide lane. A draw reaching HERE is opaque by
+                // construction -- the authored-glass check above returns before this line -- so the
+                // false is a statement of fact rather than a default being accepted.
+                voxiRenderer_.submit(m, &sWm.m[0][0], c, metal, rough, ms, mc, mb,
+                                     /*translucent=*/false, sHiddenFromOwner);
             };
 #endif
 
@@ -5295,6 +5299,33 @@ public:
                 const auto it = sceneMeshes_.find(mr->mesh);
                 if (it == sceneMeshes_.end()) continue;
                 const Mat4& wm = w.worldMatrix(ent);
+
+                // ---- OWNER HIDE, DECIDED BEFORE THE CULLS ------------------------------------
+                // The answer is needed by all THREE submitShadowOnly calls below, not just the
+                // owner-hide branch's own, and the culls come first: an entity that is both
+                // frustum-culled and owner-hidden would otherwise reach the acceleration structure
+                // through the frustum branch with the flag unset, and be primary-visible again the
+                // moment it came back on screen. Deciding it here means one answer per entity that
+                // every submission path sees.
+                //
+                // COSTS ESSENTIALLY NOTHING to hoist. The walk runs only for an entity that both
+                // carries the flag and has a first-person viewer to be hidden from -- in practice
+                // the possessed pawn's own body, one entity in the scene.
+                //
+                // ANCESTOR WALK, NOT A DIRECT-PARENT COMPARE: a COMP tree can nest (`parent=` names
+                // another COMP, per OcGraph.hpp's own COMP comment), so "this mesh's owner" is
+                // whichever entity the hierarchy chain actually roots at, which may be several hops
+                // above `ent` -- or `ent` itself, for a mesh set through `CLASS mesh=` directly on
+                // the pawn's own entity rather than through a COMP child. World::setParent already
+                // refuses a cycle (World.hpp's own comment on setParent), so this walk is
+                // guaranteed to reach kInvalidEntity and stop.
+                bool ownerHiddenHere = false;
+                if ((mr->flags & scene::kMeshRendererHiddenFromOwner) &&
+                    firstPersonPawn_ != scene::kInvalidEntity) {
+                    for (scene::Entity anc = ent; w.valid(anc); anc = w.parent(anc)) {
+                        if (anc == firstPersonPawn_) { ownerHiddenHere = true; break; }
+                    }
+                }
 
                 // A STATIC entity gets its bounds from the asset. A skinned one already had them
                 // written this frame by SkinnedScene from its ACTUAL POSE, so leave those alone --
@@ -5344,7 +5375,8 @@ public:
                                              Vec3{(wlo.x + whi.x) * 0.5f, (wlo.y + whi.y) * 0.5f, (wlo.z + whi.z) * 0.5f},
                                              0.5f * std::sqrt((whi.x - wlo.x) * (whi.x - wlo.x) +
                                                               (whi.y - wlo.y) * (whi.y - wlo.y) +
-                                                              (whi.z - wlo.z) * (whi.z - wlo.z)));
+                                                              (whi.z - wlo.z) * (whi.z - wlo.z)),
+                                             ownerHiddenHere);
 #endif
                             continue;
                         }
@@ -5371,30 +5403,20 @@ public:
                                      Vec3{(wlo.x + whi.x) * 0.5f, (wlo.y + whi.y) * 0.5f, (wlo.z + whi.z) * 0.5f},
                                      0.5f * std::sqrt((whi.x - wlo.x) * (whi.x - wlo.x) +
                                                       (whi.y - wlo.y) * (whi.y - wlo.y) +
-                                                      (whi.z - wlo.z) * (whi.z - wlo.z)));
+                                                      (whi.z - wlo.z) * (whi.z - wlo.z)),
+                                     ownerHiddenHere);
 #endif
                     continue;
                 }
 #endif
                 // ---- OWNER HIDE: a first-person camera does not see its own pawn's body ------------
-                // Checked here, after both culls and before any of the colour-path work below (LOD
-                // selection, skin/soft-body substitution, material resolution) -- an entity this frame
-                // decides not to rasterise needs none of that, the same reasoning the frustum and
-                // occlusion culls just above already act on for their own reasons.
-                //
-                // ANCESTOR WALK, NOT A DIRECT-PARENT COMPARE: a COMP tree can nest (`parent=` names
-                // another COMP, per OcGraph.hpp's own COMP comment), so "this mesh's owner" is
-                // whichever entity the hierarchy chain actually roots at, which may be several hops
-                // above `ent` -- or `ent` itself, for a mesh set through `CLASS mesh=` directly on the
-                // pawn's own entity rather than through a COMP child. World::setParent already refuses
-                // a cycle (World.hpp's own comment on setParent), so this walk is guaranteed to reach
-                // kInvalidEntity and stop.
-                if ((mr->flags & scene::kMeshRendererHiddenFromOwner) && firstPersonPawn_ != scene::kInvalidEntity) {
-                    bool ownedByViewer = false;
-                    for (scene::Entity anc = ent; w.valid(anc); anc = w.parent(anc)) {
-                        if (anc == firstPersonPawn_) { ownedByViewer = true; break; }
-                    }
-                    if (ownedByViewer) {
+                // The WALK is hoisted above the culls (see ownerHiddenHere's own comment up there for
+                // why); this is where acting on it belongs -- after both culls and before any of the
+                // colour-path work below (LOD selection, skin/soft-body substitution, material
+                // resolution), because an entity this frame decides not to rasterise needs none of
+                // that, the same reasoning the frustum and occlusion culls just above already act on.
+                {
+                    if (ownerHiddenHere) {
 #if AVER_MODULE_VOXI
                         // Still a shadow caster, still in the GI volume, still in the RT geometry
                         // table -- see submitShadowOnly's own header comment for why skipping IT
@@ -5405,6 +5427,12 @@ public:
                         // submitShadowOnly already reads as "unknown, never angular-size-cull" -- the
                         // identical fallback a boxless entity gets from the frustum cull two
                         // paragraphs up.
+                        // THE FLAG IS WHAT MAKES THE HIDE REACH THE RENDERER THAT ACTUALLY DRAWS.
+                        // Skipping drawMesh() below removes this mesh from the RASTER image only.
+                        // Ray-driven primary visibility -- the default -- reads the acceleration
+                        // structure instead, and the three lines above deliberately keep the mesh
+                        // in it. Passing the flag puts the instance in the AVER_RT_MASK_OWNER_HIDDEN
+                        // lane, which the primary ray excludes and every other ray still includes.
                         submitShadowOnly(ent, it->second, wm, mr->material,
                                          haveWorldBox
                                              ? Vec3{(wlo.x + whi.x) * 0.5f, (wlo.y + whi.y) * 0.5f, (wlo.z + whi.z) * 0.5f}
@@ -5413,7 +5441,8 @@ public:
                                              ? 0.5f * std::sqrt((whi.x - wlo.x) * (whi.x - wlo.x) +
                                                                  (whi.y - wlo.y) * (whi.y - wlo.y) +
                                                                  (whi.z - wlo.z) * (whi.z - wlo.z))
-                                             : -1.0f);
+                                             : -1.0f,
+                                         /*sHiddenFromOwner=*/true);
 #endif
                         ++ownerHidden;
                         continue;
@@ -8520,6 +8549,10 @@ private:
         return gm;
     }
     int32_t engineDefaultGm_ = 0;
+    // The view request as it stood before this editor overrode it -- see startPlay.
+    bool    savedView_ = false;
+    int32_t savedViewMode_ = AVER_FW_VIEW_THIRD_PERSON;
+    float   savedViewEye_ = 160.0f, savedViewBoom_ = 450.0f;
 
     void startPlay() {
         // BEFORE anything begins, so what is recorded is the editor's level and not one frame of
@@ -8557,6 +8590,18 @@ private:
                 // puts the camera relative to the pawn, and it also decides whether the pawn is
                 // HIDDEN (firstPersonPawn_). A flying camera wants to be exactly at its pawn and to
                 // never see it, which is what first person with a zero eye height means.
+                // SAVED FIRST, AND PUT BACK ON STOP. aver_fw_set_view writes a PROCESS-WIDE static
+                // (FrameworkAbi's ViewRequest) that nothing in the framework ever resets -- not
+                // begin_play, not end_play. Setting it here and walking away leaves every LATER
+                // session in the same process running with eye height 0, and drivePlayCamera's
+                // no-view-entity fallback is `pawnPos + up * eye` -- so a real character whose view
+                // node has not been built yet gets a camera at its FEET, inside the floor.
+                //
+                // That is not hypothetical: a project whose scripts have not compiled yet has no
+                // GameMode on the first Play, takes this branch, and then gets its real character on
+                // the second -- with the eye height this left behind.
+                aver_fw_view(&savedViewMode_, &savedViewEye_, &savedViewBoom_);
+                savedView_ = true;
                 aver_fw_set_view(AVER_FW_VIEW_FIRST_PERSON, 0.0f, 0.0f);
 
                 // AND IT STARTS WHERE YOU WERE LOOKING, WHICH IS THE WHOLE OF THE BUG REPORT.
@@ -8619,6 +8664,12 @@ private:
         if (defaultPawnPlay_) {
             defaultPawnPlay_ = false;
             AVER_INFO("[Sandbox] Stop: engine default pawn released");
+        }
+        // Restored whether or not the default pawn was what ended, so a view this editor changed can
+        // never outlive the session that changed it.
+        if (savedView_) {
+            savedView_ = false;
+            aver_fw_set_view(savedViewMode_, savedViewEye_, savedViewBoom_);
         }
         if (aver_fw_play_state() != AVER_FW_PLAY_EDITOR) {
             aver_fw_end_play();

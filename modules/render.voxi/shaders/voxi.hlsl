@@ -94,6 +94,30 @@ RWTexture3D<uint> gVoxelAccum : register(u1);
 // rays never traverse the pane at all, so their single-Proceed stays exactly as valid as it was.
 #define AVER_RT_MASK_OPAQUE      0x01
 #define AVER_RT_MASK_TRANSLUCENT 0x02
+// THE VIEWER'S OWN BODY. An opaque instance that every ray may hit EXCEPT the ray-driven primary
+// one -- a first-person camera sits inside its own character's head, so the primary ray leaving it
+// hits the inward-facing surface of that mesh and shades it, which fills the whole screen with a
+// flat wash of the character's own skin texture and hides the entire game behind it.
+//
+// scene::kMeshRendererHiddenFromOwner ALREADY EXISTED FOR EXACTLY THIS, and the raster walk in
+// SandboxApp honours it -- it skips drawMesh() and reports the mesh as `owner-hidden`. But that
+// walk deliberately keeps the mesh in the acceleration structure (its own comment says so: "still
+// a shadow caster, still in the GI volume, still in the RT geometry table"), because dropping it
+// would take its shadow and its GI bounce with it. Under raster primary visibility that is exactly
+// right and the bug is invisible. Under RAY-DRIVEN primary visibility -- which is the DEFAULT --
+// the TLAS *is* what the camera sees, so "hidden" never reached the renderer that draws the image.
+// Measured: identical camera pose and identical `1 owner-hidden` in the log, probe 43,33,28
+// (ray-driven) versus 206,215,218 (--rt-render-mode 0).
+//
+// A THIRD LANE RATHER THAN REMOVING THE INSTANCE, because everything except that one ray still
+// wants this geometry: you cast a shadow, you bounce light onto the floor beside you, and you
+// appear in a mirror and through a pane of glass. Only the ray that starts inside your own head
+// must not see it. The shadow ray masks AVER_RT_MASK_ALL, so it picks this lane up for free.
+#define AVER_RT_MASK_OWNER_HIDDEN 0x04
+// OPAQUE GEOMETRY AS A SECONDARY RAY SEES IT: solid surfaces including the viewer's own body.
+// Every opaque traversal in this file uses this EXCEPT the ray-driven primary ray, which is the
+// single place the distinction exists to make.
+#define AVER_RT_MASK_OPAQUE_ALL  (AVER_RT_MASK_OPAQUE | AVER_RT_MASK_OWNER_HIDDEN)
 #define AVER_RT_MASK_ALL         0xFF
 
 // Directional shadow map. Core feature level 11_0, so it works on every DX12 GPU.
@@ -724,7 +748,7 @@ float3 rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float
         // Measurement only -- see AVER_RD_ABL_SHADOW_FIRSTHIT. Opaque lane only and stop at the first
         // thing touched, which is what this ray did before transmissive shadows existed.
         q.TraceRayInline(gScene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_FORCE_OPAQUE,
-                         AVER_RT_MASK_OPAQUE, r);
+                         AVER_RT_MASK_OPAQUE_ALL, r);
 #else
         q.TraceRayInline(gScene, RAY_FLAG_NONE, AVER_RT_MASK_ALL, r);
 #endif
@@ -1277,7 +1301,7 @@ float3 rtReflection(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, flo
     // NOT on the shadow ray (this file, the rtShadow query): that one masks AVER_RT_MASK_ALL on
     // purpose so a pane of glass can attenuate it, and forcing opaque there would make every pane a
     // wall -- which is the exact behaviour its own comment says was removed.
-    q.TraceRayInline(gScene, RAY_FLAG_FORCE_OPAQUE, AVER_RT_MASK_OPAQUE, r);
+    q.TraceRayInline(gScene, RAY_FLAG_FORCE_OPAQUE, AVER_RT_MASK_OPAQUE_ALL, r);
     q.Proceed();
     if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) return 0.0;
 
@@ -1515,7 +1539,7 @@ float2 averRefractedBackdropUV(AverSurface s, float3 wpos, float thicknessCm,
         rr.TMin = 0.0;
         rr.TMax = 100000.0;
         RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> rq;
-        rq.TraceRayInline(gScene, RAY_FLAG_FORCE_OPAQUE, AVER_RT_MASK_OPAQUE, rr);
+        rq.TraceRayInline(gScene, RAY_FLAG_FORCE_OPAQUE, AVER_RT_MASK_OPAQUE_ALL, rr);
         rq.Proceed();
         if (rq.CommittedStatus() == COMMITTED_TRIANGLE_HIT)
             target = target + R * rq.CommittedRayT();
@@ -1649,7 +1673,7 @@ float averVolumeThickness(float3 wpos, float3 N, float3 viewDir) {
 
     RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
     q.TraceRayInline(gScene, RAY_FLAG_FORCE_OPAQUE,
-                     AVER_RT_MASK_OPAQUE | AVER_RT_MASK_TRANSLUCENT, r);
+                     AVER_RT_MASK_OPAQUE_ALL | AVER_RT_MASK_TRANSLUCENT, r);
     q.Proceed();
     if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) return 0.0;
     return q.CommittedRayT() + bias;
@@ -2668,6 +2692,10 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // NOT on the shadow ray (this file, the rtShadow query): that one masks AVER_RT_MASK_ALL on
     // purpose so a pane of glass can attenuate it, and forcing opaque there would make every pane a
     // wall -- which is the exact behaviour its own comment says was removed.
+    // THE ONE RAY THAT USES THE NARROW LANE. AVER_RT_MASK_OPAQUE, not
+    // AVER_RT_MASK_OPAQUE_ALL: this ray starts inside the first-person viewer's own head,
+    // so it is the single traversal that must not see the body carrying
+    // AVER_RT_MASK_OWNER_HIDDEN. Every other opaque query in this file asks for _ALL.
     q.TraceRayInline(gScene, RAY_FLAG_FORCE_OPAQUE, AVER_RT_MASK_OPAQUE, r);
     q.Proceed();
 
@@ -3355,7 +3383,7 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> qb;
         // Opaque lane only -- see AVER_RT_MASK_OPAQUE.
         // Same proof as the primary ray above: this mask cannot see a non-opaque candidate.
-        qb.TraceRayInline(gScene, RAY_FLAG_FORCE_OPAQUE, AVER_RT_MASK_OPAQUE, rb);
+        qb.TraceRayInline(gScene, RAY_FLAG_FORCE_OPAQUE, AVER_RT_MASK_OPAQUE_ALL, rb);
         qb.Proceed();
 
         if (qb.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {

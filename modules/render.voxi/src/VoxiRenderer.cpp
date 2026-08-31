@@ -82,6 +82,10 @@ u32 tlasTranslucentThisBuild_ = 0;
 u32 tlasTranslucentLogged_    = 0;
 constexpr u32 kRtMaskOpaque      = 0x01;
 constexpr u32 kRtMaskTranslucent = 0x02;
+// The viewer's own first-person body -- see AVER_RT_MASK_OWNER_HIDDEN in voxi.hlsl, which this
+// MUST match, and which carries the full reasoning. Opaque geometry that every ray may hit except
+// the ray-driven primary one.
+constexpr u32 kRtMaskOwnerHidden = 0x04;
 constexpr u32 kRtMaskAll         = 0xFF;
 
 // The material system's sampler register. materialShaderDefines() is told the same number.
@@ -639,7 +643,8 @@ void VoxiRenderer::beginScene() {
 // Records one draw into this frame's list, copying its material block.
 void VoxiRenderer::submit(rhi::MeshHandle mesh, const f32 world[16], const f32 baseColor[4],
                           f32 metallic, f32 roughness, rhi::BindingSetHandle drawBinding,
-                          const void* drawConstants, u32 drawConstantBytes, bool translucent) {
+                          const void* drawConstants, u32 drawConstantBytes, bool translucent,
+                          bool hiddenFromOwner) {
     if (mesh == 0) return;
     if (draws_.size() >= kMaxDraws) {
         // Says so exactly once. The old silent return is what let a 4096 cap survive a scene with
@@ -661,6 +666,7 @@ void VoxiRenderer::submit(rhi::MeshHandle mesh, const f32 world[16], const f32 b
     std::memcpy(d.color, baseColor, 4 * sizeof(f32));
     d.metallic = metallic;
     d.roughness = roughness;
+    d.hiddenFromOwner = hiddenFromOwner;
     d.matSet = drawBinding;
     d.matBytes = drawConstantBytes < sizeof(d.mat) ? drawConstantBytes : static_cast<u32>(sizeof(d.mat));
     if (drawConstants && d.matBytes) std::memcpy(d.mat, drawConstants, d.matBytes);
@@ -1019,7 +1025,13 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
         // that wants only solid surfaces. Splitting the mask now, while there is exactly one
         // consumer, is what lets a reflection or an ambient-occlusion ray opt out later by passing a
         // narrower mask, without having to rebuild the structure differently for each.
-        i.mask = d.translucent ? kRtMaskTranslucent : kRtMaskOpaque;
+        // THREE LANES. Translucency is a property of the material; hiddenFromOwner is a property
+        // of WHO IS LOOKING, and the two cannot co-occur -- a draw reaching the translucent lane
+        // was diverted by submitDraw's blended branch and never passes through the owner-hide walk.
+        // Tested in this order so translucency keeps its existing answer unchanged.
+        i.mask = d.translucent      ? kRtMaskTranslucent
+               : d.hiddenFromOwner  ? kRtMaskOwnerHidden
+                                    : kRtMaskOpaque;
         // FORCE_NON_OPAQUE only for the translucent lane. createBlas marks every geometry OPAQUE,
         // which permits the hardware to skip any-hit entirely -- so without this override a
         // Proceed() loop would never be offered a candidate to inspect and the pane would simply
