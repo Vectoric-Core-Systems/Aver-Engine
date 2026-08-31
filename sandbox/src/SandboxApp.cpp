@@ -8529,6 +8529,34 @@ private:
             const int32_t dgm = engineDefaultGameMode();
             if (dgm && aver_fw_begin_play(0, dgm)) {
                 defaultPawnPlay_ = true;
+                // FIRST PERSON, NO EYE OFFSET, NO BOOM. The view mode decides where drivePlayCamera
+                // puts the camera relative to the pawn, and it also decides whether the pawn is
+                // HIDDEN (firstPersonPawn_). A flying camera wants to be exactly at its pawn and to
+                // never see it, which is what first person with a zero eye height means.
+                aver_fw_set_view(AVER_FW_VIEW_FIRST_PERSON, 0.0f, 0.0f);
+
+                // AND IT STARTS WHERE YOU WERE LOOKING, WHICH IS THE WHOLE OF THE BUG REPORT.
+                //
+                // The framework spawns a default pawn at the world ORIGIN, and drivePlayCamera then
+                // dutifully moves the view to it. In an empty test level the origin is open air and
+                // nothing looks wrong. In a real level it is very often INSIDE something -- pressing
+                // Play in ElectricDreams put the camera inside the terrain, which reads exactly as
+                // "a cube stuck in the screen": you are within a mesh, looking at its back faces.
+                //
+                // Unreal answers this by spawning at a PlayerStart, and where there is none, at the
+                // editor camera. There is no PlayerStart concept here yet, so this takes the second
+                // half: Play keeps you where you already were and lets you fly on from there, which
+                // is also the least surprising thing a Play button can do.
+                const int32_t pn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
+                if (pn) {
+                    const scene::Entity pe = static_cast<scene::Entity>(static_cast<uint32_t>(pn));
+                    scene::World& pw = scene::World::instance();
+                    if (pw.valid(pe)) {
+                        pw.setLocalPosition(pe, camPos_);
+                        pw.setLocalRotation(pe, Quat::fromAxisAngle(Vec3{0, 0, 1}, yaw_) *
+                                                Quat::fromAxisAngle(Vec3{0, 1, 0}, -pitch_));
+                    }
+                }
                 AVER_INFO("[Sandbox] Play: no GameMode declared -- possessing the engine's "
                           "AverDefaultPawn (WASD/QE to fly, hold RMB to look). Declare an "
                           "[AverGameMode] class to take over.");
