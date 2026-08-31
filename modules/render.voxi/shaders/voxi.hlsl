@@ -654,6 +654,35 @@ float rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3
         q.TraceRayInline(gScene, RAY_FLAG_NONE, AVER_RT_MASK_ALL, r);
 #endif
 
+        // ---- TWO MODELS, AND THE MATERIAL PICKS WHICH ----------------------------------------
+        //
+        // A material that authors a VOLUME (attenuationDistance > 0) is attenuated by Beer-Lambert
+        // over the distance the light actually travelled inside it. One that does not keeps the
+        // per-crossing surface rule, which is the correct answer for a thin sheet with no authored
+        // medium rather than a compromise.
+        //
+        // WHY THE LOOP GATHERS INSTEAD OF MULTIPLYING AS IT GOES. A path length needs both ends of
+        // the segment, and the exit candidate can arrive at any point in the walk, so there is
+        // nowhere to apply a volume's contribution until the walk is over. Spans are collected here
+        // and resolved below.
+        //
+        // PAIRED BY MIN/MAX t, NEVER BY ARRIVAL ORDER OR BY FACING. DXR does not specify that
+        // non-opaque candidates arrive nearest-first, so "first is entry, second is exit" is unsound.
+        // And CandidateTriangleFrontFace() would be worse than unsound here: winding is exactly what
+        // broke volume absorption on the pool this morning -- the fluid box winds opposite to the
+        // cube -- so a facing test is the one thing this must not be built on. min/max needs neither.
+        //
+        //   one hit   -> the ray STARTED INSIDE the medium, and t IS the distance out. This is the
+        //                pool floor looking up at the sun through its own water.
+        //   two hits  -> entered and exited; the span between them is the thickness. A pane.
+        //   more      -> concave or self-overlapping geometry; the outer span is the honest estimate.
+        const uint kMaxMedia = 2u;                 // glass over water is the real case; see below
+        uint  medIid[kMaxMedia];
+        float medTMin[kMaxMedia];
+        float medTMax[kMaxMedia];
+        uint  medHits[kMaxMedia];
+        uint  medN = 0u;
+
         float3 through = float3(1, 1, 1);   // running transmittance along this ray
         // Bounded: a ray that somehow finds a great many translucent surfaces must not spin. Eight
         // crossings is far past the point where transmittance is visually zero anyway.
@@ -665,23 +694,62 @@ float rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3
             const uint iid = q.CandidateInstanceID();
             const RtMaterial m = gRtMaterials[gRtInstances[iid].materialIndex];
 
-            // The HLSL twin of pbr::shadowTransmittance (Material.cpp). Kept deliberately identical
-            // in shape so the two can be read against each other; there is no shared source.
-            float3 t;
-            if ((m.flags & AVER_MAT_CAST_SHADOW) == 0) {
-                t = float3(1, 1, 1);            // castShadow=0: casts nothing at all
-            } else {
-                const float k = max(1.0 - m.baseColorFactor.a, saturate(m.transmission));
-                t = saturate(m.baseColorFactor.rgb) * k;
-            }
-            through *= t;
+            if ((m.flags & AVER_MAT_CAST_SHADOW) == 0) continue;   // casts nothing at all
 
-            // Once effectively nothing gets through, the surface is opaque for shadow purposes and
-            // there is no point walking further.
-            if (max(through.r, max(through.g, through.b)) < 0.01) { through = float3(0, 0, 0); break; }
+            bool handled = false;
+            if (m.attenuationDistance > 0.0) {
+                // A VOLUME: remember the span, resolve after the walk.
+                const float ct = q.CandidateTriangleRayT();
+                uint slot = kMaxMedia;
+                [unroll] for (uint j = 0; j < kMaxMedia; ++j)
+                    if (j < medN && medIid[j] == iid) slot = j;
+                if (slot == kMaxMedia && medN < kMaxMedia) {
+                    slot = medN;
+                    medIid[slot] = iid; medTMin[slot] = ct; medTMax[slot] = ct; medHits[slot] = 0u;
+                    ++medN;
+                }
+                if (slot < kMaxMedia) {
+                    medTMin[slot] = min(medTMin[slot], ct);
+                    medTMax[slot] = max(medTMax[slot], ct);
+                    ++medHits[slot];
+                    handled = true;
+                }
+                // A THIRD overlapping medium falls through to the surface rule below rather than
+                // being dropped: two slots covers glass-over-water, which is the case this scene
+                // actually builds, and silently ignoring a caster would be worse than approximating it.
+            }
+
+            if (!handled) {
+                // NO VOLUME (or no slot left): the per-crossing surface rule, the HLSL twin of
+                // pbr::shadowTransmittance (Material.cpp). See that function's comment for why the
+                // two are no longer identical in shape -- it has no ray and cannot know a distance.
+                const float k = max(1.0 - m.baseColorFactor.a, saturate(m.transmission));
+                through *= saturate(m.baseColorFactor.rgb) * k;
+
+                // Once effectively nothing gets through, the surface is opaque for shadow purposes
+                // and there is no point walking further. Only the surface path may take this
+                // early-out: a volume's contribution has not been applied yet, so a walk carrying
+                // one must run to the end or its medium is silently dropped.
+                if (max(through.r, max(through.g, through.b)) < 0.01 && medN == 0u) {
+                    through = float3(0, 0, 0);
+                    break;
+                }
+            }
 
             // NOT committed. Committing would end the traversal at this pane; leaving the candidate
             // uncommitted is what lets Proceed() carry on to whatever is behind it.
+        }
+
+        // Resolve every gathered span, per channel, by the same Beer-Lambert the VIEW path uses.
+        // averVolumeTransmittance is the one implementation both paths call, and it reads no globals
+        // precisely so a ray hit can use it -- see its own comment. Calling it here is what makes the
+        // light going DOWN through a medium agree with the light coming back UP through it, which is
+        // the disagreement this whole change exists to remove.
+        [unroll] for (uint mi = 0; mi < kMaxMedia; ++mi) {
+            if (mi >= medN) continue;
+            const RtMaterial mm = gRtMaterials[gRtInstances[medIid[mi]].materialIndex];
+            const float thickness = (medHits[mi] == 1u) ? medTMax[mi] : (medTMax[mi] - medTMin[mi]);
+            through *= averVolumeTransmittance(mm.attenuationColor, mm.attenuationDistance, thickness);
         }
 
         // An opaque hit anywhere along the way blocks everything, whatever the panes in front said.
