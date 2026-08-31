@@ -79,6 +79,7 @@ struct MockFactory final : public rhi::IResourceFactory {
         if (set && set <= srvSlot0.size() && slot == 0) srvSlot0[set - 1] = t;
     }
     void setUav(rhi::BindingSetHandle, u32, rhi::TextureHandle, u32) override {}
+    void clearSrv(rhi::BindingSetHandle, u32) override {}
     void setSrvTlas(rhi::BindingSetHandle, u32, rhi::TlasHandle) override {}
     void setSrvBuffer(rhi::BindingSetHandle, u32, rhi::BufferHandle, u32, u32, u32) override {}
     void setUavBuffer(rhi::BindingSetHandle, u32, rhi::BufferHandle, u32, u32, u32) override {}

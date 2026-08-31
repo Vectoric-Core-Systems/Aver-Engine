@@ -1593,7 +1593,6 @@ private:
     // Created UNCONDITIONALLY, unlike sceneColorTex_ above, which only the upscaler path needs.
     TextureHandle blendBackdropTex_ = 0;
     u32           blendBackdropW_ = 0, blendBackdropH_ = 0;
-    bool          blendBackdropMsaaWarned_ = false;
     bool          blendBackdropCopyLogged_ = false;
     // AverSR's output: HDR (pre-tonemap) at PRESENT resolution. The upscale runs on radiance and
     // PSComposite then tonemaps an image that is already the right size, so its own resample
@@ -1832,6 +1831,7 @@ public:
 
     void setSrv(BindingSetHandle set, u32 slot, TextureHandle t, u32 mip) override;
     void setUav(BindingSetHandle set, u32 slot, TextureHandle t, u32 mip) override;
+    void clearSrv(BindingSetHandle set, u32 slot) override;
     void setSrvTlas(BindingSetHandle set, u32 slot, TlasHandle tlas) override;
     void setSrvBuffer(BindingSetHandle set, u32 slot, BufferHandle b, u32 stride, u32 count, u32 firstElement) override;
     // The underlying resource, for the context's copy and barrier paths. Null on a bad handle.
@@ -1892,6 +1892,11 @@ private:
     D3D12_CPU_DESCRIPTOR_HANDLE cpuSlot(u32 index) const;
     D3D12_GPU_DESCRIPTOR_HANDLE gpuSlot(u32 index) const;
     void nullFill(const RhiBindingSet& s);
+    // The null view for ONE slot of a given kind. Shared by nullFill (which writes every slot at
+    // creation) and clearSrv (which returns one slot to that state later), so the two can never
+    // disagree about what "null" means for a kind -- a divergence that would show up only as a
+    // device removal on whichever path was not updated.
+    D3D12_SHADER_RESOURCE_VIEW_DESC nullSrvDesc(SlotKind kind);
     // Reuses a retired range large enough for `count`, or bump-allocates. False when exhausted.
     bool allocRange(u32 count, u32& outFirst);
 
@@ -4825,12 +4830,21 @@ void D3D12Device::endFrame() {
         // the whole reason glass can be composited over the scene at all. Copying `scene` here would
         // capture last frame's resolve, or nothing.
         //
-        // SINGLE-SAMPLE ONLY. Under MSAA the scene target is multisampled and CopyResource into a
-        // single-sample texture is invalid; a ResolveSubresource would be the answer, but resolving
-        // mid-pass to feed a shader that then draws back into the unresolved target is a bigger
-        // change than this one, so the backdrop is simply unavailable there and the shader falls
-        // back to its scalar composite. Said once rather than every frame.
-        if (blendBackdropTex_ && rhiFactory_ && msaaColor_) {
+        // THE SIZE CHECK IS NOT OPTIONAL, AND LEAVING IT OUT REMOVED THE DEVICE ON EVERY RESIZE.
+        //
+        // CopyResource and ResolveSubresource both REQUIRE matching dimensions. The backdrop is
+        // created in createPostTargets against sceneWidth_/sceneHeight_, and the scene colour target
+        // is recreated by the swapchain path -- so any window resize, render-scale change or AverSR
+        // rung change opens a window in which one has the new size and the other still has the old.
+        // Issuing the resolve across that mismatch is an invalid call, and an invalid call here does
+        // not fail gracefully: it removes the device, which is a GPU crash and a lost window.
+        //
+        // Skipping cleanly is the right answer rather than asserting: blendBackdropTex_ stays valid,
+        // the shader's own GetDimensions guard takes the no-backdrop path for that frame, glass
+        // falls back to its scalar composite for one frame, and the next frame -- with both targets
+        // agreed on a size -- resolves normally. A frame of slightly wrong glass beats a dead device.
+        if (blendBackdropTex_ && rhiFactory_ && msaaColor_ &&
+            blendBackdropW_ == sceneWidth_ && blendBackdropH_ == sceneHeight_) {
             if (RhiTexture* bt = rhiFactory_->texture(blendBackdropTex_)) {
                 if (bt->res) {
                     // MSAA IS 4x BY DEFAULT ON THIS DEVICE, so the single-sample-only version of this
@@ -5502,46 +5516,52 @@ D3D12_GPU_DESCRIPTOR_HANDLE D3D12ResourceFactory::gpuSlot(u32 index) const {
 // fixed here -- that needs a per-slot SlotKind on PipelineLayout, the same information this loop
 // already reads off BindingSetDesc, threaded through to the Vulkan descriptor-set-layout builder).
 // So the merge is D3D12 ONLY, and that is a property of the whole design, not a note in one file.
-void D3D12ResourceFactory::nullFill(const RhiBindingSet& s) {
-    for (u32 i = 0; i < s.srvCount; ++i) {
-        const SlotKind kind = s.srvKinds[i];
-        D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
-        sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        if (kind == SlotKind::AccelerationStructure) {
-            if (dev_->caps_.rayTracingTier == 0) {
-                if (!asSlotLogged_) {
-                    asSlotLogged_ = true;
-                    AVER_INFO("[RHI.D3D12] no ray tracing on this device: acceleration-structure slots "
-                              "are filled with a null 2D view and the shaders that would trace decline");
-                }
-                sv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-                sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-                sv.Texture2D.MipLevels = 1;
-            } else {
-                sv.Format = DXGI_FORMAT_UNKNOWN;
-                sv.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
-                sv.RaytracingAccelerationStructure.Location = 0;
+// The null view for one SRV slot, by kind. Lifted out of nullFill so clearSrv writes the identical
+// descriptor: a slot returned to null later must be indistinguishable from one that was never bound.
+D3D12_SHADER_RESOURCE_VIEW_DESC D3D12ResourceFactory::nullSrvDesc(SlotKind kind) {
+    D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    if (kind == SlotKind::AccelerationStructure) {
+        if (dev_->caps_.rayTracingTier == 0) {
+            if (!asSlotLogged_) {
+                asSlotLogged_ = true;
+                AVER_INFO("[RHI.D3D12] no ray tracing on this device: acceleration-structure slots "
+                          "are filled with a null 2D view and the shaders that would trace decline");
             }
-        } else if (kind == SlotKind::StructuredBuffer) {
-            // A null structured-buffer view needs a stride, or Tier 1 validation rejects it.
-            sv.Format = DXGI_FORMAT_UNKNOWN;
-            sv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-            sv.Buffer.NumElements = 0;
-            sv.Buffer.StructureByteStride = 4;
-        } else if (kind == SlotKind::Texture3D) {
-            sv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-            sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
-            sv.Texture3D.MipLevels = 1;
-        } else if (kind == SlotKind::Texture2DMS) {
-            // D3D12_TEX2DMS_SRV is an empty struct (no mip/level fields to set at all) -- see
-            // setSrv's own comment on this dimension.
-            sv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-            sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DMS;
-        } else {
             sv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
             sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
             sv.Texture2D.MipLevels = 1;
+        } else {
+            sv.Format = DXGI_FORMAT_UNKNOWN;
+            sv.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
+            sv.RaytracingAccelerationStructure.Location = 0;
         }
+    } else if (kind == SlotKind::StructuredBuffer) {
+        // A null structured-buffer view needs a stride, or Tier 1 validation rejects it.
+        sv.Format = DXGI_FORMAT_UNKNOWN;
+        sv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        sv.Buffer.NumElements = 0;
+        sv.Buffer.StructureByteStride = 4;
+    } else if (kind == SlotKind::Texture3D) {
+        sv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
+        sv.Texture3D.MipLevels = 1;
+    } else if (kind == SlotKind::Texture2DMS) {
+        // D3D12_TEX2DMS_SRV is an empty struct (no mip/level fields to set at all) -- see
+        // setSrv's own comment on this dimension.
+        sv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DMS;
+    } else {
+        sv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        sv.Texture2D.MipLevels = 1;
+    }
+    return sv;
+}
+
+void D3D12ResourceFactory::nullFill(const RhiBindingSet& s) {
+    for (u32 i = 0; i < s.srvCount; ++i) {
+        const D3D12_SHADER_RESOURCE_VIEW_DESC sv = nullSrvDesc(s.srvKinds[i]);
         dev_->device_->CreateShaderResourceView(nullptr, &sv, cpuSlot(s.heapBase + i));
     }
 
@@ -6613,6 +6633,21 @@ void D3D12ResourceFactory::setUav(BindingSetHandle set, u32 slot, TextureHandle 
 }
 
 // Writes an acceleration-structure SRV into one slot of a binding set.
+// Returns one SRV slot to null. See IResourceFactory::clearSrv for why a stale descriptor is a
+// device removal rather than a wrong pixel.
+//
+// The heap write is immediate, as every setSrv here is, and that is safe for the same reason: a
+// binding set's descriptors are written between frames, not while the GPU is reading them. What it
+// must NOT do is nothing -- the caller reaches this because the texture it was showing is being
+// destroyed, so leaving the old descriptor is the one outcome that crashes.
+void D3D12ResourceFactory::clearSrv(BindingSetHandle set, u32 slot) {
+    RhiBindingSet* s = bindingSet(set);
+    if (!s) { AVER_ERROR("[RHI.D3D12] clearSrv with an invalid set"); return; }
+    if (slot >= s->srvCount) { AVER_ERROR("[RHI.D3D12] clearSrv slot {} past the {} declared", slot, s->srvCount); return; }
+    const D3D12_SHADER_RESOURCE_VIEW_DESC sv = nullSrvDesc(s->srvKinds[slot]);
+    dev_->device_->CreateShaderResourceView(nullptr, &sv, cpuSlot(s->heapBase + slot));
+}
+
 void D3D12ResourceFactory::setSrvTlas(BindingSetHandle set, u32 slot, TlasHandle h) {
     RhiBindingSet* s = bindingSet(set);
     RhiTlas* t = tlas(h);

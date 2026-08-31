@@ -777,15 +777,27 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
         // reaches shutdown still leaves a number behind.
         if (frameTimeMs_.size() && frameTimeMs_.size() % 120 == 0) reportFrameTime("running");
     }
-    // t10, THE BLENDED BACKDROP. Re-bound only when the handle actually changes -- the device
-    // recreates it on resize, and setSrv every frame for a handle that has not moved is descriptor
-    // churn for nothing. A 0 handle (before the first resize, under MSAA, or a backend without one)
-    // leaves the slot null-filled, which is exactly what the shader's own guard expects.
+    // t10, THE BLENDED BACKDROP. Re-bound only when the handle actually changes -- setSrv every
+    // frame for a handle that has not moved is descriptor churn for nothing.
+    //
+    // A 0 HANDLE MUST CLEAR THE SLOT, NOT SKIP IT, AND GETTING THAT WRONG CRASHED THE GPU ON EVERY
+    // WINDOW RESIZE. D3D12Device::resize calls releasePostTargets() and does NOT recreate them in
+    // the same call, so the backdrop is destroyed and this handle reads 0 for a frame or more until
+    // something rebuilds the post targets. The obvious `if (bd) setSrv(...)` updates the cache and
+    // then does nothing -- leaving slot 10 pointing at a texture the factory has just retired and is
+    // about to free. The shader samples t10 every blended pixel, guarded only by GetDimensions(),
+    // which is not a validity test on a dangling descriptor. Sampling freed memory faults the shader,
+    // a faulted shader removes the device, and the window dies with "the GPU stopped responding".
+    //
+    // clearSrv writes the same null view the set was created with, so the frame that follows a resize
+    // sees a legitimately empty backdrop, GetDimensions() returns 0, and the shader takes the
+    // no-backdrop path it already has for exactly this case.
     if (dev_ && bindings_) {
         const rhi::TextureHandle bd = dev_->sceneColorBackdropTexture();
         if (bd != boundBackdrop_) {
             boundBackdrop_ = bd;
             if (bd) res_->setSrv(bindings_, 10, bd);
+            else    res_->clearSrv(bindings_, 10);
         }
     }
 

@@ -6137,6 +6137,7 @@ public:
             skinScene_->tick(e, vpX_, vpY_, vpW_, vpH_, 0u);
 #endif
         captureCheck(e);
+        resizeCheck(e);
 #if AVER_MODULE_SYNAPSE
         navBakeCheck(e);
 #endif
@@ -6645,6 +6646,7 @@ public:
 #if AVER_MODULE_SR
     void setAverSrCycleAuto(int framesIn) { averSrCycleFrames_ = framesIn; }   // --aversr-cycle [N]
 #endif
+    void setResizeCycle(int n) { resizeCycle_ = n < 0 ? 0 : (u64)n; }              // --resize-cycle [N]
     void setSkinSceneDir(std::string d) { skinSceneDir_ = std::move(d); }          // --skin-scene-test <dir>
     // --shader-source <dir>: watch a shader source tree and reload without restarting.
     void setShaderSourceDir(std::string d) { shaderSourceDir_ = std::move(d); }
@@ -14533,6 +14535,41 @@ private:
     }
 #endif
 
+    // --resize-cycle N: resize the real window every N frames during a bounded run.
+    //
+    // WHY THIS EXISTS. "Resizing the window crashed my GPU" was a report I could not reproduce,
+    // because every headless lever I had -- --render-scale, --aversr-cycle -- changes the SCENE size
+    // through rebuildSceneTargets, and that is a different path from D3D12Device::resize. The
+    // difference is the whole bug: resize() calls releasePostTargets() and does NOT recreate them in
+    // the same call, so handles to those targets read 0 for a frame while a binding set still points
+    // at the freed texture. Nothing but a real window resize opens that window.
+    //
+    // SetWindowPos on the HWND rather than an engine call, deliberately: Engine::frameStep syncs the
+    // swapchain to window_->width()/height() at the top of every frame, so this reproduces the user's
+    // path exactly -- their drag and this call arrive at resize() the same way. Going straight to
+    // swapchain_->resize would test a path no user ever takes.
+    //
+    // SWP_NOACTIVATE, because a capture run must not steal focus (--frames already opens the window
+    // unactivated and this must not undo that).
+    void resizeCheck(Engine& e) {
+        if (resizeCycle_ == 0 || !e.window()) return;
+        const u64 f = e.time().frame;
+        if (f == 0 || (f % resizeCycle_) != 0) return;
+        HWND hwnd = static_cast<HWND>(e.window()->nativeHandle());
+        if (!hwnd) return;
+        RECT r{};
+        if (!GetWindowRect(hwnd, &r)) return;
+        // Alternate between two sizes rather than growing without bound: a run of any length stays
+        // on screen, and both directions of the transition get exercised.
+        const int w = (r.right - r.left), h = (r.bottom - r.top);
+        const bool big = (resizeStep_++ & 1) == 0;
+        const int nw = big ? (w - 137) : (w + 137);   // odd numbers on purpose -- an even split can
+        const int nh = big ? (h -  83) : (h +  83);   // hide an off-by-one in a half-resolution target
+        if (nw < 320 || nh < 240) return;
+        SetWindowPos(hwnd, nullptr, 0, 0, nw, nh, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        AVER_INFO("[Sandbox] --resize-cycle: frame {} resized the window to {}x{}", f, nw, nh);
+    }
+
     void captureCheck(Engine& e) {
         const u64 f = e.time().frame;
         const u64 sf = maxFrames_>8?maxFrames_-3:4;
@@ -14573,6 +14610,8 @@ private:
     }
 
     u64 maxFrames_; bool headless_; std::string beamPath_, shot_;
+    u64 resizeCycle_ = 0;   // --resize-cycle N: 0 is off. See resizeCheck() for what it reproduces.
+    u32 resizeStep_ = 0;
     Tool initialTool_ = Tool::Select;
     std::vector<MeshObj> objects_;
     // The selection addresses either world: sel_ >= 0 is an objects_ index, -1 is nothing,
@@ -17696,8 +17735,13 @@ Application* createApplication(int argc, char** argv) {
     // silently undiscardable, which is the bug that block's own comment was written about.
     int refraction = -1;
     f32 refractionStrength = -1.0f, refractionFade = -1.0f;
+    // --resize-cycle N: resize the real window every N frames of a bounded run. Here for the same
+    // C1061 reason as everything else in this loop. Verification-only, and it reproduces a real
+    // crash -- see SandboxApp::resizeCheck() for which one and why nothing else could.
+    int resizeCycleArg = 0;
     for (int i = 1; i + 1 < argc; ++i) {
         if (!std::strcmp(argv[i], "--rd-ablate"))            rdAblate = std::atoi(argv[i + 1]);
+        if (!std::strcmp(argv[i], "--resize-cycle"))         resizeCycleArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--refraction"))           refraction = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--refraction-strength"))  refractionStrength = (f32)std::atof(argv[i + 1]);
         if (!std::strcmp(argv[i], "--refraction-fade"))      refractionFade = (f32)std::atof(argv[i + 1]);
@@ -18612,6 +18656,7 @@ Application* createApplication(int argc, char** argv) {
     if (ptSceneToggleOff > 0) app->setPtSceneToggleOffAuto(ptSceneToggleOff);
 #if AVER_MODULE_SR
     if (aversrCycle > 0) app->setAverSrCycleAuto(aversrCycle);
+    if (resizeCycleArg > 0) app->setResizeCycle(resizeCycleArg);
 #endif
     if (!skinSceneDir.empty()) app->setSkinSceneDir(skinSceneDir);
     if (!shaderSourceDir.empty()) app->setShaderSourceDir(shaderSourceDir);

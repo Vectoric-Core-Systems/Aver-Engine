@@ -1869,6 +1869,7 @@ public:
 
     void setSrv(BindingSetHandle set, u32 slot, TextureHandle t, u32 mip) override;
     void setUav(BindingSetHandle set, u32 slot, TextureHandle t, u32 mip) override;
+    void clearSrv(BindingSetHandle set, u32 slot) override;
     void setSrvTlas(BindingSetHandle set, u32 slot, TlasHandle tlas) override;
     void setSrvBuffer(BindingSetHandle set, u32 slot, BufferHandle b, u32 stride, u32 count, u32 firstElement) override;
     void setUavBuffer(BindingSetHandle set, u32 slot, BufferHandle b, u32 stride, u32 count, u32 firstElement) override;
