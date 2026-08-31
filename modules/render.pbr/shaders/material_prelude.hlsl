@@ -188,7 +188,12 @@ struct AverVertex {
 struct AverLight {
     float3 direction;   // unit vector TO the light
     float3 radiance;    // linear radiance arriving along `direction`
-    float  visibility;  // 0 = fully occluded, 1 = fully lit
+    // PER CHANNEL, so a light arriving through a tinted medium keeps that medium's colour.
+    // (0,0,0) = fully occluded, (1,1,1) = fully lit; a scalar assignment promotes, so every
+    // caller that has only a scalar visibility -- the whole raster shadow-map path -- is
+    // unchanged and needed no edit. It is only ever MULTIPLIED into the result below, which is
+    // why widening it costs those callers nothing.
+    float3 visibility;
 };
 
 // Everything reaching the surface that did not come straight from a light, as RAW radiance.

@@ -587,7 +587,7 @@ float2 rtDiscSample(uint k, float ang0) {
 // rtShadowTemporal is the one caller that passes something else, and only when pixel tiling is
 // actually on -- see its own comment for why a NONZERO, per-frame value is what makes tiling
 // converge at all instead of repeating one sample forever.
-float rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3 dpy, uint rays,
+float3 rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3 dpy, uint rays,
                float frameJitter) {
     const uint  n    = max(rays, 1u);
     const float tanR = max(gRtParams.x, 0.0);
@@ -611,7 +611,7 @@ float rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3
     // which is antialiasing the shadow rather than blurring it: the result converges to the exact
     // fraction of the pixel that is occluded.
     const float ang0 = rtHash(pixel) * 6.2831853 + frameJitter;
-    float vis = 0.0;
+    float3 vis = float3(0.0, 0.0, 0.0);
 
     [loop] for (uint k = 0; k < n; ++k) {
         // The sample the loop is at. NOTHING HERE DEPENDS ON n, which is the whole design: sample k
@@ -676,12 +676,21 @@ float rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3
         //                pool floor looking up at the sun through its own water.
         //   two hits  -> entered and exited; the span between them is the thickness. A pane.
         //   more      -> concave or self-overlapping geometry; the outer span is the honest estimate.
-        const uint kMaxMedia = 2u;                 // glass over water is the real case; see below
-        uint  medIid[kMaxMedia];
-        float medTMin[kMaxMedia];
-        float medTMax[kMaxMedia];
-        uint  medHits[kMaxMedia];
-        uint  medN = 0u;
+        // TWO SLOTS AS PLAIN SCALARS, NOT AN ARRAY, AND THAT IS A MEASURED DECISION.
+        //
+        // The first version of this held medIid/medTMin/medTMax/medHits as local arrays indexed by a
+        // loop variable. HLSL cannot always keep a dynamically-indexed local array in registers, and
+        // when it spills to scratch the cost lands on the pass that can least afford it: the sun
+        // shadow is wave-bound, so losing occupancy costs far more than the arithmetic saves.
+        // MEASURED: 7.96 ms -> 9.95 ms, a 25% frame regression for a water shadow. Unrolled into
+        // named scalars it stays in registers.
+        //
+        // Two is what the scene actually needs -- glass over water -- and a third overlapping medium
+        // falls through to the surface rule rather than being dropped, which is approximate but never
+        // silently absent.
+        uint  med0Iid = 0xffffffffu, med1Iid = 0xffffffffu;
+        float med0Min = 0.0, med0Max = 0.0, med1Min = 0.0, med1Max = 0.0;
+        uint  med0Hits = 0u, med1Hits = 0u;
 
         float3 through = float3(1, 1, 1);   // running transmittance along this ray
         // Bounded: a ray that somehow finds a great many translucent surfaces must not spin. Eight
@@ -698,25 +707,16 @@ float rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3
 
             bool handled = false;
             if (m.attenuationDistance > 0.0) {
-                // A VOLUME: remember the span, resolve after the walk.
                 const float ct = q.CandidateTriangleRayT();
-                uint slot = kMaxMedia;
-                [unroll] for (uint j = 0; j < kMaxMedia; ++j)
-                    if (j < medN && medIid[j] == iid) slot = j;
-                if (slot == kMaxMedia && medN < kMaxMedia) {
-                    slot = medN;
-                    medIid[slot] = iid; medTMin[slot] = ct; medTMax[slot] = ct; medHits[slot] = 0u;
-                    ++medN;
+                if (med0Iid == iid) {
+                    med0Min = min(med0Min, ct); med0Max = max(med0Max, ct); ++med0Hits; handled = true;
+                } else if (med1Iid == iid) {
+                    med1Min = min(med1Min, ct); med1Max = max(med1Max, ct); ++med1Hits; handled = true;
+                } else if (med0Hits == 0u) {
+                    med0Iid = iid; med0Min = ct; med0Max = ct; med0Hits = 1u; handled = true;
+                } else if (med1Hits == 0u) {
+                    med1Iid = iid; med1Min = ct; med1Max = ct; med1Hits = 1u; handled = true;
                 }
-                if (slot < kMaxMedia) {
-                    medTMin[slot] = min(medTMin[slot], ct);
-                    medTMax[slot] = max(medTMax[slot], ct);
-                    ++medHits[slot];
-                    handled = true;
-                }
-                // A THIRD overlapping medium falls through to the surface rule below rather than
-                // being dropped: two slots covers glass-over-water, which is the case this scene
-                // actually builds, and silently ignoring a caster would be worse than approximating it.
             }
 
             if (!handled) {
@@ -730,7 +730,7 @@ float rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3
                 // and there is no point walking further. Only the surface path may take this
                 // early-out: a volume's contribution has not been applied yet, so a walk carrying
                 // one must run to the end or its medium is silently dropped.
-                if (max(through.r, max(through.g, through.b)) < 0.01 && medN == 0u) {
+                if (max(through.r, max(through.g, through.b)) < 0.01 && med0Hits == 0u) {
                     through = float3(0, 0, 0);
                     break;
                 }
@@ -740,27 +740,35 @@ float rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3
             // uncommitted is what lets Proceed() carry on to whatever is behind it.
         }
 
-        // Resolve every gathered span, per channel, by the same Beer-Lambert the VIEW path uses.
-        // averVolumeTransmittance is the one implementation both paths call, and it reads no globals
+        // Resolve the gathered spans, per channel, by the same Beer-Lambert the VIEW path uses.
+        // averVolumeTransmittance is the one implementation both paths call and it reads no globals,
         // precisely so a ray hit can use it -- see its own comment. Calling it here is what makes the
         // light going DOWN through a medium agree with the light coming back UP through it, which is
         // the disagreement this whole change exists to remove.
-        [unroll] for (uint mi = 0; mi < kMaxMedia; ++mi) {
-            if (mi >= medN) continue;
-            const RtMaterial mm = gRtMaterials[gRtInstances[medIid[mi]].materialIndex];
-            const float thickness = (medHits[mi] == 1u) ? medTMax[mi] : (medTMax[mi] - medTMin[mi]);
-            through *= averVolumeTransmittance(mm.attenuationColor, mm.attenuationDistance, thickness);
+        //
+        //   one hit  -> the ray STARTED INSIDE the medium and t IS the distance out: the pool floor
+        //               looking up at the sun through its own water.
+        //   two+     -> entered and exited; the span between them is the thickness. A pane.
+        if (med0Hits > 0u) {
+            const RtMaterial m0 = gRtMaterials[gRtInstances[med0Iid].materialIndex];
+            const float th0 = (med0Hits == 1u) ? med0Max : (med0Max - med0Min);
+            through *= averVolumeTransmittance(m0.attenuationColor, m0.attenuationDistance, th0);
+        }
+        if (med1Hits > 0u) {
+            const RtMaterial m1 = gRtMaterials[gRtInstances[med1Iid].materialIndex];
+            const float th1 = (med1Hits == 1u) ? med1Max : (med1Max - med1Min);
+            through *= averVolumeTransmittance(m1.attenuationColor, m1.attenuationDistance, th1);
         }
 
         // An opaque hit anywhere along the way blocks everything, whatever the panes in front said.
         if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) through = float3(0, 0, 0);
 
-        // SCALAR OUT, FOR NOW. rtShadow's return type, its seven call sites and the RG32Float
-        // history that feeds the temporal filter are all single-channel; carrying the tint through
-        // all of them is the next slice of this work. Luminance rather than an average, because it
-        // is the right reduction for "how much light got through" and it keeps a green-tinted pane
-        // from reading as darker than a red one of the same transmittance.
-        vis += dot(through, float3(0.2126, 0.7152, 0.0722));
+        // PER CHANNEL NOW. This used to reduce to luminance here because rtShadow's return type,
+        // its call sites and the history were all single-channel -- so a shadow could be correctly
+        // DARKENED by a medium but never take its COLOUR. Water lit a pool floor grey instead of
+        // cyan. The reduction moved to rtShadowTemporal, which needs a scalar only for the history
+        // it filters; see there for why the history did NOT have to grow to carry this.
+        vis += through;
     }
     return vis / (float)n;
 }
@@ -986,7 +994,30 @@ float rtShadowSpatial(float centre, float3 wpos, float3 N, float2 pixel, float c
 // actually cuts ray count -- not blending on its own, which only smooths flicker on something that
 // is genuinely moving. Turning tiling on is what makes the (now adaptive, see below) blend cost
 // worth paying: most pixels do not trace at all most frames.
-float rtShadowTemporal(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3 dpy, uint rays) {
+// Splits a tinted visibility into the scalar the denoiser filters and the colour it does not.
+//
+// WHY THE HISTORY DID NOT HAVE TO GROW, which is the whole design of this: the two things rtShadow
+// now returns have completely different character. OCCLUSION is binary and noisy -- one ray either
+// met a wall or did not -- and that is exactly what the temporal and spatial filters exist to
+// smooth. A MEDIUM'S TINT is smooth and almost noise-free: it is a continuous function of a path
+// length through a volume, and neighbouring pixels agree closely. Filtering it buys nothing.
+//
+// So the scalar keeps going through the RG32Float history and its filters, bit for bit as before,
+// and the tint rides on top unfiltered. Widening gRtShadowHist to RGBA32Float would have doubled two
+// buffers already costing ~56 MB each at scene resolution, and RGBA16Float would have put the
+// history's linear DEPTH channel -- clip-space w in centimetres, which reaches tens of thousands out
+// on terrain -- into a format with 8 cm of precision up there, which the disocclusion test reads.
+// Neither price is worth paying for a quantity that does not need filtering.
+float averShadowLum(float3 v) { return dot(v, float3(0.2126, 0.7152, 0.0722)); }
+
+// The normalised colour of a tinted visibility. White when there is effectively nothing to tint --
+// a fully occluded pixel has no medium colour to speak of, and dividing by its luminance would be a
+// 0/0 that spreads NaN through the filter.
+float3 averShadowTint(float3 v, float lum) {
+    return (lum > 1e-4) ? (v / lum) : float3(1.0, 1.0, 1.0);
+}
+
+float3 rtShadowTemporal(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3 dpy, uint rays) {
     // gRtHistParams.x is 0 whenever t6/u2 are not bound to real textures this frame (see
     // VoxiRenderer::beginShadowHistory) -- an unbound slot is Tier 1 null-filled, and touching
     // either one here would read or write a null descriptor rather than skip cleanly.
@@ -1001,7 +1032,9 @@ float rtShadowTemporal(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx
 
     const uint tileBits = (uint)gRtHistParams.w;
     if (tileBits == 0u) {
-        const float fresh = rtShadow(wpos, N, L, pixel, dpx, dpy, rays, 0.0);
+        const float3 fresh3 = rtShadow(wpos, N, L, pixel, dpx, dpy, rays, 0.0);
+        const float  fresh   = averShadowLum(fresh3);
+        const float3 tint    = averShadowTint(fresh3, fresh);
         gRtShadowHistOut[uint2(pixel)] = float2(fresh, curDepth);
         // FILTERED HERE TOO, and this branch is the one that matters most. tileBits == 0 is
         // rtPixelsPerRayTile == 1, which is what Medium -- the DEFAULT tier -- runs, and it is the
@@ -1010,7 +1043,7 @@ float rtShadowTemporal(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx
         // into the amortised path alone and left the default one completely untouched: the penumbra
         // probe read an unchanged 61,59,59 at every radius, which is what caught it. Two returns,
         // two call sites -- an early return is exactly how a later edit loses one of them again.
-        return rtShadowSpatial(fresh, wpos, N, pixel, curDepth);
+        return rtShadowSpatial(fresh, wpos, N, pixel, curDepth) * tint;
     }
 
     // Which pixel in its tileBits x tileBits tile gets to trace THIS frame -- a bitmask against the
@@ -1029,6 +1062,11 @@ float rtShadowTemporal(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx
     const bool haveHist = gRtHistParams.y > 0.5 && rtReprojectHistory(wpos, pixel, hist, velocityPx);
 
     float vis;
+    // WHITE WHEN THIS PIXEL DID NOT TRACE. On a reused-history frame there is no fresh sample to
+    // take a colour from, and the history deliberately does not store one -- so the tint falls back
+    // to untinted rather than to a stale colour from a different surface. Only reachable on the
+    // amortised path, which is dead at every shipped tier (rtPixelsPerRayTile is 1 everywhere).
+    float3 tint = float3(1.0, 1.0, 1.0);
     if (myTurn || !haveHist) {
         // The golden-angle frame offset spends a DIFFERENT sample of the same low-discrepancy
         // sequence each turn, so 2^(2*tileBits) turns converge toward the same estimate that many
@@ -1037,7 +1075,9 @@ float rtShadowTemporal(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx
         // converges past one sample; that is the whole reason tiling needs this and the tileBits==0
         // path above does not.
         const float frameJitter = (float)frameIdx * 2.39996323;
-        vis = rtShadow(wpos, N, L, pixel, dpx, dpy, rays, frameJitter);
+        const float3 vis3 = rtShadow(wpos, N, L, pixel, dpx, dpy, rays, frameJitter);
+        vis  = averShadowLum(vis3);
+        tint = averShadowTint(vis3, vis);
         if (haveHist) {
             // ADAPTIVE blend weight, not a flat constant: a reprojected sample that has barely
             // moved on screen is close to a repeated measurement of the same point and earns a high
@@ -1067,7 +1107,7 @@ float rtShadowTemporal(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx
     // never learns it happened. A later reader will be tempted to "save work" by writing the
     // filtered value here; that is the bug, not the optimisation.
     gRtShadowHistOut[uint2(pixel)] = float2(vis, curDepth);
-    return rtShadowSpatial(vis, wpos, N, pixel, curDepth);
+    return rtShadowSpatial(vis, wpos, N, pixel, curDepth) * tint;
 }
 
 // Traces one reflection ray and shades what it hits.
@@ -1196,7 +1236,8 @@ float3 rtReflection(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, flo
     // a reflective pixel was firing one reflection ray plus a four-ray disc from its hit, so five
     // rays where two do. The penumbra of a reflected shadow is not resolvable in a one-bounce
     // mirror image.
-    float shadow = rtShadow(hitPos, nWS, L, pixel, float3(0,0,0), float3(0,0,0), 1u, 0.0);
+    // float3: a reflected surface seen through a tinted medium is lit through that tint too.
+    float3 shadow = rtShadow(hitPos, nWS, L, pixel, float3(0,0,0), float3(0,0,0), 1u, 0.0);
 
     // LAMBERTIAN EXITANT RADIANCE, and the /PI is the whole point. averGroundRadiance is the
     // engine's own reference for this and reads:
@@ -1995,13 +2036,15 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     const float rtDzdx  = ddx(rtViewZ);
     const float rtDzdy  = ddy(rtViewZ);
 
-    float sunVis;
+    // float3 NOW: rtShadowTemporal carries the medium's colour. shadowFactor returns a scalar and
+    // promotes, so the non-RT path is unchanged.
+    float3 sunVis;
     if (gShadowParams.z > 0.5)
         sunVis = rtShadowTemporal(i.wpos, N, L, i.pos.xy, ddx(i.wpos), ddy(i.wpos),
                                   (uint)max(gRtParams.y, 1.0));
     else                       sunVis = shadowFactor(i.wpos, N, ndl);
 #else
-    const float sunVis = shadowFactor(i.wpos, N, ndl);
+    const float3 sunVis = shadowFactor(i.wpos, N, ndl);
 #endif
 #if AVER_GBUFFER
     // View-space linear depth for this pixel's G-buffer entry. REUSED, not recomputed, when AVER_RT
@@ -2566,7 +2609,7 @@ RayDrivenOut PSRayDriven(SkyOut i) {
 #if AVER_RD_ABLATE == AVER_RD_ABL_SHADOW || AVER_RD_ABLATE == AVER_RD_ABL_ALL
     float sunVis = 1.0;   // ablated: fully lit, no ray
 #else
-    float sunVis = rtShadowTemporal(wpos, N, L, i.pos.xy, dpx, dpy, (uint)max(gRtParams.y, 1.0));
+    float3 sunVis = rtShadowTemporal(wpos, N, L, i.pos.xy, dpx, dpy, (uint)max(gRtParams.y, 1.0));
 #endif
 
     // Lambertian exitant radiance, with the /PI on the direct term -- see rtReflection's own
