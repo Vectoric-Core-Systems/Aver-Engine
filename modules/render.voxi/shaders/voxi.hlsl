@@ -137,10 +137,12 @@ StructuredBuffer<RtInstance> gRtInstances : register(t5);
 // raster path's per-draw constant buffer -- see that struct's own comment for why grouping every
 // four floats needs no explicit HLSL padding to land the C++ struct's 96 bytes exactly, and for why
 // a mismatched order is what makes every field after the mismatch read a neighbour's bytes rather
-// than fail to compile. Fields this pass never reads (emissive, the second material layer, graphId,
-// ior/transmission) are still declared, in order, for exactly that reason: HLSL has no partial
-// StructuredBuffer element, so leaving any of them out would silently misalign every field that
-// follows it, not just drop the one that was skipped.
+// than fail to compile. Fields this pass never reads -- now only graphId and ior; emissive, the
+// second material layer and transmission ARE read (see PSRayDriven's bindless block, s.emissive and
+// the layer-1 blend, and the transmission read further down) and this list said otherwise for
+// longer than it was true -- are still declared, in order, for exactly that reason: HLSL has no
+// partial StructuredBuffer element, so leaving any of them out would silently misalign every field
+// that follows it, not just drop the one that was skipped.
 #ifdef AVER_RT_BINDLESS
 // THE RAY PATH'S TEXTURE ARRAY, in register space 1 so it cannot collide with any t-register the
 // two ordinary descriptor tables, the mesh geometry SRVs or the instanced world matrices already
@@ -2413,15 +2415,16 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
 // pays the whole traversal to discover the same thing. That is the trade this mode exists to
 // measure, and the number to beat is in Settings::rtRenderMode.
 //
-// STILL UNTEXTURED, though less approximately so than the first version of this comment claimed.
-// A hit now reaches its real per-material reflectance/f90/baseColorFactor through RtInstance::
-// materialIndex and gRtMaterials (see their own declarations near the top of this file), which is
-// what makes the surface's COLOUR right rather than merely present -- but there is still no base-
-// colour TEXTURE sample: RtVertex's `uv` is interpolated at the hit (this function, below) and left
-// unconsumed, ready for a Texture2DArray that does not exist yet rather than feeding one that does.
-// COLOUR WILL STILL DIFFER from the raster image wherever a material's own texture carries detail a
-// flat factor cannot -- normal maps, emissive maps, and base-colour/metal-rough texture variation
-// within one material are all still absent here. GEOMETRY MUST NOT DIFFER, and that is what the
+// TEXTURED, and this comment claimed the opposite long after it stopped being true. Under
+// AVER_RT_BINDLESS a hit samples base colour, metal-rough, normal, occlusion and emissive -- plus
+// the slope-blended second layer -- through RtInstance::materialIndex and gRtMaterials, with UVs
+// interpolated at the hit and a real gradient footprint. The Texture2DArray this used to say "does
+// not exist yet" is bound in register space 1 a few lines below the material struct.
+//
+// WHAT STILL DIFFERS from the raster image is narrower than it was: no material GRAPH is dispatched
+// on any ray path (graphId is declared and never read), and normal-map PERTURBATION is compiled out
+// -- AVER_RT_NORMAL_MAPPING is 0, so the tangent-space normal is built and then not applied.
+// GEOMETRY MUST NOT DIFFER, and that is what the
 // side-by-side capture is checking.
 //
 // ---- WHAT A TRANSLUCENT SURFACE SHARES WITH THIS PASS, AND WHAT IT STILL DOES NOT ----
@@ -2447,10 +2450,11 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
 //
 // WHAT DOES DIVERGE is what a translucent surface reveals: the picture already painted at that
 // pixel by whichever pass drew primary visibility. This pass's own hit shading is still a simpler
-// material response than PSMainVoxi's -- REAL per-material reflectance/f90/baseColorFactor now
-// (RtInstance::materialIndex + gRtMaterials, above), but still no texture sample in place of that
-// baseColorFactor, no normal/occlusion/emissive maps at all, and a stochastic path-traced bounce for
-// diffuse GI in place of the voxel cone trace -- all stated and accepted above and below as
+// material response than PSMainVoxi's -- though much less so than this said for a long time. The
+// maps ARE sampled (base colour, metal-rough, normal, occlusion, emissive, and the second layer);
+// what remains simpler is that no material GRAPH runs, normal-map perturbation is compiled out
+// (AVER_RT_NORMAL_MAPPING 0), and a stochastic path-traced bounce stands in for the voxel cone trace
+// on diffuse GI -- all stated and accepted above and below as
 // approximations for an OPAQUE surface. They stopped being invisible the moment glass could put
 // that surface behind a window a viewer looks through instead of at directly, which is what a
 // translucency bug report reads as if nobody has separated it from an actual compositing defect
