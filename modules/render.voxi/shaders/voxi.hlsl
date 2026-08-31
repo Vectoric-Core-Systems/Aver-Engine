@@ -2426,9 +2426,15 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
 //
 // ---- WHAT A TRANSLUCENT SURFACE SHARES WITH THIS PASS, AND WHAT IT STILL DOES NOT ----
 //
-// A blended (glass) draw never reaches PSRayDriven at all -- VoxiRenderer::submitDraw drops it
-// before it reaches draws_/drawsPrev_ (see that function's own comment), so it is never in the
-// TLAS this pass queries and this pass cannot see it. The ONLY place glass is drawn in this mode is
+// A blended (glass) draw never reaches PSRayDriven at all, but NOT because it is missing from the
+// TLAS -- it is in there. submitDraw used to drop it outright and this comment used to say so;
+// it now routes it into the TRANSLUCENT LANE instead (submit(..., translucent=true)), which puts it
+// in the acceleration structure masked kRtMaskTranslucent and flagged FORCE_NON_OPAQUE so a shadow
+// ray's Proceed() loop can attenuate through it. What keeps it out of THIS pass is the MASK: the
+// primary visibility ray here traces AVER_RT_MASK_OPAQUE only, so the pane is excluded by the ray's
+// own mask rather than by its absence. The distinction matters to anyone changing either: widening
+// the mask here would start hitting glass immediately, with no change to how the TLAS is built.
+// The ONLY place glass is drawn in this mode is
 // the same place it is drawn in raster mode: D3D12Device::endFrame's blended-mesh flush, through
 // VSMain+PSMainVoxi's premultiplied-alpha PSO, after this pass's own scenePass() call and the
 // deferred sky. Depth test (Less, no write), the blend equation, VSMain's vertex math, and

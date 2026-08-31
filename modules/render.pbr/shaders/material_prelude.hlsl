@@ -542,6 +542,13 @@ AverSurface averBuildSurface(AverVertex v, AverLight l, AverAuthored a, float2 u
     // (coverage) alone, so the diffuse lobe kept its full albedo no matter how see-through the author
     // said the surface was.
     //
+    // MEASURED AGAINST THE MATERIAL AS IT STOOD THEN, and it has changed since: M_Glass now authors
+    // baseColorFactor 0.97 0.98 0.97 0.10, because the flat green tint moved out of the base colour
+    // and into attenuationColor where a path length can act on it. The numbers below are left EXACTLY
+    // as they were taken -- re-writing a measurement to match today's asset turns a record into a
+    // claim -- so read them as evidence for the MECHANISM (an undimmed diffuse lobe dominating the
+    // reflection), not as values to reproduce.
+    //
     // MEASURED, on PTTest's M_Glass (baseColorFactor 0.86 0.93 0.88 0.12, transmission 0.92) over the
     // dark pool. Probing one pixel of pane against the water beside it, and bisecting this function's
     // output to attribute the pale wash:

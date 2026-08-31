@@ -3427,15 +3427,26 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     // still sorts every blended draw back-to-front and replays it in endFrame after the deferred sky
     // and before transparentPass, through scenePipeline(..., blended=true)'s own pipelines below -- so
     // this comment's correction is only about WHERE the exclusion for THIS feature's own internal
-    // passes happens, not about when a translucent surface is actually drawn to the screen. What
-    // dropping it in submitDraw() means for THIS function: a blended draw is never added to
-    // draws_/drawsPrev_, so it is invisible to buildAccelerationStructures (not in the TLAS),
-    // voxelizePass (never injected into the volume) and shadowPass/giShadowPass (casts no shadow of
-    // its own). Those are this feature's
-    // three STATED APPROXIMATIONS for glass -- no ray-traced shadow FROM it, no reflection hit ON
-    // it, no GI bounce CONTRIBUTED by it -- deliberate first answers, not oversights: fixing any one
-    // of them means teaching buildGeometryTable/buildAccelerationStructures/voxelizePass to walk a
-    // second draw list, which is real work this task does not include.
+    // passes happens, not about when a translucent surface is actually drawn to the screen.
+    //
+    // WHAT IS ACTUALLY EXCLUDED, AND IT IS NO LONGER "EVERYTHING". This paragraph used to say a
+    // blended draw is never added to draws_/drawsPrev_ and is therefore absent from the TLAS. That
+    // stopped being true when submitDraw grew the translucent lane, and the stale version cost a
+    // reader real time -- read submitDraw above: it calls submit(..., translucent=true) and does
+    // NOT return empty-handed.
+    //
+    //   IN the TLAS   -- masked kRtMaskTranslucent and flagged FORCE_NON_OPAQUE, which is exactly
+    //                    what lets rtShadow's Proceed() walk gather a span through the pane and tint
+    //                    the shadow it casts. Glass DOES cast a shadow now.
+    //   OUT of voxelisation, the shadow cascade and the GI shadow map -- all three are depth-only,
+    //                    and a depth map has no channel for a transmittance, so that exclusion is by
+    //                    construction rather than by choice.
+    //   OUT of reflection and primary-visibility RAYS -- not by absence but by MASK: both trace
+    //                    AVER_RT_MASK_OPAQUE and so skip the pane. Widening that mask is all it
+    //                    would take to let glass reflect glass; the geometry is already there.
+    //
+    // So the standing approximations are now TWO, not three: no GI bounce CONTRIBUTED by it, and no
+    // reflection hit ON it. The "no ray-traced shadow FROM it" that used to head this list is done.
     //
     // What glass DOES still get, because it is real geometry running the SAME pixel shader as the
     // opaque pass: PSMainVoxi's shadowFactor()/rtShadowTemporal() call still tests glass's own pixel
