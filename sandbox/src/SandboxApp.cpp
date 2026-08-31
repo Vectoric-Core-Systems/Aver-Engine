@@ -8649,57 +8649,94 @@ private:
 #if AVER_MODULE_FRAMEWORK
         ++pieCamFrame_;
         if (pieCamFrame_ == 10) { startPlay(); return; }   // let startup settle, as --play-test does
-        if (pieCamFrame_ < 10) return;
-        if (pieCamFrame_ == 11) {                          // the reference, one frame after Play
+        if (pieCamFrame_ < 11) return;
+
+        ImGuiIO& io = ImGui::GetIO();
+
+        // ---- phase 1: idle. Nothing touches anything; the view must not move. ----
+        if (pieCamFrame_ == 11) {
             pieCamRef_ = camPos_; pieCamRefYaw_ = yaw_; pieCamRefPitch_ = pitch_;
             return;
         }
-        // A SINGLE LOOK, ONCE, then silence -- because idle proved steady and the report is that the
-        // camera misbehaves while being used. This is the headless equivalent of nudging the mouse
-        // and letting go: yaw and pitch are moved exactly as the RMB look moves them, and then
-        // nothing touches them again. A lossless round trip settles instantly at the new angles; a
-        // lossy one keeps walking, which is what "glitchy" looks like from the chair.
+        if (pieCamFrame_ < 40) {
+            pieCamMaxPos_   = std::fmax(pieCamMaxPos_,   (camPos_ - pieCamRef_).size());
+            pieCamMaxYaw_   = std::fmax(pieCamMaxYaw_,   std::fabs(yaw_   - pieCamRefYaw_));
+            pieCamMaxPitch_ = std::fmax(pieCamMaxPitch_, std::fabs(pitch_ - pieCamRefPitch_));
+            return;
+        }
+
+        // ---- phase 2: one look, then settle. ----
         if (pieCamFrame_ == 40) { pieCamPendingLook_ = true; pieCamLooked_ = true; return; }
         if (pieCamFrame_ == 41) return;                    // the look lands in the fly block here
         if (pieCamFrame_ == 42) {
-            // DID THE LOOK SURVIVE THE ROUND TRIP? This is the question a drift measurement cannot
-            // answer on its own, and the reason the first version of this test passed while the
-            // camera was in fact dead. drivePlayCamera recomputes yaw_/pitch_ from the possessed
-            // pawn every frame, so if nothing wrote that look INTO the pawn, the angles are simply
-            // restored to what the pawn already had -- and a drift check re-baselined one frame
-            // later then reports a perfectly steady camera that ignores every input.
+            // DID THE LOOK SURVIVE THE ROUND TRIP? drivePlayCamera recomputes yaw_/pitch_ from the
+            // possessed pawn every frame, so if nothing wrote the look INTO the pawn the angles are
+            // simply restored and a drift check re-baselined afterwards reports a beautifully steady
+            // camera that ignores every input. That is exactly what this test did on its first
+            // version, and why it needs this comparison and not just a drift number.
             pieCamKeptYaw_   = std::fabs(yaw_   - pieCamWantYaw_)   < 1e-3f;
             pieCamKeptPitch_ = std::fabs(pitch_ - pieCamWantPitch_) < 1e-3f;
-            pieCamRef_ = camPos_; pieCamRefYaw_ = yaw_; pieCamRefPitch_ = pitch_;
-            pieCamMaxPos_ = pieCamMaxYaw_ = pieCamMaxPitch_ = 0.0f;
+            pieCamRef_ = camPos_;
             return;
         }
-        const f32 dp = (camPos_ - pieCamRef_).size();
-        const f32 dy = std::fabs(yaw_   - pieCamRefYaw_);
-        const f32 dq = std::fabs(pitch_ - pieCamRefPitch_);
-        pieCamMaxPos_   = std::fmax(pieCamMaxPos_, dp);
-        pieCamMaxYaw_   = std::fmax(pieCamMaxYaw_, dy);
-        pieCamMaxPitch_ = std::fmax(pieCamMaxPitch_, dq);
-        if (pieCamFrame_ >= 42 + pieCamFrames_) {
-            // Tolerances are tight ON PURPOSE. This is not "does it look steady", it is "is the
-            // round trip lossless". A hundredth of a degree per frame is invisible for a second and
-            // a full revolution over a few minutes.
-            const bool ok = pieCamMaxPos_ < 0.5f && pieCamMaxYaw_ < 1e-3f && pieCamMaxPitch_ < 1e-3f;
-            AVER_INFO("[pie-camera] over {} frames with NO input: max drift pos {:.4f} cm, yaw "
-                      "{:.6f} rad, pitch {:.6f} rad -- {}",
-                      pieCamFrames_, pieCamMaxPos_, pieCamMaxYaw_, pieCamMaxPitch_,
-                      ok ? "STEADY" : "DRIFTING (the camera does not hold still)");
-            AVER_INFO("[pie-camera] a look of +0.5 yaw / +0.3 pitch was {}: yaw {}, pitch {} -- {}",
-                      pieCamLooked_ ? "applied" : "NOT applied",
+
+        // ---- phase 3: hold W, and check the camera actually travels. ----
+        //
+        // THROUGH ImGui's OWN KEY QUEUE, not by shortcutting to the movement maths. The fly control
+        // asks ImGui::IsKeyDown(ImGuiKey_W), so anything that sets a private flag instead would pass
+        // while the real key path stayed broken -- which is the same mistake the look half of this
+        // test made in its second version. AddKeyEvent is processed at the next NewFrame, so the key
+        // is re-asserted every frame it should be held rather than pressed once.
+        if (pieCamFrame_ >= 50 && pieCamFrame_ < 90) {
+            io.AddKeyEvent(ImGuiKey_W, true);
+            if (pieCamFrame_ == 50) pieCamMoveFrom_ = camPos_;
+            return;
+        }
+        if (pieCamFrame_ == 90) {
+            io.AddKeyEvent(ImGuiKey_W, false);
+            pieCamMoved_    = (camPos_ - pieCamMoveFrom_).size();
+            // ALONG THE VIEW, not merely somewhere. A pawn shoved by gravity or by a stray physics
+            // impulse would also register distance; only a forward component proves it was W.
+            const Vec3 d = (camPos_ - pieCamMoveFrom_).getSafeNormal();
+            pieCamMoveDot_  = dot(d, camForward());
+            return;
+        }
+        // ---- phase 4: released. It must COAST TO A STOP, not keep going. ----
+        //
+        // BASELINED TWO FRAMES AFTER THE RELEASE IS ASKED FOR, and that is not slack in the test --
+        // it is what AddKeyEvent means. Events are queued and applied at the next NewFrame, so a
+        // release requested on frame 90 is still down for 90 and only clears on 91. Baselining at 90
+        // therefore counted one more legitimate frame of travel as "still moving": it reported 6.89 cm
+        // of coast against 6.7 cm per frame of real motion, which is the same number wearing a
+        // disguise. The product was never wrong; the ruler started early.
+        if (pieCamFrame_ == 92) { pieCamAfterMove_ = camPos_; return; }
+        if (pieCamFrame_ > 92)
+            pieCamCoast_ = std::fmax(pieCamCoast_, (camPos_ - pieCamAfterMove_).size());
+
+        if (pieCamFrame_ >= 92 + pieCamFrames_) {
+            const bool idleOk  = pieCamMaxPos_ < 0.5f && pieCamMaxYaw_ < 1e-3f && pieCamMaxPitch_ < 1e-3f;
+            const bool lookOk  = pieCamKeptYaw_ && pieCamKeptPitch_;
+            const bool moveOk  = pieCamMoved_ > 1.0f && pieCamMoveDot_ > 0.9f;
+            const bool stopOk  = pieCamCoast_ < 0.5f;
+            AVER_INFO("[pie-camera] idle  : max drift pos {:.4f} cm, yaw {:.6f}, pitch {:.6f} -- {}",
+                      pieCamMaxPos_, pieCamMaxYaw_, pieCamMaxPitch_, idleOk ? "STEADY" : "DRIFTING");
+            AVER_INFO("[pie-camera] look  : +0.5 yaw / +0.3 pitch -> yaw {}, pitch {} -- {}",
                       pieCamKeptYaw_ ? "kept" : "REVERTED", pieCamKeptPitch_ ? "kept" : "REVERTED",
-                      (pieCamKeptYaw_ && pieCamKeptPitch_)
-                          ? "the view answers input"
-                          : "THE VIEW IGNORES INPUT (nothing is writing the pawn)");
+                      lookOk ? "the view answers the mouse" : "THE VIEW IGNORES THE MOUSE");
+            AVER_INFO("[pie-camera] move  : W held 40 frames -> travelled {:.1f} cm, {:.3f} along the "
+                      "view -- {}", pieCamMoved_, pieCamMoveDot_,
+                      moveOk ? "the view answers W" : "THE VIEW IGNORES W");
+            AVER_INFO("[pie-camera] release: drift after W let go {:.4f} cm -- {}", pieCamCoast_,
+                      stopOk ? "stops" : "STILL MOVING (the key is stuck or nothing clears it)");
+            AVER_INFO("[pie-camera] RESULT: {}",
+                      (idleOk && lookOk && moveOk && stopOk) ? "PASS" : "FAIL");
             stopPlay();
             pieCamFrames_ = 0;
         }
 #endif
     }
+    Vec3 pieCamMoveFrom_{0, 0, 0}, pieCamAfterMove_{0, 0, 0};
+    f32  pieCamMoved_ = 0.0f, pieCamMoveDot_ = 0.0f, pieCamCoast_ = 0.0f;
     int pieCamFrames_ = 0, pieCamFrame_ = 0;
     Vec3 pieCamRef_{0, 0, 0};
     f32  pieCamRefYaw_ = 0.0f, pieCamRefPitch_ = 0.0f;
