@@ -828,6 +828,26 @@ internal static class GraphInterop
         return true;
     }
 
+    /// <summary>Entity.SetLocalPosition: where this entity sits RELATIVE TO ITS PARENT.
+    ///
+    /// The node set had SetParent, SetBodyPosition (which is world space, and physics) and
+    /// SetLocalScale -- so a graph could attach a child and resize it, and could not move it. The
+    /// visible cost of that gap was the first-person viewmodel: AN_FPCharacter parents the blaster to
+    /// the camera node and then has no way to push it forward and down, so it renders centred on the
+    /// eye and fills the view. There was nothing wrong with the authoring; the node did not exist.
+    ///
+    /// LOCAL, not world, and that is the whole point of adding it rather than reusing SetBodyPosition:
+    /// a viewmodel has to hold its offset while the camera it hangs from moves and turns every frame,
+    /// which is exactly what a parent-relative transform is for. Writing a world position each tick
+    /// would fight the parent and lag it by a frame.</summary>
+    internal static bool SetLocalPositionForGraph(int entity, float x, float y, float z)
+    {
+        Entity e = new Entity(entity);
+        if (!e.IsAlive) return false;
+        e.SetLocalPosition(new Vec3(x, y, z));
+        return true;
+    }
+
     internal static bool SetLocalScaleForGraph(int entity, float x, float y, float z)
     {
         Entity e = new Entity(entity);

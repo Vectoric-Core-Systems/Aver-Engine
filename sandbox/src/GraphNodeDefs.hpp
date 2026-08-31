@@ -231,6 +231,10 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"IsAlive", "Is Alive", "Transform", {pin("entity", "int", false), pin("alive", "bool", true)}});
     t.push_back({"IsActor", "Is Actor", "Transform", {pin("entity", "int", false), pin("isActor", "bool", true)}});
     t.push_back({"Translate", "Translate", "Transform", {pin("exec", "exec", false), pin("entity", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    // SetLocalPosition sits beside SetLocalScale and shares its pin shape exactly -- see
+    // OcGraphParser's own note on the pair. Moving a child and resizing one should not be two
+    // different things to learn. Translate above is the RELATIVE peer; this one is absolute.
+    t.push_back({"SetLocalPosition", "Set Local Position", "Transform", {pin("exec", "exec", false), pin("entity", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
     t.push_back({"SetLocalScale", "Set Local Scale", "Transform", {pin("exec", "exec", false), pin("entity", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
     t.push_back({"DestroyEntity", "Destroy Entity", "Transform", {pin("exec", "exec", false), pin("entity", "int", false), pin("then", "exec", true), pin("success", "bool", true)}});
     // -- PHYSICS. A BODY IS NOT AN ENTITY: a body is a Jolt handle with a shape and a velocity, an

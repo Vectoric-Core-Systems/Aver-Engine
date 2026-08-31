@@ -1283,6 +1283,9 @@ public class GraphCompiler
             case "setlocalscale":
                 EmitPullInput(node, "x"); EmitPullInput(node, "y"); EmitPullInput(node, "z");
                 _il.Emit(OpCodes.Call, SetLocalScaleMethod); break;
+            case "setlocalposition":
+                EmitPullInput(node, "x"); EmitPullInput(node, "y"); EmitPullInput(node, "z");
+                _il.Emit(OpCodes.Call, SetLocalPositionMethod); break;
             default:
                 _il.Emit(OpCodes.Call, DestroyEntityMethod); break;
         }
@@ -3255,7 +3258,7 @@ public class GraphCompiler
     private static bool IsExecCapableTransformWriteType(string type)
     {
         string t = type.ToLowerInvariant();
-        return t == "translate" || t == "setlocalscale" || t == "destroyentity";
+        return t == "translate" || t == "setlocalscale" || t == "setlocalposition" || t == "destroyentity";
     }
 
     /// A CallFunc reached by the exec walk. Its own purity does not decide this -- calling a PURE
@@ -4781,6 +4784,10 @@ public class GraphCompiler
     private static readonly MethodInfo SetLocalScaleMethod =
         typeof(GraphInterop).GetMethod("SetLocalScaleForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SetLocalScaleForGraph was not found by reflection");
+
+    private static readonly MethodInfo SetLocalPositionMethod =
+        typeof(GraphInterop).GetMethod("SetLocalPositionForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SetLocalPositionForGraph was not found by reflection");
     private static readonly MethodInfo IsAliveMethod =
         typeof(GraphInterop).GetMethod("IsAliveForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.IsAliveForGraph was not found by reflection");
