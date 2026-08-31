@@ -3246,6 +3246,7 @@ public:
         maybeSpawnTestActor();
         maybePlayTest();
         maybePieCameraTest();
+        maybeInputStuckTest();
         // The tick groups bracket the physics step: PrePhysics -> Physics -> PostPhysics.
         if (!spawnTestClass_.empty() || aver_fw_play_state() == AVER_FW_PLAY_PLAYING) {
             aver_fw_tick(AVER_FW_TICK_PRE_PHYSICS, t.dt);
@@ -6732,6 +6733,7 @@ public:
     void setResizeCycle(int n) { resizeCycle_ = n < 0 ? 0 : (u64)n; }              // --resize-cycle [N]
     void setGpuTiming(bool on) { gpuTiming_ = on; }                                // --gpu-timing
     void setPieCameraTest(int n) { pieCamFrames_ = n; }                            // --pie-camera-test
+    void setInputStuckTest(int n) { inputStuckFrames_ = n; }                       // --input-stuck-test
     void setSkinSceneDir(std::string d) { skinSceneDir_ = std::move(d); }          // --skin-scene-test <dir>
     // --shader-source <dir>: watch a shader source tree and reload without restarting.
     void setShaderSourceDir(std::string d) { shaderSourceDir_ = std::move(d); }
@@ -8796,6 +8798,74 @@ private:
     bool pieCamPendingLook_ = false;
     f32  pieCamWantYaw_ = 0.0f, pieCamWantPitch_ = 0.0f;
 
+    // --input-stuck-test N: does releasing the mouse mid-session leave a key held forever?
+    //
+    // THE BUG THIS EXISTS FOR. pushInput() used to `return` after aver_fw_input_new_frame(), and
+    // new_frame does not clear cur[] -- it only rolls cur into prev. So the instant the release-mouse
+    // chord was pressed, every key and button froze at its last published value while aver_fw_tick
+    // kept running. A weapon gated on a LEVEL read of MOUSE_LEFT fired forever with the mouse
+    // untouched. That is not a hypothetical: it is what "it starts turning on its own and firing"
+    // turned out to be, and PTTest's fire gate is exactly that shape.
+    //
+    // IT ASSERTS EVERY KEY, NOT THE ONE IT PRESSED, and that is the whole design of it. The fix
+    // spreads across ~29 set_key call sites; a test that watched only MOUSE_LEFT would pass with 28
+    // of them fixed and the 29th still latching. Walking 0..AVER_FW_KEY_COUNT means the assertion
+    // cannot be satisfied by a partial fix, and it names the offending slot rather than just failing.
+    //
+    // WHY IT DRIVES ImGui RATHER THAN THE ABI. --play-test calls aver_fw_input_set_key directly,
+    // which is the one thing that CANNOT catch this: it writes the state the bug corrupts, so it
+    // would paper over the defect it is meant to find. AddMouseButtonEvent enters ImGui's queue and
+    // reaches the framework only by going through pushInput -- the function under test.
+    void maybeInputStuckTest() {
+        if (inputStuckFrames_ <= 0) return;
+#if AVER_MODULE_FRAMEWORK && AVER_WITH_IMGUI
+        ++inputStuckFrame_;
+        if (inputStuckFrame_ == 10) { startPlay(); return; }
+        if (inputStuckFrame_ < 11) return;
+
+        ImGuiIO& io = ImGui::GetIO();
+
+        // ---- phase 1: hold the button and prove it actually reaches gameplay ----
+        // Re-asserted every frame rather than pressed once: the point is that the BUTTON never goes
+        // up, so a test that stopped saying so would be testing the wrong thing.
+        if (inputStuckFrame_ < 30) {
+            io.AddMouseButtonEvent(0, true);
+            if (inputStuckFrame_ > 12 && aver_fw_input_key(AVER_FW_KEY_MOUSE_LEFT)) inputStuckSawDown_ = true;
+            return;
+        }
+
+        // ---- phase 2: release the mouse to the editor, WITHOUT letting the button up ----
+        // Exactly what a person does mid-session to go and click something in the Outliner, and the
+        // precise moment the old code stopped publishing.
+        if (inputStuckFrame_ == 30) { io.AddMouseButtonEvent(0, true); releasedByUser_ = true; return; }
+
+        // ---- phase 3: from here on gameplay must see NOTHING held ----
+        io.AddMouseButtonEvent(0, true);   // still physically down; still must not reach the game
+        for (int k = 0; k < AVER_FW_KEY_COUNT; ++k) {
+            if (aver_fw_input_key(k)) { ++inputStuckLatched_; if (inputStuckFirstKey_ < 0) inputStuckFirstKey_ = k; }
+        }
+
+        if (inputStuckFrame_ >= 30 + inputStuckFrames_) {
+            const bool downOk  = inputStuckSawDown_;
+            const bool clearOk = inputStuckLatched_ == 0;
+            AVER_INFO("[input-stuck] press  : MOUSE_LEFT held -> gameplay {} -- {}",
+                      downOk ? "saw it" : "NEVER SAW IT",
+                      downOk ? "the button reaches the game" : "THE TEST PROVED NOTHING (no input arrived)");
+            AVER_INFO("[input-stuck] release: {} key-frames still held across {} frames after the "
+                      "release chord, first offender key {} -- {}",
+                      inputStuckLatched_, inputStuckFrames_, inputStuckFirstKey_,
+                      clearOk ? "nothing latched" : "A KEY IS STUCK (pushInput returned without publishing)");
+            AVER_INFO("[input-stuck] RESULT: {}", (downOk && clearOk) ? "PASS" : "FAIL");
+            io.AddMouseButtonEvent(0, false);
+            releasedByUser_ = false;
+            stopPlay();
+            inputStuckFrames_ = 0;
+        }
+#endif
+    }
+    int  inputStuckFrames_ = 0, inputStuckFrame_ = 0, inputStuckLatched_ = 0, inputStuckFirstKey_ = -1;
+    bool inputStuckSawDown_ = false;
+
     // Runs the --play-test session: begins play, drives synthetic input for 150 frames, then stops.
     void maybePlayTest() {
         if (!playTest_) return;
@@ -8854,12 +8924,28 @@ private:
     void pushInput(bool uiActive) {
         aver_fw_input_new_frame();
 #if AVER_WITH_IMGUI
-        if (!uiActive) return;
-        if (releasedByUser_ && playSessionActive()) return;
+        // NEVER RETURN AFTER new_frame(). aver_fw_input_new_frame (FrameworkAbi.cpp) rolls cur into
+        // prev and zeroes the mouse -- it does NOT clear cur[]. So an early return here does not mean
+        // "publish nothing this frame", it means "publish LAST frame's answer forever": every key and
+        // button freezes at whatever it was, while aver_fw_tick keeps running the game. Hold the fire
+        // button, press the release-mouse chord, and the weapon goes on firing with the mouse
+        // untouched -- which is exactly the bug this replaced.
+        //
+        // THE ENGINE ALREADY LEARNED THIS ONCE, on the other host, and the fix never reached here.
+        // GameInput.cpp's publishInput says it in full: "AN UNFOCUSED WINDOW PUBLISHES EVERY KEY AS
+        // UP, and does not simply return. The first version of this returned early after
+        // aver_fw_input_new_frame(), on the assumption that new_frame clears the key state. IT DOES
+        // NOT". InputBridgeTest asserts it for that path; --input-stuck-test asserts it for this one.
+        //
+        // A BOOL, NOT A RETURN, so that every one of the set_key calls below still runs and publishes
+        // an explicit release. Suppression is folded into the SAME kb/m terms the calls already read,
+        // which is what makes it impossible for one slot to be left behind: there is no second code
+        // path to keep in step, only a term that goes false.
+        const bool suppressed = !uiActive || (releasedByUser_ && playSessionActive());
         ImGuiIO& io = ImGui::GetIO();
-        const bool kb = !io.WantCaptureKeyboard;
-        const bool chordSpace = keybinds_.pressed(editor::CommandId::DrawerToggleContent, io);
-        const bool chordEsc   = drawer_ != Drawer::None && keybinds_.pressed(editor::CommandId::DrawerDismiss, io);
+        const bool kb = !suppressed && !io.WantCaptureKeyboard;
+        const bool chordSpace = !suppressed && keybinds_.pressed(editor::CommandId::DrawerToggleContent, io);
+        const bool chordEsc   = !suppressed && drawer_ != Drawer::None && keybinds_.pressed(editor::CommandId::DrawerDismiss, io);
         for (int i = 0; i < 26; ++i) aver_fw_input_set_key(AVER_FW_KEY_A + i, kb && ImGui::IsKeyDown((ImGuiKey)(ImGuiKey_A + i)));
         for (int i = 0; i < 10; ++i) aver_fw_input_set_key(AVER_FW_KEY_0 + i, kb && ImGui::IsKeyDown((ImGuiKey)(ImGuiKey_0 + i)));
         aver_fw_input_set_key(AVER_FW_KEY_SPACE,  kb && !chordSpace && ImGui::IsKeyDown(ImGuiKey_Space));
@@ -8873,11 +8959,15 @@ private:
         aver_fw_input_set_key(AVER_FW_KEY_RIGHT,  kb && ImGui::IsKeyDown(ImGuiKey_RightArrow));
         aver_fw_input_set_key(AVER_FW_KEY_UP,     kb && ImGui::IsKeyDown(ImGuiKey_UpArrow));
         aver_fw_input_set_key(AVER_FW_KEY_DOWN,   kb && ImGui::IsKeyDown(ImGuiKey_DownArrow));
-        const bool m = mouseCaptured_ || (!io.WantCaptureMouse && !io.WantCaptureKeyboard);
+        const bool m = !suppressed && (mouseCaptured_ || (!io.WantCaptureMouse && !io.WantCaptureKeyboard));
         aver_fw_input_set_key(AVER_FW_KEY_MOUSE_LEFT,   m && ImGui::IsMouseDown(0));
         aver_fw_input_set_key(AVER_FW_KEY_MOUSE_RIGHT,  m && ImGui::IsMouseDown(1));
         aver_fw_input_set_key(AVER_FW_KEY_MOUSE_MIDDLE, m && ImGui::IsMouseDown(2));
-        if (mouseCaptured_) aver_fw_input_set_mouse(captureDx_, captureDy_, io.MouseWheel);
+        // Suppressed publishes an explicit zero rather than falling through to the captured branch:
+        // new_frame() already zeroes the delta, but saying so here keeps this function's contract one
+        // sentence long -- every slot is written, every frame, whatever the gate decided.
+        if (suppressed) aver_fw_input_set_mouse(0.0f, 0.0f, 0.0f);
+        else if (mouseCaptured_) aver_fw_input_set_mouse(captureDx_, captureDy_, io.MouseWheel);
         else aver_fw_input_set_mouse(m ? io.MouseDelta.x : 0.0f, m ? io.MouseDelta.y : 0.0f, m ? io.MouseWheel : 0.0f);
 #endif
     }
@@ -17839,6 +17929,32 @@ private:
     void pollCapturedMouse() {
         captureDx_ = captureDy_ = 0.0f;
         if (!mouseCaptured_) return;
+        HWND fg = window_ ? static_cast<HWND>(window_->nativeHandle()) : nullptr;
+        // A STALE ANCHOR IS A VIEW SNAP, and losing focus is how the anchor goes stale. Windows
+        // drops a window's ClipCursor confinement the moment it stops being foreground, so the
+        // cursor is free to be anywhere -- another monitor, another app -- while mouseCaptured_ is
+        // still true. Nothing here re-captures on the way back, either: setMouseCaptured() opens
+        // with `if (on == mouseCaptured_) return;`, so calling it again is a no-op and
+        // warpToAnchor() never re-runs. The next line down would then measure GetCursorPos()
+        // against an anchor from before the user alt-tabbed and hand the framework one enormous
+        // delta -- the camera whips round exactly once, on the frame focus comes back.
+        //
+        // RE-ANCHOR AND REPORT ZERO. One frame of no look input on refocus is not something a
+        // player can perceive; a spin is. Same GetForegroundWindow() test the MCP input bridge in
+        // this file already uses to decide whether its synthetic messages have a window to land in.
+        //
+        // ANCHOR TO WHERE THE CURSOR IS, NOT warpToAnchor(). The obvious spelling of this is to
+        // re-centre and return, but warpToAnchor() calls SetCursorPos, and dragging the pointer to
+        // this window's centre every frame while the user is working in a DIFFERENT application is
+        // a worse bug than the one being fixed -- it also silently steals the cursor during any
+        // bounded --frames run that happens to have a play session up. Recording the cursor's
+        // actual position as the anchor gives the identical zero delta with no side effect, and
+        // the first foreground frame then measures from somewhere real.
+        if (fg && ::GetForegroundWindow() != fg) {
+            POINT q{};
+            if (GetCursorPos(&q)) { captureAnchorX_ = q.x; captureAnchorY_ = q.y; }
+            return;
+        }
         POINT p{};
         if (!GetCursorPos(&p)) return;
         captureDx_ = static_cast<f32>(p.x - captureAnchorX_);
@@ -18254,6 +18370,10 @@ Application* createApplication(int argc, char** argv) {
     // crash -- see SandboxApp::resizeCheck() for which one and why nothing else could.
     int resizeCycleArg = 0;
     int pieCamArg = 0;
+    // --input-stuck-test N: in THIS loop and not the else-if chain below, for the same C1061 reason
+    // as every other flag here -- that chain is at MSVC's nesting limit and one more `else if` is a
+    // build failure, not a warning.
+    int inputStuckArg = 0;
     // --gpu-timing takes no value, so it is matched in the i+1<argc loop below only incidentally --
     // it is checked in its own full-length loop underneath, or a trailing --gpu-timing with nothing
     // after it would be silently ignored. That is the exact shape of the --no-rt/--no-gi bug this
@@ -18263,6 +18383,7 @@ Application* createApplication(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--rd-ablate"))            rdAblate = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--resize-cycle"))         resizeCycleArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--pie-camera-test"))      pieCamArg = std::atoi(argv[i + 1]);
+        if (!std::strcmp(argv[i], "--input-stuck-test"))     inputStuckArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--refraction"))           refraction = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--refraction-strength"))  refractionStrength = (f32)std::atof(argv[i + 1]);
         if (!std::strcmp(argv[i], "--refraction-fade"))      refractionFade = (f32)std::atof(argv[i + 1]);
@@ -19182,6 +19303,7 @@ Application* createApplication(int argc, char** argv) {
     if (resizeCycleArg > 0) app->setResizeCycle(resizeCycleArg);
     if (gpuTimingArg) app->setGpuTiming(true);
     if (pieCamArg > 0) app->setPieCameraTest(pieCamArg);
+    if (inputStuckArg > 0) app->setInputStuckTest(inputStuckArg);
 #endif
     if (!skinSceneDir.empty()) app->setSkinSceneDir(skinSceneDir);
     if (!shaderSourceDir.empty()) app->setShaderSourceDir(shaderSourceDir);
