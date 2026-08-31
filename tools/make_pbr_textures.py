@@ -220,7 +220,7 @@ def make_glass(out_dir, rng):
     pane and so cannot be painted into a texture at all. Put the tint in attenuationColor, not here.
 
     THE ROUGHNESS IS ABSOLUTE, not a multiplier. Bind this with `PARAM roughnessFactor 1.0` and let
-    the green channel carry the real value: about 0.03 where the pane is clean, rising toward 0.33
+    the green channel carry the real value: about 0.03 where the pane is clean, rising toward 0.13
     in a smudge. Authoring a low roughnessFactor as well would multiply the two and flatten every
     smudge back out, which is the mistake this note exists to prevent.
     """
@@ -232,8 +232,15 @@ def make_glass(out_dir, rng):
 
     smear = fbm(4, 6, rng) - 0.5            # broad wipe marks, centred so they do not bias height
     dust = fbm(5, 90, rng) - 0.5            # fine settled speckle
-    prints = normalize01(fbm(3, 14, rng))
-    smudge = np.clip((prints - 0.62) / 0.38, 0, 1)      # sparse fingerprint patches
+
+    # FINGERPRINT SCALE, AND IT HAS TO BE SAID IN CENTIMETRES OR IT GOES WRONG AGAIN. base_period is
+    # cells across the tile, and the material tiles this at 150 cm, so period 14 put the marks at
+    # 20-30 cm across -- and a 30 cm blob of rough on a smooth pane is not a fingerprint, it is a
+    # PUDDLE. That is exactly how it read: the glass walkway over the pool looked wet. 48 cells puts
+    # them near 3 cm, which is a fingertip.
+    prints = normalize01(fbm(3, 48, rng))
+    # SPARSE, because a pane is mostly clean. 0.72 leaves marks on roughly a tenth of the surface.
+    smudge = np.clip((prints - 0.72) / 0.28, 0, 1)
 
     albedo = np.full((SIZE, SIZE, 3), 0.98, dtype=np.float32)
     albedo -= (smudge * 0.04)[..., None]
@@ -243,7 +250,12 @@ def make_glass(out_dir, rng):
     # stops looking like glass immediately.
     height = roller * 0.030 + smear * 0.010 + dust * 0.004
 
-    rough = 0.03 + smudge * 0.30 + np.clip(dust + 0.5, 0, 1) * 0.03
+    # 0.03 CLEAN, 0.13 IN A MARK. The ceiling was 0.33, an eleven-fold jump, and a jump that size
+    # does not blur the reflection so much as REPLACE it: the smooth pane mirrors the blue sky while
+    # the rough patch scatters in the tan deck beside it, so every mark came out as a warm blotch
+    # against cold glass. That colour inversion is the whole reason it looked like standing water.
+    # A fingerprint is a micron of skin oil; it perturbs the highlight, it does not swap it.
+    rough = 0.03 + smudge * 0.10 + np.clip(dust + 0.5, 0, 1) * 0.03
     save_set(out_dir, "glass", albedo, height, rough, np.zeros_like(rough), 0.25)
 
 
