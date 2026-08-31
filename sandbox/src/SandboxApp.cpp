@@ -6138,6 +6138,7 @@ public:
 #endif
         captureCheck(e);
         resizeCheck(e);
+        gpuTimingCheck(e);
 #if AVER_MODULE_SYNAPSE
         navBakeCheck(e);
 #endif
@@ -6647,6 +6648,7 @@ public:
     void setAverSrCycleAuto(int framesIn) { averSrCycleFrames_ = framesIn; }   // --aversr-cycle [N]
 #endif
     void setResizeCycle(int n) { resizeCycle_ = n < 0 ? 0 : (u64)n; }              // --resize-cycle [N]
+    void setGpuTiming(bool on) { gpuTiming_ = on; }                                // --gpu-timing
     void setSkinSceneDir(std::string d) { skinSceneDir_ = std::move(d); }          // --skin-scene-test <dir>
     // --shader-source <dir>: watch a shader source tree and reload without restarting.
     void setShaderSourceDir(std::string d) { shaderSourceDir_ = std::move(d); }
@@ -14535,6 +14537,40 @@ private:
     }
 #endif
 
+    // --gpu-timing: print the per-pass GPU breakdown once, near the end of a bounded run.
+    //
+    // WHY THIS EXISTS AT ALL, given the profiler already does. D3D12Device has a full hierarchical
+    // timestamp profiler and IDevice::gpuTiming() already returns it as a parent-indexed tree with
+    // inclusive milliseconds averaged over frames -- but the ONLY thing that ever asked for it was
+    // the interactive `frametime` console command. A bounded `--frames N` run, which is how every
+    // measurement in this project is actually taken, could not get a breakdown at all: --frame-time
+    // reports the WHOLE frame, CPU, and nothing about where it went. So every attribution question
+    // was being answered by ablation -- removing a term and diffing -- which is exactly the method
+    // that has already produced a false answer here (a sky march "costing 2.61ms" when substituting
+    // a cheaper sky saved 0.04ms, because the compiler had eliminated everything feeding the term).
+    // A profiler that exists but is unreachable from the harness is why.
+    //
+    // CALLS handleFrameTime RATHER THAN REPRINTING THE TREE. The walk, the inclusive/exclusive
+    // arithmetic and the GPU-bound/CPU-bound line all live there already; a second copy here would
+    // be a second thing to keep correct, and this codebase has been bitten specifically by
+    // hand-kept mirrors drifting apart. The only thing this adds is a ConsolePrint that routes to
+    // the log instead of to the console widget.
+    //
+    // LATE, at maxFrames_ - 2, for two reasons the report itself states: the numbers are averaged
+    // over accumulated frames, so early is a small sample, and they are "a couple of frames old"
+    // because the timestamps have to round-trip through a readback buffer. Asking at frame 0 gets
+    // "supported but no data yet", which is a true answer to a useless question.
+    void gpuTimingCheck(Engine& e) {
+        if (!gpuTiming_ || maxFrames_ == 0 || gpuTimingDone_) return;
+        const u64 want = maxFrames_ > 8 ? maxFrames_ - 2 : maxFrames_ - 1;
+        if (e.time().frame < want) return;
+        gpuTimingDone_ = true;
+        editor::handleFrameTime(*this, e, {}, [](LogLevel lvl, std::string msg) {
+            if (lvl == LogLevel::Error) AVER_ERROR("[GPU] {}", msg);
+            else                        AVER_INFO ("[GPU] {}", msg);
+        });
+    }
+
     // --resize-cycle N: resize the real window every N frames during a bounded run.
     //
     // WHY THIS EXISTS. "Resizing the window crashed my GPU" was a report I could not reproduce,
@@ -14611,6 +14647,8 @@ private:
 
     u64 maxFrames_; bool headless_; std::string beamPath_, shot_;
     u64 resizeCycle_ = 0;   // --resize-cycle N: 0 is off. See resizeCheck() for what it reproduces.
+    bool gpuTiming_ = false;      // --gpu-timing: dump the per-pass GPU tree once, near the end
+    bool gpuTimingDone_ = false;
     u32 resizeStep_ = 0;
     Tool initialTool_ = Tool::Select;
     std::vector<MeshObj> objects_;
@@ -17739,6 +17777,11 @@ Application* createApplication(int argc, char** argv) {
     // C1061 reason as everything else in this loop. Verification-only, and it reproduces a real
     // crash -- see SandboxApp::resizeCheck() for which one and why nothing else could.
     int resizeCycleArg = 0;
+    // --gpu-timing takes no value, so it is matched in the i+1<argc loop below only incidentally --
+    // it is checked in its own full-length loop underneath, or a trailing --gpu-timing with nothing
+    // after it would be silently ignored. That is the exact shape of the --no-rt/--no-gi bug this
+    // file already paid for once: a flag that parses without error and does nothing.
+    bool gpuTimingArg = false;
     for (int i = 1; i + 1 < argc; ++i) {
         if (!std::strcmp(argv[i], "--rd-ablate"))            rdAblate = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--resize-cycle"))         resizeCycleArg = std::atoi(argv[i + 1]);
@@ -17746,6 +17789,8 @@ Application* createApplication(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--refraction-strength"))  refractionStrength = (f32)std::atof(argv[i + 1]);
         if (!std::strcmp(argv[i], "--refraction-fade"))      refractionFade = (f32)std::atof(argv[i + 1]);
     }
+    for (int i = 1; i < argc; ++i)
+        if (!std::strcmp(argv[i], "--gpu-timing")) gpuTimingArg = true;
 
     u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; std::string shaderSourceDir; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool furnaceGrid=false; f32 furnaceTilt=0.0f; bool ptFurnace=false; bool ptScene=false; int deviceLostAt=0; int ptQualityRamp=0; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int aversrCycle=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=-1; int rt=-1; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int rtRenderMode=-1; int pt=-1; int ptBounces=-1; int layeredBsdf=-1; f32 coatWeight=0.0f; f32 coatRough=0.1f; f32 coatF0=0.04f; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string selectEntity; bool openLegacy=false; bool waterOn=false; f32 waterHeight=0.0f; std::string graphSelectNode; std::string graphTab; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false; bool bakeNav=false; f32 bakeNavCell=50.0f; std::string openMap; bool gbuffer=false; std::string gbufferDebug; std::string crashTest; std::string startMode;
     for (int i=1;i<argc;++i){
@@ -18657,6 +18702,7 @@ Application* createApplication(int argc, char** argv) {
 #if AVER_MODULE_SR
     if (aversrCycle > 0) app->setAverSrCycleAuto(aversrCycle);
     if (resizeCycleArg > 0) app->setResizeCycle(resizeCycleArg);
+    if (gpuTimingArg) app->setGpuTiming(true);
 #endif
     if (!skinSceneDir.empty()) app->setSkinSceneDir(skinSceneDir);
     if (!shaderSourceDir.empty()) app->setShaderSourceDir(shaderSourceDir);
