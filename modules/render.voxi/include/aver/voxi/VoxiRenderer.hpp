@@ -882,6 +882,13 @@ private:
         // The reprojected NDC lands in THIS rect, not at [0,1] of the whole history texture: the
         // editor docks the 3D view in a sub-rect of the backbuffer, same as prevViewProj above.
         f32 sceneViewport[4] = {};
+        // THIS frame's scene viewport rect, in the same (x, y, w, h) target pixels.
+        //
+        // A SECOND COPY IS NOT REDUNDANT: sceneViewport above is the PREVIOUS frame's, because every
+        // reader of it pairs it with prevViewProj to reproject into last frame's history. A reader
+        // that projects with THIS frame's gViewProj -- refraction does -- needs this frame's rect,
+        // and reusing the previous one silently mismatches for a frame after any viewport change.
+        f32 sceneViewportCur[4] = {};
         // The GI-only shadow map's light view-projection, fitted to the GI volume rather than the
         // camera -- see fitGiShadow(). Read only by PSVoxel through giShadowFactor(); PSMainVoxi
         // keeps using cascadeViewProj/shadowFactor above for the camera cascades.
@@ -907,12 +914,19 @@ private:
     } cb_;
 
     // THE MIRROR THIS FILE HAS ALWAYS HAD AND NEVER GUARDED. `cbuffer VoxiFrame : register(b4)` in
-    // VoxiShaders.hpp repeats every field above by hand, and nothing checked that the two agreed --
-    // the same unguarded-mirror bug already fixed for PathTracer's FrameCB and PcgVolume's VolumeCB.
-    // VoxiFrame was simply the one that never got the assert. Appending here without appending there
-    // reads garbage off the end of the block in every Voxi shader at once.
-    static_assert(sizeof(FrameConstants) == 624,
-                  "cbuffer VoxiFrame in VoxiShaders.hpp mirrors this byte for byte");
+    // modules/render.voxi/shaders/voxi.hlsl repeats every field above by hand, and nothing checked
+    // that the two agreed -- the same unguarded-mirror bug already fixed for PathTracer's FrameCB
+    // and PcgVolume's VolumeCB. VoxiFrame was simply the one that never got the assert. Appending
+    // here without appending there reads garbage off the end of the block in every Voxi shader at
+    // once, and INSERTING in the middle -- which is what adding sceneViewportCur beside its
+    // previous-frame twin does -- shifts every field after it instead, which is worse: it is silent
+    // and it is wrong everywhere rather than at the end.
+    //
+    // The file this used to name, VoxiShaders.hpp, no longer exists: the HLSL moved out of C++
+    // string literals into shaders/ and the message was never updated. It sent me to a deleted file
+    // when this assert did its job. Naming the real one now.
+    static_assert(sizeof(FrameConstants) == 640,
+                  "cbuffer VoxiFrame in modules/render.voxi/shaders/voxi.hlsl mirrors this byte for byte");
     static_assert(sizeof(FrameConstants) % 16 == 0, "must be a legal constant-buffer size");
 
     // ---- the GI rebuild gate: skip a revoxelisation whose result would be bit-identical ----

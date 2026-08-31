@@ -2649,6 +2649,10 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
 
     std::memcpy(cb_.prevViewProj, prevViewProj_, sizeof(prevViewProj_));
     std::memcpy(cb_.sceneViewport, prevSceneViewport_, sizeof(prevSceneViewport_));
+    // THIS frame's rect, for the readers that project with gViewProj rather than gPrevViewProj.
+    // Zeroed when the device could not report one, which is what the shader's own w > 0 test reads.
+    if (haveViewport) std::memcpy(cb_.sceneViewportCur, curSceneViewport_, sizeof(curSceneViewport_));
+    else              std::memset(cb_.sceneViewportCur, 0, sizeof(cb_.sceneViewportCur));
     cb_.rtHistParams[0] = 1.0f;                                        // t6/u2 are bound to real textures
     cb_.rtHistParams[1] = (rtHistValid_ && haveViewport) ? 1.0f : 0.0f; // ...and t6 + gSceneViewport are usable
     cb_.rtHistParams[2] = static_cast<f32>(rtFrameIndex_);

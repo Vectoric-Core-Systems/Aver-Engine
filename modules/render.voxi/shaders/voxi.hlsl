@@ -32,6 +32,9 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     // here, not at [0,1] of the whole history texture -- the editor docks the 3D view in a sub-rect
     // of the backbuffer. Same validity as gPrevViewProj.
     float4   gSceneViewport;
+    // THIS frame's scene viewport rect, same (x, y, w, h) in target pixels. Paired with gViewProj,
+    // where gSceneViewport above is paired with gPrevViewProj. w == 0 means the device had none.
+    float4   gSceneViewportCur;
     // The GI-ONLY shadow map's light view-projection: one box fitted to the GI VOLUME, not to the
     // camera. Read only by giShadowFactor (PSVoxel); the cascades above stay camera-fitted and are
     // what PSMainVoxi samples.
@@ -1421,16 +1424,49 @@ float2 averRefractedBackdropUV(AverSurface s, float3 wpos, float thicknessCm,
     const float4 clip = mul(float4(target, 1.0), gViewProj);
     if (clip.w <= 1e-4) return uv0;               // behind the eye: nothing sensible to sample
     const float2 ndc = clip.xy / clip.w;
-    float2 uvR = float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+
+    // NDC -> THE VIEWPORT RECT, NOT [0,1] OF THE WHOLE TARGET, and this line is the whole bug that
+    // made refraction look like a wrecked image rather than a bent one.
+    //
+    // The editor docks the 3D view in a SUB-RECT of the backbuffer -- a toolbar above it, panels to
+    // the right -- so NDC maps to gSceneViewportCur, while uv0 (screenPos * invSize) is a full-target
+    // UV because SV_Position is in target pixels. A plain ndc*0.5+0.5 mixes those two spaces. The
+    // error is affine, so it does not look like noise: it looks like the pane is showing a shifted,
+    // scaled copy of the scene, and near the right-hand edge it walks clean off the image and
+    // samples nothing, which is where the black block in the glass rail came from.
+    //
+    // MEASURED, before the fix, by forcing target = wpos so the answer HAD to be uv0 exactly: 100%
+    // of the rail's pixels still landed more than 60 px away. That is what proved this was the
+    // projection and not the refraction offset -- an 8 cm pane cannot bend anything by 60 px, and I
+    // had been about to go looking at the offset.
+    //
+    // The file already knew: rtReprojectHistory (voxi.hlsl, "NDC -> LAST frame's VIEWPORT rect")
+    // and three other sites all do exactly this conversion, and one of them says in its own comment
+    // that the plain form "lands every reprojection on the wrong texel". Refraction was written
+    // later and did not pick it up.
+    //
+    // A ZERO-WIDTH RECT means the device reported no viewport this frame. Sampling straight through
+    // is the honest answer there -- the same fallback this function already takes for total internal
+    // reflection and for a target behind the eye.
+    if (gSceneViewportCur.z <= 0.0 || gSceneViewportCur.w <= 0.0) return uv0;
+    const float2 pxR = gSceneViewportCur.xy +
+                       float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) * gSceneViewportCur.zw;
+    float2 uvR = pxR * invSize;
 
     // THE EDGE FADE, and it is not cosmetic. The backdrop only holds what the camera saw, so an
     // offset that walks off the screen samples nothing meaningful and one that walks onto a
     // FOREGROUND object shows that object through the glass. Fading the offset back to zero near
     // the border turns both into a soft loss of refraction rather than a hard wrong pixel.
+    // FADED AGAINST THE VIEWPORT RECT, NOT THE TARGET. Outside the 3D view the backdrop holds
+    // whatever the rest of the frame is, so "still on the texture" is not the test that matters --
+    // "still on the part of the texture the camera drew" is. Measuring to the target border let a
+    // pane keep sampling right up to the edge of the docked view and then past it.
     const float fadePx = max(gGiParams.w, 0.0);
     float edge = 1.0;
     if (fadePx > 0.0) {
-        const float2 d = min(uvR, 1.0 - uvR);     // distance to the nearest border, in UV
+        const float2 vpMin = gSceneViewportCur.xy * invSize;
+        const float2 vpMax = (gSceneViewportCur.xy + gSceneViewportCur.zw) * invSize;
+        const float2 d = min(uvR - vpMin, vpMax - uvR);   // to the nearest viewport border, in UV
         edge = saturate(min(d.x, d.y) / fadePx);
     }
     return lerp(uv0, uvR, saturate(gGiParams.z) * edge);
