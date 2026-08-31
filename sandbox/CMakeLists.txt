@@ -9,6 +9,7 @@ add_executable(Sandbox
   src/ProjectBrowser.cpp
   src/ProjectScaffold.cpp
   src/EditorPrefs.cpp
+  src/InputOwnership.cpp
   src/EngineScaffold.cpp
   src/McpConf.cpp
   src/IdeIntegration.cpp

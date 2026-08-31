@@ -41,6 +41,20 @@ struct ProjectDesc {
     // still, but now because it was never told where to fly rather than because there was no way to
     // tell it.
     std::string droneGraph;             // DRONE.GRAPH, relative to the content root; may be empty
+
+    // INPUT.SCHEME -- the .ocinput that supplies this project's default input bindings, relative to
+    // the content root. Empty means none, for DRONE.GRAPH's exact reason directly above: no context
+    // is pushed for the project automatically, rather than a loader guessing at a path.
+    //
+    // A PROJECT KEY, NOT AN ASSUMED FILENAME, for the identical reason DRONE.GRAPH is one (see that
+    // field's comment above -- this key repeats its argument rather than restating it): the engine
+    // must not require a project to keep its default bindings at one particular path under Content,
+    // so the manifest says which file rather than a loader guessing e.g. "Input/Default.ocinput" and
+    // silently finding nothing in a project laid out differently. A project stating no INPUT.SCHEME
+    // still runs -- gameplay code can still call EnhancedInput.AddContext directly with a hand-built
+    // context -- but a project whose bindings are DATA (see aver/formats/OcInput.hpp) rather than a
+    // compiled-in InputMappingContext subclass now has one place to say where that data lives.
+    std::string inputScheme;            // INPUT.SCHEME, relative to the content root; may be empty
     std::string author;                 // AUTHOR (free text, rest of line)
 
     // RENDER.*, all -1 when the manifest did not state them.

@@ -643,6 +643,15 @@ public class GraphCompiler
                 EmitInputKeyEdge(node);
                 break;
 
+            case "inputaction":
+                EmitInputAction(node);
+                break;
+
+            case "inputactionpressed":
+            case "inputactionreleased":
+                EmitInputActionEdge(node);
+                break;
+
             case "raycast":
                 EmitRaycast(node);
                 break;
@@ -1895,6 +1904,79 @@ public class GraphCompiler
         LoadPin(node.Id, "key");
         _il.Emit(OpCodes.Call, node.Type.ToLowerInvariant() == "inputkeyreleased"
                                    ? InputKeyReleasedMethod : InputKeyPressedMethod);
+
+        if (_pinLocals.TryGetValue((node.Id, "triggered"), out var local))
+            _il.Emit(OpCodes.Stloc, local);
+    }
+
+    /// InputAction(action) -> x, y, held: the float2 CURRENT VALUE and digital-active state of a named
+    /// action someone else's setup code already registered and bound (aver_fw_action_register +
+    /// aver_fw_action_bind -- framework_abi.h's Named Actions section) -- InputKey's higher-level
+    /// sibling for the vocabulary's PREFERRED input path; see OcGraphParser's "inputaction" case for
+    /// the full reasoning. `action` is the ACTION HANDLE aver_fw_action_register/_find returned, not a
+    /// name -- see that case's own comment for why: PinType has no String member (Graph.cs's own
+    /// PinType enum: Float/Int/Bool/Exec only) and the established "string chosen by the author,
+    /// resolved by name at invocation" mechanism (ClassName/EventName/CurveName's NODE-line attributes)
+    /// lives on Node, in Graph.cs -- a file outside this slice's owned files -- so, exactly like
+    /// InputKey's own "key" pin, "action" is a plain Int the graph must already hold a handle for.
+    ///
+    /// TWO NATIVE CALLS, NOT ONE -- aver_fw_action_value2 (x, y) and aver_fw_action_held (held) are
+    /// separate ABI entry points (framework_abi.h:444, 447), unlike GetFieldVec3/GetForward's single
+    /// call producing every output. Both are pure array-scan reads over actionBindings()
+    /// (FrameworkAbi.cpp's actionAccumulate/actionActive), the same "no physics query, no device I/O"
+    /// cost class GetForward's own comment already calls cheap enough to redundantly pull -- so, like
+    /// InputKey and GetForward, no _execLocals caching here even though this is two calls, not one.
+    ///
+    /// aver_fw_action_value2 takes a `float[]` out-parameter (Native.cs's own P/Invoke signature), not
+    /// two individual `ref float` the way GetFieldVecForGraph takes three -- so this allocates a
+    /// 2-element array with Newarr and Dup's the reference before the call rather than pushing two
+    /// Ldloca addresses, the one place this method's IL shape actually differs from
+    /// EmitGetFieldVec3/EmitRaycast's "address per out-param" pattern.
+    private void EmitInputAction(Node node)
+    {
+        if (_il == null) return;
+
+        // x, y: Dup the fresh array so one reference feeds the call (consumed as out2) and a second
+        // survives in a local to read back afterward -- the call itself returns void, so there is no
+        // other way to reach index 0/1 once aver_fw_action_value2 has run.
+        LoadPin(node.Id, "action");
+        _il.Emit(OpCodes.Ldc_I4_2);
+        _il.Emit(OpCodes.Newarr, typeof(float));
+        var arrLocal = _il.DeclareLocal(typeof(float[]));
+        _il.Emit(OpCodes.Dup);
+        _il.Emit(OpCodes.Stloc, arrLocal);
+        _il.Emit(OpCodes.Call, ActionValue2Method);
+
+        _il.Emit(OpCodes.Ldloc, arrLocal);
+        _il.Emit(OpCodes.Ldc_I4_0);
+        _il.Emit(OpCodes.Ldelem_R4);
+        _il.Emit(OpCodes.Stloc, RequirePinLocal(node, "x"));
+
+        _il.Emit(OpCodes.Ldloc, arrLocal);
+        _il.Emit(OpCodes.Ldc_I4_1);
+        _il.Emit(OpCodes.Ldelem_R4);
+        _il.Emit(OpCodes.Stloc, RequirePinLocal(node, "y"));
+
+        // held: a wholly separate ABI call -- see this method's own doc comment for why this is two
+        // native calls, not one. Optional, like EmitGetForward's "success": stored when the graph
+        // declared the pin, popped otherwise so the stack still balances either way.
+        LoadPin(node.Id, "action");
+        _il.Emit(OpCodes.Call, ActionHeldMethod);
+        if (_pinLocals.TryGetValue((node.Id, "held"), out var heldLocal)) _il.Emit(OpCodes.Stloc, heldLocal);
+        else                                                              _il.Emit(OpCodes.Pop);
+    }
+
+    /// InputActionPressed / InputActionReleased: the action-level twin of EmitInputKeyEdge above -- one
+    /// action handle in, one bool "triggered" out, the node type choosing aver_fw_action_pressed vs
+    /// aver_fw_action_released. See EmitInputKeyEdge's own comment for why the pin is `triggered`, not
+    /// `held` -- the identical "state vs event" distinction, one layer up.
+    private void EmitInputActionEdge(Node node)
+    {
+        if (_il == null) return;
+
+        LoadPin(node.Id, "action");
+        _il.Emit(OpCodes.Call, node.Type.ToLowerInvariant() == "inputactionreleased"
+                                   ? ActionReleasedMethod : ActionPressedMethod);
 
         if (_pinLocals.TryGetValue((node.Id, "triggered"), out var local))
             _il.Emit(OpCodes.Stloc, local);
@@ -4227,6 +4309,12 @@ public class GraphCompiler
                 EmitPullInput(source, "key"); _il.Emit(OpCodes.Call, InputKeyPressedMethod); return;
             case "inputkeyreleased":
                 EmitPullInput(source, "key"); _il.Emit(OpCodes.Call, InputKeyReleasedMethod); return;
+            case "inputaction":
+                EmitPullInputAction(source, pinName); return;
+            case "inputactionpressed":
+                EmitPullInput(source, "action"); _il.Emit(OpCodes.Call, ActionPressedMethod); return;
+            case "inputactionreleased":
+                EmitPullInput(source, "action"); _il.Emit(OpCodes.Call, ActionReleasedMethod); return;
             // GetAnimCurve DOES get a standalone pull path, unlike Raycast/MouseDelta/MoveAxis below.
             // The reason those three are refused is that they must run exactly ONCE however many pins
             // are read, so a node that behaved differently on and off the exec chain would be a trap.
@@ -4300,6 +4388,38 @@ public class GraphCompiler
             // diamond (two consumers pulling the same node) legal while a genuine cycle is not.
             _pullVisiting.Remove(source.Id);
         }
+    }
+
+    /// PULL half of EmitInputAction -- mirrors EmitPullVec3Read's "recompute per reader" shape (see
+    /// that method's own comment) rather than caching: an "x"/"y" pull re-runs aver_fw_action_value2 in
+    /// full and discards the unwanted half, and a "held" pull runs the wholly separate
+    /// aver_fw_action_held call -- so a graph pulling all three costs THREE native calls, not one.
+    /// Safe because both ABI calls are pure array-scan reads with no side effect (see EmitInputAction's
+    /// own comment for the cost accounting) -- idempotent, so re-running them changes nothing.
+    private void EmitPullInputAction(Node source, string pinName)
+    {
+        if (_il == null) return;
+
+        if (pinName == "held")
+        {
+            EmitPullInput(source, "action");
+            _il.Emit(OpCodes.Call, ActionHeldMethod);
+            return;
+        }
+
+        // x/y: same Newarr + Dup shape EmitInputAction uses -- see that method's own comment for why
+        // aver_fw_action_value2's `float[]` out-parameter needs it instead of a plain Ldloca address.
+        EmitPullInput(source, "action");
+        _il.Emit(OpCodes.Ldc_I4_2);
+        _il.Emit(OpCodes.Newarr, typeof(float));
+        var arrLocal = _il.DeclareLocal(typeof(float[]));
+        _il.Emit(OpCodes.Dup);
+        _il.Emit(OpCodes.Stloc, arrLocal);
+        _il.Emit(OpCodes.Call, ActionValue2Method);
+
+        _il.Emit(OpCodes.Ldloc, arrLocal);
+        _il.Emit(OpCodes.Ldc_I4, pinName == "x" ? 0 : 1);
+        _il.Emit(OpCodes.Ldelem_R4);
     }
 
     /// Mirrors EmitDivide's own zero-divisor convention (b == 0 yields 0.0, never NaN/Infinity) --
@@ -4609,6 +4729,20 @@ public class GraphCompiler
     private static readonly MethodInfo InputKeyReleasedMethod =
         typeof(Fw).GetMethod("aver_fw_input_key_released", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.Fw.aver_fw_input_key_released was not found by reflection");
+    // InputAction's own twin of aver_fw_input_key/_pressed/_released above -- see EmitInputAction's own
+    // comment for why "action" is a HANDLE (an int the caller already holds), not a name.
+    private static readonly MethodInfo ActionValue2Method =
+        typeof(Fw).GetMethod("aver_fw_action_value2", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.Fw.aver_fw_action_value2 was not found by reflection");
+    private static readonly MethodInfo ActionHeldMethod =
+        typeof(Fw).GetMethod("aver_fw_action_held", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.Fw.aver_fw_action_held was not found by reflection");
+    private static readonly MethodInfo ActionPressedMethod =
+        typeof(Fw).GetMethod("aver_fw_action_pressed", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.Fw.aver_fw_action_pressed was not found by reflection");
+    private static readonly MethodInfo ActionReleasedMethod =
+        typeof(Fw).GetMethod("aver_fw_action_released", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.Fw.aver_fw_action_released was not found by reflection");
     private static readonly MethodInfo RaycastMethod =
         typeof(GraphInterop).GetMethod("RaycastForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.RaycastForGraph was not found by reflection");

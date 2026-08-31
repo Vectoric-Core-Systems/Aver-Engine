@@ -115,6 +115,8 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "EditorPrefs.hpp"
 #include "EditorIcons.hpp"
 #include "EditorKeybinds.hpp"
+// The one place that decides who owns the keyboard and mouse this frame.
+#include "InputOwnership.hpp"
 #include "EditorConsole.hpp"
 #include "EditorEntitySnapshot.hpp"
 #include "aver/platform/DirectoryWatcher.hpp"
@@ -3098,7 +3100,11 @@ public:
         // A project's OWN pawn should still take the input; that is what the gate is for and it
         // keeps it. The engine's stand-in is the editor camera wearing a pawn, so it is the one
         // session that must not stand the editor camera down.
-        if (e.device()->uiActive() && !browserActive_ && (!gameHasInput() || defaultPawnPlay_)) {
+        // The tools' half of the same one decision -- see own_'s declaration. This used to spell the
+        // gate out inline as (uiActive && !browserActive_ && (!gameHasInput() || defaultPawnPlay_)),
+        // which resolveInputOwnership now reproduces exactly; the keyboard/mouse split it always
+        // wanted but never had is what the two flags add.
+        if (own_.keyboardToTool || own_.mouseToTool) {
             const ImGuiIO& io = ImGui::GetIO();
             const bool overUI = !levelHovered_ || !inViewport(io.MousePos.x, io.MousePos.y);
             if (inputProbe_ && (ImGui::GetFrameCount() % 30) == 0)
@@ -3238,6 +3244,30 @@ public:
         (void)interactive;   // no ImGui to arbitrate mouse/keyboard capture with
 #endif
         pollCapturedMouse();
+        // ---- ONE ARBITRATION, HANDED TO EVERY CONSUMER ---------------------------------------------
+        // Computed once, here, instead of eleven times in eleven slightly different spellings. See
+        // InputOwnership.hpp for what went wrong when each consumer answered this for itself. The
+        // ImGui queries stay at this call site -- only the DECISION moved into a pure function that a
+        // headless test can reach.
+#if AVER_WITH_IMGUI
+        {
+            const ImGuiIO& oio = ImGui::GetIO();
+            editor::InputConditions ic;
+            ic.uiActive          = e.device()->uiActive();
+            ic.browserActive     = browserActive_;
+            ic.textInput         = oio.WantTextInput;
+            ic.uiWantsKeyboard   = oio.WantCaptureKeyboard;
+            ic.uiWantsMouse      = oio.WantCaptureMouse;
+            ic.playing           = playSessionActive();
+            ic.releasedByUser    = releasedByUser_;
+            ic.defaultPawnPlay   = defaultPawnPlay_;
+            ic.mouseCaptured     = mouseCaptured_;
+            ic.pointerInViewport = levelHovered_ && inViewport(oio.MousePos.x, oio.MousePos.y);
+            ic.drawerOpen        = drawer_ != Drawer::None;
+            ic.landscapeMode     = mode_ == EditorMode::Landscape;
+            own_ = editor::resolveInputOwnership(ic);
+        }
+#endif
         pushInput(e.device()->uiActive());
         // The UI frame opens before gameplay ticks, because ticking is when a game draws its HUD.
 #if AVER_MODULE_SCRIPTING
@@ -9031,9 +9061,14 @@ private:
         // an explicit release. Suppression is folded into the SAME kb/m terms the calls already read,
         // which is what makes it impossible for one slot to be left behind: there is no second code
         // path to keep in step, only a term that goes false.
+        // READ, NOT RE-DERIVED. own_ was resolved once this frame by editor::resolveInputOwnership
+        // from exactly these conditions (see the call site just before pushInput, and
+        // InputOwnership.hpp for why the decision left this function). `suppressed` survives only
+        // because the mouse branch at the bottom still needs to tell "publish a zero" apart from
+        // "publish the captured delta".
         const bool suppressed = !uiActive || (releasedByUser_ && playSessionActive());
         ImGuiIO& io = ImGui::GetIO();
-        const bool kb = !suppressed && !io.WantCaptureKeyboard;
+        const bool kb = own_.keyboardToGame;
         const bool chordSpace = !suppressed && keybinds_.pressed(editor::CommandId::DrawerToggleContent, io);
         const bool chordEsc   = !suppressed && drawer_ != Drawer::None && keybinds_.pressed(editor::CommandId::DrawerDismiss, io);
         for (int i = 0; i < 26; ++i) aver_fw_input_set_key(AVER_FW_KEY_A + i, kb && ImGui::IsKeyDown((ImGuiKey)(ImGuiKey_A + i)));
@@ -9049,7 +9084,26 @@ private:
         aver_fw_input_set_key(AVER_FW_KEY_RIGHT,  kb && ImGui::IsKeyDown(ImGuiKey_RightArrow));
         aver_fw_input_set_key(AVER_FW_KEY_UP,     kb && ImGui::IsKeyDown(ImGuiKey_UpArrow));
         aver_fw_input_set_key(AVER_FW_KEY_DOWN,   kb && ImGui::IsKeyDown(ImGuiKey_DownArrow));
-        const bool m = !suppressed && (mouseCaptured_ || (!io.WantCaptureMouse && !io.WantCaptureKeyboard));
+        // ---- THE RAW-VK TWIN, published from the editor's own accumulator --------------------------
+        // The 46-slot AVER_FW_KEY_* enum above cannot reach an F-key, the numpad or any OEM key, and
+        // it cannot be renumbered to fix that -- the InputKey graph node takes a literal integer, so
+        // saved .ocgraph content depends on the current numbering. aver_fw_input_set_vk is the
+        // additive answer, and this is the editor's publisher for it.
+        //
+        // IT READS input_, NOT ImGui, and that is the point rather than an inconsistency. ImGui's key
+        // enum is not Win32's, so publishing the full VK range from ImGui would need a 256-entry
+        // reverse table that does not exist and would rot. input_ is fed straight from the Win32
+        // message stream and is already keyed by virtual key -- it is the only thing in this process
+        // that HAS this answer. --input-source-test asserts the two views agree, so the named slots
+        // above and this loop cannot silently drift apart.
+        //
+        // Gated on the same own_.keyboardToGame as everything above, so an unfocused window or a
+        // focused text field publishes the whole range as UP rather than leaving it latched -- the
+        // exact discipline the named slots learned the hard way.
+        for (int32_t vk = 0; vk < AVER_FW_VK_COUNT; ++vk)
+            aver_fw_input_set_vk(vk, (kb && input_.keyHeld(vk)) ? 1 : 0);
+
+        const bool m = own_.mouseToGame;
         aver_fw_input_set_key(AVER_FW_KEY_MOUSE_LEFT,   m && ImGui::IsMouseDown(0));
         aver_fw_input_set_key(AVER_FW_KEY_MOUSE_RIGHT,  m && ImGui::IsMouseDown(1));
         aver_fw_input_set_key(AVER_FW_KEY_MOUSE_MIDDLE, m && ImGui::IsMouseDown(2));
@@ -17729,6 +17783,13 @@ private:
     // This owns WHAT the input is. Asking ImGui the second question is what let a held key survive
     // into frames nobody published, because ImGui's answer is a snapshot with no edges of its own.
     InputState input_;
+
+    // This frame's answer to "who owns the keyboard and mouse", recomputed once per frame just before
+    // pushInput. Consumers READ this rather than re-deriving it from ImGui flags -- see
+    // InputOwnership.hpp for the eleven-spellings problem it replaces. Migrated consumer by consumer
+    // on purpose: one subtly wrong central function is worse than eleven independently wrong ones,
+    // because it is wrong for all of them at once.
+    editor::InputOwnership own_;
 
 #if AVER_WITH_IMGUI
     editor::UiRegistry uiReg_;   // what the editor drew this frame, by name

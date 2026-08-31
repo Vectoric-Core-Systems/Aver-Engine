@@ -42,8 +42,17 @@ extern "C" {
  * 4: added aver_fw_set_fluid_spawn_material_provider / aver_fw_fluid_spawn_material -- the material
  *    layer (real density, calibrated-fit viscosity, named presets) on top of minor 3's four raw
  *    solver knobs. Additive only, same reason: minor 3's own pair is UNCHANGED, so a host built
- *    against it still links and spawns exactly as before against this header. */
-#define AVER_FW_ABI_VERSION_MINOR 4
+ *    against it still links and spawns exactly as before against this header.
+ * 5: added the named-action layer (aver_fw_action_register/find/bind/clear_bindings/value2/held/
+ *    pressed/released), porting scripting/csharp/Aver.Framework/EnhancedInput.cs's algorithm onto
+ *    this ABI so a graph node or a C++ system can finally reach it, where before only a C# script
+ *    could; a raw-VK twin to the aver_fw_input_* pair above (aver_fw_input_set_vk/vk/vk_pressed/
+ *    vk_released) for the Win32 VK range the named AVER_FW_KEY_* enum cannot grow to cover; and the
+ *    gamepad ABI's SHAPE with deliberately no polling behind it yet (aver_fw_input_set_gamepad_
+ *    button/axis, aver_fw_input_gamepad_button/axis). Additive only, same reason as every entry
+ *    above: minor 4's own surface is UNCHANGED, so a host built against it still links and runs
+ *    unchanged against this header. */
+#define AVER_FW_ABI_VERSION_MINOR 5
 #define AVER_FW_ABI_VERSION \
     ((AVER_FW_ABI_VERSION_MAJOR << 16) | AVER_FW_ABI_VERSION_MINOR)
 
@@ -352,6 +361,173 @@ AVER_FW_ABI int32_t aver_fw_input_key_pressed(int32_t key);
 AVER_FW_ABI int32_t aver_fw_input_key_released(int32_t key);
 /* Writes {dx, dy, wheel} into out3. */
 AVER_FW_ABI void    aver_fw_input_mouse(float* out3);
+
+/* ---- NAMED ACTIONS (Enhanced Input), PORTED FROM Aver.Framework's EnhancedInput.cs ---------------
+ *
+ * scripting/csharp/Aver.Framework/EnhancedInput.cs is a complete, well-designed named-action layer
+ * -- InputAction (Digital/Axis1D/Axis2D), InputBinding, InputMappingContext, priority-stacked
+ * contexts with PER-LAYER KEY CONSUMPTION, a 0.15 dead zone, WasPressed/WasReleased -- with zero
+ * consumers and zero tests, because it is pure C# with no way for a graph node or a C++ system to
+ * reach it. Its ALGORITHM is ported here verbatim; its PLACEMENT (unreachable from anywhere but a
+ * C# script) is the defect this section fixes.
+ *
+ * THIS ABI HAS NO CONTEXT HANDLE. EnhancedInput.cs pushes whole InputMappingContext OBJECTS onto a
+ * priority-sorted stack (AddContext/RemoveContext), and every binding inside one object shares that
+ * object's priority. A C ABI has no object to push, so `contextPriority` on EVERY binding stands in
+ * for it -- two bindings sharing a `contextPriority` number ARE one context for consumption
+ * purposes, exactly as two bindings inside one InputMappingContext are (EnhancedInput.cs's own
+ * Update() comment: "Consumption is per layer, so two bindings in one context can share a key").
+ * There is consequently no partial "pop this one context" call either -- aver_fw_action_clear_
+ * bindings drops every binding at once, and a caller that wants to swap contexts re-binds everything
+ * after that, which is what RemoveContext+AddContext amount to from outside EnhancedInput.cs anyway.
+ *
+ * NO SEPARATE PER-FRAME "Update()" ENTRY POINT, unlike EnhancedInput.cs's own Update(): held/
+ * pressed/released/value2 below evaluate ON DEMAND, straight out of the SAME InputState cur/prev
+ * (and mouse/prevMouse) arrays aver_fw_input_key / aver_fw_input_key_pressed already read
+ * (FrameworkAbi.cpp). That is a hard requirement, not a style choice: an action bound to
+ * AVER_FW_KEY_W and a script calling aver_fw_input_key(AVER_FW_KEY_W) directly must NEVER be able to
+ * disagree about whether the key is down, and the only way to guarantee that is to have both read
+ * the identical bytes instead of two copies that could drift out of step. This is also why
+ * aver_fw_input_new_frame now rolls a `prevMouse` snapshot alongside `prev` (FrameworkAbi.cpp) --
+ * a mouse-sourced action needs a "was this channel already active last frame" answer to detect an
+ * edge on, the same thing a keyboard binding gets for free from cur/prev, and that snapshot is the
+ * one piece of state EnhancedInput.cs's Raw/Prev pair carried that plain InputState had no slot for.
+ *
+ * DEAD ZONE 0.15, PINNED to EnhancedInput.cs's own Active() check -- not a parameter, because the
+ * algorithm being ported is not configurable either; a caller who needs a different threshold is
+ * asking for a different feature, not a variant of this one. */
+#define AVER_FW_ACTION_DIGITAL 0
+#define AVER_FW_ACTION_AXIS1D  1
+#define AVER_FW_ACTION_AXIS2D  2
+
+/* Where one binding reads from -- pinned to EnhancedInput.cs's own InputSource enum.
+ * AVER_FW_ACTION_SRC_KEY reads an AVER_FW_KEY_* slot (the SAME enum aver_fw_input_key reads, never a
+ * raw VK -- see the RAW WIN32 VK section below for that ABI instead); the three MOUSE_* sources read
+ * whatever aver_fw_input_set_mouse published this frame (dx, dy, wheel respectively). */
+#define AVER_FW_ACTION_SRC_KEY         0
+#define AVER_FW_ACTION_SRC_MOUSE_X     1
+#define AVER_FW_ACTION_SRC_MOUSE_Y     2
+#define AVER_FW_ACTION_SRC_MOUSE_WHEEL 3
+
+/* Declares a named action, or returns the existing handle for `name` unchanged -- IDEMPOTENT BY
+ * NAME, the same convention aver_fw_class_declare uses above and for the same reason: a script's
+ * OnBeginPlay runs every time its actor spawns, and re-registering "Jump" on every possession must
+ * hand back the ORIGINAL action rather than silently multiplying it. 0 for a null/empty name or a
+ * valueType outside AVER_FW_ACTION_DIGITAL..AVER_FW_ACTION_AXIS2D. */
+AVER_FW_ABI int32_t aver_fw_action_register(const char* name, int32_t valueType);
+/* The handle for a previously registered action name, or 0. */
+AVER_FW_ABI int32_t aver_fw_action_find(const char* name);
+/* Adds one binding to `action`. `key` is an AVER_FW_KEY_* slot and is ignored when `source` is not
+ * AVER_FW_ACTION_SRC_KEY (EnhancedInput.cs's own BindMouseLook/BindMouseWheel likewise carry an
+ * unused Key.A placeholder on a mouse-sourced InputBinding -- ported as-is rather than inventing a
+ * second binding shape just to avoid one ignored parameter). `scale` multiplies the source value
+ * before it accumulates into the action -- this is how EnhancedInput.cs's BindAxis1D turns two
+ * opposed keys into one -1..1 axis: +1 scale on one key, -1 on the other, both landing in the same
+ * component. `component` selects which channel the value lands in: 0 = X, 1 = Y, anything else = Z
+ * (Z exists only because EnhancedInput.cs's own Accumulate() has a third case; nothing here binds
+ * it, and aver_fw_action_value2 does not read it back). `contextPriority` is the tier this section's
+ * own opening comment describes: a STRICTLY higher `contextPriority` binding on the SAME key blocks
+ * this one from ever seeing it, win or lose based on which context the caller considers "in front"
+ * this frame, not on declaration order. Silently ignored for an invalid action, an out-of-range
+ * source, or (when source is KEY) an out-of-range key -- matching aver_fw_input_set_key's own
+ * "out-of-range keys are ignored" convention a few lines above. */
+AVER_FW_ABI void    aver_fw_action_bind(int32_t action, int32_t source, int32_t key, float scale,
+                                        int32_t component, int32_t contextPriority);
+/* Drops every binding on every action. Registrations (and their handles) survive -- only the map
+ * from keys to actions is cleared, so a caller re-establishes a whole set of contexts by calling
+ * this once and then aver_fw_action_bind for each binding again, the same net effect as
+ * EnhancedInput.ClearContexts() followed by fresh AddContext calls. */
+AVER_FW_ABI void    aver_fw_action_clear_bindings(void);
+/* Writes {X, Y} of the action's CURRENT accumulated value into out2 -- EnhancedInput.cs's Value2D
+ * without the Z channel this ABI has no consumer for. Applies NO dead zone (same as Value2D/Raw) --
+ * that only gates held/pressed/released below. {0, 0} for an invalid handle. */
+AVER_FW_ABI void    aver_fw_action_value2(int32_t action, float* out2);
+/* 1 while the action is active (any channel's magnitude exceeds the 0.15 dead zone). 0 for an
+ * invalid handle. */
+AVER_FW_ABI int32_t aver_fw_action_held(int32_t action);
+/* 1 on the frame the action became active. 0 for an invalid handle. */
+AVER_FW_ABI int32_t aver_fw_action_pressed(int32_t action);
+/* 1 on the frame the action stopped being active. 0 for an invalid handle. */
+AVER_FW_ABI int32_t aver_fw_action_released(int32_t action);
+
+/* ---- RAW WIN32 VK, ADDITIVE TWIN TO AVER_FW_KEY_* -------------------------------------------------
+ *
+ * frameworkKeyFromVk (aver/framework/InputKeys.hpp) maps Win32 virtual keys onto the AVER_FW_KEY_*
+ * enum above, and that header's own comment says why most of the VK range falls through to -1: "the
+ * framework enum has 46 slots and Win32 has 256 codes, so F-keys, the numpad and every OEM key are
+ * simply unreachable by gameplay today." The SAME comment gives the reason the enum above cannot
+ * just grow to cover them: "The enum cannot be renumbered to fix it -- the InputKey graph node
+ * takes a literal integer, so saved graphs depend on the current numbering." A saved .ocgraph's
+ * InputKey node stores (say) AVER_FW_KEY_LEFT as whatever plain int that slot currently is; inserting
+ * a new named key anywhere but the enum's own tail would silently repoint every saved graph's
+ * InputKey node at the WRONG key, with no error at load.
+ *
+ * This is the escape hatch: a second, parallel cur/prev array indexed by the RAW vk code (0..255,
+ * matching aver::platform::InputState::kKeyCount -- modules/platform/include/aver/platform/
+ * InputState.hpp), published and read exactly like the named-slot pair above but never subject to
+ * the renumbering constraint, because nothing here is a graph node's literal operand -- a caller
+ * that wants F5 asks for vk 0x74 by value, not through an enum name that could move. */
+/* The Win32 VK range this twin covers, 0..(AVER_FW_VK_COUNT-1) -- Win32's own VK codes are 0..255. */
+#define AVER_FW_VK_COUNT 256
+/* Sets the held state of a raw Win32 VK. Out-of-range (outside 0..255) is ignored, matching
+ * aver_fw_input_set_key's own convention. Independent of aver_fw_input_set_key -- setting the named
+ * AVER_FW_KEY_A slot does NOT also set raw vk 'A', and vice versa; they are two separate arrays that
+ * happen to be fed the same physical key by whichever host publishes both. */
+AVER_FW_ABI void    aver_fw_input_set_vk(int32_t vk, int32_t down);
+/* 1 while the raw VK is held. */
+AVER_FW_ABI int32_t aver_fw_input_vk(int32_t vk);
+/* 1 on the frame the raw VK went down. */
+AVER_FW_ABI int32_t aver_fw_input_vk_pressed(int32_t vk);
+/* 1 on the frame the raw VK went up. */
+AVER_FW_ABI int32_t aver_fw_input_vk_released(int32_t vk);
+
+/* ---- GAMEPAD, SHAPE ONLY -- NO POLLING -------------------------------------------------------------
+ *
+ * State in, state out, like every other aver_fw_input_* pair above -- and DELIBERATELY NOTHING MORE.
+ * This ABI does not open XInput, does not poll a device, does not detect hotplug, and applies no
+ * dead zone of its own. That is not an oversight left for later in this same change; it is the
+ * decision, for two reasons:
+ *
+ *   - ZERO CONSUMERS. Nothing in this tree reads a gamepad today -- no graph node, no C# script, no
+ *     editor panel. Building a poller for a device nothing asks for is exactly the shape this
+ *     change's own brief calls out for EnhancedInput.cs itself: a complete layer with no way to
+ *     reach it is a liability (someone maintains it) without being an asset (nothing uses it).
+ *   - A REAL POLLER IS NOT A SMALL ADDITION. XInput hotplug (a controller can vanish mid-frame and
+ *     XInputGetState keeps returning stale data for that slot, not a trustworthy error), trigger and
+ *     stick dead zones (XInput's own guidance is a per-stick radius, a different shape of problem
+ *     than the flat 0.15 the action layer above uses -- not a constant the two can share), and
+ *     rumble are each their own scope. Shipping the shape now and the device binding later means the
+ *     day a consumer shows up, it is a provider plugged into an already-agreed ABI, not a
+ *     renegotiation of the ABI itself while a gameplay feature waits on it.
+ *
+ * Buttons and axes are modelled on XInput's own XINPUT_GAMEPAD_* bitmask and XINPUT_STATE thumbstick/
+ * trigger fields -- 14 buttons, 6 axes -- so that a future provider is a mechanical bit-to-index and
+ * int16-to-float unpack, not a redesign. `pad` is fixed at 0 for every call below, the same "only
+ * player 0 exists until split-screen does" precedent aver_fw_player_controller documents above --
+ * every function here rejects any other value exactly as that one rejects any other player index. */
+enum {
+    AVER_FW_GAMEPAD_DPAD_UP = 0, AVER_FW_GAMEPAD_DPAD_DOWN, AVER_FW_GAMEPAD_DPAD_LEFT,
+    AVER_FW_GAMEPAD_DPAD_RIGHT, AVER_FW_GAMEPAD_START, AVER_FW_GAMEPAD_BACK,
+    AVER_FW_GAMEPAD_LEFT_THUMB, AVER_FW_GAMEPAD_RIGHT_THUMB,
+    AVER_FW_GAMEPAD_LEFT_SHOULDER, AVER_FW_GAMEPAD_RIGHT_SHOULDER,
+    AVER_FW_GAMEPAD_A, AVER_FW_GAMEPAD_B, AVER_FW_GAMEPAD_X, AVER_FW_GAMEPAD_Y,
+    AVER_FW_GAMEPAD_BUTTON_COUNT
+};
+enum {
+    AVER_FW_GAMEPAD_AXIS_LEFT_X = 0, AVER_FW_GAMEPAD_AXIS_LEFT_Y,
+    AVER_FW_GAMEPAD_AXIS_RIGHT_X, AVER_FW_GAMEPAD_AXIS_RIGHT_Y,
+    AVER_FW_GAMEPAD_AXIS_LEFT_TRIGGER, AVER_FW_GAMEPAD_AXIS_RIGHT_TRIGGER,
+    AVER_FW_GAMEPAD_AXIS_COUNT
+};
+/* Sets one button's held state. `pad` must be 0; an out-of-range pad or button is ignored. */
+AVER_FW_ABI void    aver_fw_input_set_gamepad_button(int32_t pad, int32_t button, int32_t down);
+/* Sets one axis's value. Unclamped -- this ABI applies no dead zone (see this section's own header
+ * comment), so a future provider's raw stick/trigger reading crosses exactly as read. */
+AVER_FW_ABI void    aver_fw_input_set_gamepad_axis(int32_t pad, int32_t axis, float value);
+/* 1 while the button is held. 0 for `pad` != 0 or an out-of-range button. */
+AVER_FW_ABI int32_t aver_fw_input_gamepad_button(int32_t pad, int32_t button);
+/* The axis's last-set value. 0.0 for `pad` != 0 or an out-of-range axis. */
+AVER_FW_ABI float   aver_fw_input_gamepad_axis(int32_t pad, int32_t axis);
 
 /* Play view: a possessed character publishes the camera it wants and the editor reads it back.
  * One request (one local player) until split-screen exists. */

@@ -26,6 +26,16 @@ target_compile_definitions(OcGraphTest PRIVATE
 set_target_properties(OcGraphTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# OcInputTest -- the .ocinput input-binding-scheme format, and the OcProject INPUT.SCHEME key that
+# names one (see modules/formats/include/aver/formats/OcInput.hpp for the grammar and
+# modules/formats/include/aver/formats/OcProject.hpp for the new key). The OcProject assertions live
+# in this same executable rather than a separate one: the point of INPUT.SCHEME is the pairing of the
+# two formats, and neither Aver.Formats target dependency changes by testing them together.
+add_executable(OcInputTest src/OcInputTest.cpp)
+target_link_libraries(OcInputTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(OcInputTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # OcParticleTest -- the .ocparticle format (particles DECIDED 3). Round-tripping, unknown-record and
 # comment preservation, strict malformed-input rejection, and a real on-disk malformed file. Guarded
 # on the TARGET rather than on AVER_MODULE_PARTICLES for MaterialTest's exact reason below: an

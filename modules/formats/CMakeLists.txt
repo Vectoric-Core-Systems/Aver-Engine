@@ -9,6 +9,11 @@ aver_add_module(Aver.Formats
     src/OcAnim.cpp
     src/OcBeam.cpp
     src/OcGraph.cpp
+    # .ocinput -- named input actions and default key/mouse bindings (see OcInput.hpp for the format
+    # and why it needs no engine dependency). Beside the other AVR1-adjacent text readers for the same
+    # reason .ocparticle states for itself minus the module split: this one has no type from outside
+    # Aver.Formats to parse into at all (Aver.Framework is C#-only), so it never needed a third target.
+    src/OcInput.cpp
     src/OcMap.cpp
     src/OcMesh.cpp
     src/OcWorld.cpp

@@ -64,6 +64,8 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
             if (t.size() > 1) out.startMap = std::string(t[1]);
         } else if (equalsCI(key, "DRONE.GRAPH")) {
             if (t.size() > 1) out.droneGraph = std::string(t[1]);
+        } else if (equalsCI(key, "INPUT.SCHEME")) {
+            if (t.size() > 1) out.inputScheme = std::string(t[1]);
         } else if (equalsCI(key, "AUTHOR")) {
             out.author = std::string(restOfLine(line, key));
         } else if (equalsCI(key, "RENDER.GI")) {
@@ -154,7 +156,7 @@ bool isOwnedKey(std::string_view line) {
     const std::string_view l = trim(line);
     if (l.empty() || l[0] == '#') return false;
     static const char* kOwned[] = {
-        "NAME", "ENGINE", "CREATEDWITH", "CONTENT", "STARTMAP", "AUTHOR", "DRONE.GRAPH",
+        "NAME", "ENGINE", "CREATEDWITH", "CONTENT", "STARTMAP", "AUTHOR", "DRONE.GRAPH", "INPUT.SCHEME",
         "RENDER.GI", "RENDER.RAYTRACING", "RENDER.PATHTRACING",
         "RENDER.VOXELRES", "RENDER.GIINTENSITY", "RENDER.GIDISTANCE",
         "RENDER.RTSHADOWRAYS", "RENDER.RTPIXELSPERRAY", "RENDER.RTSHADOWDENOISE",
@@ -187,6 +189,11 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     // line the file had; without this it would strip and never replace, and saving a project would
     // quietly delete its drone. Empty writes nothing -- a project with no drone graph has no line.
     if (!d.droneGraph.empty())       { owned += "DRONE.GRAPH "; owned += d.droneGraph; owned += '\n'; }
+    // EMITTED BECAUSE IT IS AN OWNED KEY, for DRONE.GRAPH's exact reason immediately above: isOwnedKey
+    // lists INPUT.SCHEME, so leaving this out would strip whatever line the file had without ever
+    // replacing it -- silently deleting a project's input scheme reference on every save. Empty
+    // writes nothing -- a project with no default scheme has no line.
+    if (!d.inputScheme.empty())      { owned += "INPUT.SCHEME "; owned += d.inputScheme; owned += '\n'; }
     appendKey(owned, "RENDER.GI",          d.giQuality);
     appendKey(owned, "RENDER.RAYTRACING",  d.rayTracing);
     appendKey(owned, "RENDER.PATHTRACING", d.pathTracing);

@@ -1420,17 +1420,22 @@ public static class HostBridge
         catch (Exception ex) { DisableActor(live, "OnBeginPlay", ex); }
     }
 
-    // Ticks every actor in one group, and refreshes the frame's input before the first group.
+    // Ticks every actor in one group.
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static void DispTickAll(int group, float dt)
     {
         if (group < 0 || group >= TickGroupCount) return;
 
-        if (group == 0)
-        {
-            try { EnhancedInput.Update(); }
-            catch (Exception ex) { Emit(3, $"[bridge] input update threw: {ex.Message}"); }
-        }
+        // GROUP 0 USED TO ALSO CALL EnhancedInput.Update() HERE, refreshing every action's value
+        // before the first tick group ran so every actor in the frame agreed on a "was pressed" edge
+        // regardless of tick order. That call is GONE, not just relocated: EnhancedInput.cs is now a
+        // thin wrapper over aver_fw_action_held/pressed/released/value2 (framework_abi.h's NAMED
+        // ACTIONS section, minor 5), which read InputState's cur/prev/mouse/prevMouse ON DEMAND --
+        // the SAME bytes aver_fw_input_key already reads -- so there is no separate per-frame copy
+        // left for this dispatcher to roll. The cross-actor-agreement guarantee above still holds; it
+        // now falls out of every actor reading the identical native state instead of a C#-side
+        // snapshot this method used to take once per frame. See EnhancedInput.cs's own top-of-file
+        // comment for the rest of the reasoning.
         // A SNAPSHOT, not the live list. The walk used to index s_tickBuckets[group] directly, and
         // DispUnbind REMOVES from that same list (:808) -- so an actor destroying an actor during
         // OnTick shifted every later element down one, and the next ++i stepped straight over

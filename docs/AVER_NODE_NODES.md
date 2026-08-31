@@ -386,10 +386,24 @@ each is a behaviour change to nodes that change did not otherwise touch.
 | `InputKey` | `key` (in, int), `down` (out, bool) | — | D | Whether a given key code is currently held. |
 | `InputKeyPressed` | `key` (in, int), `triggered` (out, bool) | — | D | True only on the frame the key went **down**. |
 | `InputKeyReleased` | `key` (in, int), `triggered` (out, bool) | — | D | True only on the frame the key came **up**. |
+| `InputAction` | `action` (in, int), `x`/`y` (out, float), `held` (out, bool) | — | D | A NAMED action's current value. `x`/`y` carry the axis components; a digital action reports 1/0 in `x`. |
+| `InputActionPressed` | `action` (in, int), `triggered` (out, bool) | — | D | True only on the frame the action went **down**. |
+| `InputActionReleased` | `action` (in, int), `triggered` (out, bool) | — | D | True only on the frame the action came **up**. |
 
 `MoveAxis` has no `z` pin — `Input.MoveAxis`'s own Z component is hardcoded `0` in
 `Aver.Framework/Input.cs`, so a pin that could only ever read a compile-time constant would add
 noise, not information (`OcGraphParser.cs:883-886`).
+
+**THE `action` PIN TAKES A HANDLE, NOT A NAME.** The graph pin vocabulary has no string type, so an
+action is addressed by the integer `aver_fw_action_register`/`aver_fw_action_find` returned -- exactly
+as `InputKey`'s `key` pin takes a literal key code rather than `"W"`. Register the action once (from
+the scheme asset or from C#) and feed the handle in through a `ConstInt`. A name pin would need a
+string PinType across the parser, both compiler paths and the palette, which is a larger change than
+this node needed.
+
+**PREFER `InputAction` OVER `InputKey` for anything a player should be able to rebind** -- that is the
+whole point of the named layer. `InputKey` remains correct for a genuinely fixed key, and for content
+authored before actions existed; nothing about it changed.
 
 **`InputKey` answers a STATE and the other two answer an EVENT**, and the output pin names say so:
 `down` versus `triggered`. `down` is true every frame a key is held, which is the wrong answer for

@@ -62,6 +62,18 @@ void publishInput(const InputState& in, bool focused, std::string* echo) {
         held[AVER_FW_KEY_MOUSE_MIDDLE] = in.mouseHeld(2);
     }
 
+    // The raw Win32 VK twin (framework_abi.h's own RAW WIN32 VK section) gets the SAME "unfocused
+    // means every key publishes as up" discipline as the named slots just above, and for the exact
+    // same reason this function's own header comment spells out: an early return, or any path that
+    // skips a slot instead of writing an explicit 0 to it, leaves that slot frozen at whatever it
+    // last was while aver_fw_tick keeps running. That bug already bit the named enum once
+    // (InputBridgeTest asserts against it there); reintroducing it for the 200-odd VKs the named
+    // enum cannot reach would be the same defect wearing a new array. `focused &&` is ANDed into the
+    // value itself, not a guard around the loop, so every one of the AVER_FW_VK_COUNT calls below
+    // still runs and publishes an explicit answer every frame, focused or not.
+    for (i32 vk = 0; vk < static_cast<i32>(InputState::kKeyCount); ++vk)
+        aver_fw_input_set_vk(vk, (focused && in.keyHeld(vk)) ? 1 : 0);
+
     std::string names;
     for (i32 k = 0; k < AVER_FW_KEY_COUNT; ++k) {
         aver_fw_input_set_key(k, held[k] ? 1 : 0);

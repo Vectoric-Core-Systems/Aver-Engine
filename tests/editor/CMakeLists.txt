@@ -212,3 +212,22 @@ if(TARGET Aver.Render.PBR)
   endif()
   set_target_properties(DumpClusterPs PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# InputOwnershipTest -- the editor's input arbitration table.
+#
+# Same EditorPrefsTest precedent as above (Sandbox is add_executable-only, so this compiles the sandbox
+# translation units directly rather than linking a library half that does not exist). It needs
+# It links NOTHING from the keybind system: editor::Scope moved into InputOwnership.hpp precisely so
+# this target would not have to drag in EditorKeybinds.hpp, which is whole-file `#if AVER_WITH_IMGUI`.
+#
+# NO ImGui, deliberately and by construction: resolveInputOwnership takes a struct of plain bools and
+# returns one, precisely so the decision that used to be spread across ~11 ImGui-reading call sites in
+# SandboxApp.cpp could be tested without a window, a device or an ImGui context. If this target ever
+# needs AVER_WITH_IMGUI, the function has stopped being pure and the extraction has been undone.
+add_executable(InputOwnershipTest
+  src/InputOwnershipTest.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/InputOwnership.cpp)
+target_include_directories(InputOwnershipTest PRIVATE
+  ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(InputOwnershipTest PRIVATE Aver.Core)
+set_target_properties(InputOwnershipTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

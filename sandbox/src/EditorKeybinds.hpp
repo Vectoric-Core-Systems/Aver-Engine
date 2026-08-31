@@ -10,6 +10,8 @@
 #include "imgui.h"
 
 #include "aver/core/Types.hpp"
+// For editor::Scope, which this header used to define itself.
+#include "InputOwnership.hpp"
 
 #include <array>
 #include <string>
@@ -40,18 +42,9 @@ enum class CommandId : u8 {
 };
 inline constexpr usize kCommandCount = static_cast<usize>(CommandId::Count);
 
-// Which editor context(s) a command's chord is live in. Two commands sharing a chord is only a REAL
-// conflict -- the kind that leaves "which command does this key mean" genuinely ambiguous -- when
-// their scopes overlap. Tool.Select (1) and Sculpt.Raise (1) never can, because the editor is only
-// ever in Object mode or Landscape mode, never both; Play.Stop (Escape) and Drawer.Dismiss (Escape)
-// never can, because a play session and an open drawer are different UI states. See conflictWith().
-enum Scope : u32 {
-    kScopeObjectMode    = 1u << 0,
-    kScopeLandscapeMode = 1u << 1,
-    kScopePlaySession   = 1u << 2,
-    kScopeDrawerOpen    = 1u << 3,
-    kScopeGlobalUI      = 1u << 4,
-};
+// Scope moved to InputOwnership.hpp -- see that header for why (this file is whole-file
+// `#if AVER_WITH_IMGUI`, and the arbitration table that now hands out the live scope mask must be
+// testable with no ImGui at all). Same namespace, same values, one definition.
 
 // One command's fixed identity: its persisted key, its label, its default chord, which scope(s) it
 // fires in, and how its modifiers and repeat behaviour are checked. checkCtrl/checkShift/repeatAllowed

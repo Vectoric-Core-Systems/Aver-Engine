@@ -1867,6 +1867,11 @@ public class OcGraphParser
                 // side effect), so -- like GetField -- it is safe to pull as often as anything wants,
                 // through either compiler, with no _execLocals caching needed. See
                 // GraphCompiler.EmitInputKey.
+                //
+                // InputAction, below, is this node's newer NAMED sibling -- prefer it for anything a
+                // project wants to REBIND without touching the graph. This node stays for the literal
+                // key code case (and for content authored before InputAction existed) -- see
+                // "InputAction / InputActionPressed / InputActionReleased"'s own comment for the trade.
                 node.Pins.Add(new Pin { Name = "key", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "down", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;
@@ -1886,6 +1891,58 @@ public class OcGraphParser
             case "inputkeypressed":
             case "inputkeyreleased":
                 node.Pins.Add(new Pin { Name = "key", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "triggered", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            // ---- InputAction / InputActionPressed / InputActionReleased ---------------------------
+            // THE PREFERRED PATH over InputKey/MouseDelta/MoveAxis above, for anything a project wants
+            // REBINDABLE rather than baked to a literal key or a raw device axis: aver_fw_action_*
+            // (framework_abi.h's Named Actions section, minor 5 -- aver_fw_action_register/find/bind/
+            // value2/held/pressed/released) reads whatever mix of keys/mouse a project's own setup code
+            // bound to a name via aver_fw_action_bind, so a graph asks "did the player Jump" once and
+            // never again cares which physical key that project -- or a later rebinding -- happens to
+            // use.
+            //
+            // `action` IS AN INT HANDLE, NOT A NAME, and that is a real limitation worth spelling out
+            // rather than leaving implicit. PinType has no String member (Graph.cs's own PinType enum:
+            // Float/Int/Bool/Exec only), and the established "author-chosen string, resolved by NAME at
+            // invocation" mechanism this format already has for exactly this situation -- Spawn's
+            // class=, FireEvent's event=, GetAnimCurve's curve= -- lives on a dedicated Node property
+            // (Graph.cs's ClassName/EventName/CurveName, set from a NODE-line attribute), and adding one
+            // more of those means editing Graph.cs and this parser's key=value attribute loop both --
+            // Graph.cs is a file this slice does not own (see the file's own exclusive-ownership list).
+            // So, like InputKey's own `key` pin above, `action` is a plain Int the graph must already
+            // hold a HANDLE for: the value aver_fw_action_register/_find returned, NOT the string that
+            // was registered.
+            //
+            // UNLIKE a VK_/AVER_FW_KEY_* code, that handle is NOT a stable compile-time constant:
+            // aver_fw_action_register appends to a vector and hands back its 1-based index
+            // (FrameworkAbi.cpp:1245-1253's actionDefs()/aver_fw_action_register, idempotent by name --
+            // FrameworkAbi.cpp:1234-1240's aver_fw_action_find), so the number assigned to "Jump"
+            // depends on how many OTHER actions a project's own code had already registered earlier
+            // that same run. A literal Const int authored into a .ocgraph file today is therefore only
+            // as reliable as that registration order staying fixed -- see GraphCompiler.EmitInputAction's
+            // own comment for the full accounting and what a real name pin would need instead.
+            //
+            // Pure data, no exec pins -- like InputKey just above, NOT like MouseDelta/MoveAxis below:
+            // both native calls behind InputAction (aver_fw_action_value2, aver_fw_action_held) are
+            // array-scan reads over actionBindings() with no side effect, the same "cheap enough to
+            // redundantly pull" cost class GetForward's own comment already accepts for a six-output
+            // read -- not a per-call cost that would justify MouseDelta's _execLocals caching shape.
+            case "inputaction":
+                node.Pins.Add(new Pin { Name = "action", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "x", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "y", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "held", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            // InputActionPressed / InputActionReleased: the action-level twin of InputKeyPressed/
+            // InputKeyReleased above -- identical reasoning, identical "triggered" pin name (an EVENT,
+            // not a STATE -- see that case's own comment), one layer up over aver_fw_action_pressed/
+            // _released instead of aver_fw_input_key_pressed/_released.
+            case "inputactionpressed":
+            case "inputactionreleased":
+                node.Pins.Add(new Pin { Name = "action", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "triggered", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;
 
@@ -1930,6 +1987,14 @@ public class OcGraphParser
             // one frame's input costs exactly one native call regardless of how many output pins a
             // graph reads, and the PUSH compiler only has one mechanism that guarantees that:
             // _execLocals caching keyed to a single exec visit, exactly like Raycast's.
+            //
+            // THE LOW-LEVEL PATH, now that InputAction exists (see that case's own comment, below
+            // InputKeyPressed/InputKeyReleased): these two read the device DIRECTLY, with no name and
+            // no rebinding in between -- exactly right for a raw camera look or a debug probe, and
+            // exactly wrong for anything a project wants a player (or a future rebinding UI) to
+            // reconfigure, where InputAction is the one to reach for instead. Behaviour here is
+            // UNCHANGED by InputAction's addition; existing .ocgraph content wires MouseDelta/MoveAxis
+            // directly and must keep doing exactly what it always did.
 
             case "mousedelta":
                 // Zero data inputs -- nothing to read before the call. "then" (not "exec", for the

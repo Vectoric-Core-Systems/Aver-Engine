@@ -438,6 +438,11 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     //    neither read is expensive the way a physics query is. Pin sets copied field for field from
     //    OcGraphParser.AddDefaultPins's "mousedelta"/"moveaxis" cases. MoveAxis has no "z" pin --
     //    Input.MoveAxis's own Z is hardcoded 0 always (Aver.Framework/Input.cs).
+    //
+    //    THE LOW-LEVEL PATH, now that InputAction exists below: these read the device directly, with
+    //    no name and no rebinding in between -- right for a raw camera look, wrong for anything a
+    //    project wants a player (or a rebinding UI) to reconfigure, where InputAction is the one to
+    //    reach for instead. Unchanged by InputAction's addition.
     t.push_back({"MouseDelta", "Mouse Delta", "Input", {
         pin("exec", "exec", false), pin("then", "exec", true),
         pin("deltaX", "float", true), pin("deltaY", "float", true), pin("wheel", "float", true)}});
@@ -463,6 +468,29 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         pin("key", "int", false), pin("triggered", "bool", true)}});
     t.push_back({"InputKeyReleased", "Input Key Released", "Input", {
         pin("key", "int", false), pin("triggered", "bool", true)}});
+    // -- InputAction / InputActionPressed / InputActionReleased: the PREFERRED input path over
+    //    InputKey/MouseDelta/MoveAxis above -- one named, rebindable ACTION (aver_fw_action_register/
+    //    bind/value2/held/pressed/released, framework_abi.h's Named Actions section, minor 5) instead
+    //    of a literal key code or a raw device axis. `action` is a HANDLE -- the int
+    //    aver_fw_action_register/_find returned -- NOT a name: this format has no string pin (PinType
+    //    is Float/Int/Bool/Exec) and the name-by-attribute mechanism ClassName/EventName/CurveName use
+    //    lives on Node in Graph.cs, outside this slice's owned files. See
+    //    scripting/csharp/Aver.Graph/GraphCompiler.cs's EmitInputAction comment for the full accounting
+    //    -- including why that makes the handle less stable to author than InputKey's own "key" int --
+    //    and what a future name pin would need.
+    //
+    //    InputAction mirrors InputKey's shape (NO exec pins -- both native calls behind it,
+    //    aver_fw_action_value2/_held, are pure array-scan reads with no side effect, cheap enough to
+    //    redundantly pull the same way GetForward's six-output read already is) but widens InputKey's
+    //    single `down` bool into the float2 + held an action (digital, 1D or 2D axis alike) can carry.
+    //    InputActionPressed/Released are InputKeyPressed/Released's exact twins, one level up. --
+    t.push_back({"InputAction", "Input Action", "Input", {
+        pin("action", "int", false),
+        pin("x", "float", true), pin("y", "float", true), pin("held", "bool", true)}});
+    t.push_back({"InputActionPressed", "Input Action Pressed", "Input", {
+        pin("action", "int", false), pin("triggered", "bool", true)}});
+    t.push_back({"InputActionReleased", "Input Action Released", "Input", {
+        pin("action", "int", false), pin("triggered", "bool", true)}});
     // -- Select: pick one of two values by a bool. Pure data, no exec pins. In the PULL compiler BOTH
     //    arms are computed regardless of cond -- see GraphCompiler.EmitSelect, which explains why
     //    that is correct and not a missing short-circuit. --
