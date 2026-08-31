@@ -52,13 +52,28 @@ struct PerFrameCB {
     f32 fogInscatterRef[4]; // rgb averFogInscatterRef's answer, baked once per frame on the CPU
     f32 furnace[4];      // x on, y radiance -- the white-furnace energy oracle
     f32 skySh[9][4];     // nine L2 SH coefficients of the sky, rgb; w unused
+    // THE CLOCK, and it lives HERE rather than anywhere more obvious for a reason worth stating.
+    //
+    // Animated materials need a time value, and there was none: a material graph is emitted into
+    // EVERY shader that shades a surface, so it may only read constants that exist identically in
+    // all of them. b2 is per-DRAW authored material data (and MaterialConstants has no slack left);
+    // b4 is per-FEATURE and each feature declares a different struct there -- Voxi, Water and
+    // ActorPreview disagree about what b4 even is. b0 is the one block the backend binds on every
+    // pipeline bind, for every shader, which makes it the only correct home.
+    //
+    // x IS WRAPPED, and that is not a detail: sin(t) loses its meaning once t is large enough that
+    // consecutive float32 values skip past a period. Wrapping to an hour keeps ~0.2 ms of
+    // resolution forever, and any ripple whose period divides the wrap is seamless across it.
+    // y is the raw unwrapped seconds for anything that genuinely wants monotonic time and can
+    // accept the precision loss; z is the frame delta.
+    f32 time[4];         // x seconds wrapped to 3600, y seconds raw, z delta seconds, w unused
 };
 
 // A REAL SIZE, not just an alignment. The `% 16 == 0` check both backends carried is necessary and
 // nowhere near sufficient: every legal edit to this struct keeps it a multiple of 16, so the one
 // assertion guarding the layout could not fail for the change most likely to break it. This number
 // moving is the signal that shared_prelude.hlsl's cbuffer has to move with it.
-static_assert(sizeof(PerFrameCB) == 592, "cbuffer PerFrame in shaders/shared_prelude.hlsl mirrors this");
+static_assert(sizeof(PerFrameCB) == 608, "cbuffer PerFrame in shaders/shared_prelude.hlsl mirrors this");
 static_assert(sizeof(PerFrameCB) % 16 == 0, "a constant buffer's rows are float4s");
 
 // Spot checks at the boundaries a reader would look for, in the shape MaterialTest.cpp proved out:
@@ -71,7 +86,8 @@ static_assert(sizeof(PerFrameCB) % 16 == 0, "a constant buffer's rows are float4
 static_assert(offsetof(PerFrameCB, camPos)    == 128, "camPos follows the two matrices");
 static_assert(offsetof(PerFrameCB, fogColor)  == 224, "fogColor at 224");
 static_assert(offsetof(PerFrameCB, atmoMie)   == 336, "atmoMie at 336");
-static_assert(offsetof(PerFrameCB, skySh)     == 448, "the SH block is last");
+static_assert(offsetof(PerFrameCB, skySh)     == 448, "the SH block sits at 448");
+static_assert(offsetof(PerFrameCB, time)      == 592, "time is last, appended after the SH block");
 
 // Constants for every post pass. Mirrors `cbuffer AverPost : register(b0)` in rhi::postShaderSource().
 struct PostCB {

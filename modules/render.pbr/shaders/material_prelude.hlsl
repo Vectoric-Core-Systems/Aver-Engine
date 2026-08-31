@@ -250,6 +250,12 @@ struct AverSurface {
     // on every ray-driven pixel. sssWeight/sssRadius above are on the surface for exactly this reason.
     float  coatWeight, coatRough, coatF0;
 #endif
+    // THE VOLUME THIS SURFACE BELONGS TO, carried on the surface rather than read from the material
+    // cbuffer at the point of use. That indirection is the point: a graph may have overridden these
+    // per pixel, and a consumer reading gAttenuationColor directly would silently get the authored
+    // constant back and quietly ignore the graph. Same reason sssWeight/sssRadius sit here.
+    float3 attenuationColor;
+    float  attenuationDistance;
     // Carried through from AverVertex -- see its own comment. Read only by the transmissive branch
     // below, for total internal reflection.
     bool   backFace;
@@ -470,6 +476,14 @@ struct AverAuthored {
     // is how one mesh becomes a window with a frosted band, or a bottle with a label.
     float  ior;
     float  transmission;
+    // THE VOLUME, AUTHORED PER PIXEL RATHER THAN PER MATERIAL. These mirror gAttenuationColor and
+    // gAttenuationDistance, and they are here so a GRAPH can drive them -- which is the whole
+    // difference between "this engine ships a green glass" and "anyone can author one". The tint of
+    // real glass is its iron content and its thickness, and both vary across a pane; a constant
+    // could express neither. attenuationDistance <= 0 still means "no volume", exactly as the
+    // constant did, so every material authored before this existed is unaffected.
+    float3 attenuationColor;
+    float  attenuationDistance;
     // THE COAT TRIPLE IS NOT BEHIND AVER_LAYERED_BSDF, and that is deliberate even though the only
     // thing that reads it is. Putting it behind the define would make the shape of AverAuthored --
     // and therefore the generated material-graph HLSL, which assigns into it by field name --
@@ -504,6 +518,8 @@ AverAuthored averStockAuthored(float2 uv, float3 geoN) {
     a.subsurfaceRadius = (gMaterialFlags & AVER_MAT_SUBSURFACE) ? saturate(gSubsurfaceRadius) : 0.0;
     a.ior              = gIor;
     a.transmission     = gTransmission;
+    a.attenuationColor    = gAttenuationColor;
+    a.attenuationDistance = gAttenuationDistance;
     // Gated here once, like subsurface above, and for the same reason: a graph driving the pin
     // writes after this and must not then be vetoed by the flag.
     a.coatWeight       = (gMaterialFlags & AVER_MAT_COAT) ? saturate(gCoatWeight)    : 0.0;
@@ -568,6 +584,8 @@ AverSurface averBuildSurface(AverVertex v, AverLight l, AverAuthored a, float2 u
     s.kdAlbedo = (1.0 - s.metallic) * s.albedo * (1.0 - saturate(a.transmission));
     // GATED ON THE FLAG, not on the float, so the whole subsurface branch folds away for every
     // material that does not want it.
+    s.attenuationColor    = a.attenuationColor;
+    s.attenuationDistance = a.attenuationDistance;
     s.backFace  = v.backFace;
     // FROM THE AUTHORED STRUCT, not from the cbuffer. Reading gSubsurfaceWeight here instead would
     // work identically for the stock material and silently ignore every material graph that drove

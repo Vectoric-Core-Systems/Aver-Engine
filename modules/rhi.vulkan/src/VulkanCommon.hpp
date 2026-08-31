@@ -1381,6 +1381,12 @@ public:
     bool camera(f32 viewProj[16], f32 invViewProj[16], f32 cameraPos[3]) const override;
     bool sceneViewport(f32 rect[4]) const override;
     void setLight(const f32 dirToLight[3], const f32 color[3], f32 ambient) override;
+    void setFrameTime(f32 seconds, f32 deltaSeconds) override {
+        frameCB_.time[0] = std::fmod(seconds, 3600.0f);   // see the D3D12 twin for why it wraps
+        frameCB_.time[1] = seconds;
+        frameCB_.time[2] = deltaSeconds;
+        frameCB_.time[3] = 0.0f;
+    }
     void setSkyAtmosphere(const SkyAtmosphere& s) override;
     SkyAtmosphere skyAtmosphere() const override { return sky_; }
     void setPostProcess(const PostSettings& p) override { post_ = p; }

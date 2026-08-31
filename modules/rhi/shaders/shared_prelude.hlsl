@@ -48,6 +48,9 @@ cbuffer PerFrame : register(AVER_CB_JOIN(b, AVER_FRAME_CB)) {
     // the same reason: nothing about them varies per pixel. Only written while the PHYSICAL
     // atmosphere is on; averSkyIrradiance reads them only under averAtmoOn() for that reason.
     float4   gSkySh[9];
+    // x seconds wrapped to 3600, y seconds raw, z delta seconds. See PerFrameCB::time for why the
+    // clock lives in THIS block and not in the material or feature ones, and why x is wrapped.
+    float4   gTime;
 };
 // The per-draw block: transform plus shading constants. 32 dwords, matching kObjectConstantDwords.
 cbuffer PerObject : register(AVER_CB_JOIN(b, AVER_OBJECT_CB)) {

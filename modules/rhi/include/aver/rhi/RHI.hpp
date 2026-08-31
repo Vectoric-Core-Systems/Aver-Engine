@@ -535,6 +535,13 @@ public:
     // Sets the directional light and the ambient term.
     virtual void setLight(const f32 dirToLight[3], const f32 color[3], f32 ambient) { (void)dirToLight; (void)color; (void)ambient; }
     // Sets the sky, the sun and the air. Supersedes setLight for the sun.
+    // The engine's clock, forwarded into PerFrameCB::time so that ANY shader can animate.
+    //
+    // Separate from SkyAtmosphere::cloudTime, which is the cloud layer's own drift and is authored
+    // weather rather than a wall clock -- a level that pauses its sky must not thereby freeze every
+    // animated material in it. `seconds` is raw and monotonic; the backend does the wrapping the
+    // shader needs (see PerFrameCB::time for why it wraps at all).
+    virtual void setFrameTime(f32 seconds, f32 deltaSeconds) { (void)seconds; (void)deltaSeconds; }
     virtual void setSkyAtmosphere(const SkyAtmosphere& s) { (void)s; }
     virtual SkyAtmosphere skyAtmosphere() const { return {}; }
     // Sets the camera post-processing chain.

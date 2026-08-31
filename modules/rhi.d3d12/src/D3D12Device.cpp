@@ -866,6 +866,15 @@ public:
         frameCB_.lightColor[0] = color[0]; frameCB_.lightColor[1] = color[1]; frameCB_.lightColor[2] = color[2]; frameCB_.lightColor[3] = 0;
         frameCB_.ambient[0] = frameCB_.ambient[1] = frameCB_.ambient[2] = ambient; frameCB_.ambient[3] = 0;
     }
+    void setFrameTime(f32 seconds, f32 deltaSeconds) override {
+        // Wrapped on the way IN, so no shader has to remember to do it. 3600 keeps a float32 at
+        // roughly 0.2 ms of resolution indefinitely; a ripple whose period divides an hour crosses
+        // the wrap without a seam.
+        frameCB_.time[0] = std::fmod(seconds, 3600.0f);
+        frameCB_.time[1] = seconds;
+        frameCB_.time[2] = deltaSeconds;
+        frameCB_.time[3] = 0.0f;
+    }
     void setSkyAtmosphere(const SkyAtmosphere& s) override;
     SkyAtmosphere skyAtmosphere() const override { return sky_; }
     // Packs the physical atmosphere fields, and the four it derives, into the per-frame block.

@@ -2410,13 +2410,17 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
         //
         // Absorbing once, on entry, is also the physically right count: light crossing a pane is
         // attenuated by its thickness once, not once per surface it passes through.
-        if (gAttenuationDistance > 0.0 && !s.backFace) {
+        // FROM THE SURFACE, NOT FROM THE CBUFFER, and that one-word change is what makes the volume
+        // authorable. A material GRAPH can now drive attenuationColor/attenuationDistance per pixel;
+        // reading gAttenuationColor here would fetch the authored constant straight back and discard
+        // whatever the graph decided, silently and with the graph looking perfectly correct.
+        if (s.attenuationDistance > 0.0 && !s.backFace) {
             // Measured ONCE and used twice: the absorption needs it for Beer-Lambert, and the
             // refraction needs it to know how far along the bent path the ray travels before it
             // leaves. Tracing it a second time would be the same ray for the same answer.
             const float volThick = averVolumeThickness(i.wpos, N, -s.V);
             const float3 volT = averVolumeTransmittance(
-                gAttenuationColor, gAttenuationDistance, volThick);
+                s.attenuationColor, s.attenuationDistance, volThick);
             // THE BACKDROP PATH, which is what lets attenuationColor's HUE reach the picture at all.
         // averBlendedOutputVolume (the fallback inside this call) can only make the surface go
         // opaque faster in the channels it absorbs; it cannot tint the background, because one
