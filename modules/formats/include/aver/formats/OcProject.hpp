@@ -27,6 +27,20 @@ struct ProjectDesc {
     std::string createdWith;            // CREATEDWITH <version>
     std::string contentRoot = "Content"; // CONTENT, relative to the manifest
     std::string startMap;               // STARTMAP, relative to the content root
+    // DRONE.GRAPH -- the .ocgraph that flies this project's drone, relative to the content root.
+    //
+    // EXISTS BECAUSE THE DRONE COULD ONLY EVER BE FLOWN FROM A COMMAND LINE. The graph that drives
+    // it was settable by --drone-graph and by nothing else: no UI, no project key. So starting the
+    // drone from the editor -- from Play, or from the Drone window -- spawned it with no graph and
+    // it sat perfectly still, which is what "the drone is glitched" looks like from the outside. Its
+    // own warning said so ("It will sit still"), into a log nobody reading the viewport was watching.
+    //
+    // A PROJECT KEY RATHER THAN A CONVENTIONAL FILENAME, deliberately. setDroneGraph's comment is
+    // right that the engine must not assume a project contains a file with any particular name --
+    // so the project says which file, and a project that says nothing still gets a drone that sits
+    // still, but now because it was never told where to fly rather than because there was no way to
+    // tell it.
+    std::string droneGraph;             // DRONE.GRAPH, relative to the content root; may be empty
     std::string author;                 // AUTHOR (free text, rest of line)
 
     // RENDER.*, all -1 when the manifest did not state them.

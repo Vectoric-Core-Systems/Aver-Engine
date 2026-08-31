@@ -16128,12 +16128,18 @@ private:
         // every project contains a file of that name -- one sample project's content compiled into
         // the editor. A graph-driven actor is an engine feature; WHICH graph drives it is content,
         // the same way the editor does not know what any project's meshes are called.
+        // THE PROJECT'S OWN ANSWER FIRST, then the CLI override. Until DRONE.GRAPH existed this read
+        // droneGraphRel_ alone, which only --drone-graph could set -- so starting the drone from the
+        // editor, from Play or from the Drone window, spawned it with no graph and it sat perfectly
+        // still. The principle in the comment above is right and is kept: the ENGINE still assumes
+        // nothing about filenames. The PROJECT names the file, which is content describing itself.
+        const std::string& droneRel = !droneGraphRel_.empty() ? droneGraphRel_ : project_.droneGraph;
         const std::string graphPath =
-            droneGraphRel_.empty() ? std::string()
-                                   : project_.contentDir() + "\\" + droneGraphRel_;
+            droneRel.empty() ? std::string() : project_.contentDir() + "\\" + droneRel;
         if (graphPath.empty()) {
-            AVER_WARN("[Drone] entity #{} spawned with NO graph: pass --drone-graph <path relative "
-                      "to Content>, e.g. --drone-graph Scripts\\MyActor.ocgraph. It will sit still.",
+            AVER_WARN("[Drone] entity #{} spawned with NO graph, so it will sit still. Give the "
+                      "project a DRONE.GRAPH line (e.g. `DRONE.GRAPH Scripts/Drone.ocgraph`), or "
+                      "pass --drone-graph <path relative to Content>.",
                       (u32)e);
             droneGraphLoaded_ = false;
         } else {
