@@ -3108,14 +3108,40 @@ public:
             // hands you a plain camera, and a camera you have to hold a mouse button to walk is not
             // what anyone means by that. Mouse LOOK still wants the button: capturing the cursor for
             // the whole session would trap it in the viewport, and an editor has panels to reach.
-            if ((flying_ || spectatorPlay_) && !io.WantCaptureKeyboard) {
+            if ((flying_ || defaultPawnPlay_) && !io.WantCaptureKeyboard) {
                 const f32 sp = flySpeed_ * t.dt;
-                if (ImGui::IsKeyDown(ImGuiKey_W)) camPos_ += fwd * sp;
-                if (ImGui::IsKeyDown(ImGuiKey_S)) camPos_ -= fwd * sp;
-                if (ImGui::IsKeyDown(ImGuiKey_D)) camPos_ += right * sp;
-                if (ImGui::IsKeyDown(ImGuiKey_A)) camPos_ -= right * sp;
-                if (ImGui::IsKeyDown(ImGuiKey_E)) camPos_ += up * sp;
-                if (ImGui::IsKeyDown(ImGuiKey_Q)) camPos_ -= up * sp;
+                Vec3 step{0, 0, 0};
+                if (ImGui::IsKeyDown(ImGuiKey_W)) step += fwd * sp;
+                if (ImGui::IsKeyDown(ImGuiKey_S)) step -= fwd * sp;
+                if (ImGui::IsKeyDown(ImGuiKey_D)) step += right * sp;
+                if (ImGui::IsKeyDown(ImGuiKey_A)) step -= right * sp;
+                if (ImGui::IsKeyDown(ImGuiKey_E)) step += up * sp;
+                if (ImGui::IsKeyDown(ImGuiKey_Q)) step -= up * sp;
+#if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE
+                // MOVE THE PAWN, NOT THE CAMERA, while the engine's default pawn is possessed.
+                // drivePlayCamera() rewrites the view from the possessed pawn every frame, so a
+                // camPos_ nudged here would be overwritten before it was ever seen -- the input
+                // would look ignored. Driving the pawn puts the movement where the follow reads it,
+                // which is also what makes this a PAWN rather than a camera wearing one as a hat.
+                if (defaultPawnPlay_) {
+                    const int32_t pn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
+                    if (pn) {
+                        const scene::Entity pe = static_cast<scene::Entity>(static_cast<uint32_t>(pn));
+                        scene::World& pw = scene::World::instance();
+                        if (pw.valid(pe)) {
+                            const Transform& cur = pw.localTransform(pe);
+                            pw.setLocalPosition(pe, cur.position + step);
+                            // Yaw about world up, then pitch about the pawn's own right: the same two
+                            // angles the viewport camera uses, so looking with RMB turns the pawn and
+                            // the follow puts the view exactly where the editor camera would have been.
+                            const Quat qy = Quat::fromAxisAngle(Vec3{0, 0, 1}, yaw_);
+                            const Quat qp = Quat::fromAxisAngle(Vec3{0, 1, 0}, -pitch_);
+                            pw.setLocalRotation(pe, qy * qp);
+                        }
+                    }
+                } else
+#endif
+                camPos_ += step;
             } else if (!overUI) {
                 if (io.MouseWheel != 0.0f) camPos_ += fwd * io.MouseWheel * (flySpeed_ * 0.15f);
                 if (io.MouseDown[2]) { camPos_ -= right * io.MouseDelta.x * 0.02f; camPos_ += up * io.MouseDelta.y * 0.02f; }
@@ -8430,6 +8456,47 @@ private:
         playWorldCaptured_ = false;
     }
 
+    // THE ENGINE'S OWN DEFAULT GAME MODE, PAWN AND CONTROLLER, declared once and reused.
+    //
+    // WHY THE ENGINE AND NOT THE PROJECT. A project that has declared no GameMode has still asked to
+    // press Play, and Unreal answers that with classes IT ships -- DefaultPawn, and a GameMode that
+    // names it -- so an empty project is playable out of the box. Every previous answer here needed
+    // the PROJECT to supply something: first a .ocgraph the drone could fly, then a DRONE.GRAPH key
+    // naming it. Both leave a project that has authored nothing with nothing to play.
+    //
+    // DECLARED NATIVELY, through the same C ABI C# uses. aver_fw_class_declare and its
+    // set_flags/set_default_pawn/set_player_controller/seal siblings are plain C entry points, so the
+    // editor can register these without a line of managed code and without any project content.
+    //
+    // NO PARENT, AND THE KIND BITS SET DIRECTLY. Parenting to "Pawn" or "GameMode" would depend on
+    // those base rows existing, which is a managed-side fact (inheritedKindFlags' own comment walks
+    // through why a graph class needs that chain). Setting AVER_FW_CLASS_PAWN / CONTROLLER /
+    // GAME_MODE outright is what those bits mean, needs no ancestor, and is exactly what
+    // aver_fw_possess type-checks against.
+    //
+    // Returns the GameMode class, or 0 if the framework would not take it.
+    int32_t engineDefaultGameMode() {
+        if (engineDefaultGm_) return engineDefaultGm_;
+        const int32_t pawn = aver_fw_class_declare("AverDefaultPawn", nullptr);
+        const int32_t ctrl = aver_fw_class_declare("AverDefaultController", nullptr);
+        const int32_t gm   = aver_fw_class_declare("AverDefaultGameMode", nullptr);
+        if (!pawn || !ctrl || !gm) {
+            AVER_WARN("[Sandbox] the framework would not declare the engine's default play classes");
+            return 0;
+        }
+        aver_fw_class_set_flags(pawn, AVER_FW_CLASS_PAWN);
+        aver_fw_class_set_flags(ctrl, AVER_FW_CLASS_CONTROLLER);
+        aver_fw_class_set_flags(gm,   AVER_FW_CLASS_GAME_MODE);
+        aver_fw_class_set_default_pawn(gm, "AverDefaultPawn");
+        aver_fw_class_set_player_controller(gm, "AverDefaultController");
+        aver_fw_class_seal(pawn); aver_fw_class_seal(ctrl); aver_fw_class_seal(gm);
+        engineDefaultGm_ = gm;
+        AVER_INFO("[Sandbox] engine default play classes registered "
+                  "(AverDefaultGameMode -> AverDefaultPawn, AverDefaultController)");
+        return gm;
+    }
+    int32_t engineDefaultGm_ = 0;
+
     void startPlay() {
         // BEFORE anything begins, so what is recorded is the editor's level and not one frame of
         // gameplay's effect on it.
@@ -8453,9 +8520,22 @@ private:
             // A camera has no such failure mode: there is nothing to spawn, nothing to possess, and
             // nothing that can decline to move. The drone is still there for anyone who wants it,
             // from Window > Drone, where it is a thing you asked for rather than a surprise.
-            spectatorPlay_ = true;
-            AVER_INFO("[Sandbox] Play: no GameMode declared -- flying as a plain camera "
-                      "(WASD/QE, hold RMB to look). Declare an [AverGameMode] class to take over.");
+            // THE ENGINE'S DEFAULT TAKES OVER, and it goes through the SAME begin_play every real
+            // session does -- a GameMode is spawned, a controller possesses the default pawn, and the
+            // camera follows that pawn because it genuinely is one. The previous version set an
+            // editor-only flag and flew the viewport camera directly, which looked the same and was
+            // not the same: nothing was possessed, aver_fw_play_state stayed EDITOR, and every gate
+            // that asks "are we playing" had to be taught about a second kind of playing.
+            const int32_t dgm = engineDefaultGameMode();
+            if (dgm && aver_fw_begin_play(0, dgm)) {
+                defaultPawnPlay_ = true;
+                AVER_INFO("[Sandbox] Play: no GameMode declared -- possessing the engine's "
+                          "AverDefaultPawn (WASD/QE to fly, hold RMB to look). Declare an "
+                          "[AverGameMode] class to take over.");
+            } else {
+                AVER_WARN("[Sandbox] Play: no GameMode declared and the engine's default could not "
+                          "start; the viewport camera is unchanged");
+            }
             return;
         }
         const int32_t gi = aver_fw_find_class_with_flags(AVER_FW_CLASS_GAME_INSTANCE);  // 0 == none, allowed
@@ -8473,7 +8553,7 @@ private:
     // True while Play is standing in as a plain camera because the project declares no GameMode.
     // Not a play session -- begin_play never ran -- so everything that gates on "are we playing"
     // has to ask this too, exactly as it already had to ask dronePlayActive().
-    bool spectatorPlayActive() const { return spectatorPlay_; }
+    bool spectatorPlayActive() const { return defaultPawnPlay_; }
 
     // Ends whichever kind of play is running. Both kinds, deliberately: a drone the USER switched on
     // from Window > Drone is left alone, because stopping play should not take down something the
@@ -8484,9 +8564,9 @@ private:
             droneStartedByPlay_ = false;
             AVER_INFO("[Sandbox] Stop: default drone stopped");
         }
-        if (spectatorPlay_) {
-            spectatorPlay_ = false;
-            AVER_INFO("[Sandbox] Stop: spectator camera released");
+        if (defaultPawnPlay_) {
+            defaultPawnPlay_ = false;
+            AVER_INFO("[Sandbox] Stop: engine default pawn released");
         }
         if (aver_fw_play_state() != AVER_FW_PLAY_EDITOR) {
             aver_fw_end_play();
@@ -8510,8 +8590,8 @@ private:
             if (aver_fw_find_class_with_flags(AVER_FW_CLASS_GAME_MODE) == 0) {
                 if (++playTestWait_ <= 10) return;   // still give classes a moment to register
                 playTestBegun_ = true;
-                AVER_INFO("[play-test] no GameMode after 10 frames -- exercising the spectator "
-                          "camera fallback instead");
+                AVER_INFO("[play-test] no GameMode after 10 frames -- exercising the engine default "
+                          "pawn fallback instead");
                 startPlay();
                 return;
             }
@@ -17135,8 +17215,10 @@ private:
     // Restoring every component of every entity is a much larger promise and would need its own
     // answer for assets loaded mid-play; this is the honest subset, and it is written down here so
     // nobody reads Stop as a guarantee it does not make.
-    // Play with no GameMode: a plain flying camera rather than a spawned pawn. See startPlay.
-    bool spectatorPlay_ = false;
+    // True while Play is running on the ENGINE's default GameMode because the project declared
+    // none. A real session -- begin_play ran -- so unlike the old spectator flag nothing else
+    // has to special-case it; it exists only so the fly input knows to drive the pawn.
+    bool defaultPawnPlay_ = false;
     struct PlaySavedTransform { scene::Entity e; Transform xf; };
     std::vector<PlaySavedTransform> playWorldSnapshot_;
     // Every entity alive when Play began. Anything alive at Stop that is NOT in here was created
