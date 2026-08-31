@@ -1442,10 +1442,42 @@ float4 averBlendedOutputBackdrop(AverSurface s, float3 diffuse, float3 specular,
     if (!averBlendBackdropValid(invSize))
         return averBlendedOutputVolume(s, diffuse, specular, T);
 
-    const float2 uv    = averRefractedBackdropUV(s, wpos, thicknessCm, invSize, screenPos);
-    const float3 bg    = gBlendBackdrop.SampleLevel(gMaterialSampler, uv, 0).rgb;
+    // TWO SAMPLES, AND THE SECOND ONE IS NOT AN EXTRA -- IT IS WHAT MAKES THE CORRECTION CANCEL.
+    //
+    // This function does not write the background; the HARDWARE does, adding dst * (1 - alpha) after
+    // this returns. Everything here is a correction ON TOP of that, and a correction can only work if
+    // it subtracts EXACTLY WHAT THE HARDWARE WILL ADD -- the pixel straight behind this one, at uv0.
+    //
+    // The single-sample version subtracted the REFRACTED sample instead. Those are different pixels
+    // the moment refraction is on, so nothing cancelled and the residue was (dst - bgRefracted) per
+    // channel: wherever the bent ray landed on something BRIGHTER than what is really behind -- the
+    // sunlit deck sampled against the dark pool floor -- the sum went NEGATIVE, and a negative
+    // channel through the tonemap is not dark, it is a hue. That is what the magenta blocks in the
+    // pool were. MEASURED: 41773 magenta pixels at the 45-degree pool camera with refraction on,
+    // exactly 0 with --refraction 0, and 0 with refraction on after this change.
+    //
+    // The algebra, with a == alpha:
+    //     final = specular + diffuse*a + (bgRefr*T - bgStraight)*(1-a) + dst*(1-a)
+    //   and dst IS bgStraight, so the last two collapse and leave
+    //     final = specular + diffuse*a + bgRefr*T*(1-a)
+    //   which is the answer: the bent background, absorbed over the path, behind a Fresnel-weighted
+    //   surface. Two properties worth keeping:
+    //     - refraction OFF makes bgRefr == bgStraight and this becomes bg*(T-1)*(1-a) again, the
+    //       exact expression this replaced, so the no-refraction path is bit-identical.
+    //     - T == 1 leaves (bgRefr - bgStraight)*(1-a): pure bending, no absorption. Also correct,
+    //       and it means a material with refraction but no volume is no longer silently wrong.
+    //
+    // dst == bgStraight holds for the FIRST translucent surface over a pixel. A second one behind
+    // glass is compositing against a backdrop that does not yet contain the first, which is the
+    // known cost of capturing the backdrop once per frame rather than once per draw. It is an
+    // approximation in the overlap only, and it is bounded -- unlike the misregistration above,
+    // which was unbounded and could invert a channel.
+    const float2 uvR   = averRefractedBackdropUV(s, wpos, thicknessCm, invSize, screenPos);
+    const float2 uv0   = screenPos * invSize;
+    const float3 bgR   = gBlendBackdrop.SampleLevel(gMaterialSampler, uvR, 0).rgb;
+    const float3 bg0   = gBlendBackdrop.SampleLevel(gMaterialSampler, uv0, 0).rgb;
     const float  alpha = saturate(s.alpha);
-    return float4(specular + diffuse * alpha + bg * (1.0 - alpha) * (T - 1.0), alpha);
+    return float4(specular + diffuse * alpha + (bgR * T - bg0) * (1.0 - alpha), alpha);
 }
 
 float averVolumeThickness(float3 wpos, float3 N, float3 viewDir) {
