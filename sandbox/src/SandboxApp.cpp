@@ -7,6 +7,7 @@
 #include "aver/platform/FileSystem.hpp"
 #include "aver/platform/Image.hpp"
 #include "aver/platform/DirectoryWatcher.hpp"
+#include "aver/platform/InputState.hpp"
 #include "aver/rhi/ShaderFiles.hpp"
 #include "aver/rhi/RHI.hpp"
 #include "aver/core/Log.hpp"
@@ -264,6 +265,15 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include <vector>
 
 namespace aver {
+
+// The editor's window-event sink. A free function because Window::setEventCallback takes a plain
+// function pointer and a void* -- the same shape GameApp's onWindowEvent uses, for the same reason.
+// It filters nothing: an event that reached the window is an event the accumulator should know
+// about, and whether any given CONSUMER is allowed to act on it is a separate question answered
+// per-frame further down. Filtering here would put policy in the one place that cannot see it.
+static void sandboxWindowEvent(void* user, const Event& e) {
+    static_cast<InputState*>(user)->onEvent(e);
+}
 
 #if AVER_MODULE_SCENE && AVER_MODULE_FRAMEWORK
 namespace {
@@ -1568,6 +1578,10 @@ public:
             editor::setActorEditorHooks(std::move(hooks));
         }
         window_ = e.window();
+        // The one event sink the editor installs, identical to GameApp's. Everything the window
+        // produces lands in the accumulator; nothing is filtered here, because filtering is policy
+        // and policy is decided per-consumer, per-frame, further down.
+        if (window_) window_->setEventCallback(&sandboxWindowEvent, &input_);
 
         // SINGLE-INSTANCE FORWARDING, RECEIVER REGISTRATION. singleInstanceEligible_ is computed in
         // createApplication from argc/argv (this class never sees argv itself) and is a SUPERSET of
@@ -3247,6 +3261,7 @@ public:
         maybePlayTest();
         maybePieCameraTest();
         maybeInputStuckTest();
+        maybeInputSourceTest();
         // The tick groups bracket the physics step: PrePhysics -> Physics -> PostPhysics.
         if (!spawnTestClass_.empty() || aver_fw_play_state() == AVER_FW_PLAY_PLAYING) {
             aver_fw_tick(AVER_FW_TICK_PRE_PHYSICS, t.dt);
@@ -6225,6 +6240,14 @@ public:
 #if AVER_MODULE_SYNAPSE
         navBakeCheck(e);
 #endif
+        // ROLLED HERE, AT THE END OF THE FRAME, and the position is the whole contract. Engine::run
+        // is  pumpEvents -> frameStep{ onUpdate -> beginFrame -> onRender -> endFrame }, and
+        // InputState's own header states the protocol: newFrame() must come BEFORE pumpEvents(),
+        // because pressed()/released() report edges seen since the last newFrame(). Rolling it at the
+        // top of onUpdate would discard the frame's own edges -- which reads as "the game ignores
+        // single taps", a genuinely nasty bug to find. Last thing in the frame leaves the accumulator
+        // empty for the next pumpEvents to fill. Same placement, same reasoning, as GameApp.
+        input_.newFrame();
     }
 
     // Drives --skin-draw-test, handing it the LIVE viewport rect so its probes can be expressed as
@@ -6734,6 +6757,7 @@ public:
     void setGpuTiming(bool on) { gpuTiming_ = on; }                                // --gpu-timing
     void setPieCameraTest(int n) { pieCamFrames_ = n; }                            // --pie-camera-test
     void setInputStuckTest(int n) { inputStuckFrames_ = n; }                       // --input-stuck-test
+    void setInputSourceTest(int n) { inputSrcFrames_ = n; }                        // --input-source-test
     void setSkinSceneDir(std::string d) { skinSceneDir_ = std::move(d); }          // --skin-scene-test <dir>
     // --shader-source <dir>: watch a shader source tree and reload without restarting.
     void setShaderSourceDir(std::string d) { shaderSourceDir_ = std::move(d); }
@@ -8797,6 +8821,72 @@ private:
     bool pieCamLooked_ = false, pieCamKeptYaw_ = false, pieCamKeptPitch_ = false;
     bool pieCamPendingLook_ = false;
     f32  pieCamWantYaw_ = 0.0f, pieCamWantPitch_ = 0.0f;
+
+    // --input-source-test N: does the editor's own InputState see the real OS event stream, and does
+    // ImGui still see it too?
+    //
+    // WHAT IT IS ACTUALLY GUARDING. The editor now installs Window::setEventCallback alongside the
+    // ImGui backend's Window::messageHook. That is only safe because imgui_impl_win32's handler
+    // returns 0 -- not consumed -- for every WM_KEYDOWN/UP, WM_MOUSEMOVE, WM_LBUTTON* and
+    // WM_MOUSEWHEEL, so the message falls through to Window::dispatch() as well and BOTH accumulators
+    // see it. That is a property of vendored third-party code. An ImGui upgrade could change it and
+    // produce no compile error whatsoever -- just an editor whose gameplay input silently stops. A
+    // comment cannot catch that; this can.
+    //
+    // WHY IT POSTS REAL WINDOW MESSAGES. io.AddKeyEvent -- what --pie-camera-test and
+    // --input-stuck-test use -- injects directly into ImGui's queue and never reaches
+    // Win32Window::dispatch(), so it could not tell whether InputState received anything at all. The
+    // only synthesis in this file that enters the real pump is the MCP bridge's PostMessageW, and
+    // this borrows exactly that. It is therefore the one harness here that exercises OS -> window ->
+    // both consumers.
+    void maybeInputSourceTest() {
+        if (inputSrcFrames_ <= 0) return;
+#if defined(_WIN32) && AVER_WITH_IMGUI
+        ++inputSrcFrame_;
+        HWND hwnd = window_ ? static_cast<HWND>(window_->nativeHandle()) : nullptr;
+        if (!hwnd) { if (inputSrcFrame_ > 4) { AVER_INFO("[input-source] RESULT: SKIPPED (no window)"); inputSrcFrames_ = 0; } return; }
+
+        const int   kVk = 0x57;              // VK_W
+        const int   half = inputSrcFrames_;  // frames spent held, then the same again released
+
+        if (inputSrcFrame_ == 5)        { ::PostMessageW(hwnd, WM_KEYDOWN, (WPARAM)kVk, 0); return; }
+        if (inputSrcFrame_ == 6 + half) { ::PostMessageW(hwnd, WM_KEYUP,   (WPARAM)kVk, 0); return; }
+        if (inputSrcFrame_ < 7) return;
+
+        // Two frames of slack after each post: PostMessageW queues, pumpEvents delivers on the next
+        // turn of the loop, and ImGui applies queued key events at its own NewFrame. Sampling the
+        // frame after a post would be reading the answer before it was written.
+        const bool inState = input_.keyHeld(kVk);
+        const bool inImGui = ImGui::IsKeyDown(ImGuiKey_W);
+        const bool wantDown = inputSrcFrame_ < 6 + half;
+        if (inputSrcFrame_ >= 7 && inputSrcFrame_ != 6 + half + 1) {
+            if (inState) inputSrcStateSaw_ = true;
+            if (inImGui) inputSrcImguiSaw_ = true;
+            if (inState != inImGui) ++inputSrcDisagree_;
+            if (!wantDown && inputSrcFrame_ > 6 + half + 2 && (inState || inImGui)) ++inputSrcStuck_;
+        }
+
+        if (inputSrcFrame_ >= 6 + half * 2) {
+            const bool stateOk = inputSrcStateSaw_;
+            const bool imguiOk = inputSrcImguiSaw_;
+            const bool agreeOk = inputSrcDisagree_ == 0;
+            const bool clearOk = inputSrcStuck_ == 0;
+            AVER_INFO("[input-source] InputState saw the OS key: {} -- {}", inputSrcStateSaw_ ? "yes" : "NO",
+                      stateOk ? "setEventCallback is wired and receiving" : "THE EDITOR NEVER GOT THE EVENT");
+            AVER_INFO("[input-source] ImGui still saw it too : {} -- {}", inputSrcImguiSaw_ ? "yes" : "NO",
+                      imguiOk ? "the two do not compete" : "IMGUI STOPPED SEEING INPUT");
+            AVER_INFO("[input-source] frames they disagreed  : {} -- {}", inputSrcDisagree_,
+                      agreeOk ? "one stream, two readers" : "THE TWO VIEWS OF THE KEYBOARD HAVE DIVERGED");
+            AVER_INFO("[input-source] held after WM_KEYUP    : {} -- {}", inputSrcStuck_,
+                      clearOk ? "released" : "STILL HELD");
+            AVER_INFO("[input-source] RESULT: {}",
+                      (stateOk && imguiOk && agreeOk && clearOk) ? "PASS" : "FAIL");
+            inputSrcFrames_ = 0;
+        }
+#endif
+    }
+    int  inputSrcFrames_ = 0, inputSrcFrame_ = 0, inputSrcDisagree_ = 0, inputSrcStuck_ = 0;
+    bool inputSrcStateSaw_ = false, inputSrcImguiSaw_ = false;
 
     // --input-stuck-test N: does releasing the mouse mid-session leave a key held forever?
     //
@@ -17619,6 +17709,27 @@ private:
     f32  captureDx_ = 0.0f, captureDy_ = 0.0f;
     Window* window_ = nullptr;   // borrowed from the engine in onInit, for the HWND
 
+    // ---- THE EDITOR'S OWN INPUT ACCUMULATOR ------------------------------------------------------
+    // Until this existed, ImGuiIO was the SOLE source of truth for keyboard and mouse in the editor:
+    // SandboxApp never called Window::setEventCallback, so the raw Win32 event stream reached it only
+    // by way of ImGui. That is how a correct, tested accumulator (aver::InputState, with real edge
+    // detection and a clear() on focus loss) came to be wired up by exactly one host -- GameApp, which
+    // ships as a library and has no executable -- while the editor, the only way a project actually
+    // runs, went without it.
+    //
+    // IT DOES NOT COMPETE WITH ImGui, and it cannot: ImGui's Win32 backend hooks Window::messageHook,
+    // this uses the separate setEventCallback slot, and imgui_impl_win32 returns 0 (not consumed) for
+    // every WM_KEYDOWN/UP, WM_MOUSEMOVE, WM_LBUTTON*, WM_MOUSEWHEEL and WM_KILLFOCUS/SETFOCUS. Both
+    // see the same messages. THAT IS A PROPERTY OF VENDORED THIRD-PARTY CODE, not of this file, and an
+    // ImGui upgrade could change it with no compile error -- which is why --input-source-test asserts
+    // the two agree rather than a comment claiming they do.
+    //
+    // THE SPLIT IS POLICY vs VALUE. ImGui still decides WHETHER gameplay may have input -- it owns the
+    // panels, so only it knows whether a text field is focused (WantCaptureKeyboard/WantCaptureMouse).
+    // This owns WHAT the input is. Asking ImGui the second question is what let a held key survive
+    // into frames nobody published, because ImGui's answer is a snapshot with no edges of its own.
+    InputState input_;
+
 #if AVER_WITH_IMGUI
     editor::UiRegistry uiReg_;   // what the editor drew this frame, by name
 #endif
@@ -18374,6 +18485,7 @@ Application* createApplication(int argc, char** argv) {
     // as every other flag here -- that chain is at MSVC's nesting limit and one more `else if` is a
     // build failure, not a warning.
     int inputStuckArg = 0;
+    int inputSourceArg = 0;
     // --gpu-timing takes no value, so it is matched in the i+1<argc loop below only incidentally --
     // it is checked in its own full-length loop underneath, or a trailing --gpu-timing with nothing
     // after it would be silently ignored. That is the exact shape of the --no-rt/--no-gi bug this
@@ -18384,6 +18496,7 @@ Application* createApplication(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--resize-cycle"))         resizeCycleArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--pie-camera-test"))      pieCamArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--input-stuck-test"))     inputStuckArg = std::atoi(argv[i + 1]);
+        if (!std::strcmp(argv[i], "--input-source-test"))    inputSourceArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--refraction"))           refraction = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--refraction-strength"))  refractionStrength = (f32)std::atof(argv[i + 1]);
         if (!std::strcmp(argv[i], "--refraction-fade"))      refractionFade = (f32)std::atof(argv[i + 1]);
@@ -19304,6 +19417,7 @@ Application* createApplication(int argc, char** argv) {
     if (gpuTimingArg) app->setGpuTiming(true);
     if (pieCamArg > 0) app->setPieCameraTest(pieCamArg);
     if (inputStuckArg > 0) app->setInputStuckTest(inputStuckArg);
+    if (inputSourceArg > 0) app->setInputSourceTest(inputSourceArg);
 #endif
     if (!skinSceneDir.empty()) app->setSkinSceneDir(skinSceneDir);
     if (!shaderSourceDir.empty()) app->setShaderSourceDir(shaderSourceDir);
