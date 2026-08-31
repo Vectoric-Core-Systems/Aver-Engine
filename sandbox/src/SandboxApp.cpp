@@ -3104,7 +3104,11 @@ public:
             const Vec3 up{0, 0, 1};
             const Vec3 right = cross(up, fwd).getSafeNormal();
 
-            if (flying_ && !io.WantCaptureKeyboard) {
+            // SPECTATOR PLAY FLIES WITHOUT HOLDING THE RIGHT BUTTON. Pressing Play with no GameMode
+            // hands you a plain camera, and a camera you have to hold a mouse button to walk is not
+            // what anyone means by that. Mouse LOOK still wants the button: capturing the cursor for
+            // the whole session would trap it in the viewport, and an editor has panels to reach.
+            if ((flying_ || spectatorPlay_) && !io.WantCaptureKeyboard) {
                 const f32 sp = flySpeed_ * t.dt;
                 if (ImGui::IsKeyDown(ImGuiKey_W)) camPos_ += fwd * sp;
                 if (ImGui::IsKeyDown(ImGuiKey_S)) camPos_ -= fwd * sp;
@@ -3163,7 +3167,7 @@ public:
             // menu should not also race the editor for what the key means.
             // Escape ends a drone stand-in too. Play started it, so Play's exit has to end it, or
             // the only way out is a menu item the user has no reason to think is involved.
-            if (keybinds_.pressed(editor::CommandId::PlayStop, ImGui::GetIO()) && (playSessionActive() || dronePlayActive()))
+            if (keybinds_.pressed(editor::CommandId::PlayStop, ImGui::GetIO()) && (playSessionActive() || dronePlayActive() || spectatorPlayActive()))
                 stopPlay();
             if (!playSessionActive()) releasedByUser_ = false;
             setMouseCaptured(wantCapture && !ImGui::GetIO().WantTextInput);
@@ -8404,6 +8408,24 @@ private:
                             "destroyed during play and cannot be", put, lost);
         else      AVER_INFO("[Sandbox] Stop: {} level transform(s) restored", put);
 #endif
+#if AVER_MODULE_FLUIDS
+        // AND THE FLUID, WHICH A TRANSFORM CANNOT PUT BACK. A soft body's shape lives in its
+        // vertices, not in an entity transform, so a pool left sloshing by a session stayed sloshing
+        // through Stop no matter how many transforms were restored. Re-settling it means building it
+        // again from the descriptor the level authored.
+        //
+        // THROUGH THE DEFERRED PATH, NOT BY CALLING spawn() HERE. fluidWantPending_'s own comment is
+        // explicit that fluidScene_.spawn() is only safe from onUpdate's drain, and this runs from a
+        // toolbar button. Despawning now and re-arming the want lets the existing, safe path rebuild
+        // it on the next frame -- the same route the level's own water takes at load.
+        if (fluidHandle_) {
+            fluidScene_.despawn(fluidHandle_);
+            fluidHandle_ = 0;
+            fluidWantPending_ = true;
+            AVER_INFO("[Sandbox] Stop: the simulated fluid is being re-settled from its authored "
+                      "volume; it rebuilds on the next frame");
+        }
+#endif
         playWorldSnapshot_.clear();
         playWorldCaptured_ = false;
     }
@@ -8417,19 +8439,23 @@ private:
             // scene:: is safe to reach here without a further guard: the root CMakeLists forces
             // AVER_MODULE_FRAMEWORK off when AVER_MODULE_SCENE is off (CMakeLists.txt:169-171), and
             // this whole function is inside #if AVER_MODULE_FRAMEWORK.
-            if (droneEntity_ == scene::kInvalidEntity) {
-                setDroneEnabled(true);
-                // setDroneEnabled refuses for its own reasons -- no project, no scripting host, a
-                // bridge with no Graph exports -- and says which in the log. Only claim the fallback
-                // if an entity actually exists now.
-                droneStartedByPlay_ = (droneEntity_ != scene::kInvalidEntity);
-            }
-            if (droneStartedByPlay_)
-                AVER_INFO("[Sandbox] Play: no GameMode declared -- flying the default drone instead. "
-                          "Declare an [AverGameMode] class to take over.");
-            else
-                AVER_WARN("[Sandbox] Play: no GameMode class is loaded, and the drone fallback could "
-                          "not start either (see the reason logged above)");
+            // NO GameMode MEANS A PLAIN FLYING CAMERA, which is what Unreal hands you and is what
+            // this used to get wrong in a way that read as a broken engine.
+            //
+            // It used to SPAWN THE DRONE and possess it. Two things went wrong with that, and the
+            // second is the one people actually hit. First, the drone only moves if the project
+            // named a graph to fly it, and until DRONE.GRAPH existed nothing outside a command line
+            // could. Second -- and worse -- the camera FOLLOWS a play-started drone as its pawn. So
+            // pressing Play in a project with no GameMode snapped your view onto a stationary
+            // quadcopter and left you unable to move. Something appeared, nothing happened, and the
+            // camera stopped answering. That is the whole of "the drone is glitched".
+            //
+            // A camera has no such failure mode: there is nothing to spawn, nothing to possess, and
+            // nothing that can decline to move. The drone is still there for anyone who wants it,
+            // from Window > Drone, where it is a thing you asked for rather than a surprise.
+            spectatorPlay_ = true;
+            AVER_INFO("[Sandbox] Play: no GameMode declared -- flying as a plain camera "
+                      "(WASD/QE, hold RMB to look). Declare an [AverGameMode] class to take over.");
             return;
         }
         const int32_t gi = aver_fw_find_class_with_flags(AVER_FW_CLASS_GAME_INSTANCE);  // 0 == none, allowed
@@ -8444,6 +8470,10 @@ private:
     // play session -- aver_fw_begin_play never ran -- so aver_fw_play_state() knows nothing about it
     // and every place that gates on "are we playing" has to ask this too.
     bool dronePlayActive() const { return droneStartedByPlay_; }
+    // True while Play is standing in as a plain camera because the project declares no GameMode.
+    // Not a play session -- begin_play never ran -- so everything that gates on "are we playing"
+    // has to ask this too, exactly as it already had to ask dronePlayActive().
+    bool spectatorPlayActive() const { return spectatorPlay_; }
 
     // Ends whichever kind of play is running. Both kinds, deliberately: a drone the USER switched on
     // from Window > Drone is left alone, because stopping play should not take down something the
@@ -8453,6 +8483,10 @@ private:
             setDroneEnabled(false);
             droneStartedByPlay_ = false;
             AVER_INFO("[Sandbox] Stop: default drone stopped");
+        }
+        if (spectatorPlay_) {
+            spectatorPlay_ = false;
+            AVER_INFO("[Sandbox] Stop: spectator camera released");
         }
         if (aver_fw_play_state() != AVER_FW_PLAY_EDITOR) {
             aver_fw_end_play();
@@ -8468,9 +8502,17 @@ private:
     void maybePlayTest() {
         if (!playTest_) return;
         if (!playTestBegun_) {
+            // NO GameMode IS A CASE WORTH TESTING, NOT A REASON TO GIVE UP. It used to abandon the
+            // run, which left the single most broken Play path in the editor -- the one a project
+            // with no GameMode takes -- with no automated coverage at all. That is the path where
+            // Play used to possess a stationary drone and strand the camera. It now hands over a
+            // plain flying camera, and this drives that too: same 150 frames, same Stop.
             if (aver_fw_find_class_with_flags(AVER_FW_CLASS_GAME_MODE) == 0) {
-                if (++playTestWait_ > 10) { playTest_ = false;
-                    AVER_WARN("[play-test] no GameMode class after 10 frames - pass --scripts <dir> with a GameMode"); }
+                if (++playTestWait_ <= 10) return;   // still give classes a moment to register
+                playTestBegun_ = true;
+                AVER_INFO("[play-test] no GameMode after 10 frames -- exercising the spectator "
+                          "camera fallback instead");
+                startPlay();
                 return;
             }
             playTestBegun_ = true;
@@ -8478,12 +8520,19 @@ private:
             startPlay();
             return;
         }
-        if (aver_fw_play_state() == AVER_FW_PLAY_PLAYING) {
+        // SYNTHETIC INPUT ONLY WHERE THERE IS SOMETHING TO RECEIVE IT, but the COUNTDOWN runs either
+        // way. It used to live entirely inside this branch, so the spectator fallback -- which never
+        // calls begin_play and so never reports PLAYING -- started and then ran forever without ever
+        // reaching Stop. A harness that can begin a session it cannot end tests half of it.
+        const bool fwPlaying = aver_fw_play_state() == AVER_FW_PLAY_PLAYING;
+        if (fwPlaying) {
             aver_fw_input_set_key(AVER_FW_KEY_W, 1);
             if (playTestFrames_ > 60) aver_fw_input_set_key(AVER_FW_KEY_MOUSE_LEFT, 1);
             if (playTestFrames_ == 100) aver_fw_input_set_key(AVER_FW_KEY_SPACE, 1);
+        }
+        {
             if (++playTestFrames_ == 150) {
-                const int32_t pawn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
+                const int32_t pawn = fwPlaying ? aver_fw_controlled_pawn(aver_fw_player_controller(0)) : 0;
                 if (pawn) {
                     const scene::Entity pe = static_cast<scene::Entity>(static_cast<uint32_t>(pawn));
                     const Mat4& wm = scene::World::instance().worldMatrix(pe);
@@ -11057,7 +11106,7 @@ private:
             // A drone stand-in is not a play session -- begin_play never ran -- so aver_fw_play_state
             // reports EDITOR throughout. Without folding it in here, Play would stay lit while the
             // drone flew and Stop would sit greyed out, leaving no way to stop it from the toolbar.
-            const bool anyPlay = playing || dronePlayActive();
+            const bool anyPlay = playing || dronePlayActive() || spectatorPlayActive();
             ImGui::BeginDisabled(anyPlay);
             if (ImGui::Button(ICON_PLAY " Play")) startPlay();
             uiReg_.track("toolbar.play");
@@ -17086,6 +17135,8 @@ private:
     // Restoring every component of every entity is a much larger promise and would need its own
     // answer for assets loaded mid-play; this is the honest subset, and it is written down here so
     // nobody reads Stop as a guarantee it does not make.
+    // Play with no GameMode: a plain flying camera rather than a spawned pawn. See startPlay.
+    bool spectatorPlay_ = false;
     struct PlaySavedTransform { scene::Entity e; Transform xf; };
     std::vector<PlaySavedTransform> playWorldSnapshot_;
     // Every entity alive when Play began. Anything alive at Stop that is NOT in here was created
