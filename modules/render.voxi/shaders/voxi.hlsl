@@ -35,6 +35,10 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     // THIS frame's scene viewport rect, same (x, y, w, h) in target pixels. Paired with gViewProj,
     // where gSceneViewport above is paired with gPrevViewProj. w == 0 means the device had none.
     float4   gSceneViewportCur;
+    // x = 1 when the eye is inside a blended single-sided volume, y = that medium's ior.
+    // Computed once per frame on the CPU -- a pixel cannot know whether its own volume encloses the
+    // camera. See VoxiRenderer's own comment for why a loose bounding-sphere test is safe here.
+    float4   gCameraMedium;
     // The GI-ONLY shadow map's light view-projection: one box fitted to the GI VOLUME, not to the
     // camera. Read only by giShadowFactor (PSVoxel); the cascades above stay camera-fitted and are
     // what PSMainVoxi samples.
@@ -1385,17 +1389,46 @@ bool averBlendBackdropValid(out float2 invSize) {
 // Returns the UV to sample the backdrop at. gGiParams.y is the mode, .z the strength, .w the edge
 // fade (see Settings::refractionMode and its neighbours for the ladder these come off).
 float2 averRefractedBackdropUV(AverSurface s, float3 wpos, float thicknessCm,
-                               float2 invSize, float2 screenPos) {
+                               float2 invSize, float2 screenPos, out bool tir) {
+    tir = false;
     const float2 uv0  = screenPos * invSize;
     const uint   mode = (uint)(gGiParams.y + 0.5);
     if (mode == 0u || gGiParams.z <= 0.0) return uv0;
 
-    // TOTAL INTERNAL REFLECTION IS A REAL ANSWER, not an error: past the critical angle there is no
-    // transmitted ray at all, and HLSL's refract() returns 0 to say so. Sampling straight through is
-    // the honest fallback -- the alternative, normalising a zero vector, is a NaN that would spread.
-    const float  eta = 1.0 / max(gIor, 1.0001);
-    const float3 R   = refract(-s.V, s.N, eta);
-    if (dot(R, R) < 1e-6) return uv0;
+    // WHICH WAY THE LIGHT IS CROSSING, which decides everything below.
+    //
+    // eta is the ratio of the index the ray is LEAVING to the one it is ENTERING. Looking at a pane
+    // from the outside that is air->medium, 1/n. Looking at the underside of the pool's surface while
+    // swimming in it, it is medium->air, n -- and getting that backwards does not merely bend the
+    // image the wrong way, it makes total internal reflection unreachable, because TIR only exists
+    // for eta > 1.
+    //
+    // GATED ON gCameraMedium, NOT ON s.backFace, AND THAT DISTINCTION HAS ALREADY COST THIS ENGINE
+    // ONCE. material_prelude.hlsl carries the post-mortem: a TIR override gated on backFace "turned
+    // every pane of glass in the engine into a dark slab at 41 degrees off normal", because backFace
+    // is also true for the FAR surface of a two-sided pane seen from outside -- an ordinary
+    // air-to-glass view with the normal flipped -- and Snell forbids TIR there outright. That
+    // comment concludes the two cases are "indistinguishable from a pixel shader". They were. They
+    // are not any more: gCameraMedium.x is computed on the CPU from the camera against the volume's
+    // own bounds, which is exactly the fact a pixel could never recover for itself. Glass is
+    // twosided=1 and is never a medium by that test, so the pane case cannot reach this branch at
+    // all.
+    const float  ior      = max(gIor, 1.0001);
+    const bool   eyeInside = gCameraMedium.x > 0.5;
+    const float  eta      = eyeInside ? ior : (1.0 / ior);
+    float3 R = refract(-s.V, s.N, eta);
+    if (dot(R, R) < 1e-6) {
+        // refract() returns 0 to say "no transmitted ray exists". Normalising it would be a NaN.
+        if (!eyeInside) return uv0;   // from outside this is unreachable; sampling straight through
+                                      // stays the honest fallback rather than a fabricated bend.
+        // GENUINE TIR, and this is the half of Snell's window nobody sees from above: past the
+        // critical angle -- 48.75 degrees at n = 1.33 -- the underside of the water stops being a
+        // window and becomes a MIRROR, showing the pool floor and walls instead of the sky. Reflect
+        // about the same eye-facing normal and let the machinery below project it exactly as it
+        // projects a refracted target.
+        tir = true;
+        R = reflect(-s.V, s.N);
+    }
 
     // Where the bent ray leaves the medium, one thickness along the bent path rather than the
     // straight one -- which is the whole point, and is why this needs the ray-measured thickness
@@ -1510,11 +1543,29 @@ float4 averBlendedOutputBackdrop(AverSurface s, float3 diffuse, float3 specular,
     // known cost of capturing the backdrop once per frame rather than once per draw. It is an
     // approximation in the overlap only, and it is bounded -- unlike the misregistration above,
     // which was unbounded and could invert a channel.
-    const float2 uvR   = averRefractedBackdropUV(s, wpos, thicknessCm, invSize, screenPos);
+    bool tir = false;
+    const float2 uvR   = averRefractedBackdropUV(s, wpos, thicknessCm, invSize, screenPos, tir);
     const float2 uv0   = screenPos * invSize;
     const float3 bgR   = gBlendBackdrop.SampleLevel(gMaterialSampler, uvR, 0).rgb;
     const float3 bg0   = gBlendBackdrop.SampleLevel(gMaterialSampler, uv0, 0).rgb;
     const float  alpha = saturate(s.alpha);
+
+    // TOTAL INTERNAL REFLECTION IS NOT A WINDOW WITH A DIFFERENT UV, AND TREATING IT AS ONE MADE IT
+    // BLACK. Past the critical angle no light is transmitted at all: everything the eye receives
+    // arrived from the REFLECTED direction. The window form below weights its background term by
+    // (1 - alpha), and alpha is driven toward 1 by the view Fresnel at exactly the grazing angles
+    // where TIR occurs -- so the mirror was multiplied by roughly zero. Measured underwater at 25
+    // degrees: the mirrored region read 0.59 mean against the 18.8 of the pit wall it was supposed
+    // to be showing. Not dark because the pool is dark; dark because the term was cancelled.
+    //
+    // alpha = 1 is correct HERE and was wrong in the case material_prelude.hlsl's post-mortem
+    // describes. That override slammed alpha to 1 on a PANE seen from outside -- where Snell forbids
+    // TIR outright -- and supplied no reflected image, so it left a dark slab. This fires only where
+    // gCameraMedium says the eye is genuinely inside a single-sided volume, and it hands back the
+    // reflected scene as the surface's own radiance. The background is blocked because a mirror
+    // blocks it, and replaced because a mirror replaces it.
+    if (tir) return float4(specular + bgR * T, 1.0);
+
     return float4(specular + diffuse * alpha + (bgR * T - bg0) * (1.0 - alpha), alpha);
 }
 
@@ -2158,8 +2209,25 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     // dot(N, V), not SV_IsFrontFace: averVertexOf already computes it that way and states why, and
     // this reuses that answer rather than adding a second, differently-derived notion of "backwards"
     // that could disagree with the normal flip sitting immediately beside it.
+    // INVERTED WHEN THE EYE IS INSIDE THE VOLUME, NOT SWITCHED OFF, and the difference is the whole
+    // reason this is safe.
+    //
+    // Seen from within a closed volume every face points away from the eye, so every face is
+    // backFace and the discard above deleted the surface outright -- which is why swimming under the
+    // pool showed no water surface at all, only the concrete beyond it. What is wanted from below is
+    // still exactly ONE layer: a ray leaving the eye inside a convex volume crosses the boundary
+    // once, so keeping the back faces and dropping the front ones is the same "one coat" rule read
+    // from the other side.
+    //
+    // gCameraMedium.x comes from a bounding-SPHERE test and is therefore loose -- a wide shallow
+    // pool's sphere bulges above its own surface. Inverting rather than disabling is what makes that
+    // acceptable: a false positive standing on the deck drops the near face and keeps the far one,
+    // so the pixel still gets ONE layer of water, not two. Turning the discard off instead would
+    // composite both and resurrect the four-coats bug this whole block exists to prevent. Do not
+    // "simplify" this into an early-out.
+    const bool eyeInside = gCameraMedium.x > 0.5;
     if ((gMaterialFlags & AVER_MAT_ALPHA_BLEND) && !(gMaterialFlags & AVER_MAT_TWO_SIDED) &&
-        vtx.backFace)
+        (eyeInside ? !vtx.backFace : vtx.backFace))
         clip(-1);
 
     AverLight sun;

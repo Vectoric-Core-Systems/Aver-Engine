@@ -2653,6 +2653,51 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     // Zeroed when the device could not report one, which is what the shader's own w > 0 test reads.
     if (haveViewport) std::memcpy(cb_.sceneViewportCur, curSceneViewport_, sizeof(curSceneViewport_));
     else              std::memset(cb_.sceneViewportCur, 0, sizeof(cb_.sceneViewportCur));
+
+    // ---- IS THE EYE INSIDE A TRANSLUCENT VOLUME? --------------------------------------------
+    //
+    // Answered here, once per frame, for the whole renderer, because it is a property of the CAMERA
+    // and not of any one draw -- and because the shader cannot work it out for itself: a pixel knows
+    // its own surface, not whether the volume that surface belongs to encloses the eye.
+    //
+    // THE TEST IS THE DRAW'S WORLD BOUNDING SPHERE, WHICH IS LOOSE, AND THAT IS SAFE HERE ONLY
+    // BECAUSE OF HOW THE SHADER USES IT. A sphere around a wide shallow pool bulges above the water,
+    // so standing on the deck can test "inside". If the shader responded by SWITCHING OFF the
+    // back-face discard, that false positive would composite two coats of water and bring back
+    // exactly the bug the discard exists to prevent. It instead INVERTS the discard -- front faces
+    // are dropped and back faces kept -- so a false positive changes WHICH single face is drawn, and
+    // never HOW MANY. That property is what lets this ship on a bounding sphere instead of waiting
+    // for a real point-in-volume test, and it is the reason the shader must not be "simplified" into
+    // an early-out later.
+    //
+    // Blended AND single-sided only: those are exactly the draws the discard applies to, so anything
+    // else would be answering a question nobody asks. M_Glass is twosided=1 and is therefore never a
+    // medium by this test, which is correct -- a pane is not something you are inside of.
+    cb_.cameraMedium[0] = cb_.cameraMedium[1] = 0.0f;
+    {
+        f32 vp[16], ivp[16], eye[3] = {};
+        if (dev_ && dev_->camera(vp, ivp, eye)) {
+            // drawsPrev_, NOT draws_, AND THE PROBE CAUGHT ME READING THE WRONG ONE. beginScene()
+            // swaps this frame's list into drawsPrev_ and clears draws_ before any pass runs --
+            // "Voxi runs a frame behind: the passes replay the previous one", as its own comment
+            // says -- so draws_ is EMPTY here and the test silently never fired. It is the same list
+            // buildAccelerationStructures reads, for the same reason.
+            for (const Draw& d : drawsPrev_) {
+                if (!d.translucent || d.boundsRadius < 0.0f) continue;   // negative radius = no bounds
+                const pbr::MaterialConstants* mc =
+                    reinterpret_cast<const pbr::MaterialConstants*>(d.mat);
+                if (d.matBytes < sizeof(pbr::MaterialConstants)) continue;
+                if (mc->flags & pbr::MaterialFlag_TwoSided) continue;
+                const f32 dx = eye[0] - d.boundsCentre[0];
+                const f32 dy = eye[1] - d.boundsCentre[1];
+                const f32 dz = eye[2] - d.boundsCentre[2];
+                if (dx * dx + dy * dy + dz * dz > d.boundsRadius * d.boundsRadius) continue;
+                cb_.cameraMedium[0] = 1.0f;
+                cb_.cameraMedium[1] = mc->ior > 1.0f ? mc->ior : 1.0f;
+                break;   // one medium is enough; nesting two is not a case this models
+            }
+        }
+    }
     cb_.rtHistParams[0] = 1.0f;                                        // t6/u2 are bound to real textures
     cb_.rtHistParams[1] = (rtHistValid_ && haveViewport) ? 1.0f : 0.0f; // ...and t6 + gSceneViewport are usable
     cb_.rtHistParams[2] = static_cast<f32>(rtFrameIndex_);

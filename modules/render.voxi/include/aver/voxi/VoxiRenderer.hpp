@@ -889,6 +889,14 @@ private:
         // that projects with THIS frame's gViewProj -- refraction does -- needs this frame's rect,
         // and reusing the previous one silently mismatches for a frame after any viewport change.
         f32 sceneViewportCur[4] = {};
+        // THE MEDIUM THE CAMERA IS CURRENTLY INSIDE. x = 1 when the eye is within a blended,
+        // single-sided volume; y = that material's ior; z, w spare.
+        //
+        // Needed because a closed volume seen FROM WITHIN has no front faces at all -- every face
+        // points away from the eye -- so the back-face discard that keeps a water box from
+        // compositing four coats of alpha also deletes the surface entirely once you swim under it.
+        // The shader inverts that discard rather than switching it off; see PSMainVoxi.
+        f32 cameraMedium[4] = {};
         // The GI-only shadow map's light view-projection, fitted to the GI volume rather than the
         // camera -- see fitGiShadow(). Read only by PSVoxel through giShadowFactor(); PSMainVoxi
         // keeps using cascadeViewProj/shadowFactor above for the camera cascades.
@@ -925,7 +933,7 @@ private:
     // The file this used to name, VoxiShaders.hpp, no longer exists: the HLSL moved out of C++
     // string literals into shaders/ and the message was never updated. It sent me to a deleted file
     // when this assert did its job. Naming the real one now.
-    static_assert(sizeof(FrameConstants) == 640,
+    static_assert(sizeof(FrameConstants) == 656,
                   "cbuffer VoxiFrame in modules/render.voxi/shaders/voxi.hlsl mirrors this byte for byte");
     static_assert(sizeof(FrameConstants) % 16 == 0, "must be a legal constant-buffer size");
 

@@ -3091,6 +3091,30 @@ MeshHandle D3D12Device::createSkinTargetMesh(MeshHandle source, BufferHandle* ou
     m.ibv = src.ibv;
     m.indexCount = src.indexCount;
     m.vbBuffer = vh;
+    // AND SO DO THE BOUNDS, which defaulted to a centre of (0,0,0) and a radius of ZERO.
+    //
+    // createMesh measures an AABB over the vertices once, at creation. A skin target has no CPU
+    // vertices to measure -- the skinning pass writes them on the GPU -- so nothing ever filled
+    // these in and every soft body and skinned mesh in the engine reported a radius-0 sphere sitting
+    // at its own local origin. Anything that asks meshBounds() a question therefore got "this is a
+    // point": a frustum cull treats the whole body as a dot at its centre, so it can vanish the
+    // moment that dot leaves the view while the geometry is still plainly on screen -- the same
+    // shape of failure as the cull that once starved shadows and GI of their off-screen casters.
+    //
+    // Found because a point-in-volume test against the pool's water reported the camera outside a
+    // sphere it was 20 cm inside of: centre right, radius 0.
+    //
+    // THE SOURCE'S BOUNDS ARE THE HONEST ANSWER, NOT A PERFECT ONE. The seed shell is where the
+    // geometry starts and, for a skinned mesh in bind pose or a soft body at rest, where it stays;
+    // deformation can push a vertex outside it, and a sloshing fluid genuinely does. That makes this
+    // conservative in the wrong direction for extreme deformation, which is a real limit and is why
+    // it is written down here rather than presented as exact -- but "the shape it was built from" is
+    // strictly better than "a point at the origin", and it is the only answer available without a
+    // GPU readback this path cannot afford.
+    m.boundsCentre[0] = src.boundsCentre[0];
+    m.boundsCentre[1] = src.boundsCentre[1];
+    m.boundsCentre[2] = src.boundsCentre[2];
+    m.boundsRadius    = src.boundsRadius;
     // THE INDEX BUFFER'S HANDLE COMES ACROSS TOO, not just its raw pointer. meshGeometry() refuses
     // on `!m.vbBuffer || !m.ibBuffer` (:712), and ibBuffer defaulted to 0 here -- so every skin
     // target reported "no readable geometry" even though its indices are the source mesh's and are
