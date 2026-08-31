@@ -323,7 +323,29 @@ float3 averPerturbNormal(float3 N, float3 wpos, float2 uv, float3 nTS) {
     float3 T = dp2perp * du1.x + dp1perp * du2.x;
     float3 B = dp2perp * du1.y + dp1perp * du2.y;
     float m = max(dot(T, T), dot(B, B));
-    if (m <= 0.0) return N;
+    if (m <= 0.0) {
+        // NO USABLE UV FRAME, WHICH USED TO MEAN "SILENTLY NO NORMAL AT ALL". The frame above comes
+        // from ddx/ddy of the UVs, so a mesh whose UVs are constant across a triangle -- generated
+        // geometry very often has none worth the name -- collapses T and B to zero and this returned
+        // the geometric normal, discarding the perturbation without a word. That is how a material
+        // graph driving Normal can be compiled, registered, dispatched and correct, and still change
+        // absolutely nothing: measured on the pool's fluid shell, graph on versus off was 0 differing
+        // pixels, and every part of the chain except this line looked healthy.
+        //
+        // A WORLD-ANCHORED FRAME, NOT ONE FROM THE POSITION DERIVATIVES. dp1/dp2 are screen-space
+        // quantities, so a frame built from them rotates as the camera does and the ripple would
+        // swim when you turned your head. Picking the world axis least parallel to N gives a frame
+        // that depends only on the surface, so a world-space pattern stays put.
+        //
+        // The tangent DIRECTION is arbitrary here, and that is honest rather than a compromise: a
+        // mesh with no UVs has no authored tangent direction to respect. What matters is that the
+        // frame is orthonormal, continuous over the surface, and stable in world space -- which is
+        // exactly what a world-space ripple or triplanar pattern needs.
+        const float3 up = abs(N.z) < 0.999 ? float3(0, 0, 1) : float3(1, 0, 0);
+        const float3 T2 = normalize(cross(up, N));
+        const float3 B2 = cross(N, T2);
+        return normalize(T2 * nTS.x + B2 * nTS.y + N * nTS.z);
+    }
     float invmax = rsqrt(m);
     return normalize(T * (nTS.x * invmax) + B * (nTS.y * invmax) + N * nTS.z);
 }
