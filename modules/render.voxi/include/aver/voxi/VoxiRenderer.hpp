@@ -897,6 +897,15 @@ private:
         // compositing four coats of alpha also deletes the surface entirely once you swim under it.
         // The shader inverts that discard rather than switching it off; see PSMainVoxi.
         f32 cameraMedium[4] = {};
+        // THE WATER VOLUME THAT CASTS CAUSTICS, in world centimetres: min.xyz and max.xyz of its
+        // axis-aligned box, with min.w = 1 when there is one at all and max.w its strength.
+        //
+        // The volume's TOP (max.z) is the surface light refracts through, and everything inside the
+        // footprint and below that height is lit through it. Published from the renderer rather than
+        // read from the fluids module because Voxi renders and plugins do not: what arrives here is
+        // a box, and nothing about this says "water".
+        f32 causticMin[4] = {};
+        f32 causticMax[4] = {};
         // The GI-only shadow map's light view-projection, fitted to the GI volume rather than the
         // camera -- see fitGiShadow(). Read only by PSVoxel through giShadowFactor(); PSMainVoxi
         // keeps using cascadeViewProj/shadowFactor above for the camera cascades.
@@ -933,7 +942,7 @@ private:
     // The file this used to name, VoxiShaders.hpp, no longer exists: the HLSL moved out of C++
     // string literals into shaders/ and the message was never updated. It sent me to a deleted file
     // when this assert did its job. Naming the real one now.
-    static_assert(sizeof(FrameConstants) == 656,
+    static_assert(sizeof(FrameConstants) == 688,
                   "cbuffer VoxiFrame in modules/render.voxi/shaders/voxi.hlsl mirrors this byte for byte");
     static_assert(sizeof(FrameConstants) % 16 == 0, "must be a legal constant-buffer size");
 

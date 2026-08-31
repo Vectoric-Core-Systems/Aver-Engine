@@ -438,6 +438,13 @@ struct GpuMesh {
     // createMesh. See IDevice::meshBounds for why a corner rather than the farthest actual vertex.
     f32 boundsCentre[3] = {0.0f, 0.0f, 0.0f};
     f32 boundsRadius = 0.0f;
+    // THE BOX THE SPHERE WAS DERIVED FROM, which createMesh already computed and then threw away.
+    // A sphere is the right shape for a frustum cull and the wrong one for "is this point inside the
+    // volume": the sphere around a wide shallow pool bulges well above its own surface, so a test
+    // against it answers yes while you are standing on the deck. Keeping the extents costs six
+    // floats per mesh and makes that question exactly answerable.
+    f32 boundsMin[3] = {0.0f, 0.0f, 0.0f};
+    f32 boundsMax[3] = {0.0f, 0.0f, 0.0f};
 
     // ---- index-buffer sharing, which exists ONLY because of createSkinTargetMesh ----
     //
@@ -903,6 +910,13 @@ public:
         if (ib) *ib = m.ibBuffer;
         if (vertexCount) *vertexCount = m.vertexCount;
         if (indexCount) *indexCount = m.indexCount;
+        return true;
+    }
+    bool meshBoundsAabb(MeshHandle mesh, f32 outMin[3], f32 outMax[3]) const override {
+        if (!mesh || mesh > meshes_.size()) return false;
+        const GpuMesh& m = meshes_[mesh - 1];
+        if (m.boundsRadius <= 0.0f) return false;   // never measured; a point is not an answer
+        for (int a = 0; a < 3; ++a) { outMin[a] = m.boundsMin[a]; outMax[a] = m.boundsMax[a]; }
         return true;
     }
     bool meshBounds(MeshHandle mesh, f32 outCentre[3], f32* outRadius) const override {
@@ -3021,6 +3035,7 @@ MeshHandle D3D12Device::createMesh(const MeshVertex* verts, u32 vcount, const u3
             const f32 p[3] = {verts[i].px, verts[i].py, verts[i].pz};
             for (int a = 0; a < 3; ++a) { lo[a] = std::fmin(lo[a], p[a]); hi[a] = std::fmax(hi[a], p[a]); }
         }
+        for (int a = 0; a < 3; ++a) { m.boundsMin[a] = lo[a]; m.boundsMax[a] = hi[a]; }
         for (int a = 0; a < 3; ++a) m.boundsCentre[a] = 0.5f * (lo[a] + hi[a]);
         const f32 dx = hi[0] - m.boundsCentre[0], dy = hi[1] - m.boundsCentre[1], dz = hi[2] - m.boundsCentre[2];
         m.boundsRadius = std::sqrt(dx * dx + dy * dy + dz * dz);
@@ -3124,6 +3139,7 @@ MeshHandle D3D12Device::createSkinTargetMesh(MeshHandle source, BufferHandle* ou
     m.boundsCentre[1] = src.boundsCentre[1];
     m.boundsCentre[2] = src.boundsCentre[2];
     m.boundsRadius    = src.boundsRadius;
+    for (int a = 0; a < 3; ++a) { m.boundsMin[a] = src.boundsMin[a]; m.boundsMax[a] = src.boundsMax[a]; }
     // THE INDEX BUFFER'S HANDLE COMES ACROSS TOO, not just its raw pointer. meshGeometry() refuses
     // on `!m.vbBuffer || !m.ibBuffer` (:712), and ibBuffer defaulted to 0 here -- so every skin
     // target reported "no readable geometry" even though its indices are the source mesh's and are

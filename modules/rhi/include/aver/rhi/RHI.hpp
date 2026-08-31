@@ -514,6 +514,16 @@ public:
     // caller culling with it can produce a false "might be visible", never a false "definitely is
     // not". False when the backend has no bounds to give, which is the signal to skip culling for
     // that mesh rather than treat an all-zero sphere as a real, radius-zero point.
+    // The mesh's LOCAL-space axis-aligned extents, or false where the backend never measured them.
+    //
+    // The sphere below is the right shape for a frustum cull -- one centre, one radius, one dot
+    // product -- and the wrong one for containment. A sphere around a wide shallow pool bulges above
+    // its own surface, so "is the camera in the water" answered yes from the poolside. Callers that
+    // need to know whether a POINT is inside a volume, or where that volume's top actually is, want
+    // this instead.
+    virtual bool meshBoundsAabb(MeshHandle mesh, f32 outMin[3], f32 outMax[3]) const {
+        (void)mesh; (void)outMin; (void)outMax; return false;
+    }
     virtual bool meshBounds(MeshHandle mesh, f32 outCentre[3], f32* outRadius) const {
         (void)mesh; (void)outCentre; (void)outRadius; return false;
     }

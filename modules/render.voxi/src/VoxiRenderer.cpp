@@ -2674,6 +2674,7 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     // else would be answering a question nobody asks. M_Glass is twosided=1 and is therefore never a
     // medium by this test, which is correct -- a pane is not something you are inside of.
     cb_.cameraMedium[0] = cb_.cameraMedium[1] = 0.0f;
+    cb_.causticMin[3] = 0.0f;
     {
         f32 vp[16], ivp[16], eye[3] = {};
         if (dev_ && dev_->camera(vp, ivp, eye)) {
@@ -2688,10 +2689,39 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
                     reinterpret_cast<const pbr::MaterialConstants*>(d.mat);
                 if (d.matBytes < sizeof(pbr::MaterialConstants)) continue;
                 if (mc->flags & pbr::MaterialFlag_TwoSided) continue;
-                const f32 dx = eye[0] - d.boundsCentre[0];
-                const f32 dy = eye[1] - d.boundsCentre[1];
-                const f32 dz = eye[2] - d.boundsCentre[2];
-                if (dx * dx + dy * dy + dz * dz > d.boundsRadius * d.boundsRadius) continue;
+
+                // THE BOX, NOT THE SPHERE, now that the RHI keeps the extents createMesh always
+                // measured. The sphere test that stood here was loose enough to answer "inside" from
+                // the poolside -- safe only because the shader INVERTS its discard rather than
+                // disabling it -- and useless for finding where the surface actually is, which
+                // caustics need. Eight corners through the world matrix, then min/max: exact for the
+                // axis-aligned case every volume in practice is, conservative for a rotated one.
+                f32 lmin[3], lmax[3];
+                if (!dev_->meshBoundsAabb(d.mesh, lmin, lmax)) continue;
+                f32 wmin[3] = {1e30f, 1e30f, 1e30f}, wmax[3] = {-1e30f, -1e30f, -1e30f};
+                for (int c = 0; c < 8; ++c) {
+                    const f32 lx = (c & 1) ? lmax[0] : lmin[0];
+                    const f32 ly = (c & 2) ? lmax[1] : lmin[1];
+                    const f32 lz = (c & 4) ? lmax[2] : lmin[2];
+                    for (int a = 0; a < 3; ++a) {
+                        const f32 v = d.world[a] * lx + d.world[4 + a] * ly + d.world[8 + a] * lz + d.world[12 + a];
+                        wmin[a] = std::fmin(wmin[a], v);
+                        wmax[a] = std::fmax(wmax[a], v);
+                    }
+                }
+
+                // THE CAUSTIC CASTER IS PUBLISHED WHETHER OR NOT THE EYE IS IN IT -- you see caustics
+                // on a pool floor from the deck, which is the common case and the one the eye test
+                // would have excluded.
+                if (cb_.causticMin[3] == 0.0f) {
+                    for (int a = 0; a < 3; ++a) { cb_.causticMin[a] = wmin[a]; cb_.causticMax[a] = wmax[a]; }
+                    cb_.causticMin[3] = 1.0f;
+                    cb_.causticMax[3] = settings_.causticStrength;
+                }
+
+                if (eye[0] < wmin[0] || eye[0] > wmax[0] ||
+                    eye[1] < wmin[1] || eye[1] > wmax[1] ||
+                    eye[2] < wmin[2] || eye[2] > wmax[2]) continue;
                 cb_.cameraMedium[0] = 1.0f;
                 cb_.cameraMedium[1] = mc->ior > 1.0f ? mc->ior : 1.0f;
                 break;   // one medium is enough; nesting two is not a case this models

@@ -132,6 +132,11 @@ struct Settings {
     // re-measured against it.
     u32 giCones         = 6;
     f32 giIntensity     = 1.0f;
+    // CAUSTICS: how strongly light focused by a water surface brightens what is beneath it.
+    // 0 switches the term off entirely (and the shader's own branch then costs nothing measurable).
+    // Not on the quality ladder: it is a LOOK, not a fidelity rung -- a pool with caustics at Low
+    // and none at Epic would be the same scene lit differently, which is not what a tier means.
+    f32 causticStrength = 0.6f;
     f32 giMaxDistance   = 4000.0f;  // centimetres
 
     // ---- refraction: how a translucent surface BENDS what is behind it ----

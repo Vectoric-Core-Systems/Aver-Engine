@@ -39,6 +39,10 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     // Computed once per frame on the CPU -- a pixel cannot know whether its own volume encloses the
     // camera. See VoxiRenderer's own comment for why a loose bounding-sphere test is safe here.
     float4   gCameraMedium;
+    // The caustic caster's world box: min.xyz / max.xyz, min.w = 1 when one exists, max.w strength.
+    // max.z is the surface light refracts through. See VoxiRenderer for why a box and not a sphere.
+    float4   gCausticMin;
+    float4   gCausticMax;
     // The GI-ONLY shadow map's light view-projection: one box fitted to the GI VOLUME, not to the
     // camera. Read only by giShadowFactor (PSVoxel); the cascades above stay camera-fitted and are
     // what PSMainVoxi samples.
@@ -109,6 +113,82 @@ Texture2D<float>          gGiShadowTex : register(t8);
 // target), or on a backend that does not implement it. averBlendBackdropValid() below is how a
 // caller asks, and every use falls back to the scalar composite when it says no.
 Texture2D<float4>         gBlendBackdrop : register(t10);
+
+// PLACED HERE, ABOVE THE AVER_RT REGION, AND THAT MATTERS. This sat next to the shadow helpers and
+// was therefore inside `#if AVER_RT`, so on every pipeline compiled without ray tracing -- the
+// shadow and GI-shadow VERTEX shaders among them -- the definition vanished while the call sites did
+// not, and four pipelines failed to compile. The visible result was not a caustics bug at all: no
+// shadow map, no GI shadow map, and a scene missing its pit, its water and its sky. Caustics need no
+// rays; the function is pure arithmetic on the clock and a box, so it belongs where everything can
+// see it.
+// ---- CAUSTICS: light focused by the water surface onto what lies under it -----------------------
+//
+// PROJECTED FROM THE VOLUME, NOT PAINTED INTO A MATERIAL. The alternative -- an animated pattern in
+// the pool floor's own material -- is cheaper and authorable, but the floor would have no idea where
+// the water actually is: the pattern would run to the edges of whatever mesh carried it, keep going
+// where the pool ends, and appear on surfaces that happen to share the material and are nowhere near
+// water. This reads the caster's box from the frame constants, so caustics stop exactly where the
+// water stops and land on ANY surface beneath it whatever material that surface has.
+//
+// THE PHYSICS IT APPROXIMATES. A wavy surface refracts sunlight; where the surface is CONCAVE it
+// converges those rays and where it is convex it spreads them. The convergence is the Laplacian of
+// the height field, so bright caustic lines sit where the second derivative is most negative. For a
+// sum of sine waves that Laplacian is analytic -- each term contributes -k^2 * sin(phase) -- which
+// is why this needs no ray tracing, no photon map and no texture: it is the same three sines the
+// ripple graph uses, differentiated twice.
+//
+// WHAT IT DELIBERATELY IS NOT. Real caustics depend on the whole light path, so they shift with the
+// sun's angle and pool up against walls; this does neither. It is a focus term evaluated directly
+// beneath the surface, which is right for a flat-bottomed pool lit from above and increasingly wrong
+// as either assumption fails. Written down because "caustics" is a word that promises more than this
+// delivers, and a reader should know which one they have.
+//
+// THE WAVE CONSTANTS ARE DUPLICATED FROM G_WaterRipple.ocgraph, AND THAT IS A REAL SEAM. The ripple
+// is authored as a material graph whose numbers are pin defaults baked into generated HLSL; nothing
+// in C++ can read them back, so the two cannot share one source today. They are written here in the
+// same order and units so a divergence is at least visible side by side, and if the graph is retuned
+// this has to be retuned with it or the bright lines will drift out of step with the bumps that
+// should be casting them.
+float averCausticFocus(float3 wpos) {
+    if (gCausticMin.w < 0.5 || gCausticMax.w <= 0.0) return 0.0;
+    // Inside the footprint, and below the surface. A point above the water gets nothing.
+    if (wpos.x < gCausticMin.x || wpos.x > gCausticMax.x ||
+        wpos.y < gCausticMin.y || wpos.y > gCausticMax.y ||
+        wpos.z > gCausticMax.z) return 0.0;
+
+    const float t = gTime.x;
+    // Matching G_WaterRipple.ocgraph: 37 cm along X, 23 cm along Y, 61 cm on the diagonal.
+    const float k1 = 0.169816, s1 = 3.740140;
+    const float k2 = 0.273182, s2 = 4.640800;
+    const float k3 = 0.103003, s3 = 2.879793;
+    const float p1 = wpos.x * k1 + t * s1;
+    const float p2 = wpos.y * k2 + t * s2;
+    const float p3 = (wpos.x + wpos.y) * k3 + t * s3;
+
+    // The Laplacian of the height field. NEGATED, because focus is where it is most negative, and
+    // clamped at zero: a convex patch spreads light rather than removing it, and the shading it
+    // leaves is already handled by the surface being lit less, not by subtracting here.
+    const float lap = -(k1 * k1 * sin(p1) + k2 * k2 * sin(p2) + 2.0 * k3 * k3 * sin(p3));
+    // Normalised by the largest curvature the three waves can produce together, so `strength` means
+    // the same thing whatever the wavelengths are retuned to.
+    const float norm = k1 * k1 + k2 * k2 + 2.0 * k3 * k3;
+    float focus = saturate(lap / max(norm, 1e-6));
+
+    // SHARPENED, because real caustics are thin bright lines and not a broad glow. The power is what
+    // turns a smooth curvature field into the filigree the eye recognises.
+    focus = pow(focus, 4.0);
+
+    // Deeper water spreads the focus out and dims it -- the rays have further to diverge before they
+    // land. 200 cm is a soft falloff, not a physical depth constant.
+    const float depth = max(gCausticMax.z - wpos.z, 0.0);
+    focus *= exp(-depth / 200.0);
+
+    // And fade out at the very edge of the box so the pattern does not end on a hard line.
+    const float2 edge = min(wpos.xy - gCausticMin.xy, gCausticMax.xy - wpos.xy);
+    focus *= saturate(min(edge.x, edge.y) / 20.0);
+
+    return focus * gCausticMax.w;
+}
 
 #if AVER_RT
 // DXR 1.1 inline ray tracing: traced from the pixel shader, no state objects or binding tables.
@@ -2234,6 +2314,15 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     sun.direction  = L;
     sun.radiance   = averSunRadiance();
     sun.visibility = sunVis;
+    // CAUSTICS, INTO THE SUN TERM, because that is what they are: sunlight the water surface has
+    // concentrated rather than a glow of their own. Scaling the sun means a caustic cannot appear in
+    // shadow -- sunVis is already zero there -- which is the single most obvious way a caustic
+    // implementation gives itself away.
+    //
+    // OPAQUE ONLY. The water's own top face sits exactly at the box's max.z and would otherwise be
+    // lit by the caustics it is itself casting.
+    if (!(gMaterialFlags & AVER_MAT_ALPHA_BLEND))
+        sun.visibility *= 1.0 + averCausticFocus(vtx.wpos);
 
     AverSurface s = averEvalMaterial(vtx, sun);
 #if AVER_GBUFFER
@@ -2997,6 +3086,9 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     sun.direction  = L;
     sun.radiance   = averSunRadiance();
     sun.visibility = sunVis;
+    // The ray-driven twin of the caustic term above. No blended test here: this pass shades opaque
+    // primary hits only -- translucency is drawn by the blended replay through PSMainVoxi.
+    sun.visibility *= 1.0 + averCausticFocus(wpos);
 
     const uint bounces = (uint)max(gPtBounceParams.x, 1.0);
 
