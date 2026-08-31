@@ -3074,7 +3074,17 @@ public:
                 applyDpi(dpi);
             }
         }
-        if (e.device()->uiActive() && !browserActive_ && !gameHasInput()) {
+        // THE ENGINE'S DEFAULT PAWN IS AN EXCEPTION TO "the game owns the input", and leaving it out
+        // is what made PIE feel broken: gameHasInput() is true for ANY live session, so this whole
+        // block -- the viewport camera, and with it the only thing that moves the default pawn --
+        // stood down the moment Play possessed one. You pressed Play and the camera stopped
+        // answering entirely. The headless --pie-camera-test reported drift of exactly 0.0000, which
+        // is not "steady" so much as "nothing ran".
+        //
+        // A project's OWN pawn should still take the input; that is what the gate is for and it
+        // keeps it. The engine's stand-in is the editor camera wearing a pawn, so it is the one
+        // session that must not stand the editor camera down.
+        if (e.device()->uiActive() && !browserActive_ && (!gameHasInput() || defaultPawnPlay_)) {
             const ImGuiIO& io = ImGui::GetIO();
             const bool overUI = !levelHovered_ || !inViewport(io.MousePos.x, io.MousePos.y);
             if (inputProbe_ && (ImGui::GetFrameCount() % 30) == 0)
@@ -3108,6 +3118,18 @@ public:
             // hands you a plain camera, and a camera you have to hold a mouse button to walk is not
             // what anyone means by that. Mouse LOOK still wants the button: capturing the cursor for
             // the whole session would trap it in the viewport, and an editor has panels to reach.
+            // A SYNTHETIC LOOK ENTERS HERE, WHERE THE REAL ONE DOES. --pie-camera-test used to bump
+            // yaw_/pitch_ from its own tick, which runs LATER in the frame than this block -- so the
+            // bump was never carried into the pawn and drivePlayCamera restored it from the pawn's
+            // unchanged forward on the very next frame. The test then measured a beautifully steady
+            // camera and told me the view ignored input, when what it had actually caught was its
+            // own ordering. Mouse look writes these angles a few lines above; so does this.
+            if (pieCamPendingLook_) {
+                pieCamPendingLook_ = false;
+                yaw_   += 0.5f;
+                pitch_ += 0.3f;
+                pieCamWantYaw_ = yaw_; pieCamWantPitch_ = pitch_;
+            }
             if ((flying_ || defaultPawnPlay_) && !io.WantCaptureKeyboard) {
                 const f32 sp = flySpeed_ * t.dt;
                 Vec3 step{0, 0, 0};
@@ -3223,6 +3245,7 @@ public:
 #endif
         maybeSpawnTestActor();
         maybePlayTest();
+        maybePieCameraTest();
         // The tick groups bracket the physics step: PrePhysics -> Physics -> PostPhysics.
         if (!spawnTestClass_.empty() || aver_fw_play_state() == AVER_FW_PLAY_PLAYING) {
             aver_fw_tick(AVER_FW_TICK_PRE_PHYSICS, t.dt);
@@ -6679,6 +6702,7 @@ public:
 #endif
     void setResizeCycle(int n) { resizeCycle_ = n < 0 ? 0 : (u64)n; }              // --resize-cycle [N]
     void setGpuTiming(bool on) { gpuTiming_ = on; }                                // --gpu-timing
+    void setPieCameraTest(int n) { pieCamFrames_ = n; }                            // --pie-camera-test
     void setSkinSceneDir(std::string d) { skinSceneDir_ = std::move(d); }          // --skin-scene-test <dir>
     // --shader-source <dir>: watch a shader source tree and reload without restarting.
     void setShaderSourceDir(std::string d) { shaderSourceDir_ = std::move(d); }
@@ -8605,6 +8629,84 @@ private:
         // last tick shove it again.
         restorePlayWorld();
     }
+
+    // --pie-camera-test [N]: press Play, touch NOTHING, and prove the camera holds perfectly still.
+    //
+    // WHY THIS IS THE RIGHT TEST FOR "the camera is glitchy". A PIE camera with no input has exactly
+    // one correct behaviour: it does not move. Any drift at all is a bug, and the size of the drift
+    // per frame says which bug -- so this needs no eyes, no screenshot and no judgement call, which
+    // is what makes it runnable headlessly.
+    //
+    // It exists because the loop it catches is invisible to every other test here. drivePlayCamera
+    // derives yaw_/pitch_ back OUT of the possessed pawn's forward vector every frame, while the
+    // fly control writes that pawn's rotation IN from yaw_/pitch_. Those two run in a cycle, so if
+    // the quaternion built on the way in does not exactly invert camForward() on the way out, the
+    // angles walk a little further every frame and the view slowly tumbles. Nothing asserts a
+    // round trip, --play-test only looks at where a character walked to, and a screenshot of one
+    // frame cannot show a drift at all.
+    void maybePieCameraTest() {
+        if (pieCamFrames_ <= 0) return;
+#if AVER_MODULE_FRAMEWORK
+        ++pieCamFrame_;
+        if (pieCamFrame_ == 10) { startPlay(); return; }   // let startup settle, as --play-test does
+        if (pieCamFrame_ < 10) return;
+        if (pieCamFrame_ == 11) {                          // the reference, one frame after Play
+            pieCamRef_ = camPos_; pieCamRefYaw_ = yaw_; pieCamRefPitch_ = pitch_;
+            return;
+        }
+        // A SINGLE LOOK, ONCE, then silence -- because idle proved steady and the report is that the
+        // camera misbehaves while being used. This is the headless equivalent of nudging the mouse
+        // and letting go: yaw and pitch are moved exactly as the RMB look moves them, and then
+        // nothing touches them again. A lossless round trip settles instantly at the new angles; a
+        // lossy one keeps walking, which is what "glitchy" looks like from the chair.
+        if (pieCamFrame_ == 40) { pieCamPendingLook_ = true; pieCamLooked_ = true; return; }
+        if (pieCamFrame_ == 41) return;                    // the look lands in the fly block here
+        if (pieCamFrame_ == 42) {
+            // DID THE LOOK SURVIVE THE ROUND TRIP? This is the question a drift measurement cannot
+            // answer on its own, and the reason the first version of this test passed while the
+            // camera was in fact dead. drivePlayCamera recomputes yaw_/pitch_ from the possessed
+            // pawn every frame, so if nothing wrote that look INTO the pawn, the angles are simply
+            // restored to what the pawn already had -- and a drift check re-baselined one frame
+            // later then reports a perfectly steady camera that ignores every input.
+            pieCamKeptYaw_   = std::fabs(yaw_   - pieCamWantYaw_)   < 1e-3f;
+            pieCamKeptPitch_ = std::fabs(pitch_ - pieCamWantPitch_) < 1e-3f;
+            pieCamRef_ = camPos_; pieCamRefYaw_ = yaw_; pieCamRefPitch_ = pitch_;
+            pieCamMaxPos_ = pieCamMaxYaw_ = pieCamMaxPitch_ = 0.0f;
+            return;
+        }
+        const f32 dp = (camPos_ - pieCamRef_).size();
+        const f32 dy = std::fabs(yaw_   - pieCamRefYaw_);
+        const f32 dq = std::fabs(pitch_ - pieCamRefPitch_);
+        pieCamMaxPos_   = std::fmax(pieCamMaxPos_, dp);
+        pieCamMaxYaw_   = std::fmax(pieCamMaxYaw_, dy);
+        pieCamMaxPitch_ = std::fmax(pieCamMaxPitch_, dq);
+        if (pieCamFrame_ >= 42 + pieCamFrames_) {
+            // Tolerances are tight ON PURPOSE. This is not "does it look steady", it is "is the
+            // round trip lossless". A hundredth of a degree per frame is invisible for a second and
+            // a full revolution over a few minutes.
+            const bool ok = pieCamMaxPos_ < 0.5f && pieCamMaxYaw_ < 1e-3f && pieCamMaxPitch_ < 1e-3f;
+            AVER_INFO("[pie-camera] over {} frames with NO input: max drift pos {:.4f} cm, yaw "
+                      "{:.6f} rad, pitch {:.6f} rad -- {}",
+                      pieCamFrames_, pieCamMaxPos_, pieCamMaxYaw_, pieCamMaxPitch_,
+                      ok ? "STEADY" : "DRIFTING (the camera does not hold still)");
+            AVER_INFO("[pie-camera] a look of +0.5 yaw / +0.3 pitch was {}: yaw {}, pitch {} -- {}",
+                      pieCamLooked_ ? "applied" : "NOT applied",
+                      pieCamKeptYaw_ ? "kept" : "REVERTED", pieCamKeptPitch_ ? "kept" : "REVERTED",
+                      (pieCamKeptYaw_ && pieCamKeptPitch_)
+                          ? "the view answers input"
+                          : "THE VIEW IGNORES INPUT (nothing is writing the pawn)");
+            stopPlay();
+            pieCamFrames_ = 0;
+        }
+#endif
+    }
+    int pieCamFrames_ = 0, pieCamFrame_ = 0;
+    Vec3 pieCamRef_{0, 0, 0};
+    f32  pieCamRefYaw_ = 0.0f, pieCamRefPitch_ = 0.0f;
+    f32  pieCamMaxPos_ = 0.0f, pieCamMaxYaw_ = 0.0f, pieCamMaxPitch_ = 0.0f;
+    bool pieCamLooked_ = false, pieCamKeptYaw_ = false, pieCamKeptPitch_ = false;
+    bool pieCamPendingLook_ = false;
+    f32  pieCamWantYaw_ = 0.0f, pieCamWantPitch_ = 0.0f;
 
     // Runs the --play-test session: begins play, drives synthetic input for 150 frames, then stops.
     void maybePlayTest() {
@@ -18063,6 +18165,7 @@ Application* createApplication(int argc, char** argv) {
     // C1061 reason as everything else in this loop. Verification-only, and it reproduces a real
     // crash -- see SandboxApp::resizeCheck() for which one and why nothing else could.
     int resizeCycleArg = 0;
+    int pieCamArg = 0;
     // --gpu-timing takes no value, so it is matched in the i+1<argc loop below only incidentally --
     // it is checked in its own full-length loop underneath, or a trailing --gpu-timing with nothing
     // after it would be silently ignored. That is the exact shape of the --no-rt/--no-gi bug this
@@ -18071,6 +18174,7 @@ Application* createApplication(int argc, char** argv) {
     for (int i = 1; i + 1 < argc; ++i) {
         if (!std::strcmp(argv[i], "--rd-ablate"))            rdAblate = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--resize-cycle"))         resizeCycleArg = std::atoi(argv[i + 1]);
+        if (!std::strcmp(argv[i], "--pie-camera-test"))      pieCamArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--refraction"))           refraction = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--refraction-strength"))  refractionStrength = (f32)std::atof(argv[i + 1]);
         if (!std::strcmp(argv[i], "--refraction-fade"))      refractionFade = (f32)std::atof(argv[i + 1]);
@@ -18989,6 +19093,7 @@ Application* createApplication(int argc, char** argv) {
     if (aversrCycle > 0) app->setAverSrCycleAuto(aversrCycle);
     if (resizeCycleArg > 0) app->setResizeCycle(resizeCycleArg);
     if (gpuTimingArg) app->setGpuTiming(true);
+    if (pieCamArg > 0) app->setPieCameraTest(pieCamArg);
 #endif
     if (!skinSceneDir.empty()) app->setSkinSceneDir(skinSceneDir);
     if (!shaderSourceDir.empty()) app->setShaderSourceDir(shaderSourceDir);
