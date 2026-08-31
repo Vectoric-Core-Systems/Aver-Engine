@@ -633,6 +633,22 @@ struct Emitter {
         // a pin's authored default and, for a pin nobody declared, to zero -- so an unconnected
         // scale would multiply the clock by 0 and freeze every animation with no error anywhere.
         // A Multiply beside this node costs one node and cannot fail that way.
+        // THE WATER SURFACE, so a graph shapes it from the SAME numbers the caustics project through.
+        //
+        //   WaveNormal.value  -- tangent-space normal of the wave set at `position` (world XY, cm)
+        //   WaveNormal.height -- its height in cm, for anything wanting the scalar
+        //   WaveNormal.focus  -- how strongly it converges light there, which is what caustics use
+        //
+        // A graph that wants a different ripple should change the wave set, not re-derive one out of
+        // Sin nodes: a hand-built one looks identical and silently stops agreeing with the caustics.
+        if (ciEquals(ty, "WaveNormal")) {
+            const Value p2 = input(n, "position", MatType::Float2);
+            if (ciEquals(pin, "height"))
+                return bind(n.id, pin, MatType::Float, "averWaveHeight(" + p2.expr + ")");
+            if (ciEquals(pin, "focus"))
+                return bind(n.id, pin, MatType::Float, "averWaveFocus(" + p2.expr + ")");
+            return bind(n.id, pin, MatType::Float3, "averWaveNormal(" + p2.expr + ")");
+        }
         if (ciEquals(ty, "Time")) {
             const char* src = ciEquals(pin, "raw")   ? "gTime.y"
                             : ciEquals(pin, "delta") ? "gTime.z"

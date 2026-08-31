@@ -7867,6 +7867,46 @@ private:
         // declared a WATER record and no WAVEs asked for still water, and a pool usually wants exactly
         // that. gerstnerHeightCm's own contract already returns the flat level for an empty set.
         waterRenderer_.setWaves(waves, n);
+
+        // THE SURFACE RIPPLE SET, which is a different thing from the Gerstner swell above and is
+        // published to the DEVICE rather than to the water renderer. The swell displaces vertices on
+        // an analytic ocean; this is the fine surface texture that shapes the NORMAL, and it is read
+        // by two shaders that must agree -- the material graph that ripples the water and the
+        // caustics that project light through it. See IDevice::setWaterWaves.
+        //
+        // DERIVED FROM THE AUTHORED WAVES WHERE THERE ARE ANY, so a level that describes its water
+        // gets a ripple that matches it; otherwise a default set sized for a pool. Non-harmonic
+        // wavelengths (37, 23 and 61 cm) so the pattern does not beat into a visible grid, and each
+        // speed is an exact multiple of 2*pi/3600 so it crosses gTime's hourly wrap without a jump.
+        //
+        // A PCG PASS COULD WRITE THIS INSTEAD and nothing downstream would notice: the seam is the
+        // three vectors, not where they came from.
+        {
+            f32 rip[3][4];
+            if (n > 0) {
+                for (u32 i = 0; i < 3; ++i) {
+                    const fluids::GerstnerWave& g = waves[i < n ? i : n - 1];
+                    const f32 len = std::sqrt(g.dirX * g.dirX + g.dirZ * g.dirZ);
+                    const f32 k = 6.2831853f / (g.wavelengthCm > 1.0f ? g.wavelengthCm : 1.0f);
+                    rip[i][0] = len > 1e-4f ? g.dirX / len : 1.0f;
+                    rip[i][1] = len > 1e-4f ? g.dirZ / len : 0.0f;
+                    rip[i][2] = k;
+                    // Deep-water dispersion, snapped to the hourly wrap: omega = sqrt(g*k).
+                    const f32 omega = std::sqrt(981.0f * k);
+                    rip[i][3] = std::round(omega / 0.001745329f) * 0.001745329f;
+                }
+            } else {
+                const f32 kk[3] = {0.169816f, 0.273182f, 0.145670f};
+                const f32 ss[3] = {3.740140f, 4.640800f, 2.879793f};
+                const f32 dx[3] = {1.0f, 0.0f, 0.7071068f};
+                const f32 dy[3] = {0.0f, 1.0f, 0.7071068f};
+                for (u32 i = 0; i < 3; ++i) {
+                    rip[i][0] = dx[i]; rip[i][1] = dy[i]; rip[i][2] = kk[i]; rip[i][3] = ss[i];
+                }
+            }
+            eng.device()->setWaterWaves(rip, 3, 0.055f);
+        }
+
         waterHeightCm_ = static_cast<f32>(wp.levelCm);
 
         // The same single number for both, for the reason the startup path states: two independent

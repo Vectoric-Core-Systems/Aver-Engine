@@ -873,6 +873,14 @@ public:
         frameCB_.lightColor[0] = color[0]; frameCB_.lightColor[1] = color[1]; frameCB_.lightColor[2] = color[2]; frameCB_.lightColor[3] = 0;
         frameCB_.ambient[0] = frameCB_.ambient[1] = frameCB_.ambient[2] = ambient; frameCB_.ambient[3] = 0;
     }
+    void setWaterWaves(const f32 (*waves)[4], u32 count, f32 amplitude) override {
+        const u32 n = count > 3u ? 3u : count;
+        for (u32 i = 0; i < 3; ++i)
+            for (int a = 0; a < 4; ++a) frameCB_.wave[i][a] = (i < n && waves) ? waves[i][a] : 0.0f;
+        frameCB_.waveParams[0] = amplitude;
+        frameCB_.waveParams[1] = static_cast<f32>(n);
+        frameCB_.waveParams[2] = frameCB_.waveParams[3] = 0.0f;
+    }
     void setFrameTime(f32 seconds, f32 deltaSeconds) override {
         // Wrapped on the way IN, so no shader has to remember to do it. 3600 keeps a float32 at
         // roughly 0.2 ms of resolution indefinitely; a ripple whose period divides an hour crosses

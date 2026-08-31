@@ -1381,6 +1381,14 @@ public:
     bool camera(f32 viewProj[16], f32 invViewProj[16], f32 cameraPos[3]) const override;
     bool sceneViewport(f32 rect[4]) const override;
     void setLight(const f32 dirToLight[3], const f32 color[3], f32 ambient) override;
+    void setWaterWaves(const f32 (*waves)[4], u32 count, f32 amplitude) override {
+        const u32 n = count > 3u ? 3u : count;
+        for (u32 i = 0; i < 3; ++i)
+            for (int a = 0; a < 4; ++a) frameCB_.wave[i][a] = (i < n && waves) ? waves[i][a] : 0.0f;
+        frameCB_.waveParams[0] = amplitude;
+        frameCB_.waveParams[1] = static_cast<f32>(n);
+        frameCB_.waveParams[2] = frameCB_.waveParams[3] = 0.0f;
+    }
     void setFrameTime(f32 seconds, f32 deltaSeconds) override {
         frameCB_.time[0] = std::fmod(seconds, 3600.0f);   // see the D3D12 twin for why it wraps
         frameCB_.time[1] = seconds;

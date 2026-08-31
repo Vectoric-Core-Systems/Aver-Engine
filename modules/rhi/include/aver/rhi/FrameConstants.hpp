@@ -67,13 +67,29 @@ struct PerFrameCB {
     // y is the raw unwrapped seconds for anything that genuinely wants monotonic time and can
     // accept the precision loss; z is the frame delta.
     f32 time[4];         // x seconds wrapped to 3600, y seconds raw, z delta seconds, w unused
+    // THE WATER WAVE SET, and it is here for the same reason the clock is: it has TWO consumers that
+    // must agree exactly, and they live in different shaders.
+    //
+    // A material graph shapes the water surface from these; the caustics term projects light through
+    // that same surface onto whatever lies under it. Those are the bumps and the bright lines they
+    // cast, so if the two ever disagree the lines drift away from the bumps making them -- which is
+    // precisely what happened when each carried its own copy of the numbers. One array, read by both.
+    //
+    // Alongside fog, clouds and the atmosphere rather than in a renderer's own block because it is
+    // the same KIND of thing: authored environment that any shader may need.
+    //
+    // Each wave: xy = unit direction in world XY, z = k (radians per cm, 2*pi/wavelength),
+    // w = angular speed (radians per second). waveParams: x = amplitude, y = how many of the three
+    // are live, z and w spare.
+    f32 wave[3][4];
+    f32 waveParams[4];
 };
 
 // A REAL SIZE, not just an alignment. The `% 16 == 0` check both backends carried is necessary and
 // nowhere near sufficient: every legal edit to this struct keeps it a multiple of 16, so the one
 // assertion guarding the layout could not fail for the change most likely to break it. This number
 // moving is the signal that shared_prelude.hlsl's cbuffer has to move with it.
-static_assert(sizeof(PerFrameCB) == 608, "cbuffer PerFrame in shaders/shared_prelude.hlsl mirrors this");
+static_assert(sizeof(PerFrameCB) == 672, "cbuffer PerFrame in shaders/shared_prelude.hlsl mirrors this");
 static_assert(sizeof(PerFrameCB) % 16 == 0, "a constant buffer's rows are float4s");
 
 // Spot checks at the boundaries a reader would look for, in the shape MaterialTest.cpp proved out:
@@ -87,7 +103,8 @@ static_assert(offsetof(PerFrameCB, camPos)    == 128, "camPos follows the two ma
 static_assert(offsetof(PerFrameCB, fogColor)  == 224, "fogColor at 224");
 static_assert(offsetof(PerFrameCB, atmoMie)   == 336, "atmoMie at 336");
 static_assert(offsetof(PerFrameCB, skySh)     == 448, "the SH block sits at 448");
-static_assert(offsetof(PerFrameCB, time)      == 592, "time is last, appended after the SH block");
+static_assert(offsetof(PerFrameCB, time)      == 592, "time follows the SH block");
+static_assert(offsetof(PerFrameCB, wave)      == 608, "the wave set follows time");
 
 // Constants for every post pass. Mirrors `cbuffer AverPost : register(b0)` in rhi::postShaderSource().
 struct PostCB {

@@ -551,6 +551,16 @@ public:
     // weather rather than a wall clock -- a level that pauses its sky must not thereby freeze every
     // animated material in it. `seconds` is raw and monotonic; the backend does the wrapping the
     // shader needs (see PerFrameCB::time for why it wraps at all).
+    // The water wave set both the surface shader and the caustics read -- see PerFrameCB::wave for
+    // why one array rather than a copy each. `waves` is up to 3 entries of
+    // {dirX, dirY, k (rad/cm), speed (rad/s)}; `count` 0 disables the surface entirely.
+    //
+    // A CALLER MAY GENERATE THESE HOWEVER IT LIKES -- authored WAVE records, a PCG pass, a gameplay
+    // system reacting to weather. The renderer neither knows nor cares where they came from, which
+    // is the point of putting the seam here.
+    virtual void setWaterWaves(const f32 (*waves)[4], u32 count, f32 amplitude) {
+        (void)waves; (void)count; (void)amplitude;
+    }
     virtual void setFrameTime(f32 seconds, f32 deltaSeconds) { (void)seconds; (void)deltaSeconds; }
     virtual void setSkyAtmosphere(const SkyAtmosphere& s) { (void)s; }
     virtual SkyAtmosphere skyAtmosphere() const { return {}; }

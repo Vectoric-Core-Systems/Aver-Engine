@@ -143,12 +143,10 @@ Texture2D<float4>         gBlendBackdrop : register(t10);
 // as either assumption fails. Written down because "caustics" is a word that promises more than this
 // delivers, and a reader should know which one they have.
 //
-// THE WAVE CONSTANTS ARE DUPLICATED FROM G_WaterRipple.ocgraph, AND THAT IS A REAL SEAM. The ripple
-// is authored as a material graph whose numbers are pin defaults baked into generated HLSL; nothing
-// in C++ can read them back, so the two cannot share one source today. They are written here in the
-// same order and units so a divergence is at least visible side by side, and if the graph is retuned
-// this has to be retuned with it or the bright lines will drift out of step with the bumps that
-// should be casting them.
+// ONE WAVE SET, SHARED. This used to duplicate the ripple graph's constants with a comment asking
+// whoever retuned one to remember the other. Both now call averWaveFocus/averWaveNormal in
+// shared_prelude.hlsl, reading gWave[] from the engine's per-frame block, so the surface that makes
+// the ripples IS the surface that focuses this light and they cannot drift apart.
 float averCausticFocus(float3 wpos) {
     if (gCausticMin.w < 0.5 || gCausticMax.w <= 0.0) return 0.0;
     // Inside the footprint, and below the surface. A point above the water gets nothing.
@@ -156,23 +154,11 @@ float averCausticFocus(float3 wpos) {
         wpos.y < gCausticMin.y || wpos.y > gCausticMax.y ||
         wpos.z > gCausticMax.z) return 0.0;
 
-    const float t = gTime.x;
-    // Matching G_WaterRipple.ocgraph: 37 cm along X, 23 cm along Y, 61 cm on the diagonal.
-    const float k1 = 0.169816, s1 = 3.740140;
-    const float k2 = 0.273182, s2 = 4.640800;
-    const float k3 = 0.103003, s3 = 2.879793;
-    const float p1 = wpos.x * k1 + t * s1;
-    const float p2 = wpos.y * k2 + t * s2;
-    const float p3 = (wpos.x + wpos.y) * k3 + t * s3;
-
-    // The Laplacian of the height field. NEGATED, because focus is where it is most negative, and
-    // clamped at zero: a convex patch spreads light rather than removing it, and the shading it
-    // leaves is already handled by the surface being lit less, not by subtracting here.
-    const float lap = -(k1 * k1 * sin(p1) + k2 * k2 * sin(p2) + 2.0 * k3 * k3 * sin(p3));
-    // Normalised by the largest curvature the three waves can produce together, so `strength` means
-    // the same thing whatever the wavelengths are retuned to.
-    const float norm = k1 * k1 + k2 * k2 + 2.0 * k3 * k3;
-    float focus = saturate(lap / max(norm, 1e-6));
+    // averWaveFocus, NOT a second copy of the wave arithmetic. This function used to carry its own
+    // k and speed constants "matching G_WaterRipple.ocgraph", kept in step by a comment asking the
+    // next person to remember. They are one array in the engine's per-frame block now, and the
+    // surface that makes the ripples is literally the surface that focuses this light.
+    float focus = averWaveFocus(wpos.xy);
 
     // SHARPENED, because real caustics are thin bright lines and not a broad glow. The power is what
     // turns a smooth curvature field into the filigree the eye recognises.
