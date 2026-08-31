@@ -242,6 +242,24 @@ AVER_PBR_API bool isTranslucent(const MaterialDesc& d);
 // So a clear pane attenuates a little and tints not at all; a blue pane at alpha 0.2 passes 0.8 of
 // the sun, blue-tinted; and an opaque material authored with transmission > 0 casts a partial shadow
 // too. AlphaMode::Mask stays binary and is handled by the depth-prepass clip, not here.
+//
+// THIS IS THE SURFACE MODEL, AND IT IS NOW THE FALLBACK RATHER THAN THE WHOLE ANSWER.
+//
+// It is thickness-free by construction -- "ONE crossing" is the contract, and this function has no
+// ray, so it cannot know how far light actually travelled inside anything. That is fine for a sheet
+// with no authored medium, which is what it is for.
+//
+// A material that authors a VOLUME (attenuationColor / attenuationDistance, just above) is a
+// different question, and the answer lives where the distance is knowable: rtShadow in
+// modules/render.voxi/shaders/voxi.hlsl gathers the ray's entry and exit t through each medium and
+// applies averVolumeTransmittance -- the same Beer-Lambert the VIEW path uses, so the light going
+// DOWN through water agrees with the light coming back UP through it. Before that, water shadowed
+// its own pool floor with THIS rule, and (0.38,0.60,0.66)*0.92 has nothing to do with 130 cm of
+// water; the floor read almost black.
+//
+// So the HLSL is deliberately NO LONGER identical in shape to this, and its own comment says which
+// branch is which. The two agree exactly on materials with no volume -- which is what this function's
+// test assertions cover -- and the ray path adds a branch this one structurally cannot have.
 AVER_PBR_API void shadowTransmittance(const MaterialDesc& d, f32 outRgb[3]);
 
 // The material features the editor and the bindings may advertise.
