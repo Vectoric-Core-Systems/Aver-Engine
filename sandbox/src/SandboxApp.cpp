@@ -6401,6 +6401,25 @@ public:
         mcp_.stop();
 #endif
         setLogSink(nullptr, nullptr);
+        // ---- CAPTURE LIVE STATE BEFORE FLUSHING IT ---------------------------------------------
+        // flushEditorPrefs() writes the pref STORE. It does not look at the editor. So on its own it
+        // only persists settings that something already pushed INTO the store -- and until this line
+        // the only thing that ever did was saveEditorPreferences(), called from exactly one place:
+        // the tail of buildEditorPrefs(), which early-returns whenever the Preferences window is
+        // closed.
+        //
+        // Several of those same settings have a second, more convenient control that changes the
+        // member and never reaches that function: the mouse wheel adjusts flySpeed_ in onUpdate
+        // every frame, the viewport toolbar flips wireframe_, the Content Browser's own Tiles/List
+        // buttons and zoom slider move cbGallery_/cbTileSize_, and dragging the drawer grip moves
+        // drawerFrac_. Change any of them the natural way, close the editor, and the value was
+        // silently gone -- the store had never heard about it, so the flush had nothing to write.
+        //
+        // Calling the sync here fixes all of them at once, because it reads the live members rather
+        // than caring which UI last touched them. It is safe to call unconditionally: setPref* is a
+        // no-op on an unchanged value and flushEditorPrefs() is a no-op with nothing dirty, which
+        // EditorPrefs.hpp's own comment says is the point of that design.
+        saveEditorPreferences();
         editor::flushEditorPrefs();
         editor::shutdownActorEditors();
     editor::shutdownAnimEditors();
