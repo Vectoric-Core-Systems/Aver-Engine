@@ -209,10 +209,23 @@ static void splitParams(std::string list, Signature& sig) {
     // `[MarshalAs(UnmanagedType.LPUTF8Str)] string utf8Path` -- and they can contain their own
     // commas, so they come out before anything is split. `[]` is left alone: that is an array, and
     // erasing it would silently turn `float[]` into a by-value float.
+    //
+    // AND SO IS `[3]`, WHICH IS THE SAME THING SPELLED IN C. A C header may declare a parameter as a
+    // fixed-size array -- `const float pointCm[3]` -- which is a POINTER, exactly like `float*`, and
+    // is how physics_joints_abi.h spells nearly every anchor and axis it takes. Erasing that bracket
+    // along with the attributes read the type as a by-value `float`, while the C# binding's `float[]`
+    // read as `float*`, and the two disagreed on thirteen functions that were both correct. The rule
+    // that tells them apart is what is INSIDE the brackets: a declarator holds a number or nothing, an
+    // attribute holds a name. Collapsing `[N]` to `[]` puts the C spelling on the same footing as the
+    // C# one and leaves canonType, which already understands `[]`, to mark both as pointers.
     for (size_t p = list.find('['); p != std::string::npos; p = list.find('[', p)) {
         if (p + 1 < list.size() && list[p + 1] == ']') { p += 2; continue; }
         const size_t e = list.find(']', p);
         if (e == std::string::npos) break;
+        bool allDigits = e > p + 1;
+        for (size_t i = p + 1; i < e && allDigits; ++i)
+            if (list[i] < '0' || list[i] > '9') allDigits = false;
+        if (allDigits) { list.erase(p + 1, e - p - 1); p += 2; continue; }   // `[3]` -> `[]`
         list.erase(p, e - p + 1);
     }
     if (list.empty() || list == "void") return;
@@ -224,6 +237,15 @@ static void splitParams(std::string list, Signature& sig) {
         const bool last = (comma == list.size());
         start = comma + 1;
 
+        // A C++ DEFAULT ARGUMENT IS NOT PART OF THE ABI. physics_abi.h's aver_phys_softbody_create
+        // ends `float damping = 0.1f, int32_t iterations = 5`, and without this that parameter's type
+        // reads as "float damping =" and its NAME as "0.1f". Harmless until the day the function is
+        // bound in C#, which is exactly when a parity test is supposed to be useful.
+        if (const size_t eq = one.find('='); eq != std::string::npos) one.erase(eq);
+        // C#'s nullable-reference annotation says something about null, not about the marshalled
+        // type: `float[]?` and `float[]` are the same pointer as far as the CLR is concerned.
+        for (size_t q = one.find('?'); q != std::string::npos; q = one.find('?')) one.erase(q, 1);
+
         while (!one.empty() && (one.back()  == ' ' || one.back()  == '\t')) one.pop_back();
         while (!one.empty() && (one.front() == ' ' || one.front() == '\t')) one.erase(one.begin());
         if (!one.empty()) {
@@ -231,6 +253,15 @@ static void splitParams(std::string list, Signature& sig) {
             const size_t sp = one.find_last_of(" \t*");
             std::string type = (sp == std::string::npos) ? one : one.substr(0, sp + 1);
             std::string name = (sp == std::string::npos) ? std::string() : one.substr(sp + 1);
+            // AN ARRAY DECLARATOR SITS ON THE NAME IN C AND ON THE TYPE IN C#. `const float p[3]`
+            // and `float[] p` describe the same pointer, but the brackets land on opposite sides of
+            // the space -- so the name gives them back to the type before either is compared.
+            // Without this the C side reads as a by-value float called "p[]" and the C# side as a
+            // "float*" called "p", disagreeing on both counts over one spelling difference.
+            if (name.size() >= 2 && name.compare(name.size() - 2, 2, "[]") == 0) {
+                name.erase(name.size() - 2);
+                type += "[]";
+            }
             sig.types.push_back(canonType(type));
             sig.names.push_back(normalise(name));
         }
@@ -253,17 +284,44 @@ static std::string flatten(const std::string& s) {
 
 // Every `<apiMacro> <ret> <prefix>name(params);` in a C header. Comments come out first: these
 // declarations carry doc comments that would otherwise land inside a parameter list.
+// Removes both kinds of comment IN ONE PASS, which is the only way to get it right.
+//
+// THIS USED TO BE TWO SEQUENTIAL SEARCH-AND-ERASE LOOPS, block comments first and then line comments,
+// and that ordering is wrong in a way that silently ate whole headers. A line comment is allowed to
+// contain the two characters that open a block comment -- physics_joints_abi.h's own opening
+// paragraph names a build-artefact path with a wildcard in it -- and the block pass, running first
+// and knowing nothing about line comments, treated that as the start of a block, found no terminator
+// anywhere after it, and erased THE REST OF THE FILE. Both the joints and shapes headers parsed to
+// zero exports because of one path in one sentence, and it presented as 29 believable "C# imports a
+// function the header does not export" failures rather than as a parse error.
+//
+// Swapping the two passes only moves the bug: a block comment containing a line comment would then
+// lose its own terminator to the line pass. A single left-to-right walk that knows which comment it
+// is inside has neither problem, and is shorter than the two loops it replaces.
+static std::string stripComments(const std::string& in) {
+    std::string out;
+    out.reserve(in.size());
+    for (size_t i = 0; i < in.size(); ++i) {
+        if (in[i] == '/' && i + 1 < in.size() && in[i + 1] == '/') {
+            while (i < in.size() && in[i] != 0x0A) ++i;
+            if (i < in.size()) out.push_back(static_cast<char>(0x0A));
+            continue;
+        }
+        if (in[i] == '/' && i + 1 < in.size() && in[i + 1] == '*') {
+            const size_t e = in.find("*/", i + 2);
+            if (e == std::string::npos) break;   // unterminated: the rest genuinely is a comment
+            i = e + 1;
+            continue;
+        }
+        out.push_back(in[i]);
+    }
+    return out;
+}
+
+
 static std::map<std::string, Signature> cSignatures(std::string text, const std::string& apiMacro,
                                                     const std::string& prefix) {
-    for (size_t p = text.find("/*"); p != std::string::npos; p = text.find("/*")) {
-        const size_t e = text.find("*/", p);
-        if (e == std::string::npos) { text.erase(p); break; }
-        text.erase(p, e - p + 2);
-    }
-    for (size_t p = text.find("//"); p != std::string::npos; p = text.find("//")) {
-        const size_t e = text.find('\n', p);
-        text.erase(p, (e == std::string::npos ? text.size() : e) - p);
-    }
+    text = stripComments(text);
 
     std::map<std::string, Signature> out;
     for (size_t p = text.find(apiMacro); p != std::string::npos; p = text.find(apiMacro, p + 1)) {
@@ -319,19 +377,34 @@ static std::map<std::string, Signature> csSignatures(const std::string& text, co
     return out;
 }
 
+// ONE C# FILE MAY MIRROR SEVERAL C HEADERS, which is why `headers` is a list.
+//
+// The physics ABI grew from 49 functions to 125 and split into five headers on the C side, while the
+// C# side stayed one Native.cs -- a P/Invoke declaration has no natural home other than the assembly
+// it lives in. Pairing them one-to-one would have made the base row see all 125 C# imports (its
+// prefix, aver_phys_, matches every one of them) against only its own header's 74 exports, and report
+// the other 51 as imports of functions that do not exist. They do exist; they are just declared next
+// door. So a row names every header that together makes up the C side of one C# file.
 struct Abi {
     const char* label;
-    const char* header;
+    const char* headers[6];   // NULL-terminated; most rows name exactly one
     const char* apiMacro;
     const char* csFile;
     const char* prefix;
 };
 
 static const Abi kAbis[] = {
-    {"physics ABI", "modules/physics/include/aver/physics/physics_abi.h", "AVER_PHYS_API",
-     "scripting/csharp/Aver.Framework/Physics.cs", "aver_phys_"},
-    {"audio ABI",   "modules/audio.abi/include/aver/audio/audio_abi.h",   "AVER_AUDIO_API",
-     "scripting/csharp/Aver.Framework/Audio.cs",   "aver_audio_"},
+    {"physics ABI",
+     {"modules/physics/include/aver/physics/physics_abi.h",
+      "modules/physics/include/aver/physics/physics_joints_abi.h",
+      "modules/physics/include/aver/physics/physics_shapes_abi.h",
+      "modules/physics/include/aver/physics/physics_layers_abi.h",
+      "modules/physics/include/aver/physics/physics_character_abi.h",
+      nullptr},
+     "AVER_PHYS_API", "scripting/csharp/Aver.Physics/Native.cs", "aver_phys_"},
+    {"audio ABI",
+     {"modules/audio.abi/include/aver/audio/audio_abi.h", nullptr},
+     "AVER_AUDIO_API", "scripting/csharp/Aver.Framework/Audio.cs", "aver_audio_"},
 };
 
 // A DOCUMENTED, DELIBERATE DIVERGENCE. Parameter NAMES are compared because types alone cannot see
@@ -437,11 +510,23 @@ int main() {
 
     // ------------------------------------------------ function signatures
     for (const Abi& a : kAbis) {
-        std::string hdr, cs;
-        if (!readText(root + a.header, hdr)) { check(false, std::string(a.label) + ": cannot read " + a.header); continue; }
+        std::string cs;
         if (!readText(root + a.csFile, cs))  { check(false, std::string(a.label) + ": cannot read " + a.csFile); continue; }
 
-        const std::map<std::string, Signature> c = cSignatures(hdr, a.apiMacro, a.prefix);
+        // Every header in the row, merged: together they are the C side of this one C# file.
+        std::map<std::string, Signature> c;
+        bool readAll = true;
+        for (const char* h : a.headers) {
+            if (!h) break;
+            std::string hdr;
+            if (!readText(root + h, hdr)) {
+                check(false, std::string(a.label) + ": cannot read " + h);
+                readAll = false;
+                break;
+            }
+            for (auto& [n, sig] : cSignatures(hdr, a.apiMacro, a.prefix)) c.emplace(n, sig);
+        }
+        if (!readAll) continue;
         const std::map<std::string, Signature> m = csSignatures(cs, a.prefix);
 
         // Same rule as the constant groups above: a parse that finds nothing must FAIL. Rename the

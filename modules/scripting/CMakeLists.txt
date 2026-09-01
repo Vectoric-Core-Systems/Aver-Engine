@@ -64,6 +64,12 @@ file(GLOB AVER_BRIDGE_SOURCES CONFIGURE_DEPENDS
   ${AVER_CSHARP_DIR}/Aver.Framework/*.csproj
   ${AVER_CSHARP_DIR}/Aver.Scene/*.cs
   ${AVER_CSHARP_DIR}/Aver.Scene/*.csproj
+  # Aver.Physics, the C# binding for modules/physics' 125-function ABI. LISTED HERE FOR THE REASON
+  # THE NOTE AT THE TOP OF THIS BLOCK RECORDS: Aver.Framework references it, so it compiles INTO the
+  # bridge, and a referenced project whose sources are not a dependency means editing it re-stages
+  # nothing and the running editor keeps the previous build with no sign anything was skipped.
+  ${AVER_CSHARP_DIR}/Aver.Physics/*.cs
+  ${AVER_CSHARP_DIR}/Aver.Physics/*.csproj
   # Aver.Graph (GraphHost, the graph compiler, the .ocgraph parser): referenced by the bridge so
   # HostBridge's GraphLoad/GraphTick/GraphUnload can host a compiled graph per entity.
   ${AVER_CSHARP_DIR}/Aver.Graph/*.cs
