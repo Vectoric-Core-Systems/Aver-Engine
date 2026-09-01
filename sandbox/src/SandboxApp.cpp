@@ -117,6 +117,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "EditorKeybinds.hpp"
 // The one place that decides who owns the keyboard and mouse this frame.
 #include "ViewportIconRenderer.hpp"
+#include "PhysicsSceneSync.hpp"
 #include "InputOwnership.hpp"
 #include "EditorConsole.hpp"
 #include "EditorEntitySnapshot.hpp"
@@ -8697,6 +8698,20 @@ private:
         playWorldCaptured_ = true;
         AVER_INFO("[Sandbox] Play: {} level transform(s) recorded; Stop will put them back",
                   (u32)playWorldSnapshot_.size());
+
+        // AND THE AUTHORED PHYSICS BECOMES REAL, here and nowhere else.
+        //
+        // A CRigidBody in a level is data until something turns it into a Jolt body, and PLAY is the
+        // only moment that should happen. Building them at level LOAD would mean a crate settling
+        // onto the floor, drifting and going to sleep while someone was only looking around -- the
+        // same complaint that got gameplay graphs gated out of Select mode, and the transform
+        // snapshot taken immediately above is what puts them back afterwards.
+        //
+        // AFTER the snapshot, deliberately: the snapshot is what Stop restores, so it has to record
+        // where the level was BEFORE physics touched anything.
+#if AVER_MODULE_PHYSICS
+        editor::syncPhysicsFromScene();
+#endif
 #endif
     }
 
@@ -8960,6 +8975,13 @@ private:
     // from Window > Drone is left alone, because stopping play should not take down something the
     // user started for their own reasons and never asked play to own.
     void stopPlay() {
+        // PHYSICS FIRST, because the handles live IN the components: an entity destroyed by the
+        // session takes its CRigidBody -- and the body handle inside it -- with it, and a body whose
+        // handle is gone can never be removed. Tearing down here, before any other teardown runs, is
+        // what keeps a Play/Stop cycle from leaking a Jolt body per destroyed entity.
+#if AVER_MODULE_SCENE && AVER_MODULE_PHYSICS
+        editor::clearPhysicsFromScene();
+#endif
         if (droneStartedByPlay_) {
             setDroneEnabled(false);
             droneStartedByPlay_ = false;

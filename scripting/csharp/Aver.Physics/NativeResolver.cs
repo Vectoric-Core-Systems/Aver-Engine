@@ -1,16 +1,38 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems. All rights reserved.
 // Proprietary. See LICENSE.md at the repository root.
-// DllImport resolver that loads the native Aver.Framework / Aver.Scene DLLs from the executable directory.
+// DllImport resolver that loads the native Aver.Physics DLL from the executable directory.
 
 using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
-namespace Aver.Framework;
+namespace Aver.Physics;
 
-/// <summary>Redirects this assembly's P/Invokes past the managed DLLs of the same name to the native ones beside the executable.</summary>
+/// <summary>
+/// Redirects this assembly's P/Invokes past the managed DLL of the same name to the native one
+/// beside the executable.
+/// </summary>
+/// <remarks>
+/// THIS ASSEMBLY IS NAMED AFTER THE NATIVE LIBRARY IT BINDS, and that is a collision, not a
+/// coincidence: <c>Aver.Physics.dll</c> is both the native module and this managed assembly.
+/// modules/scripting/CMakeLists.txt already keeps the two apart on disk by staging every managed
+/// assembly into <c>bin/Scripting/</c> rather than <c>bin/</c>, so they do not overwrite each other
+/// — but the runtime still probes for a P/Invoke target next to the CALLING assembly first, finds
+/// the managed <c>Aver.Physics.dll</c> sitting right there, and fails with an
+/// <c>EntryPointNotFoundException</c> naming a function that plainly exists in the native one.
+/// <para>
+/// That is not a hypothetical: it is exactly what happened the first time this assembly was built,
+/// and it took down every physics call in a running play session. Aver.Framework and Aver.Scene each
+/// carry the same resolver for the same reason.
+/// </para>
+/// <para>
+/// A RESOLVER IS REGISTERED PER ASSEMBLY, which is why this file exists at all rather than
+/// Aver.Framework's copy covering it: <c>NativeLibrary.SetDllImportResolver</c> takes the assembly
+/// whose P/Invokes it governs, so each assembly that names a colliding library needs its own.
+/// </para>
+/// </remarks>
 internal static class NativeResolver
 {
     private static int s_installed;
@@ -27,17 +49,10 @@ internal static class NativeResolver
     }
 #pragma warning restore CA2255
 
-    /// <summary>Loads the two colliding library names by full path; zero for everything else.</summary>
+    /// <summary>Loads the one colliding library name by full path; zero for everything else.</summary>
     private static IntPtr Resolve(string libraryName, Assembly assembly, DllImportSearchPath? searchPath)
     {
-        // "Aver.Physics" JOINED THIS LIST THE DAY A MANAGED ASSEMBLY TOOK THAT NAME. Until then the
-        // only Aver.Physics.dll anywhere was the native one in bin/, so the loader found it with no
-        // help; now a managed Aver.Physics.dll sits in bin/Scripting/ beside THIS assembly, wins the
-        // probe, and every P/Invoke against it fails with EntryPointNotFoundException naming a
-        // function that plainly exists. Aver.Framework still calls into native physics directly (see
-        // Physics.cs's Phys block, kept for Character.cs), so it needs the redirect for its own
-        // P/Invokes -- a resolver is registered per ASSEMBLY, and Aver.Physics registers its own.
-        if (libraryName is not ("Aver.Framework" or "Aver.Scene" or "Aver.Physics"))
+        if (libraryName is not "Aver.Physics")
             return IntPtr.Zero;
 
         string? dir = ExecutableDirectory();

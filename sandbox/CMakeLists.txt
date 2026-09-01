@@ -23,6 +23,7 @@ add_executable(Sandbox
   src/SoundEditor.cpp
   src/EditorKeybinds.cpp
   src/EditorEntitySnapshot.cpp
+  src/PhysicsSceneSync.cpp
   src/ThumbnailCache.cpp
   Sandbox.rc)
 target_link_libraries(Sandbox PRIVATE Aver.Runtime Aver.Formats)
