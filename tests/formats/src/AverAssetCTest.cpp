@@ -222,6 +222,37 @@ int main() {
 
     std::filesystem::remove_all(matOutDir, ec);
 
+    // ---- a texture set with no metalRough bound must not default to fully metallic ----------
+    AVER_INFO("-- a set with no metal/rough map at all writes metallicFactor 0, not glTF's default 1 --");
+    const std::filesystem::path diffuseFixture =
+        std::filesystem::path(AVER_REPO_ROOT) / "content" / "dev" / "test_diffuse_1k.jpg";
+    check(std::filesystem::exists(diffuseFixture, ec), "the diffuse fixture exists: " + diffuseFixture.string());
+
+    const std::filesystem::path noMetalOutDir =
+        std::filesystem::temp_directory_path() / "aver-assetc-test-nometal";
+    std::filesystem::remove_all(noMetalOutDir, ec);
+    std::filesystem::create_directories(noMetalOutDir, ec);
+    {
+        // baseColor + a lone roughness map, no matching metal map: baseColor binds (so the .ocmat
+        // actually gets written at all), but packing never triggers for roughness alone, so
+        // metalRough stays unbound -- exactly the case pbr::MaterialDesc's own default
+        // (metallicFactor = 1.0, glTF's spec default) would otherwise leave rendering as fully
+        // metallic despite nothing here being metal.
+        const std::string cmd = "\"" + exe.string() + "\" material \"" + diffuseFixture.string() +
+                                "\" \"" + roughFixture.string() +
+                                "\" --out-dir \"" + noMetalOutDir.string() + "\" --base NoMetalMat";
+        std::string noMetalOut;
+        const int noMetalCode = runCapture(cmd, noMetalOut);
+        check(noMetalCode == 0, "it still exits 0 (got " + std::to_string(noMetalCode) + ")");
+
+        std::ifstream matFile(noMetalOutDir / "NoMetalMat.ocmat");
+        std::stringstream matContents;
+        matContents << matFile.rdbuf();
+        check(matContents.str().find("PARAM metallicFactor 0") != std::string::npos,
+              "NoMetalMat.ocmat writes PARAM metallicFactor 0, not the glTF default of 1");
+    }
+    std::filesystem::remove_all(noMetalOutDir, ec);
+
     // ---- the failure path -------------------------------------------------------------------
     AVER_INFO("-- and a bad input FAILS detectably, rather than silently --");
     {

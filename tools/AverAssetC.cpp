@@ -174,6 +174,17 @@ MapRole classifyMap(const std::string& fileName) {
     if (n.find("_ao_") != std::string::npos || n.find("_occlusion_") != std::string::npos) return MapRole::Occlusion;
     if (n.find("_rough_") != std::string::npos) return MapRole::RoughnessOnly;
     if (n.find("_metal_") != std::string::npos) return MapRole::MetalOnly;
+
+    // ambientCG's own naming convention -- verified against two real downloaded asset ZIPs, not
+    // guessed. A genuinely different shape from Poly Haven's underscore-PADDED style above: the
+    // suffix sits PascalCase right before the extension ("Ground110_1K-JPG_Color.jpg"), not between
+    // two underscores with a resolution token after it.
+    if (n.find("_color.") != std::string::npos) return MapRole::BaseColor;
+    if (n.find("_normalgl.") != std::string::npos) return MapRole::Normal;
+    if (n.find("_roughness.") != std::string::npos) return MapRole::RoughnessOnly;
+    if (n.find("_metalness.") != std::string::npos) return MapRole::MetalOnly;
+    if (n.find("_ambientocclusion.") != std::string::npos) return MapRole::Occlusion;
+
     return MapRole::Unrecognised;
 }
 
@@ -329,6 +340,14 @@ int runMaterial(int argc, char** argv) {
     bool anyBound = false;
     for (const pbr::TextureRef& t : desc.textures) if (!t.empty()) { anyBound = true; break; }
     if (anyBound) {
+        // pbr::MaterialDesc::metallicFactor defaults to 1.0 (glTF's own spec default) -- correct
+        // when a metalRough texture IS bound (the factor multiplies the sampled value), wrong when
+        // one is not: a texture set with only a Roughness map and no Metal/arm map at all (a real,
+        // common case -- ambientCG's own Ground110 set has no metal content and ships no Metalness
+        // map for it) would otherwise render fully metallic with nothing overriding that default.
+        if (desc.textures[static_cast<u32>(pbr::TextureSlot::MetalRough)].empty()) {
+            desc.metallicFactor = 0.0f;
+        }
         const std::string matPath = outDir + "/" + base + ".ocmat";
         if (!writeAndVerifyMaterial(allInputs, matPath, desc, stats)) anyFailed = true;
     } else {

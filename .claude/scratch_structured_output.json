@@ -1,0 +1,85 @@
+{
+  "area": "Material and shader system (modules/render.pbr, PbrShaders, ShaderFiles/RHIShaders, VoxiRenderer RT material table)",
+  "summary": "The raster material pipeline is fully reached: .ocmat -> MaterialDesc -> packMaterial() -> 112-byte MaterialConstants (cbuffer AverMaterial b2) + an 8-slot texture binding set, bound per draw and consumed by material_prelude.hlsl's averStockAuthored/averBuildSurface/BRDF. Material graphs compile to a generated averEvalMaterial dispatched on gMaterialGraphId and are genuinely reached by the raster path, including the coat pins -- a DXC test compiles a coat-driving graph with the layered BSDF both on and off, contradicting a stale comment earlier in the same test file. The ray-traced path is a second, independently-built pipeline: VoxiRenderer builds its own RtMaterial table (gRtMaterials) from raw MaterialConstants bytes, bypassing MaterialSystem's own purpose-built dense-table API (gpuMaterialIndex/gpuMaterialTable/gpuMaterialRevision), which has zero callers anywhere. PSRayDriven -- the shader for rtRenderMode's default value of 1, called the default render path in its own header -- hand-builds AverSurface from RtMaterial fields, never calls averEvalMaterial, and its own comment says it never reads RtMaterial::graphId; RtMaterial carries no texture reference at all. So under the standing default render mode, material graphs and every texture map go unread for opaque/masked primary visibility; only translucent materials still get the full raster path. ior is a confirmed dead field on both paths (the prelude's own comment says gIor is read by nothing). Shader hot reload is real but limited to one edit per process run, per the engine's own comment on the underlying file watcher.",
+  "items": [
+    {
+      "name": "Raster material path (.ocmat to pixel)",
+      "state": "working",
+      "detail": "packMaterial() builds MaterialConstants from MaterialDesc. MaterialSystem::update() drains dirty materials each frame and rewrites SRV binding sets. GameRender.cpp/SandboxApp.cpp call setDrawBinding(bindingSet(authored), constants(authored)) per draw. material_prelude.hlsl's cbuffer AverMaterial mirrors the struct; averStockAuthored/averBuildSurface sample the 8 texture slots and feed the shared GGX BRDF that PSMainVoxi/PSVoxel/PSClusterMain/ActorPreview call through averEvalMaterial.",
+      "evidence": "modules/render.pbr/src/MaterialGpu.cpp:30-92; modules/render.pbr/src/MaterialSystem.cpp:184-296; modules/runtime.game/src/GameRender.cpp:166-173; modules/render.pbr/shaders/material_prelude.hlsl:399-641"
+    },
+    {
+      "name": "MaterialConstants / RtMaterial GPU block",
+      "state": "working",
+      "detail": "112 bytes, static_assert-checked, mirrored by hand three times: HLSL cbuffer AverMaterial, RtMaterial in voxi.hlsl, and the C++ struct. No slack left per the struct's own comment; next field grows it to 128 and forces revisiting all three plus a test's field-layout check.",
+      "evidence": "modules/render.pbr/include/aver/pbr/MaterialGpu.hpp:45-137; modules/render.pbr/shaders/material_prelude.hlsl:20-80; modules/render.voxi/shaders/voxi.hlsl:127-159"
+    },
+    {
+      "name": "Material graph compiler (.ocgraph to HLSL)",
+      "state": "working",
+      "detail": "MaterialGraphHlsl.cpp walks backward from the MaterialOutput node, emitting one SSA line per reachable node into a body that writes only the AverAuthored fields the author drove. MaterialGraphRegistry::add (called from GraphEditor.cpp / SandboxApp.cpp) assigns a stable id; VoxiRenderer::voxiShaderPrelude() appends the generated averEvalMaterial switch and rebuilds pipelines when the registry revision moves. ActorPreview does the same for its own pipeline. Genuinely reached by the raster path.",
+      "evidence": "modules/render.pbr/src/MaterialGraphHlsl.cpp:650-773; sandbox/src/GraphEditor.cpp:3326; sandbox/src/SandboxApp.cpp:3859-3868; modules/render.voxi/src/VoxiRenderer.cpp:221-236,728-731"
+    },
+    {
+      "name": "Coat / layered BSDF, including graph-driven coat pins",
+      "state": "working",
+      "detail": "Compiled only under AVER_LAYERED_BSDF (Settings::layeredBsdf, default Off); off, the coat lobe is not in the compiled binary at all. Its three AverAuthored pins are declared unconditionally so a graph compiles either way. tests/formats/src/MaterialGraphTest.cpp's testCoatPinsAreDrivable() and a real DXC compile of a coat-driving graph under both settings both pass.",
+      "evidence": "modules/render.pbr/shaders/material_prelude.hlsl:783-829,420-428; modules/render.voxi/include/aver/voxi/Voxi.hpp:101; tests/formats/src/MaterialGraphTest.cpp:901-924,1079-1108"
+    },
+    {
+      "name": "Stale test comment: coat claimed not graph-drivable",
+      "state": "broken",
+      "detail": "tests/formats/src/MaterialGraphTest.cpp around line 162 still says the coat is not graph-drivable yet and that this wants a second DXC pass once it is -- but several hundred lines later in the same file, testCoatPinsAreDrivable() and a DXC-compile block already run exactly that pass, and both are asserted to succeed. The feature landed in the same file; only the comment was not updated.",
+      "evidence": "tests/formats/src/MaterialGraphTest.cpp:162-164 vs 897-924 and 1079-1108"
+    },
+    {
+      "name": "MaterialSystem's dense GPU material table (gpuMaterialTable/gpuMaterialIndex/gpuMaterialRevision)",
+      "state": "dead",
+      "detail": "Fully implemented and documented as existing for exactly a ray-hit consumer that shades from a dense index rather than a MaterialHandle. A repo-wide grep for all four symbol names finds no call site anywhere outside MaterialSystem.hpp/.cpp. The one consumer it was built for -- VoxiRenderer's RT material table -- does not call it; it builds its own table instead (next item).",
+      "evidence": "modules/render.pbr/include/aver/pbr/MaterialSystem.hpp:91-156; modules/render.pbr/src/MaterialSystem.cpp:240-308"
+    },
+    {
+      "name": "RT material table (gRtMaterials, VoxiRenderer::buildMaterialTable)",
+      "state": "working",
+      "detail": "A separate table from MaterialSystem's own. buildAccelerationStructures()'s per-draw loop dedups by a key (authored binding-set handle, or a hash of colour/metal/rough for unauthored draws) and copies raw MaterialConstants bytes captured at submit time. buildMaterialTable() sorts keys, builds the row-0-is-fallback table, fixes up RtInstance::materialIndex, and re-uploads only on real content change. Order versus buildGeometryTable() is load-bearing; a prior bug had it backwards and every ray-driven hit silently read the fallback row.",
+      "evidence": "modules/render.voxi/src/VoxiRenderer.cpp:1007-1045,1136-1153,1869-1966"
+    },
+    {
+      "name": "PSRayDriven ray-hit shading (the default primary-visibility path)",
+      "state": "partial",
+      "detail": "Settings::rtRenderMode defaults to 1, called the default render path in Voxi.hpp's own comment. rayDrivenActive() gates scenePass() to return before reaching the ordinary raster scenePipeline(); binding set 1 stays at the fallback (no per-material texture table bound at all). PSRayDriven hand-builds AverSurface from RtMaterial's scalar fields and calls the shared BRDF helpers directly, never averEvalMaterial; its own comment says RtMaterial::graphId is never read here, confirmed by grep. RtMaterial carries no texture reference, and the shader's own comment says nothing is sampled because there is nothing yet to sample. So under the default mode, graphs and every texture map are unread for primary visibility on opaque/masked geometry. Translucent materials are the one exception: excluded from this pass by construction and always drawn by PSMainVoxi, per the shader's own comment.",
+      "evidence": "modules/render.voxi/include/aver/voxi/Voxi.hpp:259-323; modules/render.voxi/include/aver/voxi/VoxiRenderer.hpp:1039; modules/render.voxi/src/VoxiRenderer.cpp:2355-2380; modules/render.voxi/shaders/voxi.hlsl:123,1787-1805,1940-2009"
+    },
+    {
+      "name": "Alpha-masked geometry under ray-driven primary rays",
+      "state": "unknown",
+      "detail": "Lower confidence, adjacent to core scope. TLAS instance masks only distinguish opaque vs translucent, and translucent is wired from isTranslucent() (Blend/transmission), not AlphaMode::Mask; BLAS geometry is marked fully opaque except the translucent lane. The only clip() in voxi.hlsl sits in a raster-only function; PSRayDriven's hit code has no clip/discard. If this reading holds, an alpha-masked cutout material would render as fully solid under a primary ray in the default mode. Not independently confirmed against the BLAS build for masked submeshes specifically.",
+      "evidence": "modules/render.voxi/src/VoxiRenderer.cpp:83-84,653,970-976; sandbox/src/SandboxApp.cpp:5314; modules/render.voxi/shaders/voxi.hlsl:2364-2372"
+    },
+    {
+      "name": "MaterialDesc/MaterialConstants::ior",
+      "state": "dead",
+      "detail": "Authored, packed to both GPU blocks, transported as cbuffer field gIor, and copied into the graph-authorable AverAuthored.ior on the raster path -- but AverSurface has no ior field, and no shading term anywhere reads a.ior afterward. The prelude's own comment says outright that gIor is read by nothing, and that an earlier version of the comment claiming otherwise (a total-internal-reflection use) was removed once found to fire incorrectly on ordinary glass. transmission, packed alongside it, is a live consumer on both paths.",
+      "evidence": "modules/render.pbr/include/aver/pbr/Material.hpp:88-103; modules/render.pbr/shaders/material_prelude.hlsl:43-61,452"
+    },
+    {
+      "name": "Shader file loading and hot reload (--shader-source)",
+      "state": "partial",
+      "detail": "ShaderFiles.cpp gives a real file-backed cache with a revision counter; sharedShaderPrelude()/voxiShaderPrelude() are correctly keyed on it after a documented earlier bug where a plain static made reload a convincing lie. Deployment to bin/shaders is a real build-graph dependency edge, not a POST_BUILD command, fixed after POST_BUILD was found not to rerun on a shader-only edit. But SandboxApp.cpp's own comment documents a measured limit: the underlying DirectoryWatcher delivers exactly one file-change event per process run and then goes quiet, so hot reload works for only the first HLSL edit of a session.",
+      "evidence": "modules/rhi/src/ShaderFiles.cpp:40-89; modules/rhi/src/RHIShaders.cpp:128-144; cmake/AvModule.cmake:100-138; sandbox/src/SandboxApp.cpp:2984-3021"
+    },
+    {
+      "name": "shaderConstantsHlsl() / emitted register defines",
+      "state": "working",
+      "detail": "RHIShaders.cpp emits frame/object/draw/mesh register and dword-count constants as #defines prepended to sharedShaderPrelude(), replacing a prior arrangement where the same numbers were hardcoded independently in HLSL and C++. materialShaderDefines() does the same for the material SRV/sampler registers and the AVER_LAYERED_BSDF switch, called from every material-shaded pipeline builder with no default on layeredBsdf so a missed call site fails to compile rather than silently shipping a pipeline with no coat.",
+      "evidence": "modules/rhi/src/RHIShaders.cpp:86-126; modules/render.pbr/src/PbrShaders.cpp:16-28"
+    }
+  ],
+  "riskiest_claims": [
+    "Material graphs and material texture maps go unread for opaque/masked geometry under the standing-default render mode (rtRenderMode=1, ray-driven primary visibility); only scalar factors, reflectance/f90, transmission, subsurface and coat reach the pixel there, and only translucent materials still get the full raster (textured, graph-driven) treatment.",
+    "MaterialSystem's dense-GPU-material-table API (gpuMaterialIndex/gpuMaterialTable/gpuMaterialRevision) has zero callers anywhere in the codebase, despite being built and documented for exactly the ray-hit use case; VoxiRenderer's actual RT material table is a separate, independently implemented mechanism.",
+    "MaterialConstants::ior / cbuffer gIor is authored, packed, uploaded and copied into the graph-authorable AverAuthored struct, but is read by no shading term on either the raster or ray-traced path.",
+    "A comment in tests/formats/src/MaterialGraphTest.cpp claims the coat lobe is not graph-drivable yet, which is false as of the same file's own tests further down, which compile a coat-driving graph successfully with the layered BSDF both on and off.",
+    "--shader-source hot reload delivers only the first shader-file-change event per process run before the underlying file watcher goes silent, per the engine's own comment -- not continuous hot reload."
+  ]
+}
