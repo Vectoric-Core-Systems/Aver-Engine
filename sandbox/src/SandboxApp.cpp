@@ -11059,10 +11059,23 @@ private:
         const rhi::LineHandle* nrm = tool_==Tool::Move ? gzMove_ : tool_==Tool::Rotate ? gzRot_ : gzScale_;
         const rhi::LineHandle* hi  = tool_==Tool::Move ? gzMoveHi_ : tool_==Tool::Rotate ? gzRotHi_ : gzScaleHi_;
         e.device()->setLineDepth(false);
+        // A SLIGHT GLOW ON THE HANDLES. Lines already write into the pre-tonemap HDR target and the
+        // camera's bloom runs before the tonemap, so this is real bloom rather than a fake halo --
+        // it only needed headroom above 1.0 to have something to pick up. See IDevice::setLineGlow
+        // for why the multiplier is applied after the inverse tonemap and not to the authored hue.
+        //
+        // Deliberately small. The gizmo is a precision instrument you drag by a two-pixel line; a
+        // bloom wide enough to be obvious is also wide enough to bury the handle you are aiming at,
+        // and the axis colours are how you tell the three apart. 1.35 is where the handles read as
+        // lit rather than painted without the red and green bleeding into each other.
+        static constexpr f32 kGizmoGlow = 1.35f;
+        e.device()->setLineGlow(kGizmoGlow);
         for (int a=0;a<3;++a) {
             const bool active = (dragging_ && a==activeAxis_) || (!dragging_ && a==hoverAxis_);
             e.device()->drawLines(active ? hi[a] : nrm[a], &w.m[0][0]);
         }
+        // Back to unglowed for the grid and everything else: the setter is sticky.
+        e.device()->setLineGlow(1.0f);
         e.device()->setLineDepth(true);
     }
 

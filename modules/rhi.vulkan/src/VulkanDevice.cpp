@@ -1931,6 +1931,12 @@ void VulkanDevice::drawLines(LineHandle mesh, const f32 world[16]) {
     api_.CmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, scenePipelineLayout_, kVkSetConstants, 1,
                                &sceneFrameSet_[frameIndex_], 1, &zeroOffset);
     api_.CmdPushConstants(cmd, scenePipelineLayout_, VK_SHADER_STAGE_ALL, PushConstantLayout::kObjectOffset, 64, world);
+    // The 65th byte onward is gBaseColor, whose .x carries the glow multiplier -- PSLine reads
+    // nothing else from it. Pushed on EVERY line draw for the same reason D3D12 writes its dword
+    // unconditionally: push constants persist, so the grid and sculpt ring would otherwise inherit
+    // the last mesh's base-colour red as their brightness. Mirrors D3D12Device::drawLines.
+    api_.CmdPushConstants(cmd, scenePipelineLayout_, VK_SHADER_STAGE_ALL,
+                          PushConstantLayout::kObjectOffset + 64, 4, &lineGlow_);
     VkDeviceSize off = 0;
     api_.CmdBindVertexBuffers(cmd, 0, 1, &m.vb, &off);
     api_.CmdDraw(cmd, m.count, 1, 0, 0);

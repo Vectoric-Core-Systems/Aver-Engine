@@ -967,6 +967,7 @@ public:
     bool drawBlended() const override { return drawBlended_; }
 
     void setLineDepth(bool testDepth) override { lineDepth_ = testDepth; }
+    void setLineGlow(f32 gain) override { lineGlow_ = gain; }
     void setMeshShaders(bool enabled) override {
         const bool want = enabled && msSupported_;
         if (want != msActive_) AVER_INFO("[RHI.D3D12] geometry path: {}", want ? "mesh shaders" : "input assembler");
@@ -1405,6 +1406,8 @@ private:
     // See IDevice::setUnlit. Sticky exactly as wireframe_ is -- neither is reset per frame.
     bool unlit_ = false;
     bool lineDepth_ = true;
+    // 1.0 is exactly the pre-glow behaviour; see IDevice::setLineGlow.
+    f32  lineGlow_  = 1.0f;
     std::vector<GpuLineMesh> lineMeshes_;
     ComPtr<ID3D12Resource> frameCBs_[kFrameCount];
     u8* frameCBPtr_[kFrameCount] = {nullptr, nullptr};
@@ -3934,6 +3937,14 @@ void D3D12Device::drawLines(LineHandle mesh, const f32 world[16]) {
     bindGraphicsRoot(rootSig_.Get());
     cmdList_->SetPipelineState(lineDepth_ ? linePso_.Get() : lineOverlayPso_.Get());
     cmdList_->SetGraphicsRoot32BitConstants(kSceneObjectParam, 16, world, 0);
+    // Dword 16 is gBaseColor.x, which PSLine does not otherwise read -- so the glow multiplier
+    // rides in the per-object block a line draw already binds, with no root-signature change.
+    //
+    // WRITTEN EVERY CALL, not only when it differs from 1.0. Root constants persist across draws:
+    // the grid, the navmesh overlay and the sculpt ring all come after the scene's meshes, so
+    // skipping the write would hand them the red channel of whatever material was drawn last as
+    // their brightness. A line's glow must not depend on what happened to precede it.
+    cmdList_->SetGraphicsRoot32BitConstants(kSceneObjectParam, 1, &lineGlow_, 16);
     cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINELIST);
     cmdList_->IASetVertexBuffers(0, 1, &m.vbv);
     cmdList_->DrawInstanced(m.count, 1, 0, 0);

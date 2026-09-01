@@ -699,6 +699,30 @@ public:
     // Line depth testing. Default true; false draws subsequent lines as an always-on-top overlay.
     virtual void setLineDepth(bool testDepth) { (void)testDepth; }
 
+    // How much scene radiance a line writes, as a multiple of the colour it was authored with.
+    // 1.0 is exactly the old behaviour: the line lands at the display colour the vertex named.
+    // Above 1.0 the line is BRIGHTER THAN WHITE in the pre-tonemap target, which is what makes the
+    // camera's own bloom pick it up -- lines already draw into the HDR scene target and bloom runs
+    // before the tonemap, so this needs no glow shader of its own, only headroom.
+    //
+    // WHY A MULTIPLIER AND NOT A BRIGHTER AUTHORED COLOUR. PSLine writes
+    // averInverseTonemap(srgbToLin(col)), and that curve is near-vertical at the top: it clamps at
+    // 1.0329, because its `2.43y - 2.51` denominator reaches zero there. Two of the six baked gizmo
+    // hues already sit at exactly 1.0 on a channel, where averInverseTonemap(srgbToLin(1.0)) is
+    // about 7.24 -- and at 1.4 it clamps and evaluates to about 1931. A 270x jump, with the other
+    // channels washing toward white on the way. Scaling AFTER the inverse tonemap has no ceiling
+    // and no hue shift: every channel moves by the same factor, so red stays red.
+    //
+    // STICKY, like setLineDepth above it, and drawLines writes the constant on EVERY call rather
+    // than only when it is non-default -- the value shares dword 16 of the per-object block with
+    // gBaseColor.x, so a line drawn after any mesh would otherwise inherit that mesh's red channel
+    // as its glow. Callers still bracket, so the sticky value is 1.0 outside a bracket.
+    //
+    // NOT EXPOSURE-STABLE, stated rather than fixed: PSLine never divides by gPostTone.x, so under
+    // auto-exposure the apparent strength drifts with scene brightness. That is pre-existing --
+    // the authored line colour has always had it -- and acceptable for a cosmetic effect.
+    virtual void setLineGlow(f32 gain) { (void)gain; }
+
     // Captures the backbuffer pixel at (x,y) during the next presented frame; poll getCapture().
     virtual void requestCapture(u32 x, u32 y) { (void)x; (void)y; }
     virtual bool getCapture(f32 outRGBA[4]) { (void)outRGBA; return false; }

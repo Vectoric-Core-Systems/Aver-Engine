@@ -265,5 +265,14 @@ LVSOut VSLine(LVSIn i) {
     o.col = i.col;
     return o;
 }
-// Writes a display-authored line colour as the scene radiance that tonemaps back to it.
-float4 PSLine(LVSOut i) : SV_TARGET { return float4(averInverseTonemap(srgbToLin(i.col)), 1.0); }
+// Writes a display-authored line colour as the scene radiance that tonemaps back to it, times the
+// glow multiplier in gBaseColor.x (1.0 = exactly the colour authored; see IDevice::setLineGlow).
+//
+// THE MULTIPLY IS AFTER THE INVERSE TONEMAP ON PURPOSE. averInverseTonemap is near-vertical at the
+// top -- it clamps at 1.0329, where its 2.43y - 2.51 denominator hits zero -- so brightening the
+// INPUT colour explodes rather than glows: 1.0 maps to about 7.24 and 1.4 to about 1931, and any
+// channel already at 1.0 washes the hue toward white on the way. Scaling the radiance it returns
+// has no ceiling and scales every channel equally, so a red axis handle stays red.
+float4 PSLine(LVSOut i) : SV_TARGET {
+    return float4(averInverseTonemap(srgbToLin(i.col)) * gBaseColor.x, 1.0);
+}

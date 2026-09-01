@@ -1435,6 +1435,7 @@ public:
     void setWireframe(bool on) override { wireframe_ = on; }
     void setUnlit(bool on) override { unlit_ = on; }
     void setLineDepth(bool testDepth) override { lineDepth_ = testDepth; }
+    void setLineGlow(f32 gain) override { lineGlow_ = gain; }
     void requestCapture(u32 x, u32 y) override { capX_ = x; capY_ = y; captureReq_ = true; captureReady_ = false; }
     bool getCapture(f32 outRGBA[4]) override;
     bool getFrameImage(std::vector<u8>& outRGBA, u32& w, u32& h) override;
@@ -1694,6 +1695,8 @@ private:
     // See IDevice::setUnlit. Sticky exactly as wireframe_ is.
     bool unlit_ = false;
     bool lineDepth_ = true;
+    // 1.0 is exactly the pre-glow behaviour; see IDevice::setLineGlow.
+    f32  lineGlow_  = 1.0f;
     std::vector<GpuLineMesh> lineMeshes_;
     PerFrameCB frameCB_{};
 
