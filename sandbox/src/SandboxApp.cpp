@@ -3244,7 +3244,12 @@ public:
         scripts_.update(t.dt);
 #endif
 #if AVER_MODULE_FRAMEWORK
-        const bool interactive = maxFrames_ == 0 && !playTest_;
+        // --recapture-test OPTS IN, and it has to: the gesture it exercises -- release the mouse to
+        // the editor, then click back into the viewport -- lives entirely inside this block, so a
+        // bounded run that skips the block cannot reach the bug at all. Safe now that warpToAnchor()
+        // refuses to move a background window's cursor, which is what this exclusion was protecting
+        // a headless run from in the first place.
+        const bool interactive = (maxFrames_ == 0 && !playTest_) || recapFrames_ > 0;
         // THE #if IS NOT REDUNDANT WITH uiActive(). uiActive() is a RUNTIME question -- "is an ImGui
         // frame open right now" -- and it answers false on a UI-less build, which is why this block
         // was correct at runtime and still failed to COMPILE without ImGui: the ImGuiIO/ImGui::
@@ -3304,6 +3309,8 @@ public:
         maybePieCameraTest();
         maybeInputStuckTest();
         maybeInputSourceTest();
+        maybeRecaptureTest();
+        maybeViewmodelTest();
         // The tick groups bracket the physics step: PrePhysics -> Physics -> PostPhysics.
         if (!spawnTestClass_.empty() || aver_fw_play_state() == AVER_FW_PLAY_PLAYING) {
             aver_fw_tick(AVER_FW_TICK_PRE_PHYSICS, t.dt);
@@ -6819,6 +6826,8 @@ public:
     void setPieCameraTest(int n) { pieCamFrames_ = n; }                            // --pie-camera-test
     void setInputStuckTest(int n) { inputStuckFrames_ = n; }                       // --input-stuck-test
     void setInputSourceTest(int n) { inputSrcFrames_ = n; }                        // --input-source-test
+    void setRecaptureTest(int n)   { recapFrames_ = n; }                          // --recapture-test
+    void setViewmodelTest(int n)   { vmFrames_ = n; }                             // --viewmodel-test
     void setSkinSceneDir(std::string d) { skinSceneDir_ = std::move(d); }          // --skin-scene-test <dir>
     // --shader-source <dir>: watch a shader source tree and reload without restarting.
     void setShaderSourceDir(std::string d) { shaderSourceDir_ = std::move(d); }
@@ -8948,6 +8957,173 @@ private:
     }
     int  inputSrcFrames_ = 0, inputSrcFrame_ = 0, inputSrcDisagree_ = 0, inputSrcStuck_ = 0;
     bool inputSrcStateSaw_ = false, inputSrcImguiSaw_ = false;
+
+    // --viewmodel-test N: does the gun sit STILL in the frame, or does it swim against the camera?
+    //
+    // THE INVARIANT. The viewmodel is parented to the view entity, so it is rigidly attached to the
+    // eye. Its position expressed in VIEW SPACE -- right/up/forward of the camera -- is therefore a
+    // constant, by construction, whatever the player does. Any deviation at all means the gun's
+    // transform and the camera's transform were derived from different data, and that is exactly
+    // what "the gun jitters" looks like from the outside.
+    //
+    // WHY VIEW SPACE AND NOT WORLD. In world space the gun moves constantly and correctly -- it
+    // follows the camera. Watching world position proves nothing. The question is only ever whether
+    // it moves RELATIVE TO THE EYE, and that is one dot product away once the basis is rebuilt.
+    //
+    // TWO PHASES, because the suspected cause only shows up in one of them: drivePlayCamera derives
+    // camPos_/yaw_/pitch_ from the view entity and the renderer rebuilds a basis from those, while
+    // the gun is drawn from the view entity's matrix directly. Two paths from one source agree
+    // exactly while nothing moves and can disagree by a frame the moment something does. So a still
+    // camera and a turning one are measured separately, and the DIFFERENCE between them is the
+    // finding.
+    void maybeViewmodelTest() {
+        if (vmFrames_ <= 0) return;
+#if AVER_MODULE_FRAMEWORK && AVER_MODULE_SCENE && AVER_WITH_IMGUI
+        ++vmFrame_;
+        if (vmFrame_ == 10) { startPlay(); return; }
+        if (vmFrame_ < 20) return;
+
+        scene::World& w = scene::World::instance();
+        const int32_t viewId = aver_fw_view_entity();
+        const scene::Entity ve = static_cast<scene::Entity>(static_cast<uint32_t>(viewId));
+        if (!w.valid(ve)) return;
+
+        // The gun is the view entity's mesh-bearing child. Found by walking rather than remembered,
+        // so the probe cannot go stale against a graph that spawns it differently.
+        scene::Entity gun = scene::kInvalidEntity;
+        vmKids_ = 0;
+        const u32 vmN = w.count();
+        for (u32 k = 0; k < vmN; ++k) {
+            const scene::Entity c = w.at(k);
+            if (!w.valid(c) || w.parent(c) != ve) continue;
+            if (w.component<scene::CMeshRenderer>(c, scene::kComponentMeshRenderer)) { if (!w.valid(gun)) gun = c; ++vmKids_; }
+        }
+        if (!w.valid(gun)) { if (vmFrame_ == 25) AVER_INFO("[viewmodel] no viewmodel found under the view entity"); return; }
+
+        const Mat4& gm = w.worldMatrix(gun);
+        const Vec3 gunPos{gm.m[3][0], gm.m[3][1], gm.m[3][2]};
+
+        // The exact basis the renderer uses: camForward() from yaw_/pitch_, not the view entity's
+        // own axes. Using the entity's axes here would compare the gun against itself and always
+        // report zero -- the whole point is to test the DECOMPOSED path the camera actually takes.
+        const Vec3 fwd = camForward();
+        const Vec3 wup{0, 0, 1};
+        const Vec3 rgt = Vec3{fwd.y * wup.z - fwd.z * wup.y, fwd.z * wup.x - fwd.x * wup.z,
+                              fwd.x * wup.y - fwd.y * wup.x}.getSafeNormal();
+        const Vec3 up2{rgt.y * fwd.z - rgt.z * fwd.y, rgt.z * fwd.x - rgt.x * fwd.z,
+                       rgt.x * fwd.y - rgt.y * fwd.x};
+        const Vec3 rel = gunPos - camPos_;
+        const Vec3 vs{rel.x * rgt.x + rel.y * rgt.y + rel.z * rgt.z,
+                      rel.x * up2.x + rel.y * up2.y + rel.z * up2.z,
+                      rel.x * fwd.x + rel.y * fwd.y + rel.z * fwd.z};
+
+        // ---- phase 1: dead still ----
+        // NOTHING IS MEASURED BEFORE THE REFERENCE EXISTS. The first version accumulated from frame
+        // 20 while vmRef_ was still its zero-initialised value, so frames 20-24 compared the gun
+        // against the ORIGIN and reported |vs| -- 39.56 cm -- as drift. That is not a subtle bug: it
+        // is a probe that fails loudly on a perfectly rigid viewmodel, which is worse than one that
+        // passes quietly on a broken one, because it sends the search somewhere real code is fine.
+        if (vmFrame_ <= 25) { vmRef_ = vs; return; }
+        if (vmFrame_ < 25 + vmFrames_) {
+            vmStill_ = std::fmax(vmStill_, (vs - vmRef_).size());
+            return;
+        }
+        // ---- phase 2: turning, one steady look per frame ----
+        if (vmFrame_ <= 25 + vmFrames_) { vmRef_ = vs; return; }
+        ImGuiIO& io = ImGui::GetIO();
+        io.AddMousePosEvent(vpX_ + vpW_ * 0.5f + (f32)(vmFrame_ % 20) * 2.0f, vpY_ + vpH_ * 0.5f);
+        vmMoving_ = std::fmax(vmMoving_, (vs - vmRef_).size());
+
+        if (vmFrame_ >= 25 + vmFrames_ * 2) {
+            const bool stillOk  = vmStill_  < 0.05f;
+            const bool moveOk   = vmMoving_ < 0.05f;
+            AVER_INFO("[viewmodel] offset from the eye: ({:.3f}, {:.3f}, {:.3f}) cm right/up/forward",
+                      vmRef_.x, vmRef_.y, vmRef_.z);
+            AVER_INFO("[viewmodel] still  : drifts {:.4f} cm in view space -- {}", vmStill_,
+                      stillOk ? "rigid" : "IT MOVES WITH NOBODY TOUCHING ANYTHING");
+            AVER_INFO("[viewmodel] turning: drifts {:.4f} cm in view space -- {}", vmMoving_,
+                      moveOk ? "rigid" : "IT SWIMS AGAINST THE CAMERA WHILE TURNING");
+            AVER_INFO("[viewmodel] RESULT: {}", (stillOk && moveOk) ? "PASS" : "FAIL");
+            stopPlay();
+            vmFrames_ = 0;
+        }
+#endif
+    }
+    int  vmFrames_ = 0, vmFrame_ = 0;
+    Vec3 vmRef_{0, 0, 0};
+    f32  vmStill_ = 0.0f, vmMoving_ = 0.0f;
+    u32  vmKids_ = 0;
+
+    // --recapture-test N: does the click that takes the mouse BACK also fire the weapon?
+    //
+    // THE GESTURE. Mid-session you press the release-mouse chord to go and click something in the
+    // editor, then click back into the viewport to carry on playing. That second click is a UI
+    // action -- it means "give the game the mouse again" -- and it must not ALSO reach gameplay as a
+    // trigger pull. In PTTest it did: the fire gate is a LEVEL read of InputKey(MOUSE_LEFT) behind a
+    // 0.35s cooldown, so one held click fires repeatedly for as long as it is down.
+    //
+    // WHY --input-stuck-test DOES NOT COVER IT. That harness holds the button and then releases the
+    // mouse, asserting nothing stays latched afterwards. This is the opposite order: release first,
+    // then click. The state that leaks is not a stale key, it is a live one arriving through a
+    // gesture that was never meant to be gameplay input.
+    void maybeRecaptureTest() {
+        if (recapFrames_ <= 0) return;
+#if AVER_MODULE_FRAMEWORK && AVER_WITH_IMGUI
+        ++recapFrame_;
+        if (recapFrame_ == 10) { startPlay(); return; }
+        if (recapFrame_ < 15) return;
+
+        ImGuiIO& io = ImGui::GetIO();
+        // Park the pointer in the middle of the 3D view for the whole test: the recapture path is
+        // gated on inViewport(), so a click anywhere else would prove nothing either way.
+        io.AddMousePosEvent(vpX_ + vpW_ * 0.5f, vpY_ + vpH_ * 0.5f);
+
+        // Hand the mouse to the editor, exactly as the chord does.
+        if (recapFrame_ == 15) { releasedByUser_ = true; return; }
+        if (recapFrame_ < 20) return;
+
+        // ...then click back into the viewport and HOLD. A real click lasts many frames; the bug
+        // needs only the frames after the first, once own_ has refreshed with releasedByUser_ false
+        // and mouseCaptured_ true.
+        io.AddMouseButtonEvent(0, true);
+        // The recapture itself takes a frame or two to land -- the button event is queued and applied
+        // at ImGui's next NewFrame, and the capture block reads it the frame after that. So the leak
+        // is only counted ONCE THE MOUSE IS ACTUALLY BACK, which is the window the bug lives in: the
+        // button is still physically down, own_ has refreshed with releasedByUser_ false, and every
+        // one of those frames is a shot.
+        if (!releasedByUser_) recapNotRecaptured_ = 1;          // 1 == "it did take the mouse back"
+        if (recapNotRecaptured_ && aver_fw_input_key(AVER_FW_KEY_MOUSE_LEFT)) ++recapLeaked_;
+
+        if (recapFrame_ >= 21 + recapFrames_) {
+            const bool tookBack = recapNotRecaptured_ != 0;
+            const bool clean    = recapLeaked_ == 0;
+            // NOT-RECAPTURED IS A FINDING, NOT A FAILURE, and reporting it as a failure would have
+            // been a lie in the other direction. The recapture branch requires !WantCaptureMouse, and
+            // ImGui ALWAYS wants the mouse over the 3D view because that view is one of its own dock
+            // windows -- measured here: play=1 released=1 clicked=1 inViewport=1 and wantMouse=1, so
+            // the branch cannot be taken. Clicking back into the viewport therefore does nothing
+            // today; the release chord is the only way back in. That is its own bug, and it is the
+            // REASON the "recapture click fires the weapon" defect cannot currently happen.
+            //
+            // The leak assertion is kept and stays meaningful: whoever fixes the recapture gesture
+            // opens exactly the path this guards, and will find out here rather than in a play test.
+            AVER_INFO("[recapture] the click took the mouse back : {} -- {}",
+                      tookBack ? "yes" : "no",
+                      tookBack ? "the gesture works"
+                               : "UNREACHABLE: the branch needs !WantCaptureMouse and the viewport is "
+                                 "an ImGui window, so it always wants the mouse");
+            AVER_INFO("[recapture] frames it also reached the gun: {} of {} -- {}",
+                      recapLeaked_, recapFrames_,
+                      clean ? "no shot leaked" : "THE RECAPTURE CLICK IS FIRING THE WEAPON");
+            AVER_INFO("[recapture] RESULT: {}",
+                      !clean ? "FAIL" : (tookBack ? "PASS" : "PASS (recapture unreachable -- see above)"));
+            io.AddMouseButtonEvent(0, false);
+            stopPlay();
+            recapFrames_ = 0;
+        }
+#endif
+    }
+    int recapFrames_ = 0, recapFrame_ = 0, recapLeaked_ = 0, recapNotRecaptured_ = 0;
 
     // --input-stuck-test N: does releasing the mouse mid-session leave a key held forever?
     //
@@ -18115,6 +18291,18 @@ private:
     void warpToAnchor() {
         HWND hwnd = window_ ? static_cast<HWND>(window_->nativeHandle()) : nullptr;
         if (!hwnd) return;
+        // A WINDOW THAT IS NOT FOREGROUND HAS NO BUSINESS MOVING THE POINTER. SetCursorPos and
+        // ClipCursor below are global: they would drag the cursor to this window's centre and pen it
+        // there while the user is working in a different application entirely. Windows ignores
+        // ClipCursor from a background window anyway, so the confinement half is not even lost --
+        // only the cursor theft is. Anchoring to where the pointer actually IS keeps the delta
+        // measurement honest for the frame focus returns, which is the same answer pollCapturedMouse
+        // reaches for the same reason.
+        if (::GetForegroundWindow() != hwnd) {
+            POINT q{};
+            if (GetCursorPos(&q)) { captureAnchorX_ = q.x; captureAnchorY_ = q.y; }
+            return;
+        }
         RECT rc{};
         if (!GetClientRect(hwnd, &rc)) return;
         POINT c{ (rc.right - rc.left) / 2, (rc.bottom - rc.top) / 2 };
@@ -18578,6 +18766,8 @@ Application* createApplication(int argc, char** argv) {
     // build failure, not a warning.
     int inputStuckArg = 0;
     int inputSourceArg = 0;
+    int recaptureArg = 0;
+    int viewmodelArg = 0;
     // --gpu-timing takes no value, so it is matched in the i+1<argc loop below only incidentally --
     // it is checked in its own full-length loop underneath, or a trailing --gpu-timing with nothing
     // after it would be silently ignored. That is the exact shape of the --no-rt/--no-gi bug this
@@ -18589,6 +18779,8 @@ Application* createApplication(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--pie-camera-test"))      pieCamArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--input-stuck-test"))     inputStuckArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--input-source-test"))    inputSourceArg = std::atoi(argv[i + 1]);
+        if (!std::strcmp(argv[i], "--recapture-test"))       recaptureArg = std::atoi(argv[i + 1]);
+        if (!std::strcmp(argv[i], "--viewmodel-test"))       viewmodelArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--refraction"))           refraction = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--refraction-strength"))  refractionStrength = (f32)std::atof(argv[i + 1]);
         if (!std::strcmp(argv[i], "--refraction-fade"))      refractionFade = (f32)std::atof(argv[i + 1]);
@@ -19510,6 +19702,8 @@ Application* createApplication(int argc, char** argv) {
     if (pieCamArg > 0) app->setPieCameraTest(pieCamArg);
     if (inputStuckArg > 0) app->setInputStuckTest(inputStuckArg);
     if (inputSourceArg > 0) app->setInputSourceTest(inputSourceArg);
+    if (recaptureArg > 0) app->setRecaptureTest(recaptureArg);
+    if (viewmodelArg > 0) app->setViewmodelTest(viewmodelArg);
 #endif
     if (!skinSceneDir.empty()) app->setSkinSceneDir(skinSceneDir);
     if (!shaderSourceDir.empty()) app->setShaderSourceDir(shaderSourceDir);
