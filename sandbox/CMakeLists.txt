@@ -10,6 +10,7 @@ add_executable(Sandbox
   src/ProjectScaffold.cpp
   src/EditorPrefs.cpp
   src/InputOwnership.cpp
+  src/ViewportIconRenderer.cpp
   src/EngineScaffold.cpp
   src/McpConf.cpp
   src/IdeIntegration.cpp
@@ -251,6 +252,21 @@ add_custom_command(
 add_custom_target(Sandbox.Logo DEPENDS ${CMAKE_BINARY_DIR}/bin/logo.png)
 add_dependencies(Sandbox Sandbox.Logo)
 set_target_properties(Sandbox.Logo PROPERTIES FOLDER "sandbox")
+
+# Ship the Player Start's viewport marker. Same OUTPUT/DEPENDS rule as the splash and logo above.
+# Unlike those two this one is drawn into the 3D SCENE rather than blitted into an ImGui panel --
+# see EditorIconRenderer -- but it is staged identically because it is loaded the identical way, by
+# path, next to the executable.
+add_custom_command(
+  OUTPUT ${CMAKE_BINARY_DIR}/bin/player-start-icon.png
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          ${CMAKE_SOURCE_DIR}/branding/player-start-icon.png ${CMAKE_BINARY_DIR}/bin/player-start-icon.png
+  DEPENDS ${CMAKE_SOURCE_DIR}/branding/player-start-icon.png
+  COMMENT "Staging player-start-icon.png"
+  VERBATIM)
+add_custom_target(Sandbox.PlayerStartIcon DEPENDS ${CMAKE_BINARY_DIR}/bin/player-start-icon.png)
+add_dependencies(Sandbox Sandbox.PlayerStartIcon)
+set_target_properties(Sandbox.PlayerStartIcon PROPERTIES FOLDER "sandbox")
 
 # Ship the Compile C# status sprite sheet (three tiles: built / failed / stale). Same OUTPUT/DEPENDS
 # rule as the splash and logo above, so editing the artwork alone re-stages it without a relink.

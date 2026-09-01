@@ -36,20 +36,29 @@ banner that a global replace punches holes through it.
 
 ## Generated — drawn by a script, and it ships
 
-One sheet, and it is listed apart from the human artwork above deliberately. The rule this file
-exists for is that anything shipped be traceable to its author; the honest way to add an icon nobody
-had drawn was to draw a **new sheet** rather than a fifth tile inside `file-icons.png`, which would
-have quietly mixed machine-drawn art into the project owner's own.
+Listed apart from the human artwork above deliberately. The rule this file exists for is that
+anything shipped be traceable to its author; the honest way to add an icon nobody had drawn was to
+draw a **new sheet** rather than a fifth tile inside `file-icons.png`, which would have quietly
+mixed machine-drawn art into the project owner's own.
 
 | File | Slot | Consumed by |
 |------|------|-------------|
 | `asset-icons.png` | 963×432 RGBA, 3 **portrait** tiles (321×432) — ANIM / SKELETON / MESH | The Content Browser's icons for `.ocanim`, `.ocskel` and `.ocmesh`, which previously fell back to the C# script tile. **Machine-drawn by `scripts/make-asset-icons.py`** — a running figure with motion streaks, a bone chain, an isometric cube. Requested by the project owner ("make some running look for it"). |
+| `player-start-icon.png` | 256×256 RGBA, single image | The Player Start's marker in the **3D viewport** — the only entry in this file that is not UI chrome. `sandbox/CMakeLists.txt` stages it next to the exe; `SandboxApp` hands it to `editor::ViewportIconRenderer`, which draws it on a camera-facing quad in `transparentPass` so it is occluded by level geometry. **Machine-drawn by `scripts/make-editor-icons.py`** — a teal map pin with a standing figure, chosen so it collides with nothing already in a viewport (the gizmo owns red/green/blue, the selection outline owns orange). Two nested rims, light inside dark, so the silhouette reads against both a bright sky and dark interiors. It REPLACES a plain white cube; that cube still draws if this file is missing. |
 
 The house style is **matched from measurements of `file-icons.png`, not guessed** — page `#999999`,
 banner `#262626` showing through a folded corner at (232,0)–(320,0)–(320,88) with a `#4D4D4D` crease,
 a pointy-top hexagon badge 245×265 centred at (159,215), and a Roboto Medium caption centred on
 y=398. Everything is drawn at 4× and downsampled, which is where the antialiasing comes from. Rerun
 the script to change it; do not hand-edit the sheet.
+
+That house style applies to `asset-icons.png` alone. **`player-start-icon.png` is drawn against
+different constraints and deliberately shares none of it**: there is no tile for it to sit on, so it
+has to read as a transparent silhouette; it is composited over whatever the level looks like, so it
+carries a dark rim outside a light one rather than a single outline; and it is centred on a world
+position, so a map-pin shape says "at the tip" where a circular badge would say "somewhere in here".
+It is drawn at 4× and downsampled like the sheet, and it is likewise regenerated, not hand-edited --
+`python scripts/make-editor-icons.py`.
 
 The badge hues are new on purpose — amber, teal and green against the human sheet's purple (C#) and
 blue (C++) — so an asset type is distinguishable from a source file at a glance in a mixed folder.

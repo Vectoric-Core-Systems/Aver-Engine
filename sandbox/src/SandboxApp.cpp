@@ -116,6 +116,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "EditorIcons.hpp"
 #include "EditorKeybinds.hpp"
 // The one place that decides who owns the keyboard and mouse this frame.
+#include "ViewportIconRenderer.hpp"
 #include "InputOwnership.hpp"
 #include "EditorConsole.hpp"
 #include "EditorEntitySnapshot.hpp"
@@ -718,6 +719,11 @@ static constexpr ImGuiWindowFlags kDrawerFlags =
 // The editor's placeholder scene dimensions, in centimetres.
 inline constexpr f32 kEditorFloorHalf = 1000.0f;   // cm
 inline constexpr f32 kEditorCubeHalf  = 50.0f;     // cm
+// The Player Start marker's world-space half-size, in centimetres. 45 rather than the 50 the cube it
+// replaces used: the pin artwork is taller than it is wide and carries a transparent margin, so a
+// quad matched to the cube's own half-extent reads noticeably BIGGER than the cube did. Chosen by
+// eye against a 100cm cube in the same shot.
+inline constexpr f32 kPlayerStartIconHalfSize = 45.0f;   // cm
 inline constexpr f32 kEditorGridCell  = 100.0f;    // cm
 inline constexpr f32 kEditorGridHalf  = 1000.0f;   // cm
 // How far in front of the camera Add places a new object.
@@ -2090,6 +2096,27 @@ public:
         // effect would see the volume one frame stale -- and on its first frame, the unposed seed
         // shell at the world origin.
         if (fluidScene_.init(*e.device())) e.device()->addRenderFeature(&fluidScene_);
+
+        // The 3D-viewport icon renderer. Registered here for one concrete reason: it draws in
+        // transparentPass, which runs after every opaque draw and after the deferred sky, so its
+        // position in the FEATURE list does not affect what it composites over -- but it must exist
+        // before the first frame that wants to queue an icon, and level loading (which is what
+        // creates a Player Start) happens further down this same function.
+        //
+        // A FAILED init IS NOT FATAL and is not even a warning here: init() logs its own reason, and
+        // viewportIconsReady_ staying false means the render walk keeps drawing the Player Start's
+        // cube exactly as it did before this feature existed. The marker degrades to the old look
+        // rather than disappearing -- which matters, because on Vulkan (no transparentPass call at
+        // all) that is the permanent state, not a transient failure.
+        viewportIconsReady_ = viewportIcons_.init(*e.device());
+        if (viewportIconsReady_) {
+            e.device()->addRenderFeature(&viewportIcons_);
+            playerStartIcon_ = viewportIcons_.loadIcon(executableDir() + "\\" + "player-start-icon.png",
+                                                       "PlayerStartIcon");
+            // No icon file, no icon renderer: falling back to the cube is better than a Player Start
+            // that is invisible because its picture failed to load.
+            if (playerStartIcon_ == editor::ViewportIconRenderer::kNoIcon) viewportIconsReady_ = false;
+        }
 
         // A GRAPH-AUTHORED `COMP ... Fluid` (Aver.Graph's GraphComponentTree.ApplyKind) and a
         // plain C# script calling Game.SpawnFluidVolume both reach fluidScene_ through this one
@@ -5400,6 +5427,25 @@ public:
                 const scene::CMeshRenderer* mr =
                     w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
                 if (!mr || !(mr->flags & scene::kMeshRendererVisible) || mr->mesh == 0) continue;
+
+                // ---- THE PLAYER START IS CHROME, AND IT DRAWS AS AN ICON INSTEAD ---------------
+                //
+                // Skipping it HERE, by identity, drops it from the opaque pass, the shadow cascade,
+                // the GI voxelisation and the ray-tracing acceleration structure all at once --
+                // which is exactly right for a marker: an editor annotation should not cast a
+                // shadow, bounce light, or appear in a reflection of the level it annotates.
+                //
+                // NOT BY CLEARING kMeshRendererVisible, and this is the trap the identity check
+                // exists to avoid: ray picking asks the IDENTICAL question this loop does (see the
+                // pick walk's own `mr->flags & kMeshRendererVisible` test), so unsetting the flag
+                // would remove the draw AND the ability to click the marker at all. The entity is
+                // already special-cased by identity in loadLevel, unloadLevel and addPlayerStart,
+                // so this is the established way to say "this one is different", not a new one.
+                //
+                // The icon itself is queued further down, next to the selection outline, so the two
+                // pieces of Player Start chrome share one is-anything-playing test.
+                if (ent == playerStart_ && viewportIconsReady_) continue;
+
                 const auto it = sceneMeshes_.find(mr->mesh);
                 if (it == sceneMeshes_.end()) continue;
                 const Mat4& wm = w.worldMatrix(ent);
@@ -6243,7 +6289,13 @@ public:
         // The outline being invisible under path tracing is separate and INTENDED -- the Quality
         // combo's own tooltip says the view "SUPPRESSES the raster view entirely while on". This
         // does not restore it; it stops the suppressed draw from contaminating what replaced it.
-        if (hasSelection_ && maxFrames_ == 0 && !e.device()->sceneSuppressed()) {
+        //
+        // AND NOT WHILE ANYTHING IS PLAYING. An orange shell around whatever you last clicked is an
+        // editing aid; once the viewport is showing the game it is a rectangle floating in the shot.
+        // anyPlayActive() rather than playSessionActive() because two of the three ways to be
+        // playing never start a session -- see that predicate -- and chrome has to disappear for all
+        // three. The Player Start icon is hidden by the same call, so the two cannot disagree.
+        if (hasSelection_ && maxFrames_ == 0 && !anyPlayActive() && !e.device()->sceneSuppressed()) {
             static constexpr f32 kSelect[4] = {1.0f, 0.62f, 0.12f, 1.0f};   // selection orange
             const Vec3 sp{selectionOutline_.m[3][0], selectionOutline_.m[3][1], selectionOutline_.m[3][2]};
             const f32 camDist = (sp - camPos_).size();
@@ -6284,6 +6336,34 @@ public:
             e.device()->setWireframe(wireframe_);
         }
         hasSelection_ = false;
+
+        // ---- THE PLAYER START'S MARKER --------------------------------------------------------
+        //
+        // Queued every frame rather than kept as scene state: what it draws is a view of live editor
+        // state (where the marker is, whether anything is playing), and re-deriving that each frame
+        // is how the rest of the editor's viewport chrome already works.
+        //
+        // HIDDEN BY THE SAME anyPlayActive() THE OUTLINE ABOVE USES, deliberately sharing the call
+        // so the two cannot drift apart: during play the viewport is showing the game, and a spawn
+        // marker floating in the shot is the clearest possible sign it is not.
+        //
+        // NOT GATED ON maxFrames_, unlike the outline. The outline is a response to a click, which a
+        // bounded capture run has no way to make meaningful; the marker is part of what the level
+        // LOOKS like in the editor, so a screenshot that omitted it would be showing something the
+        // user never sees.
+#if AVER_MODULE_SCENE
+        if (viewportIconsReady_ && !anyPlayActive() && playerStart_ != scene::kInvalidEntity) {
+            const scene::World& psw = scene::World::instance();
+            if (psw.valid(playerStart_)) {
+                // Raised by its own half-height so the pin's TIP lands on the marker's origin
+                // rather than its middle -- the quad is centred on the position it is given, and
+                // the artwork points down (see scripts/make-editor-icons.py).
+                const Vec3 at = psw.localTransform(playerStart_).position;
+                viewportIcons_.addIcon(Vec3{at.x, at.y, at.z + kPlayerStartIconHalfSize},
+                                       kPlayerStartIconHalfSize, playerStartIcon_);
+            }
+        }
+#endif
 
         e.device()->setWireframe(false);
         if (showGrid_) {
@@ -6493,6 +6573,11 @@ public:
         // kept the resident map permanently empty. It is reachable now.
         e.device()->removeRenderFeature(&fluidScene_);
         fluidScene_.shutdown();
+        if (viewportIconsReady_) {
+            e.device()->removeRenderFeature(&viewportIcons_);
+            viewportIcons_.shutdown();
+            viewportIconsReady_ = false;
+        }
 #endif
         // THE SAME REASON, THE SAME FIX, one member along -- see the FluidScene note directly above.
         // GBufferDebugFeature owns a pipeline and a binding set, and its destructor calls
@@ -8854,6 +8939,23 @@ private:
     // has to ask this too, exactly as it already had to ask dronePlayActive().
     bool spectatorPlayActive() const { return defaultPawnPlay_; }
 
+    // IS ANY KIND OF PLAY RUNNING -- the question editor chrome actually wants to ask.
+    //
+    // There are three ways to be playing and only one of them is a play SESSION: a real GameMode
+    // session (playSessionActive), Play standing in a drone, and Play standing in the engine's
+    // spectator pawn. The two stand-ins never call aver_fw_begin_play, so aver_fw_play_state()
+    // reports EDITOR throughout both -- which means anything that gates on "are we playing" and
+    // asks only playSessionActive() is right about one case in three.
+    //
+    // WHY IT MATTERS HERE RATHER THAN AS TIDYING. Chrome -- the selection outline, the Player Start
+    // icon -- must vanish for all three, because all three are "the user is looking at their game
+    // now, not editing it". Two call sites already spell the disjunction out by hand, and a third
+    // and fourth written the same way would eventually disagree about a case. One name, so they
+    // cannot.
+    bool anyPlayActive() const {
+        return playSessionActive() || dronePlayActive() || spectatorPlayActive();
+    }
+
     // Ends whichever kind of play is running. Both kinds, deliberately: a drone the USER switched on
     // from Window > Drone is left alone, because stopping play should not take down something the
     // user started for their own reasons and never asked play to own.
@@ -10397,8 +10499,21 @@ private:
                 world.addComponent(e, scene::kComponentMeshRenderer))) {
             mr->mesh = fnv1a64(std::string_view(kCubeAsset));
             mr->flags |= scene::kMeshRendererVisible;
-            mr->aabbMin[0] = mr->aabbMin[1] = mr->aabbMin[2] = -1.0f;
-            mr->aabbMax[0] = mr->aabbMax[1] = mr->aabbMax[2] =  1.0f;
+            mr->aabbMin[0] = mr->aabbMin[1] = -1.0f;
+            mr->aabbMax[0] = mr->aabbMax[1] =  1.0f;
+            // TALLER THAN THE CUBE IT BOUNDS, ON PURPOSE, AND ONLY IN +Z. This box is what ray
+            // picking tests (see the selection walk's rayAabb call) -- and the marker is not drawn
+            // as this cube any more: ViewportIconRenderer draws a pin whose TIP is at the entity's
+            // origin and whose head reaches ~90cm above it, so a box centred on the origin would
+            // leave the top half of the visible marker unclickable while making 50cm of empty floor
+            // beneath it clickable instead. Local units, scaled by the transform's kEditorCubeHalf:
+            // -1..1.8 in Z is -50cm..+90cm in world.
+            //
+            // Still reaches -1 rather than 0 so it also contains the CUBE, which is what draws when
+            // the icon renderer or its PNG is unavailable (see viewportIconsReady_). One box has to
+            // serve both looks, and the union is the only answer that never leaves either unclickable.
+            mr->aabbMin[2] = -1.0f;
+            mr->aabbMax[2] =  1.8f;
         }
         entityLabels_[static_cast<u32>(e)] = "Player Start";
         playerStartYaw_ = yawDeg;
@@ -16486,6 +16601,15 @@ private:
     // record is either a Gerstner surface or a soft body, never both, and which one a level gets is
     // decided in applyLevelWater.
     fluids::FluidScene fluidScene_;
+
+    // ---- the 3D-viewport icon renderer, and the Player Start marker it draws ----
+    // viewportIconsReady_ is not redundant with the handles: it is the ONE flag the render walk
+    // consults to decide whether to skip the Player Start's cube, and it is false unless the feature
+    // AND its texture both came up. Every failure path therefore lands on the same behaviour --
+    // draw the cube, exactly as before this feature existed -- rather than on a missing marker.
+    editor::ViewportIconRenderer viewportIcons_;
+    bool viewportIconsReady_ = false;
+    editor::ViewportIconRenderer::IconHandle playerStartIcon_ = editor::ViewportIconRenderer::kNoIcon;
     fluids::FluidHandle fluidHandle_ = 0;
     // What a level ASKED for, and whether that ask is still outstanding. applyLevelWater fills these
     // three and returns; the drain in onUpdate is what actually spawns. The name rides along only so
