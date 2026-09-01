@@ -3104,6 +3104,41 @@ public:
         // gate out inline as (uiActive && !browserActive_ && (!gameHasInput() || defaultPawnPlay_)),
         // which resolveInputOwnership now reproduces exactly; the keyboard/mouse split it always
         // wanted but never had is what the two flags add.
+        // ---- ONE ARBITRATION, HANDED TO EVERY CONSUMER ---------------------------------------------
+        // Computed once, here, instead of eleven times in eleven slightly different spellings. See
+        // InputOwnership.hpp for what went wrong when each consumer answered this for itself. The
+        // ImGui queries stay at this call site -- only the DECISION moved into a pure function that a
+        // headless test can reach.
+#if AVER_WITH_IMGUI
+        {
+            const ImGuiIO& oio = ImGui::GetIO();
+            editor::InputConditions ic;
+            ic.uiActive          = e.device()->uiActive();
+            ic.browserActive     = browserActive_;
+            ic.textInput         = oio.WantTextInput;
+            ic.uiWantsKeyboard   = oio.WantCaptureKeyboard;
+            ic.uiWantsMouse      = oio.WantCaptureMouse;
+            ic.playing           = playSessionActive();
+            ic.releasedByUser    = releasedByUser_;
+            ic.defaultPawnPlay   = defaultPawnPlay_;
+            ic.mouseCaptured     = mouseCaptured_;
+            ic.pointerInViewport = levelHovered_ && inViewport(oio.MousePos.x, oio.MousePos.y);
+            ic.drawerOpen        = drawer_ != Drawer::None;
+            ic.landscapeMode     = mode_ == EditorMode::Landscape;
+            own_ = editor::resolveInputOwnership(ic);
+        }
+#endif
+        // ---- LEAVING FLY MODE IS UNCONDITIONAL, AND MUST BE ----------------------------------------
+        // flying_ is entered inside the gate below and used to be cleared there too. That is the exact
+        // shape of the bug this session spent its first commit on: a state whose ONLY reset lives
+        // inside a conditional block latches the moment that block stops running. The gate below is
+        // narrower than the one it replaced (it now splits keyboard from mouse), so there are states
+        // -- a focused text field with the pointer off the viewport -- where it does not run at all,
+        // and the camera would have stayed in fly mode with the cursor hidden until something else
+        // happened to re-enter it. Releasing the button always means stop flying, whoever owns input.
+#if AVER_WITH_IMGUI
+        if (!ImGui::GetIO().MouseDown[1]) flying_ = false;
+#endif
         if (own_.keyboardToTool || own_.mouseToTool) {
             const ImGuiIO& io = ImGui::GetIO();
             const bool overUI = !levelHovered_ || !inViewport(io.MousePos.x, io.MousePos.y);
@@ -3115,9 +3150,10 @@ public:
                           (int)levelFocused_, (int)overUI, (int)flying_,
                           camPos_.x, camPos_.y, camPos_.z, yaw_);
 
-            // Right mouse enters fly mode: look plus WASD/QE, cursor hidden but never warped.
+            // Right mouse ENTERS fly mode here; LEAVING it is handled unconditionally above, outside
+            // this gate -- see that clear's own comment for why a state whose only reset lives inside
+            // a conditional block is the same defect as the input publisher that latched every key.
             if (ImGui::IsMouseClicked(1) && !overUI) flying_ = true;
-            if (!io.MouseDown[1]) flying_ = false;
             if (flying_) ImGui::SetMouseCursor(ImGuiMouseCursor_None);
 
             if (flying_) {
@@ -3244,30 +3280,6 @@ public:
         (void)interactive;   // no ImGui to arbitrate mouse/keyboard capture with
 #endif
         pollCapturedMouse();
-        // ---- ONE ARBITRATION, HANDED TO EVERY CONSUMER ---------------------------------------------
-        // Computed once, here, instead of eleven times in eleven slightly different spellings. See
-        // InputOwnership.hpp for what went wrong when each consumer answered this for itself. The
-        // ImGui queries stay at this call site -- only the DECISION moved into a pure function that a
-        // headless test can reach.
-#if AVER_WITH_IMGUI
-        {
-            const ImGuiIO& oio = ImGui::GetIO();
-            editor::InputConditions ic;
-            ic.uiActive          = e.device()->uiActive();
-            ic.browserActive     = browserActive_;
-            ic.textInput         = oio.WantTextInput;
-            ic.uiWantsKeyboard   = oio.WantCaptureKeyboard;
-            ic.uiWantsMouse      = oio.WantCaptureMouse;
-            ic.playing           = playSessionActive();
-            ic.releasedByUser    = releasedByUser_;
-            ic.defaultPawnPlay   = defaultPawnPlay_;
-            ic.mouseCaptured     = mouseCaptured_;
-            ic.pointerInViewport = levelHovered_ && inViewport(oio.MousePos.x, oio.MousePos.y);
-            ic.drawerOpen        = drawer_ != Drawer::None;
-            ic.landscapeMode     = mode_ == EditorMode::Landscape;
-            own_ = editor::resolveInputOwnership(ic);
-        }
-#endif
         pushInput(e.device()->uiActive());
         // The UI frame opens before gameplay ticks, because ticking is when a game draws its HUD.
 #if AVER_MODULE_SCRIPTING
