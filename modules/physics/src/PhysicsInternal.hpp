@@ -38,53 +38,114 @@
 namespace aver::physics::detail {
 
 // ---- Layers ---------------------------------------------------------------------------------------
-// Two object layers: things that never move, and things that do.
+//
+// AN OBJECT LAYER ENCODES TWO THINGS AT ONCE, and the encoding is what makes user-defined collision
+// layers possible without changing a single existing body's behaviour.
+//
+// Jolt asks two questions of a layer: which BROAD-PHASE tree a body belongs in (a coarse, structural
+// split -- things that never move are kept apart from things that do, so the static half of a level
+// need not be re-inserted every frame), and which other object layers it COLLIDES with. This module
+// used to answer the first with the whole layer -- exactly two of them, NON_MOVING and MOVING -- which
+// left the second question with no room to say anything at all: there was one static layer and one
+// moving layer, so a caller could not put the player and the player's own bullets on layers that
+// ignore each other.
+//
+// So an object layer is now a PAIR: `userLayer * 2 + moving`. The broad-phase question is answered by
+// the low bit alone, exactly as before; the collision question is answered by the user layer through
+// a matrix the caller owns. And because user layer 0 is the default, a body created without asking for
+// a layer lands on object layer 0 (static) or 1 (moving) -- THE SAME TWO NUMBERS AS BEFORE THIS
+// CHANGE, with the same broad-phase mapping and the same pair rule. Existing content is not merely
+// compatible, it is identical.
 namespace Layers {
+
+// How many user layers exist. 16 is the number that fits a u16 ObjectLayer at two per user layer with
+// room to spare, and a mask of them fits a u32 for the query filters -- more would cost a bigger
+// matrix for layers nobody has asked for.
+inline constexpr u32 kUserLayerCount = 16;
+
+// The default user layer's two halves, unchanged in name and in VALUE from when they were the only
+// two layers that existed.
 inline constexpr JPH::ObjectLayer NON_MOVING = 0;
 inline constexpr JPH::ObjectLayer MOVING     = 1;
-inline constexpr JPH::uint        NUM        = 2;
+inline constexpr JPH::uint        NUM        = kUserLayerCount * 2;
+
+inline JPH::ObjectLayer encode(u32 userLayer, bool moving) {
+    return static_cast<JPH::ObjectLayer>(userLayer * 2u + (moving ? 1u : 0u));
 }
+inline u32  userOf(JPH::ObjectLayer l)   { return static_cast<u32>(l) >> 1; }
+inline bool movingOf(JPH::ObjectLayer l) { return (static_cast<u32>(l) & 1u) != 0u; }
+
+} // namespace Layers
+
 namespace BroadPhaseLayers {
 inline constexpr JPH::BroadPhaseLayer NON_MOVING(0);
 inline constexpr JPH::BroadPhaseLayer MOVING(1);
 inline constexpr JPH::uint            NUM = 2;
 }
 
-// Maps each object layer onto its broad-phase layer.
+// Maps each object layer onto its broad-phase layer -- which is now the low bit and nothing else.
 class BPLayerInterface final : public JPH::BroadPhaseLayerInterface {
 public:
-    // Builds the object-layer to broad-phase-layer table.
-    BPLayerInterface() {
-        m_[Layers::NON_MOVING] = BroadPhaseLayers::NON_MOVING;
-        m_[Layers::MOVING]     = BroadPhaseLayers::MOVING;
-    }
     JPH::uint GetNumBroadPhaseLayers() const override { return BroadPhaseLayers::NUM; }
-    JPH::BroadPhaseLayer GetBroadPhaseLayer(JPH::ObjectLayer l) const override { return m_[l]; }
+    JPH::BroadPhaseLayer GetBroadPhaseLayer(JPH::ObjectLayer l) const override {
+        return Layers::movingOf(l) ? BroadPhaseLayers::MOVING : BroadPhaseLayers::NON_MOVING;
+    }
 #if defined(JPH_EXTERNAL_PROFILE) || defined(JPH_PROFILE_ENABLED)
     const char* GetBroadPhaseLayerName(JPH::BroadPhaseLayer l) const override {
         return static_cast<JPH::BroadPhaseLayer::Type>(l) == 0 ? "NON_MOVING" : "MOVING";
     }
 #endif
-private:
-    JPH::BroadPhaseLayer m_[Layers::NUM];
 };
 
 // Decides which object layers are tested against which broad-phase layers.
 class ObjectVsBroadPhaseFilter final : public JPH::ObjectVsBroadPhaseLayerFilter {
 public:
-    // Static geometry only needs testing against things that move.
+    // Static geometry only needs testing against things that move -- the same rule as before, now
+    // asked of the low bit rather than of the whole layer.
     bool ShouldCollide(JPH::ObjectLayer a, JPH::BroadPhaseLayer b) const override {
-        return a != Layers::NON_MOVING || b == BroadPhaseLayers::MOVING;
+        return Layers::movingOf(a) || b == BroadPhaseLayers::MOVING;
     }
 };
 
-// Decides which object layers collide with each other.
+// Decides which object layers collide with each other: the structural rule first, then the caller's.
+//
+// THE MATRIX LIVES HERE, INSIDE THE FILTER, rather than in a global. Jolt holds a pointer to this
+// object for the life of the PhysicsSystem and asks it from worker threads; keeping the table in the
+// same object means it is created and destroyed with the world, so a matrix set up for one level
+// cannot leak into the next. Reads are unsynchronised and that is deliberate -- it is a table of
+// bools written between steps and read during them, and the alternative is a lock taken on every
+// broad-phase pair.
 class ObjectLayerPairFilter final : public JPH::ObjectLayerPairFilter {
 public:
-    // Static geometry is not tested against static geometry.
-    bool ShouldCollide(JPH::ObjectLayer a, JPH::ObjectLayer b) const override {
-        return a != Layers::NON_MOVING || b == Layers::MOVING;
+    ObjectLayerPairFilter() {
+        for (u32 i = 0; i < Layers::kUserLayerCount; ++i)
+            for (u32 j = 0; j < Layers::kUserLayerCount; ++j) collides_[i][j] = true;
     }
+
+    bool ShouldCollide(JPH::ObjectLayer a, JPH::ObjectLayer b) const override {
+        // STATIC AGAINST STATIC IS STILL NEVER TESTED, whatever the matrix says. Two bodies that
+        // cannot move cannot begin to overlap, so the pair is work with no possible outcome -- and
+        // this is the rule that was here before, kept ahead of the caller's so no matrix entry can
+        // accidentally reintroduce that cost.
+        if (!Layers::movingOf(a) && !Layers::movingOf(b)) return false;
+        return collides_[Layers::userOf(a)][Layers::userOf(b)];
+    }
+
+    // Symmetric by construction: Jolt may ask about a pair in either order, and a matrix that
+    // disagreed with itself would make collision depend on which body the broad-phase happened to
+    // visit first.
+    void setCollides(u32 a, u32 b, bool on) {
+        if (a >= Layers::kUserLayerCount || b >= Layers::kUserLayerCount) return;
+        collides_[a][b] = on;
+        collides_[b][a] = on;
+    }
+    bool collides(u32 a, u32 b) const {
+        if (a >= Layers::kUserLayerCount || b >= Layers::kUserLayerCount) return false;
+        return collides_[a][b];
+    }
+
+private:
+    bool collides_[Layers::kUserLayerCount][Layers::kUserLayerCount] = {};
 };
 
 // ---- Events ---------------------------------------------------------------------------------------
@@ -132,8 +193,11 @@ extern std::unique_ptr<World> g_world;
 JPH::BodyInterface& bi();
 
 // Creates a body from a shape, registers it in both handle tables, and returns its handle.
+//
+// `userLayer` DEFAULTS TO 0, which is why every existing call site is unchanged and every body this
+// module made before user layers existed lands on exactly the object layer it always did.
 int32_t addBody(const JPH::Shape* shape, const Vec3& centreCm, bool dynamic, float massKg,
-                bool sensor = false);
+                bool sensor = false, u32 userLayer = 0);
 
 // The Jolt body id behind a handle, or nullptr.
 const JPH::BodyID* findBody(int32_t h);
@@ -154,5 +218,17 @@ void writeVec(float* out, const Vec3& v);
 // PhysicsJoints.cpp, called from PhysicsWorld.cpp, so the ordering is stated in one place instead of
 // being a property nobody wrote down.
 void destroyAllJoints();
+
+// Applies the stair-stepping distances a character was given to the settings the step loop passes to
+// ExtendedUpdate, and forgets them all on shutdown. Both defined in PhysicsCharacter.cpp.
+//
+// THIS SEAM IS THE DIFFERENCE BETWEEN A SETTER AND A FEATURE. Jolt takes the walk-stairs step-up and
+// the stick-to-floor step-down as ARGUMENTS to ExtendedUpdate, not as state on the character, so there
+// is no Jolt-side setter for aver_phys_character_set_stair_stepping to forward to -- it can only
+// record the numbers and something must read them back at the moment of the update. Without this call
+// the setter would be a function that stores a value nothing ever looks at, which is the shape this
+// repository keeps shipping and then finding unused.
+void applyCharacterStairSettings(int32_t handle, JPH::CharacterVirtual::ExtendedUpdateSettings& out);
+void clearCharacterStairSettings();
 
 } // namespace aver::physics::detail

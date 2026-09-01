@@ -135,12 +135,18 @@ std::unique_ptr<World> g_world;
 JPH::BodyInterface& bi() { return g_world->system.GetBodyInterface(); }
 
 int32_t addBody(const JPH::Shape* shape, const Vec3& centreCm, bool dynamic, float massKg,
-                bool sensor) {
+                bool sensor, u32 userLayer) {
     if (!g_world) return 0;
-    // A sensor sits in the MOVING layer even though it never moves, so it is told about the world.
+    if (userLayer >= Layers::kUserLayerCount) {
+        AVER_WARN("[Physics] collision layer {} is out of range; using 0", userLayer);
+        userLayer = 0;
+    }
+    // A sensor sits in the MOVING half even though it never moves, so it is told about the world.
+    // At userLayer 0 this encodes to exactly the NON_MOVING/MOVING values that were the only two
+    // object layers before user layers existed.
     JPH::BodyCreationSettings s(shape, toJolt(centreCm), JPH::Quat::sIdentity(),
                                 dynamic ? JPH::EMotionType::Dynamic : JPH::EMotionType::Static,
-                                (dynamic || sensor) ? Layers::MOVING : Layers::NON_MOVING);
+                                Layers::encode(userLayer, dynamic || sensor));
     if (dynamic && massKg > 0.0f) {
         s.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
         s.mMassPropertiesOverride.mMass = massKg;
@@ -213,6 +219,7 @@ void aver_phys_shutdown(void) {
     // points into the PhysicsSystem below and at the bodies in it. Destroying the world first would
     // leave PhysicsJoints.cpp's table holding references into wreckage.
     destroyAllJoints();
+    clearCharacterStairSettings();
     if (!g_world) return;
     // Characters hold refs into the system; drop them before the system goes.
     g_world->characters.clear();
@@ -285,7 +292,12 @@ int32_t aver_phys_step(float dt) {
             }
             ch->SetLinearVelocity(v);
 
+            // THE STAIR DISTANCES THE CALLER ASKED FOR, rather than Jolt's defaults. Both are
+            // arguments to ExtendedUpdate and not state on the character, so this is the only moment
+            // aver_phys_character_set_stair_stepping's numbers can be honoured -- see
+            // detail::applyCharacterStairSettings.
             JPH::CharacterVirtual::ExtendedUpdateSettings us;
+            applyCharacterStairSettings(h, us);
             ch->ExtendedUpdate(g_world->fixedStep,
                                g_world->system.GetGravity(),
                                us,

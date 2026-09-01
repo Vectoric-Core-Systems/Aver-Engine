@@ -23,7 +23,11 @@ add_library(Aver.Physics SHARED
   # entry points over the handle tables in src/PhysicsInternal.hpp, with its own header beside
   # physics_abi.h so the C# parity test can pair one header with one binding file.
   src/PhysicsJoints.cpp
-  src/PhysicsShapes.cpp)
+  src/PhysicsShapes.cpp
+  # Collision layers, and the _ex forms of the three spatial queries that can filter by them.
+  src/PhysicsLayers.cpp
+  # The character's own settings: slope, stairs, ground info, and the shape swap that is crouching.
+  src/PhysicsCharacter.cpp)
 
 target_include_directories(Aver.Physics PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(Aver.Physics PUBLIC cxx_std_20)

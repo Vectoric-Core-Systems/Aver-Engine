@@ -36,6 +36,23 @@ set_target_properties(SoftBodyTest PROPERTIES
 # Links Aver.Physics and Aver.Core only, like BuoyancyTest below and for the same reason: every claim
 # it makes is about OBSERVED MOTION through the public ABI, so it is checked the way a caller sees it
 # rather than by reaching into the module. It needs no Jolt header at all.
+# CharacterTest -- and its first test is the one that matters: the stair-stepping distances are
+# arguments to Jolt's ExtendedUpdate rather than state on the character, so the setter can only record
+# them and something must read them back. Walking a character at a kerb is the only way to tell a
+# working feature from a setter that stores a number nothing looks at.
+add_executable(CharacterTest src/CharacterTest.cpp)
+target_link_libraries(CharacterTest PRIVATE Aver.Physics Aver.Core)
+set_target_properties(CharacterTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# LayerTest -- collision layers. Its FIRST job is a negative claim: that a project which never
+# mentions a layer behaves exactly as it did before layers existed, since every body's object layer
+# is now an encoding rather than a constant.
+add_executable(LayerTest src/LayerTest.cpp)
+target_link_libraries(LayerTest PRIVATE Aver.Physics Aver.Core)
+set_target_properties(LayerTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # ShapeTest -- the rigid shapes, checked by DROPPING them and measuring where their centres rest.
 # That number is a shape's half-height, measured rather than declared, which is the only check that
 # tells a capsule built to the right size from one built to twice or half of it.
