@@ -3544,12 +3544,34 @@ public:
                 }
             }
         }
-        // GRAPH-AS-CLASS instances -- UNGATED on Play state, same reasoning as the drone tick just
-        // above and as modules/runtime.game/src/GameApp.cpp's own tickGraphClassInstances call site:
-        // a graph-only project never calls aver_fw_begin_play (no C# GameMode to find), so gating this
-        // on aver_fw_play_state() would make a class-placed graph instance's OnTick never run at all
-        // while merely browsing a level -- see ScriptHost::tickGraphClassInstances' own comment.
-        scripts_.tickGraphClassInstances(t.dt);
+        // GRAPH-AS-CLASS instances -- GATED ON PLAY, and the comment that used to sit here arguing
+        // the opposite rested on a premise that is not true.
+        //
+        // It said: "a graph-only project never calls aver_fw_begin_play (no C# GameMode to find), so
+        // gating this would make a class-placed graph instance's OnTick never run at all." That was
+        // the whole justification, and PTTest disproves it in its own log every time Play is pressed:
+        //
+        //     [Graph] GameMode 'AN_FPRules' begins play with pawn='AN_FPCharacter' ...
+        //     [Sandbox] Play: begin_play GameMode='AN_FPRules'
+        //
+        // AN_FPRules.ocgraph declares `CLASS AN_FPRules GameMode`, and HostBridge registers graph
+        // classes into the SAME native class registry a C# GameMode lands in -- so startPlay finds it
+        // and begin_play runs. A graph-only project reaches Play exactly like any other.
+        //
+        // WHAT THE UNGATED VERSION ACTUALLY DID. Every class-placed graph ran its OnTick every frame
+        // while someone was only looking around. Measured on PTTest over 1000 frames with Play never
+        // pressed: AN_FPRules' own `elapsed` VAR climbed continuously from 3.6e-05 to 12.31 seconds
+        // and 4003 tick lines were written, with no begin_play anywhere in the log. A round clock ran
+        // for twelve seconds in an editor nobody had started. That is not a harmless no-op: a graph
+        // is free to move entities, fire events and write VARs, so browsing a level was quietly
+        // mutating it.
+        //
+        // THE SAME CONDITION AS THE FRAMEWORK TICK GROUPS ABOVE, deliberately -- including
+        // spawnTestClass_, so --spawn-test keeps ticking the one class it exists to tick. Anything
+        // that ticks gameplay should agree about when gameplay is running, and there is now one
+        // spelling of that question rather than two.
+        if (!spawnTestClass_.empty() || aver_fw_play_state() == AVER_FW_PLAY_PLAYING)
+            scripts_.tickGraphClassInstances(t.dt);
 #endif
         // --chunk-stream: switches streaming on N frames in, on its own, so a --frames capture run
         // can prove it happened without a human clicking Window > Chunk Streaming.
