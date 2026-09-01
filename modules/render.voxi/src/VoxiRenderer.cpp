@@ -487,9 +487,13 @@ void VoxiRenderer::setSettings(const Settings& s) {
     if (!layeredBsdfLatched_) {
         layeredBsdf_ = (s.layeredBsdf != Quality::Off);
         layeredBsdfLatched_ = true;
-    } else if (layeredBsdf_ != (s.layeredBsdf != Quality::Off)) {
+    } else if (layeredBsdf_ != (s.layeredBsdf != Quality::Off) && !layeredBsdfWarned_) {
+        // ONCE. The condition does not clear itself -- the setting disagrees with the shaders for the
+        // whole session -- so without this the same line lands every time settings are applied.
+        layeredBsdfWarned_ = true;
         AVER_WARN("[Voxi] layeredBsdf changed after the pipelines were built; it takes effect on the "
-                  "next project load. The shaders compiled for this session are unchanged.");
+                  "next project load. The shaders compiled for this session are unchanged. "
+                  "(said once)");
     }
     setGiUpdateInterval(s.giUpdateInterval);
 

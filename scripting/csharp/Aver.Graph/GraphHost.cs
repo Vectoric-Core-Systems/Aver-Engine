@@ -741,8 +741,34 @@ public class GraphHost
     // needed to first confirm CompileEntryPoint's output was really running every frame.
     private void LogEntryFired(string eventName, int entityId, object? result)
     {
-        Console.WriteLine($"[GraphHost] '{_graph?.Name}' entity {entityId}: {eventName} -> {DescribeResult(result)}");
+        // ONCE PER ENTITY FOR OnTick, AND THAT IS THE WHOLE POINT OF THE DIAGNOSTIC ANYWAY.
+        //
+        // OnStart fires once by construction, so it was never the problem. OnTick fires every frame
+        // for every entity carrying a graph, and this wrote a line for each. MEASURED on PTTest --
+        // three placed targets plus a rules object, 120 frames, no play session running:
+        //
+        //     360 lines  50.1%  [GraphHost] 'FPTarget' entity N: OnTick -> N
+        //     119 lines  16.6%  [GraphHost] 'FPRules'  entity N: OnTick -> N
+        //
+        // 479 of 718 lines, two thirds of the entire log, from four objects sitting still. At that
+        // rate the Output Log is not a diagnostic, it is a wall that hides every other message --
+        // including the ones this codebase deliberately logs because they once hid a bug.
+        //
+        // The value being kept is unchanged: this exists, in its own words, as "proof
+        // CompileEntryPoint's output was really running every frame", and ONE line per entity proves
+        // exactly that. What it does not do is keep proving it sixty times a second forever. The
+        // suppression is announced on the line itself rather than left for someone to wonder whether
+        // the graph stopped ticking.
+        if (eventName == "OnTick" && !_tickLogged.Add(entityId))
+            return;
+
+        var note = eventName == "OnTick" ? "  (OnTick fires every frame; said once per entity)" : "";
+        Console.WriteLine($"[GraphHost] '{_graph?.Name}' entity {entityId}: {eventName} -> {DescribeResult(result)}{note}");
     }
+
+    // Entities whose OnTick has already been reported. Per graph host instance, which is the same
+    // scope _graph itself has, so reloading a graph legitimately reports its first tick again.
+    private readonly HashSet<int> _tickLogged = new HashSet<int>();
 
     private static string DescribeResult(object? result) => result switch
     {

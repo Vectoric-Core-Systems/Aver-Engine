@@ -429,6 +429,12 @@ private:
     // is a project-level decision; changing it takes a project reload. See voxi::Settings.
     bool layeredBsdf_ = false;
     bool layeredBsdfLatched_ = false;
+    // ONCE PER PROCESS, not once per frame. The mismatch this reports is a STANDING condition -- the
+    // setting really does disagree with the compiled shaders for the rest of the session -- so the
+    // warning it drives fired on EVERY applySettings call. Measured in an ordinary bounded run: ~30
+    // copies of the same line, which is not a louder warning, it is a log nobody can read. Same
+    // idiom as drawCapReported_ a few members down, for the same reason.
+    bool layeredBsdfWarned_ = false;
     // Settings::ptBounces. Spent only while pathTracingWanted() -- see where cb_.ptBounceParams
     // is filled, which is the one place that decision is made.
     u32 ptBounces_ = 1;
