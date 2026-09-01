@@ -280,6 +280,18 @@ if(TARGET Aver.Formats.Material)
   # stb_image_write, for the packed metalRough PNG. A SECOND STB_IMAGE_WRITE_IMPLEMENTATION relative
   # to MakeFoliage is fine: they are separate executables, so there is no duplicate symbol to collide.
   target_include_directories(AverAssetC PRIVATE ${CMAKE_SOURCE_DIR}/third_party/stb)
+  # Emitting the material's own .ocgraph needs the graph->HLSL compiler on top, so that the tool can
+  # PROVE the graph it just wrote shades before pointing the .ocmat at it. Nested inside the material
+  # guard because a graph is only ever written beside a .ocmat.
+  #
+  # LINKING THE COMPILER COSTS NO DEVICE AND NO BACKEND -- MaterialGraphTest above links this exact
+  # set and creates neither (see its own comment); compileMaterialGraph is a pure function from an
+  # OcGraphData to HLSL text. Aver.RHI comes along because Aver.Render.PBR.Materials declares it
+  # PUBLIC, not because anything here calls it.
+  if(TARGET Aver.Render.PBR.Materials)
+    target_link_libraries(AverAssetC PRIVATE Aver.Render.PBR.Materials)
+    target_compile_definitions(AverAssetC PRIVATE AVER_HAVE_MATERIAL_GRAPH=1)
+  endif()
 endif()
 
 # AverAssetCTest -- the JSON contract Aver Exchange in the LAUNCHER parses.

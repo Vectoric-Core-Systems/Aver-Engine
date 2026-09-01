@@ -220,6 +220,49 @@ int main() {
     check(sawOcmatFile, "TestMat.ocmat is actually on disk");
     check(sawPackedPng, "TestMat_metalRough.png is actually on disk");
 
+    // ---- the material's own .ocgraph, and the GRAPHREF that points at it ---------------------
+    //
+    // A NEW ARTIFACT KIND CROSSES THE PROCESS BOUNDARY, which is the whole reason this file exists:
+    // the launcher's Aver Exchange parses these lines and nothing in THIS repository calls the tool,
+    // so "kind":"materialgraph" is an interface change that only a check here can protect.
+    //
+    // The graph is written only where the graph->HLSL compiler is linked (AVER_HAVE_MATERIAL_GRAPH),
+    // so its absence is not a failure -- but its PRESENCE has to be complete: a .ocgraph on disk with
+    // no GRAPHREF in the .ocmat is a file nothing will ever load, and a GRAPHREF naming a graph that
+    // is not there is a material that stops shading. The two are asserted together for that reason.
+    bool sawGraphFile = false;
+    for (const auto& e : std::filesystem::directory_iterator(matOutDir, ec)) {
+        if (!e.is_regular_file(ec)) continue;
+        if (e.path().filename().string() == "TestMat.ocgraph") sawGraphFile = true;
+    }
+    bool sawGraphArtifact = false, sawGraphRef = false;
+    for (const std::string& l : matLines) {
+        if (hasPair(l, "kind", "\"materialgraph\"") && hasPair(l, "ok", "true")
+            && hasPair(l, "verified", "true")) sawGraphArtifact = true;
+        if (l.find("\"graphRef\":\"Textures/TestMat.ocgraph\"") != std::string::npos) sawGraphRef = true;
+    }
+    check(sawGraphFile == sawGraphArtifact,
+          "a materialgraph artifact line and a TestMat.ocgraph on disk agree with each other");
+    check(sawGraphFile == sawGraphRef,
+          "and the .ocmat's graphRef is reported exactly when the graph was written");
+    if (sawGraphFile) {
+        std::ifstream gin((matOutDir / "TestMat.ocgraph").string(), std::ios::binary);
+        const std::string gtext((std::istreambuf_iterator<char>(gin)), std::istreambuf_iterator<char>());
+        check(gtext.find("DOMAIN material") != std::string::npos,
+              "the generated graph declares DOMAIN material, without which it compiles to nothing");
+        check(gtext.find("MaterialOutput") != std::string::npos,
+              "and has the one sink node a material graph needs");
+        check(gtext.find("slot=metalrough") != std::string::npos,
+              "and samples the metalRough slot this fixture packed");
+        // The pin TYPE declarations are not decoration: the graph compiler sizes every generic
+        // operator from them, and a SampleTexture with no declared output pin reads as a float --
+        // which silently narrows the normal chain and loudly breaks the metallic swizzle.
+        check(gtext.find("PIN texMetalRough rgb out float3") != std::string::npos,
+              "and declares its sample outputs as float3, which is what makes the swizzles legal");
+    } else {
+        AVER_INFO("[INFO ]   (no .ocgraph: this build has no material graph compiler linked)");
+    }
+
     std::filesystem::remove_all(matOutDir, ec);
 
     // ---- a texture set with no metalRough bound must not default to fully metallic ----------

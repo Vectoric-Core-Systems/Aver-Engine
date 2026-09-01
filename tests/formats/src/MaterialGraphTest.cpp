@@ -1284,6 +1284,113 @@ static void testItActuallyCompiles(Dxc& dxc) {
 }
 
 // A graph that arrived as TEXT, which is how every real one will.
+// THE GRAPH AverAssetC GENERATES FOR AN IMPORTED TEXTURE SET, verbatim.
+//
+// WHY THIS TEXT IS PASTED RATHER THAN BUILT WITH THE HELPERS ABOVE. Every other case in this file
+// builds its graph with node()/addPin()/link(), which is the right shape for testing ONE emitter. This
+// one is testing a different claim -- that a graph another program writes to disk compiles and means
+// what that program intended -- and a hand-built twin of that graph can drift from the real generator
+// without either side failing. Pasting the tool's actual output makes the round trip through
+// parseOcgraph part of what is under test, exactly as testFromParsedText does for the same reason.
+//
+// AND IT IS TESTING AN EXACT-EQUIVALENCE CLAIM, which is the part worth being fussy about.
+// AverAssetC wires this graph into the .ocmat's GRAPHREF, so it REPLACES averStockAuthored for every
+// imported material. It is only safe to do that if the graph computes what the stock path computes:
+//
+//   roughness  = metalRough.g       averSampleMaps: m.metalRough = float2(mr.g, mr.b), and
+//   metallic   = metalRough.b       averStockAuthored reads .x for rough and .y for metal
+//   normalTS   = normal.rgb*2 - 1   at FLOAT3 width, not a scalar broadcast of its .x
+//   occlusion  = occlusion.r
+//
+// The assertions below check each of those in the emitted text, because "it compiles" would pass just
+// as happily for a graph that read the wrong channel.
+static void testGeneratedImportGraph(Dxc& dxc) {
+    AVER_INFO("=== the graph AverAssetC writes for an imported texture set ===");
+    const std::string text =
+        "OCGRAPH 1\n"
+        "DOMAIN material\n"
+        "NAME TestRock\n"
+        "NODE surface MaterialOutput 760 0\n"
+        "NODE texBaseColor SampleTexture 0 0 slot=basecolor\n"
+        "NODE texMetalRough SampleTexture 0 150 slot=metalrough\n"
+        "NODE roughness Swizzle 320 150 mask=y\n"
+        "NODE metallic Swizzle 320 225 mask=z\n"
+        "NODE texNormal SampleTexture 0 375 slot=normal\n"
+        "NODE normalScaled Multiply 320 375\n"
+        "NODE normalUnpacked Subtract 520 375\n"
+        "NODE texOcclusion SampleTexture 0 525 slot=occlusion\n"
+        "NODE occlusionR Swizzle 320 525 mask=x\n"
+        "PIN texBaseColor rgb out float3\n"
+        "PIN texMetalRough rgb out float3\n"
+        "PIN roughness result out float\n"
+        "PIN metallic result out float\n"
+        "PIN texNormal rgb out float3\n"
+        "PIN normalScaled b in float 2\n"
+        "PIN normalScaled result out float3\n"
+        "PIN normalUnpacked b in float 1\n"
+        "PIN normalUnpacked result out float3\n"
+        "PIN texOcclusion rgb out float3\n"
+        "PIN occlusionR result out float\n"
+        "LINK texBaseColor.rgb surface.BaseColor\n"
+        "LINK texMetalRough.rgb roughness.x\n"
+        "LINK roughness.result surface.Roughness\n"
+        "LINK texMetalRough.rgb metallic.x\n"
+        "LINK metallic.result surface.Metallic\n"
+        "LINK texNormal.rgb normalScaled.a\n"
+        "LINK normalScaled.result normalUnpacked.a\n"
+        "LINK normalUnpacked.result surface.Normal\n"
+        "LINK texOcclusion.rgb occlusionR.x\n"
+        "LINK occlusionR.result surface.Occlusion\n";
+
+    fmt::OcGraphData g;
+    std::string err;
+    check(fmt::parseOcgraph(text, g, &err), "the generated text parses: " + err);
+
+    const pbr::MaterialGraphBody body = pbr::compileMaterialGraph(g);
+    check(body.ok, "the generated graph compiles: " + body.error);
+    if (!body.ok) return;
+
+    // All five fields an imported set can drive, and nothing else: Emissive and the layer slots are
+    // never bound by the importer, so a graph driving them would be writing over the stock value.
+    check(body.hlsl.find("a.baseColor") != std::string::npos, "drives baseColor");
+    check(body.hlsl.find("a.roughness") != std::string::npos, "drives roughness");
+    check(body.hlsl.find("a.metallic")  != std::string::npos, "drives metallic");
+    check(body.hlsl.find("a.normalTS")  != std::string::npos, "drives normalTS");
+    check(body.hlsl.find("a.occlusion") != std::string::npos, "drives occlusion");
+    check(body.hlsl.find("a.emissive")  == std::string::npos,
+          "and does NOT drive emissive, which the importer never binds");
+
+    // THE CHANNEL ASSIGNMENTS, which is the half "it compiles" cannot see. Swapping .y and .z here
+    // would compile perfectly and render every imported material's metalness as its roughness.
+    check(body.hlsl.find(").y") != std::string::npos, "roughness reads the GREEN channel");
+    check(body.hlsl.find(").z") != std::string::npos, "metallic reads the BLUE channel");
+    check(body.hlsl.find(").x") != std::string::npos, "occlusion reads the RED channel");
+
+    // THE NORMAL UNPACK AT FULL WIDTH. widen() narrows a float3 to a float by appending .x without
+    // failing (see its own arity branch), so a normal chain whose Multiply sized itself to float
+    // would compile and silently flatten every normal map. float3(2,2,2) in the text is the proof
+    // that both scalars broadcast to the sample's width instead.
+    check(body.hlsl.find("float3(2") != std::string::npos,
+          "the *2 of the normal unpack is at float3 width, not a narrowed scalar: " + body.hlsl);
+    check(body.hlsl.find("float3(1") != std::string::npos,
+          "and so is the -1");
+
+    // ONE FETCH FOR THE PAIR. Roughness and metallic both read texMetalRough.rgb, which is one
+    // (node, pin) key -- two texture reads per texel for one texel would be a real runtime cost.
+    const int mrSamples = countOccurrences(body.hlsl, "averSampleSlot(1u");
+    check(mrSamples == 1, "the metalRough texture is fetched ONCE for both channels -- found " +
+                          std::to_string(mrSamples));
+
+    if (!dxc.available()) return;
+    pbr::MaterialGraphEntry e;
+    e.id = 11;
+    e.name = g.name;
+    e.hlsl = body.hlsl;
+    std::string cerr;
+    check(dxc.compile(compose(pbr::materialGraphHlsl({e})), defines(true), cerr),
+          "and DXC compiles it: " + cerr);
+}
+
 static void testFromParsedText(Dxc& dxc) {
     AVER_INFO("=== from a .ocgraph file's own text ===");
     const std::string text =
@@ -1343,6 +1450,7 @@ int main() {
     testDispatchShape();
     testItActuallyCompiles(dxc);
     testFromParsedText(dxc);
+    testGeneratedImportGraph(dxc);
     testEveryNewNodeTypeCompiles(dxc);
     testSwizzleRules();
     testSampleTextureBadSlotFails();
