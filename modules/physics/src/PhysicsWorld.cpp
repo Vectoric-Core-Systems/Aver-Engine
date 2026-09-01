@@ -209,6 +209,10 @@ int32_t aver_phys_init(void) {
 
 // Destroys every character and body, unhooks the listener, and drops the world.
 void aver_phys_shutdown(void) {
+    // JOINTS FIRST, and the order is the whole point: a joint holds a reference to a Constraint that
+    // points into the PhysicsSystem below and at the bodies in it. Destroying the world first would
+    // leave PhysicsJoints.cpp's table holding references into wreckage.
+    destroyAllJoints();
     if (!g_world) return;
     // Characters hold refs into the system; drop them before the system goes.
     g_world->characters.clear();

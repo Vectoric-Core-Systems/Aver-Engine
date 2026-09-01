@@ -144,4 +144,15 @@ JPH::CharacterVirtual* findCharacter(int32_t h);
 // Writes a vector into a caller-owned float[3].
 void writeVec(float* out, const Vec3& v);
 
+// Destroys every joint, and is called by aver_phys_shutdown BEFORE the world goes.
+//
+// A HOOK RATHER THAN A LAZY CLEAR, and the difference is real. PhysicsJoints.cpp keeps its own table
+// of JPH::Ref<Constraint>, and those constraints point into the PhysicsSystem and at the bodies inside
+// it. Noticing on the NEXT lookup that g_world had gone would leave that table holding references to
+// constraints belonging to a destroyed system for however long it took someone to ask -- and would
+// leave aver_phys_joint_count answering with a previous world's joints until then. Defined in
+// PhysicsJoints.cpp, called from PhysicsWorld.cpp, so the ordering is stated in one place instead of
+// being a property nobody wrote down.
+void destroyAllJoints();
+
 } // namespace aver::physics::detail

@@ -18,7 +18,12 @@ add_library(Aver.Physics SHARED
   # Body dynamics: forces, impulses, spin, the material properties and mass. Its own TU for the same
   # reason buoyancy is one -- PhysicsWorld.cpp owns the world's lifetime and the step loop, and this
   # is a flat sheet of per-body setters that shares only the handle tables (src/PhysicsInternal.hpp).
-  src/PhysicsBody.cpp)
+  src/PhysicsBody.cpp
+  # Joints, and the extra rigid shapes. Same reasoning again: each is a self-contained sheet of ABI
+  # entry points over the handle tables in src/PhysicsInternal.hpp, with its own header beside
+  # physics_abi.h so the C# parity test can pair one header with one binding file.
+  src/PhysicsJoints.cpp
+  src/PhysicsShapes.cpp)
 
 target_include_directories(Aver.Physics PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(Aver.Physics PUBLIC cxx_std_20)

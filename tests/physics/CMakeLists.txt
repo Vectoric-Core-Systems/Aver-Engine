@@ -36,6 +36,22 @@ set_target_properties(SoftBodyTest PROPERTIES
 # Links Aver.Physics and Aver.Core only, like BuoyancyTest below and for the same reason: every claim
 # it makes is about OBSERVED MOTION through the public ABI, so it is checked the way a caller sees it
 # rather than by reaching into the module. It needs no Jolt header at all.
+# ShapeTest -- the rigid shapes, checked by DROPPING them and measuring where their centres rest.
+# That number is a shape's half-height, measured rather than declared, which is the only check that
+# tells a capsule built to the right size from one built to twice or half of it.
+add_executable(ShapeTest src/ShapeTest.cpp)
+target_link_libraries(ShapeTest PRIVATE Aver.Physics Aver.Core)
+set_target_properties(ShapeTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# JointTest -- written against physics_joints_abi.h ALONE, by a different author from the
+# implementation, deliberately: a test written by reading the implementation agrees with that
+# implementation's bugs.
+add_executable(JointTest src/JointTest.cpp)
+target_link_libraries(JointTest PRIVATE Aver.Physics Aver.Core)
+set_target_properties(JointTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 add_executable(BodyDynamicsTest src/BodyDynamicsTest.cpp)
 target_link_libraries(BodyDynamicsTest PRIVATE Aver.Physics Aver.Core)
 set_target_properties(BodyDynamicsTest PROPERTIES
