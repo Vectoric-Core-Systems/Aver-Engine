@@ -1625,6 +1625,16 @@ private:
     TextureHandle blendBackdropTex_ = 0;
     u32           blendBackdropW_ = 0, blendBackdropH_ = 0;
     bool          blendBackdropCopyLogged_ = false;
+    // Per-layer backdrop re-capture: how many extra MSAA resolves one frame's translucency may buy.
+    //
+    // EIGHT, AND THE NUMBER IS A BUDGET RATHER THAN A LIMIT OF THE ALGORITHM. Each re-capture is a
+    // full-target resolve, so this is the knob that keeps "correct stacked glass" from turning a
+    // field of a hundred panes into a hundred resolves. Eight covers every arrangement this engine
+    // has actually been pointed at -- water under a glass walkway under a rail is three -- and the
+    // surfaces beyond it degrade to exactly the single-capture behaviour that shipped before, which
+    // is a known approximation rather than a new failure.
+    static constexpr u32 kMaxBlendLayerResolves = 8;
+    bool          blendLayerCapWarned_ = false;
     // AverSR's output: HDR (pre-tonemap) at PRESENT resolution. The upscale runs on radiance and
     // PSComposite then tonemaps an image that is already the right size, so its own resample
     // becomes 1:1 and neither the shader nor its pipeline changes.
@@ -4900,41 +4910,68 @@ void D3D12Device::endFrame() {
         // the shader's own GetDimensions guard takes the no-backdrop path for that frame, glass
         // falls back to its scalar composite for one frame, and the next frame -- with both targets
         // agreed on a size -- resolves normally. A frame of slightly wrong glass beats a dead device.
-        if (blendBackdropTex_ && rhiFactory_ && msaaColor_ &&
-            blendBackdropW_ == sceneWidth_ && blendBackdropH_ == sceneHeight_) {
-            if (RhiTexture* bt = rhiFactory_->texture(blendBackdropTex_)) {
-                if (bt->res) {
-                    // MSAA IS 4x BY DEFAULT ON THIS DEVICE, so the single-sample-only version of this
-                    // was a feature that never ran for anybody. A multisampled target cannot be
-                    // CopyResource'd into a single-sample texture -- it has to be RESOLVED -- and the
-                    // resolve is what the backdrop wants anyway, since the shader samples it once per
-                    // pixel and has no use for per-sample data.
-                    const bool ms = sampleCount_ > 1;
-                    const D3D12_RESOURCE_STATES srcTo = ms ? D3D12_RESOURCE_STATE_RESOLVE_SOURCE
-                                                           : D3D12_RESOURCE_STATE_COPY_SOURCE;
-                    const D3D12_RESOURCE_STATES dstTo = ms ? D3D12_RESOURCE_STATE_RESOLVE_DEST
-                                                           : D3D12_RESOURCE_STATE_COPY_DEST;
-                    D3D12_RESOURCE_BARRIER pre[2] = {
-                        transition(msaaColor_.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, srcTo),
-                        transition(bt->res.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, dstTo),
-                    };
-                    cmdList_->ResourceBarrier(2, pre);
-                    if (ms) cmdList_->ResolveSubresource(bt->res.Get(), 0, msaaColor_.Get(), 0,
-                                                         kSceneColorFormat);
-                    else    cmdList_->CopyResource(bt->res.Get(), msaaColor_.Get());
-                    D3D12_RESOURCE_BARRIER post[2] = {
-                        transition(msaaColor_.Get(), srcTo, D3D12_RESOURCE_STATE_RENDER_TARGET),
-                        transition(bt->res.Get(), dstTo, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
-                    };
-                    cmdList_->ResourceBarrier(2, post);
-                    if (!blendBackdropCopyLogged_) {
-                        blendBackdropCopyLogged_ = true;
-                        AVER_INFO("[RHI.D3D12] blended backdrop: {} {}x{} from the scene target",
-                                  ms ? "resolved" : "copied", blendBackdropW_, blendBackdropH_);
+        // ---- THE BACKDROP RESOLVE, NOW CALLABLE MORE THAN ONCE -----------------------------
+        // A LAMBDA BECAUSE ONE CAPTURE PER FRAME IS NOT ENOUGH FOR STACKED TRANSLUCENCY.
+        //
+        // averBlendedOutputBackdrop does not write the background; the hardware adds dst*(1-alpha)
+        // after it returns. So its correction has to subtract EXACTLY what the hardware will add,
+        // and it subtracts a sample of this texture. That holds for the FIRST translucent surface
+        // over a pixel, where dst really is the opaque scene. It stops holding for the second: that
+        // one composites against a backdrop which does not yet contain the first, nothing cancels,
+        // and the residue can go NEGATIVE -- which since the tonemap clamp is a black artefact
+        // rather than the bright hue the same defect used to produce.
+        //
+        // MEASURED, on PTTest's glass walkway over the pool -- the pair that map places specifically
+        // to test transparency in front of transparency. Looking down, the walkway read as a pale
+        // opaque strip hiding the water entirely. Looking up from underwater through both surfaces,
+        // the sun grew a black crescent; through the water ALONE, in the same frame, it was a clean
+        // disc. One surface was always right and two were always wrong.
+        //
+        // Re-resolving between layers is what makes dst and this texture agree again. The draws are
+        // already sorted furthest-first just below, so each re-capture hands the next-nearest surface
+        // a backdrop that contains every surface behind it.
+        auto resolveBlendBackdrop = [&]() {
+            if (blendBackdropTex_ && rhiFactory_ && msaaColor_ &&
+                blendBackdropW_ == sceneWidth_ && blendBackdropH_ == sceneHeight_) {
+                if (RhiTexture* bt = rhiFactory_->texture(blendBackdropTex_)) {
+                    if (bt->res) {
+                        // MSAA IS 4x BY DEFAULT ON THIS DEVICE, so the single-sample-only version of this
+                        // was a feature that never ran for anybody. A multisampled target cannot be
+                        // CopyResource'd into a single-sample texture -- it has to be RESOLVED -- and the
+                        // resolve is what the backdrop wants anyway, since the shader samples it once per
+                        // pixel and has no use for per-sample data.
+                        const bool ms = sampleCount_ > 1;
+                        const D3D12_RESOURCE_STATES srcTo = ms ? D3D12_RESOURCE_STATE_RESOLVE_SOURCE
+                                                               : D3D12_RESOURCE_STATE_COPY_SOURCE;
+                        const D3D12_RESOURCE_STATES dstTo = ms ? D3D12_RESOURCE_STATE_RESOLVE_DEST
+                                                               : D3D12_RESOURCE_STATE_COPY_DEST;
+                        D3D12_RESOURCE_BARRIER pre[2] = {
+                            transition(msaaColor_.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, srcTo),
+                            transition(bt->res.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, dstTo),
+                        };
+                        cmdList_->ResourceBarrier(2, pre);
+                        if (ms) cmdList_->ResolveSubresource(bt->res.Get(), 0, msaaColor_.Get(), 0,
+                                                             kSceneColorFormat);
+                        else    cmdList_->CopyResource(bt->res.Get(), msaaColor_.Get());
+                        D3D12_RESOURCE_BARRIER post[2] = {
+                            transition(msaaColor_.Get(), srcTo, D3D12_RESOURCE_STATE_RENDER_TARGET),
+                            transition(bt->res.Get(), dstTo, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE),
+                        };
+                        cmdList_->ResourceBarrier(2, post);
+                        if (!blendBackdropCopyLogged_) {
+                            blendBackdropCopyLogged_ = true;
+                            AVER_INFO("[RHI.D3D12] blended backdrop: {} {}x{} from the scene target",
+                                      ms ? "resolved" : "copied", blendBackdropW_, blendBackdropH_);
+                        }
                     }
                 }
             }
-        }
+        };
+
+        // The first capture, in the position and for the reason the one-shot version had: after the
+        // opaque scene and the sky, before any translucent draw.
+        resolveBlendBackdrop();
+        u32 blendLayerResolves = 0;
 
         beginGpuSpan("blended replay");
         // Only the FIRST feature that overridesScenePipeline() is ever asked, exactly the assumption
@@ -5019,12 +5056,44 @@ void D3D12Device::endFrame() {
             // is hygiene and not a live bug -- but leaving it accurately false is one line, and
             // costs less than reasoning out, next time someone adds a reader, whether this stale
             // "true" was ever safe to trust.
+            bool blendDrewAny = false;
             for (const BlendedDraw& bd : blendedDraws_) {
                 // A capture can outlive its mesh within the SAME frame (destroyMesh() called between
                 // the drawMesh() that captured it and this flush) -- the identical "stale handle
                 // draws nothing" rule drawMesh() itself applies to a live call, applied here to a
                 // deferred one.
                 if (bd.mesh == 0 || bd.mesh > meshes_.size() || !meshes_[bd.mesh - 1].alive) continue;
+
+                // ---- RE-CAPTURE, SO THIS SURFACE SEES THE ONES BEHIND IT -------------------------
+                // Everything drawn so far this flush is FURTHER from the camera (the sort above is
+                // furthest-first), so folding it into the backdrop is exactly what this draw's
+                // correction needs to cancel against. Skipped for the first surviving draw, which
+                // already has the capture taken before the loop.
+                //
+                // CAPPED, AND THE CAP IS A REAL TRADE. Each re-capture is a full-target MSAA resolve;
+                // a scene with a hundred panes would pay a hundred of them. The cap bounds that at a
+                // cost proportional to the layers that actually change the picture -- the first few
+                // -- and beyond it later surfaces fall back to the previous behaviour, which is the
+                // approximation this replaces rather than something newly wrong. Logged once so a
+                // scene that exceeds it says so instead of quietly looking like the old bug again.
+                if (blendDrewAny) {
+                    if (blendLayerResolves < kMaxBlendLayerResolves) {
+                        ++blendLayerResolves;
+                        // NO OMSetRenderTargets AFTERWARDS, and that is not an omission. The
+                        // resolve moves msaaColor_ to RESOLVE_SOURCE and straight back to
+                        // RENDER_TARGET; a resource BARRIER changes state, it does not unbind, so the
+                        // render targets set before this loop are still bound when the draw below
+                        // runs. Re-binding here would be a call that does nothing per layer.
+                        resolveBlendBackdrop();
+                    } else if (!blendLayerCapWarned_) {
+                        blendLayerCapWarned_ = true;
+                        AVER_WARN("[RHI.D3D12] more than {} overlapping translucent layers this "
+                                  "frame; the ones beyond that composite against a backdrop missing "
+                                  "the nearer surfaces, as every layer did before per-layer capture "
+                                  "existed (said once)", kMaxBlendLayerResolves);
+                    }
+                }
+                blendDrewAny = true;
 
                 const BindingSetHandle bs = owner->sceneBindingSet();
                 const void* cb = nullptr; u32 cbBytes = 0;
