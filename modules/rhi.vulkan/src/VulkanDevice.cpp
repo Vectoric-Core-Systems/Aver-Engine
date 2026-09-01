@@ -2214,7 +2214,7 @@ void VulkanDevice::drawMesh(MeshHandle mesh, const f32 world[16], const f32 colo
         f32 fc[kObjectConstantDwords];
         std::memcpy(fc, world, 16 * sizeof(f32));
         std::memcpy(fc + 16, color, 4 * sizeof(f32));
-        fc[20] = metallic; fc[21] = roughness; fc[22] = 0.0f; fc[23] = 0.0f;
+        fc[20] = metallic; fc[21] = roughness; fc[22] = unlit_ ? 1.0f : 0.0f; fc[23] = 0.0f;
         writeShadingConstants(fc);
         rhiContext_->setConstants(kObjectConstantRegister, fc, kObjectConstantDwords);
         if (msActive_ && meshPso_ && !wireframe_) rhiContext_->dispatchMeshFor(mesh);
@@ -2241,7 +2241,7 @@ void VulkanDevice::drawMesh(MeshHandle mesh, const f32 world[16], const f32 colo
     f32 consts[kObjectConstantDwords];
     std::memcpy(consts, world, 16 * sizeof(f32));
     std::memcpy(consts + 16, color, 4 * sizeof(f32));
-    consts[20] = metallic; consts[21] = roughness; consts[22] = 0.0f; consts[23] = 0.0f;
+    consts[20] = metallic; consts[21] = roughness; consts[22] = unlit_ ? 1.0f : 0.0f; consts[23] = 0.0f;
     writeShadingConstants(consts);
     api_.CmdPushConstants(cmd, layout, VK_SHADER_STAGE_ALL, PushConstantLayout::kObjectOffset, sizeof(consts), consts);
 

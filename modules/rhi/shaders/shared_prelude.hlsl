@@ -797,7 +797,20 @@ float4 plainShadeSurface(VSOut i, float sunVis, float3 indirectRadiance, float a
     float rough = clamp(gMaterial.y, 0.045, 1.0);
 
     if (gMaterial.z > 0.5) {
-        return float4(gBaseColor.rgb, gBaseColor.a);
+        // UNLIT: hand the authored colour back with no shading at all. Used by editor chrome -- the
+        // selection outline -- where the colour is a signal ("this is selected") rather than a
+        // surface, so sun, sky ambient, specular and fog all have nothing to say about it.
+        //
+        // srgbToLin IS REQUIRED HERE, and its absence was a real bug the first live use of this
+        // bypass exposed. Every other exit of this function converts the authored colour with
+        // srgbToLin (see the `albedo` line just below) before doing anything with it, because what
+        // this shader writes is LINEAR radiance that the tonemap and sRGB encode downstream undo.
+        // Returning the sRGB triple raw skips only the first half of that round trip, so the value
+        // is tonemapped as though it were already linear: measured, selection orange (1.0, 0.62,
+        // 0.12) came out YELLOW, because ACES compresses the saturated red channel far harder than
+        // the middling green one and the ratio between them collapses. With the conversion the
+        // outline is the colour it was authored as, merely unshaded.
+        return float4(srgbToLin(gBaseColor.rgb), gBaseColor.a);
     }
 
     float3 albedo = srgbToLin(gBaseColor.rgb);

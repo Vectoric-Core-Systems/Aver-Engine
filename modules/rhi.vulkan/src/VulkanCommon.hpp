@@ -1433,6 +1433,7 @@ public:
     void setMeshShaders(bool enabled) override;
     bool meshShadersActive() const override { return msActive_; }
     void setWireframe(bool on) override { wireframe_ = on; }
+    void setUnlit(bool on) override { unlit_ = on; }
     void setLineDepth(bool testDepth) override { lineDepth_ = testDepth; }
     void requestCapture(u32 x, u32 y) override { capX_ = x; capY_ = y; captureReq_ = true; captureReady_ = false; }
     bool getCapture(f32 outRGBA[4]) override;
@@ -1690,6 +1691,8 @@ private:
     u32                   lastSuppressClaimants_ = 0;
     SkyAtmosphere sky_{};
     bool wireframe_ = false;
+    // See IDevice::setUnlit. Sticky exactly as wireframe_ is.
+    bool unlit_ = false;
     bool lineDepth_ = true;
     std::vector<GpuLineMesh> lineMeshes_;
     PerFrameCB frameCB_{};

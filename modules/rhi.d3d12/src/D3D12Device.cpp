@@ -938,6 +938,7 @@ public:
     LineHandle createLineMesh(const LineVertex* verts, u32 count) override;
     void drawLines(LineHandle mesh, const f32 world[16]) override;
     void setWireframe(bool on) override { wireframe_ = on; }
+    void setUnlit(bool on) override { unlit_ = on; }
     void setDrawBinding(BindingSetHandle set, const void* constants, u32 bytes) override {
         storeDrawBinding(drawBinding_, set, constants, bytes);
     }
@@ -1401,6 +1402,8 @@ private:
     // The authored atmosphere; the frame block above holds the packed form the shader reads.
     SkyAtmosphere sky_{};
     bool wireframe_ = false;
+    // See IDevice::setUnlit. Sticky exactly as wireframe_ is -- neither is reset per frame.
+    bool unlit_ = false;
     bool lineDepth_ = true;
     std::vector<GpuLineMesh> lineMeshes_;
     ComPtr<ID3D12Resource> frameCBs_[kFrameCount];
@@ -3828,7 +3831,7 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
         f32 fc[kObjectConstantDwords];
         std::memcpy(fc, world, 16 * sizeof(f32));
         std::memcpy(fc + 16, color, 4 * sizeof(f32));
-        fc[20] = metallic; fc[21] = roughness; fc[22] = 0.0f; fc[23] = 0.0f;
+        fc[20] = metallic; fc[21] = roughness; fc[22] = unlit_ ? 1.0f : 0.0f; fc[23] = 0.0f;
         writeShadingConstants(fc);
         rhiContext_->setConstants(kObjectConstantRegister, fc, kObjectConstantDwords);
         if (msActive_ && msPso_ && !wireframe_) rhiContext_->dispatchMeshFor(mesh);
@@ -3858,7 +3861,7 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
     f32 consts[kObjectConstantDwords];
     std::memcpy(consts, world, 16 * sizeof(f32));
     std::memcpy(consts + 16, color, 4 * sizeof(f32));
-    consts[20] = metallic; consts[21] = roughness; consts[22] = 0.0f; consts[23] = 0.0f;
+    consts[20] = metallic; consts[21] = roughness; consts[22] = unlit_ ? 1.0f : 0.0f; consts[23] = 0.0f;
     writeShadingConstants(consts);
     cmdList_->SetGraphicsRoot32BitConstants(kSceneObjectParam, kObjectConstantDwords, consts, 0);
     if (useMs) { dispatchMesh(m); return; }
@@ -5121,6 +5124,11 @@ void D3D12Device::endFrame() {
                 f32 fc[kObjectConstantDwords];
                 std::memcpy(fc, bd.world, 16 * sizeof(f32));
                 std::memcpy(fc + 16, bd.color, 4 * sizeof(f32));
+                // fc[22] STAYS 0 HERE, unlike the two live drawMesh paths: a blended draw is
+                // CAPTURED and replayed later, so honouring setUnlit would mean capturing it into
+                // BlendedDraw beside bd.metallic/bd.roughness and reading it back. Nothing wants an
+                // unlit blended mesh today, and plumbing it speculatively is how a flag ends up with
+                // two spellings that disagree.
                 fc[20] = bd.metallic; fc[21] = bd.roughness; fc[22] = 0.0f; fc[23] = 0.0f;
                 writeShadingConstants(fc);
                 rhiContext_->setConstants(kObjectConstantRegister, fc, kObjectConstantDwords);

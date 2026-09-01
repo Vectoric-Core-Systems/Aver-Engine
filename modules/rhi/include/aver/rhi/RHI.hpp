@@ -679,6 +679,22 @@ public:
 
     // Renders subsequent meshes as wireframe until toggled off.
     virtual void setWireframe(bool on) { (void)on; }
+    // Draws the next mesh with NO LIGHTING -- flat gBaseColor, no sun, no ambient, no fog.
+    //
+    // IT TURNS ON A PATH THAT ALREADY EXISTED AND COULD NOT BE REACHED. plainShadeSurface has carried
+    // `if (gMaterial.z > 0.5) return float4(gBaseColor.rgb, gBaseColor.a);` since it was written
+    // (shared_prelude.hlsl, and its constant block documents the slot as "z=unlit(0/1)"), and every
+    // single call site that fills that constant hardcoded it to 0 -- so the branch was dead in the
+    // shader with nothing on either backend able to select it.
+    //
+    // A SETTER, NOT A WIDER drawMesh, matching setWireframe/setDrawBlended/setLineDepth beside it.
+    // Widening the call would drag IRenderFeature::submitDraw's signature and every feature with it,
+    // for a flag no feature ever sees: the editor's one caller draws in WIREFRAME, and wireframe is
+    // exactly the case where VoxiRenderer declines the pipeline, so the draw has already fallen
+    // through to the backend's own before this matters.
+    //
+    // STICKY, like setWireframe: nothing resets it per frame, so a caller brackets its own draw.
+    virtual void setUnlit(bool on) { (void)on; }
 
     // Line depth testing. Default true; false draws subsequent lines as an always-on-top overlay.
     virtual void setLineDepth(bool testDepth) { (void)testDepth; }

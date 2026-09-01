@@ -6265,7 +6265,22 @@ public:
             // drawn entity happened to be, is a strange one to debug. This is chrome, never geometry:
             // always opaque.
             e.device()->setDrawBlended(false);
+            // UNLIT, BECAUSE A SELECTION OUTLINE IS CHROME AND CHROME HAS NO SURFACE NORMAL WORTH
+            // LIGHTING. Until this call the outline went through the ordinary shaded path and came
+            // out sun-lit, sky-tinted and FOGGED: setWireframe(true) makes VoxiRenderer decline the
+            // pipeline, so the draw falls through to the backend's own PSMainPlain, which is a real
+            // Cook-Torrance shader with an averApplyFog at the end. The result was an outline whose
+            // colour depended on which way each face of the selected mesh happened to point -- dark
+            // where it faced away from the sun, orange where it faced into it, and washed out with
+            // distance. Selection orange is supposed to mean "this is selected", not "this face is
+            // lit"; anything that varies with the scene defeats the one job the colour has.
+            //
+            // setUnlit reaches a bypass plainShadeSurface has always had and nothing could select --
+            // see IDevice::setUnlit. Bracketed, because the flag is sticky like setWireframe beside
+            // it, and leaving it on would quietly flatten the next mesh anything else drew.
+            e.device()->setUnlit(true);
             e.device()->drawMesh(selectionMesh_, &o.m[0][0], kSelect, 0.0f, 1.0f);
+            e.device()->setUnlit(false);
             e.device()->setWireframe(wireframe_);
         }
         hasSelection_ = false;
