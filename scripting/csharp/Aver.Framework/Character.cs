@@ -71,6 +71,7 @@ public class AverCharacter : AverPawn
     public float PitchMin = -85f, PitchMax = 85f;
 
     private float _yaw;         // degrees
+    private bool  _yawSeeded;   // has _yaw been taken from the spawn transform yet -- see Drive
     private float _pitch;       // degrees
     private int   _capsule;     // physics character handle; 0 when none
     private Entity _view;
@@ -169,6 +170,31 @@ public class AverCharacter : AverPawn
     /// <param name="moveAxis">X = forward intent, Y = right intent, each -1..1.</param>
     protected void Drive(float dt, Vec3 moveAxis, float yawDeltaDeg, float pitchDeltaDeg)
     {
+        // A CHARACTER KEEPS THE FACING IT WAS PLACED WITH, seeded on the first drive.
+        //
+        // _yaw starts at 0 and was never seeded from anything, so ApplyLookRotation's first call
+        // wrote yaw 0 straight over whatever rotation the spawn gave the entity. A character placed
+        // facing down a corridor, or spawned at a Player Start with a yaw, snapped to +X on its
+        // first frame with no way to say otherwise -- SetYaw is protected, so only the character's
+        // own subclass could correct it and native code placing a pawn had no route at all.
+        //
+        // HERE AND NOT IN EnsureCapsule, WHICH IS WHERE I PUT IT FIRST AND WAS WRONG. The capsule is
+        // created during begin_play, BEFORE the editor's Play path gets a chance to move the pawn on
+        // to the Player Start -- so seeding there read the pre-placement rotation, got 0, and the
+        // Player Start's yaw was still discarded. Measured: a spawn authored yaw 180 produced a view
+        // 1.1% different from the same spawn authored yaw 0, when a half turn should change every
+        // pixel. Drive runs after startPlay within the same frame, so the first call here is the
+        // earliest point at which the placed rotation is definitely the real one.
+        //
+        // READ BACK RATHER THAN TRACKED. A pawn moved by ANY route -- level placement, a Player
+        // Start, a graph, a C# spawn -- ends at the same entity transform, so reading it honours all
+        // of them without each having to remember to announce itself.
+        if (!_yawSeeded)
+        {
+            _yawSeeded = true;
+            _yaw = YawDegreesFromQuat(Self.LocalRotation);
+        }
+
         Fw.aver_fw_set_view((int)CameraViewMode, EyeHeight, BoomLength);
         EnsureView();
 
@@ -191,6 +217,18 @@ public class AverCharacter : AverPawn
 
         Vec3 v = Velocity;
         Phys.aver_phys_character_set_velocity(_capsule, wish.X, wish.Y, v.Z);
+    }
+
+    // Yaw about +Z out of a quaternion, in degrees, matching Rot(yaw,0,0).ToQuat()'s own convention
+    // so that seeding from a rotation this class itself wrote is exactly a round trip.
+    private static float YawDegreesFromQuat(Quat q)
+    {
+        // Standard atan2 extraction of rotation about Z. A pure yaw quaternion round-trips exactly;
+        // a rotation carrying pitch or roll contributes only its yaw component, which is the right
+        // answer for a character that has no roll and tracks pitch separately.
+        float siny = 2f * (q.W * q.Z + q.X * q.Y);
+        float cosy = 1f - 2f * (q.Y * q.Y + q.Z * q.Z);
+        return MathF.Atan2(siny, cosy) * (180f / MathF.PI);
     }
 
     /// <summary>Snaps the facing yaw, degrees.</summary>
@@ -263,6 +301,7 @@ public class AverCharacter : AverPawn
     private void EnsureCapsule()
     {
         if (_capsule != 0 || !Physics.Ready) return;
+
         Vec3 feet = Self.LocalPosition;
         Vec3 centre = feet + Vec3.Up * (Height * 0.5f);
         _capsule = Phys.aver_phys_character_create(Radius, Height, centre.X, centre.Y, centre.Z);

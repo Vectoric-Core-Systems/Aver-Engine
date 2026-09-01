@@ -8689,6 +8689,38 @@ private:
     int32_t savedViewMode_ = AVER_FW_VIEW_THIRD_PERSON;
     float   savedViewEye_ = 160.0f, savedViewBoom_ = 450.0f;
 
+    // Puts the possessed pawn on the level's Player Start, if it has one. Returns false when the
+    // level declares no spawn at all, so a caller can fall back to whatever it did before.
+    //
+    // ONE HELPER FOR BOTH PLAY PATHS, and that is the point rather than tidiness: the engine's
+    // default pawn and a project's real GameMode pawn are spawned by completely different code, and
+    // "where does the player start" must not be able to answer differently for the two. The drone
+    // (Window > Drone) already asked playerStartTransform this question and honoured it; these two
+    // did not, which is what made a Player Start look like a marker that did nothing.
+    //
+    // POSITION AND ROTATION BOTH. The rotation matters more than it looks: AverCharacter used to
+    // overwrite it with yaw 0 on its first frame, so a Player Start's yaw was silently discarded for
+    // exactly the pawn type most projects use. Character.cs now seeds its own yaw from this
+    // transform (see EnsureCapsule), which is why setting it here finally sticks.
+    bool placePawnAtPlayerStart(const char* who) {
+#if AVER_MODULE_SCENE
+        Vec3 sp{}; f32 sy = 0.0f;
+        if (!playerStartTransform(sp, sy)) return false;
+        const int32_t pn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
+        if (!pn) return false;
+        const scene::Entity pe = static_cast<scene::Entity>(static_cast<uint32_t>(pn));
+        scene::World& pw = scene::World::instance();
+        if (!pw.valid(pe)) return false;
+        pw.setLocalPosition(pe, sp);
+        pw.setLocalRotation(pe, quatFromEulerDeg(Vec3{0.0f, 0.0f, sy}));
+        AVER_INFO("[Sandbox] Play: {} spawned at the level's Player Start ({:.0f}, {:.0f}, {:.0f}) "
+                  "yaw {:.0f}", who, sp.x, sp.y, sp.z, sy);
+        return true;
+#else
+        (void)who; return false;
+#endif
+    }
+
     void startPlay() {
         // BEFORE anything begins, so what is recorded is the editor's level and not one frame of
         // gameplay's effect on it.
@@ -8751,14 +8783,22 @@ private:
                 // editor camera. There is no PlayerStart concept here yet, so this takes the second
                 // half: Play keeps you where you already were and lets you fly on from there, which
                 // is also the least surprising thing a Play button can do.
-                const int32_t pn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
-                if (pn) {
-                    const scene::Entity pe = static_cast<scene::Entity>(static_cast<uint32_t>(pn));
-                    scene::World& pw = scene::World::instance();
-                    if (pw.valid(pe)) {
-                        pw.setLocalPosition(pe, camPos_);
-                        pw.setLocalRotation(pe, Quat::fromAxisAngle(Vec3{0, 0, 1}, yaw_) *
-                                                Quat::fromAxisAngle(Vec3{0, 1, 0}, -pitch_));
+                // THE PLAYER START FIRST, THE CAMERA SECOND -- which is the whole of what the
+                // paragraph above says Unreal does, and the half this could not do when it was
+                // written. "There is no PlayerStart concept here yet" was true then and is not now:
+                // the marker exists, the drone already spawns on it, and playerStartTransform
+                // resolves the marker or the level's own SPAWN record. Keeping the camera fallback
+                // means a level that has placed no marker behaves exactly as it did.
+                if (!placePawnAtPlayerStart("the engine's default pawn")) {
+                    const int32_t pn = aver_fw_controlled_pawn(aver_fw_player_controller(0));
+                    if (pn) {
+                        const scene::Entity pe = static_cast<scene::Entity>(static_cast<uint32_t>(pn));
+                        scene::World& pw = scene::World::instance();
+                        if (pw.valid(pe)) {
+                            pw.setLocalPosition(pe, camPos_);
+                            pw.setLocalRotation(pe, Quat::fromAxisAngle(Vec3{0, 0, 1}, yaw_) *
+                                                    Quat::fromAxisAngle(Vec3{0, 1, 0}, -pitch_));
+                        }
                     }
                 }
                 AVER_INFO("[Sandbox] Play: no GameMode declared -- possessing the engine's "
@@ -8771,11 +8811,23 @@ private:
             return;
         }
         const int32_t gi = aver_fw_find_class_with_flags(AVER_FW_CLASS_GAME_INSTANCE);  // 0 == none, allowed
-        if (aver_fw_begin_play(gi, gm))
+        if (aver_fw_begin_play(gi, gm)) {
             AVER_INFO("[Sandbox] Play: begin_play GameMode='{}'{}", aver_fw_class_name(gm),
                       gi ? std::string(" GameInstance='") + aver_fw_class_name(gi) + "'" : std::string());
-        else
+            // AFTER begin_play, not before: the pawn this moves does not exist until the GameMode has
+            // spawned and the controller has possessed it, which is what begin_play does.
+            //
+            // NO FALLBACK HERE, deliberately, and it is the one asymmetry with the default-pawn path
+            // above. That pawn is a bare flying camera the engine invented, so putting it where the
+            // editor camera was is strictly better than the origin. A project's own pawn is not:
+            // where a GameMode chooses to spawn its character is a decision the project made, and
+            // silently relocating it to wherever someone happened to be looking would override that
+            // decision every time Play is pressed. A level with no Player Start keeps exactly the
+            // behaviour it has today.
+            placePawnAtPlayerStart(aver_fw_class_name(gm));
+        } else {
             AVER_WARN("[Sandbox] Play: begin_play was rejected (already playing?)");
+        }
     }
 
     // True when Play is standing in a drone because the project declares no GameMode. Not a real
