@@ -31,6 +31,16 @@ set_target_properties(SoftBodyTest PROPERTIES
 # THIS TARGET WAS MISSING when the buoyancy code was first written, and the consequence is worth
 # recording: the test file existed, compiled by hand, and reported a real failure that nothing in
 # the build would ever have run. A test that is not in a CMakeLists is not a test.
+# BodyDynamicsTest -- forces, impulses, spin, motion type, material properties, mass, sleeping.
+#
+# Links Aver.Physics and Aver.Core only, like BuoyancyTest below and for the same reason: every claim
+# it makes is about OBSERVED MOTION through the public ABI, so it is checked the way a caller sees it
+# rather than by reaching into the module. It needs no Jolt header at all.
+add_executable(BodyDynamicsTest src/BodyDynamicsTest.cpp)
+target_link_libraries(BodyDynamicsTest PRIVATE Aver.Physics Aver.Core)
+set_target_properties(BodyDynamicsTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 add_executable(BuoyancyTest src/BuoyancyTest.cpp)
 target_link_libraries(BuoyancyTest PRIVATE Aver.Physics Aver.Core)
 set_target_properties(BuoyancyTest PROPERTIES

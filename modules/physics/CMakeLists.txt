@@ -14,7 +14,11 @@ add_library(Aver.Physics SHARED
   # machinery -- and because keeping the Jolt call in one small file makes it obvious that
   # ApplyBuoyancyImpulse is the whole of the physics, and the rest is bookkeeping.
   src/Buoyancy.cpp
-  src/BuoyancyAbi.cpp)
+  src/BuoyancyAbi.cpp
+  # Body dynamics: forces, impulses, spin, the material properties and mass. Its own TU for the same
+  # reason buoyancy is one -- PhysicsWorld.cpp owns the world's lifetime and the step loop, and this
+  # is a flat sheet of per-body setters that shares only the handle tables (src/PhysicsInternal.hpp).
+  src/PhysicsBody.cpp)
 
 target_include_directories(Aver.Physics PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(Aver.Physics PUBLIC cxx_std_20)

@@ -3,6 +3,7 @@
 #include "aver/physics/physics_abi.h"
 #include "Convert.hpp"   // src-local: it speaks Jolt, and Jolt is PRIVATE to this module
 #include "Buoyancy.hpp"  // src-local for the same reason: WaterVolume holds JPH:: types
+#include "PhysicsInternal.hpp"  // the world and its handle tables, shared with the sibling ABI files
 
 #include "aver/core/Log.hpp"
 
@@ -44,58 +45,13 @@
 
 using namespace aver;
 using namespace aver::physics;
+// The world, the handle tables and the lookups now live in PhysicsInternal.hpp so the joint,
+// shape and body-dynamics files can reach them too. Pulled in unqualified here so every call
+// site below is the same text it was before the extraction -- which is what lets the three
+// existing physics suites act as the check that nothing changed.
+using namespace aver::physics::detail;
 
 namespace {
-
-// ---- Layers ---------------------------------------------------------------------------------------
-// Two object layers: things that never move, and things that do.
-namespace Layers {
-static constexpr JPH::ObjectLayer NON_MOVING = 0;
-static constexpr JPH::ObjectLayer MOVING     = 1;
-static constexpr JPH::uint        NUM        = 2;
-}
-namespace BroadPhaseLayers {
-static constexpr JPH::BroadPhaseLayer NON_MOVING(0);
-static constexpr JPH::BroadPhaseLayer MOVING(1);
-static constexpr JPH::uint            NUM = 2;
-}
-
-// Maps each object layer onto its broad-phase layer.
-class BPLayerInterface final : public JPH::BroadPhaseLayerInterface {
-public:
-    // Builds the object-layer to broad-phase-layer table.
-    BPLayerInterface() {
-        m_[Layers::NON_MOVING] = BroadPhaseLayers::NON_MOVING;
-        m_[Layers::MOVING]     = BroadPhaseLayers::MOVING;
-    }
-    JPH::uint GetNumBroadPhaseLayers() const override { return BroadPhaseLayers::NUM; }
-    JPH::BroadPhaseLayer GetBroadPhaseLayer(JPH::ObjectLayer l) const override { return m_[l]; }
-#if defined(JPH_EXTERNAL_PROFILE) || defined(JPH_PROFILE_ENABLED)
-    const char* GetBroadPhaseLayerName(JPH::BroadPhaseLayer l) const override {
-        return static_cast<JPH::BroadPhaseLayer::Type>(l) == 0 ? "NON_MOVING" : "MOVING";
-    }
-#endif
-private:
-    JPH::BroadPhaseLayer m_[Layers::NUM];
-};
-
-// Decides which object layers are tested against which broad-phase layers.
-class ObjectVsBroadPhaseFilter final : public JPH::ObjectVsBroadPhaseLayerFilter {
-public:
-    // Static geometry only needs testing against things that move.
-    bool ShouldCollide(JPH::ObjectLayer a, JPH::BroadPhaseLayer b) const override {
-        return a != Layers::NON_MOVING || b == BroadPhaseLayers::MOVING;
-    }
-};
-
-// Decides which object layers collide with each other.
-class ObjectLayerPairFilter final : public JPH::ObjectLayerPairFilter {
-public:
-    // Static geometry is not tested against static geometry.
-    bool ShouldCollide(JPH::ObjectLayer a, JPH::ObjectLayer b) const override {
-        return a != Layers::NON_MOVING || b == Layers::MOVING;
-    }
-};
 
 // Routes Jolt's diagnostics into the engine log.
 void traceImpl(const char* fmt, ...) {
@@ -114,43 +70,6 @@ bool assertFailedImpl(const char* expr, const char* msg, const char* file, JPH::
     return true;   // break into the debugger
 }
 #endif
-
-// ---- Events ---------------------------------------------------------------------------------------
-
-// Two solid bodies that began touching, and where.
-struct ContactEvent { int32_t a = 0, b = 0; Vec3 point, normal; };
-// A body entering or leaving a sensor volume.
-struct OverlapEvent { int32_t sensor = 0, body = 0; int32_t entered = 0; };
-
-// ---- The world ------------------------------------------------------------------------------------
-
-// The whole simulation: Jolt's system, the handle tables, and the event queues.
-struct World {
-    JPH::PhysicsSystem                       system;
-    BPLayerInterface                         bpLayers;
-    ObjectVsBroadPhaseFilter                 objVsBp;
-    ObjectLayerPairFilter                    objPair;
-    std::unique_ptr<JPH::TempAllocatorImpl>  temp;
-    std::unique_ptr<JPH::JobSystemThreadPool> jobs;
-
-    // Handles are dense int32 starting at 1, because 0 must stay invalid.
-    std::unordered_map<int32_t, JPH::BodyID> bodies;
-    std::unordered_map<int32_t, JPH::Ref<JPH::CharacterVirtual>> characters;
-    int32_t nextHandle = 1;
-
-    std::unordered_map<JPH::BodyID, int32_t> byId;   // reverse of `bodies`
-    std::unordered_map<int32_t, bool> sensors;       // which handles are sensors
-
-    // Written from Jolt's worker threads under the mutex, drained by the caller between steps.
-    std::mutex                 eventMutex;
-    std::vector<ContactEvent>  contacts;
-    std::vector<OverlapEvent>  overlaps;
-
-    float fixedStep = 1.0f / 60.0f;
-    float accumulator = 0.0f;
-};
-
-std::unique_ptr<World> g_world;
 
 // Records contacts and sensor overlaps as Jolt finds them.
 // Every method here runs on a PHYSICS WORKER THREAD, possibly several at once.
@@ -203,12 +122,20 @@ EventListener g_listener;
 // Jolt's global registration is process-wide, not per-world, so it is done once and never undone.
 bool g_joltStarted = false;
 
-// Jolt's body interface for the live world.
+} // namespace
+
+// ---- what PhysicsInternal.hpp declares ------------------------------------------------------------
+// Defined HERE rather than in the header because this file owns the world's lifetime: aver_phys_init
+// creates it and aver_phys_shutdown destroys it, and a second definition anywhere else would be a
+// second world.
+namespace aver::physics::detail {
+
+std::unique_ptr<World> g_world;
+
 JPH::BodyInterface& bi() { return g_world->system.GetBodyInterface(); }
 
-// Creates a body from a shape, registers it in both handle tables, and returns its handle.
 int32_t addBody(const JPH::Shape* shape, const Vec3& centreCm, bool dynamic, float massKg,
-                bool sensor = false) {
+                bool sensor) {
     if (!g_world) return 0;
     // A sensor sits in the MOVING layer even though it never moves, so it is told about the world.
     JPH::BodyCreationSettings s(shape, toJolt(centreCm), JPH::Quat::sIdentity(),
@@ -229,24 +156,21 @@ int32_t addBody(const JPH::Shape* shape, const Vec3& centreCm, bool dynamic, flo
     return h;
 }
 
-// The Jolt body id behind a handle, or nullptr.
 const JPH::BodyID* findBody(int32_t h) {
     if (!g_world) return nullptr;
     auto it = g_world->bodies.find(h);
     return it == g_world->bodies.end() ? nullptr : &it->second;
 }
 
-// The character behind a handle, or nullptr.
 JPH::CharacterVirtual* findCharacter(int32_t h) {
     if (!g_world) return nullptr;
     auto it = g_world->characters.find(h);
     return it == g_world->characters.end() ? nullptr : it->second.GetPtr();
 }
 
-// Writes a vector into a caller-owned float[3].
 void writeVec(float* out, const Vec3& v) { out[0] = v.x; out[1] = v.y; out[2] = v.z; }
 
-} // namespace
+} // namespace aver::physics::detail
 
 // ---- ABI ------------------------------------------------------------------------------------------
 
