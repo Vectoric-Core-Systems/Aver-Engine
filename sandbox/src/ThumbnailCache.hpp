@@ -69,9 +69,6 @@ public:
     // per frame by the host, BEFORE the render features run.
     void update();
 
-    u32 residentCount() const { return static_cast<u32>(entries_.size()); }
-    u32 pendingCount() const { return static_cast<u32>(pending_.size()); }
-
     // The feature that performs the copy. Registered by init(); exposed so the host can unregister
     // it at shutdown, matching how every other feature in the editor is torn down.
     rhi::IRenderFeature* copyFeature();

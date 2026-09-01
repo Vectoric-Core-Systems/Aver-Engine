@@ -85,7 +85,6 @@ public:
 
     // The command's live chord (possibly rebound).
     const Chord& chordFor(CommandId id) const { return current_[static_cast<usize>(id)]; }
-    Chord defaultFor(CommandId id) const { return keybindDef(id).def; }
 
     // The other command already holding `chord` in a scope that overlaps `scope`, or Count if free.
     // Comparing against `scope` (the chord's own intended scope) rather than always comparing

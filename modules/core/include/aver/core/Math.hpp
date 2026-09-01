@@ -180,14 +180,6 @@ struct Mat4 {
         return r;
     }
 
-    // The transpose.
-    Mat4 transposed() const {
-        Mat4 r;
-        for (int i = 0; i < 4; ++i)
-            for (int j = 0; j < 4; ++j) r.m[i][j] = m[j][i];
-        return r;
-    }
-
     // General 4x4 inverse. Returns identity if singular.
     Mat4 inverse() const {
         const f32* a = &m[0][0];

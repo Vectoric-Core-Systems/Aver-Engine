@@ -17,7 +17,7 @@ struct ComponentPool::Storage {
 
 // Creates an empty pool and rejects a layout this pool cannot store.
 ComponentPool::ComponentPool(u32 typeId, usize stride, usize align)
-    : s_(new Storage()), typeId_(typeId), stride_(stride), align_(align) {
+    : s_(new Storage()), typeId_(typeId), stride_(stride) {
     AVER_ASSERTM(stride > 0, "a component with no bytes has nothing to store");
     // std::vector's allocator guarantees alignment for max_align_t and no more.
     AVER_ASSERTM(align <= alignof(std::max_align_t),
@@ -87,14 +87,5 @@ usize  ComponentPool::size() const              { return s_->dense.size(); }
 Entity ComponentPool::entityAt(usize i) const   { return s_->dense[i]; }
 void*  ComponentPool::dataAt(usize i)           { return s_->bytes.data() + i * stride_; }
 const void* ComponentPool::dataAt(usize i) const{ return s_->bytes.data() + i * stride_; }
-
-// Copies all three arrays into `dst`, which must be the same component type.
-void ComponentPool::snapshotTo(ComponentPool& dst) const {
-    AVER_ASSERTM(dst.typeId_ == typeId_ && dst.stride_ == stride_,
-                 "a snapshot must be taken into a pool of the same component type");
-    dst.s_->sparse = s_->sparse;
-    dst.s_->dense  = s_->dense;
-    dst.s_->bytes  = s_->bytes;
-}
 
 } // namespace aver::scene
