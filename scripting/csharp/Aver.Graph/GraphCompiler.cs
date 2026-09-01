@@ -488,6 +488,17 @@ public class GraphCompiler
                 EmitSimpleApiRead(node);
                 break;
 
+            // The new physics reads: all pure (a body/joint handle in, a value out), so all welcome
+            // in the dataflow compiler exactly like the five just above.
+            case "getbodyangularvelocity":
+            case "getbodymass":
+            case "getbodymotiontype":
+            case "isbodyactive":
+            case "getbodylayer":
+            case "getjointvalue":
+                EmitSimpleApiRead(node);
+                break;
+
             case "getworldposition":
             case "getentityforward":
             case "getentityright":
@@ -1135,6 +1146,23 @@ public class GraphCompiler
         _il.Emit(OpCodes.Ldloc, pinName == "x" ? xL : pinName == "y" ? yL : zL);
     }
 
+    /// EmitPullVec3Read's own shape narrowed to ONE out-parameter instead of three: GetBodyMass,
+    /// GetBodyMotionType, GetBodyLayer and GetJointValue each call a method whose signature is exactly
+    /// `bool Method(int handle, out T value)`, `success` IS the bool return exactly like every other
+    /// read in this family, and there is only ever one non-success pin left to want back, so unlike
+    /// EmitPullVec3Read's x/y/z ternary this needs no pin-name dispatch at all.
+    private void EmitPullScalarRead(Node node, string pinName, MethodInfo method, Type outType, string inputPin)
+    {
+        if (_il == null) return;
+        EmitPullInput(node, inputPin);
+        var outL = _il.DeclareLocal(outType);
+        _il.Emit(OpCodes.Ldloca, outL);
+        _il.Emit(OpCodes.Call, method);
+        if (pinName == "success") return;
+        _il.Emit(OpCodes.Pop);
+        _il.Emit(OpCodes.Ldloc, outL);
+    }
+
     /// SynapseSteer's own emission -- NOT EmitPullVec3Read, which only ever produces three floats
     /// and a bool: this node has four real outputs (forward, right, yawDelta, arrived) on top of
     /// the method's own bool return ("success", the same "entity was not alive" meaning every other
@@ -1216,9 +1244,47 @@ public class GraphCompiler
             case "addbodyvelocity":
                 EmitPullInput(node, "x"); EmitPullInput(node, "y"); EmitPullInput(node, "z");
                 _il.Emit(OpCodes.Call, AddBodyVelocityMethod); break;
+            // Forces and impulses -- same "pull body, pull x/y/z, call" shape as addbodyvelocity
+            // just above; only which native call gets made differs.
+            case "addforce":
+                EmitPullInput(node, "x"); EmitPullInput(node, "y"); EmitPullInput(node, "z");
+                _il.Emit(OpCodes.Call, AddForceMethod); break;
+            case "addimpulse":
+                EmitPullInput(node, "x"); EmitPullInput(node, "y"); EmitPullInput(node, "z");
+                _il.Emit(OpCodes.Call, AddImpulseMethod); break;
+            case "addtorque":
+                EmitPullInput(node, "x"); EmitPullInput(node, "y"); EmitPullInput(node, "z");
+                _il.Emit(OpCodes.Call, AddTorqueMethod); break;
+            case "addangularimpulse":
+                EmitPullInput(node, "x"); EmitPullInput(node, "y"); EmitPullInput(node, "z");
+                _il.Emit(OpCodes.Call, AddAngularImpulseMethod); break;
+            case "setbodyangularvelocity":
+                EmitPullInput(node, "x"); EmitPullInput(node, "y"); EmitPullInput(node, "z");
+                _il.Emit(OpCodes.Call, SetBodyAngularVelocityMethod); break;
             case "setbodyentity":
                 EmitPullInput(node, "entity");
                 _il.Emit(OpCodes.Call, SetBodyEntityMethod); break;
+            // Material, mass, motion type, layer -- one scalar pin each after body.
+            case "setbodyfriction":
+                EmitPullInput(node, "friction");
+                _il.Emit(OpCodes.Call, SetBodyFrictionMethod); break;
+            case "setbodyrestitution":
+                EmitPullInput(node, "restitution");
+                _il.Emit(OpCodes.Call, SetBodyRestitutionMethod); break;
+            case "setbodygravityfactor":
+                EmitPullInput(node, "factor");
+                _il.Emit(OpCodes.Call, SetBodyGravityFactorMethod); break;
+            case "setbodymass":
+                EmitPullInput(node, "mass");
+                _il.Emit(OpCodes.Call, SetBodyMassMethod); break;
+            case "setbodymotiontype":
+                EmitPullInput(node, "motionType");
+                _il.Emit(OpCodes.Call, SetBodyMotionTypeMethod); break;
+            case "activatebody":
+                _il.Emit(OpCodes.Call, ActivateBodyMethod); break;
+            case "setbodylayer":
+                EmitPullInput(node, "layer");
+                _il.Emit(OpCodes.Call, SetBodyLayerMethod); break;
             case "setgravity":
                 EmitPullInput(node, "x"); EmitPullInput(node, "y"); EmitPullInput(node, "z");
                 _il.Emit(OpCodes.Call, SetGravityMethod); break;
@@ -1263,6 +1329,70 @@ public class GraphCompiler
                 _il.Emit(OpCodes.Call, AddSensorSphereMethod); break;
         }
         _il.Emit(OpCodes.Stloc, GetOrCreateExecLocal(node.Id, "body", typeof(int)));
+    }
+
+    /// The joint creators: bodyA/bodyB always first (bodyB == 0 means "the world", not "dead" -- see
+    /// GraphNodeDefs.hpp's own JOINTS banner), then the shape-specific point/axis/limit floats, then
+    /// one call whose return goes into an exec-local named "joint" rather than "body" -- otherwise
+    /// exactly EmitExecPhysicsCreate's own reasoning: the handle is read AFTER this node runs, by
+    /// whatever the exec chain reaches next.
+    private void EmitExecJointCreate(Node node)
+    {
+        if (_il == null) return;
+        EmitPullInput(node, "bodyA"); EmitPullInput(node, "bodyB");
+        switch (node.Type.ToLowerInvariant())
+        {
+            case "jointfixed":
+                EmitPullInput(node, "px"); EmitPullInput(node, "py"); EmitPullInput(node, "pz");
+                EmitPullInput(node, "axX"); EmitPullInput(node, "axY"); EmitPullInput(node, "axZ");
+                EmitPullInput(node, "ayX"); EmitPullInput(node, "ayY"); EmitPullInput(node, "ayZ");
+                _il.Emit(OpCodes.Call, JointFixedMethod); break;
+            case "jointpoint":
+                EmitPullInput(node, "px"); EmitPullInput(node, "py"); EmitPullInput(node, "pz");
+                _il.Emit(OpCodes.Call, JointPointMethod); break;
+            case "jointdistance":
+                EmitPullInput(node, "paX"); EmitPullInput(node, "paY"); EmitPullInput(node, "paZ");
+                EmitPullInput(node, "pbX"); EmitPullInput(node, "pbY"); EmitPullInput(node, "pbZ");
+                EmitPullInput(node, "minDist"); EmitPullInput(node, "maxDist");
+                _il.Emit(OpCodes.Call, JointDistanceMethod); break;
+            case "jointslider":
+                EmitPullInput(node, "px"); EmitPullInput(node, "py"); EmitPullInput(node, "pz");
+                EmitPullInput(node, "sx"); EmitPullInput(node, "sy"); EmitPullInput(node, "sz");
+                EmitPullInput(node, "nx"); EmitPullInput(node, "ny"); EmitPullInput(node, "nz");
+                EmitPullInput(node, "minCm"); EmitPullInput(node, "maxCm");
+                _il.Emit(OpCodes.Call, JointSliderMethod); break;
+            default: // jointhinge
+                EmitPullInput(node, "px"); EmitPullInput(node, "py"); EmitPullInput(node, "pz");
+                EmitPullInput(node, "hx"); EmitPullInput(node, "hy"); EmitPullInput(node, "hz");
+                EmitPullInput(node, "nx"); EmitPullInput(node, "ny"); EmitPullInput(node, "nz");
+                EmitPullInput(node, "minAngleRad"); EmitPullInput(node, "maxAngleRad");
+                _il.Emit(OpCodes.Call, JointHingeMethod); break;
+        }
+        _il.Emit(OpCodes.Stloc, GetOrCreateExecLocal(node.Id, "joint", typeof(int)));
+    }
+
+    /// The joint operations: a JOINT handle (never a body) pulled first, then the op-specific args,
+    /// then the same "store success into an exec local" tail EmitExecPhysicsWrite/
+    /// EmitExecTransformWrite/EmitExecApiCall each already carry -- see EmitExecPhysicsWrite's own
+    /// comment for why an exec local rather than a pin local.
+    private void EmitExecJointOp(Node node)
+    {
+        if (_il == null) return;
+        EmitPullInput(node, "joint");
+        switch (node.Type.ToLowerInvariant())
+        {
+            case "jointsetmotor":
+                EmitPullInput(node, "state"); EmitPullInput(node, "target");
+                _il.Emit(OpCodes.Call, JointSetMotorMethod); break;
+            case "jointsetenabled":
+                EmitPullInput(node, "enabled");
+                _il.Emit(OpCodes.Call, JointSetEnabledMethod); break;
+            default: // jointremove
+                _il.Emit(OpCodes.Call, JointRemoveMethod); break;
+        }
+        var successPin = node.Pins.FirstOrDefault(p => p.IsOutput && p.Name == "success" && p.Type == PinType.Bool);
+        if (successPin != null) _il.Emit(OpCodes.Stloc, GetOrCreateExecLocal(node.Id, "success", typeof(bool)));
+        else                    _il.Emit(OpCodes.Pop);
     }
 
     /// SphereCast, shaped exactly like EmitExecRaycast: one call, N results into N exec-locals, so
@@ -1332,6 +1462,12 @@ public class GraphCompiler
             case "removetag":
                 EmitPullInput(node, "entity"); EmitPullInput(node, "mask");
                 _il.Emit(OpCodes.Call, RemoveTagMethod); break;
+            // SetLayerCollision has no "body"/"entity" prefix at all -- it edits the world's shared
+            // layer matrix -- which is exactly why it sits here rather than in
+            // EmitExecPhysicsWrite (whose whole shape starts by pulling a body pin).
+            case "setlayercollision":
+                EmitPullInput(node, "layerA"); EmitPullInput(node, "layerB"); EmitPullInput(node, "collide");
+                _il.Emit(OpCodes.Call, SetLayerCollisionMethod); break;
             default:
                 EmitPullInput(node, "controller");
                 _il.Emit(OpCodes.Call, UnpossessMethod); break;
@@ -2747,6 +2883,8 @@ public class GraphCompiler
                     else if (IsExecCapableTransformWriteType(node.Type)) EmitExecTransformWrite(node);
                     else if (IsExecCapablePhysicsWriteType(node.Type)) EmitExecPhysicsWrite(node);
                     else if (IsExecCapablePhysicsCreateType(node.Type)) EmitExecPhysicsCreate(node);
+                    else if (IsExecCapableJointCreateType(node.Type)) EmitExecJointCreate(node);
+                    else if (IsExecCapableJointOpType(node.Type)) EmitExecJointOp(node);
                     else if (IsExecCapableSphereCastType(node.Type)) EmitExecSphereCast(node);
                     else if (IsExecCapableFireEventType(node.Type)) EmitExecFireEvent(node);
                     else if (IsExecCapableSaveLoadType(node.Type)) EmitExecSaveLoad(node);
@@ -3322,10 +3460,19 @@ public class GraphCompiler
     /// The physics writers, creators and the sweep. Three predicates because there are three
     /// emitters: a write returns a bool, a creator returns a body handle, and the sweep fills
     /// exec-locals the way Raycast does.
+    /// WIDENED past the original six for forces/impulses, spin, material, mass, motion type,
+    /// activation and layer -- every one of them shares the exact "pull body (unless setgravity),
+    /// pull its own scalar args, call, store/pop the bool" shape EmitExecPhysicsWrite already had, so
+    /// they join its switch rather than getting a fourth physics predicate/emitter pair.
     private static bool IsExecCapablePhysicsWriteType(string type)
     {
         string t = type.ToLowerInvariant();
-        return t == "setbodyposition" || t == "setbodyvelocity" || t == "addbodyvelocity" || t == "destroybody" || t == "setbodyentity" || t == "setgravity";
+        return t == "setbodyposition" || t == "setbodyvelocity" || t == "addbodyvelocity" || t == "destroybody" ||
+               t == "setbodyentity" || t == "setgravity" ||
+               t == "addforce" || t == "addimpulse" || t == "addtorque" || t == "addangularimpulse" ||
+               t == "setbodyangularvelocity" || t == "setbodyfriction" || t == "setbodyrestitution" ||
+               t == "setbodygravityfactor" || t == "setbodymass" || t == "setbodymotiontype" ||
+               t == "activatebody" || t == "setbodylayer";
     }
 
     private static bool IsExecCapablePhysicsCreateType(string type)
@@ -3336,6 +3483,26 @@ public class GraphCompiler
 
     private static bool IsExecCapableSphereCastType(string type) =>
         type.Equals("spherecast", StringComparison.OrdinalIgnoreCase);
+
+    /// The joint creators -- EmitExecJointCreate's own dispatch list. A FOURTH physics-family
+    /// predicate rather than folding into IsExecCapablePhysicsCreateType: a joint creator's return
+    /// goes into an exec-local named "joint", not "body", and its first two inputs are bodyA/bodyB,
+    /// not a single centre point -- different enough that sharing one emitter would need it to
+    /// branch on node.Type just to know which pin comes first.
+    private static bool IsExecCapableJointCreateType(string type)
+    {
+        string t = type.ToLowerInvariant();
+        return t == "jointhinge" || t == "jointpoint" || t == "jointdistance" || t == "jointslider" || t == "jointfixed";
+    }
+
+    /// The joint operations -- EmitExecJointOp's own dispatch list. Kept apart from
+    /// IsExecCapablePhysicsWriteType for the identical reason the creators are: these key off a JOINT
+    /// handle, never a body, and EmitExecPhysicsWrite's shape starts by unconditionally pulling "body".
+    private static bool IsExecCapableJointOpType(string type)
+    {
+        string t = type.ToLowerInvariant();
+        return t == "jointsetmotor" || t == "jointsetenabled" || t == "jointremove";
+    }
 
     private static bool IsExecCapableTransformWriteType(string type)
     {
@@ -3356,7 +3523,7 @@ public class GraphCompiler
     {
         string t = type.ToLowerInvariant();
         return t == "setvelocity" || t == "teleport" || t == "possess" || t == "unpossess" ||
-               t == "setvisible" || t == "addtag" || t == "removetag";
+               t == "setvisible" || t == "addtag" || t == "removetag" || t == "setlayercollision";
     }
 
     /// FireEvent's own version of IsExecCapableSpawnType -- a SEVENTH, separate predicate/emitter
@@ -4046,7 +4213,8 @@ public class GraphCompiler
         IsExecCapableFireEventType(type) || IsExecCapableJumpType(type) ||
         IsExecCapablePrintType(type) || IsExecCapableApiCallType(type) ||
         IsExecCapableTransformWriteType(type) || IsExecCapablePhysicsWriteType(type) ||
-        IsExecCapablePhysicsCreateType(type) || IsExecCapableSaveLoadType(type);
+        IsExecCapablePhysicsCreateType(type) || IsExecCapableSaveLoadType(type) ||
+        IsExecCapableJointCreateType(type) || IsExecCapableJointOpType(type);
 
     private static bool IsExecOnlyNodeType(string type) => type.ToLowerInvariant() switch
     {
@@ -4218,6 +4386,18 @@ public class GraphCompiler
                 EmitPullInput(source, "body"); _il.Emit(OpCodes.Call, BodyValidMethod); return;
             case "getbodycount":
                 _il.Emit(OpCodes.Call, BodyCountMethod); return;
+            case "getbodyangularvelocity":
+                EmitPullVec3Read(source, pinName, BodyAngularVelocityMethod, -1, "body"); return;
+            case "isbodyactive":
+                EmitPullInput(source, "body"); _il.Emit(OpCodes.Call, BodyActiveMethod); return;
+            case "getbodymass":
+                EmitPullScalarRead(source, pinName, BodyMassMethod, typeof(float), "body"); return;
+            case "getbodymotiontype":
+                EmitPullScalarRead(source, pinName, BodyMotionTypeMethod, typeof(int), "body"); return;
+            case "getbodylayer":
+                EmitPullScalarRead(source, pinName, BodyLayerMethod, typeof(int), "body"); return;
+            case "getjointvalue":
+                EmitPullScalarRead(source, pinName, JointValueMethod, typeof(float), "joint"); return;
             case "isphysicsready":
                 _il.Emit(OpCodes.Call, PhysicsReadyMethod); return;
             case "getfixedstep":
@@ -4893,6 +5073,93 @@ public class GraphCompiler
     private static readonly MethodInfo SphereCastMethod =
         typeof(GraphInterop).GetMethod("SphereCastForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SphereCastForGraph was not found by reflection");
+    // Forces, impulses, spin, material, mass, motion type, layers -- all body-keyed, all resolved by
+    // name up front exactly like every MethodInfo above: a lookup naming a method that does not
+    // exist throws HERE, at GraphCompiler's static init, and breaks every graph in the process, not
+    // just whichever one used the new node -- see GraphInterop.cs's own bridge methods for the shapes
+    // these resolve.
+    private static readonly MethodInfo AddForceMethod =
+        typeof(GraphInterop).GetMethod("AddForceForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.AddForceForGraph was not found by reflection");
+    private static readonly MethodInfo AddImpulseMethod =
+        typeof(GraphInterop).GetMethod("AddImpulseForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.AddImpulseForGraph was not found by reflection");
+    private static readonly MethodInfo AddTorqueMethod =
+        typeof(GraphInterop).GetMethod("AddTorqueForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.AddTorqueForGraph was not found by reflection");
+    private static readonly MethodInfo AddAngularImpulseMethod =
+        typeof(GraphInterop).GetMethod("AddAngularImpulseForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.AddAngularImpulseForGraph was not found by reflection");
+    private static readonly MethodInfo BodyAngularVelocityMethod =
+        typeof(GraphInterop).GetMethod("BodyAngularVelocityForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.BodyAngularVelocityForGraph was not found by reflection");
+    private static readonly MethodInfo SetBodyAngularVelocityMethod =
+        typeof(GraphInterop).GetMethod("SetBodyAngularVelocityForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SetBodyAngularVelocityForGraph was not found by reflection");
+    private static readonly MethodInfo SetBodyFrictionMethod =
+        typeof(GraphInterop).GetMethod("SetBodyFrictionForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SetBodyFrictionForGraph was not found by reflection");
+    private static readonly MethodInfo SetBodyRestitutionMethod =
+        typeof(GraphInterop).GetMethod("SetBodyRestitutionForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SetBodyRestitutionForGraph was not found by reflection");
+    private static readonly MethodInfo SetBodyGravityFactorMethod =
+        typeof(GraphInterop).GetMethod("SetBodyGravityFactorForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SetBodyGravityFactorForGraph was not found by reflection");
+    private static readonly MethodInfo SetBodyMassMethod =
+        typeof(GraphInterop).GetMethod("SetBodyMassForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SetBodyMassForGraph was not found by reflection");
+    private static readonly MethodInfo BodyMassMethod =
+        typeof(GraphInterop).GetMethod("BodyMassForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.BodyMassForGraph was not found by reflection");
+    private static readonly MethodInfo SetBodyMotionTypeMethod =
+        typeof(GraphInterop).GetMethod("SetBodyMotionTypeForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SetBodyMotionTypeForGraph was not found by reflection");
+    private static readonly MethodInfo BodyMotionTypeMethod =
+        typeof(GraphInterop).GetMethod("BodyMotionTypeForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.BodyMotionTypeForGraph was not found by reflection");
+    private static readonly MethodInfo ActivateBodyMethod =
+        typeof(GraphInterop).GetMethod("ActivateBodyForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.ActivateBodyForGraph was not found by reflection");
+    private static readonly MethodInfo BodyActiveMethod =
+        typeof(GraphInterop).GetMethod("BodyActiveForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.BodyActiveForGraph was not found by reflection");
+    private static readonly MethodInfo SetBodyLayerMethod =
+        typeof(GraphInterop).GetMethod("SetBodyLayerForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SetBodyLayerForGraph was not found by reflection");
+    private static readonly MethodInfo BodyLayerMethod =
+        typeof(GraphInterop).GetMethod("BodyLayerForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.BodyLayerForGraph was not found by reflection");
+    private static readonly MethodInfo SetLayerCollisionMethod =
+        typeof(GraphInterop).GetMethod("SetLayerCollisionForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SetLayerCollisionForGraph was not found by reflection");
+    // Joints.
+    private static readonly MethodInfo JointFixedMethod =
+        typeof(GraphInterop).GetMethod("JointFixedForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.JointFixedForGraph was not found by reflection");
+    private static readonly MethodInfo JointPointMethod =
+        typeof(GraphInterop).GetMethod("JointPointForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.JointPointForGraph was not found by reflection");
+    private static readonly MethodInfo JointDistanceMethod =
+        typeof(GraphInterop).GetMethod("JointDistanceForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.JointDistanceForGraph was not found by reflection");
+    private static readonly MethodInfo JointHingeMethod =
+        typeof(GraphInterop).GetMethod("JointHingeForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.JointHingeForGraph was not found by reflection");
+    private static readonly MethodInfo JointSliderMethod =
+        typeof(GraphInterop).GetMethod("JointSliderForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.JointSliderForGraph was not found by reflection");
+    private static readonly MethodInfo JointSetMotorMethod =
+        typeof(GraphInterop).GetMethod("JointSetMotorForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.JointSetMotorForGraph was not found by reflection");
+    private static readonly MethodInfo JointSetEnabledMethod =
+        typeof(GraphInterop).GetMethod("JointSetEnabledForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.JointSetEnabledForGraph was not found by reflection");
+    private static readonly MethodInfo JointRemoveMethod =
+        typeof(GraphInterop).GetMethod("JointRemoveForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.JointRemoveForGraph was not found by reflection");
+    private static readonly MethodInfo JointValueMethod =
+        typeof(GraphInterop).GetMethod("JointValueForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.JointValueForGraph was not found by reflection");
     // The entity transform surfaces.
     private static readonly MethodInfo WorldPositionMethod =
         typeof(GraphInterop).GetMethod("WorldPositionForGraph", BindingFlags.NonPublic | BindingFlags.Static)

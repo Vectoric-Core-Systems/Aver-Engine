@@ -266,6 +266,69 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"AddSensorBox", "Add Sensor Box", "Physics", {pin("exec", "exec", false), pin("cx", "float", false), pin("cy", "float", false), pin("cz", "float", false), pin("hx", "float", false), pin("hy", "float", false), pin("hz", "float", false), pin("then", "exec", true), pin("body", "int", true)}});
     t.push_back({"AddSensorSphere", "Add Sensor Sphere", "Physics", {pin("exec", "exec", false), pin("cx", "float", false), pin("cy", "float", false), pin("cz", "float", false), pin("radius", "float", false), pin("then", "exec", true), pin("body", "int", true)}});
     t.push_back({"SphereCast", "Sphere Cast", "Physics", {pin("exec", "exec", false), pin("originX", "float", false), pin("originY", "float", false), pin("originZ", "float", false), pin("dirX", "float", false), pin("dirY", "float", false), pin("dirZ", "float", false), pin("maxDist", "float", false), pin("radius", "float", false), pin("then", "exec", true), pin("hit", "bool", true), pin("body", "int", true), pin("pointX", "float", true), pin("pointY", "float", true), pin("pointZ", "float", true)}});
+
+    // -- PHYSICS: FORCES, MATERIAL, MOTION AND LAYERS. Four more families on the same body handle the
+    //    creators above return. A force/torque lasts one physics step and must be re-applied to push
+    //    continuously; an impulse changes velocity instantly and does not accumulate -- see
+    //    Aver.Physics/Body.cs's own section comment for the exact unit derivations (force is
+    //    kg*cm/s^2, torque is kg*cm^2/s^2). Angular velocity is RADIANS per second about each engine
+    //    axis, never degrees, matching every rotation in this file.
+    t.push_back({"AddForce", "Add Force", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"AddImpulse", "Add Impulse", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"AddTorque", "Add Torque", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"AddAngularImpulse", "Add Angular Impulse", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"GetBodyAngularVelocity", "Get Body Angular Velocity", "Physics", {pin("body", "int", false), pin("x", "float", true), pin("y", "float", true), pin("z", "float", true), pin("success", "bool", true)}});
+    t.push_back({"SetBodyAngularVelocity", "Set Body Angular Velocity", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    //    Material and mass: DYNAMIC BODIES ONLY for mass -- a static or kinematic body has infinite
+    //    mass by definition, so SetBodyMass on one simply fails (success=false) rather than changing
+    //    what the body is.
+    t.push_back({"SetBodyFriction", "Set Body Friction", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("friction", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"SetBodyRestitution", "Set Body Restitution", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("restitution", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"SetBodyGravityFactor", "Set Body Gravity Factor", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("factor", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"SetBodyMass", "Set Body Mass", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("mass", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"GetBodyMass", "Get Body Mass", "Physics", {pin("body", "int", false), pin("mass", "float", true), pin("success", "bool", true)}});
+    //    Motion type and sleeping. motionType rides an INT PIN: 0 Static, 1 Kinematic, 2 Dynamic --
+    //    Aver.Physics.MotionType's own numbering. GetBodyMotionType answers -1 for a dead handle,
+    //    which is why success exists instead of trusting the int alone (0 is a real answer, Static).
+    t.push_back({"SetBodyMotionType", "Set Body Motion Type", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("motionType", "int", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"GetBodyMotionType", "Get Body Motion Type", "Physics", {pin("body", "int", false), pin("motionType", "int", true), pin("success", "bool", true)}});
+    t.push_back({"ActivateBody", "Activate Body", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"IsBodyActive", "Is Body Active", "Physics", {pin("body", "int", false), pin("active", "bool", true)}});
+    //    Layers: 0..15, the same bitmask family Physics.SetLayerCollision (below) enables/disables
+    //    pairs of. Changing a body's layer never changes whether it is static or dynamic.
+    t.push_back({"SetBodyLayer", "Set Body Layer", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("layer", "int", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"GetBodyLayer", "Get Body Layer", "Physics", {pin("body", "int", false), pin("layer", "int", true), pin("success", "bool", true)}});
+    //    SetLayerCollision has NO body pin -- it edits the world's shared layer matrix, SYMMETRIC
+    //    ((a,b) also sets (b,a)), the same matrix a level teardown resets to all-colliding.
+    t.push_back({"SetLayerCollision", "Set Layer Collision", "Physics", {pin("exec", "exec", false), pin("layerA", "int", false), pin("layerB", "int", false), pin("collide", "bool", false), pin("then", "exec", true), pin("success", "bool", true)}});
+
+    // -- JOINTS. A constraint between two body handles, created ONCE at a WORLD-SPACE point/axis --
+    //    move the bodies to where they belong FIRST, then join them there, exactly like Add*Box above
+    //    places a shape before anything can touch it. BODY B == 0 (what an unwired int pin already
+    //    reads as) JOINS BODY A TO THE WORLD instead of to nothing -- a door hinged to a wall that is
+    //    not itself simulated, not a joint with a missing argument. A JOINT HANDLE RIDES AN INT PIN
+    //    LIKE A BODY HANDLE, BUT THE TWO ARE NOT INTERCHANGEABLE: Jolt's own handle ranges overlap, so
+    //    GetBodyPosition on a joint handle (or JointRemove on a body handle) is a silent wrong answer
+    //    that only the graph author can avoid by keeping the two straight -- there is no type system
+    //    here to catch it. Angles are RADIANS, distances/points CENTIMETRES, matching every other
+    //    physics node in this file. Hinge and Slider each take a SECOND axis pin trio (nx/ny/nz) that
+    //    MUST be perpendicular to the first -- it is the zero-angle/zero-offset reference the limits
+    //    are measured from, not a second direction of travel.
+    t.push_back({"JointFixed", "Joint: Fixed", "Physics", {pin("exec", "exec", false), pin("bodyA", "int", false), pin("bodyB", "int", false), pin("px", "float", false), pin("py", "float", false), pin("pz", "float", false), pin("axX", "float", false), pin("axY", "float", false), pin("axZ", "float", false), pin("ayX", "float", false), pin("ayY", "float", false), pin("ayZ", "float", false), pin("then", "exec", true), pin("joint", "int", true)}});
+    t.push_back({"JointPoint", "Joint: Point", "Physics", {pin("exec", "exec", false), pin("bodyA", "int", false), pin("bodyB", "int", false), pin("px", "float", false), pin("py", "float", false), pin("pz", "float", false), pin("then", "exec", true), pin("joint", "int", true)}});
+    t.push_back({"JointDistance", "Joint: Distance", "Physics", {pin("exec", "exec", false), pin("bodyA", "int", false), pin("bodyB", "int", false), pin("paX", "float", false), pin("paY", "float", false), pin("paZ", "float", false), pin("pbX", "float", false), pin("pbY", "float", false), pin("pbZ", "float", false), pin("minDist", "float", false), pin("maxDist", "float", false), pin("then", "exec", true), pin("joint", "int", true)}});
+    t.push_back({"JointHinge", "Joint: Hinge", "Physics", {pin("exec", "exec", false), pin("bodyA", "int", false), pin("bodyB", "int", false), pin("px", "float", false), pin("py", "float", false), pin("pz", "float", false), pin("hx", "float", false), pin("hy", "float", false), pin("hz", "float", false), pin("nx", "float", false), pin("ny", "float", false), pin("nz", "float", false), pin("minAngleRad", "float", false), pin("maxAngleRad", "float", false), pin("then", "exec", true), pin("joint", "int", true)}});
+    t.push_back({"JointSlider", "Joint: Slider", "Physics", {pin("exec", "exec", false), pin("bodyA", "int", false), pin("bodyB", "int", false), pin("px", "float", false), pin("py", "float", false), pin("pz", "float", false), pin("sx", "float", false), pin("sy", "float", false), pin("sz", "float", false), pin("nx", "float", false), pin("ny", "float", false), pin("nz", "float", false), pin("minCm", "float", false), pin("maxCm", "float", false), pin("then", "exec", true), pin("joint", "int", true)}});
+    //    Motor/limit/enable/remove/value all key off the JOINT handle, never a body. state on
+    //    JointSetMotor is Aver.Physics.MotorState: 0 Off, 1 Velocity (target is radians or
+    //    centimetres PER SECOND), 2 Position (target is the absolute radians/centimetres to hold).
+    //    Always axis 0 -- every named joint above has at most one motorised axis; the six-DOF
+    //    per-axis motor is not exposed to the graph.
+    t.push_back({"JointSetMotor", "Joint Set Motor", "Physics", {pin("exec", "exec", false), pin("joint", "int", false), pin("state", "int", false), pin("target", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"JointSetEnabled", "Joint Set Enabled", "Physics", {pin("exec", "exec", false), pin("joint", "int", false), pin("enabled", "bool", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"JointRemove", "Joint Remove", "Physics", {pin("exec", "exec", false), pin("joint", "int", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"GetJointValue", "Get Joint Value", "Physics", {pin("joint", "int", false), pin("value", "float", true), pin("success", "bool", true)}});
+
     // -- FUNCTION. The three node types a user-defined function is made of. They are in this catalog
     //    for their DISPLAY NAME and their HEADER COLOUR, and deliberately NOT for dropping: the
     //    palette skips the whole "Function" category (see GraphEditor.cpp's Add Node popup), because

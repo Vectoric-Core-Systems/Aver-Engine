@@ -5,6 +5,13 @@
 
 using Aver.Scene;
 using Aver.Scripting;
+// AP: the raw Aver.Physics surface, aliased rather than `using`d unqualified because this file
+// ALREADY has a Body/Physics/Entity in scope -- Aver.Framework's own Vec3-flavoured shims (see
+// Aver.Framework/Physics.cs's file comment). Forces, joints, material, motion type and layers have
+// no shim here at all: Aver.Framework.Body never grew AddForce/SetFriction/SetMotionType/SetLayer
+// (Physics.cs's own comment says why -- that file predates them and is not being widened), so those
+// wrappers below construct an AP.Body/AP.Joint directly over the same int handle instead.
+using AP = Aver.Physics;
 
 namespace Aver.Framework;
 
@@ -991,5 +998,200 @@ internal static class GraphInterop
             return false;
         }
         return character.Jump();
+    }
+
+    // ---- PHYSICS: FORCES, MATERIAL, MOTION, LAYERS, JOINTS -----------------------------------------
+    // All of these go through AP.Body/AP.Joint/AP.Physics directly (see the AP alias comment at the
+    // top of this file) rather than through Aver.Framework's own Body/Physics shim, which never grew
+    // this surface. Same shape as AddBodyVelocityForGraph/SetBodyEntityForGraph above: construct the
+    // handle wrapper, check IsValid, call through, return bool (or the value, for a read) -- a joint
+    // creator additionally mirrors AddStaticBoxForGraph et al., which do NOT pre-check validity
+    // themselves: the native factory already returns handle 0 (Joint.None) for a dead bodyA, and
+    // bodyB == 0 is not "dead" here at all, it is the documented sentinel for "join to the world"
+    // (see the JOINTS banner in GraphNodeDefs.hpp), so gating on IsValid here would reject the one
+    // case the ABI exists to support.
+
+    internal static bool AddForceForGraph(int body, float x, float y, float z)
+    {
+        AP.Body b = new AP.Body(body);
+        return b.IsValid && b.AddForce(new AP.Float3(x, y, z));
+    }
+
+    internal static bool AddImpulseForGraph(int body, float x, float y, float z)
+    {
+        AP.Body b = new AP.Body(body);
+        return b.IsValid && b.AddImpulse(new AP.Float3(x, y, z));
+    }
+
+    internal static bool AddTorqueForGraph(int body, float x, float y, float z)
+    {
+        AP.Body b = new AP.Body(body);
+        return b.IsValid && b.AddTorque(new AP.Float3(x, y, z));
+    }
+
+    internal static bool AddAngularImpulseForGraph(int body, float x, float y, float z)
+    {
+        AP.Body b = new AP.Body(body);
+        return b.IsValid && b.AddAngularImpulse(new AP.Float3(x, y, z));
+    }
+
+    internal static bool BodyAngularVelocityForGraph(int body, out float x, out float y, out float z)
+    {
+        AP.Body b = new AP.Body(body);
+        x = y = z = 0.0f;
+        if (!b.IsValid) return false;
+        AP.Float3 v = b.AngularVelocity; x = v.X; y = v.Y; z = v.Z;
+        return true;
+    }
+
+    internal static bool SetBodyAngularVelocityForGraph(int body, float x, float y, float z)
+    {
+        AP.Body b = new AP.Body(body);
+        return b.IsValid && b.SetAngularVelocity(x, y, z);
+    }
+
+    internal static bool SetBodyFrictionForGraph(int body, float friction)
+    {
+        AP.Body b = new AP.Body(body);
+        return b.IsValid && b.SetFriction(friction);
+    }
+
+    internal static bool SetBodyRestitutionForGraph(int body, float restitution)
+    {
+        AP.Body b = new AP.Body(body);
+        return b.IsValid && b.SetRestitution(restitution);
+    }
+
+    internal static bool SetBodyGravityFactorForGraph(int body, float factor)
+    {
+        AP.Body b = new AP.Body(body);
+        return b.IsValid && b.SetGravityFactor(factor);
+    }
+
+    internal static bool SetBodyMassForGraph(int body, float massKg)
+    {
+        AP.Body b = new AP.Body(body);
+        return b.IsValid && b.SetMass(massKg);
+    }
+
+    /// <summary>DYNAMIC BODIES ONLY -- a static or kinematic body has infinite mass by definition and
+    /// reports 0 here, same as Aver.Physics.Body.Mass itself documents.</summary>
+    internal static bool BodyMassForGraph(int body, out float mass)
+    {
+        AP.Body b = new AP.Body(body);
+        mass = 0.0f;
+        if (!b.IsValid) return false;
+        mass = b.Mass;
+        return true;
+    }
+
+    internal static bool SetBodyMotionTypeForGraph(int body, int motionType)
+    {
+        AP.Body b = new AP.Body(body);
+        return b.IsValid && b.SetMotionType((AP.MotionType)motionType);
+    }
+
+    /// <summary>-1 (not a valid MotionType) for a dead handle -- 0 is Static, a real answer, which is
+    /// why `success` exists instead of trusting the int alone.</summary>
+    internal static bool BodyMotionTypeForGraph(int body, out int motionType)
+    {
+        AP.Body b = new AP.Body(body);
+        motionType = -1;
+        if (!b.IsValid) return false;
+        motionType = b.MotionTypeRaw;
+        return true;
+    }
+
+    internal static bool ActivateBodyForGraph(int body)
+    {
+        AP.Body b = new AP.Body(body);
+        return b.IsValid && b.Activate();
+    }
+
+    internal static bool BodyActiveForGraph(int body) => new AP.Body(body).IsActive;
+
+    internal static bool SetBodyLayerForGraph(int body, int layer)
+    {
+        AP.Body b = new AP.Body(body);
+        return b.IsValid && b.SetLayer(layer);
+    }
+
+    internal static bool BodyLayerForGraph(int body, out int layer)
+    {
+        AP.Body b = new AP.Body(body);
+        layer = -1;
+        if (!b.IsValid) return false;
+        layer = b.Layer;
+        return true;
+    }
+
+    /// <summary>No body handle at all -- this edits the world's shared layer-collision matrix, which
+    /// Aver.Physics.Physics owns directly rather than any one body.</summary>
+    internal static bool SetLayerCollisionForGraph(int layerA, int layerB, bool collide)
+        => AP.Physics.SetLayerCollision(layerA, layerB, collide);
+
+    internal static int JointFixedForGraph(int bodyA, int bodyB, float px, float py, float pz,
+                                            float axX, float axY, float axZ, float ayX, float ayY, float ayZ)
+        => AP.Joint.Fixed(new AP.Body(bodyA), new AP.Body(bodyB), new AP.Float3(px, py, pz),
+                           new AP.Float3(axX, axY, axZ), new AP.Float3(ayX, ayY, ayZ)).Handle;
+
+    internal static int JointPointForGraph(int bodyA, int bodyB, float px, float py, float pz)
+        => AP.Joint.Point(new AP.Body(bodyA), new AP.Body(bodyB), new AP.Float3(px, py, pz)).Handle;
+
+    internal static int JointDistanceForGraph(int bodyA, int bodyB, float paX, float paY, float paZ,
+                                               float pbX, float pbY, float pbZ, float minDist, float maxDist)
+        => AP.Joint.Distance(new AP.Body(bodyA), new AP.Body(bodyB), new AP.Float3(paX, paY, paZ),
+                              new AP.Float3(pbX, pbY, pbZ), minDist, maxDist).Handle;
+
+    /// <summary>normalAxis MUST be perpendicular to hingeAxis -- the ABI's own requirement (see
+    /// physics_joints_abi.h), not something this wrapper can fix up on the graph author's behalf.</summary>
+    internal static int JointHingeForGraph(int bodyA, int bodyB, float px, float py, float pz,
+                                            float hx, float hy, float hz, float nx, float ny, float nz,
+                                            float minAngleRad, float maxAngleRad)
+        => AP.Joint.Hinge(new AP.Body(bodyA), new AP.Body(bodyB), new AP.Float3(px, py, pz),
+                           new AP.Float3(hx, hy, hz), new AP.Float3(nx, ny, nz), minAngleRad, maxAngleRad).Handle;
+
+    /// <summary>normalAxis MUST be perpendicular to sliderAxis -- same ABI requirement as Hinge's.</summary>
+    internal static int JointSliderForGraph(int bodyA, int bodyB, float px, float py, float pz,
+                                             float sx, float sy, float sz, float nx, float ny, float nz,
+                                             float minCm, float maxCm)
+        => AP.Joint.Slider(new AP.Body(bodyA), new AP.Body(bodyB), new AP.Float3(px, py, pz),
+                            new AP.Float3(sx, sy, sz), new AP.Float3(nx, ny, nz), minCm, maxCm).Handle;
+
+    /// <summary>state is Aver.Physics.MotorState (0 Off, 1 Velocity, 2 Position). Axis 0 -- every
+    /// named joint above has at most one motorised axis; the six-DOF per-axis overload is not
+    /// exposed to the graph.</summary>
+    internal static bool JointSetMotorForGraph(int joint, int state, float target)
+    {
+        AP.Joint j = new AP.Joint(joint);
+        return j.IsValid && j.SetMotor((AP.MotorState)state, target);
+    }
+
+    internal static bool JointSetEnabledForGraph(int joint, bool enabled)
+    {
+        AP.Joint j = new AP.Joint(joint);
+        if (!j.IsValid) return false;
+        j.Enabled = enabled;
+        return true;
+    }
+
+    internal static bool JointRemoveForGraph(int joint)
+    {
+        AP.Joint j = new AP.Joint(joint);
+        return j.IsValid && j.Remove();
+    }
+
+    /// <summary>A hinge's angle (radians) or a slider's offset (centimetres). False for a dead handle
+    /// AND for a joint type with no single scalar to report -- every type except hinge and slider --
+    /// which is why this checks Value()'s own null rather than only IsValid.</summary>
+    internal static bool JointValueForGraph(int joint, out float value)
+    {
+        value = 0.0f;
+        AP.Joint j = new AP.Joint(joint);
+        if (!j.IsValid) return false;
+        float? v = j.Value();
+        if (v is null) return false;
+        value = v.Value;
+        return true;
     }
 }
