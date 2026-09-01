@@ -3262,10 +3262,27 @@ public:
         if (e.device()->uiActive() && interactive) {
             // Clicking the viewport puts the mouse back in the game. Tested before wantCapture below.
             {
+                // levelHovered_, NOT !WantCaptureMouse, AND THE OLD TEST COULD NEVER PASS. The 3D view
+                // is one of ImGui's own dock windows, so ImGui always wants the mouse while the
+                // pointer is over it -- measured mid-gesture: play=1 released=1 clicked=1
+                // inViewport=1 and wantMouse=1. The branch was unreachable, which meant clicking back
+                // into the viewport did nothing and the release chord was the only way back in.
+                //
+                // levelHovered_ is the question that was actually meant: is the pointer over the
+                // LEVEL window rather than a panel floating above it. It is the same `overUI` idiom
+                // the fly camera beside this already uses, and ImGui's own hovered-window test
+                // handles the overlap case that !WantCaptureMouse was reaching for.
                 const ImGuiIO& mio = ImGui::GetIO();
                 if (playSessionActive() && releasedByUser_ && ImGui::IsMouseClicked(0) &&
-                    !mio.WantCaptureMouse && inViewport(mio.MousePos.x, mio.MousePos.y))
+                    levelHovered_ && inViewport(mio.MousePos.x, mio.MousePos.y)) {
                     releasedByUser_ = false;
+                    // AND THAT CLICK IS NOT A TRIGGER PULL. It is a UI action meaning "give the game
+                    // the mouse back"; publishing it as MOUSE_LEFT as well fires the weapon, and
+                    // keeps firing for as long as the button is held, because a level-triggered fire
+                    // gate behind a cooldown has no way to tell one long click from many. Eaten
+                    // until the button comes up -- see pushInput, where the latch is consumed.
+                    eatRecaptureClick_ = true;
+                }
             }
             const bool wantCapture = playSessionActive() && !releasedByUser_;
             if (keybinds_.pressed(editor::CommandId::PlayReleaseMouse, ImGui::GetIO()) && playSessionActive())
@@ -9310,8 +9327,13 @@ private:
         for (int32_t vk = 0; vk < AVER_FW_VK_COUNT; ++vk)
             aver_fw_input_set_vk(vk, (kb && input_.keyHeld(vk)) ? 1 : 0);
 
+        // THE RECAPTURE CLICK IS EATEN, and only that one button. Suppressing all of `m` would take
+        // mouse LOOK with it, so re-entering the game would cost you the ability to turn until you
+        // let go -- a worse bug than the one being fixed. Cleared the moment the button is released,
+        // so a genuine second click fires normally.
+        if (eatRecaptureClick_ && !ImGui::IsMouseDown(0)) eatRecaptureClick_ = false;
         const bool m = own_.mouseToGame;
-        aver_fw_input_set_key(AVER_FW_KEY_MOUSE_LEFT,   m && ImGui::IsMouseDown(0));
+        aver_fw_input_set_key(AVER_FW_KEY_MOUSE_LEFT,   m && !eatRecaptureClick_ && ImGui::IsMouseDown(0));
         aver_fw_input_set_key(AVER_FW_KEY_MOUSE_RIGHT,  m && ImGui::IsMouseDown(1));
         aver_fw_input_set_key(AVER_FW_KEY_MOUSE_MIDDLE, m && ImGui::IsMouseDown(2));
         // Suppressed publishes an explicit zero rather than falling through to the captured branch:
@@ -17997,6 +18019,10 @@ private:
     // on purpose: one subtly wrong central function is worse than eleven independently wrong ones,
     // because it is wrong for all of them at once.
     editor::InputOwnership own_;
+
+    // Set when a viewport click hands the mouse back to the game, cleared when that button comes up.
+    // Its whole job is to stop ONE physical click counting as both a UI action and a trigger pull.
+    bool eatRecaptureClick_ = false;
 
 #if AVER_WITH_IMGUI
     editor::UiRegistry uiReg_;   // what the editor drew this frame, by name
