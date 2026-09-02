@@ -266,6 +266,7 @@ namespace aver {
 // The editor's window-event sink. A free function because Window::setEventCallback takes a plain
 // function pointer and a void* (same shape GameApp's onWindowEvent uses). Filters nothing: whether a
 // given CONSUMER may act on an event is a separate, per-frame question answered further down.
+// Filtering here would put policy in the one place that cannot see it.
 static void sandboxWindowEvent(void* user, const Event& e) {
     static_cast<InputState*>(user)->onEvent(e);
 }
@@ -621,7 +622,8 @@ static std::vector<rhi::LineVertex> buildScaleAxis(int a, const Vec3& c) {
 // during terrain edits with no way to tell which activity a click meant. Foliage and Simulate
 // (framework's play/pause/stop, AVER_FW_PLAY_*) were added because both were already real.
 // Mesh Paint / Geometry-Modeling absent: OcMeshData has no vertex-colour/weight channel to paint, and
-// "MeshEditor" is read-only -- add once the format and an editable mesh exist.
+// "MeshEditor" is read-only -- add once the format and an editable mesh exist. An empty-panel mode is
+// worse than none.
 enum class EditorMode { Select, Landscape, Foliage, Simulate };
 static const char* kEditorModeNames[4] = {"Select", "Landscape", "Foliage", "Simulate"};
 // One-line "what is this for", shown in the dropdown under each name the way UE's mode picker does.
@@ -696,8 +698,10 @@ struct MeshObj {
 
 #if AVER_WITH_IMGUI
 // THE canonical Aver orange -- was GraphEditor.cpp's IM_COL32(242,101,34) but had drifted into four
-// different oranges. Selection outline stays deliberately distinct (must read against arbitrary scene
-// colour, not this chrome); the rest are unified here.
+// different oranges: this theme's accent (0.95/0.42/0.13, six units off on green), the viewport
+// selection outline's brighter 1.0/0.62/0.12, and an ad-hoc 0.79/0.47/0.16 on one button. Selection
+// outline stays deliberately distinct (must read against arbitrary scene colour, not this chrome);
+// the rest are unified here.
 static constexpr ImVec4 kAverOrange   (242.0f/255.0f, 101.0f/255.0f, 34.0f/255.0f, 1.00f);
 static constexpr ImVec4 kAverOrangeDim(242.0f/255.0f, 101.0f/255.0f, 34.0f/255.0f, 0.55f);
 
@@ -1421,9 +1425,10 @@ public:
         if (window_) window_->setEventCallback(&sandboxWindowEvent, &input_);
 
         // Single-instance forwarding, receiver registration. singleInstanceEligible_ is a superset of
-        // the sender's own forward-attempt gate by construction, so no separate bookkeeping is needed
-        // to keep them in sync. A --frames capture always carries a flag, so it's ineligible -- two
-        // concurrent captures never race to open the same named mutex.
+        // the sender's own forward-attempt gate ("argc==2 and argv[1] doesn't start with '-'") by
+        // construction, so no separate bookkeeping is needed to keep them in sync. A --frames capture
+        // is a real windowed launch (Window.hpp:17) but always carries a flag, so it's ineligible --
+        // two concurrent captures never race to open the same named mutex.
         if (window_ && window_->valid() && singleInstanceEligible_) {
             Window::registerAsSingleInstancePrimary(window_->nativeHandle());
             window_->setOpenRequestHook(&SandboxApp::onOpenRequestThunk, this);
@@ -1489,8 +1494,9 @@ public:
         // "already tried" BEFORE testing the flag, with no warning at all.
 #if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
         // OFF UNLESS ASKED FOR, a downgrade from "on by default where hardware allows" -- it was
-        // never actually on: the first real run measured 22% faster (76.3->59.8ms, triangles
-        // 8M->2.9M) but rendered every plant in Electric Dreams as a black shredded silhouette.
+        // never actually on: the first real run measured 22% faster (frame 76.3->59.8ms, scene draw
+        // 51.7->41.5, triangles 8M->2.9M) but rendered every plant in Electric Dreams as a black
+        // shredded silhouette.
         // SHADING FIXED since: PSClusterMain is now a real material shader (ClusterMaterialShader.hpp).
         // STAGE 3 added shadows/GI (still opt-in): Voxi's GI volume and shadow map MERGE into this
         // pipeline's table 0 (ensureLodMeshPipeline, D3D12Device.cpp's nullFill keeps
@@ -1627,8 +1633,9 @@ public:
             const u64 droneId = fnv1a64(std::string_view("Meshes/drone.ocmesh"));
             sceneMeshes_[droneId] = e.device()->createMesh(dv.data(), (u32)dv.size(), di.data(), (u32)di.size());
             // NOT unitBounds: appendDrone is anisotropic, so the cube/sphere's -1..1 box would be ~6x
-            // too tall and silently defeat the frustum cull above. Padded a few thousandths beyond the
-            // generator's exact numbers -- a bound must never be tighter than the geometry it describes.
+            // too tall and silently defeat the frustum cull above (loose, not missing, this time).
+            // Padded a few thousandths beyond the generator's exact numbers (X/Y tip reach 0.765685,
+            // top 0.154, skid bottom -0.218) -- a bound must never be tighter than the geometry it describes.
             meshBounds_[droneId] = {Vec3{-0.78f, -0.78f, -0.22f}, Vec3{0.78f, 0.78f, 0.16f}};
             meshTris_[droneId]   = static_cast<u32>(di.size() / 3);
 
@@ -1649,8 +1656,10 @@ public:
             look("M_Wall",   0.48f, 0.50f, 0.55f, 0.03f, 0.72f);
             // A generic surface in the engine's own default palette (like M_Floor/M_Wall/M_Metal
             // above) -- common architectural names given a sensible look when no .ocmat defines them.
-            // Added after a scene naming this one fell through to the flat fallback and got reported
-            // as a lighting bug. Keep this table and GameContent.cpp's copy in step -- they've diverged.
+            // Added after a scene naming this one fell through to the flat {0.80,0.80,0.85} fallback
+            // and got reported as a lighting bug -- it was unresolved content, identically in both
+            // render paths, the exact failure this table exists to prevent. Keep this table and
+            // GameContent.cpp's copy in step -- they've diverged.
             look("M_Concrete", 0.55f, 0.54f, 0.51f, 0.00f, 0.88f);
             look("M_Trim",   0.30f, 0.33f, 0.38f, 0.35f, 0.45f);
             look("M_Crate",  0.62f, 0.44f, 0.22f, 0.02f, 0.78f);
@@ -1663,9 +1672,11 @@ public:
             look("M_Foliage", 0.16f, 0.42f, 0.14f, 0.0f, 0.85f);
             look("M_Bark",    0.35f, 0.24f, 0.15f, 0.0f, 0.85f);
             look("M_Rock",    0.42f, 0.40f, 0.37f, 0.05f, 0.80f);
-            // M_Glass is NOT translucent here, and cannot be: SurfaceLook has no alphaMode field, so
-            // this table only gives a flat PBR triple when no .ocmat resolves -- translucency needs an
-            // AUTHORED material. "M_Glass" with a real .ocmat (BLEND) draws as actual glass; with none
+            // M_Glass is NOT translucent here, and cannot be: SurfaceLook (`{f32 col[3]; f32 metallic;
+            // f32 roughness;}`) has no alphaMode field, so this table only gives a flat PBR triple when
+            // no .ocmat resolves -- translucency needs an AUTHORED material (the scene loop's `blended`
+            // local reads pbr::MaterialDesc::alphaMode off that only, never off surfaceLooks_).
+            // "M_Glass" with a real .ocmat (BLEND) draws as actual glass; with none
             // yet, it gets this near-white, near-mirror-smooth OPAQUE placeholder instead of flat grey
             // -- reading as "probably glass", not "probably unfinished".
             look("M_Glass",   0.92f, 0.94f, 0.95f, 0.0f, 0.05f);
@@ -2538,8 +2549,10 @@ public:
         // frames, not one: device loss is noticed at Present.
         // --shader-source: pick up an HLSL edit without restarting.
         // "ONLY THE FIRST EDIT IS EVER DELIVERED" was a measurement artifact: a `--frames 900
-        // --no-vsync` run lasts ~12s, so edits 2/3 of a 21-second test landed after the process had
-        // exited. Re-measured with `--frames 9000` and five edits nine seconds apart: all delivered.
+        // --no-vsync` run lasts ~12s (measured: 900 frames, 12.0s, 75fps), so edits 2/3 of a 21-second
+        // test landed after the process had exited -- the log's own "stopped after 900 frame(s)" sits
+        // between append one and append two. Re-measured with `--frames 9000` and five edits nine
+        // seconds apart (via Add-Content/Set-Content/Copy-Item -Force): all delivered.
         // This function only bumps an integer: rhi::reloadShaderFiles() drops the text cache and
         // increments a revision. VoxiRenderer::prePass rebuilds pipelines THERE, where that's safe --
         // doing it here would free pipelines a command list is recording against.
@@ -2695,7 +2708,9 @@ public:
             // hands you a plain camera, and having to hold a mouse button to walk it isn't what anyone
             // means by that; mouse look still wants the button.
             // A synthetic look enters here, where the real one does: --pie-camera-test used to bump
-            // yaw_/pitch_ from its own LATER tick, so the bump never carried into the pawn.
+            // yaw_/pitch_ from its own LATER tick, so the bump never carried into the pawn -- and
+            // drivePlayCamera restored it from the pawn's unchanged forward next frame, a "steady
+            // camera" that was actually just bad ordering, not ignored input.
             if (pieCamPendingLook_) {
                 pieCamPendingLook_ = false;
                 yaw_   += 0.5f;
@@ -3014,7 +3029,8 @@ public:
         // so a graph-only project reaches Play like any other.
         // What ungated did: every class-placed graph ran OnTick every frame while someone just looked
         // around. Measured on PTTest over 1000 frames, Play never pressed: AN_FPRules' `elapsed` VAR
-        // climbed to 12.31s, 4003 tick lines written, no begin_play -- browsing a level mutated it.
+        // climbed from 3.6e-05 to 12.31s, 4003 tick lines written, no begin_play -- a graph is free to
+        // move entities, fire events and write VARs, so browsing a level mutated it.
         // Same condition as the framework tick groups above, deliberately: one spelling, not two.
         if (!spawnTestClass_.empty() || aver_fw_play_state() == AVER_FW_PLAY_PLAYING)
             scripts_.tickGraphClassInstances(t.dt);
@@ -5667,7 +5683,8 @@ public:
     // (aver::trifactor::ClusterAdapt). `thresholdPx` is the pixel budget passed to
     // chooseLevelCached/screenSpaceErrorPx.
     // NOW ON BY DEFAULT: it was off, reproducing pre-existing behaviour of drawing every instance at
-    // LOD 0 always. Measured on Electric Dreams at --no-vsync: 102.7ms median off, 76.7ms on.
+    // LOD 0 always. Measured on Electric Dreams at --no-vsync: 102.7ms median / 153.0ms p90 off,
+    // 76.7ms median / 127.3ms p90 on.
     void setLodSelect(bool on, f32 thresholdPx) {
 #if AVER_MODULE_SCENE && AVER_MODULE_TRIFACTOR
         lodSelectEnabled_ = on;
@@ -6074,9 +6091,10 @@ public:
             // left D3D12Device::upscaler_ dangling and the next frame's composite crashed on freed
             // memory -- turning AverSR ON then OFF crashed the editor.
             // THE GUARD ALREADY EXISTED AND HAD NO CALLERS: clearAverSrUpscaler's own comment says
-            // exactly this, and the teardown path above describes the same bug but fixes it INLINE
-            // rather than calling the helper. This, the only case a user can reach from the UI, was
-            // left open.
+            // "Detaches before destruction, so the device can never hold a dangling upscaler", and the
+            // teardown path above describes the same bug ("--edge-aa's first --frames run crashed
+            // (SIGSEGV) AT PROCESS EXIT") but fixes it INLINE rather than calling the helper. This, the
+            // only case a user can reach from the UI, was left open.
             // applyUpscalerSlot rather than setUpscaler(nullptr): the slot resolves to edge-AA if that
             // is on; clearing it outright would silently switch --edge-aa off as a side effect.
             applyUpscalerSlot(dev);
@@ -6210,7 +6228,9 @@ public:
     void setProbe(u32 x, u32 y) { probeX_ = x; probeY_ = y; }                    // --probe X Y
     void setProbeRel(f32 u, f32 v) { probeU_ = u; probeV_ = v; }                 // --probe-rel U V
     // --cam X Y Z PITCH YAW: places the viewport camera outright, cm/degrees -- a capture tool since
-    // every other way into this camera either frames the level or needs a real mouse.
+    // every other way into this camera either frames the level (always pitch -31 deg, horizon just off
+    // the top edge) or needs a real mouse, so nothing headless could aim at the sky, and the sky is the
+    // one thing no gate covers. Applied last, after level framing.
     // --cam-wobble DEG PERIOD: swing the yaw sinusoidally about wherever the camera is aimed.
     // A SINE THAT RETURNS TO ZERO, not a one-way pan: comparing a moving run against a still one AT
     // THE SAME PIXEL needs the probe to land on the same geometry, and sin() is zero at every whole
@@ -7035,7 +7055,8 @@ private:
         voxiRenderer_.setSettings(vx.settings());
         // A manifest that names Path Tracing explicitly should actually (de)register PtSceneView at
         // load: PathTracing needs an explicit register/unregister step (syncPtSceneView(), called
-        // later this frame or on the next onUpdate() for a mid-session open). Guarded on
+        // later this frame or on the next onUpdate() for a project opened mid-session via this same
+        // function at line ~4615). Guarded on
         // project_.pathTracing >= 0 -- i.e. actually PRESENT -- so a project stating nothing never
         // silently overrides a view --pt-scene or the settings combo already asked for.
         // A COMMAND-LINE FLAG OUTRANKS THE MANIFEST, AND NEITHER IS ALLOWED TO BE SILENT.
@@ -7468,7 +7489,8 @@ private:
         const int32_t gm = aver_fw_find_class_with_flags(AVER_FW_CLASS_GAME_MODE);
         if (gm == 0) {
             // scene:: is safe here without a further guard: root CMakeLists forces
-            // AVER_MODULE_FRAMEWORK off when SCENE is off, and this whole function is #if FRAMEWORK.
+            // AVER_MODULE_FRAMEWORK off when SCENE is off (CMakeLists.txt:169-171), and this whole
+            // function is #if FRAMEWORK.
             // NO GameMode MEANS A PLAIN FLYING CAMERA, what Unreal hands you.
             // It used to SPAWN THE DRONE and possess it: the drone only moves if the project named a
             // graph (nothing could before DRONE.GRAPH), and the camera FOLLOWS a play-started drone as
@@ -13952,7 +13974,8 @@ private:
     }
 
     // --resize-cycle N: resize the real window every N frames during a bounded run.
-    // WHY: every headless lever (--render-scale, --aversr-cycle) changes the SCENE size through
+    // WHY THIS EXISTS: "Resizing the window crashed my GPU" was a report I could not reproduce.
+    // Every headless lever (--render-scale, --aversr-cycle) changes the SCENE size through
     // rebuildSceneTargets, a different path from D3D12Device::resize, whose releasePostTargets() does
     // NOT recreate targets in the same call -- handles read 0 for a frame while a binding set still
     // points at the freed texture. Only a real window resize opens that path.
@@ -15256,9 +15279,10 @@ private:
             }
         }
         // 50cm half-extent applied to a mesh normalised so its rotor-tip diagonal reach is exactly
-        // 1.0 gives a HUB-to-hub diagonal span of 80cm, a prop-tip-to-prop-tip diagonal of 100cm, and
-        // a straight footprint of about 76.6cm -- a mid-size camera/mapping drone, not a car
-        // (400-500cm) or a toy (25-40cm hub-to-hub): comfortably "drone-sized".
+        // 1.0 gives a HUB-to-hub diagonal span of 2*0.80*50cm = 80cm, a prop-tip-to-prop-tip diagonal
+        // of 2*1.00*50cm = 100cm, and a straight footprint of about 2*0.7657*50cm ~= 76.6cm -- a
+        // mid-size camera/mapping drone, not a car (400-500cm) or a toy (25-40cm hub-to-hub):
+        // comfortably "drone-sized".
         // Reusing kEditorCubeHalf rather than a second size dial: the SAME "how big does a built-in primitive spawn" constant the cube used.
         xf.scale = Vec3{kEditorCubeHalf, kEditorCubeHalf, kEditorCubeHalf};
 
