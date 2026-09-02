@@ -456,8 +456,22 @@ rather than being dropped: the last edit is the one being waited on.
 
 `averdesign` (`scripting/csharp/Aver.Design/`, staged to `bin/Tools/`) parses a `.cs` with
 `Microsoft.CodeAnalysis.CSharp` and prints what it declares as JSON. It is the repo's **only** NuGet
-consumer; Roslyn is MIT and ships inside the .NET SDK, so the restore resolves from the machine's
-package cache with no network.
+consumer; Roslyn is MIT, and the package is **checked in** at `third_party/nuget` with the repo-root
+`NuGet.config` naming that folder as the only source, so the restore needs no network.
+
+> **This paragraph used to say the restore was offline because Roslyn "ships inside the .NET SDK".
+> That was false.** The SDK carries Roslyn as the compiler's own DLLs under `Roslyn/bincore`; the
+> only restorable `.nupkg` it ships is `FSharp.Core`, under `FSharp/library-packs`. The package sat
+> in the machine's cache because something had fetched it from nuget.org once, and a first build on a
+> clean machine would have gone to the network for it. Vendoring is what made the sentence true.
+
+The pin is **5.6.0**, the newest Roslyn on the `release/stable` branch — not 5.9.0, which is what the
+installed SDK's own `csc` is, because 5.9.0 is built from `release/insiders` and depends on a
+prerelease analyzer package. It moved off 4.13.0 because `csc -langversion:?` ends `13.0 14.0
+(default)` while Roslyn 4.13 stops at C# 13, and `Program.cs` never inspects diagnostics: a construct
+the parser does not know recovers silently rather than failing. **On measurement that gap changed no
+output** — twelve fixtures, four C# 14 constructs in three positions each, byte-identical JSON from
+4.13.0 and 5.6.0 — so this closed a latent hazard rather than fixing a bug.
 
 **It runs only on `Malformed`.** That status means the text has left the locked grammar rather than
 that the text is wrong. A file the scanner reads is never re-read by the slower parser, and a file
@@ -503,6 +517,9 @@ These block a start; none is answerable from the code alone.
 5. **Where `averdesign` is built, staged and versioned.** It would be the repo's *first* NuGet
    consumer: no project here has a `PackageReference`, and there is no `NuGet.config`,
    `Directory.Build.props` or `.sln`. `Sample.Game` is in no CMakeLists at all.
+   *Answered since:* built by `modules/scripting/CMakeLists.txt` into `bin/Tools/`, pinned at Roslyn
+   5.6.0, vendored at `third_party/nuget`, and there is now a repo-root `NuGet.config` and
+   `global.json` — still no `Directory.Build.props` or `.sln`.
 6. **Whether `DESIGNER_REWRITE.md` is being amended.** It says of the user half: *"The editor never
    reads or writes a byte of it."* `Configure` lives there. A class-defaults panel needs to read it —
    so either the document changes or that panel does not ship.

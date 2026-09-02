@@ -17,8 +17,17 @@
        Nothing about F# changes either argument.
 
        LICENCE: FSharp.Core is MIT. It is not a new third-party dependency either — the .NET SDK
-       carries it at sdk/<version>/FSharp/library-packs/FSharp.Core.<v>.nupkg, so the restore below
-       resolves offline from the machine, exactly like Microsoft.CodeAnalysis does for averdesign.
+       carries it at sdk/<version>/FSharp/library-packs/FSharp.Core.<v>.nupkg, and the SDK injects that
+       folder as an extra restore source rather than as a NuGet source, so this resolves offline even
+       with the repository's NuGet.config clearing every source but third_party/nuget. Measured, not
+       assumed: restoring Aver.Pcg.fsproj into an empty packages folder pulls fsharp.core and nothing.
+
+       THE COMPARISON THIS USED TO DRAW WITH ROSLYN WAS WRONG, and is corrected rather than deleted
+       because it is a mistake worth being able to find. It read "exactly like Microsoft.CodeAnalysis
+       does for averdesign". The SDK ships Roslyn only as the compiler's own DLLs under
+       Roslyn/bincore, never as a restorable .nupkg; library-packs holds FSharp.Core and nothing else.
+       Roslyn came off nuget.org the first time anyone built this tree. It is offline now only because
+       it is checked in at third_party/nuget, which is a different mechanism entirely.
 
        NO reference to Aver.Scripting. This assembly is a pure library: the bridge's CheckApiVersion
        skips an assembly that references neither Aver.Scripting nor Aver.Framework, which is the

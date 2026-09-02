@@ -181,7 +181,7 @@ Every binary that must ship, with what actually pulls it in and whether it may b
 | `Scripting\Aver.{Framework,Scene,Scripting,UI}.dll` + `Aver.Scripting.Bridge.*` | ours | ours | yes |
 | `Binaries\Scripts\*.dll` | the project's | the project's | yes |
 | `FSharp.Core.dll` | .NET SDK `library-packs` | **MIT** | yes **if** F# is used — **currently in NO allowlist section, so it neither ships nor gets a notice.** Newly *redistributed* the moment a game ships. |
-| `Microsoft.CodeAnalysis(.CSharp).dll` + 26 satellites | `bin\Tools\` | **MIT** | **NO.** No game needs a compiler. Note in passing: these ship in the *engine* payload today and `THIRD-PARTY-NOTICES.txt` never mentions Roslyn — MIT requires the copyright notice. That is a live compliance miss in `stage-payload.ps1`. |
+| `Microsoft.CodeAnalysis(.CSharp).dll` + 26 satellites | `bin\Tools\` | **MIT** | **NO.** No game needs a compiler. Note in passing: these ship in the *engine* payload today and `THIRD-PARTY-NOTICES.txt` never mentioned Roslyn — MIT requires the copyright notice. **Fixed:** `stage-payload.ps1` now emits a Roslyn section whenever it finds `Microsoft.CodeAnalysis*.dll` in the staged tree, concatenating `third_party/nuget/LICENSE.roslyn.txt`. The licence file had to be written rather than vendored: the packages declare MIT by SPDX expression and carry no licence text of their own. |
 | `Aver.Audio.Abi.dll` | ours | ours | **NO** — zero callers (see (b)) |
 
 ### The one that is missing and is a hard blocker

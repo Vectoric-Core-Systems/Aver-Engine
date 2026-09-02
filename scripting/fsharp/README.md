@@ -27,18 +27,28 @@ no new compile mechanism at all** — the two places the engine already compiles
 
 | | Where | What it runs |
 |---|---|---|
-| build time | `modules/scripting/CMakeLists.txt` | `dotnet build <proj> -c Release -o <dir>` |
-| run time | `ToolsMenu::startCompile` | `dotnet build <proj> --nologo -o <dir>` |
+| build time | `modules/scripting/CMakeLists.txt` | `dotnet build <proj> -c Release --nologo -v quiet -p:UseSharedCompilation=false -o <dir>` |
+| run time | `ToolsMenu::startCompile` | `dotnet build <proj> -c Release -p:UseSharedCompilation=false --nologo -o <dir>` |
+
+The two rows used to differ in a way nobody had decided: the run-time one passed **no `-c`**, so a
+project's own `Scripts.dll` was built Debug while every contract assembly it referenced was built
+Release. They now agree. `-p:UseSharedCompilation=false` is on both because `VBCSCompiler.exe`
+outlives the build holding its referenced assemblies open, and those are exactly the files the next
+build overwrites — it failed a gate run twice; the long version is in `modules/scripting/CMakeLists.txt`.
 
 **FSharp.Compiler.Service was the alternative and was rejected.** It is the F# analogue of Roslyn and
 its licence is fine (MIT), but two things count against it here, both checked rather than assumed:
 
-- **It does not restore offline on this machine.** `C:\Users\User\.nuget\packages\` contains exactly
-  one F# package, `fsharp.core`, and the SDK's offline `library-packs` folder contains exactly one
-  `.nupkg`, `FSharp.Core.10.1.302.nupkg`. The SDK does ship `FSharp.Compiler.Service.dll`
-  (38.6 MB, under `sdk/10.0.302/FSharp/`) but that is `fsc`'s own copy, not something a
-  `PackageReference` resolves. Adding it would make the first build of this tree need the network,
-  which no other part of it does.
+- **It does not restore offline on this machine.** The SDK's offline `library-packs` folder contains
+  exactly one `.nupkg` — `FSharp.Core.<v>.nupkg`. The SDK does ship `FSharp.Compiler.Service.dll`
+  (38.6 MB, under `sdk/<version>/FSharp/`) but that is `fsc`'s own copy, not something a
+  `PackageReference` resolves. Adding it would make the first build of this tree reach the network.
+  *(As first written this bullet named `10.1.302` and `sdk/10.0.302`, and the SDK has since moved to
+  10.0.400 / `FSharp.Core.10.1.400`. The version numbers are dropped rather than re-pinned: the
+  argument does not turn on them, and a number in prose is a number that goes stale unwatched.)*
+  *(It also closed "which no other part of it does" — that was wrong. `Microsoft.CodeAnalysis` did
+  reach the network, despite three comments claiming otherwise. It no longer does, because the
+  package is now vendored at `third_party/nuget`; see the repo-root `NuGet.config`.)*
 - **It means hosting a compiler in a process whose job is to draw frames.**
   `scripting/csharp/Aver.Design/Aver.Design.csproj` already argued that case for Roslyn and settled it
   the other way. Nothing about F# reopens it.
@@ -58,8 +68,13 @@ into it.
 
 FSharp.Core is **MIT**, and it is not a new third-party dependency either: the .NET SDK carries it at
 `sdk/<version>/FSharp/library-packs/FSharp.Core.<v>.nupkg`, so the restore resolves from the machine
-with no network — measured, `project.assets.json` resolves `FSharp.Core/10.1.302`, the version in that
-folder. Installed SDK on this machine: **10.0.302** only (`dotnet --list-sdks`).
+with no network. Re-measured after the repo-root `NuGet.config` cleared every source but
+`third_party/nuget`: restoring `Aver.Pcg.fsproj` into an empty packages folder pulls `fsharp.core` and
+nothing else, because the SDK injects `library-packs` through the MSBuild property
+`RestoreAdditionalProjectSources` rather than as a NuGet source, which is not what `<clear/>` clears.
+
+The installed SDK is pinned by the repo-root `global.json` rather than described here, so this
+paragraph no longer names a version to go stale. `dotnet --version` at the repo root is the answer.
 
 ## What is here
 

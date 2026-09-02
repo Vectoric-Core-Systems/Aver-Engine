@@ -240,8 +240,10 @@ A file with no region — the single-mesh actor declared on the class — is a *
 
 **The Roslyn backend exists.** `averdesign` is a console tool at
 `scripting/csharp/Aver.Design/`, staged to `bin/Tools/`, built on `Microsoft.CodeAnalysis.CSharp`
-(MIT, and already in the SDK's package cache, so it restores offline). It is the repo's only NuGet
-consumer.
+(MIT, pinned at 5.6.0 and **checked in** at `third_party/nuget`, so it restores offline). It is the
+repo's only NuGet consumer. This used to say the package was "already in the SDK's package cache" —
+the SDK ships Roslyn as compiler DLLs, never as a package, so that was wrong; see
+[ACTOR_EDITOR.md §4d](ACTOR_EDITOR.md).
 
 It runs **only** when the builtin scanner returns `Malformed`, which is exactly the signal that the
 text has left the locked grammar of `docs/DESIGNER_REWRITE.md` rather than that the text is wrong.

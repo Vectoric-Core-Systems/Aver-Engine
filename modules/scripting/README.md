@@ -290,6 +290,28 @@ All of it is optional. With no `dotnet` on `PATH` there is nothing to build the 
 says so at configure time and skips the rules, and the host declines at run time — the same path a
 user machine with no runtime takes.
 
+### The toolchain the managed half is built with
+
+Three files at the repository root, none of which existed before, decide what compiles these
+assemblies. They are here rather than in a comment inside them because two of the three are formats
+that cannot carry one.
+
+- **`global.json`** pins the SDK: `10.0.400`, `rollForward: latestMinor`, `allowPrerelease: false`.
+  21 projects target `net10.0` and, until this existed, did so against whatever SDK the machine
+  happened to have. `latestMinor` accepts any installed 10.x from 10.0.400 up, so a newer SDK is
+  fine and a .NET 9 machine fails at `dotnet` with a sentence naming the version it wanted, instead
+  of failing later inside MSBuild with "does not support targeting .NET 10.0".
+  **It carries no comments.** The SDK's reader may well tolerate them; whether the whole managed
+  build starts is not the place to find out.
+- **`NuGet.config`** clears every inherited source and names `third_party/nuget` as the only one, so
+  a package comes from the checkout or the restore fails and says which. Its own comment carries the
+  reasoning.
+- **`third_party/nuget/`** holds the three vendored `.nupkg` (Roslyn 5.6.0 and its two dependencies),
+  27 MB, beside dxc and imgui and under the same permissive-licence rule.
+
+None of the three reaches a **user's** project: `ToolsMenu::startCompile` runs `dotnet` with the
+project's own directory as the working directory, and these are found by walking up from there.
+
 ## Trying it
 
 ```

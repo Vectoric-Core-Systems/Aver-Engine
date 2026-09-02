@@ -735,7 +735,20 @@ void ToolsMenu::startCompile(const std::string& csproj, const std::string& outDi
         std::string out;
         int code = -1;
 #if defined(_WIN32)
-        const std::wstring cmd = L"dotnet build \"" + widen(csproj) + L"\" --nologo -o \"" +
+        // -c Release AND -p:UseSharedCompilation=false, both of which this command used to omit.
+        //
+        // -c Release because omitting it means Debug, which is MSBuild's default and was nobody's
+        // decision: modules/scripting/CMakeLists.txt builds every contract assembly the project
+        // references (Aver.Framework, Aver.Scene, Aver.UI, Aver.Physics) with -c Release, so a
+        // project's own Scripts.dll was the one Debug assembly in a folder of Release ones.
+        //
+        // -p:UseSharedCompilation=false for the reason written out at length in that same file: the
+        // compiler server keeps the assemblies it referenced open for minutes after it answers, and
+        // the ones it references here are exactly the ones the NEXT build has to overwrite. This is
+        // the invocation most likely to leave one running, because the editor can be closed a second
+        // after a compile and the server outlives it.
+        const std::wstring cmd = L"dotnet build \"" + widen(csproj) +
+                                 L"\" -c Release -p:UseSharedCompilation=false --nologo -o \"" +
                                  widen(outDir) + L"\"";
         if (!runCaptured(cmd, widen(dir), out, code)) {
             out = "Could not start dotnet.";
