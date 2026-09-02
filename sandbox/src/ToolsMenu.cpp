@@ -742,14 +742,15 @@ void ToolsMenu::startCompile(const std::string& csproj, const std::string& outDi
         // references (Aver.Framework, Aver.Scene, Aver.UI, Aver.Physics) with -c Release, so a
         // project's own Scripts.dll was the one Debug assembly in a folder of Release ones.
         //
-        // -p:UseSharedCompilation=false for the reason written out at length in that same file: the
-        // compiler server keeps the assemblies it referenced open for minutes after it answers, and
-        // the ones it references here are exactly the ones the NEXT build has to overwrite. This is
-        // the invocation most likely to leave one running, because the editor can be closed a second
-        // after a compile and the server outlives it.
+        // -p:UseSharedCompilation=false and -nodeReuse:false for the reasons written out at length in
+        // that same file. Both are needed and they cover different processes: the compiler server
+        // holds the assemblies it REFERENCED (bin/Scripting/*.dll), the MSBuild worker nodes hold the
+        // ones they WROTE (obj/**/*.dll), and both outlive the build. This is the invocation most
+        // likely to strand either, because the editor can be closed a second after a compile and
+        // neither pool goes with it.
         const std::wstring cmd = L"dotnet build \"" + widen(csproj) +
-                                 L"\" -c Release -p:UseSharedCompilation=false --nologo -o \"" +
-                                 widen(outDir) + L"\"";
+                                 L"\" -c Release -p:UseSharedCompilation=false -nodeReuse:false"
+                                 L" --nologo -o \"" + widen(outDir) + L"\"";
         if (!runCaptured(cmd, widen(dir), out, code)) {
             out = "Could not start dotnet.";
             code = -1;

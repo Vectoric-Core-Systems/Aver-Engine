@@ -44,10 +44,29 @@ endif()
 # OUTPUT/DEPENDS rules below skip it entirely when nothing changed. So the server was buying almost
 # nothing and charging a file lock for it.
 #
-# NOT ALSO -nodeReuse:false. MSBuild's worker nodes linger too and could in principle hold the same
-# files, but that has not been observed here and a flag added on suspicion is a flag nobody can later
-# tell was needed. If a lock survives this, that is the next thing to try.
-set(AVER_DOTNET_BUILD_FLAGS -c Release --nologo -v quiet -p:UseSharedCompilation=false)
+# -nodeReuse:false IS THE SECOND HALF, AND IT WAS ADDED ON EVIDENCE. This block first shipped saying
+# MSBuild's worker nodes "could in principle hold the same files, but that has not been observed here",
+# and that a flag added on suspicion is one nobody can later tell was needed. Twenty minutes later a
+# Release build failed with
+#
+#   CSC : error CS2012: Cannot open '...\Aver.Framework\obj\x64\Release\net10.0\Aver.Framework.dll'
+#         for writing -- the process cannot access the file because it is being used by another process
+#
+# and the machine held NINE dotnet.exe processes, every one of them
+# `MSBuild.dll /nodemode:1 /nodeReuse:true`, all created during the PREVIOUS build. No VBCSCompiler:
+# that half of the fix was working. The worker nodes are a separate pool with its own lifetime, they
+# survive the build that spawned them, and a reused node brings the previous build's open handles with
+# it.
+#
+# The two flags are therefore not alternatives. UseSharedCompilation=false stops the COMPILER server
+# holding bin/Scripting/*.dll; nodeReuse:false stops the BUILD nodes holding obj/**/*.dll. Removing
+# either one leaves a process alive that the next build has to write past.
+#
+# Note the shape of the evidence: a single-project `dotnet build` spawns no worker nodes at all, so an
+# A/B on one project shows zero either way. Only the full CMake build, which fires eight of these,
+# reproduces it -- which is why the first pass through here saw nothing to fix.
+set(AVER_DOTNET_BUILD_FLAGS -c Release --nologo -v quiet
+                            -p:UseSharedCompilation=false -nodeReuse:false)
 
 set(AVER_CSHARP_DIR ${CMAKE_SOURCE_DIR}/scripting/csharp)
 set(AVER_BRIDGE_PROJ ${AVER_CSHARP_DIR}/Aver.Scripting.Bridge/Aver.Scripting.Bridge.csproj)
