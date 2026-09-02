@@ -13,6 +13,7 @@
 // byte-identically through GraphEditor's real save() path (not just the pure autoLayoutPositions()
 // function in isolation, which GraphEditorGeometryTest already covers).
 #include "GraphEditor.hpp"
+#include "LevelClassSave.hpp"
 
 #include "aver/core/Log.hpp"
 
@@ -1335,6 +1336,59 @@ static void testContentBrowserStarterOpensAndKeepsItsClass() {
     std::filesystem::remove_all(dir, ec);
 }
 
+static void testClassPlacementsCarryTheEditorsMoves() {
+    AVER_INFO("=== a moved graph-class placement survives the save ===");
+
+    // THE BUG THIS ENCODES. saveLevel used to write class placements straight from the copy it read
+    // off disk, defended by a comment saying "the editor cannot currently EDIT a class placement
+    // (there is no entity to select and drag)". The premise was false: spawnClassPlacements spawns a
+    // real entity per placement, aver_fw_spawn's handle IS a scene entity, and the World Outliner
+    // lists anything with a mesh or a name. So you could select a placed graph class, drag it, save,
+    // reload -- and find it exactly where it started, with nothing logged. A discarded edit.
+
+    std::vector<fmt::OcWorldPlacement> authored(3);
+    for (auto& p : authored) { p.x = 1; p.y = 2; p.z = 3; p.sx = p.sy = p.sz = 1; }
+    authored[0].className = "AN_Alpha";
+    authored[1].className = "AN_Beta";
+    authored[2].className = "AN_Gamma";
+    authored[2].snapToGround = true;
+    authored[2].z = 25;            // an OFFSET above the ground, not a height
+
+    // Placement 0 never spawned -- its class was not declared, which is a warning and not an error,
+    // and is the ordinary state of a level opened before its project's scripts are compiled.
+    // THIS IS THE PAIRING TRAP: the first live entity is the SECOND placement.
+    std::vector<editor::LevelClassInstance> live = {{1, 41}, {2, 42}};
+
+    const auto transformOf = [](int32_t e, Transform& xf) {
+        if (e == 41) { xf.position = Vec3{100, 200, 300}; xf.scale = Vec3{2, 2, 2}; return true; }
+        if (e == 42) { xf.position = Vec3{-50, -60, 999}; xf.scale = Vec3{1, 1, 1}; return true; }
+        return false;   // anything else is gone
+    };
+
+    std::vector<fmt::OcWorldPlacement> out;
+    editor::appendClassPlacements(authored, live, transformOf, out);
+
+    check(out.size() == 3, "every placement is written -- none is dropped for want of an entity");
+    if (out.size() != 3) return;
+
+    check(out[0].className == "AN_Alpha" && out[0].x == 1 && out[0].y == 2 && out[0].z == 3,
+          "the one with no live entity is written EXACTLY as it was read");
+
+    check(out[1].className == "AN_Beta",
+          "the entity paired with placement 1 landed on placement 1, not placement 0 -- pairing is by "
+          "recorded index, and the two vectors are not parallel when a class fails to resolve");
+    check(out[1].x == 100 && out[1].y == 200 && out[1].z == 300,
+          "and it carries the position the editor moved it to");
+    check(out[1].sx == 2 && out[1].sy == 2 && out[1].sz == 2, "and the scale");
+
+    check(out[2].x == -50 && out[2].y == -60,
+          "a SNAPPED placement moves in x and y like any other");
+    check(out[2].z == 25,
+          "but keeps its authored z, because snap makes z an offset above the ground and the live "
+          "entity's z is the resolved world height -- writing 999 back would bake the terrain in and "
+          "the placement would climb on every save/load");
+}
+
 static void testWrongExtensionIsRejectedByFactory() {
     AVER_INFO("=== factory only claims .ocgraph ===");
     check(makeGraphEditor("something.ocmesh") == nullptr, "makeGraphEditor declines a .ocmesh path");
@@ -1373,6 +1427,7 @@ int main() {
     testLoadFailure();
     testWrongExtensionIsRejectedByFactory();
     testContentBrowserStarterOpensAndKeepsItsClass();
+    testClassPlacementsCarryTheEditorsMoves();
 
     AVER_INFO("======== {} failure(s) ========", g_failures);
     return g_failures;

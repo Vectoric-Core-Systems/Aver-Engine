@@ -76,6 +76,7 @@
 #include "aver/ui/ui_abi.h"
 
 #include "ProjectBrowser.hpp"
+#include "LevelClassSave.hpp"
 #include "ProjectScaffold.hpp"
 #include "ClusterMaterialShader.hpp"
 
@@ -17767,7 +17768,8 @@ private:
     // copy: browsing a level with a placed class in it runs that class's OnTick immediately, even
     // outside Play.
     void spawnClassPlacements() {
-        for (const fmt::OcWorldPlacement& p : classPlacements_) {
+        for (usize pi = 0; pi < classPlacements_.size(); ++pi) {
+            const fmt::OcWorldPlacement& p = classPlacements_[pi];
             const int32_t c = aver_fw_class_find(p.className.c_str());
             if (c == 0) {
                 AVER_WARN("[Level] placement names class '{}', which is not declared -- skipped", p.className);
@@ -17799,7 +17801,7 @@ private:
                           p.className, pos3[0], pos3[1], pos3[2]);
                 continue;
             }
-            levelClassInstances_.push_back(e);
+            levelClassInstances_.push_back(ClassInstance{pi, e});
         }
         if (!levelClassInstances_.empty())
             AVER_INFO("[Level] {} class instance(s) placed -- an entity exists for each; whether its graph "
@@ -17952,7 +17954,7 @@ private:
         // BEFORE the raw-entity loop below, and through aver_fw_destroy rather than world.destroy() --
         // see GameLevel::unload's identical comment for why (the managed-dispatch unbind hook is what
         // releases a graph-class instance's GraphHost/VAR storage).
-        for (const int32_t e : levelClassInstances_) aver_fw_destroy(e);
+        for (const ClassInstance& ci : levelClassInstances_) aver_fw_destroy(ci.entity);
         levelClassInstances_.clear();
         classPlacements_.clear();
 #endif
@@ -18138,11 +18140,36 @@ private:
         // save"), one field further along, and it is worse because the thing dropped is not a
         // property of an object but the object itself.
         //
-        // Written from classPlacements_ verbatim rather than rebuilt: the editor cannot currently
-        // EDIT a class placement (there is no entity to select and drag), so the copy it read in is
-        // still the truth, and passing it straight through is both correct and the only honest thing
-        // to do until that changes.
-        for (const fmt::OcWorldPlacement& cp : classPlacements_) w.placements.push_back(cp);
+        // AND THE TRANSFORM IS REBUILT FROM THE LIVE ENTITY, WHICH IT USED TO NOT BE.
+        //
+        // This wrote classPlacements_ verbatim, defended by "the editor cannot currently EDIT a class
+        // placement (there is no entity to select and drag)". THAT PREMISE WAS FALSE. spawnClassPlacements
+        // spawns a real entity per placement, aver_fw_spawn's handle IS a scene entity
+        // (framework_abi.h:74), and the World Outliner lists anything carrying a mesh or a name -- so a
+        // placed graph class has always been selectable and draggable. What did not happen was the save
+        // reading any of it back: you could move one, save, reload, and find it exactly where it was,
+        // with nothing said. Silent discard of an edit the editor let you make.
+        //
+        // PAIRED BY RECORDED INDEX, never by position -- see ClassInstance's own comment for why the
+        // two vectors are not parallel.
+        //
+        // A DEAD OR MISSING ENTITY FALLS BACK TO THE FILE'S COPY rather than dropping the placement:
+        // a class that failed to resolve at load has no entity, and losing its line would be the very
+        // defect the paragraph above this one records having fixed.
+        // The pairing and the snap rule live in LevelClassSave.hpp, header-only and Core+Formats
+        // only, so a test can drive them with a fake lookup. SandboxApp is add_executable-only; a
+        // loop written out here would be the one part of the level save nothing could check.
+        editor::appendClassPlacements(
+            classPlacements_, levelClassInstances_,
+            [&world](int32_t e, Transform& xf) {
+                const scene::Entity ent = static_cast<scene::Entity>(e);
+                if (!world.valid(ent)) return false;
+                const auto* loc = world.component<scene::CLocal>(ent, scene::kComponentLocal);
+                if (!loc) return false;
+                xf = loc->xf;
+                return true;
+            },
+            w.placements);
 
         std::string why;
         if (!fmt::saveOcworld(path, w, &why)) { AVER_WARN("[Level] save failed: {}", why); return false; }
@@ -18249,7 +18276,16 @@ private:
     // levelClassInstances_ is filled) for the full ordering story. Mirrors GameLevel.hpp's own pair
     // of members, one for one.
     std::vector<fmt::OcWorldPlacement> classPlacements_;
-    std::vector<int32_t> levelClassInstances_;
+
+    // WHICH PLACEMENT EACH LIVE INSTANCE CAME FROM, carried explicitly rather than by position.
+    //
+    // This used to be a bare vector<int32_t> and the two were read as index-parallel. They are not:
+    // spawnClassPlacements `continue`s past a class it cannot resolve WITHOUT pushing, so the moment
+    // any placement names an undeclared class -- which is a warning, not an error, and happens to any
+    // level opened before its project's scripts are compiled -- every later entity pairs with the
+    // wrong placement. Saving would then write one placement's position onto another's line.
+    using ClassInstance = editor::LevelClassInstance;
+    std::vector<ClassInstance> levelClassInstances_;
 #endif
 
     // ---------------- chunk streaming (opt-in, Window > Chunk Streaming) ----------------

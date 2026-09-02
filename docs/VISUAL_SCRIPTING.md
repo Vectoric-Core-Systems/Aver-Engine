@@ -400,8 +400,9 @@ running. It is also new, and smaller than what it resembles. Specifically:
   one entity's graph raise an event *on a different entity's* graph. `Fire()` is something a host
   calls into one specific `GraphHost`; it is not something a node can invoke.
 - **No HUD or 2D drawing from a graph.** Nothing in the palette reaches `Aver.UI` — still true,
-  checked against the catalog rather than remembered: 124 nodes across 17 families, none of them a
-  draw call. (This bullet used to say "the 36-node vocabulary", which was the count when it was
+  checked against the catalog rather than remembered: **240 node types across 23 categories** in
+  `sandbox/src/GraphNodeDefs.hpp`, none of them a draw call. (This bullet has now had its number go
+  stale twice -- it said 36, then 124. The claim keeps surviving; the count keeps not.) (This bullet used to say "the 36-node vocabulary", which was the count when it was
   written. The claim survived; the number did not, and a stale number beside a true statement is
   what teaches a reader to stop trusting the statement.)
 - **No `String` pin.** `PinType` has exactly four members — `Float`, `Int`, `Bool`, `Exec`. Every
@@ -421,13 +422,19 @@ running. It is also new, and smaller than what it resembles. Specifically:
   `CLASS AN_Player Character` is exactly this, proven by a headless run. (This paragraph used to say
   a project still needed one minimal C# subclass for the graph's `CLASS` line to name; that stopped
   being true once `Character` itself became declarable, and this doc had not caught up.)
-- **The editor's Save does not round-trip a class placement.** `saveLevel()` rebuilds every
-  `PLACE` line it writes by walking only the raw mesh/physics entities the ordinary placement path
-  creates — and a class placement, by design (§6, step 2), never gets one of those. Opening a
-  level that has a class placement and hitting Save silently drops that placement's *entire* line,
-  not merely its `class` attribute — there is no raw entity left to reconstruct it from. Until this
-  is fixed, treat a level with class placements as **edit the `.ocworld`/`.ocmap` text directly**,
-  not **load it in the editor and Save**.
+- **~~The editor's Save does not round-trip a class placement.~~ FIXED, TWICE OVER.** This said that
+  opening a level with a class placement and hitting Save silently dropped the placement's entire
+  line, and that the workaround was to edit the `.ocworld`/`.ocmap` text by hand. Both halves of that
+  are now out of date.
+
+  The dropped line was fixed first: `saveLevel` writes `classPlacements_` back out. The *second* half
+  survived longer and was harder to see -- the line was written from the copy read off disk, so a
+  placement you selected and dragged in the viewport was saved exactly where it had been, with
+  nothing logged. The comment defending that said "the editor cannot currently EDIT a class placement
+  (there is no entity to select and drag)", which was false: `spawnClassPlacements` spawns a real
+  entity per placement, `aver_fw_spawn`'s handle IS a scene entity, and the World Outliner lists
+  anything carrying a mesh or a name. Both are fixed; `sandbox/src/LevelClassSave.hpp` holds the
+  rebuild, and `GraphEditorLoadSaveTest` fails against the old behaviour.
 
 A few smaller, related edges, already covered in more depth above: an undeclared/misspelled
 `CLASS` parent fails almost silently (§2), parenting one graph class to another is file-sort-order

@@ -80,7 +80,11 @@ target_compile_definitions(GraphEditorLoadSaveTest PRIVATE
   # source fixture lives," matching AVER_OCGRAPH_FIXTURE's own precedent just above.
   AVER_OCGRAPH_ATTR_FIXTURE="${CMAKE_SOURCE_DIR}/scripting/csharp/Aver.Graph.Tests/attribute_edit_test.ocgraph"
   AVER_OCGRAPH_ATTR_FIXTURE_OUTPUT="${CMAKE_SOURCE_DIR}/scripting/csharp/Aver.Graph.Tests/attribute_edit_test.output.ocgraph")
-target_link_libraries(GraphEditorLoadSaveTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+# Aver.World is here for its HEADERS ONLY: LevelClassSave.hpp (the class-placement save path this
+# suite covers) includes aver/world/LevelTransform.hpp for eulerDegFromQuat, so that the level save
+# and every other level path agree on what "yaw 90" means rather than each rolling its own. The
+# functions there are `inline`, so this adds an include directory and no object code.
+target_link_libraries(GraphEditorLoadSaveTest PRIVATE Aver.Formats Aver.World Aver.Core Aver.Platform)
 set_target_properties(GraphEditorLoadSaveTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # BtEditorTest -- the .ocbt behaviour-tree editor tab's headless core: the four structural edits
