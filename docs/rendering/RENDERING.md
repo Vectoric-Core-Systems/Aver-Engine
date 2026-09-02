@@ -296,7 +296,7 @@ The `PtSceneView::AlbedoResolver` is a `std::function<bool(BindingSetHandle, con
 
 ### 4b.5 RHI change: acceleration structures no longer require a window
 
-**Prerequisite for headless path-tracer runs:** `D3D12Device::initAccelerationStructures()` was moved from `createSwapchainResources()` to `init()` (commit 43fab37; the call now sits at `D3D12Device.cpp:2102`, drifted from the `1927` first recorded here as the file grew — the function itself is defined at `:2588`). This means DXR 1.1 capability detection and the ray-tracing device (`device5_`) are initialized before any window exists. Previously, headless runs had `device5_ == nullptr` despite RT tier 11 capabilities, silently disabling path tracing. This applies to DX12 only; Vulkan and DX11 have no ray-tracing backend changes (Vulkan already builds structures headless; DX11 has no RT).
+**Prerequisite for headless path-tracer runs:** `D3D12Device::initAccelerationStructures()` was moved from `createSwapchainResources()` to `init()` (commit 43fab37; the call now sits at `D3D12Device.cpp:2100`, drifted again from the `2102` previously recorded here, itself drifted from the `1927` first recorded as the file grew — the function itself is defined at `:2586`). This means DXR 1.1 capability detection and the ray-tracing device (`device5_`) are initialized before any window exists. Previously, headless runs had `device5_ == nullptr` despite RT tier 11 capabilities, silently disabling path tracing. This applies to DX12 only; Vulkan and DX11 have no ray-tracing backend changes (Vulkan already builds structures headless; DX11 has no RT).
 
 ### 4b.6 Runtime toggle: no relaunch required
 

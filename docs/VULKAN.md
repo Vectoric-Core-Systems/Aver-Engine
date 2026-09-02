@@ -99,7 +99,7 @@ that built it:
 - **The whole editor UI**, added in `43a04c8` (2026-08-23, "Vulkan: the editor runs on it"):
   `modules/rhi.vulkan.imgui`'s `ImGuiVulkanUiBackend` is installed from `sandbox/src/SandboxApp.cpp`
   (`rhi::vkb::imgui_backend::create()` then `rhi::vkb::installUiBackend(e.device(), ...)`, around
-  `SandboxApp.cpp:1436`, drifted from `1057-1058`) whenever the live device reports itself as the Vulkan backend. See "The
+  `SandboxApp.cpp:1411`, drifted again from `1436`, itself drifted from `1057-1058`) whenever the live device reports itself as the Vulkan backend. See "The
   two contradictions" below for how this reconciles with an older note claiming the opposite.
 - **Ray tracing and mesh-shader capability queries are real, not deferred.** `VulkanDevice.cpp`
   queries `VK_EXT_mesh_shader` and the acceleration-structure extension set and reports
@@ -151,10 +151,11 @@ directly:
 - It is wired into the build: `CMakeLists.txt:264-272` adds it as a nested subdirectory of the
   `AVER_RHI_VULKAN` block, additionally gated on `AVER_ENABLE_UI` — the same two-level gating
   `modules/rhi.d3d12.imgui` uses.
-- `sandbox/src/SandboxApp.cpp` installs it: the block, now around line 1420 (drifted from 1042 as the
-  file grew), picks one of two `installUiBackend` calls "by what the device actually is" —
-  `rhi::d3d12::installUiBackend` (`SandboxApp.cpp:1429`) for a D3D12 device, `rhi::vkb::installUiBackend`
-  (`SandboxApp.cpp:1436`) for a Vulkan one.
+- `sandbox/src/SandboxApp.cpp` installs it: the block, now around line 1398 (drifted again from the
+  1420 previously recorded here, itself drifted from 1042 as the file grew), picks one of two
+  `installUiBackend` calls "by what the device actually is" — `rhi::d3d12::installUiBackend`
+  (`SandboxApp.cpp:1404`) for a D3D12 device, `rhi::vkb::installUiBackend`
+  (`SandboxApp.cpp:1411`) for a Vulkan one.
 - `43a04c8`'s own commit message claims the result was seen on screen ("menus, toolbar, World
   Outliner, Details, dockspace and the 3D viewport with the scene in it -- now draws on the Vulkan
   backend at 60 FPS"). That claim is not independently reproducible from this pass — this document
@@ -291,8 +292,10 @@ parenthetical is also now inaccurate, per "Why no SDK is needed" above). Turning
   request that somehow failed would still silently fall through to D3D12 with only a warning, exactly
   as the draft described.
 - `scripts/gates.ps1` still has no `-Backend`/`--backend` handling anywhere in it (confirmed:
-  `grep -n backend scripts/gates.ps1` returns nothing), so the 18-gate pixel-probe oracle cannot run
-  against this backend at all yet, let alone assert that a gate run actually used it. This is the
+  `grep -n backend scripts/gates.ps1` returns nothing), so the pixel-probe oracle cannot run
+  against this backend at all yet, let alone assert that a gate run actually used it — 18 gates in
+  `$Gates` when this line was written, 20 now, the count having grown since is itself evidence the
+  oracle keeps changing under a backend that has never once run through it. This is the
   same hole the 2026-08-02 draft flagged, unchanged. Recording `gates.baseline.vulkan.txt` before
   this backend is turned on by default would be recording nothing, silently.
 

@@ -27,14 +27,18 @@ no new compile mechanism at all** — the two places the engine already compiles
 
 | | Where | What it runs |
 |---|---|---|
-| build time | `modules/scripting/CMakeLists.txt` | `dotnet build <proj> -c Release --nologo -v quiet -p:UseSharedCompilation=false -o <dir>` |
-| run time | `ToolsMenu::startCompile` | `dotnet build <proj> -c Release -p:UseSharedCompilation=false --nologo -o <dir>` |
+| build time | `modules/scripting/CMakeLists.txt` | `dotnet build <proj> -c Release --nologo -v quiet -p:UseSharedCompilation=false -nodeReuse:false -o <dir>` |
+| run time | `ToolsMenu::startCompile` | `dotnet build <proj> -c Release -p:UseSharedCompilation=false -nodeReuse:false --nologo -o <dir>` |
 
 The two rows used to differ in a way nobody had decided: the run-time one passed **no `-c`**, so a
 project's own `Scripts.dll` was built Debug while every contract assembly it referenced was built
 Release. They now agree. `-p:UseSharedCompilation=false` is on both because `VBCSCompiler.exe`
 outlives the build holding its referenced assemblies open, and those are exactly the files the next
-build overwrites — it failed a gate run twice; the long version is in `modules/scripting/CMakeLists.txt`.
+build overwrites — it failed a gate run twice. **`-nodeReuse:false` was added to both later, on the
+same kind of evidence**: MSBuild's own worker nodes (as opposed to the compiler server the first flag
+stops) hold `obj/**/*.dll` open across builds the identical way, and only the full multi-project CMake
+build reproduced it — a single-project `dotnet build` spawns no worker nodes at all, so the first pass
+through this file saw nothing to fix. The long version of both is in `modules/scripting/CMakeLists.txt`.
 
 **FSharp.Compiler.Service was the alternative and was rejected.** It is the F# analogue of Roslyn and
 its licence is fine (MIT), but two things count against it here, both checked rather than assumed:
@@ -186,12 +190,19 @@ a default editor run loads no demo and no oracle gate can be made to pick this u
 **Corrected — the PCG API is no longer future work.** This section used to say "no PCG API... the
 next stage depends on this one and is deliberately not started here." `Aver.Pcg` now exists (see "What
 is here" above): deterministic hashing, boundary types built for the F#/C# split this seam proved, and
-a worked forest-scatter example a `PcgScatterBehaviour` actually runs and spawns entities from. Two
-parts of the original claim still hold, unverified-but-not-contradicted: no F#-authored actor or
-behaviour was found (every `AverBehaviour` subclass in the tree, including the PCG sample's, is C#),
-and whether a *second* F# compile path exists for PCG rules a project authors itself — as opposed to
-`Aver.Pcg.SampleRules`, which is a checked-in `.fsproj` the C# sample project references and `dotnet
-build` compiles as one unit — was not settled either way in this pass.
+a worked forest-scatter example a `PcgScatterBehaviour` actually runs and spawns entities from. One
+part of the original claim still holds, unverified-but-not-contradicted: no F#-authored actor or
+behaviour was found (every `AverBehaviour` subclass in the tree, including the PCG sample's, is C#).
+
+**The second F# compile path this section once left unsettled now exists.** `sandbox/src/ProjectScaffold.cpp`'s
+`fsprojText()` (added by `e09691a`, "Sky: a project's sky is an F# PCG graph it owns, not numbers in
+its level") scaffolds `Scripts.FSharp.fsproj` into a new project's own `Content/Scripts/` directory —
+distinct from the checked-in `Aver.Pcg.SampleRules` this seam shipped with — and `Scripts.csproj`
+carries a `ProjectReference` to it guarded by `Condition="Exists(...)"`, so a project's own F# rules
+(the scaffolded `Sky.fs`) build as part of the ordinary `dotnet build` of `Scripts.csproj`, deleting the
+file being the supported way to opt back out to C#-only. `0a9c959` fixed the gap this created for a
+project scaffolded before the reference existed. This is now a project-authoring path, not just this
+seam's own proof.
 
 An F# type *could* derive from `AverBehaviour` and be discovered directly — nothing in the bridge
 prevents it — but that is untested and is not claimed. What is proved is the shape this work was asked

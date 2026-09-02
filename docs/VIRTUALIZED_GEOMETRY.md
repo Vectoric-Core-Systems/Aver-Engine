@@ -186,10 +186,15 @@ struck-through claims are kept, not deleted, because they were the honest state 
   `dispatch`, `drawIndexed`). **Indirect draws are required for GPU-driven rendering; this is a
   gap.**
 
-- **Bindless descriptors NOT implemented:** `RHIResources.hpp:3` states the binding model is
-  "explicit descriptor tables, NOT bindless". RENDERING.md §2.5 lists bindless as a "Tier A"
-  desired future with "Tier B bound fallback for DX11". **Dynamic descriptor indexing is not
-  available.**
+- **Bindless descriptors NOT implemented for the raster path — one narrow exception exists.**
+  `RHIResources.hpp:3` still states the general binding model is "explicit descriptor tables, NOT
+  bindless", and RENDERING.md §2.5 still lists general bindless as a "Tier A" desired future with
+  "Tier B bound fallback for DX11". **Checked this pass:** `createBindlessTextureTable` (same file,
+  `IResourceFactory`) now exists — a fixed-size, shader-indexable texture array, gated behind
+  `DeviceCaps::rtBindlessTextures`, but its own comment is explicit that this is "the one exception"
+  and deliberately not a `BindingSetDesc` extension the raster path could also use. **Dynamic
+  descriptor indexing for cluster/meshlet rendering (a raster or mesh-shader consumer) is still not
+  available**; only the ray-hit shading path has it.
 
 ### Current rendering architecture
 
@@ -320,9 +325,16 @@ error and a per-frame error budget.
 feedback or frustum culling), looks up each cluster's screen-space error, and selects the LOD
 level. Output: per-cluster LOD decision.
 
-**NOT VERIFIED:** The current engine does not populate `ScreenErrorThreshold` (hardcoded to 0.0f,
-`OcMesh.cpp:261`), and it is unclear whether the existing visibility-buffer code or any runtime
-LOD-selection code references it at all.
+**Corrected 2026-09-02 — this used to say the engine never populates `ScreenErrorThreshold` at all,
+which contradicted §2's own correction of the same claim two sections up.** With
+`AVER_MODULE_TRIFACTOR` on, `OcMesh.cpp`'s writer (`:595`, not the previous citation's `:261`, which
+names an unrelated root-meshlet validation check) writes `lods[L].screenError` — a real value
+`buildLodHierarchy()` computed — into `ScreenErrorThreshold`; only a Trifactor-disabled build, or a
+mesh clustering produced nothing for, still gets the all-zero bytes. **What is still NOT VERIFIED,
+and is the part of this concern that survives the correction:** nothing outside `modules/formats`
+and `modules/trifactor` reads `ScreenErrorThreshold` back (checked this pass — no match in
+`sandbox/src/*.cpp` or any `render*` module), so a value now exists on disk with no runtime GPU
+LOD-selection code consuming it yet.
 
 ---
 

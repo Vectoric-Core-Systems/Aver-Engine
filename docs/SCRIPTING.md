@@ -159,17 +159,25 @@ Same honest-status contract as `Pbr`: `StatusOf` / `StatusTextOf` / `IsAvailable
 
 Read this before planning anything. The gap is large and it is not hidden.
 
-**There is no scene API.** You cannot create, find, move, parent or destroy an object from C#. There
-is no way to *assign* a material to an object either — `Pbr` lets you author materials, but nothing
-in script binds one to something in the world.
+**`Aver.Scripting`'s own surface — the one this page documents, `AverBehaviour` plus `Pbr`/`Voxi` —
+has no scene API.** An `AverBehaviour` cannot create, find, move, parent or destroy an object, and
+cannot *assign* a material to one either — `Pbr` lets you author materials, but nothing in this
+assembly binds one to something in the world.
 
-That is not an oversight. `Aver.Scene` — the entity/component world — is designed but unbuilt
-(`modules/scene/` is a README, and `docs/STATUS.md` carries the design). An interim object API would
-have to be replaced wholesale, breaking every script written against it, so none was written. See
-`docs/STATUS.md` for the design and its identity model.
+**This used to be explained by "`Aver.Scene` is designed but unbuilt (`modules/scene/` is a
+README)" — that stopped being true.** `modules/scene/` now has a real `CMakeLists.txt`, five source
+files and a live C ABI (`scene_abi.h`): entities, component pools, transform/hierarchy propagation
+and typed field get/set are implemented and exercised by `SceneTest.exe` (`modules/scene/README.md`'s
+own status line, `docs/STATUS.md` §9 corrects the same stale claim elsewhere in that document too).
+A separate, newer C# surface — `Aver.Framework` (actor classes, `Actors.Spawn`/`Entity`/`SetParent`/
+`DestroyEntity`, and Aver Node graphs built on the same layer) — reaches that world today; see
+**[`VISUAL_SCRIPTING.md`](VISUAL_SCRIPTING.md)** and **[`AVER_NODE_NODES.md`](AVER_NODE_NODES.md)**.
+What remains true, and is this page's actual subject: `Aver.Scripting`'s `AverBehaviour` is not that
+surface, references neither `Aver.Scene` nor `Aver.Framework`, and gets no scene binding by simply
+existing alongside them — the gap this section describes is `AverBehaviour`'s, not the engine's.
 
-Also absent: input, physics, audio, asset loading, and any form of coroutine or timer beyond
-counting `dt` yourself.
+Also absent from `Aver.Scripting` itself: input, physics, audio, asset loading, and any form of
+coroutine or timer beyond counting `dt` yourself.
 
 **What scripting genuinely does today:** it runs real managed code in the engine's process, on the
 frame loop, against the editor's own live material library and renderer settings — and it hot-reloads.

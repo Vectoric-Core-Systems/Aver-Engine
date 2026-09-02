@@ -217,8 +217,8 @@ the corrected ones are.
   a documented exclusion instead.** This entry used to say the gate's `giDrawsKey()` never checked
   `meshVertexBuffer`, so a skinned character's indirect-light contribution froze at whatever pose was
   current when its transform last changed. `modules/render.voxi/src/VoxiRenderer.cpp` (rebuild gate
-  at `806-832`; the actual fix at the `voxelizePass`/`giDrawsKey` call sites, currently ~1253-1257 and
-  ~2328-2353, since this file's line numbers move) now **excludes** any draw whose
+  at `806-832`; the actual fix at the `giDrawsKey`/`voxelizePass` call sites, currently ~1202 and
+  ~2240, since this file's line numbers move) now **excludes** any draw whose
   `dev_->meshVertexBuffer(d.mesh)` is non-zero from both the hash and the injection pass, with the
   code's own comment naming this "a trade rather than a fix": a skinned character now bounces **no**
   indirect light at all, consistently, rather than a stale pose's worth of it silently. Measured on a

@@ -202,7 +202,7 @@ engine.
 
 A normal map read as sRGB is a subtly wrong lighting response that looks like a shading bug rather
 than a decode bug, which is why this is decided by slot in both resolvers' matching
-`pbr::TextureSlot` switch (`SandboxApp.cpp`, currently around line 3656, was cited at 1167; and
+`pbr::TextureSlot` switch (`SandboxApp.cpp`, currently around line 3537, was cited at 1167; and
 `GameContent.cpp`, currently around line 535, was cited at 229 — both numbers have drifted since)
 and not by guessing from the name.
 

@@ -47,7 +47,8 @@ Jolt's sources are **vendored** — MIT, 5.6.0, not edited here. The provenance,
   (`aver_phys_character_grounded`/`ground_state`, kerb step-up, max slope angle); the specific "drops
   a character from 3 m, logs ~1 g, lands at exactly z=0" scenario this line used to describe for
   `--play-test` no longer matches that harness, which now begins Play, holds synthetic `W` for 150
-  frames and logs where the pawn walked to (`SandboxApp.cpp:9431`, `maybePlayTest`) rather than
+  frames and logs where the pawn walked to (`SandboxApp.cpp:9094`, `maybePlayTest`, drifted from the
+  `9431` previously recorded here) rather than
   measuring a drop.
 
 See [docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md) for the full module DAG.

@@ -41,7 +41,8 @@ A project is **additive, never required**: the editor runs exactly as well with 
 - **Never in automation.** The browser is suppressed when `--frames` is present, when a project
   was named on the command line, or when headless. The verification harness drives the editor
   with `--frames` and reads one probe pixel out of the viewport; a full-screen chooser in front
-  of it would take out all 13 oracle gates at once.
+  of it would take out all 20 oracle gates at once (`scripts/gates.ps1`'s `$Gates` array; 13 when
+  this line was first written, since grown).
 - **Older-series projects need `--open-legacy` in automation**, and the bullet above is exactly
   why this is easy to miss: the BROWSER is suppressed, but the *upgrade prompt* is a different
   modal and is not. A project whose `CREATEDWITH` predates the current series is offered an

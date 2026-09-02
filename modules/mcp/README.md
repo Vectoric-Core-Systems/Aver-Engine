@@ -112,7 +112,7 @@ and holding the mutex across it would stall the socket thread for as long as the
 
 **The sandbox does pump it.** Both of this section's former gaps are closed. `SandboxApp` takes a
 `--mcp [port]` flag, calls `mcp_.start(port)`, and pumps one event per frame from `onUpdate` whenever
-`mcp_.listening()` (`SandboxApp.cpp:3108`) — the click-forcing path this module exists for actually
+`mcp_.listening()` (`SandboxApp.cpp:2831`, drifted from `3108`) — the click-forcing path this module exists for actually
 runs today, not just in `tests/mcp`. `registerMcpAbis()` registers `editor`, `physics`, `world` and
 `graph` (see the corrected protocol section above); `framework` and `scene` are not among them, so a
 client should not assume every module in the engine has an ABI seam exposed here yet — only the four

@@ -20,6 +20,14 @@ code that actually run it, not against an earlier design doc — several already
 stale (see the note at the bottom). Where this page shows a `.ocgraph`/`.ocworld` fragment, it is
 lifted from a real file in `test-content/GraphDemo`, not invented for the example.
 
+**A pass against the tree found most of this page's specific `File.cs:NNN` citations pointing at the
+wrong content** — normal line drift from ordinary commits to `GraphHost.cs`, `OcGraphParser.cs`,
+`HostBridge.cs`, `Graph.cs` and `OcWorld.cpp` over time, not any one dramatic edit. The ones this
+pass re-derived now carry a corrected number and say what they used to cite; a handful of the less
+load-bearing ones were left with the file/symbol only, since finding their exact current line was
+not worth the churn against files that will keep moving. Treat every number below as a
+last-known-good pointer, not a promise — grep the named symbol if it doesn't land where expected.
+
 ---
 
 ## 1. What Aver Node is
@@ -73,7 +81,9 @@ one is spawned* (§2). A shipped game never needs a C# compiler on the player's 
 this IL emitter, which is already linked in.
 
 A graph is exactly one of two shapes, decided once from whether it has any `ENTRY` record
-(`GraphHost.LoadFromText`, `GraphHost.cs:248-254`):
+(`GraphHost.LoadFromText`, `GraphHost.cs:274` for the `EntryPoints.Count > 0` check itself, inside a
+method starting at `:244` — drifted from an earlier `:248-254`, which named the same method but not
+the check):
 
 - **No `ENTRY` at all** — a pure dataflow graph. `PARAM entity int` / `PARAM time float` go in,
   0–3 `OUT` floats come out, pulled fresh every tick with no memory between calls. This is the
@@ -94,11 +104,14 @@ CLASS AN_Orbiter Actor
 ```
 
 `CLASS <name> [parentName] [mesh=<path>] [material=<name>] [view=firstperson|thirdperson] [pawn=<className>] [controller=<className>]`
-(`OcGraphParser.cs:210-270`). This is
+(the `"CLASS"` key case, `OcGraphParser.cs:332` onward as of this pass, drifted from an earlier
+`:210-270`, which now falls inside a `PARAM` default-value switch instead). This is
 the Blueprint model, not a component that references a graph: **the graph file is the class
 asset.** `Aver.Scripting.Bridge`'s `HostBridge` reads it and registers it through the *exact same*
 `aver_fw_class_declare` / `aver_fw_class_set_flags(Managed)` / `aver_fw_class_seal` sequence a C#
-`[AverClass]` type goes through (`HostBridge.cs:427-434, 486-509`) — one flat registry, so
+`[AverClass]` type goes through (`HostBridge.cs:599-616` as of this pass, drifted from an earlier
+`:427-434, 486-509`, which now falls on an unrelated `GraphHost` dictionary comment and `GraphFire`
+instead) — one flat registry, so
 `ActorClass.Find("AN_Orbiter")` cannot tell, and does not need to, whether what it found came from
 a graph or from C#.
 
@@ -110,7 +123,10 @@ A few things worth knowing before you rely on this:
   scripting bootstrap, *before* any project script or graph scan runs (`HostBridge.cs:771-793`) —
   so there is always something for a bare `CLASS Foo` to parent to.
 - **`mesh=`/`material=` on the `CLASS` line are class *defaults***, registered as a default
-  `CMeshRenderer` component on the class itself (`Graph.cs:224-231`) — not the same mechanism as a
+  `CMeshRenderer` component on the class itself (the `ClassBuilder.Mesh(...)` call,
+  `HostBridge.cs:608-609` — the previous citation, `Graph.cs:224-231`, named `GraphVariable`'s own
+  persistence comment, a different file entirely; `Graph.cs` only holds the parsed `ClassMesh`/
+  `ClassMaterial` strings themselves, at `:449-450`) — not the same mechanism as a
   `SetMesh`/`SetMaterial` *node*'s own `mesh=`/`material=` attribute, which is a per-invocation
   write. The class default is what a spawned instance looks like before its own `OnStart` has run
   even once; a node's write is what happens after.
@@ -122,18 +138,23 @@ A few things worth knowing before you rely on this:
   `ThirdPerson`. Meaningless (and silently ignored, not an error) on a class whose native ancestor
   isn't `AverCharacter` — the same tolerance an unrecognised `CLASS`-line attribute already gets.
 - **`pawn=<className>` and `controller=<className>` on the `CLASS` line set the default pawn and
-  player-controller classes for a `GameMode`-parented class** (`HostBridge.cs:597-623`, `Graph.cs:261-291`).
+  player-controller classes for a `GameMode`-parented class** (the second-pass loop over
+  `pendingRoles`, `HostBridge.cs:670-703` as of this pass, drifted from an earlier `:597-623`, which
+  now falls on the unrelated class-declare/seal sequence, and an earlier `Graph.cs:261-291`, which
+  named `GraphComponent`'s own fields — `Graph.cs`'s actual `ClassPawn` field is at `:486`).
   Both attributes are **GameMode-only** — `HostBridge` warns and ignores them on any other class parent
-  (`HostBridge.cs:618-623`). `pawn=` alone does nothing; `aver_fw_begin_play` possesses only when it has
+  (`HostBridge.cs:676-682` as of this pass, drifted from an earlier `:618-623`). `pawn=` alone does nothing; `aver_fw_begin_play` possesses only when it has
   *both* a pawn and a controller handle. The built-in `PlayerController` is abstract and cannot be spawned
   directly, but a graph can declare `CLASS AN_FPController PlayerController` to create a concrete,
   spawnable controller class with the `CONTROLLER` flag inheritance. Both names are resolved at class-seal
   time against declared classes (not file paths), so a graph naming a pawn/controller whose own class had
   not been declared yet would resolve to 0 and silently possess nothing — which is why `HostBridge` applies
   these in a *second pass* after every graph class is declared, rather than inline, and warns if either
-  name is unresolvable (`HostBridge.cs:629-639`).
+  name is unresolvable (the second-pass loop's own comment, `HostBridge.cs:664-670` as of this pass,
+  drifted from an earlier `:629-639`, which now falls on an unrelated `ticks =` computation).
 - **Every spawned instance gets its own, freshly loaded `GraphHost`.** Binding a class instance
-  (`DispBind`, `HostBridge.cs:988-1010`) parses and compiles the `.ocgraph` file again from disk,
+  (`DispBind`, `HostBridge.cs:1293` as of this pass, drifted from an earlier `:988-1010`, which now
+  falls on the unrelated `InstallGraphVarProvider`) parses and compiles the `.ocgraph` file again from disk,
   per spawn — it is not a shared compiled graph reused across instances. That cost buys the thing
   the worked example in §7 exists to prove: two instances of one class carry **independent** `VAR`
   storage automatically, because independence falls out of "two `GraphHost` objects" with no extra
@@ -141,14 +162,16 @@ A few things worth knowing before you rely on this:
   instances this slice targets, a real limitation at thousands.
 - **An undeclared or misspelled parent fails almost silently.** `aver_fw_class_seal` returns 0 on a
   cycle or an unresolvable parent name, and `HostBridge` reports it as a single `WARN` naming the
-  file and the parent (`HostBridge.cs:503-509`) — the graph is not registered as a class, and it
+  file and the parent (`HostBridge.cs:617-621` as of this pass, drifted from an earlier `:503-509`)
+  — the graph is not registered as a class, and it
   is *also* not picked up by the older CLASS-less project-graph discovery, because that path skips
   any file whose text merely looks like it declares a `CLASS` (`GameApp.cpp`'s
   `ocgraphDeclaresClass` text scan). A broken parent does not degrade to old behaviour: the graph
   runs nowhere, with one log line as the only trace.
 - **Parenting a graph class to another graph class is file-sort-order fragile.**
   `DeclareGraphClasses` does one linear pass over `*.ocgraph`, ordered alphabetically by path, with
-  no forward-declare step (`HostBridge.cs:456-461`). A child graph class whose filename sorts
+  no forward-declare step (the `.OrderBy(p => p, StringComparer.Ordinal)` scan, `HostBridge.cs:566`
+  as of this pass, drifted from an earlier `:456-461`). A child graph class whose filename sorts
   *before* its graph-class parent's fails to seal, even though the parent declares moments later in
   the same scan. Parenting to a C# class or a bootstrap base never has this problem, because both
   are declared earlier, during script load, before the graph scan starts at all.
@@ -192,12 +215,13 @@ entry point (`Graph.cs`):
 
 - A dataflow graph (no `ENTRY` at all) accepts exactly `entity` (int) and `time` (float),
   case-insensitively — anything else fails at `Load()`, naming the offending `PARAM`
-  (`GraphHost.cs:256-275`).
+  (the `PARAM` type/name check loop, `GraphHost.cs:277-294` as of this pass, drifted from an earlier
+  `:256-275`, which named the doc comment just above the loop rather than the loop itself).
 - A graph wanting `OnStart` or `OnTick` accepts exactly `entity`, `time`, and `deltaTime`
   (`GraphHost.cs:326-373`).
 - A graph with **only** an on-demand event (no `OnStart`/`OnTick`) is unconstrained — it declares
   whatever `PARAM` list its own payload needs, because `Fire()`'s args are positional, matching
-  declaration order, not drawn from a named-slot vocabulary (`GraphHost.cs:580-604`).
+  declaration order, not drawn from a named-slot vocabulary (`GraphHost.cs:633-645` (`Fire`, drifted from an earlier `:580-604`, which named an on-demand-path comment rather than the method)).
 
 The sharp edge here: mix an on-demand event into a file that *also* wants `OnStart`/`OnTick`, and
 every `PARAM` in that file — including the ones only the on-demand event reads — gets checked
@@ -218,7 +242,9 @@ you can declare, rename, retype, and delete variables without hand-editing the `
 `GetVar` and `SetVar` nodes take a variable picker instead of free-text `var=` attributes,
 refusing to compile if the named variable does not exist. This was not possible before `VAR`
 became part of the model: `Graph.Validate()` checks undeclared variables and rejects them at
-load time (`Graph.cs:366-375, 462-465`), which meant the editor's graph-loading path could not
+load time (the undeclared-variable check, `Graph.cs:818` as of this pass, inside `Validate()`
+starting at `:507` — drifted from an earlier `:366-375, 462-465`, which named the unrelated `Domain`/
+`DomainKind` property and a `view=` comment), which meant the editor's graph-loading path could not
 open any file with an undeclared `GetVar`/`SetVar` node; now every real graph round-trips
 without read-only-mode fallbacks.
 
@@ -228,7 +254,8 @@ An `ENTRY <nodeId> <eventName>` record is what makes a node run at all on the ev
 the node type (`OnStart`, `OnTick`, `OnHit`, or any other type with no inputs) is just a labelled,
 no-input starting shape the `ENTRY` record points at. Nothing in the parser or compiler special-
 cases the string `"OnHit"`; it sorts into "on-demand" the same way any project-invented event name
-would (`OcGraphParser.cs:774-786`).
+would (`GraphHost.cs:24`'s own header comment — "'OnHit' is the worked example, not a special case" —
+replacing an earlier `OcGraphParser.cs:774-786` citation, which named `PinnedValue` parsing).
 
 **`OnStart` fires exactly once, on the graph's own first `Tick()` call** — not inside `Load()`.
 That is deliberate: `Load()` can run long before the game loop's first real frame (a project's
@@ -241,7 +268,10 @@ load/runtime split the rest of this system already has.
 **`OnTick` fires every `Tick()` call, strictly after `OnStart` in the tick where both run** — and
 `_execSimTime` (the clock a graph's `PARAM time` reads) accumulates once per `Tick()` call, not
 once per entry fired, so `OnStart` and `OnTick` see the *identical* time value on the frame where
-both run (`GraphHost.cs:125-138, 553-568`).
+both run (`_startInvoked`'s declaration at `GraphHost.cs:132` and its lazy-fire site at `:582-586`
+for the "once" half; `_execSimTime += deltaTime` at `:535`, inside `TickEventGraph` starting at `:533`,
+for the shared-clock half — drifted from an earlier `:125-138, 553-568`, whose second range fell
+inside an unrelated boxing-bug comment).
 
 **Both class instances and CLASS-less project graphs tick every frame, ungated on play state.**
 Deliberately: a pure-graph project has no C# `GameMode` to ever call `aver_fw_begin_play`, so
@@ -258,7 +288,7 @@ phase at all — it is the same `OnStart`/`OnTick` a spawned instance always run
 order — a deliberately different contract from `Tick()`'s named `entity`/`time`/`deltaTime`
 vocabulary, because the caller firing an on-demand event already knows its specific payload shape,
 and a second growing named-slot vocabulary would only recreate the trap `PARAM` itself avoids
-(`GraphHost.cs:580-604`). `Fire()`'s result is **not** auto-applied to the entity's position the
+(`GraphHost.cs:633-645` (`Fire`, drifted from an earlier `:580-604`, which named an on-demand-path comment rather than the method)). `Fire()`'s result is **not** auto-applied to the entity's position the
 way `Tick()`'s is — an on-demand event has no fixed target the way `Tick(entityId, …)` does.
 
 **There is no teardown entry point.** `DispUnbind` is the only teardown hook for a class instance:
@@ -278,7 +308,8 @@ PLACE none 0 0 0 0 0 0 1 class AN_Orbiter
 (`test-content/GraphDemo/Content/Maps/OrbitDemo.ocmap:17`). The leading asset column (`none`,
 above) is never read for a class placement — the parser consumes `class <name>` as a keyword pair,
 not a bare flag, so the argument token is captured rather than misread as a material name
-(`OcWorld.cpp:206-211`).
+(`OcWorld.cpp:264` as of this pass, drifted from an earlier `:206-211`, which named an unrelated
+water-placement field parse).
 
 The pipeline from there is the same shape in both composition roots (the shipped game and the
 editor):
@@ -400,11 +431,15 @@ running. It is also new, and smaller than what it resembles. Specifically:
   one entity's graph raise an event *on a different entity's* graph. `Fire()` is something a host
   calls into one specific `GraphHost`; it is not something a node can invoke.
 - **No HUD or 2D drawing from a graph.** Nothing in the palette reaches `Aver.UI` — still true,
-  checked against the catalog rather than remembered: **240 node types across 23 categories** in
-  `sandbox/src/GraphNodeDefs.hpp`, none of them a draw call. (This bullet has now had its number go
-  stale twice -- it said 36, then 124. The claim keeps surviving; the count keeps not.) (This bullet used to say "the 36-node vocabulary", which was the count when it was
-  written. The claim survived; the number did not, and a stale number beside a true statement is
-  what teaches a reader to stop trusting the statement.)
+  checked against the catalog rather than remembered: **239 node types across 24 categories**
+  (re-derived this pass: `grep -cP '^\s*t\.push_back\('` in `sandbox/src/GraphNodeDefs.hpp`, and 24
+  distinct category strings, an "Audio" one among them, which this page's own node reference does
+  not yet document at all), none of them a draw call. This bullet's number has now gone stale three
+  times in a row — 36, then 124, then 240 (that last one counted a comment that happened to quote
+  the literal text `t.push_back({...})`, not a real entry) — while the claim itself ("no draw call
+  in the catalog") has held every time. A stale number beside a true statement is what teaches a
+  reader to stop trusting the statement; see [the node reference](AVER_NODE_NODES.md)'s own intro for
+  the same lesson stated at length.
 - **No `String` pin.** `PinType` has exactly four members — `Float`, `Int`, `Bool`, `Exec`. Every
   string a node needs (`field=`, `class=`, `var=`, `name=`, `mesh=`, `material=`) arrives as a
   `NODE`-line attribute, never as data an upstream node computes or a pin carries.
