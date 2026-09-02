@@ -6,3 +6,9 @@
 add_executable(AnimTest src/AnimTest.cpp)
 target_link_libraries(AnimTest PRIVATE Aver.Anim Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(AnimTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# IkTest -- two-bone IK. Same link set and the same reason: a triangle solved by the law of cosines
+# needs no device, so the whole solver is checkable by asserting where a chain ended up.
+add_executable(IkTest src/IkTest.cpp)
+target_link_libraries(IkTest PRIVATE Aver.Anim Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(IkTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
