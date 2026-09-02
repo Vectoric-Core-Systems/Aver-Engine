@@ -87,4 +87,9 @@ bool findBone(const fmt::OcSkeleton& skel, const std::string& name, u32& out);
 // entity or an AnimSystem -- the arithmetic is the part worth checking and none of it needs a scene.
 bool applyRigOp(const fmt::OcSkeleton& skel, Pose& pose, const fmt::OcRigOp& op, f32 weight);
 
+// The process-wide control rig system, mirroring animSystem() next door. One per process because
+// the World it reads is a singleton too -- two of these would race to be AnimSystem's single pose
+// modifier, and the loser would silently do nothing.
+ControlRigSystem& controlRigSystem();
+
 } // namespace aver::anim

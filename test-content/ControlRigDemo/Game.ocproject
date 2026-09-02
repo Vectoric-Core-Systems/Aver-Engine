@@ -1,0 +1,28 @@
+OCPROJECT 1
+# Engine test content for the CONTROL RIG. Not a demo game -- it exists so a real .ocrig, authored
+# against a real humanoid skeleton, sits somewhere the editor can open and a person can read.
+#
+# WHAT IS HERE, AND WHAT IS HONESTLY NOT.
+#
+# Here: Content/Rigs/ArmReach.ocrig, a two-op rig (a two-bone IK on the left arm and a weighted head
+# aim) written against Content/Skeletons/Character.ocskel's actual bone names. Open the Content
+# Browser on this project and it is there, with an icon; open the file and it reads as what it does.
+# Every layer beneath it is built and tested -- anim::twoBoneIk and anim::aimAt (IkTest), the format
+# (OcRigTest), and CControlRig applied through AnimSystem's pose-modifier seam (ControlRigTest,
+# which drives exactly this chain end to end from a file on disk).
+#
+# NOT here: a MAP that places the character with this rig attached. That is not an oversight and it
+# is not a missing file -- the level format cannot yet express it. An .ocworld/.ocmap PLACE record
+# carries an asset, a transform, a material and a class name; it has no skeleton field, so a placed
+# mesh is a static mesh, and a static mesh has no pose for a rig to modify. Skinned, animated
+# characters reach a level through a graph CLASS instead (that is how templates/FirstPerson does it),
+# and there is no Aver Node node that attaches a control rig yet.
+#
+# So the honest state is: the rig runs, and is proven to run, from code and from a test; it cannot
+# yet be PLACED from a level file. Closing that needs one of two small things -- a `rig=` attribute
+# on a placement plus skeleton support, or a SetControlRig node in the Aver Node palette -- and
+# neither should be guessed at before somebody has authored a second rig.
+NAME ControlRigDemo
+ENGINE Aver 0.5.0
+CREATEDWITH 0.5.0
+CONTENT Content

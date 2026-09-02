@@ -29,3 +29,12 @@ endif()
 add_executable(ControlRigTest src/ControlRigTest.cpp)
 target_link_libraries(ControlRigTest PRIVATE Aver.Anim.Scene Aver.Anim Aver.Scene Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(ControlRigTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+# The SHIPPED demo rig and the SHIPPED skeleton it was authored against, passed in rather than
+# guessed so the test does not have to reason about where it is run from. Checking these is what
+# stops the asset going quietly inert: a rig naming a bone the skeleton does not have is not an
+# error at any layer -- it is the ordinary case for a rig written for another character -- so a
+# single typo would leave a file that loads, validates, applies nothing, and says nothing.
+target_compile_definitions(ControlRigTest PRIVATE
+  AVER_DEMO_RIG="${CMAKE_SOURCE_DIR}/test-content/ControlRigDemo/Content/Rigs/ArmReach.ocrig"
+  AVER_DEMO_SKEL="${CMAKE_SOURCE_DIR}/test-content/ControlRigDemo/Content/Skeletons/Character.ocskel")
+

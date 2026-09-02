@@ -129,6 +129,68 @@ int main() {
         check(moved < 0.5f, "the wrist did not move, by " + f2s(moved) + " cm");
     }
 
+    AVER_INFO("=== a chain hanging off a ROTATED parent, which is the case that broke it ===");
+    {
+        // THE GAP THIS CLOSES. The `arm` fixture above has a parentless root and identity rest
+        // rotations everywhere, and that makes two thirds of applyModelDelta untestable: with no
+        // parent there is no model->parent frame conversion to get wrong, and with an identity local
+        // rotation the quaternion product commutes so its ORDER cannot matter either. Both were
+        // wrong, and every assertion above still passed.
+        //
+        // What found it was a real humanoid skeleton: the hand landed 1,766 cm from a goal 6,633 cm
+        // away, inside a 9,980 cm reach, with the bone lengths perfect. So the shape is reproduced
+        // here in a fixture -- a root with a parent, and rest rotations that are not identity.
+        fmt::OcSkeleton s2;
+        fmt::OcBone base;     base.name = "base";     base.parent = -1;
+        // A quarter turn about Z, then a tilt about X: enough that neither the conjugation nor the
+        // product order can be got wrong and still land on the goal.
+        base.rotation = (Quat::fromAxisAngle(Vec3{0, 0, 1}, 0.9f) *
+                         Quat::fromAxisAngle(Vec3{1, 0, 0}, 0.6f)).normalized();
+        base.translation = Vec3{10, -20, 30};
+
+        fmt::OcBone shoulder; shoulder.name = "shoulder"; shoulder.parent = 0;
+        shoulder.translation = Vec3{0, 0, 15};
+        shoulder.rotation = Quat::fromAxisAngle(Vec3{0, 1, 0}, 0.4f).normalized();
+
+        fmt::OcBone elbow;    elbow.name = "elbow";       elbow.parent = 1;
+        elbow.translation = Vec3{0, 0, 40};
+        elbow.rotation = Quat::fromAxisAngle(Vec3{1, 0, 0}, -0.3f).normalized();
+
+        fmt::OcBone wrist;    wrist.name = "wrist";       wrist.parent = 2;
+        wrist.translation = Vec3{0, 0, 60};
+
+        s2.bones = {base, shoulder, elbow, wrist};
+        s2.rootBone = 0;
+
+        anim::Pose p;
+        anim::restPose(s2, p);
+
+        Vec3 sh{0, 0, 0}, wr{0, 0, 0};
+        anim::bonePositionModel(s2, p, 1, sh);
+        anim::bonePositionModel(s2, p, 3, wr);
+        const f32 reach = 100.0f;   // 40 + 60, unchanged by any rotation
+
+        // A goal comfortably inside the reach, and nowhere near the rest pose.
+        const Vec3 goal = sh + Vec3{50, 30, -20};
+        const Vec3 pole = sh + Vec3{-60, 40, 40};
+
+        check(anim::twoBoneIk(s2, p, 1, 2, 3, goal, pole), "it solves on a parented, rotated chain");
+
+        Vec3 got{0, 0, 0};
+        anim::bonePositionModel(s2, p, 3, got);
+        const f32 miss = gap(got, goal);
+        check(miss < 0.5f,
+              "and the tip lands ON the goal, missing by " + f2s(miss) +
+              " cm -- the derived-but-wrong product order missed by a sixth of the reach here, with "
+              "every length still perfect");
+
+        Vec3 e2{0, 0, 0};
+        anim::bonePositionModel(s2, p, 2, e2);
+        check(std::fabs(gap(e2, sh) - 40.0f) < 0.1f && std::fabs(gap(got, e2) - 60.0f) < 0.1f,
+              "with both bones still their own length");
+        (void)reach; (void)wr;
+    }
+
     AVER_INFO("=== what it refuses ===");
     {
         anim::Pose p;

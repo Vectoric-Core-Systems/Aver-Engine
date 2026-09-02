@@ -67,6 +67,79 @@ int main() {
 
     std::error_code ec;
     g_dir = (std::filesystem::temp_directory_path(ec) / "aver-controlrig-test").string();
+    // THE SHIPPED DEMO ASSET, checked against the SHIPPED skeleton it was authored for.
+    //
+    // A rig naming a bone the skeleton does not have is not an error at any layer -- applyRigOp
+    // returns false and the pose is left alone, which is exactly right for a rig written for another
+    // character. That correctness is what makes a typo dangerous here: one wrong bone name leaves a
+    // file that loads, validates, applies nothing and says nothing. Nothing else in the tree would
+    // notice, so this does.
+    AVER_INFO("=== the shipped ArmReach.ocrig matches the shipped Character.ocskel ===");
+    {
+        fmt::OcRigData demo;
+        std::string why;
+        check(fmt::loadOcRig(AVER_DEMO_RIG, demo, &why), "the demo rig loads: " + why);
+
+        fmt::OcSkeleton character;
+        check(fmt::loadOcSkel(AVER_DEMO_SKEL, character, &why), "the character skeleton loads: " + why);
+
+        check(!demo.ops.empty(), "the rig has ops, got " + std::to_string(demo.ops.size()));
+        check(character.bones.size() > 20,
+              "and the skeleton is the real humanoid, " + std::to_string(character.bones.size()) +
+              " bones");
+
+        for (const fmt::OcRigOp& op : demo.ops) {
+            u32 idx = 0;
+            check(anim::findBone(character, op.root, idx), "bone '" + op.root + "' exists");
+            if (op.kind == fmt::OcRigOpKind::TwoBoneIk) {
+                check(anim::findBone(character, op.mid, idx), "bone '" + op.mid + "' exists");
+                check(anim::findBone(character, op.tip, idx), "bone '" + op.tip + "' exists");
+
+                // AND THEY ARE ACTUALLY A CHAIN. twoBoneIk refuses bones that are not parent-linked,
+                // so three real bones in the wrong order is the other way this asset could be inert.
+                u32 r = 0, m = 0, t = 0;
+                if (anim::findBone(character, op.root, r) && anim::findBone(character, op.mid, m) &&
+                    anim::findBone(character, op.tip, t)) {
+                    check(character.bones[m].parent == static_cast<i32>(r),
+                          "'" + op.mid + "' is a child of '" + op.root + "'");
+                    check(character.bones[t].parent == static_cast<i32>(m),
+                          "'" + op.tip + "' is a child of '" + op.mid + "'");
+                }
+            }
+        }
+
+        // And it does something: applied to the character's rest pose, the hand moves.
+        anim::Pose p;
+        anim::restPose(character, p);
+        u32 hand = 0;
+        if (anim::findBone(character, "LeftHand", hand)) {
+            Vec3 before{0, 0, 0};
+            anim::bonePositionModel(character, p, hand, before);
+            bool applied = false;
+            for (const fmt::OcRigOp& op : demo.ops)
+                applied = anim::applyRigOp(character, p, op, 1.0f) || applied;
+            Vec3 after{0, 0, 0};
+            anim::bonePositionModel(character, p, hand, after);
+            check(applied, "the rig applies to the character");
+            check(gap(before, after) > 5.0f,
+                  "and the left hand actually MOVES, by " + f2s(gap(before, after)) + " cm");
+
+            // THE ASSERTION THAT ACTUALLY CHECKS THE ASSET. "it moved" passes for any goal at all,
+            // including a nonsense one -- the first version of this rig had a human-scale goal
+            // against a skeleton that is 100x oversized (a known importer bug, see the rig's own
+            // header), the arm straightened at full stretch toward a point 129 METRES away, and
+            // "it moved by 12,919 cm" sailed through. Landing ON the goal is the property that
+            // distinguishes a rig authored for this skeleton from one that merely disturbs it.
+            for (const fmt::OcRigOp& op : demo.ops) {
+                if (op.kind != fmt::OcRigOpKind::TwoBoneIk) continue;
+                check(gap(after, op.target) < 1.0f,
+                      "and lands ON the rig's goal, missing by " + f2s(gap(after, op.target)) +
+                      " cm -- so the goal is inside the arm's reach, not somewhere it can only "
+                      "point at");
+            }
+        }
+    }
+
     std::filesystem::remove_all(g_dir, ec);
     std::filesystem::create_directories(g_dir, ec);
 

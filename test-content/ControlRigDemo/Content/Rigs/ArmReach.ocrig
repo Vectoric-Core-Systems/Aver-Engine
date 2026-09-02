@@ -1,0 +1,51 @@
+OCRIG 1
+# ArmReach -- the engine's first control rig, authored against Character.ocskel.
+#
+# WHAT IT DOES. The left arm reaches for a fixed point while whatever clip is playing carries the
+# rest of the body, and the head turns to watch the same point. Both are procedural: no animator
+# keyframed them, and they hold for any pose the clip produces.
+#
+# THE CHAIN IS REAL. LeftArm -> LeftForeArm -> LeftHand are three actual bones of
+# Content/Skeletons/Character.ocskel, in parent order, which is what twoBoneIk requires -- it refuses
+# a chain that is not parent-linked rather than solving nonsense. ControlRigTest asserts all of that
+# against this exact file, including that the two child links really are parent links.
+#
+# ------------------------------------------------------------------------------------------------
+# WHY THESE NUMBERS LOOK ABSURD: THIS SKELETON IS 100x TOO BIG, AND IT IS NOT THIS RIG'S FAULT.
+#
+# Measured from the file itself, in the engine's own centimetres:
+#
+#     Hips        z = 12,422          LeftArm      (  -167,  3,358, 23,589)
+#     Head        z = 26,985          LeftForeArm  (   -42,  8,045, 23,172)
+#     upper arm   4,708               LeftHand     (  -396, 13,289, 22,756)
+#     forearm     5,272               total reach   9,980
+#
+# That is a 270-metre character. A human is about 180 cm. The cause is a known, recorded importer
+# bug -- a skinned mesh node's transform is baked in against the glTF spec, scaling the rig by 100 --
+# and it belongs to the importer, not here.
+#
+# So the goal below is authored in the space this skeleton ACTUALLY occupies rather than the space it
+# should occupy. When the import bug is fixed, every coordinate in this file divides by 100 and the
+# numbers become the human-scale ones they should always have been: a goal 60 cm forward and 110 cm
+# up, which is where a person's hand goes reaching out at chest height.
+#
+# Written down rather than quietly tuned, because a coordinate that matches a bug is a coordinate
+# that breaks when the bug is fixed, and the next person deserves to know which it is.
+# ------------------------------------------------------------------------------------------------
+NAME ArmReach
+
+# 6,000 forward, 2,000 out and 2,000 down from the shoulder -- 6,633 away, comfortably inside the
+# 9,980 the arm can reach, so this bends the elbow rather than straightening it at full stretch.
+#
+# The pole decides which way that elbow bends: two mirrored solutions reach any goal, and putting the
+# pole behind and below the shoulder is what drops the elbow naturally instead of inverting it
+# through the character's chest.
+OP twobone root=LeftArm mid=LeftForeArm tip=LeftHand goal=5833,5357,21588 pole=-4000,4000,19000 weight=1
+
+# The head watches the same point, at partial weight so the clip's own head motion still reads
+# through it. This is what per-op weight is for -- see OcRig.hpp on why the layer-or-overwrite
+# question is answered per op rather than per rig.
+#
+# axis= is the bone's OWN forward, not a world direction: which way this skeleton's head calls
+# forward is a property of the rig, not of where the head happens to be pointing this frame.
+OP aim bone=Head at=5833,5357,21588 axis=0,0,1 weight=0.6

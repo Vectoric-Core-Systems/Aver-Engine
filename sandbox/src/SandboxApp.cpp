@@ -204,6 +204,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #if AVER_MODULE_SCENE
 #include "aver/scene/scene_abi.h"
 #include "aver/anim/AnimSystem.hpp"
+#include "aver/anim/ControlRig.hpp"
 #include "aver/save/SaveWorld.hpp"
 #include "aver/formats/OcSave.hpp"
 #include "aver/scene/World.hpp"
@@ -1486,6 +1487,20 @@ public:
         synapse::perceptionSystem().registerComponents(scene::World::instance());
         synapse::btSystem().registerComponents(scene::World::instance());
         synapse::registerBuiltinBehaviors(synapse::btSystem());
+#endif
+
+#if AVER_MODULE_SCENE
+        // THE CONTROL RIG, registered and INSTALLED here for the same reason the Synapse systems are
+        // above: before any project opens, needing no level. Registration alone would be the defect
+        // this repository keeps finding -- a component type nothing ever reads -- so the system that
+        // applies it is installed in the same breath, as AnimSystem's pose modifier.
+        //
+        // Installed unconditionally rather than when a rig first appears: the modifier costs one
+        // component lookup per animated entity per tick and returns immediately when there is no
+        // CControlRig, whereas installing it lazily would mean a rig attached at run time did
+        // nothing until something noticed.
+        anim::controlRigSystem().registerComponents(scene::World::instance());
+        anim::controlRigSystem().install(anim::animSystem(), scene::World::instance());
 #endif
 
         // RESOLVED BEFORE THE PROJECT OPENS -- moved up from further down onInit, where the same code

@@ -128,4 +128,9 @@ void ControlRigSystem::install(AnimSystem& anim, scene::World& world) {
 
 void ControlRigSystem::uninstall(AnimSystem& anim) { anim.setPoseModifier(nullptr, nullptr); }
 
+ControlRigSystem& controlRigSystem() {
+    static ControlRigSystem s;
+    return s;
+}
+
 } // namespace aver::anim

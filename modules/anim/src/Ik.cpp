@@ -56,6 +56,19 @@ bool rotationBetween(const Vec3& from, const Vec3& to, Vec3& axis, f32& angle) {
 // frame -- if D turns about `n`, then `parentModel * D * parentModel^-1` turns about `n * parentModel^-1`.
 // So only the AXIS needs transforming, which is why this takes an axis and an angle rather than a
 // quaternion: there is no quaternion inverse in Math.hpp to conjugate with.
+//
+// BUT THE QUATERNION PRODUCT IS WRITTEN THE OTHER WAY ROUND FROM THAT DERIVATION, AND THAT IS
+// MEASURED, NOT A TYPO. Math.hpp's Quat::operator* does NOT compose in the same order as
+// Mat4::operator* does under fromQuat: `fromQuat(a * b)` is `fromQuat(b) * fromQuat(a)`. So the
+// matrix-order `local_old * D` becomes the quaternion-order `D * local_old` here.
+//
+// It was found by a real skeleton, because no fixture caught it. IkTest's arm has a PARENTLESS root
+// and identity rest rotations throughout, which makes both halves of this function untestable: with
+// no parent there is no conjugation to get wrong, and with an identity local rotation the product
+// commutes and the order cannot matter. Character.ocskel's LeftArm has a real parent chain and real
+// rest rotations, and with the derived order the hand landed 1,766 cm from a goal that was 6,633 cm
+// away and well inside a 9,980 cm reach -- bone lengths perfect, chain rigid, simply the wrong pose.
+// testParentedChainWithRestRotations in IkTest now covers exactly that shape.
 void applyModelDelta(const fmt::OcSkeleton& skel, Pose& pose, const std::vector<Mat4>& model,
                      u32 bone, const Vec3& axisModel, f32 angle) {
     if (std::fabs(angle) < 1e-6f) return;
@@ -68,7 +81,7 @@ void applyModelDelta(const fmt::OcSkeleton& skel, Pose& pose, const std::vector<
         axis = transformDir(axisModel, model[static_cast<usize>(parent)].inverse()).getSafeNormal();
     }
     pose.local[bone].rotation =
-        (pose.local[bone].rotation * Quat::fromAxisAngle(axis, angle)).normalized();
+        (Quat::fromAxisAngle(axis, angle) * pose.local[bone].rotation).normalized();
 }
 
 // True when `child`'s parent is `parent` and both index real bones.
