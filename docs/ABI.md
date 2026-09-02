@@ -1123,7 +1123,7 @@ There is genuine C ABI test coverage here, more than this project's history woul
 - **`AvActorVTable` and the native per-class tick path.** The struct is declared at `framework_hooks.h:91-98`; the registrar `aver_fw_class_set_vtable` and the tick loop are a documented follow-up, and nothing reads the table today (`framework_hooks.h:80-83`; `FrameworkAbi.cpp:807`). The registrar's only appearance in **code** is the comment at `framework_hooks.h:82` — no header declares it, no source defines it. It is named four times in the documentation: `docs/SCENE_FRAMEWORK.md:1223` carries a planned declaration returning `aver_class` rather than the tree-wide `int32_t` 1/0, `:1876` and `:2122` discuss it, and `docs/DESIGNER_REWRITE.md:183` already records the return-type contradiction and the conclusion that the header should return `int32_t` 1/0. Anyone implementing it should implement the corrected signature.
 - **The bind-time version check** (`docs/SCENE_FRAMEWORK.md:1722-1723`).
 - **The consolidated `Aver.ABI`** described in `abi/README.md`, `modules/abi/README.md` and `docs/ARCHITECTURE.md` §7 is not planned. It has been **dropped**. Those files are stale.
-- **Rust bindings** promised by `interop/README.md:3` do not exist and there is no Rust in this repository.
+- **Rust bindings** were promised by a top-level `interop/` directory that held one README and no code. They do not exist, there is no Rust in this repository, and that directory has since been deleted rather than corrected.
 
 ---
 

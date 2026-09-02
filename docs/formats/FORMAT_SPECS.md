@@ -936,6 +936,8 @@ STARTMAP Maps/MyStartLevel.ocmap
 ---
 
 ### Deliverable file map (paths this design implies under `C:/Users/User/Documents/Aver Engine`)
+
+> **This map is the original proposal and was never the layout that got built.** `engine/assets/`, `libaver_assets`, `include/ocasset.h` and the Rust `tools/aver-cook/` never existed; the readers live at `modules/formats/` and there is no Rust in the tree. `editor/` did exist as a directory holding one README and no source, and has been deleted — the editor is `sandbox/`. Read the list below as intent from the design, not as a description of the repository.
 - `docs/formats/` — this spec split per format (container, ocmesh, octex, ocmat, ocskel, ocanim, ocprefab, ocworld, legacy, .octemplate).
 - `engine/assets/` — C++ readers/writers (`libaver_assets`) + C ABI header `include/ocasset.h`.
 - `tools/aver-cook/` — Rust importer/cooker.

@@ -360,7 +360,7 @@ Dark base `#1e1e1e`, neutral chrome, **one accent = Aver Amber `ImVec4(1.0,0.42,
 
 ## Build wiring
 
-**This section described a target that was never built, and it is worth saying so plainly.** There is no `Aver.Editor`, no `AVER_BUILD_EDITOR`, and `add_subdirectory(editor)` appears nowhere — `editor/` holds a README for a C# editor that has no source. The editor **is** `Sandbox`, and there is no second binary: the same executable runs the oracle gates under `--frames`.
+**This section described a target that was never built, and it is worth saying so plainly.** There is no `Aver.Editor`, no `AVER_BUILD_EDITOR`, and `add_subdirectory(editor)` appears nowhere. `editor/` used to hold a README for a C# editor with no source behind it; that directory has since been **deleted**, because a folder whose only content describes something that was never started is a second, worse copy of this paragraph. The editor **is** `Sandbox`, and there is no second binary: the same executable runs the oracle gates under `--frames`.
 
 What actually builds it is `sandbox/CMakeLists.txt` behind `option(AVER_BUILD_SANDBOX ON)`: `SandboxApp.cpp` plus `AssetEditor`, `ActorEditor`, `ProjectBrowser`, `ProjectScaffold`, `EngineScaffold`, `IdeIntegration`, `ShellIntegration` and `ToolsMenu`, linking `Aver.Runtime Aver.Formats Aver.UI Aver.Render.UI Aver.UI.Abi Aver.Render.ActorPreview` unconditionally and each optional module when its target exists. ImGui is `third_party/imgui`, added under `option(AVER_ENABLE_UI ON)` and reaching the executable transitively through `Aver.RHI.D3D12`, which links it `PUBLIC` and defines `AVER_WITH_IMGUI=1` — which is why every editor source guards on that macro rather than on a target. ImGuizmo is not vendored and never was.
 

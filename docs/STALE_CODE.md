@@ -63,11 +63,17 @@ Verified independently for `ambient_` and `upgradeStatus_`: both confirmed by di
 Safe to fix, and the highest ratio of harm to effort — these send readers looking for things that do
 not exist.
 
-- `shaders/README.md:3` — describes a directory of HLSL compiled by a tool called `aver-shaderc`
+- ~~`shaders/README.md:3`~~ — described HLSL compiled by a tool called `aver-shaderc`. **FIXED by
+  deleting the directory:** the tool never existed and HLSL lives in files under
+  `modules/<mod>/shaders/` and `sandbox/shaders/`.
 - `tools/README.md:13`, `:38` — a tool table missing most tools, and a "Rust asset pipeline" of five
-  tools that do not exist
-- `interop/README.md:3` — promises generated P/Invoke and Rust bindgen bindings
-- `editor/README.md:3` — describes a C#/.NET editor application
+  tools that do not exist. **Still open** — `tools/` holds real source, so it is a README to correct
+  rather than a directory to remove.
+- ~~`interop/README.md:3`~~ — promised generated P/Invoke and Rust bindgen bindings. **FIXED by
+  deleting the directory:** the C# bindings are hand-written under `scripting/csharp/`, and there is
+  no Rust in this tree.
+- ~~`editor/README.md:3`~~ — described a C#/.NET editor application. **FIXED by deleting the
+  directory:** the editor is `sandbox/`.
 - `docs/ABI.md:3`, `:5` — omits the `Aver.Audio.Abi` seam entirely; its own staleness callout is stale
 - `docs/SCENE_FRAMEWORK.md:7` — status banner says "only step 1 is built… no entity, no component"
 
@@ -124,8 +130,14 @@ Worth recording, because these are the traps a naive sweep falls into:
 Do not treat these as clean. Seven are documentation claims; one is an orphan project.
 
 `Aver.Scripting.Sample.csproj:1` · `docs/ABI.md:88` · `docs/SCENE_FRAMEWORK.md:888` ·
-`modules/render/README.md:10` · `modules/render.gi/README.md:10` · `content/legacy/README.md:3` ·
-`README.md:63` · `modules/framework/README.md:55`
+~~`modules/render/README.md:10`~~ · ~~`modules/render.gi/README.md:10`~~ ·
+`content/legacy/README.md:3` · `README.md:63` · `modules/framework/README.md:55`
+
+The two struck rows were checked afterwards and resolved by deleting their directories: both promised
+a "Phase 3" that had since been built elsewhere under other names, and `docs/ARCHITECTURE.md`'s rows
+for `Aver.Render` / `Aver.Render.GI` already described that more accurately. `content/legacy/README.md`
+was checked too and **survives** — it promises fixtures for `.ocaero` and `.scene`, which
+`modules/formats/README.md:44` confirms are still unimplemented, so it is a live placeholder.
 
 Full data, including each verifier's reasoning: run the sweep again, or see the workflow journal at
 `subagents/workflows/wf_2b54986f-7e5/journal.jsonl` while it survives.

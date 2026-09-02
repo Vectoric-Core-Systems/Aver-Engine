@@ -11,13 +11,13 @@ See **[docs/ABI.md](docs/ABI.md)** for every C entry point and which seam to rea
 
 ## Status
 
-**`build/bin/Sandbox.exe` *is* the editor** — a Dear ImGui shell composited over the D3D12 viewport, with a project browser, asset and actor editor tabs, a Details panel and a Tools menu that compiles a project's C#. The separate C# editor process that `editor/` and `interop/` describe was never started; both directories hold one README and no code.
+**`build/bin/Sandbox.exe` *is* the editor** — a Dear ImGui shell composited over the D3D12 viewport, with a project browser, asset and actor editor tabs, a Details panel and a Tools menu that compiles a project's C#. The separate C# editor process that a top-level `editor/` and `interop/` once described was never started, and those directories have been deleted rather than left describing it.
 
 Two of its panels write back to C# source rather than to a built artefact, which is the shape the editor is converging on. The actor editor (`sandbox/src/ActorEditor.*`) opens a `.cs` that carries a generated designer region — or, read-only, one whose class declares a mesh, camera or light — draws it through `Aver.Render.ActorPreview`, and rewrites the placements in that file when you drag the gizmo. An external edit reloads into the view unless the tab is dirty, in which case the reload is refused and says so. The Details panel's **Save to C#** writes the material's `.cs`, never the `.ocmat` — a save into a build artefact appears to work and then vanishes on the next compile.
 
 Implemented and exercised by headless tests: the D3D12 renderer, the AVR1 container and the `.oc*` readers on it, the entity/component world and the gameplay layer over it, Jolt physics behind the engine's own C seam, the in-process CoreCLR host with hot reload, the retained game UI and its renderer, and the audio mixer.
 
-Not implemented — each is a README under `modules/` describing a responsibility nothing has taken yet: `render`, `render.gi`, `softbody`, `aero`, `gpudeform`, `fracture`, `vehicle`, `net`, `netvehicle`, `match`, `world`. `modules/abi` and `abi/` are empty *by decision* rather than by omission; `abi/README.md` says why.
+Not implemented — each is a README under `modules/` describing a responsibility nothing has taken yet: `softbody`, `aero`, `gpudeform`, `fracture`, `vehicle`, `net`, `netvehicle`, `match`. (`render` and `render.gi` were on this list and their directories are now **deleted**: what they described was built elsewhere, under other names, and `docs/ARCHITECTURE.md`'s rows say so more precisely than a stub README could. `world` was on it too and is simply **wrong** — `modules/world` has a CMakeLists, headers and sources, and has for some time.) `modules/abi` and `abi/` are empty *by decision* rather than by omission; `abi/README.md` says why.
 
 Audio is the newest and the least connected: the mixer, the WASAPI device and the C seam all exist and are tested, but nothing in the editor plays a sound, no managed `Aver.Audio` assembly exists yet, and `sandbox` does not link any of it.
 
@@ -52,10 +52,25 @@ cmake/            AvModule.cmake (aver_add_module)
 third_party/      imgui (docking), stb, fonts (Roboto). Jolt is vendored under modules/, at
                   physics.jolt/ — it is the rigid-body backend, not an incidental dependency
 branding/         master lockup (human-authored) -> splash, icons, logo
-abi/ interop/ editor/ shaders/ content/   README only — nothing is built from these
+abi/ content/       README only — nothing is built from these
 ```
 
-`shaders/` is one of those placeholders: HLSL is embedded in C++ next to the code that compiles it (`modules/rhi/src/RHIShaders.cpp` for the shared prelude, `modules/render.pbr/include/aver/pbr/PbrShaders.hpp`, `modules/render.ui/src/UiShaders.hpp`) and is compiled at run time by DXC. Game content lives outside the engine entirely — see [docs/PROJECTS.md](docs/PROJECTS.md).
+`abi/` is a placeholder **by decision, not omission**: its README records why the single flat
+`Aver.ABI` was dropped in favour of the seven separate per-module C seams, so that nobody proposes it
+again. `docs/ABI.md` documents the seams that replaced it.
+
+**`interop/`, `editor/` and `shaders/` used to sit on that line and have been deleted**, along with
+`modules/render/` and `modules/render.gi/`. Each held one README describing something that was either
+never started or had since been built elsewhere under another name, and `docs/ARCHITECTURE.md` already
+carried a more accurate account of all five. A directory that exists only to describe work that does
+not exist is a second copy of the truth, and it was the copy nobody was updating.
+
+HLSL lives in **files**, at `modules/<module>/shaders/*.hlsl` and `sandbox/shaders/*.hlsl` — 25 of
+them, plus 17 more vendored inside Jolt — compiled at run time by DXC and staged beside the executable as `bin/shaders/`. This paragraph
+previously said HLSL "is embedded in C++ next to the code that compiles it", naming
+`modules/rhi/src/RHIShaders.cpp`, `PbrShaders.hpp` and `UiShaders.hpp`. Those three files still exist
+and contain **no HLSL at all** — the shader bodies moved out to files and the sentence did not follow
+them. Game content lives outside the engine entirely — see [docs/PROJECTS.md](docs/PROJECTS.md).
 
 ## Modules
 

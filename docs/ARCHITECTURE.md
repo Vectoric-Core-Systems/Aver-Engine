@@ -210,10 +210,17 @@ Aver.Formats.Audio`. The device is optional; the mixer is not.
 
 Core-tier = compiled by default in a game client; only **Core** and **Platform** are strictly mandatory to instantiate an engine. `[opt]` modules default OFF unless noted.
 
-**‹skeleton› means the directory holds a `README.md` and nothing else** — no header, no source, no
-`CMakeLists.txt`, and no `add_subdirectory` in the top-level build. Twelve of the rows below are in
-that state, including the two this document previously leaned on hardest (`Aver.Render`,
-`Aver.Render.GI`) and every Rust tool. The **Optional?** column describes intent for those rows and
+**‹skeleton› means the module is NOT BUILT** — no header, no source, no `CMakeLists.txt`, and no
+`add_subdirectory` in the top-level build. Most such rows still have a directory holding a single
+`README.md` describing the eventual responsibility, which is the convention the root
+`CMakeLists.txt` documents.
+
+**Two of them no longer have even that.** `Aver.Render` and `Aver.Render.GI` — the two this document
+previously leaned on hardest — had their directories deleted, because what they described has since
+been built elsewhere under other names and their READMEs still promised "Phase 3". Their rows below
+are now the only account of them, which is what the rows already were in substance: each says plainly
+what does not exist and names what renders instead. A ‹skeleton› row therefore means "not built", and
+says nothing about whether a directory is there. The **Optional?** column describes intent for those rows and
 the actual CMake option for the rest; where a built module has no option at all, it says so, and §2
 gives the reason. Depends-on for a built module is transcribed from its `CMakeLists.txt`, so it may
 be shorter or longer than the plan in the same row's prose.
@@ -572,13 +579,13 @@ Aver Engine/
   scripts/                       # build.ps1, run.ps1, gates.ps1 + baselines, brand.py
   content/legacy/                # sample fixtures for golden tests
   docs/                          # this file, ABI.md, ACTOR_EDITOR.md, AUDIO.md, RENDERING.md, …
-  ‹shaders/›                     # was: HLSL sources -> aver-shaderc. HLSL is embedded in the
-                                 #   module sources today and compiled by the backend at run time.
-  ‹abi/›                         # was: Aver.ABI headers + wrapper TUs. Dropped; see §7.1.
+  ‹abi/›                         # was: Aver.ABI headers + wrapper TUs. Dropped; see §7.1. KEPT as a
+                                 #   directory on purpose -- its README is the record of that drop.
   ‹tools/›                       # was: the Rust cook. No Rust exists.
-  ‹editor/›                      # was: Aver.Editor (C#). The editor is sandbox/.
-  ‹interop/›                     # was: generated P/Invoke + bindgen. The C# bindings are
-                                 #   hand-written under scripting/csharp/.
+  # DELETED, not merely empty: shaders/, editor/ and interop/ each held one README describing
+  # something never started or since built elsewhere, and this file already said so more accurately
+  # than they did. HLSL is in files at modules/<mod>/shaders/ and sandbox/shaders/; the editor is
+  # sandbox/; the C# bindings are hand-written under scripting/csharp/.
 ```
 
 ---

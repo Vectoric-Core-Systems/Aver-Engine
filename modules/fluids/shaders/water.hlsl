@@ -74,10 +74,17 @@ struct VSWaterOut {
 };
 
 // PORTED BY HAND from modules/water/include/aver/fluids/GerstnerWave.hpp's gerstnerDisplaceCm --
-// there is NO shared-source mechanism between C++ and HLSL anywhere in this engine (every shader in
-// this codebase is a raw string literal compiled at runtime; see shaders/README.md's own admission
-// that the aver-shaderc tool it describes does not exist, and RHIShaders.cpp's kColorHlsl for the
-// established convention this file follows). Keeping this function and GerstnerWave.hpp's C++
+// there is NO shared-source mechanism between C++ and HLSL anywhere in this engine.
+//
+// (This used to justify that with "every shader in this codebase is a raw string literal compiled at
+// runtime", citing shaders/README.md and RHIShaders.cpp's kColorHlsl. BOTH HALVES WERE FALSE BY THE
+// TIME THIS FILE EXISTED -- it is itself one of 25 engine .hlsl files under modules/*/shaders/ and
+// sandbox/shaders/, and RHIShaders.cpp no longer contains a line of HLSL. shaders/README.md, which
+// described a compiler called aver-shaderc that was never written, has been deleted. The CONCLUSION
+// still holds and is the only part that mattered: shaders are files now, but they are not the SAME
+// file as the C++, and nothing checks the two against each other.)
+//
+// Keeping this function and GerstnerWave.hpp's C++
 // agreeing is consequently a MANUAL, DOCUMENTED OBLIGATION, not something a build step enforces --
 // if you change the wave formula, the clamp, or the normal derivation on one side, you must change
 // it here too, by hand, and re-read GerstnerWave.hpp's own comments for WHY each term is there
