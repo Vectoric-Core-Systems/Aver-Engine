@@ -22,3 +22,10 @@ if(TARGET Aver.Scripting.Host)
   # The staged bridge is what it loads at run time, so a build of this target must have produced one.
   add_dependencies(AnimNotifyGraphTest Aver.Scripting.Host)
 endif()
+
+# ControlRigTest -- the whole chain: a .ocrig file, resolved by asset id, loaded once, its bone NAMES
+# matched against a real skeleton, its ops run in AnimSystem's pose-modifier seam. Every layer under
+# it has its own test; this is the only one that fails if they are wired together wrongly.
+add_executable(ControlRigTest src/ControlRigTest.cpp)
+target_link_libraries(ControlRigTest PRIVATE Aver.Anim.Scene Aver.Anim Aver.Scene Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(ControlRigTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

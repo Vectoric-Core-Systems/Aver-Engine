@@ -309,3 +309,11 @@ target_compile_definitions(AverAssetCTest PRIVATE
   AVER_ASSETC_EXE="$<TARGET_FILE:AverAssetC>"
   AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
 set_target_properties(AverAssetCTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# OcRigTest -- the .ocrig control-rig format. Text like .ocgraph and for the same reason (a rig is
+# four lines a person writes), so the checks are the ones text formats need: parse, round-trip
+# through both memory and disk, byte-stable rewrite, and a refusal with a reason for each malformed
+# shape.
+add_executable(OcRigTest src/OcRigTest.cpp)
+target_link_libraries(OcRigTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(OcRigTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

@@ -79,6 +79,30 @@ bool linked(const fmt::OcSkeleton& skel, u32 parent, u32 child) {
 
 } // namespace
 
+bool aimAt(const fmt::OcSkeleton& skel, Pose& pose, u32 bone,
+           const Vec3& targetModel, const Vec3& localAxis) {
+    if (bone >= skel.bones.size() || pose.local.size() != skel.bones.size()) return false;
+    if (lengthOf(localAxis) < kEps) return false;
+
+    std::vector<Mat4> model;
+    poseToModel(skel, pose, model);
+
+    const Vec3 origin = originOf(model[bone]);
+    const Vec3 toTarget = targetModel - origin;
+    if (lengthOf(toTarget) < kEps) return false;
+
+    // The authored axis is in the BONE's space, so it has to be carried into model space through the
+    // bone's own model matrix before it can be compared with a direction to a point out in the world.
+    const Vec3 curDir = transformDir(localAxis, model[bone]).getSafeNormal();
+    if (lengthOf(curDir) < kEps) return false;
+
+    Vec3 axis{0, 0, 1};
+    f32 angle = 0.0f;
+    if (rotationBetween(curDir, toTarget.getSafeNormal(), axis, angle))
+        applyModelDelta(skel, pose, model, bone, axis, angle);
+    return true;
+}
+
 bool bonePositionModel(const fmt::OcSkeleton& skel, const Pose& pose, u32 bone, Vec3& out) {
     if (bone >= skel.bones.size() || pose.local.size() != skel.bones.size()) return false;
     std::vector<Mat4> model;

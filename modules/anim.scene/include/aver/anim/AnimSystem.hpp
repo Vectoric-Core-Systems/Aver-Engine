@@ -55,6 +55,16 @@ public:
     // clocks, so a scrubbing editor works before any asset path is known.
     void setResolver(AssetPathFn fn, void* user) { resolve_ = fn; user_ = user; }
 
+    // The path an interned asset id resolves to, or empty when there is no resolver or it declines.
+    //
+    // Exposed because this class OWNS the resolver and other systems in this module need it: the
+    // control rig loads a .ocrig by the same asset id, through the same host-supplied mapping, so
+    // that a rig is found exactly the way a skeleton and a clip are. A second resolver installed
+    // beside this one would be a second answer to the same question.
+    std::string assetPath(u64 objectId) const {
+        return (resolve_ && objectId) ? resolve_(objectId, user_) : std::string{};
+    }
+
     // Installs the notify sink. Without one, crossings are still TRACKED (so installing a sink
     // mid-session does not deliver a backlog) but nothing is delivered -- an editor previewing a
     // clip has no graphs to fire at, and should not pay for pretending otherwise.

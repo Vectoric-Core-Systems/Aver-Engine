@@ -11,8 +11,15 @@
 aver_add_module(Aver.Anim.Scene
   SOURCES
     src/AnimSystem.cpp
+    # The control rig: a .ocrig applied through AnimSystem's pose-modifier seam. Here rather
+    # than in Aver.Anim because it needs a World to find the component on -- the SOLVERS it
+    # calls are pure and live one tier down, in Aver.Anim, with no scene at all.
+    src/ControlRig.cpp
   DEPS
     Aver.Anim
     Aver.Scene
     Aver.Core
+    # .ocrig, which ControlRig.cpp reads. Aver.Anim already pulls Formats in for .ocskel/.ocanim;
+    # naming it here is the DAG stated rather than inherited.
+    Aver.Formats
 )

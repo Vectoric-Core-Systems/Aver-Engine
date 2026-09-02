@@ -44,6 +44,9 @@ aver_add_module(Aver.Formats
     # .ocsnd -- a procedural sound as a node graph. Beside the other AVR1 readers for the same
     # reason: a node array, a link array and a header, nothing that needs a mixer.
     src/OcSound.cpp
+    # .ocrig -- a control rig. TEXT rather than an AVR1 container, unlike its neighbours here:
+    # a rig is four lines a person writes and reads, not a baked array. See OcRig.hpp.
+    src/OcRig.cpp
     src/Texture.cpp
   DEPS
     Aver.Core

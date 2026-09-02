@@ -39,6 +39,18 @@ bool twoBoneIk(const fmt::OcSkeleton& skel, Pose& pose,
                u32 root, u32 mid, u32 tip,
                const Vec3& goalModel, const Vec3& poleModel);
 
+// Turns one bone so its own `localAxis` ends up pointing at `targetModel`.
+//
+// A head that watches something, a turret, an eye. Not IK -- there is no chain and nothing to solve;
+// it is one rotation, and it is here because it is the other half of what a rig does and shares every
+// helper with the solver above.
+//
+// `localAxis` is in the BONE's space, which is what makes it authorable: "the axis this head calls
+// forward" is a property of the rig, not of where the head happens to be pointing this frame.
+// Returns false on a bad index, a mismatched pose, a zero axis, or a target on top of the bone.
+bool aimAt(const fmt::OcSkeleton& skel, Pose& pose, u32 bone,
+           const Vec3& targetModel, const Vec3& localAxis);
+
 // The model-space position of `bone` in `pose` -- the translation row of its model matrix.
 //
 // Exposed because a caller solving IK almost always needs it: a goal is usually expressed relative
