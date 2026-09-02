@@ -49,6 +49,20 @@ i32 btDeleteSubtree(std::vector<fmt::OcBtNode>& nodes, i32 index);
 // when either is out of range.
 i32 btReparent(std::vector<fmt::OcBtNode>& nodes, i32 index, i32 newParent);
 
+// The tree the Content Browser's "New Behaviour Tree" writes: a Selector root over one `Wait`.
+//
+// DECLARED HERE SO A TEST CAN CHECK IT, exactly as snStarterGraph is in SoundEditor.hpp. This one has
+// a sharper reason than convention: BtEditor's constructor refuses a file it cannot load (it sets
+// loaded_ = false and shows an error instead of an editable tree), so a starter that fails
+// OcBtData::valid() would be written successfully and then rejected by the very editor the create
+// path opens for it -- a failure that looks like success at the moment it happens and only appears
+// one step later. A test that saves this and loads it back is what makes that impossible.
+//
+// `Wait` rather than a bare structural root because it is one of the registered built-ins (see
+// btAddChild above, which picks the same name for the same reason): the tree resolves and runs,
+// instead of being a shape that validates and does nothing.
+fmt::OcBtData btStarterTree();
+
 // Moves `index` one place earlier (delta < 0) or later (delta > 0) among its siblings. ORDER IS
 // SEMANTIC HERE, not cosmetic -- see btChildrenOf -- so this is a real behaviour edit, not a tidy-up.
 // Returns its new index; -1 when it is already at that end, is the root, or is out of range.

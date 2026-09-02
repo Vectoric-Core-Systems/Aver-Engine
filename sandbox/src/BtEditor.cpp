@@ -189,6 +189,22 @@ void btSetKind(std::vector<fmt::OcBtNode>& nodes, i32 index, fmt::OcBtNodeKind k
         n.name.clear();
 }
 
+fmt::OcBtData btStarterTree() {
+    fmt::OcBtData bt;
+
+    fmt::OcBtNode root;
+    root.kind = fmt::OcBtNodeKind::Selector;
+    root.parent = fmt::kOcBtNoParent;
+    bt.nodes.push_back(root);
+
+    // Built through btAddChild rather than hand-rolled, so the starter is produced by the same edit
+    // path every other node in this editor goes through -- including its choice of a registered name.
+    btAddChild(bt.nodes, 0, fmt::OcBtNodeKind::Action);
+    if (bt.nodes.size() > 1) bt.nodes[1].params[0] = 1.0f;   // Wait's duration, seconds
+
+    return bt;
+}
+
 // ================================================================================== the tab =======
 
 BtEditor::BtEditor(std::string path) : path_(std::move(path)) { loadFromDisk(); }

@@ -594,6 +594,19 @@ private:
 
 // Creates the .ocgraph editor tab, or nullptr for any other extension. Registered via the EXACT
 // HOOK above.
+// The text the Content Browser's "New Aver Node Graph" writes, for a file whose stem is `stem`.
+//
+// WRITTEN AS TEXT, AND THAT IS FORCED. The C++ OcGraphData does not model the CLASS record -- grep
+// modules/formats/src/OcGraph.cpp for "CLASS" and there is nothing. A CLASS line survives an editor
+// save only because GraphEditor::save() goes through writeOcgraph(graph_, originalText_), which
+// passes unrecognised lines through from the text it parsed. fmt::saveOcgraph() writes fresh with no
+// such text, so a starter built as an OcGraphData and saved that way would come out with NO CLASS
+// LINE -- a graph that opens, looks finished, and can never be placed in a level, because a
+// placement names a class rather than a file.
+//
+// Declared here so a test can parse it, the same reason SoundEditor.hpp declares snStarterGraph.
+std::string graphStarterText(const std::string& stem);
+
 std::unique_ptr<AssetEditor> makeGraphEditor(const std::string& path);
 
 } // namespace aver::editor

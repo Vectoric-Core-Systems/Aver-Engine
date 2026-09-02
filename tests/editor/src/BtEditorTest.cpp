@@ -201,6 +201,49 @@ int main() {
         check(editor::makeBtEditor(dir + "/nope.ocanim") == nullptr, "and a .ocanim");
     }
 
+    // THE STARTER THE CONTENT BROWSER WRITES, CHECKED END TO END.
+    //
+    // "New Behaviour Tree" writes btStarterTree() and immediately opens the file in this editor. That
+    // is the whole trap: BtEditor's constructor calls loadFromDisk() and, when the load fails, sets
+    // loaded_ = false and shows an error instead of an editable tree. A starter that does not satisfy
+    // OcBtData::valid() would therefore be WRITTEN SUCCESSFULLY and then refused by the tab opened for
+    // it -- the create path reports "Created NewBehaviour.ocbt", and the failure surfaces one step
+    // later as an editor that will not open its own new file.
+    //
+    // So this does exactly what the menu item does, in order, and asserts each step rather than the
+    // last one only.
+    AVER_INFO("the Content Browser's starter tree is valid, saves, loads, and opens");
+    {
+        const fmt::OcBtData starter = editor::btStarterTree();
+        check(starter.valid(), "the starter satisfies OcBtData::valid(), which the loader enforces");
+        check(starter.nodes.size() >= 2,
+              "and is not a bare root -- a starter should show what the format is for, got " +
+              std::to_string(starter.nodes.size()) + " node(s)");
+
+        bool named = false;
+        for (const fmt::OcBtNode& n : starter.nodes) {
+            const bool leaf = n.kind == fmt::OcBtNodeKind::Condition || n.kind == fmt::OcBtNodeKind::Action;
+            if (leaf && !n.name.empty()) named = true;
+            check(!leaf || !n.name.empty(),
+                  "every Condition/Action in it carries a registered name, so the tree resolves at load");
+        }
+        check(named, "and at least one leaf actually does something when ticked");
+
+        const std::string starterPath = dir + "/starter.ocbt";
+        std::string why;
+        check(fmt::saveOcBt(starterPath, starter, &why), "it writes: " + why);
+
+        fmt::OcBtData back;
+        check(fmt::loadOcBt(starterPath, back, &why), "and loads back: " + why);
+        check(back.nodes.size() == starter.nodes.size(),
+              "with every node intact, got " + std::to_string(back.nodes.size()));
+
+        // The check that actually mirrors the menu item: the tab opens it, rather than reporting a
+        // load error into a dead panel.
+        check(editor::makeBtEditor(starterPath) != nullptr,
+              "and the editor the create path opens for it ACCEPTS it");
+    }
+
     std::filesystem::remove_all(dir, ec);
     AVER_INFO(g_failures ? "BtEditorTest: {} FAILURES" : "BtEditorTest: all checks passed ({})",
               g_failures);

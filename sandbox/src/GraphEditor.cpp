@@ -3422,6 +3422,31 @@ bool GraphEditor::buildMaterialPreview(Engine&, render::preview::PreviewDraw&) {
 
 #endif  // AVER_WITH_IMGUI
 
+std::string graphStarterText(const std::string& stem) {
+    // A RAW STRING LITERAL, so the file this writes is legible here as the lines it becomes. It also
+    // sidesteps a trap this repository has now hit twice: a backslash-n typed through tooling that
+    // eats escapes lands as a real newline inside a narrow string literal, and MSVC answers with a
+    // wall of C2001 "newline in string literal". There is nothing to escape in a raw literal.
+    //
+    // The class name has to be a legal identifier and a file name need not be, so it is derived from
+    // the stem: NewGraph.ocgraph -> AN_NewGraph. Renaming the file afterwards does NOT rename the
+    // class -- a level placement names the CLASS, and the Details panel is where that is changed.
+    return std::string(R"(OCGRAPH 1
+DOMAIN gameplay
+# A new Aver Node graph. It declares a spawnable class and does nothing yet.
+#
+# CLASS is what makes this placeable: a level PLACE line names a class, not a file, so a graph with
+# no CLASS record can be opened and edited but never put in a world. `Actor` is the bootstrap base
+# every graph class may name for free; `Character` is the other concrete one, and gives you
+# CharacterMove with no C# involved.
+#
+# Right-click the canvas to add an OnStart or OnTick event and give it behaviour.
+NAME )") + stem + R"(
+DESCRIPTION A new graph.
+CLASS AN_)" + stem + R"( Actor
+)";
+}
+
 // ------------------------------------------------------------------------------------------ factory
 
 std::unique_ptr<AssetEditor> makeGraphEditor(const std::string& path) {

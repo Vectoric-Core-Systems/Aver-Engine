@@ -30,6 +30,10 @@
 #include "aver/formats/OcProject.hpp"
 #include "aver/formats/OcWorld.hpp"
 #include "aver/formats/OcMesh.hpp"
+// The behaviour-tree format, for the Content Browser's "New Behaviour Tree". .ocbt is a binary
+// AVR1 container, not a text format, so a starter has to go through fmt::saveOcBt rather than
+// being written as lines the way a starter .ocgraph is.
+#include "aver/formats/OcBt.hpp"
 #include "aver/formats/GltfImport.hpp"
 #if AVER_MODULE_TRIFACTOR
 #include "aver/trifactor/ClusterAdapt.hpp"
@@ -12706,35 +12710,102 @@ private:
     // False for engine content, which the browser mounts read-only.
     bool cbIsEditable(const std::string& path) const { return !isEnginePath(path); }
 
+    // ---- creating a new asset in the browser -----------------------------------------------------
+    //
+    // Three formats can be created here and they share everything except the bytes they write, so the
+    // common half is these two helpers rather than a fourth copy of the same loop. Each "New X" item
+    // is then: pick a free path, write, adopt.
+    //
+    // NO NAME PROMPT, unlike New Folder beside them: a new asset lands as New<Kind>.<ext> and is
+    // renamed with the browser's existing Rename, which every other asset already uses. A modal per
+    // format would be three more naming UIs.
+
+    // A free "<stem>[N].<ext>" in the selected folder, or empty if the folder is read-only or a
+    // thousand names are taken. NEVER returns a path that exists: an existing NewGraph.ocgraph may be
+    // somebody's work in progress, and silently replacing it is the one outcome this must not have.
+    std::filesystem::path cbFreeAssetPath(const char* stem, const char* ext) {
+        if (!cbIsEditable(cbSelectedDir_)) { cbStatus_ = cbImportBlockedReason(cbSelectedDir_); return {}; }
+        std::error_code ec;
+        for (int n = 0; n < 1000; ++n) {
+            const std::string name = std::string(stem) + (n == 0 ? "" : std::to_string(n)) + ext;
+            std::filesystem::path candidate = std::filesystem::path(cbSelectedDir_) / name;
+            if (!std::filesystem::exists(candidate, ec)) return candidate;
+        }
+        cbStatus_ = std::string("Could not find a free name for a new ") + stem;
+        return {};
+    }
+
+    // The tail every successful create runs: refresh the folder cache, SELECT the new file, open its
+    // editor. The selection is the part that was missing -- cbCreateSoundGraph opened the tab but left
+    // the browser's highlight on whatever was there before, so the thing you just made was the one
+    // item not highlighted.
+    void cbAdoptNewAsset(const std::filesystem::path& target) {
+        cbInvalidate(cbSelectedDir_);
+        cbSelectedFile_ = target.string();
+        assetEditors_.open(target.string());
+        cbStatus_ = "Created " + target.filename().string();
+    }
+
     // Writes a starter .ocsnd into the selected folder and opens it. See the Add menu's own comment
     // for why this exists at all.
-    //
-    // NO NAME PROMPT, unlike New Folder beside it: the file lands as NewSound.ocsnd and is renamed
-    // with the browser's existing Rename, which every other asset already uses. A modal here would
-    // be a second naming UI for one format.
     void cbCreateSoundGraph() {
-        if (!cbIsEditable(cbSelectedDir_)) { cbStatus_ = cbImportBlockedReason(cbSelectedDir_); return; }
-        std::error_code ec;
-        std::filesystem::path target;
-        // Never overwrites: an existing NewSound.ocsnd may be somebody's work in progress, and
-        // silently replacing it is the one outcome this must not have.
-        for (int n = 0; n < 1000; ++n) {
-            const std::string name = n == 0 ? "NewSound.ocsnd"
-                                            : "NewSound" + std::to_string(n) + ".ocsnd";
-            std::filesystem::path candidate = std::filesystem::path(cbSelectedDir_) / name;
-            if (!std::filesystem::exists(candidate, ec)) { target = std::move(candidate); break; }
-        }
-        if (target.empty()) { cbStatus_ = "Could not find a free name for a new sound graph"; return; }
-
+        const std::filesystem::path target = cbFreeAssetPath("NewSound", ".ocsnd");
+        if (target.empty()) return;
         std::string why;
         if (!fmt::saveOcSound(target.string(), editor::snStarterGraph(), &why)) {
             cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
             AVER_ERROR("[Editor] new sound graph failed: {}", why);
             return;
         }
-        cbInvalidate(cbSelectedDir_);
-        assetEditors_.open(target.string());
-        cbStatus_ = "Created " + target.filename().string();
+        cbAdoptNewAsset(target);
+    }
+
+    // Writes a starter .ocgraph -- an Aver Node visual-scripting graph -- and opens it.
+    //
+    // The bytes come from editor::graphStarterText rather than being built here, so a test can parse
+    // exactly what this writes; its declaration in GraphEditor.hpp carries the reason it is TEXT and
+    // not an OcGraphData through fmt::saveOcgraph (short version: the C++ struct does not model the
+    // CLASS record, so saving one that way silently drops it). writeNewFile refuses to touch a file
+    // that already exists -- belt and braces with cbFreeAssetPath's own loop.
+    void cbCreateNodeGraph() {
+        const std::filesystem::path target = cbFreeAssetPath("NewGraph", ".ocgraph");
+        if (target.empty()) return;
+        const std::string text = editor::graphStarterText(target.stem().string());
+
+        std::string why;
+        if (!editor::writeNewFile(target.string(), text, &why)) {
+            cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+            AVER_ERROR("[Editor] new graph failed: {}", why);
+            return;
+        }
+        cbAdoptNewAsset(target);
+    }
+
+    // Writes a starter .ocbt -- a Synapse behaviour tree -- and opens it. The tree comes from
+    // editor::btStarterTree, whose declaration in BtEditor.hpp carries the reason it must be a VALID
+    // tree rather than an empty file (BtEditor refuses a file it cannot load, so an invalid starter
+    // fails one step after the moment that looks like success).
+    void cbCreateBehaviourTree() {
+        const std::filesystem::path target = cbFreeAssetPath("NewBehaviour", ".ocbt");
+        if (target.empty()) return;
+
+        const fmt::OcBtData bt = editor::btStarterTree();
+
+        // Checked here rather than trusted: valid() is the same predicate the loader applies, so a
+        // starter that fails it would be written and then refused by the editor that just opened it.
+        if (!bt.valid()) {
+            cbStatus_ = "Internal error: the starter behaviour tree is not valid";
+            AVER_ERROR("[Editor] starter .ocbt failed OcBtData::valid()");
+            return;
+        }
+
+        std::string why;
+        if (!fmt::saveOcBt(target.string(), bt, &why)) {
+            cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+            AVER_ERROR("[Editor] new behaviour tree failed: {}", why);
+            return;
+        }
+        cbAdoptNewAsset(target);
     }
 
     // Explains why `dir` cannot be imported/created into, or empty if it can.
@@ -12921,8 +12992,18 @@ private:
             // that emits one, and no other tool writes one -- so without this item the tab could
             // only ever open a file authored by hand. That is exactly the shape of the recurring
             // "built through every layer, read by nothing" defect, and one menu item avoids it.
+            //
+            // THE SAME ARGUMENT APPLIES TO .ocgraph AND .ocbt, and for longer. Both have a working
+            // editor tab (makeGraphEditor, makeBtEditor), both have an icon and a label in
+            // assetKindFor, and until now neither could be BROUGHT INTO EXISTENCE by the editor at
+            // all: an .ocgraph had to be copied from a project template or typed by hand, and no
+            // .ocbt existed anywhere in this repository outside two test fixtures written at run
+            // time. A whole visual-scripting system and a whole behaviour-tree system, each
+            // reachable only by a file the editor could not make.
             ImGui::BeginDisabled(!cbIsEditable(cbSelectedDir_));
-            if (ImGui::MenuItem("New Sound Graph")) cbCreateSoundGraph();
+            if (ImGui::MenuItem("New Aver Node Graph")) cbCreateNodeGraph();
+            if (ImGui::MenuItem("New Behaviour Tree"))  cbCreateBehaviourTree();
+            if (ImGui::MenuItem("New Sound Graph"))     cbCreateSoundGraph();
             ImGui::EndDisabled();
             ImGui::EndPopup();
         }

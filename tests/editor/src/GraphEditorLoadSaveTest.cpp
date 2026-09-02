@@ -1267,6 +1267,74 @@ static void testLoadFailure() {
     check(!why.empty(), "the failure reason is non-empty, not a silent false");
 }
 
+static void testContentBrowserStarterOpensAndKeepsItsClass() {
+    AVER_INFO("=== the Content Browser's starter graph opens, and keeps the CLASS line ===");
+
+    // WHAT THIS GUARDS. "New Aver Node Graph" writes graphStarterText() and opens the file. The C++
+    // OcGraphData does not model the CLASS record at all, so the obvious implementation -- build an
+    // OcGraphData and hand it to fmt::saveOcgraph -- would produce a graph with NO CLASS LINE. It
+    // would open cleanly, look finished, and be impossible to place in a level, because a level
+    // placement names a class rather than a file. Nothing about that failure is visible at the moment
+    // it happens.
+    //
+    // So the starter is written as TEXT, and this asserts the property that forced it.
+    const std::string dir = scratchDir();
+    const std::string path = dir + "/NewGraph.ocgraph";
+    const std::string text = graphStarterText("NewGraph");
+
+    check(text.find("CLASS AN_NewGraph") != std::string::npos,
+          "the starter declares a class derived from the file stem");
+    check(text.find("OCGRAPH 1") == 0, "and opens with the format header");
+    check(text.find("DOMAIN gameplay") != std::string::npos, "and names its domain");
+
+    writeFile(path, text);
+
+    // It parses at all, through the same reader the editor uses.
+    fmt::OcGraphData parsed;
+    std::string err;
+    check(fmt::parseOcgraph(text, parsed, &err), "it parses: " + err);
+    check(parsed.name == "NewGraph", "with the NAME the stem gave it, got '" + parsed.name + "'");
+
+    // And the tab opens it -- the step the menu item takes immediately after writing.
+    auto ed = makeGraphEditor(path);
+    check(ed != nullptr, "the editor the create path opens for it ACCEPTS it");
+
+    if (ed) {
+        // A load -> save with no edits must be byte-identical, which is this editor's stated contract.
+        // For the starter that is the CLASS line's survival: it is an unrecognised record, carried
+        // only by writeOcgraph's pass-through of the original text, so a save that dropped it would
+        // silently un-place every instance of this class in every level.
+        std::string why;
+        check(ed->save(&why), "and saves it back: " + why);
+        const std::string after = readFile(path);
+        check(after == text, "byte-identically -- the unmodelled CLASS record survived the round trip");
+        check(after.find("CLASS AN_NewGraph") != std::string::npos,
+              "and is still there to be named by a placement");
+    }
+
+    // AND THE FALSIFICATION, kept rather than run once and discarded: the obvious implementation
+    // really does lose the class. Round-tripping the starter through OcGraphData and fmt::saveOcgraph
+    // -- which is how a starter would naturally be built, and how this one nearly was -- drops the
+    // CLASS line, because the struct has no field for it and saveOcgraph writes fresh with no
+    // original text to pass through. If this check ever starts failing, the C++ layer has learned to
+    // model CLASS and graphStarterText may go back to being structured data.
+    {
+        const std::string viaStruct = dir + "/viaStruct.ocgraph";
+        fmt::OcGraphData g;
+        std::string err;
+        check(fmt::parseOcgraph(text, g, &err), "the starter parses into an OcGraphData: " + err);
+        check(fmt::saveOcgraph(viaStruct, g, &err), "which saveOcgraph will happily write: " + err);
+        const std::string lost = readFile(viaStruct);
+        check(lost.find("CLASS") == std::string::npos,
+              "and the CLASS line is GONE from it -- which is why the starter is written as text");
+        check(lost.find("NAME NewGraph") != std::string::npos,
+              "while everything the struct DOES model survives, so the loss is silent");
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
 static void testWrongExtensionIsRejectedByFactory() {
     AVER_INFO("=== factory only claims .ocgraph ===");
     check(makeGraphEditor("something.ocmesh") == nullptr, "makeGraphEditor declines a .ocmesh path");
@@ -1304,6 +1372,7 @@ int main() {
     testFunctionsInTheEditor();
     testLoadFailure();
     testWrongExtensionIsRejectedByFactory();
+    testContentBrowserStarterOpensAndKeepsItsClass();
 
     AVER_INFO("======== {} failure(s) ========", g_failures);
     return g_failures;
