@@ -13,6 +13,7 @@
 // byte-identically through GraphEditor's real save() path (not just the pure autoLayoutPositions()
 // function in isolation, which GraphEditorGeometryTest already covers).
 #include "GraphEditor.hpp"
+#include "GraphNodeDefs.hpp"
 #include "LevelClassSave.hpp"
 
 #include "aver/core/Log.hpp"
@@ -1389,6 +1390,82 @@ static void testClassPlacementsCarryTheEditorsMoves() {
           "the placement would climb on every save/load");
 }
 
+static void testPaletteSearchRanksSensibly() {
+    AVER_INFO("=== the add-node palette search ===");
+
+    // 240 node types across 23 categories used to be reachable only through a submenu per category
+    // with no filter, so finding a node meant already knowing which family it was filed under.
+    // The ranking is the part with logic in it, and a flat substring match gets it wrong.
+
+    check(graphPaletteSearch("", kDomainGameplay).empty(),
+          "an empty query matches nothing -- the caller shows its category menus instead");
+    check(graphPaletteSearch("zzzznotanode", kDomainGameplay).empty(),
+          "and a query nothing matches returns nothing rather than everything");
+
+    {
+        const auto hits = graphPaletteSearch("add", kDomainGameplay);
+        check(!hits.empty(), "'add' finds something");
+        if (!hits.empty()) {
+            // THE RANKING TEST. `Add` starts with the query; `VecAdd` merely contains it. A flat
+            // substring match would order them by catalog position and could put VecAdd first.
+            check(hits[0]->displayName.size() >= 3 &&
+                  editor::detail::ciFind(hits[0]->displayName, "add") == 0,
+                  "and the best match STARTS with it, got '" + hits[0]->displayName + "'");
+
+            usize add = hits.size(), vecAdd = hits.size();
+            for (usize i = 0; i < hits.size(); ++i) {
+                if (hits[i]->typeId == "Add")    add = i;
+                if (hits[i]->typeId == "VecAdd") vecAdd = i;
+            }
+            if (add < hits.size() && vecAdd < hits.size())
+                check(add < vecAdd, "Add outranks VecAdd, which only contains the query");
+        }
+    }
+
+    {
+        // A category name is searchable too, which is the whole point for someone who knows the
+        // family but not the node: "vector" should reach the Vector rows even though none of their
+        // display names contain the word.
+        const auto hits = graphPaletteSearch("vector", kDomainGameplay);
+        check(!hits.empty(), "a CATEGORY name finds its nodes");
+        bool anyVector = false;
+        for (const auto* d : hits) if (d->category == "Vector") anyVector = true;
+        check(anyVector, "and they really are the Vector family");
+    }
+
+    {
+        // Domain filtering must hold, for the reason the category menus filter: offering a gameplay
+        // node to a material graph offers a node whose only outcome is a compile error.
+        const auto play = graphPaletteSearch("branch", kDomainGameplay);
+        const auto mat  = graphPaletteSearch("branch", kDomainMaterial);
+        // NOT A VACUOUS PAIR: the gameplay side must actually find Branch, or "material found none"
+        // would be satisfied by a search that finds nothing anywhere.
+        check(!play.empty(), "'branch' is a real gameplay node");
+        check(mat.empty(),
+              "and a MATERIAL graph is not offered it -- a material has nothing to branch on, and "
+              "suggesting it would suggest a node whose only outcome is a compile error, got " +
+              std::to_string(mat.size()) + " hit(s)");
+        for (const auto* d : mat)
+            check((d->domain & kDomainMaterial) != 0u,
+                  "a material search never returns a gameplay-only node (" + d->typeId + ")");
+    }
+
+    {
+        // The cap must be a cap, and the count must be honest about what it hides -- a truncated list
+        // that looks complete teaches the reader that a node does not exist.
+        const auto capped = graphPaletteSearch("e", kDomainGameplay, 5);
+        check(capped.size() <= 5, "the limit is respected, got " + std::to_string(capped.size()));
+        const usize total = graphPaletteSearchCount("e", kDomainGameplay);
+        check(total >= capped.size(), "and the uncapped count is at least as large, got " +
+              std::to_string(total));
+    }
+
+    // Function rows stay out, for the same reason the category menu skips them: they are created by
+    // the Functions panel, which knows which function they belong to, and a bare one has no pins.
+    for (const auto* d : graphPaletteSearch("function", kDomainGameplay))
+        check(d->category != "Function", "no bare Function row is offered (" + d->typeId + ")");
+}
+
 static void testWrongExtensionIsRejectedByFactory() {
     AVER_INFO("=== factory only claims .ocgraph ===");
     check(makeGraphEditor("something.ocmesh") == nullptr, "makeGraphEditor declines a .ocmesh path");
@@ -1428,6 +1505,7 @@ int main() {
     testWrongExtensionIsRejectedByFactory();
     testContentBrowserStarterOpensAndKeepsItsClass();
     testClassPlacementsCarryTheEditorsMoves();
+    testPaletteSearchRanksSensibly();
 
     AVER_INFO("======== {} failure(s) ========", g_failures);
     return g_failures;

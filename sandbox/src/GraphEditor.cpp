@@ -2291,6 +2291,53 @@ void GraphEditor::drawEventGraph(float dpi) {
             addComment(a, Vec2{a.x + 320.0f * dpi, a.y + 180.0f * dpi}, "Comment");
         }
         ImGui::Separator();
+
+        // THE SEARCH BOX, and it is the first thing focused when the popup opens.
+        //
+        // 240 node types across 23 categories used to be reachable only by knowing which submenu a
+        // node was filed under -- VecAdd is Vector, not Math; SetFieldVec3 is Scene, not Transform.
+        // Typing is how anyone who has not memorised the catalog finds a node.
+        //
+        // The matching and the ranking live in GraphNodeDefs.hpp so a test can drive them; this is
+        // just the box and the rows.
+        if (ImGui::IsWindowAppearing()) {
+            addSearch_[0] = '\0';
+            ImGui::SetKeyboardFocusHere();
+        }
+        ImGui::SetNextItemWidth(260.0f * dpi);
+        ImGui::InputTextWithHint("##addsearch", "Search nodes...", addSearch_, sizeof addSearch_);
+
+        if (addSearch_[0] != '\0') {
+            const GraphNodeDomain searchDomain = openGraphDomain();
+            const usize kShown = 40;
+            const std::vector<const GraphNodeDesc*> hits =
+                graphPaletteSearch(addSearch_, searchDomain, kShown);
+            if (hits.empty()) {
+                ImGui::TextDisabled("no node matches");
+            } else {
+                for (const GraphNodeDesc* d : hits) {
+                    // The category rides on the row rather than being a header: a ranked list is not
+                    // grouped, and a reader still needs to know that Add is Math and VecAdd is Vector.
+                    const std::string row = d->displayName + "##s" + d->typeId;
+                    if (ImGui::MenuItem(row.c_str())) {
+                        addNodeFromCatalog(d->typeId, pendingSpawnCanvasPos_);
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("%s", d->category.c_str());
+                }
+                // NEVER A SILENT TRUNCATION. A capped list that just stops looks like the whole
+                // answer, and "there is no such node" is the wrong thing to learn from a full box.
+                const usize total = graphPaletteSearchCount(addSearch_, searchDomain);
+                if (total > hits.size())
+                    ImGui::TextDisabled("...and %zu more; type more to narrow", total - hits.size());
+            }
+        }
+        // The category menus are the EMPTY-BOX view, so an `else` and not an early return: EndChild()
+        // and the entire details panel are drawn after this popup, and returning from here would take
+        // the right-hand side of the editor with it.
+        else {
+        ImGui::Separator();
         // ONLY THIS GRAPH'S OWN VOCABULARY. A material graph has no Branch, no Spawn and no
         // CharacterMove -- those compile to IL and call the framework, and a material is arithmetic
         // evaluated once per pixel with nothing to call. Offering them would be offering nodes whose
@@ -2320,6 +2367,7 @@ void GraphEditor::drawEventGraph(float dpi) {
                 ImGui::EndMenu();
             }
         }
+        }   // else: the category menus
         ImGui::EndPopup();
     }
 

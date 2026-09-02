@@ -52,8 +52,10 @@
 // GraphEditorGeometry.hpp's computeAttributeRows (see its own header comment for why that split is a
 // hybrid, not a fully generic key=value editor: a node TYPE still gets to say what it expects, the way
 // it already says what pins it has, but nothing the table doesn't know about is ever dropped).
+#include <algorithm>    // stable_sort, for graphPaletteSearch's ranking
 #include <cstdint>
 #include <string>
+#include <string_view>  // graphPaletteSearch takes its query as one
 #include <utility>
 #include <vector>
 
@@ -1211,6 +1213,84 @@ inline const GraphNodeDesc* findGraphNodeDescIn(const std::string& typeId, Graph
         if (detail::ciEquals(d.typeId, typeId) && (d.domain & domain) != 0u) return &d;
     }
     return findGraphNodeDesc(typeId);
+}
+
+// ---- searching the palette ---------------------------------------------------------------------
+//
+// WHY A SEARCH EXISTS AT ALL. This catalog holds 240 node types across 23 categories, and the only
+// way to add one was a right-click menu with a submenu per category and no filter. Finding `VecAdd`
+// meant knowing it is filed under Vector rather than Math; finding `SetFieldVec3` meant knowing it is
+// Scene rather than Transform. A palette you can only use if you already know where everything is
+// is a palette for the person who wrote it.
+//
+// HERE RATHER THAN IN THE POPUP, so it can be tested with no ImGui context -- the same reason
+// GraphEditor.cpp keeps addNodeFromCatalog separate from the menu item that calls it.
+
+namespace detail {
+
+// Case-insensitive find. Returns npos when absent, like std::string::find.
+inline usize ciFind(std::string_view hay, std::string_view needle) {
+    if (needle.empty()) return 0;
+    if (needle.size() > hay.size()) return std::string_view::npos;
+    const auto lower = [](char c) { return c >= 'A' && c <= 'Z' ? char(c - 'A' + 'a') : c; };
+    for (usize i = 0; i + needle.size() <= hay.size(); ++i) {
+        usize j = 0;
+        while (j < needle.size() && lower(hay[i + j]) == lower(needle[j])) ++j;
+        if (j == needle.size()) return i;
+    }
+    return std::string_view::npos;
+}
+
+} // namespace detail
+
+// Palette rows in `domain` matching `query`, best first, at most `limit` of them.
+//
+// THE RANKING IS THE WHOLE POINT and it is three tiers, because a flat substring match puts
+// `SetFieldVec3` above `Add` when you type "add":
+//   0  the display name STARTS with the query        -- "add" -> Add, AddChild
+//   1  the display name contains it                  -- "add" -> VecAdd
+//   2  only the type id or the category contains it   -- "vector" -> every Vector row
+// Ties keep catalog order, which groups a family together rather than shuffling it.
+//
+// An empty query returns nothing: the caller shows its category menus instead, and a search box that
+// answers "everything" to an empty box would just be the catalog with extra steps.
+inline std::vector<const GraphNodeDesc*> graphPaletteSearch(std::string_view query,
+                                                            GraphNodeDomain domain,
+                                                            usize limit = 40) {
+    std::vector<const GraphNodeDesc*> out;
+    if (query.empty() || limit == 0) return out;
+
+    std::vector<std::pair<int, const GraphNodeDesc*>> hits;
+    for (const GraphNodeDesc& d : graphNodeCatalog()) {
+        if ((d.domain & domain) == 0u) continue;
+        // Function rows are excluded for the reason the category menu excludes them: they are created
+        // by the Functions panel, which knows which function they belong to, and a bare one has no
+        // pins and no owner.
+        if (d.category == "Function") continue;
+
+        const usize inName = detail::ciFind(d.displayName, query);
+        int rank = -1;
+        if (inName == 0)                              rank = 0;
+        else if (inName != std::string_view::npos)    rank = 1;
+        else if (detail::ciFind(d.typeId, query) != std::string_view::npos ||
+                 detail::ciFind(d.category, query) != std::string_view::npos) rank = 2;
+        if (rank >= 0) hits.push_back({rank, &d});
+    }
+
+    std::stable_sort(hits.begin(), hits.end(),
+                     [](const auto& a, const auto& b) { return a.first < b.first; });
+    for (const auto& h : hits) {
+        if (out.size() >= limit) break;
+        out.push_back(h.second);
+    }
+    return out;
+}
+
+// How many rows `graphPaletteSearch` would return with no limit -- so a capped list can say how many
+// it is not showing instead of silently ending. A truncated list that looks complete is the reason
+// this is reported rather than assumed.
+inline usize graphPaletteSearchCount(std::string_view query, GraphNodeDomain domain) {
+    return graphPaletteSearch(query, domain, static_cast<usize>(-1)).size();
 }
 
 } // namespace aver::editor

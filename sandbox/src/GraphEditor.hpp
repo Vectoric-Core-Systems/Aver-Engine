@@ -534,6 +534,11 @@ private:
     std::string currentSubgraph_;          // empty = the event graph
     std::string funcEditRowKey_;           // in-flight text edit, keyed like varEditRowKey_
     char funcEditBuf_[128] = {};
+
+    // The add-node popup's search box. Cleared and focused every time the popup appears, so a search
+    // is never inherited from the last one -- reopening the menu and finding somebody else's filter
+    // still applied is the failure this avoids.
+    char addSearch_[128] = {};
     char newFuncPinBuf_[64] = {};
     int newFuncPinType_ = 0;               // index into the same float/int/bool list the Variables panel uses
     fmt::OcGraphFunction* findFunction(const std::string& name);
