@@ -152,14 +152,53 @@ static void testCompoundOfBoxes() {
         10.0f, 10.0f, 40.0f,
         10.0f, 10.0f, 40.0f,
     };
-    const int32_t table = aver_phys_add_dynamic_compound_boxes(0, 0, 300.0f, offsets, halves, 3, 20.0f);
+    // Dropped from just above its resting height rather than from 300: a 240 cm fall lands hard
+    // enough to tip a table with a wide top on two narrow legs, and where a shape RESTS should not
+    // also be a test of how it survives being thrown at the floor.
+    const int32_t table = aver_phys_add_dynamic_compound_boxes(0, 0, 100.0f, offsets, halves, 3, 20.0f);
     check(table != 0, "a three-box compound is created");
 
     const f32 z = restHeight(table);
-    // The legs reach to local z = -60, so the body's origin comes to rest 60 cm up.
-    check(near(z, 60.0f, 8.0f),
-          "it rests on its LEGS at 60 cm, not on its top slab at 20 -- got " + f2s(z) +
-          " (20 would mean the sub-box offsets never made it through)");
+    // THE EXPECTED NUMBER IS 94, AND WORKING OUT WHY IS WHAT CAUGHT THE BUG UNDER THIS TEST.
+    //
+    // aver_phys_body_position reports a DYNAMIC body's centre of mass, not its shape origin, and a
+    // compound's centre of mass is wherever its parts put it. Slab 120x120x40 at z = +40 is 576000
+    // cm^3; each leg 20x20x80 at z = -20 is 32000. So
+    //     com_z = (576000*40 + 2*32000*-20) / 640000 = +34
+    // and the legs reach local z = -60, which is 94 below that. Resting, the reported height is 94.
+    //
+    // This test used to assert 60 -- and 60 is exactly what you get if all three parts are the LAST
+    // box repeated: three identical legs at z = +40, -20, -20 put the centre of mass at 0, and 0 is
+    // 60 above the lowest point. The number this test checked was therefore a fingerprint of the
+    // defect it was meant to rule out. It only ever passed because the sub-shapes were pointers to a
+    // destroyed stack local (PhysicsShapes.cpp), and the assert Jolt raises for that is compiled out
+    // of the Release build this suite is normally run in.
+    check(near(z, 94.0f, 3.0f),
+          "its centre of mass rests at 94 cm, which is the slab-weighted value derived above -- got " +
+          f2s(z) + " (60 would mean all three parts came out as copies of the last box)");
+
+    // THE SLAB IS ACTUALLY A SLAB, which the rest height above cannot tell you.
+    //
+    // The top spans x in [-60, 60]; the legs sit at x = +/-50 with a half-extent of 10, so they cover
+    // only [-60, -40] and [40, 60]. x = +30 is therefore covered by the TOP AND BY NOTHING ELSE, and a
+    // ray dropped there either lands on the table or falls through it to the floor.
+    //
+    // This exists because the rest height did not distinguish the shapes. Every sub-shape used to be
+    // handed to the compound as a pointer to a stack local that had already been destroyed, so all
+    // three parts came out as copies of the last one -- three legs, no top. Three legs reach the same
+    // lowest point as two legs and a slab, so `restHeight` was satisfied by the broken shape, and
+    // asserts are compiled out of the Release build this suite is normally run in.
+    {
+        float hit[3] = {0, 0, 0}, n[3] = {0, 0, 0};
+        int32_t ent = -1;
+        // Straight down the +30 line from above the table, which is resting with its origin at z = 60.
+        const int32_t h = aver_phys_raycast(30.0f, 0.0f, 400.0f, 0.0f, 0.0f, -1.0f, 1000.0f, hit, n, &ent);
+        check(h == table,
+              "a ray down x = +30 hits the TABLE, not the floor past it -- only the top slab covers "
+              "that line, so hitting the floor means the slab was built as another leg");
+        check(h != table || hit[2] > 40.0f,
+              "and it lands on the slab's upper face near z = 120, got " + f2s(hit[2]));
+    }
 
     // ONE BODY, NOT THREE. Every part shares a single handle, so the body count rose by exactly one
     // over the floor that was already there.

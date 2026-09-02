@@ -47,11 +47,38 @@ JPH::Ref<JPH::Shape> buildBoxCompound(const float* offsetsCm, const float* halfE
         // as aver_phys_add_dynamic_box already does in PhysicsWorld.cpp.
         JPH::BoxShapeSettings box(JPH::Vec3(std::abs(cmToM(hy)), std::abs(cmToM(hz)), std::abs(cmToM(hx))));
         box.SetEmbedded();
+
+        // THE SUB-SHAPE IS BUILT HERE, and the compound is handed the SHAPE rather than the SETTINGS.
+        //
+        // The AddShape(..., const ShapeSettings *) overload stores a RefConst to what it is given, and
+        // `box` is a loop-local on the stack: it died at the closing brace with the compound still
+        // holding a reference to it. SetEmbedded does not make that safe -- it only promises Release()
+        // will not call delete, and ~RefTarget still asserts the refcount is back to 0 or cEmbedded
+        // (Core/Reference.h:39), which is the assert a Debug run hit on the first compound ever built.
+        //
+        // Release never saw it, and that is the worse half: with asserts compiled out this was a
+        // dangling pointer into a stack slot that the NEXT iteration reused, so all `count` sub-shape
+        // pointers aliased one address and the compound was built from whatever the LAST box left
+        // there -- a table of three identical legs where a slab and two legs were asked for.
+        //
+        // ShapeTest's boxes are NOT all the same size, so that is not why it stayed green: the rest
+        // height it asserted, 60 cm, is the centre-of-mass height of THREE IDENTICAL LEGS. The real
+        // shape, whose centre of mass the heavy top slab pulls up to +34, rests at 94. The number the
+        // test checked was a fingerprint of this bug. It now asserts 94 with the derivation written
+        // out, and casts a ray at a point only the slab can cover.
+        //
+        // Create() returns a properly refcounted Ref<Shape>; the Shape overload takes its own
+        // reference, and `box` then destructs with nothing pointing at it.
+        JPH::ShapeSettings::ShapeResult sub = box.Create();
+        if (sub.HasError()) {
+            AVER_WARN("[Physics] {} compound: box {}: {}", label, i, sub.GetError().c_str());
+            return nullptr;
+        }
         // Every sub-box shares the compound's rotation: IDENTITY on both sides. toJolt(Quat) of the
         // identity has an all-zero vector part, so the axis permutation and sign flip Convert.hpp
         // warns about have nothing to act on -- there is no separate conversion to get wrong for a
         // per-box rotation this ABI does not yet expose.
-        compound.AddShape(offset, JPH::Quat::sIdentity(), &box);
+        compound.AddShape(offset, JPH::Quat::sIdentity(), sub.Get());
     }
 
     auto res = compound.Create();

@@ -38,13 +38,20 @@ namespace {
 // the same JPH::BodyLockWrite pattern aver_phys_set_entity already uses in PhysicsWorld.cpp; the
 // BodyInterface setters used elsewhere in this file take that lock internally, and these paths have no
 // BodyInterface equivalent to take it for them.
+//
+// GetMotionPropertiesUnchecked, NOT GetMotionProperties. The plain accessor is
+// `{ JPH_ASSERT(!IsStatic()); return mMotionProperties; }` (Body.h:325-326) -- ASKING a static body
+// for its motion properties is the assertion failure, not a way to find out that it has none. The
+// null test below then "worked" only because asserts compile out of a Release build and the pointer
+// really is null there, so every Release run agreed with this function's own comment while a Debug
+// run died on the first call. Jolt ships the Unchecked pair for exactly this question.
 template <typename Fn>
 int32_t withMotionProperties(int32_t handle, Fn&& fn) {
     const JPH::BodyID* id = findBody(handle);
     if (!id) return 0;
     JPH::BodyLockWrite lock(g_world->system.GetBodyLockInterface(), *id);
     if (!lock.Succeeded()) return 0;
-    JPH::MotionProperties* mp = lock.GetBody().GetMotionProperties();
+    JPH::MotionProperties* mp = lock.GetBody().GetMotionPropertiesUnchecked();
     if (!mp) return 0;
     fn(*mp, lock.GetBody());
     return 1;

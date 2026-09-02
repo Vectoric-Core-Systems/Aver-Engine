@@ -245,6 +245,18 @@ int32_t aver_phys_joint_hinge(int32_t bodyA, int32_t bodyB,
         AVER_WARN("[Physics] hinge axis is zero-length");
         return 0;
     }
+    // A HINGE THAT CANNOT TURN IS NOT A HINGE, and Jolt says so itself: HingeConstraint.cpp:83
+    // asserts mLimitsMin != mLimitsMax unless a limit spring is configured, with the message "Better
+    // use a fixed constraint in this case". The clamp below forces min <= 0 <= max, so equality can
+    // only be 0 == 0 -- which is exactly what a caller writes when they mean "locked". Refused here,
+    // and named, rather than left to fail as an assert in a Debug build and a degenerate constraint
+    // in a Release one.
+    if (minAngleRad >= 0.0f && maxAngleRad <= 0.0f) {
+        AVER_WARN("[Physics] hinge locked at a single angle ({} to {} rad) is not a constraint Jolt "
+                  "will build; use aver_phys_joint_fixed for no rotation at all",
+                  minAngleRad, maxAngleRad);
+        return 0;
+    }
     const Vec3 point = point3(pointCm);
     return createJoint(bodyA, bodyB, [&](JPH::Body& a, JPH::Body& b) -> JPH::Ref<JPH::Constraint> {
         JPH::HingeConstraintSettings settings;
@@ -267,6 +279,15 @@ int32_t aver_phys_joint_slider(int32_t bodyA, int32_t bodyB,
     Vec3 sAxis, nAxis;
     if (!normalizedAxis(sliderAxis, sAxis) || !normalizedAxis(normalAxis, nAxis)) {
         AVER_WARN("[Physics] slider axis is zero-length");
+        return 0;
+    }
+    // The same refusal the hinge makes, for the same assert: SliderConstraint.cpp:159 rejects
+    // min == max without a limit spring. After the clamp below that can only be 0 == 0, which means
+    // a slider with nowhere to slide.
+    if (minCm >= 0.0f && maxCm <= 0.0f) {
+        AVER_WARN("[Physics] slider locked at a single position ({} to {} cm) is not a constraint Jolt "
+                  "will build; use aver_phys_joint_fixed to hold two bodies together",
+                  minCm, maxCm);
         return 0;
     }
     const Vec3 point = point3(pointCm);

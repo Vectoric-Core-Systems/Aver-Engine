@@ -119,31 +119,66 @@ static void testHingeSwingsAtConstantRadius() {
     aver_phys_shutdown();
 }
 
-// THE OTHER HALF OF THE SAME JOINT: min == max == 0 is not "a very tight limit", it is no rotation at
-// all. The same pendulum geometry that swung 80+ cm in the test above must now barely move, under the
-// exact same gravity.
-static void testHingeLockedAtZeroDoesNotRotate() {
-    AVER_INFO("=== a hinge with min == max == 0 does not rotate ===");
+// THE OTHER HALF OF THE SAME JOINT, AND IT IS A REFUSAL RATHER THAN A BEHAVIOUR.
+//
+// This test used to assert that min == max == 0 produced a hinge that simply did not turn, and it
+// passed -- in Release. Jolt does not build that constraint: HingeConstraint.cpp:83 asserts
+// mLimitsMin != mLimitsMax with the message "Better use a fixed constraint in this case", and asserts
+// are compiled out of Release, so the suite was measuring a constraint Jolt had already objected to.
+// A Debug run died here on the first step.
+//
+// So the subject changed: a degenerate range is now refused at the ABI, named in the warning, and
+// pointed at aver_phys_joint_fixed, which is the joint that actually means "no relative motion". The
+// slider carries the identical guard for the identical assert at SliderConstraint.cpp:159.
+static void testDegenerateLimitsAreRefused() {
+    AVER_INFO("=== a hinge or slider locked at a single value is refused, not silently degenerate ===");
     aver_phys_init();
 
     const float pivot[3] = {0.0f, 0.0f, 0.0f};
     const int32_t b = aver_phys_add_dynamic_box(0.0f, 200.0f, 0.0f, 20.0f, 20.0f, 20.0f, 1.0f);
     const float hingeAxis[3]  = {1.0f, 0.0f, 0.0f};
     const float normalAxis[3] = {0.0f, 1.0f, 0.0f};
-    const int32_t j = aver_phys_joint_hinge(b, AVER_PHYS_WORLD_BODY, pivot, hingeAxis, normalAxis,
-                                            0.0f, 0.0f);
-    check(j != 0, "the locked hinge is created");
 
+    check(aver_phys_joint_hinge(b, AVER_PHYS_WORLD_BODY, pivot, hingeAxis, normalAxis,
+                                0.0f, 0.0f) == 0,
+          "a hinge with min == max == 0 is refused");
+    check(aver_phys_joint_slider(b, AVER_PHYS_WORLD_BODY, pivot, hingeAxis, normalAxis,
+                                 0.0f, 0.0f) == 0,
+          "and so is a slider with nowhere to slide");
+    check(aver_phys_joint_count() == 0, "neither left a joint behind");
+
+    // AND THE NEIGHBOURING CASES STILL WORK, because a guard that refuses too much is as wrong as one
+    // that refuses too little. A one-sided range is a door that opens one way, not a degenerate joint.
+    const int32_t oneSided = aver_phys_joint_hinge(b, AVER_PHYS_WORLD_BODY, pivot, hingeAxis,
+                                                  normalAxis, 0.0f, 1.5f);
+    check(oneSided != 0, "a hinge that may open one way but not the other is still created");
+    check(aver_phys_joint_count() == 1, "and it is the only joint in the world");
+
+    // What the caller should reach for instead, and it holds the body up under gravity.
+    aver_phys_joint_remove(oneSided);
+    const float axisX[3] = {1.0f, 0.0f, 0.0f};
+    const float axisY[3] = {0.0f, 1.0f, 0.0f};
+    const int32_t fixed = aver_phys_joint_fixed(b, AVER_PHYS_WORLD_BODY, pivot, axisX, axisY);
+    check(fixed != 0, "aver_phys_joint_fixed, which the warning names, does build");
+
+    // HELD, AND THE TEST IS THAT IT SETTLES rather than that it does not move at all. A fixed
+    // constraint is solved, not welded: a 1 kg box on a 200 cm arm sags a few centimetres before the
+    // solver catches it, and picking a tolerance tight enough to call that a failure would only be
+    // measuring the solver's stiffness. What distinguishes "held" from "slipping" is whether the sag
+    // CONVERGES, so the position is sampled twice, three seconds apart.
     for (int i = 0; i < 90; ++i) aver_phys_step(kDt);
+    float early[3] = {0, 0, 0};
+    aver_phys_body_position(b, early);
+    for (int i = 0; i < 300; ++i) aver_phys_step(kDt);
+    float late[3] = {0, 0, 0};
+    aver_phys_body_position(b, late);
 
-    float p[3] = {0, 0, 0};
-    aver_phys_body_position(b, p);
-    check(near(p[1], 200.0f, 3.0f) && near(p[2], 0.0f, 3.0f),
-          "under gravity it stayed at (*, 200, 0), got (*, " + f2s(p[1]) + ", " + f2s(p[2]) + ")");
-
-    float v = 999.0f;
-    check(aver_phys_joint_value(j, &v) == 1 && near(v, 0.0f, 0.05f),
-          "and its angle stayed at 0, got " + f2s(v));
+    check(dist3(early, late) < 1.0f,
+          "the body has stopped moving between 1.5 s and 6.5 s, drifting " +
+          f2s(dist3(early, late)) + " cm in five seconds -- a joint that were slipping would keep going");
+    check(near(late[1], 200.0f, 10.0f) && near(late[2], 0.0f, 10.0f),
+          "and it is still where it started, not on the floor, at (*, " + f2s(late[1]) + ", " +
+          f2s(late[2]) + ")");
 
     aver_phys_shutdown();
 }
@@ -452,7 +487,7 @@ int main() {
     AVER_INFO("joints: fixed, point, distance, hinge, slider, motors, lifetime, refusals");
 
     testHingeSwingsAtConstantRadius();
-    testHingeLockedAtZeroDoesNotRotate();
+    testDegenerateLimitsAreRefused();
     testPointJointHoldsCentreAndFreesRotation();
     testDistanceJointHoldsExactSeparation();
     testSliderMovesAlongAxisOnly();

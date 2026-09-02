@@ -101,6 +101,10 @@ AVER_PHYS_API int32_t aver_phys_joint_distance(int32_t bodyA, int32_t bodyB,
 // `hingeAxis` is what it turns about and `normalAxis` is the zero-angle reference the limits are
 // measured from; the two must be perpendicular. `minAngle`/`maxAngle` are radians, and passing
 // -PI/+PI (or anything wider) means unlimited -- a wheel rather than a door.
+//
+// A RANGE OF ZERO IS REFUSED (returns 0). min >= 0 >= max collapses, after the clamp this applies, to
+// a hinge locked at one angle, and Jolt declines to build that: HingeConstraint.cpp:83 asserts the
+// limits differ, saying "Better use a fixed constraint in this case". Use aver_phys_joint_fixed.
 AVER_PHYS_API int32_t aver_phys_joint_hinge(int32_t bodyA, int32_t bodyB,
                                             const float pointCm[3],
                                             const float hingeAxis[3], const float normalAxis[3],
@@ -108,6 +112,10 @@ AVER_PHYS_API int32_t aver_phys_joint_hinge(int32_t bodyA, int32_t bodyB,
 
 // SLIDER -- one axis of translation, everything else locked. A piston, a drawer, a lift, a sliding
 // door. Limits in centimetres along `sliderAxis`; `normalAxis` must be perpendicular to it.
+//
+// A RANGE OF ZERO IS REFUSED (returns 0), for the same reason the hinge above refuses one:
+// SliderConstraint.cpp:159 asserts the limits differ. Use aver_phys_joint_fixed to hold two bodies
+// together with no relative motion at all.
 AVER_PHYS_API int32_t aver_phys_joint_slider(int32_t bodyA, int32_t bodyB,
                                              const float pointCm[3],
                                              const float sliderAxis[3], const float normalAxis[3],
