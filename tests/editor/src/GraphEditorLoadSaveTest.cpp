@@ -1466,6 +1466,106 @@ static void testPaletteSearchRanksSensibly() {
         check(d->category != "Function", "no bare Function row is offered (" + d->typeId + ")");
 }
 
+static void testCopyPasteRemapsIdsAndLinks() {
+    AVER_INFO("=== copy / paste / duplicate ===");
+
+    const std::string dir = scratchDir();
+    const std::string path = dir + "/paste.ocgraph";
+    // A RAW LITERAL: the escape for a newline does not survive every tool that writes this file,
+    // and MSVC reports the result as a wall of "newline in string literal". Nothing to escape here.
+    writeFile(path, R"(OCGRAPH 1
+DOMAIN gameplay
+NAME Paste
+NODE tick OnTick
+NODE a Add
+NODE b Add
+LINK a.result b.a
+ENTRY tick OnTick
+)");
+
+    auto ed = makeGraphEditor(path);
+    check(ed != nullptr, "the fixture opens");
+    if (!ed) return;
+    auto* g = static_cast<GraphEditor*>(ed.get());
+
+    const usize nodes0 = g->graph().nodes.size();
+    check(nodes0 == 3, "the fixture parsed three nodes, got " + std::to_string(nodes0));
+    const usize links0 = g->graph().links.size();
+
+    // Copy the two Add nodes AND the link between them.
+    g->selectNodes({"a", "b"});
+    check(g->selectedNodes().size() == 2, "two nodes select, got " + std::to_string(g->selectedNodes().size()));
+    g->copySelection();
+    g->pasteClipboard(Vec2{500.0f, 500.0f});
+
+    check(g->graph().nodes.size() == nodes0 + 2, "two nodes arrived, got " +
+          std::to_string(g->graph().nodes.size() - nodes0));
+    check(g->graph().links.size() == links0 + 1,
+          "and the link BETWEEN them came too, got " +
+          std::to_string(g->graph().links.size() - links0));
+
+    // THE REMAP IS THE POINT. The pasted link must join the two NEW nodes, not reach back into the
+    // originals -- a copy wired to the thing it was copied from is the one outcome this must not have.
+    const auto& pasted = g->selectedNodes();
+    check(pasted.size() == 2, "the paste is what is selected afterwards");
+    if (pasted.size() == 2) {
+        check(pasted[0] != "a" && pasted[1] != "b", "the copies have new ids");
+        bool joined = false;
+        for (const auto& l : g->graph().links)
+            if ((l.sourceNode == pasted[0] && l.destNode == pasted[1]) ||
+                (l.sourceNode == pasted[1] && l.destNode == pasted[0])) joined = true;
+        check(joined, "and the new link joins the two COPIES, not the originals");
+
+        for (const auto& l : g->graph().links) {
+            const bool srcNew = l.sourceNode == pasted[0] || l.sourceNode == pasted[1];
+            const bool dstNew = l.destNode   == pasted[0] || l.destNode   == pasted[1];
+            check(srcNew == dstNew,
+                  "no link straddles the copy and the original (" + l.sourceNode + " -> " +
+                  l.destNode + ")");
+        }
+    }
+
+    // A LINK WITH ONE END OUTSIDE THE SELECTION IS NOT COPIED. Selecting only `b` copies no link,
+    // because the link's source `a` was not part of the copy and has nothing to map to.
+    {
+        const usize before = g->graph().links.size();
+        g->selectNodes({"b"});
+        g->copySelection();
+        g->pasteClipboard(Vec2{700.0f, 700.0f});
+        check(g->graph().links.size() == before,
+              "copying one end of a link copies no link at all, got " +
+              std::to_string(g->graph().links.size() - before) + " new");
+    }
+
+    // AN EVENT NODE PASTED GETS ITS OWN ENTRY, exactly as one dropped from the palette does. Without
+    // it the node exists, the graph saves, and the event never fires -- with no error at any layer.
+    {
+        const usize entries = g->graph().entryPoints.size();
+        g->selectNodes({"tick"});
+        g->copySelection();
+        g->pasteClipboard(Vec2{900.0f, 900.0f});
+        check(g->graph().entryPoints.size() == entries + 1,
+              "a pasted OnTick carries an ENTRY record, got " +
+              std::to_string(g->graph().entryPoints.size() - entries));
+        if (!g->selectedNodes().empty()) {
+            bool found = false;
+            for (const auto& e : g->graph().entryPoints)
+                if (e.first == g->selectedNodes()[0] && e.second == "OnTick") found = true;
+            check(found, "and it names the pasted node and the right event");
+        }
+    }
+
+    // Undo puts each paste back -- one pushUndo per paste, not per node.
+    {
+        const usize n = g->graph().nodes.size();
+        g->undoForTest();
+        check(g->graph().nodes.size() < n, "undo removes a whole paste at once, not one node of it");
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
 static void testWrongExtensionIsRejectedByFactory() {
     AVER_INFO("=== factory only claims .ocgraph ===");
     check(makeGraphEditor("something.ocmesh") == nullptr, "makeGraphEditor declines a .ocmesh path");
@@ -1506,6 +1606,7 @@ int main() {
     testContentBrowserStarterOpensAndKeepsItsClass();
     testClassPlacementsCarryTheEditorsMoves();
     testPaletteSearchRanksSensibly();
+    testCopyPasteRemapsIdsAndLinks();
 
     AVER_INFO("======== {} failure(s) ========", g_failures);
     return g_failures;

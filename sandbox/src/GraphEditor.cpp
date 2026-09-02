@@ -1217,6 +1217,109 @@ bool GraphEditor::applyAutoLayout(float dpi) {
     return true;
 }
 
+void GraphEditor::copySelection() {
+    clipNodes_.clear();
+    clipLinks_.clear();
+    if (selectedNodes_.empty()) return;
+
+    const auto selected = [&](const std::string& id) {
+        return std::find(selectedNodes_.begin(), selectedNodes_.end(), id) != selectedNodes_.end();
+    };
+
+    for (const fmt::OcGraphNode& n : graph_.nodes)
+        if (selected(n.id)) clipNodes_.push_back(n);
+
+    // BOTH ENDS, OR NOT AT ALL -- see the header. A half-copied link would either dangle or, worse,
+    // point the copy back at the original.
+    for (const fmt::OcGraphLink& l : graph_.links)
+        if (selected(l.sourceNode) && selected(l.destNode)) clipLinks_.push_back(l);
+}
+
+void GraphEditor::pasteClipboard(Vec2 canvasPos) {
+    if (clipNodes_.empty()) return;
+    pushUndo();
+
+    // Pasted where asked, keeping the copied nodes' RELATIVE layout: the top-left of the copied set
+    // lands on canvasPos and everything keeps its offset from it. Pasting a shape and getting a pile
+    // would make the feature useless for the case it exists for.
+    Vec2 origin{static_cast<f32>(clipNodes_[0].x), static_cast<f32>(clipNodes_[0].y)};
+    for (const fmt::OcGraphNode& n : clipNodes_) {
+        origin.x = n.x < origin.x ? static_cast<f32>(n.x) : origin.x;
+        origin.y = n.y < origin.y ? static_cast<f32>(n.y) : origin.y;
+    }
+
+    std::unordered_map<std::string, std::string> remap;
+    std::vector<std::string> pasted;
+
+    for (const fmt::OcGraphNode& src : clipNodes_) {
+        fmt::OcGraphNode n = src;
+        n.id = makeUniqueNodeId(src.type);
+        remap[src.id] = n.id;
+        n.x = canvasPos.x + (src.x - origin.x);
+        n.y = canvasPos.y + (src.y - origin.y);
+        graph_.nodes.push_back(n);
+
+        // The same two things addNodeFromCatalog does after pushing, for the same reasons: an Event
+        // node with no ENTRY never runs, and a node pasted onto a function's canvas belongs to that
+        // function rather than to the event graph it would otherwise vanish into.
+        const GraphNodeDesc* desc = findGraphNodeDescIn(n.type, openGraphDomain());
+        if (desc && desc->category == "Event") {
+            std::string eventName = desc->typeId;
+            if (desc->typeId == "CustomEvent") {
+                eventName = makeUniqueEventName("MyEvent");
+                setNodeAttribute(graph_.nodes.back(), "name", eventName);
+            }
+            syncEventEntry(n.id, eventName);
+        }
+        if (!currentSubgraph_.empty()) setNodeAttribute(graph_.nodes.back(), "func", currentSubgraph_);
+        else                           removeNodeAttribute(graph_.nodes.back(), "func");
+
+        displayPos_[n.id] = Vec2{static_cast<f32>(n.x), static_cast<f32>(n.y)};
+        pasted.push_back(n.id);
+    }
+
+    for (const fmt::OcGraphLink& src : clipLinks_) {
+        const auto a = remap.find(src.sourceNode);
+        const auto b = remap.find(src.destNode);
+        if (a == remap.end() || b == remap.end()) continue;   // unreachable: copy filtered these out
+        fmt::OcGraphLink l = src;
+        l.sourceNode = a->second;
+        l.destNode   = b->second;
+        graph_.links.push_back(l);
+    }
+
+    // The paste becomes the selection, so it can be dragged into place immediately -- and so a second
+    // Ctrl+V does not silently stack a third copy on a selection the user thinks is the second.
+    selectedNodes_ = pasted;
+    selectedLink_ = -1;
+    dirty_ = true;
+}
+
+void GraphEditor::duplicateSelection() {
+    // Duplicate is copy+paste that does NOT disturb the clipboard: a user who copied one thing, then
+    // duplicated another, still has the first on the clipboard. The offset is a nudge rather than a
+    // position, so the copy is visibly on top of but not exactly over its original.
+    if (selectedNodes_.empty()) return;
+    std::vector<fmt::OcGraphNode> keepNodes = clipNodes_;
+    std::vector<fmt::OcGraphLink> keepLinks = clipLinks_;
+
+    copySelection();
+    Vec2 at{0.0f, 0.0f};
+    if (!clipNodes_.empty()) {
+        at = Vec2{static_cast<f32>(clipNodes_[0].x), static_cast<f32>(clipNodes_[0].y)};
+        for (const fmt::OcGraphNode& n : clipNodes_) {
+            at.x = n.x < at.x ? static_cast<f32>(n.x) : at.x;
+            at.y = n.y < at.y ? static_cast<f32>(n.y) : at.y;
+        }
+        at.x += 40.0f;
+        at.y += 40.0f;
+    }
+    pasteClipboard(at);
+
+    clipNodes_ = std::move(keepNodes);
+    clipLinks_ = std::move(keepLinks);
+}
+
 void GraphEditor::deleteSelection() {
     // A selected comment box is deleted on its own, BEFORE the node/link work, and then this
     // returns. Not folded into the same undo step: a box and a node selection are never both
@@ -1295,6 +1398,14 @@ void GraphEditor::commitLink(const std::string& srcNode, const std::string& srcP
     link.destNode = dstNode; link.destPin = dstPin;
     graph_.links.push_back(link);
     dirty_ = true;
+}
+
+void GraphEditor::selectNodes(const std::vector<std::string>& nodeIds) {
+    selectedNodes_.clear();
+    for (const std::string& id : nodeIds)
+        for (const auto& n : graph_.nodes)
+            if (n.id == id) { selectedNodes_.push_back(id); break; }
+    selectedLink_ = -1;
 }
 
 bool GraphEditor::selectNode(const std::string& nodeId) {
@@ -1998,6 +2109,13 @@ void GraphEditor::drawEventGraph(float dpi) {
             addCommentAroundSelection(dpi);
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Z, false)) { if (io.KeyShift) redo(); else undo(); }
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Y, false)) redo();
+        // Ctrl+C / Ctrl+V / Ctrl+D. The bare-C comment gesture above already excludes Ctrl, so these
+        // do not fight it. PASTE LANDS UNDER THE CURSOR, which is where a paste is expected to appear
+        // and is also what makes pasting the same clipboard twice put the copies somewhere different
+        // -- a fixed offset would stack them.
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C, false)) copySelection();
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V, false)) pasteClipboard(mouseCanvas);
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_D, false)) duplicateSelection();
         // F frames the selection (falling back to everything), Home always frames everything --
         // the same two bindings Blueprint uses, and the reason for having both is that "show me
         // what I just clicked" and "show me where I am" are different questions.

@@ -106,6 +106,20 @@ public:
     // failure mode this repo keeps paying for; a hook that cannot fail cannot verify.
     bool selectNode(const std::string& nodeId);
 
+    // Selects SEVERAL nodes at once, which selectNode above cannot express -- it replaces the
+    // selection with exactly one. Public for the same reason selectNode is: copy/paste is a
+    // multi-node operation, and a test that can only ever select one node can only test the
+    // single-node case, which is the case with no link remapping in it.
+    //
+    // Ids that name no node are dropped rather than refused; a caller naming a node that has since
+    // been deleted wants the rest of its selection, not nothing.
+    void selectNodes(const std::vector<std::string>& nodeIds);
+
+    // Undo/redo, exposed so a headless test can check that one paste is one undo step rather than
+    // one per node -- the shape of that stack is not observable any other way.
+    void undoForTest() { undo(); }
+    void redoForTest() { redo(); }
+
     // ---- attribute editing (Gap B) -------------------------------------------------------------------
     // A selected node's NODE-line key=value attributes -- param=/field=/class= today, anything else
     // tomorrow. See GraphEditorGeometry.hpp's getNodeAttribute/setNodeAttribute/removeNodeAttribute for
@@ -298,6 +312,27 @@ public:
     // that name them -- all three would otherwise be dangling references the parser refuses on the
     // next load. Public for the same reason addNodeFromCatalog is.
     void deleteSelection();
+
+    // ---- copy / paste / duplicate ---------------------------------------------------------------
+    //
+    // Absent until now, which for a node editor is the gap you feel first: building the same
+    // three-node pattern five times means dropping fifteen nodes from the palette and re-wiring
+    // fourteen links by hand.
+    //
+    // A PASTE IS EXACTLY A PALETTE DROP OF THE SAME NODES, PLUS THEIR INTERNAL LINKS. That
+    // equivalence is deliberate and is what keeps it from inventing semantics: an Event node pasted
+    // here gets an ENTRY record the same way addNodeFromCatalog gives one to an Event node dropped
+    // from the menu, and a CustomEvent gets a freshly generated unique name the same way. The editor
+    // already permits two OnTick nodes, each with its own ENTRY, so paste is not creating a state the
+    // palette could not.
+    //
+    // ONLY LINKS WITH BOTH ENDS IN THE COPIED SET come along. A link to a node that was not copied
+    // has nothing to point at, and silently re-pointing it at the ORIGINAL would wire the copy into
+    // the thing it was copied from -- the one outcome a duplicate must not have.
+    void copySelection();
+    void pasteClipboard(Vec2 canvasPos);
+    void duplicateSelection();
+    bool clipboardEmpty() const { return clipNodes_.empty(); }
 
     // ---- component tree edits ---------------------------------------------------------------------
     // Each pushes undo and sets dirty_, exactly like the variable edits below, and each is PUBLIC
@@ -539,6 +574,11 @@ private:
     // is never inherited from the last one -- reopening the menu and finding somebody else's filter
     // still applied is the failure this avoids.
     char addSearch_[128] = {};
+
+    // The copy buffer. Nodes verbatim (ids and all -- they are remapped at paste, not at copy, so the
+    // same buffer can be pasted repeatedly) and only the links whose two ends are both in it.
+    std::vector<fmt::OcGraphNode> clipNodes_;
+    std::vector<fmt::OcGraphLink> clipLinks_;
     char newFuncPinBuf_[64] = {};
     int newFuncPinType_ = 0;               // index into the same float/int/bool list the Variables panel uses
     fmt::OcGraphFunction* findFunction(const std::string& name);
