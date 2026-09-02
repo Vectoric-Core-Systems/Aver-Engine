@@ -1,10 +1,8 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems. All rights reserved.
 // Proprietary. See LICENSE.md at the repository root.
-// IL compiler for graphs.
-// Comment explains WHY: System.Reflection.Emit lets us turn a graph into native .NET IL at runtime
-// without needing a compiler (Roslyn). This removes the constraint that games must ship a compiler.
-// The compiled method is cached in the AssemblyLoadContext so it can be invoked repeatedly.
+// IL compiler for graphs: uses System.Reflection.Emit (not Roslyn) so games need no compiler at
+// runtime. The compiled method is cached in the AssemblyLoadContext for reuse.
 
 using System;
 using System.Collections.Generic;
@@ -17,47 +15,31 @@ using Aver.Scene;
 
 namespace Aver.Graph;
 
-/// <summary>Resolves a scene field's dense id and kind by qualified name, so getfield/setfield
-/// nodes can be checked at COMPILE time rather than silently doing nothing at runtime. fieldId
-/// is 0 (and the return is false) when the name is unknown; kind mirrors aver::scene::FieldKind
-/// (Fields.hpp) when it is.
+/// <summary>Resolves a scene field's dense id and kind by qualified name so getfield/setfield are
+/// checked at COMPILE time, not silently no-op'd at runtime. fieldId 0 (return false) means
+/// unknown; kind mirrors aver::scene::FieldKind (Fields.hpp).
 ///
-/// GraphCompiler's default implementation calls straight through to the live scene via
-/// Native.aver_scene_field/aver_scene_field_kind -- correct for a graph compiled inside a running
-/// engine, where the scene's field table is exactly the authority a graph should be checked
-/// against. That default requires the native Aver.Scene library to be loadable; a process with no
-/// scene running (a bare unit test, notably) cannot exercise it and should supply its own resolver
-/// instead of standing up a native scene just to compile a graph.</summary>
+/// Default impl calls Native.aver_scene_field/aver_scene_field_kind, which needs a loadable native
+/// Aver.Scene library -- a scene-less unit test should supply its own resolver instead.</summary>
 public delegate bool FieldResolver(string qualifiedName, out int fieldId, out int kind);
 
 /// Compiles a graph to a DynamicMethod and invokes it.
 public class GraphCompiler
 {
-    // aver::scene::FieldKind (Fields.hpp) values getfield/setfield/getfieldvec3/setfieldvec3 check
-    // against. getfield/setfield only ever accepted F32; getfieldvec3/setfieldvec3 (below) close the
-    // Vec3 half of the gap that comment used to describe as "out of scope" -- CLocal.position,
-    // CLocal.scale, CLight.colour and friends are all FieldKind.Vec3 (Builtins.cpp) and were
-    // previously unreachable from a graph at all. NO NEW PIN TYPE was needed to do this: a Vec3 field
-    // reads/writes as three ordinary Float pins (x/y/z), the same "one native call, several scalar
-    // pins" shape Raycast already established for a five-output native call -- see EmitGetFieldVec3's
-    // own comment for why that is the right size rather than adding PinType.Vec3. Quat (arity 4) and
-    // Mat4 (arity 16) fields remain out of scope -- no known consumer of this vocabulary needs graph
-    // access to either yet -- and RequireVec3Field's own guard (below) is what stops
-    // getfieldvec3/setfieldvec3 from being pointed at one and reading/writing the wrong number of
-    // floats.
+    // aver::scene::FieldKind (Fields.hpp) values checked by getfield/setfield (F32 only) and
+    // getfieldvec3/setfieldvec3 (Vec3 -- CLocal.position, CLight.colour, etc, Builtins.cpp). Vec3
+    // support needed NO new pin type: a Vec3 field reads/writes as three Float pins (x/y/z), same
+    // shape as Raycast's multi-output call. Quat (arity 4) and Mat4 (arity 16) stay out of scope;
+    // RequireVec3Field's guard (below) stops getfieldvec3/setfieldvec3 from misreading their arity.
     private const int FieldKindF32 = 0;
     private const int FieldKindVec3 = 1;
 
     private Graph _graph;
     private readonly FieldResolver _fieldResolver;
 
-    // ---- user-defined functions -----------------------------------------------------------------
-    //
-    // One DynamicMethod per FUNC, created for ALL functions before ANY body is emitted, so a call
-    // can reference a callee whose IL has not been written yet -- including itself. That forward
-    // reference is the whole basis of this design and it was established by spike before a line of
-    // it was written: on this toolchain a DynamicMethod can be the target of Emit(OpCodes.Call, ...)
-    // from another DynamicMethod, from itself, and from one emitted earlier than the callee.
+    // One DynamicMethod per FUNC, created for ALL functions before any body is emitted, so a call can
+    // reference a callee whose IL is not written yet -- including itself or one emitted later. A
+    // DynamicMethod can be the target of Emit(OpCodes.Call, ...) before its own IL exists.
     private readonly Dictionary<string, DynamicMethod> _funcMethods = new(StringComparer.OrdinalIgnoreCase);
     private bool _functionsCompiled;
     // The function currently being emitted -- null while emitting the event graph. FuncEntry reads
@@ -68,59 +50,46 @@ public class GraphCompiler
     private Dictionary<(string, string), LocalBuilder> _pinLocals = new();
     private ILGenerator? _il;
 
-    // ---- exec/PUSH compilation state -- see the PUSH VS PULL comment above CompileEntryPoint() -----
+    // Exec/PUSH compilation state -- see the PUSH VS PULL comment above CompileEntryPoint().
 
-    // Hard cap on a single while/forEach's iteration count. Exists so a graph author's mistake (a
-    // `cond` that never goes false, a `count` fed a huge or negative-looking value) cannot hang
-    // whatever calls the compiled delegate -- a live game's frame, or this very test suite -- instead
-    // of just running a very long time. PUBLIC so a test can assert against the real number rather
-    // than a second, possibly-drifting copy of it (see GraphFlowTests.cs's guard test).
+    // Hard cap on a single while/forEach's iteration count: stops a bad `cond`/`count` from hanging
+    // the caller (a live frame, or this test suite) instead of erroring. PUBLIC so a test can assert
+    // against the real number rather than a drifting copy (GraphFlowTests.cs's guard test).
     public const int MaxLoopIterations = 100_000;
 
-    // Loop/branch-local values that only make sense DURING or AFTER a specific run of the exec chain
-    // -- a loop's live counter, a branch's "which side did I take", a SetField's captured return code
-    // -- keyed the same way _pinLocals is (nodeId, pinName), but populated by EmitExecNode's control-
-    // flow emitters rather than by the topological PULL pass. EmitPullOutput checks this FIRST, before
-    // dispatching by node type, so `OUT whileNode iterations` (say) reads the live counter instead of
-    // trying to re-derive "iterations" as if it were a pure expression -- it is not one.
+    // Loop/branch-local values valid only DURING/AFTER a specific exec run (a loop counter, a
+    // branch's taken side, SetField's return code) -- keyed like _pinLocals (nodeId, pinName) but
+    // populated by EmitExecNode's control-flow emitters. EmitPullOutput checks this FIRST so e.g.
+    // `OUT whileNode iterations` reads the live counter, not a re-derived pure expression.
     private Dictionary<(string, string), LocalBuilder> _execLocals = new();
 
-    // Nodes currently on the exec walk's OWN call stack (not "ever visited" -- see EmitExecNode).
-    // Catches a hand-authored exec LINK cycle that does not go through a while/forEach's internal
-    // loop-back (which is not expressed as a graph link at all -- see EmitWhile/EmitForEach) at
-    // COMPILE time, as a clear error, rather than recursing until the process's call stack overflows.
+    // Nodes on the exec walk's OWN call stack right now (not "ever visited" -- see EmitExecNode).
+    // Catches a hand-authored exec LINK cycle -- distinct from while/forEach's internal loop-back,
+    // which is not a graph link (see EmitWhile/EmitForEach) -- at COMPILE time, not via stack overflow.
     private HashSet<string> _execVisiting = new();
-    // THE SAME GUARD, FOR THE OTHER RECURSION, and it is not optional. EmitPullOutput recurses through
-    // EmitPullInput to evaluate its operands, and a hand-authored .ocgraph can wire two data nodes into
-    // each other -- add.a <- multiply.result and multiply.a <- add.result. Nothing upstream rejects it:
-    // the parser accepts it, Graph.Validate() has no data-cycle check, and the exec walk's own
-    // _execVisiting never sees these nodes because they are reached by PULL, not by PUSH.
+    // Same guard, for PULL recursion: EmitPullOutput recurses through EmitPullInput, and a hand-
+    // authored .ocgraph can wire two data nodes into each other (add.a <- multiply.result,
+    // multiply.a <- add.result) -- nothing upstream rejects it (no parser/Validate() cycle check),
+    // and _execVisiting never sees these nodes since they're reached by PULL, not PUSH. Unbounded
+    // recursion here is StackOverflowException, which .NET makes UNCATCHABLE -- it kills the whole
+    // host process (editor included), worse than any wrong number this compiler could produce, and
+    // hand-authored .ocgraph is normal input here, not exotic.
     //
-    // Without this the recursion is unbounded, and the failure is not a hang or an exception anyone can
-    // report -- it is StackOverflowException, which .NET makes UNCATCHABLE by design. The compiler's own
-    // catch(Exception) cannot intercept it; the entire host process dies, taking the editor with it, on
-    // input a user typed. That is a worse outcome than any wrong number this compiler could produce, and
-    // hand-authored .ocgraph is a normal input in this codebase, not an exotic one.
-    //
-    // Keyed on node id rather than (id, pin) deliberately: re-entering a node by ANY pin on the current
-    // path is a cycle. A diamond -- two different consumers pulling the same node -- is not affected,
-    // because the try/finally below removes the node when its own evaluation completes, so the second
-    // consumer starts from an empty path.
+    // Keyed on node id, not (id, pin): re-entering a node by ANY pin on the current path is a cycle.
+    // A diamond (two consumers pulling the same node) is unaffected -- the try/finally below clears
+    // the node once its own evaluation completes.
     private HashSet<string> _pullVisiting = new();
 
     // The event name CompileEntryPoint() is currently compiling, purely so a loop-guard warning
     // emitted from deep inside EmitWhile/EmitForEach can name which entry point misbehaved.
     private string _currentEventName = "";
 
-    // ---- graph-local persistent variables (VAR / GraphVarStore) -----------------------------------
+    // Graph-local persistent variables (VAR / GraphVarStore).
 
-    // Argument index of the trailing GraphVarStore parameter this compiled delegate takes, or -1 when
-    // this graph declares no VAR records at all -- the overwhelmingly common case, and the entire
-    // reason appending this parameter is additive rather than a breaking change: a VAR-less graph's
-    // delegate shape (Func<...>/Action<...> arity and argument types) is byte-for-byte identical to
-    // what it was before VAR existed, because paramTypes only grows when _graph.Variables.Count > 0.
-    // Set once per Compile()/CompileEntryPoint() call, from _graph.Variables.Count, BEFORE any node is
-    // emitted -- EmitGetVar/EmitPullGetVar/EmitExecSetVar are the only readers.
+    // Index of the trailing GraphVarStore parameter, or -1 if this graph declares no VAR records
+    // (the common case) -- additive, not breaking: paramTypes only grows when Variables.Count > 0, so
+    // a VAR-less graph's delegate shape is unchanged. Set once per Compile()/CompileEntryPoint() call
+    // before any node is emitted; EmitGetVar/EmitPullGetVar/EmitExecSetVar are the only readers.
     private int _varStoreArgIndex = -1;
 
     public GraphCompiler(Graph graph, FieldResolver? fieldResolver = null)
@@ -136,44 +105,37 @@ public class GraphCompiler
         return fieldId != 0;
     }
 
-    /// Compiles the graph to a DynamicMethod. The method takes one argument per PARAM the graph
-    /// declares, in declaration order (no PARAM records -- the common case today -- means zero
-    /// arguments, exactly as before PARAM existed), and returns the single output pin's value, or
-    /// void if multiple outputs.
-    /// Returns null if compilation fails; check log for errors.
+    /// Compiles the graph to a DynamicMethod: one argument per declared PARAM in order (no PARAM
+    /// records means zero arguments), returning the single output pin's value or void for multiple
+    /// outputs. Returns null on failure; check log for errors.
     public Delegate? Compile(out string? err)
     {
         err = null;
 
-        // Validate the graph first.
         if (!_graph.Validate(out var validateErr))
         {
             err = validateErr;
             return null;
         }
 
-        // FUNCTIONS BEFORE ANYTHING ELSE, because emitting one takes over _il and every local map
-        // this class owns -- see EnsureFunctionsCompiled. Doing it here, before this method
-        // creates its own DynamicMethod, is what keeps that from being a problem rather than a
-        // save/restore dance at every call site.
+        // FUNCTIONS BEFORE ANYTHING ELSE: emitting one takes over _il and every local map this class
+        // owns (see EnsureFunctionsCompiled). Doing it before this method's own DynamicMethod exists
+        // avoids a save/restore dance at every call site.
         if (!EnsureFunctionsCompiled(out err)) return null;
 
-        // An OUT record cannot name an exec pin -- "what the graph hands back" is a data question;
-        // control flow has nothing to hand back. Checked explicitly, here, rather than letting
-        // PinTypeToCLRType's typeof(void) fall through to DeclareLocal(typeof(void)) a few lines below
-        // and throw a confusing runtime ArgumentException: Validate() itself does not look at pin
-        // TYPES for Outputs, only that the referenced pin exists and is an output (Graph.cs), so this
-        // is the first point in Compile() that can see the mismatch. Shared with CompileEntryPoint(),
-        // which has the identical question to answer about the identical field.
+        // An OUT record can't name an exec pin -- control flow has nothing to "hand back". Checked
+        // explicitly here rather than letting PinTypeToCLRType's typeof(void) reach
+        // DeclareLocal(typeof(void)) and throw a confusing runtime ArgumentException: Validate()
+        // doesn't check pin TYPES for Outputs (Graph.cs), so this is the first point that can catch
+        // it. Shared with CompileEntryPoint(), which faces the identical question.
         if (!ValidateOutputsAreData(out err)) return null;
 
         try
         {
-            // Determine the return type. Zero outputs -> void (unchanged). One output -> that
-            // pin's own CLR type, exactly as before (every existing single-output graph and test
-            // keeps the same Func<T> shape). Two or more outputs -> object[], one boxed entry per
-            // Outputs record IN FILE ORDER -- see the OUTPUTS ARRAY comment below Compile() for why
-            // this is object[] and not a second delegate convention.
+            // Return type: zero outputs -> void; one output -> that pin's CLR type (keeps every
+            // existing single-output graph's Func<T> shape); 2+ outputs -> object[], one boxed entry
+            // per Outputs record in file order -- see the OUTPUTS ARRAY comment below for why object[]
+            // rather than a second delegate convention.
             Type returnType = typeof(void);
             string singleOutputNodeId = "";
             string singleOutputPinName = "";
@@ -199,10 +161,9 @@ public class GraphCompiler
 
             Type[] paramTypes = _graph.Parameters.Select(p => PinTypeToCLRType(p.Type)).ToArray();
 
-            // Append a trailing GraphVarStore parameter iff this graph declares at least one VAR --
-            // see _varStoreArgIndex's own comment for why this is additive, never mixed into the
-            // declared PARAM list itself (constraint: PARAM is caller-supplied, VAR is graph-owned,
-            // and reusing one slot for both would erase that distinction for whatever read the IL back).
+            // Append a trailing GraphVarStore param iff this graph declares >=1 VAR (see
+            // _varStoreArgIndex) -- kept separate from PARAM because PARAM is caller-supplied and VAR
+            // is graph-owned; merging the two slots would erase that distinction.
             if (_graph.Variables.Count > 0)
             {
                 _varStoreArgIndex = paramTypes.Length;
@@ -224,7 +185,6 @@ public class GraphCompiler
             _nodeLocals.Clear();
             _pinLocals.Clear();
 
-            // Sort nodes in topological order.
             var sortedNodes = TopologicalSort();
             if (sortedNodes == null)
             {
@@ -232,31 +192,24 @@ public class GraphCompiler
                 return null;
             }
 
-            // Emit code for each node in order -- SKIPPING the ones this compiler has no business
-            // touching. OcGraph.hpp's own contract says a graph may be "pure dataflow, pure exec, or
-            // both at once; the two halves do not interact", and that Compile() is "driven entirely
-            // by `outputs`". It was not: it emitted EVERY node in the graph, so the first graph that
-            // carried both halves died on `Node type 'OnTick' is not supported` -- a dataflow
-            // compiler refusing to compile a graph because of nodes it was never meant to look at.
-            //
-            // Found the moment the cross-implementation fixture grew an exec chain, which is exactly
-            // what that fixture is for. Skipping by "is this node exec-capable" rather than by
-            // reachability from OUT keeps the change small and keeps the failure mode honest: a pure
-            // DATA node that is genuinely unreachable still gets emitted and still reports its own
-            // errors, so a typo in an unused subgraph is not silently swallowed.
+            // Emit each node, SKIPPING ones this compiler has no business touching. OcGraph.hpp says a
+            // graph may be pure dataflow, pure exec, or both, with Compile() "driven entirely by
+            // `outputs`" -- but it used to emit EVERY node, so a graph with both halves died on
+            // `Node type 'OnTick' is not supported`. Found when the cross-implementation fixture grew
+            // an exec chain. Skips by "is this node exec-capable" rather than by reachability from OUT,
+            // so a pure DATA node that's genuinely unreachable still gets emitted and still reports its
+            // own errors -- a typo in an unused subgraph isn't silently swallowed.
             foreach (var node in sortedNodes)
             {
-                // A NODE THAT LIVES IN A FUNCTION IS NOT PART OF THIS METHOD. TopologicalSort walks
-                // every node in the FILE, and a function body is ordinary nodes in that same file --
-                // so without this, emitting the event graph would also emit every function's body
-                // into it, with that body's FuncEntry trying to Ldarg an argument this method does
-                // not have. The bodies were already emitted, into their own methods, above.
+                // A node inside a FUNCTION is not part of this method. TopologicalSort walks every
+                // node in the file, so without this the event graph would re-emit every function
+                // body too, with its FuncEntry trying to Ldarg an argument this method lacks --
+                // bodies are already emitted into their own methods above.
                 if (node.FuncOwner != null) continue;
                 if (IsExecOnlyNodeType(node.Type)) continue;
                 EmitNode(node);
             }
 
-            // If there's a single output, load it and return.
             if (_graph.Outputs.Count == 1 && !string.IsNullOrEmpty(singleOutputNodeId))
             {
                 if (_pinLocals.TryGetValue((singleOutputNodeId, singleOutputPinName), out var outLocal))
@@ -271,18 +224,14 @@ public class GraphCompiler
             }
             else if (_graph.Outputs.Count >= 2)
             {
-                // OUTPUTS ARRAY: multiple OUT records used to compile to a void-returning method
-                // whose computed values were locals inside the DynamicMethod and thus unrecoverable
-                // by the caller -- the graph "ran" but nothing it produced could ever be read back.
-                // A drone's flight path needs x, y, and z out of ONE compile (three separate
-                // single-output graphs would triple-compute the shared angle/time math and, worse,
-                // could drift out of sync if edited independently), so this builds a boxed
-                // object[_graph.Outputs.Count] instead, one entry per OUT record IN FILE ORDER. A
-                // typed tuple would be nicer to consume but MakeGenericType over ValueTuple's arity
-                // needs the same "which arity" dispatch GetDelegateType already does for Func/Action
-                // by NAME -- object[] avoids inventing that a second time for a return type instead
-                // of a delegate type. The caller (GraphHost) unboxes by the LOCAL'S declared CLR
-                // type, which is exactly the pin's own type -- see LocalBuilder.LocalType below.
+                // OUTPUTS ARRAY: multiple OUT records used to compile to void with the computed
+                // values stuck in unrecoverable DynamicMethod locals -- the graph "ran" but produced
+                // nothing readable. A drone's flight path needs x/y/z from ONE compile (three
+                // single-output graphs would triple-compute the shared math and could drift), so this
+                // builds boxed object[Outputs.Count], one entry per OUT record in file order. A typed
+                // tuple was rejected: MakeGenericType over ValueTuple's arity needs the same by-NAME
+                // dispatch GetDelegateType already does for Func/Action. GraphHost unboxes by each
+                // local's declared CLR type (LocalBuilder.LocalType), i.e. the pin's own type.
                 _il.Emit(OpCodes.Ldc_I4, _graph.Outputs.Count);
                 _il.Emit(OpCodes.Newarr, typeof(object));
 
@@ -314,8 +263,7 @@ public class GraphCompiler
         }
     }
 
-    /// Topologically sorts the nodes so outputs depend on inputs.
-    /// Returns null if there is a cycle.
+    /// Topological sort of the nodes (outputs depend on inputs); returns null if there's a cycle.
     private List<Node>? TopologicalSort()
     {
         var visited = new HashSet<string>();
@@ -359,16 +307,13 @@ public class GraphCompiler
     {
         if (_il == null) return;
 
-        // Create locals for all DATA output pins of this node. Exec-typed output pins are skipped --
-        // PinTypeToCLRType(PinType.Exec) is typeof(void), and DeclareLocal(typeof(void)) throws; a
-        // pure-dataflow node never legitimately has an exec pin (see the flow-node catalog in
-        // OcGraphParser.AddDefaultPins), but TopologicalSort() walks EVERY node in the graph
-        // regardless of type, so this guards the case where a flow node (branch/sequence/while/
-        // forEach) ends up here because Compile() -- the OLD, PULL-only path -- was called on a graph
-        // that also happens to declare one, rather than CompileEntryPoint(). EmitNode's switch below
-        // still has no case for those types and throws NotSupportedException naming the type, which is
-        // the right answer either way; this just keeps that the FIRST failure instead of an
-        // unrelated-looking ArgumentException from the runtime.
+        // Create locals for all DATA output pins. Exec-typed output pins are skipped --
+        // PinTypeToCLRType(PinType.Exec) is typeof(void) and DeclareLocal(typeof(void)) throws. A
+        // pure-dataflow node never legitimately has one, but TopologicalSort() walks every node
+        // regardless of type, so this guards a flow node (branch/while/forEach) reaching Compile()
+        // (the old PULL-only path) instead of CompileEntryPoint() -- the switch below still throws
+        // NotSupportedException for it either way; this just keeps that the FIRST failure instead of
+        // an unrelated ArgumentException from the runtime.
         foreach (var pin in node.Pins.Where(p => p.IsOutput && p.Type != PinType.Exec))
         {
             var local = _il.DeclareLocal(PinTypeToCLRType(pin.Type));
@@ -393,11 +338,9 @@ public class GraphCompiler
                 EmitConstBool(node);
                 break;
 
-            // ---- scalar operators, PUSH path ---------------------------------------
-            // Operands pushed from the node's stored pin locals, then one shared emitter.
-            // The matching PULL arm is in EmitPullOutput; a node present in one and absent
-            // from the other compiles in some graphs and throws in others, which is the
-            // exact defect shape this file has hit repeatedly.
+            // Scalar operators, PUSH path: operands pushed from stored pin locals into one shared
+            // emitter. The matching PULL arm is in EmitPullOutput -- a node present in one and absent
+            // from the other is the exact defect shape this file has hit repeatedly.
             case "not": case "abs": case "negate":
             case "sqrt": case "floor": case "ceil":
             case "round": case "saturate":
@@ -466,10 +409,9 @@ public class GraphCompiler
                 EmitGetVelocity(node);
                 break;
 
-            // A pure CallFunc sitting in the EVENT graph of a pure-dataflow file. Emitted through
-            // EmitSimpleApiRead, which is the existing "call something, store its results in this
-            // node's pin locals" shape -- see the pull path for the impure case, which never
-            // reaches here because Compile() has no exec walk to reach it with.
+            // A pure CallFunc in the EVENT graph of a pure-dataflow file, via EmitSimpleApiRead's
+            // "call, store results in pin locals" shape; the impure case never reaches here since
+            // Compile() has no exec walk.
             case "callfunc":
                 EmitCallFuncTopological(node);
                 break;
@@ -488,8 +430,7 @@ public class GraphCompiler
                 EmitSimpleApiRead(node);
                 break;
 
-            // The new physics reads: all pure (a body/joint handle in, a value out), so all welcome
-            // in the dataflow compiler exactly like the five just above.
+            // Physics reads: pure (handle in, value out), so welcome here like the five above.
             case "getbodyangularvelocity":
             case "getbodymass":
             case "getbodymotiontype":
@@ -528,20 +469,16 @@ public class GraphCompiler
                 break;
 
             case "setfieldvec3":
-                // Present here too, exactly like "setfield" above -- Compile()'s topological pass
-                // visits every non-exec-only node EXACTLY ONCE regardless of graph shape, so running
-                // SetFieldVec3's write from here is a single, deterministic write per compiled
-                // delegate invocation, not the double-write EmitPullOutput's refusal (below) guards
-                // against -- that guard is about its OWN recursive, uncached pull mechanism inside the
-                // PUSH compiler, a genuinely different risk. See EmitSetField's own comment for the
-                // full "why SetField is dual-reachable" reasoning, which applies unchanged here.
+                // Like "setfield" above: Compile()'s topological pass visits every non-exec-only node
+                // exactly once, so this is a single deterministic write per invocation, not the
+                // double-write EmitPullOutput's refusal (below) guards against (a different risk --
+                // its own recursive pull mechanism). See EmitSetField's "dual-reachable" reasoning.
                 EmitSetFieldVec3(node);
                 break;
 
             case "setparent":
-                // Same dual-reachable reasoning as "setfieldvec3" just above -- see
-                // OcGraphParser.AddDefaultPins's "setparent"/"setviewentity"/"setname" comment for the
-                // full "why SetField-style, not Spawn/SetVar-style" story.
+                // Same dual-reachable reasoning as "setfieldvec3" above -- see
+                // OcGraphParser.AddDefaultPins's setparent/setviewentity/setname comment.
                 EmitSetParent(node);
                 break;
 
@@ -556,14 +493,12 @@ public class GraphCompiler
             case "isphysicsready":
             case "getfixedstep":
             case "findentity":
-                // PURE reads -- welcome in the dataflow compiler, exactly like getbodycount and
-                // getworldposition. EmitSimpleApiRead drives EmitPullOutput's own cases above.
+                // Pure reads, welcome here like getbodycount/getworldposition (EmitPullOutput above).
                 EmitSimpleApiRead(node);
                 break;
 
             case "issoundplaying":
-                // The one PURE audio read -- asking whether a voice is still sounding changes
-                // nothing, so both compilers are welcome to it.
+                // The one pure audio read -- checking playback state changes nothing.
                 EmitSimpleApiRead(node);
                 break;
 
@@ -673,13 +608,11 @@ public class GraphCompiler
                 break;
 
             case "spawn":
-                // Side-effecting (creates a new scene entity) -- see IsExecCapableSpawnType's own
-                // comment. REFUSED explicitly rather than silently skipped via IsExecOnlyNodeType
-                // (which would give no signal) or run unconditionally the way SetField/SetFieldVec3's
-                // PULL-switch cases are (safe for THEM: overwriting a field with the same value twice
-                // is harmless -- see SetFieldVec3's case above). Spawn gets no such pass: ticked every
-                // frame by GraphHost with no branch structure to gate it, a stray Spawn node would
-                // create a brand NEW entity every single tick.
+                // Side-effecting (creates a new entity) -- see IsExecCapableSpawnType. REFUSED
+                // explicitly rather than skipped via IsExecOnlyNodeType (no signal) or run
+                // unconditionally like SetField/SetFieldVec3 (safe for them: overwriting a field
+                // twice is harmless). Spawn has no such pass -- ticked every frame with no branch to
+                // gate it, a stray Spawn would create a new entity every tick.
                 throw new InvalidOperationException(
                     $"Spawn node '{node.Id}' cannot be compiled by Compile() -- spawning an entity is a " +
                     "side effect with no notion of 'when' in a pure-dataflow graph, and Compile()'s " +
@@ -688,10 +621,9 @@ public class GraphCompiler
                     "CompileEntryPoint() instead.");
 
             case "charactermove":
-                // Side-effecting: drives a real actor (yaw, pitch, capsule velocity, via
-                // AverCharacter.Drive) -- see IsExecCapableCharacterMoveType's own comment. Same
-                // reason as "spawn" above: must run only when the author's exec chain actually
-                // reaches it (typically once per OnTick), not once per arbitrary data pull.
+                // Side-effecting: drives a real actor (yaw/pitch/capsule velocity via
+                // AverCharacter.Drive; see IsExecCapableCharacterMoveType). Same reason as "spawn"
+                // above -- must run only when the exec chain reaches it, not per arbitrary pull.
                 throw new InvalidOperationException(
                     $"CharacterMove node '{node.Id}' cannot be compiled by Compile() -- driving a " +
                     "character is a side effect with no notion of 'when' in a pure-dataflow graph, " +
@@ -700,10 +632,9 @@ public class GraphCompiler
                     "and reach it through CompileEntryPoint() instead.");
 
             case "fireevent":
-                // Side-effecting: runs ANOTHER ENTITY'S WHOLE EXEC CHAIN, not merely a scalar write --
-                // see IsExecCapableFireEventType's own comment. Same reason as spawn/charactermove
-                // above, with a worse hazard: an ungated FireEvent would run a STRANGER's OnHit
-                // handler on every single pull.
+                // Side-effecting: runs ANOTHER ENTITY'S WHOLE EXEC CHAIN, not a scalar write (see
+                // IsExecCapableFireEventType). Worse than spawn/charactermove: an ungated FireEvent
+                // would run a STRANGER's OnHit handler on every pull.
                 throw new InvalidOperationException(
                     $"FireEvent node '{node.Id}' cannot be compiled by Compile() -- firing an event " +
                     "runs another entity's exec chain and is a side effect with no notion of 'when' " +
@@ -713,9 +644,8 @@ public class GraphCompiler
 
             case "savegame":
             case "loadgame":
-                // Side-effecting -- writes or REPLACES THE ENTIRE WORLD -- same reason as above.
-                // LoadGame is the worst case: it would tear down and rebuild EVERYTHING, including
-                // whatever entity's graph pulled it.
+                // Side-effecting -- writes or REPLACES THE ENTIRE WORLD. LoadGame is worst case: it
+                // tears down and rebuilds EVERYTHING, including whatever entity's graph pulled it.
                 throw new InvalidOperationException(
                     $"{(node.Type.Equals("savegame", StringComparison.OrdinalIgnoreCase) ? "SaveGame" : "LoadGame")} " +
                     $"node '{node.Id}' cannot be compiled by Compile() -- it is a side effect with no " +
@@ -724,17 +654,14 @@ public class GraphCompiler
                     "an ENTRY-driven exec chain and reach it through CompileEntryPoint() instead.");
 
             case "getvar":
-                // A pure read -- see IsExecCapableVarSideEffectType's own comment -- so, unlike SetVar,
-                // it is welcome in the PULL-only compiler exactly like GetField.
+                // A pure read (see IsExecCapableVarSideEffectType) -- unlike SetVar, welcome here like GetField.
                 EmitGetVar(node);
                 break;
 
             case "setvar":
-                // A WRITE IS A SIDE EFFECT -- same reason as "spawn" above. UNLIKE SetField/
-                // SetFieldVec3 (safe to repeat: overwriting a native field with the same value twice
-                // is harmless), a variable write has no such excuse -- it is exactly as much a real
-                // side effect as a native write, and the PULL path must refuse it rather than fall
-                // back (see TestSetVarPulledWithoutExecVisitFailsClearly).
+                // A WRITE IS A SIDE EFFECT, same reason as "spawn" above. Unlike SetField/SetFieldVec3
+                // (safe to repeat), a variable write has no such excuse and the PULL path must refuse
+                // it (see TestSetVarPulledWithoutExecVisitFailsClearly).
                 throw new InvalidOperationException(
                     $"SetVar node '{node.Id}' cannot be compiled by Compile() -- writing a variable is a " +
                     "side effect with no notion of 'when' in a pure-dataflow graph, and Compile()'s " +
@@ -743,9 +670,8 @@ public class GraphCompiler
                     "CompileEntryPoint() instead.");
 
             default:
-                // A PUSH-only node reaching the dataflow compiler is not an unknown node type, and
-                // saying so sent authors looking for a node they already had. See
-                // IsPushOnlySideEffectType for the full account.
+                // A PUSH-only node here is not an unknown node type -- saying so sent authors looking
+                // for a node they already had. See IsPushOnlySideEffectType.
                 if (IsPushOnlySideEffectType(node.Type))
                     throw new InvalidOperationException(
                         $"{node.Type} node '{node.Id}' cannot be compiled by Compile() -- it has a " +
@@ -805,14 +731,12 @@ public class GraphCompiler
 
     /// One output component of a vector node, onto the stack.
     ///
-    /// RECOMPUTED PER OUTPUT rather than evaluated once into three shared locals, deliberately.
-    /// Both compilers already re-emit a pure expression at every read -- that is what
-    /// EmitPullOutput IS -- and a hoisted local would have to live somewhere the topological pass
-    /// and an inline pull could both reach. Normalize pays the most, a square root per component,
-    /// and that is still a handful of float ops.
+    /// RECOMPUTED PER OUTPUT rather than hoisted into shared locals, deliberately -- both compilers
+    /// already re-emit a pure expression at every read (that's what EmitPullOutput IS), and Normalize
+    /// (worst case, a sqrt per component) is still just a handful of float ops.
     ///
-    /// Dup-then-Mul is used to square, so a squared term pulls its input ONCE. That matters when the
-    /// input is not a constant but a subgraph: pulling it twice would emit that subgraph twice.
+    /// Dup-then-Mul squares so a squared term pulls its input ONCE -- pulling twice would emit a
+    /// subgraph input twice.
     private void EmitVecComponent(Node node, string pinName)
     {
         if (_il == null) return;
@@ -867,9 +791,8 @@ public class GraphCompiler
         }
     }
 
-    /// The PULL compiler's topological visit of a vector node: every output it declared a local for
-    /// gets its component computed and stored. An output nobody reads has no local and is skipped,
-    /// so an unread Cross costs nothing.
+    /// The PULL compiler's topological visit of a vector node: every output with a declared local
+    /// gets computed and stored; an unread output has no local, so an unread Cross costs nothing.
     private void EmitVecNode(Node node)
     {
         if (_il == null) return;
@@ -930,11 +853,10 @@ public class GraphCompiler
                 $"GetField node '{node.Id}' field '{node.FieldName}' is not an F32 field (kind={kind}); " +
                 "getfield only supports F32 fields today, not Vec3/Quat/Bool/I32/etc");
 
-        // Load the entity id (input pin), then the resolved field id, then call straight through to
-        // the same P/Invoke extern Aver.Scene's own C# consumers use (Native.cs) -- not a second,
-        // differently-configured DllImport surface. GraphCompiler needs InternalsVisibleTo("Aver.Graph")
-        // from Aver.Scene.csproj to name the internal Native type at compile time; DynamicMethod's
-        // restrictedSkipVisibility:true (set in Compile()) is what lets the EMITTED IL actually call it.
+        // Calls the same P/Invoke extern Aver.Scene's C# consumers use (Native.cs), not a second
+        // DllImport surface. Needs InternalsVisibleTo("Aver.Graph") from Aver.Scene.csproj to name the
+        // internal Native type at compile time; DynamicMethod's restrictedSkipVisibility:true (set in
+        // Compile()) is what lets the EMITTED IL actually call it.
         LoadPin(node.Id, "entity");
         _il.Emit(OpCodes.Ldc_I4, fieldId);
         _il.Emit(OpCodes.Call, GetFieldMethod);
@@ -962,25 +884,18 @@ public class GraphCompiler
         _il.Emit(OpCodes.Ldc_I4, fieldId);
         LoadPin(node.Id, "value");
         _il.Emit(OpCodes.Call, SetFieldMethod);
-        // aver_scene_set_f32 returns 1 on success, 0 on any rejection (unknown entity, read-only
-        // field -- e.g. CWorld.matrix -- or missing component). That real return code is now what
-        // reaches the "success" pin; the old stub hardcoded 1 regardless of whether anything happened.
+        // aver_scene_set_f32 returns 1 on success, 0 on rejection (unknown entity, read-only field
+        // e.g. CWorld.matrix, missing component) -- now reaches "success"; the old stub hardcoded 1
+        // regardless of outcome.
 
         if (_pinLocals.TryGetValue((node.Id, "success"), out var local))
             _il.Emit(OpCodes.Stloc, local);
     }
 
-    /// Shared by every getfieldvec3/setfieldvec3 emitter (four call sites: PULL get, PULL set, exec
-    /// set, and the PUSH compiler's own pull-side get) -- resolves field= through the same
-    /// _fieldResolver GetField/SetField use, but requires FieldKindVec3 SPECIFICALLY rather than "not
-    /// F32" the way those two only need to rule out one other kind. That distinction matters here in a
-    /// way it does not for GetField/SetField: GraphInterop.GetFieldVecForGraph/SetFieldVecForGraph
-    /// (Aver.Framework) copy exactly 3 floats through a fixed scratch buffer, so pointing this at a
-    /// Quat (arity 4) or Mat4 (arity 16) field -- both also "not F32" -- would be a buffer overrun
-    /// mistaken for a type error, not merely a wrong number silently returned. Centralised into one
-    /// helper (GetField/SetField duplicate their own version of this three times; this would have been
-    /// a fourth near-identical copy, and drift between four independent wordings of "is this Vec3?" is
-    /// worse than one method four call sites share) rather than inlined again.
+    /// Shared by all 4 getfieldvec3/setfieldvec3 call sites. Requires FieldKindVec3 SPECIFICALLY, not
+    /// just "not F32": GraphInterop.GetFieldVecForGraph/SetFieldVecForGraph (Aver.Framework) copy
+    /// exactly 3 floats through a fixed scratch buffer, so a Quat (arity 4) or Mat4 (arity 16) field
+    /// would be a buffer overrun, not a caught type error. Centralised rather than duplicated 4x.
     private int RequireVec3Field(Node node, string nodeTypeLabel)
     {
         if (string.IsNullOrEmpty(node.FieldName))
@@ -999,17 +914,12 @@ public class GraphCompiler
         return fieldId;
     }
 
-    /// GetFieldVec3(entity) -> x,y,z: reads a Vec3-KIND scene field (CLocal.position, CLocal.scale,
-    /// CLight.colour, ...) as three scalar pins instead of GetField's single F32 -- the gap
-    /// FieldKindF32's own comment (top of this file) names. Pure read, idempotent (no state changes),
-    /// so -- exactly like GetField/InputKey -- safe to pull as often as anything wants, through EITHER
-    /// compiler, with no _execLocals caching needed; see EmitPullGetFieldVec3's own comment for the
-    /// one real cost that idempotence does NOT erase (three separate pulls of x/y/z cost three native
-    /// calls, not one). Silently reads back 0,0,0 on any RUNTIME rejection (unknown entity, absent
-    /// component) -- mirrors GetField's own "0f on any rejection" contract (aver_scene_get_f32's
-    /// convention) rather than inventing a "found" pin GetField itself does not have; the COMPILE-time
-    /// rejection (wrong field, wrong kind) is a hard compile error via RequireVec3Field, same as
-    /// GetField.
+    /// GetFieldVec3(entity) -> x,y,z: reads a Vec3-kind field (CLocal.position, CLight.colour, ...)
+    /// as three scalar pins instead of GetField's single F32. Pure/idempotent, so safe to pull as
+    /// often as wanted through either compiler -- but three separate x/y/z pulls cost three native
+    /// calls, not one (see EmitPullGetFieldVec3). Reads back 0,0,0 on runtime rejection (unknown
+    /// entity/component), mirroring GetField's convention rather than adding a "found" pin; wrong
+    /// field/kind is a hard COMPILE error via RequireVec3Field.
     private void EmitGetFieldVec3(Node node)
     {
         if (_il == null) return;
@@ -1024,14 +934,10 @@ public class GraphCompiler
         _il.Emit(OpCodes.Call, GetFieldVecMethod);
     }
 
-    /// GetForward(entity) -> x,y,z + eyeX,eyeY,eyeZ + success: the character's own look direction and
-    /// eye position, in one call. Pure and idempotent exactly like GetFieldVec3 -- reading where a
-    /// character is pointing changes nothing -- so it needs none of Raycast's _execLocals caching and
-    /// is safe to pull from as many places as ask.
-    ///
-    /// SIX OUT-PARAMETERS, ONE NATIVE CALL, the same "one call, however many pins" shape
-    /// EmitGetFieldVec3 and EmitRaycast already use: Ldloca per output, never Ldloc, because these are
-    /// written THROUGH by the callee rather than read from.
+    /// GetForward(entity) -> x,y,z + eyeX,eyeY,eyeZ + success: look direction and eye position in one
+    /// call. Pure/idempotent like GetFieldVec3, so no _execLocals caching needed. Six out-parameters,
+    /// one native call (same shape as EmitGetFieldVec3/EmitRaycast): Ldloca per output, never Ldloc,
+    /// since the callee writes THROUGH them.
     private void EmitGetForward(Node node)
     {
         if (_il == null) return;
@@ -1051,48 +957,40 @@ public class GraphCompiler
         else                                                            _il.Emit(OpCodes.Pop);
     }
 
-    /// The PULL half of GetForward, mirroring EmitPullGetFieldVec3: one full native call, then push the
-    /// ONE pin asked for and discard the rest. Same recompute-per-reader cost that emitter already
-    /// documents and accepts -- a graph reading x, y and eyeZ through three separate pulls makes three
-    /// calls. Cheap enough to be the right trade here: this reads two already-computed vectors off a
-    /// managed object, with no physics query behind it.
-    ///
-    /// EXISTS AT ALL because a node implemented only in the PUSH compiler works on an exec chain and
-    /// then silently fails the moment someone reads it through OUT or from a pure graph -- the recurring
-    /// shape of bugs in this file. Both paths, or neither.
-    /// Jump(entity) -> jumped. A side effect, so it lives on the exec chain and is refused when pulled
-    /// as data -- see IsExecCapableSideEffectType. The bool is stored when the node declares `jumped`
-    /// and popped otherwise, because the stack has to balance either way.
+    /// The PULL half of GetForward, mirroring EmitPullGetFieldVec3: one native call, then push the
+    /// pin asked for and discard the rest -- reading x, y, eyeZ separately costs three calls, an
+    /// acceptable trade since this only reads two already-computed vectors off a managed object.
+    /// Exists because a node implemented only in the PUSH compiler silently fails the moment
+    /// something reads it through OUT or a pure graph -- the recurring bug shape in this file. Both
+    /// paths, or neither.
+    /// Jump(entity) -> jumped: a side effect, refused when pulled as data (IsExecCapableSideEffectType).
+    /// The bool is stored when the node declares `jumped`, popped otherwise, to balance the stack.
     private void EmitJump(Node node)
     {
         if (_il == null) return;
-        // EmitPullInput, NOT LoadPin, and the difference is the whole of this node working or not.
-        // LoadPin reads `_pinLocals` -- which the EXEC compiler never populates for data nodes, as
-        // EmitPullInput's own comment says one screen below. Every other exec-path emitter beside this
-        // one (CharacterMove, SetParent, Spawn, FireEvent, SetVar...) pulls its inputs; this one read a
-        // local that nothing had ever stored, so it pushed a zero. Jump therefore received entity 0 on
-        // every single call since it was written, found no actor bound to it, warned, and returned
-        // false. It has never once made a character jump.
+        // EmitPullInput, NOT LoadPin -- the difference is the whole of this node working or not.
+        // LoadPin reads `_pinLocals`, which the EXEC compiler never populates for data nodes (see
+        // EmitPullInput's own comment below). Every other exec-path emitter (CharacterMove, SetParent,
+        // Spawn, FireEvent, SetVar...) pulls its inputs; this one read an unset local and pushed zero,
+        // so Jump received entity 0 on every call, found no actor, warned, and returned false -- it
+        // has never once made a character jump.
         //
-        // It looked like a once-a-run glitch rather than a dead node because nothing in the shipped
-        // FirstPerson template presses the jump key, and --play-test only synthesises Space from frame
-        // 100 (SandboxApp.cpp). Read the warning as "Jump is broken", not "the first frame is odd".
+        // Looked like a once-a-run glitch rather than a dead node because nothing in the shipped
+        // FirstPerson template presses jump, and --play-test only synthesises Space from frame 100
+        // (SandboxApp.cpp). Read the warning as "Jump is broken", not "the first frame is odd".
         EmitPullInput(node, "entity");
         _il.Emit(OpCodes.Call, JumpMethod);
         if (_pinLocals.TryGetValue((node.Id, "jumped"), out var local)) _il.Emit(OpCodes.Stloc, local);
         else                                                           _il.Emit(OpCodes.Pop);
     }
 
-    /// Print(value) -> then. Writes one line to the log, labelled with the NODE'S OWN ID, which is
-    /// why it needs no attribute: `NODE muzzleLen Print` prints "muzzleLen = 35" and the author
-    /// already chose that name. The id is pushed as a compile-time constant, so the string costs
-    /// nothing at run time beyond the call.
-    /// The four writing API calls, which differ only in which method they call and what they push.
-    /// The bool every one of them returns is stored into `success` when the node declared it and
-    /// popped otherwise, because the stack has to balance either way -- the shape EmitJump uses.
-    /// A three-out-parameter read of an entity, for whichever component the caller asked for.
-    /// `axis` is pushed only when it is not -1, which is how the three orientation nodes share one
-    /// interop surface with the two that take no extra argument.
+    /// Print(value) -> then: writes one line to the log labelled with the NODE'S OWN ID (no attribute
+    /// needed), e.g. `NODE muzzleLen Print` prints "muzzleLen = 35". Pushed as a compile-time constant.
+    /// The four writing API calls differ only in which method they call and what they push; each
+    /// bool return is stored into `success` when declared, popped otherwise (the EmitJump shape).
+    /// A three-out-parameter read of an entity for whichever component was asked for; `axis` is
+    /// pushed only when not -1, letting the three orientation nodes share one interop surface with
+    /// the two that take no extra argument.
     private void EmitPullVec3Read(Node node, string pinName, MethodInfo method, int axis,
                                   string inputPin = "entity")
     {
@@ -1111,11 +1009,9 @@ public class GraphCompiler
         _il.Emit(OpCodes.Ldloc, pinName == "x" ? xL : pinName == "y" ? yL : zL);
     }
 
-    /// EmitPullVec3Read's own shape narrowed to ONE out-parameter instead of three: GetBodyMass,
-    /// GetBodyMotionType, GetBodyLayer and GetJointValue each call a method whose signature is exactly
-    /// `bool Method(int handle, out T value)`, `success` IS the bool return exactly like every other
-    /// read in this family, and there is only ever one non-success pin left to want back, so unlike
-    /// EmitPullVec3Read's x/y/z ternary this needs no pin-name dispatch at all.
+    /// EmitPullVec3Read's shape narrowed to ONE out-parameter: GetBodyMass/GetBodyMotionType/
+    /// GetBodyLayer/GetJointValue each call `bool Method(int handle, out T value)`. `success` is the
+    /// bool return; the one remaining pin needs no x/y/z-style dispatch.
     private void EmitPullScalarRead(Node node, string pinName, MethodInfo method, Type outType, string inputPin)
     {
         if (_il == null) return;
@@ -1128,13 +1024,11 @@ public class GraphCompiler
         _il.Emit(OpCodes.Ldloc, outL);
     }
 
-    /// SynapseSteer's own emission -- NOT EmitPullVec3Read, which only ever produces three floats
-    /// and a bool: this node has four real outputs (forward, right, yawDelta, arrived) on top of
-    /// the method's own bool return ("success", the same "entity was not alive" meaning every other
-    /// pure node's success pin already carries). Same overall shape as EmitPullVec3Read otherwise --
-    /// push every input pin in declared order, push the address of one local per out-parameter,
-    /// Call, then either leave the bool return on the stack (pinName == "success") or pop it and
-    /// push whichever local the caller actually asked for.
+    /// SynapseSteer's own emission -- not EmitPullVec3Read, which only produces three floats + bool:
+    /// this node has four real outputs (forward, right, yawDelta, arrived) plus the method's own
+    /// bool return ("success", same "entity was not alive" meaning as elsewhere). Same overall shape
+    /// otherwise: push inputs, push one local address per out-parameter, Call, then either leave the
+    /// bool on the stack (pinName == "success") or pop it and push the requested local.
     private void EmitPullSynapseSteer(Node node, string pinName)
     {
         if (_il == null) return;
@@ -1165,10 +1059,9 @@ public class GraphCompiler
         }
     }
 
-    /// GetSynapsePerception's own emission -- same overall shape as EmitPullSynapseSteer (three
-    /// real outputs of MIXED type on top of the method's own bool return), for the identical
-    /// reason: EmitPullVec3Read only ever produces three floats, and this node's outputs are
-    /// bool/int/float, not float/float/float.
+    /// GetSynapsePerception's emission -- same shape as EmitPullSynapseSteer (three real outputs of
+    /// MIXED type + bool return), since EmitPullVec3Read only produces float/float/float, not
+    /// bool/int/float.
     private void EmitPullSynapsePerception(Node node, string pinName)
     {
         if (_il == null) return;
@@ -1190,9 +1083,8 @@ public class GraphCompiler
         }
     }
 
-    /// The three transform writers. Same shape as EmitExecApiCall: push, call, keep or drop the bool.
-    /// The physics writers: push the body (or nothing, for SetGravity), push the vector, call,
-    /// keep or drop the bool.
+    /// The three transform writers: same shape as EmitExecApiCall -- push, call, keep or drop the bool.
+    /// The physics writers: push the body (none for SetGravity), push the vector, call, keep or drop.
     private void EmitExecPhysicsWrite(Node node)
     {
         if (_il == null) return;
@@ -1256,20 +1148,17 @@ public class GraphCompiler
             default:
                 _il.Emit(OpCodes.Call, DestroyBodyMethod); break;
         }
-        // INTO AN EXEC LOCAL, NOT _pinLocals -- see EmitExecSideEffect's own comment for the full
-        // account. This emitter is reached ONLY from the exec dispatch, and _pinLocals is empty
-        // for the whole of CompileEntryPoint, so this lookup never hit: `success` on every physics
-        // writer fell to Pop and was a pin no graph could read. A body write that failed because
-        // the handle was stale looked identical to one that worked.
+        // INTO AN EXEC LOCAL, NOT _pinLocals (see EmitExecSideEffect) -- this emitter runs only from
+        // exec dispatch, where _pinLocals is empty, so this lookup never hit and `success` on every
+        // physics writer fell to Pop: a failed write (stale handle) looked identical to a working one.
         var successPin = node.Pins.FirstOrDefault(p => p.IsOutput && p.Name == "success" && p.Type == PinType.Bool);
         if (successPin != null) _il.Emit(OpCodes.Stloc, GetOrCreateExecLocal(node.Id, "success", typeof(bool)));
         else                    _il.Emit(OpCodes.Pop);
     }
 
-    /// The creators. Each returns a BODY HANDLE, which goes into an exec-local rather than a pin
-    /// local: the body pin is read AFTER this node runs, by whatever the exec chain reaches next,
-    /// and that is exactly the guarantee _execLocals exists to give -- one creation, however many
-    /// readers. A pin local would be right for the pull compiler and wrong here.
+    /// The creators: each returns a BODY HANDLE into an exec-local, not a pin local -- the body pin
+    /// is read AFTER this node runs by whatever the exec chain reaches next, which is exactly what
+    /// _execLocals guarantees (one creation, many readers). A pin local would be wrong here.
     private void EmitExecPhysicsCreate(Node node)
     {
         if (_il == null) return;
@@ -1296,11 +1185,9 @@ public class GraphCompiler
         _il.Emit(OpCodes.Stloc, GetOrCreateExecLocal(node.Id, "body", typeof(int)));
     }
 
-    /// The joint creators: bodyA/bodyB always first (bodyB == 0 means "the world", not "dead" -- see
-    /// GraphNodeDefs.hpp's own JOINTS banner), then the shape-specific point/axis/limit floats, then
-    /// one call whose return goes into an exec-local named "joint" rather than "body" -- otherwise
-    /// exactly EmitExecPhysicsCreate's own reasoning: the handle is read AFTER this node runs, by
-    /// whatever the exec chain reaches next.
+    /// The joint creators: bodyA/bodyB first (bodyB == 0 means "the world", not "dead" -- see
+    /// GraphNodeDefs.hpp's JOINTS banner), then shape-specific floats, then a call whose return goes
+    /// into exec-local "joint" instead of "body" -- same EmitExecPhysicsCreate reasoning otherwise.
     private void EmitExecJointCreate(Node node)
     {
         if (_il == null) return;
@@ -1336,10 +1223,9 @@ public class GraphCompiler
         _il.Emit(OpCodes.Stloc, GetOrCreateExecLocal(node.Id, "joint", typeof(int)));
     }
 
-    /// The joint operations: a JOINT handle (never a body) pulled first, then the op-specific args,
-    /// then the same "store success into an exec local" tail EmitExecPhysicsWrite/
-    /// EmitExecTransformWrite/EmitExecApiCall each already carry -- see EmitExecPhysicsWrite's own
-    /// comment for why an exec local rather than a pin local.
+    /// The joint operations: a JOINT handle (never a body) pulled first, then op-specific args, then
+    /// the same "success into an exec local" tail as EmitExecPhysicsWrite/EmitExecTransformWrite/
+    /// EmitExecApiCall (see EmitExecPhysicsWrite for why exec local, not pin local).
     private void EmitExecJointOp(Node node)
     {
         if (_il == null) return;
@@ -1393,10 +1279,9 @@ public class GraphCompiler
             default:
                 _il.Emit(OpCodes.Call, DestroyEntityMethod); break;
         }
-        // INTO AN EXEC LOCAL, NOT _pinLocals -- see EmitExecSideEffect's own comment for the full
-        // account. Identical to the physics writer above, and to EmitExecSideEffect which
-        // fixed the same mistake first. Translate/SetLocalScale/DestroyEntity each return a real
-        // bool that no graph could see.
+        // INTO AN EXEC LOCAL, NOT _pinLocals (see EmitExecSideEffect, which fixed this mistake
+        // first) -- identical to the physics writer above. Translate/SetLocalScale/DestroyEntity
+        // each return a real bool that no graph could see.
         var successPin = node.Pins.FirstOrDefault(p => p.IsOutput && p.Name == "success" && p.Type == PinType.Bool);
         if (successPin != null) _il.Emit(OpCodes.Stloc, GetOrCreateExecLocal(node.Id, "success", typeof(bool)));
         else                    _il.Emit(OpCodes.Pop);
@@ -1427,9 +1312,8 @@ public class GraphCompiler
             case "removetag":
                 EmitPullInput(node, "entity"); EmitPullInput(node, "mask");
                 _il.Emit(OpCodes.Call, RemoveTagMethod); break;
-            // SetLayerCollision has no "body"/"entity" prefix at all -- it edits the world's shared
-            // layer matrix -- which is exactly why it sits here rather than in
-            // EmitExecPhysicsWrite (whose whole shape starts by pulling a body pin).
+            // SetLayerCollision has no "body"/"entity" prefix -- it edits the world's shared layer
+            // matrix, which is why it sits here rather than in EmitExecPhysicsWrite (body-first shape).
             case "setlayercollision":
                 EmitPullInput(node, "layerA"); EmitPullInput(node, "layerB"); EmitPullInput(node, "collide");
                 _il.Emit(OpCodes.Call, SetLayerCollisionMethod); break;
@@ -1437,22 +1321,17 @@ public class GraphCompiler
                 EmitPullInput(node, "controller");
                 _il.Emit(OpCodes.Call, UnpossessMethod); break;
         }
-        // INTO AN EXEC LOCAL, NOT _pinLocals -- a fix, not a preference. _pinLocals belongs to the PULL
-        // compiler and is empty while CompileEntryPoint runs, so this lookup never hit: every one of
-        // these nodes fell to Pop and `success` was a pin no graph could read. Wiring the node into the
-        // exec chain did not help either -- EmitPullOutput checks _execLocals FIRST, so an author who
-        // had done exactly the right thing was still told to wire it into the exec chain, which they
-        // had.
+        // INTO AN EXEC LOCAL, NOT _pinLocals -- a fix, not a preference. _pinLocals is empty while
+        // CompileEntryPoint runs, so every one of these nodes fell to Pop and `success` was unreadable;
+        // wiring into the exec chain didn't help either, since EmitPullOutput checks _execLocals FIRST.
+        // `success` is now readable for SetVelocity, Teleport, Possess, Unpossess, SetVisible, AddTag,
+        // RemoveTag -- for Teleport (false on a capsule-less character) that's the difference between
+        // noticing a failure and silently continuing.
         //
-        // `success` is now readable for SetVelocity, Teleport, Possess, Unpossess, SetVisible, AddTag
-        // and RemoveTag -- for Teleport (false on a character with no capsule yet) that is the
-        // difference between noticing a failure and silently continuing.
-        //
-        // CORRECTION: this note used to name ten emitters with the bug. Eight do not have it --
+        // CORRECTION: this note used to name ten emitters with the bug. Eight don't have it --
         // EmitSetField/SetParent/SetName/SetMesh/SetMaterial/SetFieldVec3/GetForward/GetViewEntity run
-        // only from EmitNode's PULL switch (where _pinLocals is right), and their exec-capable twins
-        // already use GetOrCreateExecLocal. Only EmitExecPhysicsWrite and EmitExecTransformWrite really
-        // had it; both are fixed the same way as this block. Nothing outstanding.
+        // only from EmitNode's PULL switch (_pinLocals is right there); only EmitExecPhysicsWrite and
+        // EmitExecTransformWrite really had it, and both are fixed the same way. Nothing outstanding.
         var successPin = node.Pins.FirstOrDefault(p => p.IsOutput && p.Name == "success" && p.Type == PinType.Bool);
         if (successPin != null) _il.Emit(OpCodes.Stloc, GetOrCreateExecLocal(node.Id, "success", typeof(bool)));
         else                    _il.Emit(OpCodes.Pop);
@@ -1582,12 +1461,10 @@ public class GraphCompiler
         _il.Emit(OpCodes.Ldloc, wanted);
     }
 
-    /// SetFieldVec3(entity, x, y, z) -> success: the write half, mirroring EmitSetField exactly --
-    /// including getting NO exec pins by default (see OcGraphParser.AddDefaultPins's "setfieldvec3"
-    /// case), so a graph author who wants it ON the exec chain adds explicit PIN records for them by
-    /// hand, the same convention SetField already established. aver_scene_set_vec's real return code
-    /// (1 on success, 0 on any rejection -- unknown field, wrong arity, read-only, missing component)
-    /// reaches the "success" pin if the node declares one, exactly like SetField's.
+    /// SetFieldVec3(entity, x, y, z) -> success: mirrors EmitSetField, including getting NO exec pins
+    /// by default (OcGraphParser.AddDefaultPins's "setfieldvec3" case) -- an author wanting it on the
+    /// exec chain adds explicit PIN records, same convention as SetField. aver_scene_set_vec's return
+    /// (1 success, 0 on any rejection) reaches "success" if declared, like SetField's.
     private void EmitSetFieldVec3(Node node)
     {
         if (_il == null) return;
@@ -1606,15 +1483,12 @@ public class GraphCompiler
     }
 
     /// SetParent(child, parent) -> success: reparents `child` under `parent` (0 makes it a root) --
-    /// wraps aver_scene_set_parent(int32,int32) directly (scene_abi.h:105), the same
-    /// reflect-straight-into-Aver.Scene.Native template GetField/SetField already use, needing no
-    /// GraphInterop wrapper (unlike Raycast/Spawn, whose native surfaces need scalar reshaping this one
-    /// does not). The ABI ALREADY refuses a cycle, a self-parent, and a doomed parent -- returning 0,
-    /// not throwing -- so the real return code is what reaches "success", exactly mirroring
-    /// EmitSetField's own "the old stub hardcoded 1 regardless of whether anything happened" fix: a
-    /// graph author who wires a cycle gets a live false on the success pin, not a silently-ignored
-    /// no-op. See EmitExecSetParent for the mirrored PUSH-compiler version and this file's own
-    /// "setparent" case comment (in EmitNode) for why this is reachable from BOTH compilers.
+    /// wraps aver_scene_set_parent(int32,int32) directly (scene_abi.h:105), same
+    /// reflect-straight-into-Aver.Scene.Native template as GetField/SetField, no GraphInterop wrapper
+    /// needed (unlike Raycast/Spawn). The ABI ALREADY refuses a cycle, self-parent, or doomed parent --
+    /// returning 0, not throwing -- so the real return code reaches "success" (same fix as SetField's
+    /// old hardcoded-1 stub): wiring a cycle gets a live false, not a silent no-op. See
+    /// EmitExecSetParent for the PUSH twin and EmitNode's "setparent" case for why both compilers reach this.
     private void EmitSetParent(Node node)
     {
         if (_il == null) return;
@@ -1626,16 +1500,14 @@ public class GraphCompiler
         if (_pinLocals.TryGetValue((node.Id, "success"), out var local))
             _il.Emit(OpCodes.Stloc, local);
         else
-            _il.Emit(OpCodes.Pop); // nothing declared to read the return code; discard it rather than
-                                    // leaving it on the IL stack for whatever the next node emits.
+            _il.Emit(OpCodes.Pop); // nothing declared to read the return code; discard it.
     }
 
     /// SetViewEntity(entity) -> (nothing): publishes which entity the camera follows -- wraps
-    /// aver_fw_set_view_entity(int32) -> void directly (framework_abi.h:206), reflected the same way
-    /// EmitInputKey already reflects into Aver.Framework.Fw. VOID MEANS EXACTLY THAT: no output pin
-    /// exists for this node type at all (see OcGraphParser.AddDefaultPins's "setviewentity" case), so
-    /// there is nothing to Stloc and nothing left on the stack to Pop either -- the call itself is the
-    /// entire effect.
+    /// aver_fw_set_view_entity(int32) -> void directly (framework_abi.h:206), reflected like
+    /// EmitInputKey. VOID means exactly that: no output pin exists at all (see
+    /// OcGraphParser.AddDefaultPins's "setviewentity" case), so nothing to Stloc or Pop -- the call is
+    /// the entire effect.
     private void EmitSetViewEntity(Node node)
     {
         if (_il == null) return;
@@ -1646,11 +1518,10 @@ public class GraphCompiler
 
     /// SetName(entity, name) -> success: writes the entity's name -- wraps aver_scene_set_name
     /// (int32,const char*)->int32 directly (scene_abi.h:113). `name` is a NODE-line attribute
-    /// (Node.NameValue, from a name= token), not a pin -- PinType has no String member (see the
-    /// PinType enum in Graph.cs), so a NODE-line attribute is the only route a literal string reaches
-    /// any node in this format, exactly the reasoning class= already established for Spawn. Required at
-    /// COMPILE time (an empty name= can never write anything useful), the same "fail loudly now, not
-    /// silently at runtime" rule GetField/SetField/Spawn already apply to field=/class=.
+    /// (Node.NameValue, from name=), not a pin: PinType has no String member (Graph.cs), so a
+    /// NODE-line attribute is the only route a literal string reaches a node, same as class= for
+    /// Spawn. Required at COMPILE time, the same "fail loudly, not silently at runtime" rule
+    /// GetField/SetField/Spawn apply to field=/class=.
     private void EmitSetName(Node node)
     {
         if (_il == null) return;
@@ -1669,11 +1540,10 @@ public class GraphCompiler
     }
 
     /// SetMesh(entity) -> success: sets the drawn mesh by asset path -- wraps
-    /// Aver.Framework.GraphInterop.SetMeshForGraph(int,string), which in turn composes
-    /// EnsureMeshRenderer() + Assets.ObjectIdOf(path) + SetInt64 (EntityScene.cs's own Entity.SetMesh).
-    /// `mesh` is a NODE-line attribute (Node.MeshPath, from a mesh= token), the same "a literal string
-    /// can only reach a node this way" reasoning EmitSetName's own comment gives. Required at compile
-    /// time for the identical reason field=/class=/name= all are.
+    /// GraphInterop.SetMeshForGraph(int,string), which composes EnsureMeshRenderer() +
+    /// Assets.ObjectIdOf(path) + SetInt64 (Entity.SetMesh). `mesh` is a NODE-line attribute
+    /// (Node.MeshPath), same "literal string can only reach a node this way" reasoning as EmitSetName.
+    /// Required at compile time for the same reason field=/class=/name= all are.
     private void EmitSetMesh(Node node)
     {
         if (_il == null) return;
@@ -1694,9 +1564,8 @@ public class GraphCompiler
     /// GetAnimCurve(entity) -> value: the named curve on whatever clip `entity` is playing, at its
     /// current playhead. Wraps GraphInterop.GetAnimCurveForGraph(int,string).
     ///
-    /// PURE, so there is no exec twin of this method and no IsExecCapable predicate -- it reads and
-    /// writes nothing, so the topological pass running it once per invocation is exactly right. It
-    /// is therefore also absent from IsPushOnlySideEffectType, along with every other reader.
+    /// PURE, so no exec twin and no IsExecCapable predicate: it reads and writes nothing, so running
+    /// it once per invocation is exactly right, and it's absent from IsPushOnlySideEffectType too.
     private void EmitGetAnimCurve(Node node)
     {
         if (_il == null) return;
@@ -1776,10 +1645,9 @@ public class GraphCompiler
             _il.Emit(OpCodes.Pop);
     }
 
-    /// PlayAnimation(entity, loop) -> success: plays a clip by path -- mostly mirrors EmitSetMesh, but
-    /// with a SECOND pin load (loop) between the mesh-shaped string push and the call, because
-    /// GraphInterop.PlayAnimationForGraph takes (int,string,bool) rather than (int,string). Order on
-    /// the IL stack matches the method's own parameter order: entity, then clip, then loop.
+    /// PlayAnimation(entity, loop) -> success: mirrors EmitSetMesh but with a SECOND pin load (loop)
+    /// before the call, since GraphInterop.PlayAnimationForGraph takes (int,string,bool). Stack order
+    /// matches the method's params: entity, clip, loop.
     private void EmitPlayAnimation(Node node)
     {
         if (_il == null) return;
@@ -1802,11 +1670,10 @@ public class GraphCompiler
     {
         if (_il == null) return;
 
-        // System.Math.Sin takes and returns double; the graph is float end to end, so the value
-        // needs an explicit widen going in and an explicit narrow coming out. Skipping either
-        // conversion still compiles (the IL verifier accepts a bare double left where a float local
-        // was declared in some cases) but silently reinterprets bits rather than converting the
-        // value -- wrong numbers with no error, exactly what this comment exists to not repeat.
+        // System.Math.Sin takes/returns double; the graph is float end to end, so an explicit
+        // widen/narrow is required. Skipping either still compiles (the IL verifier can accept a bare
+        // double where a float local was declared) but silently reinterprets bits -- wrong numbers,
+        // no error.
         LoadPin(node.Id, "a");
         _il.Emit(OpCodes.Conv_R8);
         _il.Emit(OpCodes.Call, MathSinMethod);
@@ -1845,16 +1712,11 @@ public class GraphCompiler
     {
         if (_il == null) return;
 
-        // DIVIDE-BY-ZERO CONVENTION: b == 0.0 exactly yields 0.0, not IEEE754's NaN/Infinity.
-        //
-        // A bare `div` on floats never throws -- 5/0 is +Infinity, -5/0 is -Infinity, 0/0 is NaN --
-        // and any of those reaching a transform (position, rotation, scale) is very hard to trace
-        // back to the divide node that produced it: it propagates silently through every downstream
-        // add/multiply and shows up frames later as an object that vanished or exploded, nowhere near
-        // this node. 0.0 is a defined, inert value a drone flight path can just continue through;
-        // NaN is not. This is a deliberate choice, not the IEEE default left alone -- flag if a
-        // consumer ever needs the propagating-NaN behavior instead (e.g. to detect the condition
-        // downstream via a compare-vs-self NaN check).
+        // DIVIDE-BY-ZERO CONVENTION: b == 0.0 yields 0.0, not IEEE754 NaN/Infinity. A bare `div`
+        // never throws (5/0 = +Inf, 0/0 = NaN), and any of those reaching a transform is hard to
+        // trace back -- it propagates silently and shows up frames later as an object that vanished
+        // or exploded. 0.0 is inert and a flight path can continue through it; NaN cannot. Deliberate
+        // choice, not the IEEE default left alone -- flag if a consumer ever needs propagating NaN.
         var aLocal = _il.DeclareLocal(typeof(float));
         var bLocal = _il.DeclareLocal(typeof(float));
         LoadPin(node.Id, "a");
@@ -1887,10 +1749,9 @@ public class GraphCompiler
     {
         if (_il == null) return;
 
-        // Graph.Validate() (run at the top of Compile(), and again by the parser) already checked
-        // param= is present and names a declared PARAM with a matching pin type; this repeats the
-        // lookup defensively rather than trusting a check made in a different method, the same
-        // pattern LoadPin already follows for its own node/pin lookups below.
+        // Graph.Validate() (top of Compile(), and the parser) already checked param= names a declared
+        // PARAM with a matching type; this repeats the lookup defensively, the same pattern LoadPin
+        // follows for its own node/pin lookups below.
         int index = _graph.Parameters.FindIndex(p => p.Name == node.ParamName);
         if (index < 0)
             throw new InvalidOperationException($"Param node '{node.Id}' references undeclared parameter '{node.ParamName}'");
@@ -1901,16 +1762,12 @@ public class GraphCompiler
             _il.Emit(OpCodes.Stloc, local);
     }
 
-    /// GetVar(var=name) -> value: reads one of this graph's own persistent VAR slots (see
-    /// GraphVariable and GraphVarStore). A PURE READ -- reading twice is always safe, there is no
-    /// notion of "reached by mistake" the way SetVar's write has -- so, exactly like GetField/EmitParam,
-    /// this is welcome in EITHER compiler; EmitPullGetVar (below) is this method's PULL-recursive
-    /// twin for the exec compiler's own EmitPullOutput switch.
+    /// GetVar(var=name) -> value: reads a persistent VAR slot (GraphVariable/GraphVarStore). A PURE
+    /// READ -- always safe to read twice, unlike SetVar's write -- so welcome in EITHER compiler like
+    /// GetField/EmitParam; EmitPullGetVar (below) is the PULL-recursive twin for EmitPullOutput.
     ///
-    /// Graph.Validate() (run at the top of every Compile()/CompileEntryPoint(), and again by the
-    /// parser) already checked var= is present and names a declared VAR with an agreeing pin type; this
-    /// repeats the lookup defensively rather than trusting a check made in a different method, the same
-    /// pattern EmitParam just above already follows for PARAM.
+    /// Graph.Validate() already checked var= names a declared VAR with an agreeing type; this repeats
+    /// the lookup defensively, same pattern as EmitParam above.
     private void EmitGetVar(Node node)
     {
         if (_il == null) return;
@@ -1933,16 +1790,13 @@ public class GraphCompiler
 
     /// Select(cond, ifTrue, ifFalse) -> result: picks one of two float values by a bool condition.
     ///
-    /// NOT SHORT-CIRCUITING, DELIBERATELY, AND THIS IS NOT THE SAME THING AS "BOTH ARMS COST
-    /// NOTHING". The Brfalse/Br pair below only decides which LOCAL gets LOADED into `result` --
-    /// ifTrue's and ifFalse's own upstream expressions were already computed by the time this method
-    /// runs, because Compile()'s single topological pass (line ~191) calls EmitNode on EVERY node in
-    /// the graph exactly once, regardless of what any other node's condition turns out to be. Unlike
-    /// Branch's exec fan-out (EmitExecFanOut), which genuinely does not walk into the untaken arm's
-    /// nodes at all, Select cannot skip computing either side -- both source nodes already ran before
-    /// this method was ever called. The branch below is a real optimization (skip the LDLOC, not the
-    /// computation) that would be equally correct as a branchless "compute both, keep one" -- it is
-    /// written as a branch only because that is the shape LoadPin's caching model makes free.
+    /// NOT SHORT-CIRCUITING, AND NOT "BOTH ARMS COST NOTHING" either. The Brfalse/Br pair only
+    /// decides which LOCAL gets loaded into `result` -- ifTrue/ifFalse were already computed upstream,
+    /// since Compile()'s single topological pass calls EmitNode on every node exactly once regardless
+    /// of any condition. Unlike Branch's exec fan-out (EmitExecFanOut), which genuinely skips the
+    /// untaken arm's nodes, Select cannot skip computing either side. The branch here only saves the
+    /// LDLOC (a branchless "compute both, keep one" would be equally correct) -- written this way
+    /// because it's the shape LoadPin's caching model makes free.
     private void EmitSelect(Node node)
     {
         if (_il == null) return;
@@ -1964,11 +1818,10 @@ public class GraphCompiler
             _il.Emit(OpCodes.Stloc, local);
     }
 
-    /// InputKey(key) -> down: reads Aver.Framework's polled input state. Pure data, no exec pins --
-    /// like GetField, reading is idempotent, so this is safe to call as many times as anything pulls
-    /// it (through either compiler) with no _execLocals caching needed, unlike Raycast. aver_fw_input_key
-    /// already returns 0/1 as an int32, which is exactly the bit pattern IL's Stloc expects for a bool
-    /// local -- the same "no explicit conversion needed" property EmitCompare's Cgt result relies on.
+    /// InputKey(key) -> down: reads Aver.Framework's polled input state. Pure/idempotent like
+    /// GetField, so safe to pull repeatedly through either compiler with no _execLocals caching,
+    /// unlike Raycast. aver_fw_input_key returns 0/1 as int32 -- the exact bit pattern Stloc expects
+    /// for a bool local, same "no conversion needed" property EmitCompare's Cgt result relies on.
     private void EmitInputKey(Node node)
     {
         if (_il == null) return;
@@ -1980,13 +1833,12 @@ public class GraphCompiler
             _il.Emit(OpCodes.Stloc, local);
     }
 
-    /// InputKeyPressed / InputKeyReleased: the rising and falling EDGE of a key, from the framework
-    /// ABI entry points that already answer exactly that. Identical shape to EmitInputKey above --
-    /// one int in, one bool out -- with the node type choosing which of the two calls to make.
+    /// InputKeyPressed / InputKeyReleased: the rising/falling EDGE of a key, from framework ABI
+    /// entry points that already answer that. Same shape as EmitInputKey (int in, bool out); node
+    /// type picks the call.
     ///
-    /// The output pin is `triggered`, not `down`, and the difference is the whole point: `down` is
-    /// a state and this is an EVENT. A graph reading `triggered` on a key held for a second gets one
-    /// true and fifty-nine falses, which is what jumping, firing and toggling all actually want.
+    /// Output pin is `triggered`, not `down` -- `down` is a state, this is an EVENT: a key held for a
+    /// second yields one true and fifty-nine falses, which is what jump/fire/toggle actually want.
     private void EmitInputKeyEdge(Node node)
     {
         if (_il == null) return;
@@ -1999,30 +1851,25 @@ public class GraphCompiler
             _il.Emit(OpCodes.Stloc, local);
     }
 
-    /// InputAction(action) -> x, y, held: the float2 CURRENT VALUE and digital-active state of a named
-    /// action someone else's setup code registered and bound (aver_fw_action_register/_bind --
-    /// framework_abi.h's Named Actions section) -- InputKey's higher-level, PREFERRED sibling; see
-    /// OcGraphParser's "inputaction" case for the full reasoning. `action` is the ACTION HANDLE
-    /// aver_fw_action_register/_find returned, not a name -- PinType has no String member (Graph.cs),
-    /// so, exactly like InputKey's own "key" pin, it is a plain Int the graph must already hold a
-    /// handle for.
+    /// InputAction(action) -> x, y, held: float2 value + digital-active state of a named action set up
+    /// elsewhere (aver_fw_action_register/_bind, framework_abi.h Named Actions) -- InputKey's
+    /// higher-level, PREFERRED sibling (see OcGraphParser's "inputaction" case). `action` is the
+    /// ACTION HANDLE from aver_fw_action_register/_find, a plain Int like InputKey's "key" (PinType
+    /// has no String member).
     ///
-    /// TWO NATIVE CALLS, NOT ONE: aver_fw_action_value2 (x,y) and aver_fw_action_held (held) are
-    /// separate ABI entries (framework_abi.h:444,447), unlike GetFieldVec3/GetForward's single call.
-    /// Both are pure array-scan reads (FrameworkAbi.cpp's actionAccumulate/actionActive) -- cheap
-    /// enough that, like InputKey/GetForward, no _execLocals caching is needed despite the two calls.
+    /// TWO NATIVE CALLS: aver_fw_action_value2 (x,y) and aver_fw_action_held (held) are separate ABI
+    /// entries (framework_abi.h:444,447), unlike GetFieldVec3/GetForward's single call -- both are
+    /// cheap array-scan reads, so no _execLocals caching is needed despite that.
     ///
-    /// aver_fw_action_value2 takes a `float[]` out-parameter, not two `ref float` the way
-    /// GetFieldVecForGraph takes three -- so this Newarr's a 2-element array and Dup's the reference
-    /// before the call, the one place this IL shape differs from EmitGetFieldVec3/EmitRaycast's
-    /// "address per out-param" pattern.
+    /// aver_fw_action_value2 takes a `float[]` out-param, not `ref float` x3 like GetFieldVecForGraph
+    /// -- so this Newarr's a 2-element array and Dup's the reference before the call, the one place
+    /// this differs from EmitGetFieldVec3/EmitRaycast's "address per out-param" pattern.
     private void EmitInputAction(Node node)
     {
         if (_il == null) return;
 
-        // x, y: Dup the fresh array so one reference feeds the call (consumed as out2) and a second
-        // survives in a local to read back afterward -- the call itself returns void, so there is no
-        // other way to reach index 0/1 once aver_fw_action_value2 has run.
+        // Dup the fresh array: one reference feeds the call (as out2), the other survives in a local
+        // to read back afterward -- the call returns void, so there's no other way to reach index 0/1.
         LoadPin(node.Id, "action");
         _il.Emit(OpCodes.Ldc_I4_2);
         _il.Emit(OpCodes.Newarr, typeof(float));
@@ -2041,19 +1888,17 @@ public class GraphCompiler
         _il.Emit(OpCodes.Ldelem_R4);
         _il.Emit(OpCodes.Stloc, RequirePinLocal(node, "y"));
 
-        // held: a wholly separate ABI call -- see this method's own doc comment for why this is two
-        // native calls, not one. Optional, like EmitGetForward's "success": stored when the graph
-        // declared the pin, popped otherwise so the stack still balances either way.
+        // held: a separate ABI call (see doc comment above for why two calls, not one). Optional like
+        // EmitGetForward's "success": stored when declared, popped otherwise to balance the stack.
         LoadPin(node.Id, "action");
         _il.Emit(OpCodes.Call, ActionHeldMethod);
         if (_pinLocals.TryGetValue((node.Id, "held"), out var heldLocal)) _il.Emit(OpCodes.Stloc, heldLocal);
         else                                                              _il.Emit(OpCodes.Pop);
     }
 
-    /// InputActionPressed / InputActionReleased: the action-level twin of EmitInputKeyEdge above -- one
-    /// action handle in, one bool "triggered" out, the node type choosing aver_fw_action_pressed vs
-    /// aver_fw_action_released. See EmitInputKeyEdge's own comment for why the pin is `triggered`, not
-    /// `held` -- the identical "state vs event" distinction, one layer up.
+    /// InputActionPressed / InputActionReleased: action-level twin of EmitInputKeyEdge -- handle in,
+    /// bool "triggered" out, node type picks aver_fw_action_pressed vs _released. Same "state vs
+    /// event" reasoning as EmitInputKeyEdge for why the pin is `triggered`, not `held`.
     private void EmitInputActionEdge(Node node)
     {
         if (_il == null) return;
@@ -2066,14 +1911,12 @@ public class GraphCompiler
             _il.Emit(OpCodes.Stloc, local);
     }
 
-    /// Raycast(originX,Y,Z, dirX,Y,Z, maxDist) -> hit, entity, pointX,Y,Z: one native call producing
-    /// five results. This compiler (PULL) computes every node exactly once per Compile() regardless of
-    /// how many things read its outputs (see EmitNode's own doc comment), so -- unlike the PUSH
-    /// compiler's EmitExecRaycast, which needs _execLocals to get the same one-call guarantee -- a
-    /// straightforward "one call, five _pinLocals stores" is already correct here with no extra
-    /// mechanism: push the 7 inputs, push the ADDRESS of each of the 5 pre-declared output locals
-    /// (RequirePinLocal/Ldloca), Call. See Aver.Framework.GraphInterop.RaycastForGraph's own comment
-    /// for why the call is shaped as scalar out-params rather than a returned struct.
+    /// Raycast(originX,Y,Z, dirX,Y,Z, maxDist) -> hit, entity, pointX,Y,Z: one native call, five
+    /// results. PULL computes every node once per Compile() regardless of reader count (EmitNode's
+    /// doc), so unlike PUSH's EmitExecRaycast (needs _execLocals for the same guarantee), a plain
+    /// "one call, five _pinLocals stores" already works: push 7 inputs, push each output local's
+    /// ADDRESS (RequirePinLocal/Ldloca), Call. See GraphInterop.RaycastForGraph for why out-params
+    /// rather than a returned struct.
     private void EmitRaycast(Node node)
     {
         if (_il == null) return;
@@ -2094,13 +1937,10 @@ public class GraphCompiler
         _il.Emit(OpCodes.Call, RaycastMethod);
     }
 
-    /// MouseDelta() -> deltaX, deltaY, wheel: one native call (aver_fw_input_mouse) producing this
-    /// frame's mouse movement/wheel as three float pins, mirroring EmitGetFieldVec3's "one call,
-    /// several _pinLocals stores" shape for the PULL compiler -- Compile()'s single topological pass
-    /// (EmitNode's own doc comment) already guarantees this runs exactly once per Compile()
-    /// invocation no matter how many things read deltaX/deltaY/wheel, so no extra machinery is needed
-    /// HERE for that guarantee; see GraphInterop.MouseDeltaForGraph's own comment for why the PUSH
-    /// compiler (below) needs more. Zero data inputs -- there is nothing to pull before the call.
+    /// MouseDelta() -> deltaX, deltaY, wheel: one native call (aver_fw_input_mouse), mirroring
+    /// EmitGetFieldVec3's "one call, several _pinLocals stores" shape. Compile()'s topological pass
+    /// already guarantees one run per invocation regardless of reader count, so no extra machinery is
+    /// needed here (see GraphInterop.MouseDeltaForGraph for why PUSH needs more). Zero data inputs.
     private void EmitMouseDelta(Node node)
     {
         if (_il == null) return;
@@ -2111,9 +1951,8 @@ public class GraphCompiler
         _il.Emit(OpCodes.Call, MouseDeltaMethod);
     }
 
-    /// MoveAxis() -> forward, right: MouseDelta's MOVE-input sibling -- see EmitMouseDelta's own
-    /// comment, which applies unchanged here, and GraphInterop.MoveAxisForGraph's comment for why Z
-    /// is not a pin.
+    /// MoveAxis() -> forward, right: MouseDelta's MOVE-input sibling (see EmitMouseDelta) --
+    /// GraphInterop.MoveAxisForGraph explains why Z is not a pin.
     private void EmitMoveAxis(Node node)
     {
         if (_il == null) return;
@@ -2142,21 +1981,18 @@ public class GraphCompiler
         return local;
     }
 
-    /// Loads a pin value onto the stack. If the pin is an output of another node, load it
-    /// from that node's local. If it's a constant, load the constant. Otherwise, load a default.
-    /// nodeId is a string to support both integer and arbitrary string node IDs.
+    /// Loads a pin value onto the stack: from a linked node's local, else a pinned constant, else a
+    /// type default. nodeId is a string to support both integer and arbitrary string node IDs.
     private void LoadPin(string nodeId, string pinName)
     {
         if (_il == null) return;
 
-        // First, check if this pin is linked to an output pin of another node.
         var link = _graph.Links.FirstOrDefault(l =>
             l.TargetNodeId == nodeId && l.TargetPinName == pinName
         );
 
         if (link != null)
         {
-            // Load from the source node's output pin.
             if (_pinLocals.TryGetValue((link.SourceNodeId, link.SourcePinName), out var sourceLocal))
             {
                 _il.Emit(OpCodes.Ldloc, sourceLocal);
@@ -2164,7 +2000,6 @@ public class GraphCompiler
             }
         }
 
-        // Otherwise, check if there's a pinned value.
         var pv = _graph.PinnedValues.FirstOrDefault(p =>
             p.NodeId == nodeId && p.PinName == pinName
         );
@@ -2180,17 +2015,13 @@ public class GraphCompiler
             return;
         }
 
-        // Load a default value based on the pin type.
         var node = _graph.Nodes[nodeId];
         var pin = node.Pins.FirstOrDefault(p => p.Name == pinName);
 
-        // SAME DEFECT AS EmitPullInput's, IN THE OTHER COMPILER, AND WORSE. See that method's comment
-        // for how a node ends up without a pin an emitter asks for. Where the PULL path at least
-        // pushed something (of the wrong type), this `if (pin != null)` guarded the entire emit -- so a
-        // missing pin pushed NOTHING, and the Call that followed silently consumed whatever was beneath
-        // it on the stack. Wrong operand, or invalid IL, depending on what was there.
-        //
-        // As in the PULL path: absent is refused, merely unconnected still reads zero.
+        // SAME DEFECT AS EmitPullInput's, in the other compiler, and WORSE: `if (pin != null)` used to
+        // guard the entire emit, so a missing pin pushed NOTHING and the following Call silently
+        // consumed whatever was beneath it on the stack (wrong operand or invalid IL). As in the PULL
+        // path: absent is refused, merely unconnected still reads zero.
         if (pin == null)
             throw new InvalidOperationException(
                 $"node '{nodeId}' ({node.Type}) has no input pin '{pinName}' to read. " +
@@ -2225,15 +2056,12 @@ public class GraphCompiler
         return true;
     }
 
-    // ---------------------------------------------------------------------------------------------
     // USER-DEFINED FUNCTIONS
-    // ---------------------------------------------------------------------------------------------
 
-    /// Creates a DynamicMethod for every declared function and emits each body. Idempotent, and
-    /// called at the TOP of both Compile() and CompileEntryPoint(), before either has created its own
-    /// method -- emitting a function body overwrites _il, _pinLocals, _execLocals and friends, so it
-    /// cannot run in the middle of another emission. (EmitFunctionBody saves and restores them anyway,
-    /// because a function body containing a CallFunc re-enters this class while it is already busy.)
+    /// Creates a DynamicMethod for every declared function and emits each body. Idempotent; called at
+    /// the TOP of both Compile() and CompileEntryPoint(), before either creates its own method --
+    /// emitting a body overwrites _il/_pinLocals/_execLocals, so it can't run mid-emission.
+    /// (EmitFunctionBody still saves/restores them, since a CallFunc in a body re-enters this class.)
     private bool EnsureFunctionsCompiled(out string? err)
     {
         err = null;
@@ -2251,9 +2079,8 @@ public class GraphCompiler
             {
                 0 => typeof(void),
                 1 => PinTypeToCLRType(fn.Outputs[0].Type),
-                // Several outputs box into an object[], exactly as Compile() does for several OUT
-                // records -- the same shape rather than a second convention, so a caller unpacking one
-                // has already seen how.
+                // Several outputs box into an object[], same as Compile() for several OUT records --
+                // one convention, so a caller unpacking one has already seen how.
                 _ => typeof(object[]),
             };
             _funcMethods[fn.Name] = new DynamicMethod($"GraphFunc_{fn.Name}", ret, argTypes, restrictedSkipVisibility: true);
@@ -2272,10 +2099,9 @@ public class GraphCompiler
         err = null;
         var dm = _funcMethods[fn.Name];
 
-        // SAVE EVERYTHING, because a CallFunc inside this body does not re-enter here (bodies are
-        // emitted one at a time in pass 2) but Compile()/CompileEntryPoint() may already hold state if
-        // a future caller moves this. Restoring is cheap and removes a whole class of "why did the
-        // event graph get this function's locals" bug before it can exist.
+        // SAVE EVERYTHING: a CallFunc inside this body doesn't re-enter here (bodies emit one at a
+        // time in pass 2), but a future caller might. Cheap, and removes a whole class of "why did
+        // the event graph get this function's locals" bug before it can exist.
         var savedIl = _il;
         var savedPin = _pinLocals;
         var savedExec = _execLocals;
@@ -2298,17 +2124,15 @@ public class GraphCompiler
             _funcOutLocals = new List<LocalBuilder>();
             foreach (var o in fn.Outputs) _funcOutLocals.Add(_il.DeclareLocal(PinTypeToCLRType(o.Type)));
 
-            // THE RECURSION GUARD, and why it is a helper call rather than IL. A recursive graph
-            // function with no base case would overflow the CLR stack, and a StackOverflowException
-            // cannot be caught -- it takes the process down, which in a running editor means the
-            // author loses their level. The guard counts depth in managed code and throws an ordinary
+            // THE RECURSION GUARD, as a helper call rather than IL. An unbounded recursive function
+            // would overflow the CLR stack -- StackOverflowException is UNCATCHABLE, taking the whole
+            // editor down with it -- so this counts depth in managed code and throws an ordinary
             // catchable exception instead.
             //
-            // NOT a try/finally in emitted IL, deliberately. A protected region has verifiability rules
-            // about branching out of it that the branch/loop emitters here would have to learn, for a
-            // guarantee that is not needed: GraphCallGuard resets to zero at the start of every
-            // top-level invocation, so a depth leaked by an exception unwinding past an Exit cannot
-            // accumulate across calls.
+            // NOT a try/finally in emitted IL: a protected region's verifiability rules around
+            // branching out of it would spread into every branch/loop emitter here, for a guarantee
+            // not needed -- GraphCallGuard resets to zero at the start of every top-level invocation,
+            // so a leaked depth (from an exception unwinding past an Exit) can't accumulate across calls.
             _il.Emit(OpCodes.Ldstr, fn.Name);
             _il.Emit(OpCodes.Call, GraphCallGuardEnter);
 
@@ -2342,10 +2166,9 @@ public class GraphCompiler
 
             _il.Emit(OpCodes.Call, GraphCallGuardExit);
 
-            // ONE Ret, always, reached after the whole body has run -- which is why a function has
-            // exactly one FuncReturn (Validate refuses a second): its job is to STORE into these
-            // locals when the exec walk reaches it, not to return, so branches inside the body all
-            // converge here.
+            // ONE Ret, reached after the whole body runs -- why a function has exactly one FuncReturn
+            // (Validate refuses a second): it STORES into these locals when reached, not returns, so
+            // every branch inside the body converges here.
             if (fn.Outputs.Count == 1)
             {
                 _il.Emit(OpCodes.Ldloc, _funcOutLocals[0]);
@@ -2380,10 +2203,9 @@ public class GraphCompiler
         }
     }
 
-    /// Loads a CallFunc node's arguments and emits the direct IL Call. Leaves the callee's return
-    /// value (or nothing, or an object[]) on the stack -- the two callers below decide what to do
-    /// with it, because a pure call inside a data pull wants ONE value while an exec call wants every
-    /// output stored into its own local.
+    /// Loads a CallFunc node's arguments and emits the direct IL Call, leaving the callee's return
+    /// (or nothing, or object[]) on the stack -- callers decide what to do with it: a pure pull wants
+    /// ONE value, an exec call wants every output stored into its own local.
     private GraphFunction? EmitCallFuncInvoke(Node node)
     {
         if (_il == null) return null;
@@ -2427,9 +2249,8 @@ public class GraphCompiler
         }
     }
 
-    /// A CallFunc pulled as data -- only legal for a PURE function, which is exactly what "pure"
-    /// means here: safe to evaluate whenever, and as often as, a reader asks for it. Leaves the ONE
-    /// requested pin's value on the stack.
+    /// A CallFunc pulled as data -- only legal for a PURE function: safe to evaluate whenever and as
+    /// often as a reader asks. Leaves the ONE requested pin's value on the stack.
     private void EmitPullCallFunc(Node node, string pinName)
     {
         if (_il == null) return;
@@ -2446,15 +2267,13 @@ public class GraphCompiler
         _il.Emit(OpCodes.Unbox_Any, t);
     }
 
-    /// A CallFunc met by the PULL compiler's topological pass -- i.e. a call sitting in a graph with
-    /// no ENTRY records at all, which is the shape every pre-exec .ocgraph in this repo still has.
+    /// A CallFunc met by the PULL compiler's topological pass -- a call in a graph with no ENTRY
+    /// records, the shape every pre-exec .ocgraph in this repo still has.
     ///
-    /// AN IMPURE FUNCTION IS REFUSED HERE, and refused for the same reason Spawn/CharacterMove/
-    /// FireEvent/SetVar are: the topological pass runs every node exactly once per invocation, in an
-    /// order derived from data dependencies, with no branch structure available to gate anything. A
-    /// function with an exec chain has a notion of WHEN that this compiler cannot honour, so calling
-    /// one from here would run its side effects every invocation whether the author meant it or not.
-    /// Declaring a function `pure` is exactly the promise that this is safe.
+    /// AN IMPURE FUNCTION IS REFUSED HERE, same reason as Spawn/CharacterMove/FireEvent/SetVar: the
+    /// topological pass runs every node exactly once per invocation with no branch structure to gate
+    /// anything, so an exec-chain function's side effects would run whether the author meant it or
+    /// not. Declaring a function `pure` is the promise that this is safe.
     private void EmitCallFuncTopological(Node node)
     {
         if (_il == null) return;
@@ -2469,9 +2288,8 @@ public class GraphCompiler
                 "Either declare the function pure (FUNC " + fn.Name + " pure), or give this graph an ENTRY " +
                 "record and wire the call into its exec chain so CompileEntryPoint() runs it.");
 
-        // One call, results into this node's pin locals -- the same "call once, store every output"
-        // shape EmitExecCallFunc uses, against _pinLocals instead of _execLocals because that is what
-        // this compiler's readers (LoadPin) look in.
+        // One call, results into this node's pin locals -- same "call once, store every output"
+        // shape as EmitExecCallFunc, but against _pinLocals since that's what LoadPin reads.
         var invoked = EmitCallFuncInvoke(node);
         if (invoked == null) return;
         if (fn.Outputs.Count == 0) return;
@@ -2492,9 +2310,8 @@ public class GraphCompiler
         }
     }
 
-    /// A FuncReturn reached by the exec walk: pull each declared output and store it into the
-    /// enclosing function's output local. It does NOT return -- see EmitFunctionBody for why a
-    /// function has exactly one Ret, after the whole chain, rather than one per FuncReturn.
+    /// A FuncReturn reached by the exec walk: pulls each declared output into the enclosing
+    /// function's output local. Does NOT return -- see EmitFunctionBody for the single shared Ret.
     private void EmitFuncReturnStores(Node node)
     {
         if (_il == null || _currentFunc == null) return;
@@ -2505,10 +2322,9 @@ public class GraphCompiler
         }
     }
 
-    /// A FuncEntry's output pin IS an argument of the enclosing method. Same shape as EmitParam,
-    /// which does exactly this for a graph-level PARAM -- the index is the pin's position in the
-    /// function's declared input list, so a FUNCIN reordered in the file reorders the arguments and
-    /// the loads together.
+    /// A FuncEntry's output pin IS an argument of the enclosing method (same shape as EmitParam for a
+    /// graph-level PARAM). The index is the pin's position in the function's input list, so a FUNCIN
+    /// reordered in the file reorders the arguments and loads together.
     private void EmitFuncEntryLoad(string pinName)
     {
         if (_il == null || _currentFunc == null) return;
@@ -2535,62 +2351,56 @@ public class GraphCompiler
         _ => typeof(void)
     };
 
-    // =================================================================================================
     // EXEC / PUSH COMPILATION
     //
     // PUSH VS PULL: two compilers in this file. Above this line (Compile/TopologicalSort/EmitNode/
-    // LoadPin) is the ORIGINAL, UNTOUCHED PULL compiler: a node with no exec edge has no "when" -- it
-    // runs once, whenever the topological pass reaches it, caching its value in `_pinLocals` so every
-    // consumer reads the same answer. Correct for a DAG of pure expressions, and adding exec support
-    // must not change that: a graph with no ENTRY record still produces the exact IL it always did.
+    // LoadPin) is the ORIGINAL, UNTOUCHED PULL compiler: a node with no exec edge runs once, whenever
+    // the topological pass reaches it, caching its value in `_pinLocals` so every consumer reads the
+    // same answer -- correct for a DAG of pure expressions, and unaffected by adding exec support: a
+    // graph with no ENTRY record still produces the exact IL it always did.
     //
     // CompileEntryPoint(), below, PUSHES: a node reached via an exec edge runs at an ordered point in
-    // time, possibly more than once (a while/forEach loop) or never (an untaken branch arm) -- caching
-    // in a local is EXACTLY WRONG for that (a loop's `cond` must be read fresh every pass). So the exec
-    // compiler never touches `_pinLocals`/TopologicalSort/LoadPin; it has its own primitive,
-    // EmitPullInput/EmitPullOutput below, which is RECURSIVE AND UNCACHED -- every call re-emits the
-    // upstream subgraph's IL on the spot. Two deliberate consequences:
+    // time, possibly more than once (a loop) or never (an untaken branch arm) -- caching in a local is
+    // EXACTLY WRONG for that (a loop's `cond` must be read fresh every pass). So the exec compiler
+    // never touches `_pinLocals`/TopologicalSort/LoadPin; its own primitive, EmitPullInput/
+    // EmitPullOutput below, is RECURSIVE AND UNCACHED -- every call re-emits the upstream subgraph's
+    // IL on the spot. Two deliberate consequences:
     //
     //   1. A shared pure sub-expression pulled from two exec sites (or two loop iterations) is
-    //      computed TWICE -- correct, not free. No cross-site memoization; left rough for Phase 1
-    //      (about a graph being ABLE to decide, not how cheaply -- flagged again in the phase-2
-    //      handoff notes).
+    //      computed TWICE -- correct, not free. No cross-site memoization; Phase 1 is about a graph
+    //      being ABLE to decide, not how cheaply -- left rough (flagged again in the phase-2 handoff
+    //      notes).
     //
-    //   2. A node with a genuine SIDE EFFECT (SetField, and now others) must never be reached by a
-    //      PULL -- pulling it twice would perform its write twice, silently. EmitPullOutput refuses
-    //      to pull a side-effecting node's output; the write only happens when the exec walk visits
-    //      the node directly (EmitExecSideEffect), exactly once per visit.
+    //   2. A node with a genuine SIDE EFFECT (SetField, and others) must never be reached by a PULL --
+    //      pulling it twice would silently perform its write twice. EmitPullOutput refuses to pull a
+    //      side-effecting node's output; the write happens only when the exec walk visits the node
+    //      directly (EmitExecSideEffect), exactly once per visit.
     //
-    // NO SPECIAL CASE FOR "Sequence": firing a node's exec-out pins is one generic operation
-    // (EmitExecFanOut, below) that follows every EXEC-typed output pin with a link, in file order --
-    // one pin just continues the chain, several (Sequence's two, or more via hand-added PIN records)
-    // fire them all. EmitExecNode's switch special-cases only the two shapes that are NOT "fire every
-    // exec-out pin": branch (fires exactly one of two) and while/forEach (fire one, N times, looping).
-    // =================================================================================================
+    // NO SPECIAL CASE FOR "Sequence": firing exec-out pins is one generic operation (EmitExecFanOut,
+    // below) that follows every EXEC-typed output pin with a link, in file order. EmitExecNode's
+    // switch special-cases only the two shapes that are NOT "fire every exec-out pin": branch (fires
+    // exactly one of two) and while/forEach (fire one, N times, looping).
 
     /// <summary>Compiles ONE declared entry point (`ENTRY &lt;nodeId&gt; &lt;eventName&gt;`) to a
-    /// Delegate, by walking PUSH/exec edges outward from that node -- see the PUSH VS PULL comment
+    /// Delegate by walking PUSH/exec edges outward from that node -- see the PUSH VS PULL comment
     /// above for how this differs from Compile()'s PULL compilation, which this method never touches.
     ///
-    /// Parameters: the graph's PARAM list, in declaration order (same convention as Compile()), plus
-    /// a trailing GraphVarStore iff the graph declares a VAR (see _varStoreArgIndex) -- an internal
-    /// wiring detail GraphHost appends itself, invisible to the PUBLIC positional-argument contract a
-    /// caller of Fire()/Tick() sees. This is deliberately how OnTick receives delta time:
-    /// `PARAM deltaTime float` read by an ordinary `param` node, not a special "OnTick's second pin is
-    /// always dt" rule -- no new node type, no format change, for a future event with different args.
+    /// Parameters: the graph's PARAM list in declaration order (same convention as Compile()), plus a
+    /// trailing GraphVarStore iff the graph declares a VAR (see _varStoreArgIndex) -- invisible to the
+    /// public Fire()/Tick() caller. Deliberately how OnTick receives delta time too: `PARAM deltaTime
+    /// float` read by an ordinary `param` node, not a special "OnTick's second pin is always dt" rule --
+    /// this generalizes to a future event with different args, with no new node type or format change.
     ///
-    /// Return value: the same OUT convention as Compile() (void / one CLR type / boxed object[] in
-    /// file order -- see its OUTPUTS ARRAY comment). Read AFTER the chain finishes by pulling each OUT
-    /// pin's current value; because EmitPullOutput checks `_execLocals` first, this can surface a
-    /// loop/branch/side-effect value the exec walk itself produced (a while's `iterations`, a branch's
-    /// `tookTrue`, a Sequence's `fireLog`, a SetField's `success`) -- see those pins' own comments in
-    /// OcGraphParser.AddDefaultPins -- making an otherwise internal, per-invocation value observable
-    /// without a live native scene to read back from.
+    /// Return value: same OUT convention as Compile() (void / one CLR type / boxed object[] -- see its
+    /// OUTPUTS ARRAY comment), read AFTER the chain finishes. Since EmitPullOutput checks `_execLocals`
+    /// first, this can surface a loop/branch/side-effect value the walk itself produced (a while's
+    /// `iterations`, a branch's `tookTrue`, a SetField's `success` -- see OcGraphParser.AddDefaultPins),
+    /// making an otherwise-internal per-invocation value observable with no live native scene needed.
     ///
     /// Returns null and reports err on: no ENTRY for `eventName`, the ENTRY node missing, an OUT
     /// naming an exec pin, an exec-output pin wired to more than one link, an exec cycle not mediated
-    /// by a while/forEach, or a node type the walker does not understand appearing directly on the
-    /// exec chain (a node reached only through ordinary DATA links is unaffected).</summary>
+    /// by a while/forEach, or an unrecognized node type directly on the exec chain (data-linked nodes
+    /// are unaffected).</summary>
     public Delegate? CompileEntryPoint(string eventName, out string? err)
     {
         err = null;
@@ -2615,10 +2425,8 @@ public class GraphCompiler
         }
         if (!_graph.Nodes.TryGetValue(startNodeId, out var startNode))
         {
-            // Graph.Validate() already refuses this at parse time, but Compile()/CompileEntryPoint()
-            // can also run against a Graph built programmatically rather than through the text parser
-            // (see Graph.Validate's own note on why it re-checks things the parser also checked), so
-            // this is not unreachable in principle.
+            // Graph.Validate() already refuses this at parse time, but a Graph can also be built
+            // programmatically rather than through the parser, so this is not unreachable in principle.
             err = $"ENTRY '{eventName}' names node '{startNodeId}', which does not exist";
             return null;
         }
@@ -2672,8 +2480,7 @@ public class GraphCompiler
             EmitExecNode(startNode);
 
             // Read OUT AFTER the chain has fully run -- pulling now sees any loop/branch/side-effect
-            // local the walk above populated, exactly like reading a variable after a function body
-            // finishes.
+            // local the walk populated, like reading a variable after a function body finishes.
             if (_graph.Outputs.Count == 1)
             {
                 var (onlyOutNodeId, onlyOutPinName) = _graph.Outputs[0];
@@ -2717,17 +2524,15 @@ public class GraphCompiler
         }
     }
 
-    /// Emits IL for one step of the exec walk: run `node`'s own logic (if it has any worth
-    /// sequencing), then hand control on. `_execVisiting` guards against a hand-authored exec LINK
-    /// cycle that does not go through a while/forEach's internal loop-back -- see that field's own
-    /// comment -- by throwing a clear compile error instead of recursing forever. A DIAMOND (two
-    /// branches of an earlier `branch` both eventually reaching the same downstream node) is NOT a
-    /// cycle and is explicitly allowed: `_execVisiting` only tracks nodes on the CURRENT recursion
-    /// path, removed again in `finally` once that path returns, so the false arm can still reach a
-    /// node the true arm already visited and returned from. The cost of allowing that is that shared
-    /// downstream node's IL is emitted twice (once inlined at the end of each arm) rather than once
-    /// with a jump -- accepted, and named, in the PUSH VS PULL comment above as a Phase 1 rough edge;
-    /// a real join-point/basic-block compiler is out of scope here.
+    /// Emits IL for one step of the exec walk: run `node`'s own logic (if any is worth sequencing),
+    /// then hand control on. `_execVisiting` guards against a hand-authored exec LINK cycle that skips
+    /// while/forEach's internal loop-back (see that field's comment), throwing a clear compile error
+    /// instead of recursing forever. A DIAMOND (two `branch` arms reaching the same downstream node)
+    /// is NOT a cycle: `_execVisiting` only tracks the CURRENT recursion path, cleared in `finally`
+    /// once that path returns, so the false arm can still reach a node the true arm already visited.
+    /// Cost: that shared node's IL is emitted twice (inlined at the end of each arm) rather than once
+    /// with a jump -- an accepted Phase 1 rough edge (see PUSH VS PULL above); a real join-point/
+    /// basic-block compiler is out of scope here.
     private void EmitExecNode(Node node)
     {
         if (_il == null) return;
@@ -2747,10 +2552,7 @@ public class GraphCompiler
                     return; // branch owns its own fan-out (exactly one of two arms); no generic fan-out after it
                 case "switchint":
                     EmitSwitchInt(node);
-                    return; // same reason as branch: it picks ONE arm, and a generic fan-out after it
-                            // would additionally run every other arm it just decided against
-                // Each owns its own fan-out: it decides which output runs, and generic fan-out
-                // afterwards would run them all again.
+                    return; // same reason as branch: picks ONE arm; a generic fan-out would run the rest too
                 case "doonce":
                     EmitDoOnce(node);
                     return;
@@ -2767,14 +2569,11 @@ public class GraphCompiler
                     EmitForEach(node);
                     return;
                 default:
-                    // Every other node type reached via exec: run its own side effect if it has one
-                    // worth sequencing (SetField/SetFieldVec3/Spawn/SetVar -- four separate predicate/
-                    // emitter pairs rather than one, for the reasons each IsExecCapable*Type comment
-                    // gives) or its own cached QUERY if it has one worth running exactly once per visit
-                    // (today, only Raycast -- IsExecCapableQueryType), then fall through to the generic
-                    // multi-exec-out fan-out, which is what makes a plain node with 0, 1, or N exec-
-                    // output pins behave correctly (no-op, continue, or "sequence") with no special
-                    // case needed here.
+                    // Every other node type reached via exec: run its side effect if it has one worth
+                    // sequencing (SetField/SetFieldVec3/Spawn/SetVar -- separate predicate/emitter
+                    // pairs, see each IsExecCapable*Type comment) or its cached QUERY if it has one
+                    // (today, only Raycast), then fall through to the generic multi-exec-out fan-out --
+                    // which handles a plain node with 0/1/N exec-output pins with no special case.
                     if (IsExecCapableSideEffectType(node.Type)) EmitExecSideEffect(node);
                     else if (IsExecCapableVecSideEffectType(node.Type)) EmitExecSetFieldVec3(node);
                     else if (IsExecCapableSpawnType(node.Type)) EmitExecSpawn(node);
@@ -2816,25 +2615,22 @@ public class GraphCompiler
         }
     }
 
-    /// Fires every declared EXEC-typed OUTPUT pin on `node`, in the order node.Pins lists them --
-    /// file order for an explicit PIN record, catalog order for a default-pinned node (see
-    /// OcGraphParser.AddDefaultPins / sandbox/src/GraphNodeDefs.hpp). See the section-level comment
-    /// above for why this alone is what implements "Sequence" with no dedicated case.
+    /// Fires every declared EXEC-typed OUTPUT pin on `node`, in node.Pins order -- file order for an
+    /// explicit PIN record, catalog order for a default-pinned node (OcGraphParser.AddDefaultPins /
+    /// GraphNodeDefs.hpp). See the section comment above for why this alone implements "Sequence".
     private void EmitExecFanOut(Node node)
     {
         if (_il == null) return;
 
         var execOuts = node.Pins.Where(p => p.IsOutput && p.Type == PinType.Exec).ToList();
 
-        // "fireLog" -- OPT-IN OBSERVABILITY, not part of the control-flow contract, and a no-op for
-        // any node that doesn't declare an int output pin literally named "fireLog" (Sequence's
-        // default pins do; see OcGraphParser.AddDefaultPins). Proving "a sequence really fires its
-        // arms in the file's order" needs a channel that survives to the end of the compiled method:
-        // a SetField write cannot be observed in this process (no live native scene -- see
-        // GraphHostTests.cs's own class comment for the identical limitation elsewhere in this
-        // codebase), and a pure DATA pull cannot prove a node was actually VISITED by the exec walk,
-        // only that it CAN be computed on demand. Updated as `fireLog = fireLog*10 + (armIndex+1)`
-        // before each arm fires; three arms firing in order leaves fireLog == 123.
+        // "fireLog" -- OPT-IN OBSERVABILITY, not part of the control-flow contract; a no-op unless
+        // the node declares an int output pin named "fireLog" (Sequence's default pins do). Proving
+        // "a sequence fires its arms in file order" needs a channel that survives to the end of the
+        // method: no live native scene to observe a SetField write (GraphHostTests.cs has the same
+        // limitation), and a pure pull can't prove a node was actually VISITED, only computable on
+        // demand. Updated as `fireLog = fireLog*10 + (armIndex+1)` before each arm; three arms in
+        // order leaves fireLog == 123.
         var fireLogPin = node.Pins.FirstOrDefault(p => p.IsOutput && p.Name == "fireLog" && p.Type == PinType.Int);
         LocalBuilder? fireLog = null;
         if (fireLogPin != null)
@@ -2861,9 +2657,8 @@ public class GraphCompiler
         }
     }
 
-    /// Resolves the single exec LINK leaving `nodeId.pinName`, if any -- null means that arm is simply
-    /// not wired to anything, which is not an error (the same permissiveness LoadPin already extends
-    /// to an unwired DATA input, which falls back to a default rather than failing).
+    /// Resolves the single exec LINK leaving `nodeId.pinName`; null means unwired, which is not an
+    /// error (same permissiveness LoadPin extends to an unwired DATA input, defaulting rather than failing).
     private Node? FindExecTarget(string nodeId, string pinName)
     {
         var links = _graph.Links.Where(l => l.SourceNodeId == nodeId && l.SourcePinName == pinName).ToList();
@@ -2880,16 +2675,15 @@ public class GraphCompiler
         return target;
     }
 
-    /// branch: a bool condition, ONE incoming exec pulse, and exactly one of two outgoing exec pins
-    /// (`true`/`false`) fires -- unlike EmitExecFanOut, which fires ALL of a node's exec-out pins.
-    /// switchint (Blueprint's Switch on Int): evaluate the selector once, then run exactly ONE case
-    /// chain, or the default.
+    /// branch: a bool condition, ONE incoming exec pulse, exactly one of `true`/`false` fires --
+    /// unlike EmitExecFanOut, which fires ALL exec-out pins. switchint (Blueprint's Switch on Int):
+    /// evaluate the selector once, run exactly ONE case chain or the default.
     ///
-    /// A CHAIN OF COMPARES, NOT AN IL `switch` OPCODE: that opcode needs a dense jump table over a
-    /// contiguous range from zero, and the selector here is an arbitrary author-wired int -- negative,
-    /// sparse, or out of range are all ordinary. Four compares cost nothing at this scale.
+    /// A CHAIN OF COMPARES, NOT AN IL `switch` OPCODE: that needs a dense jump table from zero, but
+    /// the selector is an arbitrary author-wired int (negative/sparse/out-of-range are ordinary).
+    /// Four compares cost nothing at this scale.
     ///
-    /// THE SELECTOR IS PULLED ONCE, into a local, not re-pulled per case -- EmitPullOutput is
+    /// THE SELECTOR IS PULLED ONCE into a local, not re-pulled per case -- EmitPullOutput is
     /// deliberately uncached, so re-pulling would re-evaluate it (a Raycast-fed selector would trace
     /// the ray once per case).
     private void EmitSwitchInt(Node node)
@@ -2957,15 +2751,12 @@ public class GraphCompiler
         _il.MarkLabel(endLabel);
     }
 
-    /// while: `cond` (re-pulled fresh every pass -- see the PUSH VS PULL comment for why this cannot
-    /// be the cached-local approach LoadPin/EmitNode use) gates a `loop` body that may run any number
-    /// of times, up to MaxLoopIterations -- past that, WarnLoopGuardTripped logs (naming the node and
-    /// event) and the loop is stopped exactly as if `cond` had gone false, so a buggy graph loses one
-    /// tick's worth of correctness rather than hanging whatever called it. `done` runs once, either
-    /// when `cond` genuinely goes false or when the guard trips.
-    // The reserved GraphVarStore key a stateful flow node keeps its memory under. Node ids
-    // are unique within a graph and a VAR name cannot contain '$', so this can never collide
-    // with a variable the author declared.
+    /// while: `cond` (re-pulled fresh every pass -- see PUSH VS PULL for why not LoadPin's cached
+    /// approach) gates a `loop` body, up to MaxLoopIterations -- past that, WarnLoopGuardTripped logs
+    /// (node + event) and the loop stops as if `cond` went false, so a buggy graph loses one tick's
+    /// correctness rather than hanging the caller. `done` runs once either way.
+    // The reserved GraphVarStore key a stateful flow node keeps its memory under -- node ids are
+    // unique and a VAR name cannot contain '$', so this can never collide with an author's variable.
     private static string FlowStateKey(Node node) => "$flow$" + node.Id;
 
     /// Emits `store.GetBool("$flow$<id>")` onto the stack.
@@ -2987,9 +2778,8 @@ public class GraphCompiler
         _il.Emit(OpCodes.Call, VarSetMethodFor(PinType.Bool));
     }
 
-    /// Every stateful flow node needs somewhere to remember. A graph that declares no VAR
-    /// records has no store argument at all, so say which node needs one rather than letting
-    /// the IL reference argument -1.
+    /// Every stateful flow node needs somewhere to remember; a graph with no VAR records has no store
+    /// argument, so name which node needs one rather than letting the IL reference argument -1.
     private void RequireFlowState(Node node)
     {
         if (_varStoreArgIndex < 0)
@@ -3005,9 +2795,8 @@ public class GraphCompiler
         if (_il == null) return;
         RequireFlowState(node);
 
-        // RESET IS SAMPLED FIRST, so an activation with reset true re-arms and then fires in the
-        // same pass -- which is what a caller wiring "reset and go" means, and it makes the node
-        // usable from a single exec chain instead of needing two.
+        // RESET IS SAMPLED FIRST, so reset=true re-arms and fires in the same pass -- what a caller
+        // wiring "reset and go" means, and lets one exec chain use the node instead of needing two.
         var afterReset = _il.DefineLabel();
         EmitPullInput(node, "reset");
         _il.Emit(OpCodes.Brfalse, afterReset);
@@ -3027,9 +2816,8 @@ public class GraphCompiler
         _il.MarkLabel(alreadyFired);
     }
 
-    /// gate: `then` fires only while the gate is open. `open`/`close` are sampled every
-    /// activation and applied BEFORE the test, so opening and firing in one activation works.
-    /// Closed is the default, matching Blueprint's own Gate.
+    /// gate: `then` fires only while open. `open`/`close` are sampled every activation and applied
+    /// BEFORE the test, so opening and firing in one activation works. Closed is default (Blueprint's Gate).
     private void EmitGate(Node node)
     {
         if (_il == null) return;
@@ -3136,11 +2924,10 @@ public class GraphCompiler
         if (done != null) EmitExecNode(done);
     }
 
-    /// forEach: the COUNTED-REPEAT variant -- see OcGraphParser.AddDefaultPins's "foreach" case for
-    /// why (no array/collection pin type exists yet to iterate a real collection). `index` runs
-    /// 0..count-1 through the `loop` body; the natural `index >= count` bound already prevents
-    /// "forever" for any finite count, and MaxLoopIterations is a second, redundant guard for a
-    /// corrupted or absurdly large `count` -- cheap insurance, not the primary termination mechanism.
+    /// forEach: the COUNTED-REPEAT variant (no array/collection pin type exists yet -- see
+    /// OcGraphParser.AddDefaultPins's "foreach" case). `index` runs 0..count-1 through `loop`; the
+    /// natural `index >= count` bound already prevents "forever", and MaxLoopIterations is a second,
+    /// redundant guard for a corrupted/absurd `count` -- cheap insurance, not the primary mechanism.
     private void EmitForEach(Node node)
     {
         if (_il == null) return;
@@ -3184,13 +2971,11 @@ public class GraphCompiler
         if (done != null) EmitExecNode(done);
     }
 
-    /// Declares (once) or returns (on every later call) the IL local backing one exec-scoped pin --
-    /// a loop's live counter, a branch's "which side" flag, a captured SetField return code. Declared
-    /// ONCE per compile (DeclareLocal is only ever called the first time), but the SAME slot is
-    /// written afresh every time its owning node's code runs at RUNTIME -- including every pass of a
-    /// loop, since the IL that writes it is emitted once but sits inside the loop's branch-back range.
-    /// That single property is what makes a loop counter "just work" without re-declaring anything per
-    /// iteration: IL loops via jumps, not by re-emitting the body N times.
+    /// Declares (once) or returns (on later calls) the IL local backing one exec-scoped pin -- a
+    /// loop's live counter, a branch's "which side" flag, a captured SetField return code. Declared
+    /// ONCE per compile, but the SAME slot is written afresh every RUNTIME pass, since the IL that
+    /// writes it sits inside the loop's branch-back range -- IL loops via jumps, not by re-emitting
+    /// the body N times, which is what makes a loop counter "just work".
     private LocalBuilder GetOrCreateExecLocal(string nodeId, string pinName, Type type)
     {
         if (_il == null) throw new InvalidOperationException("no active ILGenerator");
@@ -3207,86 +2992,67 @@ public class GraphCompiler
     private static bool IsExecCapableSideEffectType(string type) =>
         type.Equals("setfield", StringComparison.OrdinalIgnoreCase);
 
-    /// Node types with NO side effect (safe to call any number of times) that still want the exec
-    /// walk's "compute once per visit, cache into _execLocals" shape -- today, only Raycast. A
-    /// SEPARATE predicate from IsExecCapableSideEffectType because the reason differs: SetField is on
-    /// the exec chain for CORRECTNESS (pulling it twice would silently write twice); Raycast is there
-    /// for COST (pulling it twice would merely re-run an expensive physics query). A query-type node
-    /// would be safe for EmitPullOutput to compute fresh too, unlike a side-effect type, which it
-    /// actively refuses -- Raycast just has no such fallback today, by choice (see EmitPullOutput's
-    /// own "raycast has NO case here" note).
+    /// Node types with NO side effect that still want the exec walk's "compute once per visit, cache
+    /// into _execLocals" shape -- today, only Raycast. Separate from IsExecCapableSideEffectType
+    /// because the reason differs: SetField is on the exec chain for CORRECTNESS (pulling twice would
+    /// silently write twice); Raycast is there for COST (pulling twice re-runs an expensive query).
+    /// EmitPullOutput COULD compute a query type fresh (unlike a side effect, which it refuses), it
+    /// just doesn't today, by choice (see its "raycast has NO case here" note).
     private static bool IsExecCapableQueryType(string type) =>
         type.Equals("raycast", StringComparison.OrdinalIgnoreCase);
 
-    /// MouseDelta's own version of IsExecCapableQueryType -- separate because MouseDeltaForGraph is a
-    /// different native surface (Aver.Framework's polled input, not a physics query), a different
-    /// arity (3 out-params vs 5), and a different cost class (a memcpy-class struct copy, not a BVH
-    /// walk) -- see GraphInterop.MouseDeltaForGraph's own comment for why it gets Raycast's CACHING
-    /// SHAPE without sharing its CACHING REASON. Kept separate, like Raycast, so a future continuous-
-    /// input type has an obvious spot rather than an ever-growing shared switch.
+    /// MouseDelta's own version of IsExecCapableQueryType -- separate native surface (Aver.Framework's
+    /// polled input, not physics), different arity (3 out-params vs 5) and cost class (memcpy-class
+    /// copy, not a BVH walk); see GraphInterop.MouseDeltaForGraph for why it shares Raycast's caching
+    /// SHAPE without the caching REASON. Kept separate so a future continuous-input type has its own spot.
     private static bool IsExecCapableMouseDeltaType(string type) =>
         type.Equals("mousedelta", StringComparison.OrdinalIgnoreCase);
 
-    /// MoveAxis's own version of IsExecCapableMouseDeltaType -- see that predicate's comment; kept
-    /// separate for the identical reason (a different native surface -- Input.MoveAxis's ~8 GetKey
-    /// reads, not one aver_fw_input_mouse call -- with a different arity, 2 out-params not 3).
+    /// MoveAxis's own version of IsExecCapableMouseDeltaType (see that comment) -- different native
+    /// surface (Input.MoveAxis's ~8 GetKey reads, not one mouse call) and arity (2 out-params not 3).
     private static bool IsExecCapableMoveAxisType(string type) =>
         type.Equals("moveaxis", StringComparison.OrdinalIgnoreCase);
 
     /// SetFieldVec3's own version of IsExecCapableSideEffectType -- separate because SetField/
-    /// SetFieldVec3 write through different native wrappers with different arities and different
-    /// field-kind checks (F32 vs Vec3); folding them would force EmitExecSideEffect to type-switch
-    /// internally to pick which write logic applies. Kept as its own list, mirroring
-    /// IsExecCapableQueryType sitting beside IsExecCapableSideEffectType, so a third side-effecting
-    /// type has an obvious third place to go.
+    /// SetFieldVec3 write through different wrappers, arities, and field-kind checks (F32 vs Vec3);
+    /// folding them would force EmitExecSideEffect to type-switch internally.
     private static bool IsExecCapableVecSideEffectType(string type) =>
         type.Equals("setfieldvec3", StringComparison.OrdinalIgnoreCase);
 
-    /// Spawn's own version, but the reason goes a step further than SetField/SetFieldVec3: those are
-    /// refused as a PULL only because a write must never happen twice (EmitPullOutput's refusal,
-    /// below); Spawn shares that refusal but is ALSO refused by the PULL compiler's own topological
-    /// pass entirely (EmitNode's "spawn" case, above) -- which they are not. Kept as its own predicate
-    /// because SpawnForGraph is yet another native surface (Aver.Framework's class registry, not
-    /// Aver.Scene's field table) with its own signature, resolution strategy (by NAME at runtime, not
-    /// a compile-time fieldId), and failure mode.
+    /// Spawn's own version, but stricter than SetField/SetFieldVec3: those are refused as a PULL only
+    /// by EmitPullOutput's refusal (below); Spawn is ALSO refused by EmitNode's "spawn" case in the
+    /// topological pass entirely. Own predicate because SpawnForGraph is a different native surface
+    /// (Aver.Framework's class registry, not Aver.Scene's field table) resolved by NAME at runtime.
     private static bool IsExecCapableSpawnType(string type) =>
         type.Equals("spawn", StringComparison.OrdinalIgnoreCase);
 
-    /// SetVar's own version -- writes through yet another surface (GraphVarStore, an in-process object
-    /// with its own type-to-accessor dispatch, not a native P/Invoke call) with no runtime failure
-    /// mode a native write has (unknown entity, read-only field, missing component -- see
-    /// EmitExecSetVar's own comment for why that means no "success" pin is needed either). That
-    /// difference does not change WHERE it belongs: SetVar shares the PULL refusal (EmitPullOutput,
-    /// below, and EmitNode's "setvar" case) every side-effecting type in this family shares.
+    /// SetVar's own version -- writes through GraphVarStore (in-process, type dispatch), not a native
+    /// P/Invoke, so it has none of a native write's failure modes (see EmitExecSetVar for why that
+    /// means no "success" pin either). Still shares the family's PULL refusal (EmitPullOutput below,
+    /// EmitNode's "setvar" case).
     private static bool IsExecCapableVarSideEffectType(string type) =>
         type.Equals("setvar", StringComparison.OrdinalIgnoreCase);
 
-    /// SetParent's own version -- kept apart from SetField's for the same reason SetFieldVec3/Spawn/
-    /// SetVar each got their own: SetParentForGraph (no wrapper, a direct reflect into
-    /// Aver.Scene.Native) has a different arity (two entity ids, not entity+fieldId+value) and a
-    /// different refusal contract (a cycle/self-parent/doomed-parent rejection baked into the ABI, not
-    /// a missing-component one). See OcGraphParser.AddDefaultPins's "setparent"/"setviewentity"/
-    /// "setname" comment for why this type (and its two siblings below) is dispatched SetField-style
-    /// rather than Spawn/SetVar-style.
+    /// SetParent's own version -- SetParentForGraph (direct reflect into Aver.Scene.Native, no
+    /// wrapper) has a different arity (two entity ids) and refusal contract (cycle/self-parent
+    /// rejection, not missing-component). See OcGraphParser.AddDefaultPins's setparent/setviewentity/
+    /// setname comment for why this family is dispatched SetField-style, not Spawn/SetVar-style.
     private static bool IsExecCapableSetParentType(string type) =>
         type.Equals("setparent", StringComparison.OrdinalIgnoreCase);
 
-    /// SetViewEntity's own version -- see IsExecCapableSetParentType's comment. Its own ABI call
-    /// (aver_fw_set_view_entity) returns void, which is why EmitExecSetViewEntity/EmitSetViewEntity
-    /// have no "capture or discard a return code" branch the other four side-effecting types all share.
+    /// SetViewEntity's own version (see IsExecCapableSetParentType). Its ABI call returns void, so
+    /// EmitExecSetViewEntity/EmitSetViewEntity have no "capture or discard a return code" branch.
     private static bool IsExecCapableSetViewEntityType(string type) =>
         type.Equals("setviewentity", StringComparison.OrdinalIgnoreCase);
 
-    /// SetName's own version -- see IsExecCapableSetParentType's comment. The first of this family
-    /// whose write carries a STRING (node.NameValue, from a name= attribute) rather than only scalar
-    /// pins.
+    /// SetName's own version (see IsExecCapableSetParentType) -- first of this family whose write
+    /// carries a STRING (node.NameValue, from name=) rather than only scalar pins.
     private static bool IsExecCapableSetNameType(string type) =>
         type.Equals("setname", StringComparison.OrdinalIgnoreCase);
 
-    /// SetMesh's own version -- see IsExecCapableSetParentType's comment. Unlike SetParent/SetName
-    /// (which reflect straight into Aver.Scene.Native with no wrapper), this one DOES go through a
-    /// GraphInterop wrapper (SetMeshForGraph), the same "needs Entity's internal constructor, which
-    /// only Aver.Framework code can call" reason GetFieldVecForGraph/SetFieldVecForGraph already have.
+    /// SetMesh's own version -- unlike SetParent/SetName (reflect straight into Aver.Scene.Native),
+    /// this goes through a GraphInterop wrapper (SetMeshForGraph), needing Entity's internal
+    /// constructor like GetFieldVecForGraph/SetFieldVecForGraph.
     private static bool IsExecCapableSetMeshType(string type) =>
         type.Equals("setmesh", StringComparison.OrdinalIgnoreCase);
 
@@ -3299,38 +3065,31 @@ public class GraphCompiler
     private static bool IsExecCapableSetSkeletonType(string type) =>
         type.Equals("setskeleton", StringComparison.OrdinalIgnoreCase);
 
-    /// PlayAnimation's own version -- see IsExecCapableSetMeshType's comment, which applies unchanged.
-    /// Grouped with SetMesh/SetMaterial/SetSkeleton rather than with Spawn/PlaySound because there is
-    /// only one CAnimator per entity: replaying the same clip twice overwrites the same three fields
-    /// with the same values, unlike PlaySound (a genuinely NEW voice each call, refused by the pull
-    /// compiler entirely -- see IsExecCapableSideEffectType's own family).
+    /// PlayAnimation's own version (see IsExecCapableSetMeshType). Grouped with SetMesh/SetMaterial/
+    /// SetSkeleton, not Spawn/PlaySound: only one CAnimator per entity, so replaying a clip twice
+    /// overwrites the same fields, unlike PlaySound's genuinely NEW voice each call.
     private static bool IsExecCapablePlayAnimationType(string type) =>
         type.Equals("playanimation", StringComparison.OrdinalIgnoreCase);
 
-    /// AttachToSocket's own version. Grouped with SetMesh/SetMaterial rather than with Spawn because
-    /// it is IDEMPOTENT -- attaching to the same parent and socket twice is the same state, not two
-    /// attachments -- so it is allowed in the PULL compiler too and is NOT in
-    /// IsPushOnlySideEffectType.
+    /// AttachToSocket's own version. Grouped with SetMesh/SetMaterial, not Spawn: IDEMPOTENT --
+    /// attaching twice is the same state, not two attachments -- so allowed in the PULL compiler too
+    /// (NOT in IsPushOnlySideEffectType).
     private static bool IsExecCapableAttachToSocketType(string type) =>
         type.Equals("attachtosocket", StringComparison.OrdinalIgnoreCase);
 
     /// CharacterMove's own version of IsExecCapableSpawnType -- refused by the PULL compiler's
     /// topological pass ENTIRELY (EmitNode's "charactermove" case), the same stricter-than-SetField
-    /// treatment Spawn gets and SetParent/SetViewEntity/SetName/SetMesh/SetMaterial do NOT: those five
-    /// write through an idempotent "same value twice is harmless" ABI call, but CharacterMoveForGraph
-    /// -> AverCharacter.Drive mutates _yaw/_pitch and the physics capsule's velocity on every call --
-    /// the same "running it twice is a materially worse hazard than a stray field overwrite"
-    /// reasoning Spawn's comment already gives. Kept separate because CharacterMoveForGraph is yet
-    /// another native surface (AverCharacter/Actors, not the class registry) with its own signature
-    /// (six scalars in, one bool out) and failure mode (a runtime type check, not an unresolved class
-    /// name).
+    /// treatment as Spawn: SetParent/SetViewEntity/SetName/SetMesh/SetMaterial write through an
+    /// idempotent "same value twice is harmless" ABI call, but CharacterMoveForGraph ->
+    /// AverCharacter.Drive mutates _yaw/_pitch and capsule velocity on every call -- a materially
+    /// worse hazard than a stray field overwrite. Own predicate: a different native surface
+    /// (AverCharacter/Actors) with its own signature (six scalars in, bool out).
     private static bool IsExecCapableCharacterMoveType(string type) =>
         type.Equals("charactermove", StringComparison.OrdinalIgnoreCase);
 
-    /// Jump gets its OWN predicate rather than joining CharacterMove's, following the one-per-
-    /// side-effect-type shape the six above already use: it is a different call, with a different
-    /// emitter and a different failure mode (declined in mid-air, which is ordinary), and a predicate
-    /// matching two unrelated node types is one whose name has stopped describing what it matches.
+    /// Jump gets its OWN predicate rather than joining CharacterMove's -- a different call, emitter,
+    /// and failure mode (declined in mid-air, ordinary); a predicate matching two unrelated types is
+    /// one whose name stops describing what it matches.
     private static bool IsExecCapableJumpType(string type) =>
         type.Equals("jump", StringComparison.OrdinalIgnoreCase);
 
@@ -3340,14 +3099,13 @@ public class GraphCompiler
         type.Equals("print", StringComparison.OrdinalIgnoreCase) ||
         type.Equals("printint", StringComparison.OrdinalIgnoreCase);
 
-    /// The four framework calls that WRITE, grouped into ONE predicate (unlike Jump/CharacterMove):
-    /// all four share EmitExecApiCall exactly -- same shape, same bool return, same success handling.
-    /// The three transform writers, grouped for the same reason: one shared emitter.
-    /// The physics writers, creators and the sweep: three predicates for three emitters (a write
-    /// returns a bool, a creator returns a body handle, the sweep fills exec-locals like Raycast).
-    /// WIDENED past the original six for forces/impulses, spin, material, mass, motion type,
-    /// activation and layer -- each shares EmitExecPhysicsWrite's "pull body (unless setgravity), pull
-    /// scalar args, call, store/pop bool" shape, so they join its switch rather than getting a new one.
+    /// The four framework WRITE calls, grouped into ONE predicate (unlike Jump/CharacterMove): all
+    /// share EmitExecApiCall exactly. The three transform writers share one emitter for the same
+    /// reason. Physics writers/creators/sweep get three predicates for three emitters (a write
+    /// returns bool, a creator returns a body handle, the sweep fills exec-locals like Raycast).
+    /// WIDENED past the original six for forces/impulses/mass/motion-type/layer etc -- each shares
+    /// EmitExecPhysicsWrite's "pull body (unless setgravity), pull scalars, call, store/pop bool"
+    /// shape, joining its switch rather than getting a new one.
     private static bool IsExecCapablePhysicsWriteType(string type)
     {
         string t = type.ToLowerInvariant();
@@ -3368,20 +3126,17 @@ public class GraphCompiler
     private static bool IsExecCapableSphereCastType(string type) =>
         type.Equals("spherecast", StringComparison.OrdinalIgnoreCase);
 
-    /// The joint creators -- EmitExecJointCreate's own dispatch list. A FOURTH physics-family
-    /// predicate rather than folding into IsExecCapablePhysicsCreateType: a joint creator's return
-    /// goes into an exec-local named "joint", not "body", and its first two inputs are bodyA/bodyB,
-    /// not a single centre point -- different enough that sharing one emitter would need it to
-    /// branch on node.Type just to know which pin comes first.
+    /// The joint creators -- EmitExecJointCreate's dispatch list. A FOURTH physics-family predicate,
+    /// not folded into IsExecCapablePhysicsCreateType: return goes into exec-local "joint" not "body",
+    /// and inputs start with bodyA/bodyB, not a single centre point.
     private static bool IsExecCapableJointCreateType(string type)
     {
         string t = type.ToLowerInvariant();
         return t == "jointhinge" || t == "jointpoint" || t == "jointdistance" || t == "jointslider" || t == "jointfixed";
     }
 
-    /// The joint operations -- EmitExecJointOp's own dispatch list. Kept apart from
-    /// IsExecCapablePhysicsWriteType for the identical reason the creators are: these key off a JOINT
-    /// handle, never a body, and EmitExecPhysicsWrite's shape starts by unconditionally pulling "body".
+    /// The joint operations -- EmitExecJointOp's dispatch list. Apart from IsExecCapablePhysicsWriteType
+    /// for the same reason as the creators: these key off a JOINT handle, never a body.
     private static bool IsExecCapableJointOpType(string type)
     {
         string t = type.ToLowerInvariant();
@@ -3394,9 +3149,8 @@ public class GraphCompiler
         return t == "translate" || t == "setlocalscale" || t == "setlocalposition" || t == "destroyentity";
     }
 
-    /// A CallFunc reached by the exec walk. Its own purity does not decide this -- calling a PURE
-    /// function from an exec chain is legal and useful (it just has no exec pins to wire, so it
-    /// never appears there); what this predicate answers is "is this node type a call at all".
+    /// A CallFunc reached by the exec walk. Purity doesn't decide this -- a PURE function can be
+    /// called from an exec chain too (it just has no exec pins to wire); this only asks "is it a call".
     private static bool IsExecCapableCallFuncType(string type) =>
         type.Equals("callfunc", StringComparison.OrdinalIgnoreCase);
 
@@ -3411,30 +3165,24 @@ public class GraphCompiler
     }
 
     /// FireEvent's own version of IsExecCapableSpawnType -- refused by the PULL compiler's
-    /// topological pass ENTIRELY (EmitNode's "fireevent" case), the same stricter treatment Spawn/
-    /// CharacterMove get. GraphEvents.FireEventForGraph is yet another surface (a managed router into
-    /// a DIFFERENT GraphHost, not P/Invoke and not this compiler's own GraphVarStore) with its own
-    /// signature (int target, string event name in; bool "did it run" out) and failure mode (no live
-    /// graph bound to the target, or one that never declared this event -- neither a native ABI
-    /// rejection).
+    /// topological pass ENTIRELY, same stricter treatment as Spawn/CharacterMove. GraphEvents.
+    /// FireEventForGraph routes into a DIFFERENT GraphHost (not P/Invoke, not GraphVarStore), with
+    /// its own signature (target int, event name string in; bool "did it run" out) and failure mode
+    /// (no live graph bound, or one that never declared this event).
     private static bool IsExecCapableFireEventType(string type) =>
         type.Equals("fireevent", StringComparison.OrdinalIgnoreCase);
 
-    /// SaveGame/LoadGame's own version -- grouped into ONE predicate (unlike Jump/CharacterMove)
-    /// because they share one emitter (EmitExecSaveLoad) with one internal switch. Refused by the
-    /// PULL compiler's topological pass ENTIRELY -- the worst-case member of this family: LoadGame
-    /// does not merely write one field or spawn one entity, it replaces the world.
+    /// SaveGame/LoadGame's own version -- ONE predicate (unlike Jump/CharacterMove) since both share
+    /// one emitter (EmitExecSaveLoad). Refused by the PULL compiler entirely -- the worst case here:
+    /// LoadGame doesn't write one field or spawn one entity, it replaces the world.
     private static bool IsExecCapableSaveLoadType(string type) =>
         type.Equals("savegame", StringComparison.OrdinalIgnoreCase) ||
         type.Equals("loadgame", StringComparison.OrdinalIgnoreCase);
 
-    /// Runs a SetField node's write exactly once, at the point the exec walk reaches it -- mirrors
-    /// EmitSetField's own field=/resolver/native-call logic, but pulls its "entity"/"value" inputs
-    /// through EmitPullInput rather than LoadPin/_pinLocals (see the section-level comment for why the
-    /// two input mechanisms are not shared). If the node declares a "success" output pin, the real
-    /// P/Invoke return code is captured into an exec-local (the same mechanism branch's "tookTrue" and
-    /// the loop nodes' counters use) so it can be read back via OUT after the chain finishes; if not,
-    /// the value is discarded rather than left on the stack.
+    /// Runs a SetField node's write exactly once, when the exec walk reaches it -- mirrors
+    /// EmitSetField's field=/resolver/native-call logic, but pulls "entity"/"value" via EmitPullInput,
+    /// not LoadPin/_pinLocals (see the section comment for why). A declared "success" pin captures the
+    /// real return code into an exec-local (same mechanism as branch's "tookTrue"); otherwise discarded.
     private void EmitExecSideEffect(Node node)
     {
         if (_il == null) return;
@@ -3463,12 +3211,10 @@ public class GraphCompiler
         }
     }
 
-    /// SetFieldVec3's own version of EmitExecSideEffect -- mirrors EmitSetFieldVec3's field=/resolver/
-    /// native-call logic (RequireVec3Field), but pulls "entity"/"x"/"y"/"z" through EmitPullInput
-    /// rather than LoadPin/_pinLocals, and captures "success" into an exec-local rather than a
-    /// _pinLocals entry, for the same reason EmitExecSideEffect does both of those instead of just
-    /// calling EmitSetFieldVec3 directly: this runs from the exec walk, where nothing was pre-computed
-    /// by a topological pass.
+    /// SetFieldVec3's own version of EmitExecSideEffect -- mirrors EmitSetFieldVec3's field=/resolver
+    /// logic (RequireVec3Field) but pulls inputs via EmitPullInput and captures "success" into an
+    /// exec-local, for the same reason EmitExecSideEffect does: this runs from the exec walk, where
+    /// nothing was pre-computed by a topological pass.
     private void EmitExecSetFieldVec3(Node node)
     {
         if (_il == null) return;
@@ -3493,15 +3239,11 @@ public class GraphCompiler
         }
     }
 
-    /// Runs a Spawn node's native call exactly once, at the point the exec walk reaches it -- mirrors
-    /// EmitExecSideEffect/EmitExecSetFieldVec3's own shape (pull inputs via EmitPullInput, Call, capture
-    /// -or-discard the result into an exec-local), but "which class to spawn" is class=, resolved by
-    /// GraphInterop.SpawnForGraph at RUNTIME rather than a fieldId baked at compile time the way
-    /// field=/_fieldResolver resolve GetField/SetField's own attribute -- see that method's own comment
-    /// for why. class= is read the same way field=/param= already are (OcGraphParser's generic
-    /// NODE-line key=value parsing, Node.ClassName) -- required at compile time here (an empty class=
-    /// can never spawn anything useful, so failing loudly now beats failing quietly at runtime with
-    /// entity 0 for a reason nobody can see).
+    /// Runs a Spawn node's native call once, when the exec walk reaches it -- mirrors
+    /// EmitExecSideEffect/EmitExecSetFieldVec3's shape (pull inputs, Call, capture-or-discard into an
+    /// exec-local), but class= is resolved by GraphInterop.SpawnForGraph at RUNTIME, not a compile-time
+    /// fieldId. class= is required at compile time: an empty one can never spawn anything, so failing
+    /// loudly now beats a silent entity-0 at runtime.
     private void EmitExecSpawn(Node node)
     {
         if (_il == null) return;
@@ -3525,10 +3267,9 @@ public class GraphCompiler
         }
     }
 
-    /// CreateEntity is exec-only, for EmitExecSpawn's exact reason one tier down: Spawn mints an
-    /// ACTOR of a declared class, this mints a bare entity, and both are side effects a dataflow
-    /// pull has no way to gate. Same shape as EmitExecSpawn -- push the name= literal (there is no
-    /// string pin it could arrive on), Call, then capture the two outputs or discard them.
+    /// CreateEntity is exec-only, same reason as Spawn one tier down: Spawn mints an ACTOR, this a
+    /// bare entity, both side effects a dataflow pull can't gate. Same shape as EmitExecSpawn -- push
+    /// the name= literal, Call, capture the two outputs or discard them.
     private void EmitExecCreateEntity(Node node)
     {
         if (_il == null) return;
@@ -3627,13 +3368,10 @@ public class GraphCompiler
             _il.Emit(OpCodes.Pop);
     }
 
-    /// Runs a CharacterMove node's native call exactly once, at the point the exec walk reaches it --
-    /// mirrors EmitExecSpawn's own shape (pull inputs via EmitPullInput, Call, capture-or-discard the
-    /// result into an exec-local), but with no attribute check at the top: UNLIKE Spawn's class=
-    /// (an edit-time NODE-line attribute, required before anything can be emitted), every one of
-    /// CharacterMoveForGraph's six parameters is an ordinary pin here -- see
-    /// OcGraphParser.AddDefaultPins's "CharacterMove" comment for why -- so there is nothing to
-    /// validate before pulling inputs and calling.
+    /// Runs a CharacterMove node's native call once, when reached -- mirrors EmitExecSpawn's shape
+    /// (pull inputs, Call, capture-or-discard into an exec-local), but no attribute check: unlike
+    /// Spawn's class=, all six CharacterMoveForGraph parameters are ordinary pins (see
+    /// OcGraphParser.AddDefaultPins's "CharacterMove" comment).
     private void EmitExecCharacterMove(Node node)
     {
         if (_il == null) return;
@@ -3657,15 +3395,11 @@ public class GraphCompiler
         }
     }
 
-    /// Runs a FireEvent node's call exactly once, at the point the exec walk reaches it -- mirrors
-    /// EmitExecSpawn/EmitExecCharacterMove's own shape (pull inputs via EmitPullInput, Call, capture-
-    /// or-discard the result into an exec-local), but "which event to fire" is event=, an edit-time
-    /// NODE-line attribute (see Node.EventName) required non-empty at COMPILE time -- mirrors class='s
-    /// own required-at-compile-time treatment for Spawn (an empty event= can never fire anything
-    /// useful, so failing loudly now beats a silent no-op refusal at runtime for a reason nobody can
-    /// see). UNLIKE class=, "which entity to fire at" (target) IS an ordinary pin, not a second
-    /// attribute -- a graph author computes the target at RUNTIME (a Spawn's own entity output, a
-    /// VAR, a Raycast's entity pin), never chooses it at edit time the way an event NAME is chosen.
+    /// Runs a FireEvent node's call once, when reached -- mirrors EmitExecSpawn/EmitExecCharacterMove's
+    /// shape, but event= is an edit-time NODE-line attribute (Node.EventName) required non-empty at
+    /// COMPILE time, like Spawn's class= (an empty one can never fire anything, so fail loudly now).
+    /// UNLIKE class=, `target` IS an ordinary pin -- the entity to fire at is computed at RUNTIME
+    /// (a Spawn's entity output, a VAR, a Raycast's entity pin), not chosen at edit time.
     private void EmitExecFireEvent(Node node)
     {
         if (_il == null) return;
@@ -3688,12 +3422,10 @@ public class GraphCompiler
         }
     }
 
-    /// Runs a SaveGame or LoadGame node's write exactly once, at the point the exec walk reaches
-    /// it -- the ONE emitter both share (see IsExecCapableSaveLoadType's own comment for why one
-    /// predicate, one emitter, is the right split here and Jump/CharacterMove's own-predicate-each
-    /// is not). Shape otherwise mirrors EmitExecSetName: push the path= literal, call, capture-or-
-    /// discard "success" into an exec-local. NO ENTITY PULLED, unlike every other node in this exec
-    /// family -- SaveGame/LoadGame act on the whole world, not on one thing in it.
+    /// Runs a SaveGame or LoadGame write once, when reached -- the ONE emitter both share (see
+    /// IsExecCapableSaveLoadType). Mirrors EmitExecSetName otherwise: push path=, call, capture-or-
+    /// discard "success". NO ENTITY PULLED, unlike the rest of this family -- these act on the whole
+    /// world, not one thing in it.
     private void EmitExecSaveLoad(Node node)
     {
         if (_il == null) return;
@@ -3717,18 +3449,15 @@ public class GraphCompiler
         }
     }
 
-    /// Runs a SetVar node's write exactly once, at the point the exec walk reaches it -- mirrors
-    /// EmitExecSideEffect/EmitExecSetFieldVec3/EmitExecSpawn's own shape (pull inputs via EmitPullInput,
-    /// Call, capture-or-discard the result), but "which variable" is var=, checked directly against
-    /// _graph.Variables (no _fieldResolver/native lookup at all -- a VAR is declared in THIS graph file,
-    /// not a scene-wide or class-wide registry the way field=/class= are).
+    /// Runs a SetVar node's write once, when reached -- mirrors EmitExecSideEffect/
+    /// EmitExecSetFieldVec3/EmitExecSpawn's shape, but var= is checked directly against
+    /// _graph.Variables (no native lookup: a VAR is declared in THIS graph file, not a scene/class
+    /// registry like field=/class=).
     ///
-    /// NO "success" PIN, AND THAT IS A REAL DIFFERENCE FROM EmitExecSideEffect/EmitExecSetFieldVec3, NOT
-    /// A MISSING FEATURE: SetField/SetFieldVec3's "success" reflects a REAL native return code (unknown
-    /// entity, read-only field, missing component are all real runtime rejections aver_scene_set_f32/
-    /// aver_scene_set_vec can report). A write into GraphVarStore's in-process Dictionary, keyed by a
-    /// name Graph.Validate() has ALREADY confirmed is declared with a matching type, has nothing left to
-    /// fail at runtime -- there is no "success" a caller could ever meaningfully receive false from.
+    /// NO "success" PIN -- a REAL difference, not a missing feature: SetField/SetFieldVec3's success
+    /// reflects a REAL native return code (unknown entity, read-only field, etc), but a write into
+    /// GraphVarStore's Dictionary, keyed by a name Graph.Validate() already confirmed declared and
+    /// typed, has nothing left to fail at runtime.
     private void EmitExecSetVar(Node node)
     {
         if (_il == null) return;
@@ -3749,11 +3478,9 @@ public class GraphCompiler
         _il.Emit(OpCodes.Call, VarSetMethodFor(declared.Type));
     }
 
-    /// Runs a SetParent node's write exactly once, at the point the exec walk reaches it -- mirrors
-    /// EmitSetParent's own native-call shape, but pulls "child"/"parent" through EmitPullInput rather
-    /// than LoadPin/_pinLocals (see the section-level comment for why the two input mechanisms are not
-    /// shared), and captures "success" into an exec-local rather than a _pinLocals entry, exactly like
-    /// EmitExecSideEffect/EmitExecSetFieldVec3 do for SetField/SetFieldVec3's own "success".
+    /// Runs a SetParent write once, when reached -- mirrors EmitSetParent's native-call shape, but
+    /// pulls "child"/"parent" via EmitPullInput (not LoadPin/_pinLocals) and captures "success" into
+    /// an exec-local, like EmitExecSideEffect does for SetField.
     private void EmitExecSetParent(Node node)
     {
         if (_il == null) return;
@@ -3773,10 +3500,9 @@ public class GraphCompiler
         }
     }
 
-    /// Runs a SetViewEntity node's write exactly once, at the point the exec walk reaches it -- mirrors
-    /// EmitSetViewEntity's own native-call shape, but pulls "entity" through EmitPullInput. VOID MEANS
-    /// EXACTLY THAT here too: no "capture or discard a return code" branch, because there is no return
-    /// code -- the Call itself is the entire effect, same as EmitSetViewEntity's own PULL-compiler twin.
+    /// Runs a SetViewEntity write once, when reached -- mirrors EmitSetViewEntity but pulls "entity"
+    /// via EmitPullInput. VOID means exactly that here too: no return code, so no capture/discard
+    /// branch -- the Call itself is the entire effect.
     private void EmitExecSetViewEntity(Node node)
     {
         if (_il == null) return;
@@ -3785,9 +3511,8 @@ public class GraphCompiler
         _il.Emit(OpCodes.Call, SetViewEntityMethod);
     }
 
-    /// Runs a SetName node's write exactly once, at the point the exec walk reaches it -- mirrors
-    /// EmitSetName's own name=/native-call shape, but pulls "entity" through EmitPullInput and captures
-    /// "success" into an exec-local rather than a _pinLocals entry.
+    /// Runs a SetName write once, when reached -- mirrors EmitSetName's name=/native-call shape but
+    /// pulls "entity" via EmitPullInput and captures "success" into an exec-local.
     private void EmitExecSetName(Node node)
     {
         if (_il == null) return;
@@ -3810,9 +3535,8 @@ public class GraphCompiler
         }
     }
 
-    /// Runs a SetMesh node's write exactly once, at the point the exec walk reaches it -- mirrors
-    /// EmitSetMesh's own mesh=/native-call shape, but pulls "entity" through EmitPullInput and captures
-    /// "success" into an exec-local rather than a _pinLocals entry.
+    /// Runs a SetMesh write once, when reached -- mirrors EmitSetMesh's mesh=/native-call shape but
+    /// pulls "entity" via EmitPullInput and captures "success" into an exec-local.
     private void EmitExecSetMesh(Node node)
     {
         if (_il == null) return;
@@ -3835,11 +3559,10 @@ public class GraphCompiler
         }
     }
 
-    /// Runs an AttachToSocket node exactly once, at the point the exec walk reaches it.
+    /// Runs an AttachToSocket node once, when reached.
     ///
-    /// EmitPullInput, NOT LoadPin, and this is the rule that made Jump dead from birth: on the exec
-    /// path a pin has no _pinLocals entry, so LoadPin reads an unset local and the node silently
-    /// attaches entity 0 to entity 0.
+    /// EmitPullInput, NOT LoadPin -- the rule that made Jump dead from birth: on the exec path a pin
+    /// has no _pinLocals entry, so LoadPin reads an unset local and silently attaches entity 0 to entity 0.
     private void EmitExecAttachToSocket(Node node)
     {
         if (_il == null) return;
@@ -3911,12 +3634,11 @@ public class GraphCompiler
         }
     }
 
-    /// Runs a PlayAnimation node's write exactly once, at the point the exec walk reaches it -- mirrors
-    /// EmitExecSetMesh's shape, plus a second EmitPullInput (loop) between the clip string push and the
-    /// call, exactly as EmitPlayAnimation's own comment explains for the PULL-compiler twin.
+    /// Runs a PlayAnimation write once, when reached -- mirrors EmitExecSetMesh plus a second
+    /// EmitPullInput (loop) before the call (see EmitPlayAnimation for the PULL-compiler twin).
     ///
-    /// EmitPullInput, NOT LoadPin, on BOTH data pins -- see EmitExecAttachToSocket's own comment for
-    /// why: on the exec path a pin has no _pinLocals entry, so LoadPin silently reads an unset local.
+    /// EmitPullInput, NOT LoadPin, on both data pins -- see EmitExecAttachToSocket for why: on the
+    /// exec path LoadPin would silently read an unset local.
     private void EmitExecPlayAnimation(Node node)
     {
         if (_il == null) return;
@@ -3970,13 +3692,11 @@ public class GraphCompiler
         _il.Emit(OpCodes.Call, RaycastMethod);
     }
 
-    /// Runs a MouseDelta node's native read exactly once, at the point the exec walk reaches it --
-    /// mirrors EmitExecRaycast's own "one call, N results into N exec-locals" shape (zero inputs to
-    /// pull first, since MouseDelta takes none), gated by IsExecCapableMouseDeltaType instead of
-    /// IsExecCapableQueryType. See GraphInterop.MouseDeltaForGraph's comment for why this node needs
-    /// this exec-cached shape (a "cost" node would not) and EmitPullOutput's "no case for
-    /// mousedelta/moveaxis" comment for what happens if a MouseDelta node is never visited by exec at
-    /// all.
+    /// Runs a MouseDelta native read once, when reached -- mirrors EmitExecRaycast's "one call, N
+    /// results into N exec-locals" shape (zero inputs, since MouseDelta takes none), gated by
+    /// IsExecCapableMouseDeltaType instead of IsExecCapableQueryType. See
+    /// GraphInterop.MouseDeltaForGraph for why this needs the exec-cached shape, and
+    /// EmitPullOutput's "no case for mousedelta/moveaxis" note for what happens if never visited by exec.
     private void EmitExecMouseDelta(Node node)
     {
         if (_il == null) return;
@@ -3998,11 +3718,9 @@ public class GraphCompiler
         _il.Emit(OpCodes.Call, MoveAxisMethod);
     }
 
-    /// Pulls the value linked into `node`'s input pin `pinName` and pushes it onto the IL stack:
-    /// follows a LINK to its source and recurses into EmitPullOutput, falls back to a PINVAL, then to
-    /// the pin's zero-ish default -- the exact same three-step fallback LoadPin already uses for the
-    /// PULL-only compiler, just re-emitted at THIS call site instead of assumed pre-computed in
-    /// `_pinLocals` (which the exec compiler never populates for data nodes -- see the section header).
+    /// Pulls the value linked into `node`'s input pin `pinName`: follows a LINK into EmitPullOutput,
+    /// falls back to a PINVAL, then to the pin's zero-ish default -- LoadPin's same three-step
+    /// fallback, re-emitted here since the exec compiler never populates `_pinLocals` for data nodes.
     private void EmitPullInput(Node node, string pinName)
     {
         if (_il == null) return;
@@ -4029,19 +3747,15 @@ public class GraphCompiler
         var pin = node.Pins.FirstOrDefault(p => p.Name == pinName);
 
         // ABSENT IS NOT THE SAME AS UNCONNECTED, and conflating them emitted an INVALID PROGRAM.
+        // `pin == null` means the emitter asked for an input this node doesn't have -- the state ANY
+        // hand-written PIN record leaves it in, since one explicit PIN suppresses every default
+        // AddDefaultPins would add. The old code fell back to `pin?.Type ?? PinType.Float` and pushed
+        // a FLOAT zero, so a missing `entity` (an INT) put a float32 where an int32 was expected --
+        // not a wrong number but IL the runtime refuses to run, with a "Common Language Runtime
+        // detected an invalid program" message naming neither node, pin, nor PIN record.
         //
-        // Reaching here with `pin == null` means the emitter asked for an input this node does not
-        // have -- which is the state ANY hand-written PIN record leaves a node in, because one
-        // explicit PIN suppresses every default AddDefaultPins would have added. The old code fell
-        // back to `pin?.Type ?? PinType.Float` and pushed a FLOAT zero, so a missing `entity` (an INT)
-        // put a float32 on the stack where the callee's signature wants an int32. That does not
-        // produce a wrong number, it produces IL the runtime refuses to run at all, and the author
-        // sees "Common Language Runtime detected an invalid program" -- a message that names neither
-        // the node nor the pin nor the PIN record that deleted it.
-        //
-        // A pin that EXISTS but has no incoming link still falls through to zero below, unchanged:
-        // an Add with only `a` wired is a legal graph meaning "a + 0", and every sample in this repo
-        // relies on it.
+        // A pin that EXISTS but has no incoming link still falls through to zero: an Add with only
+        // `a` wired legally means "a + 0", and samples in this repo rely on it.
         if (pin == null)
             throw new InvalidOperationException(
                 $"node '{node.Id}' ({node.Type}) has no input pin '{pinName}' to read. " +
@@ -4053,32 +3767,28 @@ public class GraphCompiler
         else _il.Emit(OpCodes.Ldc_R4, 0f);
     }
 
-    /// Pushes node `source`'s output pin `pinName` onto the IL stack, computing it fresh every call
-    /// (no memoization -- see the section header). Checked first against `_execLocals` (a live loop
-    /// counter or a captured side-effect result), then dispatched by node TYPE for the pure expression
-    /// kinds Compile()'s EmitNode already knows how to build. SetField (and any future side-effecting
-    /// type IsExecCapableSideEffectType names) is refused here on purpose.
-    /// True for node kinds that exist ONLY to be walked by the exec/PUSH compiler and have no data
-    /// value to pull -- Compile() skips these rather than failing, since a graph may carry both
-    /// halves with no interaction between them.
+    /// Pushes node `source`'s output pin `pinName` onto the IL stack, computed fresh every call (no
+    /// memoization -- see the section header). Checked first against `_execLocals` (a live loop
+    /// counter or captured side-effect result), then dispatched by node TYPE for pure expressions.
+    /// SetField (and any IsExecCapableSideEffectType type) is refused here on purpose.
+    /// True for node kinds that exist ONLY to be walked by the exec/PUSH compiler, with no data value
+    /// to pull -- Compile() skips these rather than failing, since a graph may carry both halves with
+    /// no interaction.
     ///
-    /// NOT the same predicate as IsExecCapableSideEffectType: SetField has exec pins AND a data
-    /// output someone might wrongly try to read, so it must stay reachable to refuse with its own
-    /// explanatory error. The kinds below have no data output at all -- nothing for the pull compiler
-    /// to do but fail.
+    /// NOT the same predicate as IsExecCapableSideEffectType: SetField has exec pins AND a data output
+    /// someone might wrongly try to read, so it stays reachable to refuse with its own error. The
+    /// kinds below have no data output at all -- nothing for the pull compiler to do but fail.
     // EVERY node type only the PUSH compiler can run: a side effect, a write, or a creation with no
     // meaning in a pure-dataflow graph.
     //
-    // Was a seventeen-term disjunction inline in EmitPullOutput, needed in TWO places -- there, and in
+    // Was a seventeen-term disjunction inline in EmitPullOutput, needed in TWO places -- there and in
     // EmitNode's default arm, which lacked it. Not a wrong answer but a wrong SENTENCE: a stray Jump,
-    // PrintInt, SetGravity, SetVelocity, Teleport, or any of the eleven physics writers, compiled by
-    // Compile(), got "Node type 'Jump' is not supported" -- true of neither compiler, leaving the
-    // author believing there was no Jump node at all.
+    // PrintInt, SetGravity, or any of the eleven physics writers, compiled by Compile(), got "Node
+    // type 'Jump' is not supported" -- true of neither compiler, implying there was no Jump node at all.
     //
-    // Spawn/CharacterMove/FireEvent/SetVar/SaveGame/LoadGame keep their own hand-written cases above,
-    // deliberately: each says something specific and true (Spawn creates an entity EVERY TICK;
-    // LoadGame replaces the world EVERY TICK) that folding into this generic predicate would lose.
-    // This is the floor, not the ceiling.
+    // Spawn/CharacterMove/FireEvent/SetVar/SaveGame/LoadGame keep their own hand-written cases above
+    // deliberately: each says something specific and true (Spawn creates an entity EVERY TICK) that
+    // folding into this generic predicate would lose. This is the floor, not the ceiling.
     private static bool IsPushOnlySideEffectType(string type) =>
         IsExecCapableSideEffectType(type) || IsExecCapableVecSideEffectType(type) ||
         IsExecCapableSpawnType(type) || IsExecCapableVarSideEffectType(type) ||
@@ -4095,14 +3805,12 @@ public class GraphCompiler
     private static bool IsExecOnlyNodeType(string type) => type.ToLowerInvariant() switch
     {
         // "onhit"/"customevent" sit beside "onstart"/"ontick" purely for SHAPE -- a bare exec-output
-        // trigger with no data value (OcGraphParser.AddDefaultPins) -- not because this compiler
-        // knows GraphHost fires them on demand rather than every tick (GraphHost's own PHASE 3
-        // concern) or that an event's name is author-chosen (the ENTRY record's business). Any future
-        // trigger-only node belongs here for the same "no data value to pull" reason.
+        // trigger with no data value (OcGraphParser.AddDefaultPins), not because this compiler cares
+        // when GraphHost fires them or that an event's name is author-chosen. Any future trigger-only
+        // node belongs here for the same reason.
         // "funcentry" joins them too: its data outputs are the enclosing method's ARGUMENTS, which no
-        // topological pass can compute. It only ever appears inside a function body, which the event
-        // graph's pass already skips wholesale -- belt-and-braces, making a stray FuncEntry left in
-        // the event graph harmless.
+        // topological pass can compute -- belt-and-braces, since it only appears inside a function
+        // body the event graph's pass already skips wholesale.
         "onstart" or "ontick" or "onhit" or "customevent" or "branch" or "sequence" or "while" or "foreach"
             or "funcentry" or "switchint" => true,
         _ => false,
@@ -4118,15 +3826,12 @@ public class GraphCompiler
             return;
         }
 
-        // Generalised from a SetField-only message ("SetField has a side effect...") the moment a
-        // SECOND side-effecting type (SetFieldVec3) existed -- naming source.Type rather than a fixed
-        // literal is what keeps this accurate for whichever one actually triggered it, and for any
-        // future type IsExecCapableSideEffectType/IsExecCapableVecSideEffectType/IsExecCapableSpawnType/
-        // IsExecCapableVarSideEffectType grows to cover. Spawn (a THIRD) and SetVar (a FOURTH) added to
-        // this check unchanged -- neither needed new wording, only a new predicate name in the
-        // condition, which is exactly the point of naming source.Type instead of hardcoding one. SetVar
-        // sharing this refusal is the direct proof of the task's own instruction ("the PULL path must
-        // REFUSE it... rather than fall back") -- see TestSetVarPulledWithoutExecVisitFailsClearly.
+        // Generalised from a SetField-only message the moment a SECOND side-effecting type
+        // (SetFieldVec3) existed -- naming source.Type keeps this accurate for whichever type
+        // triggered it, and for any future type IsPushOnlySideEffectType grows to cover. Spawn and
+        // SetVar were added unchanged -- only a new predicate name in the condition, proving the
+        // point of naming source.Type instead of hardcoding one (see
+        // TestSetVarPulledWithoutExecVisitFailsClearly).
         if (IsPushOnlySideEffectType(source.Type))
             throw new InvalidOperationException(
                 $"'{source.Id}.{pinName}' cannot be read as a data value: {source.Type} has a side effect " +
@@ -4134,9 +3839,8 @@ public class GraphCompiler
                 "by pulling its output from somewhere else -- pulling could run its write more than once, " +
                 "or not at all, depending on what else reads it");
 
-        // See _pullVisiting's declaration for why an uncaught cycle here kills the process rather than
-        // raising something catchable. Reported as an ordinary compile error naming both ends, so the
-        // author is told which wire to cut.
+        // See _pullVisiting's declaration for why an uncaught cycle here kills the process rather
+        // than raising something catchable; reported as an ordinary error naming both ends.
         if (!_pullVisiting.Add(source.Id))
             throw new InvalidOperationException(
                 $"data cycle detected while evaluating '{source.Id}.{pinName}': this node's value " +
@@ -4365,12 +4069,10 @@ public class GraphCompiler
                 EmitPullInput(source, "action"); _il.Emit(OpCodes.Call, ActionPressedMethod); return;
             case "inputactionreleased":
                 EmitPullInput(source, "action"); _il.Emit(OpCodes.Call, ActionReleasedMethod); return;
-            // GetAnimCurve DOES get a standalone pull path, unlike Raycast/MouseDelta/MoveAxis below.
-            // The reason those three are refused is that they must run exactly ONCE however many pins
-            // are read, so a node that behaved differently on and off the exec chain would be a trap.
-            // A curve read has neither property: it has one output, no side effect, and re-reading it
-            // in the same activation gives the same number, because the playhead does not move between
-            // two pulls. So pulling it here is not a second behaviour, it is the same one.
+            // GetAnimCurve DOES get a standalone pull path, unlike Raycast/MouseDelta/MoveAxis below:
+            // those three must run exactly ONCE however many pins are read, so behaving differently on
+            // and off the exec chain would be a trap. A curve read has neither property -- one output,
+            // no side effect, same number on re-read since the playhead doesn't move between pulls.
             case "getanimcurve":
                 if (string.IsNullOrEmpty(source.CurveName))
                     throw new InvalidOperationException(
@@ -4381,14 +4083,12 @@ public class GraphCompiler
                 return;
             case "select":
             {
-                // Mirrors EmitSelect's own branch shape, but PULLED (recursive, uncached) rather than
-                // stored to a _pinLocals entry -- see EmitPullInput/EmitPullOutput's own section header
-                // for why the exec compiler re-emits an upstream expression at every pull site instead
-                // of caching it. UNLIKE EmitSelect's PULL-compiler branch (which only skips which local
-                // gets LOADED, since both arms' upstream nodes already ran during the topological
-                // walk), this branch is a REAL short-circuit: EmitPullInput recursively emits and runs
-                // whichever arm's upstream subgraph is chosen, so only ONE of ifTrue/ifFalse's cost is
-                // ever paid per pull here.
+                // Mirrors EmitSelect's branch shape but PULLED (recursive, uncached), not stored to
+                // _pinLocals -- see the section header for why the exec compiler re-emits rather than
+                // caches. UNLIKE EmitSelect's PULL-compiler branch (which only skips which local gets
+                // LOADED, since both arms already ran during the topological walk), this IS a real
+                // short-circuit: EmitPullInput recursively runs only the chosen arm's subgraph, so
+                // only ONE of ifTrue/ifFalse's cost is paid per pull.
                 EmitPullInput(source, "cond");
                 var elseLabel = _il.DefineLabel();
                 var endLabel = _il.DefineLabel();
@@ -4400,19 +4100,15 @@ public class GraphCompiler
                 _il.MarkLabel(endLabel);
                 return;
             }
-            // "raycast" (and, for the identical reason, "mousedelta"/"moveaxis") has NO case here,
-            // deliberately. Reached VIA THE EXEC CHAIN, Raycast populates _execLocals for all five
-            // outputs (EmitExecRaycast), and this method already checks _execLocals before the switch
-            // runs -- so a visited Raycast needs no dispatch here. A Raycast never visited by exec
-            // (data-linked only, no incoming exec edge, inside a CompileEntryPoint graph) falls to
-            // `default` and reports a clear NotSupportedException: a deliberate Phase-1 limitation, not
-            // an oversight -- unlike GetField, Raycast has no standalone pull path, because one would
-            // let an author-visible node type behave differently depending on whether it sits on the
-            // exec chain, a worse trap than a clear error. A pure-pull graph (no ENTRY at all) never
-            // reaches this method at all -- EmitRaycast (PULL) handles it on its own. MouseDelta/
-            // MoveAxis inherit this shape even though neither has Raycast's per-call cost -- refused
-            // for consistency, not cost: the "one call regardless of how many pins are read" guarantee
-            // has no other enforcement point here.
+            // "raycast" (and "mousedelta"/"moveaxis", same reason) has NO case here, deliberately.
+            // Reached VIA THE EXEC CHAIN, Raycast populates _execLocals for all five outputs
+            // (EmitExecRaycast), and this method checks _execLocals before the switch runs, so a
+            // visited Raycast needs no dispatch. One never visited by exec falls to `default` and
+            // reports a clear NotSupportedException -- a deliberate Phase-1 limitation: unlike
+            // GetField, Raycast has no standalone pull path, because one would let a node type behave
+            // differently on and off the exec chain, a worse trap than a clear error. A pure-pull
+            // graph (no ENTRY) never reaches this method at all -- EmitRaycast (PULL) handles it.
+            // MouseDelta/MoveAxis inherit this shape for consistency, not cost.
             default:
                 throw new NotSupportedException(
                     $"node type '{source.Type}' cannot be pulled as a data value inside an exec chain " +
@@ -4423,19 +4119,16 @@ public class GraphCompiler
         }
         finally
         {
-            // In finally rather than after the switch because EVERY arm above returns or throws --
-            // there is no fallthrough path to put this on. Removing on the way out is what keeps a
-            // diamond (two consumers pulling the same node) legal while a genuine cycle is not.
+            // In finally, not after the switch, since EVERY arm above returns or throws (no
+            // fallthrough) -- removing on the way out is what keeps a diamond legal while a cycle isn't.
             _pullVisiting.Remove(source.Id);
         }
     }
 
-    /// PULL half of EmitInputAction -- mirrors EmitPullVec3Read's "recompute per reader" shape (see
-    /// that method's own comment) rather than caching: an "x"/"y" pull re-runs aver_fw_action_value2 in
-    /// full and discards the unwanted half, and a "held" pull runs the wholly separate
-    /// aver_fw_action_held call -- so a graph pulling all three costs THREE native calls, not one.
-    /// Safe because both ABI calls are pure array-scan reads with no side effect (see EmitInputAction's
-    /// own comment for the cost accounting) -- idempotent, so re-running them changes nothing.
+    /// PULL half of EmitInputAction -- mirrors EmitPullVec3Read's "recompute per reader" shape rather
+    /// than caching: an "x"/"y" pull re-runs aver_fw_action_value2 in full and discards the unwanted
+    /// half; "held" runs the separate aver_fw_action_held call -- pulling all three costs THREE native
+    /// calls. Safe since both ABI calls are pure, idempotent array-scan reads (see EmitInputAction).
     private void EmitPullInputAction(Node source, string pinName)
     {
         if (_il == null) return;
@@ -4462,9 +4155,8 @@ public class GraphCompiler
         _il.Emit(OpCodes.Ldelem_R4);
     }
 
-    /// Mirrors EmitDivide's own zero-divisor convention (b == 0 yields 0.0, never NaN/Infinity) --
-    /// see that method's comment for the full reasoning -- but pushes the result rather than storing
-    /// it to a `_pinLocals` entry.
+    /// Mirrors EmitDivide's zero-divisor convention (b == 0 yields 0.0, never NaN/Infinity -- see
+    /// that comment), but pushes the result rather than storing it to `_pinLocals`.
     private void EmitPullDivide(Node node)
     {
         if (_il == null) return;
@@ -4488,9 +4180,9 @@ public class GraphCompiler
         _il.MarkLabel(endLabel);
     }
 
-    /// Mirrors EmitGetField's own field=/resolver checks -- see that method's comment -- but pushes
-    /// the read value rather than storing it to a `_pinLocals` entry. Reading is idempotent (no state
-    /// changes), so unlike SetField this is safe to pull more than once; see IsExecCapableSideEffectType.
+    /// Mirrors EmitGetField's field=/resolver checks but pushes the read value rather than storing to
+    /// `_pinLocals`. Reading is idempotent, so unlike SetField this is safe to pull more than once
+    /// (see IsExecCapableSideEffectType).
     private void EmitPullGetField(Node node)
     {
         if (_il == null) return;
@@ -4507,11 +4199,9 @@ public class GraphCompiler
         _il.Emit(OpCodes.Call, GetFieldMethod);
     }
 
-    /// Mirrors EmitGetVar's own var=/declared-type lookup, but pushes the read value rather than
-    /// storing it to a `_pinLocals` entry -- see EmitPullGetField's identical shape for GetField, the
-    /// pattern this method copies. Reading a variable is idempotent (GraphVarStore.GetFloat/Int/Bool
-    /// have no side effect), so, exactly like GetField, this is safe to pull as many times as anything
-    /// wants -- no _execLocals caching needed.
+    /// Mirrors EmitGetVar's var=/declared-type lookup but pushes the read value rather than storing to
+    /// `_pinLocals` (same pattern as EmitPullGetField for GetField). Reading a variable is idempotent
+    /// (GraphVarStore.GetFloat/Int/Bool have no side effect), so safe to pull as often as wanted.
     private void EmitPullGetVar(Node node)
     {
         if (_il == null) return;
@@ -4529,21 +4219,16 @@ public class GraphCompiler
         _il.Emit(OpCodes.Call, VarGetMethodFor(declared.Type));
     }
 
-    /// Mirrors EmitGetFieldVec3's own field=/RequireVec3Field checks, but pushes ONE requested
-    /// component rather than storing all three to `_pinLocals` entries -- EmitPullOutput's contract is
-    /// "push the ONE pin asked for", and GetFieldVec3 has three (x/y/z), unlike GetField's one.
+    /// Mirrors EmitGetFieldVec3's field=/RequireVec3Field checks but pushes ONE requested component
+    /// rather than storing all three to `_pinLocals` -- EmitPullOutput's contract is "push the ONE pin
+    /// asked for", and GetFieldVec3 has three (x/y/z) unlike GetField's one.
     ///
-    /// NOT FREE, AND NAMED HERE RATHER THAN LEFT IMPLICIT: this makes ONE full native call (all three
-    /// components) and then discards the two the caller did not ask for, every time it runs. A graph
-    /// that reads x, y, AND z of the same GetFieldVec3 node via three separate OUT records (or three
-    /// separate exec-chain readers) costs three native calls for one logical field read, not one. This
-    /// is the exact "shared pure sub-expression pulled from more than one site is recomputed, not
-    /// cached" tradeoff the section-header PUSH VS PULL comment already accepts for this compiler in
-    /// general (point 1) -- not a NEW cost this node type invents. Deliberately NOT given Raycast's
-    /// _execLocals-caching treatment: that machinery exists because a PHYSICS QUERY is expensive enough
-    /// to matter (IsExecCapableQueryType's own comment); a Vec3 field read is a same-cost sibling of
-    /// GetField's own single-float memcpy, not "a costly read" in that sense, so paying for a cache
-    /// mechanism here would be solving a problem this operation does not actually have.
+    /// NOT FREE: this makes ONE full native call (all three components) and discards the two unasked,
+    /// every time it runs -- reading x, y, AND z via three separate readers costs three native calls
+    /// for one logical field. Just the "shared sub-expression recomputed, not cached" tradeoff PUSH VS
+    /// PULL point 1 already accepts, not a new cost. Deliberately NOT given Raycast's _execLocals
+    /// caching: that exists because a PHYSICS QUERY is expensive (IsExecCapableQueryType); a Vec3 read
+    /// is cost-equal to GetField's single-float read, so a cache here would solve a non-problem.
     private void EmitPullGetFieldVec3(Node node, string pinName)
     {
         if (_il == null) return;
@@ -4572,26 +4257,23 @@ public class GraphCompiler
         _il.Emit(OpCodes.Ldloc, wanted);
     }
 
-    // Resolved once, by reflection: Native is internal to Aver.Scene, so these are looked up with
-    // BindingFlags.NonPublic rather than a plain method-group reference. (This is independent of the
-    // InternalsVisibleTo grant on Aver.Scene.csproj, which is what lets GraphCompiler.cs name the
-    // `Native` TYPE at compile time in the first place; GetMethod itself would find an internal
-    // method either way.)
+    // Resolved once by reflection: Native is internal to Aver.Scene, so these use BindingFlags.NonPublic
+    // rather than a method-group reference. Independent of the InternalsVisibleTo grant on
+    // Aver.Scene.csproj (which only lets GraphCompiler.cs name the `Native` TYPE at compile time --
+    // GetMethod finds an internal method either way).
     private static readonly MethodInfo GetFieldMethod =
         typeof(Native).GetMethod("aver_scene_get_f32", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Scene.Native.aver_scene_get_f32 was not found by reflection");
     private static readonly MethodInfo SetFieldMethod =
         typeof(Native).GetMethod("aver_scene_set_f32", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Scene.Native.aver_scene_set_f32 was not found by reflection");
-    // ONE EMITTER, CALLED FROM BOTH COMPILERS. The PUSH path stores each node's result into a
-    // local and the PULL path re-emits the expression at every use, but the arithmetic between
-    // "operands are on the stack" and "result is on the stack" is identical, so it lives once
-    // here and both paths push their operands their own way and then call this. Adding an
-    // operator to one compiler and not the other is the recurring defect shape in this file.
-    // The PUSH-path wrappers: load each declared input from its pin local, run the shared
-    // arithmetic, store the result. Split by arity rather than one variadic helper so a node
-    // wired with the wrong number of inputs fails at compile time in the emitter it named,
-    // rather than silently reading a stale stack slot.
+    // ONE EMITTER, CALLED FROM BOTH COMPILERS: the arithmetic between "operands on the stack" and
+    // "result on the stack" is identical whether PUSH stores it to a local or PULL re-emits it at
+    // every use, so it lives once here. Adding an operator to one compiler and not the other is the
+    // recurring defect shape in this file.
+    // The PUSH-path wrappers: load each input from its pin local, run the shared arithmetic, store
+    // the result. Split by arity, not one variadic helper, so a wrong-arity node fails at compile
+    // time in the emitter it named, rather than silently reading a stale stack slot.
     private void EmitScalarUnary(Node node)
     {
         if (_il == null) return;
@@ -4626,16 +4308,14 @@ public class GraphCompiler
 
     private void EmitScalarOp(string type)
     {
-        if (_il == null) return;   // same guard every emitter in this file opens with
-        // LOWERCASED HERE, not by the callers. Node.Type keeps whatever case the .ocgraph
-        // wrote -- the palette emits "Lerp", a hand-written graph may say "lerp" -- and only
-        // the parser's AddDefaultPins was normalising. Both compilers hand this the raw type,
-        // so doing it once here is what stops "Lerp" compiling and "lerp" not.
+        if (_il == null) return;
+        // LOWERCASED HERE, not by callers: Node.Type keeps whatever case the .ocgraph wrote (palette
+        // emits "Lerp", hand-written may say "lerp"), and only AddDefaultPins was normalising. Both
+        // compilers hand this the raw type, so doing it once here stops "Lerp" compiling and "lerp" not.
         switch (type.ToLowerInvariant())
         {
-            // Bools are I4 on the stack, so the bitwise ops ARE the logical ops -- both operands
-            // are guaranteed 0 or 1 because every producer of a Bool pin emits Ceq/Cgt/Clt or a
-            // const, never an arbitrary integer.
+            // Bools are I4 on the stack, so bitwise ops ARE logical ops -- every producer of a Bool
+            // pin emits Ceq/Cgt/Clt or a const, guaranteeing 0 or 1, never an arbitrary integer.
             case "and": _il.Emit(OpCodes.And); break;
             case "or":   _il.Emit(OpCodes.Or); break;
             case "xor": _il.Emit(OpCodes.Xor); break;
@@ -4724,10 +4404,9 @@ public class GraphCompiler
     private static readonly MethodInfo MathCosMethod =
         typeof(Math).GetMethod(nameof(Math.Cos), new[] { typeof(double) })
         ?? throw new InvalidOperationException("System.Math.Cos(double) was not found by reflection");
-    // The double-precision System.Math entry points the scalar nodes call. Every one takes and
-    // returns double, so each call site brackets it with Conv_R8 / Conv_R4 -- the graph value
-    // type is float throughout, and widening at the call rather than storing doubles keeps that
-    // true. Sin and Cos below predate these and use the identical shape.
+    // Double-precision System.Math entry points the scalar nodes call; each call site brackets with
+    // Conv_R8/Conv_R4 since the graph value type is float throughout. Sin/Cos below predate these and
+    // use the identical shape.
     private static readonly MethodInfo MathMinMethod =
         typeof(Math).GetMethod(nameof(Math.Min), new[] { typeof(float), typeof(float) })
         ?? throw new InvalidOperationException("System.Math.Min(float,float) was not found by reflection");
@@ -4760,9 +4439,8 @@ public class GraphCompiler
     private static readonly MethodInfo InputKeyMethod =
         typeof(Fw).GetMethod("aver_fw_input_key", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.Fw.aver_fw_input_key was not found by reflection");
-    // The edge-triggered pair beside aver_fw_input_key above. Separate ABI entry points rather
-    // than a flag on one, because that is how the framework exposes them and inventing a
-    // three-way selector here would put a second definition of "pressed" in the graph compiler.
+    // The edge-triggered pair beside aver_fw_input_key -- separate ABI entry points because that's
+    // how the framework exposes them; a selector flag here would duplicate "pressed" logic.
     private static readonly MethodInfo InputKeyPressedMethod =
         typeof(Fw).GetMethod("aver_fw_input_key_pressed", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.Fw.aver_fw_input_key_pressed was not found by reflection");
@@ -4838,15 +4516,13 @@ public class GraphCompiler
     private static readonly MethodInfo GetAnimCurveMethod =
         typeof(GraphInterop).GetMethod("GetAnimCurveForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.GetAnimCurveForGraph was not found by reflection");
-    // CharacterMove: the last Blueprint-parity node, reflected the same way every other GraphInterop
-    // wrapper above is -- see GraphInterop.CharacterMoveForGraph's own comment for why this call, not
-    // a cast onto AverCharacter.Drive, is the seam.
+    // CharacterMove: the last Blueprint-parity node, reflected like every other GraphInterop wrapper
+    // above -- see GraphInterop.CharacterMoveForGraph for why this call, not a cast, is the seam.
     private static readonly MethodInfo CharacterMoveMethod =
         typeof(GraphInterop).GetMethod("CharacterMoveForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.CharacterMoveForGraph was not found by reflection");
-    // GetForward: CharacterMove's read-side counterpart -- where the character this graph drives is
-    // actually LOOKING, which nothing in the vocabulary could ask before (Character.cs keeps _yaw and
-    // _pitch private and the scene rotation is a Quat, which neither GetField nor GetFieldVec3 reads).
+    // GetForward: CharacterMove's read-side counterpart -- where the character is LOOKING, unaskable
+    // before (_yaw/_pitch are private; the scene rotation is a Quat GetField/GetFieldVec3 can't read).
     private static readonly MethodInfo LookDirectionMethod =
         typeof(GraphInterop).GetMethod("LookDirectionForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.LookDirectionForGraph was not found by reflection");
@@ -4933,11 +4609,9 @@ public class GraphCompiler
     private static readonly MethodInfo SphereCastMethod =
         typeof(GraphInterop).GetMethod("SphereCastForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SphereCastForGraph was not found by reflection");
-    // Forces, impulses, spin, material, mass, motion type, layers -- all body-keyed, all resolved by
-    // name up front exactly like every MethodInfo above: a lookup naming a method that does not
-    // exist throws HERE, at GraphCompiler's static init, and breaks every graph in the process, not
-    // just whichever one used the new node -- see GraphInterop.cs's own bridge methods for the shapes
-    // these resolve.
+    // Forces, impulses, spin, material, mass, motion type, layers -- all body-keyed, resolved by name
+    // up front like every MethodInfo above: a lookup naming a nonexistent method throws HERE, at
+    // static init, breaking every graph in the process, not just the one using the new node.
     private static readonly MethodInfo AddForceMethod =
         typeof(GraphInterop).GetMethod("AddForceForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.AddForceForGraph was not found by reflection");
@@ -5129,21 +4803,18 @@ public class GraphCompiler
     private static readonly MethodInfo ViewEntityMethod =
         typeof(GraphInterop).GetMethod("ViewEntityForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.ViewEntityForGraph was not found by reflection");
-    // FireEvent: GAP 3, the cross-entity event node -- reflected differently from every wrapper above.
-    // GraphEvents lives in THIS SAME ASSEMBLY (Aver.Graph), and its Router-dispatching method is
-    // PUBLIC (see GraphEvents.cs's own comment for why a public static router, mirroring
-    // Actors.Resolver's shape one assembly down), so an ordinary public GetMethod lookup suffices --
-    // no BindingFlags.NonPublic, the same "public method, same assembly" shape the GraphVarStore
-    // accessors below already use, not the "internal member of a different assembly" shape Native/Fw/
-    // GraphInterop above need.
+    // FireEvent: GAP 3, the cross-entity event node -- reflected differently from every wrapper
+    // above. GraphEvents lives in THIS SAME ASSEMBLY (Aver.Graph) with a PUBLIC Router-dispatching
+    // method (see GraphEvents.cs for why), so an ordinary public GetMethod suffices -- no
+    // BindingFlags.NonPublic, the same shape the GraphVarStore accessors below use, unlike the
+    // internal-member-of-a-different-assembly shape Native/Fw/GraphInterop need.
     private static readonly MethodInfo FireEventMethod =
         typeof(GraphEvents).GetMethod(nameof(GraphEvents.FireEventForGraph))
         ?? throw new InvalidOperationException("Aver.Graph.GraphEvents.FireEventForGraph was not found by reflection");
 
     // GraphVarStore's own typed accessors -- PUBLIC instance methods on a plain class in THIS assembly
-    // (unlike Native/Fw/GraphInterop above, which are internal members of a DIFFERENT assembly reached
-    // only through NonPublic|Static reflection), so an ordinary public GetMethod lookup suffices; no
-    // BindingFlags.NonPublic needed here.
+    // (unlike Native/Fw/GraphInterop's internal members of a DIFFERENT assembly, reached only via
+    // NonPublic|Static), so an ordinary public GetMethod lookup suffices.
     private static readonly MethodInfo VarGetFloatMethod =
         typeof(GraphVarStore).GetMethod(nameof(GraphVarStore.GetFloat))
         ?? throw new InvalidOperationException("Aver.Graph.GraphVarStore.GetFloat was not found by reflection");
@@ -5184,14 +4855,12 @@ public class GraphCompiler
             $"VAR type {t} has no GraphVarStore write accessor -- VAR only supports Float/Int/Bool"),
     };
 
-    /// Called FROM EMITTED IL (see EmitWhile/EmitForEach), not from ordinary C# control flow, when a
-    /// loop's iteration count crosses MaxLoopIterations. Logs -- loudly, naming the exact node and
-    /// event -- and lets the loop's `done` path run anyway, exactly as if `cond`/`count` had run out
-    /// normally, rather than throwing mid-tick: a graph bug should be visible, not a crashed frame for
-    /// whatever else the game was doing that tick. Static and private: reachable from the emitted IL
-    /// only because CompileEntryPoint's DynamicMethod sets restrictedSkipVisibility:true, the same
-    /// mechanism that already lets EmitGetField/EmitSetField call Aver.Scene.Native's own internal
-    /// P/Invoke methods.
+    /// Called FROM EMITTED IL (EmitWhile/EmitForEach), not ordinary C# control flow, when a loop's
+    /// iteration count crosses MaxLoopIterations. Logs loudly (node + event) and lets `done` run
+    /// anyway, as if `cond`/`count` ran out normally, rather than throwing mid-tick: a graph bug
+    /// should be visible, not a crashed frame for whatever else the game was doing. Static/private,
+    /// reachable from IL only via CompileEntryPoint's restrictedSkipVisibility:true -- the same
+    /// mechanism letting EmitGetField/EmitSetField call Aver.Scene.Native's internal P/Invoke methods.
     private static void WarnLoopGuardTripped(string nodeId, string eventName)
     {
         Console.Error.WriteLine(
@@ -5201,9 +4870,8 @@ public class GraphCompiler
     }
 
     /// Builds the Action/Action&lt;...&gt; or Func&lt;...,TResult&gt; matching paramTypes and
-    /// returnType. Generalized over BCL Action`N/Func`N by name (both go up to 16 type parameters)
-    /// rather than hand-listing every arity GraphCompiler happens to need today -- a graph declaring
-    /// a 5th PARAM should not require a matching hardcoded case here.
+    /// returnType. Generalized over BCL Action`N/Func`N by name (up to 16 type parameters) rather
+    /// than hand-listing every arity -- a graph declaring a 5th PARAM needs no hardcoded case here.
     private static Type GetDelegateType(Type[] paramTypes, Type returnType)
     {
         int n = paramTypes.Length;

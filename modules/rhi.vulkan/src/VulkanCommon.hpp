@@ -1,82 +1,64 @@
 // Internal shared header for the Vulkan RHI backend. Included ONLY by .cpp files inside
 // modules/rhi.vulkan/src/ -- this module has no include/ directory (aver_add_module only exposes
-// a module's include/ PUBLICly; see cmake/AvModule.cmake), so nothing outside this directory can
-// see a VkFoo. That is house rule 3 (the RHI must not leak backend types): D3D12 already satisfies
-// it (d3d12.h appears nowhere outside modules/rhi.d3d12), and this header makes it hold here too.
+// a module's include/ PUBLICly), so nothing outside this directory can see a VkFoo. That is house
+// rule 3 (the RHI must not leak backend types), matching D3D12 (d3d12.h appears nowhere outside
+// modules/rhi.d3d12).
 //
-// D3D12Device.cpp is one 5,423-line TU with every backend object in anonymous-namespace scope.
-// This backend is FOUR TUs, so anything two of them share needs EXTERNAL linkage -- the reason
-// this header exists at all. Everything below lives in aver::rhi::vkb ("Vulkan backend"), not
-// directly in aver::rhi, so a same-named D3D12 anonymous-namespace type (RhiTexture, hrOk, ...)
-// is never a collision risk, textually or at link time.
+// D3D12Device.cpp is one 5,423-line TU with every backend object in anonymous-namespace scope;
+// this backend is FOUR TUs, so anything two share needs EXTERNAL linkage -- why this header
+// exists. Everything below lives in aver::rhi::vkb, not aver::rhi, so a same-named D3D12
+// anonymous-namespace type (RhiTexture, hrOk, ...) is never a collision risk.
 //
-// ================================================================================================
-// FILE MAP — which of the four implementation files defines what. Every declaration below names
-// its one owner; nothing here should ever be defined in two of them or in none of them.
-// ================================================================================================
+// FILE MAP -- which of the four .cpp files defines what. Every declaration below names its one
+// owner; nothing here should ever be defined in two of them or in none.
 //
 //   VulkanDevice.cpp
-//     - class VulkanSwapchain (ISwapchain) — all four methods.
-//     - class VulkanDevice (IDevice) — every override, plus:
-//         init(), queryCaps(), initAccelerationStructures(), initMeshShaders(), dispatchMesh(),
-//         createPipeline() (the FIXED scene/wire/sky/line PSOs, not the generic factory path),
-//         createSwapchainResources()/createRenderTargetViews()/createDepthBuffer()/createMsaaColor(),
-//         waitForGpu()/waitTimeline(), present()/resize(), notifyRenderTargetsChanged(),
-//         ensureViewportTexture(), seedSkinTargets(), packAtmosphere(), toSceneReferred(),
-//         the camera post chain (createPostPipelines/createPostTargets/releasePostTargets/
-//         runPostChain/postConstants — kept here exactly as D3D12 keeps its post chain inside
-//         D3D12Device.cpp rather than splitting it out),
-//         debugMessengerCallback() (the VkDebugUtilsMessengerEXT callback — Vulkan delivers debug
-//         output by CALLBACK, not a polled InfoQueue; see its own declaration below),
-//         loadGlobalApi()/loadInstanceApi()/loadDeviceApi()/unloadApi() (VulkanApi bootstrap: the
-//         first file that ever needs an instance or device to resolve function pointers against;
-//         every other file reaches the already-filled table through VulkanDevice::api()),
-//         aver::rhi::detail::createVulkanDevice() itself (replacing the stub), matching the
-//         forward declaration in modules/rhi/src/RHI.cpp exactly.
+//     - VulkanSwapchain (ISwapchain), all methods.
+//     - VulkanDevice (IDevice), every override, plus: init(), queryCaps(),
+//       initAccelerationStructures(), initMeshShaders(), dispatchMesh(), createPipeline() (fixed
+//       scene/wire/sky/line PSOs only), createSwapchainResources/createRenderTargetViews/
+//       createDepthBuffer/createMsaaColor, waitForGpu/waitTimeline, present/resize,
+//       notifyRenderTargetsChanged, ensureViewportTexture, seedSkinTargets, packAtmosphere,
+//       toSceneReferred, the camera post chain (createPostPipelines/createPostTargets/
+//       releasePostTargets/runPostChain/postConstants), debugMessengerCallback(),
+//       loadGlobalApi/loadInstanceApi/loadDeviceApi/unloadApi (this is the first file that ever
+//       needs an instance/device to resolve Vulkan API function pointers against; everywhere else
+//       reaches the filled table via VulkanDevice::api()), and
+//       aver::rhi::detail::createVulkanDevice() itself, matching the forward declaration in
+//       modules/rhi/src/RHI.cpp exactly.
 //
 //   VulkanShaderCompiler.cpp
-//     - class VulkanShaderCompiler — init()/usingDxc()/compile(). The DXC-with-`-spirv` wrapper;
-//       the Vulkan analog of D3D12Device.cpp's private ShaderCompiler class, promoted to its own
-//       TU (external linkage) because both VulkanDevice.cpp (fixed pipelines' shaders) and
-//       VulkanResourceFactory.cpp (createShader) need it.
-//     - vulkanShaderCompiler() — the process-wide singleton accessor.
+//     - VulkanShaderCompiler (init/usingDxc/compile): the DXC `-spirv` wrapper, its own TU
+//       because both VulkanDevice.cpp and VulkanResourceFactory.cpp need it.
+//     - vulkanShaderCompiler(), the process-wide singleton accessor.
 //
 //   VulkanResourceFactory.cpp
-//     - class VulkanResourceFactory (IResourceFactory) — every override, plus every private
-//       helper declared on it below: the descriptor-set-layout / pipeline-layout cache
-//       (descriptorLayout(), tableSetLayout()), the sampler cache (getOrCreateSampler()), the
-//       push-constant layout calculator (pushConstantLayout() — a free function, defined here
-//       since nothing else needs it before a pipeline is built), nullFill(), uploadInitialData(),
-//       and the deferred-destruction machinery (retireFence()/retire()/collect()).
-//     - createBufferCommitted()/createImageCommitted()/destroyBufferCommitted()/
-//       destroyImageCommitted() — free functions, the multi-TU analog of D3D12's
-//       CreateCommittedResource, DEFINED HERE because this file already owns allocation policy
-//       (memory-type selection, budget tracking) for its own createTexture/createBuffer; every
-//       other caller of a raw buffer/image (VulkanDevice's per-frame CBs and line meshes,
-//       VulkanRenderContext's BLAS/TLAS scratch and instance buffers) shares that SAME policy
-//       rather than growing a second one.
+//     - VulkanResourceFactory (IResourceFactory), every override plus its private helpers: the
+//       descriptor/pipeline-layout cache (descriptorLayout(), tableSetLayout()), the sampler
+//       cache (getOrCreateSampler()), pushConstantLayout(), nullFill(), uploadInitialData(), and
+//       the deferred-destruction machinery (retireFence/retire/collect).
+//     - createBufferCommitted/createImageCommitted/destroyBufferCommitted/destroyImageCommitted:
+//       free functions (D3D12's CreateCommittedResource analog), defined here since this file
+//       already owns allocation policy and every other raw buffer/image caller shares it.
 //
 //   VulkanRenderContext.cpp
-//     - class VulkanRenderContext (IRenderContext) — every override, plus ringAlloc(),
+//     - VulkanRenderContext (IRenderContext) — every override, plus ringAlloc(),
 //       bindDeclaredDescriptors(), applyDrawBinding(), cmd().
 //
 // Every free INLINE helper below (format/state/filter/compare/vertex-layout conversions, vkOk,
-// findMemoryType, sameLayout/sameSampler, storeDrawBinding, setVkObjectName) is defined RIGHT HERE,
-// not assigned to any one .cpp: each is a pure function of its arguments with no ties to a live
-// VulkanDevice, so `inline` in a shared header is the direct multi-TU equivalent of
-// D3D12Device.cpp's anonymous-namespace free functions of the same shape (hrOk, toResourceStates,
-// toComparison, toFilter, toDxgiFormat, semanticName, texelBytes, ...).
+// findMemoryType, sameLayout/sameSampler, storeDrawBinding, setVkObjectName) lives here rather
+// than in one .cpp: each is a pure function of its arguments, the multi-TU equivalent of
+// D3D12Device.cpp's anonymous-namespace free functions of the same shape.
 #pragma once
 
 // ---------------------------------------------------------------------------------------------
-// Platform / loader configuration. Also set as PRIVATE compile definitions in this module's
-// CMakeLists.txt; the #ifndef guards just make this header self-sufficient if that ever changes.
-// VK_NO_PROTOTYPES matters: there is no vulkan-1.lib on this machine (the SDK that ships it is
-// deliberately not installed — see third_party/vulkan-headers/README.md), so nothing here may
-// reference an unprefixed vkFoo() and expect the linker to resolve it. Every entry point is a
-// function pointer in VulkanApi below, resolved at RUNTIME from
-// C:\Windows\System32\vulkan-1.dll (present — it ships with the GPU driver, not the SDK) via
-// LoadLibraryW + GetProcAddress, starting from vkGetInstanceProcAddr itself.
+// Platform / loader configuration; also set as PRIVATE compile definitions in this module's
+// CMakeLists.txt (the #ifndef guards just make this header self-sufficient). VK_NO_PROTOTYPES
+// matters: there is no vulkan-1.lib on this machine (SDK deliberately not installed -- see
+// third_party/vulkan-headers/README.md), so nothing here may call an unprefixed vkFoo() and
+// expect the linker to resolve it. Every entry point is a function pointer in VulkanApi below,
+// resolved at RUNTIME from C:\Windows\System32\vulkan-1.dll (ships with the GPU driver, not the
+// SDK) via LoadLibraryW + GetProcAddress, starting from vkGetInstanceProcAddr itself.
 // ---------------------------------------------------------------------------------------------
 #ifndef VK_NO_PROTOTYPES
 #define VK_NO_PROTOTYPES 1
@@ -126,14 +108,12 @@ constexpr VkFormat kVkSceneColorFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
 constexpr VkFormat kVkDepthFormat      = VK_FORMAT_D32_SFLOAT;
 
 // This backend's minimum requirement, requested as VkApplicationInfo::apiVersion; failure here
-// makes VulkanDevice::init() return false and createVulkanDevice() report unavailable, exactly
-// like any other backend that fails to initialise (see DeviceDesc's "can be asked for and
-// honestly reports absent" contract). Chosen because synchronization2, dynamic_rendering,
-// buffer_device_address and timeline_semaphore -- every one structurally required by this
-// backend's frame-pacing and render-target model, not optionally -- are all CORE at 1.3. No
-// "extension instead" fallback exists for a 1.2-only driver (which would need
-// VK_KHR_synchronization2 and VK_KHR_dynamic_rendering); that path is deliberately not carried
-// until a real 1.2-only machine needs it.
+// makes VulkanDevice::init() return false and createVulkanDevice() report unavailable, like any
+// other backend that fails to initialise. Chosen because synchronization2, dynamic_rendering,
+// buffer_device_address and timeline_semaphore -- all structurally required by this backend's
+// frame-pacing and render-target model -- are CORE at 1.3, with no extension-based fallback for a
+// 1.2-only driver carried until a real 1.2-only machine needs it (it would need
+// VK_KHR_synchronization2 and VK_KHR_dynamic_rendering).
 constexpr u32 kRequiredApiVersion = VK_API_VERSION_1_3;
 
 // ---- required / optional extension name lists -------------------------------------------------
@@ -161,11 +141,9 @@ inline constexpr const char* kOptionalDeviceExtensions[] = {
     VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,       // -> DeviceCaps::rayTracingTier
     VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,     // dependency of acceleration_structure
     VK_KHR_RAY_QUERY_EXTENSION_NAME,                    // -> DeviceCaps::rayTracingTier (inline
-                                                         //    RayQuery; see the contract scout's
-                                                         //    finding that D3D12 here only ever
-                                                         //    builds DXR 1.1 inline queries, never
-                                                         //    a hit-group pipeline+DispatchRays, so
-                                                         //    VK_KHR_ray_tracing_pipeline is NOT
+                                                         //    RayQuery only: D3D12 here only ever
+                                                         //    builds DXR 1.1 inline queries, so
+                                                         //    VK_KHR_ray_tracing_pipeline isn't
                                                          //    needed)
     VK_EXT_CONSERVATIVE_RASTERIZATION_EXTENSION_NAME,   // -> DeviceCaps::conservativeRaster
 };
@@ -559,11 +537,9 @@ inline u32 findMemoryType(const VkPhysicalDeviceMemoryProperties& memProps, u32 
 // ---- vertex input: POSITIONAL locations, not semantic names ------------------------------------
 // SPIR-V vertex-stage inputs carry only a numeric Location decoration; DXC's default HLSL->SPIR-V
 // lowering assigns Location by INPUT-STRUCT DECLARATION ORDER. The shared prelude's VSIn (pos,
-// nrm, uv0, in that order — modules/rhi/src/RHIShaders.cpp, off-limits to this module) already
-// agrees with kMeshInputLayout's D3D12 semantic order, so binding by position 0/1/2 needs no
-// [[vk::location(N)]] annotation added there. See the contract scout's finding 6.5 for the full
-// reasoning, and re-verify against an actual DXC -spirv disassembly before trusting this in a real
-// build — it is read from source, not from a compile.
+// nrm, uv0) already agrees with kMeshInputLayout's D3D12 semantic order, so binding by position
+// 0/1/2 needs no [[vk::location(N)]] annotation. Re-verify against an actual DXC -spirv
+// disassembly before trusting this in a real build -- it is read from source, not from a compile.
 inline void meshVertexInputState(VkVertexInputBindingDescription& outBinding,
                                  VkVertexInputAttributeDescription (&outAttribs)[3]) {
     outBinding = VkVertexInputBindingDescription{0, static_cast<u32>(sizeof(MeshVertex)), VK_VERTEX_INPUT_RATE_VERTEX};
@@ -629,77 +605,62 @@ inline void setVkObjectName(const VulkanApi& api, VkDevice device, VkObjectType 
 
 // ================================================================================================
 // 4. Descriptor-set / push-constant scheme. Every declared PipelineLayout slot lands in EXACTLY
-//    one of these two mechanisms, by ONE fixed rule everything in this backend must agree with —
-//    see the contract's write-up of why this is the single biggest structural fork from D3D12's
+//    one of these two mechanisms -- the single biggest structural fork from D3D12's
 //    root-signature model.
 // ================================================================================================
 //
-//   set kVkSetTable0 (0)     = PipelineLayout table 0: SRV registers t0..t(srvCount-1) at binding
-//                              0..srvCount-1, UAV registers u0..u(uavCount-1) at binding
-//                              kVkUavBindingBase..+uavCount-1.
-//   set kVkSetTable1 (1)     = table 1, same scheme, restarted at binding 0/kVkUavBindingBase
-//                              within its OWN set (srvCount1/uavCount1).
-//   set kVkSetConstants (2)  = one VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC binding, at binding
-//                              k, for every DECLARED slot k in [0, kMaxConstantSlots) whose
-//                              constantDwords[k] == 0 (a "root CBV" in the D3D12 model). Slot 0
-//                              (b0, the engine PerFrame block) is ALWAYS zero by convention
-//                              (RHIResources.hpp:209) and so is ALWAYS one of these bindings, on
-//                              EVERY pipeline, feature-declared or fixed — VulkanRenderContext
-//                              writes its dynamic offset automatically on every setPipeline(),
-//                              exactly as "bound by the backend on every pipeline bind"
-//                              (RHIResources.hpp:340-341) already promises, with no caller action.
-//   set kVkSetSamplers (3)   = s0..s(samplerCount-1) at binding 0..samplerCount-1, IMMUTABLE —
-//                              baked into the VkDescriptorSetLayout at pipeline-layout build time
-//                              via pImmutableSampler, matching D3D12's static samplers: never
-//                              written at bind time, allocated and bound ONCE per DescriptorLayoutEntry.
+//   set kVkSetTable0 (0)    = table 0: SRV registers t0..t(srvCount-1) at binding 0..srvCount-1,
+//                             UAV registers u0..u(uavCount-1) at binding kVkUavBindingBase..+uavCount-1.
+//   set kVkSetTable1 (1)    = table 1, same scheme, restarted within its own set (srvCount1/uavCount1).
+//   set kVkSetConstants (2) = one UNIFORM_BUFFER_DYNAMIC binding per declared slot k where
+//                             constantDwords[k] == 0 (a "root CBV"). Slot 0 (b0, PerFrame) is
+//                             ALWAYS zero by convention (RHIResources.hpp:209) and so is ALWAYS
+//                             bound here, on every pipeline — VulkanRenderContext writes its
+//                             dynamic offset automatically on every setPipeline()
+//                             (RHIResources.hpp:340-341).
+//   set kVkSetSamplers (3)  = s0..s(samplerCount-1), IMMUTABLE (pImmutableSampler, matching
+//                             D3D12's static samplers): allocated and bound ONCE per
+//                             DescriptorLayoutEntry.
 //
-//   PUSH CONSTANTS carry everything that is a D3D12 root 32-bit CONSTANT (constantDwords[k] != 0),
-//   which in practice is exactly kObjectConstantRegister (b1, ALWAYS present, ALWAYS
-//   kObjectConstantDwords=32 dwords) plus whichever other slot(s) a feature declares that way, PLUS
-//   — mesh/amplification pipelines only — the reserved mesh-geometry block: the vertex and index
-//   buffer device addresses (VK_KHR_buffer_device_address; D3D12's raw root-SRV bind has no
-//   descriptor-model equivalent, and this is the direct one) and the 4-dword count block D3D12
-//   root-binds at kMeshGeometryConstantRegister (b5). See PushConstantLayout/pushConstantLayout()
-//   below for the exact byte offsets, which VulkanResourceFactory (building VkPushConstantRange)
-//   and VulkanRenderContext (calling vkCmdPushConstants) must agree on byte-for-byte.
+//   PUSH CONSTANTS carry every D3D12 root 32-bit CONSTANT (constantDwords[k] != 0): always
+//   kObjectConstantRegister (b1, 32 dwords) plus any feature-declared slot, plus — mesh/
+//   amplification pipelines only — the mesh-geometry block (vertex/index buffer device addresses
+//   via VK_KHR_buffer_device_address -- push constants because D3D12's raw root-SRV bind has no
+//   Vulkan descriptor-model equivalent, and this is the direct translation -- and the count block
+//   at kMeshGeometryConstantRegister/b5).
+//   Exact byte offsets in PushConstantLayout/pushConstantLayout() below; VulkanResourceFactory and
+//   VulkanRenderContext must agree on them byte-for-byte.
 constexpr u32 kVkSetTable0    = 0;
 constexpr u32 kVkSetTable1    = 1;
 constexpr u32 kVkSetConstants = 2;
 constexpr u32 kVkSetSamplers  = 3;
-// Set 4: the PER-INSTANCE WORLD MATRICES a GraphicsPipelineDesc::instanced pipeline reads, as one
-// StructuredBuffer<float4x4>. Its own set rather than a slot in table 0 for a reason that is forced,
-// not stylistic: the shared HLSL declares it at register t(declaredSrvCount) -- one PAST whatever the
-// layout declares -- so on a layout with 16 SRVs it would land at binding 16 in set 0, which is
-// exactly kVkUavBindingBase, i.e. on top of UAV slot 0. A set of its own cannot collide with anything
-// whatever the layout declares, and it costs nothing when a pipeline is not instanced: the set is
-// simply absent from that pipeline layout.
+// Set 4: PER-INSTANCE WORLD MATRICES for GraphicsPipelineDesc::instanced, as one
+// StructuredBuffer<float4x4>. Its own set because the shared HLSL declares it at register
+// t(declaredSrvCount) -- one past the layout's own SRVs -- which would otherwise land on
+// kVkUavBindingBase (UAV slot 0) in set 0. Absent entirely from a non-instanced pipeline.
 constexpr u32 kVkSetInstances = 4;
 constexpr u32 kVkDescriptorSetCount = 5;   // table0, table1, constants, samplers, instances
-// UAV bindings within a table's set start here, so a layout whose declared srvCount grows later
-// never renumbers an already-cached UAV binding. kMaxBindingSlots (16, RHIResources.hpp) already
-// bounds one binding SET's slot count, so 0..15 for SRVs / 16..31 for UAVs never collide.
+// UAV bindings start here so a layout whose srvCount grows later never renumbers an already-cached
+// UAV binding; kMaxBindingSlots (16) bounds one set's slot count, so SRV/UAV ranges never collide.
 constexpr u32 kVkUavBindingBase = kMaxBindingSlots;
 
 // Moves the shared prelude's per-frame constant buffer to the descriptor set this backend
-// actually binds it in. MUST be applied to any HLSL that includes sharedShaderPrelude() before
-// it is handed to the compiler.
+// actually binds it in. MUST be applied to any HLSL including sharedShaderPrelude() before
+// compiling.
 //
-// WHY: the prelude (modules/rhi/src/RHIShaders.cpp, shared with D3D12, off-limits to this module)
-// declares `cbuffer PerFrame : register(b0)` with no register space -- meaningless to the D3D12
-// root signature reading the same text. DXC maps HLSL register space to SPIR-V descriptor set, so
-// with none the block lands at SET 0, which in this backend is table 0 (SRVs/UAVs, section 4), not
-// set kVkSetConstants where the per-frame UBO actually lives. Every shader touching gViewProj
-// therefore named a descriptor its own pipeline layout did not contain.
+// WHY: the prelude (modules/rhi/src/RHIShaders.cpp, shared with D3D12) declares
+// `cbuffer PerFrame : register(b0)` with no register space, so DXC maps it to SPIR-V set 0
+// (table 0, SRVs/UAVs) instead of kVkSetConstants where the per-frame UBO actually lives --
+// every shader touching gViewProj named a descriptor its own pipeline layout didn't contain.
 //
-// HOW THAT FAILED, and why it took a while to see: AMD's two compilers disagree about what to do
-// with it. The integrated GPU's driver returns a recoverable, diagnosable
-// VK_ERROR_INVALID_SHADER_NV from vkCreateGraphicsPipelines; the discrete card's LLPC calls
-// abort() instead, surfacing as the process dying with 0xC0000409 inside amdvlk64.dll and no
-// message at all. Same defect, only one of its two symptoms looks like a bug in this repo.
+// TRAP: AMD's two compilers disagreed on the symptom -- the integrated GPU gave a diagnosable
+// VK_ERROR_INVALID_SHADER_NV, but the discrete card's LLPC called abort() instead, surfacing as
+// the process dying with 0xC0000409 inside amdvlk64.dll with no message. Same defect; one symptom
+// looks like a bug in this repo and the other looks like a crash.
 //
-// The annotation is Vulkan-only DXC syntax, inserted into the assembled string this module alone
-// owns -- the shared prelude is never modified, and D3D12 never sees this. Same approach as
-// patchPushConstants in VulkanDevice.cpp.
+// Vulkan-only DXC syntax, inserted into the assembled string this module owns; the shared prelude
+// is never modified and D3D12 never sees it. Same approach as patchPushConstants in
+// VulkanDevice.cpp.
 inline bool patchPerFrameSet(std::string& src) {
     const std::string needle = "cbuffer PerFrame : register(b0)";
     const std::size_t pos = src.find(needle);
@@ -710,17 +671,17 @@ inline bool patchPerFrameSet(std::string& src) {
     return true;
 }
 
-// patchPerFrameSet handles only b0, deliberately: it runs at createShader time, before any
+// patchPerFrameSet handles only b0 deliberately: it runs at createShader time, before any
 // PipelineLayout exists, and b0 is the one register every layout treats identically
-// (kEngineFrameConstantRegister -- descriptorLayout always declares it). Everything else is
-// patchCbuffersForLayout's job, at PIPELINE creation, once a layout is available to consult (an
-// earlier note called a general version impossible; that held only with no layout in hand).
+// (kEngineFrameConstantRegister). Everything else is patchCbuffersForLayout's job, at PIPELINE
+// creation, once a layout is available to consult -- an earlier note called a general version
+// impossible, which held only with no layout in hand.
 //
-// Worth keeping why: annotating every cbuffer into kVkSetConstants once moved SkinParams from set
-// 0 to set 2, and validation said set 2 binding 3 was undeclared too -- SkinningPass declares
-// constantDwords[3] = 4, so b3 is push constants, and a block cannot be both. AMD's discrete
-// driver reported none of it (the same silent LLPC abort() above). Run --debug-layer, and believe
-// the layer over the shader text.
+// TRAP: annotating every cbuffer into kVkSetConstants once moved SkinParams from set 0 to set 2,
+// and validation flagged set 2 binding 3 as undeclared too -- SkinningPass declares
+// constantDwords[3] = 4, so b3 is push constants, and a block can't be both. AMD's discrete driver
+// reported none of it (same silent LLPC abort()). Run --debug-layer, and believe the layer over
+// the shader text.
 
 
 
@@ -758,30 +719,29 @@ PushConstantLayout pushConstantLayout(const PipelineLayout& layout, bool mesh);
 u32 shaderVariantKey(const PipelineLayout& layout, bool mesh);
 
 // Lowers EVERY cbuffer in a shader to what its PipelineLayout says it is -- the general form of
-// what VulkanDevice.cpp does for the three FIXED pipelines by exact text, replacing the
-// needle-per-block approach outright. One source of truth, `constantDwords[N]`:
+// what VulkanDevice.cpp does for its three FIXED pipelines by exact text. One source of truth,
+// `constantDwords[N]`:
 //
 //   NON-ZERO -> root constants: folded into a single [[vk::push_constant]] struct (SPIR-V allows
-//       at most one per entry point, so every such cbuffer shares it, concatenated in
-//       pushConstantLayout()'s byte order). PADDED: b1 sits at byte 0, so a shader declaring only
-//       b3 still needs its fields starting at byte 128 or it reads the object block instead.
+//       at most one per entry point), concatenated in pushConstantLayout()'s byte order. PADDED:
+//       b1 sits at byte 0, so a shader declaring only b3 needs its fields starting at byte 128 or
+//       it reads the object block instead.
+//   ZERO -> a descriptor: a dynamic UBO at binding == register in kVkSetConstants, per
+//       descriptorLayout(). Left alone if patchPerFrameSet already annotated it.
 //
-//   ZERO -> a descriptor: a dynamic UBO at binding == register in kVkSetConstants, exactly where
-//       descriptorLayout() declares it. Left alone if patchPerFrameSet already annotated it.
-//
-// WHY THIS TAKES A LAYOUT, unlike patchPerFrameSet: a cbuffer's kind is not a property of the
-// shader text -- `cbuffer SkinParams : register(b3)` reads the same whether b3 is push constants
-// or a descriptor, and only constantDwords[3] tells them apart. A source-only patch has to guess,
-// which turns a diagnosable "wrong set" into an equally broken "right set, wrong kind" (tried,
-// reverted). createShader has no idea which pipeline will use its module, so RhiShader keeps its
-// source and moduleForLayout re-patches at PIPELINE creation, where the layout is finally known.
+// TAKES A LAYOUT, unlike patchPerFrameSet: a cbuffer's kind isn't in the shader text --
+// `cbuffer SkinParams : register(b3)` reads the same whether b3 is push constants or a descriptor,
+// only constantDwords[3] tells them apart. A source-only patch would have to guess (tried,
+// reverted: turns a diagnosable "wrong set" into an equally broken "right set, wrong kind"). So
+// createShader keeps RhiShader's source and moduleForLayout re-patches at PIPELINE creation, once
+// the layout is known.
 //
 // False only on a malformed block or an unpaddable gap, both logged. A shader already agreeing
 // with its layout comes back byte-identical -- moduleForLayout's signal to reuse the
 // layout-agnostic module rather than compile a second one.
 //
-// `annotateDescriptors` false leaves ZERO-dword blocks alone, for callers placing them with a
-// -fvk-bind-register map instead (buildRegisterBinds). The push-constant half always runs: a
+// `annotateDescriptors` false leaves ZERO-dword blocks alone, for callers placing them via
+// -fvk-bind-register (buildRegisterBinds) instead; the push-constant half always runs since a
 // folded block has no register left for the map to express.
 bool patchCbuffersForLayout(std::string& src, const PipelineLayout& layout, bool mesh,
                             bool annotateDescriptors);
@@ -789,24 +749,20 @@ bool patchCbuffersForLayout(std::string& src, const PipelineLayout& layout, bool
 // ================================================================================================
 // 5. Per-frame constant ring: the Vulkan analog of D3D12RenderContext::ringAlloc. One HOST_VISIBLE
 //    buffer per frame in flight, bump-allocated at the device's queried
-//    minUniformBufferOffsetAlignment (NOT a fixed 256 — see VulkanDevice::minUboAlignment()) and
-//    bound as a VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC through set kVkSetConstants; the dynamic
-//    OFFSET returned here is what a raw root-CBV's GPU address was in the D3D12 model, preserving
-//    "no fresh descriptor write per draw". OWNED BY VulkanRenderContext.cpp (the scene/post-chain
-//    ring) — see ConstantRing's own note on the one exception.
+//    minUniformBufferOffsetAlignment (NOT a fixed 256 -- see VulkanDevice::minUboAlignment()) and
+//    bound as a UNIFORM_BUFFER_DYNAMIC through set kVkSetConstants; the dynamic OFFSET returned
+//    here is what a raw root-CBV's GPU address was in the D3D12 model. OWNED BY
+//    VulkanRenderContext.cpp -- see ConstantRing's own note on the one exception.
 // ================================================================================================
 // Transient constant bytes per frame in flight: starting size and the ceiling growth stops at.
 //
-// DECLARED HERE, ABOVE ConstantRing, BECAUSE ConstantRing USES IT. These two lines used to sit
-// thirty lines below that struct, so every TU here failed on `kRhiRingBytes: identifier not
-// found` -- unnoticed because the module also couldn't be CONFIGURED (CMakeLists named a
-// nonexistent source file, so CMake failed first). Fixing that outer breakage is what surfaced
-// this one.
+// DECLARED HERE, ABOVE ConstantRing, BECAUSE ConstantRing USES IT -- these two lines used to sit
+// thirty lines below that struct, so every TU failed on `kRhiRingBytes: identifier not found`,
+// unnoticed because the module also couldn't be CONFIGURED (CMakeLists named a nonexistent
+// source file, so CMake failed first).
 //
-// The D3D12 backend keeps its own constant of the same name in its own .cpp, deliberately not
-// shared: its ring is an UPLOAD-heap buffer that is always mappable, while this one may not be
-// HOST_COHERENT (see ConstantRing::coherent below). Same idea, different object, measured
-// separately.
+// Not shared with D3D12's own constant of the same name: its ring is an UPLOAD-heap buffer that
+// is always mappable, while this one may not be HOST_COHERENT (see ConstantRing::coherent below).
 constexpr u64 kRhiRingBytes = 1u << 20;
 constexpr u64 kRhiRingMaxBytes = 64ull << 20;
 
@@ -917,13 +873,12 @@ struct RhiTexture {
     VkImageView dsvView = VK_NULL_HANDLE;    // depth-attachment view, when ResourceBind::DepthStencil (or isDepthFormatVk)
     std::vector<VkImageView> uavViews;       // one storage-image view per mip, built lazily by setUav
     TextureDesc desc{};                      // resolved: `mips` holds the real count, never 0
-    // OUTSIDE AVER_RHI_TRACK_STATE, unlike `states` below -- see D3D12's RhiTexture::debugName for
-    // the reasoning. THIS BACKEND IS WHERE THE MISTAKE SHOWED UP: textureBarrier and
-    // uavBarrierTexture both name the texture in their null-VkImage error (the validation layer
-    // reports the failure at the barrier, not at whatever left the image null, so the name is the
-    // difference between a one-line fix and a hunt), but the field sat on the wrong side of a macro
-    // unrelated to naming, so neither message compiled under NDEBUG -- and Aver.RHI.Vulkan had
-    // never been built Release. Moving the field is the whole fix; neither message changed.
+    // OUTSIDE AVER_RHI_TRACK_STATE, unlike `states` below (see D3D12's RhiTexture::debugName). THE
+    // MISTAKE THIS AVOIDS: textureBarrier/uavBarrierTexture name the texture in their null-VkImage
+    // error, but the field used to sit inside that macro, so neither message compiled under
+    // NDEBUG -- unnoticed because Aver.RHI.Vulkan had never been built Release. Moving it was the
+    // fix: the validation layer reports a null-VkImage failure at the barrier call site, not at
+    // whatever earlier code left the image null, so having the name there is a one-line fix vs a hunt.
     std::string debugName;                   // owned copy: the desc's debugName is the caller's pointer
 #if AVER_RHI_TRACK_STATE
     std::vector<ResourceState> states;       // one entry per mip; a subresource index is a mip index here
@@ -933,14 +888,12 @@ struct RhiTexture {
     // why imgui_impl_vulkan is a deliberately deferred decision). Kept so the field exists the day
     // it is wired up, rather than adding it to this struct's ABI later.
     u64 uiDescriptor = 0;
-    // True for a record that WRAPS a VkImage/VkDeviceMemory this factory did NOT allocate -- today
-    // only adoptExternalDepthTexture's re-publication of VulkanDevice::depthBuffer_/depthMemory_
-    // (see IDevice::sceneDepthTexture's contract, RHI.hpp). Those are owned and torn down by
-    // VulkanDevice itself, so this factory's teardown paths (destroyTexture(),
-    // ~VulkanResourceFactory()) MUST check this flag and skip destroyImageCommitted() when set, or
-    // a resize/shutdown double-frees a VkImage/VkDeviceMemory Vulkan has already recycled. The
-    // VIEWS this record builds for itself (srvView etc.) are NOT foreign and are always destroyed
-    // the ordinary way regardless of this flag.
+    // True for a record WRAPPING a VkImage/VkDeviceMemory this factory did NOT allocate -- today
+    // only adoptExternalDepthTexture's republication of VulkanDevice::depthBuffer_/depthMemory_
+    // (IDevice::sceneDepthTexture's contract, RHI.hpp). VulkanDevice owns and tears those down
+    // itself, so destroyTexture()/~VulkanResourceFactory() MUST skip destroyImageCommitted() when
+    // set, or a resize/shutdown double-frees an already-recycled image. The VIEWS this record
+    // builds (srvView etc.) are NOT foreign and are always destroyed normally regardless.
     bool externallyOwned = false;
 };
 
@@ -1064,21 +1017,18 @@ struct BindingSlotState {
 // A binding set, RINGED kFrameCount DEEP.
 //
 // WHY: a descriptor set can't be rewritten while a command buffer that bound it is still pending
-// ("VkDescriptorSet ... was destroyed or updated without UPDATE_AFTER_BIND") -- and worse than a
-// warning, that puts the command buffer in an INVALID state, so the driver DROPS every call
-// recorded after it. With one set per binding set that happened every frame the engine rebound
-// anything (Voxi's RT history ping-pong rewrites four slots per frame), taking the whole overlay
-// with it, editor UI included.
+// ("... destroyed or updated without UPDATE_AFTER_BIND") -- worse than a warning, it puts the
+// command buffer in an INVALID state and the driver DROPS every call recorded after it. With one
+// set per binding set that happened every frame the engine rebound anything (Voxi's RT history
+// ping-pong rewrites four slots per frame), taking the whole overlay down with it.
 //
-// beginFrame() already waits on the timeline value retiring frame-in-flight slot
-// frameIndexInFlight(), so the CURRENT frame's ring slot is provably free to write. The cost: a
-// write lands in one ring slot only, so the others go stale -- hence srvSlots/uavSlots and
-// staleMask, replayed lazily by bindingSetForFrame().
+// beginFrame() already waits on the timeline value retiring frameIndexInFlight(), so the CURRENT
+// frame's ring slot is provably free to write. Cost: a write lands in one ring slot only, so the
+// others go stale -- hence srvSlots/uavSlots and staleMask, replayed lazily by bindingSetForFrame().
 //
-// THE INVARIANT THIS RESTS ON: nothing writes a binding set AFTER binding it within the same
-// frame -- a ring by FRAME can't help with that, since the offending set would be the one this
-// frame is already using. Measured, not assumed: writeBindingSlot warns if it's ever violated,
-// and it was zero across a 12-frame run when this was built.
+// INVARIANT: nothing writes a binding set AFTER binding it within the same frame -- a ring by
+// FRAME can't help with that. Measured, not assumed: writeBindingSlot warns if this is ever
+// violated, and it was zero across a 12-frame run when this was built.
 struct RhiBindingSet {
     VkDescriptorSet sets[kFrameCount] = {};
     // Bit f: ring slot f has not seen the writes below and must be replayed before it is bound.
@@ -1146,19 +1096,15 @@ public:
     void init();
     bool usingDxc() const;
 
-    // Compiles one HLSL entry point to SPIR-V. `src` is the FULLY ASSEMBLED source (prelude already
-    // concatenated by the caller — VulkanResourceFactory::createShader owns that concatenation,
-    // mirroring D3D12ResourceFactory::createShader's own `src = d.prelude; src += d.source`).
-    // `stage`+`minShaderModel` derive the DXC target profile (e.g. "cs_6_5") via
-    // dxcTargetPrefix(stage) below; `defines` is semicolon-separated, identical shape to
-    // ShaderDesc::defines. Appends `-spirv` (and the binding-shift arguments the descriptor scheme
-    // in section 4 requires — see this method's own definition for the exact -fvk-*-shift values,
-    // which must agree with tableSetLayout()/descriptorLayout() byte for byte, register for
-    // register). False (and logged) on any failure, `outSpirv` left untouched.
+    // Compiles one HLSL entry point to SPIR-V. `src` is the FULLY ASSEMBLED source (prelude
+    // already concatenated by the caller). `stage`+`minShaderModel` derive the DXC target profile
+    // (e.g. "cs_6_5") via dxcTargetPrefix(stage); `defines` is semicolon-separated, same shape as
+    // ShaderDesc::defines. Appends `-spirv` and the binding-shift arguments section 4's descriptor
+    // scheme requires (must agree with tableSetLayout()/descriptorLayout() byte for byte). False
+    // (and logged) on failure, `outSpirv` left untouched.
     //
-    // `quiet` downgrades DXC's own diagnostics from ERROR to DEBUG, for a caller that EXPECTS this
-    // compile to possibly fail and has a recovery path (moduleForLayout's bind-map attempt). The
-    // return value is unchanged; only the logging is.
+    // `quiet` downgrades DXC's diagnostics from ERROR to DEBUG, for a caller that EXPECTS this
+    // compile to possibly fail and has a recovery path (moduleForLayout's bind-map attempt).
     bool compile(const char* src, const char* entry, ShaderStage stage, u32 minShaderModel,
                  const char* defines, std::vector<u32>& outSpirv,
                  const VkRegisterBind* binds = nullptr, u32 bindCount = 0, bool quiet = false);
@@ -1242,13 +1188,12 @@ inline VkBufferUsageFlags toVkBufferUsage(const BufferDesc& d, bool rtAvailable)
         u |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR;
     // BUILD-INPUT USAGE BELONGS ON ORDINARY BUFFERS TOO, not only AccelStructure ones -- it used to
     // be the latter only, and a BLAS builds from a plain vertex/index buffer (BufferKind::Default),
-    // so every build was rejected ("missing
-    // VK_BUFFER_USAGE_2_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR"). Worse than a
-    // rejection: vkCmdBuildAccelerationStructuresKHR INVALIDATES the command buffer on failure, so
-    // everything recorded after it -- the whole overlay, editor UI included -- got dropped by the
-    // driver. Granting it to every buffer follows this function's "everything is everything"
-    // policy: the alternative, a BufferKind for "might be raytraced", is unknowable at upload time
-    // for a mesh some later frame decides to trace against.
+    // so every build was rejected (missing
+    // VK_BUFFER_USAGE_2_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR). Worse: on failure
+    // vkCmdBuildAccelerationStructuresKHR INVALIDATES the command buffer, so everything recorded
+    // after it -- the whole overlay, editor UI included -- got dropped by the driver. Granting it
+    // to every buffer follows "everything is everything": the alternative, a BufferKind for "might
+    // be raytraced", is unknowable at upload time for a mesh some later frame decides to trace.
     if (rtAvailable) u |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
     return u;
 }
@@ -1294,12 +1239,11 @@ public:
     IRenderContext* renderContext() override;
     void addRenderFeature(IRenderFeature* f) override;
     void removeRenderFeature(IRenderFeature* f) override;
-    // Same predicate drawMesh applies internally (VulkanDevice.cpp's suppressesScene early return),
-    // exposed so a caller can decline a draw it knows to be editor chrome rather than scene
-    // geometry -- see IDevice::sceneSuppressed for why the filter can't live in drawMesh itself.
-    // Implemented here rather than left on the default false: that default would silently mean
-    // "nothing is suppressing" even though drawMesh has the identical path, a cross-backend
-    // divergence that is the hardest kind of bug to notice.
+    // Same predicate drawMesh applies internally (suppressesScene early return), exposed so a
+    // caller can decline a draw it knows to be editor chrome -- see IDevice::sceneSuppressed for
+    // why the filter can't live in drawMesh itself. Implemented here rather than left on the
+    // default false: that default would silently mean "nothing is suppressing" even though
+    // drawMesh has the identical path, a cross-backend divergence that's hard to notice.
     bool sceneSuppressed() const override {
         for (const IRenderFeature* f : features_) if (f->suppressesScene()) return true;
         return false;
@@ -1316,11 +1260,9 @@ public:
     bool setSampleCount(u32 samples) override;
     // Decouples the scene's render targets from the swapchain's: the scene renders at
     // round(present * scale) while everything present-resolution (backbuffer, viewport texture,
-    // capture) stays pinned to width_/height_ -- see IDevice::setRenderScale's contract (RHI.hpp).
-    // NOT inline: before this existed, createDepthBuffer/createMsaaColor/beginFrame all sized
-    // directly off width_/height_, so the setter does real work -- computeSceneSize() plus a full
-    // rebuildSceneTargets() when a swapchain is already live. Defined in VulkanDevice.cpp per the
-    // FILE MAP banner.
+    // capture) stays pinned to width_/height_ (IDevice::setRenderScale's contract, RHI.hpp).
+    // NOT inline: the setter does real work -- computeSceneSize() plus a full
+    // rebuildSceneTargets() when a swapchain is already live.
     void setRenderScale(f32 scale) override;
     f32 renderScale() const override { return renderScale_; }
     ISwapchain* createSwapchain(const SwapchainDesc& desc) override;
@@ -1386,10 +1328,8 @@ public:
     void setNextDrawPrepassed(bool prepassed) override { nextDrawPrepassed_ = prepassed; }
     // Contract on IDevice::sceneDepthTexture (RHI.hpp); mirrors D3D12Device::sceneDepthTexture
     // (D3D12Device.cpp:1993-2006). Lazily (re)adopts depthBuffer_ into rhiFactory_'s texture table
-    // via depthTexDirty_ (see that flag's comment for why a dirty bit, not a size compare, is the
-    // trigger). modules/occlusion's HZB seed pass is the one consumer today; see this method's own
-    // definition for what changed elsewhere (createDepthBuffer's image usage flags, a new
-    // ownership flag on RhiTexture) to make the returned handle safe to sample and safe to tear down.
+    // via depthTexDirty_ (see that flag's comment for why a dirty bit, not a size compare). Only
+    // consumer today is modules/occlusion's HZB seed pass.
     TextureHandle sceneDepthTexture() override;
     LineHandle createLineMesh(const LineVertex* verts, u32 count) override;
     void drawLines(LineHandle mesh, const f32 world[16]) override;
@@ -1402,18 +1342,16 @@ public:
     void requestCapture(u32 x, u32 y) override { capX_ = x; capY_ = y; captureReq_ = true; captureReady_ = false; }
     bool getCapture(f32 outRGBA[4]) override;
     bool getFrameImage(std::vector<u8>& outRGBA, u32& w, u32& h) override;
-    // ---- the UI methods -----------------------------------------------------------------------
+    // ---- the UI methods ----
     //
-    // DELEGATE to whatever aver::rhi::vulkan::IUiBackend has been installed; behave exactly as
-    // before -- false/no-op, an honest "no in-window UI" -- when none has, which is every game
-    // build. The seam is modules/rhi.vulkan/include/aver/rhi/vulkan/UiBackend.hpp; the concrete
-    // toolkit lives in its own module so nothing about Dear ImGui compiles into anything that
-    // merely links the RHI. NO ImGui INCLUDE OR SYMBOL MAY APPEAR IN THIS MODULE -- the same rule
-    // Aver.RHI.D3D12 keeps, and the whole point of the split.
+    // DELEGATE to whatever aver::rhi::vulkan::IUiBackend has been installed; false/no-op ("no
+    // in-window UI") when none has, which is every game build. The seam is
+    // modules/rhi.vulkan/include/aver/rhi/vulkan/UiBackend.hpp; the concrete toolkit lives in its
+    // own module so nothing about Dear ImGui compiles into anything that merely links the RHI. NO
+    // ImGui INCLUDE OR SYMBOL MAY APPEAR IN THIS MODULE -- same rule Aver.RHI.D3D12 keeps.
     //
-    // Which toolkit fills the seam is still open: imgui_impl_vulkan is not vendored, and vendoring
-    // it is a real dependency call, not something implied by "implement the Vulkan backend". The
-    // seam accepts either that or a renderer written against this backend directly.
+    // OPEN: which toolkit fills the seam. imgui_impl_vulkan is not vendored, and vendoring it is a
+    // real dependency call, not implied by "implement the Vulkan backend".
     bool uiInit(void* windowHandle) override;
     void uiNewFrame() override;
     void uiShutdown() override;
@@ -1478,13 +1416,12 @@ private:
     bool createDepthBuffer();
     bool createMsaaColor();
     // Tears down and rebuilds every target sized off sceneWidth_/sceneHeight_ after renderScale_
-    // changes with a swapchain already live. Mirrors D3D12Device::rebuildSceneTargets() exactly:
-    // wait for the GPU (nothing sized off the old scene extent may still be in flight), drop the
-    // depth/MSAA-colour images, recompute the scene size, invalidate the stored viewport sub-rect
-    // (vpX_/vpY_/vpW_/vpH_ are stored in SCENE space -- see setViewportRect's own comment -- and are
-    // stale the instant sceneWidth_/sceneHeight_ move), recreate the two scene targets at the new
-    // size, drop the post chain's own size-dependent targets (releasePostTargets(), lazily rebuilt
-    // by the next runPostChain), and renotify every registered render feature of the new size.
+    // changes with a swapchain already live. Mirrors D3D12Device::rebuildSceneTargets(): wait for
+    // the GPU, drop the depth/MSAA-colour images, recompute the scene size, invalidate the stored
+    // viewport sub-rect (vpX_/vpY_/vpW_/vpH_ are stored in SCENE space -- see setViewportRect --
+    // and go stale the instant sceneWidth_/sceneHeight_ move), recreate the scene targets, drop
+    // the post chain's size-dependent targets (releasePostTargets()), and renotify every
+    // registered render feature of the new size.
     void rebuildSceneTargets();
     void waitForGpu();
     // Blocks until the timeline semaphore reaches `value`. False only when the device has been
@@ -1535,7 +1472,7 @@ private:
     // object fence value in RetiredObject is a value on this SAME timeline. Per-swapchain-image
     // BINARY semaphores are still required for the acquire/present handoff itself, which core
     // Vulkan never lets a timeline semaphore do alone (vkAcquireNextImageKHR's semaphore parameter
-    // must be binary). See the architecture scout's finding #1. ----
+    // must be binary). ----
     VkSemaphore timeline_ = VK_NULL_HANDLE;
     u64 nextTimelineValue_ = 0;
     u64 frameTimelineValues_[kFrameCount] = {};   // the timeline value that retires each FRAME-IN-FLIGHT slot's last submit
@@ -1566,10 +1503,9 @@ private:
 
     // The generic-RHI wrapper around depthBuffer_ -- see sceneDepthTexture()'s own comment. STABLE
     // across a resize: adoptExternalDepthTexture re-fills this SAME slot rather than pushing a new
-    // one, so a caller that cached the handle across frames (modules/occlusion does not today, but
-    // nothing stops a future one) never has to notice depthBuffer_ was reallocated underneath it.
-    // Field-for-field mirror of D3D12Device's own depthTexHandle_/depthTexDirty_ pair
-    // (D3D12Device.cpp:1130-1138).
+    // one, so a future caller that caches the handle across frames never has to notice depthBuffer_
+    // was reallocated. Field-for-field mirror of D3D12Device's own depthTexHandle_/depthTexDirty_
+    // pair (D3D12Device.cpp:1130-1138).
     TextureHandle depthTexHandle_ = 0;
     // True whenever depthBuffer_ has (re)allocated since depthTexHandle_ was last refreshed --
     // createDepthBuffer() sets this every time it runs (initial creation, resize(), and
@@ -1577,20 +1513,20 @@ private:
     // has re-adopted the current depthBuffer_.
     bool depthTexDirty_ = true;
 
-    // ---- fixed scene/line/sky pipelines (built via VulkanShaderCompiler + vkCreateGraphicsPipelines
-    // directly -- NOT through VulkanResourceFactory's generic PipelineLayout cache, exactly as
-    // D3D12Device builds its own rootSig_/pso_ separately from D3D12ResourceFactory's cache) ----
+    // ---- fixed scene/line/sky pipelines (built directly via VulkanShaderCompiler +
+    // vkCreateGraphicsPipelines, NOT through VulkanResourceFactory's generic cache, mirroring how
+    // D3D12Device builds its own rootSig_/pso_ separately) ----
     // HOW MANY vkCmdBeginRendering SCOPES ARE OPEN on the shared command buffer -- zero or one;
-    // dynamic-rendering scopes CANNOT NEST. Exists because two independent owners record into the
-    // same buffer with no visibility into each other: this class opens a scope around the scene and
-    // overlay passes and calls IRenderFeature::scenePass/overlayPass from inside it, while
-    // VulkanRenderContext opens its own scope around every single draw (needed for draws from
-    // prePass(), where nothing is open). A feature drawing through the context from inside one of
-    // this class's passes used to issue a nested vkCmdBeginRendering ("invalid ... inside an active
-    // render pass"), whose matching vkCmdEndRendering then closed THIS class's scope early, leaving
-    // the pass's remaining draws and its own CmdEndRendering with nothing open -- three validation
-    // errors, one cause. pushRenderScope/popRenderScope are now the ONLY way either owner opens a
-    // scope, so the inner request becomes a no-op instead of a nesting error.
+    // dynamic-rendering scopes CANNOT NEST. Two independent owners record into the same buffer
+    // with no visibility into each other: this class opens a scope around the scene/overlay
+    // passes and calls IRenderFeature::scenePass/overlayPass inside it, while VulkanRenderContext
+    // opens its own scope around every draw (needed for prePass(), where nothing is open). A
+    // feature drawing through the context from inside one of this class's passes used to issue a
+    // NESTED vkCmdBeginRendering ("invalid ... inside an active render pass"), whose matching
+    // vkCmdEndRendering closed THIS class's scope early -- three validation errors, one cause: the
+    // nested-begin error itself, the pass's now-unterminated remaining draws, and the orphaned
+    // vkCmdEndRendering. pushRenderScope/popRenderScope are now the ONLY way either owner opens a
+    // scope, so the inner request becomes a no-op instead.
     u32 renderScopeDepth_ = 0;
     // The scene pass opens in beginFrame and closes in endFrame, so "did I open it" has to outlive
     // the call that answered it.
@@ -1600,11 +1536,10 @@ private:
     // ONE empty descriptor-set layout, for the DEVICE'S LIFETIME, used as the placeholder in every
     // pipeline layout whose set 0 or set 1 goes unused.
     //
-    // Three call sites used to each build their own throwaway pair and destroy it the instant
-    // CreatePipelineLayout returned -- looked tidy, wasn't: the pipeline layout goes on referencing
-    // them, so every pipeline later built from it is created against a layout whose set layouts are
-    // already gone ("references deleted object VkDescriptorSetLayout ..."). Reported once per site,
-    // three times. Keeping one alive costs a single empty layout and removes the whole class of bug.
+    // TRAP: three call sites used to each build their own throwaway pair and destroy it the
+    // instant CreatePipelineLayout returned -- but the pipeline layout goes on referencing them, so
+    // every pipeline later built from it referenced an already-destroyed VkDescriptorSetLayout.
+    // Reported three times (once per site). Keeping one alive removes the whole class of bug.
     VkDescriptorSetLayout emptySetLayout_ = VK_NULL_HANDLE;   // set kVkSetConstants, binding 0 (b0) only
     VkPipelineLayout scenePipelineLayout_ = VK_NULL_HANDLE;        // push constants: b1 object block only
     VkPipeline scenePso_ = VK_NULL_HANDLE, skyPso_ = VK_NULL_HANDLE, wirePso_ = VK_NULL_HANDLE,
@@ -1662,14 +1597,13 @@ private:
     VkBuffer expBuf_ = VK_NULL_HANDLE;  VkDeviceMemory expMemory_ = VK_NULL_HANDLE;    // the one adapted-exposure scalar
     bool expSeeded_ = false;
     VkDescriptorPool postDescriptorPool_ = VK_NULL_HANDLE;
-    // MEMBERS, NOT FILE-SCOPE STATICS -- not stylistic. These four used to live in anonymous-
-    // namespace blocks in VulkanDevice.cpp, so nothing destroyed them (a destructor can only reach
-    // what the class owns): the pools, layout and sampler were still alive at vkDestroyDevice, the
-    // last leaks the validation layer reported. Worse than the leak: a static outlives the device
-    // that filled it, so a second VulkanDevice in one process (device-loss recovery, a backend
-    // switch) would find them already non-null and use handles belonging to a destroyed device.
+    // MEMBERS, NOT FILE-SCOPE STATICS -- these four used to live in anonymous-namespace blocks in
+    // VulkanDevice.cpp, so nothing destroyed them: the pools, layout and sampler were still alive
+    // at vkDestroyDevice (the validation layer's last-reported leak). Worse: a static outlives the
+    // device that filled it, so a second VulkanDevice in one process (device-loss recovery, a
+    // backend switch) would find them already non-null and reuse handles from a destroyed device.
     // Set by createPostTargets, consumed once by runPostChain: the frame the targets are built is
-    // the one frame where sceneResolved_ has no layout yet. See where this is read.
+    // the one frame where sceneResolved_ has no layout yet.
     bool postTargetsFresh_ = false;
     VkSampler postSampler_ = VK_NULL_HANDLE;
     std::vector<VkDescriptorSet> postSets_;              // allocated from postDescriptorPool_, die with it
@@ -1720,11 +1654,10 @@ private:
     u32 width_ = 0, height_ = 0;
     // The scene's OWN render-target size: width_/height_ scaled by renderScale_, rounded, floored
     // at 1; equal to width_/height_ at renderScale_ == 1.0 (the default), so a build that never
-    // calls setRenderScale renders byte-for-byte what this backend rendered before renderScale_
-    // existed -- field-for-field mirror of D3D12Device.cpp's own pair. Present-resolution state
-    // (width_/height_, the swapchain, the capture buffer, ImGui were it hosted) never reads this
-    // pair; only the scene depth/MSAA-colour targets, the scene render-scope's area and default
-    // viewport, the post chain's resolve target and bloom pyramid, and onRenderTargetsChanged do.
+    // calls setRenderScale renders byte-for-byte what it did before renderScale_ existed.
+    // Present-resolution state (width_/height_, the swapchain, the capture buffer) never reads
+    // this pair; only the scene depth/MSAA-colour targets, the scene render-scope's area and
+    // default viewport, the post chain's targets, and onRenderTargetsChanged do.
     u32 sceneWidth_ = 0, sceneHeight_ = 0;
     f32 renderScale_ = 1.0f;   // [0.25, 1.0]; see IDevice::setRenderScale
     void computeSceneSize() {
@@ -1853,17 +1786,16 @@ public:
     // D3D12ResourceFactory::bufferResource() exactly, including "null on a bad handle".
     VkBuffer bufferResource(BufferHandle h) const;
     // Wraps a VkImage/VkDeviceMemory this factory did NOT create (VulkanDevice::depthBuffer_/
-    // depthMemory_ -- createTexture() never makes either) into an ordinary TextureHandle, so a
-    // caller reaches it through setSrv/textureBarrier like any factory-made texture. Concrete
-    // rather than on IResourceFactory: this is the mechanics of ONE specific adoption (mirrors
+    // depthMemory_) into an ordinary TextureHandle, so a caller reaches it through
+    // setSrv/textureBarrier like any factory-made texture. Concrete rather than on
+    // IResourceFactory: the mechanics of ONE specific adoption (mirrors
     // D3D12ResourceFactory::adoptExternalDepthTexture), not a general "wrap anything" entry point.
     // Builds its OWN VkImageView for sampled reads (VK_IMAGE_ASPECT_DEPTH_BIT, kVkDepthFormat --
-    // see RhiTexture::externallyOwned for why that view, unlike `image`/`memory`, IS this record's
-    // to own and destroy) rather than reusing VulkanDevice's own depthView_, which VulkanDevice
-    // destroys on its own schedule. `existing`, when non-zero, is REUSED in place rather than
-    // allocating a new slot -- see VulkanDevice::depthTexHandle_ for why the handle must stay
-    // stable across a resize. Returns the (possibly reused) handle, or 0 on a null image or a
-    // failed view.
+    // see RhiTexture::externallyOwned for why that view IS this record's to own and destroy)
+    // rather than reusing VulkanDevice's own depthView_, which it destroys on its own schedule.
+    // `existing`, when non-zero, is REUSED in place rather than allocating a new slot (see
+    // VulkanDevice::depthTexHandle_ for why the handle must stay stable across a resize). Returns
+    // the (possibly reused) handle, or 0 on a null image or a failed view.
     TextureHandle adoptExternalDepthTexture(VkImage image, VkDeviceMemory memory, u32 width, u32 height,
                                              TextureHandle existing);
 
@@ -1911,20 +1843,18 @@ private:
     // the caller never wrote.
     //
     // WHY IT STAYS: the engine null-fills UNCONDITIONALLY as self-imposed policy, not because any
-    // device requires it -- docs/VULKAN.md's audit of the D3D12 original says the same ("cite Tier
-    // 1 as the origin, not the condition"), and matching it here keeps the two backends identical,
-    // worth more than the descriptors saved by skipping it.
+    // device requires it -- docs/VULKAN.md's audit of the D3D12 original says the same, and
+    // matching it here keeps the two backends identical, worth more than the descriptors saved.
     //
     // CORRECTION: this used to justify the policy by saying descriptor_indexing's
-    // descriptorBindingPartiallyBound couldn't be assumed present. That no longer holds --
-    // descriptorBindingPartiallyBound, runtimeDescriptorArray,
-    // shaderSampledImageArrayNonUniformIndexing and descriptorIndexing are all CORE
-    // VkPhysicalDeviceVulkan12Features fields, and this backend already hard-requires
+    // descriptorBindingPartiallyBound couldn't be assumed present. That no longer holds -- it and
+    // runtimeDescriptorArray/shaderSampledImageArrayNonUniformIndexing/descriptorIndexing are all
+    // CORE VkPhysicalDeviceVulkan12Features fields, and this backend already hard-requires
     // VK_API_VERSION_1_3 plus four sibling 1.2/1.3 bits with no fallback (bufferDeviceAddress,
     // timelineSemaphore, dynamicRendering, synchronization2 -- queryRequiredFeatures,
     // VulkanDevice.cpp:596-603). So a bindless array here would be a feature-bit query, not an
-    // extension gamble; the engine's FL 11_0 minimum (docs/MINIMUM_SPECS.md) is a D3D12-only
-    // statement, since that hardware can't reach Vulkan 1.3 and never runs this backend at all.
+    // extension gamble; the engine's FL 11_0 minimum (docs/MINIMUM_SPECS.md) is D3D12-only, since
+    // that hardware can't reach Vulkan 1.3 and never runs this backend at all.
     void nullFill(const RhiBindingSet& s);
 
     // Writes one descriptor into the CURRENT frame's ring slot and records it so the other ring
@@ -1950,13 +1880,11 @@ private:
     std::vector<RhiBuffer>     buffers_;
     std::vector<RhiShader>     shaders_;
     // std::deque, NOT std::vector -- same reason and same defect as its D3D12 twin. VulkanRenderContext
-    // caches a raw `const RhiPipeline* pipe_` from &pipelines_[h-1] and reads descriptor-set and
-    // push-constant indices through it for the rest of the recording, so a push_back that
-    // reallocates while a command buffer is open leaves it dangling. FOUR growth sites here vs
-    // D3D12's two. Measured on the D3D12 side (this backend can't be run): an ordinary 60-frame
-    // editor session relocates the table twelve times, once while a pipeline is bound -- a
-    // container issue, not a D3D12-specific one, so fixed here at the same time even though this
-    // backend is OFF by default and the bug has never had a chance to announce itself.
+    // caches a raw `const RhiPipeline* pipe_` from &pipelines_[h-1], so a push_back that reallocates
+    // while a command buffer is open leaves it dangling. FOUR growth sites here vs D3D12's two.
+    // Measured on the D3D12 side (this backend can't be run): an ordinary 60-frame editor session
+    // relocates the table twelve times, once while a pipeline is bound -- a container issue, not a
+    // D3D12-specific one, fixed here too even though this backend is OFF by default.
     // Compile-verified with -DAVER_RHI_VULKAN=ON; NOT run, because this backend has no editor UI.
     std::deque<RhiPipeline>    pipelines_;
     std::vector<RhiBindingSet> bindingSets_;
@@ -2002,20 +1930,17 @@ public:
     // drawMeshInstanced, which does the same through a root SRV at a raw GPU virtual address.
     //
     // NOT AN OPTIMISATION: an earlier note claimed the inherited base-class fallback (one
-    // setConstants(kObjectConstantRegister) + drawMesh per instance) was already correct here,
-    // since it reproduces D3D12 semantics through overrides that already exist. False as used --
-    // the pipelines Voxi calls this with (VSShadowInstanced / VSGiShadowInstanced) read
-    // gInstanceWorlds[instanceID] and, by their own comment, NEVER read gWorld. So the fallback set
-    // a constant the shader ignores, drew every instance at instanceID 0, and left the transform
-    // sourced from a StructuredBuffer this backend had never bound -- meaning shadow cascades and
-    // the GI-only shadow map were drawn from undefined transforms on Vulkan.
+    // setConstants(kObjectConstantRegister) + drawMesh per instance) was already correct here.
+    // False -- the pipelines Voxi calls this with (VSShadowInstanced/VSGiShadowInstanced) read
+    // gInstanceWorlds[instanceID] and never gWorld, so the fallback set a constant the shader
+    // ignores and drew every instance at instanceID 0: shadow cascades and the GI-only shadow map
+    // were drawn from undefined transforms on Vulkan.
     //
-    // A DESCRIPTOR, NOT the push-constant device address an earlier design proposed: every buffer
+    // A DESCRIPTOR, NOT a push-constant device address as an earlier design proposed: every buffer
     // here does carry a VkDeviceAddress, but the HLSL is SHARED with D3D12 and declares
     // StructuredBuffer<float4x4> gInstanceWorlds : register(tN) -- a descriptor by construction. A
-    // device-address design would need a Vulkan-only entry point taking a pointer, forking text
-    // D3D12 compiles unchanged -- exactly what this backend's explicit -fvk-bind-register map exists
-    // to avoid.
+    // device-address design would fork text D3D12 compiles unchanged, exactly what this backend's
+    // explicit -fvk-bind-register map exists to avoid.
     void drawMeshInstanced(MeshHandle mesh, const f32* worlds, u32 instanceCount) override;
     void dispatchMeshFor(MeshHandle mesh) override;
     void dispatchMeshClusters(MeshHandle mesh, u32 clusterCount) override;
