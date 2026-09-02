@@ -2,11 +2,9 @@
 // Feature-owned frame constants, at the register RHIResources.hpp reserves for a render feature.
 #define AVER_SHADOW_CASCADES 4
 
-// register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)), not a literal b4. rhi::
-// kFeatureFrameConstantRegister is the one definition and shaderConstantsHlsl() emits it as
-// that #define; ClusterFrameCB in shared_prelude.hlsl already binds this way. A literal here
-// keeps compiling against the OLD slot the day that constant is renumbered, while the C++
-// binds the new one -- and its static_assert exists precisely to make renumbering deliberate.
+// register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)), never a literal b4: rhi::kFeatureFrameConstantRegister
+// is the one definition (shaderConstantsHlsl() emits this #define; ClusterFrameCB binds the same way). A
+// literal would keep compiling against a renumbered slot while the C++ side moved to the new one.
 cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     float4   gVoxelOrigin; // xyz = volume min corner, w = 1/volumeWorldSize
     float4   gVoxelParams; // x = resolution, y = intensity, z = maxDistance, w = enabled|debug<<1
@@ -51,11 +49,10 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     // indirect), z = normal-offset bias in world units, w unused.
     float4   gGiShadowParams;
     // The SPATIAL shadow denoiser. x = filter radius in pixels (0 = off); y = how much of the
-    // filtered value to take (0 = none, so the taps still run and the result is discarded --
-    // that is the cost-measurement configuration, and lerp(v, f, 0) is v exactly for any finite
-    // f); z and w unused. RADIUS LIVES IN A CONSTANT, not a #define, so the tap loop is dynamic
-    // and cannot be unrolled away when the host asks for zero taps -- a compile-time 0 would
-    // measure nothing and report it as free.
+    // filtered value to take (0 = none: taps still run and the result is discarded -- the
+    // cost-measurement configuration; lerp(v, f, 0) is v exactly for any finite f); z, w unused.
+    // Radius lives in a CONSTANT, not a #define, so the tap loop stays dynamic and can't be
+    // unrolled away at zero taps -- a compile-time 0 would measure nothing and call it free.
     float4   gRtDenoiseParams;
     float4   gPtBounceParams;
     // x = total cones the diffuse gather traces, including the axial one. y/z/w unused.
@@ -80,43 +77,33 @@ RWTexture3D<uint> gVoxelAccum : register(u1);
 // derived from this one number rather than each choosing its own threshold.
 #define AVER_REFL_MIRROR_ROUGH 0.1
 
-// TLAS instance-mask lanes. MUST MATCH kRtMaskOpaque/kRtMaskTranslucent in VoxiRenderer.cpp -- there
-// is no shared-source mechanism between C++ and HLSL anywhere in this engine, so a value changed on
-// one side and not the other is an image-only bug with no build error, exactly like the cbuffer
-// mirrors this file already warns about.
+// TLAS instance-mask lanes. MUST MATCH kRtMaskOpaque/kRtMaskTranslucent in VoxiRenderer.cpp -- no
+// shared-source mechanism ties C++ and HLSL, so a value changed on one side only is an image bug
+// with no build error, like the cbuffer mirrors this file already warns about.
 //
-// WHY EVERY RAY BUT THE SHADOW RAY ASKS FOR OPAQUE ONLY. Translucent panes are now in the structure,
-// marked FORCE_NON_OPAQUE. A RayQuery that meets a non-opaque candidate does NOT commit it; Proceed()
-// returns true and hands it to the shader to decide. Every traversal below except rtShadow calls
-// Proceed() exactly ONCE and reads CommittedStatus -- correct while the structure held only opaque
-// geometry, and quietly wrong now: traversal would stop AT the pane with an opaque wall behind it
-// still unvisited, so the wall would vanish from that ray's answer. Narrowing the mask means those
-// rays never traverse the pane at all, so their single-Proceed stays exactly as valid as it was.
+// Every ray but the shadow ray asks for OPAQUE only. Translucent panes sit in the structure marked
+// FORCE_NON_OPAQUE; a RayQuery meeting one does not commit it, so a single Proceed()+CommittedStatus
+// traversal (every non-shadow ray here) would stop AT the pane and miss whatever is behind it.
+// Narrowing the mask keeps those rays from ever seeing translucent geometry, so their single-Proceed
+// stays valid.
 #define AVER_RT_MASK_OPAQUE      0x01
 #define AVER_RT_MASK_TRANSLUCENT 0x02
-// THE VIEWER'S OWN BODY. An opaque instance that every ray may hit EXCEPT the ray-driven primary
-// one -- a first-person camera sits inside its own character's head, so the primary ray leaving it
-// hits the inward-facing surface of that mesh and shades it, which fills the whole screen with a
-// flat wash of the character's own skin texture and hides the entire game behind it.
+// THE VIEWER'S OWN BODY: an opaque instance every ray may hit EXCEPT the ray-driven primary one. A
+// first-person camera sits inside its own character's head, so an unfiltered primary ray hits the
+// inward-facing mesh and fills the screen with the character's own skin.
 //
-// scene::kMeshRendererHiddenFromOwner ALREADY EXISTED FOR EXACTLY THIS, and the raster walk in
-// SandboxApp honours it -- it skips drawMesh() and reports the mesh as `owner-hidden`. But that
-// walk deliberately keeps the mesh in the acceleration structure (its own comment says so: "still
-// a shadow caster, still in the GI volume, still in the RT geometry table"), because dropping it
-// would take its shadow and its GI bounce with it. Under raster primary visibility that is exactly
-// right and the bug is invisible. Under RAY-DRIVEN primary visibility -- which is the DEFAULT --
-// the TLAS *is* what the camera sees, so "hidden" never reached the renderer that draws the image.
-// Measured: identical camera pose and identical `1 owner-hidden` in the log, probe 43,33,28
-// (ray-driven) versus 206,215,218 (--rt-render-mode 0).
+// scene::kMeshRendererHiddenFromOwner already exists for this; the raster walk in SandboxApp skips
+// drawMesh() for it but deliberately keeps it in the acceleration structure (still a shadow caster,
+// still in the GI volume) so raster primary visibility is unaffected. Ray-driven primary visibility
+// -- the DEFAULT -- traces the TLAS directly, so "hidden" never reaches it. Measured: identical pose
+// and log, probe 43,33,28 (ray-driven) vs 206,215,218 (--rt-render-mode 0).
 //
-// A THIRD LANE RATHER THAN REMOVING THE INSTANCE, because everything except that one ray still
-// wants this geometry: you cast a shadow, you bounce light onto the floor beside you, and you
-// appear in a mirror and through a pane of glass. Only the ray that starts inside your own head
-// must not see it. The shadow ray masks AVER_RT_MASK_ALL, so it picks this lane up for free.
+// A third lane rather than removing the instance: every ray except the primary one still wants this
+// geometry (shadow, GI bounce, mirrors, glass). The shadow ray masks AVER_RT_MASK_ALL and picks up
+// this lane for free.
 #define AVER_RT_MASK_OWNER_HIDDEN 0x04
-// OPAQUE GEOMETRY AS A SECONDARY RAY SEES IT: solid surfaces including the viewer's own body.
-// Every opaque traversal in this file uses this EXCEPT the ray-driven primary ray, which is the
-// single place the distinction exists to make.
+// Opaque geometry as a SECONDARY ray sees it: solid surfaces including the viewer's own body. Every
+// opaque traversal but the ray-driven primary ray uses this.
 #define AVER_RT_MASK_OPAQUE_ALL  (AVER_RT_MASK_OPAQUE | AVER_RT_MASK_OWNER_HIDDEN)
 #define AVER_RT_MASK_ALL         0xFF
 
@@ -138,39 +125,30 @@ Texture2D<float>          gGiShadowTex : register(t8);
 // caller asks, and every use falls back to the scalar composite when it says no.
 Texture2D<float4>         gBlendBackdrop : register(t10);
 
-// PLACED HERE, ABOVE THE AVER_RT REGION, AND THAT MATTERS. This sat next to the shadow helpers and
-// was therefore inside `#if AVER_RT`, so on every pipeline compiled without ray tracing -- the
-// shadow and GI-shadow VERTEX shaders among them -- the definition vanished while the call sites did
-// not, and four pipelines failed to compile. The visible result was not a caustics bug at all: no
-// shadow map, no GI shadow map, and a scene missing its pit, its water and its sky. Caustics need no
-// rays; the function is pure arithmetic on the clock and a box, so it belongs where everything can
-// see it.
+// PLACED ABOVE THE AVER_RT REGION, DELIBERATELY: this used to sit inside `#if AVER_RT`, so every
+// pipeline built without ray tracing -- including the shadow and GI-shadow vertex shaders -- lost
+// the definition while call sites remained, and four pipelines failed to compile (no shadow map, no
+// GI shadow map, no pit/water/sky). Caustics need no rays; the function is pure arithmetic on the
+// clock and a box, so it belongs where every pipeline can see it.
 // ---- CAUSTICS: light focused by the water surface onto what lies under it -----------------------
 //
-// PROJECTED FROM THE VOLUME, NOT PAINTED INTO A MATERIAL. The alternative -- an animated pattern in
-// the pool floor's own material -- is cheaper and authorable, but the floor would have no idea where
-// the water actually is: the pattern would run to the edges of whatever mesh carried it, keep going
-// where the pool ends, and appear on surfaces that happen to share the material and are nowhere near
-// water. This reads the caster's box from the frame constants, so caustics stop exactly where the
-// water stops and land on ANY surface beneath it whatever material that surface has.
+// PROJECTED FROM THE VOLUME, NOT PAINTED INTO A MATERIAL: an animated pattern baked into the pool
+// floor's material would have no idea where the water actually is, and would bleed onto any surface
+// sharing that material. Reading the caster's box from frame constants means caustics stop exactly
+// where the water stops, on any surface beneath it.
 //
-// THE PHYSICS IT APPROXIMATES. A wavy surface refracts sunlight; where the surface is CONCAVE it
-// converges those rays and where it is convex it spreads them. The convergence is the Laplacian of
-// the height field, so bright caustic lines sit where the second derivative is most negative. For a
-// sum of sine waves that Laplacian is analytic -- each term contributes -k^2 * sin(phase) -- which
-// is why this needs no ray tracing, no photon map and no texture: it is the same three sines the
-// ripple graph uses, differentiated twice.
+// THE PHYSICS THIS APPROXIMATES: a wavy surface refracts sunlight, converging where it is concave
+// and spreading where convex -- the convergence is the Laplacian of the height field, brightest
+// where the second derivative is most negative. For a sum of sines that Laplacian is analytic
+// (-k^2 * sin(phase) per term), so this needs no ray tracing, photon map or texture: it differentiates
+// the same three sines the ripple graph uses, twice.
 //
-// WHAT IT DELIBERATELY IS NOT. Real caustics depend on the whole light path, so they shift with the
-// sun's angle and pool up against walls; this does neither. It is a focus term evaluated directly
-// beneath the surface, which is right for a flat-bottomed pool lit from above and increasingly wrong
-// as either assumption fails. Written down because "caustics" is a word that promises more than this
-// delivers, and a reader should know which one they have.
+// WHAT IT IS NOT: real caustics depend on the whole light path and shift with the sun's angle and
+// pool walls; this is a focus term evaluated directly beneath the surface, right for a flat-bottomed
+// pool lit from above and increasingly wrong as either assumption fails.
 //
-// ONE WAVE SET, SHARED. This used to duplicate the ripple graph's constants with a comment asking
-// whoever retuned one to remember the other. Both now call averWaveFocus/averWaveNormal in
-// shared_prelude.hlsl, reading gWave[] from the engine's per-frame block, so the surface that makes
-// the ripples IS the surface that focuses this light and they cannot drift apart.
+// ONE WAVE SET, SHARED with the ripple graph via averWaveFocus/averWaveNormal (shared_prelude.hlsl)
+// reading gWave[] from the frame block -- no duplicated constants to drift out of step.
 float averCausticFocus(float3 wpos) {
     if (gCausticMin.w < 0.5 || gCausticMax.w <= 0.0) return 0.0;
     // Inside the footprint, and below the surface. A point above the water gets nothing.
@@ -178,22 +156,17 @@ float averCausticFocus(float3 wpos) {
         wpos.y < gCausticMin.y || wpos.y > gCausticMax.y ||
         wpos.z > gCausticMax.z) return 0.0;
 
-    // averWaveFocus, NOT a second copy of the wave arithmetic. This function used to carry its own
-    // k and speed constants "matching G_WaterRipple.ocgraph", kept in step by a comment asking the
-    // next person to remember. They are one array in the engine's per-frame block now, and the
-    // surface that makes the ripples is literally the surface that focuses this light.
     float focus = averWaveFocus(wpos.xy);
 
-    // SHARPENED, because real caustics are thin bright lines and not a broad glow. The power is what
-    // turns a smooth curvature field into the filigree the eye recognises.
+    // Sharpened: real caustics are thin bright lines, not a broad glow. The power turns a smooth
+    // curvature field into the filigree the eye recognises.
     focus = pow(focus, 4.0);
 
-    // Deeper water spreads the focus out and dims it -- the rays have further to diverge before they
-    // land. 200 cm is a soft falloff, not a physical depth constant.
+    // Deeper water spreads the focus out and dims it. 200 cm is a soft falloff, not a physical depth.
     const float depth = max(gCausticMax.z - wpos.z, 0.0);
     focus *= exp(-depth / 200.0);
 
-    // And fade out at the very edge of the box so the pattern does not end on a hard line.
+    // Fade out at the box edge so the pattern doesn't end on a hard line.
     const float2 edge = min(wpos.xy - gCausticMin.xy, gCausticMax.xy - wpos.xy);
     focus *= saturate(min(edge.x, edge.y) / 20.0);
 
@@ -219,37 +192,25 @@ StructuredBuffer<RtInstance> gRtInstances : register(t5);
 // ---- per-material data for a ray hit, keyed by RtInstance::materialIndex ----
 //
 // WHAT materialIndex REPLACES: `pad`, a u32 nothing on either side of this ABI ever read (grep
-// confirmed zero references, in this file or its C++ mirror, before this change). A ray hit
-// therefore had no per-material data reachable at all -- see the comment this one replaces, just
-// above PSRayDriven's AverSurface construction, for what that cost. Repurposing an already-unread
-// field is why this costs zero bytes: RtInstance is still 96 bytes, the C++-side static_assert on
-// that size (VoxiRenderer.hpp) is unchanged, and every existing ray-driven pixel that never once
-// read `pad` is unaffected by it meaning something now.
+// confirmed zero references before this change). A ray hit therefore had no per-material data
+// reachable at all. Repurposing an already-unread field costs zero bytes: RtInstance stays 96 bytes,
+// its C++-side static_assert (VoxiRenderer.hpp) is unchanged, and no existing pixel that never read
+// `pad` is affected by it meaning something now.
 //
-// RtMaterial MIRRORS pbr::MaterialConstants (MaterialGpu.hpp) FIELD FOR FIELD, in the SAME ORDER,
-// the identical discipline cbuffer AverMaterial above (PbrShaders.cpp) already follows for the
-// raster path's per-draw constant buffer -- see that struct's own comment for why grouping every
-// four floats needs no explicit HLSL padding to land the C++ struct's 96 bytes exactly, and for why
-// a mismatched order is what makes every field after the mismatch read a neighbour's bytes rather
-// than fail to compile. Fields this pass never reads -- now only graphId and ior; emissive, the
-// second material layer and transmission ARE read (see PSRayDriven's bindless block, s.emissive and
-// the layer-1 blend, and the transmission read further down) and this list said otherwise for
-// longer than it was true -- are still declared, in order, for exactly that reason: HLSL has no
-// partial StructuredBuffer element, so leaving any of them out would silently misalign every field
-// that follows it, not just drop the one that was skipped.
+// RtMaterial MIRRORS pbr::MaterialConstants (MaterialGpu.hpp) FIELD FOR FIELD, SAME ORDER -- the
+// same discipline `cbuffer AverMaterial` (PbrShaders.cpp) follows for the raster path. A mismatched
+// order makes every field after it read a neighbour's bytes rather than fail to compile. Fields
+// this pass never reads (now only graphId and ior -- emissive, the second layer and transmission
+// ARE read) stay declared in order regardless: HLSL has no partial StructuredBuffer element, so
+// skipping one would silently misalign everything after it.
 #ifdef AVER_RT_BINDLESS
 // THE RAY PATH'S TEXTURE ARRAY, in register space 1 so it cannot collide with any t-register the
-// two ordinary descriptor tables, the mesh geometry SRVs or the instanced world matrices already
-// claim in space 0. The size must match PipelineLayout::bindlessTextureCount exactly -- the root
-// signature declares a range of that length and a shader declaring more would read past it.
-//
-// A fixed size rather than an unbounded array: a fixed range serialises under root signature
-// version 1.0, which is what this backend builds.
-//
-// THE LENGTH COMES FROM C++, not from a literal here. It must equal the root signature's declared
-// range exactly -- a shader declaring more would index past what the table actually reserved, which
-// is the out-of-bounds descriptor read this whole design is careful about. Same reason the register
-// numbers in the shared prelude are emitted rather than written: two copies of a number drift.
+// two ordinary descriptor tables, the mesh geometry SRVs, or the instanced world matrices already
+// claim in space 0. AVER_RT_TEX_CAPACITY comes from C++ and must equal
+// PipelineLayout::bindlessTextureCount exactly -- the root signature declares a range of that
+// length, and a shader declaring more reads past it. Fixed-size rather than unbounded: a fixed
+// range serialises under root signature version 1.0, which this backend builds. Same reason the
+// shared prelude's register numbers are emitted rather than written: two copies of a number drift.
 #ifndef AVER_RT_TEX_CAPACITY
 #error "AVER_RT_TEX_CAPACITY must be defined by the pipeline that declares the bindless table"
 #endif
@@ -265,10 +226,9 @@ Texture2D gRtTextures[AVER_RT_TEX_CAPACITY] : register(t0, space1);
 #endif
 
 struct RtMaterial {
-    float4 baseColorFactor;   // rgb LINEAR already -- see MaterialConstants::baseColorFactor's own
-                               // comment; no srgbToLin needed on the read side, unlike the raster
-                               // path's separate per-draw gBaseColor (PbrShaders.cpp), which is not
-                               // this and is not read here.
+    float4 baseColorFactor;   // rgb LINEAR already (see MaterialConstants::baseColorFactor) -- no
+                               // srgbToLin here, unlike the raster path's separate per-draw
+                               // gBaseColor (PbrShaders.cpp), which this is not and does not read.
     float3 emissiveFactor;
     float  metallicFactor;
     float  roughnessFactor;
@@ -302,11 +262,10 @@ struct RtMaterial {
     // texture in this slot" -- not 0, which is a real index. Unread until the bindless table lands.
     uint   texIndex[8];
 
-    // Volume absorption, mirroring MaterialConstants::attenuationColor/attenuationDistance -- the row
-    // that took the block from 144 to 160. Same order and same offsets as the C++ struct and as
-    // `cbuffer AverMaterial` in material_prelude.hlsl; tests/formats/src/MaterialTest.cpp asserts the
-    // offsets so a field moved in one copy and not the other two fails the suite rather than shading
-    // a material with its neighbour's bytes.
+    // Volume absorption, mirroring MaterialConstants::attenuationColor/attenuationDistance -- the
+    // row that took the block from 144 to 160 bytes. Same order/offsets as the C++ struct and as
+    // `cbuffer AverMaterial` (material_prelude.hlsl); tests/formats/src/MaterialTest.cpp asserts the
+    // offsets so a field moved in one copy and not the others fails the suite.
     float3 attenuationColor;
     float  attenuationDistance;
 };
@@ -314,36 +273,30 @@ struct RtMaterial {
 #ifdef AVER_RT_BINDLESS
 // One material map at a ray hit, or `fallback` where the material bound nothing.
 //
-// SampleLevel, NEVER Sample, and this is not a preference. A pixel shader's implicit derivatives
-// describe how the SCREEN coordinate changes between neighbouring pixels; in a fullscreen ray pass
-// the neighbour may have hit a different triangle, a different object, or nothing. The derivative is
-// meaningless there and the mip it picks is garbage at every silhouette. Mip 0 aliases in the
-// distance -- wrong, but wrong PREDICTABLY -- and ray-differential SampleGrad is a later stage.
+// SampleLevel, NEVER Sample -- not a preference. A pixel shader's implicit derivatives describe how
+// the SCREEN coordinate changes between neighbours; in a fullscreen ray pass the neighbour may have
+// hit a different triangle, object, or nothing, so the derivative (and the mip it picks) is garbage
+// at every silhouette. Mip 0 aliases in the distance -- wrong, but PREDICTABLY so; ray-differential
+// SampleGrad is a later stage.
 //
-// NonUniformResourceIndex because neighbouring pixels genuinely hit different materials. Without it
-// the hardware may broadcast one lane's index across the wave, and every pixel in it samples one
-// material's texture.
+// NonUniformResourceIndex because neighbouring pixels genuinely hit different materials -- without
+// it the hardware may broadcast one lane's index across the wave.
 // ---- AVER_RD_ABLATE: A MEASUREMENT SWITCH, NOT A FEATURE ----------------------------------------
 //
-// WHY THIS EXISTS. The ray-driven primary path costs about 6.7 ms of a 14.55 ms frame on PTTest --
-// measured, by taking the same camera through the raster path (7.82 ms) with ray tracing left fully
-// on in both. It is strongly pixel-bound: quarter the pixels and it drops to 9.00 ms, while raster
-// barely moves. But NOTHING said which term inside this shader spends it, and every RT quality dial
-// is inert against it (--rt-rays 4/2/1 gives 14.49/14.46/14.44, and --rt 2 is SLOWER than --rt 4).
+// WHY: the ray-driven primary path costs ~6.7ms of a 14.55ms frame on PTTest, measured against the
+// same camera through raster (7.82ms) with RT fully on in both. Strongly pixel-bound (quarter the
+// pixels -> 9.00ms; raster barely moves), but nothing said WHICH term spent it, and every RT quality
+// dial is inert against it (--rt-rays 4/2/1 gives 14.49/14.46/14.44; --rt 2 is SLOWER than --rt 4).
 //
-// YOU CANNOT TIMESTAMP INSIDE A PIXEL SHADER. GPU spans bracket draws, not terms, so the only way to
-// attribute cost within one shader is to remove a term and re-measure. Each value below neutralises
-// exactly one, keeping the shader compiling and the surrounding code identical, so the difference
-// between two runs is that term and nothing else.
+// GPU spans bracket draws, not terms, so a pixel shader cannot be timestamped internally -- the only
+// way to attribute cost is to remove one term and re-measure. Each value below neutralises exactly
+// one, keeping everything else identical, so the delta between two runs is that term alone.
 //
-// THE OUTPUT IS WRONG ON PURPOSE for every non-zero value. This is not a quality ladder and must
-// never be wired to one: an ablated frame is a broken frame that happens to be timeable. 0 is the
-// only value that renders correctly, and it is the default in every build that does not ask.
+// EVERY NON-ZERO VALUE RENDERS A DELIBERATELY WRONG FRAME. This is not a quality ladder and must
+// never be wired to one; 0 is the only value that renders correctly and is the default everywhere.
 //
-// HOW TO READ THE RESULT: the terms should roughly ADD UP to the gap between the normal frame and
-// the raster floor. If they do not -- if ablating everything does not approach 7.82 ms -- then the
-// ablation is not measuring what it claims and the numbers are void. Check that before believing
-// any single line of the table.
+// The terms should roughly ADD UP to the gap between the normal frame and the raster floor (7.82ms).
+// If ablating everything does not approach that, the ablation is not measuring what it claims.
 #ifndef AVER_RD_ABLATE
 #define AVER_RD_ABLATE 0
 #endif
@@ -353,20 +306,17 @@ struct RtMaterial {
 #define AVER_RD_ABL_REFL    3   // the mirror ray (rtReflectionTemporal)
 #define AVER_RD_ABL_SKY     4   // the atmosphere march (skyColor) in the reflection branch
 #define AVER_RD_ABL_TEX     5   // material texture sampling
-// ALL = shadow + GI + reflection + sky. NOT textures, and that exclusion is the fix to a method
-// check this harness previously FAILED. Ablating textures makes averRtSampleSlot return its
-// fallback, so metalRough reads 1.0 and the surface's roughness jumps to the material factor --
-// past the `s.rough <= 0.75` gate on the reflection branch. Mode 5 therefore does not merely remove
-// texture sampling, it REROUTES the shader onto the voxel-cone fallback, which is why combining it
-// with the others made the frame SLOWER than removing the sky alone and why the deltas refused to
-// add up. A term that moves a branch condition cannot be summed with terms that do not.
+// ALL = shadow + GI + reflection + sky. NOT textures: ablating textures makes averRtSampleSlot
+// return its fallback, so metalRough reads 1.0 and roughness jumps past the `s.rough <= 0.75` gate
+// on the reflection branch -- mode 5 doesn't just remove sampling, it REROUTES onto the voxel-cone
+// fallback, which is why combining it with the others made the frame SLOWER than sky alone and why
+// the deltas refused to add up. A term that moves a branch condition can't be summed with ones that
+// don't.
 #define AVER_RD_ABL_ALL     6   // shadow + GI + reflection + sky -- the method check
-// 7 IS NOT LIKE THE OTHERS: it does not remove a term, it restores ACCEPT_FIRST_HIT_AND_END_SEARCH
-// on the sun-shadow ray. That flag was deliberately dropped so a pane of glass could ATTENUATE a
-// shadow instead of stopping it, and the shadow ray's own comment asks for the cost of that decision
-// to be measured before anyone assumes it is small. This is that stopwatch. It KNOWINGLY BREAKS
-// tinted shadows through glass -- a pane becomes a wall again -- so like every other non-zero value
-// here it renders a deliberately wrong frame and must never be wired to a quality tier.
+// 7 IS NOT LIKE THE OTHERS: it restores ACCEPT_FIRST_HIT_AND_END_SEARCH on the sun-shadow ray, which
+// was deliberately dropped so glass could ATTENUATE a shadow instead of stopping it -- this measures
+// the cost of that decision. It KNOWINGLY BREAKS tinted shadows through glass (a pane becomes a wall
+// again), so like every non-zero value here it must never be wired to a quality tier.
 #define AVER_RD_ABL_SHADOW_FIRSTHIT 7
 
 float4 averRtSampleSlot(RtMaterial mat, uint slot, float2 uv, float2 gx, float2 gy, float4 fallback) {
@@ -657,35 +607,30 @@ float2 rtDiscSample(uint k, float ang0) {
 }
 
 // Traces occlusion rays toward the sun's DISC and returns the fraction that reached it: 0 fully
-// shadowed, 1 fully lit, and everything between is a real penumbra.
+// shadowed, 1 fully lit, everything between a real penumbra.
 //
-// The single ray this replaced returned exactly 0.0 or 1.0, so a ray-traced shadow had a hard
-// aliased edge while the cascade path beside it did a 3x3 comparison filter -- turning ray tracing
-// ON made shadows look worse, which is the wrong way round. The sun is not a point: it subtends
-// about half a degree, and that angle is what sets how fast an edge softens. gRtParams.x carries
-// its tangent so the softening is the SUN's property rather than a tuned constant.
+// The single ray this replaced returned exactly 0.0 or 1.0 -- a hard aliased edge next to the
+// cascade path's 3x3 filter, so ray tracing ON made shadows look worse. The sun subtends about half
+// a degree, and that angle sets how fast an edge softens; gRtParams.x carries its tangent so the
+// softening is the SUN's property, not a tuned constant.
 //
-// The bias scales with distance from the camera. A fixed 0.02 cm offset is roughly 300 float ulp
-// at 1000 cm from the origin and under 3 at 100000 cm, so distant geometry self-intersects and
-// speckles -- acne that looks like flickering rather than like a bias problem.
-// `dpx`/`dpy` are the receiver's screen-space footprint, PASSED IN rather than taken here.
+// Bias scales with camera distance: a fixed 0.02cm offset is ~300 float ulp at 1000cm but under 3
+// at 100000cm, so distant geometry self-intersects and speckles like flickering rather than acne.
 //
-// They used to be ddx/ddy(wpos) computed inside. That is correct for a primary surface, where wpos
-// varies smoothly across the quad, and WRONG for a reflected hit: neighbouring pixels' rays land on
-// different triangles metres apart, so the "footprint" becomes a wild vector and the shadow rays
-// scatter across the scene. A derivative taken inside divergent flow is undefined in HLSL as well.
-// A reflected caller passes zero and gets a point sample, which is what it wants.
-// `rays` is explicit rather than read from the constant buffer, so a SECONDARY ray can ask for
-// fewer than a primary one. A reflection is already an approximation -- one bounce, no roughness
-// lobe -- and spending a full disc sweep on the shadow of something seen IN a reflection buys
-// detail nobody can resolve. Primary shading still passes the full count.
+// `dpx`/`dpy` (the receiver's screen-space footprint) are PASSED IN rather than taken via
+// ddx/ddy(wpos) here: that is only correct for a primary surface, and wrong for a reflected hit,
+// whose neighbouring pixels land on different triangles metres apart (and a derivative inside
+// divergent flow is undefined in HLSL regardless). A reflected caller passes zero for a point
+// sample.
 //
-// `frameJitter` is ADDED to the per-pixel rotation, and is NOT part of rtHash: rtHash itself stays
-// exactly what its own comment says it must -- a pure function of the pixel, for the gate oracle's
-// bit-exact single-frame probes. Every existing caller passes 0.0 here and is completely unaffected.
-// rtShadowTemporal is the one caller that passes something else, and only when pixel tiling is
-// actually on -- see its own comment for why a NONZERO, per-frame value is what makes tiling
-// converge at all instead of repeating one sample forever.
+// `rays` is explicit, not read from the cbuffer, so a secondary ray can ask for fewer than a
+// primary one -- a reflection is already an approximation, and a full disc sweep on its shadow buys
+// detail nobody can resolve.
+//
+// `frameJitter` is ADDED to the per-pixel rotation and is NOT part of rtHash, which stays a pure
+// function of the pixel for the gate oracle's bit-exact probes. Only rtShadowTemporal passes a
+// nonzero value, and only when pixel tiling is on -- that's what lets tiling converge instead of
+// repeating one sample forever.
 float3 rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float3 dpy, uint rays,
                float frameJitter) {
     const uint  n    = max(rays, 1u);
@@ -697,26 +642,21 @@ float3 rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float
     float3 T  = normalize(cross(up, L));
     float3 B  = cross(L, T);
 
-    // THE PIXEL'S OWN FOOTPRINT ON THE SURFACE, from the screen-space derivatives of the world
-    // position. This is what actually fixes the jagged edge, and the sun's disc is not:
-    //
-    // the sun's angular RADIUS is about a quarter of a degree, so at contact distances the true
-    // penumbra is far narrower than a pixel -- spreading rays across the disc alone gives the same
-    // binary answer as one ray did, everywhere except a single edge pixel. Meanwhile the shadow
-    // term is computed ONCE PER PIXEL while the geometry beside it is resolved at 8x MSAA, so the
-    // shadow boundary stair-steps against smooth silhouettes. That mismatch is the visible defect.
-    //
-    // Jittering the ray ORIGIN across the footprint turns the per-pixel test into an area estimate,
-    // which is antialiasing the shadow rather than blurring it: the result converges to the exact
-    // fraction of the pixel that is occluded.
+    // THE PIXEL'S OWN FOOTPRINT ON THE SURFACE, from the screen-space derivatives of world
+    // position -- this is what actually fixes the jagged edge, not the sun's disc: the sun's
+    // angular radius (~a quarter degree) makes the true penumbra far narrower than a pixel at
+    // contact distances, so spreading rays across the disc alone gives the same binary answer
+    // everywhere except a single edge pixel. Meanwhile the shadow term is computed once per pixel
+    // while geometry beside it resolves at 8x MSAA, so the boundary stair-steps against smooth
+    // silhouettes. Jittering the ray ORIGIN across the footprint turns the per-pixel test into an
+    // area estimate -- antialiasing the shadow rather than blurring it.
     const float ang0 = rtHash(pixel) * 6.2831853 + frameJitter;
     float3 vis = float3(0.0, 0.0, 0.0);
 
     [loop] for (uint k = 0; k < n; ++k) {
-        // The sample the loop is at. NOTHING HERE DEPENDS ON n, which is the whole design: sample k
-        // sits in the same place whatever the ray count, so raising the count refines the estimate
-        // instead of replacing it with an unrelated one. The same rotated pattern serves both the
-        // sun disc and the pixel footprint, so one sample covers both.
+        // Sample k, independent of n: it sits in the same place whatever the ray count, so raising
+        // the count refines the estimate rather than replacing it. The same rotated pattern serves
+        // both the sun disc and the pixel footprint.
         float2 disc = rtDiscSample(k, ang0);
 
         float3 dir = normalize(L + (T * disc.x + B * disc.y) * tanR);
@@ -724,29 +664,26 @@ float3 rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float
         float3 org = wpos + (dpx * disc.x + dpy * disc.y) * 0.5;
 
         RayDesc r;
-        // Offset along the NORMAL and along the ray. The normal alone leaves acne at grazing
-        // angles, where the surface is nearly parallel to the ray and the offset barely separates
-        // them.
+        // Offset along the NORMAL and along the ray -- the normal alone leaves acne at grazing
+        // angles, where the surface is nearly parallel to the ray and barely separates from it.
         r.Origin    = org + N * bias + dir * bias;
         r.Direction = dir;
         r.TMin      = bias;
         r.TMax      = 100000.0;
-        // NO ACCEPT_FIRST_HIT, and that removal is the feature.
+        // NO ACCEPT_FIRST_HIT: "stop at the first thing touched" is right for a binary shadow and
+        // wrong for a transmissive one -- a pane of glass IS the first thing touched, and ending
+        // there makes it a wall. The ray now runs its own traversal, multiplying a running
+        // transmittance by each translucent surface it crosses and stopping only at something
+        // genuinely solid.
         //
-        // "Stop at the first thing you touch" is exactly right for a binary shadow and exactly wrong
-        // for a transmissive one: a pane of glass IS the first thing touched, and ending there makes
-        // it a wall. The ray now runs its own traversal, multiplying a running transmittance by each
-        // translucent surface it crosses and stopping only at something genuinely solid.
-        //
-        // THE COST IS REAL AND WORTH STATING: without ACCEPT_FIRST_HIT the hardware can no longer
-        // abandon traversal at the first intersection, so every shadow ray in the scene now walks
-        // until it finds an opaque hit or leaves the structure -- including the overwhelming majority
-        // that never meet a pane at all. Measure it before assuming it is small.
+        // THE COST IS REAL: without ACCEPT_FIRST_HIT the hardware can't abandon traversal at the
+        // first hit, so every shadow ray walks until it finds an opaque hit or leaves the structure
+        // -- including the majority that never meet a pane at all. Measure before assuming it's small.
         RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
         // BOTH LANES: this is the one ray that wants to see translucent geometry.
 #if AVER_RD_ABLATE == AVER_RD_ABL_SHADOW_FIRSTHIT
-        // Measurement only -- see AVER_RD_ABL_SHADOW_FIRSTHIT. Opaque lane only and stop at the first
-        // thing touched, which is what this ray did before transmissive shadows existed.
+        // Measurement only -- see AVER_RD_ABL_SHADOW_FIRSTHIT: opaque lane only, stop at the first
+        // thing touched, matching this ray's behaviour before transmissive shadows existed.
         q.TraceRayInline(gScene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_FORCE_OPAQUE,
                          AVER_RT_MASK_OPAQUE_ALL, r);
 #else
@@ -755,38 +692,33 @@ float3 rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float
 
         // ---- TWO MODELS, AND THE MATERIAL PICKS WHICH ----------------------------------------
         //
-        // A material that authors a VOLUME (attenuationDistance > 0) is attenuated by Beer-Lambert
-        // over the distance the light actually travelled inside it. One that does not keeps the
-        // per-crossing surface rule, which is the correct answer for a thin sheet with no authored
-        // medium rather than a compromise.
+        // A material authoring a VOLUME (attenuationDistance > 0) is attenuated by Beer-Lambert over
+        // the distance light actually travelled inside it; one that doesn't keeps the per-crossing
+        // surface rule, correct for a thin sheet with no authored medium.
         //
-        // WHY THE LOOP GATHERS INSTEAD OF MULTIPLYING AS IT GOES. A path length needs both ends of
-        // the segment, and the exit candidate can arrive at any point in the walk, so there is
-        // nowhere to apply a volume's contribution until the walk is over. Spans are collected here
-        // and resolved below.
+        // THE LOOP GATHERS RATHER THAN MULTIPLYING AS IT GOES because a path length needs both ends
+        // of the segment, and the exit candidate can arrive at any point in the walk -- spans are
+        // collected here and resolved below.
         //
-        // PAIRED BY MIN/MAX t, NEVER BY ARRIVAL ORDER OR BY FACING. DXR does not specify that
-        // non-opaque candidates arrive nearest-first, so "first is entry, second is exit" is unsound.
-        // And CandidateTriangleFrontFace() would be worse than unsound here: winding is exactly what
-        // broke volume absorption on the pool this morning -- the fluid box winds opposite to the
-        // cube -- so a facing test is the one thing this must not be built on. min/max needs neither.
+        // PAIRED BY MIN/MAX t, NEVER ARRIVAL ORDER OR FACING. DXR does not guarantee non-opaque
+        // candidates arrive nearest-first, so "first is entry, second is exit" is unsound, and
+        // CandidateTriangleFrontFace() is worse: winding is exactly what broke volume absorption on
+        // the pool (the fluid box winds opposite the cube), so a facing test is the one thing this
+        // must not be built on. min/max needs neither.
         //
-        //   one hit   -> the ray STARTED INSIDE the medium, and t IS the distance out. This is the
-        //                pool floor looking up at the sun through its own water.
-        //   two hits  -> entered and exited; the span between them is the thickness. A pane.
-        //   more      -> concave or self-overlapping geometry; the outer span is the honest estimate.
-        // TWO SLOTS AS PLAIN SCALARS, NOT AN ARRAY, AND THAT IS A MEASURED DECISION.
+        //   one hit  -> the ray STARTED INSIDE the medium, t IS the distance out (pool floor looking
+        //               up through its own water).
+        //   two hits -> entered and exited; the span between is the thickness (a pane).
+        //   more     -> concave/self-overlapping geometry; the outer span is the honest estimate.
         //
-        // The first version of this held medIid/medTMin/medTMax/medHits as local arrays indexed by a
-        // loop variable. HLSL cannot always keep a dynamically-indexed local array in registers, and
-        // when it spills to scratch the cost lands on the pass that can least afford it: the sun
-        // shadow is wave-bound, so losing occupancy costs far more than the arithmetic saves.
-        // MEASURED: 7.96 ms -> 9.95 ms, a 25% frame regression for a water shadow. Unrolled into
-        // named scalars it stays in registers.
+        // TWO SLOTS AS PLAIN SCALARS, NOT AN ARRAY -- MEASURED. The first version held
+        // medIid/medTMin/medTMax/medHits as loop-indexed local arrays; HLSL can't always keep a
+        // dynamically-indexed array in registers, and the spill cost lands on the pass that can
+        // least afford it (the sun shadow is wave-bound). MEASURED: 7.96ms -> 9.95ms, a 25%
+        // regression for a water shadow. Unrolled into named scalars it stays in registers.
         //
-        // Two is what the scene actually needs -- glass over water -- and a third overlapping medium
-        // falls through to the surface rule rather than being dropped, which is approximate but never
-        // silently absent.
+        // Two is what the scene needs -- glass over water; a third overlapping medium falls through
+        // to the surface rule rather than being dropped.
         uint  med0Iid = 0xffffffffu, med1Iid = 0xffffffffu;
         float med0Min = 0.0, med0Max = 0.0, med1Min = 0.0, med1Max = 0.0;
         uint  med0Hits = 0u, med1Hits = 0u;
@@ -797,8 +729,8 @@ float3 rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float
         [loop] for (uint step = 0; step < 8u && q.Proceed(); ++step) {
             if (q.CandidateType() != CANDIDATE_NON_OPAQUE_TRIANGLE) break;
 
-            // The material of the thing we just passed through. This is what RtInstance::materialIndex
-            // and the t9 material table were built for and, until now, never used by a shadow ray.
+            // The material of the thing we just passed through -- what RtInstance::materialIndex and
+            // the t9 material table were built for, and until now never used by a shadow ray.
             const uint iid = q.CandidateInstanceID();
             const RtMaterial m = gRtMaterials[gRtInstances[iid].materialIndex];
 
@@ -819,35 +751,28 @@ float3 rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float
             }
 
             if (!handled) {
-                // NO VOLUME (or no slot left): the per-crossing surface rule, the HLSL twin of
-                // pbr::shadowTransmittance (Material.cpp). See that function's comment for why the
-                // two are no longer identical in shape -- it has no ray and cannot know a distance.
+                // NO VOLUME (or no slot left): the per-crossing surface rule, HLSL's twin of
+                // pbr::shadowTransmittance (Material.cpp) -- no longer identical in shape because
+                // this has a ray and can measure a distance, that one cannot.
                 const float k = max(1.0 - m.baseColorFactor.a, saturate(m.transmission));
                 through *= saturate(m.baseColorFactor.rgb) * k;
 
-                // Once effectively nothing gets through, the surface is opaque for shadow purposes
-                // and there is no point walking further. Only the surface path may take this
-                // early-out: a volume's contribution has not been applied yet, so a walk carrying
-                // one must run to the end or its medium is silently dropped.
+                // Once effectively nothing gets through, treat the surface as opaque and stop. Only
+                // the surface path may take this early-out: a volume's contribution hasn't been
+                // applied yet, so a walk carrying one must run to the end or lose its medium.
                 if (max(through.r, max(through.g, through.b)) < 0.01 && med0Hits == 0u) {
                     through = float3(0, 0, 0);
                     break;
                 }
             }
 
-            // NOT committed. Committing would end the traversal at this pane; leaving the candidate
-            // uncommitted is what lets Proceed() carry on to whatever is behind it.
+            // NOT committed: committing would end traversal at this pane, so Proceed() can carry on
+            // to whatever is behind it.
         }
 
-        // Resolve the gathered spans, per channel, by the same Beer-Lambert the VIEW path uses.
-        // averVolumeTransmittance is the one implementation both paths call and it reads no globals,
-        // precisely so a ray hit can use it -- see its own comment. Calling it here is what makes the
-        // light going DOWN through a medium agree with the light coming back UP through it, which is
-        // the disagreement this whole change exists to remove.
-        //
-        //   one hit  -> the ray STARTED INSIDE the medium and t IS the distance out: the pool floor
-        //               looking up at the sun through its own water.
-        //   two+     -> entered and exited; the span between them is the thickness. A pane.
+        // Resolve the gathered spans, per channel, via the same Beer-Lambert averVolumeTransmittance
+        // the VIEW path calls (it reads no globals, precisely so a ray hit can use it) -- this is
+        // what makes light going DOWN through a medium agree with light coming back UP through it.
         if (med0Hits > 0u) {
             const RtMaterial m0 = gRtMaterials[gRtInstances[med0Iid].materialIndex];
             const float th0 = (med0Hits == 1u) ? med0Max : (med0Max - med0Min);
@@ -862,46 +787,38 @@ float3 rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float
         // An opaque hit anywhere along the way blocks everything, whatever the panes in front said.
         if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) through = float3(0, 0, 0);
 
-        // PER CHANNEL NOW. This used to reduce to luminance here because rtShadow's return type,
-        // its call sites and the history were all single-channel -- so a shadow could be correctly
-        // DARKENED by a medium but never take its COLOUR. Water lit a pool floor grey instead of
-        // cyan. The reduction moved to rtShadowTemporal, which needs a scalar only for the history
-        // it filters; see there for why the history did NOT have to grow to carry this.
+        // PER CHANNEL NOW: this used to reduce to luminance here (rtShadow's return type, its call
+        // sites and the history were all single-channel), so a shadow could be correctly DARKENED by
+        // a medium but never take its COLOUR -- water lit a pool floor grey instead of cyan. The
+        // reduction moved to rtShadowTemporal, which needs a scalar only for the history it filters.
         vis += through;
     }
     return vis / (float)n;
 }
 
 // Reprojects wpos through LAST frame's camera to sample the ray-traced shadow history there. False
-// when the reprojection is not usable at all: off-screen, behind last frame's near plane, or a
-// DISOCCLUSION -- the stored depth at the reprojected texel does not match what this world point
-// should have looked like last frame (see the depth-comparison block below). In every false case
-// `hist`/`velocityPx` are left untouched.
+// when unusable: off-screen, behind last frame's near plane, or a DISOCCLUSION (stored depth at the
+// reprojected texel disagrees with what this world point should have looked like last frame -- see
+// the depth-comparison block below). `hist`/`velocityPx` are left untouched on a false return.
 //
-// `pixel` is this frame's own screen position; the reprojection's screen-space displacement from
-// it is handed back as `velocityPx` so the caller can discount an otherwise-valid sample that has
-// moved -- camera motion (or the receiver surface itself moving) pushes a static world point
-// across texels between frames, which the depth test alone does not catch: it only tells apart
-// "still the same surface" from "now looking at something else", not "the same surface, but I have
-// slid along it since last frame."
+// `pixel` is this frame's screen position; the reprojection's screen-space displacement from it is
+// handed back as `velocityPx` so the caller can discount a sample that has moved -- camera or
+// surface motion pushes a static world point across texels, which the depth test alone can't catch
+// (it tells "different surface" from "same surface", not "same surface, slid since last frame").
 //
-// NDC -> LAST frame's VIEWPORT rect, not [0,1] of the whole texture: the editor docks the 3D view
-// in a sub-rect of the backbuffer (gSceneViewport), and a plain ndc*0.5+0.5 implicitly assumes the
-// viewport covers the entire render target, which lands every reprojection on the wrong texel
-// whenever it does not. Caught by the shadow-rt / penumbra-rt gates -- moved by a full shade, not a
-// rounding difference -- not shipped.
+// NDC -> LAST frame's VIEWPORT rect, not [0,1] of the whole texture: the editor docks the 3D view in
+// a sub-rect of the backbuffer (gSceneViewport), and a plain ndc*0.5+0.5 lands every reprojection on
+// the wrong texel whenever the viewport doesn't cover the full target. Caught by the shadow-rt /
+// penumbra-rt gates -- moved by a full shade, not a rounding difference -- not shipped.
 //
-// NEAREST, not bilinear -- and this is the OPPOSITE of what an earlier version of this function
-// concluded, for a reason specific to who calls it now. That version was read every frame by every
-// pixel, all of them always in sync (freshly traced that same frame), so a bilinear tap blending in
-// a neighbour was blending in something almost identical -- cheap insurance against a reprojected
-// coordinate landing a hair off a texel centre. rtShadowTemporal's tiled path is the opposite
-// situation on purpose: neighbouring pixels are DELIBERATELY out of sync, each mid-way through its
-// own turn cycle, so a bilinear tap mixes in a neighbour that can be many frames stale and on the
-// other side of a penumbra -- measured to converge to a stable but WRONG value (a 4x4 tile settled
-// at 46,46,47 against a real 23,27,32, unmoved between 300 and 1500 frames, so this was not slow
-// convergence). Nearest guarantees this pixel reads its OWN last write, which is what the schedule
-// in rtShadowTemporal actually assumes.
+// NEAREST, not bilinear -- the OPPOSITE of an earlier version's conclusion, because who calls it
+// changed. That version was read every frame by every pixel, all freshly traced and in sync, so a
+// bilinear tap blended in something nearly identical. rtShadowTemporal's tiled path is deliberately
+// out of sync -- each pixel mid-way through its own turn cycle -- so a bilinear tap mixes in a
+// neighbour that can be many frames stale and across a penumbra: measured to converge to a stable
+// but WRONG value (a 4x4 tile settled at 46,46,47 against a real 23,27,32, unmoved between 300 and
+// 1500 frames -- not slow convergence). Nearest guarantees this pixel reads its OWN last write,
+// which is what rtShadowTemporal's schedule assumes.
 bool rtReprojectHistory(float3 wpos, float2 pixel, out float hist, out float2 velocityPx) {
     hist = 0.0;
     velocityPx = 0.0;
@@ -913,24 +830,22 @@ bool rtReprojectHistory(float3 wpos, float2 pixel, out float hist, out float2 ve
     gRtShadowHist.GetDimensions(texW, texH);
     float2 px = gSceneViewport.xy +
                 float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) * gSceneViewport.zw;
-    // FLOOR, not round: `px` for a pixel that has not moved lands almost exactly on THAT pixel's own
-    // centre (integer index + 0.5), which is precisely the .5 tie `round()` breaks inconsistently
-    // (round-half-to-even) depending on whether the index is odd or even -- silently sending roughly
-    // half of all pixels to their wrong neighbour instead of themselves. floor() of a centre at
-    // index+0.5 is exactly `index`, matching how the WRITE side already indexes this same texture
-    // (gRtShadowHistOut[uint2(pixel)] truncates SV_Position the same way). This is what a tiled
-    // pixel schedule's "read my own last write" actually needs -- round() was measured to converge
-    // to a stable but wrong value (penumbra-rt settled at 78,75,70 against a true ~23,27,32).
+    // FLOOR, not round: for a pixel that hasn't moved, `px` lands almost exactly on that pixel's own
+    // centre (index+0.5) -- exactly the tie round() breaks inconsistently (round-half-to-even) by
+    // index parity, silently sending roughly half of all pixels to the wrong neighbour. floor() of
+    // that centre is exactly `index`, matching how the WRITE side indexes this texture
+    // (gRtShadowHistOut[uint2(pixel)] truncates SV_Position the same way) -- what "read my own last
+    // write" needs. round() was measured to converge to a stable but wrong value (penumbra-rt
+    // settled at 78,75,70 against a true ~23,27,32).
     int2 texel = int2(floor(px));
     if (any(texel < 0) || texel.x >= (int)texW || texel.y >= (int)texH) return false;
 
     const float2 stored = gRtShadowHist.Load(int3(texel, 0));   // x = visibility, y = linear depth
-    // clip.w IS the expected depth at this reprojected point: the same value VSMain's o.pos.w would
-    // carry for a vertex sitting at wpos (RHIShaders.cpp's VSMain computes o.pos = mul(wp,
-    // gViewProj) the identical way), just through LAST frame's camera instead of this one. Comparing
-    // it to what the history actually stored there catches a disocclusion a screen-position check
-    // alone cannot: a silhouette edge can reproject to an already-populated texel while the surface
-    // now visible through it sits at a completely different depth.
+    // clip.w IS the expected depth here: the same value VSMain's o.pos.w carries for a vertex at
+    // wpos (RHIShaders.cpp computes o.pos = mul(wp, gViewProj) identically), through LAST frame's
+    // camera instead of this one. Comparing it to what the history stored catches a disocclusion a
+    // screen-position check alone can't: a silhouette edge can reproject onto an already-populated
+    // texel while the surface now visible there sits at a completely different depth.
     const float tol = max(clip.w, stored.y) * 0.03 + 1.0;   // 3% relative, +1cm floor at grazing distances
     if (abs(clip.w - stored.y) > tol) return false;
 
@@ -942,21 +857,18 @@ bool rtReprojectHistory(float3 wpos, float2 pixel, out float hist, out float2 ve
 // The SPATIAL denoiser: average this pixel's shadow with its neighbours' from the history texture,
 // weighted by how well each neighbour's surface agrees with this one's.
 //
-// WHY IT READS LAST FRAME'S TEXTURE AND WHY THAT IS FINE. t6 and u2 are different textures, ping-
-// ponged per frame, and t6 rests in ShaderResource for the whole colour pass -- so an arbitrary
-// neighbourhood read is a plain load of an immutable texture, needing no barrier and no reordering
-// of anything. The neighbours are one frame old. That is a completely different proposition from
-// the TEMPORAL path above, which reuses a value up to 2^(2*tileBits) frames old AS THE ANSWER:
-// here the centre pixel always contributes its own freshly traced value, and a neighbour only ever
-// adjusts the weighting. A neighbour that fails the plane test is DROPPED from the kernel, never
-// substituted, so the worst case is that every neighbour is rejected and this returns the centre
-// unchanged -- today's noisy-but-correct behaviour. The guide weights the blur; it never supplies
-// the value.
+// READS LAST FRAME'S TEXTURE, AND THAT IS FINE: t6/u2 are different ping-ponged textures, and t6
+// rests in ShaderResource for the whole colour pass, so an arbitrary neighbourhood read is a plain
+// load needing no barrier. That is a different proposition from the TEMPORAL path above, which
+// reuses a value up to 2^(2*tileBits) frames old AS THE ANSWER -- here the centre pixel always
+// contributes its own freshly traced value, and a neighbour only ever adjusts the weighting. A
+// neighbour failing the plane test is DROPPED, never substituted, so the worst case returns the
+// centre unchanged. The guide weights the blur; it never supplies the value.
 //
-// WHY AVERAGING NEIGHBOURS IS AN ESTIMATE RATHER THAN A BLUR. rtShadow jitters the ray ORIGIN
-// across the pixel's own footprint (see its `org` line), so neighbouring pixels on one flat
-// receiver are already sampling different points of the same surface. Their mean is a genuine area
-// estimate of the same integral one pixel would need many rays to reach.
+// AVERAGING NEIGHBOURS IS AN ESTIMATE, NOT A BLUR: rtShadow jitters the ray ORIGIN across the
+// pixel's own footprint (see its `org` line), so neighbours on one flat receiver already sample
+// different points of the same surface -- their mean is a genuine area estimate of the same
+// integral one pixel would need many rays to reach.
 float rtShadowSpatial(float centre, float3 wpos, float3 N, float2 pixel, float curDepth) {
     const int radius = (int)gRtDenoiseParams.x;
     if (radius <= 0 || gRtHistParams.y < 0.5) return centre;
@@ -964,19 +876,16 @@ float rtShadowSpatial(float centre, float3 wpos, float3 N, float2 pixel, float c
     float texW, texH;
     gRtShadowHist.GetDimensions(texW, texH);
 
-    // GATHER AROUND WHERE THIS PIXEL WAS LAST FRAME, NOT AROUND WHERE IT IS NOW. gRtShadowHist is
-    // last frame's texture; while the camera moves, the image has shifted inside it, so a
-    // neighbourhood centred on THIS frame's coordinate samples a patch of a different part of the
-    // scene. Measured before this was added: still, the filter landed within one code of the
-    // sixteen-ray answer -- and under a six-degree wobble it drifted 12 to 32 codes darker,
-    // increasing with radius, which is the signature of a kernel walking off its own surface.
+    // GATHER AROUND WHERE THIS PIXEL WAS LAST FRAME, NOT WHERE IT IS NOW: gRtShadowHist is last
+    // frame's texture, so while the camera moves a neighbourhood centred on THIS frame's coordinate
+    // samples a different part of the scene. Measured: still, within one code of the sixteen-ray
+    // answer -- but under a six-degree wobble it drifted 12 to 32 codes darker, worsening with
+    // radius, the signature of a kernel walking off its own surface.
     //
-    // Same arithmetic as rtReprojectHistory, and deliberately the same in every detail: last
-    // frame's viewProj, mapped into last frame's VIEWPORT RECT rather than [0,1] of the whole
-    // texture (the editor docks the 3D view in a sub-rect), and FLOOR rather than round -- a pixel
-    // that has not moved lands on its own centre at index+0.5, which is exactly the tie round()
-    // breaks half the time in the wrong direction. Both of those are documented landmines in that
-    // function; this one inherits them rather than re-deriving them.
+    // Same arithmetic as rtReprojectHistory, deliberately: last frame's viewProj mapped into last
+    // frame's VIEWPORT RECT (not [0,1] of the whole texture -- the editor docks the 3D view in a
+    // sub-rect), and FLOOR rather than round (see that function's own comment for the tie round()
+    // breaks the wrong way half the time). Inherited landmines, not re-derived ones.
     float2 centrePx = pixel;
     if (gRtHistParams.y > 0.5) {
         const float4 pclip = mul(float4(wpos, 1.0), gPrevViewProj);
@@ -996,41 +905,34 @@ float rtShadowSpatial(float centre, float3 wpos, float3 N, float2 pixel, float c
     const float dzdx = ddx(curDepth);
     const float dzdy = ddy(curDepth);
 
-    // A GAUSSIAN falloff, where this used to give every accepted neighbour weight 1.0. A flat kernel
-    // is a box filter, and a box filter's frequency response rings: the visible form of that is the
-    // faint square-edged plateau a box blur leaves around a bright feature, which on a shadow reads
-    // as a rectangular halo around a contact point. sigma = radius/2 puts the useful support at
-    // about the radius asked for, so raising the radius widens the blur smoothly rather than in
-    // steps. Matched to rtReflectionSpatial's kernel deliberately -- two filters over the same
-    // geometry with different shapes is a difference someone will eventually have to explain.
+    // A GAUSSIAN falloff, where this used to give every accepted neighbour weight 1.0. A flat (box)
+    // kernel rings in frequency response -- visibly, a square-edged plateau around a bright feature,
+    // which on a shadow reads as a rectangular halo around a contact point. sigma = radius/2 puts the
+    // useful support at about the radius asked for, so widening the radius widens the blur smoothly.
+    // Matched to rtReflectionSpatial's kernel deliberately -- two filters over the same geometry with
+    // different shapes is a difference someone would eventually have to explain.
     //
-    // THIS IS LIVE AT EVERY REAL TIER, AND THE COMMENT THAT USED TO SIT HERE SAID THE OPPOSITE.
+    // THIS IS LIVE AT EVERY REAL TIER, AND A COMMENT THAT USED TO SIT HERE SAID THE OPPOSITE: it
+    // claimed the change shipped inert because rtShadowDenoiseForQuality returns 0 at every tier. That
+    // was false and checkable in one file -- Voxi.cpp returns 2 for Low/Medium/High and 1 for Epic
+    // (only Off and an unknown tier return 0), and Voxi.hpp defaults the struct field to 2 because the
+    // DEFAULT TIER IS Medium. The radius is 2 out of the box; this kernel runs on every shadow frame.
     //
-    // It claimed the change shipped inert, on the grounds that rtShadowDenoiseForQuality returns 0 at
-    // every tier so the early return above fires everywhere. That was simply false, and checkable in
-    // one file: Voxi.cpp returns 2 for Low, Medium and High and 1 for Epic -- only Off and an unknown
-    // tier return 0 -- and Voxi.hpp defaults the struct field to 2 because the DEFAULT TIER IS Medium.
-    // So the radius is 2 out of the box and this kernel runs on every frame that traces a shadow.
-    //
-    // MEASURED, because it was caught by the oracle rather than by reading: re-recording the gates
-    // moved 15 values, and these three in all five ray-tracing-capable configurations, WARP included:
+    // CAUGHT BY THE ORACLE, NOT BY READING: re-recording the gates moved 15 values, three of them in
+    // all five ray-tracing-capable configurations, WARP included:
     //
     //   penumbra-rt   33,39,48 -> 62,64,66      partially occluded, much brighter
     //   rt-penumbra   91,88,85 -> 96,93,89      partially occluded, brighter
     //   ms-rt-gi      52,19,13 -> 38,15,11      the same sunVis feeding the GI-composited path
     //
-    // and moved shadow-rt/shadow-ms-rt NOT AT ALL. That split is the signature of a reweighting and
-    // is what makes the mechanism legible: in full umbra every accepted tap already reads 0, so any
-    // weighting averages to 0 and the value is pinned. In a penumbra the old flat kernel dragged the
-    // estimate toward far, more-occluded neighbours; the Gaussian discounts them (0.135 at distance
-    // 2, 0.018 at the corner, sigma = 1), so partial shadow lightens. Bit-identical across hardware
-    // and the WARP software rasteriser, over a record and an independent verify pass -- deterministic,
-    // not flaky.
+    // shadow-rt/shadow-ms-rt moved NOT AT ALL -- the signature of a reweighting: in full umbra every
+    // tap already reads 0 so any weighting is pinned there, while in a penumbra the old flat kernel
+    // dragged the estimate toward far, more-occluded neighbours and the Gaussian discounts them
+    // (0.135 at distance 2, 0.018 at the corner, sigma = 1), lightening partial shadow. Bit-identical
+    // across hardware and WARP, over a record and an independent verify pass.
     //
-    // THE LESSON IS THE FALSE CLAIM, NOT THE FILTER. A change asserted to be inert is a change nobody
-    // reviews as a visual one. If this kernel is ever the wrong choice, that is a judgement to make on
-    // a capture -- but it must be made, and the sentence that used to be here prevented it from being
-    // asked at all.
+    // THE LESSON IS THE FALSE CLAIM, NOT THE FILTER: an "inert" change is one nobody reviews visually.
+    // If this kernel is ever wrong, that's a judgement to make on a capture -- but it has to be asked.
     const float sigma  = max((float)radius * 0.5, 0.5);
     const float inv2s2 = 1.0 / (2.0 * sigma * sigma);
 
@@ -1047,26 +949,17 @@ float rtShadowSpatial(float centre, float3 wpos, float3 N, float2 pixel, float c
             const float tol = max(abs(predicted), 1.0) * 0.02 + 1.0;
             if (abs(st.y - predicted) > tol) continue;
 #if AVER_GBUFFER_HISTORY
-            // THE CREASE TERM. A depth-plane test alone cannot see a normal DISCONTINUITY: two
-            // surfaces meeting at a similar depth -- a wall meeting a floor, two faces of a box seen
-            // edge-on -- can pass the test just above and still be the WRONG surface to blend with,
-            // which is what bleeds shadow across a crease that ought to stay sharp (see this
-            // function's own header for the grazing-floor failure the plane test already documents;
-            // a crease is the other side of the same coin -- two surfaces, not one, where depth
-            // alone cannot tell them apart). Sampled from the SAME reprojected tap (`t`) the depth
-            // history above just read, at LAST frame's position of LAST frame's normal -- reading
-            // THIS frame's own normal here instead would compare two different moments and the
-            // comparison would mean nothing, the identical reasoning gRtShadowHist itself is read
-            // from last frame rather than this one.
+            // THE CREASE TERM: a depth-plane test alone can't see a normal DISCONTINUITY -- two
+            // surfaces meeting at a similar depth (a wall meeting a floor, a box edge-on) can pass
+            // the plane test and still be the wrong surface to blend with, bleeding shadow across a
+            // crease that should stay sharp. Sampled from the SAME reprojected tap (`t`) at LAST
+            // frame's normal -- comparing against THIS frame's own normal would mix two different
+            // moments, the same reason gRtShadowHist itself reads last frame rather than this one.
             const float3 nb = gGBufNormalHist.Load(int3(t, 0)).xyz * 2.0 - 1.0;
-            // A HARD REJECT, matching the depth-plane test immediately above rather than a soft
-            // weight: a neighbour whose normal disagrees is the wrong surface, not a noisier sample
-            // of the right one, and blending it in is exactly the crease-bleed this term exists to
-            // stop -- "dropped from the kernel, never substituted", the same rule this function's
-            // own header states for a plane-test failure. cos(60 deg), not something tighter:
-            // averPackNormalRoughness (below) quantises the normal to RGB10A2 -- 10 bits per
-            // channel -- and a threshold much tighter than this starts rejecting a FLAT surface's
-            // own quantisation noise as if every neighbour were a crease.
+            // HARD REJECT, matching the plane test: a disagreeing normal is the wrong surface, not a
+            // noisier sample of the right one. cos(60 deg), not tighter: averPackNormalRoughness
+            // quantises the normal to RGB10A2 (10 bits/channel), and a tighter threshold would reject
+            // a FLAT surface's own quantisation noise as if every neighbour were a crease.
             if (dot(N, nb) < 0.5) continue;
 #endif
             const float w = exp(-(float)(ox * ox + oy * oy) * inv2s2);
@@ -1075,38 +968,32 @@ float rtShadowSpatial(float centre, float3 wpos, float3 N, float2 pixel, float c
         }
     }
 
-    // gRtDenoiseParams.y is how much of the filtered value to take. At 0 the taps above still run --
-    // radius comes from a constant, so the loop is dynamic and survives optimisation -- and this
-    // returns `centre` EXACTLY, because lerp(v, f, 0) is v + 0*(f-v) for any finite f. That is the
-    // configuration the tap cost is measured in, before the filter itself is trusted.
+    // gRtDenoiseParams.y: how much of the filtered value to take. At 0 the taps still ran (radius is
+    // a runtime constant, so the loop can't be optimised away) and this returns `centre` exactly --
+    // lerp(v, f, 0) is v for any finite f. That's the cost-measurement configuration.
     return lerp(centre, acc / wsum, saturate(gRtDenoiseParams.y));
 }
 
-// The PRIMARY sun-shadow call only -- rtReflection's own inner rtShadow() call stays exactly as it
-// always has, one ray with no footprint and frameJitter = 0.0, and never touches the history:
-// blending in a reflected surface's shadow would overwrite this pixel's history with a value that
-// has nothing to do with what a later frame's PRIMARY ray at this same pixel is estimating.
+// The PRIMARY sun-shadow call only -- rtReflection's own inner rtShadow() call stays one ray with no
+// footprint and frameJitter = 0.0, and never touches the history: blending in a reflected surface's
+// shadow would overwrite this pixel's history with a value unrelated to what a later frame's
+// PRIMARY ray at this pixel is estimating.
 //
 // gRtHistParams.w is the pixels-per-ray TILE EDGE, as its bit count (0 = off, every pixel traces
-// every frame). At 0 this is BIT-FOR-BIT what rtShadow() alone gives: no jitter, no history blend,
-// only a plain write so the buffer stays live for whenever a caller turns tiling on. Tiling is what
-// actually cuts ray count -- not blending on its own, which only smooths flicker on something that
-// is genuinely moving. Turning tiling on is what makes the (now adaptive, see below) blend cost
-// worth paying: most pixels do not trace at all most frames.
+// every frame). At 0 this is BIT-FOR-BIT rtShadow() alone: no jitter, no history blend, just a plain
+// write so the buffer stays live for when tiling turns on. Tiling is what actually cuts ray count;
+// blending alone only smooths flicker on something genuinely moving, and is worth its (now adaptive)
+// cost once tiling means most pixels don't trace most frames.
 // Splits a tinted visibility into the scalar the denoiser filters and the colour it does not.
 //
-// WHY THE HISTORY DID NOT HAVE TO GROW, which is the whole design of this: the two things rtShadow
-// now returns have completely different character. OCCLUSION is binary and noisy -- one ray either
-// met a wall or did not -- and that is exactly what the temporal and spatial filters exist to
-// smooth. A MEDIUM'S TINT is smooth and almost noise-free: it is a continuous function of a path
-// length through a volume, and neighbouring pixels agree closely. Filtering it buys nothing.
-//
-// So the scalar keeps going through the RG32Float history and its filters, bit for bit as before,
-// and the tint rides on top unfiltered. Widening gRtShadowHist to RGBA32Float would have doubled two
-// buffers already costing ~56 MB each at scene resolution, and RGBA16Float would have put the
-// history's linear DEPTH channel -- clip-space w in centimetres, which reaches tens of thousands out
-// on terrain -- into a format with 8 cm of precision up there, which the disocclusion test reads.
-// Neither price is worth paying for a quantity that does not need filtering.
+// WHY THE HISTORY DID NOT HAVE TO GROW: OCCLUSION is binary and noisy (one ray met a wall or didn't)
+// -- exactly what the temporal/spatial filters exist to smooth. A MEDIUM'S TINT is a smooth,
+// near-noise-free function of path length through a volume; filtering it buys nothing. So the scalar
+// keeps going through the existing RG32Float history bit-for-bit, and the tint rides on top
+// unfiltered. Widening to RGBA32Float would have doubled two buffers already costing ~56MB each at
+// scene resolution; RGBA16Float would have dropped the history's linear DEPTH channel (clip-space w
+// in centimetres, tens of thousands out on terrain) to 8cm of precision where the disocclusion test
+// reads it. Neither price is worth paying for a quantity that doesn't need filtering.
 float averShadowLum(float3 v) { return dot(v, float3(0.2126, 0.7152, 0.0722)); }
 
 // The normalised colour of a tinted visibility. White when there is effectively nothing to tint --
@@ -1122,11 +1009,10 @@ float3 rtShadowTemporal(float3 wpos, float3 N, float3 L, float2 pixel, float3 dp
     // either one here would read or write a null descriptor rather than skip cleanly.
     if (gRtHistParams.x < 0.5) return rtShadow(wpos, N, L, pixel, dpx, dpy, rays, 0.0);
 
-    // THIS frame's own linear depth at wpos, computed the same way VSMain would (mul(wp, gViewProj)
-    // .w) rather than read back from a depth buffer -- the shadow pass has none of its own. Written
-    // into the history alongside visibility every single write below, regardless of which branch is
-    // taken, so next frame's rtReprojectHistory always has a fresh depth to disocclusion-test
-    // against, not one that is itself stale by however many frames since this pixel's last turn.
+    // THIS frame's own linear depth at wpos, computed the way VSMain would (mul(wp, gViewProj).w)
+    // rather than read back from a depth buffer the shadow pass doesn't have. Written into the
+    // history alongside visibility on every write below, so next frame's rtReprojectHistory always
+    // has a fresh depth rather than one stale by however many frames since this pixel's last turn.
     const float curDepth = mul(float4(wpos, 1.0), gViewProj).w;
 
     const uint tileBits = (uint)gRtHistParams.w;
@@ -1135,11 +1021,10 @@ float3 rtShadowTemporal(float3 wpos, float3 N, float3 L, float2 pixel, float3 dp
         const float  fresh   = averShadowLum(fresh3);
         const float3 tint    = averShadowTint(fresh3, fresh);
         gRtShadowHistOut[uint2(pixel)] = float2(fresh, curDepth);
-        // FILTERED HERE TOO, and this branch is the one that matters most. tileBits == 0 is
-        // rtPixelsPerRayTile == 1, which is what Medium -- the DEFAULT tier -- runs, and it is the
-        // only configuration in which the shadow term is a hard 0 or 1 with nothing whatsoever
-        // smoothing it. Returning `fresh` straight from here, as this did, wired the spatial filter
-        // into the amortised path alone and left the default one completely untouched: the penumbra
+        // FILTERED HERE TOO, and this branch matters most: tileBits == 0 is rtPixelsPerRayTile == 1,
+        // what Medium -- the DEFAULT tier -- runs, and the only configuration where the shadow term
+        // is a hard 0/1 with nothing smoothing it. Returning `fresh` straight from here wired the
+        // spatial filter into the amortised path alone and left the default untouched: the penumbra
         // probe read an unchanged 61,59,59 at every radius, which is what caught it. Two returns,
         // two call sites -- an early return is exactly how a later edit loses one of them again.
         return rtShadowSpatial(fresh, wpos, N, pixel, curDepth) * tint;
@@ -1161,32 +1046,30 @@ float3 rtShadowTemporal(float3 wpos, float3 N, float3 L, float2 pixel, float3 dp
     const bool haveHist = gRtHistParams.y > 0.5 && rtReprojectHistory(wpos, pixel, hist, velocityPx);
 
     float vis;
-    // WHITE WHEN THIS PIXEL DID NOT TRACE. On a reused-history frame there is no fresh sample to
-    // take a colour from, and the history deliberately does not store one -- so the tint falls back
-    // to untinted rather than to a stale colour from a different surface. Only reachable on the
-    // amortised path, which is dead at every shipped tier (rtPixelsPerRayTile is 1 everywhere).
+    // WHITE WHEN THIS PIXEL DID NOT TRACE: on a reused-history frame there is no fresh sample to take
+    // a colour from and the history deliberately doesn't store one, so the tint falls back to
+    // untinted rather than a stale colour from a different surface. Only reachable on the amortised
+    // path, dead at every shipped tier (rtPixelsPerRayTile is 1 everywhere).
     float3 tint = float3(1.0, 1.0, 1.0);
     if (myTurn || !haveHist) {
         // The golden-angle frame offset spends a DIFFERENT sample of the same low-discrepancy
-        // sequence each turn, so 2^(2*tileBits) turns converge toward the same estimate that many
-        // SPATIAL rays would give in one frame -- see rtDiscSample for why that composition works.
-        // frameJitter = 0.0 (rtHash alone) would repeat the identical ray every turn, which never
-        // converges past one sample; that is the whole reason tiling needs this and the tileBits==0
-        // path above does not.
+        // sequence each turn, so 2^(2*tileBits) turns converge toward what that many SPATIAL rays
+        // would give in one frame (see rtDiscSample). frameJitter = 0.0 (rtHash alone) would repeat
+        // the identical ray every turn and never converge past one sample -- why tiling needs this
+        // and the tileBits==0 path above does not.
         const float frameJitter = (float)frameIdx * 2.39996323;
         const float3 vis3 = rtShadow(wpos, N, L, pixel, dpx, dpy, rays, frameJitter);
         vis  = averShadowLum(vis3);
         tint = averShadowTint(vis3, vis);
         if (haveHist) {
-            // ADAPTIVE blend weight, not a flat constant: a reprojected sample that has barely
-            // moved on screen is close to a repeated measurement of the same point and earns a high
-            // weight; one that has moved several pixels is increasingly likely to be sampling
-            // slightly the wrong part of the surface even though it passed the depth test above
-            // (depth alone tells "same surface" from "different surface", not "same surface, but
-            // I've slid along it"), so it is trusted less the faster it is moving. The budget the
-            // falloff runs over SHRINKS as the tile grows: a bigger tile's history is on average
-            // staler even before any motion is considered (up to 2^(2*tileBits) frames old), so the
-            // same screen velocity should discount it over a shorter distance.
+            // ADAPTIVE blend weight, not a flat constant: a reprojected sample that has barely moved
+            // is close to a repeated measurement of the same point and earns high weight; one that's
+            // moved several pixels is increasingly likely sampling the wrong part of the surface
+            // even past the depth test (depth tells "different surface" from "same surface", not
+            // "same surface, slid since"), so it's trusted less the faster it moves. The budget
+            // SHRINKS as the tile grows: a bigger tile's history is staler on average even before
+            // motion (up to 2^(2*tileBits) frames old), so the same velocity should discount it over
+            // a shorter distance.
             const float budget = max(6.0 - 1.5 * (float)tileBits, 1.0);
             const float t = saturate(length(velocityPx) / budget);
             const float weight = lerp(0.9, 0.1, t);
@@ -1198,62 +1081,53 @@ float3 rtShadowTemporal(float3 wpos, float3 N, float3 L, float2 pixel, float3 dp
         vis = hist;
     }
 
-    // WRITE THE RAW VALUE, NEVER THE FILTERED ONE, and this is the single most important line in
-    // the whole denoiser. gRtShadowHistOut is what next frame reprojects from; feeding a filtered
-    // value back into it makes this an IIR filter with a spatial kernel -- a TEMPORAL filter by
-    // another name -- and every artefact the spatial path exists to avoid comes straight back,
-    // compounding a little more each frame. The filter is applied on READ, below, and the history
-    // never learns it happened. A later reader will be tempted to "save work" by writing the
-    // filtered value here; that is the bug, not the optimisation.
+    // WRITE THE RAW VALUE, NEVER THE FILTERED ONE -- the single most important line in the whole
+    // denoiser. gRtShadowHistOut is what next frame reprojects from; feeding back a filtered value
+    // makes this an IIR filter with a spatial kernel (a TEMPORAL filter by another name), and every
+    // artefact the spatial path exists to avoid comes back, compounding each frame. The filter
+    // applies on READ, below; the history never learns it happened. Writing the filtered value here
+    // to "save work" is the bug, not the optimisation.
     gRtShadowHistOut[uint2(pixel)] = float2(vis, curDepth);
     return rtShadowSpatial(vis, wpos, N, pixel, curDepth) * tint;
 }
 
 // Traces one reflection ray and shades what it hits.
 //
-// THIS IS WHAT MAKES REFLECTIONS GLOBAL. The cone tracer it replaces walks the voxel volume and
-// stops dead at its boundary -- `if (!insideVolume(uvw)) break;` -- so anything outside simply was
-// not reflected and the result fell back to sky. Objects popped in and out of reflections as they
-// crossed a boundary that has nothing to do with the scene. A ray has no such bound: it reaches
-// whatever the acceleration structure holds, at any distance.
+// THIS IS WHAT MAKES REFLECTIONS GLOBAL: the cone tracer it replaces stops dead at the voxel
+// volume's boundary (`if (!insideVolume(uvw)) break;`), so objects popped in and out of reflections
+// as they crossed a boundary that has nothing to do with the scene. A ray has no such bound.
 //
-// The shading is one bounce of Lambertian direct light plus sky ambient, with the hit surface's own
-// albedo from the instance table. No textures and no second bounce -- a reflected surface is
-// slightly flatter than the same surface seen directly, which is a stated approximation rather than
-// an accident.
+// The shading is one bounce of Lambertian direct light plus sky ambient, using the hit surface's
+// own albedo from the instance table. No textures, no second bounce -- a reflected surface reads
+// slightly flatter than the same surface seen directly, a stated approximation rather than an
+// accident.
 //
 // ---- THE LOBE: why `rough` is a parameter now, and what it fixed ----
 //
-// This function used to trace R exactly, and its caller's comment said so plainly: "A MIRROR RAY IS
-// ONLY RIGHT FOR A SMOOTH SURFACE ... a single ray has no aperture at all, so applying it to a rough
-// surface hands back a sharp reflection where a blurred one belongs". The caller's answer was to
-// REFUSE the reflection above roughness 0.5 and to fade what remained toward flat sky at twice the
-// roughness -- so a half-rough surface got no ray, and a quarter-rough surface got a mirror
-// reflection at half strength mixed with half a flat sky colour. Neither of those is a glossy
-// reflection; they are two ways of not having one.
+// This used to trace R exactly. Its caller's old comment admitted a single ray has no aperture, so
+// a rough surface got a sharp reflection where a blurred one belonged -- and "fixed" that by
+// refusing the reflection above roughness 0.5 and fading what remained toward flat sky at twice the
+// roughness. A quarter-rough surface got a mirror reflection at half strength mixed with half a
+// flat sky colour: neither is a glossy reflection, both are ways of not having one.
 //
-// The fix is the aperture the comment says is missing. `rough` widens the ray into a cone, exactly
-// the way `gRtParams.x` (the tangent of the sun's angular radius) already widens the shadow ray into
-// the sun's disc -- SAME rtDiscSample sequence, SAME per-pixel rotation, SAME frameJitter
-// decorrelation, so this is one more user of machinery that was already here and already proven
-// bit-exact across the nine gate configurations, not a second sampling scheme to keep in step.
+// The fix is the missing aperture: `rough` widens the ray into a cone, the same way `gRtParams.x`
+// (tangent of the sun's angular radius) already widens the shadow ray into the sun's disc -- same
+// rtDiscSample sequence, per-pixel rotation and frameJitter decorrelation, proven bit-exact across
+// the nine gate configurations already.
 //
-// tan(cone) = rough*rough is the GGX alpha, not a tuned number: alpha = rough^2 is the standard
-// remapping from perceptual roughness to the microfacet distribution's width, and for small angles
-// the tangent of the lobe's half-angle IS alpha. It falls out where it must -- a glass pane at
-// roughness 0.05 gets tan = 0.0025, which over a 10 m reflection distance is a 2.5 cm spread, i.e.
-// still a mirror; a half-rough floor at 0.5 gets tan = 0.25, about 14 degrees, which is a real blur.
+// tan(cone) = rough*rough is the GGX alpha (the standard remap from perceptual roughness to
+// microfacet width; for small angles the lobe's half-angle tangent IS alpha), not a tuned number: a
+// glass pane at roughness 0.05 gets tan = 0.0025, a 2.5cm spread over a 10m reflection -- still a
+// mirror; a half-rough floor at 0.5 gets tan = 0.25, about 14 degrees, a real blur.
 //
-// ONE RAY, NOT A SWEEP. Widening the cone does not cost more rays; it costs VARIANCE, which is paid
-// down over frames by rtReflectionTemporal's history and across pixels by rtReflectionSpatial's
-// roughness-scaled kernel. That is the whole trade, and it is the right one here: a second ray would
-// halve the noise and double the cost of the single most expensive thing in the ray path, while the
-// filter pair costs texture loads.
+// ONE RAY, NOT A SWEEP: widening the cone costs VARIANCE, not more rays, paid down over frames by
+// rtReflectionTemporal's history and across pixels by rtReflectionSpatial's roughness-scaled
+// kernel. A second ray would halve the noise and double the cost of the most expensive thing in the
+// ray path; the filter pair costs texture loads instead.
 //
-// `frameJitter` is ADDED to the per-pixel rotation and is zero for every caller that has no history
-// to converge into -- the identical contract, for the identical reason, as rtShadow's own parameter
-// of the same name. rtHash stays a pure function of the pixel so a single-frame capture is still
-// bit-exact; see rtHash's own comment, which the gate oracle depends on.
+// `frameJitter` is ADDED to the per-pixel rotation and is zero for every caller with no history to
+// converge into -- the same contract as rtShadow's parameter of the same name. rtHash stays a pure
+// function of the pixel so a single-frame capture is bit-exact, which the gate oracle depends on.
 float3 rtReflection(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, float rough,
                     float frameJitter, out bool hit) {
     hit = false;
@@ -1290,17 +1164,15 @@ float3 rtReflection(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, flo
     r.TMax      = 100000.0;
 
     RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
-    // Opaque lane only -- see AVER_RT_MASK_OPAQUE. A single Proceed() cannot correctly traverse
-    // past a non-opaque candidate, and this ray has no reason to want one.
-    // FORCE_OPAQUE IS FREE HERE, AND PROVABLY A NO-OP. createBlas marks every geometry it builds
-    // D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE (D3D12Device.cpp), and the only thing that can un-opaque an
-    // instance is TlasInstanceFlag_ForceNonOpaque, which VoxiRenderer sets ONLY on the translucent
-    // lane -- the lane this ray's AVER_RT_MASK_OPAQUE excludes. So no candidate this ray can ever see
-    // is non-opaque, and saying so lets the hardware skip any-hit bookkeeping entirely.
+    // Opaque lane only -- see AVER_RT_MASK_OPAQUE. A single Proceed() can't correctly traverse past
+    // a non-opaque candidate, and this ray has no reason to want one.
     //
-    // NOT on the shadow ray (this file, the rtShadow query): that one masks AVER_RT_MASK_ALL on
-    // purpose so a pane of glass can attenuate it, and forcing opaque there would make every pane a
-    // wall -- which is the exact behaviour its own comment says was removed.
+    // FORCE_OPAQUE IS FREE HERE, PROVABLY A NO-OP: createBlas marks every geometry OPAQUE
+    // (D3D12Device.cpp), and only TlasInstanceFlag_ForceNonOpaque un-opaques an instance, which
+    // VoxiRenderer sets ONLY on the translucent lane -- excluded by this ray's AVER_RT_MASK_OPAQUE.
+    // No candidate this ray can see is non-opaque, so saying so lets hardware skip any-hit
+    // bookkeeping entirely. NOT on the shadow ray (rtShadow's query masks AVER_RT_MASK_ALL on
+    // purpose so glass can attenuate it; forcing opaque there would make every pane a wall again).
     q.TraceRayInline(gScene, RAY_FLAG_FORCE_OPAQUE, AVER_RT_MASK_OPAQUE_ALL, r);
     q.Proceed();
     if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) return 0.0;
@@ -1325,49 +1197,39 @@ float3 rtReflection(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, flo
     if (dot(nWS, dir) > 0.0) nWS = -nWS;   // face the ray, so a back-facing hit is not lit from behind
 
     float3 hitPos = wpos + dir * q.CommittedRayT();
-    // Whether the SUN reaches the reflected surface. Without this every reflection is lit as if
-    // nothing could shadow it, which is what makes cheap reflections look like they glow.
-    // Seeded from the PIXEL, and with NO footprint. Seeding from hitPos.xy -- a world float derived
-    // from CommittedRayT -- makes the sample pattern depend on a ray distance, which is exactly the
-    // value most likely to differ between a hardware adapter and WARP, and the gate oracle compares
-    // nine configurations bit-exactly.
-    // ONE ray, not the full disc. This is the single largest saving available in the ray path:
-    // a reflective pixel was firing one reflection ray plus a four-ray disc from its hit, so five
-    // rays where two do. The penumbra of a reflected shadow is not resolvable in a one-bounce
-    // mirror image.
-    // float3: a reflected surface seen through a tinted medium is lit through that tint too.
+    // Whether the SUN reaches the reflected surface -- without this every reflection glows as if
+    // nothing could shadow it. Seeded from the PIXEL with NO footprint: seeding from hitPos.xy would
+    // make the sample pattern depend on ray distance, which is exactly what's most likely to differ
+    // between a hardware adapter and WARP (the gate oracle compares nine configs bit-exactly). ONE
+    // ray, not the full disc -- the single largest saving in the ray path (was one reflection ray
+    // plus a four-ray disc, five rays where two do now; a reflected shadow's penumbra isn't
+    // resolvable in a one-bounce mirror image anyway). float3: a reflected surface seen through a
+    // tinted medium is lit through that tint too.
     float3 shadow = rtShadow(hitPos, nWS, L, pixel, float3(0,0,0), float3(0,0,0), 1u, 0.0);
 
     // LAMBERTIAN EXITANT RADIANCE, and the /PI is the whole point. averGroundRadiance is the
-    // engine's own reference for this and reads:
+    // engine's own reference:
     //
     //     E = sunIrradiance*ndl + PI*skyRadiance*ambient;   return albedo * E / PI;
     //
-    // so the sun's contribution to outgoing RADIANCE is albedo*sunIrradiance*ndl/PI, while the
-    // sky's is albedo*skyRadiance*ambient with the PI cancelling. The first version of this
-    // function omitted the divide on the direct term only, which made every SUNLIT reflection
-    // 3.14x too bright while leaving shaded ones correct -- brightness that looks like an exposure
-    // problem rather than a units one, and which pushed the lit ray-traced gates from 94,27,14 to
+    // so the sun's contribution to outgoing RADIANCE is albedo*sunIrradiance*ndl/PI, the sky's
+    // albedo*skyRadiance*ambient (PI cancels). Omitting the divide on the direct term only made
+    // every SUNLIT reflection 3.14x too bright while shaded ones stayed correct -- read as an
+    // exposure bug, not a units one -- and pushed the lit ray-traced gates from 94,27,14 to
     // 131,58,40.
     //
-    // THE WHITE FURNACE DOES NOT CATCH THIS, and that is worth knowing about the oracle: it turns
-    // the sun OFF, so the direct term is zero and only the ambient half -- which was already right
-    // -- is under test. A furnace with a sun is a second mode worth having.
+    // THE WHITE FURNACE DOES NOT CATCH THIS: it turns the sun OFF, so only the (already-correct)
+    // ambient half is under test. A furnace with a sun is a second mode worth having.
     float3 direct = averSunRadiance() * saturate(dot(nWS, L)) * shadow / PI;
     float3 ambient = averSkyIrradiance(nWS) * gAmbient.r;
     hit = true;
 
-    // WHAT THE REFLECTED SURFACE'S ALBEDO ACTUALLY IS.
-    //
-    // `inst.albedo` is the per-draw FLAT colour. Until the primary path started sampling textures
-    // that was at least consistent -- everything was flat. It is not consistent any more: a scene
-    // whose directly-viewed surfaces carry real base-colour maps, reflected as untextured Lambertian
-    // paint, is exactly the mismatch that reads as "the reflection is fake".
-    //
-    // Everything needed is already here: the hit resolved inst.materialIndex, gRtMaterials is bound,
-    // the barycentrics and the three vertices are in hand, and averRtSurfaceUV/averRtSampleSlot are
-    // the same helpers the primary hit uses -- so a reflected surface and a directly-viewed one
-    // resolve their UV the same way, world-aligned materials included.
+    // WHAT THE REFLECTED SURFACE'S ALBEDO ACTUALLY IS: `inst.albedo` is the per-draw FLAT colour,
+    // consistent back when everything was flat but not any more -- a scene whose directly-viewed
+    // surfaces carry real base-colour maps, reflected as untextured Lambertian paint, reads as "the
+    // reflection is fake". Everything needed is already here (materialIndex, gRtMaterials,
+    // barycentrics, vertices, the same averRtSurfaceUV/averRtSampleSlot helpers the primary hit
+    // uses), so a reflected surface resolves its UV the same way a directly-viewed one does.
     float3 reflAlbedo = inst.albedo;
 #ifdef AVER_RT_BINDLESS
     {
@@ -1375,16 +1237,14 @@ float3 rtReflection(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, flo
         const float2 meshUV = gRtVerts[i0].uv * w.x + gRtVerts[i1].uv * w.y + gRtVerts[i2].uv * w.z;
         const float2 ruv    = averRtSurfaceUV(rmat, inst, hitPos, nWS, meshUV);
 
-        // A CONE FOOTPRINT, NOT MIP 0. Zero gradients degrade to SampleLevel(0), and mip-0 sampling
-        // in this pass was measured as a THROUGHPUT problem, not merely a quality one -- proper mip
-        // selection took the whole frame 11.96 -> 8.14 ms on ElectricDreams. A reflection ray has no
-        // screen derivatives at all, but it does have a cone: the lobe half-angle is tanCone and the
-        // ray travelled CommittedRayT, so the footprint on the hit surface is their product. Rougher
-        // reflections therefore read wider mips, which is free denoising rather than a compromise.
+        // A CONE FOOTPRINT, NOT MIP 0: zero gradients degrade to SampleLevel(0), and mip-0 sampling
+        // here was measured as a THROUGHPUT problem, not just quality -- proper mip selection took
+        // the whole frame 11.96 -> 8.14ms on ElectricDreams. A reflection ray has no screen
+        // derivatives, but it has a cone: half-angle tanCone times CommittedRayT gives the footprint
+        // on the hit surface, so rougher reflections read wider mips for free.
         const float  rad = max(tanCone, 1e-3) * q.CommittedRayT();
-        // The same up-vector trick this function already uses to build its cone basis a few dozen
-        // lines up, applied to the hit normal instead of R. Two orthogonal in-plane directions are
-        // all averRtUvGrad needs -- it projects them through the surface's own position-to-UV map.
+        // The same up-vector trick used above to build the cone basis, applied to the hit normal
+        // instead of R: two orthogonal in-plane directions are all averRtUvGrad needs.
         const float3 rup = abs(nWS.z) < 0.9 ? float3(0, 0, 1) : float3(1, 0, 0);
         const float3 rt  = normalize(cross(rup, nWS));
         const float3 rb  = cross(nWS, rt);
@@ -1402,31 +1262,28 @@ float3 rtReflection(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, flo
 
 // How far a view ray travels INSIDE a volume before something stops it, in centimetres.
 //
-// WHAT THIS IS FOR. averVolumeTransmittance needs a path length, and a blended surface has no idea
-// how thick it is -- it is one fragment on one face. The old fluid shader guessed, with
-// `depthCm / max(abs(V.z), 0.15)` measured from a CONSTANT floor height (FluidShaders.hpp), which is
-// a depth below the surface only on the TOP face of a box. On a side face it is height up the wall,
-// and at pitch 0 the clamp turns it into an ~8.7 m path, so the side of a pool came out fully opaque
-// and bright. That is the whole reason the PTTest pit read as a blown-out white slab. A ray does not
-// have to guess: it measures.
+// WHAT THIS IS FOR: averVolumeTransmittance needs a path length, and a blended surface (one
+// fragment on one face) has no idea how thick it is. The old fluid shader guessed with
+// `depthCm / max(abs(V.z), 0.15)` measured from a CONSTANT floor height (FluidShaders.hpp) -- a
+// depth below the surface only on the TOP face of a box. On a side face it's height up the wall, and
+// at pitch 0 the clamp turns it into an ~8.7m path, so a pool's side came out fully opaque and
+// bright: the whole reason the PTTest pit read as a blown-out white slab. A ray doesn't have to
+// guess; it measures.
 //
-// FORCE_OPAQUE, DELIBERATELY, and this is the one flag that makes a single Proceed() correct here.
-// Translucent instances are in the structure as FORCE_NON_OPAQUE (see the mask comment at the top of
-// this file), so an ordinary traversal would stop AT a candidate without committing it and this
-// function would answer with whatever CommittedStatus happened to hold. FORCE_OPAQUE overrides that
-// per-instance flag for this ray only: traversal commits the nearest hit in either lane and returns
-// false from Proceed(), which is exactly the question being asked -- "what is the first thing along
-// this ray, of any kind".
+// FORCE_OPAQUE, DELIBERATELY: the one flag that makes a single Proceed() correct here. Translucent
+// instances sit in the structure as FORCE_NON_OPAQUE (see the mask comment at the top of this file),
+// so an ordinary traversal would stop AT a candidate without committing it. FORCE_OPAQUE overrides
+// that per-instance flag for this ray only: traversal commits the nearest hit in either lane, which
+// is exactly the question being asked -- "what is the first thing along this ray, of any kind".
 //
-// BOTH LANES, because both can end the path. The volume's own BACK FACE ends it (that is the exit
-// point of a convex body), and so does any opaque object sitting INSIDE the volume -- a rock in a
-// pool, the pool's own floor. Taking the nearest of the two is what makes absorption respond to real
-// geometry instead of to an authored box height, which is the property the old formula could not
-// have at any amount of tuning.
+// BOTH LANES, because both can end the path: the volume's own BACK FACE (the exit point of a convex
+// body), or any opaque object sitting INSIDE it (a rock in a pool, the pool's own floor). Taking the
+// nearest of the two is what makes absorption respond to real geometry instead of an authored box
+// height -- something the old formula could never have.
 //
-// Returns 0 when nothing is hit, which averVolumeTransmittance reads as "no path through the
-// medium" and answers with full transmission. That is the right failure: an unbounded volume should
-// not absorb infinitely, it should absorb nothing until someone gives it a boundary.
+// Returns 0 when nothing is hit; averVolumeTransmittance reads that as "no path through the medium"
+// and answers with full transmission -- an unbounded volume should absorb nothing until given a
+// boundary, not absorb infinitely.
 // Is a real backdrop bound? A null-filled Texture2D reports zero dimensions, and that is the only
 // signal available from inside the shader -- the alternative is threading a validity flag through a
 // constant buffer, which would mean finding or inventing a spare component for something the
@@ -1443,33 +1300,25 @@ bool averBlendBackdropValid(out float2 invSize) {
 
 // THE VOLUME COMPOSITE, WITH THE BACKGROUND AS A CORRECTION RATHER THAN A REPLACEMENT.
 //
-// What we want, physically, is the surface's own light plus what survived the medium:
-//
-//     final = specular + diffuse*alpha + dst * T * (1 - alpha)
-//
-// and the hardware, in premultiplied alpha, gives `final = src.rgb + dst * (1 - src.a)`. Setting
-// src.a = alpha and solving for src.rgb:
+// What we want, physically: final = specular + diffuse*alpha + dst * T * (1 - alpha). The hardware,
+// in premultiplied alpha, gives `final = src.rgb + dst * (1 - src.a)`. Setting src.a = alpha and
+// solving for src.rgb:
 //
 //     src.rgb = specular + diffuse*alpha + bg * (1 - alpha) * (T - 1)
 //
-// THE LAST TERM IS THE WHOLE TRICK, and it is why this reads as a subtraction. (T - 1) is negative,
-// so it removes exactly the light the medium absorbed, per channel -- the thing one blend alpha
-// cannot express. The hardware still adds the REAL destination afterwards.
+// THE LAST TERM IS THE WHOLE TRICK: (T - 1) is negative, so it subtracts exactly the light the
+// medium absorbed, per channel -- what one blend alpha can't express. The hardware still adds the
+// REAL destination afterwards.
 //
-// TWO PROPERTIES THIS BUYS, both deliberate:
+// TWO PROPERTIES THIS BUYS: T == 1 makes the correction exactly zero, so a volumeless material
+// composites bit-for-bit as before -- an identity, which the no-absorption regression check leans
+// on. And STACKED TRANSLUCENCY DEGRADES GENTLY: `bg` is the scene copied BEFORE any translucent
+// draw, stale for a second layer but used only in the correction while the base composite still
+// blends against the true `dst` -- replacing the background outright (alpha = 1) would have let the
+// nearer pane erase the farther one, and glass over water makes that not a hypothetical.
 //
-//   T == 1 MAKES THE CORRECTION EXACTLY ZERO, so a material with no volume composites
-//   bit-for-bit as it did before this existed. That is what the no-absorption regression check
-//   leans on: it is an identity, not an approximation that happens to be close.
-//
-//   STACKED TRANSLUCENCY DEGRADES GENTLY. `bg` is the scene copied BEFORE any translucent draw, so
-//   for a second layer it is stale -- but it is used only in the correction, while the base
-//   composite still blends against the true `dst`. Replacing the background outright (alpha = 1)
-//   would have made the nearer pane erase the farther one entirely. This map puts glass over water
-//   on purpose, so that is not a hypothetical.
-//
-// Falls back to the scalar composite when no backdrop is bound, which is the honest answer rather
-// than sampling black and calling it absorption.
+// Falls back to the scalar composite when no backdrop is bound -- the honest answer, not sampling
+// black and calling it absorption.
 // WHERE THE BACKGROUND IS READ FROM, once the surface is allowed to bend it.
 //
 // Absorption decides what COLOUR survives the medium; refraction decides where it comes FROM. This
@@ -1485,24 +1334,19 @@ float2 averRefractedBackdropUV(AverSurface s, float3 wpos, float thicknessCm,
     const uint   mode = (uint)(gGiParams.y + 0.5);
     if (mode == 0u || gGiParams.z <= 0.0) return uv0;
 
-    // WHICH WAY THE LIGHT IS CROSSING, which decides everything below.
+    // WHICH WAY THE LIGHT IS CROSSING decides everything below. eta is the ratio of the index the
+    // ray is LEAVING to the one it's ENTERING: air->medium (a pane from outside) is 1/n; medium->air
+    // (the underside of the pool while swimming in it) is n -- reversed, this doesn't just bend the
+    // image the wrong way, it makes TIR unreachable (TIR only exists for eta > 1).
     //
-    // eta is the ratio of the index the ray is LEAVING to the one it is ENTERING. Looking at a pane
-    // from the outside that is air->medium, 1/n. Looking at the underside of the pool's surface while
-    // swimming in it, it is medium->air, n -- and getting that backwards does not merely bend the
-    // image the wrong way, it makes total internal reflection unreachable, because TIR only exists
-    // for eta > 1.
-    //
-    // GATED ON gCameraMedium, NOT ON s.backFace, AND THAT DISTINCTION HAS ALREADY COST THIS ENGINE
-    // ONCE. material_prelude.hlsl carries the post-mortem: a TIR override gated on backFace "turned
-    // every pane of glass in the engine into a dark slab at 41 degrees off normal", because backFace
-    // is also true for the FAR surface of a two-sided pane seen from outside -- an ordinary
-    // air-to-glass view with the normal flipped -- and Snell forbids TIR there outright. That
-    // comment concludes the two cases are "indistinguishable from a pixel shader". They were. They
-    // are not any more: gCameraMedium.x is computed on the CPU from the camera against the volume's
-    // own bounds, which is exactly the fact a pixel could never recover for itself. Glass is
-    // twosided=1 and is never a medium by that test, so the pane case cannot reach this branch at
-    // all.
+    // GATED ON gCameraMedium, NOT s.backFace -- a distinction that already cost this engine once.
+    // material_prelude.hlsl's post-mortem: a TIR override gated on backFace "turned every pane of
+    // glass in the engine into a dark slab at 41 degrees off normal", because backFace is also true
+    // for the FAR surface of a two-sided pane seen from outside (an ordinary air-to-glass view with
+    // the normal flipped, where Snell forbids TIR outright) -- "indistinguishable from a pixel
+    // shader" at the time. Not any more: gCameraMedium.x is computed CPU-side from the camera against
+    // the volume's own bounds, a fact a pixel could never recover. Glass is twosided=1 and never a
+    // medium by that test, so the pane case can't reach this branch at all.
     const float  ior      = max(gIor, 1.0001);
     const bool   eyeInside = gCameraMedium.x > 0.5;
     const float  eta      = eyeInside ? ior : (1.0 / ior);
@@ -1550,42 +1394,38 @@ float2 averRefractedBackdropUV(AverSurface s, float3 wpos, float thicknessCm,
     if (clip.w <= 1e-4) return uv0;               // behind the eye: nothing sensible to sample
     const float2 ndc = clip.xy / clip.w;
 
-    // NDC -> THE VIEWPORT RECT, NOT [0,1] OF THE WHOLE TARGET, and this line is the whole bug that
-    // made refraction look like a wrecked image rather than a bent one.
+    // NDC -> THE VIEWPORT RECT, NOT [0,1] OF THE WHOLE TARGET -- the whole bug that made refraction
+    // look like a wrecked image rather than a bent one. The editor docks the 3D view in a SUB-RECT of
+    // the backbuffer, so NDC maps to gSceneViewportCur while uv0 (screenPos * invSize) is a
+    // full-target UV (SV_Position is in target pixels); a plain ndc*0.5+0.5 mixes the two spaces. The
+    // error is affine, not noise: the pane shows a shifted, scaled copy of the scene, walking clean
+    // off the image near the right edge -- the source of the black block in the glass rail.
     //
-    // The editor docks the 3D view in a SUB-RECT of the backbuffer -- a toolbar above it, panels to
-    // the right -- so NDC maps to gSceneViewportCur, while uv0 (screenPos * invSize) is a full-target
-    // UV because SV_Position is in target pixels. A plain ndc*0.5+0.5 mixes those two spaces. The
-    // error is affine, so it does not look like noise: it looks like the pane is showing a shifted,
-    // scaled copy of the scene, and near the right-hand edge it walks clean off the image and
-    // samples nothing, which is where the black block in the glass rail came from.
+    // MEASURED by forcing target = wpos so the answer HAD to be uv0 exactly: 100% of the rail's
+    // pixels still landed more than 60px away, proving this was the projection and not the refraction
+    // offset -- an 8cm pane cannot bend anything by 60px. (Had been about to look at the offset
+    // instead.)
     //
-    // MEASURED, before the fix, by forcing target = wpos so the answer HAD to be uv0 exactly: 100%
-    // of the rail's pixels still landed more than 60 px away. That is what proved this was the
-    // projection and not the refraction offset -- an 8 cm pane cannot bend anything by 60 px, and I
-    // had been about to go looking at the offset.
+    // The file already knew: rtReprojectHistory and three other sites do exactly this conversion,
+    // one of them warning that the plain form "lands every reprojection on the wrong texel";
+    // refraction was written later and didn't pick it up.
     //
-    // The file already knew: rtReprojectHistory (voxi.hlsl, "NDC -> LAST frame's VIEWPORT rect")
-    // and three other sites all do exactly this conversion, and one of them says in its own comment
-    // that the plain form "lands every reprojection on the wrong texel". Refraction was written
-    // later and did not pick it up.
-    //
-    // A ZERO-WIDTH RECT means the device reported no viewport this frame. Sampling straight through
-    // is the honest answer there -- the same fallback this function already takes for total internal
-    // reflection and for a target behind the eye.
+    // A ZERO-WIDTH RECT means the device reported no viewport this frame -- sampling straight
+    // through is the honest answer, the same fallback this function takes for TIR and for a target
+    // behind the eye.
     if (gSceneViewportCur.z <= 0.0 || gSceneViewportCur.w <= 0.0) return uv0;
     const float2 pxR = gSceneViewportCur.xy +
                        float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) * gSceneViewportCur.zw;
     float2 uvR = pxR * invSize;
 
-    // THE EDGE FADE, and it is not cosmetic. The backdrop only holds what the camera saw, so an
-    // offset that walks off the screen samples nothing meaningful and one that walks onto a
-    // FOREGROUND object shows that object through the glass. Fading the offset back to zero near
-    // the border turns both into a soft loss of refraction rather than a hard wrong pixel.
-    // FADED AGAINST THE VIEWPORT RECT, NOT THE TARGET. Outside the 3D view the backdrop holds
-    // whatever the rest of the frame is, so "still on the texture" is not the test that matters --
-    // "still on the part of the texture the camera drew" is. Measuring to the target border let a
-    // pane keep sampling right up to the edge of the docked view and then past it.
+    // THE EDGE FADE, not cosmetic: the backdrop only holds what the camera saw, so an offset that
+    // walks off-screen samples nothing meaningful, and one onto a FOREGROUND object shows that
+    // object through the glass. Fading to zero near the border turns both into a soft loss of
+    // refraction instead of a hard wrong pixel.
+    // FADED AGAINST THE VIEWPORT RECT, NOT THE TARGET: outside the 3D view the backdrop holds
+    // whatever the rest of the frame is, so "still on the texture" isn't the test that matters --
+    // "still on the part the camera drew" is. Measuring to the target border let a pane keep
+    // sampling past the edge of the docked view.
     const float fadePx = max(gGiParams.w, 0.0);
     float edge = 1.0;
     if (fadePx > 0.0) {
@@ -1605,34 +1445,32 @@ float4 averBlendedOutputBackdrop(AverSurface s, float3 diffuse, float3 specular,
 
     // TWO SAMPLES, AND THE SECOND ONE IS NOT AN EXTRA -- IT IS WHAT MAKES THE CORRECTION CANCEL.
     //
-    // This function does not write the background; the HARDWARE does, adding dst * (1 - alpha) after
-    // this returns. Everything here is a correction ON TOP of that, and a correction can only work if
-    // it subtracts EXACTLY WHAT THE HARDWARE WILL ADD -- the pixel straight behind this one, at uv0.
+    // This function doesn't write the background; the HARDWARE does, adding dst * (1 - alpha) after
+    // this returns. Everything here corrects ON TOP of that, and a correction only works if it
+    // subtracts EXACTLY WHAT THE HARDWARE WILL ADD -- the pixel straight behind this one, at uv0.
     //
-    // The single-sample version subtracted the REFRACTED sample instead. Those are different pixels
-    // the moment refraction is on, so nothing cancelled and the residue was (dst - bgRefracted) per
-    // channel: wherever the bent ray landed on something BRIGHTER than what is really behind -- the
-    // sunlit deck sampled against the dark pool floor -- the sum went NEGATIVE, and a negative
-    // channel through the tonemap is not dark, it is a hue. That is what the magenta blocks in the
-    // pool were. MEASURED: 41773 magenta pixels at the 45-degree pool camera with refraction on,
-    // exactly 0 with --refraction 0, and 0 with refraction on after this change.
+    // The single-sample version subtracted the REFRACTED sample instead. Those differ the moment
+    // refraction is on, so nothing cancelled and the residue was (dst - bgRefracted) per channel:
+    // wherever the bent ray landed on something BRIGHTER than what's really behind (a sunlit deck
+    // sampled against a dark pool floor), the sum went NEGATIVE -- and a negative channel through
+    // the tonemap isn't dark, it's a hue. That's what the magenta blocks in the pool were. MEASURED:
+    // 41773 magenta pixels at the 45-degree pool camera with refraction on, 0 with --refraction 0,
+    // and 0 with refraction on after this change.
     //
     // The algebra, with a == alpha:
     //     final = specular + diffuse*a + (bgRefr*T - bgStraight)*(1-a) + dst*(1-a)
     //   and dst IS bgStraight, so the last two collapse and leave
     //     final = specular + diffuse*a + bgRefr*T*(1-a)
-    //   which is the answer: the bent background, absorbed over the path, behind a Fresnel-weighted
-    //   surface. Two properties worth keeping:
-    //     - refraction OFF makes bgRefr == bgStraight and this becomes bg*(T-1)*(1-a) again, the
-    //       exact expression this replaced, so the no-refraction path is bit-identical.
-    //     - T == 1 leaves (bgRefr - bgStraight)*(1-a): pure bending, no absorption. Also correct,
-    //       and it means a material with refraction but no volume is no longer silently wrong.
+    //   -- the bent background, absorbed over the path, behind a Fresnel-weighted surface. Two
+    //   properties worth keeping: refraction OFF makes bgRefr == bgStraight, collapsing this to
+    //   bg*(T-1)*(1-a) again (bit-identical to the expression it replaced); T == 1 leaves
+    //   (bgRefr - bgStraight)*(1-a) -- pure bending, no absorption, so refraction with no volume is
+    //   no longer silently wrong.
     //
-    // dst == bgStraight holds for the FIRST translucent surface over a pixel. A second one behind
-    // glass is compositing against a backdrop that does not yet contain the first, which is the
-    // known cost of capturing the backdrop once per frame rather than once per draw. It is an
-    // approximation in the overlap only, and it is bounded -- unlike the misregistration above,
-    // which was unbounded and could invert a channel.
+    // dst == bgStraight holds for the FIRST translucent surface over a pixel; a second one behind
+    // glass composites against a backdrop that doesn't yet contain the first -- the known cost of
+    // capturing the backdrop once per frame rather than once per draw. Bounded to that overlap,
+    // unlike the misregistration above, which was unbounded and could invert a channel.
     bool tir = false;
     const float2 uvR   = averRefractedBackdropUV(s, wpos, thicknessCm, invSize, screenPos, tir);
     const float2 uv0   = screenPos * invSize;
@@ -1715,47 +1553,36 @@ bool rtReprojectReflection(float3 wpos, float2 pixel, out float3 hist, out float
     return true;
 }
 
-// The SPATIAL denoiser for REFLECTIONS. There was none: the reflection history was reprojected and
-// blended in time and never filtered in space at all, while the shadow beside it had a spatial
-// filter from the start. That asymmetry was harmless while the reflection ray was a mirror -- a
-// mirror ray is deterministic, so there was no variance to remove -- and stops being harmless the
-// moment rtReflection widens into a lobe. The lobe and this filter are one change; shipping the
-// lobe without this would trade a wrong-but-clean reflection for a right-but-noisy one.
+// The SPATIAL denoiser for REFLECTIONS. There was none: the history was reprojected and blended in
+// time but never filtered in space, unlike the shadow beside it. Harmless while the reflection ray
+// was a deterministic mirror (no variance to remove) -- not harmless once rtReflection widens into a
+// lobe. The lobe and this filter are one change; shipping the lobe alone trades a wrong-but-clean
+// reflection for a right-but-noisy one.
 //
-// STRUCTURE IS DELIBERATELY rtShadowSpatial's, down to the reprojected gather centre and the
-// plane-distance rejection, because the reasoning is identical and is argued at length there --
-// read that function's comments first. Three things genuinely differ:
+// STRUCTURE IS DELIBERATELY rtShadowSpatial's (reprojected gather centre, plane-distance rejection
+// -- read that function's comments first). Three things differ:
 //
-//  1. THE RADIUS COMES FROM ROUGHNESS, not from a host constant. It has to: the width of the thing
-//     being estimated is the width of the lobe, so a filter of fixed width is either blurring a
-//     mirror or under-filtering a rough surface. At roughness 0 this returns the centre untouched
-//     without loading a single texel, which is what keeps glass and chrome sharp. It is also why
-//     this needs no new dial, no tier-ladder entry and no C++ change -- see Settings::
-//     rtShadowDenoise, whose *ForQuality returns 0 at every tier including Epic, for what a dial
-//     that nobody sets is worth.
+//  1. RADIUS COMES FROM ROUGHNESS, not a host constant: the width being estimated is the lobe's, so
+//     a fixed-width filter either blurs a mirror or under-filters a rough surface. At roughness 0
+//     this returns the centre untouched, no texel loaded -- keeping glass and chrome sharp, and
+//     needing no new dial, tier-ladder entry, or C++ change.
 //
-//  2. A NEIGHBOUR THAT MISSED IS SKIPPED, not counted as black. gRtReflHist stores a NEGATIVE alpha
-//     as its miss sentinel (see the texture's own declaration); averaging those in would drag the
-//     edge of every reflected object toward black, which is the exact artefact the sentinel exists
-//     to prevent in the temporal path.
+//  2. A NEIGHBOUR THAT MISSED IS SKIPPED, not counted as black: gRtReflHist stores a NEGATIVE alpha
+//     as its miss sentinel, and averaging those in would drag every reflected edge toward black --
+//     the exact artefact the sentinel exists to prevent in the temporal path.
 //
-//  3. THERE IS NO LUMINANCE WEIGHT, and that is a decision rather than an omission. SVGF's
-//     colour-similarity term is driven by a per-pixel VARIANCE estimate, which tells it whether a
-//     luminance difference is an edge or is noise. This engine tracks no variance -- the history is
-//     (rgb, depth) with no second moment and no room for one -- and a luminance weight without
-//     variance cannot tell those apart, so it preserves precisely the noise it was added to remove.
-//     Geometry weights only, until something stores moments.
+//  3. NO LUMINANCE WEIGHT, a decision not an omission: SVGF's colour-similarity term needs a
+//     per-pixel VARIANCE estimate to tell an edge from noise, and this engine tracks none (the
+//     history is (rgb, depth), no second moment). A luminance weight without variance preserves
+//     precisely the noise it's meant to remove. Geometry weights only, until moments are stored.
 //
-// A FOURTH THING NO LONGER DIFFERS, as of the AVER_GBUFFER_HISTORY crease term inside the tap loop
-// below: it is copied from rtShadowSpatial's OWN crease term verbatim, same threshold, same
-// reasoning (a reflected surface creases exactly the way a shadowed one does, and this filter's own
-// item 1 above already argues the two share a design whenever the underlying problem is the same
-// one) -- see that function's own comment for why cos(60 deg) and not something tighter.
+// A FOURTH THING NO LONGER DIFFERS: the AVER_GBUFFER_HISTORY crease term in the tap loop below is
+// copied from rtShadowSpatial's verbatim (same threshold, same reasoning -- a reflected surface
+// creases the way a shadowed one does).
 //
-// `N` IS A NEW PARAMETER, added only for the crease term. It needs no derivative and no divergent-
-// flow caveat of its own -- unlike `dzdx`/`dzdy`, it is simply the surface normal the caller already
-// built (rtReflectionTemporal's own `N` parameter, unchanged, passed straight through at both call
-// sites below) rather than a value this function would otherwise have to recompute or approximate.
+// `N` IS A NEW PARAMETER, for the crease term only: it's simply the surface normal the caller
+// already built (rtReflectionTemporal's own `N`, passed through unchanged), with no derivative or
+// divergent-flow caveat of its own.
 float3 rtReflectionSpatial(float3 centre, float3 wpos, float3 N, float2 pixel, float curDepth,
                            float rough, float dzdx, float dzdy) {
     // Radius tracks the lobe: tan(cone) = rough*rough, so the reflected image's blur grows with the
@@ -1783,10 +1610,9 @@ float3 rtReflectionSpatial(float3 centre, float3 wpos, float3 N, float2 pixel, f
     }
     const int2 base = int2(floor(centrePx));
 
-    // A GAUSSIAN falloff, where rtShadowSpatial uses a flat box. Every accepted neighbour counting
-    // equally makes the kernel a box filter, whose frequency response rings -- visible as the faint
-    // square-edged plateaus a box blur leaves around a bright highlight. sigma = radius/2 puts the
-    // kernel's useful support at about the radius asked for, so widening the radius widens the blur
+    // A GAUSSIAN falloff, where rtShadowSpatial uses a flat box: a box filter's frequency response
+    // rings, visible as faint square-edged plateaus around a bright highlight. sigma = radius/2 puts
+    // the kernel's useful support at about the radius asked for, so widening it widens the blur
     // smoothly instead of stepping it.
     const float sigma2 = max((float)radius * 0.5, 0.5);
     const float inv2s2 = 1.0 / (2.0 * sigma2 * sigma2);
@@ -1820,44 +1646,37 @@ float3 rtReflectionSpatial(float3 centre, float3 wpos, float3 N, float2 pixel, f
     return acc / wsum;
 }
 
-// Tiled/temporal wrapper around rtReflection(), mirroring rtShadowTemporal's structure exactly and
-// sharing its tile schedule -- same tileBits, same frameIdx, same per-pixel turn -- so a pixel's
-// shadow ray and reflection ray amortise on the same cadence instead of needing two separate
-// knobs. Called ONLY when the caller has already gated on roughness (s.rough <= 0.5 in
-// PSMainVoxi): a pixel that never qualifies for a reflection ray at all has nothing here to tile
-// or reproject, and this function does not re-check that gate.
+// Tiled/temporal wrapper around rtReflection(), mirroring rtShadowTemporal's structure and sharing
+// its tile schedule (tileBits, frameIdx, per-pixel turn) so a pixel's shadow and reflection rays
+// amortise on the same cadence. Called ONLY when the caller has already gated on roughness (s.rough
+// <= 0.5 in PSMainVoxi) -- this function does not re-check that gate.
 //
-// `hit` means the same thing it does for rtReflection() -- true when there is a real reflection
-// colour to use, false when the caller should fall back to the sky. It is true both for a fresh
-// hit this frame AND for a reused hit from history (haveHist is already conditioned on the stored
-// sample being a real hit, never a miss -- see rtReprojectReflection).
+// `hit` means what it does for rtReflection(): true when there's a real reflection colour to use,
+// false when the caller should fall back to sky -- true both for a fresh hit and a reused hit from
+// history (haveHist is already conditioned on the stored sample being a real hit, never a miss).
 float3 rtReflectionTemporal(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, float rough,
                             float dzdx, float dzdy, out bool hit) {
     // ---- THE MIRROR CUTOFF: ONE predicate, three consumers ----
     //
-    // Below AVER_REFL_MIRROR_ROUGH a surface is a mirror and is treated as one throughout: no
-    // jitter, no temporal history, no spatial filter. tan(cone) = rough^2, so at 0.1 the ray is
-    // displaced by one part in a hundred of its own length -- under a pixel for anything close
-    // enough to read detail in. There is no variance there for a filter to remove.
+    // Below AVER_REFL_MIRROR_ROUGH a surface is a mirror throughout: no jitter, no temporal history,
+    // no spatial filter. tan(cone) = rough^2, so at 0.1 the ray is displaced by one part in a hundred
+    // of its own length -- under a pixel, with no variance for a filter to remove.
     //
-    // THIS IS NOT A TUNING KNOB, IT IS A CORRECTNESS FIX, and it is worth saying what it fixes
-    // because the first version of this function had the bug. That version gated the temporal blend
-    // on `rough > 0.0`, while its own comment claimed a smooth surface "still takes the fresh value
-    // outright". Those disagree for every near-mirror: glass authored at roughness 0.05 and the
-    // --refl-test mirror at 0.03 are both greater than zero, so both got an 85%-history blend --
-    // which cannot reduce a variance that is already zero, and can only add lag. A pane of glass
-    // would have smeared its reflection behind a moving camera for no benefit whatsoever.
+    // A CORRECTNESS FIX, NOT A TUNING KNOB: the first version gated the temporal blend on
+    // `rough > 0.0` while its own comment claimed a smooth surface "still takes the fresh value
+    // outright" -- those disagree for every near-mirror (glass at 0.05, --refl-test's mirror at
+    // 0.03); both got an 85%-history blend that can't reduce a variance already at zero and can only
+    // add lag. A pane of glass would have smeared its reflection behind a moving camera for nothing.
     //
-    // Deriving all three behaviours from ONE value is the point: a lobe that is jittered but not
-    // filtered is noise, and a filter applied to an unjittered ray is blur. They must agree, and the
-    // only way to guarantee that is for them to read the same number.
+    // Deriving all three behaviours from ONE value is the point: a jittered-but-unfiltered lobe is
+    // noise, a filtered-but-unjittered ray is blur -- they must agree, which only works if they read
+    // the same number.
     const float lobeRough = rough < AVER_REFL_MIRROR_ROUGH ? 0.0 : rough;
 
-    // NO HISTORY TEXTURE AT ALL: no accumulation is possible, so the lobe is not opened either.
-    // Widening the cone with nothing to converge it trades a biased-but-stable reflection for an
-    // unbiased one that flickers every frame, which is strictly worse to look at. Passing rough = 0
-    // here reduces rtReflection to the exact mirror ray it traced before this change, so this
-    // configuration is bit-for-bit what it always was.
+    // NO HISTORY TEXTURE: no accumulation is possible, so the lobe stays closed too -- widening it
+    // with nothing to converge into would trade a biased-but-stable reflection for an unbiased one
+    // that flickers every frame. rough = 0 reduces rtReflection to the exact mirror ray it traced
+    // before this change: bit-for-bit what it always was.
     if (gRtHistParams.x < 0.5) return rtReflection(wpos, N, R, L, pixel, 0.0, 0.0, hit);
 
     const float4 curClip = mul(float4(wpos, 1.0), gViewProj);
@@ -1870,14 +1689,13 @@ float3 rtReflectionTemporal(float3 wpos, float3 N, float3 R, float3 L, float2 pi
     const uint tileBits = (uint)gRtHistParams.w;
 
     if (tileBits == 0u) {
-        // THE SHIPPED PATH: rtPixelsPerRayTileForQuality returns 1 at every tier, so tileBits is 0
-        // everywhere and this is the branch that actually runs. It used to trace, write and return
-        // with NO temporal blend of any kind -- correct while the ray was a deterministic mirror,
-        // because there was no variance for a blend to reduce, and wrong the moment the lobe opened.
+        // THE SHIPPED PATH: rtPixelsPerRayTileForQuality returns 1 at every tier, so this branch
+        // always runs. It used to trace, write and return with NO temporal blend -- correct while
+        // the ray was a deterministic mirror, wrong the moment the lobe opened.
         //
-        // So the blend is added HERE, and only where variance was actually introduced: a smooth
-        // surface (rough = 0, hence tanCone = 0, hence one deterministic ray) still takes the fresh
-        // value outright and this branch stays exactly what it was for glass, chrome and water.
+        // So the blend is added HERE, only where variance was actually introduced: a smooth surface
+        // (rough = 0, tanCone = 0, one deterministic ray) still takes the fresh value outright, so
+        // this branch stays exactly what it was for glass, chrome and water.
         bool curHit;
         float3 fresh = rtReflection(wpos, N, R, L, pixel, lobeRough, frameJitter, curHit);
         float3 col = fresh;
@@ -1886,12 +1704,11 @@ float3 rtReflectionTemporal(float3 wpos, float3 N, float3 R, float3 L, float2 pi
             float3 hist = 0.0;
             float2 velocityPx = 0.0;
             if (gRtHistParams.y > 0.5 && rtReprojectReflection(wpos, pixel, hist, velocityPx)) {
-                // Same velocity-discounted shape rtShadowTemporal and the tiled path below use, and
-                // for the same reason: a reprojected sample that has slid a long way across the
-                // screen is on the same surface but not at the same point of it, and trusting it
-                // fully is what smears a reflection into a comet tail behind a moving camera. Still
-                // camera, full weight and the lobe converges in a handful of frames; fast pan, no
-                // weight and it falls back to this frame's single sample plus the spatial filter.
+                // Same velocity-discounted shape rtShadowTemporal and the tiled path below use: a
+                // reprojected sample that's slid far across the screen is on the same surface but not
+                // the same point of it, and full trust smears a reflection into a comet tail behind a
+                // moving camera. Still camera: full weight, converges in a handful of frames. Fast
+                // pan: no weight, falls back to this frame's single sample plus the spatial filter.
                 const float t = saturate(length(velocityPx) / 6.0);
                 col = lerp(hist, fresh, lerp(0.15, 1.0, t));
             }
@@ -2104,49 +1921,38 @@ float3 coneTracedIndirect(float3 wpos, float3 N, out float ao) {
 }
 
 // ================= additive G-buffer: velocity, view-space depth, normal+roughness =================
-// Gated on AVER_GBUFFER, following this file's AVER_RT convention exactly: a compile-time define,
-// undefined (hence 0 under HLSL's #if) everywhere except a variant the host explicitly compiles with
-// "AVER_GBUFFER=1" appended to its define string -- never a runtime branch -- so PSMainVoxi's and
-// PSRayDriven's ORIGINAL variants (SV_TARGET alone, or SV_TARGET+SV_DEPTH) fall through the #else
-// branches below UNCHANGED and compile to the identical shader they always did. THIS IS WHAT MAKES
-// THE FEATURE ADDITIVE: with the define off, the frame this file produces must be bit-identical to
-// today's, and the render gate oracle (18 gates x 9 configurations) is what would notice if it were
-// not.
+// Gated on AVER_GBUFFER, following this file's AVER_RT convention: a compile-time define, undefined
+// (0 under HLSL's #if) unless the host compiles with "AVER_GBUFFER=1" -- never a runtime branch, so
+// PSMainVoxi's/PSRayDriven's ORIGINAL variants fall through the #else branches UNCHANGED. THIS IS
+// WHAT MAKES THE FEATURE ADDITIVE: with the define off the frame must be bit-identical to today's,
+// checked by the render gate oracle (18 gates x 9 configurations).
 //
-// WHY THIS EXISTS AT ALL: nothing in this engine produces motion vectors, and there is no G-buffer --
-// PSMainVoxi returns one SV_TARGET, and normal/roughness/albedo live only in this shader's own
-// registers, never in a texture a compute pass could read. That single gap blocks the vendored
-// FidelityFX denoiser (third_party/fidelityfx-denoiser/README.md lists the exact host callbacks it is
-// missing), FSR 2/3, TAA and screen-space reflections all at once, and it is also WHY temporal
-// reprojection is wrong for moving geometry today: rtReprojectHistory and its siblings transform THIS
-// frame's wpos through LAST frame's camera, which only holds for a surface that did not move.
+// WHY THIS EXISTS: nothing in this engine produces motion vectors and there is no G-buffer --
+// PSMainVoxi returns one SV_TARGET, with normal/roughness/albedo living only in shader registers,
+// never in a texture a compute pass can read. That single gap blocks the vendored FidelityFX
+// denoiser (third_party/fidelityfx-denoiser/README.md lists the missing host callbacks), FSR 2/3,
+// TAA and screen-space reflections at once, and is also WHY temporal reprojection is wrong for
+// moving geometry today: rtReprojectHistory and its siblings transform THIS frame's wpos through
+// LAST frame's camera, which only holds for a surface that didn't move.
 //
-// THIS SLICE ONLY WRITES THE TARGETS -- nothing in this file reads them back. Wiring a consumer (the
-// FFX denoiser, FSR3, TAA) is later work, stated as out of scope here on purpose: a target that is
-// written and never read is precisely the shape this codebase keeps producing by accident (declared
-// but unread, entry after entry), and the point of saying so here is that this one is unread
-// DELIBERATELY, for now, not by omission.
+// THIS SLICE ONLY WRITES THE TARGETS -- nothing here reads them back. Wiring a consumer (FFX
+// denoiser, FSR3, TAA) is later work, out of scope on purpose: unread-but-written is this codebase's
+// recurring shape, and this one is unread DELIBERATELY, not by omission.
 //
-// ---- HOW TO DECODE EACH CHANNEL -- stated here because the encode (this file) and whatever decodes
-// it later (a denoiser or upscaler module, on the other side of a module boundary) will drift apart
-// the moment only one side remembers the contract ----
+// ---- HOW TO DECODE EACH CHANNEL -- stated here so the encode (this file) and whatever decodes it
+// later don't drift apart ----
 //   SV_TARGET1 velocity:        RG16F. Texels/frame, DESTINATION (this frame's) texel minus SOURCE
-//                                (last frame's) texel for the same surface point -- read back as-is,
-//                                no scale or bias: `prevPixel = thisPixel - velocity`. Matches
-//                                rhi::UpscalerNeeds::MotionVectors' own documented convention exactly
-//                                (RHIResources.hpp).
-//   SV_TARGET2 viewZ:           R32F. VIEW-SPACE LINEAR depth -- clip.w from
-//                                mul(float4(wpos,1), gViewProj) -- NOT the post-projective [0,1]
-//                                SV_Position.z/SV_DEPTH value a hardware depth buffer stores. Read
-//                                back as-is; it is already linear, in the same world units as wpos.
-//   SV_TARGET3 normalRoughness: RGB10A2. xyz = world-space shading normal * 0.5 + 0.5 (decode as
-//                                N = xyz*2-1, unit length up to 10-bit-per-channel quantisation);
-//                                w = roughness, unscaled. THE ALPHA CHANNEL IS TWO BITS -- four
-//                                representable levels -- which is the format this feature was
-//                                specified against, not a choice made in this file; a consumer that
-//                                needs finer roughness than four steps has to read it from the
-//                                material's own SRV instead of this channel. Stated here rather than
-//                                left for someone to discover as unexplained banding.
+//                                (last frame's) texel for the same surface point -- read back as-is:
+//                                `prevPixel = thisPixel - velocity`, matching
+//                                rhi::UpscalerNeeds::MotionVectors' documented convention exactly.
+//   SV_TARGET2 viewZ:           R32F. VIEW-SPACE LINEAR depth (clip.w from mul(wpos,1,gViewProj)),
+//                                NOT the post-projective [0,1] SV_Position.z/SV_DEPTH a hardware
+//                                depth buffer stores. Already linear, in wpos's own world units.
+//   SV_TARGET3 normalRoughness: RGB10A2. xyz = world-space shading normal * 0.5 + 0.5 (decode
+//                                N = xyz*2-1); w = roughness, unscaled. THE ALPHA CHANNEL IS TWO
+//                                BITS -- four levels -- specified for this feature, not chosen here;
+//                                a consumer needing finer roughness reads the material's own SRV
+//                                instead. Stated here rather than left as unexplained banding.
 #if AVER_GBUFFER
 struct GBufferOut {
     float4 col              : SV_TARGET0;   // exactly PSMainVoxi's own colour -- unchanged by this define
@@ -2163,30 +1969,22 @@ float4 averPackNormalRoughness(float3 N, float roughness) {
 }
 
 // Screen-space motion for the velocity channel: `wpos` reprojected through THIS frame's camera minus
-// the SAME wpos reprojected through LAST frame's, mapped into the SCENE VIEWPORT RECT the identical
-// way rtReprojectHistory/rtShadowSpatial/rtReprojectReflection already do -- see rtReprojectHistory's
-// own comment for the landmine this inherits rather than re-derives: the editor docks the 3D view in
-// a sub-rect of the backbuffer (gSceneViewport), and a plain ndc*0.5+0.5 implicitly assumes the
-// viewport covers the entire render target.
+// the SAME wpos through LAST frame's, mapped into the SCENE VIEWPORT RECT the same way
+// rtReprojectHistory/rtShadowSpatial/rtReprojectReflection already do -- see rtReprojectHistory's own
+// comment for the inherited landmine (the editor docks the 3D view in a sub-rect of the backbuffer,
+// and a plain ndc*0.5+0.5 assumes it covers the whole target).
 //
-// STATIC-GEOMETRY ONLY, AND THIS IS A STATED, DELIBERATE GAP RATHER THAN AN OVERSIGHT. `wpos` stands
-// in for the SAME world point in both projections, which is only correct if the underlying surface
-// did not move between frames -- precisely the assumption this feature's own module comment (above)
-// says is broken for temporal reprojection today. A genuinely moving instance needs its OWN
-// previous-frame object-to-world transform: reproject the vertex's OBJECT-space position through a
-// previous `gWorld` (raster) or a previous `RtInstance.objectToWorld` (ray-driven) instead of reusing
-// this frame's wpos for both terms. NEITHER EXISTS YET as this is written: VSOut/the per-draw cbuffer
-// carry no previous gWorld, and RtInstance (this file, above -- `struct RtInstance { float4x4
-// objectToWorld; ... }`) carries exactly one transform and no previous one, so there is nothing
-// reachable from here to consume. The consequence: this function reports real, correct motion for a
-// STATIONARY object under a MOVING camera (the same case rtReprojectHistory/rtShadowSpatial/
-// rtReprojectReflection already need fixed for their own disocclusion tests), and reports ZERO motion
-// for an object that is itself animating -- SILENTLY, which is exactly the failure mode worth naming
-// rather than leaving implicit. A consumer that trusts this channel for a moving character's own
-// reprojection will reuse stale history under it precisely the way today's shadow/reflection temporal
-// filters already do for the same reason, until a previous-transform is threaded through RtInstance
-// (or the per-draw cbuffer) and this function is updated to reproject through it instead of through
-// `wpos` twice.
+// STATIC-GEOMETRY ONLY, A STATED DELIBERATE GAP: `wpos` stands in for the same world point in both
+// projections, correct only if the surface didn't move -- the exact assumption this feature's module
+// comment above says is broken for temporal reprojection today. A genuinely moving instance needs
+// its OWN previous-frame transform (a previous `gWorld` for raster, a previous
+// `RtInstance.objectToWorld` for ray-driven), and NEITHER EXISTS YET: VSOut/the per-draw cbuffer
+// carry no previous gWorld, and RtInstance carries exactly one transform. Consequence: real, correct
+// motion for a STATIONARY object under a MOVING camera, but ZERO motion for an object that is itself
+// animating -- SILENTLY. A consumer trusting this channel for a moving character's own reprojection
+// will reuse stale history the same way today's shadow/reflection temporal filters already do, until
+// a previous-transform is threaded through RtInstance (or the per-draw cbuffer) and this function
+// reprojects through it instead of through `wpos` twice.
 float2 averGBufferVelocity(float3 wpos) {
     const float4 curClip  = mul(float4(wpos, 1.0), gViewProj);
     const float4 prevClip = mul(float4(wpos, 1.0), gPrevViewProj);
@@ -2210,12 +2008,10 @@ float2 averGBufferVelocity(float3 wpos) {
     return curPx - prevPx;
 }
 
-// One expansion point for every one of PSMainVoxi's several `return` statements, so the three extra
-// channels are populated identically at each of them instead of by hand at each site, where a future
-// edit could update the colour at one site and forget one of the other three. `gbufVelocity`/
-// `gbufViewZ`/`gbufNormalRough` are computed exactly once, further down, right after `s` (the
-// AverSurface every return site below already has in scope) is built -- this macro only ever
-// assembles values that already exist, never recomputes them per call site.
+// One expansion point for PSMainVoxi's several `return` statements, so the three extra channels are
+// populated identically everywhere instead of by hand at each site (where a future edit could update
+// the colour and forget one of the others). `gbufVelocity`/`gbufViewZ`/`gbufNormalRough` are computed
+// once, after `s` is built -- this macro only assembles values that already exist.
 #define AVER_GBUF_RETURN(colorExpr) \
     { GBufferOut aver_gbuf_o; aver_gbuf_o.col = (colorExpr); aver_gbuf_o.velocity = gbufVelocity; \
       aver_gbuf_o.viewZ = gbufViewZ; aver_gbuf_o.normalRoughness = gbufNormalRough; return aver_gbuf_o; }
@@ -2360,57 +2156,47 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     //
     // ---- THE APERTURE THE OLD COMMENT SAID WAS MISSING ----
     //
-    // What stood here said: "A MIRROR RAY IS ONLY RIGHT FOR A SMOOTH SURFACE. The cone path it
-    // replaced widened its aperture with roughness; a single ray has no aperture at all, so applying
-    // it to a rough surface hands back a sharp reflection where a blurred one belongs." That was an
-    // accurate description of a real defect, and the two things it did about it were both
-    // concealments rather than fixes: refuse the reflection outright above roughness 0.5, and fade
-    // whatever survived toward flat sky at TWICE the roughness. Between them, a surface at roughness
-    // 0.25 -- ordinary painted metal, damp stone, a pool coping -- received a mirror reflection at
-    // half strength blended with half a flat sky colour, and a surface at 0.5 received no ray at all
-    // while paying the roughness test to find that out.
+    // The reflection ray used to trace R exactly with no aperture, so a rough surface got a sharp
+    // reflection where a blurred one belonged (see rtReflection's own comment for that history) --
+    // and this call site "fixed" it by refusing any reflection above roughness 0.5 and fading what
+    // remained toward flat sky at TWICE the roughness. A surface at 0.25 got a mirror reflection at
+    // half strength blended with half a flat sky colour; a surface at 0.5 got no ray at all.
     //
-    // rtReflection now takes the roughness and opens a real cone (tan = rough^2, the GGX alpha),
-    // rtReflectionTemporal converges it over frames, and rtReflectionSpatial filters it across
-    // pixels with a kernel that widens with the same roughness. So the reflection can simply be
-    // USED, across the range where a one-ray-per-pixel estimate plus those two filters actually
-    // resolves something.
+    // rtReflection now opens a real cone from roughness, rtReflectionTemporal converges it over
+    // frames, and rtReflectionSpatial filters it across pixels -- so the reflection can be USED
+    // wherever that combination actually resolves something.
     //
-    // WHY 0.75 AND NOT 1.0. Past roughly three-quarters rough, the lobe is wide enough that a single
-    // ray per pixel is estimating a near-hemispherical integral, and neither filter can close that:
-    // the spatial kernel saturates at radius 3 and the temporal history rejects itself as soon as
-    // the camera moves. What a surface that rough reflects is, to a very good approximation, the
-    // average of its surroundings -- which is what the cone trace below returns from the voxel
-    // volume, and what the sky term returns outdoors. Handing those cases to the path that already
-    // answers them well is the right division, and 0.75 is where the ray stops being the better
-    // answer rather than where it stops being affordable.
+    // WHY 0.75 AND NOT 1.0: past roughly three-quarters rough the lobe is wide enough that a single
+    // ray per pixel is estimating a near-hemispherical integral neither filter can close (the
+    // spatial kernel saturates at radius 3; the temporal history rejects itself as soon as the
+    // camera moves). What a surface that rough reflects is, to a good approximation, the average of
+    // its surroundings -- exactly what the cone trace below returns indoors and the sky term
+    // outdoors. 0.75 is where the ray stops being the better answer, not where it stops being
+    // affordable.
     //
-    // The fade is kept, but it is now only a seam-hider across the last quarter of the range instead
-    // of the mechanism: it goes from 0 at 0.5 rough to 1 at 0.75, so nothing pops as a surface
-    // crosses the cutoff into the cone path, and everything below 0.5 rough is the traced answer at
-    // full strength rather than a blend with a flat colour.
+    // The fade is kept only as a seam-hider across the last quarter of the range (0 at 0.5 rough, 1
+    // at 0.75): nothing pops crossing the cutoff, and everything below 0.5 is the traced answer at
+    // full strength.
     if (gShadowParams.z > 0.5 && gRtParams.w > 0.5 && s.rough <= 0.75) {
         bool specHit = false;
         float3 refl = rtReflectionTemporal(i.wpos, N, R, L, i.pos.xy, s.rough,
                                            rtDzdx, rtDzdy, specHit);
-        // ONE skyColor(R), NOT TWO, AND NOW NOT ALWAYS ONE. Both operands of this lerp ask for the
+        // ONE skyColor(R), NOT TWO, AND NOW NOT ALWAYS ONE: both operands of this lerp ask for the
         // same value with the same argument, and skyColor is a 32-step atmosphere march under a
-        // physical sky -- each step evaluating a Chapman-function sun transmittance. Naming it once
-        // rather than trusting DXC to common-subexpression a term priced that high was the first
-        // half of this; the guard is the second.
+        // physical sky (each step evaluating a Chapman-function sun transmittance) -- too expensive
+        // to trust DXC to common-subexpression, so it's named once; the guard below is the other half.
         //
-        // WHEN THE MARCH IS PURE WASTE: smoothstep(0.5, 0.75, rough) is EXACTLY 0 for any surface at
-        // or below 0.5 roughness, so for a ray that HIT something the lerp reduces to `refl` and the
-        // sky it just marched is multiplied by zero. Water, glass, chrome and wet stone are all in
-        // that band, which is exactly the population that grew when water became a blended material:
-        // measured on the PTTest pool, the blended replay went 18.9 -> 15.9 ms and the whole frame
-        // 44.86 -> 41.78. Nothing on screen changes, because the term removed was multiplied by 0.
+        // WHEN THE MARCH IS PURE WASTE: smoothstep(0.5, 0.75, rough) is EXACTLY 0 at or below 0.5
+        // roughness, so for a ray that HIT something the lerp reduces to `refl` and the marched sky
+        // is multiplied by zero. Water, glass, chrome and wet stone are all in that band -- the
+        // population that grew when water became a blended material. Measured on the PTTest pool:
+        // the blended replay went 18.9 -> 15.9ms, the whole frame 44.86 -> 41.78ms, with nothing on
+        // screen changing (the removed term was multiplied by 0).
         //
-        // STILL ONE CALL, AND THAT IS NOT A STYLE POINT. An earlier attempt at this guard split the
-        // lerp into two branches that each called skyColor(R), which cost 13% (8.15 -> 9.26 ms): a
-        // divergent wave executes both sides, so "avoiding" the march by branching around it ran it
-        // twice instead. The shape below has exactly one call site, guarded, and the guard is false
-        // only where the result is provably unused.
+        // STILL ONE CALL, NOT A STYLE POINT: an earlier attempt split the lerp into two branches each
+        // calling skyColor(R), costing 13% (8.15 -> 9.26ms) because a divergent wave executes both
+        // sides -- "avoiding" the march by branching around it ran it twice instead. One guarded call
+        // site, false only where the result is provably unused.
         const float skyW = smoothstep(0.5, 0.75, s.rough);
         float3 skyR = float3(0.0, 0.0, 0.0);
         if (!specHit || skyW > 0.0) skyR = skyColor(R);
@@ -2681,21 +2467,12 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     r.TMax      = 1.0e7;
 
     RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
-    // Opaque lane only -- see AVER_RT_MASK_OPAQUE. A single Proceed() cannot correctly traverse
-    // past a non-opaque candidate, and this ray has no reason to want one.
-    // FORCE_OPAQUE IS FREE HERE, AND PROVABLY A NO-OP. createBlas marks every geometry it builds
-    // D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE (D3D12Device.cpp), and the only thing that can un-opaque an
-    // instance is TlasInstanceFlag_ForceNonOpaque, which VoxiRenderer sets ONLY on the translucent
-    // lane -- the lane this ray's AVER_RT_MASK_OPAQUE excludes. So no candidate this ray can ever see
-    // is non-opaque, and saying so lets the hardware skip any-hit bookkeeping entirely.
+    // Opaque lane, FORCE_OPAQUE a free no-op -- see rtReflection's own ray setup, above, for why.
     //
-    // NOT on the shadow ray (this file, the rtShadow query): that one masks AVER_RT_MASK_ALL on
-    // purpose so a pane of glass can attenuate it, and forcing opaque there would make every pane a
-    // wall -- which is the exact behaviour its own comment says was removed.
-    // THE ONE RAY THAT USES THE NARROW LANE. AVER_RT_MASK_OPAQUE, not
-    // AVER_RT_MASK_OPAQUE_ALL: this ray starts inside the first-person viewer's own head,
-    // so it is the single traversal that must not see the body carrying
-    // AVER_RT_MASK_OWNER_HIDDEN. Every other opaque query in this file asks for _ALL.
+    // THE ONE RAY THAT USES THE NARROW LANE, though: AVER_RT_MASK_OPAQUE, not AVER_RT_MASK_OPAQUE_ALL
+    // -- this ray starts inside the first-person viewer's own head, so it is the single traversal
+    // that must not see the body carrying AVER_RT_MASK_OWNER_HIDDEN. Every other opaque query in
+    // this file asks for _ALL.
     q.TraceRayInline(gScene, RAY_FLAG_FORCE_OPAQUE, AVER_RT_MASK_OPAQUE, r);
     q.Proceed();
 

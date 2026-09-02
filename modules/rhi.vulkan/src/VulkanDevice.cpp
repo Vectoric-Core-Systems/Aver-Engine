@@ -77,49 +77,40 @@ const std::string& sceneShaderSource() {
 // ---- the push-constant patch --------------------------------------------------------------------
 // WHY THIS EXISTS: section 4 of VulkanCommon.hpp commits kObjectConstantRegister (b1) and the
 // mesh-geometry triangle count (b5, MeshCB) to PUSH CONSTANTS -- the Vulkan analogue of D3D12's
-// root 32-bit constants. DXC only emits an actual SPIR-V PushConstant block for an HLSL cbuffer
-// that is itself annotated `[[vk::push_constant]]` in the SOURCE TEXT; there is no compile-time
-// flag that promotes an ordinary `cbuffer X : register(bN)` to one, and the shared prelude
-// (modules/rhi/src/RHIShaders.cpp, off-limits to this module) declares `PerObject`/`MeshCB` as
-// perfectly ordinary cbuffers with no such annotation, because it is shared with the D3D12 backend,
-// which has no such concept. So THIS FILE inserts the annotation itself, into the ASSEMBLED source
-// string it alone controls, before handing that string to the shader compiler -- DXC still only
-// ever compiles ordinary, well-documented `[[vk::push_constant]]` syntax; nothing here depends on
-// any DXC behaviour beyond that.
+// root 32-bit constants. DXC only emits a SPIR-V PushConstant block for an HLSL cbuffer annotated
+// `[[vk::push_constant]]` in the SOURCE TEXT itself; there is no compile-time flag that promotes an
+// ordinary `cbuffer X : register(bN)`, and the shared prelude (modules/rhi/src/RHIShaders.cpp,
+// off-limits to this module) declares PerObject/MeshCB as ordinary cbuffers because it is also
+// shared with D3D12, which has no such concept. So this file patches the annotation into the
+// ASSEMBLED source string it alone controls, before compiling -- DXC never sees anything but
+// ordinary, documented syntax.
 //
-// A SECOND, LESS OBVIOUS reason PerObject and MeshCB are merged into ONE patched block rather than
-// two separately-annotated ones: SPIR-V allows at most one PushConstant-decorated interface block
-// per entry point, and the mesh shader (MSMain) statically uses fields from BOTH. Two separate
-// `[[vk::push_constant]]` cbuffers there would be invalid SPIR-V. Folding MeshCB's two fields onto
-// the tail of PerObject's declaration -- deleting MeshCB's own block entirely -- keeps the byte
-// layout exactly what PushConstantLayout already implies elsewhere in this header (object bytes at
-// [0,128), the mesh count block immediately after), while staying inside SPIR-V's one-block rule.
-// The vertex/index STRUCTURED BUFFERS (gVerts/gIndices) are NOT part of this patch and are NOT push
-// constants here: `StructuredBuffer<T>`/`ByteAddressBuffer` always lower to a descriptor-bound
-// resource in DXC's SPIR-V backend, annotation or not -- there is no HLSL spelling in the shared,
-// un-annotated prelude that makes one a bare pointer. See dispatchMesh()'s own comment for how this
-// backend's fixed mesh pipeline binds them instead (a freshly-allocated descriptor set per draw),
-// which is the one place this backend's shape most sharply diverges from D3D12's raw root-SRV bind
-// and from section 4's own "push constants carry the mesh geometry" text.
+// PerObject and MeshCB merge into ONE patched block, not two annotated ones, because SPIR-V allows
+// at most one PushConstant interface block per entry point and MSMain uses fields from both;
+// folding MeshCB's two fields onto PerObject's tail keeps the byte layout PushConstantLayout
+// expects (object bytes at [0,128), mesh count right after).
+//
+// The vertex/index STRUCTURED BUFFERS (gVerts/gIndices) are NOT part of this patch: DXC's SPIR-V
+// backend always lowers StructuredBuffer<T>/ByteAddressBuffer to a descriptor-bound resource, with
+// no HLSL spelling in the un-annotated prelude that makes one a bare pointer. See dispatchMesh()'s
+// own comment for how the fixed mesh pipeline binds them instead (a fresh descriptor set per draw)
+// -- the one place this backend most sharply diverges from D3D12's raw root-SRV bind.
 bool patchPushConstants(std::string& src, bool mesh) {
-    // THE ANNOTATION DOES NOT GO ON A cbuffer, and the first version of this function put it there.
-    // DXC accepts `[[vk::push_constant]]` only on a global variable of STRUCT type; on a cbuffer
-    // block it rejects the shader outright with
+    // THE ANNOTATION DOES NOT GO ON A cbuffer -- the first version of this function put it there.
+    // DXC accepts `[[vk::push_constant]]` only on a global STRUCT variable; on a cbuffer it rejects
+    // the shader outright with
     //     error: 'push_constant' attribute only applies to global variables of struct type
-    // That was invisible for as long as the engine had no SPIR-V-capable dxcompiler.dll, because
-    // compilation died earlier on "SPIR-V CodeGen not available" and never reached the attribute.
-    // Vendoring a compiler that can actually emit SPIR-V is what surfaced it.
+    // Invisible until now because compilation always died earlier on "SPIR-V CodeGen not available"
+    // -- vendoring a compiler that can actually emit SPIR-V is what surfaced it.
     //
-    // The shape DXC does accept is a struct plus a ConstantBuffer of it. The fields then live inside
-    // that struct rather than at global scope, which would break every `gWorld` in the shared
-    // prelude -- so each is aliased straight back out to a global of the same name. HLSL scopes
-    // struct members separately from globals, so `static float4x4 gWorld = gAverPc.gWorld;` is legal
-    // and every existing reference keeps resolving with the prelude untouched.
+    // The shape DXC accepts is a struct plus a ConstantBuffer of it, so each field is aliased back
+    // out to a global of the same name (`static float4x4 gWorld = gAverPc.gWorld;` is legal -- HLSL
+    // scopes struct members separately from globals) to keep the prelude's own gWorld/... resolving
+    // unchanged.
     //
-    // THE ALIAS LIST IS HARDCODED AGAINST THE PRELUDE, matching what this function already did with
-    // its exact-text needles: if RHIShaders.cpp's PerObject gains or loses a field, this stops
-    // matching and says so, rather than silently compiling a block whose layout no longer agrees
-    // with PushConstantLayout.
+    // THE ALIAS LIST IS HARDCODED AGAINST THE PRELUDE, like this function's needles: if
+    // RHIShaders.cpp's PerObject gains or loses a field, this stops matching and says so, rather
+    // than silently compiling a block whose layout disagrees with PushConstantLayout.
     const std::string needle = "cbuffer PerObject : register(b1) {";
     const size_t pos = src.find(needle);
     if (pos == std::string::npos) {
@@ -573,18 +564,13 @@ bool VulkanDevice::init(const DeviceDesc& desc) {
     ici.pApplicationInfo = &appInfo;
     ici.enabledExtensionCount = static_cast<u32>(instExts.size());
     ici.ppEnabledExtensionNames = instExts.data();
-    // VK_LAYER_KHRONOS_validation, REQUESTED ONLY WHEN BOTH ASKED FOR AND PRESENT.
-    //
-    // This used to be requested never, on reasoning that was half right: asking for it
-    // unconditionally DOES fail instance creation outright on every machine without the SDK, which
-    // is most of them. But refusing to ask even when the caller passed enableDebug AND the layer is
-    // installed made --debug-layer a misnomer -- it installed the debug-utils messenger, which
-    // reports what the DRIVER volunteers, and validation is not the driver. The messenger stayed
-    // silent while the driver access-violated, and the whole point of the flag is to be told why.
-    //
-    // ENUMERATED, NOT ASSUMED: the layer is only named if EnumerateInstanceLayerProperties reports
-    // it, so a machine without the SDK behaves exactly as before and one with it gets the
-    // diagnostic. That is the same shape every optional extension in this file already uses.
+    // VK_LAYER_KHRONOS_validation, REQUESTED ONLY WHEN BOTH ASKED FOR AND PRESENT. Used to be
+    // requested never: asking for it unconditionally fails instance creation on every machine
+    // without the SDK (most of them), but never asking even with enableDebug AND the layer installed
+    // made --debug-layer a misnomer -- it only installed the debug-utils messenger, which reports
+    // what the DRIVER volunteers, and stayed silent while the driver access-violated. ENUMERATED,
+    // NOT ASSUMED: named only if EnumerateInstanceLayerProperties reports it, so a machine without
+    // the SDK behaves exactly as before -- the same shape every optional extension here uses.
     std::vector<const char*> instLayers;
     if (desc.enableDebug && api_.EnumerateInstanceLayerProperties) {
         u32 layerCount = 0;
@@ -726,21 +712,16 @@ bool VulkanDevice::init(const DeviceDesc& desc) {
     const bool accelStructFeaturesOk = !wantAccelStruct || asFeat.accelerationStructure;
     const bool rayQueryFeaturesOk = !wantRayQuery || rqFeat.rayQuery;
     if (!meshShaderFeaturesOk) { meshFeat.taskShader = meshFeat.meshShader = VK_FALSE; }
-    // CLEARED, because meshFeat came back from GetPhysicalDeviceFeatures2 with every bit the DEVICE
-    // supports, and it is then passed straight to vkCreateDevice as the set to ENABLE. Two of those
-    // bits have dependencies the engine does not turn on, and requesting a feature without its
-    // prerequisite is invalid device creation:
-    //     multiviewMeshShader                    needs multiview
-    //     primitiveFragmentShadingRateMeshShader needs primitiveFragmentShadingRate
-    // The engine uses neither multiview nor primitive shading rate, so clearing them is the correct
-    // minimal fix rather than enabling two features nothing asks for. Reported by the validation
-    // layer the first time it ran; the driver had been accepting them silently.
+    // CLEARED for the same SUPPORTED-vs-ENABLE reason as the bindless bits above. Two mesh-shader
+    // bits carry dependencies the engine never turns on -- multiviewMeshShader needs multiview,
+    // primitiveFragmentShadingRateMeshShader needs primitiveFragmentShadingRate -- so clearing them
+    // is the minimal correct fix; the validation layer caught it after the driver had been accepting
+    // them silently.
     meshFeat.multiviewMeshShader = VK_FALSE;
     meshFeat.primitiveFragmentShadingRateMeshShader = VK_FALSE;
-    // (leave the optional feature structs zeroed/disabled when their feature bits are not actually
-    // supported, even though the extension itself was present -- an extension can be exposed with
-    // its feature bits false; requesting a feature the device did not report is invalid device
-    // creation, so this is load-bearing, not defensive.)
+    // asFeat/rqFeat are left untouched here on purpose: an extension can be present with its feature
+    // bit false, and GetPhysicalDeviceFeatures2 already reported that correctly, so there is nothing
+    // to clear -- requesting an unsupported bit is invalid device creation either way.
 
     const f32 prio = 1.0f;
     VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
@@ -1046,14 +1027,13 @@ void VulkanDevice::queryCaps() {
     // kOptionalDeviceExtensions' own comment on why VK_KHR_ray_tracing_pipeline is deliberately not
     // in scope. A judgment call, not a hardware-reported number; documented here for that reason.
     //
-    // rtSupported_ was set in init() from extension + feature-bit presence alone, BEFORE this
-    // function (and therefore before shaderModel/dxcAvailable above) had run -- RayQuery needs SM
-    // 6.5 the same way this backend's mesh path does, so that gate is applied HERE, narrowing
-    // rtSupported_ in place, rather than leaving caps_.rayTracingTier computed from the pre-gate
-    // value. initAccelerationStructures(), called right after this function returns, narrows it
-    // once more (confirming the acceleration-structure function pointers actually resolved); that
-    // last step cannot fail if the extension was genuinely present, so it is not expected to move
-    // this field again, but see this backend's own honestState for the residual, unverified case.
+    // rtSupported_ was set in init() from extension + feature-bit presence alone, before
+    // shaderModel/dxcAvailable above existed -- RayQuery needs SM 6.5 like the mesh path does, so
+    // that gate is applied HERE, narrowing rtSupported_ in place. initAccelerationStructures()
+    // (called right after this function returns) narrows it once more, confirming the
+    // acceleration-structure function pointers actually resolved; not expected to fail if the
+    // extension was genuinely present, but see this backend's own honestState for the residual,
+    // unverified case.
     rtSupported_ = rtSupported_ && caps_.shaderModel >= 65 && caps_.dxcAvailable;
     caps_.rayTracingTier = rtSupported_ ? 11u : 0u;
 
@@ -2153,61 +2133,32 @@ void VulkanDevice::drawMesh(MeshHandle mesh, const f32 world[16], const f32 colo
     nextDrawPrepassed_ = false;
     if (!hasSwapchain_ || mesh == 0 || mesh > meshes_.size()) return;
     if (!meshes_[mesh - 1].alive) return;
-    // `blended` explicit and false: unlike D3D12Device, this backend never sets drawBlended_ true in
-    // the first place (see the comment on the D3D12-only gap just below), so every draw that reaches
-    // this call site is opaque by construction -- writing the false out loud says so, rather than
-    // leaning on IRenderFeature::submitDraw's default to make that true by accident, matching the same
-    // reasoning the explicit `false` a few lines down (scenePipeline's own blended argument) already
-    // applies for this exact call site.
+    // `blended` explicit and false, and TRANSLUCENT MESHES ARE D3D12-ONLY TODAY. IDevice::
+    // setDrawBlended (RHI.hpp:613) is the seam a caller uses to mark a draw translucent, but
+    // VulkanDevice does not override it -- the base class's setter is a no-op and drawBlended()
+    // always answers false (RHI.hpp:613-615). So every draw reaching this call site is opaque by
+    // construction, and both this `/*blended=*/false` and the scenePipeline() call's explicit
+    // `false` below say so out loud rather than leaning on a default.
     for (IRenderFeature* f : features_)
         f->submitDraw(mesh, world, color, metallic, roughness, drawBinding_.set, drawBinding_.constants, drawBinding_.bytes, /*blended=*/false);
     for (IRenderFeature* f : features_) if (f->suppressesScene()) return;
 
-    // TRANSLUCENT MESHES ARE D3D12-ONLY TODAY. IDevice::setDrawBlended (RHI.hpp:613) is the seam a
-    // caller uses to mark a draw translucent, but VulkanDevice does not override it -- the base
-    // class's default is a no-op setter and a drawBlended() that always answers false (RHI.hpp:
-    // 613-615). Concretely: nothing in this file ever captures a blended draw into a per-frame list
-    // the way D3D12Device::drawMesh does, so a caller that calls setDrawBlended(true) and then draws
-    // a glass mesh here gets exactly the SAME opaque path every other mesh takes, below -- msActive_
-    // ? dispatchMeshFor : drawMesh, through whichever pipeline scenePipeline() or the backend's own
-    // fallback PSO hands back. That pipeline's blend state is itself hardcoded opaque -- the fixed
-    // `VkPipelineColorBlendAttachmentState blendAtt{}` this file builds for scenePso_/wirePso_ (around
-    // line 1321) and again for meshPso_ (around line 1490) never sets blendEnable, so it stays
-    // VK_FALSE, and neither call site reads a BlendMode of any kind -- so the draw is not merely
-    // mis-classified, it is rendered WRONG: a pane of glass paints fully opaque instead of vanishing
-    // or being dropped. Stated plainly because it is wrong but VISIBLE, not silently absent: a
-    // screenshot shows a solid pane where glass was meant to be, which is at least discoverable, but
-    // there is no log line or assert here to catch it automatically -- this comment is the only
-    // record of the gap until (c) below is done.
+    // CONCRETELY WRONG, NOT JUST UNSUPPORTED: a caller that marks a glass mesh blended and draws it
+    // here gets the same opaque path as everything else -- scenePso_/wirePso_/meshPso_ each build a
+    // single hardcoded-opaque VkPipelineColorBlendAttachmentState (createPipeline() ~line 1321,
+    // initMeshShaders() ~line 1490) with no BlendMode read anywhere. The glass paints solid instead
+    // of vanishing. Visible in a screenshot, but nothing logs or asserts it -- this comment is the
+    // only record until it's fixed.
     //
-    // The 4th argument below is passed explicitly as `false` (never `prepassed`'s neighbour, always
-    // opaque) purely so the opaque intent reads at the call site rather than relying on the
-    // parameter's default -- this is the ONLY caller of scenePipeline() in this backend, and it never
-    // asks for the blended variant no matter what a feature's `overridesScenePipeline` override
-    // might otherwise be willing to hand back.
-    //
-    // WHAT REAL SUPPORT WOULD TAKE, so the next person does not have to re-derive it: (a) override
-    // setDrawBlended/drawBlended here with a real sticky bool, reset in beginFrame the same as
-    // D3D12Device's; (b) give drawMesh a branch that diverts AFTER the submitDraw loop above, not
-    // instead of it -- D3D12Device::drawMesh runs that loop with blended=true for every blended draw
-    // before it captures anything, precisely so a feature that wants to see a translucent instance
-    // (the path tracer, which is supposed to accept one -- see IRenderFeature::submitDraw's own
-    // comment, RHIResources.hpp) still gets it; only the BACKEND's own opaque consumers past that
-    // point -- the scenePipeline walk here, and through it voxelisation/TLAS/shadow/prepass -- are
-    // what a blended mesh must skip. So the divert belongs where the opaque scenePipeline walk
-    // would otherwise start (roughly where this very comment sits today), appending
-    // {mesh, world, color, metallic, roughness, drawBinding_} to a new per-frame vector instead of
-    // running that walk; (c) in endFrame, after the sky draw (VulkanDevice's sky PSO is depth-EQUAL no-write,
-    // same hazard D3D12Device::endFrame's own comment documents -- drawing blended before the sky
-    // would have the sky's opaque fill paint over it) and before the transparentPass loop, sort that
-    // vector back-to-front by camera distance and replay each entry through
-    // scenePipeline(meshShaders, wireframe_, false, true) with a blend pipeline variant that does not
-    // exist yet -- scenePso_/wirePso_/meshPso_ are each built (createPipeline() around line 1321,
-    // initMeshShaders() around line 1490) with exactly one hardcoded-opaque
-    // VkPipelineColorBlendAttachmentState apiece, so a second PSO with blendEnable=VK_TRUE
-    // (toVkBlendAttachment already knows how to build one correctly for BlendMode::AlphaBlend,
-    // VulkanResourceFactory.cpp:500-528) would need to be added alongside each, plus a
-    // depth-write-off VkPipelineDepthStencilStateCreateInfo variant to pair with it.
+    // WHAT REAL SUPPORT WOULD TAKE: (a) override setDrawBlended/drawBlended with a real sticky bool
+    // reset in beginFrame, like D3D12Device's; (b) after the submitDraw loop above (so a feature like
+    // the path tracer still sees the blended instance -- IRenderFeature::submitDraw's own comment),
+    // divert a blended mesh into a new per-frame vector instead of walking scenePipeline here; (c) in
+    // endFrame, after the sky draw (its depth-EQUAL no-write PSO would paint over blended geometry
+    // drawn before it -- see D3D12Device::endFrame) and before transparentPass, sort that vector
+    // back-to-front and replay it through a new blendEnable=VK_TRUE variant of each PSO
+    // (toVkBlendAttachment already builds one for BlendMode::AlphaBlend,
+    // VulkanResourceFactory.cpp:500-528) paired with a depth-write-off state.
     for (IRenderFeature* f : features_) {
         if (!f->overridesScenePipeline() || !rhiContext_) continue;
         const PipelineHandle fp = f->scenePipeline(msActive_ && meshPso_, wireframe_, prepassed, false);
@@ -2262,21 +2213,16 @@ void VulkanDevice::drawMesh(MeshHandle mesh, const f32 world[16], const f32 colo
 // 11b. drawMeshDepthPrepass -- draws `mesh`'s depth ONLY, through whichever registered feature both
 //     overridesScenePipeline() and offers a non-zero depthPrepassPipeline(). See IDevice's own
 //     comment (RHI.hpp:449-460) for the full contract and D3D12Device::drawMeshDepthPrepass
-//     (D3D12Device.cpp:3033-3093) for the implementation this is a structural copy of.
-//
-//     STRUCTURALLY A SMALL COPY OF drawMesh() ABOVE'S OWN feature-pipeline branch -- same walk over
-//     features_, same table-0/frame-CB/table-1/object-constant sequence -- because it is issuing the
-//     same KIND of draw through the same seam, just a different pipeline and no colour/material
-//     tail. Not folded into drawMesh(): the caller (SandboxApp's prepass phase) runs this from a
-//     SEPARATE, earlier walk over the scene, before its ordinary colour walk, never interleaved
-//     per-instance with colour draws -- see D3D12Device::drawMeshDepthPrepass's own comment for why
-//     that separation matters to the GPU stat tree's span budget, which applies here identically.
+//     (D3D12Device.cpp:3033-3093) for the implementation this copies structurally: same walk over
+//     features_, same table-0/frame-CB/table-1/object-constant sequence, just a different pipeline
+//     and no colour/material tail. Not folded into drawMesh(): the caller (SandboxApp's prepass
+//     phase) runs this from a separate, earlier walk over the scene, never interleaved per-instance
+//     with colour draws -- see D3D12Device::drawMeshDepthPrepass's own comment on why that
+//     separation matters to the GPU stat tree's span budget, which applies here identically.
 //
 //     UNLIKE D3D12Device::drawMeshDepthPrepass, there is no fovPso_/fovSet_/fovCbBytes_ elision
-//     cache to replicate here: VulkanDevice::drawMesh above already re-binds the pipeline and the
-//     b0 descriptor set on every call with no such cache (see that function's own header comment),
-//     so this function does the same -- unconditionally, on every eligible draw. Redundant relative
-//     to D3D12's cached path, not incorrect, and not a NEW gap this method introduces.
+//     cache here: drawMesh() above already re-binds the pipeline and b0 set on every call with no
+//     such cache, so this does the same -- redundant relative to D3D12's cached path, not incorrect.
 // ================================================================================================
 void VulkanDevice::drawMeshDepthPrepass(MeshHandle mesh, const f32 world[16]) {
     if (!hasSwapchain_ || !depthPrepassEnabled_ || !rhiContext_ || mesh == 0 || mesh > meshes_.size()) return;
@@ -2792,15 +2738,13 @@ void VulkanDevice::resize(u32 w, u32 h) {
 //     the HLSL every one of these binds against.
 //
 //     DESCRIPTOR STRATEGY, and why it differs from D3D12's descriptor HEAP: D3D12Device writes every
-//     SRV/UAV/sampler descriptor triple ONCE, in createPostTargets (resize time), and simply re-uses
-//     the same heap slots every frame after that -- nothing about which mip a given pass reads or
-//     writes ever changes between two resizes, only the DATA in those textures does, which is an
-//     ordinary GPU-GPU hazard the barriers below already order. This backend copies that shape
-//     exactly rather than reaching for D3D12's OWN alternative of updating descriptors every frame:
-//     Vulkan forbids rewriting a descriptor set that a not-yet-completed command buffer still
-//     references (see dispatchMesh's identical note), so writing kPostSlotCount descriptor sets
-//     ONCE per resize and never touching them again for the rest of that resize generation is not
-//     just simplest here, it is the one shape that sidesteps that hazard entirely.
+//     SRV/UAV/sampler triple ONCE, at resize time, and reuses the same heap slots every frame after
+//     -- only the DATA in those textures changes between frames, an ordinary GPU-GPU hazard the
+//     barriers below already order. This backend copies that shape rather than updating descriptors
+//     every frame the way D3D12 could: Vulkan forbids rewriting a descriptor set a not-yet-completed
+//     command buffer still references (see dispatchMesh's identical note), so writing
+//     kPostSlotCount sets ONCE per resize and never touching them again is the one shape that
+//     sidesteps that hazard entirely.
 // ================================================================================================
 
 // The post chain's explicit register map, at FILE scope because BOTH createPostPipelines and
@@ -2822,36 +2766,29 @@ constexpr u32 kPostBindCount = static_cast<u32>(sizeof(kPostBinds) / sizeof(kPos
 
 
 bool VulkanDevice::createPostPipelines() {
-    // THIS CHAIN REFUSED TO BUILD AT ALL until now, and the comment that lived here listed two
-    // blockers plus an unknown. All three are resolved; the history is worth keeping because each
-    // one was a different kind of wrong.
+    // THIS CHAIN REFUSED TO BUILD AT ALL until now, for three unrelated reasons -- kept here because
+    // each was a different kind of wrong:
     //
     //   THE SET AND THE PERMUTATION -- a WRONG TOOL, not a real limit. The shared HLSL from
-    //   rhi::postShaderSource() declares b0/t0/t1/t2/s0/u0/u1 with no register space, DXC maps space
-    //   to descriptor SET, so everything landed in set 0 while this layout wants set kVkSetConstants
-    //   permuted. The old note said DXC could not express that because the single -fvk-u-shift was
-    //   "already spent" on the scene path. A shift moves binding NUMBERS within one space and can
-    //   never move anything into another set; -fvk-bind-register maps each register to an explicit
-    //   (set, binding), which is exactly what was needed. kPostBinds is that map.
+    //   rhi::postShaderSource() declares b0/t0/t1/t2/s0/u0/u1 with no register space, and DXC maps
+    //   space to descriptor SET, so everything landed in set 0 while this layout wants set
+    //   kVkSetConstants. A -fvk-u-shift only moves binding NUMBERS within one space; the fix is
+    //   -fvk-bind-register, which maps each register to an explicit (set, binding) -- kPostBinds is
+    //   that map.
     //
     //   THE COMBINED SAMPLERS -- the LAYOUT was wrong, not the shader. It asked for
-    //   COMBINED_IMAGE_SAMPLER and DXC emits separate Texture2D + SamplerState with no flag to
-    //   combine them, so the layout now declares SAMPLED_IMAGE plus an immutable SAMPLER at binding
-    //   6. Vulkan supports separate samplers natively and D3D12 reads the same HLSL unchanged.
+    //   COMBINED_IMAGE_SAMPLER, but DXC always emits separate Texture2D + SamplerState, so the layout
+    //   now declares SAMPLED_IMAGE plus an immutable SAMPLER at binding 6 instead.
     //
-    //   THE DESCRIPTOR POOL WAS HALF THE SIZE IT NEEDED TO BE, and this was the one that actually
-    //   killed the process. The allocation below asks for kFrameCount * kPostSlotCount sets -- one
-    //   chain per frame in flight -- while the pool was sized for kPostSlotCount. Half the sets came
-    //   back unallocated as VK_NULL_HANDLE and were bound anyway, and AMD answers a null descriptor
-    //   set with an access violation rather than an error. A LATENT bug, not a regression: this
-    //   whole function sat behind `#if 0` and had never been compiled, so nothing could report it.
+    //   THE DESCRIPTOR POOL WAS HALF THE SIZE IT NEEDED (see the pool-size array below) -- the one
+    //   that actually killed the process, since AMD answers a bound null descriptor set with an
+    //   access violation rather than an error.
     //
-    // HOW THE FIRST TWO WERE VERIFIED WITHOUT VALIDATION LAYERS, since Khronos publishes none for
-    // Windows and this machine has no LunarG SDK: AVER_VK_DUMP_SPIRV writes each compiled module to
-    // disk, and SPIR-V carries its own answer -- OpDecorate DescriptorSet/Binding on every resource.
-    // Reading them back showed AverPost at set 2 binding 0, gPostSceneTex at 2/1, gPostSamp at 2/6
-    // and gPostHist at 2/4, exactly as kPostBinds asks. The compiler was doing its job; the pool was
-    // not.
+    // THE FIRST TWO WERE VERIFIED WITHOUT VALIDATION LAYERS (no LunarG SDK on this machine, and
+    // Khronos publishes none for Windows) via AVER_VK_DUMP_SPIRV: SPIR-V's own OpDecorate
+    // DescriptorSet/Binding on each compiled module showed AverPost at set 2 binding 0, gPostSceneTex
+    // at 2/1, gPostSamp at 2/6, gPostHist at 2/4 -- exactly as kPostBinds asks. The compiler was doing
+    // its job; the pool was not.
 
     if (!postSampler_) {
         VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
@@ -2863,8 +2800,11 @@ bool VulkanDevice::createPostPipelines() {
     }
     if (!postSetLayout_) {
         // SEVEN, not six: t0/t1 are SAMPLED_IMAGE and s0 is its own immutable SAMPLER at binding 6,
-        // because that is what DXC emits for Texture2D + SamplerState and no flag makes it emit a
-        // combined one. See this function's own header comment.
+        // because that is what DXC emits for Texture2D + SamplerState (see this function's header
+        // comment). bindingCount used to say six anyway, leaving binding 6 built but never handed to
+        // Vulkan; the validation layer caught it immediately: "SPIR-V uses descriptor [Set 2, Binding
+        // 6, variable gPostSamp] but the binding was not declared in
+        // VkPipelineLayoutCreateInfo::pSetLayouts[2]".
         VkDescriptorSetLayoutBinding binds[7] = {};
         binds[0] = {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1, VK_SHADER_STAGE_ALL, nullptr};
         binds[1] = {1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_ALL, nullptr};
@@ -2874,11 +2814,6 @@ bool VulkanDevice::createPostPipelines() {
         binds[5] = {5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_ALL, nullptr};
         binds[6] = {6, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_ALL, &postSampler_};
         VkDescriptorSetLayoutCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        // SEVEN. The array above has seven entries and this said six, so the immutable sampler at
-        // binding 6 was built and then never handed to Vulkan -- the layout simply did not contain
-        // it. That is precisely what the validation layer reported the moment it was switched on:
-        // "SPIR-V uses descriptor [Set 2, Binding 6, variable gPostSamp] but the binding was not
-        // declared in VkPipelineLayoutCreateInfo::pSetLayouts[2]".
         ci.bindingCount = 7; ci.pBindings = binds;
         if (!vkOk(api_.CreateDescriptorSetLayout(device_, &ci, nullptr, &postSetLayout_), "post set layout")) return false;
     }
@@ -2892,17 +2827,13 @@ bool VulkanDevice::createPostPipelines() {
     }
     if (!postDescriptorPool_) {
         VkDescriptorPoolSize sizes[4] = {
-            // EVERY COUNT IS PER FRAME IN FLIGHT, and it did not used to be. The allocation below
-            // asks for `kFrameCount * kPostSlotCount` sets (one chain per frame in flight, see
-            // postSets_), while this pool was sized for kPostSlotCount -- exactly HALF. That makes
-            // vkAllocateDescriptorSets return VK_ERROR_OUT_OF_POOL_MEMORY, and the sets that were
-            // never allocated stay VK_NULL_HANDLE and are then bound anyway.
-            //
-            // A latent bug rather than a regression: this whole function sat behind `#if 0` and had
-            // never once been compiled, let alone run, so nothing could ever have reported it. It is
-            // a very good candidate for the in-frame driver fault, because binding a null descriptor
-            // set is precisely the kind of thing AMD answers with an access violation instead of an
-            // error.
+            // EVERY COUNT IS PER FRAME IN FLIGHT -- this is the pool-size bug from the function's
+            // header comment. It used to be sized for kPostSlotCount alone, exactly half of the
+            // `kFrameCount * kPostSlotCount` sets actually allocated below (one chain per frame in
+            // flight; see postSets_), so vkAllocateDescriptorSets returned VK_ERROR_OUT_OF_POOL_MEMORY
+            // and the unallocated sets stayed VK_NULL_HANDLE and got bound anyway -- a latent bug (the
+            // function sat behind `#if 0`, never compiled) that AMD answers with an access violation
+            // rather than an error.
             {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, kFrameCount * kPostSlotCount},
             // SAMPLED_IMAGE and SAMPLER separately, matching the layout above. An immutable sampler
             // still consumes a pool slot -- immutable means the set cannot rewrite it, not that it
@@ -2976,17 +2907,13 @@ bool VulkanDevice::createPostPipelines() {
     if (!makeGfx("PSBloomUp", kVkSceneColorFormat, true, nullptr, bloomUpPso_)) return false;
     // PSComposite's 4 permutations are NOT built here, unlike every other post PSO above: their
     // render-target format is the SWAPCHAIN's negotiated format, which does not exist yet -- this
-    // function runs from VulkanDevice::init(), before any window or swapchain (mirroring
-    // D3D12Device::init() calling createPostPipelines() before any swapchain exists there too).
-    // D3D12 gets away with building its own composite PSOs here anyway because
-    // D3D12_GRAPHICS_PIPELINE_STATE_DESC::RTVFormats is a FIXED compile-time constant
-    // (kBackbufferFormat) it does not negotiate; this backend DOES negotiate swapchainFormat_ from
-    // what the surface actually offers (see that field's own comment), and a Vulkan graphics
-    // pipeline built via dynamic rendering is bound to an EXACT attachment format at creation time --
-    // there is no "compatible enough" fallback the way a traditional VkRenderPass's format
-    // compatibility rules might allow. So the composite PSOs are instead built once, lazily, in
-    // createPostTargets() -- the first point in this backend's lifecycle where swapchainFormat_ is
-    // actually known.
+    // runs from VulkanDevice::init(), before any window or swapchain (mirroring D3D12Device::init()'s
+    // identical ordering). D3D12 can build its composite PSOs here anyway because
+    // D3D12_GRAPHICS_PIPELINE_STATE_DESC::RTVFormats is a fixed compile-time constant it does not
+    // negotiate; this backend DOES negotiate swapchainFormat_ (see that field's own comment), and a
+    // Vulkan pipeline built via dynamic rendering is bound to an EXACT attachment format at creation
+    // time, with no VkRenderPass-style "compatible enough" fallback. So the composite PSOs are built
+    // once, lazily, in createPostTargets() -- the first point swapchainFormat_ is actually known.
 
     auto makeCompute = [&](const char* entry, VkPipeline& out) {
         std::vector<u32> csSpv;
