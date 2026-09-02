@@ -42,9 +42,11 @@ Recorded here rather than left to be discovered:
   registration, not authored per level. Making them level data is a separate slice and follows the
   `LANDSCAPE` record precedent exactly.
 - **No soft shoreline.** The surface is depth-*tested* but does not sample scene depth, so it meets
-  sloped terrain in a hard line rather than a fade. Scene depth is D3D12-only today
-  (`IDevice::sceneDepthTexture()` returns 0 on every other backend), so the blend is deferred rather
-  than half-built against a backend gap.
+  sloped terrain in a hard line rather than a fade. **Corrected:** scene depth is no longer D3D12-only
+  — `VulkanDevice::sceneDepthTexture()` (`VulkanDevice.cpp:906`) now mirrors the D3D12 implementation
+  structurally, so both backends can supply it. D3D11 still returns `IDevice`'s own default of 0
+  (no override in `modules/rhi.d3d11`). The blend is still deferred, but the reason has narrowed to
+  "not built yet" rather than "blocked on a D3D12-only capability".
 - **Vulkan is untested, not broken.** The code is written against the generic `rhi::` vocabulary and
   should compile, but the post chain it would composite through is refused on Vulkan today, so no
   claim is made about the final image there.

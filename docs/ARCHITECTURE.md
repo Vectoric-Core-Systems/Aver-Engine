@@ -46,12 +46,16 @@ Arrows point to dependencies (A ──▶ B means "A depends on B"). No edge poi
  ── TIER 7: OTHER-LANGUAGE CONSUMERS (out of the runtime binary) ─────────────────────
     [Aver.Scripting] [Aver.Scene] [Aver.Framework] [Aver.UI] [Aver.Materials]
     [Aver.MaterialCompiler — avermatc, reflects an assembly and writes .ocmat]
-                 │  P/Invoke                     ‹{aver-assetc / aver-ocbeamc /
-                 ▼                                 aver-aerobake / aver-mapc /
+                 │  P/Invoke                     {aver-assetc}(C++, not Rust — built, see §3) and
+                 ▼                                 ‹{aver-ocbeamc / aver-aerobake / aver-mapc /
  ═════════════════ THE C ABI SEAMS ═════════════   aver-shaderc}› — no Rust in the tree
    ONE PER MODULE. THERE IS NO `Aver.ABI`, AND THERE IS NOT GOING TO BE.
    scene_abi.h  framework_abi.h  physics_abi.h  pbr_abi.h  voxi_abi.h  ui_abi.h
-   audio_abi.h   ── seven DLLs, each with its own export macro; only scene and framework carry a version
+   audio_abi.h  settings_abi.h ── eight DLLs, each with its own export macro; only scene and
+                framework carry a version. (This used to read "seven"; Aver.Settings and its
+                seam are new since.) Physics also spreads across four more headers on the same
+                DLL — physics_character_abi.h, physics_joints_abi.h, physics_layers_abi.h,
+                physics_shapes_abi.h — which is still one seam, not five.
    scripting_abi.h ── the odd one out: STATIC, exports nothing, hands the managed
                  ▲   bridge a function-pointer table instead. See docs/ABI.md
                  │   each seam is implemented by the module below it
@@ -64,7 +68,9 @@ Arrows point to dependencies (A ──▶ B means "A depends on B"). No edge poi
  ── TIER 5: FEATURES — own GPU resources, drive the GENERIC RHI, name no backend ─────
  (Aver.Render.Voxi.Renderer)[opt,ON]  (Aver.Render.UI)  (Aver.Render.ActorPreview)
  (Aver.Render.PBR.Materials)[opt,ON]  (Aver.Assets.Gpu)
- ‹Aver.Render›  ‹Aver.Render.GI›  ‹Aver.GpuDeform›  ‹Aver.World›
+ ‹Aver.Render›  ‹Aver.Render.GI›  ‹Aver.GpuDeform›
+ (Aver.World) — no longer a skeleton; it has a `CMakeLists.txt` now. Left out of this ASCII tier
+ picture rather than mis-placed in it — see its §3 row for what it actually links.
                  ▼
  ── TIER 4: GAMEPLAY, CONTENT AND THE C SEAMS ───────────────────────────────────────
  (Aver.Framework)[opt,ON] (Aver.Scene)[opt,ON] (Aver.Formats.Material) (Aver.Formats.Audio)
@@ -232,7 +238,7 @@ be shorter or longer than the plan in the same row's prose.
 | **Aver.RHI** | C++ | Core, Platform | Core | Abstract render hardware interface: device, queues, command lists, PSO, root signature/descriptor model, typed & structured buffers, textures, resource-state/barrier model, `Buffer<float>`/`RWBuffer` semantics, feature-level query. Backend-agnostic. | The "ONE RHI abstraction"; GPU-deform buffer contract (typed R32) |
 | **Aver.RHI.D3D12** | C++ | RHI | `[opt, default ON]` | DirectX 12 backend (primary). DXIL PSOs, D3D12 barriers, UAV↔vertex-buffer aliasing. | Primary backend |
 | **Aver.RHI.D3D11** | C++ | RHI | `[opt, default ON]` | DirectX 11 backend (fallback for older HW). | Secondary backend |
-| **Aver.RHI.Vulkan** | C++ | RHI | `[opt, default OFF]` | **A 13-LINE STUB that returns `nullptr`.** No Vulkan header is included, no interface is implemented, and there is no SPIR-V or barrier code anywhere — this row previously claimed otherwise and was wrong for 269 commits. `Aver.RHI.D3D11` is the same 13 lines, and is in the DEFAULT build, so the engine ships a backend that has never executed a GPU command. For scale: `D3D12Device.cpp` is 4,703 lines. What a backend must actually implement is tiered — 9 pure virtuals to be a legal device (`resources()` defaults to `nullptr`, so a partial backend is legal and every render feature declines gracefully), 53 to be a complete one. `modules/rhi/src/null/NullDevice.cpp` is the existence proof at 43 lines. | Vulkan (SDK not installed; the LOADER `vulkan-1.dll` is present) |
+| **Aver.RHI.Vulkan** | C++ | RHI | `[opt, default OFF]` | **No longer a stub — this row said "a 13-line stub that returns `nullptr`" for a long time and that is now false.** `VulkanDevice.cpp` alone is 3,819 lines (`VulkanResourceFactory.cpp` another 3,000, `VulkanRenderContext.cpp` 1,478), Vulkan headers are vendored and included, `IDevice` is implemented, and SPIR-V compiles through a vendored `dxcompiler.dll` (`third_party/dxc-spirv`) selected because the Windows SDK's own copy accepts `-spirv` and then refuses at codegen. Per `modules/rhi.vulkan/README.md` it **presents a frame** — grid, cube, shadow, sky, world axes — and the editor's own ImGui UI draws too, since `modules/rhi.vulkan.imgui` was written to mirror `modules/rhi.d3d12.imgui` (both gated on `AVER_ENABLE_UI`, both linked only by Sandbox). 10 of an original 156 validation-layer errors are left, 9 of them the same known gap (`GraphicsPipelineDesc::instanced` and feature-module mesh geometry are unimplemented on this backend) and the 10th not a real error at all. Nothing leaks at teardown. `AVER_RHI_VULKAN` still defaults **OFF** ("staying off until it presents a frame" — the module's own README, written before it did) — so the default build still proves nothing about it, but flipping the flag on now builds and runs rather than linking a stub. `Aver.RHI.D3D11`, unlike Vulkan, genuinely still is a 13-line stub that returns `nullptr` (`modules/rhi.d3d11/src/D3D11Device.cpp`) and is in the DEFAULT build, so the engine still ships one backend — D3D11, not Vulkan any more — that has never executed a GPU command. What a backend must actually implement is tiered — 9 pure virtuals to be a legal device (`resources()` defaults to `nullptr`, so a partial backend is legal and every render feature declines gracefully), 53 to be a complete one. `modules/rhi/src/null/NullDevice.cpp` is the existence proof at 43 lines. | Vulkan (SDK still not required — loader `vulkan-1.dll` ships with the GPU driver; SPIR-V codegen is vendored separately) |
 | **Aver.Assets** | C++ | Core, Platform | Core | One source file, `AssetId.cpp` — content ids over `fnv1a64`. **Not there:** the asset registry, typed handles, ref-counting, async streaming, the binary container (that is `Avr1.hpp` in `Aver.Formats`), and the offline-cache reader P6 assumes. A leaf, and much smaller than this row used to imply. | Asset I/O runtime backbone (partial) |
 | **Aver.Assets.Gpu** | C++ | Core, Formats, RHI | always built | The decode-to-GPU join (`TextureUpload.cpp`), deliberately a second target so `Aver.Assets` stays a leaf: a tool that only needs asset ids drags in neither a decoder nor the RHI. | Asset I/O (upload path) |
 | **Aver.Formats** | C++ | Core, Platform, Assets | always built | Runtime *loaders*: `.ocmesh` (now with the JOINTS/WEIGHTS skin streams its `HasSkin` flag always promised), `.ocskel`/`.ocanim`, `.ocworld`, `.ocmap`, `.ocbeam`, `.ocproject`, glTF import **including skins and animation clips**, JSON, texture decode, and the AVR1 container every binary asset shares. Two sibling targets hang off it (below) for the same reason each: they parse into a type that lives outside this module. | Asset I/O (all carried-over text formats) |
@@ -247,7 +253,7 @@ be shorter or longer than the plan in the same row's prose.
 | **Aver.Render.PBR.Materials** | C++ | Core, RHI, Render.PBR | `AVER_MODULE_PBR` (ON) | The GPU half: an authored material becomes a binding set and a constant block. STATIC, links the generic RHI, names no backend. | material/texture pipeline (GPU) |
 | **Aver.Render.Voxi** | C++ | Core | `[opt, default ON]` | Project-wide render quality settings (MSAA / GI / ray tracing / mesh shaders / path tracing) with honest per-feature `Ready`/`NotImplemented`/`Unsupported` reporting from the real device caps. SHARED, plus a plain-C ABI (`aver_voxi_*`) for C# P/Invoke. | Implemented — the first optional module |
 | **Aver.Render.Voxi.Renderer** | C++ | Core, RHI, Render.Voxi, Render.PBR.Materials | `AVER_MODULE_VOXI` (ON; forced OFF without PBR) | The GPU half: voxel cone traced GI, a 2048² directional shadow map, DXR 1.1 inline RayQuery sun shadows, and the scene lit pipelines that combine them. A `rhi::IRenderFeature`, so it drives the generic RHI and links no backend. | Implemented |
-| **Aver.Scene** | C++ | Core, Assets | `AVER_MODULE_SCENE` (ON) | Minimal data-oriented entity/component world: transforms, hierarchy, component storage, generic field access by name. Twelve built-in components, the last four being `CSkeletalMesh`, `CAnimator`, `CParticleEmitter` and `CAttachment` (which rides a named socket on its parent's rig). SHARED, with `scene_abi.h` for C#. Render/physics-agnostic (P2) — it does not link `Aver.Render.PBR`, so a material is an interned name here and nothing more. | world/scene (entity layer) |
+| **Aver.Scene** | C++ | Core, Assets | `AVER_MODULE_SCENE` (ON) | Minimal data-oriented entity/component world: transforms, hierarchy, component storage, generic field access by name. **Fifteen** built-in components now (`modules/scene/include/aver/scene/Components.hpp`) — this row said "twelve, the last four being `CSkeletalMesh`/`CAnimator`/`CParticleEmitter`/`CAttachment`" for a long time, and physics authoring landed three more since: `CSoftBody`, `CRigidBody` and `CJoint` are now the last three. SHARED, with `scene_abi.h` for C#. Render/physics-agnostic (P2) still holds as a link-line property despite the new components being physics data — `Aver.Scene`'s `CMakeLists.txt` still depends on only Core and Assets, so a rigid body or a joint is POD here and nothing more, the same way a material is an interned name and nothing more. | world/scene (entity layer) |
 | **Aver.Framework** | C++ | Core, Assets, Scene | `AVER_MODULE_FRAMEWORK` (ON, forced OFF without Scene) | The gameplay vocabulary over the world: game instance, game mode, classes, actors, pawns, possession, play lifecycle, input. SHARED, `framework_abi.h`. The one SHARED-links-SHARED edge in the tree; §2 says why it is worth it. | — |
 | **Aver.UI** | C++ | Core | always built | The retained **game** UI (not the editor's ImGui): a draw list of layers, batches, intersecting clip rects and premultiplied colour. Renders nothing itself, which is what makes the whole widget system assertable with no GPU. | — |
 | **Aver.Render.UI** | C++ | Core, UI, RHI | always built | The GPU half: a `UiDrawList` onto the backbuffer. Links the generic RHI, never a backend. | — |
@@ -267,7 +273,7 @@ be shorter or longer than the plan in the same row's prose.
 | **Aver.Net** ‹skeleton› | C++ | *(planned: Core, Platform)* | **not built** | Modular replication framework: `AvNetPayload`/channel/module/coordinator triad; raw little-endian UDP **protocol (A)** codec (exact MsgType byte layouts), pose paging, damage fragmentation, join-parity gate. Interop-exact with the existing C# OCServer. Exposes C ABI for the headless host. | **networking/replication** (protocol A + channel framework) |
 | **Aver.NetVehicle** ‹skeleton› | C++ | *(planned: Net, Vehicle, SoftBody)* | **not built** | Vehicle net modules (Drive/Damage/Config): quantized input, crash-seed replay through the deterministic cage, durable damage end-state snapshots, detach commands. | networking (vehicle-specific channels) |
 | **Aver.Match** ‹skeleton› | C++ | *(planned: Core)* | **not built** | Matchmaking core: coordinator **protocol (§6)** codec (CoordMsg byte layouts), deterministic greedy match forming (`oc_match` successor). Links into the client for queue and the C# coordinator host via the same source. | **coordinator/matchmaking** (`OCMatchCore`) |
-| **Aver.World** ‹skeleton› | C++ | *(planned: Scene, Render, Physics, Assets, Formats)* | **not built** | *Planned:* the level/world runtime, object-reference placement, env, spawn, streaming. **Not built.** `.ocworld` and `.ocmap` are read by `Aver.Formats` today and placed by the editor; nothing wires Scene↔Render↔Physics in a module of its own. | **world/scene** (unstarted) |
+| **Aver.World** | C++ | Core, Formats, Platform, Render.Pcg (+ Scene and Physics when their targets exist) | always built | **No longer a skeleton — this row said "not built" and that is now false.** `modules/world/` has a real `CMakeLists.txt` and eleven source files. What is here: `LevelInstance::instantiate()` turns parsed `.ocworld` placements into live scene entities and their static bodies, plus the region/chunk streaming groundwork (`ChunkPayload`, `ChunkPartition`, `ChunkCodec`, `RegionFile`/`RegionIndex`, `ChunkSource`/`ChunkStreamer`/`ChunkGenerator`, `ScatterPalette`). It is unconditional — both the editor and a shipped game link it, which is the point (`modules/world/README.md`): a tree with `AVER_MODULE_SCENE=OFF` still configures it, `LevelInstance.cpp` just compiles to nothing. Per its own README it is still **partial**: placement instantiation is done, the `.avrgn` region format ("slice 5") is not yet. It deliberately does not link `Aver.Render.PBR` — material resolution stays a host job. | **world/scene** (placement half done; region streaming next) |
 | **Aver.Scripting.Host** | C++ | Core, Platform | `AVER_MODULE_SCRIPTING` (ON) | In-process CLR host: `nethost`/`hostfxr` resolved with `LoadLibraryW` at run time, so this builds on a machine with no .NET at all. Deliberately not the RHI. Exports nothing — it hands the managed bridge a function-pointer table at bootstrap (`scripting_abi.h`). | **scripting** (native half) |
 | **Aver.Runtime** | C++ | Core, Platform, RHI (+ compiled-in backends) | always built | Window and device bring-up and the run loop. **Not** the module registry and tick scheduler this row used to claim: there is no registry, and the optional modules are composed by `sandbox/`. | — |
 | **Aver.ABI** ‹skeleton› | C | — | **dropped, not deferred** | A single flat `extern "C"` seam with an `aver_abi_version()`. It is not coming: one seam has to link everything it exposes, so it could hold none of the properties the separate seams exist for. `modules/abi/README.md` records the decision; `docs/ABI.md` documents the seams that replaced it. | — |
@@ -275,18 +281,22 @@ be shorter or longer than the plan in the same row's prose.
 | **Aver.Scripting / Aver.Scene / Aver.Framework** | C# | the matching native DLL, by P/Invoke | staged with the bridge when `dotnet` is on PATH | The managed contract assemblies under `scripting/csharp/`, compiled by `modules/scripting/CMakeLists.txt` and copied beside the executable. `Aver.Scene` and `Aver.Framework` share a file name with their native halves and each needs a `NativeResolver` because of it — the newer seams are named apart precisely so they do not. | **scripting** (managed half) |
 | **Aver.UI / Aver.Materials** | C# | `Aver.UI.Abi` (P/Invoke) · — | referenced by a game's `Scripts.csproj` | The two assemblies a *game* authors against. `Aver.UI` is `Layer`/`Colour`/`Rect`/`Hud`; `Aver.Materials` is `[AverMaterial]`, `MaterialBuilder` and the `.ocmat` emitter. Neither is staged next to the engine the way the bridge is — a new project gets a `ProjectReference` to the `.csproj` in this tree, so they are built by the game's compile. | — |
 | **Aver.MaterialCompiler** (`avermatc`) | C# | Aver.Materials | built with the bridge | Reflects a compiled assembly and writes `.ocmat`. C# under `Content/Materials` is the source, `Binaries/Materials/*.ocmat` is the build output, and the engine reads `Binaries` first — so a material is authored in a language with a compiler rather than in a binary blob. Staged to `bin/Tools` and run by Compile C#. | asset I/O (material cook) |
-| **aver-assetc / aver-ocbeamc / aver-aerobake / aver-mapc / aver-shaderc** ‹skeleton› | Rust | *(planned: standalone + FFI)* | **not built** | *Planned:* the whole offline cook — glTF/OBJ import, `.ocbeam` compile, wind-tunnel bake, `.scene`→`.ocmap`, HLSL→DXIL. **There is no Rust in this repository**: no `*.rs`, no `Cargo.toml`, and `tools/` holds one README. Import happens in-process in `Aver.Formats` instead, and shaders are HLSL embedded in the module sources and compiled by the backend at run time. | asset I/O, aero, world, shaders (all offline work, unstarted) |
+| **aver-ocbeamc / aver-aerobake / aver-mapc / aver-shaderc** ‹skeleton› | Rust | *(planned: standalone + FFI)* | **not built** | *Planned:* `.ocbeam` compile, wind-tunnel bake, `.scene`→`.ocmap`, HLSL→DXIL. **There is still no Rust in this repository**: no `*.rs`, no `Cargo.toml`. Shaders are HLSL files compiled by the backend at run time, not by a `aver-shaderc` cook. | aero, world, shaders (offline work, unstarted) |
+| **`aver-assetc`** | **C++** | Core-adjacent: `Aver.Formats`, `Aver.Core`, `Aver.Platform` (+ `Aver.Trifactor`/`Aver.Formats.Audio`/`Aver.Formats.Material`/`Aver.Render.PBR.Materials` when configured in) | always built (`tests/formats/CMakeLists.txt`, under `AVER_BUILD_TESTS`) | **This row used to be grouped with the four Rust tools above as unbuilt — that stopped being true.** `tools/AverAssetC.cpp` is the standalone asset compiler the launcher's "Aver Exchange" feature shells out to: glTF/OBJ/USDA import-and-cook (and, conditionally, audio and material-graph compile), per-mesh output by default, results as JSON-Lines (one object per artifact plus a `{"summary":true,...}` line), built on the same import/merge code `ConvertTool.cpp` proved. It is the job `aver-assetc` was planned to do, done in the language every other tool in `tools/` is written in rather than in Rust. `AverAssetCTest` pins its JSON contract. | asset I/O (import-and-cook, done — in C++, not Rust) |
 
 ---
 
 ## 4. Every carried-over subsystem → module (traceability matrix)
 
-**This table is an assignment, not a report.** Nine of the twelve owning modules named below are
-‹skeleton›: SoftBody, Aero, GpuDeform, Fracture, Vehicle, Net, NetVehicle, Match and World are all a
-README, and so is every Rust tool. Of the twelve recon subsystems, the ones with code behind them
-today are the entity layer (`Aver.Scene`), the runtime half of asset I/O (`Aver.Formats` and its two
-siblings), and scripting — plus audio and the material pipeline, which the recon did not have and
-which are new work rather than a port. Read a row as *where it will go*, and check §3 for
+**This table is an assignment, not a report.** Eight of the twelve owning modules named below are
+still ‹skeleton›: SoftBody, Aero, GpuDeform, Fracture, Vehicle, Net, NetVehicle and Match are a
+README, and so is every Rust tool. **`Aver.World` is no longer one of them** — it gained a real
+`CMakeLists.txt` and eleven source files (§3) — which this paragraph used to get wrong by counting
+it among the nine. Of the twelve recon subsystems, the ones with code behind them
+today are the entity layer (`Aver.Scene`), world placement (`Aver.World`, partial), the runtime half
+of asset I/O (`Aver.Formats` and its two siblings), and scripting — plus audio and the material
+pipeline, which the recon did not have and which are new work rather than a port. Read a row as
+*where it will go*, and check §3 for
 whether it has gone there yet.
 
 | Recon subsystem | Owning module(s) | Notes on the port |
@@ -294,13 +304,13 @@ whether it has gone there yet.
 | Soft-body solver (`VehicleDamage`) | **Aver.SoftBody** | Keep exact phase order (Verlet → damage/plasticity → Gauss-Seidel), formulas, float eval order for MP determinism. Async worker via `std::thread`. |
 | Aerodynamics (`VehicleAerodynamics`) | **Aver.Aero** | Trilinear sampler + attitude inverse must match writer `flowDir`. SI units (drop `NEWTONS_TO_UE`, CoP cm→m). Ride probe via **Aver.Physics** raycast. |
 | GPU deform (`VehicleDeform.usf`) | **Aver.GpuDeform** (+ CPU parity in **Aver.Render**) | Byte-for-byte CPU/GPU parity contract preserved; UAV-as-vertex-stream via **Aver.RHI**. |
-| Fracture/debris | **Aver.Fracture** (runtime) + **aver-assetc** (author-time Voronoi pre-dice) | Runtime = clustering split/launch; author-time = pre-fractured shards (no runtime Voronoi). |
+| Fracture/debris | **Aver.Fracture** (runtime) + a planned author-time Voronoi pre-dice tool | Runtime = clustering split/launch; author-time = pre-fractured shards (no runtime Voronoi). **Not the built `aver-assetc`** — this row used to name that tool here, but the real `tools/AverAssetC.cpp` does glTF/OBJ/USDA/audio/material import-and-cook and nothing about Voronoi fracture; the pre-dice tool remains unbuilt and unnamed. |
 | Powertrain | **Aver.Vehicle** (Powertrain subsystem) | Extracted UE-free from `UOCVehicleMovementComponent` (recon P2). |
 | Tire model | **Aver.Vehicle** (Tire subsystem) | Same sim core; shared client/server via C ABI. |
 | Networking / replication | **Aver.Net** + **Aver.NetVehicle** | Protocol (A) LE UDP kept for OCServer interop; UE `OCNetWire`(B) and RPC(C) dropped. Channel/module/coordinator triad reimplemented in C++. |
 | Coordinator / matchmaking | **Aver.Match** | CoordMsg codec + `oc_match` deterministic forming. C# coordinator host stays external, speaks the same wire. |
-| World / scene | **Aver.Scene** (ECS) + **Aver.World** (levels, `.ocmap`/`.scene`/`.octrack`) | Object-reference world model (asset name + transform), surface/ground/killz env. |
-| Asset I/O | **Aver.Assets** + **Aver.Formats** (runtime) + **aver-assetc / aver-ocbeamc / aver-aerobake / aver-mapc** (offline) | Loose text = dev fallback; compiled binary = ship path. |
+| World / scene | **Aver.Scene** (ECS) + **Aver.World** (levels, `.ocmap`/`.scene`/`.octrack`) | Object-reference world model (asset name + transform), surface/ground/killz env. `Aver.World` is now built (§3) — placement instantiation is real; region streaming is still ahead. |
+| Asset I/O | **Aver.Assets** + **Aver.Formats** (runtime) + **`aver-assetc`** (offline, built — see §3) + **aver-ocbeamc / aver-aerobake / aver-mapc** (offline, still unbuilt) | Loose text = dev fallback; compiled binary = ship path. |
 | Editor | *planned* **Aver.Editor** (C#) — **actually** `sandbox/` (C++) | The plan was a separate app over a C ABI (P3). What was built links the modules directly, so this is the one row where the tree contradicts a design principle rather than merely lagging it. |
 | Scripting | **Aver.Scripting.Host** (C++) + `scripting/csharp/` (C#) | .NET P/Invoke, but over the per-module seams rather than one `Aver.ABI`; the host itself exports nothing and hands the bridge a function-pointer table. |
 | Audio *(new — not from recon)* | **Aver.Audio** + **Aver.Audio.Wasapi** + **Aver.Audio.Abi** + **Aver.Formats.Audio** | Mixer / device / seam / container. The engine's own mixer rather than a vendored one, for the reason §2 gives: a mixer you cannot assert on sample by sample cannot be checked at all. |
@@ -324,7 +334,13 @@ notes in the right-hand column are still the specification whoever writes those 
 | `.ocmap` / `.scene` | object-reference world (text) | Aver.Formats | aver-mapc | Invariant-locale, LF-normalized writer (fix Java locale + mixed-CRLF bugs). Upgrade ROOT to a real Merkle over placements+asset hashes. |
 | `.octrack` | track variant (text) | Aver.Formats | aver-mapc | Treated as an `.ocmap`/`.scene` sibling profile. |
 
-**New native formats (added for unaddressed asset types).** Binary, versioned, little-endian, magic-tagged. All of them sit on one container, **AVR1** (`modules/formats/include/aver/formats/Avr1.hpp`): a file is "an AVR1 with a different subtype and a different set of chunks", which is what lets a reader say *this is a `.octex` and you asked me to load a mesh* instead of *bad file*. Written and read in-process by **Aver.Formats** and its siblings — there is no `aver-assetc` and there never has been.
+**New native formats (added for unaddressed asset types).** Binary, versioned, little-endian, magic-tagged. All of them sit on one container, **AVR1** (`modules/formats/include/aver/formats/Avr1.hpp`): a file is "an AVR1 with a different subtype and a different set of chunks", which is what lets a reader say *this is a `.octex` and you asked me to load a mesh* instead of *bad file*. Written and read in-process by **Aver.Formats** and its siblings for the engine's own loaders — that
+part is still true — but **`aver-assetc` now exists**, this sentence's "and there never has been" is
+wrong, and it is worth being precise about what changed: `tools/AverAssetC.cpp` is a real, built C++
+executable (`build/bin/AverAssetC.exe`, registered in `tests/formats/CMakeLists.txt`) that the
+launcher's "Aver Exchange" feature shells out to for glTF/OBJ/USDA (and, conditionally, audio and
+material) import-and-cook, reporting results as JSON-Lines. It is the tool `aver-assetc` names, just
+written in C++ rather than Rust — see §3's Rust-tools row and §9 for the fuller correction.
 
 **Reader?** is the honest column. It says what has a reader and a writer in the tree today.
 
@@ -362,11 +378,13 @@ the modules that are DLLs say `add_library(… SHARED)` by hand. So the split is
 static-versus-plugin one, it is a different and simpler rule that the tree does follow:
 
 - **A module is SHARED if and only if it carries a seam managed code binds to.** `Aver.Scene`,
-  `Aver.Framework`, `Aver.Physics`, `Aver.Render.PBR`, `Aver.Render.Voxi`, `Aver.UI.Abi` and
-  `Aver.Audio.Abi` are DLLs for that reason and no other; each has a `RUNTIME_OUTPUT_DIRECTORY` of
-  `bin/` because that is where `DllImport` looks. Two of those seams are not bound from C# yet —
-  physics is driven host-side, and nothing links the audio seam at all — so the shape is ahead of
-  the use in both cases. Everything else is static and collapses into the executable.
+  `Aver.Framework`, `Aver.Physics`, `Aver.Render.PBR`, `Aver.Render.Voxi`, `Aver.UI.Abi`,
+  `Aver.Audio.Abi` and `Aver.Settings` are DLLs for that reason and no other; each has a
+  `RUNTIME_OUTPUT_DIRECTORY` of `bin/` because that is where `DllImport` looks. Two of those seams
+  are not bound from C# yet — physics is driven host-side, and nothing links the audio seam at all —
+  so the shape is ahead of the use in both cases. `Aver.Settings` is bound: `scripting/csharp/
+  Aver.Framework/Settings.cs` P/Invokes `aver_settings_*` directly. Everything else is static and
+  collapses into the executable.
 - **Being a DLL constrains the link line**, which is the point. No RHI type may sit behind a P/Invoke
   boundary, so a SHARED module's transitive closure must not reach `Aver.RHI` — which is exactly why
   `Aver.Render.PBR` and `Aver.Render.PBR.Materials` are two targets, and why `Aver.UI` and
@@ -458,7 +476,7 @@ declares one, that is the sketch and not the code.
 
 What is real is one C surface per module, each exported by its own DLL, each with its own export
 macro: `scene_abi.h`, `framework_abi.h`, `physics_abi.h`, `pbr_abi.h`,
-`voxi_abi.h`, `ui_abi.h`, `audio_abi.h`. `scripting_abi.h` is the exception that proves the rule —
+`voxi_abi.h`, `ui_abi.h`, `audio_abi.h`, `settings_abi.h`. `scripting_abi.h` is the exception that proves the rule —
 the script host exports nothing at all, because a P/Invoke would have to name the loaded module,
 which is the *executable*, and that would tie a shipped bridge assembly to whatever host embeds it.
 It hands the managed bridge a table of function pointers at bootstrap instead.
@@ -470,7 +488,7 @@ The conventions the original sketch fixed did survive, and every seam holds to t
   return-ABI mismatch between calling conventions.
 - **POD-only structs**, laid out so C# can declare them `LayoutKind.Sequential`; strings are UTF-8
   `const char*` in both directions.
-- **A version on TWO of the seven** — `aver_scene_abi_version()` and `aver_fw_abi_version()`. Physics, PBR, Voxi, UI and Audio declare none, and the "and so on" that used to end this sentence was the whole error: there is no third. Each
+- **A version on TWO of the eight** — `aver_scene_abi_version()` and `aver_fw_abi_version()`. Physics, PBR, Voxi, UI, Audio and Settings declare none, and the "and so on" that used to end this sentence was the whole error: there is no third. Each
   governing only its own boundary. `docs/ABI.md` §14 records that nothing in shipping code currently
   calls them, which is a gap and is named as one there.
 - **No ownership ambiguity** — create/destroy pairs; a seam never frees caller memory or vice versa.
@@ -491,8 +509,10 @@ The conventions the original sketch fixed did survive, and every seam holds to t
                         │
                  C++ modules — each seam is that module's own DLL
 
-   Rust          (none. tools/ holds a README; there is no .rs and no Cargo.toml
-                  in this repository, so the cook boundary drawn here is unbuilt.)
+   Rust          (still none — there is no .rs and no Cargo.toml anywhere in this repository — but
+                  "tools/ holds a README" is no longer an accurate description of that directory:
+                  it holds several real, built C++ executables, including `AverAssetC`, which does
+                  the asset-cook job this row's boundary was drawn for. See §3/§9.)
 ```
 
 - **C# — gameplay scripting and content authoring.** The CLR is hosted **in process** by
@@ -502,11 +522,14 @@ The conventions the original sketch fixed did survive, and every seam holds to t
   *content* now,
   not only behaviour — a material and an actor are C# source that the editor rewrites in place, and
   `avermatc` reflects the compiled assembly to produce `.ocmat`.
-- **Rust — nothing yet.** The asset pipeline, the cage compiler, the wind-tunnel bake and the shader
-  cook were all assigned to standalone Rust executables sharing *files* rather than linkage with the
-  runtime. None is written. Import currently happens in-process in `Aver.Formats`, which is a
-  different boundary with different consequences: a broken importer is a broken editor rather than a
-  failed cook.
+- **Rust — still nothing, but the asset pipeline itself is no longer in that "nothing."** The cage
+  compiler, the wind-tunnel bake and the shader cook were all assigned to standalone Rust executables
+  sharing *files* rather than linkage with the runtime, and none of those three is written. The asset
+  pipeline is different: `tools/AverAssetC.cpp` builds and ships as a real, standalone executable that
+  does that job — glTF/OBJ/USDA (and, conditionally, audio/material) import-and-cook, out of process,
+  called by the launcher — just in C++ instead of Rust. Editor-side import still also happens
+  in-process in `Aver.Formats`, which is a different boundary with different consequences: a broken
+  importer there is a broken editor rather than a failed cook. The two are not the same code path.
 - **C — the seams themselves.** Each module exports its own, which is what lets a headless tool link
   one and not the rest.
 
@@ -561,31 +584,46 @@ Aver Engine/
   CMakePresets.json
   cmake/AvModule.cmake           # aver_add_module(): STATIC lib, PUBLIC include dir, PUBLIC deps
   modules/
-    BUILT:    core/ platform/ assets/ formats/ formats.roslyn/ anim/ deform/ rhi/
-              rhi.d3d12/ rhi.d3d11/ rhi.vulkan/ scene/ framework/ physics/ physics.jolt/
-              scripting/ runtime/ landscape/ mcp/
-              render.pbr/ render.voxi/ render.ui/ render.actorpreview/
-              ui/ ui.abi/ audio/ audio.wasapi/ audio.abi/
-    ‹README›: render/ render.gi/ world/ softbody/ aero/ gpudeform/ fracture/
-              vehicle/ net/ netvehicle/ match/ abi/
+    # This list said "34 directories, 22 built, 12 README" for a long time; the tree has since
+    # grown well past what §2/§3 individually describe, and the honest count is now 58 directories,
+    # 49 of them carrying a CMakeLists.txt. Rather than let this list go stale line by line the way
+    # the old one did, treat `modules/*/CMakeLists.txt` itself as the source of truth for BUILT vs
+    # README-only — a directory listing is not a claim about what a module does, only that it links.
+    BUILT (49):    core/ platform/ assets/ formats/ formats.roslyn/ formats.particles/ anim/
+              anim.scene/ deform/ rhi/ rhi.d3d12/ rhi.d3d12.imgui/ rhi.d3d11/ rhi.vulkan/
+              rhi.vulkan.imgui/ scene/ framework/ physics/ physics.jolt/ scripting/ runtime/
+              runtime.game/ landscape/ mcp/ save/ settings/ upgrade/ synapse/ synapse.scene/
+              render.pbr/ render.voxi/ render.ui/ render.actorpreview/ render.pcg/ render.pt/
+              render.skin/ render.softbody/ render.sr/ fluids/ particles/ occlusion/ trifactor/
+              sound/ ui/ ui.abi/ audio/ audio.wasapi/ audio.abi/ world/
+    README-only (9): abi/ aero/ fracture/ gpudeform/ match/ net/ netvehicle/ softbody/ vehicle/
+    # `render/` and `render.gi/` are not in either list above — see the DELETED note below, and §1/§3.
   sandbox/                       # the editor. C++ + Dear ImGui, links the modules directly.
   tests/                         # ui/ render.ui/ render.actorpreview/ audio/ formats/
                                  #   scene/ framework/ physics/ — each a plain exe in bin/
   scripting/csharp/              # Aver.Scripting(+.Bridge) Aver.Scene Aver.Framework
                                  #   Aver.UI Aver.Materials Aver.MaterialCompiler + samples
-  third_party/                   # imgui/ stb/ fonts/ — and nothing else. Jolt is NOT here: it is
-                                 #   the physics backend, and lives at modules/physics.jolt/
+  third_party/                   # imgui/ stb/ fonts/ dxc-spirv/ vulkan-headers/ — and Jolt is
+                                 #   NOT here: it is the physics backend, at modules/physics.jolt/
   branding/                      # splash, logo, icon sheets staged beside the exe
   scripts/                       # build.ps1, run.ps1, gates.ps1 + baselines, brand.py
   content/legacy/                # sample fixtures for golden tests
   docs/                          # this file, ABI.md, ACTOR_EDITOR.md, AUDIO.md, RENDERING.md, …
   ‹abi/›                         # was: Aver.ABI headers + wrapper TUs. Dropped; see §7.1. KEPT as a
                                  #   directory on purpose -- its README is the record of that drop.
-  ‹tools/›                       # was: the Rust cook. No Rust exists.
-  # DELETED, not merely empty: shaders/, editor/ and interop/ each held one README describing
-  # something never started or since built elsewhere, and this file already said so more accurately
-  # than they did. HLSL is in files at modules/<mod>/shaders/ and sandbox/shaders/; the editor is
-  # sandbox/; the C# bindings are hand-written under scripting/csharp/.
+  tools/                         # NOT a skeleton any more — this line used to mark it ‹tools/›
+                                 #   as though it held only a README for the never-built Rust cook.
+                                 #   It holds real, built C++: AverAssetC (the asset cook, standing
+                                 #   in for the planned Rust aver-assetc), AverCrashReporter,
+                                 #   ActorSweep, MakeFoliage, MakeRig, MakeSamples, RelodTool,
+                                 #   DumpClusterPs. Still no Rust in it or anywhere else.
+  # DELETED, not merely empty: modules/render/, modules/render.gi/, shaders/, editor/ and interop/
+  # each held one README describing something never started or since built elsewhere, and this file
+  # already said so more accurately than they did — an older revision of this tree still listed
+  # modules/render/ and modules/render.gi/ under README-only, which was wrong the moment the
+  # directories themselves were removed rather than merely left empty. HLSL is in files at
+  # modules/<mod>/shaders/ and sandbox/shaders/; the editor is sandbox/; the C# bindings are
+  # hand-written under scripting/csharp/.
 ```
 
 ---
@@ -596,20 +634,24 @@ Aver Engine/
 2. **`.ocbeam` material field-count discrepancy is load-bearing** (runtime wanted exactly 10, writer emitted 13). Canonicalize in `Aver.Formats` + `aver-ocbeamc` (accept 10–13, default 10–12) or existing content silently loses all materials.
 3. **Map ROOT/locale/CRLF bugs** in the legacy Java writer must be *fixed* in `aver-mapc` (invariant locale, LF, real Merkle root) while `Aver.Formats` stays tolerant of the old mixed output for import.
 4. **Scene↔Render dependency direction.** Kept one-way (Scene stays render-agnostic) to preserve the DAG — do not let a render module reach back into Scene. Held so far, and held by a link line: `Aver.Scene` does not link `Aver.Render.PBR`, which is why a material is an interned name there and nothing more.
-5. **Vulkan stays compiled OFF** (`AVER_RHI_VULKAN=OFF`). Enabling it is a flag flip and produces nothing, because the backend is a stub — that is not the same claim as "scaffolded", which is what this line used to say. The real obstacles, in the order they will be met:
-   - **Root CBVs and root SRVs are in the GENERIC layout.** `PipelineLayout::constantDwords[k]` means "non-zero = root constants, zero = root CBV", and the mesh path adds root SRVs. A root descriptor is a raw GPU address with no descriptor object; Vulkan has no equivalent short of `VK_KHR_buffer_device_address`. This leaks at the shared header, not in a backend.
-   - **The push-constant budget already exceeds Vulkan's guaranteed minimum.** `kObjectConstantDwords = 32` is 128 bytes at `b1`, plus 16 more at `b5` — 144 against a guaranteed `maxPushConstantsSize` of 128. And a `static_assert` calls the 32 dwords an ABI.
-   - **Register spaces.** HLSL here uses `b0`/`t0`/`u0`/`s0` simultaneously; SPIR-V has one binding-number space per descriptor set, so they collide and need explicit remapping.
-   - **Buffer state decay.** Skinning's barrier contract is written around D3D12 decaying buffers to `COMMON` at the end of a command list. Vulkan has no such rule.
+5. **Vulkan stays compiled OFF** (`AVER_RHI_VULKAN=OFF`). This item used to say enabling it "produces nothing, because the backend is a stub" — that is no longer true (see §3's `Aver.RHI.Vulkan` row and `modules/rhi.vulkan/README.md`): the flag now builds a backend that presents a frame, including the editor's own UI, with 10 validation-layer messages left over an original 156. Two of the four obstacles this item used to list turned out to be exactly what the work went into, and are done:
+   - ~~Root CBVs and root SRVs are in the GENERIC layout... Vulkan has no equivalent short of `VK_KHR_buffer_device_address`.~~ **Done for CBVs.** `patchCbuffersForLayout` (`VulkanResourceFactory.cpp`) lowers every cbuffer per `PipelineLayout::constantDwords[k]` — non-zero folds into one push-constant struct, zero becomes a descriptor at binding `N` in `kVkSetConstants` — computed at pipeline creation rather than assumed from the shader text. **Not done for the mesh path's root SRVs**: `gVerts`/`gIndices` on `MSVoxel` and `gInstanceWorlds` at `t17` are exactly the 9 remaining validation errors, because `GraphicsPipelineDesc::instanced` and feature-module mesh geometry are still unimplemented on this backend. This is the one real obstacle left of the four.
+   - **The push-constant budget** is no longer an unaccounted-for design gap: `VulkanDevice` queries the real `maxPushConstantsSize` from the physical device and every pipeline's computed `PushConstantLayout::totalBytes` is checked against it at build time (`VulkanResourceFactory.cpp`, `VulkanPipeline.cpp`), failing loudly rather than overflowing silently. Whether 144 bytes fits a given GPU's guaranteed 128-byte minimum is still a real per-device question; it is now a checked one.
+   - ~~Register spaces. HLSL here uses `b0`/`t0`/`u0`/`s0` simultaneously... need explicit remapping.~~ **Done.** `buildRegisterBinds` (`VulkanRegisterMap.hpp`) derives one `-fvk-bind-register` per resource from the `PipelineLayout` and hands the complete map to DXC, splitting HLSL's one continuous table into per-set bindings that each restart at 0 — `tests/rhi/RegisterBindMapTest.cpp` pins it against the layout that was originally failing.
+   - **Buffer state decay.** Skinning's barrier contract is written around D3D12 decaying buffers to `COMMON` at the end of a command list; `VulkanCommon.hpp` does track a `ResourceState::Common` case in its own barrier code, but whether it reproduces the same decay semantics was not re-verified for this pass and the claim is left as this item's one still-unconfirmed obstacle.
 6. **This document was believed for longer than it was true.** `Aver.Render` and `Aver.Render.GI` were cited across §8 and the DAG as though they held the rendering stack, and an `aver_abi_version()` was quoted in §7 as though it existed; a reader following either would have gone looking for a directory containing one README. The mitigation is not a warning, it is a habit: check a module against `modules/` and the top-level `CMakeLists.txt` before writing a sentence that depends on it, and mark rather than delete what turns out to be a plan, so the next reader inherits the decision instead of a silence.
 
 ---
 
 This defines a strict-DAG, pay-for-what-you-use module graph — `Core` sinks to nothing
-engine-specific, and the edge list in §2 is transcribed from the build rather than asserted. Of the
-thirty-four directories under `modules/`, twenty-two carry a `CMakeLists.txt` and twelve carry only
-a README; the two sets are marked apart throughout, because the previous revision of this file did
-not mark them apart and was read as a description of a tree it did not match.
+engine-specific, and the edge list in §2 is transcribed from the build rather than asserted. This
+paragraph once said "thirty-four directories under `modules/`, twenty-two carry a `CMakeLists.txt`
+and twelve carry only a README" — the tree has grown since, and as of this pass it is **58**
+directories, **49** carrying a `CMakeLists.txt` and **9** carrying only a README (§9 names both
+sets). Because that count will keep moving as modules are added, treat `modules/*/CMakeLists.txt`
+as the actual source of truth rather than either number here; the two sets are marked apart
+throughout, because an earlier revision of this file did not mark them apart at all and was read as
+a description of a tree it did not match.
 
 Three of the seven design principles are held as written. P1 (Core knows nothing engine-specific),
 P2 (no universal base object) and P7 (one RHI, no backend on a feature's link line) are enforced by

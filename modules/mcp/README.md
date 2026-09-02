@@ -25,7 +25,8 @@ configurable — making the address an option would be offering remote control a
 It **posts real Win32 messages** to the window: `WM_MOUSEMOVE`, `WM_LBUTTONDOWN`/`UP`, `WM_KEYDOWN`/`UP`.
 
 The editor's input already arrives that way — `ImGui_ImplWin32_WndProcHandler`, see
-`D3D12Device.cpp:217` — so a synthetic click travels the *identical* path as a human one, through the
+`modules/rhi.d3d12.imgui/src/ImGuiUiBackend.cpp:154` (moved out of `D3D12Device.cpp` when ImGui hosting
+was split into its own module) — so a synthetic click travels the *identical* path as a human one, through the
 same handler, in the same order, with no second code path to keep in step. The alternative was calling
 ImGui's `io.Add*Event` directly, which would fight the Win32 backend's own `NewFrame` and would exercise
 a path no user ever takes.
@@ -61,8 +62,8 @@ be told, not left waiting for a button that was never pressed. Malformed lines a
 from the socket thread rather than queued, since there is nothing for the main thread to do with them.
 
 `tests/mcp` covers the parser with no socket at all: `parseCommand` is exposed precisely so the part
-where bugs live can be checked without binding a port. 44 assertions, including all ten refusal cases
-and the fact that a constructed-but-unstarted bridge is inert.
+where bugs live can be checked without binding a port. 67 assertions (was 44; the ABI-registry section
+grew), including all ten refusal cases and the fact that a constructed-but-unstarted bridge is inert.
 
 ## Calls route to the module's own ABI
 
@@ -71,10 +72,17 @@ of the plain-C seams where each module meets the engine core, and a call is rout
 it:
 
 ```
-{"cmd":"abi","module":"framework","fn":"spawn","args":[1,2.5]}   -> framework_abi.h  (aver_fw_*)
-{"cmd":"abi","module":"physics","fn":"raycast","args":[0,0,500]} -> physics_abi.h    (aver_phys_*)
-{"cmd":"abi","module":"scene","fn":"find","text":"Player"}       -> the scene ABI    (aver_scene_*)
+{"cmd":"abi","module":"physics","fn":"bodyCount"}                -> physics_abi.h    (aver_phys_body_count)
+{"cmd":"abi","module":"world","fn":"stream_on"}                  -> chunk streaming, this app's own state
+{"cmd":"abi","module":"graph","fn":"attach","args":[7]}          -> ScriptHost::graphLoad, via the entity id
 ```
+
+**Corrected:** the modules actually registered by `SandboxApp::registerMcpAbis()` today are `editor`,
+`physics`, `world` and `graph` — not `framework` or `scene` as an earlier version of this example
+showed, and neither of those two names is registered by anything in the tree. `physics` itself exposes
+only `bodyCount` and `ready`; there is no `raycast` entry point over this channel. Ask
+`{"cmd":"modules"}` (see below) rather than trusting a list in a doc, since the set is exactly the
+registry and drifts as modules are added.
 
 `fn` is the entry point **without** its module prefix — `spawn`, not `aver_fw_spawn` — because the
 prefix is already implied by `module`, and making a client repeat it is inviting the two to disagree.
@@ -100,13 +108,16 @@ unknown `fn` comes back in the module's words.
 Dispatchers are called **outside** the queue lock — a dispatcher runs module code of unknown duration,
 and holding the mutex across it would stall the socket thread for as long as the engine took to answer.
 
-## Still to wire
+## Wiring — no longer "still to do"
 
-**The sandbox does not pump it yet.** The module is built, tested and optional, but nothing in
-`SandboxApp.cpp` calls `start()` or `pump()`, so no click has actually been forced. That wiring — a
-`--mcp [port]` flag, a guarded `pump()` in `onUpdate`, the small translation from `InputEvent` to
-`PostMessage`, and one `registerAbi` call per built module — is the remaining step and the point of the
-whole module.
+**The sandbox does pump it.** Both of this section's former gaps are closed. `SandboxApp` takes a
+`--mcp [port]` flag, calls `mcp_.start(port)`, and pumps one event per frame from `onUpdate` whenever
+`mcp_.listening()` (`SandboxApp.cpp:3108`) — the click-forcing path this module exists for actually
+runs today, not just in `tests/mcp`. `registerMcpAbis()` registers `editor`, `physics`, `world` and
+`graph` (see the corrected protocol section above); `framework` and `scene` are not among them, so a
+client should not assume every module in the engine has an ABI seam exposed here yet — only the four
+above do.
 
-There is also no `{"cmd":"modules"}` yet. `modules()` exists and is tested, but a client cannot ask over
-the wire what the Aver ABI currently exposes, which is the first thing it ought to be able to ask.
+`{"cmd":"modules"}` also exists now: `McpBridge::modules()` (`McpBridge.cpp:292`) is reachable over the
+wire (`McpBridge.cpp:133, :409`), so a client can ask what this build's registry currently holds instead
+of trusting a list in this file.

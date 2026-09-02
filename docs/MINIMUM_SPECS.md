@@ -144,7 +144,7 @@ Concrete degradation path:
 | No conservative raster | GI still works; thin geometry may drop out of the volume |
 | No DXC (`dxcompiler.dll` missing) | Everything above still works, compiled by FXC at SM 5.1 — see §5b |
 | No 8× MSAA | Clamps to 4×/2×/Off |
-| No D3D12 at all | Engine will not start (no D3D11/Vulkan backend yet) |
+| No D3D12 at all | Engine will not start in the default build (D3D11 is still a stub; Vulkan works but is off by default — see §6) |
 
 Every row of that table has now been **executed and measured on this machine**, not merely reasoned
 about — see §10 for exactly what that does and does not prove. A refused request is also stated in
@@ -191,8 +191,12 @@ shaders or ray tracing — but a packaging mistake now costs those two features 
 Current drivers are strongly recommended: DXR tier reporting on NVIDIA in particular changed across
 driver revisions.
 
-> **Not required:** Vulkan (backend is a stub) and D3D11 (backend is a stub). D3D12 is the only
-> working backend today, so "supports DirectX 12" is a hard requirement, not a preference.
+> **Not required:** Vulkan and D3D11. **D3D11 is still a stub** (`modules/rhi.d3d11/src/D3D11Device.cpp`
+> is 13 lines). **Vulkan is no longer one** — see `modules/rhi.vulkan/README.md`: it presents a frame
+> (grid, cube, shadow, sky, world axes) and the editor UI now draws on it too, behind
+> `AVER_RHI_VULKAN`, a build option **OFF by default**. So for the default, shipped build, D3D12 is
+> still the only backend a user reaches, and "supports DirectX 12" is still a hard requirement rather
+> than a preference — but the reason is "off by default," not "the only backend that works."
 
 ---
 

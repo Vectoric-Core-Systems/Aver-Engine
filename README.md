@@ -3,7 +3,7 @@
 A custom, **modular** 3D game engine built exclusively on **permissively-licensed** libraries (MIT / BSD / zlib / Apache-2.0 / public-domain). It began as the successor runtime for the **OpenConstructor** soft-body destructible racing sim — carrying its `.oc*` storage formats forward while replacing Unreal Engine — and has since been taken in a more general-purpose direction. The engine holds no game content: a game is a sibling folder with its own `.ocproject` manifest.
 
 - **Polyglot:** C++ (core, RHI, renderer, physics), C (one seam per module, not one seam for everything), C# on .NET 10 (scripting, gameplay, materials, HUD). **There is no Rust in this tree.** `tools/README.md` still advertises a Rust asset pipeline that was never written, and `abi/README.md` records why the single flat `Aver.ABI` those files describe is not coming either.
-- **Render backends:** DirectX 12 is the one you should use. `modules/rhi.d3d11` is a stub that returns a null device. **`modules/rhi.vulkan` is no longer a stub** — it creates a real device and swapchain, compiles the shared HLSL to SPIR-V through a vendored SPIR-V-capable DXC, and brings the engine up to the point of drawing; it does not yet render a frame, and `AVER_RHI_VULKAN` stays **OFF by default** until it does. Its own source names what is left. All three sit behind one RHI abstraction.
+- **Render backends:** DirectX 12 is the one you should use. `modules/rhi.d3d11` is a stub that returns a null device. **`modules/rhi.vulkan` is no longer a stub** — it creates a real device and swapchain, compiles the shared HLSL to SPIR-V through a vendored SPIR-V-capable DXC, and **presents a frame** (this line used to say it did not; that was fixed in commit `b8b7257`). `AVER_RHI_VULKAN` stays **OFF by default** regardless — it is still down to 10 validation errors, not zero. Its own source names what is left. All three sit behind one RHI abstraction.
 - **Anti-bloat:** strict dependency DAG, no `UObject`, pay-for-what-you-use modules behind `AVER_MODULE_*` switches — the engine builds and runs with every optional one off, which is what makes the headless tests meaningful.
 - **Coordinate contract:** centimetres, +Z up, +X forward, +Y right, left-handed, row-major with row vectors (`v * M`) — carried from OpenConstructor.
 
@@ -52,7 +52,11 @@ cmake/            AvModule.cmake (aver_add_module)
 third_party/      imgui (docking), stb, fonts (Roboto). Jolt is vendored under modules/, at
                   physics.jolt/ — it is the rigid-body backend, not an incidental dependency
 branding/         master lockup (human-authored) -> splash, icons, logo
-abi/ content/       README only — nothing is built from these
+abi/              README only — nothing is built from it
+content/          content/legacy/ is README only (real samples are referenced from the source
+                  project, not copied); content/dev/ is NOT — it holds real, machine-generated
+                  fixtures (Rig.gltf + textures) that tools/MakeRig.cpp writes and tests/formats
+                  and sandbox/src/SkinSceneTest.cpp actually consume
 ```
 
 `abi/` is a placeholder **by decision, not omission**: its README records why the single flat
@@ -83,7 +87,7 @@ them. Game content lives outside the engine entirely — see [docs/PROJECTS.md](
 | `rhi` | `Aver.RHI` | Device/swapchain interface, the generic render-feature surface, the shared shader prelude, a Null backend. |
 | `rhi.d3d12` | `Aver.RHI.D3D12` | The backend: PBR, procedural sky, lines, wireframe, MSAA as a runtime setting, a mesh-shader geometry path, the ImGui host, capture. |
 | `rhi.d3d11` | `Aver.RHI.D3D11` | A stub. Returns a null device. |
-| `rhi.vulkan` | `Aver.RHI.Vulkan` | Vulkan 1.3, opt-in via `AVER_RHI_VULKAN` (default OFF). Real device, swapchain, descriptor sets, mesh shaders and ray query; the shared HLSL is compiled to SPIR-V by the vendored DXC in `third_party/dxc-spirv`. Brings the engine up and **presents a frame** — grid, cube, shadow, sky — at 14 validation errors, none fatal. The editor UI does not draw on it for a reason outside this backend: the editor is ImGui and the only ImGui backend here is `rhi.d3d12.imgui`, with no Vulkan equivalent yet. Its own README names the rest. Run it with `--backend vulkan --debug-layer`; with the LunarG SDK installed that enables `VK_LAYER_KHRONOS_validation`, which names each one exactly. |
+| `rhi.vulkan` | `Aver.RHI.Vulkan` | Vulkan 1.3, opt-in via `AVER_RHI_VULKAN` (default OFF). Real device, swapchain, descriptor sets, mesh shaders and ray query; the shared HLSL is compiled to SPIR-V by the vendored DXC in `third_party/dxc-spirv`. Brings the engine up and **presents a frame** — grid, cube, shadow, sky — at 10 validation errors (down from 156), none fatal. **The editor UI now draws on it too**: `modules/rhi.vulkan.imgui` supplies the Vulkan-backed `IUiBackend` this row used to say did not exist, so menus, toolbar, World Outliner, Details, the dockspace and the 3D viewport all come up under `--backend vulkan`. Its own README names the rest. Run it with `--backend vulkan --debug-layer`; with the LunarG SDK installed that enables `VK_LAYER_KHRONOS_validation`, which names each one exactly. |
 | `render.pbr` | `Aver.Render.PBR`, `.Materials` | The material system and its C seam; the surface BRDF and the GPU binding half. |
 | `render.softbody` | `Aver.Render.SoftBody` | Draws a mesh whose vertices come from a simulated soft body: reads the particles back from Jolt through `Aver.Physics`, packs them into the renderer's interleaved vertex format (recomputing normals, converting world space back to mesh-local) and substitutes the `MeshHandle` at the draw, the same seam GPU skinning uses. Needs both the scene and physics; force-disabled without either. |
 | `render.voxi` | `Aver.Render.Voxi`, `.Renderer` | Render-feature settings + C seam (Core-only) and the GI / shadow / RayQuery feature that drives the RHI. |

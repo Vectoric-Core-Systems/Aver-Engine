@@ -11,7 +11,7 @@ no GPU and no device. Giving it the RHI would end that property permanently. So 
 
 It buys three things:
 
-- the widget tree is testable headless (`tests/ui`, 26 assertions, no device);
+- the widget tree is testable headless (`tests/ui`, 27 assertions, no device);
 - a second backend is a second file **here** and no change **there**;
 - there is exactly one place in the engine that knows how a UI vertex reaches a rasteriser.
 

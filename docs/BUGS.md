@@ -80,8 +80,8 @@ overlay, not a dock split. Cosmetic over the Content Browser; over the new Conso
 **input line**, and since the overlay is `NoInputs` the box could still be typed into blind.
 
 ### 7. Every `RENDER.*` command-line override was silently discarded by the project manifest — HIGH
-`sandbox/src/SandboxApp.cpp` (`applyProjectRenderSettings`), fixed in the working tree, not yet
-committed at time of writing.
+`sandbox/src/SandboxApp.cpp` (`applyProjectRenderSettings`), fixed in `31c06a4` — this entry said "not
+yet committed at time of writing" and that commit has since landed (2026-08-29).
 
 **Trigger: pass any `RENDER.*` CLI override — e.g. `--rt-render-mode 0` — against a project manifest
 that sets the same key.** The flag is accepted, parsed, and then thrown away with no diagnostic.
@@ -213,18 +213,19 @@ the corrected ones are.
 
 ## Open
 
-- **The GI voxelisation gate ignores compute-skinned pose changes** — MEDIUM.
-  `modules/render.voxi/src/VoxiRenderer.cpp:806-832`. `giDrawsKey()` hashes mesh handle, world
-  transform and material but never the vertex buffer a compute skin pass writes, and `submit` applies
-  no `meshVertexBuffer` filter. Once an animated character's world transform stops changing, the gate
-  reports "unchanged" forever and its contribution to indirect light freezes at that pose.
-  `PtSceneView::submitDraw` and Voxi's own BLAS cache both check `meshVertexBuffer` for exactly this
-  reason; the GI gate is the one that does not.
-
-  **Deliberately not fixed blind.** The obvious repair — treat any skinned draw as "changed" — forces
-  revoxelisation every frame in any scene containing a character, which is precisely the ~10.5 ms
-  saving `giUpdateInterval` was measured to buy. The right shape is probably to fall back to the
-  interval schedule rather than skipping indefinitely, but that wants a measurement first.
+- **The GI voxelisation gate ignores compute-skinned pose changes** — MEDIUM, **no longer frozen; now
+  a documented exclusion instead.** This entry used to say the gate's `giDrawsKey()` never checked
+  `meshVertexBuffer`, so a skinned character's indirect-light contribution froze at whatever pose was
+  current when its transform last changed. `modules/render.voxi/src/VoxiRenderer.cpp` (rebuild gate
+  at `806-832`; the actual fix at the `voxelizePass`/`giDrawsKey` call sites, currently ~1253-1257 and
+  ~2328-2353, since this file's line numbers move) now **excludes** any draw whose
+  `dev_->meshVertexBuffer(d.mesh)` is non-zero from both the hash and the injection pass, with the
+  code's own comment naming this "a trade rather than a fix": a skinned character now bounces **no**
+  indirect light at all, consistently, rather than a stale pose's worth of it silently. Measured on a
+  real rig at 2 rebuilt / 62 skipped of 64 ticks through a pose transition — the ~96% rebuild-avoidance
+  this gate exists for is preserved. **Still open:** the comment names the real fix as partial
+  revoxelisation (injecting one mesh's region without rebuilding the whole volume), which
+  `voxelizePass` does not support yet.
 
 - **`--refl-test` FAILS, and has been failing** — MEDIUM, found 2026-08-27.
 
@@ -253,13 +254,18 @@ the corrected ones are.
   been reporting FAIL loudly enough that nobody has been reading it.
 
 - **The spatial shadow denoiser is a permanent no-op in the shipped product** — LOW, found
-  2026-08-27. `modules/render.voxi/src/Voxi.cpp`. `rtShadowDenoiseForQuality` returns **0 at every
-  tier including Epic**, and radius 0 hits `rtShadowSpatial`'s early return, so the filter — loop,
-  weights, cost and all — never executes in anything shipped. Same for
-  `rtPixelsPerRayTileForQuality`, which returns 1 everywhere, forcing `tileBits = 0` and killing the
-  temporal ray-reuse path. Not a defect in the code, which is correct; a defect in the ladder that
-  drives it. Turning either on is a measurement rather than a code change, and it must be taken
-  against a **moving** camera. See `docs/rendering/DENOISING.md`.
+  2026-08-27, **fixed 2026-08-29 in `31c06a4`.** `modules/render.voxi/src/Voxi.cpp`.
+  `rtShadowDenoiseForQuality` used to return **0 at every tier including Epic**, so radius 0 hit
+  `rtShadowSpatial`'s early return and the filter never executed in anything shipped. It now returns
+  **2 for Low/Medium/High and 1 for Epic** (Off stays 0 — RT is not running), with the ladder's own
+  comment recording why Epic gets *less* radius than the tiers below it: radius 3 is "within one code
+  of the sixteen-ray answer" but also the worst point on a measured 12-to-32-code motion-wobble range,
+  so it stays reachable only through an explicit override rather than as any tier's default. What was
+  never a bug, and still is not one: `rtPixelsPerRayTileForQuality` still returns 1 at every tier — the
+  same code comment now explains this is a **measured, deliberate** choice rather than an oversight
+  killing the reuse path (a moving-camera test showed the reprojected-history tile widths visibly
+  trailing the shadow during Play-in-Editor, which a still-camera benchmark could not see). See
+  `docs/rendering/DENOISING.md`.
 
 ---
 

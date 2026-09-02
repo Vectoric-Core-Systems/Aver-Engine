@@ -309,7 +309,7 @@ One answer for every mismatch is wrong, because the four fields above carry genu
   with charity: a raw byte hash cannot distinguish a real ABI change from a changed comment, a
   reordered `#include`, or (per §4) a line-ending difference across machines. Gating on it by default
   risks becoming exactly the kind of false-positive-that-takes-everything-down the task explicitly warns
-  about for the 83–89 headless test suites (`aver-running-the-test-suite.md`). An opt-in strict mode
+  about for the 95 headless test suites (`aver-running-the-test-suite.md`). An opt-in strict mode
   (an env var or CLI token, in the same vocabulary as `--force-caps`) may promote this bucket to
   `MAJOR_MISMATCH` severity for CI/matrix builds that want to fail loudly on any drift — but that is an
   opt-in, not the default.
@@ -319,7 +319,7 @@ One answer for every mismatch is wrong, because the four fields above carry genu
   enforced. A differing build stamp on an identical ABI is a fact worth putting in a bug report, not a
   reason to change behaviour.
 
-**On the 83–89 headless test executables and the MCP tooling.** None of the *Test.exe suites call
+**On the 95 headless test executables and the MCP tooling.** None of the *Test.exe suites call
 `Engine::run` at all — `tests/game/src/InputBridgeTest.cpp`'s own header comment states *"No window, no
 device, no ImGui, no human"*, and every test executable in `tests/` calls into a module's C ABI or C++
 API directly, never through `aver::Application`/`aver::Engine`. Because the check as designed here is

@@ -4,18 +4,41 @@ Two modules: `Aver.Scene`, a data-oriented entity/component world, and `Aver.Fra
 gameplay layer — GameInstance, GameMode, GameActor, Pawn, PlayerController — expressed *over* that
 world rather than as a class hierarchy inside it.
 
-> **This is a design record, and it runs well ahead of the tree.** Of section 8's fourteen steps,
-> **only step 1 is built** (commit `03b79e1`): both modules exist, both build as SHARED DLLs, both
-> are wired into the top-level `CMakeLists.txt` and the sandbox, and `scene_abi.h` and
-> `framework_abi.h` exist — containing *only* their version entry points. There is no entity, no
-> component pool, no transform, no class registry, no `Scene.cs` and no `Framework.cs`. Every other
-> header, C# file and CMake fragment below is a specification to be typed, not a file to be read.
-> Section 8 is the order to type them in, section 9 is what this design does not know, and section
-> 10 is where the design contradicts itself.
+> **This was a design record that ran ahead of the tree; it now runs well behind it.** The banner
+> here used to say: "Of section 8's fourteen steps, only step 1 is built... There is no entity, no
+> component pool, no transform, no class registry, no `Scene.cs` and no `Framework.cs`." That was
+> true at commit `03b79e1` and has not been true for a long time. Both modules hold real
+> implementations: entities, component pools, field tables and the transform/hierarchy pass are live
+> (`modules/scene/src/World.cpp`, `ComponentPool.cpp`, `Fields.cpp`), the full `scene_abi.h` surface
+> is implemented in `SceneAbi.cpp` and exercised by `SceneTest.exe` (935 lines), and
+> `modules/framework/src/FrameworkAbi.cpp` (1,436 lines) carries a working class registry —
+> `declare`/`find`/`seal`, `spawn`/`destroy`, `possess`/`unpossess`, a hoisted per-class `tick` — with
+> its own `framework_hooks.h` dispatch tables, exercised by `FrameworkTest.exe`.
+>
+> The shape it landed in diverges from what follows below in real ways, not only in degree. There is
+> no `Scene.cs` folded into `Aver.Scripting.dll` as §1.4 describes: the C# side is two separate
+> assemblies, `scripting/csharp/Aver.Scene` and `scripting/csharp/Aver.Framework` (the latter holding
+> `Actor.cs`, `ActorBuilder.cs`, `ClassBuilder.cs`, `GameMode.cs`, `Pawn.cs`, `PlayerController.cs`
+> and more). There is no `include/aver/framework/ClassRegistry.hpp` either — §4.1 below already
+> corrects that one in place. A class is declared from C# through
+> `Aver.Scripting.Bridge/HostBridge.cs`, for both an `[AverClass]` type and a `.ocgraph` `CLASS`
+> record, never through a header this document sketches.
+>
+> What genuinely has not moved: the editor's own viewport still keeps its own
+> `std::vector<MeshObj> objects_` (`sandbox/src/SandboxApp.cpp`) instead of reading
+> `CMeshRenderer`/`CWorld` off the world — there is no `Aver.Scene.Renderer` target and no
+> `SceneRender.cpp` anywhere in the tree, so step 7 below has not happened. Section 8's checklist
+> predates essentially all of this work, and its checkboxes should not be trusted step by step:
+> several unchecked steps are done, several of those in a shape this document never anticipated, and
+> step 7 genuinely is not done. Section 9 is what this design does not know and section 10 is where
+> the design contradicts itself; both remain worth reading as written.
 
-`docs/SCRIPTING.md` §5 already says the honest version of this: there is no scene API, and none was
-written on purpose, because an interim object API would have to be replaced wholesale and would break
-every script authored against it. This document is what that replacement is meant to be.
+`docs/SCRIPTING.md` §5 says the honest version of the *old* state: there is no scene API, and none
+was written on purpose, because an interim object API would have to be replaced wholesale and would
+break every script authored against it. That section is now stale for the same reason this banner
+was — the scene and framework layers described below did get built, just not by folding into
+`Aver.Scripting.dll` the way §5 anticipated. This document reads today more like a record of what got
+built than a specification of what remains to be typed.
 
 ---
 
@@ -504,9 +527,12 @@ private:
 
 ### 3.7 Built-in components
 
-Registered by Scene's own init before anything else runs, at fixed dense ids **1..8**: `CLocal`,
-`CWorld`, `CHierarchy`, `CName`, `CTags`, `CMeshRenderer`, `CLight`, `CCamera`. Every one is
-registered through the same public API a script-declared component uses, so **nothing about the
+Registered by Scene's own init before anything else runs, at fixed dense ids starting from 1: this
+section originally listed eight (`CLocal`, `CWorld`, `CHierarchy`, `CName`, `CTags`, `CMeshRenderer`,
+`CLight`, `CCamera`), and `modules/scene/src/Builtins.cpp` has since appended seven more the same
+way — `CSkeletalMesh`, `CAnimator`, `CParticleEmitter`, `CAttachment`, then (per `docs/CHUNKS.md`
+§5.1's read-only-handle rule) `CSoftBody`, `CRigidBody` and `CJoint` — for **15** in total. Every one
+is registered through the same public API a script-declared component uses, so **nothing about the
 built-ins is privileged**.
 
 ```cpp
@@ -766,6 +792,19 @@ allocator becomes silently-wrong queries the moment two subsystems want bit 12.
 
 Three headers. **Two of them are pure P/Invoke surfaces and one of them deliberately is not.** This is
 the contract; it is reproduced here in full because an implementer will follow it literally.
+
+> **The real `scene_abi.h` took the generic path further than §5.1 sketches, and is far shorter for
+> it (161 lines, not the several hundred implied below).** There is no dedicated
+> `aver_scene_get_position`/`set_rotation`/`get_scale`, no `aver_scene_set_world_position`, no batched
+> `aver_scene_get_locals`/`set_locals`/`get_world_matrices`, and no `aver_scene_query_*` or
+> `aver_scene_snapshot`/`restore` family — none of those convenience wrappers were built. What shipped
+> is the fully generic field surface this section's own reasoning argues for and then adds
+> conveniences on top of: `aver_scene_field(qualifiedName)` resolves a dense id once, and
+> `aver_scene_get_f32`/`get_vec`/`get_i32`/`get_i64`/`get_ref`/`get_str` (and their setters) read or
+> write ANY field through it, position and rotation included. `aver_scene_create` takes no name
+> argument. The one dedicated accessor that did ship is named `aver_scene_world_matrix`, not
+> `aver_scene_get_world_matrix`. Read this section for the reasoning, not as a transcript of the
+> header on disk.
 
 ### 5.1 `modules/scene/include/aver/scene/scene_abi.h`
 

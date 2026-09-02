@@ -28,6 +28,26 @@ mostly "Vulkan is a stub", found in §0, §2, §4c-2 and §4d (Known gaps and de
 attempt to write the missing sections; treat §3 onward with the same suspicion the paragraph above
 already asks for.
 
+**A third hole, opened since, and not yet closed by this pass either.** `b952b8a` was 685 commits at
+2026-08-25; `HEAD` is now `da44c33` (835 commits, 2026-09-02) — 150 commits this pass did not read in
+full. The engine version was bumped to **0.5.0** somewhere in that range (`18c1360`). What is
+independently verified among the 150: the .NET target moved to **net10.0**, with Roslyn vendored and
+pinned at **5.6.0** under `third_party/nuget`; `Aver.Physics` shipped as a C# assembly over a
+**125-function** C ABI across five headers under `modules/physics/include/aver/physics/`
+(re-counted this pass, matches); Aver Node gained parity for it, and the node catalogue is now **240
+node types across 23 categories** in `sandbox/src/GraphNodeDefs.hpp`; the graph editor gained palette
+search, copy/paste, and a moved graph-class placement that now survives a save; and the Content
+Browser learned to create `.ocgraph` and `.ocbt` assets directly. Separately, a sweep deleted five
+directories whose entire content was a stale plan for work done elsewhere under other names —
+`editor/`, `interop/`, `shaders/`, `modules/render/`, `modules/render.gi/` (`01a6d8c`) — while
+`abi/` and `modules/abi/` were kept on purpose, rewritten earlier to record that the consolidated
+`Aver.ABI` was cancelled rather than merely deferred. None of this is folded into the numbered
+§4-series sections either, and the remainder of the 150 commits (a Debug-only physics bug, an editor
+mode system, a crash reporter, among the commit subjects — not opened and read) has not been audited
+closely enough to summarize responsibly. Treat §3 onward, and every module-layout line below that
+still says "not yet wired" or "not built", with the same suspicion as before, now doubled — verify
+against the tree before repeating any of it.
+
 Read this first after a context compaction, then `docs/ARCHITECTURE.md` (module DAG),
 `docs/ABI.md` (every C seam, export by export), `docs/SCENE_FRAMEWORK.md` (scene + gameplay),
 `docs/MINIMUM_SPECS.md` (hardware requirements / launcher spec),
@@ -45,8 +65,10 @@ Read this first after a context compaction, then `docs/ARCHITECTURE.md` (module 
 **general-purpose** direction (see §9). Engine ⟂ projects: the engine holds no game
 content; games live in their own folders with a `.ocproject` manifest.
 
-- **Polyglot:** C++ (core/RHI/renderer/physics), C (stable ABI), C# (.NET 10 editor +
-  scripting — not built yet), Rust (asset pipeline — not built yet).
+- **Polyglot:** C++ (core/RHI/renderer/physics **and** the editor — `sandbox/`, there is no separate
+  C# editor), C (stable ABI), C# (.NET 10 scripting — built and working, hosted in-process via
+  `Aver.Scripting.Host`, §4f; this line used to say "editor + scripting — not built yet", which was
+  true when written and has not been since §4f landed), Rust (asset pipeline — not built yet).
 - **Backends:** DirectX 12 (implemented, the primary path). Vulkan constructs a real device,
   presents frames and runs the full editor as of an 11-commit maturation pass (`df16c95`..`c97f092`,
   `git log --oneline df16c95..c97f092` — corrected from a wrong "18" this pass found uncited and
@@ -119,8 +141,13 @@ modules/
   scripting/ Aver.Scripting.Host (STATIC: in-process CLR host via nethost/hostfxr, Core+Platform,
                              never the RHI) + the managed bridge under scripting/csharp/
   runtime/   Aver.Runtime    Engine loop, Application, EntryPoint (splash + ImGui hooks)
-  (skeleton, not yet wired: render, render.gi, softbody, aero, gpudeform,
-   fracture, vehicle, net, netvehicle, match, world, abi — each has a README)
+  (skeleton, not yet wired: softbody, aero, gpudeform, fracture, vehicle, net, netvehicle,
+   match — each has a README. This line used to also list `render`, `render.gi`, `world` and
+   `abi`: the first two were deleted whole (`01a6d8c`) as directories whose only content was a
+   stale plan — what renders is render.voxi/render.pbr/render.ui/render.actorpreview, per
+   docs/ARCHITECTURE.md; `world` graduated out of skeleton status, has a CMakeLists/include/src
+   now, and is linked unconditionally — see modules/world/README.md; `abi` is not a skeleton
+   awaiting work, it was DROPPED on purpose — see §4d item 17)
 sandbox/     Sandbox.exe      the editor app (SandboxApp.cpp) + Sandbox.rc (icon), the asset-editor
                               shell (AssetEditor.*), ActorEditor.*, ProjectScaffold.*, ToolsMenu.*
 tools/       ActorSweep.exe   opens every actor .cs in a real project and reports what parses (§4r)
@@ -831,9 +858,10 @@ is accepted and ignored, and the gates are unchanged (measured, see below). Full
 `modules/scripting/README.md`.
 
 **Naming diverges from `docs/ARCHITECTURE.md` §142/§246 on purpose.** That document plans
-`Aver.Scripting.NET` behind `AVER_SCRIPTING`, reaching the engine through a central `Aver.ABI`. The
-central ABI module is still an empty skeleton (§4d item 17) and the C ABIs that exist live in the
-feature modules that own them, so the host was built to match what is actually there: option
+`Aver.Scripting.NET` behind `AVER_SCRIPTING`, reaching the engine through a central `Aver.ABI`. **That
+central module was DROPPED, not merely left an empty skeleton** — this paragraph used to say "still an
+empty skeleton", but `modules/abi/README.md` records the decision and §4d item 17 lists the eight
+places the C ABIs that exist actually live, so the host was built to match what is actually there: option
 `AVER_MODULE_SCRIPTING` and target `Aver.Scripting.Host`, consistent with `AVER_MODULE_VOXI` /
 `AVER_MODULE_PBR`. ARCHITECTURE.md is the design intent and has not been rewritten.
 

@@ -83,6 +83,14 @@ paragraph no longer names a version to go stale. `dotnet --version` at the repo 
 | `Aver.FSharp.Sample` | F# | `RoundTrip.Checksum` and `RoundTrip.Describe`. References nothing of the engine's. |
 | `Aver.Scripting.SampleFSharp` | C# | An ordinary `AverBehaviour` that calls them. |
 
+**Added since this table was written, and not this seam's proof — the PCG API the section below still
+says is "deliberately not started here":** `Aver.Pcg` (F#: `Types.fs`, `Primitives.fs`, `Pcg.fs` —
+deterministic hashing and boundary types, staged to `bin/Scripting/` beside the bridge, built by
+`modules/scripting/CMakeLists.txt`'s `Aver.Pcg` target), `Aver.Pcg.SampleRules` (F#: `Forest.fs`,
+`Sky.fs` — worked generation rules) and `Aver.Scripting.SamplePcg` (C#: `PcgScatterBehaviour`, staged
+to `bin/PcgScripts/`, run with `Sandbox.exe --scripts PcgScripts`). See §"What this does not do" below
+for what that changes and what it does not.
+
 The C# project's entire F# integration is **one `ProjectReference` to an `.fsproj`**. Nothing on the
 native side, in the bridge, or in the host knows which compiler emitted the IL it is loading.
 
@@ -175,8 +183,15 @@ a default editor run loads no demo and no oracle gate can be made to pick this u
 
 ## What this does not do
 
-No PCG API, no F#-authored actors or behaviours, and no second F# compile path for generated source.
-The next stage depends on this one and is deliberately not started here.
+**Corrected — the PCG API is no longer future work.** This section used to say "no PCG API... the
+next stage depends on this one and is deliberately not started here." `Aver.Pcg` now exists (see "What
+is here" above): deterministic hashing, boundary types built for the F#/C# split this seam proved, and
+a worked forest-scatter example a `PcgScatterBehaviour` actually runs and spawns entities from. Two
+parts of the original claim still hold, unverified-but-not-contradicted: no F#-authored actor or
+behaviour was found (every `AverBehaviour` subclass in the tree, including the PCG sample's, is C#),
+and whether a *second* F# compile path exists for PCG rules a project authors itself — as opposed to
+`Aver.Pcg.SampleRules`, which is a checked-in `.fsproj` the C# sample project references and `dotnet
+build` compiles as one unit — was not settled either way in this pass.
 
 An F# type *could* derive from `AverBehaviour` and be discovered directly — nothing in the bridge
 prevents it — but that is untested and is not claimed. What is proved is the shape this work was asked

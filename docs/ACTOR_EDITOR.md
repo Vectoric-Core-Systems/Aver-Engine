@@ -1,18 +1,24 @@
 # Actor Editor with Live Sync
 
 > **Status: all four pieces are built.** The preview, the designer reader and rewriter, the tab, the
-> translate gizmo, source-to-view reload, the Live view (§4b), the file watcher (§4c) and the Roslyn
-> backend `averdesign` (§4d) all exist and are in the build.
-> What is NOT built: rotate/scale gizmo handles, and the tab infrastructure fixes in §2 Piece 1.
+> translate/rotate/scale gizmo (all three — see below), source-to-view reload, the Live view (§4b),
+> the file watcher (§4c) and the Roslyn backend `averdesign` (§4d) all exist and are in the build.
+> What is NOT built: most of the tab infrastructure fixes in §2 Piece 1 (Ctrl+S, and a cancellable
+> exit-confirm) — the `.cs`-file item in that same list has since been fixed, see below.
 > Sections below marked *(built)* describe what shipped; the rest is still plan.
+>
+> **Corrected: this used to say rotate/scale gizmo handles were not built.** `ActorEditor.cpp` now
+> has `ToolRotate`/`ToolScale` (keys 3/4) alongside the original translate tool, with
+> `dragRotateAxis`/`dragScaleAxis` driving them.
 
 
 A tab for a C# actor class: a 3D preview of its authored model tree, a properties panel, and a save
 path that rewrites the actor's `.Designer.cs`. Two-way — dragging in the preview changes the source;
 changing the source changes the preview.
 
-Nothing here is built. This is the plan, and it exists before the code for the same reason
-[docs/AUDIO.md](AUDIO.md) did: the expensive decision is where the second 3D view comes from, and it
+None of this was built when this document was first written — see the Status callout above for what
+has shipped since. This started as the plan, written before the code for the same reason
+[docs/AUDIO.md](AUDIO.md) was: the expensive decision is where the second 3D view comes from, and it
 is not recoverable once something depends on the wrong answer.
 
 **This was surveyed and then adversarially checked, and the check found ten factual errors in the
@@ -52,15 +58,15 @@ and zero tests.** It is a starting point, not a dependency that has been exercis
 
 | Piece | Where | Verified by |
 |---|---|---|
-| Reading the generated region, and rewriting coordinates | `modules/formats/{include/aver/formats,src}/ActorScript.*` | `ActorScriptTest`, 51 assertions |
+| Reading the generated region, and rewriting coordinates | `modules/formats/{include/aver/formats,src}/ActorScript.*` | `ActorScriptTest`, 92 assertions (was 51; the suite has grown since this table was written) |
 | Reading what a class declares (`Configure`) | same | same |
-| The preview render feature | `modules/render.actorpreview/` | `ActorPreviewTest`, 51 assertions |
+| The preview render feature | `modules/render.actorpreview/` | `ActorPreviewTest`, 98 assertions (was 51) |
 | The preview's own mesh registry | `modules/render.actorpreview/src/PreviewMeshCache.cpp` | — |
 | The tab, gizmo and reload | `sandbox/src/ActorEditor.{hpp,cpp}` | not covered by a test |
 | The **Live** view — spawn the class, read what it built | same, plus `aver_fw_spawn_preview` | `FrameworkTest` (the ABI edge); `--open-asset … --actor-live` (the tab) |
 | The Components tree, and the camera/light wireframes | `sandbox/src/ActorEditor.cpp` | not covered by a test; verified by screenshot against `Car.Designer.cs` and `FpsCharacter.cs` |
 | A resizable, non-square preview target | `modules/render.actorpreview/` | `ActorPreviewTest` — drain/create/destroy order, id re-fetch, idempotence, zero-extent refusal |
-| The file watcher, and routing a disk change to a tab | `modules/platform/…/DirectoryWatcher`, `sandbox/src/AssetEditor.cpp` | `WatcherTest`, 33 assertions against a real filesystem |
+| The file watcher, and routing a disk change to a tab | `modules/platform/…/DirectoryWatcher`, `sandbox/src/AssetEditor.cpp` | `WatcherTest`, 47 assertions against a real filesystem (was 33) |
 | The **Roslyn** backend | `scripting/csharp/Aver.Design/` → `bin/Tools/averdesign.exe`; `modules/formats.roslyn/` | `RoslynTest` — agreement with the scanner, and the cases it declines |
 
 **It is general, and that was checked against real projects rather than a fixture.** A sweep over
@@ -100,8 +106,7 @@ Three things the first draft missed, all found by the check:
 
 - **There is no `Ctrl+S` handler anywhere in the editor.** `MenuItem("Save Level", "Ctrl+S")` passes a
   *display string*; it binds nothing. Building the shortcut path — including the level's — is new work.
-- **A `.cs` file cannot reach the host at all.** Double-clicking one tests `cbIsSourceFile`, opens the
-  IDE, and *returns* before the editor-open call. The actor editor's own file type is short-circuited.
+- **This has since been fixed — a `.cs` file now reaches the host.** It used to be true that double-clicking one tested `cbIsSourceFile`, opened the IDE, and *returned* before the editor-open call, short-circuiting the actor editor's own file type. `SandboxApp.cpp`'s `cbOpenEntry` now checks `assetEditors_.open(full)` **first** and only falls through to `cbIsSourceFile`/the IDE if that returns false; `ActorEditor.cpp`'s `makeActorEditor` factory accepts a `.cs` path, parses it, and returns non-null exactly when it declares something previewable (§1b's "files that declare nothing previewable are skipped"). A `.cs` file with a recognised actor now opens the actor tab; one with no actor content still falls through to the IDE unchanged.
 - **The exit-confirm is not implementable as stated.** `Window` exposes `shouldClose()` and
   `requestClose()` and nothing that clears or vetoes it; `WM_CLOSE` calls `requestClose()`
   unconditionally. "Cancel" needs a cancellable close in the platform layer.
@@ -510,6 +515,10 @@ These block a start; none is answerable from the code alone.
    one conforming sample in the tree places models that resolve to nothing and draw nothing, silently.
    This is a live latent bug, not merely a spec question.
 2. **What a `.cs` double-click does now**, given it currently opens the IDE and people rely on that.
+   *Answered since:* `cbOpenEntry` tries `assetEditors_.open(full)` before falling back to the IDE, and
+   `ActorEditor`'s factory accepts a `.cs` path that declares a previewable actor — so a `.cs` file
+   with recognised actor content now opens the actor tab, and one without still opens the IDE exactly
+   as before.
 3. **How an editor window becomes a tab.** The dock layout is built once, and `DockBuilderDockWindow`
    takes a window *name* — but editor windows are named from their path and do not exist at layout
    time. "Add it to the existing DockBuilder block" is not implementable as written.
@@ -534,4 +543,4 @@ cases that leave the file unmodified; a tuple literal with nested parens; a name
 order. The preview feature gets the `tests/render.ui` treatment — a recording context asserting the
 draw list, with no GPU.
 
-The watcher needs its **first** test, including the overflow return. It has never had one.
+> **This used to say the watcher had never had a test at all. That's no longer true — `WatcherTest` (`tests/platform/src/WatcherTest.cpp`, §1b, §4c) now exists, with 47 assertions against a real filesystem.** What is still true: every one of those assertions calls `drain()`, whose only overflow behaviour is returning `false` when the OS reports one, and every call site asserts `drain(...)` is `true` — "does not overflow" in a create, a rewrite, a burst, a rename, a delete, a nested write, and an idle stretch. Nothing in the file forces a real overflow and checks that the **positive** case — `poll()` actually signalling one, and whatever a caller is meant to do with `true` (§4c: "the kernel dropped records, rescan yourself") — is handled at all. That path remains untested.

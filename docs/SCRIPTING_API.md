@@ -749,8 +749,9 @@ the slot's space into the `TEX` line and the reader validates it, so the two can
 > guard against them drifting is weaker than it sounds, and worth knowing before trusting it:
 > `testGeneratedByCsharp` in `tests/formats/src/MaterialTest.cpp` parses a **pasted, verbatim** sample
 > of `MaterialBuilder.Emit`'s output with the C++ reader. Nothing runs the C# emitter, so a change made
-> only to `Emit` goes unnoticed until somebody re-pastes the sample. (The comment in `MaterialBuilder.cs`
-> claiming a `MaterialCompilerTest` does this is wrong — no such test exists.)
+> only to `Emit` goes unnoticed until somebody re-pastes the sample. (This paragraph used to add that
+> `MaterialBuilder.cs` carried a doc comment wrongly claiming a `MaterialCompilerTest` did this instead
+> — that comment is gone now, fixed in `4c1e111`, and the file makes no such claim today.)
 
 ---
 

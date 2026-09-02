@@ -21,7 +21,7 @@ A renderer can be checked by looking at it. Audio cannot. A pan law that dips 3 
 one that does not are the same arithmetic to a reader and the same silence to a screenshot. An
 attenuation curve still 2% audible at its own cutoff sounds fine until you walk past the boundary. A
 loop point that drifts a fraction of a frame per pass takes minutes to become audible. So the whole
-mixer runs headlessly in `tests/audio`, with 70 assertions and no sound card.
+mixer runs headlessly in `tests/audio`, with 73 assertions and no sound card.
 
 That test has already earned its place: it caught a stolen voice failing to bump its generation,
 which meant the stolen handle still matched its slot and its owner went on silently driving the voice

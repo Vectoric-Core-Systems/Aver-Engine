@@ -7,8 +7,10 @@ This is the deliberate opposite of bundling a game's content inside the engine t
 ```
 C:\Users\User\Documents\
 ├── Aver Engine\                 ← THE ENGINE (this repo). No game content lives here.
-│   ├── modules\  abi\  tools\  editor\  shaders\
-│   ├── sandbox\                 ← an engine SAMPLE, not a game project
+│   ├── modules\  abi\  tools\   ← editor\ and shaders\ existed here once; both were deleted
+│   │                              (the editor is sandbox\ -> Sandbox.exe; HLSL lives in
+│   │                              modules/*/shaders/ and sandbox/shaders/ files instead)
+│   ├── sandbox\                 ← an engine SAMPLE, not a game project — and also THE EDITOR
 │   ├── templates\               ← starter templates the engine COPIES into a new project
 │   ├── test-content\            ← fixtures the suites open; miniature projects on purpose
 │   └── tests\                   ← format-conformance vectors only
@@ -77,7 +79,7 @@ the engine — the Tools items are labelled `(engine)` and their modals say it o
 C# is the reverse: `Content/Scripts/` is plain content, `Scripts.csproj` is generated beside it,
 and **Tools ▸ Compile Scripts** runs `dotnet build` on it without the engine being touched.
 Compiled scripts now *run*: `spawnActor` dispatches `OnBeginPlay`
-(`modules/framework/src/FrameworkAbi.cpp:530`) and the Play lifecycle spawns
+(`modules/framework/src/FrameworkAbi.cpp:535`) and the Play lifecycle spawns
 GameInstance/GameMode/Controller/Pawn. One deliberate exception — the Actor Editor's **Live**
 preview spawns the class, runs `BuildModels` and destroys it the same frame, so no `OnBeginPlay`
 and no ticking there; its tooltip says so.

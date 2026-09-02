@@ -1,8 +1,35 @@
 # Aver Engine — Audio: the plan
 
-Nothing here is built yet. This is the plan, written before any of it, because the two decisions that
-matter most in an audio system are both impossible to retrofit: where the real-time boundary falls,
-and whether the mixer can be tested without a sound card.
+**This plan is now built.** This document said "nothing here is built yet" for a long time; that
+stopped being true once `Aver.Audio`, `Aver.Audio.Wasapi` and `Aver.Audio.Abi` shipped, and
+`modules/audio/CMakeLists.txt` and `modules/audio/README.md` now cite this file as "the plan this
+implements" rather than a plan waiting to be started. The shape below mostly held — three targets,
+the Core-only mixer, the never-touches-a-device split, generational voice handles, fixed voice pool,
+constant-power panning, inverse-distance attenuation — but several specifics changed on the way from
+plan to code, and this document was never updated to say which. Known divergences, checked against
+the tree rather than assumed:
+
+- **The command mechanism is per-slot atomics, not the lock-free SPSC ring §3 specifies.**
+  `modules/audio/README.md` names this explicitly: volume, pitch, position and stop are not *ordered*
+  with respect to each other — latest value wins — so a ring built for ordered messages was the wrong
+  shape, and the deviation is recorded as deliberate rather than as drift.
+- **The shipped format is `.ocaudio` with an `AHDR` header chunk and an `APCM` sample chunk**
+  (`modules/formats/include/aver/formats/OcAudio.hpp`), not the `.ocsound`/`SNDH` naming §4 proposes.
+- **There is no streaming and no Ogg Vorbis importer.** `modules/audio/README.md`'s own "what it does
+  not do" list says so directly: "no streaming — every sound is resident." §4's resident-vs-streamed
+  design and §2's `stb_vorbis` choice were never built; only a WAV reader (plus, per
+  `Aver.Formats.Audio`, Windows Media Foundation for compressed formats other than Ogg) exists.
+- **The C ABI is shaped differently from §6's sketch.** The real `audio_abi.h` splits a plan-shaped
+  `aver_audio_play(path, volume, pitch)` into `aver_audio_load(path)` (returns a *sound* handle,
+  decoding once) and `aver_audio_play(sound, volume, pitch, looping, bus)` (returns a *voice* handle)
+  — closer to WASAPI's own load/play separation than the single-call sketch here. `aver_audio_init`/
+  `_shutdown`/`_ready` also exist and are not in §6's list at all.
+- **`tests/audio` runs 73 assertions with no sound card**, matching §7's intent exactly (a stolen
+  voice failing to bump its generation was a real bug this suite caught), even though the specific
+  list of cases has not been checked one-for-one against §7's bullets.
+
+The rest of this document is the plan as originally written, kept for the reasoning it records — not
+because every specific in it shipped unchanged.
 
 ---
 

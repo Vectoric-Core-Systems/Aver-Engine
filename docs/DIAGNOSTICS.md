@@ -138,11 +138,15 @@ generic `Crash` — throwing away the assert's message, file and line. It is now
 
 ## Diagnostic codes (`AVR####`) — reserved, not yet issued
 
-The ranges below are allocated so a code names its owner on sight. The retrofit itself is not done:
-`noteCritical` already takes a `u32 code`, and the intended approach is to attach codes at the few
-choke points that cover most ground — `hrOk` in `D3D12Device.cpp`, `fail()` in `Avr1.cpp`,
-`assertFail` — rather than editing all 1,197 `AVER_ERROR`/`AVER_WARN` call sites. An uncoded line is
-still coloured by severity; codes are additive.
+The ranges below are allocated so a code names its owner on sight. The retrofit itself is not done —
+`Log.cpp`'s only call to `noteCritical` still passes the literal `0` for every Critical, confirming no
+code has actually been issued anywhere yet: `noteCritical` already takes a `u32 code`, and the
+intended approach is to attach codes at the few choke points that cover most ground — `hrOk` in
+`D3D12Device.cpp`, `fail()` in `Avr1.cpp`, `assertFail` — rather than editing every `AVER_ERROR`/
+`AVER_WARN` call site (1,313 of them as of this pass — this line said 1,197 before a recount; re-run
+`grep -roP "AVER_ERROR\(|AVER_WARN\(" -r modules sandbox tools tests | wc -l` rather than trust either
+number, since it moves with every commit). An uncoded line is still coloured by severity; codes are
+additive.
 
 | Range | Owner |
 |---|---|
