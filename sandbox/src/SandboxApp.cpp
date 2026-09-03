@@ -710,10 +710,19 @@ static constexpr ImVec4 kAverOrangeDim(242.0f/255.0f, 101.0f/255.0f, 34.0f/255.0
 // EVERY colour is set deliberately -- it used to leave most of ImGui's ~50 entries at the library
 // default (blue), so tabs, scrollbars and docking read default-blue against an orange-on-steel
 // identity. Neutrals carry a slight blue bias so the warm accent reads as chosen, not merely present.
-static void applyUnrealStyle() {
+// SPLIT FROM THE COLOURS ON PURPOSE, and the reason is a trap rather than tidiness.
+//
+// A runtime theme switch wants to rewrite the palette and nothing else. Re-running the whole style
+// setup would look like the obvious way to do that, and it is wrong: the only caller is applyDpi,
+// which runs ScaleAllSizes(dpi) immediately AFTER it, so calling the combined function on its own
+// resets every metric to unscaled and silently drops the DPI scale. On a 1.5x display that takes
+// FramePadding.y from 6 back to 4, which changes the docked tab-bar height, which moves the Level
+// viewport rect -- and --probe-rel resolves against that rect, so all twenty oracle gates move at
+// once. Metrics are applied with the DPI pass; colours can be applied any time.
+static void applyEditorMetrics() {
     ImGuiStyle& s = ImGui::GetStyle();
 
-    // Metrics. Set UNSCALED -- applyDpi calls ScaleAllSizes(dpi) immediately after this, so writing
+    // Set UNSCALED -- applyDpi calls ScaleAllSizes(dpi) immediately after this, so writing
     // pre-multiplied values here would square the scaling on a high-DPI display.
     s.WindowRounding    = 4;  s.ChildRounding  = 4;  s.FrameRounding  = 4;
     s.PopupRounding     = 4;  s.GrabRounding   = 3;  s.TabRounding    = 4;
@@ -733,7 +742,12 @@ static void applyUnrealStyle() {
     s.IndentSpacing     = 18;
     s.WindowTitleAlign  = ImVec2(0.0f, 0.5f);
     s.SeparatorTextBorderSize = 1;
+}
 
+// The palette. Safe to re-run at any point outside a widget's own draw, because it writes colours
+// and touches no metric -- see applyEditorMetrics above for why that distinction is load-bearing.
+static void applyEditorColors() {
+    ImGuiStyle& s = ImGui::GetStyle();
     ImVec4* c = s.Colors;
 
     // One ladder of neutrals, deepest to lightest, so depth is expressed by ONE consistent set
@@ -1161,7 +1175,8 @@ public:
         // interface for one subclass is the wrong trade. ActorEditor's content-root setter set this
         // precedent; GraphEditor follows it.
         editor::setGraphEditorDpi(dpi_);
-        applyUnrealStyle();
+        applyEditorMetrics();
+        applyEditorColors();
         if (dpi_ > 1.01f) ImGui::GetStyle().ScaleAllSizes(dpi_);
 
         ImGuiIO& io = ImGui::GetIO();
