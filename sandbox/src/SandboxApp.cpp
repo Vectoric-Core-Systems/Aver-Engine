@@ -8305,27 +8305,7 @@ private:
             xf.position = x.pos;
             xf.rotation = quatFromEulerDeg(x.rotDeg);
             xf.scale    = x.scale;
-            const scene::Entity par = w.parent(selEntity_);
-            if (par != scene::kInvalidEntity) {
-                const Transform pw = worldTransformOf(w, par);
-                // DIVIDING BY THE PARENT'S SCALE, and refusing to when it is zero. A zero component
-                // is legal to author (a flattened parent) and would otherwise produce an infinity
-                // that propagates into CLocal and then into every descendant's world matrix.
-                const Vec3 inv{pw.scale.x != 0.0f ? 1.0f / pw.scale.x : 1.0f,
-                               pw.scale.y != 0.0f ? 1.0f / pw.scale.y : 1.0f,
-                               pw.scale.z != 0.0f ? 1.0f / pw.scale.z : 1.0f};
-                // The CONJUGATE, which inverts a UNIT quaternion. Every rotation reaching this
-                // point comes from quatFromEulerDeg or a composition of such, so it is unit by
-                // construction; Quat has no inverse() to reach for and adding one for a single
-                // call site would put a general-purpose name on a narrow assumption.
-                const Quat pinv{-pw.rotation.x, -pw.rotation.y, -pw.rotation.z, pw.rotation.w};
-                const Vec3 d = xf.position - pw.position;
-                const Vec3 r = pinv.rotate(d);
-                xf.position = Vec3{r.x * inv.x, r.y * inv.y, r.z * inv.z};
-                xf.rotation = pinv * xf.rotation;
-                xf.scale    = Vec3{xf.scale.x * inv.x, xf.scale.y * inv.y, xf.scale.z * inv.z};
-            }
-            w.setLocalTransform(selEntity_, xf);
+            w.setLocalTransform(selEntity_, localFromWorldFor(w, selEntity_, x));
             return;
         }
 #endif
@@ -8335,6 +8315,39 @@ private:
     }
 
 #if AVER_MODULE_SCENE
+    // The LOCAL transform an entity needs in order to sit at a given WORLD one, given its parent.
+    //
+    // THE ONE CONVERSION, because there were nearly two. setSelectedXform carried this inline while
+    // applyXformTo -- the function undo and redo actually call -- wrote its stored transform straight
+    // into setLocalTransform. Once selectedXform started returning WORLD, that made undo of any
+    // transform edit on a CHILD write a world position into CLocal: the child jumps to its own world
+    // coordinates reinterpreted as an offset from its parent. Invisible on a root, where the two
+    // frames coincide, which is why every suite and all twenty gates passed over it.
+    static Transform localFromWorldFor(scene::World& w, scene::Entity e, const EditXform& x) {
+        Transform xf;
+        xf.position = x.pos;
+        xf.rotation = quatFromEulerDeg(x.rotDeg);
+        xf.scale    = x.scale;
+        const scene::Entity par = w.valid(e) ? w.parent(e) : scene::kInvalidEntity;
+        if (par == scene::kInvalidEntity) return xf;
+        const Transform pw = worldTransformOf(w, par);
+        // DIVIDING BY THE PARENT'S SCALE, and refusing to when it is zero. A zero component is legal
+        // to author (a flattened parent) and would otherwise produce an infinity that propagates into
+        // CLocal and then into every descendant's world matrix.
+        const Vec3 inv{pw.scale.x != 0.0f ? 1.0f / pw.scale.x : 1.0f,
+                       pw.scale.y != 0.0f ? 1.0f / pw.scale.y : 1.0f,
+                       pw.scale.z != 0.0f ? 1.0f / pw.scale.z : 1.0f};
+        // The CONJUGATE, which inverts a UNIT quaternion. Every rotation reaching this point comes
+        // from quatFromEulerDeg or a composition of such, so it is unit by construction.
+        const Quat pinv{-pw.rotation.x, -pw.rotation.y, -pw.rotation.z, pw.rotation.w};
+        const Vec3 d = xf.position - pw.position;
+        const Vec3 r = pinv.rotate(d);
+        xf.position = Vec3{r.x * inv.x, r.y * inv.y, r.z * inv.z};
+        xf.rotation = pinv * xf.rotation;
+        xf.scale    = Vec3{xf.scale.x * inv.x, xf.scale.y * inv.y, xf.scale.z * inv.z};
+        return xf;
+    }
+
     // An entity's world transform as position/rotation/scale.
     //
     // COMPOSED UP THE CHAIN rather than decomposed from CWorld's Mat4: recovering a rotation and a
@@ -8424,6 +8437,15 @@ private:
             Vec3 bodyHalf{0,0,0};
         };
         std::vector<DestroyedNode> subtree;
+
+        // THE DESTROYED ENTITY'S OWN PARENT, as an EditId; 0 means it was a root.
+        //
+        // `subtree` restores everything BELOW the entity the command names. Nothing recorded what
+        // was ABOVE it, so undoing the deletion of a child put it back at the top level -- and,
+        // because its transform is stored parent-relative, at that offset from the world origin
+        // rather than from where its parent is. The subtree half of this shipped without the half
+        // that keeps the deleted thing attached to what it hung from.
+        EditId parentId = 0;
 #endif
     };
 
@@ -8496,8 +8518,9 @@ private:
             const scene::Entity e = entityForEdit(c.id);
             scene::World& w = scene::World::instance();
             if (e == scene::kInvalidEntity || !w.valid(e)) return;
-            Transform xf; xf.position = x.pos; xf.rotation = quatFromEulerDeg(x.rotDeg); xf.scale = x.scale;
-            w.setLocalTransform(e, xf);
+            // WORLD IN, LOCAL OUT. A Transform command's before/after come from selectedXform,
+            // which is world-space, and this used to assign them to CLocal unconverted.
+            w.setLocalTransform(e, localFromWorldFor(w, e, x));
             sel_ = kSelScene; selEntity_ = e;
             return;
         }
@@ -8525,6 +8548,8 @@ private:
             c.after.scale = loc->xf.scale;
         }
         c.snap = editor::captureEntity(w, e);
+        if (const scene::Entity par = w.parent(e); par != scene::kInvalidEntity)
+            c.parentId = editIdFor(par);
 #if AVER_MODULE_PHYSICS
         if (const auto it = entityBodies_.find(static_cast<u32>(e)); it != entityBodies_.end()) {
             c.hadBody = true;
@@ -8571,7 +8596,18 @@ private:
     // caller of spawnEntityFrom that must preserve the original EditId rather than mint a fresh one,
     // since a later redo/undo of the SAME command needs to keep finding the same logical entity.
     void recreateFrom(const EditCmd& c) {
-        const scene::Entity e = spawnEntityFrom(c.snap, c.after, c.label, c.hadBody, c.bodyHalf);
+        // RESTORED UNDER WHAT IT HUNG FROM. A parent that has since been destroyed itself resolves
+        // to kInvalidEntity and the entity comes back as a root -- losing the relationship, which is
+        // recoverable by hand, rather than losing the object, which is not.
+        scene::Entity par = scene::kInvalidEntity;
+#if AVER_MODULE_SCENE
+        if (c.parentId) {
+            par = entityForEdit(c.parentId);
+            if (!scene::World::instance().valid(par)) par = scene::kInvalidEntity;
+        }
+#endif
+        const scene::Entity e = spawnEntityFrom(c.snap, c.after, c.label, c.hadBody, c.bodyHalf,
+                                                true, par);
         if (e == scene::kInvalidEntity) return;
         rebindEdit(c.id, e);
 
@@ -10218,7 +10254,69 @@ private:
                 check(selectedXform(again) && std::fabs(again.pos.z - 140.0f) < 0.01f,
                       "and moving it in world space puts it where the drag asked");
 
-                sel_ = kSelScene; selEntity_ = parent;
+                    sel_ = kSelScene; selEntity_ = parent;
+            }
+
+            // ---- undo of a TRANSFORM on a child ---------------------------------------------
+            //
+            // endTransformEdit records before/after through selectedXform, which is WORLD, and
+            // applyXformTo wrote them straight into CLocal. On a root the two frames coincide and
+            // nothing shows; on a child, undo moved the object to its own world coordinates read as
+            // an offset from its parent. This is the case the earlier hierarchy phase did not reach,
+            // because it exercised selectedXform directly rather than the Transform COMMAND.
+            {
+                Transform pxf; pxf.position = Vec3{5000.0f, 0.0f, 0.0f};
+                w.setLocalTransform(parent, pxf);
+                Transform cxf; cxf.position = Vec3{0.0f, 0.0f, 90.0f};
+                w.setLocalTransform(child, cxf);
+
+                sel_ = kSelScene; selEntity_ = child;
+                beginTransformEdit();
+                EditXform moved{};
+                selectedXform(moved);
+                moved.pos = Vec3{5000.0f, 0.0f, 250.0f};   // a world-space drag, straight up
+                setSelectedXform(moved);
+                endTransformEdit();
+
+                const auto* afterDrag = w.component<scene::CLocal>(child, scene::kComponentLocal);
+                check(afterDrag && std::fabs(afterDrag->xf.position.z - 250.0f) < 0.01f,
+                      "dragging a child in world space leaves the expected LOCAL z");
+
+                undo();
+                w.flush();
+                const auto* afterUndo = w.component<scene::CLocal>(child, scene::kComponentLocal);
+                check(afterUndo && std::fabs(afterUndo->xf.position.z - 90.0f) < 0.01f
+                                && std::fabs(afterUndo->xf.position.x) < 0.01f,
+                      "and UNDO puts the child back at local (0,0,90) -- not at its world x of 5000");
+
+                redo();
+                w.flush();
+                const auto* afterRedo = w.component<scene::CLocal>(child, scene::kComponentLocal);
+                check(afterRedo && std::fabs(afterRedo->xf.position.z - 250.0f) < 0.01f,
+                      "and redo returns it to the dragged position");
+                undo(); w.flush();
+            }
+
+            // ---- undo of DELETING A CHILD keeps it attached ---------------------------------
+            //
+            // The subtree capture restores everything BELOW the deleted entity. Nothing recorded
+            // what was ABOVE it, so a deleted child came back as a root -- and, since its transform
+            // is parent-relative, at that offset from the world origin instead of from its parent.
+            {
+                sel_ = kSelScene; selEntity_ = child;
+                deleteSelection();
+                w.flush();
+                check(!w.valid(child), "the child is deleted");
+
+                undo();
+                w.flush();
+                const scene::Entity back = selEntity_;
+                check(w.valid(back), "and undo brings it back");
+                check(w.parent(back) == parent,
+                      "STILL PARENTED to the entity it hung from, rather than restored as a root");
+                const auto* bl = w.component<scene::CLocal>(back, scene::kComponentLocal);
+                check(bl && std::fabs(bl->xf.position.z - 90.0f) < 0.01f,
+                      "at its original parent-relative transform");
             }
 
             sel_ = kSelScene; selEntity_ = parent;
