@@ -840,8 +840,28 @@ static void testSceneAbiRepairs(World& world) {
     check(strType != 0 && fStr != 0, "the String component and field registered");
     check(aver_scene_field_kind(fStr) == AVER_SCENE_KIND_STRING, "CStr.s is String-kind");
 
+    // ---- aver_scene_component: the same lookup, reachable from a BINDING rather than only from C++.
+    // CStr is registered at runtime exactly as CControlRig and CSynapseAgent are, so its id is not a
+    // fixed AVER_SCENE_COMP_* constant and depends on registration order -- which is precisely why a
+    // by-name resolve has to exist for anything outside C++ to attach one. `strType` above is the C++
+    // answer, so it is the ground truth this is measured against rather than a number written twice.
+    check(aver_scene_component("CStr") == strType,
+          "aver_scene_component resolves the dynamic type to the SAME id World::componentId gave");
+    check(aver_scene_component("CNoSuchComponent") == 0, "an unregistered name resolves to 0");
+    check(aver_scene_component("") == 0, "and so does an empty one");
+    check(aver_scene_component(nullptr) == 0, "a null name does not crash");
+    // FAILING CLOSED IS THE PROPERTY THAT MATTERS. A typo must attach NOTHING; if 0 were treated as
+    // "the first pool" a misspelt name would silently give an entity some unrelated component.
+    {
+        const int32_t typoEnt = aver_scene_create();
+        check(aver_scene_add_component(typoEnt, aver_scene_component("CStrr")) == 0,
+              "so a misspelt component name attaches nothing at all");
+        aver_scene_destroy(typoEnt);
+    }
+
     const int32_t se = aver_scene_create();
-    check(aver_scene_add_component(se, strType) == 1, "the entity takes the String component");
+    check(aver_scene_add_component(se, aver_scene_component("CStr")) == 1,
+          "the entity takes the String component, attached through the by-NAME id");
 
     const int64_t poolBefore = aver_scene_debug_string_pool_size();
     const char*   values[]   = {"first", "second", "third", "fourth", "fifth"};

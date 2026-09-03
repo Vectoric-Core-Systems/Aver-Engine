@@ -265,6 +265,23 @@ internal static class GraphInterop
     internal static bool PlayAnimationForGraph(int entity, string clipAsset, bool loop) =>
         new Entity(entity).PlayAnimation(clipAsset, loop);
 
+    /// <summary>SetControlRig's own surface: binds an .ocrig by path so the entity's sampled pose is
+    /// modified before skinning, adding a CControlRig component if it has none. Wraps
+    /// <see cref="Entity.SetControlRig"/> (Animation.cs).
+    ///
+    /// <para>Unlike its two siblings above, the component this attaches is registered at RUNTIME, so
+    /// this returns false in a host that never registered CControlRig -- and false, not a throw, is
+    /// the right answer: a graph authored against a rig is not broken content when it runs somewhere
+    /// the rig system is absent, it simply does not get its rig.</para>
+    ///
+    /// <para>Ordering with SetSkeleton is a real constraint and it is the graph author's to satisfy:
+    /// a rig has nothing to modify until the entity has a skeleton, because the pose it edits is the
+    /// one AnimSystem samples for a skeleton. This node does not enforce that -- attaching in the
+    /// other order is harmless and self-corrects the moment a skeleton arrives, since the rig is
+    /// applied per tick from the component, not once at attach time.</para></summary>
+    internal static bool SetControlRigForGraph(int entity, string rigAsset, float weight) =>
+        new Entity(entity).SetControlRig(rigAsset, weight);
+
     /// <summary>CharacterMove's own surface: the last Blueprint-parity node, one coarse exec call
     /// wrapping <see cref="AverCharacter"/>.DriveFromGraph -- itself a one-line forward to the
     /// existing <c>protected</c> Drive(dt, moveAxis, yawDeltaDeg, pitchDeltaDeg), which owns the

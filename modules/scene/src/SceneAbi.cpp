@@ -301,6 +301,13 @@ int32_t aver_scene_valid(int32_t e) {
     return world().valid(toEntity(e)) ? 1 : 0;
 }
 
+// Resolves a component type by registered name. 0 when unregistered -- which addComponent below
+// then rejects, so a typo fails closed rather than attaching some other pool.
+int32_t aver_scene_component(const char* name) {
+    if (!name) return 0;
+    return static_cast<int32_t>(world().componentId(name));
+}
+
 // Attaches a component's storage to the entity.
 int32_t aver_scene_add_component(int32_t e, int32_t component) {
     return world().addComponent(toEntity(e), static_cast<u32>(component)) ? 1 : 0;

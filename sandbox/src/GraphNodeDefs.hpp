@@ -908,6 +908,28 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"PlayAnimation", "Play Animation", "Scene", {
         pin("entity", "int", false), pin("loop", "bool", false, "true"), pin("success", "bool", true)},
         {attr("clip", "Clip")}});
+    // -- SetControlRig: the third of the animation family, and the node that makes a control rig
+    //    reachable from a LEVEL. Everything under it was already built and tested -- anim::twoBoneIk
+    //    and anim::aimAt, the .ocrig format, CControlRig applied through AnimSystem's pose-modifier
+    //    seam -- but a rig could only be attached from C++, so a rigged character could not be placed
+    //    in a map at all. A skinned character reaches a level through a graph CLASS (there is no
+    //    skeleton field on an .ocworld PLACE record), which makes THIS node the missing link rather
+    //    than a new level-format attribute.
+    //
+    //    THE COMPONENT IT ATTACHES IS NOT A BUILT-IN, which is what separates it from SetSkeleton
+    //    directly above. CControlRig is registered at runtime (docs/SYNAPSE.md section 6's pattern),
+    //    so it has no AVER_SCENE_COMP_* id and is attached by NAME through aver_scene_component --
+    //    scene ABI 1.4, added for exactly this and useful to every other dynamic component after it.
+    //    In a host that never registered CControlRig the node returns false and changes nothing.
+    //
+    //    weight is a PIN and rig= is an attribute, for the same split PlayAnimation's loop pin
+    //    documents just above: which rig an entity wears is edit-time naming, but how strongly it is
+    //    worn is genuine runtime data a graph may compute -- fading a reach out as the hand arrives,
+    //    or dropping it to 0 on death, is the ordinary use, and 0 disables the rig without detaching
+    //    it. The default "1" matches Entity.SetControlRig's own default parameter.
+    t.push_back({"SetControlRig", "Set Control Rig", "Scene", {
+        pin("entity", "int", false), pin("weight", "float", false, "1"), pin("success", "bool", true)},
+        {attr("rig", "Rig")}});
 
     // ============================================================================================
     // MATERIAL NODES -- DOMAIN material, compiled to HLSL by aver::pbr::compileMaterialGraph()

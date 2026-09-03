@@ -162,6 +162,10 @@ internal static class SceneNative
 
     [DllImport(Lib)] internal static extern int aver_scene_create();
     [DllImport(Lib)] internal static extern int aver_scene_destroy(int e);
+    // Resolves a DYNAMICALLY registered component type by name (scene ABI 1.4). The Component enum
+    // covers the built-ins, whose ids are fixed; a type registered at runtime has no enum value and
+    // no knowable id, so this is the only way the framework can attach one.
+    [DllImport(Lib)] internal static extern int aver_scene_component([MarshalAs(UnmanagedType.LPUTF8Str)] string name);
     [DllImport(Lib)] internal static extern int aver_scene_add_component(int e, int component);
     [DllImport(Lib)] internal static extern int aver_scene_has_component(int e, int component);
     [DllImport(Lib)] internal static extern int aver_scene_set_parent(int child, int parent);

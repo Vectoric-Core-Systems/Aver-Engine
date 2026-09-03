@@ -26,8 +26,11 @@ extern "C" {
 /* MINOR 1 adds aver_scene_material_name. Additive only -- no existing binding changes. */
 /* MINOR 2 adds AVER_SCENE_COMP_PARTICLE_EMITTER (11th built-in). Additive only. */
 /* MINOR 3 adds AVER_SCENE_COMP_ATTACHMENT (12th built-in). Additive only. */
+/* MINOR 4 adds aver_scene_component, which resolves a DYNAMICALLY registered component type by
+ * name. Additive only -- the AVER_SCENE_COMP_* built-ins keep their fixed ids and every existing
+ * binding is unchanged. */
 #define AVER_SCENE_ABI_VERSION_MAJOR 1
-#define AVER_SCENE_ABI_VERSION_MINOR 3
+#define AVER_SCENE_ABI_VERSION_MINOR 4
 #define AVER_SCENE_ABI_VERSION \
     ((AVER_SCENE_ABI_VERSION_MAJOR << 16) | AVER_SCENE_ABI_VERSION_MINOR)
 
@@ -101,6 +104,18 @@ AVER_SCENE_ABI int32_t aver_scene_create(void);
 AVER_SCENE_ABI int32_t aver_scene_destroy(int32_t e);
 /* 1 if the handle addresses a live entity, else 0 (rejects 0, a stale generation, and a freed slot). */
 AVER_SCENE_ABI int32_t aver_scene_valid(int32_t e);
+/* Resolve a component TYPE by its registered name (e.g. "CControlRig") to the id the two calls
+ * below take; 0 when nothing of that name is registered.
+ *
+ * THIS IS THE ONLY WAY A BINDING CAN REACH A DYNAMICALLY REGISTERED COMPONENT. The AVER_SCENE_COMP_*
+ * ids above are fixed and cover the built-ins only, so a type registered at runtime through
+ * World::registerComponent -- CControlRig, CSynapseAgent and anything else that deliberately stays
+ * out of Components.hpp -- has an id that is not knowable ahead of time and differs with
+ * registration order. Fields of such a component were always reachable (aver_scene_field resolves
+ * "CControlRig.rig" by name against the same registry), but ATTACHING one was not, which left every
+ * dynamic component addable from C++ and from nowhere else. */
+AVER_SCENE_ABI int32_t aver_scene_component(const char* name);
+
 /* Attach a component pool's storage to `e`; returns 1 (idempotent), 0 if the type or handle is bad. */
 AVER_SCENE_ABI int32_t aver_scene_add_component(int32_t e, int32_t component);
 /* Reparent; parent 0 makes `child` a root. Refuses a cycle, a self-parent, or a doomed parent. */

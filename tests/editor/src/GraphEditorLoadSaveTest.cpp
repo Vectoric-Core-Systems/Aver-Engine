@@ -856,6 +856,55 @@ static void testAddingAnEventNodeAlsoDeclaresItsEntry() {
           "and the ENTRY record reached the file");
 }
 
+// SetControlRig dropped from the palette must carry weight=1 INTO THE FILE.
+//
+// THE FAILURE THIS FORBIDS IS SILENT AT EVERY LAYER. Both graph compilers fall back to a literal 0
+// for an input pin with no LINK and no PINVAL. For every other node in the palette that zero is a
+// harmless starting value; for this one it means the rig is attached, its asset loads, its bone
+// names resolve against the skeleton -- and then every op is scaled to nothing. The character simply
+// stands there, exactly as if the rig had been authored for a different skeleton, with no warning
+// from the loader, the compiler, the editor or the rig system.
+//
+// So the default has to be real data in the saved file, not a number that only exists in the
+// palette's declaration. This is also the assertion the C# side cannot make: those delegates are
+// DynamicMethods whose GetMethodBody() throws, so ControlRigNodeTests.cs can prove a float reaches
+// the call but not WHICH float. Here the file itself is the evidence.
+static void testControlRigNodeCarriesItsWeightDefault() {
+    AVER_INFO("=== a SetControlRig dropped from the palette saves weight=1, not 0 ===");
+    const std::string tmp = (std::filesystem::path(scratchDir()) / "controlrig_default.ocgraph").string();
+    writeFile(tmp, "OCGRAPH 1\nNAME R\n");
+    GraphEditor ed(tmp);
+
+    const std::string rigId = ed.addNodeFromCatalog("SetControlRig", Vec2{60.0f, 60.0f});
+    check(!rigId.empty(), "the catalog knows SetControlRig");
+
+    const fmt::OcGraphNode* n = nullptr;
+    for (const fmt::OcGraphNode& candidate : ed.graph().nodes)
+        if (candidate.id == rigId) n = &candidate;
+    check(n != nullptr, "and the node reached the graph");
+
+    if (n) {
+        const fmt::OcGraphPin* weight = nullptr;
+        for (const fmt::OcGraphPin& p : n->pins)
+            if (p.name == "weight") weight = &p;
+        check(weight != nullptr, "it has a weight pin");
+        if (weight) {
+            check(weight->type == "float", "which is a float, got '" + weight->type + "'");
+            check(weight->defaultValue == "1",
+                  "and defaults to 1 -- NOT 0, which would attach a rig that does nothing at all. Got '" +
+                      weight->defaultValue + "'");
+        }
+    }
+
+    std::string why;
+    check(ed.save(&why), "save() succeeds (why='" + why + "')");
+    const std::string onDisk = readFile(tmp);
+    check(onDisk.find("weight") != std::string::npos, "the weight pin reached the file");
+    check(onDisk.find("weight in float 1") != std::string::npos,
+          "carrying its default of 1, so the compilers never see an unwired weight for an "
+          "editor-made node");
+}
+
 static void testDeletingANodeTakesItsEntryAndOutRecords() {
     AVER_INFO("=== deleting a node removes the ENTRY and OUT records naming it ===");
     const std::string tmp = (std::filesystem::path(scratchDir()) / "entry_delete.ocgraph").string();
@@ -1607,6 +1656,7 @@ int main() {
     testClassPlacementsCarryTheEditorsMoves();
     testPaletteSearchRanksSensibly();
     testCopyPasteRemapsIdsAndLinks();
+    testControlRigNodeCarriesItsWeightDefault();
 
     AVER_INFO("======== {} failure(s) ========", g_failures);
     return g_failures;

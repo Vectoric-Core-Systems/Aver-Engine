@@ -583,6 +583,12 @@ public class OcGraphParser
                     {
                         node.ClipPath = v;
                     }
+                    // rig= names the .ocrig a "setcontrolrig" node binds (see Node.RigPath) -- same
+                    // treatment as skeleton=/clip= above. weight is NOT parsed here; it is a pin.
+                    else if (k == "rig")
+                    {
+                        node.RigPath = v;
+                    }
                     // event= names which event a "fireevent" node fires on another entity's graph (see
                     // Node.EventName) -- the value itself (an event name, e.g. "OnHit"), not a lookup
                     // key, the same "carries data" treatment name=/mesh=/material= already get. Nothing
@@ -2633,6 +2639,16 @@ public class OcGraphParser
             case "playanimation":
                 node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "loop", Type = PinType.Bool, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            // SetControlRig, the third of the family. Shaped like PlayAnimation rather than
+            // SetSkeleton -- a float weight pin beside the entity, for the same reason loop is a pin:
+            // rig= is edit-time naming, weight is runtime data. See GraphNodeDefs.hpp's own comment
+            // for why the component it attaches is reached by NAME and not by a Component enum value.
+            case "setcontrolrig":
+                node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "weight", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;
         }

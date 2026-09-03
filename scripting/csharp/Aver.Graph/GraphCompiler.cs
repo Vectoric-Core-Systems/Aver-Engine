@@ -550,6 +550,10 @@ public class GraphCompiler
                 EmitPlayAnimation(node);
                 break;
 
+            case "setcontrolrig":
+                EmitSetControlRig(node);
+                break;
+
             case "sin":
                 EmitSin(node);
                 break;
@@ -1666,6 +1670,30 @@ public class GraphCompiler
             _il.Emit(OpCodes.Pop);
     }
 
+    /// SetControlRig(entity, weight) -> success: binds an .ocrig by path. Shaped like
+    /// EmitPlayAnimation rather than EmitSetSkeleton -- a SECOND pin load before the call, since
+    /// GraphInterop.SetControlRigForGraph takes (int,string,float). Stack order matches the method's
+    /// params: entity, rig, weight.
+    private void EmitSetControlRig(Node node)
+    {
+        if (_il == null) return;
+
+        if (string.IsNullOrEmpty(node.RigPath))
+            throw new InvalidOperationException($"SetControlRig node '{node.Id}' has no rig= attribute naming which rig to bind");
+
+        LoadPin(node.Id, "entity");
+        _il.Emit(OpCodes.Ldstr, node.RigPath);
+        // An unwired weight is 1, not 0 -- see IsPinUnwired for why this one pin earns the exception.
+        if (IsPinUnwired(node.Id, "weight")) _il.Emit(OpCodes.Ldc_R4, 1.0f);
+        else LoadPin(node.Id, "weight");
+        _il.Emit(OpCodes.Call, SetControlRigMethod);
+
+        if (_pinLocals.TryGetValue((node.Id, "success"), out var local))
+            _il.Emit(OpCodes.Stloc, local);
+        else
+            _il.Emit(OpCodes.Pop);
+    }
+
     private void EmitSin(Node node)
     {
         if (_il == null) return;
@@ -1983,6 +2011,21 @@ public class GraphCompiler
 
     /// Loads a pin value onto the stack: from a linked node's local, else a pinned constant, else a
     /// type default. nodeId is a string to support both integer and arbitrary string node IDs.
+    /// True when an input pin has neither a LINK into it nor a PIN record giving it a value -- i.e.
+    /// both compilers are about to fall back to a literal zero for it.
+    ///
+    /// Exists for SetControlRig's weight, where that zero is actively harmful rather than merely a
+    /// neutral starting value: a rig bound at weight 0 loads, validates, resolves its bone names and
+    /// then scales every op to nothing, which is indistinguishable from a rig that does not fit the
+    /// skeleton. The editor writes weight's "1" default as a PIN record when it creates the node
+    /// (GraphEditor.cpp's node-creation path copies GraphNodeDefs.hpp's defaultValue), so this only
+    /// ever fires for a HAND-AUTHORED .ocgraph -- which is exactly the file nobody gets a UI warning
+    /// about. Deliberately not applied to PlayAnimation's loop pin: an unwired zero there means "play
+    /// once", which is a different clip, not a dead node.
+    private bool IsPinUnwired(string nodeId, string pinName) =>
+        !_graph.Links.Any(l => l.TargetNodeId == nodeId && l.TargetPinName == pinName) &&
+        !_graph.PinnedValues.Any(p => p.NodeId == nodeId && p.PinName == pinName);
+
     private void LoadPin(string nodeId, string pinName)
     {
         if (_il == null) return;
@@ -2000,6 +2043,9 @@ public class GraphCompiler
             }
         }
 
+        var node = _graph.Nodes[nodeId];
+        var pin = node.Pins.FirstOrDefault(p => p.Name == pinName);
+
         var pv = _graph.PinnedValues.FirstOrDefault(p =>
             p.NodeId == nodeId && p.PinName == pinName
         );
@@ -2009,14 +2055,19 @@ public class GraphCompiler
             if (pv.Value is float f)
                 _il.Emit(OpCodes.Ldc_R4, f);
             else if (pv.Value is int i)
-                _il.Emit(OpCodes.Ldc_I4, i);
+                // A WHOLE-NUMBER PINVAL ON A FLOAT PIN, which used to emit an INVALID PROGRAM. The
+                // parser tries int.TryParse before float.TryParse, so `PINVAL n weight 0` yields a
+                // boxed int no matter what the pin is declared as; emitting by the VALUE's type then
+                // pushed ldc.i4 into a float argument slot and the CLR refused the whole method at
+                // invoke time ("Common Language Runtime detected an invalid program"). Every float
+                // pin in the engine had this, and 0 and 1 are the two values an author is most likely
+                // to type. The PIN's declared type is the authority, so widen to it here.
+                if (pin != null && pin.Type == PinType.Float) _il.Emit(OpCodes.Ldc_R4, (float)i);
+                else _il.Emit(OpCodes.Ldc_I4, i);
             else if (pv.Value is bool b)
                 _il.Emit(OpCodes.Ldc_I4, b ? 1 : 0);
             return;
         }
-
-        var node = _graph.Nodes[nodeId];
-        var pin = node.Pins.FirstOrDefault(p => p.Name == pinName);
 
         // SAME DEFECT AS EmitPullInput's, in the other compiler, and WORSE: `if (pin != null)` used to
         // guard the entire emit, so a missing pin pushed NOTHING and the following Call silently
@@ -2589,6 +2640,7 @@ public class GraphCompiler
                     else if (IsExecCapableAttachToSocketType(node.Type)) EmitExecAttachToSocket(node);
                     else if (IsExecCapableSetSkeletonType(node.Type)) EmitExecSetSkeleton(node);
                     else if (IsExecCapablePlayAnimationType(node.Type)) EmitExecPlayAnimation(node);
+                    else if (IsExecCapableSetControlRigType(node.Type)) EmitExecSetControlRig(node);
                     else if (IsExecCapableCharacterMoveType(node.Type)) EmitExecCharacterMove(node);
                     else if (IsExecCapableJumpType(node.Type)) EmitJump(node);
                     else if (IsExecCapablePrintType(node.Type)) EmitExecPrint(node);
@@ -3070,6 +3122,11 @@ public class GraphCompiler
     /// overwrites the same fields, unlike PlaySound's genuinely NEW voice each call.
     private static bool IsExecCapablePlayAnimationType(string type) =>
         type.Equals("playanimation", StringComparison.OrdinalIgnoreCase);
+
+    /// SetControlRig's own version. Grouped with SetSkeleton/PlayAnimation, not Spawn: one CControlRig
+    /// per entity, so binding the same rig twice leaves the same state rather than stacking two rigs.
+    private static bool IsExecCapableSetControlRigType(string type) =>
+        type.Equals("setcontrolrig", StringComparison.OrdinalIgnoreCase);
 
     /// AttachToSocket's own version. Grouped with SetMesh/SetMaterial, not Spawn: IDEMPOTENT --
     /// attaching twice is the same state, not two attachments -- so allowed in the PULL compiler too
@@ -3662,6 +3719,36 @@ public class GraphCompiler
         }
     }
 
+    /// Runs a SetControlRig write once, when reached -- mirrors EmitExecPlayAnimation exactly, with
+    /// a float weight where that has a bool loop (see EmitSetControlRig for the PULL-compiler twin).
+    ///
+    /// EmitPullInput, NOT LoadPin, on both data pins -- see EmitExecAttachToSocket for why: on the
+    /// exec path LoadPin would silently read an unset local.
+    private void EmitExecSetControlRig(Node node)
+    {
+        if (_il == null) return;
+
+        if (string.IsNullOrEmpty(node.RigPath))
+            throw new InvalidOperationException($"SetControlRig node '{node.Id}' has no rig= attribute naming which rig to bind");
+
+        EmitPullInput(node, "entity");
+        _il.Emit(OpCodes.Ldstr, node.RigPath);
+        // Same unwired-weight-is-1 rule as the PULL twin; see IsPinUnwired.
+        if (IsPinUnwired(node.Id, "weight")) _il.Emit(OpCodes.Ldc_R4, 1.0f);
+        else EmitPullInput(node, "weight");
+        _il.Emit(OpCodes.Call, SetControlRigMethod);
+
+        if (node.Pins.Any(p => p.IsOutput && p.Name == "success"))
+        {
+            var successLocal = GetOrCreateExecLocal(node.Id, "success", typeof(bool));
+            _il.Emit(OpCodes.Stloc, successLocal);
+        }
+        else
+        {
+            _il.Emit(OpCodes.Pop);
+        }
+    }
+
     /// Runs a Raycast node's native query exactly once, at the point the exec walk reaches it --
     /// mirrors EmitRaycast's own "one call, five results" shape, but pulls its 7 inputs through
     /// EmitPullInput rather than LoadPin/_pinLocals (see the section-level comment for why the two
@@ -3735,16 +3822,19 @@ public class GraphCompiler
             return;
         }
 
+        var pin = node.Pins.FirstOrDefault(p => p.Name == pinName);
+
         var pv = _graph.PinnedValues.FirstOrDefault(p => p.NodeId == node.Id && p.PinName == pinName);
         if (pv != null)
         {
             if (pv.Value is float pf) _il.Emit(OpCodes.Ldc_R4, pf);
-            else if (pv.Value is int pi) _il.Emit(OpCodes.Ldc_I4, pi);
+            // Widen a whole-number PINVAL to the float pin it feeds -- see LoadPin's twin for the
+            // invalid-program this used to emit.
+            else if (pv.Value is int pi && pin != null && pin.Type == PinType.Float) _il.Emit(OpCodes.Ldc_R4, (float)pi);
+            else if (pv.Value is int pi2) _il.Emit(OpCodes.Ldc_I4, pi2);
             else if (pv.Value is bool pb) _il.Emit(OpCodes.Ldc_I4, pb ? 1 : 0);
             return;
         }
-
-        var pin = node.Pins.FirstOrDefault(p => p.Name == pinName);
 
         // ABSENT IS NOT THE SAME AS UNCONNECTED, and conflating them emitted an INVALID PROGRAM.
         // `pin == null` means the emitter asked for an input this node doesn't have -- the state ANY
@@ -3795,7 +3885,8 @@ public class GraphCompiler
         IsExecCapableSetParentType(type) || IsExecCapableSetViewEntityType(type) ||
         IsExecCapableSetNameType(type) || IsExecCapableSetMeshType(type) ||
         IsExecCapableSetMaterialType(type) || IsExecCapableSetSkeletonType(type) ||
-        IsExecCapablePlayAnimationType(type) || IsExecCapableCharacterMoveType(type) ||
+        IsExecCapablePlayAnimationType(type) || IsExecCapableSetControlRigType(type) ||
+        IsExecCapableCharacterMoveType(type) ||
         IsExecCapableFireEventType(type) || IsExecCapableJumpType(type) ||
         IsExecCapablePrintType(type) || IsExecCapableApiCallType(type) ||
         IsExecCapableTransformWriteType(type) || IsExecCapablePhysicsWriteType(type) ||
@@ -4508,6 +4599,10 @@ public class GraphCompiler
     private static readonly MethodInfo PlayAnimationMethod =
         typeof(GraphInterop).GetMethod("PlayAnimationForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.PlayAnimationForGraph was not found by reflection");
+    // SetControlRig, reflected the same way -- same "needs Entity's internal constructor" reason.
+    private static readonly MethodInfo SetControlRigMethod =
+        typeof(GraphInterop).GetMethod("SetControlRigForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.SetControlRigForGraph was not found by reflection");
     // AttachToSocket, reflected the same way -- Entity.AttachToSocket needs Entity's internal
     // constructor, so the call has to enter through Aver.Framework rather than from here.
     private static readonly MethodInfo AttachToSocketMethod =
