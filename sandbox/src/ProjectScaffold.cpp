@@ -386,7 +386,7 @@ std::string starterMaterialText(const std::string& projectName) {
     s += "// The Details panel's \"Save to C#\" writes back here, so tuning a surface by dragging a\n";
     s += "// slider and tuning it by editing this file are the same edit.\n";
     s += "using Aver.Materials;\n\n";
-    s += "namespace " + projectName + ".Materials;\n\n";
+    s += "namespace " + csharpNamespaceFor(projectName) + ".Materials;\n\n";
     s += "/// <summary>A plain mid-grey surface. Bind it by name from a mesh: \"M_Default\".</summary>\n";
     s += "[AverMaterial(\"M_Default\")]\n";
     s += "public sealed class Default : Material\n";
@@ -525,7 +525,7 @@ std::string actorScriptText(const std::string& projectName, const std::string& s
     s += "using Aver.Scene;\n";
     s += "using Aver.Scripting;   // Log\n";
     s += "\n";
-    s += "namespace " + projectName + ";\n";
+    s += "namespace " + csharpNamespaceFor(projectName) + ";\n";
     s += "\n";
     if (kind == CsKind::GameMode) {
         s += "[AverGameMode(\"" + scriptName + "\")]\n";
@@ -622,7 +622,7 @@ std::string scriptText(const std::string& projectName, const std::string& script
     }
     s += "\n";
     if (behaviour) s += "using Aver.Scripting;\n\n";
-    s += "namespace " + projectName + ";\n";
+    s += "namespace " + csharpNamespaceFor(projectName) + ";\n";
     s += "\n";
     s += "public sealed class " + scriptName + (behaviour ? " : AverBehaviour\n" : "\n");
     s += "{\n";
@@ -696,6 +696,24 @@ const char* csKindNoun(CsKind kind) {
 }
 
 // Checks a project name as a folder name. Returns false and fills `err` with the reason.
+// See the header for why this is needed at all. Kept next to validateProjectName, which is the
+// function whose permissiveness makes it necessary.
+std::string csharpNamespaceFor(const std::string& projectName) {
+    std::string ns;
+    ns.reserve(projectName.size());
+    for (const char c : projectName) {
+        const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                        (c >= '0' && c <= '9') || c == '_';
+        ns += ok ? c : '_';
+    }
+    // Trim the underscores a trailing space or dot would have produced, so "My Game " does not
+    // become "My_Game_". Leading ones are handled by the digit/empty rules below.
+    while (!ns.empty() && ns.back() == '_') ns.pop_back();
+    if (ns.empty()) return "Game";
+    if (ns.front() >= '0' && ns.front() <= '9') ns.insert(ns.begin(), '_');
+    return ns;
+}
+
 bool validateProjectName(const std::string& name, std::string* err) {
     auto fail = [&](const char* m) { if (err) *err = m; return false; };
     if (name.empty()) return fail("Enter a project name.");

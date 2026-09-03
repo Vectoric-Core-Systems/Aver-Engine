@@ -19,11 +19,15 @@ using namespace aver;
 namespace {
 int gChecks = 0, gFailed = 0;
 
-void check(bool ok, const std::string& what) {
+// Returns what it was given, so a check that GATES further checks can be written as
+// `if (check(...)) { ... }` -- asserting on a file that was never written produces a cascade of
+// failures pointing at the wrong thing.
+bool check(bool ok, const std::string& what) {
     ++gChecks;
-    if (ok) { AVER_INFO("  ok    {}", what); return; }
+    if (ok) { AVER_INFO("  ok    {}", what); return true; }
     ++gFailed;
     AVER_ERROR("  FAIL  {}", what);
+    return false;
 }
 
 // Writes one <id>.octemplate manifest under `root`, in the exact shape a real template ships.
@@ -221,6 +225,59 @@ int main() {
               "listTemplates()'s executableDir()-walk ALSO finds it -- the shipped-editor discovery path");
     }
 #endif
+
+    // ---- a project name is a FOLDER name, and the generators paste it after `namespace ` --------
+    //
+    // validateProjectName deliberately allows spaces, hyphens and dots, because it is naming a
+    // directory. Every .cs generator then pasted that name straight into a namespace declaration,
+    // so a project called "My Game" emitted `namespace My Game;` into its starter material, its
+    // actor scripts and its behaviours -- and the whole Scripts assembly failed at the first
+    // Compile C#, pointing at files nobody had written by hand.
+    AVER_INFO("=== a project name becomes a LEGAL C# namespace ===");
+    {
+        using aver::editor::csharpNamespaceFor;
+        using aver::editor::validateProjectName;
+
+        // The names below must be ones validateProjectName ACCEPTS -- a sanitiser for names the
+        // editor already refuses would prove nothing.
+        std::string why;
+        check(validateProjectName("My Game", &why), "'My Game' is a name the editor accepts: " + why);
+        check(csharpNamespaceFor("My Game") == "My_Game",
+              "and it becomes My_Game, got '" + csharpNamespaceFor("My Game") + "'");
+
+        check(validateProjectName("Sky-Forge v2.1", &why), "'Sky-Forge v2.1' is accepted too: " + why);
+        check(csharpNamespaceFor("Sky-Forge v2.1") == "Sky_Forge_v2_1",
+              "hyphens and dots go too, got '" + csharpNamespaceFor("Sky-Forge v2.1") + "'");
+
+        check(csharpNamespaceFor("2Fast") == "_2Fast",
+              "a leading digit is prefixed rather than left illegal, got '" +
+                  csharpNamespaceFor("2Fast") + "'");
+        check(csharpNamespaceFor("Plain") == "Plain", "an already-legal name is untouched");
+        check(csharpNamespaceFor("") == "Game", "and nothing at all falls back rather than emitting `namespace ;`");
+        check(csharpNamespaceFor("...") == "Game", "as does a name with no legal character in it");
+
+        // THE POINT OF THE WHOLE EXERCISE, asserted end to end on a really-scaffolded project
+        // rather than on the generator in isolation: scaffold "My Game" and read what landed on
+        // disk. A unit test of the sanitiser alone would still pass if a generator forgot to call
+        // it, which is exactly the mistake being fixed.
+        const std::filesystem::path nsRoot = root / "nsproj";
+        std::filesystem::create_directories(nsRoot, ec);
+        fmt::ProjectDesc made;
+        std::string serr;
+        if (check(aver::editor::scaffoldProject(nsRoot.string(), "My Game", made, &serr),
+                  "a project named 'My Game' scaffolds: " + serr)) {
+            const std::filesystem::path surfaces =
+                nsRoot / "My Game" / "Content" / "Materials" / "Surfaces.cs";
+            std::string text;
+            if (check(aver::readFileText(surfaces.string(), text),
+                      "its starter material was written")) {
+                check(text.find("namespace My_Game.Materials;") != std::string::npos,
+                      "and declares the sanitised namespace");
+                check(text.find("namespace My Game") == std::string::npos,
+                      "never the raw one -- that is the line that would not compile");
+            }
+        }
+    }
 
     std::filesystem::remove_all(root, ec);
     if (gFailed) { AVER_ERROR("=== {} of {} checks FAILED ===", gFailed, gChecks); return 1; }

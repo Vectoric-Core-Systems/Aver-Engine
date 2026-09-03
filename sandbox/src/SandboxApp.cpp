@@ -11188,11 +11188,49 @@ private:
     // The tail every successful create runs: refresh the folder cache, SELECT the new file, open its
     // editor. The selection was the missing part -- cbCreateSoundGraph opened the tab but left the
     // browser's highlight on whatever was there before.
-    void cbAdoptNewAsset(const std::filesystem::path& target) {
+    void cbAdoptNewAsset(const std::filesystem::path& target, bool openEditor = true) {
         cbInvalidate(cbSelectedDir_);
         cbSelectedFile_ = target.string();
-        assetEditors_.open(target.string());
+        if (openEditor) assetEditors_.open(target.string());
         cbStatus_ = "Created " + target.filename().string();
+    }
+
+    // Writes a new material SOURCE file -- a [AverMaterial] C# class -- into the selected folder.
+    //
+    // fmt::newMaterialScript has been implemented and covered by MaterialTest for a long time with
+    // ZERO production callers; docs/EDITOR.md said so outright ("There is no New Material menu item,
+    // although fmt::newMaterialScript exists and will write the whole file"). This is that menu item.
+    //
+    // NO EDITOR IS OPENED, unlike its .ocgraph/.ocbt/.ocsnd siblings. A material's .cs is compiled to
+    // an .ocmat by Compile C#, and the only editor that claims a .cs is the ACTOR editor, which
+    // parses for an [AverActor] class this file does not have. Selecting it in the browser and
+    // leaving it to the IDE is the honest outcome; opening a tab that cannot show it is not.
+    void cbCreateMaterial() {
+        const std::filesystem::path target = cbFreeAssetPath("NewMaterial", ".cs");
+        if (target.empty()) return;
+
+        // The bound name is what a mesh names, and the M_ prefix is the tree's convention --
+        // newMaterialScript strips it again for the class name.
+        const std::string stem  = target.stem().string();
+        const std::string bound = stem.rfind("M_", 0) == 0 ? stem : "M_" + stem;
+        // Through csharpNamespaceFor, because a project name is a FOLDER name and may contain
+        // spaces -- pasting one straight after `namespace ` is how "My Game" produced C# that
+        // could not compile.
+        const std::string ns    = (project_.valid() && !project_.name.empty())
+                                      ? editor::csharpNamespaceFor(project_.name) + ".Materials"
+                                      : std::string("Materials");
+
+        pbr::MaterialDesc d;   // engine defaults: the starter is plain, not a guess at intent
+        const std::string text = fmt::newMaterialScript(bound, ns, d, nullptr);
+
+        std::string why;
+        if (!editor::writeNewFile(target.string(), text, &why)) {
+            cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+            AVER_ERROR("[Editor] new material failed: {}", why);
+            return;
+        }
+        cbAdoptNewAsset(target, /*openEditor=*/false);
+        cbStatus_ = "Created " + target.filename().string() + " (" + bound + ") - Compile C# to build its .ocmat";
     }
 
     // Writes a starter .ocsnd into the selected folder and opens it. See the Add menu's own comment
@@ -11426,11 +11464,25 @@ private:
             if (ImGui::MenuItem("New Folder")) { cbWantNewFolder_ = true; cbNewFolderBuf_[0] = '\0'; }
             ImGui::EndDisabled();
             ImGui::Separator();
+            // THESE FOUR IGNORE THE SELECTED FOLDER, and say so rather than letting "+ Add" in
+            // Content\Meshes imply "add here". Scripts always land in the project's Scripts folder
+            // and C++ always lands in modules\; each modal states its destination, but the menu is
+            // where the expectation is set. The C++ pair additionally needs no project at all --
+            // they write into the ENGINE tree -- so they stay enabled when the C# pair is not.
+            ImGui::TextDisabled("  Written to a fixed location, not this folder");
+            ImGui::BeginDisabled(!project_.valid());
             if (ImGui::MenuItem("New C# Script...")) tools_.openNewCsScript();
+            uiReg_.track("cb.add.csScript");
             if (ImGui::MenuItem("New C# Class..."))  tools_.openNewCsClass();
+            uiReg_.track("cb.add.csClass");
+            ImGui::EndDisabled();
+            if (!project_.valid() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("Open or create a project first - a script belongs to one.");
             ImGui::Separator();
             if (ImGui::MenuItem("New C++ Module...")) tools_.openNewCppModule();
+            uiReg_.track("cb.add.cppModule");
             if (ImGui::MenuItem("New C++ Class..."))  tools_.openNewCppClass();
+            uiReg_.track("cb.add.cppClass");
             ImGui::Separator();
             // A SOUND GRAPH HAS TO BE CREATABLE FROM HERE OR ITS EDITOR IS UNREACHABLE: .ocsnd is the
             // first format the editor can edit but nothing can produce, the "built through every
@@ -11441,8 +11493,13 @@ private:
             // editor could not make.
             ImGui::BeginDisabled(!cbIsEditable(cbSelectedDir_));
             if (ImGui::MenuItem("New Aver Node Graph")) cbCreateNodeGraph();
+            uiReg_.track("cb.add.nodeGraph");
             if (ImGui::MenuItem("New Behaviour Tree"))  cbCreateBehaviourTree();
+            uiReg_.track("cb.add.behaviourTree");
             if (ImGui::MenuItem("New Sound Graph"))     cbCreateSoundGraph();
+            uiReg_.track("cb.add.soundGraph");
+            if (ImGui::MenuItem("New Material"))        cbCreateMaterial();
+            uiReg_.track("cb.add.material");
             ImGui::EndDisabled();
             ImGui::EndPopup();
         }

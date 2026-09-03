@@ -243,6 +243,22 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
         if (last) break;
     }
     if (!placed) out += owned;
+
+    // THE HEADER IS NOT OPTIONAL, and this branch used to omit it whenever `existing` carried no
+    // OCPROJECT line of its own. Only the empty-existing branch above wrote one, so any caller
+    // passing a non-empty preamble got back a manifest with every key and no header -- which
+    // loadOcproject then refuses with "not an .ocproject: no OCPROJECT header line".
+    //
+    // That is not hypothetical. It broke NEW PROJECT ENTIRELY: ProjectScaffold::manifestText passes
+    // three comment lines as `existing`, so every project the editor scaffolded was written with no
+    // header and failed to load a moment later, from the very function that had just written it.
+    // The guard then deleted the half-made folder, so the user saw a creation that simply refused.
+    //
+    // Prepended rather than fixed at the call site because the contract belongs here: this function
+    // returns a manifest, and a manifest has a header. Any other caller passing a preamble -- a
+    // template, an importer, a migration -- had the same bug waiting.
+    if (!sawHeader)
+        out.insert(0, "OCPROJECT " + std::to_string(d.version > 0 ? d.version : 1) + "\n");
     return out;
 }
 

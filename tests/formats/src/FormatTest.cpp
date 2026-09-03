@@ -156,6 +156,38 @@ static void checkOcproject() {
     check(parseOcproject(fresh, nb, &err), "a manifest written from nothing parses");
     check(nb.name == "Fresh", "and carries its name");
 
+    // A PREAMBLE IS NOT A MANIFEST, and writing over one must still produce a header.
+    //
+    // THIS BROKE NEW PROJECT COMPLETELY. Only the empty-existing branch emitted OCPROJECT; the
+    // preserve-existing branch copied a header through if it found one and wrote none if it did
+    // not. ProjectScaffold::manifestText passes three comment lines as `existing`, so every
+    // project the editor scaffolded came out with all its keys and no header, was refused by
+    // loadOcproject a moment later ("not an .ocproject: no OCPROJECT header line") from the very
+    // function that had just written it, and the scaffold guard then deleted the half-made folder.
+    // Creating a project simply did not work, and the test above passed the whole time because it
+    // only ever wrote from "".
+    {
+        const std::string preamble = "# Created by the editor.\n# AUTHOR <your name>\n";
+        const std::string withPre  = writeOcproject(n, preamble);
+        check(withPre.rfind("OCPROJECT ", 0) == 0,
+              "a manifest written over a comment-only preamble starts with the header");
+        ProjectDesc pb;
+        std::string perr;
+        check(parseOcproject(withPre, pb, &perr),
+              "and therefore parses: " + perr);
+        check(pb.name == "Fresh", "carrying its name");
+        check(withPre.find("# AUTHOR <your name>") != std::string::npos,
+              "while still preserving the unowned lines it was given");
+
+        // And exactly one header, not one per save: writing over its own output must be stable.
+        const std::string again = writeOcproject(pb, withPre);
+        usize headers = 0;
+        for (usize at = again.find("OCPROJECT "); at != std::string::npos;
+             at = again.find("OCPROJECT ", at + 1)) ++headers;
+        check(headers == 1, "re-writing its own output keeps exactly one header, got " +
+                            std::to_string(headers));
+    }
+
     // EVERY RENDER KEY IS A THIRD LIST AWAY FROM DUPLICATING ITSELF. A key is read in
     // parseOcproject, written by appendKey, AND named in isOwnedKey -- and only the third one
     // stops the writer copying the author's existing line through as "unowned text" while
