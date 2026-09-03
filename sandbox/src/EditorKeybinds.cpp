@@ -179,6 +179,21 @@ bool KeybindRegistry::drawPreferencesSection(f32 dpi) {
     bool changed = false;
     ImGui::TextDisabled("Click Rebind, then press the new chord. Esc cancels the capture.");
 
+    // Reset All. Per-row Reset has always been here; putting every binding back was fifteen
+    // clicks. Disabled when nothing differs from the defaults, so it never claims to undo
+    // changes that were not made.
+    bool anyChanged = false;
+    for (usize i = 0; i < kCommandCount; ++i)
+        if (current_[i] != kDefs[i].def) { anyChanged = true; break; }
+    ImGui::BeginDisabled(!anyChanged);
+    if (ImGui::SmallButton("Reset All")) {
+        for (usize i = 0; i < kCommandCount; ++i) resetToDefault(kDefs[i].id);
+        changed = true;
+    }
+    ImGui::EndDisabled();
+    if (!anyChanged && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("Every binding is already at its default.");
+
     if (ImGui::BeginTable("keybindsTable", 4,
                           ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH)) {
         ImGui::TableSetupColumn("Command", ImGuiTableColumnFlags_WidthStretch);
@@ -204,6 +219,17 @@ bool KeybindRegistry::drawPreferencesSection(f32 dpi) {
                 if (ImGui::SmallButton("Rebind")) { listening_ = static_cast<int>(i); conflictLabel_.clear(); }
             }
             ImGui::TableSetColumnIndex(3);
+            // CLEAR, which rebind() has always supported and nothing could reach. The header says
+            // outright that "an unbound chord always succeeds and clears the command instead", and
+            // the conflict message below this table tells the user to "clear it first" -- but the
+            // capture loop can only ever produce a real key, and Escape cancels. So the one
+            // instruction the UI gives for resolving a conflict named a control that did not exist.
+            ImGui::BeginDisabled(!current_[i].isBound());
+            if (ImGui::SmallButton("Clear")) { rebind(def.id, Chord{}); changed = true; }
+            ImGui::EndDisabled();
+            if (!current_[i].isBound() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("Already unbound.");
+            ImGui::SameLine();
             ImGui::BeginDisabled(current_[i] == def.def);
             if (ImGui::SmallButton("Reset")) { resetToDefault(def.id); changed = true; }
             ImGui::EndDisabled();
