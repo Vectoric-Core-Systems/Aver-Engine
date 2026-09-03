@@ -12678,6 +12678,23 @@ private:
         ImGui::End();
     }
 
+    // A labelled text field backed by a std::string. True on the frame the value changed.
+    //
+    // ImGui edits a fixed char buffer, and the string it is backing may be arbitrarily long, so the
+    // copy is bounded and the write-back only happens when InputText says something changed -- a
+    // blind copy every frame would truncate a value the user never touched, on the first frame the
+    // page was opened.
+    static bool editField(const char* label, std::string& value, usize cap) {
+        std::vector<char> buf(cap, '\0');
+        const usize n = value.size() < cap - 1 ? value.size() : cap - 1;
+        std::memcpy(buf.data(), value.data(), n);
+        ImGui::PushID(label);
+        const bool changed = ImGui::InputText(label, buf.data(), cap);
+        ImGui::PopID();
+        if (changed) value.assign(buf.data());
+        return changed;
+    }
+
     // Caption ABOVE the control, control full width below.
     // ImGui's default puts the label to the RIGHT of a slider and does not clip it -- it just runs
     // out of panel and disappears. In a 20%-width dock at 300% DPI that turned "Radius (cm)" into
@@ -13780,14 +13797,39 @@ private:
             ImGui::TextUnformatted("Description");
             ImGui::Separator();
             if (project_.valid()) {
-                ImGui::Text("Name        %s", project_.name.c_str());
-                ImGui::Text("Author      %s", project_.author.empty() ? "(unset)" : project_.author.c_str());
+                // EDITABLE AT LAST. This page was five ImGui::Text lines, so a project's author,
+                // start map and name could not be changed from the editor at all -- while
+                // saveProjectManifest has always written the whole desc through writeOcproject,
+                // which already owns NAME, AUTHOR, CONTENT and STARTMAP. Only the widgets were
+                // missing; nothing in the format or the save path needed touching.
+                ImGui::PushItemWidth(-160.0f * dpi_);
+                if (editField("Name", project_.name, 96)) projectDirty_ = true;
+                uiReg_.track("project.name");
+                // The rename is IN THE MANIFEST ONLY, and the consequences are worth stating rather
+                // than leaving to be discovered: the folder and the .ocproject filename keep the old
+                // name, and project_.name also feeds csharpNamespaceFor(), which decides the
+                // namespace of NEWLY created materials and scripts -- so existing files stay in the
+                // old namespace and new ones land in another.
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Renames the project in the manifest only.\nThe folder and file keep their names, and new scripts get a namespace from this.");
+                if (editField("Author", project_.author, 96)) projectDirty_ = true;
+                uiReg_.track("project.author");
+                if (editField("Start map", project_.startMap, 256)) projectDirty_ = true;
+                uiReg_.track("project.startMap");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Relative to the content root, e.g. Maps/Default.ocmap");
+                ImGui::PopItemWidth();
+
+                // READ-ONLY ON PURPOSE, both of them. ENGINE is what the project needs at least, not
+                // a preference; and changing CONTENT mid-session would move where every asset
+                // resolves from with nothing re-mounting behind it.
                 ImGui::Text("Engine      %s %s (this build: %.*s)",
                             project_.engineName.empty() ? "(unset)" : project_.engineName.c_str(),
                             project_.engineMinVersion.empty() ? "" : project_.engineMinVersion.c_str(),
                             (int)kEngineVersion.size(), kEngineVersion.data());
                 ImGui::Text("Content     %s", project_.contentRoot.c_str());
-                ImGui::Text("Start map   %s", project_.startMap.empty() ? "(unset)" : project_.startMap.c_str());
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Read-only: every asset path resolves from here, and nothing re-mounts on a change.");
                 ImGui::Separator();
                 ImGui::TextDisabled("%s", project_.manifestPath.c_str());
                 ImGui::Spacing();
@@ -13805,7 +13847,7 @@ private:
                 ImGui::EndDisabled();
                 if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                     ImGui::SetTooltip(projectDirty_
-                        ? "Writes the Rendering page's settings into the .ocproject.\nComments and any keys this build does not know are preserved."
+                        ? "Writes this page and the Rendering page into the .ocproject.\nComments and any keys this build does not know are preserved."
                         : "Nothing has changed since the manifest was last read.");
                 if (!projectSaveStatus_.empty()) {
                     ImGui::SameLine();
