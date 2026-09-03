@@ -283,6 +283,27 @@ BrowserAction ProjectBrowser::draw(f32 dpi, ImFont* medium, u64 logoTex, f32 log
             if (ImGui::IsMouseDoubleClicked(0) && openOrOfferUpgrade(card.path))
                 action = BrowserAction::Open;
         }
+        // Right-click a row to drop it. RecentProjects::forget has been public since the class
+        // existed and was reachable from exactly one place: the FAILURE path, when a project would
+        // not open. A project you simply no longer want listed could only be removed by deleting it
+        // from disk or hand-editing recent.txt.
+        //
+        // It removes the ENTRY, never the project, and the wording says so -- this menu sits one
+        // slip away from reading as "delete", and the two are not the same thing at all.
+        if (ImGui::BeginPopupContextItem()) {
+            ImGui::TextDisabled("%s", card.name.c_str());
+            ImGui::Separator();
+            if (ImGui::MenuItem("Remove from this list")) {
+                list_.forget(card.path);
+                saveRecents();
+                // Still on disk, so the folder scan may legitimately bring it straight back as a
+                // non-recent card. That is correct: the list is recents PLUS what is in the projects
+                // folder, and forgetting is about the recent half.
+            }
+            ImGui::TextDisabled("The project itself is left on disk.");
+            ImGui::EndPopup();
+        }
+
         const ImVec2 rmin = ImGui::GetItemRectMin();
         const ImVec2 rmax = ImGui::GetItemRectMax();
         ImDrawList* dl = ImGui::GetWindowDrawList();

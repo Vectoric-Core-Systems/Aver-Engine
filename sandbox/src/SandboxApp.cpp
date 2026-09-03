@@ -10108,6 +10108,122 @@ private:
 
     // The unsaved-changes modal. Names the files, because "you have unsaved changes" is not
     // something a user can act on.
+    // Help > About. Deliberately short: what this build is, what it is drawing with, and where the
+    // preferences it writes live -- the three things somebody filing a bug is asked for.
+    void drawAboutPrompt(Engine& e) {
+        if (!showAbout_) return;
+        constexpr const char* kTitle = "About Aver Engine";
+        if (!ImGui::IsPopupOpen(kTitle)) ImGui::OpenPopup(kTitle);
+        const ImVec2 centre = ImGui::GetMainViewport()->GetCenter();
+        ImGui::SetNextWindowPos(centre, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowSize(ImVec2(460.0f * dpi_, 0.0f), ImGuiCond_Appearing);
+        if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+
+        if (logoUiId_) {
+            const f32 h = 56.0f * dpi_;
+            ImGui::Image(static_cast<ImTextureID>(logoUiId_), ImVec2(h * logoAspect_, h));
+            ImGui::SameLine(0.0f, 14.0f * dpi_);
+        }
+        ImGui::BeginGroup();
+        if (fontMedium_) ImGui::PushFont(fontMedium_, 0.0f);
+        // kEngineName/kEngineVersion are string_views, not char* -- print by length.
+        ImGui::Text("%.*s", static_cast<int>(kEngineName.size()), kEngineName.data());
+        if (fontMedium_) ImGui::PopFont();
+        ImGui::TextDisabled("Version %.*s", static_cast<int>(kEngineVersion.size()), kEngineVersion.data());
+        ImGui::EndGroup();
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        if (rhi::IDevice* dev = e.device()) {
+            ImGui::Text("Renderer   %s", rhi::backendName(dev->backend()));
+            const char* adapter = dev->adapterName();
+            if (adapter && *adapter) ImGui::Text("Adapter    %s", adapter);
+        }
+        ImGui::Text("Interface  %.0f%% scale", static_cast<double>(dpi_) * 100.0);
+        ImGui::TextDisabled("Settings   %s", editor::editorPrefsPath().c_str());
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        if (ImGui::Button("Close", ImVec2(110.0f * dpi_, 0.0f))) {
+            showAbout_ = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
+    // Names a new file for the current level and saves it there.
+    //
+    // A NAME, NOT A FILE DIALOG, because the platform layer has openFileDialog and no save
+    // counterpart -- and a level belongs in the project's Content\Maps regardless, the same way
+    // the Content Browser's own create items work. saveLevel already accepts an arbitrary path.
+    void drawSaveLevelAsPrompt() {
+        if (!wantSaveLevelAs_) return;
+        constexpr const char* kTitle = "Save Level As";
+        if (!ImGui::IsPopupOpen(kTitle)) ImGui::OpenPopup(kTitle);
+        const ImVec2 centre = ImGui::GetMainViewport()->GetCenter();
+        ImGui::SetNextWindowPos(centre, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowSize(ImVec2(520.0f * dpi_, 0.0f), ImGuiCond_Appearing);
+        if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+
+        const std::string maps = project_.valid()
+            ? (std::filesystem::path(project_.contentDir()) / "Maps").string()
+            : std::string();
+
+        ImGui::TextUnformatted("Name");
+        ImGui::PushItemWidth(-1);
+        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+        const bool submit = ImGui::InputTextWithHint("##savelevelas", "Arena", saveLevelAsName_,
+                                                     sizeof saveLevelAsName_,
+                                                     ImGuiInputTextFlags_EnterReturnsTrue);
+        ImGui::PopItemWidth();
+
+        const std::string stem = saveLevelAsName_;
+        const bool named = !stem.empty();
+        const std::filesystem::path target = named && !maps.empty()
+            ? std::filesystem::path(maps) / (stem + ".ocworld")
+            : std::filesystem::path();
+        if (!target.empty()) ImGui::TextDisabled("Saves to: %s", target.string().c_str());
+        else                 ImGui::TextDisabled("Saves to: <project>\\Content\\Maps\\<Name>.ocworld");
+
+        std::error_code ec;
+        const bool exists = !target.empty() && std::filesystem::exists(target, ec);
+        if (exists) ImGui::TextDisabled("A level of that name is already there and will be replaced.");
+        if (!saveLevelAsError_.empty())
+            ImGui::TextColored(ImVec4(0.93f, 0.42f, 0.38f, 1.0f), "%s", saveLevelAsError_.c_str());
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        const bool valid = named && !maps.empty() && stem.find_first_of("\\/:*?\"<>|") == std::string::npos;
+        ImGui::BeginDisabled(!valid);
+        const bool go = ImGui::Button("Save", ImVec2(110.0f * dpi_, 0.0f));
+        ImGui::EndDisabled();
+        if (!valid && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip(maps.empty() ? "Open or create a project first."
+                                           : "Enter a name with no path separators.");
+        if ((go || (submit && valid)) && valid) {
+            std::filesystem::create_directories(maps, ec);
+            if (saveLevel(target.string())) {
+                levelPath_ = target.string();
+                levelName_ = stem;
+                cbInvalidate(maps);
+                setUpgradeStatus("Saved " + target.filename().string());
+                wantSaveLevelAs_ = false;
+                ImGui::CloseCurrentPopup();
+            } else {
+                saveLevelAsError_ = "Could not write " + target.filename().string() + ".";
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(110.0f * dpi_, 0.0f))) {
+            wantSaveLevelAs_ = false;
+            saveLevelAsError_.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
     void drawExitPrompt(Engine& e) {
 #if AVER_WITH_IMGUI
         if (!exitPrompt_) return;
@@ -10358,6 +10474,21 @@ private:
                 uiReg_.track("file.openLevel");
                 if (ImGui::MenuItem("Save Level", "Ctrl+S") && !levelPath_.empty()) saveLevel(levelPath_);
                 uiReg_.track("file.saveLevel");
+                // SAVE LEVEL AS, which the toolbar's own Save tooltip has been telling people to use
+                // for as long as it has existed -- "File > New Level, then Save Level As" -- while
+                // the menu had New / Open / Save and nothing else. saveLevel already takes an
+                // arbitrary path; only the way to name one was missing.
+                if (ImGui::MenuItem("Save Level As...")) {
+                    saveLevelAsName_[0] = '\0';
+                    const std::string stem = levelPath_.empty()
+                        ? levelName_
+                        : std::filesystem::path(levelPath_).stem().string();
+                    std::snprintf(saveLevelAsName_, sizeof saveLevelAsName_, "%s",
+                                  stem.empty() ? "untitled" : stem.c_str());
+                    saveLevelAsError_.clear();
+                    wantSaveLevelAs_ = true;
+                }
+                uiReg_.track("file.saveLevelAs");
                 ImGui::EndDisabled();
                 if (!haveProject && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                     ImGui::SetTooltip("Open or create a project first - a level belongs to one.");
@@ -10528,7 +10659,14 @@ private:
                 ImGui::EndMenu();
             }
             uiReg_.track("menu.select");
-            if (ImGui::BeginMenu("Help")){ ImGui::MenuItem("About Aver Engine"); ImGui::EndMenu(); }
+            if (ImGui::BeginMenu("Help")){
+                // Discarded its return value and had no dialog behind it. Every string it needs was
+                // already one line away -- the version is printed in Project Settings, the backend
+                // and adapter in the status bar.
+                if (ImGui::MenuItem("About Aver Engine")) showAbout_ = true;
+                uiReg_.track("help.about");
+                ImGui::EndMenu();
+            }
             uiReg_.track("menu.help");
             if (fontMedium_) ImGui::PopFont();
             ImGui::EndMainMenuBar();
@@ -10554,7 +10692,7 @@ private:
         uiReg_.track("toolbar.save");
         ImGui::EndDisabled();
         if (levelPath_.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("No level loaded - File > New Level, then Save Level As");
+            ImGui::SetTooltip("No level loaded - File > New Level, then File > Save Level As...");
 #else
         ImGui::BeginDisabled(true);
         ImGui::Button("Save");
@@ -10820,6 +10958,8 @@ private:
         assetEditors_.draw(e, centralDock_, dpi_);
         tools_.drawModals(project_, dpi_);
         drawUpgradePrompt();
+        drawAboutPrompt(e);
+        drawSaveLevelAsPrompt();
         drawExitPrompt(e);
         drawForwardedOpenPrompt(e);
 
@@ -12766,9 +12906,22 @@ private:
         if (sel_>=0 && sel_<(int)objects_.size()){
             MeshObj& o=objects_[sel_]; ImGui::TextUnformatted(o.name.c_str()); ImGui::Separator();
             if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
+                // BRACKETED FOR UNDO, exactly as the scene-entity branch below does. These three
+                // drags were the only transform edits in the editor that pushed nothing: the
+                // machinery already handles placeholder objects (selectedXform and endTransformEdit
+                // both branch for them, and the GIZMO drives these same objects through it), so
+                // dragging a placeholder in the viewport was undoable and typing the same number
+                // here was not.
                 ImGui::DragFloat3("Location (cm)", &o.pos.x, 1.0f);
+                if (ImGui::IsItemActivated()) beginTransformEdit();
+                bool objDone = ImGui::IsItemDeactivatedAfterEdit();
                 ImGui::DragFloat3("Rotation", &o.rotDeg.x, 1.0f);
+                if (ImGui::IsItemActivated()) beginTransformEdit();
+                objDone = objDone || ImGui::IsItemDeactivatedAfterEdit();
                 ImGui::DragFloat3("Scale", &o.scale.x, 0.01f, 0.02f, 100.f);
+                if (ImGui::IsItemActivated()) beginTransformEdit();
+                objDone = objDone || ImGui::IsItemDeactivatedAfterEdit();
+                if (objDone) endTransformEdit();
             }
             if (ImGui::CollapsingHeader("Material", ImGuiTreeNodeFlags_DefaultOpen)) {
                 ImGui::ColorEdit3("Base Color", o.color);
@@ -14556,6 +14709,11 @@ private:
     // Viewport Show flags. Both default ON -- hiding is the deliberate act.
     bool showStaticMeshes_=true;
     bool showAtmosphere_=true;
+    // File > Save Level As...
+    bool showAbout_=false;             // Help > About
+    bool wantSaveLevelAs_=false;
+    char saveLevelAsName_[128]={};
+    std::string saveLevelAsError_;
     bool showEditorPrefs_=false;     // Edit > Editor Preferences window
     bool scrollPrefsToKeybinds_=false;   // --scroll-prefs-to-keybinds, one-shot
     int  settingsPage_=1;            // 0 Description, 1 Rendering>General, 2 >GI, 3 >Ray Tracing, 4 >Path Tracing
