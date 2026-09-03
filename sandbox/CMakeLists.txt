@@ -7,6 +7,7 @@ add_executable(Sandbox
   src/SkinSceneTest.cpp
   src/ReflTest.cpp
   src/ProjectBrowser.cpp
+  src/RecentProjects.cpp
   src/ProjectScaffold.cpp
   src/EditorPrefs.cpp
   src/InputOwnership.cpp

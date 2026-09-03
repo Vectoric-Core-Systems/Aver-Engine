@@ -235,3 +235,25 @@ target_include_directories(InputOwnershipTest PRIVATE
   ${CMAKE_SOURCE_DIR}/sandbox/src)
 target_link_libraries(InputOwnershipTest PRIVATE Aver.Core)
 set_target_properties(InputOwnershipTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# RecentProjectsTest -- the start screen's list model: recent order, cards, and the selection.
+#
+# Same EditorPrefsTest precedent as the targets above (Sandbox is add_executable-only, so this
+# compiles the sandbox translation unit directly rather than linking a library half that does not
+# exist), and the same reason ProjectCopyTest gives for the extraction itself: a private member of
+# an ImGui screen cannot be reached from a test, and the browser's two parallel containers were
+# where its worst bug lived -- a selection that indexed one of them while the Open button indexed
+# the other.
+#
+# NO ImGui and NO filesystem, by construction. RecentProjects::parse() takes its own keep-predicate
+# and rebuild() takes the results of the caller's directory walk, so the ordering, identity and
+# selection logic is reachable without a window or a disk. If this target ever needs
+# AVER_WITH_IMGUI or Aver.Platform, the model has stopped being pure and the extraction has been
+# undone -- the same tripwire InputOwnershipTest sets for itself.
+add_executable(RecentProjectsTest
+  src/RecentProjectsTest.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/RecentProjects.cpp)
+target_include_directories(RecentProjectsTest PRIVATE
+  ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(RecentProjectsTest PRIVATE Aver.Core)
+set_target_properties(RecentProjectsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

@@ -3,6 +3,7 @@
 // own window, not a launcher process.
 #include "aver/formats/OcProject.hpp"
 #include "ProjectScaffold.hpp"   // TemplateInfo -- the New Project modal's template picker
+#include "RecentProjects.hpp"    // the list/cards/selection model, lifted out to be testable
 
 #include <string>
 #include <vector>
@@ -43,31 +44,22 @@ public:
     // True while the upgrade modal is waiting to be shown or answered.
     bool upgradePending() const { return upgradeModal_ || !upgradePath_.empty(); }
 
-    // One row on the start screen. Carries what the card DRAWS, so the list is built once from disk
-    // rather than each frame re-reading a manifest to find out what version to print in a corner.
-    struct Card {
-        std::string path;       // the .ocproject
-        std::string name;       // its file stem
-        std::string version;    // CREATEDWITH, or empty when it records none
-        bool recent = false;    // in the recent list, so it sorts above the rest
-    };
-
 private:
     // Writes the recent list back to disk.
     void saveRecents() const;
-    // Drops one manifest from the recent list.
-    void forget(const std::string& manifestPath);
 
-    // Rebuilds `cards_` from the recent list AND every .ocproject under the projects folder, so a
-    // project the author has never opened on this machine still appears. Reads each manifest once,
-    // for its version stamp.
+    // Rebuilds the card list from the recent list AND every .ocproject under the projects folder,
+    // so a project the author has never opened on this machine still appears. Reads each manifest
+    // once, for its version stamp, then hands the results to the model for ordering and identity.
     void rescan();
 
     fmt::ProjectDesc project_;
-    std::vector<std::string> recents_;
-    std::vector<Card> cards_;
-    bool cardsDirty_ = true;
-    int recentSel_ = -1;
+
+    // THE LIST, THE CARDS AND THE SELECTION, all in one place. These used to be four members here
+    // -- two parallel containers, a dirty flag and an integer -- with an index correspondence
+    // nothing enforced; see RecentProjects.hpp for the three bugs that came out of that and why the
+    // selection is now a path rather than a position.
+    RecentProjects list_;
 
     // ---- the upgrade prompt ----
     // A project made by an older series is not opened until the author chooses what happens to it.
