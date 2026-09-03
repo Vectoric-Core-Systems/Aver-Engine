@@ -14268,6 +14268,25 @@ private:
         showDetails_        = prefBool ("panels.details",                showDetails_);
         flySpeed_           = prefFloat("viewport.flySpeed",             flySpeed_);
         lookSpeed_          = prefFloat("viewport.lookSensitivity",      lookSpeed_);
+        // The three view flags and the snap grid: state the editor already had and already showed,
+        // and the only reason it was lost was that nobody had written these lines.
+        //
+        // THE VIEW FLAGS ARE INTERACTIVE-ONLY, both directions, for the reason the post-process
+        // block above gives at length: they change the IMAGE, --unlit and the Show menu can set
+        // them, and a stored one reaching a --frames run would move all twenty gate probes on one
+        // machine and not another. Snap is not gated -- nothing on the command line touches it and
+        // it cannot alter a pixel.
+        if (maxFrames_ == 0) {
+            unlit_            = prefBool("viewport.unlit",              unlit_);
+            showStaticMeshes_ = prefBool("viewport.showStaticMeshes",   showStaticMeshes_);
+            showAtmosphere_   = prefBool("viewport.showAtmosphere",     showAtmosphere_);
+        }
+        snapMove_           = prefBool ("snap.move",                      snapMove_);
+        snapRot_            = prefBool ("snap.rotate",                    snapRot_);
+        snapScale_          = prefBool ("snap.scale",                     snapScale_);
+        moveSnap_           = prefFloat("snap.moveStep",                  moveSnap_);
+        rotSnap_            = prefFloat("snap.rotateStep",                rotSnap_);
+        scaleSnap_          = prefFloat("snap.scaleStep",                 scaleSnap_);
 
         // POST PROCESS IS A PROPERTY OF THE VIEW, NOT OF THE WORLD, which is why these nine live
         // here and not in the level file: docs/EDITOR.md notes exposure is one histogram over the
@@ -14365,6 +14384,19 @@ private:
         setPrefFloat("viewport.flySpeed",            flySpeed_);
         setPrefFloat("viewport.lookSensitivity",     lookSpeed_);
         setPrefFloat("ddc.ramBudgetMb",              ddcRamBudgetMb_);
+        // Guarded exactly as the load is: a --frames run that wrote its --unlit back would leave
+        // the next interactive session unlit, and the run after that with moved gates.
+        if (maxFrames_ == 0) {
+            setPrefBool("viewport.unlit",             unlit_);
+            setPrefBool("viewport.showStaticMeshes",  showStaticMeshes_);
+            setPrefBool("viewport.showAtmosphere",    showAtmosphere_);
+        }
+        setPrefBool ("snap.move",                    snapMove_);
+        setPrefBool ("snap.rotate",                  snapRot_);
+        setPrefBool ("snap.scale",                   snapScale_);
+        setPrefFloat("snap.moveStep",                moveSnap_);
+        setPrefFloat("snap.rotateStep",              rotSnap_);
+        setPrefFloat("snap.scaleStep",               scaleSnap_);
 
         // Guarded exactly as the load is, and for the same reason: a --frames run that wrote its
         // CLI exposure back would leave the next interactive session looking at the capture's eyes.
@@ -14484,10 +14516,45 @@ private:
         }
         if (ImGui::CollapsingHeader("Viewport", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Checkbox("Show grid", &showGrid_);
+            uiReg_.track("prefs.viewport.showGrid");
             ImGui::Checkbox("Wireframe", &wireframe_);
+            uiReg_.track("prefs.viewport.wireframe");
+            // THE OTHER THREE VIEW FLAGS, which sat beside the two above in the Show menu and were
+            // the only ones not remembered -- turn off Atmosphere, close the editor, and it came
+            // back on. Same two-line pattern as Show grid and Wireframe; nothing new was needed.
+            ImGui::Checkbox("Unlit", &unlit_);
+            uiReg_.track("prefs.viewport.unlit");
+            ImGui::Checkbox("Show static meshes", &showStaticMeshes_);
+            uiReg_.track("prefs.viewport.showStaticMeshes");
+            ImGui::Checkbox("Show atmosphere", &showAtmosphere_);
+            uiReg_.track("prefs.viewport.showAtmosphere");
             ImGui::SliderFloat("Fly speed (cm/s)", &flySpeed_, 20.0f, 20000.0f, "%.0f",
                                ImGuiSliderFlags_Logarithmic);
+            uiReg_.track("prefs.viewport.flySpeed");
             ImGui::SliderFloat("Look sensitivity", &lookSpeed_, 0.001f, 0.02f, "%.4f");
+            uiReg_.track("prefs.viewport.lookSensitivity");
+
+            // SNAP, WHICH THE TOOLBAR COULD SET AND NOTHING COULD KEEP. The increments live in
+            // moveSnap_/rotSnap_/scaleSnap_ and the toolbar dropdowns write them, but neither the
+            // toggles nor the values were in loadEditorPreferences or saveEditorPreferences -- so a
+            // grid somebody set up for a level was gone the next time they opened the editor.
+            ImGui::Separator();
+            ImGui::TextDisabled("Snap");
+            ImGui::Checkbox("Move", &snapMove_);   uiReg_.track("prefs.snap.move");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(120.0f * dpi_);
+            ImGui::DragFloat("##moveSnap", &moveSnap_, 0.1f, 0.01f, 10000.0f, "%.2f units");
+            uiReg_.track("prefs.snap.moveStep");
+            ImGui::Checkbox("Rotate", &snapRot_);  uiReg_.track("prefs.snap.rotate");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(120.0f * dpi_);
+            ImGui::DragFloat("##rotSnap", &rotSnap_, 0.5f, 0.1f, 180.0f, "%.1f deg");
+            uiReg_.track("prefs.snap.rotateStep");
+            ImGui::Checkbox("Scale", &snapScale_); uiReg_.track("prefs.snap.scale");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(120.0f * dpi_);
+            ImGui::DragFloat("##scaleSnap", &scaleSnap_, 0.01f, 0.01f, 10.0f, "%.2f");
+            uiReg_.track("prefs.snap.scaleStep");
         }
         // --scroll-prefs-to-keybinds: a one-shot verification aid: Preferences has grown to six
         // DefaultOpen sections, more than fit one screen, and there is no human here to scroll. Fires
@@ -15019,6 +15086,27 @@ private:
                                    "PtSceneView.hpp for the full list of what it deliberately does\n"
                                    "not do. No tiers yet: any value but Off means on.");
             ImGui::EndDisabled();
+
+            // BOUNCES, WHICH THE MANIFEST HAS ALWAYS CARRIED AND NOTHING EVER SHOWED.
+            // OcProject's RENDER.PTBOUNCES round-trips through save and load, applyProjectRender
+            // pushes it into Settings, and --pt-bounces overrides it -- so the value was
+            // authorable by hand-editing a .ocproject or by a command line, and by no other means.
+            //
+            // TIER-DERIVED WITH AN OPEN KNOB, which is this renderer's established shape (see
+            // Settings::ptBounces and ptBouncesForQuality): picking a Quality above re-derives
+            // this, so a hand-set value survives until the tier next changes. Said out loud in the
+            // tooltip rather than left for somebody to discover by losing a setting.
+            ImGui::BeginDisabled(s.pathTracing == Quality::Off);
+            int bounces = static_cast<int>(s.ptBounces);
+            if (ImGui::SliderInt("Bounces", &bounces, 1, 8)) {
+                s.ptBounces = static_cast<u32>(bounces);
+                changed = true;
+            }
+            uiReg_.track("project.pt.bounces");
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("Light paths after the first hit. Changing Quality above re-derives\n"
+                                  "this from the tier, so set it after picking one.");
 
             if (ptSceneViewUnavailable_) {
                 ImGui::SameLine();
