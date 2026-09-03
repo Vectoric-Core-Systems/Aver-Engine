@@ -8253,17 +8253,39 @@ private:
         return movableSelected();
     }
 
-    // Reads the selection's transform. False when nothing transformable is selected.
+    // Reads the selection's transform, IN WORLD SPACE. False when nothing transformable is selected.
+    //
+    // WORLD, NOT LOCAL, AND EVERY CALLER NEEDED IT TO BE. This pair returned CLocal verbatim while
+    // the gizmo draws at the returned position, hit-tests its handles by projecting it, and the drag
+    // moves it by a world-space delta -- so selecting a child of an entity at (5000,0,0) drew the
+    // gizmo 50 m from its own mesh, and dragging it moved the child by the mouse delta measured
+    // against a manipulator that was somewhere else entirely. The Details panel and the undo capture
+    // read the same pair, so making only the gizmo world-space would have left the three disagreeing
+    // about what a number means, which is worse than all three being wrong the same way.
+    //
+    // Both halves convert, so the round trip is exact for a root (the parent matrix is identity) and
+    // the change is a no-op for every level that has no hierarchy in it -- which today is all of them.
     bool selectedXform(EditXform& x) const {
 #if AVER_MODULE_SCENE
         if (sel_ == kSelScene) {
-            const scene::World& w = scene::World::instance();
+            scene::World& w = scene::World::instance();
             if (!w.valid(selEntity_)) return false;
             const auto* loc = w.component<scene::CLocal>(selEntity_, scene::kComponentLocal);
             if (!loc) return false;
-            x.pos = loc->xf.position;
-            x.rotDeg = eulerDegFromQuat(loc->xf.rotation);
-            x.scale = loc->xf.scale;
+            const scene::Entity par = w.parent(selEntity_);
+            if (par == scene::kInvalidEntity) {
+                x.pos = loc->xf.position;
+                x.rotDeg = eulerDegFromQuat(loc->xf.rotation);
+                x.scale = loc->xf.scale;
+                return true;
+            }
+            const Transform pw = worldTransformOf(w, par);
+            x.pos    = pw.position + pw.rotation.rotate(Vec3{loc->xf.position.x * pw.scale.x,
+                                                            loc->xf.position.y * pw.scale.y,
+                                                            loc->xf.position.z * pw.scale.z});
+            x.rotDeg = eulerDegFromQuat(pw.rotation * loc->xf.rotation);
+            x.scale  = Vec3{pw.scale.x * loc->xf.scale.x, pw.scale.y * loc->xf.scale.y,
+                            pw.scale.z * loc->xf.scale.z};
             return true;
         }
 #endif
@@ -8273,7 +8295,7 @@ private:
         return true;
     }
 
-    // Writes the selection's transform.
+    // Writes the selection's transform, taking it IN WORLD SPACE. The exact inverse of the read.
     void setSelectedXform(const EditXform& x) {
 #if AVER_MODULE_SCENE
         if (sel_ == kSelScene) {
@@ -8283,6 +8305,26 @@ private:
             xf.position = x.pos;
             xf.rotation = quatFromEulerDeg(x.rotDeg);
             xf.scale    = x.scale;
+            const scene::Entity par = w.parent(selEntity_);
+            if (par != scene::kInvalidEntity) {
+                const Transform pw = worldTransformOf(w, par);
+                // DIVIDING BY THE PARENT'S SCALE, and refusing to when it is zero. A zero component
+                // is legal to author (a flattened parent) and would otherwise produce an infinity
+                // that propagates into CLocal and then into every descendant's world matrix.
+                const Vec3 inv{pw.scale.x != 0.0f ? 1.0f / pw.scale.x : 1.0f,
+                               pw.scale.y != 0.0f ? 1.0f / pw.scale.y : 1.0f,
+                               pw.scale.z != 0.0f ? 1.0f / pw.scale.z : 1.0f};
+                // The CONJUGATE, which inverts a UNIT quaternion. Every rotation reaching this
+                // point comes from quatFromEulerDeg or a composition of such, so it is unit by
+                // construction; Quat has no inverse() to reach for and adding one for a single
+                // call site would put a general-purpose name on a narrow assumption.
+                const Quat pinv{-pw.rotation.x, -pw.rotation.y, -pw.rotation.z, pw.rotation.w};
+                const Vec3 d = xf.position - pw.position;
+                const Vec3 r = pinv.rotate(d);
+                xf.position = Vec3{r.x * inv.x, r.y * inv.y, r.z * inv.z};
+                xf.rotation = pinv * xf.rotation;
+                xf.scale    = Vec3{xf.scale.x * inv.x, xf.scale.y * inv.y, xf.scale.z * inv.z};
+            }
             w.setLocalTransform(selEntity_, xf);
             return;
         }
@@ -8291,6 +8333,30 @@ private:
         MeshObj& o = objects_[sel_];
         o.pos = x.pos; o.rotDeg = x.rotDeg; o.scale = x.scale;
     }
+
+#if AVER_MODULE_SCENE
+    // An entity's world transform as position/rotation/scale.
+    //
+    // COMPOSED UP THE CHAIN rather than decomposed from CWorld's Mat4: recovering a rotation and a
+    // scale from a matrix is only well-defined when the scale is uniform and positive, and this
+    // editor can author neither. Chains here are a handful of links deep at most.
+    static Transform worldTransformOf(scene::World& w, scene::Entity e) {
+        Transform out;
+        if (!w.valid(e)) return out;
+        const auto* loc = w.component<scene::CLocal>(e, scene::kComponentLocal);
+        if (!loc) return out;
+        const scene::Entity par = w.parent(e);
+        if (par == scene::kInvalidEntity) return loc->xf;
+        const Transform pw = worldTransformOf(w, par);
+        out.position = pw.position + pw.rotation.rotate(Vec3{loc->xf.position.x * pw.scale.x,
+                                                            loc->xf.position.y * pw.scale.y,
+                                                            loc->xf.position.z * pw.scale.z});
+        out.rotation = pw.rotation * loc->xf.rotation;
+        out.scale    = Vec3{pw.scale.x * loc->xf.scale.x, pw.scale.y * loc->xf.scale.y,
+                            pw.scale.z * loc->xf.scale.z};
+        return out;
+    }
+#endif
 
     // Stable identity for an undoable object, so a command survives the entity being recreated.
     using EditId = u32;
@@ -10119,6 +10185,41 @@ private:
             check(w.setParent(child, parent, false), "the child accepts the parent");
             check(w.setParent(grand, child, false),  "and the grandchild accepts the child");
             check(w.parent(child) == parent && w.parent(grand) == child, "the chain is two deep");
+
+            // ---- the gizmo's frame ----------------------------------------------------------
+            //
+            // selectedXform/setSelectedXform used to return CLocal verbatim while the gizmo draws at
+            // the returned position and drags it by a world-space delta -- so a child of an entity
+            // 5000 cm out drew its manipulator 50 m from its own mesh.
+            {
+                Transform pxf; pxf.position = Vec3{5000.0f, 0.0f, 0.0f};
+                w.setLocalTransform(parent, pxf);
+                Transform cxf; cxf.position = Vec3{0.0f, 0.0f, 90.0f};
+                w.setLocalTransform(child, cxf);
+
+                sel_ = kSelScene; selEntity_ = child;
+                EditXform gx{};
+                check(selectedXform(gx), "the child's transform reads back");
+                check(std::fabs(gx.pos.x - 5000.0f) < 0.01f && std::fabs(gx.pos.z - 90.0f) < 0.01f,
+                      "and it is WORLD (5000,0,90), not the local (0,0,90) the gizmo would have drawn at");
+
+                // THE ROUND TRIP HAS TO BE EXACT, or every selection would drift a little each time
+                // the panel wrote back a value it had just read.
+                setSelectedXform(gx);
+                const auto* back = w.component<scene::CLocal>(child, scene::kComponentLocal);
+                check(back && std::fabs(back->xf.position.x) < 0.01f
+                           && std::fabs(back->xf.position.z - 90.0f) < 0.01f,
+                      "writing that world transform straight back leaves the LOCAL one unchanged");
+
+                // And a real world-space move lands where it was asked to, not 5000 cm away.
+                gx.pos = Vec3{5000.0f, 0.0f, 140.0f};
+                setSelectedXform(gx);
+                EditXform again{};
+                check(selectedXform(again) && std::fabs(again.pos.z - 140.0f) < 0.01f,
+                      "and moving it in world space puts it where the drag asked");
+
+                sel_ = kSelScene; selEntity_ = parent;
+            }
 
             sel_ = kSelScene; selEntity_ = parent;
             deleteSelection();
