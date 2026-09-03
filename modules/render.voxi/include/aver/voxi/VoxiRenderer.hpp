@@ -1045,6 +1045,38 @@ private:
     u64  giCacheBufBytes_ = 0;
     u32  giCacheDumpCountdown_ = 0;   // 0 = nothing pending
     fmt::GiCacheKey giCachePendingKey_{};
+
+    // ---- the write-behind buffer -------------------------------------------------------------
+    //
+    // BAKES LAND IN RAM AND GO TO DISK IN BATCHES. Every completed bake used to be an ~18 MiB file
+    // write on the frame it finished, and an author nudging the sun produces a bake per nudge --
+    // so a minute of lighting work was tens of writes and a directory that had to be swept after
+    // each one. The volumes now accumulate here and reach the filesystem when the budget is
+    // exceeded or the editor shuts down.
+    //
+    // SAFE BECAUSE OF WHAT THIS CACHE IS, not because the window is small. GiCache.hpp states the
+    // contract plainly: "nothing here is authored and nothing here is precious: the whole directory
+    // can be deleted at any time and the only cost is one rebuild." Losing the buffer to a crash
+    // costs exactly one revoxelisation, which is the same thing a cold cache costs.
+    std::vector<fmt::GiCacheEntry> giCachePendingEntries_;
+    u64 giCachePendingBytes_ = 0;
+    // Default 256 MiB: about fourteen entries at the ~18 MiB a 128^3 volume takes, comfortably more
+    // than a lighting session produces, and small enough to be unremarkable next to the volume
+    // textures themselves. Editor Preferences > Derived Data Cache moves it.
+    u64 giCacheRamBudget_ = 256ull * 1024ull * 1024ull;
+
+public:
+    // The write-behind budget, in bytes. Lowering it below what is already buffered flushes
+    // immediately rather than leaving the buffer over its own limit until the next bake.
+    void setGiCacheRamBudget(u64 bytes);
+    u64  giCacheRamBudget() const { return giCacheRamBudget_; }
+    // What is buffered but not yet written -- for the preferences page to show.
+    u64  giCachePendingBytes() const { return giCachePendingBytes_; }
+    u32  giCachePendingCount() const { return static_cast<u32>(giCachePendingEntries_.size()); }
+    // Writes every buffered entry, sweeps the directory once, and empties the buffer. Returns how
+    // many files were written. Safe to call with nothing pending.
+    u32  giCacheFlush();
+private:
     // Per-mip byte offsets inside the readback buffer, in the BACKEND's footprint layout.
     std::vector<u64> giCacheMipOffsets_;
     bool giCacheUnsupported_ = false;   // textureCopyFootprint said no; stop asking

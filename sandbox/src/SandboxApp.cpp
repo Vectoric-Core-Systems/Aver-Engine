@@ -5590,6 +5590,16 @@ public:
         mcp_.stop();
 #endif
         setLogSink(nullptr, nullptr);
+#if AVER_MODULE_VOXI
+        // THE BAKED GI GOES TO DISK HERE. Volumes are buffered in RAM while the editor runs and
+        // only reach the filesystem when the budget is exceeded or right now -- so without this
+        // line a whole session's lighting work would be thrown away and rebuilt on the next open.
+        // BEFORE the render features are torn down below: giCacheFlush only touches std::vectors
+        // and the filesystem, but it belongs with the state capture rather than after the device
+        // has started coming apart.
+        if (const u32 wrote = voxiRenderer_.giCacheFlush())
+            AVER_INFO("[Editor] wrote {} buffered GI cache entr(ies) on shutdown", wrote);
+#endif
         // ---- CAPTURE LIVE STATE BEFORE FLUSHING IT ----
         // flushEditorPrefs() writes the pref STORE but does not look at the editor, so it only
         // persists what saveEditorPreferences() already pushed in -- and that only runs from
@@ -7253,6 +7263,9 @@ private:
     int hudPreviewIndex_ = -1;
     int hudTest_ = -1;
     bool saveProject_ = false;
+    // Derived Data Cache write-behind budget, in MB. Mirrors the renderer's byte value so the
+    // slider has something to bind to; pushed across on load and on edit.
+    f32 ddcRamBudgetMb_ = 256.0f;
     std::string saveLevelTo_;         // --save-level <out>
     bool saveLevelDone_ = false;
     bool rayProbe_ = false, rayProbeDone_ = false;   // --ray-probe <sx> <sy>
@@ -14279,6 +14292,13 @@ private:
             post_.bloomKnee      = prefFloat("post.bloomKnee",      post_.bloomKnee);
         }
 
+        // The derived-data cache's write-behind budget, in MEGABYTES on the wire because that is
+        // the unit the control shows; the renderer takes bytes.
+        ddcRamBudgetMb_ = prefFloat("ddc.ramBudgetMb", ddcRamBudgetMb_);
+#if AVER_MODULE_VOXI
+        voxiRenderer_.setGiCacheRamBudget(static_cast<u64>(ddcRamBudgetMb_) * 1024ull * 1024ull);
+#endif
+
         prefIdeName_ = prefString("contentBrowser.ide", "");
 
         if (prefsDevice_ && prefsDevice_->vsyncCanDisable())
@@ -14344,6 +14364,7 @@ private:
         setPrefBool ("panels.details",               showDetails_);
         setPrefFloat("viewport.flySpeed",            flySpeed_);
         setPrefFloat("viewport.lookSensitivity",     lookSpeed_);
+        setPrefFloat("ddc.ramBudgetMb",              ddcRamBudgetMb_);
 
         // Guarded exactly as the load is, and for the same reason: a --frames run that wrote its
         // CLI exposure back would leave the next interactive session looking at the capture's eyes.
@@ -14472,6 +14493,38 @@ private:
         // DefaultOpen sections, more than fit one screen, and there is no human here to scroll. Fires
         // once (consumes its own flag) so it never fights a person who scrolls the window themselves.
         if (scrollPrefsToKeybinds_) { ImGui::SetScrollHereY(0.0f); scrollPrefsToKeybinds_ = false; }
+        if (ImGui::CollapsingHeader("Derived Data Cache", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::TextDisabled("Baked global illumination, cached beside the project under");
+            ImGui::TextDisabled("DerivedDataCache\\GI. Derived data: deleting it costs one rebuild.");
+#if AVER_MODULE_VOXI
+            // IN MB, because a budget in bytes is a number nobody can read at a glance. The floor
+            // is one volume's worth: below that every bake would flush immediately and the buffer
+            // would do nothing at all except add a copy.
+            if (ImGui::SliderFloat("Memory budget", &ddcRamBudgetMb_, 32.0f, 4096.0f, "%.0f MB",
+                                   ImGuiSliderFlags_Logarithmic))
+                voxiRenderer_.setGiCacheRamBudget(static_cast<u64>(ddcRamBudgetMb_) * 1024ull * 1024ull);
+            uiReg_.track("prefs.ddc.ramBudget");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Bakes are held in memory and written in batches, rather than one\n"
+                                  "~18 MB file per bake. They go to disk when this is exceeded, and\n"
+                                  "when the editor closes. Lowering it below what is already held\n"
+                                  "writes immediately.");
+
+            const u64 pend = voxiRenderer_.giCachePendingBytes();
+            ImGui::Text("Buffered: %llu MB in %u entr(ies)",
+                        static_cast<unsigned long long>(pend / (1024 * 1024)),
+                        voxiRenderer_.giCachePendingCount());
+            ImGui::BeginDisabled(pend == 0);
+            if (ImGui::Button("Write to disk now")) voxiRenderer_.giCacheFlush();
+            ImGui::EndDisabled();
+            uiReg_.track("prefs.ddc.flushNow");
+            if (pend == 0 && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("Nothing is buffered -- every bake is already on disk.");
+#else
+            ImGui::TextDisabled("The Voxi render module is not in this build, so nothing bakes.");
+#endif
+        }
+
         if (ImGui::CollapsingHeader("Keybinds", ImGuiTreeNodeFlags_DefaultOpen)) {
             keybinds_.drawPreferencesSection(dpi_);
         }

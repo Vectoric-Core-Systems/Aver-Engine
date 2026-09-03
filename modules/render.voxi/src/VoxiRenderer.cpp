@@ -1338,10 +1338,22 @@ bool VoxiRenderer::giCacheRestore(rhi::IRenderContext& ctx) {
     giCacheTried_ = true;
     giCacheTriedKey_ = key;
 
+    // THE BUFFER IS PART OF THE CACHE. A bake that has landed in RAM but not yet on disk must be a
+    // HIT -- otherwise write-behind turns every within-session revisit into a full revoxelisation,
+    // which is the exact cost this cache exists to remove, and the regression would look like the
+    // cache had simply stopped working.
     fmt::GiCacheEntry entry;
+    bool fromBuffer = false;
+    for (const fmt::GiCacheEntry& held : giCachePendingEntries_) {
+        if (held.key != key) continue;
+        entry = held;
+        fromBuffer = true;
+        break;
+    }
+
     const std::string path = giCacheDir_ + "\\" + fmt::giCacheFileName(key);
     std::string why;
-    if (!fmt::loadGiCache(path, entry, &why)) return false;
+    if (!fromBuffer && !fmt::loadGiCache(path, entry, &why)) return false;
     // The file name is a hash, so a collision is possible and cheap to rule out: compare the key
     // the entry actually carries.
     if (entry.key != key) return false;
@@ -1428,18 +1440,76 @@ void VoxiRenderer::giCacheTick() {
         }
     }
 
-    const std::string path = giCacheDir_ + "\\" + fmt::giCacheFileName(entry.key);
-    std::string why;
-    if (!fmt::saveGiCache(path, entry, &why)) {
-        AVER_WARN("[Voxi] GI cache could not be written: {}", why);
-        return;
+    // BUFFERED, NOT WRITTEN. See giCachePendingEntries_ for why this is safe: the cache is derived
+    // data whose stated contract is that losing it costs one rebuild.
+    //
+    // REPLACES an entry with the same key rather than accumulating duplicates -- re-baking the same
+    // inputs is exactly what happens when an author moves the sun back to where it was.
+    const u64 bytes = static_cast<u64>(entry.voxels.size());
+    bool replaced = false;
+    for (fmt::GiCacheEntry& held : giCachePendingEntries_) {
+        if (held.key != entry.key) continue;
+        giCachePendingBytes_ -= static_cast<u64>(held.voxels.size());
+        held = std::move(entry);
+        giCachePendingBytes_ += bytes;
+        replaced = true;
+        break;
     }
+    if (!replaced) {
+        giCachePendingBytes_ += bytes;
+        giCachePendingEntries_.push_back(std::move(entry));
+    }
+
+    if (giCachePendingBytes_ > giCacheRamBudget_) {
+        AVER_INFO("[Voxi] GI cache buffer over budget ({} MB of {} MB) -- flushing",
+                  giCachePendingBytes_ / (1024 * 1024), giCacheRamBudget_ / (1024 * 1024));
+        giCacheFlush();
+    }
+}
+
+// Lowering the budget below what is already held flushes now, rather than leaving the buffer over
+// its own limit until whenever the next bake happens to land.
+void VoxiRenderer::setGiCacheRamBudget(u64 bytes) {
+    giCacheRamBudget_ = bytes;
+    if (giCachePendingBytes_ > giCacheRamBudget_) giCacheFlush();
+}
+
+// Writes everything held, sweeps ONCE, and empties the buffer.
+//
+// ONE SWEEP FOR THE WHOLE BATCH rather than one per file: the sweep stats every entry in the
+// directory to order it by age, so doing it per write made a ten-bake session do ten directory
+// walks to reach the same end state.
+u32 VoxiRenderer::giCacheFlush() {
+    if (giCachePendingEntries_.empty()) return 0;
+    if (giCacheDir_.empty()) {
+        // No project, nowhere to put it. Drop the buffer rather than growing it forever.
+        giCachePendingEntries_.clear();
+        giCachePendingBytes_ = 0;
+        return 0;
+    }
+
+    u32 wrote = 0;
+    u64 wroteBytes = 0;
+    for (const fmt::GiCacheEntry& entry : giCachePendingEntries_) {
+        const std::string path = giCacheDir_ + "\\" + fmt::giCacheFileName(entry.key);
+        std::string why;
+        if (!fmt::saveGiCache(path, entry, &why)) {
+            AVER_WARN("[Voxi] GI cache could not be written: {}", why);
+            continue;
+        }
+        ++wrote;
+        wroteBytes += static_cast<u64>(entry.voxels.size());
+    }
+    giCachePendingEntries_.clear();
+    giCachePendingBytes_ = 0;
+
     // Bounded, because nothing else bounds it: every distinct bake writes a new file and none is
     // ever overwritten.
-    const u32 swept = fmt::giCacheSweep(giCacheDir_, 8);
-    AVER_INFO("[Voxi] GI cache WROTE {} ({} KB){}", fmt::giCacheFileName(entry.key),
-              entry.voxels.size() / 1024,
-              swept ? (", swept " + std::to_string(swept) + " older entr(ies)") : std::string());
+    const u32 swept = wrote ? fmt::giCacheSweep(giCacheDir_, 8) : 0;
+    if (wrote)
+        AVER_INFO("[Voxi] GI cache FLUSHED {} entr(ies), {} KB{}", wrote, wroteBytes / 1024,
+                  swept ? (", swept " + std::to_string(swept) + " older entr(ies)") : std::string());
+    return wrote;
 }
 
 void VoxiRenderer::takeGiSnapshot() {
