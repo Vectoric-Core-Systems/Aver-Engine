@@ -308,6 +308,106 @@ static void checkOcworld() {
         check(text.find("# elev") != std::string::npos, "the written SUN line carries a readable elevation");
         check(writeOcworld(b) == text, "and a second write reproduces the first byte for byte");
     }
+
+    // ---- the environment fields added for the editor's Details panel -------------------------
+    //
+    // Roughly forty controls under Sun, Sky and Fog were live in the viewport and lost on exit,
+    // because the format had five of them. These check the ones whose failure mode is silent.
+    {
+        // EVERY NEW TOKEN, GIVEN EXPLICITLY, so nothing below is a struct default in disguise.
+        OcWorldData w;
+        check(parseOcworld("OCWORLD 1\nNAME T\n"
+                           "SUN dir 0 0 1 lux 50000 kelvin 6500 angular 1.25\n"
+                           "SKY model authored zenith 0.1 0.2 0.3 horizon 0.4 0.5 0.6 dome 0.8"
+                           " ground 0.11 0.12 0.13 groundblend 0.5 skylight 1.75"
+                           " mieextinction 0.0031 miephase 0.7 rayleighkm 9 miekm 1.4"
+                           " planetkm 6000 airkm 55\n"
+                           "FOG exp density 8e-6 color 0.7 0.8 0.9 falloff 0.004 height 1200"
+                           " start 250 maxopacity 0.85\n"
+                           "CLOUDS on coverage 0.7 density 2 bottom 90000 top 210000"
+                           " feature 32000 wind 12 -34\n", w, &err),
+              "a world with every environment token parses");
+        check(w.sunTemperatureK == 6500.0 && w.sunAngularDeg == 1.25, "the sun's temperature and disk size survive");
+        check(w.skyZenith[0] == 0.1 && w.skyHorizon[2] == 0.6 && w.skyDomeExponent == 0.8,
+              "so does the authored dome");
+        check(w.skyGroundAlbedo[1] == 0.12 && w.skyGroundBlend == 0.5 && w.skyLight == 1.75,
+              "and the ground and the sky light");
+        check(w.skyMiePhaseG == 0.7 && w.skyRayleighKm == 9.0 && w.skyPlanetKm == 6000.0,
+              "and the air parameters");
+        check(w.fogFalloff == 0.004 && w.fogHeight == 1200.0 && w.fogStart == 250.0 && w.fogMaxOpacity == 0.85,
+              "and all four height-fog values");
+        check(w.hasClouds && w.cloudsEnabled && w.cloudCoverage == 0.7 && w.cloudTop == 210000.0,
+              "and the CLOUDS record");
+        // A NEGATIVE WIND IS THE POINT: cloudWind is a direction, so any `>= 0 means set` rule
+        // would have made half the compass unauthorable.
+        check(w.cloudWind[0] == 12.0 && w.cloudWind[1] == -34.0, "including a negative wind component");
+    }
+    {
+        // "SPOKE ABOUT CLOUDS" AND "HAS CLOUDS" ARE TWO FACTS. Collapsing them would make an
+        // authored overcast level that the author turned OFF come back overcast on the next load,
+        // because "off" and "never mentioned" would be the same state and the writer omits the
+        // second. This is the check that a single bool cannot pass.
+        OcWorldData w;
+        check(parseOcworld("OCWORLD 1\nNAME T\nCLOUDS off coverage 0.9\n", w, &err), "CLOUDS off parses");
+        check(w.hasClouds && !w.cloudsEnabled, "and says the level SPOKE about clouds and turned them off");
+        const std::string text = writeOcworld(w);
+        check(text.find("CLOUDS off") != std::string::npos, "so the written file still carries the record");
+
+        OcWorldData none;
+        check(parseOcworld("OCWORLD 1\nNAME T\n", none, &err), "a world with no CLOUDS parses");
+        check(!none.hasClouds, "and reports no opinion rather than 'clouds off'");
+        check(writeOcworld(none).find("CLOUDS") == std::string::npos,
+              "and writing it back adds no CLOUDS line -- a level cannot grow a record by being saved");
+    }
+    {
+        // ZERO IS AN AUTHORED VALUE for fogHeight, fogStart and the cloud bounds -- they are world
+        // Z and a distance. The token's PRESENCE is the flag, so a zero must round-trip as a zero
+        // rather than being read back as the engine's default.
+        OcWorldData w;
+        w.name = "Zeroes";
+        w.hasFog = true;  w.fogHeight = 0.0; w.fogStart = 0.0; w.fogFalloff = 0.0; w.fogMaxOpacity = 0.0;
+        w.hasSky = true;  w.skyGroundBlend = 0.0; w.skyLight = 0.0;
+        w.hasClouds = true; w.cloudBottom = 0.0; w.cloudWind[0] = 0.0; w.cloudWind[1] = 0.0;
+        OcWorldData b;
+        check(parseOcworld(writeOcworld(w), b, &err), "a world whose environment is all zeroes parses");
+        check(b.fogHeight == 0.0 && b.fogStart == 0.0 && b.fogMaxOpacity == 0.0,
+              "and a zero fog height, start and max opacity come back as zero, not as defaults");
+        check(b.skyGroundBlend == 0.0 && b.skyLight == 0.0, "so does a ground blend and sky light of zero");
+        check(b.cloudBottom == 0.0 && b.cloudWind[0] == 0.0, "and a zero cloud base and wind");
+    }
+    {
+        // BYTE-STABLE SECOND WRITE over the full environment. This is the check that catches BOTH
+        // halves of the mirror hazard for free: a token added to the parser and not the writer
+        // disappears here, and one added to the writer and not the parser comes back different.
+        OcWorldData w;
+        w.name = "EnvRoundTrip";
+        w.hasSun = true;  w.sunTemperatureK = 5200.0; w.sunAngularDeg = 0.61;
+        w.hasSky = true;  w.skyPhysical = false; w.skyZenith[1] = 0.375; w.skyLight = 1.4;
+                          w.skyMieExtinction = 0.0033; w.skyPlanetKm = 6100.0;
+        w.hasFog = true;  w.fogFalloff = 0.0021; w.fogHeight = -400.0; w.fogMaxOpacity = 0.9;
+        w.hasClouds = true; w.cloudsEnabled = true; w.cloudFeatureSize = 24000.0; w.cloudWind[1] = -88.0;
+        const std::string text = writeOcworld(w);
+        OcWorldData b;
+        check(parseOcworld(text, b, &err), "the full environment writes and parses again");
+        check(writeOcworld(b) == text, "and a second write reproduces the first byte for byte");
+        // A NEGATIVE FOG HEIGHT is a level whose fog thins going up from below sea level, which is
+        // ordinary; it is also the value a `>= 0` sentinel would have silently discarded.
+        check(b.fogHeight == -400.0, "including a fog height below zero");
+    }
+    {
+        // OLD FILES ARE THE COMMON CASE. Every level in the tree predates these tokens, and each
+        // must load with the engine's own defaults rather than with zeroes -- which is what makes
+        // "the token's presence is the flag" safe in the first place.
+        OcWorldData w;
+        check(parseOcworld("OCWORLD 1\nNAME T\nSUN dir 0 0 1 lux 90000\nSKY model physical\n"
+                           "FOG exp density 4e-6\n", w, &err),
+              "a world written before these tokens existed still parses");
+        check(w.sunTemperatureK == 0.0, "an absent kelvin leaves the sun on its authored colour");
+        check(w.sunAngularDeg == 0.545, "an absent angular size keeps the real sun's disk");
+        check(w.fogMaxOpacity == 1.0, "an absent max opacity does not become zero and erase the fog");
+        check(w.skyLight == 1.0, "an absent sky light does not put the ambient term at zero");
+        check(!w.hasClouds, "and no CLOUDS record means no opinion about clouds");
+    }
 }
 
 // Checks the SCATTER record: every field, round-trip byte-identity, an unbounded density band's

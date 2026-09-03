@@ -35,6 +35,7 @@
 #  include "aver/scene/scene_abi.h"
 #  include "aver/core/Hash.hpp"
 #endif
+#include "aver/assets/LevelSky.hpp"
 #if AVER_MODULE_VOXI
 #  include "aver/voxi/Voxi.hpp"
 #endif
@@ -1152,33 +1153,24 @@ void GameApp::particleGiBind(rhi::IResourceFactory& res, rhi::BindingSetHandle s
 
 void GameApp::applyLevelSky() {
 #if AVER_MODULE_SCENE
-    if (!level_.hasSun() && !level_.hasSky()) return;
+    const fmt::OcWorldEnv& w = level_.env();
+    if (!w.hasSun && !w.hasSky && !w.hasFog && !w.hasClouds) return;
 
-    if (level_.hasSun()) {
-        const f64* sunDir = level_.sunDir();
-        const f64* sunColor = level_.sunColor();
-        for (int i = 0; i < 3; ++i) {
-            sky_.sunDirection[i] = static_cast<f32>(sunDir[i]);
-            sunColor_[i] = static_cast<f32>(sunColor[i]);
-        }
-        // Apply sunLux as a multiplier on the default intensity
-        // OcWorldData defaults to 100000, rhi::SkyAtmosphere defaults to 3.0
-        sky_.sunIntensity = static_cast<f32>(level_.sunLux() / (100000.0 / 3.0));
-        AVER_INFO("[Level] applied sun settings: dir[{:.3f} {:.3f} {:.3f}], intensity {:.2f}",
-                  sunDir[0], sunDir[1], sunDir[2], sky_.sunIntensity);
-    }
+    // ONE SHARED MAPPING, so the game and the editor cannot drift. This function used to read five
+    // of the format's fields; aver::voxi::applyLevelEnv reads all of them, which is how a level's
+    // clouds, height fog, authored dome and sun temperature reach a running game at all -- until
+    // now they were authorable in the editor and dropped on the floor here.
+    assets::applyLevelEnv(w, sky_);
 
-    if (level_.hasSky()) {
-        sky_.model = level_.skyPhysical() ? rhi::SkyModel::Physical : rhi::SkyModel::Authored;
-        if (level_.skyMieScatter() >= 0.0) sky_.air.mieScatter = static_cast<f32>(level_.skyMieScatter());
-        if (level_.skyMultiScatter() >= 0.0) sky_.air.multiScatterGain = static_cast<f32>(level_.skyMultiScatter());
-        if (level_.skyViewSteps() > 0) sky_.air.viewSteps = level_.skyViewSteps();
-        if (level_.skyAerialSteps() > 0) sky_.air.aerialSteps = level_.skyAerialSteps();
-        AVER_INFO("[Level] applied sky settings: model={}, mie={:.2f}, multi={:.2f}, view={}, aerial={}",
-                  level_.skyPhysical() ? "physical" : "authored",
-                  level_.skyMieScatter(), level_.skyMultiScatter(),
-                  level_.skyViewSteps(), level_.skyAerialSteps());
-    }
+    // RESEEDED FROM THE ATMOSPHERE, not from the level, because the frame loop copies sunColor_
+    // back over sky_.sunColor every frame -- so applying the level and not doing this would show
+    // the level's sun for exactly zero frames. See LevelSky.hpp's note on host-owned mirrors.
+    for (int i = 0; i < 3; ++i) sunColor_[i] = sky_.sunColor[i];
+    if (w.hasFog) fogDensity_ = sky_.fogDensity;
+
+    AVER_INFO("[Level] applied environment: sun={} sky={} fog={} clouds={}, intensity {:.2f}, "
+              "model {}", w.hasSun, w.hasSky, w.hasFog, w.hasClouds, sky_.sunIntensity,
+              w.skyPhysical ? "physical" : "authored");
 #endif
 }
 
@@ -1274,10 +1266,9 @@ void GameApp::pushFrame(Engine& e) {
                   aspect, zNear, zFar);
     }
 
-    f32 fog = fogDensity_;
-#if AVER_MODULE_SCENE
-    if (level_.hasFog()) fog = level_.fogDensity();
-#endif
+    // ONE MEMBER FOR ONE VALUE, matching the editor's own fix: applyLevelSky seeds fogDensity_ from
+    // the level, so there is no second member for this to lose a race with.
+    const f32 fog = fogDensity_;
     // FROZEN: sunDirection stays unnormalised here -- the shaders normalise it.
     sky_.enabled = true;
     for (int i = 0; i < 3; ++i) {

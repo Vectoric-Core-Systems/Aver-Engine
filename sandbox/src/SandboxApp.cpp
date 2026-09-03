@@ -166,6 +166,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "aver/pbr/PbrShaders.hpp"
 #include "aver/formats/OcMat.hpp"
 #include "aver/formats/MaterialScript.hpp"
+#include "aver/assets/LevelSky.hpp"
 #include "aver/assets/TextureUpload.hpp"
 #endif
 
@@ -13352,6 +13353,11 @@ private:
                     sky_.cloudScale = 1.0f / std::fmax(featureSize, 1.0f);
                 ImGui::DragFloat2("Wind", sky_.cloudWind, 5.0f);
             }
+            // CLOUDS IS ITS OWN RECORD, so it needs its own mark, for the same reason FOG did. The
+            // Clouds checkbox is above the `if`, deliberately: turning clouds OFF is an edit that
+            // has to reach the file, and marking only inside the enabled branch would make "off"
+            // the one cloud setting that could never be saved.
+            markLevelRecordEdited(hasLevelClouds_);
             markLevelRecordEdited(hasLevelSky_);
         } else if (sel_==-4){
             ImGui::TextUnformatted("Post Process"); ImGui::Separator();
@@ -16119,13 +16125,9 @@ private:
         }
 #endif
 
-        if (w.hasFog) {
-            fogDensity_ = static_cast<f32>(w.fogDensity);
-            fogColor_[0] = static_cast<f32>(w.fogColor[0]);
-            fogColor_[1] = static_cast<f32>(w.fogColor[1]);
-            fogColor_[2] = static_cast<f32>(w.fogColor[2]);
-            hasLevelFog_ = true;
-        }
+        // FOG USED TO BE UNPACKED HERE, four lines above the call that now does it. Two places
+        // reading the same record is how they drift, and this pair already had: this block set
+        // fogDensity_ while saveLevel wrote a different member entirely.
         applyLevelSky(w);
         levelPath_ = path;
         levelName_ = w.name;
@@ -16289,22 +16291,30 @@ private:
     }
 #endif
 
-    // Applies a level's SUN and SKY records to the live atmosphere.
-    // The SUN half is NEW BEHAVIOUR: OcWorld has always parsed sunDir/sunColor/sunLux and nothing has
-    // ever read them, so every level in existence has been lit by the editor's default sun.
+    // Applies a level's SUN, SKY, FOG and CLOUDS records to the live atmosphere.
+    //
+    // The MAPPING is aver::assets::applyLevelEnv, shared with the shipped game -- see LevelSky.hpp
+    // for why it is one function and not two. What stays here is what is genuinely the EDITOR's:
+    // its own mirrors of the fields the Details sliders bind to, the record-present flags saveLevel
+    // reads, and the one warning that only makes sense to somebody authoring a level.
     void applyLevelSky(const fmt::OcWorldData& w) {
+        assets::applyLevelEnv(w, sky_);
+
+        // RESEEDED FROM THE ATMOSPHERE. The frame loop copies each of these back over sky_ every
+        // frame (see the "FROZEN: sunDirection stays unnormalised" block), so applying a level and
+        // not doing this would show its sky for exactly zero frames -- which is the shape the sun's
+        // `lux` bug already had once: a level could state any intensity and every scene rendered at
+        // the editor's default, silently, with a BIT-IDENTICAL frame either way.
+        for (int i = 0; i < 3; ++i) {
+            sunColor_[i]   = sky_.sunColor[i];
+            skyZenith_[i]  = sky_.zenith[i];
+            skyHorizon_[i] = sky_.horizon[i];
+            fogColor_[i]   = sky_.fogColor[i];
+        }
+        sunAmbient_ = sky_.skyLightIntensity;
+        fogDensity_ = sky_.fogDensity;
+
         if (w.hasSun) {
-            for (int i = 0; i < 3; ++i) {
-                sky_.sunDirection[i] = static_cast<f32>(w.sunDir[i]);
-                sunColor_[i] = static_cast<f32>(w.sunColor[i]);
-            }
-            // `lux` WAS STILL BEING DROPPED after the comment above said sunDir/sunColor no longer
-            // were: a level could state any sun intensity and every scene rendered at the editor's
-            // default 3.0, silently -- caught by changing lux 112000 -> 34000 and getting a
-            // BIT-IDENTICAL frame back.
-            // The divisor makes the two defaults agree (OcWorldData's 100000 / SkyAtmosphere's 3.0)
-            // rather than inventing a constant, so omitting SUN never changes brightness.
-            sky_.sunIntensity = static_cast<f32>(w.sunLux / (100000.0 / 3.0));
             // A sun below the horizon is legal -- the physical model renders night -- but under the
             // authored dome it silently lit everything from underneath, so no level was ever told.
             // Say it out loud rather than clamping: only the author knows if they meant it.
@@ -16316,14 +16326,9 @@ private:
                           "as it always did.", elev, w.sunDir[0], w.sunDir[1], w.sunDir[2]);
             hasLevelSun_ = true;
         }
-        if (w.hasSky) {
-            sky_.model = w.skyPhysical ? rhi::SkyModel::Physical : rhi::SkyModel::Authored;
-            if (w.skyMieScatter   >= 0.0) sky_.air.mieScatter       = static_cast<f32>(w.skyMieScatter);
-            if (w.skyMultiScatter >= 0.0) sky_.air.multiScatterGain = static_cast<f32>(w.skyMultiScatter);
-            if (w.skyViewSteps    >  0)   sky_.air.viewSteps        = w.skyViewSteps;
-            if (w.skyAerialSteps  >  0)   sky_.air.aerialSteps      = w.skyAerialSteps;
-            hasLevelSky_ = true;
-        }
+        if (w.hasSky)    hasLevelSky_    = true;
+        if (w.hasFog)    hasLevelFog_    = true;
+        if (w.hasClouds) hasLevelClouds_ = true;
     }
 
     // Puts the editor camera where the whole level is visible, and fits the fly speed and the GI
@@ -16490,6 +16495,7 @@ private:
         hasLevelFog_ = false;
         hasLevelSun_ = false;
         hasLevelSky_ = false;
+        hasLevelClouds_ = false;
         // BACK TO THE EDITOR DEFAULT, now that the slider IS the saved value. While fog lived in two
         // members this happened for free: the level's copy went out of scope with levelFog_ and the
         // slider had never been touched. With one member, leaving it alone would carry one level's
@@ -16526,33 +16532,38 @@ private:
             }
         }
 
-        w.hasFog = hasLevelFog_;
-        w.fogDensity = fogDensity_;
-        w.fogColor[0] = fogColor_[0]; w.fogColor[1] = fogColor_[1]; w.fogColor[2] = fogColor_[2];
+        // EACH RECORD GOES OUT WHENEVER THE LEVEL CARRIED IT **OR** THE AUTHOR HAS EDITED IT HERE
+        // (markLevelRecordEdited), so a Details-panel edit survives a save rather than being
+        // silently dropped. That second half was missing for a long time: the claim was in this
+        // comment while the flags were set only by the loader, so it held for levels that already
+        // had the record and for no others.
+        w.hasSun    = hasLevelSun_;
+        w.hasSky    = hasLevelSky_;
+        w.hasFog    = hasLevelFog_;
+        w.hasClouds = hasLevelClouds_;
 
-        // The sun and the sky go back out whenever the level carried them OR the author has edited
-        // them here (markLevelRecordEdited), so a Details-panel edit survives a save rather than
-        // being silently dropped. That second half was missing: this comment used to make the claim
-        // while the flags were set only by the loader, so it held for levels that already had the
-        // record and for no others.
-        w.hasSun = hasLevelSun_;
-        w.hasSky = hasLevelSky_;
-        // THE SUN'S BRIGHTNESS, which applyLevelSky has always READ (sunLux -> sunIntensity)
-        // and saveLevel never wrote. Turn Intensity down, save, reload, and the old lux came
-        // straight back from levelHeader_'s passthrough. GameApp does the identical mapping,
-        // so the runtime already honoured a lux the editor had no way to author.
-        w.sunLux = static_cast<f64>(sky_.sunIntensity) * (100000.0 / 3.0);
+        // THE EDITOR'S OWN MIRRORS GO BACK INTO THE ATMOSPHERE FIRST, because the Details sliders
+        // bind to these members rather than to sky_, and the frame loop is what normally copies
+        // them across. saveLevel can be reached on a frame where that has not happened yet -- from
+        // --save-level, which runs the moment the renderer attaches -- and reading sky_ without
+        // this would then write the atmosphere's defaults over the author's sliders.
         for (int i = 0; i < 3; ++i) {
-            w.sunDir[i] = sky_.sunDirection[i];
-            w.sunColor[i] = sunColor_[i];
+            sky_.sunColor[i] = sunColor_[i];
+            sky_.zenith[i]   = skyZenith_[i];
+            sky_.horizon[i]  = skyHorizon_[i];
+            sky_.fogColor[i] = fogColor_[i];
         }
+        sky_.skyLightIntensity = sunAmbient_;
+        sky_.fogDensity        = fogDensity_;
+
+        // ONE CAPTURE, the exact inverse of the one applyLevelSky applies -- see LevelSky.hpp. This
+        // was seventeen hand-written assignments that had to be kept in step with the loader by
+        // eye, and were not: the sun's `lux` was read and never written, so turning Intensity down
+        // and saving gave the old value straight back from levelHeader_'s passthrough.
+        assets::captureLevelEnv(sky_, w);
+
         // Straight back out, in the order they were read. See loadLevel.
-        w.pcgVolumes      = levelPcgVolumes_;
-        w.skyPhysical     = sky_.model == rhi::SkyModel::Physical;
-        w.skyMieScatter   = sky_.air.mieScatter;
-        w.skyMultiScatter = sky_.air.multiScatterGain;
-        w.skyViewSteps    = sky_.air.viewSteps;
-        w.skyAerialSteps  = sky_.air.aerialSteps;
+        w.pcgVolumes = levelPcgVolumes_;
 
         for (const scene::Entity e : levelEntities_) {
             if (!world.valid(e)) continue;
@@ -16685,6 +16696,10 @@ private:
     bool hasLevelSun_ = false;
     bool hasLevelSky_ = false;
     bool hasLevelFog_ = false;
+    // "This level said something about clouds", which is NOT the same as "this level has clouds" --
+    // see fmt::OcWorldEnv::hasClouds. Without the distinction, saving an overcast level that had
+    // been switched to clear would write no record and it would come back overcast.
+    bool hasLevelClouds_ = false;
 
 #if AVER_MODULE_FRAMEWORK
     // GRAPH-AS-CLASS / any other class placement -- see loadLevel's own comment (where
