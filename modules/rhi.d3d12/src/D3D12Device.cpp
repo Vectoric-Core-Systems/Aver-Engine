@@ -3492,6 +3492,18 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
 
     for (IRenderFeature* f : features_) {
         if (!f->overridesScenePipeline() || !rhiContext_) continue;
+        // UNLIT FALLS THROUGH TO THIS BACKEND'S OWN PSO, exactly as wireframe does, and for the same
+        // structural reason rather than as a shortcut: the unlit bypass lives in the shared prelude
+        // (`gMaterial.z > 0.5`), which the backend's own shader runs and an overriding feature's does
+        // not -- Voxi's scene shader reads gMaterialFlags and gMaterial.xy and never gMaterial.z. So
+        // asking the feature for a pipeline here would hand the draw to a shader with no unlit branch
+        // in it and the mode would silently do nothing.
+        //
+        // Wireframe expresses the same decision one level down, inside VoxiRenderer::scenePipeline,
+        // which returns 0 when wireframe is requested. Unlit is decided here instead only because
+        // scenePipeline has no unlit parameter to decline on, and adding one would change the
+        // IRenderFeature interface for a fallthrough both sides already agree about.
+        if (unlit_) break;
         // `blended` explicit and false: the OPAQUE scene walk. A translucent mesh never reaches here
         // -- setDrawBlended(true) diverts it into the capture-and-replay path above -- so writing
         // false out loud says so, rather than leaning on the parameter's default.
