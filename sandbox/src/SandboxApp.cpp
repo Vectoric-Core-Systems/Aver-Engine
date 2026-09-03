@@ -12535,9 +12535,15 @@ private:
 
     // Draws the material half of the Details panel, editing the shared MaterialDesc where there is
     // one and the actor's own values otherwise.
-    void materialPanel(MeshObj& o) {
+    // TAKES A HANDLE, not a MeshObj. This whole panel -- ~25 sliders, the IOR/F0 consistency
+    // check, the texture slots and Save to C# -- was reachable from exactly one call site: the
+    // editor's PLACEHOLDER objects. A real scene entity's Details offered Transform and Mesh
+    // and nothing else, which docs/EDITOR.md:276 states outright. The material was always one
+    // lookup away (surfaceMaterials_ maps the token a CMeshRenderer carries to exactly this
+    // handle); only the signature stood in the way.
+    void materialPanel(pbr::MaterialHandle handle) {
 #if AVER_MODULE_PBR
-        pbr::MaterialDesc* d = pbr::MaterialLibrary::get().mutableDesc(o.material);
+        pbr::MaterialDesc* d = pbr::MaterialLibrary::get().mutableDesc(handle);
         if (!d) { ImGui::TextDisabled("No material (drawing with the fallback)"); return; }
         bool changed = false;
         changed |= ImGui::SliderFloat("Metallic", &d->metallicFactor, 0.0f, 1.0f);
@@ -12611,7 +12617,7 @@ private:
                 changed = true;
             }
         }
-        if (changed) pbr::MaterialLibrary::get().touch(o.material);
+        if (changed) pbr::MaterialLibrary::get().touch(handle);
 
         ImGui::Separator();
         ImGui::BeginDisabled(!project_.valid() || d->name.empty());
@@ -12936,7 +12942,7 @@ private:
             }
             if (ImGui::CollapsingHeader("Material", ImGuiTreeNodeFlags_DefaultOpen)) {
                 ImGui::ColorEdit3("Base Color", o.color);
-                materialPanel(o);
+                materialPanel(o.material);
             }
             ImGui::Checkbox("Visible", &o.visible);
 #if AVER_MODULE_SCENE
@@ -12976,6 +12982,31 @@ private:
                     }
                     ImGui::TextDisabled("mesh id 0x%llx", (unsigned long long)mr->mesh);
                 }
+
+                // THE MATERIAL, which a scene entity's Details has never offered. The scene stores a
+                // NAME TOKEN, not a material handle -- surfaceMaterials_ is the map between them,
+                // populated when the project's .ocmat files load -- so this is the one lookup that
+                // stood between the panel and the entities anybody actually edits.
+                //
+                // Says WHICH surface by name, because the desc behind it is SHARED: every entity
+                // using M_Floor is looking at these same sliders, and editing them here moves all of
+                // them. That is the material system working as designed, and it is the sort of thing
+                // a panel should say out loud rather than let somebody discover.
+#if AVER_MODULE_PBR
+                if (ImGui::CollapsingHeader("Material", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    const char* surfaceName = aver_scene_material_name(mr->material);
+                    const auto it = surfaceMaterials_.find(mr->material);
+                    if (it == surfaceMaterials_.end() || !it->second) {
+                        ImGui::TextDisabled("Surface '%s' has no .ocmat loaded.",
+                                            surfaceName && *surfaceName ? surfaceName : "(none)");
+                        ImGui::TextDisabled("Drawing with the flat fallback; author one under Content\\Materials.");
+                    } else {
+                        ImGui::TextDisabled("Surface  %s", surfaceName && *surfaceName ? surfaceName : "(unnamed)");
+                        ImGui::TextDisabled("Shared: editing this changes every entity using it.");
+                        materialPanel(it->second);
+                    }
+                }
+#endif
             }
 #if AVER_MODULE_PARTICLES
             // The authoring surface DECIDED components need: visible and editable the same way
