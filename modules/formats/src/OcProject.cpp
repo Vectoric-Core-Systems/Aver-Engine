@@ -1,5 +1,7 @@
 // .ocproject reader and writer: parses a project manifest and rewrites it in place.
 #include "aver/formats/OcProject.hpp"
+
+#include <cstdio>
 #include "aver/formats/detail/TextScan.hpp"
 #include "aver/platform/FileSystem.hpp"
 #include "aver/core/Version.hpp"
@@ -92,6 +94,42 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
             if (t.size() > 1) out.rtRenderMode = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.PTBOUNCES")) {
             if (t.size() > 1) out.ptBounces = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.GICONES")) {
+            if (t.size() > 1) out.giCones = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.REFRACTIONMODE")) {
+            if (t.size() > 1) out.refractionMode = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.REFRACTIONSTRENGTH")) {
+            if (t.size() > 1) out.refractionStrength = static_cast<f32>(parseF64(t[1]));
+        } else if (equalsCI(key, "RENDER.REFRACTIONEDGEFADE")) {
+            if (t.size() > 1) out.refractionEdgeFade = static_cast<f32>(parseF64(t[1]));
+        } else if (equalsCI(key, "RENDER.LODSELECT")) {
+            if (t.size() > 1) out.lodSelect = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.LODTHRESHOLD")) {
+            if (t.size() > 1) out.lodThresholdPx = static_cast<f32>(parseF64(t[1]));
+        } else if (equalsCI(key, "RENDER.OCCLUSIONCULL")) {
+            if (t.size() > 1) out.occlusionCull = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.DEPTHPREPASS")) {
+            if (t.size() > 1) out.depthPrepass = parseI32(t[1], -1);
+        } else if (equalsCI(key, "PHYSICS.GRAVITY")) {
+            // All three or none: a partial vector is worse than no vector, because two of the axes
+            // would silently keep a default the author thought they had replaced.
+            if (t.size() > 3) {
+                out.gravity[0] = static_cast<f32>(parseF64(t[1]));
+                out.gravity[1] = static_cast<f32>(parseF64(t[2]));
+                out.gravity[2] = static_cast<f32>(parseF64(t[3]));
+                out.hasGravity = true;
+            }
+        } else if (equalsCI(key, "PHYSICS.FIXEDSTEP")) {
+            if (t.size() > 1) out.fixedStep = static_cast<f32>(parseF64(t[1]));
+        } else if (equalsCI(key, "AUDIO.MASTER")) {
+            if (t.size() > 1) { out.masterVolume = static_cast<f32>(parseF64(t[1])); out.hasAudioMix = true; }
+        } else if (equalsCI(key, "AUDIO.BUS")) {
+            // Four on one line, in audio_abi.h's own bus order. One key rather than four keeps the
+            // mix readable as a mix, and makes a partial write impossible.
+            if (t.size() > 4) {
+                for (int i = 0; i < 4; ++i) out.busVolume[i] = static_cast<f32>(parseF64(t[static_cast<usize>(i) + 1]));
+                out.hasAudioMix = true;
+            }
         }
     }
 
@@ -161,6 +199,10 @@ bool isOwnedKey(std::string_view line) {
         "RENDER.VOXELRES", "RENDER.GIINTENSITY", "RENDER.GIDISTANCE",
         "RENDER.RTSHADOWRAYS", "RENDER.RTPIXELSPERRAY", "RENDER.RTSHADOWDENOISE",
         "RENDER.RTRENDERMODE", "RENDER.PTBOUNCES", "RENDER.LAYEREDBSDF",
+        "RENDER.GICONES", "RENDER.REFRACTIONMODE", "RENDER.REFRACTIONSTRENGTH",
+        "RENDER.REFRACTIONEDGEFADE", "RENDER.LODSELECT", "RENDER.LODTHRESHOLD",
+        "RENDER.OCCLUSIONCULL", "RENDER.DEPTHPREPASS",
+        "PHYSICS.GRAVITY", "PHYSICS.FIXEDSTEP", "AUDIO.MASTER", "AUDIO.BUS",
     };
     const std::vector<std::string_view> t = splitWhitespace(l);
     if (t.empty()) return false;
@@ -206,6 +248,33 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     appendKey(owned, "RENDER.RTRENDERMODE", d.rtRenderMode);
     appendKey(owned, "RENDER.PTBOUNCES", d.ptBounces);
     appendKey(owned, "RENDER.LAYEREDBSDF", d.layeredBsdf);
+    appendKey(owned, "RENDER.GICONES", d.giCones);
+    appendKey(owned, "RENDER.REFRACTIONMODE", d.refractionMode);
+    appendKey(owned, "RENDER.REFRACTIONSTRENGTH", d.refractionStrength);
+    appendKey(owned, "RENDER.REFRACTIONEDGEFADE", d.refractionEdgeFade);
+    appendKey(owned, "RENDER.LODSELECT", d.lodSelect);
+    appendKey(owned, "RENDER.LODTHRESHOLD", d.lodThresholdPx);
+    appendKey(owned, "RENDER.OCCLUSIONCULL", d.occlusionCull);
+    appendKey(owned, "RENDER.DEPTHPREPASS", d.depthPrepass);
+
+    // WRITTEN ON THEIR PRESENCE FLAG, not on a sentinel -- appendKey's "negative means unstated"
+    // rule cannot express a downward gravity or a muted bus. See OcProjectDesc for both reasons.
+    if (d.hasGravity) {
+        char b[160];
+        std::snprintf(b, sizeof b, "PHYSICS.GRAVITY %g %g %g\n",
+                      static_cast<double>(d.gravity[0]), static_cast<double>(d.gravity[1]),
+                      static_cast<double>(d.gravity[2]));
+        owned += b;
+    }
+    appendKey(owned, "PHYSICS.FIXEDSTEP", d.fixedStep);
+    if (d.hasAudioMix) {
+        char b[200];
+        std::snprintf(b, sizeof b, "AUDIO.MASTER %g\nAUDIO.BUS %g %g %g %g\n",
+                      static_cast<double>(d.masterVolume),
+                      static_cast<double>(d.busVolume[0]), static_cast<double>(d.busVolume[1]),
+                      static_cast<double>(d.busVolume[2]), static_cast<double>(d.busVolume[3]));
+        owned += b;
+    }
 
     if (trim(existing).empty()) {
         std::string out = "OCPROJECT " + std::to_string(d.version > 0 ? d.version : 1) + "\n";

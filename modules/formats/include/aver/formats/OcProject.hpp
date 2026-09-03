@@ -70,14 +70,48 @@ struct ProjectDesc {
     int rtRenderMode       = -1; // RENDER.RTRENDERMODE     0 = raster primary, 1 = ray-driven
     int ptBounces          = -1; // RENDER.PTBOUNCES        PATH tracing: bounces after the first hit, [1,8]
     int layeredBsdf        = -1; // RENDER.LAYEREDBSDF      0=Off 1=Low 2=Medium 3=High 4=Epic
+    int giCones            = -1; // RENDER.GICONES          diffuse gather cones, [1,16]
+    int refractionMode     = -1; // RENDER.REFRACTIONMODE   0=Off 1=Screen-space 2=Ray-traced
+    f32 refractionStrength = -1.0f; // RENDER.REFRACTIONSTRENGTH  bend scale
+    f32 refractionEdgeFade = -1.0f; // RENDER.REFRACTIONEDGEFADE  hides the screen-space miss at edges
+    int lodSelect          = -1; // RENDER.LODSELECT        0/1; off draws every instance at LOD 0
+    f32 lodThresholdPx     = -1.0f; // RENDER.LODTHRESHOLD  screen-space error, pixels
+    int occlusionCull      = -1; // RENDER.OCCLUSIONCULL    0/1
+    int depthPrepass       = -1; // RENDER.DEPTHPREPASS     0/1
 
     // True when the manifest stated at least one RENDER.* key.
     bool hasRenderSettings() const {
         return giQuality >= 0 || rayTracing >= 0 || pathTracing >= 0 ||
                voxelResolution > 0 || giIntensity >= 0.0f || giMaxDistance >= 0.0f ||
                rtShadowRays >= 0 || rtPixelsPerRayTile >= 0 || rtShadowDenoise >= 0 ||
-               rtRenderMode >= 0 || ptBounces >= 0 || layeredBsdf >= 0;
+               rtRenderMode >= 0 || ptBounces >= 0 || layeredBsdf >= 0 ||
+               giCones >= 0 || refractionMode >= 0 || refractionStrength >= 0.0f ||
+               refractionEdgeFade >= 0.0f || lodSelect >= 0 || lodThresholdPx >= 0.0f ||
+               occlusionCull >= 0 || depthPrepass >= 0;
     }
+
+    // PHYSICS.* -- the world-wide defaults a project starts its simulation with.
+    //
+    // GRAVITY NEEDS A PRESENCE FLAG, NOT A SENTINEL, and that is the whole reason this section is
+    // shaped differently from RENDER.*: gravity points DOWN, so every component a project would
+    // realistically state is negative, and the `< 0 means unstated` rule the RENDER keys use would
+    // make the only interesting value unwritable.
+    bool hasGravity = false;
+    f32  gravity[3] = {0.0f, 0.0f, -980.0f};   // cm/s^2, engine axes; one g down +Z-up
+    // Seconds. Strictly positive, so -1 can mean unstated here where it cannot for gravity.
+    f32  fixedStep  = -1.0f;                   // PHYSICS.FIXEDSTEP
+
+    bool hasPhysicsSettings() const { return hasGravity || fixedStep > 0.0f; }
+
+    // AUDIO.* -- the mix a project starts at. Bus order matches audio_abi.h's
+    // AVER_AUDIO_BUS_SFX / MUSIC / VOICE / UI.
+    //
+    // ONE PRESENCE FLAG FOR THE WHOLE MIX, because zero is the most meaningful value any of these
+    // takes: a project that ships with music muted must be able to say so, and a `< 0 means
+    // unstated` rule would silently turn that into "leave it at 1".
+    bool hasAudioMix = false;
+    f32  masterVolume = 1.0f;                  // AUDIO.MASTER
+    f32  busVolume[4] = {1.0f, 1.0f, 1.0f, 1.0f};   // AUDIO.BUS <sfx> <music> <voice> <ui>
 
     std::string dir;                    // absolute directory the manifest lives in
     std::string manifestPath;           // absolute path to the .ocproject itself

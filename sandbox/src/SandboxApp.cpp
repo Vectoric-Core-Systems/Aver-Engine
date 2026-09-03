@@ -7078,7 +7078,52 @@ private:
         if (project_.rtRenderMode       >= 0) s.rtRenderMode       = static_cast<u32>(project_.rtRenderMode);
         if (project_.ptBounces          >= 0) s.ptBounces          = static_cast<u32>(project_.ptBounces);
         if (project_.layeredBsdf        >= 0) s.layeredBsdf        = static_cast<voxi::Quality>(project_.layeredBsdf);
+        if (project_.giCones            >= 0) s.giCones            = static_cast<u32>(project_.giCones);
+        if (project_.refractionMode     >= 0) s.refractionMode     = static_cast<u32>(project_.refractionMode);
+        if (project_.refractionStrength >= 0.0f) s.refractionStrength = project_.refractionStrength;
+        if (project_.refractionEdgeFade >= 0.0f) s.refractionEdgeFade = project_.refractionEdgeFade;
         vx.setSettings(s);   // clamps to this device; the manifest keeps what was asked for
+
+        // THE THREE THAT ARE NOT VOXI SETTINGS. LOD select, occlusion culling and the depth
+        // pre-pass are editor-side per-frame flags rather than fields on voxi::Settings, so they
+        // are applied directly rather than through setSettings. Same manifest keys, same -1 means
+        // unstated rule.
+        if (project_.lodSelect >= 0)
+            setLodSelect(project_.lodSelect != 0,
+                         project_.lodThresholdPx >= 0.0f ? project_.lodThresholdPx : lodErrorThresholdPx_);
+        else if (project_.lodThresholdPx >= 0.0f)
+            setLodSelect(lodSelectEnabled_, project_.lodThresholdPx);
+        if (project_.occlusionCull >= 0) occlusionCullEnabled_ = project_.occlusionCull != 0;
+        if (project_.depthPrepass  >= 0) depthPrepassOverride_ = project_.depthPrepass != 0;
+
+        // ---- PHYSICS AND AUDIO, which no manifest could state until now -------------------------
+        //
+        // GUARDED ON READINESS, not attempted blind: a project can open before either subsystem has
+        // been initialised, and both ABIs are explicit that a call before init is a no-op. Applying
+        // into a world that does not exist yet would look like the setting was honoured and leave
+        // the default running.
+#if AVER_MODULE_PHYSICS
+        if (aver_phys_ready()) {
+            if (project_.hasGravity)
+                aver_phys_set_gravity(project_.gravity[0], project_.gravity[1], project_.gravity[2]);
+            // CHECKED, because the setter refuses a step outside (0, 0.5] and says so by returning
+            // 0. A manifest with a nonsense step must not read as applied.
+            if (project_.fixedStep > 0.0f && !aver_phys_set_fixed_step(project_.fixedStep))
+                AVER_WARN("[Project] PHYSICS.FIXEDSTEP {} refused -- must be within (0, 0.5] seconds",
+                          project_.fixedStep);
+        } else if (project_.hasPhysicsSettings()) {
+            AVER_INFO("[Project] physics settings will apply once the world exists");
+        }
+#endif
+// AVER_SOUND_EDITOR_AUDIO, not a plausible-looking AVER_MODULE_AUDIO -- there is no such macro,
+// and an #if on one compiles this whole block to nothing while the build stays green. The name is
+// historical (see the include at the top of this file): it means "this build links the mixer seam".
+#if AVER_SOUND_EDITOR_AUDIO
+        if (project_.hasAudioMix) {
+            aver_audio_set_master_volume(project_.masterVolume);
+            for (int b = 0; b < 4; ++b) aver_audio_set_bus_volume(b, project_.busVolume[b]);
+        }
+#endif
 
         // ---- THE COMMAND LINE OUTRANKS THE MANIFEST, AND UNTIL NOW IT DID NOT ----
         // THE BUG THIS FIXES: CLI overrides apply ONCE at startup, but this function runs LATER when a
@@ -7193,6 +7238,14 @@ private:
         project_.rtRenderMode       = static_cast<int>(requested.rtRenderMode);
         project_.ptBounces          = static_cast<int>(requested.ptBounces);
         project_.layeredBsdf        = static_cast<int>(requested.layeredBsdf);
+        project_.giCones            = static_cast<int>(requested.giCones);
+        project_.refractionMode     = static_cast<int>(requested.refractionMode);
+        project_.refractionStrength = requested.refractionStrength;
+        project_.refractionEdgeFade = requested.refractionEdgeFade;
+        project_.lodSelect          = lodSelectEnabled_ ? 1 : 0;
+        project_.lodThresholdPx     = lodErrorThresholdPx_;
+        project_.occlusionCull      = occlusionCullEnabled_ ? 1 : 0;
+        project_.depthPrepass       = depthPrepassOverride_ ? 1 : 0;
         projectDirty_ = true;
     }
 #else
@@ -14769,6 +14822,10 @@ private:
         if (ImGui::Selectable("Ray Tracing",            settingsPage_==3)) settingsPage_=3;
         if (ImGui::Selectable("Path Tracing",           settingsPage_==4)) settingsPage_=4;
         ImGui::Unindent();
+        // SIBLINGS OF RENDERING, not children of it: neither is drawn by the renderer, and nesting
+        // them under it would say they were.
+        if (ImGui::Selectable("Physics",                settingsPage_==5)) settingsPage_=5;
+        if (ImGui::Selectable("Audio",                  settingsPage_==6)) settingsPage_=6;
         ImGui::Unindent();
         ImGui::EndChild();
 
@@ -14840,6 +14897,10 @@ private:
                 ImGui::TextDisabled("No project loaded. The editor runs fine without one; open or");
                 ImGui::TextDisabled("create a project from the start screen to populate this page.");
             }
+        } else if (settingsPage_ == 5) {
+            buildPhysicsSettings();
+        } else if (settingsPage_ == 6) {
+            buildAudioSettings();
         } else {
 #if AVER_MODULE_VOXI
             buildRenderingSettings(settingsPage_);
@@ -14867,6 +14928,91 @@ private:
     // Draws one of the Rendering page's sub-pages (General / Global Illumination / Ray Tracing /
     // Path Tracing). Each feature reports its real status and is disabled when the renderer or GPU
     // can't do it. Reads and writes the WHOLE Settings struct regardless of which sub-page is showing.
+    // Project Settings > Physics. World-wide defaults, written to PHYSICS.* in the manifest.
+    void buildPhysicsSettings() {
+        ImGui::TextUnformatted("Physics");
+        ImGui::SameLine(); ImGui::TextDisabled("(Jolt, behind the plain-C seam)");
+        ImGui::Separator();
+#if AVER_MODULE_PHYSICS
+        // NOT READY IS A REAL STATE, not an error: a project can be open before anything has called
+        // aver_phys_init. Every setter below would silently no-op, so the page says so instead of
+        // offering controls that do nothing.
+        const bool ready = aver_phys_ready() != 0;
+        if (!ready)
+            ImGui::TextDisabled("No physics world yet -- these apply when one is created.");
+
+        ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.45f);
+        ImGui::TextUnformatted("Gravity (cm/s^2)");
+        if (ImGui::DragFloat3("##gravity", project_.gravity, 1.0f, -10000.0f, 10000.0f, "%.1f")) {
+            project_.hasGravity = true;
+            projectDirty_ = true;
+            if (ready) aver_phys_set_gravity(project_.gravity[0], project_.gravity[1], project_.gravity[2]);
+        }
+        uiReg_.track("project.physics.gravity");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Engine axes, +Z up. One g down is (0, 0, -980).");
+
+        // SECONDS ON THE WIRE, HERTZ ON SCREEN. The ABI takes a step in seconds; nobody reasons in
+        // 0.0167. The conversion happens here rather than in the format so the file stays the ABI's
+        // own unit.
+        f32 hz = project_.fixedStep > 0.0f ? 1.0f / project_.fixedStep : 60.0f;
+        if (ImGui::SliderFloat("Tick rate (Hz)", &hz, 20.0f, 240.0f, "%.0f")) {
+            project_.fixedStep = 1.0f / hz;
+            projectDirty_ = true;
+            // CHECKED: the setter refuses anything outside (0, 0.5] and reports it by returning 0.
+            if (ready && !aver_phys_set_fixed_step(project_.fixedStep))
+                AVER_WARN("[Project] physics tick rate {} Hz refused by the solver", hz);
+        }
+        uiReg_.track("project.physics.tickRate");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("The fixed step the solver advances in. Its own header advises setting\n"
+                              "this before any bodies exist; changing it mid-session changes how a\n"
+                              "running simulation behaves.");
+        ImGui::PopItemWidth();
+
+        if (ready) ImGui::TextDisabled("%d body(ies) in the world.", aver_phys_body_count());
+#else
+        ImGui::TextDisabled("This build has no physics module.");
+#endif
+    }
+
+    // Project Settings > Audio. The mix a project starts at, written to AUDIO.* in the manifest.
+    void buildAudioSettings() {
+        ImGui::TextUnformatted("Audio");
+        ImGui::SameLine(); ImGui::TextDisabled("(Aver.Audio mixer)");
+        ImGui::Separator();
+#if AVER_SOUND_EDITOR_AUDIO
+        ImGui::TextDisabled("Applied when the project opens. The device may be closed until a");
+        ImGui::TextDisabled("Play session or the Sound Editor opens it; the values still stick.");
+        ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.45f);
+
+        // ONE PRESENCE FLAG FOR THE WHOLE MIX -- see OcProjectDesc::hasAudioMix. Touching any
+        // slider makes the project state a mix, because a muted bus and an unstated one have to
+        // stay different things.
+        bool mixed = false;
+        if (ImGui::SliderFloat("Master", &project_.masterVolume, 0.0f, 1.0f, "%.2f")) mixed = true;
+        uiReg_.track("project.audio.master");
+        ImGui::Separator();
+        static const char* kBusNames[4] = {"Sfx", "Music", "Voice", "UI"};
+        for (int b = 0; b < 4; ++b) {
+            if (ImGui::SliderFloat(kBusNames[b], &project_.busVolume[b], 0.0f, 1.0f, "%.2f")) mixed = true;
+            uiReg_.track((std::string("project.audio.bus.") + kBusNames[b]).c_str());
+        }
+        ImGui::PopItemWidth();
+
+        if (mixed) {
+            project_.hasAudioMix = true;
+            projectDirty_ = true;
+            aver_audio_set_master_volume(project_.masterVolume);
+            for (int b = 0; b < 4; ++b) aver_audio_set_bus_volume(b, project_.busVolume[b]);
+        }
+        if (!project_.hasAudioMix)
+            ImGui::TextDisabled("This project states no mix; these are the engine's defaults.");
+#else
+        ImGui::TextDisabled("This build does not link the audio seam.");
+#endif
+    }
+
     void buildRenderingSettings(int page) {
         using namespace aver::voxi;
         Renderer& vx = Renderer::get();
@@ -14926,6 +15072,56 @@ private:
             if ((s.layeredBsdf != Quality::Off) != voxiRenderer_.layeredBsdfActive())
                 ImGui::TextWrapped("Takes effect when the project is reloaded; the shaders compiled "
                                    "for this session are unchanged.");
+
+            // ---- refraction, and three culling knobs that were CLI-only ------------------------
+            //
+            // All four were live per-frame state with no control anywhere: a flag on the command
+            // line could set them and nothing could record the choice. Each is one manifest key.
+            ImGui::Separator();
+            ImGui::TextUnformatted("Refraction");
+            {
+                int rm = static_cast<int>(s.refractionMode);
+                const char* rms[] = {"Off", "Screen-space", "Ray-traced"};
+                if (ImGui::Combo("Mode", &rm, rms, 3)) { s.refractionMode = static_cast<u32>(rm); changed = true; }
+                uiReg_.track("project.refraction.mode");
+                ImGui::BeginDisabled(s.refractionMode == 0);
+                if (ImGui::SliderFloat("Strength", &s.refractionStrength, 0.0f, 2.0f)) changed = true;
+                uiReg_.track("project.refraction.strength");
+                if (ImGui::SliderFloat("Edge fade", &s.refractionEdgeFade, 0.0f, 1.0f)) changed = true;
+                uiReg_.track("project.refraction.edgeFade");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Screen-space refraction cannot see what the camera never saw.\n"
+                                      "This fades the effect out near the screen edge, where the miss\n"
+                                      "would otherwise be visible.");
+                ImGui::EndDisabled();
+            }
+
+            ImGui::Separator();
+            ImGui::TextUnformatted("Culling and level of detail");
+            {
+                bool lod = lodSelectEnabled_;
+                if (ImGui::Checkbox("LOD select", &lod)) {
+                    setLodSelect(lod, lodErrorThresholdPx_);
+                    projectDirty_ = true;
+                }
+                uiReg_.track("project.lod.select");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Off draws every instance at LOD 0. Measured on Electric Dreams:\n"
+                                      "102.7 ms median off, 76.7 ms on.");
+                ImGui::BeginDisabled(!lodSelectEnabled_);
+                f32 px = lodErrorThresholdPx_;
+                if (ImGui::SliderFloat("Screen error (px)", &px, 0.25f, 8.0f, "%.2f")) {
+                    setLodSelect(lodSelectEnabled_, px);
+                    projectDirty_ = true;
+                }
+                uiReg_.track("project.lod.threshold");
+                ImGui::EndDisabled();
+
+                if (ImGui::Checkbox("Occlusion culling", &occlusionCullEnabled_)) projectDirty_ = true;
+                uiReg_.track("project.occlusionCull");
+                if (ImGui::Checkbox("Depth pre-pass", &depthPrepassOverride_)) projectDirty_ = true;
+                uiReg_.track("project.depthPrepass");
+            }
         }
 
         if (page == 2) {
@@ -14953,6 +15149,20 @@ private:
             if (ImGui::SliderFloat("GI distance", &s.giMaxDistance, 10.0f, 20000.0f, "%.0f")) changed = true;
             ImGui::DragFloat3("Volume centre", &giCenter_.x, 0.5f);
             ImGui::DragFloat("Volume extent", &giExtent_, 0.5f, 1.0f, 100000.0f);
+            // THE CONE COUNT, which this renderer's own comment calls the GI setting that actually
+            // costs anything. Tier-derived with an open knob, like every other rung on this ladder:
+            // Low 3, Medium 6, High 9, Epic 13, and picking a Quality above re-derives it.
+            {
+                int cones = static_cast<int>(s.giCones);
+                if (ImGui::SliderInt("Diffuse cones", &cones, 1, 16)) {
+                    s.giCones = static_cast<u32>(cones);
+                    changed = true;
+                }
+                uiReg_.track("project.gi.cones");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Cones in the diffuse gather, including the axial one.\n"
+                                      "Changing Quality above re-derives this from the tier.");
+            }
             ImGui::Checkbox("Debug: show voxel radiance", &giDebugView_);
             ImGui::EndDisabled();
         }

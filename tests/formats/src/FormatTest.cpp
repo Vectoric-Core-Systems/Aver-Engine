@@ -139,6 +139,81 @@ static void checkOcproject() {
     const std::string again = writeOcproject(back, written);
     check(again == written, "writing an unchanged manifest reproduces it byte for byte");
 
+    // ---- the render keys the settings pages gained, and the two new sections ------------------
+    //
+    // EVERY ONE OF THESE COSTS FIVE PLACES in this format -- the field, hasRenderSettings, the
+    // parse branch, isOwnedKey, and the writer -- and missing the fourth is invisible until a save
+    // strips a key it never replaced. The byte-stable second write below is what catches that.
+    {
+        ProjectDesc r;
+        check(parseOcproject("OCPROJECT 1\nNAME R\n"
+                             "RENDER.GICONES 9\n"
+                             "RENDER.REFRACTIONMODE 2\nRENDER.REFRACTIONSTRENGTH 0.75\n"
+                             "RENDER.REFRACTIONEDGEFADE 0.2\n"
+                             "RENDER.LODSELECT 1\nRENDER.LODTHRESHOLD 2.5\n"
+                             "RENDER.OCCLUSIONCULL 1\nRENDER.DEPTHPREPASS 1\n", r, &err),
+              "the five new render keys parse");
+        check(r.giCones == 9 && r.refractionMode == 2, "cone count and refraction mode survive");
+        check(std::fabs(r.refractionStrength - 0.75f) < 1e-6f &&
+              std::fabs(r.refractionEdgeFade - 0.2f) < 1e-6f, "and both refraction floats");
+        check(r.lodSelect == 1 && std::fabs(r.lodThresholdPx - 2.5f) < 1e-6f, "and LOD select plus threshold");
+        check(r.occlusionCull == 1 && r.depthPrepass == 1, "and the two culling toggles");
+        check(r.hasRenderSettings(), "and hasRenderSettings sees them -- it had to grow with them");
+
+        const std::string w = writeOcproject(r, "");
+        ProjectDesc b2;
+        check(parseOcproject(w, b2, &err), "they write and parse back");
+        check(b2.giCones == 9 && b2.occlusionCull == 1 && b2.depthPrepass == 1, "with the same values");
+        check(writeOcproject(b2, w) == w, "and a second write is byte-identical -- isOwnedKey covers them");
+    }
+    {
+        // GRAVITY POINTS DOWN, which is exactly why it needs a presence flag and not appendKey's
+        // "negative means unstated" rule. A sentinel here would make the only value anybody would
+        // ever write unwritable.
+        ProjectDesc g;
+        check(parseOcproject("OCPROJECT 1\nNAME G\nPHYSICS.GRAVITY 0 0 -980\nPHYSICS.FIXEDSTEP 0.0083\n",
+                             g, &err), "a physics section parses");
+        check(g.hasGravity && std::fabs(g.gravity[2] + 980.0f) < 1e-3f, "with a NEGATIVE gravity, which a sentinel could not express");
+        check(std::fabs(g.fixedStep - 0.0083f) < 1e-6f, "and the fixed step");
+        check(g.hasPhysicsSettings(), "and the section reports itself present");
+
+        const std::string w = writeOcproject(g, "");
+        check(w.find("PHYSICS.GRAVITY") != std::string::npos, "gravity is written");
+        ProjectDesc b3;
+        check(parseOcproject(w, b3, &err), "and parses back");
+        check(b3.hasGravity && std::fabs(b3.gravity[2] + 980.0f) < 1e-3f, "still negative");
+        check(writeOcproject(b3, w) == w, "byte-stable second write");
+
+        // A PARTIAL VECTOR IS NO VECTOR: two axes silently keeping a default the author thought
+        // they had replaced is worse than the line being ignored.
+        ProjectDesc part;
+        check(parseOcproject("OCPROJECT 1\nNAME P\nPHYSICS.GRAVITY 0 0\n", part, &err),
+              "a two-component gravity still parses the file");
+        check(!part.hasGravity, "but is NOT taken as a gravity");
+    }
+    {
+        // ZERO IS THE POINT for a mix: a project shipping with music muted has to be able to say
+        // so, and a `< 0 means unstated` rule would quietly turn that into 1.
+        ProjectDesc a;
+        check(parseOcproject("OCPROJECT 1\nNAME A\nAUDIO.MASTER 0.8\nAUDIO.BUS 1 0 0.5 0.25\n", a, &err),
+              "an audio mix parses");
+        check(a.hasAudioMix && std::fabs(a.masterVolume - 0.8f) < 1e-6f, "with its master volume");
+        check(std::fabs(a.busVolume[1]) < 1e-6f, "and a MUTED music bus, which a sentinel would have erased");
+        check(std::fabs(a.busVolume[3] - 0.25f) < 1e-6f, "and the UI bus");
+
+        const std::string w = writeOcproject(a, "");
+        ProjectDesc b4;
+        check(parseOcproject(w, b4, &err), "the mix writes and parses back");
+        check(b4.hasAudioMix && std::fabs(b4.busVolume[1]) < 1e-6f, "music still muted after a round trip");
+        check(writeOcproject(b4, w) == w, "byte-stable second write");
+
+        ProjectDesc none;
+        check(parseOcproject("OCPROJECT 1\nNAME N\n", none, &err), "a manifest with no audio parses");
+        check(!none.hasAudioMix, "and reports no opinion rather than a default mix");
+        check(writeOcproject(none, "").find("AUDIO.") == std::string::npos,
+              "and writing it back adds no AUDIO line -- a project cannot grow a mix by being saved");
+    }
+
     const std::string future = written + "COOKTARGET WindowsClient\n";
     ProjectDesc f;
     check(parseOcproject(future, f, &err), "a manifest with an unknown key still parses");
