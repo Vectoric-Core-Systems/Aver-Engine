@@ -2176,6 +2176,19 @@ public:
                 voxiAttached_ = true;
                 if (projectRenderPending_) applyProjectRenderSettings();
                 if (saveProject_ && !saveProjectDone_) { saveProjectDone_ = true; seedAndSaveProject(); }
+#if AVER_MODULE_SCENE
+                // --save-level <out>: write the OPEN level to another path and log the result.
+                //
+                // saveLevel had no caller but a mouse click -- Ctrl+S, the File menu and the
+                // toolbar button -- so nothing could prove a round-trip headlessly, which is the
+                // same gap the four project flags were added to close. Writes ELSEWHERE rather
+                // than over levelPath_, so proving the save never costs the content it proved on.
+                if (!saveLevelTo_.empty() && !saveLevelDone_ && !levelPath_.empty()) {
+                    saveLevelDone_ = true;
+                    if (saveLevel(saveLevelTo_)) AVER_INFO("[Level] --save-level wrote {}", saveLevelTo_);
+                    else                        AVER_ERROR("[Level] --save-level failed for {}", saveLevelTo_);
+                }
+#endif
 #if AVER_WITH_IMGUI
                 // --import's deferred handshake, UI-only on purpose: importAsset belongs to the
                 // content-browser half of this file and calls cbIsEditable/cbInvalidate/importModel,
@@ -3230,10 +3243,14 @@ public:
         e.device()->setCamera(&viewProj.m[0][0], &invVP.m[0][0], &camPos_.x);
         invVP_ = invVP; viewProj_ = viewProj; eye_ = camPos_;
 
-        // A loaded level's own FOG record wins over the editor default.
+        // ONE MEMBER FOR ONE VALUE. This used to read `fog = fogDensity_` and then, on a level
+        // with a FOG record, overwrite it with a SECOND member `levelFog_` that saveLevel wrote
+        // and the slider never touched. So the Fog Density slider was dead in both directions:
+        // inert when the level had fog (levelFog_ won), and unsaved when it did not
+        // (hasLevelFog_ was false). The load now writes the slider's own member and the save
+        // reads it, so what is on screen is what is in the file.
         f32 fog = fogDensity_;
 #if AVER_MODULE_SCENE
-        if (hasLevelFog_) fog = levelFog_;
         // OPT-IN, and overrides whatever the level/slider said while on: match fog density to the
         // streaming load boundary instead. See fogDensityForOpacityAt and matchFogToStreamRadius_'s
         // comment -- this makes the world visibly foggier, on purpose, only when asked for.
@@ -5843,6 +5860,7 @@ public:
     void setScrollPrefsToKeybinds(bool on) { scrollPrefsToKeybinds_ = on; }
     void setHudTest(int idx) { hudTest_ = idx; }   // --hud-preview <index>
     void setSaveProject(bool on) { saveProject_ = on; }   // --save-project
+    void setSaveLevelTo(std::string p) { saveLevelTo_ = std::move(p); }   // --save-level <out>
     // Queues one Content Browser import to run on startup. --import <src> <destDir>.
     void setImportOnce(std::string src, std::string dst) { importSrc_ = std::move(src); importDst_ = std::move(dst); }
     bool* autoCompileFlag() { return &autoCompile_; }
@@ -7218,6 +7236,8 @@ private:
     int hudPreviewIndex_ = -1;
     int hudTest_ = -1;
     bool saveProject_ = false;
+    std::string saveLevelTo_;         // --save-level <out>
+    bool saveLevelDone_ = false;
     std::string importSrc_, importDst_;
     bool importDone_ = false;
     bool saveProjectDone_ = false;
@@ -13286,6 +13306,10 @@ private:
             ImGui::DragFloat("Fog Height", &sky_.fogHeight, 1.0f);
             ImGui::DragFloat("Fog Start", &sky_.fogStart, 1.0f, 0.0f, 1e6f);
             ImGui::SliderFloat("Max Opacity", &sky_.fogMaxOpacity, 0.0f, 1.0f, "%.2f");
+            // FOG IS ITS OWN RECORD, so it needs its own mark. markLevelRecordEdited went in
+            // for SUN and SKY and this was missed, which left Fog Tint and Fog Density still
+            // silently discarded on a level whose file carries no FOG line.
+            markLevelRecordEdited(hasLevelFog_);
 #if AVER_MODULE_SCENE
             if (chunkWorld_) {
                 const world::StreamSettings& mst = chunkWorld_->settings().stream;
@@ -16046,7 +16070,7 @@ private:
 #endif
 
         if (w.hasFog) {
-            levelFog_ = static_cast<f32>(w.fogDensity);
+            fogDensity_ = static_cast<f32>(w.fogDensity);
             fogColor_[0] = static_cast<f32>(w.fogColor[0]);
             fogColor_[1] = static_cast<f32>(w.fogColor[1]);
             fogColor_[2] = static_cast<f32>(w.fogColor[2]);
@@ -16416,6 +16440,11 @@ private:
         hasLevelFog_ = false;
         hasLevelSun_ = false;
         hasLevelSky_ = false;
+        // BACK TO THE EDITOR DEFAULT, now that the slider IS the saved value. While fog lived in two
+        // members this happened for free: the level's copy went out of scope with levelFog_ and the
+        // slider had never been touched. With one member, leaving it alone would carry one level's
+        // weather into the next one that declares none.
+        fogDensity_ = 4e-6f;
         levelPath_.clear();
 #if AVER_MODULE_LANDSCAPE
         unloadLandscape(eng.device());
@@ -16448,7 +16477,7 @@ private:
         }
 
         w.hasFog = hasLevelFog_;
-        w.fogDensity = levelFog_;
+        w.fogDensity = fogDensity_;
         w.fogColor[0] = fogColor_[0]; w.fogColor[1] = fogColor_[1]; w.fogColor[2] = fogColor_[2];
 
         // The sun and the sky go back out whenever the level carried them OR the author has edited
@@ -16458,6 +16487,11 @@ private:
         // record and for no others.
         w.hasSun = hasLevelSun_;
         w.hasSky = hasLevelSky_;
+        // THE SUN'S BRIGHTNESS, which applyLevelSky has always READ (sunLux -> sunIntensity)
+        // and saveLevel never wrote. Turn Intensity down, save, reload, and the old lux came
+        // straight back from levelHeader_'s passthrough. GameApp does the identical mapping,
+        // so the runtime already honoured a lux the editor had no way to author.
+        w.sunLux = static_cast<f64>(sky_.sunIntensity) * (100000.0 / 3.0);
         for (int i = 0; i < 3; ++i) {
             w.sunDir[i] = sky_.sunDirection[i];
             w.sunColor[i] = sunColor_[i];
@@ -16601,7 +16635,6 @@ private:
     bool hasLevelSun_ = false;
     bool hasLevelSky_ = false;
     bool hasLevelFog_ = false;
-    f32  levelFog_ = 0.0002f;
 
 #if AVER_MODULE_FRAMEWORK
     // GRAPH-AS-CLASS / any other class placement -- see loadLevel's own comment (where
@@ -17412,6 +17445,9 @@ Application* createApplication(int argc, char** argv) {
     bool unlitArg = false;
     for (int i = 1; i < argc; ++i)
         if (!std::strcmp(argv[i], "--unlit")) unlitArg = true;
+    std::string saveLevelArg;
+    for (int i = 1; i + 1 < argc; ++i)
+        if (!std::strcmp(argv[i], "--save-level")) saveLevelArg = argv[i + 1];
 
     u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; std::string shaderSourceDir; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool furnaceGrid=false; f32 furnaceTilt=0.0f; bool ptFurnace=false; bool ptScene=false; int deviceLostAt=0; int ptQualityRamp=0; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int aversrCycle=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=-1; int rt=-1; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int rtRenderMode=-1; int pt=-1; int ptBounces=-1; int layeredBsdf=-1; f32 coatWeight=0.0f; f32 coatRough=0.1f; f32 coatF0=0.04f; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string selectEntity; bool openLegacy=false; bool waterOn=false; f32 waterHeight=0.0f; std::string graphSelectNode; std::string graphTab; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false; bool bakeNav=false; f32 bakeNavCell=50.0f; std::string openMap; bool gbuffer=false; std::string gbufferDebug; std::string crashTest; std::string startMode;
     for (int i=1;i<argc;++i){
@@ -18097,6 +18133,7 @@ Application* createApplication(int argc, char** argv) {
     if (!backendName.empty()) app->setBackend(backendName);
     app->setDebugLayer(debugLayer);
     app->setUnlitMode(unlitArg);
+    app->setSaveLevelTo(saveLevelArg);
     app->setProjectPath(project);
     // The start screen: interactive launches with no project, or --start-screen. Never in a capture run.
     app->armBrowser(startScreen || (!headless && frames == 0 && project.empty()));

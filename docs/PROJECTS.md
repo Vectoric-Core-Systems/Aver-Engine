@@ -61,7 +61,10 @@ A project is **additive, never required**: the editor runs exactly as well with 
 
 Once loaded, the project's name appears in the window title and the status bar, the Content
 Browser reports where the mount points, and Edit ▸ Project Settings ▸ Description shows the
-manifest. The editor **reads** `.ocproject`; it does not write one back yet.
+manifest. The editor reads `.ocproject` and, since Project Settings became editable, writes one back:
+Name, Author and Start map are fields, and Save rewrites the manifest through
+`fmt::writeOcproject`. Engine and Content stay read-only, with the reason on screen — changing
+`CONTENT` moves where every asset resolves and nothing re-mounts.
 
 ## Where code goes — C# is project-side, C++ is engine-side
 

@@ -339,7 +339,7 @@ The manifest names `STARTMAP Maps/Default.ocmap` and **no map file is written**,
 
 ## Driving it from the command line
 
-Flags on `Sandbox.exe`, alongside `--frames`, `--screenshot`, `--probe` and the rest. The four below exist for one reason: each names a path whose only proof was that somebody had clicked it once.
+Flags on `Sandbox.exe`, alongside `--frames`, `--screenshot`, `--probe` and the rest. Those below exist for one reason: each names a path whose only proof was that somebody had clicked it once.
 
 | Flag | What it does |
 |---|---|
@@ -347,8 +347,12 @@ Flags on `Sandbox.exe`, alongside `--frames`, `--screenshot`, `--probe` and the 
 | `--new-project <location> <name>` | scaffolds a Blank project and exits, touching no device. Creation was reachable only from the browser's modal, so a generated `Scripts.csproj` that MSBuild refuses to load is exactly the kind of thing that ships silently — nobody creates a project on the day they change the generator |
 | `--new-project-template <location> <name> <templateId>` | the same, from one of the shipped `templates\` directories (see the New Project modal's template picker) instead of Blank. `templateId` is the template's folder name, e.g. `FirstPerson`. Exits 1 with a clear message if no template by that id is found — the same discovery `listTemplates()` does for the modal, so this is what a test drives instead of clicking a card |
 | `--upgrade-project <path.ocproject>` | applies what the prompt would apply, logs each fix, and exits. The prompt is how a person does this; a flag is the only way a test does, and the apply path edits somebody's build file |
+| `--save-level <out.ocmap>` | writes the **open level** to `<out>` once, on the first frame after the renderer attaches, and logs the path. `saveLevel` had no caller but a mouse — Ctrl+S, `File ▸ Save Level`, the toolbar button — so no round-trip could be checked without a person in front of the window. It writes **elsewhere**, never over `levelPath_`, so proving the save costs nothing it proved on. Pair it with `--open-legacy` to save a level exactly as it exists on disk |
 
-All four project flags are matched before every other argument and call `std::exit`; none opens a window.
+The four project flags — `--new-project`, `--new-project-template`, `--upgrade-project` and
+`--save-project` — are matched before every other argument and call `std::exit`; none opens a
+window. `--save-level` is the exception and has to be: it needs a level open and a renderer
+attached, so it rides a normal `--frames` run rather than short-circuiting one.
 
 ---
 
