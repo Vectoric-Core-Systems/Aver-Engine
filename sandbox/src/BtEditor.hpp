@@ -68,6 +68,11 @@ fmt::OcBtData btStarterTree();
 // Returns its new index; -1 when it is already at that end, is the root, or is out of range.
 i32 btMoveSibling(std::vector<fmt::OcBtNode>& nodes, i32 index, i32 delta);
 
+// Whether btMoveSibling would move anything -- so a toolbar can disable the control at either end
+// rather than accepting a click that does nothing. btMoveSibling calls this itself, so the two can
+// never disagree.
+bool btCanMoveSibling(const std::vector<fmt::OcBtNode>& nodes, i32 index, i32 delta);
+
 // Changes `index`'s kind, keeping the tree valid(): a node becoming a Condition/Action gains a
 // default built-in name if it had none, and one leaving those kinds has its name cleared, because
 // valid() requires a node be named if and only if it is one of those two. Without this, flipping a

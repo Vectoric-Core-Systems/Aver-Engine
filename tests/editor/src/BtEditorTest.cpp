@@ -67,8 +67,26 @@ int main() {
         check(probe.valid(), "still valid after an add");
         check(editor::btChildrenOf(n, 1).size() == 3, "the Sequence has three children now");
 
+        // btCanMoveSibling has to agree with btMoveSibling exactly, because the toolbar disables
+        // the button on the first and the edit is refused by the second. It is asserted against the
+        // move itself rather than against a second copy of the rule: a predicate that drifts from
+        // the operation it guards is a button that is enabled and does nothing, which is the defect
+        // this pair was added to remove.
+        check(editor::btCanMoveSibling(n, added, -1), "canMove agrees the new node can move up");
         const i32 moved = editor::btMoveSibling(n, added, -1);
         check(moved >= 0, "the new node moves up among its siblings");
+
+        // At the ends, and on the root, both must refuse.
+        const std::vector<i32> kids = editor::btChildrenOf(n, 1);
+        check(!kids.empty(), "the Sequence still has children");
+        if (!kids.empty()) {
+            check(!editor::btCanMoveSibling(n, kids.front(), -1), "the first child cannot move up");
+            check(editor::btMoveSibling(n, kids.front(), -1) < 0, "and the move itself refuses too");
+            check(!editor::btCanMoveSibling(n, kids.back(), 1), "the last child cannot move down");
+            check(editor::btMoveSibling(n, kids.back(), 1) < 0, "and that move refuses too");
+        }
+        check(!editor::btCanMoveSibling(n, 0, -1), "the root has no siblings to move among");
+        check(!editor::btCanMoveSibling(n, added, 0), "a zero delta moves nothing");
         probe.nodes = n;
         check(probe.valid(), "still valid after a reorder");
 

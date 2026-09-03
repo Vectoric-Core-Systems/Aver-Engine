@@ -9053,7 +9053,13 @@ private:
     }
 
     // Spawns a cube in front of the camera, in whichever world owns the viewport, and selects it.
-    void spawnCube(Engine&) {
+    // Adds one of the engine's built-in primitives. Cube and sphere are both synthesised at
+    // startup (appendBox/appendSphere) and registered in sceneMeshes_/meshBounds_/meshTris_ under
+    // their asset ids, so "Add > Sphere" needed no new asset, no new loader and no new bounds --
+    // only for this function to stop hardcoding the cube. It was disabled in the menu for as long
+    // as sphere.ocmesh had been a registered built-in.
+    void spawnPrimitive(Engine& engine, const char* assetPath, const char* label) {
+        (void)engine;
         const Vec3 at = camPos_ + camForward() * kAddDistance;
 #if AVER_MODULE_SCENE
         if (hideEditorScene_ || !levelPath_.empty()) {
@@ -9066,7 +9072,7 @@ private:
             xf.scale = Vec3{kEditorCubeHalf, kEditorCubeHalf, kEditorCubeHalf};
 
             // FROZEN: the entity name is the asset path saveLevel writes and loadOcworld hashes back.
-            static const std::string kCubeAsset = "Meshes/cube.ocmesh";
+            const std::string kCubeAsset = assetPath;
             const scene::Entity e = world.create(kCubeAsset, scene::kInvalidEntity, xf);
             if (e == scene::kInvalidEntity) { AVER_WARN("[Editor] Add: the world refused a new entity"); return; }
             if (auto* mr = static_cast<scene::CMeshRenderer*>(
@@ -9084,14 +9090,38 @@ private:
                 c.kind = EditCmd::Kind::Create;
                 pushEdit(std::move(c));
             }
-            AVER_INFO("[Editor] added cube entity #{} at ({:.0f}, {:.0f}, {:.0f})",
-                      (u32)e, xf.position.x, xf.position.y, xf.position.z);
+            AVER_INFO("[Editor] added {} entity #{} at ({:.0f}, {:.0f}, {:.0f})",
+                      label, (u32)e, xf.position.x, xf.position.y, xf.position.z);
             return;
         }
 #endif
-        if (!cubeMesh_) return;
-        MeshObj c; c.mesh = cubeMesh_; c.tris = cubeTris_;
-        c.name = "Cube " + std::to_string(++spawnCount_);
+        // The placeholder world (no level loaded), which keeps its OWN cube mesh at
+        // kEditorCubeHalf rather than the unit one sceneMeshes_ registers.
+        //
+        // THE TWO CUBES ARE DIFFERENT SIZES, which is the trap here. cubeMesh_ is appendBox at
+        // half-extent 50 and is drawn at scale 1; sceneMeshes_["Meshes/cube.ocmesh"] is the UNIT
+        // cube, because .ocworld PLACEG scales are half-extents in cm applied to a unit mesh.
+        // Looking the cube up in sceneMeshes_ here would silently shrink the placeholder cube 50x.
+        // So the cube keeps its own handle, and anything else comes from the registry scaled up to
+        // match it.
+        rhi::MeshHandle mesh = cubeMesh_;
+        u32 tris = cubeTris_;
+        Vec3 scale{1, 1, 1};
+        const u64 assetId = fnv1a64(std::string_view(assetPath));
+        if (assetId != fnv1a64(std::string_view("Meshes/cube.ocmesh"))) {
+            const auto meshIt = sceneMeshes_.find(assetId);
+            if (meshIt == sceneMeshes_.end()) {
+                AVER_WARN("[Editor] Add: no built-in mesh registered for '{}'", assetPath);
+                return;
+            }
+            mesh = meshIt->second;
+            const auto trisIt = meshTris_.find(assetId);
+            tris = trisIt != meshTris_.end() ? trisIt->second : 0;
+            scale = Vec3{kEditorCubeHalf, kEditorCubeHalf, kEditorCubeHalf};   // unit mesh -> cube's size
+        }
+        if (!mesh) return;
+        MeshObj c; c.mesh = mesh; c.tris = tris; c.scale = scale;
+        c.name = std::string(label) + " " + std::to_string(++spawnCount_);
         c.pos = at;
         if (snapMove_) for (int k=0;k<3;++k) (&c.pos.x)[k] = snapf((&c.pos.x)[k], moveSnap_);
         c.color[0]=0.72f; c.color[1]=0.72f; c.color[2]=0.74f; c.metallic=0.0f; c.roughness=0.6f;
@@ -9107,6 +9137,10 @@ private:
         edit.objSnapshot = c;
         pushEdit(std::move(edit));
     }
+
+    // The original name, kept so every existing caller (menus, --undo-test, --spawn-test)
+    // is untouched by the parameterisation above.
+    void spawnCube(Engine& engine) { spawnPrimitive(engine, "Meshes/cube.ocmesh", "Cube"); }
 
 #if AVER_WITH_IMGUI
 // DRAG-AND-DROP FROM THE CONTENT BROWSER, hence UI-only: spawnFromAssetDrop's sole caller is the
@@ -10535,9 +10569,14 @@ private:
             if (ImGui::Selectable("Cube"))     spawnCube(e);
             if (ImGui::Selectable("Player Start")) addPlayerStart(e);
             uiReg_.track("toolbar.add.playerStart");
-            ImGui::Selectable("Sphere",  false, ImGuiSelectableFlags_Disabled);
+            if (ImGui::Selectable("Sphere")) spawnPrimitive(e, "Meshes/sphere.ocmesh", "Sphere");
+            uiReg_.track("toolbar.add.sphere");
             ImGui::Selectable("Plane",   false, ImGuiSelectableFlags_Disabled);
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("No plane primitive yet.\nA flattened cube is the convention: add a Cube and scale Z down.");
             ImGui::Selectable("Point Light", false, ImGuiSelectableFlags_Disabled);
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("CLight exists as a component, but no renderer reads it yet.\nLighting is the sun plus voxel cone-traced GI.");
             ImGui::EndPopup();
         }
         ImGui::SameLine(); ImGui::TextDisabled("|"); ImGui::SameLine();
