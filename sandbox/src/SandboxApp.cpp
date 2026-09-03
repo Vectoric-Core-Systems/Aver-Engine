@@ -5470,6 +5470,7 @@ public:
         captureCheck(e);
         resizeCheck(e);
         gpuTimingCheck(e);
+        rayProbeCheck(e);
 #if AVER_MODULE_SYNAPSE
         navBakeCheck(e);
 #endif
@@ -5862,6 +5863,7 @@ public:
     void setHudTest(int idx) { hudTest_ = idx; }   // --hud-preview <index>
     void setSaveProject(bool on) { saveProject_ = on; }   // --save-project
     void setSaveLevelTo(std::string p) { saveLevelTo_ = std::move(p); }   // --save-level <out>
+    void setRayProbe(f32 x, f32 y) { rayProbe_ = true; rayProbeX_ = x; rayProbeY_ = y; }   // --ray-probe
     // Queues one Content Browser import to run on startup. --import <src> <destDir>.
     void setImportOnce(std::string src, std::string dst) { importSrc_ = std::move(src); importDst_ = std::move(dst); }
     bool* autoCompileFlag() { return &autoCompile_; }
@@ -7249,6 +7251,8 @@ private:
     bool saveProject_ = false;
     std::string saveLevelTo_;         // --save-level <out>
     bool saveLevelDone_ = false;
+    bool rayProbe_ = false, rayProbeDone_ = false;   // --ray-probe <sx> <sy>
+    f32  rayProbeX_ = 0.0f, rayProbeY_ = 0.0f;
     std::string importSrc_, importDst_;
     bool importDone_ = false;
     bool saveProjectDone_ = false;
@@ -10058,16 +10062,39 @@ private:
 
     // Unprojects a screen-space point within the viewport rect into a world-space ray. Shared by
     // pick() and the asset drag-drop drop point so there is exactly one screen->ray conversion.
+    // BOTH ENDS ARE UNPROJECTED, and the near one is not decoration.
+    //
+    // This used to read `ro = eye_`, which is right only because a perspective frustum has one. It
+    // is the SINGLE assumption in the editor's screen-to-world conversion that a projection matrix
+    // has a centre of projection at all, and it is wrong the moment one does not: under an
+    // orthographic view every ray is PARALLEL and starts on the near plane, so a fan converging on
+    // a camera point tens of thousands of centimetres away picks along a line that is nowhere near
+    // the pixel. Every caller inherits it -- pick, handleSculpt, handleFoliage, dropWorldPoint.
+    //
+    // Unprojecting ndc.z = 0 instead is CORRECT TODAY, under perspective, which is why it lands on
+    // its own ahead of any ortho work: the origin moves from the eye to the near plane 2 cm in
+    // front of it, along the same ray, so every hit point ro + rd*t is unchanged and only the
+    // parameterisation shifts. `pick()` passes an unnormalised rd to rayAabb and compares t between
+    // objects, so a uniform change of scale within one call reorders nothing.
+    //
+    // The two expressions differ only in the iv.m[2][*] term, which carries ndc.z: present for the
+    // far plane at z = 1, absent for the near plane at z = 0. The depth range is [0,1], not
+    // [-1,1] -- see Mat4::perspectiveLH.
     void viewportRay(f32 screenX, f32 screenY, Vec3& ro, Vec3& rd) const {
         const f32 nx = (screenX - vpX_) / vpW_ * 2.f - 1.f;   // NDC within the viewport rect
         const f32 ny = 1.f - (screenY - vpY_) / vpH_ * 2.f;
         const Mat4& iv = invVP_;
-        const f32 rx = nx*iv.m[0][0]+ny*iv.m[1][0]+iv.m[2][0]+iv.m[3][0];
-        const f32 ry = nx*iv.m[0][1]+ny*iv.m[1][1]+iv.m[2][1]+iv.m[3][1];
-        const f32 rz = nx*iv.m[0][2]+ny*iv.m[1][2]+iv.m[2][2]+iv.m[3][2];
-        const f32 rw = nx*iv.m[0][3]+ny*iv.m[1][3]+iv.m[2][3]+iv.m[3][3];
-        const Vec3 farW{rx/rw, ry/rw, rz/rw};
-        ro = eye_; rd = farW - eye_;
+        const f32 fx = nx*iv.m[0][0]+ny*iv.m[1][0]+iv.m[2][0]+iv.m[3][0];
+        const f32 fy = nx*iv.m[0][1]+ny*iv.m[1][1]+iv.m[2][1]+iv.m[3][1];
+        const f32 fz = nx*iv.m[0][2]+ny*iv.m[1][2]+iv.m[2][2]+iv.m[3][2];
+        const f32 fw = nx*iv.m[0][3]+ny*iv.m[1][3]+iv.m[2][3]+iv.m[3][3];
+        const f32 ox = nx*iv.m[0][0]+ny*iv.m[1][0]+iv.m[3][0];
+        const f32 oy = nx*iv.m[0][1]+ny*iv.m[1][1]+iv.m[3][1];
+        const f32 oz = nx*iv.m[0][2]+ny*iv.m[1][2]+iv.m[3][2];
+        const f32 ow = nx*iv.m[0][3]+ny*iv.m[1][3]+iv.m[3][3];
+        const Vec3 farW{fx/fw, fy/fw, fz/fw};
+        ro = Vec3{ox/ow, oy/ow, oz/ow};
+        rd = farW - ro;
     }
 
     // Selects whatever the cursor's ray hits first, across both the placeholder and scene worlds.
@@ -14510,6 +14537,39 @@ private:
     // keep correct, and this codebase has been bitten by hand-kept mirrors drifting apart.
     // LATE, at maxFrames_ - 2: numbers are averaged over accumulated frames and lag a readback buffer,
     // so frame 0 would only say "supported but no data yet".
+    // --ray-probe <sx> <sy>: report what viewportRay returns for one screen point.
+    //
+    // pick, handleSculpt, handleFoliage and dropWorldPoint ALL go through that one function and
+    // NONE of them is reachable without a mouse, so the editor's entire screen-to-world conversion
+    // had no headless witness at all. What it prints is chosen to be checkable rather than merely
+    // informative: the origin's distance IN FRONT OF THE EYE along the view axis, which must equal
+    // the near plane and was exactly 0 while ro was hardcoded to eye_, and the reprojection of a
+    // point on the ray, which must come back to the pixel that was asked for.
+    //
+    // LATE, on gpuTimingCheck's frame and for the same kind of reason: vpX_/vpW_ and invVP_ are
+    // written by the frame that draws the viewport, so probing at attach time reported a 1600x900
+    // rect and an identity-ish camera -- self-consistent, reprojecting perfectly, and describing a
+    // view nobody was looking at.
+    void rayProbeCheck(Engine& e) {
+        if (!rayProbe_ || maxFrames_ == 0 || rayProbeDone_) return;
+        const u64 want = maxFrames_ > 8 ? maxFrames_ - 2 : maxFrames_ - 1;
+        if (e.time().frame < want) return;
+        rayProbeDone_ = true;
+        Vec3 ro{}, rd{};
+        viewportRay(rayProbeX_, rayProbeY_, ro, rd);
+        const Vec3 fwd = camForward();
+        const Vec3 d   = ro - eye_;
+        const f32 along = d.x*fwd.x + d.y*fwd.y + d.z*fwd.z;
+        f32 bx = 0.0f, by = 0.0f;
+        const bool ok = project(ro + rd * 0.5f, bx, by);
+        AVER_INFO("[RayProbe] screen ({:.1f},{:.1f}) viewport ({:.0f},{:.0f} {:.0f}x{:.0f}) "
+                  "eye ({:.2f},{:.2f},{:.2f}) origin ({:.2f},{:.2f},{:.2f}) "
+                  "aheadOfEye {:.4f} dir ({:.3f},{:.3f},{:.3f}) reproject {} ({:.1f},{:.1f})",
+                  rayProbeX_, rayProbeY_, vpX_, vpY_, vpW_, vpH_,
+                  eye_.x, eye_.y, eye_.z, ro.x, ro.y, ro.z, along,
+                  rd.x, rd.y, rd.z, ok ? "ok" : "BEHIND", bx, by);
+    }
+
     void gpuTimingCheck(Engine& e) {
         if (!gpuTiming_ || maxFrames_ == 0 || gpuTimingDone_) return;
         const u64 want = maxFrames_ > 8 ? maxFrames_ - 2 : maxFrames_ - 1;
@@ -17513,6 +17573,15 @@ Application* createApplication(int argc, char** argv) {
     std::string saveLevelArg;
     for (int i = 1; i + 1 < argc; ++i)
         if (!std::strcmp(argv[i], "--save-level")) saveLevelArg = argv[i + 1];
+    // PARSED IN ITS OWN LOOP, like --save-level above: the main else-if chain is at MSVC's
+    // C1061 nesting limit and one more branch does not compile.
+    bool rayProbeArg = false; f32 rayProbeXArg = 0.0f, rayProbeYArg = 0.0f;
+    for (int i = 1; i + 2 < argc; ++i)
+        if (!std::strcmp(argv[i], "--ray-probe")) {
+            rayProbeArg = true;
+            rayProbeXArg = static_cast<f32>(std::atof(argv[i + 1]));
+            rayProbeYArg = static_cast<f32>(std::atof(argv[i + 2]));
+        }
 
     u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; std::string shaderSourceDir; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool furnaceGrid=false; f32 furnaceTilt=0.0f; bool ptFurnace=false; bool ptScene=false; int deviceLostAt=0; int ptQualityRamp=0; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int aversrCycle=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=-1; int rt=-1; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int rtRenderMode=-1; int pt=-1; int ptBounces=-1; int layeredBsdf=-1; f32 coatWeight=0.0f; f32 coatRough=0.1f; f32 coatF0=0.04f; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool bloomSet=false, exposureSet=false; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string selectEntity; bool openLegacy=false; bool waterOn=false; f32 waterHeight=0.0f; std::string graphSelectNode; std::string graphTab; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false; bool bakeNav=false; f32 bakeNavCell=50.0f; std::string openMap; bool gbuffer=false; std::string gbufferDebug; std::string crashTest; std::string startMode;
     for (int i=1;i<argc;++i){
@@ -18199,6 +18268,7 @@ Application* createApplication(int argc, char** argv) {
     app->setDebugLayer(debugLayer);
     app->setUnlitMode(unlitArg);
     app->setSaveLevelTo(saveLevelArg);
+    if (rayProbeArg) app->setRayProbe(rayProbeXArg, rayProbeYArg);
     app->setProjectPath(project);
     // The start screen: interactive launches with no project, or --start-screen. Never in a capture run.
     app->armBrowser(startScreen || (!headless && frames == 0 && project.empty()));
