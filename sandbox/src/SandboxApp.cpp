@@ -8334,6 +8334,31 @@ private:
         std::vector<EditId>                 batchIds;
 #endif
         bool batchWasErase = false;   // which direction undo has to run
+
+#if AVER_MODULE_SCENE
+        // Destroy's DESCENDANTS, parents before children, excluding the root the command already
+        // names through `id`/`snap`.
+        //
+        // A DELETE TAKES A SUBTREE AND AN UNDO HAS TO PUT ONE BACK. World::destroy retires the whole
+        // subtree, so a Destroy carrying one snapshot could only ever restore one entity: parent a
+        // lamp to a table, delete the table, Ctrl+Z, and the table returns alone with the lamp gone
+        // for good. That is data loss, not a missing nicety, and it becomes reachable the moment a
+        // level file can express a hierarchy.
+        //
+        // `parent` indexes THIS vector, with -1 meaning the command's own root -- not an EditId,
+        // because the whole subtree is destroyed and rebound in one go and an id would have to be
+        // re-resolved mid-restore.
+        struct DestroyedNode {
+            EditId id = 0;
+            i32 parent = -1;
+            EditXform xf{};
+            std::string label;
+            editor::EntitySnapshot snap;
+            bool hadBody = false;
+            Vec3 bodyHalf{0,0,0};
+        };
+        std::vector<DestroyedNode> subtree;
+#endif
     };
 
     // Returns the edit id bound to an entity, minting one on first use.
@@ -8452,10 +8477,11 @@ private:
     // and refactoring their working create tails is out of scope here.
     scene::Entity spawnEntityFrom(const editor::EntitySnapshot& snap, const EditXform& xf,
                                    const std::string& label, bool hadBody, const Vec3& bodyHalf,
-                                   bool restoreObjectId = true) {
+                                   bool restoreObjectId = true,
+                                   scene::Entity parent = scene::kInvalidEntity) {
         scene::World& w = scene::World::instance();
         Transform t; t.position = xf.pos; t.rotation = quatFromEulerDeg(xf.rotDeg); t.scale = xf.scale;
-        const scene::Entity e = editor::instantiateEntity(w, snap, t, scene::kInvalidEntity, restoreObjectId);
+        const scene::Entity e = editor::instantiateEntity(w, snap, t, parent, restoreObjectId);
         if (e == scene::kInvalidEntity) {
             AVER_WARN("[Editor] the world refused to create '{}'", snap.asset);
             return e;
@@ -8482,22 +8508,119 @@ private:
         const scene::Entity e = spawnEntityFrom(c.snap, c.after, c.label, c.hadBody, c.bodyHalf);
         if (e == scene::kInvalidEntity) return;
         rebindEdit(c.id, e);
+
+#if AVER_MODULE_SCENE
+        // AND THE SUBTREE THAT WENT WITH IT. Parents precede children in `subtree`, so each node's
+        // parent handle is already live by the time it is read -- captureSubtree guarantees that
+        // ordering, and it is the only reason this can be a single forward pass.
+        //
+        // A NODE WHOSE PARENT FAILED TO COME BACK is restored as a root rather than dropped. Losing
+        // a relationship is recoverable by hand; losing the object is not.
+        std::vector<scene::Entity> made;
+        made.reserve(c.subtree.size());
+        for (const EditCmd::DestroyedNode& n : c.subtree) {
+            scene::Entity par = e;
+            if (n.parent >= 0 && n.parent < static_cast<i32>(made.size())) par = made[static_cast<usize>(n.parent)];
+            const scene::Entity ce = spawnEntityFrom(n.snap, n.xf, n.label, n.hadBody, n.bodyHalf, true, par);
+            made.push_back(ce);
+            if (ce != scene::kInvalidEntity) rebindEdit(n.id, ce);
+        }
+        // spawnEntityFrom selects whatever it made last, so the selection has to be put back on the
+        // entity the command is actually about.
+        sel_ = kSelScene; selEntity_ = e;
+#endif
     }
 
+#if AVER_MODULE_SCENE
+    // Fills `c.subtree` with `e`'s descendants, parents before children, for a Destroy.
+    //
+    // CALLED FROM THE DELETE PATH ONLY, not from describeEntity: a Transform command has no use for
+    // this and snapshotting a whole subtree per drag would put real cost on the common case.
+    void captureSubtree(EditCmd& c, scene::Entity e) {
+        scene::World& w = scene::World::instance();
+        std::vector<scene::Entity> nodes;
+        collectSubtree(w, e, nodes);
+        // nodes[0] is `e` itself, which the command already carries.
+        std::unordered_map<u32, i32> indexOf;
+        for (usize i = 1; i < nodes.size(); ++i) {
+            const scene::Entity d = nodes[i];
+            EditCmd::DestroyedNode n;
+            n.id = editIdFor(d);
+            const scene::Entity par = w.parent(d);
+            const auto it = indexOf.find(static_cast<u32>(par));
+            n.parent = it == indexOf.end() ? -1 : it->second;
+            if (const auto* loc = w.component<scene::CLocal>(d, scene::kComponentLocal)) {
+                n.xf.pos = loc->xf.position;
+                n.xf.rotDeg = eulerDegFromQuat(loc->xf.rotation);
+                n.xf.scale = loc->xf.scale;
+            }
+            if (const auto lb = entityLabels_.find(static_cast<u32>(d)); lb != entityLabels_.end())
+                n.label = lb->second;
+            n.snap = editor::captureEntity(w, d);
+#  if AVER_MODULE_PHYSICS
+            if (entityBodies_.find(static_cast<u32>(d)) != entityBodies_.end()) {
+                n.hadBody = true;
+                n.bodyHalf = n.xf.scale;
+            }
+#  endif
+            indexOf.emplace(static_cast<u32>(d), static_cast<i32>(c.subtree.size()));
+            c.subtree.push_back(std::move(n));
+        }
+    }
+#endif
+
     // Removes an entity and everything the editor hung off it, including its static body.
+    //
+    // THE WHOLE SUBTREE, because World::destroy retires the whole subtree and this function used to
+    // forget only the entity it was handed. Every child's static body, label and collide flag stayed
+    // behind: the body went on colliding with nothing visible, and entityBodies_ kept a key for an
+    // entity id the world had retired and would eventually reissue. BodyRegistry's own header names
+    // THIS FUNCTION as the live offender and exists to stop it recurring -- see its detachSubtree.
+    //
+    // Unreachable until now only because nothing in the editor could make a child. A level file can,
+    // as of this branch, so it is reachable by opening one and pressing Delete.
+    //
+    // COLLECTED BEFORE THE DESTROY, not after: World::destroy queues the subtree for retirement and
+    // the hierarchy links are gone by the time it returns, so a walk afterwards finds nothing and
+    // reports a clean job it did not do.
     void destroyEntity(scene::Entity e) {
         scene::World& w = scene::World::instance();
         if (!w.valid(e)) return;
+
+        std::vector<scene::Entity> doomed;
+        collectSubtree(w, e, doomed);
+
         w.destroy(e);
-        levelEntities_.erase(std::remove(levelEntities_.begin(), levelEntities_.end(), e), levelEntities_.end());
-        entityLabels_.erase(static_cast<u32>(e));
+        for (const scene::Entity d : doomed) {
+            levelEntities_.erase(std::remove(levelEntities_.begin(), levelEntities_.end(), d),
+                                 levelEntities_.end());
+            entityLabels_.erase(static_cast<u32>(d));
+            entityCollide_.erase(static_cast<u32>(d));
 #if AVER_MODULE_PHYSICS
-        if (const auto it = entityBodies_.find(static_cast<u32>(e)); it != entityBodies_.end()) {
-            aver_phys_remove_body(it->second);
-            levelBodies_.erase(std::remove(levelBodies_.begin(), levelBodies_.end(), it->second), levelBodies_.end());
-            entityBodies_.erase(it);
-        }
+            if (const auto it = entityBodies_.find(static_cast<u32>(d)); it != entityBodies_.end()) {
+                aver_phys_remove_body(it->second);
+                levelBodies_.erase(std::remove(levelBodies_.begin(), levelBodies_.end(), it->second),
+                                   levelBodies_.end());
+                entityBodies_.erase(it);
+            }
 #endif
+        }
+    }
+
+    // Appends `e` and every descendant, parents before children.
+    //
+    // ITERATIVE, and `next` is read BEFORE the recursion in every walk of this shape in the tree
+    // (BodyRegistry::detachSubtree does the same) -- a child's sibling link is not safe to read
+    // after that child has been visited.
+    static void collectSubtree(const scene::World& w, scene::Entity e,
+                               std::vector<scene::Entity>& out) {
+        if (!w.valid(e)) return;
+        out.push_back(e);
+        for (scene::Entity c = w.firstChild(e); c != scene::kInvalidEntity;) {
+            const scene::Entity next = w.nextSibling(c);
+            collectSubtree(w, c, out);
+            c = next;
+        }
     }
 #endif  // AVER_MODULE_SCENE
 
@@ -9775,6 +9898,12 @@ private:
                 AVER_INFO("[Editor] deleted entity #{} '{}'", (u32)selEntity_, w.name(selEntity_));
                 EditCmd c = describeEntity(selEntity_);
                 c.kind = EditCmd::Kind::Destroy;
+                // BEFORE destroyEntity, which retires the subtree and takes the hierarchy links with
+                // it -- a capture afterwards would find an empty subtree and report a complete undo
+                // record it did not have.
+                captureSubtree(c, selEntity_);
+                if (!c.subtree.empty())
+                    AVER_INFO("[Editor] ...and {} descendant(s) with it", c.subtree.size());
                 destroyEntity(selEntity_);
                 pushEdit(std::move(c));
             }
@@ -9964,6 +10093,74 @@ private:
             undo(); w.flush(); check(w.count() == base + 2, "unwind 1/3: undoes duplicate's Create");
             undo(); w.flush(); check(w.count() == base + 1, "unwind 2/3: undoes paste's Create");
             undo(); w.flush(); check(w.count() == base,     "unwind 3/3: undoes the original spawn's Create");
+        }
+
+        // ---- deleting a PARENT, and getting its children back ------------------------------------
+        //
+        // World::destroy retires the whole subtree, so a Destroy command carrying one snapshot could
+        // only ever restore one entity: parent a lamp to a table, delete the table, Ctrl+Z, and the
+        // table came back alone. That is data loss and it became reachable the moment a level file
+        // could express a hierarchy.
+        {
+            scene::World& w = scene::World::instance();
+            const u32 base = w.count();
+            hideEditorScene_ = true;
+
+            spawnCube(eng); w.flush();
+            const scene::Entity parent = selEntity_;
+            spawnCube(eng); w.flush();
+            const scene::Entity child = selEntity_;
+            spawnCube(eng); w.flush();
+            const scene::Entity grand = selEntity_;
+            check(w.count() == base + 3, "three entities for the hierarchy phase");
+
+            // keepWorld = false: the local transform IS the parent-relative one, matching what a
+            // level file's CHILD record stores and what LevelInstance applies on load.
+            check(w.setParent(child, parent, false), "the child accepts the parent");
+            check(w.setParent(grand, child, false),  "and the grandchild accepts the child");
+            check(w.parent(child) == parent && w.parent(grand) == child, "the chain is two deep");
+
+            sel_ = kSelScene; selEntity_ = parent;
+            deleteSelection();
+            w.flush();
+            check(w.count() == base, "deleting the PARENT removes all three -- World::destroy takes the subtree");
+            check(!w.valid(child) && !w.valid(grand), "the children are gone with it, not orphaned");
+
+            undo();
+            w.flush();
+            check(w.count() == base + 3, "and undo brings all three back, not just the one that was selected");
+
+            // THE RELATIONSHIP, not just the count. Restoring three loose entities where a hierarchy
+            // was is the same data loss one step quieter -- every child would silently jump to its
+            // parent-relative offset from the world origin.
+            const scene::Entity p2 = selEntity_;
+            check(w.valid(p2) && w.parent(p2) == scene::kInvalidEntity, "the restored parent is a root again");
+            u32 kids = 0;
+            scene::Entity firstKid = scene::kInvalidEntity;
+            for (scene::Entity c = w.firstChild(p2); c != scene::kInvalidEntity; c = w.nextSibling(c)) {
+                if (firstKid == scene::kInvalidEntity) firstKid = c;
+                ++kids;
+            }
+            check(kids == 1, "with exactly one child under it again");
+            u32 grandKids = 0;
+            if (firstKid != scene::kInvalidEntity)
+                for (scene::Entity g = w.firstChild(firstKid); g != scene::kInvalidEntity; g = w.nextSibling(g))
+                    ++grandKids;
+            check(grandKids == 1, "and the grandchild back under THAT child, two deep as it was");
+
+            redo();
+            w.flush();
+            check(w.count() == base, "redo re-deletes the whole subtree");
+            undo();
+            w.flush();
+            check(w.count() == base + 3, "and a second undo restores all three again");
+
+            // Leave the world as this phase found it, so the placeholder-object phase below starts
+            // from a clean count the way it always has.
+            sel_ = kSelScene; selEntity_ = selEntity_;
+            deleteSelection();
+            w.flush();
+            check(w.count() == base, "teardown: the phase leaves no entities behind");
         }
 #else
         AVER_INFO("[undo-test] AVER_MODULE_SCENE is off; skipping the scene-entity phase");
