@@ -682,6 +682,10 @@ inline constexpr f32 kDuplicateOffset = 50.0f;     // cm
 // Drag-drop payload carrying a content-browser item's full path as bytes (content browser ->
 // viewport asset placement). Under ImGui's 32-char payload-type limit; not prefixed with '_'.
 static constexpr const char* kAssetDragDropType = "AVER_ASSET_PATH";
+// The World Outliner's reparent drag. Carries a fixed 4-byte scene::Entity rather than a
+// string, so every target guards on size EQUALITY -- kAssetDragDropType's payload is a path of
+// unknown length and cannot.
+static constexpr const char* kOutlinerReparentDragDropType = "AVER_OUTLINER_ENTITY";
 
 // One placed object in the editor scene: mesh, transform, and surface parameters.
 struct MeshObj {
@@ -8381,7 +8385,7 @@ private:
     // captures every component via EntitySnapshot -- see EditorEntitySnapshot.hpp for what it
     // deliberately omits (hierarchy; CName's internal blob offsets).
     struct EditCmd {
-        enum class Kind { Transform, Create, Destroy, CreateObj, DestroyObj, LandscapeStroke, FoliageStroke };
+        enum class Kind { Transform, Create, Destroy, CreateObj, DestroyObj, LandscapeStroke, FoliageStroke, Reparent };
         Kind kind = Kind::Transform;
         EditId id = 0;            // a scene entity, through the indirection
         int objIndex = -1;        // or an objects_ index, for the placeholder scene
@@ -8446,6 +8450,15 @@ private:
         // rather than from where its parent is. The subtree half of this shipped without the half
         // that keeps the deleted thing attached to what it hung from.
         EditId parentId = 0;
+
+        // Reparent's before/after parent, as EditIds; 0 means root.
+        //
+        // SEPARATE FIELDS even though the shape matches parentId just above, because that field's
+        // meaning is Destroy-specific -- "the destroyed entity's own parent" -- and one field
+        // carrying two meanings across two Kinds is drift a later reader has no way to detect. The
+        // before/after EditXform pair rides the existing `before`/`after` members.
+        EditId reparentOldParentId = 0;
+        EditId reparentNewParentId = 0;
 #endif
     };
 
@@ -8634,6 +8647,110 @@ private:
     }
 
 #if AVER_MODULE_SCENE
+    // ---- the World Outliner's reparent, as an undoable command ----------------------------
+
+    // True when `maybeAncestor` is `e` itself or anywhere up its parent chain.
+    //
+    // THE DESIGN IS GraphEditor::componentIsAncestorOf's, not its code: bounded by the entity count
+    // for the same reason that one is bounded by the component count -- it runs MID-EDIT, in the
+    // frame a drop is being evaluated, which is exactly when a cycle would exist if this were the
+    // thing allowing it. World::setParent has its own cycle refusal, but the UI must never OFFER an
+    // illegal target, so the test has to be reachable from outside the scene module.
+    static bool outlinerIsAncestorOf(const scene::World& w, scene::Entity maybeAncestor, scene::Entity e) {
+        if (maybeAncestor == e) return true;
+        scene::Entity at = e;
+        for (u32 guard = 0; guard < w.count() && at != scene::kInvalidEntity; ++guard) {
+            at = w.parent(at);
+            if (at == maybeAncestor) return true;
+        }
+        return false;
+    }
+
+    // Whether the level's own save would carry this entity -- levelEntities_ ONLY, deliberately not
+    // levelClassInstances_. editor::appendClassPlacements copies the authored placement and
+    // overwrites position/rotation/scale alone; it never touches `parent`, so a class instance's
+    // parent is not round-tripped by a save whatever the live world says. Calling one "level owned"
+    // here would let a reparent through as legal that is provably lost on the next reload.
+    bool isLevelOwned(scene::Entity e) const {
+        return std::find(levelEntities_.begin(), levelEntities_.end(), e) != levelEntities_.end();
+    }
+
+    enum class ReparentLegality { Ok, SelfOrDescendant, OffLevel };
+
+    ReparentLegality reparentLegality(scene::Entity dragged, scene::Entity newParent) const {
+        const scene::World& w = scene::World::instance();
+        if (newParent != scene::kInvalidEntity && outlinerIsAncestorOf(w, dragged, newParent))
+            return ReparentLegality::SelfOrDescendant;
+        if (!isLevelOwned(dragged) ||
+            (newParent != scene::kInvalidEntity && !isLevelOwned(newParent)))
+            return ReparentLegality::OffLevel;
+        return ReparentLegality::Ok;
+    }
+
+    // Reparents `child` under `newParent` (kInvalidEntity = make it a root) and pushes one undo
+    // entry. GUARD THEN MUTATE: a refused drop must not leave a phantom command on the stack.
+    void pushReparent(scene::Entity child, scene::Entity newParent) {
+        scene::World& w = scene::World::instance();
+        if (!w.valid(child)) return;
+        if (reparentLegality(child, newParent) != ReparentLegality::Ok) return;
+        const scene::Entity oldParent = w.parent(child);
+        if (oldParent == newParent) return;   // dropped back where it was; no undo-stack noise
+
+        EditCmd c;
+        c.kind = EditCmd::Kind::Reparent;
+        c.id = editIdFor(child);
+        c.reparentOldParentId = oldParent != scene::kInvalidEntity ? editIdFor(oldParent) : 0;
+        if (const auto* loc = w.component<scene::CLocal>(child, scene::kComponentLocal)) {
+            c.before.pos = loc->xf.position;
+            c.before.rotDeg = eulerDegFromQuat(loc->xf.rotation);
+            c.before.scale = loc->xf.scale;
+        }
+
+        // keepWorld = TRUE for the live drop: this is somebody dragging, and the object must not
+        // jump out from under the mouse. Undo and redo then REPLAY the captured local values rather
+        // than running keepWorld a second time -- the decompose is not guaranteed bit-exact across
+        // repeated cycles, and replaying stored ground truth is what applyXformTo and recreateFrom
+        // already do.
+        //
+        // AND THE RETURN VALUE IS CHECKED, which no existing caller of setParent does. A refusal
+        // here means the world declined the move; pushing a command for it would put an entry on
+        // the stack whose undo restores a state that never happened.
+        if (!w.setParent(child, newParent, true)) return;
+
+        if (const auto* loc = w.component<scene::CLocal>(child, scene::kComponentLocal)) {
+            c.after.pos = loc->xf.position;
+            c.after.rotDeg = eulerDegFromQuat(loc->xf.rotation);
+            c.after.scale = loc->xf.scale;
+        }
+        c.reparentNewParentId = newParent != scene::kInvalidEntity ? editIdFor(newParent) : 0;
+        sel_ = kSelScene; selEntity_ = child;
+        pushEdit(std::move(c));
+    }
+
+    // Undo and redo share this: re-parent WITHOUT keepWorld, then stamp the exact local transform
+    // captured at that end of the edit. keepWorld would recompute one instead, which is how a
+    // repeated undo/redo cycle drifts.
+    //
+    // A PARENT THAT NO LONGER EXISTS resolves to root rather than aborting -- losing the
+    // relationship is recoverable by hand, leaving the entity somewhere nobody asked for is not.
+    void applyReparentTo(const EditCmd& c, EditId parentEditId, const EditXform& xf) {
+        scene::World& w = scene::World::instance();
+        const scene::Entity e = static_cast<scene::Entity>(entityForEdit(c.id));
+        if (e == scene::kInvalidEntity || !w.valid(e)) return;
+        scene::Entity parent = scene::kInvalidEntity;
+        if (parentEditId) {
+            parent = static_cast<scene::Entity>(entityForEdit(parentEditId));
+            if (!w.valid(parent)) parent = scene::kInvalidEntity;
+        }
+        w.setParent(e, parent, false);
+        Transform t;
+        t.position = xf.pos;
+        t.rotation = quatFromEulerDeg(xf.rotDeg);
+        t.scale    = xf.scale;
+        w.setLocalTransform(e, t);
+        sel_ = kSelScene; selEntity_ = e;
+    }
+
     // Fills `c.subtree` with `e`'s descendants, parents before children, for a Destroy.
     //
     // CALLED FROM THE DELETE PATH ONLY, not from describeEntity: a Transform command has no use for
@@ -9123,6 +9240,7 @@ private:
             case EditCmd::Kind::Create:    destroyEntity(entityForEdit(c.id));
                                            sel_ = -1; selEntity_ = scene::kInvalidEntity; break;
             case EditCmd::Kind::Destroy:   recreateFrom(c); break;
+            case EditCmd::Kind::Reparent:  applyReparentTo(c, c.reparentOldParentId, c.before); break;
 #endif
             case EditCmd::Kind::CreateObj:   // undo a create: take it back out
                 if (c.objIndex >= 0 && c.objIndex < (int)objects_.size()) {
@@ -9163,6 +9281,7 @@ private:
             case EditCmd::Kind::Create:    recreateFrom(c); break;
             case EditCmd::Kind::Destroy:   destroyEntity(entityForEdit(c.id));
                                            sel_ = -1; selEntity_ = scene::kInvalidEntity; break;
+            case EditCmd::Kind::Reparent:  applyReparentTo(c, c.reparentNewParentId, c.after); break;
 #endif
             case EditCmd::Kind::CreateObj:   // redo a create: put it back
                 if (c.objIndex >= 0 && c.objIndex <= (int)objects_.size())
@@ -10317,6 +10436,95 @@ private:
                 const auto* bl = w.component<scene::CLocal>(back, scene::kComponentLocal);
                 check(bl && std::fabs(bl->xf.position.z - 90.0f) < 0.01f,
                       "at its original parent-relative transform");
+            }
+
+            // ---- the Outliner's reparent, as a command --------------------------------------
+            //
+            // pushReparent is what a drag-and-drop in the World Outliner calls. Everything below
+            // drives it directly: the drop itself cannot be exercised headlessly (ImGui's drag state
+            // needs a real mouse), but every decision it makes can be.
+            {
+                const u32 rbase = w.count();
+                spawnCube(eng); w.flush(); const scene::Entity ra = selEntity_;
+                spawnCube(eng); w.flush(); const scene::Entity rb = selEntity_;
+                spawnCube(eng); w.flush(); const scene::Entity rc = selEntity_;
+                check(w.count() == rbase + 3, "three fresh roots for the reparent phase");
+
+                Transform axf; axf.position = Vec3{1000.0f, 0.0f, 0.0f};
+                w.setLocalTransform(ra, axf);
+                Transform bxf; bxf.position = Vec3{1000.0f, 0.0f, 300.0f};
+                w.setLocalTransform(rb, bxf);
+
+                // KEEPWORLD ON THE LIVE DROP: the object must not jump out from under the mouse.
+                const usize stackBefore = undoStack_.size();
+                pushReparent(rb, ra);
+                check(w.parent(rb) == ra, "a drop parents the dragged entity to the row it landed on");
+                check(undoStack_.size() == stackBefore + 1, "and puts exactly one entry on the undo stack");
+                const auto* bl = w.component<scene::CLocal>(rb, scene::kComponentLocal);
+                check(bl && std::fabs(bl->xf.position.x) < 0.01f
+                         && std::fabs(bl->xf.position.z - 300.0f) < 0.01f,
+                      "keepWorld rewrote the local transform so it did not move on screen");
+
+                undo(); w.flush();
+                check(w.parent(rb) == scene::kInvalidEntity, "undo puts it back at the root");
+                const auto* bu = w.component<scene::CLocal>(rb, scene::kComponentLocal);
+                check(bu && std::fabs(bu->xf.position.x - 1000.0f) < 0.01f,
+                      "with the exact local transform it had before the drop, not a recomputed one");
+
+                redo(); w.flush();
+                check(w.parent(rb) == ra, "redo re-parents it");
+
+                // A CYCLE IS REFUSED, and pushes nothing. The UI never offers this target, but the
+                // command has to hold the line on its own -- a refused drop that still lands an undo
+                // entry would let Ctrl+Z 'restore' a state that never existed.
+                pushReparent(rc, rb);   // rc under rb, so rb's chain is ra -> rb -> rc
+                check(w.parent(rc) == rb, "a grandchild attaches");
+                const usize beforeCycle = undoStack_.size();
+                // reparentLegality DIRECTLY, because pushReparent alone cannot discriminate: it
+                // also checks setParent's return, and World refuses a cycle on its own. What the
+                // UI's own guard buys is that the target is never OFFERED -- a property only a real
+                // mouse can observe, so this is the closest a headless check can get to it.
+                check(reparentLegality(ra, rc) == ReparentLegality::SelfOrDescendant,
+                      "the Outliner's own legality test calls an ancestor-under-descendant a cycle");
+                check(reparentLegality(ra, ra) == ReparentLegality::SelfOrDescendant,
+                      "and calls self-parenting one too");
+                check(reparentLegality(rb, ra) == ReparentLegality::Ok,
+                      "while an ordinary re-parent onto a non-descendant is allowed");
+                pushReparent(ra, rc);   // ra is rc's ancestor: a cycle
+                check(w.parent(ra) == scene::kInvalidEntity, "reparenting an ancestor under its own descendant is REFUSED");
+                check(undoStack_.size() == beforeCycle, "and pushes no undo entry");
+                pushReparent(ra, ra);
+                check(w.parent(ra) == scene::kInvalidEntity, "so is parenting something to itself");
+                check(undoStack_.size() == beforeCycle, "still no undo entry");
+
+                // Dropping something back onto the parent it already has is a no-op, not an entry.
+                pushReparent(rc, rb);
+                check(undoStack_.size() == beforeCycle, "dropping onto the CURRENT parent adds nothing to the stack");
+
+                // AN OFF-LEVEL ENDPOINT IS REFUSED. saveLevel writes a parent only for entities the
+                // level owns, so this relationship would be gone on the next reload -- the UI shows
+                // a reason, and the command refuses regardless of what the UI did.
+                const scene::Entity stray = w.create("stray", scene::kInvalidEntity, Transform{});
+                w.flush();
+                check(!isLevelOwned(stray), "an entity outside levelEntities_ is not level-owned");
+                const usize beforeStray = undoStack_.size();
+                pushReparent(stray, ra);
+                check(w.parent(stray) == scene::kInvalidEntity, "reparenting an entity the level does not own is REFUSED");
+                pushReparent(rc, stray);
+                check(w.parent(rc) == rb, "and so is parenting a level entity UNDER one it does not own");
+                check(undoStack_.size() == beforeStray, "neither pushed an undo entry");
+                w.destroy(stray); w.flush();
+
+                // The root drop zone.
+                pushReparent(rc, scene::kInvalidEntity);
+                check(w.parent(rc) == scene::kInvalidEntity, "dropping on empty space unparents to the root");
+                undo(); w.flush();
+                check(w.parent(rc) == rb, "and undo re-attaches it");
+
+                // Leave the world as this phase found it.
+                sel_ = kSelScene; selEntity_ = ra; deleteSelection(); w.flush();
+                check(w.count() == rbase, "teardown: the reparent phase leaves no entities behind");
+                undoStack_.clear(); redoStack_.clear();
             }
 
             sel_ = kSelScene; selEntity_ = parent;
@@ -13346,16 +13554,129 @@ private:
         if (showDetails_)  buildDetailsPanel();
     }
 
+#if AVER_MODULE_SCENE
+    // One Outliner row, resolved once per frame. `par` is the RAW engine parent; whether that
+    // parent is itself listed is a separate question, decided in buildOutlinerPanel's second pass.
+    struct OutlinerRow { scene::Entity ent; scene::Entity par; std::string shown; };
+
+    // The name a row and a drag preview show for an entity.
+    std::string outlinerLabelFor(scene::Entity e) const {
+        const scene::World& w = scene::World::instance();
+        const auto lit = entityLabels_.find(static_cast<u32>(e));
+        if (lit != entityLabels_.end()) return lit->second;
+        const std::string nm = w.name(e);
+        return nm.empty() ? ("Entity " + std::to_string((u32)e)) : nm;
+    }
+
+    // Makes a row draggable. Default flags on purpose: TreeNodeEx already opens a collapsed parent
+    // when a drag hovers it, and that is free unless SourceNoHoldToOpenOthers is passed.
+    void drawOutlinerDragSource(scene::Entity ent) {
+        if (!ImGui::BeginDragDropSource()) return;
+        ImGui::SetDragDropPayload(kOutlinerReparentDragDropType, &ent, sizeof(scene::Entity));
+        ImGui::TextUnformatted(outlinerLabelFor(ent).c_str());
+        ImGui::EndDragDropSource();
+    }
+
+    // Makes a row a drop target, in two tiers.
+    //
+    // A CYCLE IS NEVER OFFERED. The row peeks at the payload BEFORE calling BeginDragDropTarget, so
+    // dropping onto yourself or your own descendant has no target at all -- no highlight, nothing
+    // to click. That is GraphEditor's and BtEditor's idiom: filter before offering, rather than
+    // accepting and then explaining. World::setParent refuses a cycle anyway; this is so the UI
+    // never proposes one.
+    //
+    // AN OFF-LEVEL ENDPOINT IS OFFERED AND REFUSED, with a reason. It would succeed in the live
+    // world and be GONE on the next save, because saveLevel writes a parent only for entities the
+    // level owns. A drop that visibly works and quietly reverts is a worse trap than one that says
+    // why it cannot happen -- which is the whole reason the two commits before this one exist.
+    void drawOutlinerDropTarget(scene::Entity ent) {
+        scene::World& w = scene::World::instance();
+        scene::Entity dragged = scene::kInvalidEntity;
+        if (const ImGuiPayload* peek = ImGui::GetDragDropPayload())
+            if (peek->IsDataType(kOutlinerReparentDragDropType) &&
+                peek->DataSize == static_cast<int>(sizeof(scene::Entity)))
+                dragged = *static_cast<const scene::Entity*>(peek->Data);
+
+        if (dragged != scene::kInvalidEntity && outlinerIsAncestorOf(w, dragged, ent)) return;
+
+        if (!ImGui::BeginDragDropTarget()) return;
+        const bool offLevel = dragged != scene::kInvalidEntity &&
+                              reparentLegality(dragged, ent) == ReparentLegality::OffLevel;
+        if (offLevel) {
+            // PEEK ONLY, so ImGui never paints the row as about to accept. The delivering branch is
+            // structurally unreachable for this case, not merely un-taken.
+            ImGui::AcceptDragDropPayload(kOutlinerReparentDragDropType,
+                                         ImGuiDragDropFlags_AcceptPeekOnly);
+            ImGui::SetTooltip("'%s' is not part of the saved level. This relationship would be lost "
+                              "on the next save.",
+                              outlinerLabelFor(isLevelOwned(dragged) ? ent : dragged).c_str());
+        } else if (const ImGuiPayload* payload =
+                       ImGui::AcceptDragDropPayload(kOutlinerReparentDragDropType)) {
+            if (payload->DataSize == static_cast<int>(sizeof(scene::Entity)))
+                pushReparent(*static_cast<const scene::Entity*>(payload->Data), ent);
+        }
+        ImGui::EndDragDropTarget();
+    }
+
+    // Draws one row and, when it is open, its children beneath it.
+    void drawOutlinerRow(const OutlinerRow& row,
+                         const std::unordered_map<u32, std::vector<const OutlinerRow*>>& children,
+                         int depth) {
+        const auto it = children.find(static_cast<u32>(row.ent));
+        const bool hasKids = it != children.end() && !it->second.empty();
+
+        // NEITHER _Framed NOR _FramePadding, and that is the gates constraint rather than taste.
+        // For a plain TreeNodeEx the vertical padding is min(CurrLineTextBaseOffset, FramePadding.y)
+        // and that offset is 0 at the start of a row, so the row is exactly as tall as the
+        // Selectable it replaces. Either flag would add FramePadding.y*2. This panel is a
+        // ratio-sized dock node and cannot reach the Level viewport rect anyway, but the rule costs
+        // nothing to hold and the reason is worth writing down. SpanAvailWidth matches the Content
+        // Browser's own folder tree rather than inventing a second convention.
+        ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_SpanAvailWidth;
+        if (sel_ == kSelScene && selEntity_ == row.ent) flags |= ImGuiTreeNodeFlags_Selected;
+        if (!hasKids) {
+            flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
+        } else {
+            flags |= ImGuiTreeNodeFlags_OpenOnArrow;
+            // A scene with no hierarchy in it has to look exactly as it did before this change.
+            if (depth == 0) flags |= ImGuiTreeNodeFlags_DefaultOpen;
+        }
+
+        const std::string label = "  " + row.shown + "##e" + std::to_string((u32)row.ent);
+        const bool open = ImGui::TreeNodeEx(label.c_str(), flags);
+        // IsItemToggledOpen separates "clicked the arrow" from "clicked the label" on one node, so
+        // expanding a parent does not also select it.
+        if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
+            sel_ = kSelScene; selEntity_ = row.ent;
+        }
+        uiReg_.track(("outliner.row." + std::to_string((u32)row.ent)).c_str());
+
+        drawOutlinerDragSource(row.ent);
+        drawOutlinerDropTarget(row.ent);
+
+        if (hasKids && open) {
+            for (const OutlinerRow* c : it->second) drawOutlinerRow(*c, children, depth + 1);
+            ImGui::TreePop();
+        }
+    }
+#endif
+
     void buildOutlinerPanel() {
         ImGui::Begin("World Outliner", &showOutliner_);
         if (!hideEditorScene_)
-            for (int i=0;i<(int)objects_.size();++i)
+            for (int i=0;i<(int)objects_.size();++i) {
                 if (ImGui::Selectable((std::string("  ")+objects_[i].name).c_str(), sel_==i)) { sel_=i; selEntity_=kInvalidId; }
+                uiReg_.track(("outliner.placeholder." + std::to_string(i)).c_str());
+            }
 #if AVER_MODULE_SCENE
         {
             scene::World& w = scene::World::instance();
             const u32 n = w.count();
-            int listed = 0;
+
+            // PASS ONE: which entities are listed at all. The three filters are unchanged.
+            std::vector<OutlinerRow> rows;
+            std::unordered_set<u32> survived;
+            rows.reserve(n);
             for (u32 i = 0; i < n; ++i) {
                 const scene::Entity ent = w.at(i);
                 if (!w.valid(ent) || w.destroyPending(ent)) continue;
@@ -13369,23 +13690,63 @@ private:
                 if (ent == droneEntity_) continue;
                 const auto* mr = w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
                 const std::string nm = w.name(ent);
-                if (!mr && nm.empty()) continue;
-                if (listed++ == 0 && !hideEditorScene_) ImGui::Separator();
-                const auto lit = entityLabels_.find(static_cast<u32>(ent));
-                const std::string shown = lit != entityLabels_.end() ? lit->second
-                                        : (nm.empty() ? ("Entity " + std::to_string((u32)ent)) : nm);
-                const std::string label = "  " + shown + "##e" + std::to_string((u32)ent);
-                if (ImGui::Selectable(label.c_str(), sel_==kSelScene && selEntity_==ent)) {
-                    sel_ = kSelScene; selEntity_ = ent;
-                }
+                // Anything drawable, plus anything named -- an empty used as a parent is still a
+                // node someone needs to be able to reach. RELAXED for the tree: an unnamed,
+                // mesh-less entity is also kept once it HAS a child, because hiding a group pivot
+                // the instant somebody drops onto it would make a successful reparent look like it
+                // had silently failed. childCount is the raw engine count, so a pivot whose children
+                // are all chunk- or drone-filtered shows as an empty-looking leaf; narrow enough to
+                // accept rather than add a third pass over the survivor set.
+                if (!mr && nm.empty() && w.childCount(ent) == 0) continue;
+                rows.push_back(OutlinerRow{ent, w.parent(ent), outlinerLabelFor(ent)});
+                survived.insert(static_cast<u32>(ent));
+            }
+
+            // PASS TWO, and it HAS to be a second pass: w.at() walks the dense array, which is
+            // swap-with-last on destroy and carries no ordering guarantee, so a child can appear
+            // before its parent. Testing parent membership against a set still being filled would
+            // promote the children of a later-indexed parent to the root list.
+            std::unordered_map<u32, std::vector<const OutlinerRow*>> children;
+            std::vector<const OutlinerRow*> roots;
+            for (const OutlinerRow& r : rows) {
+                if (r.par != scene::kInvalidEntity && survived.count(static_cast<u32>(r.par)))
+                    children[static_cast<u32>(r.par)].push_back(&r);
+                else
+                    roots.push_back(&r);   // a true root, OR one whose parent is filtered out or
+                                           // gone: promoted so it stays reachable, never dropped.
+            }
+            // ALPHABETICAL, not scan order: linkToParent PREPENDS, so the engine's child order is
+            // newest-first and the list would visibly reshuffle every time anything is attached.
+            const auto byLabel = [](const OutlinerRow* a, const OutlinerRow* b) { return a->shown < b->shown; };
+            std::sort(roots.begin(), roots.end(), byLabel);
+            for (auto& kv : children) std::sort(kv.second.begin(), kv.second.end(), byLabel);
+
+            if (!roots.empty() && !hideEditorScene_) ImGui::Separator();
+            for (const OutlinerRow* r : roots) drawOutlinerRow(*r, children, 0);
+
+            // DROP HERE TO UNPARENT. Promoting something to a root can never cycle, so this target
+            // needs no legality peek; pushReparent still refuses an off-level entity.
+            ImGui::InvisibleButton("##outlinerRootDrop",
+                                   ImVec2(-FLT_MIN, ImGui::GetTextLineHeightWithSpacing()));
+            uiReg_.track("outliner.rootDropZone");
+            if (ImGui::BeginDragDropTarget()) {
+                if (const ImGuiPayload* payload =
+                        ImGui::AcceptDragDropPayload(kOutlinerReparentDragDropType))
+                    if (payload->DataSize == static_cast<int>(sizeof(scene::Entity)))
+                        pushReparent(*static_cast<const scene::Entity*>(payload->Data),
+                                     scene::kInvalidEntity);
+                ImGui::EndDragDropTarget();
             }
         }
 #endif
         ImGui::Separator();
         // Unguarded: the sun/sky/post-process pseudo-entries exist whether or not there is a scene.
         if (ImGui::Selectable("  Directional Light (Sun)", sel_==-2)) { sel_=-2; selEntity_=kInvalidId; }
+        uiReg_.track("outliner.sun");
         if (ImGui::Selectable("  Sky + Atmosphere", sel_==-3))        { sel_=-3; selEntity_=kInvalidId; }
+        uiReg_.track("outliner.sky");
         if (ImGui::Selectable("  Post Process", sel_==-4))            { sel_=-4; selEntity_=kInvalidId; }
+        uiReg_.track("outliner.postProcess");
         ImGui::End();
     }
 
