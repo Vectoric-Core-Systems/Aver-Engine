@@ -410,6 +410,125 @@ static void checkOcworld() {
     }
 }
 
+// Checks the BEGIN / CHILD / END nesting: that a hierarchy survives a round trip, that the records
+// do not disturb a material the way braces would have, that a second write is byte-stable, and that
+// an unbalanced file FAILS with a message rather than loading a wrong scene.
+static void checkOcworldNesting() {
+    AVER_INFO("=== .ocworld BEGIN/CHILD/END nesting ===");
+    using namespace fmt;
+    std::string err;
+
+    const char* kNested =
+        "OCWORLD 1\nNAME Nest\n"
+        "PLACE  Meshes/table.ocmesh  0 0 0  0 0 0  1  M_Wood\n"
+        "BEGIN\n"
+        "  CHILD  Meshes/lamp.ocmesh  10 0 80  0 0 0  1  M_Brass\n"
+        "  BEGIN\n"
+        "    CHILD  Meshes/bulb.ocmesh  0 0 12  0 0 0  1  M_Glass\n"
+        "  END\n"
+        "  CHILD  Meshes/book.ocmesh  -5 0 80  0 0 0  1  M_Paper\n"
+        "END\n";
+
+    {
+        OcWorldData w;
+        check(parseOcworld(kNested, w, &err), "a nested world parses");
+        check(w.placements.size() == 4, "with all four placements, flat in memory");
+        check(w.placements[0].parent == -1, "the table is a root");
+        check(w.placements[1].parent == 0, "the lamp hangs from the table");
+        check(w.placements[2].parent == 1, "the bulb hangs from the LAMP, not the table -- BEGIN "
+                                           "attaches to the most recent placement, so depth is explicit");
+        check(w.placements[3].parent == 0, "and the book is the lamp's SIBLING, back at the table");
+
+        // THE PROPERTY BRACES WOULD HAVE BROKEN. `PLACE ... {` hits PLACE's material catch-all in a
+        // build that predates nesting, so the placement's material silently becomes "{" and the next
+        // save writes that back. Word records cannot do that: they are separate lines.
+        check(w.placements[0].material == "M_Wood"  && w.placements[1].material == "M_Brass",
+              "every material is intact -- no record was swallowed as a surface name");
+        check(w.placements[2].material == "M_Glass" && w.placements[3].material == "M_Paper",
+              "including the deepest child's and the sibling's");
+        check(w.placements[1].z == 80.0 && w.placements[2].z == 12.0,
+              "and a child's transform is stored as given, parent-relative");
+    }
+    {
+        // BYTE-STABLE SECOND WRITE, which catches parse-without-write and write-without-parse for
+        // free -- the same fixture shape checkOcworld already uses for the flat records.
+        OcWorldData w;
+        check(parseOcworld(kNested, w, &err), "the nested world parses again");
+        const std::string text = writeOcworld(w);
+        check(text.find("BEGIN") != std::string::npos && text.find("CHILD ") != std::string::npos,
+              "the writer emits the nesting rather than flattening it");
+        OcWorldData b;
+        check(parseOcworld(text, b, &err), "what the writer produced parses");
+        check(b.placements.size() == 4, "with the same four placements");
+        for (usize i = 0; i < 4; ++i)
+            check(b.placements[i].parent == w.placements[i].parent,
+                  "and the same parent for each -- the nesting IS the parent relation");
+        check(writeOcworld(b) == text, "and a second write reproduces the first byte for byte");
+    }
+    {
+        // THE PARSER'S NEW FAILURE MODE. Silently adopting the rest of a level as children of one
+        // table leg is exactly the outcome a dangling BEGIN must not have.
+        OcWorldData w;
+        err.clear();
+        check(!parseOcworld("OCWORLD 1\nNAME T\nPLACE a.ocmesh 0 0 0 0 0 0 1\nBEGIN\n"
+                            "  CHILD b.ocmesh 0 0 1 0 0 0 1\n", w, &err),
+              "a BEGIN that is never closed FAILS the parse");
+        check(err.find("unbalanced") != std::string::npos, "and says so -- the message names the cause");
+
+        err.clear();
+        check(!parseOcworld("OCWORLD 1\nNAME T\nPLACE a.ocmesh 0 0 0 0 0 0 1\nEND\n", w, &err),
+              "an END with no BEGIN FAILS too");
+        err.clear();
+        check(!parseOcworld("OCWORLD 1\nNAME T\nCHILD a.ocmesh 0 0 0 0 0 0 1\n", w, &err),
+              "and so does a CHILD with nothing to parent it to");
+        err.clear();
+        check(!parseOcworld("OCWORLD 1\nNAME T\nBEGIN\n", w, &err),
+              "and a BEGIN with no placement before it");
+    }
+    {
+        // A FLAT LEVEL IS UNCHANGED, which is what every file in the tree is today: no BEGIN, no
+        // CHILD, and a writer that emits neither.
+        OcWorldData w;
+        check(parseOcworld("OCWORLD 1\nNAME Flat\nPLACE a.ocmesh 0 0 0 0 0 0 1 M_A\n"
+                           "PLACE b.ocmesh 1 2 3 0 0 0 2 M_B\n", w, &err),
+              "a flat world still parses");
+        check(w.placements[0].parent == -1 && w.placements[1].parent == -1, "with every placement a root");
+        const std::string text = writeOcworld(w);
+        check(text.find("BEGIN") == std::string::npos && text.find("CHILD") == std::string::npos,
+              "and writing it back adds no nesting -- a level cannot grow a hierarchy by being saved");
+    }
+    {
+        // NON-UNIFORM SCALE ON A CHILD picks CHILDG, mirroring PLACE/PLACEG. Getting this wrong
+        // would silently make a stretched child uniform on the next save.
+        OcWorldData w;
+        w.name = "Childg";
+        OcWorldPlacement a; a.asset = "a.ocmesh";
+        OcWorldPlacement b; b.asset = "b.ocmesh"; b.parent = 0; b.sx = 1; b.sy = 2; b.sz = 3;
+        w.placements.push_back(a); w.placements.push_back(b);
+        const std::string text = writeOcworld(w);
+        check(text.find("CHILDG") != std::string::npos, "a non-uniformly scaled child writes as CHILDG");
+        OcWorldData r;
+        check(parseOcworld(text, r, &err), "and parses back");
+        check(r.placements.size() == 2 && r.placements[1].parent == 0, "still parented");
+        check(r.placements[1].sy == 2.0 && r.placements[1].sz == 3.0, "with its scale intact");
+    }
+    {
+        // A CYCLE cannot come out of the parser, but writeOcworld also serves callers that built the
+        // vector by hand. The walk must terminate and must not lose the rest of the level.
+        OcWorldData w;
+        w.name = "Cycle";
+        OcWorldPlacement a; a.asset = "a.ocmesh"; a.parent = 1;
+        OcWorldPlacement b; b.asset = "b.ocmesh"; b.parent = 0;
+        OcWorldPlacement c; c.asset = "c.ocmesh";
+        w.placements.push_back(a); w.placements.push_back(b); w.placements.push_back(c);
+        const std::string text = writeOcworld(w);
+        check(text.find("c.ocmesh") != std::string::npos,
+              "a placement outside a hand-built cycle is still written -- the walk terminates");
+        OcWorldData r;
+        check(parseOcworld(text, r, &err), "and what came out still parses");
+    }
+}
+
 // Checks the SCATTER record: every field, round-trip byte-identity, an unbounded density band's
 // deliberate omission from the written text, and that a line this parser does not understand (a
 // stand-in for a future record) does not disturb SCATTER or anything else already parsed.
@@ -1186,6 +1305,7 @@ int main(int argc, char** argv) {
     checkFnv();
     checkOcproject();
     checkOcworld();
+    checkOcworldNesting();
     checkOcworldScatter();
     checkOcworldLandscape();
     checkOcworldWater();

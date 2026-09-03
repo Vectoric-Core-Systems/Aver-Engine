@@ -50,6 +50,27 @@ struct OcWorldPlacement {
     // decide how it looks, not this record.
     std::string className;
 
+    // WHICH PLACEMENT THIS ONE HANGS FROM: an index into OcWorldData::placements, or -1 for a root.
+    //
+    // NESTING IS A FILE-LEVEL SHAPE ONLY. In memory the placements stay a flat vector with this
+    // index, so LevelInstance, GameLevel, frameCameraOn, LevelInspect and ScatterBudgetTool need no
+    // change at all; parseOcworld and writeOcworld are the only two functions that know about the
+    // tree. That is deliberate: a std::vector of children would have rewritten every consumer to buy
+    // nothing, since all of them walk placements linearly.
+    //
+    // THE INDEX IS NOT STABLE ACROSS A SAVE, and cannot be. writeOcworld emits depth-first from the
+    // roots, so a flat array whose children do not already follow their parents comes back
+    // renumbered. Nothing may store one of these across a round trip -- parents are re-derived from
+    // the file's BEGIN/END nesting, never from a number written down. This tree has a scar from
+    // exactly that mistake (LevelClassSave.hpp: "Pairing by position would write one placement's
+    // transform onto another's line"), which is the reason the file format nests instead of carrying
+    // a parent index of its own.
+    //
+    // x/y/z, yaw/pitch/roll and the scale are PARENT-RELATIVE when parent >= 0, and world when it is
+    // -1. That is the same convention scene::CLocal already uses, which is what lets the editor's
+    // save write CLocal straight out.
+    i32 parent = -1;
+
     bool uniform() const { return sx == sy && sy == sz; }
 };
 

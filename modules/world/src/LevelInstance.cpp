@@ -1,4 +1,5 @@
 #include "aver/world/LevelInstance.hpp"
+#include "aver/core/Log.hpp"
 
 #if AVER_MODULE_SCENE
 
@@ -18,6 +19,22 @@ LevelInstance instantiate(const fmt::OcWorldData& w, const InstantiateOptions& o
     out.entityBody.reserve(w.placements.size());
 
     scene::World& world = scene::World::instance();
+
+    // PLACEMENT INDEX -> ENTITY, so a CHILD can name its parent. out.entities is NOT indexed by
+    // placement -- class placements are skipped below -- so a second array is the only honest way to
+    // answer "which entity is placement 7".
+    //
+    // A CHILD'S PARENT ALWAYS PRECEDES IT. parseOcworld only accepts a CHILD inside an open BEGIN
+    // scope, and a scope can only be opened on a placement already read, so the parent index is
+    // strictly less than the child's. That is what lets this be ONE forward pass instead of a
+    // create-everything-then-reparent pass, and it is worth stating because the invariant is the
+    // file format's, not this loop's.
+    std::vector<scene::Entity> entityFor(w.placements.size(), scene::kInvalidEntity);
+    // World-space transform per placement, accumulated down the chain. Physics bodies are placed in
+    // WORLD coordinates while a child's authored transform is PARENT-RELATIVE, so a body built from
+    // the authored numbers would sit at the child's local offset from the origin. That is silent --
+    // the mesh draws correctly through the scene graph and only the collision is wrong.
+    std::vector<Transform> worldXf(w.placements.size());
 
     for (usize i = 0; i < w.placements.size(); ++i) {
         const fmt::OcWorldPlacement& p = w.placements[i];
@@ -43,10 +60,19 @@ LevelInstance instantiate(const fmt::OcWorldData& w, const InstantiateOptions& o
         // from the surface, not as an absolute height -- so `z 0 snap` means "on the ground" and
         // `z 50 snap` means "half a metre above it", and both survive the terrain being resculpted.
         // No callback, or no ground under this point, and the authored Z stands unchanged.
+        //
+        // ROOTS ONLY. `snap` reads Z as an offset above the TERRAIN, which is a world quantity,
+        // while a child's Z is an offset from its parent -- adding a ground height to that mixes two
+        // frames and puts the child somewhere neither the author nor the terrain asked for. A child
+        // that asks to snap is told rather than silently obeyed or silently ignored.
         f64 pz = p.z;
-        if (p.snapToGround && opt.groundHeightAt) {
+        const bool isChild = p.parent >= 0 && p.parent < static_cast<i32>(w.placements.size());
+        if (p.snapToGround && !isChild && opt.groundHeightAt) {
             f64 ground = 0.0;
             if (opt.groundHeightAt(p.x, p.y, ground)) pz = ground + p.z;
+        } else if (p.snapToGround && isChild) {
+            AVER_WARN("[Level] placement '{}' is a CHILD and asks to snap to ground; ignored -- its Z "
+                      "is measured from its parent, not from the terrain", p.asset);
         }
 
         Transform xf;
@@ -59,8 +85,35 @@ LevelInstance instantiate(const fmt::OcWorldData& w, const InstantiateOptions& o
         // does not depend on it, but a level loaded by the game and by the editor must produce the
         // same names or anything that looks an entity up by name diverges between the two. That was
         // a real risk while this loop existed twice; it is structural now.
-        const scene::Entity e = world.create(p.asset, scene::kInvalidEntity, xf);
+        // THE PARENT, IF ITS ENTITY EXISTS. A child of a CLASS placement finds kInvalidEntity here,
+        // because this loop deliberately skips class placements and the host spawns them in a later
+        // pass -- so it loads as a root, at its parent-relative transform, and says so rather than
+        // being quietly misplaced with no record of why.
+        scene::Entity parentEnt = scene::kInvalidEntity;
+        if (isChild) {
+            parentEnt = entityFor[static_cast<usize>(p.parent)];
+            if (parentEnt == scene::kInvalidEntity)
+                AVER_WARN("[Level] placement '{}' names a parent that produced no entity (a class "
+                          "placement, or one that failed to create); loading it as a root",
+                          p.asset);
+        }
+
+        // WORLD TRANSFORM, for the physics body below. Composed from the parent's, which is already
+        // final because parents precede children.
+        worldXf[i] = xf;
+        if (isChild) {
+            const Transform& pw = worldXf[static_cast<usize>(p.parent)];
+            worldXf[i].scale    = Vec3{pw.scale.x * xf.scale.x, pw.scale.y * xf.scale.y,
+                                       pw.scale.z * xf.scale.z};
+            worldXf[i].rotation = pw.rotation * xf.rotation;
+            const Vec3 scaled{xf.position.x * pw.scale.x, xf.position.y * pw.scale.y,
+                              xf.position.z * pw.scale.z};
+            worldXf[i].position = pw.position + pw.rotation.rotate(scaled);
+        }
+
+        const scene::Entity e = world.create(p.asset, parentEnt, xf);
         if (e == scene::kInvalidEntity) continue;
+        entityFor[i] = e;
 
         auto* mr = static_cast<scene::CMeshRenderer*>(
             world.addComponent(e, scene::kComponentMeshRenderer));
@@ -80,9 +133,13 @@ LevelInstance instantiate(const fmt::OcWorldData& w, const InstantiateOptions& o
         // called aver_phys_init, and the count logged afterwards is what makes an
         // initPhysics-after-openProject ordering mistake visible instead of silent.
         if (opt.createBodies && p.collide && aver_phys_ready()) {
+            // WORLD, NOT AUTHORED. For a root the two are the same and this is the line it always
+            // was; for a child the authored numbers are parent-relative and using them would put the
+            // collision somewhere the mesh is not.
+            const Transform& wx = worldXf[i];
             body = aver_phys_add_static_box(
-                static_cast<f32>(p.x), static_cast<f32>(p.y), static_cast<f32>(pz),
-                static_cast<f32>(p.sx), static_cast<f32>(p.sy), static_cast<f32>(p.sz));
+                wx.position.x, wx.position.y, wx.position.z,
+                wx.scale.x, wx.scale.y, wx.scale.z);
             // The one line that makes this placement's body IDENTIFIABLE later -- a raycast that
             // hits it can now report `e`, not just an opaque physics handle nothing else understands.
             if (body) aver_phys_set_entity(body, static_cast<i32>(e));

@@ -16625,12 +16625,46 @@ private:
         // Straight back out, in the order they were read. See loadLevel.
         w.pcgVolumes = levelPcgVolumes_;
 
+        // WHICH PLACEMENT SLOT EACH ENTITY WILL OCCUPY, decided BEFORE any is written, because a
+        // child may be reached before its parent -- levelEntities_ is the swap-removed dense array
+        // and carries no ordering guarantee at all. Without this the parent index would be "the one
+        // written so far, if we happened to have got to it", which is the shape of bug this file
+        // already has a scar from (LevelClassSave.hpp: "Pairing by position would write one
+        // placement's transform onto another's line").
+        std::unordered_map<u32, i32> slotOf;
+        {
+            i32 slot = static_cast<i32>(w.placements.size());
+            for (const scene::Entity e : levelEntities_) {
+                if (!world.valid(e)) continue;
+                if (!world.component<scene::CLocal>(e, scene::kComponentLocal)) continue;
+                slotOf.emplace(static_cast<u32>(e), slot++);
+            }
+        }
+
         for (const scene::Entity e : levelEntities_) {
             if (!world.valid(e)) continue;
             const auto* loc = world.component<scene::CLocal>(e, scene::kComponentLocal);
             const auto* mr  = world.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer);
             if (!loc) continue;
             fmt::OcWorldPlacement p;
+            // THE PARENT, AND WITH IT THE REASON CLocal IS NOW CORRECT TO WRITE. This loop has always
+            // written loc->xf -- the LOCAL transform -- into a format that read every placement back
+            // as a world position. That was harmless only because nothing in the editor could make a
+            // child; the moment one exists it becomes silent position corruption on the next
+            // save/load, with the child reappearing at its parent-relative offset from the origin.
+            // Expressing the parent is what makes the existing write correct rather than corrupting,
+            // which is why the format and this line had to land together and neither alone.
+            //
+            // A PARENT OUTSIDE THE LEVEL'S OWN ENTITIES writes as a root: an entity parented to
+            // something the level does not own (a class instance, a preview, anything spawned at
+            // runtime) has no placement to point at, and inventing one would be worse than losing
+            // the relationship.
+            {
+                const scene::Entity par = world.parent(e);
+                const auto it = par == scene::kInvalidEntity
+                              ? slotOf.end() : slotOf.find(static_cast<u32>(par));
+                p.parent = it == slotOf.end() ? -1 : it->second;
+            }
             p.asset = world.name(e);
             p.x = loc->xf.position.x; p.y = loc->xf.position.y; p.z = loc->xf.position.z;
             const Vec3 euler = eulerDegFromQuat(loc->xf.rotation);
