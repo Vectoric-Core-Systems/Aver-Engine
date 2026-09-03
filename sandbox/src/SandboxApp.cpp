@@ -5881,10 +5881,20 @@ public:
     }
     void setSkyAuthored() { sky_.model = rhi::SkyModel::Authored; }   // --sky-authored
     // Sets exposure, bloom intensity and auto-exposure. --exposure / --bloom / --auto-exposure.
-    void setPost(f32 exposure, f32 bloomIntensity, bool autoExposure) {
+    //
+    // ASSIGNS UNCONDITIONALLY, AND HAS TO. argv's defaults are exposure 1.0 and bloom 0.0, and the
+    // second of those is NOT PostSettings' own default of 0.06 -- so the sandbox has always run with
+    // bloom off unless asked, and every recorded gate image was taken that way. Making the
+    // assignment conditional on the flag being present would quietly restore 0.06 and move all 20.
+    // The two `set` bools exist only to decide who wins over a stored preference; see
+    // loadEditorPreferences.
+    void setPost(f32 exposure, bool exposureSet, f32 bloomIntensity, bool bloomSet, bool autoExposure) {
         post_.exposure = exposure;
         post_.bloomIntensity = bloomIntensity;
         if (autoExposure) post_.autoExposure = true;
+        postExposureFromCli_ = exposureSet;
+        postBloomFromCli_    = bloomSet;
+        postAutoExpFromCli_  = autoExposure;
     }
 
     // Disables auto-exposure for a capture run unless the run asked for it.
@@ -13456,6 +13466,29 @@ private:
         flySpeed_           = prefFloat("viewport.flySpeed",             flySpeed_);
         lookSpeed_          = prefFloat("viewport.lookSensitivity",      lookSpeed_);
 
+        // POST PROCESS IS A PROPERTY OF THE VIEW, NOT OF THE WORLD, which is why these nine live
+        // here and not in the level file: docs/EDITOR.md notes exposure is one histogram over the
+        // whole target, and two people opening the same level should not inherit each other's eyes.
+        // Every one of them was lost on exit before this.
+        //
+        // NOT ON A CAPTURE RUN. maxFrames_ != 0 is this file's established test for "not
+        // interactive" and is the same one applyCaptureExposureRule uses, so the two agree by
+        // construction rather than by discipline. docs/STATUS.md puts the reason plainly -- "A post
+        // chain whose default state changed the image would invalidate the whole oracle" -- and a
+        // stored exposure reaching a --frames run would do exactly that: on one machine and not on
+        // another, which is the worst shape a gate failure can take.
+        if (maxFrames_ == 0) {
+            if (!postExposureFromCli_) post_.exposure      = prefFloat("post.exposure",       post_.exposure);
+            if (!postAutoExpFromCli_)  post_.autoExposure  = prefBool ("post.autoExposure",   post_.autoExposure);
+            if (!postBloomFromCli_)    post_.bloomIntensity= prefFloat("post.bloomIntensity", post_.bloomIntensity);
+            post_.exposureKey    = prefFloat("post.exposureKey",    post_.exposureKey);
+            post_.exposureSpeed  = prefFloat("post.exposureSpeed",  post_.exposureSpeed);
+            post_.exposureMin    = prefFloat("post.exposureMin",    post_.exposureMin);
+            post_.exposureMax    = prefFloat("post.exposureMax",    post_.exposureMax);
+            post_.bloomThreshold = prefFloat("post.bloomThreshold", post_.bloomThreshold);
+            post_.bloomKnee      = prefFloat("post.bloomKnee",      post_.bloomKnee);
+        }
+
         prefIdeName_ = prefString("contentBrowser.ide", "");
 
         if (prefsDevice_ && prefsDevice_->vsyncCanDisable())
@@ -13521,6 +13554,20 @@ private:
         setPrefBool ("panels.details",               showDetails_);
         setPrefFloat("viewport.flySpeed",            flySpeed_);
         setPrefFloat("viewport.lookSensitivity",     lookSpeed_);
+
+        // Guarded exactly as the load is, and for the same reason: a --frames run that wrote its
+        // CLI exposure back would leave the next interactive session looking at the capture's eyes.
+        if (maxFrames_ == 0) {
+            setPrefFloat("post.exposure",       post_.exposure);
+            setPrefBool ("post.autoExposure",   post_.autoExposure);
+            setPrefFloat("post.exposureKey",    post_.exposureKey);
+            setPrefFloat("post.exposureSpeed",  post_.exposureSpeed);
+            setPrefFloat("post.exposureMin",    post_.exposureMin);
+            setPrefFloat("post.exposureMax",    post_.exposureMax);
+            setPrefFloat("post.bloomIntensity", post_.bloomIntensity);
+            setPrefFloat("post.bloomThreshold", post_.bloomThreshold);
+            setPrefFloat("post.bloomKnee",      post_.bloomKnee);
+        }
 
         const std::vector<editor::IdeInfo>& ides = editor::detectedIdes();
         if (cbIdeChoice_ >= 0 && cbIdeChoice_ < static_cast<int>(ides.size()))
@@ -14771,6 +14818,9 @@ private:
     f32  fogMatchTargetOpacity_ = 0.9f;   // opacity WANTED at the load boundary itself
 #endif
     rhi::PostSettings post_{};
+    // Which post values came from argv, so a stored preference cannot silently outrank a flag the
+    // caller typed. Set by setPost, read once by loadEditorPreferences.
+    bool postExposureFromCli_ = false, postBloomFromCli_ = false, postAutoExpFromCli_ = false;
     // The authored sky, sun and air. Sole owner of the sun's direction.
     rhi::SkyAtmosphere sky_{};
     f32 cloudTime_ = 0.0f;   // seconds of accumulated wind
@@ -17449,7 +17499,7 @@ Application* createApplication(int argc, char** argv) {
     for (int i = 1; i + 1 < argc; ++i)
         if (!std::strcmp(argv[i], "--save-level")) saveLevelArg = argv[i + 1];
 
-    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; std::string shaderSourceDir; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool furnaceGrid=false; f32 furnaceTilt=0.0f; bool ptFurnace=false; bool ptScene=false; int deviceLostAt=0; int ptQualityRamp=0; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int aversrCycle=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=-1; int rt=-1; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int rtRenderMode=-1; int pt=-1; int ptBounces=-1; int layeredBsdf=-1; f32 coatWeight=0.0f; f32 coatRough=0.1f; f32 coatF0=0.04f; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string selectEntity; bool openLegacy=false; bool waterOn=false; f32 waterHeight=0.0f; std::string graphSelectNode; std::string graphTab; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false; bool bakeNav=false; f32 bakeNavCell=50.0f; std::string openMap; bool gbuffer=false; std::string gbufferDebug; std::string crashTest; std::string startMode;
+    u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; std::string shaderSourceDir; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool furnaceGrid=false; f32 furnaceTilt=0.0f; bool ptFurnace=false; bool ptScene=false; int deviceLostAt=0; int ptQualityRamp=0; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int aversrCycle=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=-1; int rt=-1; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int rtRenderMode=-1; int pt=-1; int ptBounces=-1; int layeredBsdf=-1; f32 coatWeight=0.0f; f32 coatRough=0.1f; f32 coatF0=0.04f; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool bloomSet=false, exposureSet=false; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string selectEntity; bool openLegacy=false; bool waterOn=false; f32 waterHeight=0.0f; std::string graphSelectNode; std::string graphTab; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false; bool bakeNav=false; f32 bakeNavCell=50.0f; std::string openMap; bool gbuffer=false; std::string gbufferDebug; std::string crashTest; std::string startMode;
     for (int i=1;i<argc;++i){
         // HANDLED BEFORE THE else-if CHAIN BELOW, AND NOT BY PREFERENCE: one more `else if` there
         // hits MSVC's nesting limit (C1061). Anything added from here on wants this shape instead:
@@ -17933,8 +17983,8 @@ Application* createApplication(int argc, char** argv) {
         }
         else if (!std::strcmp(argv[i],"--frames") && i+1<argc) frames=std::strtoull(argv[++i],nullptr,10);
         else if (!std::strcmp(argv[i],"--screenshot") && i+1<argc) shot=argv[++i];
-        else if (!std::strcmp(argv[i],"--bloom") && i+1<argc) bloom=static_cast<f32>(std::atof(argv[++i]));
-        else if (!std::strcmp(argv[i],"--exposure") && i+1<argc) exposure=static_cast<f32>(std::atof(argv[++i]));
+        else if (!std::strcmp(argv[i],"--bloom") && i+1<argc) { bloom=static_cast<f32>(std::atof(argv[++i])); bloomSet=true; }
+        else if (!std::strcmp(argv[i],"--exposure") && i+1<argc) { exposure=static_cast<f32>(std::atof(argv[++i])); exposureSet=true; }
         else if (!std::strcmp(argv[i],"--auto-exposure")) autoExposure=true;
         else if (!std::strcmp(argv[i],"--no-vsync")) vsyncOff=true;
         // --lod-select [px]: virtualized-geometry per-instance LOD level selection
@@ -18102,7 +18152,7 @@ Application* createApplication(int argc, char** argv) {
     // argc/argv[1][0] keeps the two gates in lockstep automatically.
     app->setSingleInstanceEligible(argc == 1 || (argc == 2 && argv[1][0] != '-'));
     if (!openMap.empty()) app->setOpenMap(openMap);
-    app->setPost(exposure, bloom, autoExposure);
+    app->setPost(exposure, exposureSet, bloom, bloomSet, autoExposure);
     app->applyCaptureExposureRule(autoExposure);
     app->setGiForceOff(noGi);
     app->setGiConeTraceOff(giConeOff);
