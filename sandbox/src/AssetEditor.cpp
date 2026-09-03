@@ -125,16 +125,87 @@ bool AssetEditorHost::draw(Engine& e, unsigned dockInto, float dpi) {
     }
 
     // Erase after the loop: an editor freed mid-iteration is still on this frame's ImGui draw list.
+    //
+    // A DIRTY TAB IS NOT CLOSED, IT IS ASKED ABOUT. Closing one used to destroy the editor and log
+    // a warning into a drawer the user is probably not looking at -- an hour of graph or sound
+    // editing gone to a click on the wrong X, with the only record in the Output Log. The whole
+    // application already refuses to exit with unsaved editors and raises a proper prompt naming
+    // them; this is the same question for one tab.
     for (usize k = closing_.size(); k-- > 0;) {
         AssetEditor& ed = *editors_[closing_[k]];
-        if (ed.dirty())
-            AVER_WARN("[Editor] closed '{}' with unsaved changes", std::filesystem::path(ed.path()).filename().string());
+        if (ed.dirty()) {
+            closeAskPath_ = ed.path();     // held open until the prompt is answered
+            closeAskError_.clear();
+            continue;
+        }
         editors_.erase(editors_.begin() + static_cast<isize>(closing_[k]));
     }
+
+    drawClosePrompt(dpi);
     return !editors_.empty();
 #else
     (void)e; (void)dockInto; (void)dpi;
     return false;
+#endif
+}
+
+// Asks before throwing away one tab's unsaved edits. Modelled on SandboxApp's own exit prompt: same
+// centred auto-resizing modal, same Save / Discard / Cancel order, same rule that a FAILED save
+// keeps the dialog up and says why rather than closing and losing the work anyway.
+void AssetEditorHost::drawClosePrompt(float dpi) {
+#if AVER_WITH_IMGUI
+    if (closeAskPath_.empty()) return;
+
+    AssetEditor* ed = find(closeAskPath_);
+    if (!ed) { closeAskPath_.clear(); return; }   // saved or closed some other way meanwhile
+
+    constexpr const char* kTitle = "Unsaved changes";
+    if (!ImGui::IsPopupOpen(kTitle)) ImGui::OpenPopup(kTitle);
+    const ImVec2 centre = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(centre, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(460.0f * dpi, 0.0f), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+
+    ImGui::TextWrapped("'%s' has unsaved changes.", ed->title().c_str());
+    ImGui::TextDisabled("%s", closeAskPath_.c_str());
+    if (!closeAskError_.empty()) {
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(0.93f, 0.42f, 0.38f, 1.0f), "%s", closeAskError_.c_str());
+    }
+    ImGui::Spacing();
+    ImGui::Separator();
+
+    const auto drop = [this]() {
+        for (usize i = 0; i < editors_.size(); ++i) {
+            if (editors_[i]->path() != closeAskPath_) continue;
+            editors_.erase(editors_.begin() + static_cast<isize>(i));
+            break;
+        }
+        closeAskPath_.clear();
+        closeAskError_.clear();
+        ImGui::CloseCurrentPopup();
+    };
+
+    if (ImGui::Button("Save and close", ImVec2(150.0f * dpi, 0.0f))) {
+        std::string why;
+        if (ed->save(&why)) drop();
+        else closeAskError_ = why.empty() ? std::string("Could not save.") : why;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Discard", ImVec2(110.0f * dpi, 0.0f))) {
+        AVER_WARN("[Editor] discarded unsaved changes in '{}'",
+                  std::filesystem::path(closeAskPath_).filename().string());
+        drop();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", ImVec2(110.0f * dpi, 0.0f))) {
+        closeAskPath_.clear();       // the tab simply stays open
+        closeAskError_.clear();
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+#else
+    (void)dpi;
 #endif
 }
 

@@ -85,10 +85,22 @@ public:
     void notifyWatchLost();
 
 private:
+    // Draws the "close without saving?" prompt for `closeAskPath_`. Returns nothing; the answer is
+    // applied to closeAskPath_ itself.
+    void drawClosePrompt(float dpi);
+
     std::vector<AssetEditorFactory> factories_;
     std::vector<std::unique_ptr<AssetEditor>> editors_;
     std::string focusRequest_;          // path to bring forward on the next draw
     std::vector<usize> closing_;        // deferred: an editor must not be destroyed mid-draw
+
+    // The tab whose X was clicked while it had unsaved edits, held open until the question is
+    // answered. Empty when nothing is being asked about.
+    //
+    // A PATH, NOT AN INDEX, because editors_ is erased from while this is live and an index would
+    // come to mean a different tab -- the same reason the start screen's selection is a path.
+    std::string closeAskPath_;
+    std::string closeAskError_;   // a failed save keeps the prompt up and says why
 };
 
 // Creates the .ocmesh inspector.

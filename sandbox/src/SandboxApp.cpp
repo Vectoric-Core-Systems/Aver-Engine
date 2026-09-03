@@ -3245,7 +3245,7 @@ public:
         }
 #endif
         // FROZEN: sunDirection stays unnormalised here -- the shaders normalise it.
-        sky_.enabled = true;
+        sky_.enabled = showAtmosphere_;   // Show > Atmosphere; the backend already gates the sky draw on this
         for (int i = 0; i < 3; ++i) {
             sky_.sunColor[i] = sunColor_[i];
             sky_.zenith[i]   = skyZenith_[i];
@@ -4049,7 +4049,7 @@ public:
         const bool hideEditorScene = hideEditorScene_;
         for (int i=0;i<(int)objects_.size();++i) {
             MeshObj& o = objects_[i];
-            if (!o.visible || hideEditorScene) continue;
+            if (!o.visible || hideEditorScene || !showStaticMeshes_) continue;
             Transform tr; tr.position=o.pos; tr.rotation=quatFromEulerDeg(o.rotDeg); tr.scale=o.scale;
             Mat4 w = tr.toMatrix();
             f32 col[4]={o.color[0],o.color[1],o.color[2],1};
@@ -10376,17 +10376,28 @@ private:
                         const bool open_window = ImGui::BeginMenu("Window");
             uiReg_.track("menu.window");
             if (open_window){
-                ImGui::MenuItem("World Outliner"); ImGui::MenuItem("Details");
+                // Both of these used to discard their return value against panels that had no
+                // p_open, so the items consumed a click and could never do anything: docking let
+                // you close the tab, and nothing could reopen it.
+                ImGui::MenuItem("World Outliner", nullptr, &showOutliner_);
+                uiReg_.track("window.worldOutliner");
+                ImGui::MenuItem("Details", nullptr, &showDetails_);
+                uiReg_.track("window.details");
                 if (ImGui::MenuItem("Content Browser", "Ctrl+Space", drawer_ == Drawer::Content)) toggleDrawer(Drawer::Content);
                 uiReg_.track("window.contentBrowser");
                 if (ImGui::MenuItem("Output Log", nullptr, drawer_ == Drawer::Log)) toggleDrawer(Drawer::Log);
-                uiReg_.track("window.outputLogDup");
+                // track() names THE LAST ITEM SUBMITTED, so it belongs immediately after its own
+                // widget. A trailing `track("window.outputLog")` used to sit after World Settings
+                // below, which registered the WORLD SETTINGS rect under the Output Log's name --
+                // and this is a live automation target (setWidgetResolver -> centreOf), so anything
+                // clicking "window.outputLog" toggled World Settings instead. The real item was
+                // left under the tell-tale name "window.outputLogDup".
+                uiReg_.track("window.outputLog");
                 if (ImGui::MenuItem("Console", "`", drawer_ == Drawer::Console)) toggleDrawer(Drawer::Console);
                 uiReg_.track("window.console");
                 if (ImGui::MenuItem("World Settings", nullptr, showWorldSettings_))
                     showWorldSettings_ = !showWorldSettings_;
                 uiReg_.track("window.worldSettings");
-                uiReg_.track("window.outputLog");
                 ImGui::Separator();
 #if AVER_MODULE_SCENE
                 {
@@ -10439,8 +10450,17 @@ private:
             }
             tools_.drawMenu(project_);
             if (ImGui::BeginMenu("Build")){
+                // Build Geometry is GONE rather than disabled: there is no CSG or brush system in
+                // this engine and no plan for one, so the item was an Unreal-shaped label with
+                // nothing behind it. Build Lighting stays, disabled and explained -- a lightmap
+                // baker IS planned (docs/rendering/RENDERING.md), so that one is genuinely "not
+                // yet" rather than "not a thing here".
+                ImGui::BeginDisabled(true);
                 ImGui::MenuItem("Build Lighting");
-                ImGui::MenuItem("Build Geometry");
+                ImGui::EndDisabled();
+                uiReg_.track("build.buildLighting");
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip("No lightmap baker yet.\nLighting is real-time: the sun, and voxel cone-traced GI.");
 #if AVER_MODULE_SYNAPSE
                 ImGui::Separator();
                 if (ImGui::MenuItem("Bake Navigation")) bakeNavigationNow(e);
@@ -10456,7 +10476,23 @@ private:
                 ImGui::EndMenu();
             }
             uiReg_.track("menu.build");
-            if (ImGui::BeginMenu("Select")){ if(ImGui::MenuItem("Select All")) {} if(ImGui::MenuItem("Select None")) sel_=-1; ImGui::EndMenu(); }
+            if (ImGui::BeginMenu("Select")){
+                // Select All needs a selection SET -- selection here is two scalars and roughly ten
+                // consumers assume exactly one -- so it is disabled and says so rather than being an
+                // empty {} body that swallows the click.
+                ImGui::BeginDisabled(true);
+                ImGui::MenuItem("Select All");
+                ImGui::EndDisabled();
+                uiReg_.track("select.all");
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip("The editor selects one object at a time.\nMulti-selection is not built yet.");
+                // BOTH, like every other deselect in this file. Clearing sel_ alone left selEntity_
+                // live; it happens to read correctly today only because every consumer tests sel_
+                // first, which is one refactor away from resurrecting a dead selection.
+                if(ImGui::MenuItem("Select None")) { sel_=-1; selEntity_=kInvalidId; }
+                uiReg_.track("select.none");
+                ImGui::EndMenu();
+            }
             uiReg_.track("menu.select");
             if (ImGui::BeginMenu("Help")){ ImGui::MenuItem("About Aver Engine"); ImGui::EndMenu(); }
             uiReg_.track("menu.help");
@@ -12557,10 +12593,37 @@ private:
     }
 #endif
 
-    // Draws the World Outliner and the Details panel.
+    // Marks a level record as one this level now carries, because the author has been editing it.
+    //
+    // THE BUG THIS CLOSES. hasLevelSun_/hasLevelSky_/hasLevelFog_ were set ONLY by the loader, and
+    // saveLevel writes each record only when its flag is set. So on a level whose file carried no
+    // SUN, every slider under "Directional Light (Sun)" was live in the viewport and thrown away on
+    // save -- no dirty marker, no warning, and saveLevel's own comment claiming Details edits
+    // survive was true only for levels that already had the record.
+    //
+    // IsAnyItemActive is FRAME-GLOBAL, not scoped to this section, and that is a deliberate trade
+    // rather than an oversight: dragging a control in another panel while this section happens to
+    // be selected also sets the flag. The cost of that false positive is one extra record in the
+    // file, describing exactly the sun the author was already looking at. The cost of the false
+    // NEGATIVE it replaces was silently discarding their work.
+    static void markLevelRecordEdited(bool& has) {
+        if (ImGui::IsAnyItemActive()) has = true;
+    }
+
+    // Draws the World Outliner and the Details panel, each only when Window > ... has it on.
+    //
+    // SPLIT SO EACH CAN BE HIDDEN. ImGui::Begin does NOT skip a window whose p_open points at
+    // false -- that early-out is BeginPopupModal's, not Begin's -- so a hideable panel has to be
+    // guarded by its caller. These were one function submitting both unconditionally, which is why
+    // their Window menu items could never do anything.
     void buildPanels(Engine& e) {
         (void)e;
-        ImGui::Begin("World Outliner");
+        if (showOutliner_) buildOutlinerPanel();
+        if (showDetails_)  buildDetailsPanel();
+    }
+
+    void buildOutlinerPanel() {
+        ImGui::Begin("World Outliner", &showOutliner_);
         if (!hideEditorScene_)
             for (int i=0;i<(int)objects_.size();++i)
                 if (ImGui::Selectable((std::string("  ")+objects_[i].name).c_str(), sel_==i)) { sel_=i; selEntity_=kInvalidId; }
@@ -12600,8 +12663,10 @@ private:
         if (ImGui::Selectable("  Sky + Atmosphere", sel_==-3))        { sel_=-3; selEntity_=kInvalidId; }
         if (ImGui::Selectable("  Post Process", sel_==-4))            { sel_=-4; selEntity_=kInvalidId; }
         ImGui::End();
+    }
 
-        ImGui::Begin("Details");
+    void buildDetailsPanel() {
+        ImGui::Begin("Details", &showDetails_);
         if (sel_>=0 && sel_<(int)objects_.size()){
             MeshObj& o=objects_[sel_]; ImGui::TextUnformatted(o.name.c_str()); ImGui::Separator();
             if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -12845,6 +12910,7 @@ private:
                 ImGui::ColorEdit3("Colour", sunColor_);
             }
             ImGui::SliderFloat("Angular Size", &sky_.sunAngularDiameterDeg, 0.05f, 8.0f, "%.2f deg");
+            markLevelRecordEdited(hasLevelSun_);
         } else if (sel_==-3){
             ImGui::TextUnformatted("Sky + Atmosphere"); ImGui::Separator();
             {
@@ -12944,6 +13010,7 @@ private:
                     sky_.cloudScale = 1.0f / std::fmax(featureSize, 1.0f);
                 ImGui::DragFloat2("Wind", sky_.cloudWind, 5.0f);
             }
+            markLevelRecordEdited(hasLevelSky_);
         } else if (sel_==-4){
             ImGui::TextUnformatted("Post Process"); ImGui::Separator();
             ImGui::BeginDisabled(post_.autoExposure);
@@ -13050,6 +13117,10 @@ private:
         consoleAutoScroll_  = prefBool ("console.autoScroll",            consoleAutoScroll_);
         showGrid_           = prefBool ("viewport.showGrid",             showGrid_);
         wireframe_          = prefBool ("viewport.wireframe",            wireframe_);
+        // Toggled from the Window menu rather than the Preferences panel, so these ride
+        // onShutdown's sync rather than buildEditorPrefs' own save-on-close.
+        showOutliner_       = prefBool ("panels.worldOutliner",          showOutliner_);
+        showDetails_        = prefBool ("panels.details",                showDetails_);
         flySpeed_           = prefFloat("viewport.flySpeed",             flySpeed_);
         lookSpeed_          = prefFloat("viewport.lookSensitivity",      lookSpeed_);
 
@@ -13114,6 +13185,8 @@ private:
         setPrefBool ("console.autoScroll",           consoleAutoScroll_);
         setPrefBool ("viewport.showGrid",            showGrid_);
         setPrefBool ("viewport.wireframe",           wireframe_);
+        setPrefBool ("panels.worldOutliner",         showOutliner_);
+        setPrefBool ("panels.details",               showDetails_);
         setPrefFloat("viewport.flySpeed",            flySpeed_);
         setPrefFloat("viewport.lookSensitivity",     lookSpeed_);
 
@@ -13173,7 +13246,11 @@ private:
         }
         if (ImGui::CollapsingHeader("Output Log", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Checkbox("Auto-scroll to the newest line", &logAutoScroll_);
-            ImGui::Combo("Level filter", &logLevelFilter_, "All\0Info+\0Warn+\0");
+            // THE SAME PERSISTED VARIABLE as the Output Log drawer's own combo, so it has to offer
+            // the same entries. This copy stopped at Warn+ when Error+ and Critical+ were appended
+            // to the other one: choosing Error+ in the drawer left this preview blank, and this
+            // control could then only ever set the filter back to one of the first three.
+            ImGui::Combo("Level filter", &logLevelFilter_, "All\0Info+\0Warn+\0Error+\0Critical+\0");
         }
         if (ImGui::CollapsingHeader("Display", ImGuiTreeNodeFlags_DefaultOpen)) {
             const bool canDisable = prefsDevice_ && prefsDevice_->vsyncCanDisable();
@@ -13782,8 +13859,14 @@ private:
         uiReg_.track("viewport.show");
         if (ImGui::BeginPopup("showFlags")) {
             ImGui::Checkbox("Grid", &showGrid_);
-            bool t=true; ImGui::Checkbox("Static Meshes", &t);
-            ImGui::Checkbox("Atmosphere", &t);
+            uiReg_.track("show.grid");
+            // THESE TWO USED TO SHARE A STACK-LOCAL. `bool t=true;` was re-initialised every
+            // frame and written by both boxes, so they always rendered ticked, could never be
+            // unticked, and toggled nothing. Both now drive real state that the frame reads.
+            ImGui::Checkbox("Static Meshes", &showStaticMeshes_);
+            uiReg_.track("show.staticMeshes");
+            ImGui::Checkbox("Atmosphere", &showAtmosphere_);
+            uiReg_.track("show.atmosphere");
             ImGui::EndPopup();
         }
         ImGui::End();
@@ -14370,6 +14453,13 @@ private:
     bool iconWarned_=false;
     bool showProjectSettings_=false; // Edit > Project Settings window
     bool showWorldSettings_=false;   // Window > World Settings (per-LEVEL settings)
+    // Window > World Outliner / Details. Default ON: these are the editor's two primary panels and
+    // hiding one is the deliberate act, not showing it.
+    bool showOutliner_=true;
+    bool showDetails_=true;
+    // Viewport Show flags. Both default ON -- hiding is the deliberate act.
+    bool showStaticMeshes_=true;
+    bool showAtmosphere_=true;
     bool showEditorPrefs_=false;     // Edit > Editor Preferences window
     bool scrollPrefsToKeybinds_=false;   // --scroll-prefs-to-keybinds, one-shot
     int  settingsPage_=1;            // 0 Description, 1 Rendering>General, 2 >GI, 3 >Ray Tracing, 4 >Path Tracing
@@ -15997,8 +16087,11 @@ private:
         w.fogDensity = levelFog_;
         w.fogColor[0] = fogColor_[0]; w.fogColor[1] = fogColor_[1]; w.fogColor[2] = fogColor_[2];
 
-        // The sun and the sky go back out whenever the level carried them, so an edit in the
-        // Details panel survives a save rather than being silently dropped on the next load.
+        // The sun and the sky go back out whenever the level carried them OR the author has edited
+        // them here (markLevelRecordEdited), so a Details-panel edit survives a save rather than
+        // being silently dropped. That second half was missing: this comment used to make the claim
+        // while the flags were set only by the loader, so it held for levels that already had the
+        // record and for no others.
         w.hasSun = hasLevelSun_;
         w.hasSky = hasLevelSky_;
         for (int i = 0; i < 3; ++i) {
