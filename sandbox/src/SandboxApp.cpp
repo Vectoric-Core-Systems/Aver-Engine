@@ -8858,26 +8858,42 @@ private:
         rebindEdit(c.id, e);
 
 #if AVER_MODULE_SCENE
-        // AND THE SUBTREE THAT WENT WITH IT. Parents precede children in `subtree`, so each node's
-        // parent handle is already live by the time it is read -- captureSubtree guarantees that
-        // ordering, and it is the only reason this can be a single forward pass.
-        //
-        // A NODE WHOSE PARENT FAILED TO COME BACK is restored as a root rather than dropped. Losing
-        // a relationship is recoverable by hand; losing the object is not.
-        std::vector<scene::Entity> made;
-        made.reserve(c.subtree.size());
-        for (const EditCmd::DestroyedNode& n : c.subtree) {
-            scene::Entity par = e;
-            if (n.parent >= 0 && n.parent < static_cast<i32>(made.size())) par = made[static_cast<usize>(n.parent)];
-            const scene::Entity ce = spawnEntityFrom(n.snap, n.xf, n.label, n.hadBody, n.bodyHalf, true, par);
-            made.push_back(ce);
-            if (ce != scene::kInvalidEntity) rebindEdit(n.id, ce);
-        }
+        spawnSubtreeUnder(e, c.subtree, /*restoreIds=*/true);
         // spawnEntityFrom selects whatever it made last, so the selection has to be put back on the
         // entity the command is actually about.
         sel_ = kSelScene; selEntity_ = e;
 #endif
     }
+
+#if AVER_MODULE_SCENE
+    // Rebuilds a captured subtree under `root`. Parents precede children in `subtree`, so each
+    // node's parent handle is already live by the time it is read -- captureSubtree guarantees that
+    // ordering, and it is the only reason this can be a single forward pass.
+    //
+    // A NODE WHOSE PARENT IS MISSING is attached to `root` rather than dropped. Losing a
+    // relationship is recoverable by hand; losing the object is not.
+    //
+    // restoreIds SEPARATES AN UNDO FROM A COPY, and getting it wrong is not cosmetic. An undo is
+    // putting the SAME logical entities back, so each node's original EditId must be rebound to the
+    // new handle or every later command naming them addresses nothing. A paste or a duplicate is
+    // making NEW entities; rebinding there would point the ORIGINAL's id at the copy, so undoing the
+    // paste would delete the thing that was copied. Same reason restoreObjectId is false for a copy:
+    // two entities must not share one object id.
+    void spawnSubtreeUnder(scene::Entity root, const std::vector<EditCmd::DestroyedNode>& subtree,
+                           bool restoreIds) {
+        std::vector<scene::Entity> made;
+        made.reserve(subtree.size());
+        for (const EditCmd::DestroyedNode& n : subtree) {
+            scene::Entity par = root;
+            if (n.parent >= 0 && n.parent < static_cast<i32>(made.size()))
+                par = made[static_cast<usize>(n.parent)];
+            const scene::Entity ce =
+                spawnEntityFrom(n.snap, n.xf, n.label, n.hadBody, n.bodyHalf, restoreIds, par);
+            made.push_back(ce);
+            if (restoreIds && ce != scene::kInvalidEntity) rebindEdit(n.id, ce);
+        }
+    }
+#endif
 
 #if AVER_MODULE_SCENE
     // ---- the World Outliner's reparent, as an undoable command ----------------------------
@@ -10420,9 +10436,11 @@ private:
     void copySelection() {
 #if AVER_MODULE_SCENE
         if (sel_ == kSelScene && selEntity_ != scene::kInvalidEntity && scene::World::instance().valid(selEntity_)) {
-            const EditCmd c = describeEntity(selEntity_);
+            EditCmd c = describeEntity(selEntity_);
+            captureSubtree(c, selEntity_);
             clipboard_.hasScene   = true;
             clipboard_.sceneSnap  = c.snap;
+            clipboard_.sceneSubtree = std::move(c.subtree);
             clipboard_.sceneXform = c.after;
             clipboard_.hadBody    = c.hadBody;
             clipboard_.bodyHalf   = c.bodyHalf;
@@ -10453,10 +10471,17 @@ private:
             const std::string label = makeEntityLabel(std::string(), clipboard_.sceneSnap.asset);
             const scene::Entity e = spawnEntityFrom(clipboard_.sceneSnap, x, label, clipboard_.hadBody, clipboard_.bodyHalf, /*restoreObjectId=*/false);
             if (e == scene::kInvalidEntity) return;
+            spawnSubtreeUnder(e, clipboard_.sceneSubtree, /*restoreIds=*/false);
+            sel_ = kSelScene; selEntity_ = e;   // spawnSubtreeUnder selects whatever it made last
             EditCmd c = describeEntity(e);
             c.kind = EditCmd::Kind::Create;
+            // CAPTURED FROM THE COPY, so REDO puts the children back too. Undo of a Create destroys
+            // the whole subtree (World::destroy retires it), so without this a paste-undo-redo cycle
+            // returned the root alone -- the children were destroyed by the undo and never rebuilt.
+            captureSubtree(c, e);
             pushEdit(std::move(c));
-            AVER_INFO("[Editor] pasted entity #{}", (u32)e);
+            AVER_INFO("[Editor] pasted entity #{} and {} descendant(s)", (u32)e,
+                      clipboard_.sceneSubtree.size());
             return;
         }
 #endif
@@ -10481,16 +10506,23 @@ private:
         const f32 delta = snapMove_ ? moveSnap_ : kDuplicateOffset;
 #if AVER_MODULE_SCENE
         if (sel_ == kSelScene && selEntity_ != scene::kInvalidEntity && scene::World::instance().valid(selEntity_)) {
-            const EditCmd src = describeEntity(selEntity_);
+            EditCmd src = describeEntity(selEntity_);
+            // The source's descendants, read BEFORE anything is spawned -- the copy is about to
+            // become the selection, and captureSubtree walks whatever it is handed.
+            captureSubtree(src, selEntity_);
             EditXform x = src.after;
             x.pos.x += delta; x.pos.y += delta;
             const std::string label = makeEntityLabel(std::string(), src.snap.asset);
             const scene::Entity e = spawnEntityFrom(src.snap, x, label, src.hadBody, src.bodyHalf, /*restoreObjectId=*/false);
             if (e == scene::kInvalidEntity) return;
+            spawnSubtreeUnder(e, src.subtree, /*restoreIds=*/false);
+            sel_ = kSelScene; selEntity_ = e;
             EditCmd c = describeEntity(e);
             c.kind = EditCmd::Kind::Create;
+            captureSubtree(c, e);              // so REDO rebuilds the children; see pasteClipboard
             pushEdit(std::move(c));
-            AVER_INFO("[Editor] duplicated entity #{}", (u32)e);
+            AVER_INFO("[Editor] duplicated entity #{} and {} descendant(s)", (u32)e,
+                      src.subtree.size());
             return;
         }
 #endif
@@ -10705,6 +10737,86 @@ private:
                 const auto* bl = w.component<scene::CLocal>(back, scene::kComponentLocal);
                 check(bl && std::fabs(bl->xf.position.z - 90.0f) < 0.01f,
                       "at its original parent-relative transform");
+            }
+
+            // ---- Duplicate and Paste take the CHILDREN with them ----------------------------
+            //
+            // copySelection/duplicateSelection described ONE entity and spawned ONE entity, so
+            // duplicating a table with a lamp on it produced a bare table -- and the paste looked
+            // like it had worked, which is what made it worth a test rather than a glance. Delete
+            // had carried its subtree since the hierarchy landed; these two never did.
+            //
+            // COUNTED, NOT INSPECTED, deliberately: the depth-2 chain below means a copy that took
+            // only the direct children would come out one entity short, which counting catches and
+            // "does it have a child" would not.
+            {
+                // A fresh depth-2 chain of its own, so this phase cannot be perturbed by, or
+                // perturb, the parent/child/grand fixture the blocks above are still using.
+                const u32 dbase = w.count();
+                spawnCube(eng); w.flush(); const scene::Entity dp = selEntity_;
+                spawnCube(eng); w.flush(); const scene::Entity dc = selEntity_;
+                spawnCube(eng); w.flush(); const scene::Entity dg = selEntity_;
+                check(w.setParent(dc, dp, false) && w.setParent(dg, dc, false),
+                      "a fresh parent -> child -> grandchild chain for the copy phase");
+                Transform dcx; dcx.position = Vec3{0.0f, 0.0f, 120.0f};
+                w.setLocalTransform(dc, dcx);
+                check(w.count() == dbase + 3, "three entities before any copying");
+
+                // ---- Duplicate ----
+                sel_ = kSelScene; selEntity_ = dp;
+                duplicateSelection();
+                w.flush();
+                const scene::Entity dupRoot = selEntity_;
+                check(w.valid(dupRoot) && dupRoot != dp, "duplicate made a NEW root entity");
+                check(w.count() == dbase + 6,
+                      "and brought BOTH descendants with it -- three more entities, not one");
+                const scene::Entity dupChild = w.firstChild(dupRoot);
+                check(dupChild != scene::kInvalidEntity, "the copy has a child");
+                check(dupChild != scene::kInvalidEntity && w.firstChild(dupChild) != scene::kInvalidEntity,
+                      "and the child has one too, so the whole depth-2 chain came across");
+                // The copy is its own object, not an alias: rebinding the source's EditId to the
+                // copy would make the undo below delete the ORIGINAL.
+                const auto* dcl = dupChild != scene::kInvalidEntity
+                    ? w.component<scene::CLocal>(dupChild, scene::kComponentLocal) : nullptr;
+                check(dcl && std::fabs(dcl->xf.position.z - 120.0f) < 0.01f,
+                      "the copied child kept its parent-relative transform");
+
+                undo(); w.flush();
+                check(w.count() == dbase + 3 && w.valid(dp) && w.valid(dc) && w.valid(dg),
+                      "undo removes the whole duplicate and leaves the ORIGINAL chain intact");
+
+                redo(); w.flush();
+                check(w.count() == dbase + 6,
+                      "and REDO brings the descendants back, not just the root");
+                undo(); w.flush();
+
+                // ---- Copy / Paste ----
+                sel_ = kSelScene; selEntity_ = dp;
+                copySelection();
+                pasteClipboard();
+                w.flush();
+                const scene::Entity pasteRoot = selEntity_;
+                check(w.valid(pasteRoot) && pasteRoot != dp, "paste made a NEW root entity");
+                check(w.count() == dbase + 6, "and pasted the descendants with it");
+                const scene::Entity pasteChild = w.firstChild(pasteRoot);
+                check(pasteChild != scene::kInvalidEntity &&
+                      w.firstChild(pasteChild) != scene::kInvalidEntity,
+                      "two levels deep, like the thing that was copied");
+
+                undo(); w.flush();
+                check(w.count() == dbase + 3 && w.valid(dp) && w.valid(dc) && w.valid(dg),
+                      "undo of a paste removes the copy and leaves the original chain");
+
+                // THE CLIPBOARD SURVIVES ITS OWN PASTE. Pasting twice is ordinary, and the second
+                // one must produce a hierarchy too rather than a bare root.
+                pasteClipboard(); w.flush();
+                check(w.count() == dbase + 6, "a SECOND paste from the same clipboard is complete too");
+                undo(); w.flush();
+
+                // Leave the phase as it found it, so the reparent block below still counts from a
+                // known base.
+                sel_ = kSelScene; selEntity_ = dp; deleteSelection(); w.flush();
+                check(w.count() == dbase, "the copy phase cleaned up after itself");
             }
 
             // ---- the Outliner's reparent, as a command --------------------------------------
@@ -16215,6 +16327,9 @@ private:
         bool hasScene = false;
 #if AVER_MODULE_SCENE
         editor::EntitySnapshot sceneSnap;
+        // EVERYTHING UNDER IT, TOO. Copying only the entity the selection names meant pasting a
+        // parent produced a childless copy -- silently, since the paste looked like it worked.
+        std::vector<EditCmd::DestroyedNode> sceneSubtree;
 #endif
         EditXform sceneXform{};
         bool hadBody = false;
