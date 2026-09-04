@@ -5642,6 +5642,21 @@ public:
             }
             if (!skinScene_->passed()) return 1;
         }
+        // THE OTHER TWO SKIN TESTS, WHICH USED TO EXIT 0 WHATEVER THEY FOUND. Read from the latched
+        // scalars rather than the objects: onShutdown runs BEFORE this and destroys both, so asking
+        // skinDraw_/skinSelfTest_ here would always see null and always report success -- and a
+        // falsification written against that would pass while proving nothing.
+        // -1 means the test was never asked for, which is not a verdict and must not become one.
+        if (skinSelfTestExit_ > 0) {
+            AVER_ERROR("[Skin] --skin-test reported {}", skinSelfTestExit_ == 2 ? "no verdict (it did "
+                       "not finish)" : "FAIL");
+            return skinSelfTestExit_;
+        }
+        if (skinDrawExit_ > 0) {
+            AVER_ERROR("[Skin] --skin-draw-test reported {}", skinDrawExit_ == 2 ? "no verdict (it did "
+                       "not finish)" : "FAIL");
+            return skinDrawExit_;
+        }
         return 0;
     }
 
@@ -5741,6 +5756,11 @@ public:
             gameUi_ = nullptr;
         }
         if (skinSelfTest_) {
+            // LATCHED BEFORE THE RESET, and that ordering is the whole point. Engine::run calls
+            // onShutdown and reads exitCode() AFTER it, so a verdict left inside the object is gone
+            // by the time anything can ask for it -- which is why --skin-test exited 0 however it
+            // went. --skin-scene-test only escaped this by never being reset here.
+            skinSelfTestExit_ = !skinSelfTest_->finished() ? 2 : (skinSelfTest_->passed() ? 0 : 1);
             e.device()->removeRenderFeature(skinSelfTest_.get());
             skinSelfTest_.reset();
         }
@@ -5761,6 +5781,8 @@ public:
         ptSceneViewWantEnabled_ = false;
         syncPtSceneView(e.device());
         if (skinDraw_) {
+            // Latched before the reset, for the reason spelled out at skinSelfTest_ above.
+            skinDrawExit_ = !skinDraw_->finished() ? 2 : (skinDraw_->passed() ? 0 : 1);
             e.device()->removeRenderFeature(skinDraw_.get());
             skinDraw_.reset();
         }
@@ -16499,6 +16521,10 @@ private:
     aver::render::ui::UiRenderer* gameUi_ = nullptr;
     bool skinTest_ = false;       // --skin-test: GPU skinning against its CPU reference, then exit
     std::unique_ptr<aver::render::SkinSelfTest> skinSelfTest_;
+    // VERDICTS LATCHED OUT OF THE TWO TESTS ABOVE, because onShutdown destroys them before
+    // exitCode() is read. -1 = never asked for, 0 = passed, 1 = failed, 2 = never reached a verdict.
+    int skinSelfTestExit_ = -1;
+    int skinDrawExit_     = -1;
     bool skinDrawTest_ = false;   // --skin-draw-test: does the RASTERISER read the skinned buffer
     std::unique_ptr<aver::editor::SkinDrawTest> skinDraw_;
 #if AVER_MODULE_SCENE
