@@ -10,6 +10,44 @@
 
 namespace aver::fmt {
 
+// An image the file carried, already decoded to its ENCODED bytes -- a PNG stays a PNG, a JPEG stays
+// a JPEG. Nothing here re-encodes: a lossy round trip through a decoder would change bytes the
+// source had every right to expect back, and for a JPEG it would lose quality for no reason.
+//
+// glTF has THREE ways to name an image and they all land here: an external file URI, a base64
+// `data:` URI, and a bufferView into the binary chunk. Which one it was is not recorded, because
+// nothing downstream should care.
+struct GltfImage {
+    std::vector<u8> bytes;      // the encoded file, verbatim
+    std::string ext;            // ".png" or ".jpeg", from the mimeType or the URI
+    std::string suggestedName;  // sanitised stem for the file this becomes; never a path
+    bool ok = false;            // false when it could not be read -- see GltfImportResult::unsupported
+};
+
+// One glTF material, flattened to the subset this engine can express.
+//
+// EVERY DEFAULT HERE IS glTF'S OWN, and the values are not obvious: metallicFactor and
+// roughnessFactor both default to 1.0, so a material that states neither is a fully rough METAL.
+// Defaulting them to 0 instead yields a plausible-looking dielectric that is wrong on every asset
+// relying on the spec, and wrong in a way that reads as a lighting bug rather than an import bug.
+struct GltfMaterial {
+    // Which image a texture slot points at, if any. texCoord is carried so the importer can say it
+    // ignored a nonzero one rather than silently sampling uv0.
+    struct TexRef { i32 imageIndex = -1; u32 texCoord = 0; };
+
+    std::string name;                        // the JSON name, else "Material_<index>"
+    f32  baseColorFactor[4] = {1, 1, 1, 1};
+    f32  emissiveFactor[3]  = {0, 0, 0};
+    f32  metallicFactor     = 1.0f;          // glTF default is ONE, not zero
+    f32  roughnessFactor    = 1.0f;          // likewise
+    f32  normalScale        = 1.0f;
+    f32  occlusionStrength  = 1.0f;
+    f32  alphaCutoff        = 0.5f;          // only meaningful when alphaMode is MASK
+    std::string alphaMode   = "OPAQUE";      // OPAQUE | MASK | BLEND, verbatim
+    bool doubleSided        = false;
+    TexRef baseColorTex, metalRoughTex, normalTex, occlusionTex, emissiveTex;
+};
+
 // What an import produced, and what it had to drop.
 struct GltfImportResult {
     std::vector<OcMeshData> meshes;          // one per glTF mesh, submeshes per primitive
@@ -41,6 +79,16 @@ struct GltfImportResult {
     // Clips, in the file's own order. Bone indices address `skeletons[0]`.
     std::vector<OcAnimation> animations;
     std::vector<std::string> animationNames;
+
+    // Index-parallel to the file's own materials[] and images[] arrays, so a TexRef's imageIndex is
+    // a direct subscript into `images`. Empty when the file declared none.
+    //
+    // DELIBERATELY POD AND PBR-FREE. Turning these into a pbr::MaterialDesc happens in
+    // GltfMaterialCook, which lives in the PBR-gated Aver.Formats.Material target -- see that
+    // header. Doing it here would put the render family behind every headless tool that links
+    // Aver.Formats for nothing but meshes.
+    std::vector<GltfMaterial> materials;
+    std::vector<GltfImage>    images;
 
     std::vector<std::string> unsupported;    // features the file used and this importer cannot carry
 };
