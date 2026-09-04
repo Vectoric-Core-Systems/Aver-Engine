@@ -2210,19 +2210,6 @@ public:
                 voxiAttached_ = true;
                 if (projectRenderPending_) applyProjectRenderSettings();
                 if (saveProject_ && !saveProjectDone_) { saveProjectDone_ = true; seedAndSaveProject(); }
-#if AVER_MODULE_SCENE
-                // --save-level <out>: write the OPEN level to another path and log the result.
-                //
-                // saveLevel had no caller but a mouse click -- Ctrl+S, the File menu and the
-                // toolbar button -- so nothing could prove a round-trip headlessly, which is the
-                // same gap the four project flags were added to close. Writes ELSEWHERE rather
-                // than over levelPath_, so proving the save never costs the content it proved on.
-                if (!saveLevelTo_.empty() && !saveLevelDone_ && !levelPath_.empty()) {
-                    saveLevelDone_ = true;
-                    if (saveLevel(saveLevelTo_)) AVER_INFO("[Level] --save-level wrote {}", saveLevelTo_);
-                    else                        AVER_ERROR("[Level] --save-level failed for {}", saveLevelTo_);
-                }
-#endif
 #if AVER_WITH_IMGUI
                 // --import's deferred handshake, UI-only on purpose: importAsset belongs to the
                 // content-browser half of this file and calls cbIsEditable/cbInvalidate/importModel,
@@ -2598,6 +2585,37 @@ public:
         // Single-instance forwarding, drain. Polled rather than an Event (Event.hpp is a fixed POD
         // with no string field), latched on window_ and drained unconditionally every frame -- safe
         // since window_->pumpEvents() runs BEFORE onUpdate and WM_COPYDATA is synchronous on this thread.
+#if AVER_MODULE_SCENE
+        // --save-level <out>: write the OPEN level to another path and log the result.
+        //
+        // saveLevel had no caller but a mouse click -- Ctrl+S, the File menu and the toolbar button
+        // -- so nothing could prove a round trip headlessly, which is the same gap the four project
+        // flags were added to close. Writes ELSEWHERE rather than over levelPath_, so proving the
+        // save never costs the content it proved on.
+        //
+        // IT SAVED THE WRONG LEVEL. This sat inside the one-shot block that runs when the Voxi
+        // renderer finishes initialising -- a convenient "once" hook that has nothing to do with
+        // saving -- which is the first frame, BEFORE --open-level has been applied. So
+        // `--open-level Arena --save-level out.ocworld` faithfully wrote the project's START map
+        // every time, with a log line naming the file it wrote and nothing naming the level it came
+        // from. Two runs of mine went by before I noticed the placement count was wrong.
+        //
+        // WAITS FOR EVERY PENDING OPEN, rather than merely moving later: --open-level is consumed on
+        // the first UI draw, a forwarded launch can arrive on any frame, and either can be sitting
+        // behind an unsaved-changes prompt. Saving what is open the moment nothing is queued to
+        // replace it is the only rule that is right for all three.
+        if (!saveLevelTo_.empty() && !saveLevelDone_ && !levelPath_.empty() &&
+            openLevelByName_.empty() && pendingOpenPath_.empty() && !pendingOpenPrompt_) {
+            saveLevelDone_ = true;
+            // The SOURCE is named too. A log line that says only where it wrote cannot tell you it
+            // saved the wrong thing, which is exactly how this went unnoticed.
+            if (saveLevel(saveLevelTo_))
+                AVER_INFO("[Level] --save-level wrote '{}' ({}) to {}",
+                          levelName_, levelPath_, saveLevelTo_);
+            else
+                AVER_ERROR("[Level] --save-level failed for {}", saveLevelTo_);
+        }
+#endif
         if (window_ && window_->hasPendingOpenRequest()) {
             const std::string path = window_->takePendingOpenRequest();
             if (isLevelFile(path.c_str())) {
