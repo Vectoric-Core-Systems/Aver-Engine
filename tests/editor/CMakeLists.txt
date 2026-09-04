@@ -27,6 +27,15 @@ target_include_directories(EditorEulerTest PRIVATE
 target_link_libraries(EditorEulerTest PRIVATE Aver.Core Aver.Platform)
 set_target_properties(EditorEulerTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# LevelListTest -- the level enumeration behind File > Open Level and the Content Browser's level
+# activation. Header-only and Core-only, exactly like EditorEulerTest above, for the same reason: the
+# PICKER needs ImGui and a window, the LIST does not, and the list is where a missed extension or a
+# walk into a project's streamed-chunk directory would actually go wrong.
+add_executable(LevelListTest src/LevelListTest.cpp)
+target_include_directories(LevelListTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(LevelListTest PRIVATE Aver.Core Aver.Platform)
+set_target_properties(LevelListTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # GraphEditorGeometryTest -- the .ocgraph node editor's headless core: the node descriptor table
 # (sandbox/src/GraphNodeDefs.hpp), and layout/hit-testing/link-rules/cycle-detection/canvas-transform
 # (sandbox/src/GraphEditorGeometry.hpp/.cpp). No ImGui, no Engine, no scene:: -- an editor that only

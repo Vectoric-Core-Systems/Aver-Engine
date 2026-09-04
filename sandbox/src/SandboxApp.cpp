@@ -74,6 +74,7 @@
 
 #include "ProjectBrowser.hpp"
 #include "LevelClassSave.hpp"
+#include "LevelList.hpp"
 #include "ProjectScaffold.hpp"
 #include "ClusterMaterialShader.hpp"
 
@@ -2594,17 +2595,11 @@ public:
         if (window_ && window_->hasPendingOpenRequest()) {
             const std::string path = window_->takePendingOpenRequest();
             if (isLevelFile(path.c_str())) {
-                if (canUndo()) {
-                    // Cheapest honest "is anything unsaved" signal available: there is no per-level
-                    // dirty flag anywhere (unloadLevel clears undoStack_/redoStack_ unconditionally).
-                    // An empty stack doesn't PROVE nothing changed, but a non-empty one proves the
-                    // opposite -- the direction that must never be wrong here.
-                    forwardedOpenPrompt_ = true;
-                    forwardedOpenPath_ = path;
-                } else {
-                    loadLevel(e, path);
-                    AVER_INFO("[Sandbox] '{}' opened, forwarded from another launch", path);
-                }
+                // Through the SAME funnel as the picker and the Content Browser: the unsaved-changes
+                // check and the class-placement spawn live in there, and this path used to do the
+                // first and forget the second.
+                if (!requestOpenLevel(path, "opened, forwarded from another launch"))
+                    AVER_WARN("[Sandbox] forwarded level '{}': {}", path, openLevelError_);
             }
             // A forwarded BARE PROJECT with no level attached has nothing further to do here:
             // handleOpenRequest already confirmed it matches the live project, and Window::focus()
@@ -6017,6 +6012,8 @@ public:
     }
     void setFocusScript(bool b) { tools_.armNewScript(b); }  // --new-script
     void setFocusTools(bool b) { tools_.armToolsMenu(b); }   // --tools-menu
+    void setOpenLevelPicker(bool b) { armOpenLevelPicker_ = b; }   // --open-level-picker
+    void setOpenLevelByName(std::string n) { openLevelByName_ = std::move(n); }   // --open-level
     void setFocusCompileMenu(bool b) { tools_.armCompileMenu(b); }   // --compile-menu
 #if AVER_MODULE_MCP
     void setMcpPort(u16 p) { mcpPort_ = p; }
@@ -11138,32 +11135,155 @@ private:
 #endif
     }
 
-    // The unsaved-changes modal for a level FORWARDED from another launch. Same Save/Discard/Cancel
-    // shape as drawExitPrompt, relabeled: this asks about the CURRENT level's undo history and opens a
-    // different level rather than exiting, so reusing exitPrompt_ risked a "Discard and exit" button that actually opened a file.
-    void drawForwardedOpenPrompt(Engine& e) {
+    // Opens the picker, rebuilding its list. Shared by the menu item and --open-level-picker, which
+    // exists so a bounded --frames run can capture this modal -- the same reason --tools-menu and
+    // --project-settings-page exist, and the only way a screenshot can prove a menu-driven panel
+    // renders without a human clicking anything.
+    void openLevelPickerNow() {
+        openLevelList_ = editor::listLevels(project_.contentDir());
+        openLevelSelected_ = -1;
+        openLevelError_.clear();
+        // Pre-select what is already open, so the list appears showing where you are.
+        for (int i = 0; i < static_cast<int>(openLevelList_.size()); ++i) {
+            std::error_code lec;
+            if (!levelPath_.empty() &&
+                std::filesystem::equivalent(openLevelList_[static_cast<usize>(i)].absPath,
+                                            levelPath_, lec))
+                openLevelSelected_ = i;
+        }
+        openLevelPicker_ = true;
+    }
+
+    // File > Open Level's picker.
+    //
+    // A LIST OF THE PROJECT'S OWN LEVELS, NOT AN OS FILE DIALOG, for the same two reasons Save Level
+    // As gives: the platform layer has openFileDialog and no counterpart worth threading through
+    // here, and a level belongs to a project anyway -- offering the whole filesystem would mostly
+    // offer levels this project cannot resolve the assets of. listLevels walks the content root; see
+    // LevelList.hpp for what it refuses to walk into and why.
+    //
+    // BUILT WHEN THE MODAL OPENS, not per frame. A content root is a few thousand directory entries
+    // in a project that has streamed a scatter, and re-walking it every frame to draw a list that
+    // cannot have changed is work nobody asked for.
+    void drawOpenLevelPrompt(Engine& e) {
+#if AVER_WITH_IMGUI && AVER_MODULE_SCENE
+        // ARMED BY --open-level-picker, consumed once. Done here rather than at startup because the
+        // list needs project_ to be applied, which happens after the flags are read.
+        if (armOpenLevelPicker_) { armOpenLevelPicker_ = false; openLevelPickerNow(); }
+        // --open-level <name>: matched against both the content-relative path and the bare stem, so
+        // either "Maps/Scratch.ocworld" or "Scratch" finds it. Through requestOpenLevel like every
+        // other caller, so a name that matches nothing REPORTS that instead of emptying the world.
+        if (!openLevelByName_.empty()) {
+            const std::string want = openLevelByName_;
+            openLevelByName_.clear();
+            bool found = false;
+            for (const editor::LevelEntry& l : editor::listLevels(project_.contentDir())) {
+                if (l.relPath != want && l.name != want) continue;
+                found = true;
+                if (!requestOpenLevel(l.absPath, "opened by --open-level"))
+                    AVER_ERROR("[Level] --open-level {}: {}", want, openLevelError_);
+                break;
+            }
+            if (!found) AVER_ERROR("[Level] --open-level {}: no level of that name in this project", want);
+        }
+        if (!openLevelPicker_) return;
+        constexpr const char* kTitle = "Open Level";
+        if (!ImGui::IsPopupOpen(kTitle)) ImGui::OpenPopup(kTitle);
+        const ImVec2 centre = ImGui::GetMainViewport()->GetCenter();
+        ImGui::SetNextWindowPos(centre, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowSize(ImVec2(560.0f * dpi_, 0.0f), ImGuiCond_Appearing);
+        if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+
+        if (openLevelList_.empty()) {
+            ImGui::TextDisabled("This project has no levels yet.");
+            ImGui::TextDisabled("File > New Level, then Save Level As, writes one to Content\\Maps.");
+        } else {
+            ImGui::TextUnformatted("Levels in this project");
+            ImGui::BeginChild("##levels", ImVec2(0.0f, 240.0f * dpi_), true);
+            for (int i = 0; i < static_cast<int>(openLevelList_.size()); ++i) {
+                const editor::LevelEntry& l = openLevelList_[static_cast<usize>(i)];
+                // The one already open is marked rather than hidden: re-opening it is a legitimate
+                // way to discard edits and go back to what is on disk.
+                const bool current = !levelPath_.empty() &&
+                    std::filesystem::path(l.absPath) == std::filesystem::path(levelPath_);
+                ImGui::PushID(i);
+                if (ImGui::Selectable(l.name.c_str(), openLevelSelected_ == i,
+                                      ImGuiSelectableFlags_AllowDoubleClick)) {
+                    openLevelSelected_ = i;
+                    if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                        if (requestOpenLevel(l.absPath, "opened from File > Open Level")) {
+                            openLevelPicker_ = false;
+                            ImGui::CloseCurrentPopup();
+                        }
+                    }
+                }
+                ImGui::SameLine();
+                if (current) ImGui::TextDisabled("%s  (open)", l.relPath.c_str());
+                else         ImGui::TextDisabled("%s", l.relPath.c_str());
+                ImGui::PopID();
+            }
+            ImGui::EndChild();
+        }
+
+        if (!openLevelError_.empty())
+            ImGui::TextColored(ImVec4(0.93f, 0.42f, 0.38f, 1.0f), "%s", openLevelError_.c_str());
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        const bool picked = openLevelSelected_ >= 0 &&
+                            openLevelSelected_ < static_cast<int>(openLevelList_.size());
+        ImGui::BeginDisabled(!picked);
+        if (ImGui::Button("Open", ImVec2(110.0f * dpi_, 0.0f)) && picked) {
+            const editor::LevelEntry& l = openLevelList_[static_cast<usize>(openLevelSelected_)];
+            if (requestOpenLevel(l.absPath, "opened from File > Open Level")) {
+                openLevelPicker_ = false;
+                ImGui::CloseCurrentPopup();
+            }
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(110.0f * dpi_, 0.0f))) {
+            openLevelPicker_ = false;
+            openLevelError_.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+#else
+        (void)e;
+#endif
+    }
+
+    // The unsaved-changes modal for ANY pending open. Same Save/Discard/Cancel shape as
+    // drawExitPrompt, relabeled: this asks about the CURRENT level's undo history and opens a
+    // different level rather than exiting, so reusing exitPrompt_ risked a "Discard and exit" button
+    // that actually opened a file.
+    //
+    // ONE MODAL FOR THREE CALLERS now (the picker, the Content Browser, a forwarded launch), which is
+    // why the sentence below is built from pendingOpenWhy_ rather than saying "forwarded" outright --
+    // it used to serve only the forwarded case because that was the only case that existed.
+    void drawPendingOpenPrompt(Engine& e) {
 #if AVER_WITH_IMGUI
-        if (!forwardedOpenPrompt_) return;
-        constexpr const char* kTitle = "Open forwarded level?";
+        if (!pendingOpenPrompt_) return;
+        constexpr const char* kTitle = "Unsaved changes";
         if (!ImGui::IsPopupOpen(kTitle)) ImGui::OpenPopup(kTitle);
         const ImVec2 centre = ImGui::GetMainViewport()->GetCenter();
         ImGui::SetNextWindowPos(centre, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
         ImGui::SetNextWindowSize(ImVec2(480.0f * dpi_, 0.0f), ImGuiCond_Appearing);
         if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
 
-        ImGui::TextWrapped("'%s' was opened from outside the editor. The current level has unsaved "
-                           "changes.", std::filesystem::path(forwardedOpenPath_).filename().string().c_str());
+        ImGui::TextWrapped("'%s' is about to be %s. The current level has unsaved changes.",
+                           std::filesystem::path(pendingOpenPath_).filename().string().c_str(),
+                           pendingOpenWhy_.empty() ? "opened" : pendingOpenWhy_.c_str());
         ImGui::Spacing();
         ImGui::Separator();
 
         if (ImGui::Button("Save and open", ImVec2(150.0f * dpi_, 0.0f))) {
             if (levelPath_.empty() || saveLevel(levelPath_)) {
-                const std::string toOpen = forwardedOpenPath_;
+                const std::string toOpen = pendingOpenPath_;
                 ImGui::CloseCurrentPopup();
-                forwardedOpenPrompt_ = false;
-                forwardedOpenPath_.clear();
-                loadLevel(e, toOpen);
-                AVER_INFO("[Sandbox] '{}' opened, forwarded from another launch", toOpen);
+                pendingOpenPrompt_ = false;
+                pendingOpenPath_.clear();
+                openLevelDirect(e, toOpen);
             } else {
                 // STAY OPEN on a failed save -- same reasoning as drawExitPrompt's identical guard:
                 // proceeding anyway would discard exactly the work this prompt exists to protect.
@@ -11172,19 +11292,18 @@ private:
         }
         ImGui::SameLine();
         if (ImGui::Button("Discard and open", ImVec2(150.0f * dpi_, 0.0f))) {
-            const std::string toOpen = forwardedOpenPath_;
-            AVER_WARN("[Sandbox] opening '{}' (forwarded); the current level's unsaved changes are gone",
-                      toOpen);
+            const std::string toOpen = pendingOpenPath_;
+            AVER_WARN("[Sandbox] opening '{}'; the current level's unsaved changes are gone", toOpen);
             ImGui::CloseCurrentPopup();
-            forwardedOpenPrompt_ = false;
-            forwardedOpenPath_.clear();
-            loadLevel(e, toOpen);
+            pendingOpenPrompt_ = false;
+            pendingOpenPath_.clear();
+            openLevelDirect(e, toOpen);
         }
         ImGui::SameLine();
         if (ImGui::Button("Cancel", ImVec2(110.0f * dpi_, 0.0f))) {
             ImGui::CloseCurrentPopup();
-            forwardedOpenPrompt_ = false;
-            forwardedOpenPath_.clear();
+            pendingOpenPrompt_ = false;
+            pendingOpenPath_.clear();
         }
         ImGui::EndPopup();
 #else
@@ -11312,24 +11431,25 @@ private:
 #if AVER_MODULE_SCENE
                 const bool haveProject = project_.valid();
                 ImGui::BeginDisabled(!haveProject);
-                if (ImGui::MenuItem("New Level")) { unloadLevel(e); levelName_ = "untitled"; }
+                if (ImGui::MenuItem("New Level")) { unloadLevel(e); levelName_ = "untitled"; levelPath_.clear(); }
                 uiReg_.track("file.newLevel");
-                if (ImGui::MenuItem("Open Level")) {
-                    loadStartMap(e);
-                    // GRAPH-AS-CLASS / any other class placement: loadStartMap -> loadLevel already
-                    // collects classPlacements_ but does not spawn them -- applyProject's "Starting
-                    // scripts" stage normally calls spawnClassPlacements() after a fresh open. This
-                    // menu item reloads the level WITHOUT going through applyProject, so without this
-                    // call class placements would load unspawned with no warning. Scripting is already
-                    // up by the time a human can click this, so no CLI-style catch-up ordering concern applies.
-#if AVER_MODULE_FRAMEWORK
-#if AVER_MODULE_SCRIPTING
-                    if (scripts_.ready())
-#endif
-                        spawnClassPlacements();
-#endif
-                }
+                // OPENS A PICKER NOW. It used to call loadStartMap(), which reopens the project's ONE
+                // start map -- so a project with three levels had two the editor could not reach, and
+                // clicking this on a start map whose assets had gone reloaded the same empty world and
+                // looked like the menu item itself was broken.
+                if (ImGui::MenuItem("Open Level...")) openLevelPickerNow();
                 uiReg_.track("file.openLevel");
+                // RELOAD, which is what the old "Open Level" actually did. Keeping it as its own item
+                // rather than deleting the behaviour: reopening the start map to throw away edits is
+                // a real thing to want, it just is not what "Open Level" means.
+                ImGui::BeginDisabled(project_.startMap.empty());
+                if (ImGui::MenuItem("Reload Start Level")) {
+                    const std::string start = project_.contentDir() + "\\" + project_.startMap;
+                    if (!requestOpenLevel(start, "reloaded from the project's start level"))
+                        AVER_WARN("[Level] reload: {}", openLevelError_);
+                }
+                ImGui::EndDisabled();
+                uiReg_.track("file.reloadStartLevel");
                 if (ImGui::MenuItem("Save Level", "Ctrl+S") && !levelPath_.empty()) saveLevel(levelPath_);
                 uiReg_.track("file.saveLevel");
                 // SAVE LEVEL AS, which the toolbar's own Save tooltip has been telling people to use
@@ -11818,8 +11938,12 @@ private:
         drawUpgradePrompt();
         drawAboutPrompt(e);
         drawSaveLevelAsPrompt();
+        drawOpenLevelPrompt(e);
         drawExitPrompt(e);
-        drawForwardedOpenPrompt(e);
+        drawPendingOpenPrompt(e);
+        // AFTER the modals, so a request made this frame is guarded by the prompt this frame rather
+        // than being loaded out from under a modal that is about to ask about it.
+        applyPendingOpen(e);
 
         // ---------------- status bar ----------------
         ImGui::SetNextWindowPos(ImVec2(wpos.x, wpos.y + wsize.y - statusH));
@@ -12146,6 +12270,18 @@ private:
     void cbOpenEntry(const std::string& full, bool isDir) {
         if (isDir) { cbNavigate(full); return; }
         const std::string ext = lowerExt(std::filesystem::path(full));
+        // A LEVEL OPENS IN THE EDITOR, which is the obvious meaning of double-clicking one and was
+        // not what happened: no AssetEditor factory is registered for .ocworld/.ocmap, so activation
+        // fell all the way through to openWithShell() and the level opened in Notepad -- despite the
+        // Content Browser giving it a "Level" icon and colour of its own two hundred lines below.
+        // Deferred through requestOpenLevel because this function has no Engine& to load with.
+        if (editor::isLevelPath(full)) {
+            if (requestOpenLevel(full, "opened from the Content Browser"))
+                cbStatus_ = "Opening " + std::filesystem::path(full).stem().string();
+            else
+                cbStatus_ = openLevelError_;
+            return;
+        }
         if (assetEditors_.open(full)) { cbStatus_ = "Opened in the asset editor"; return; }
         if (cbIsSourceFile(ext)) {
             const editor::IdeInfo& ide = cbIde();
@@ -16329,11 +16465,29 @@ private:
     // primary -- see setSingleInstanceEligible's own comment for the exact condition and why it is
     // computed in createApplication rather than here.
     bool singleInstanceEligible_ = false;
-    // The modal for a level FORWARDED from another launch while the current one has unsaved changes.
-    // Separate from exitPrompt_ rather than reusing it: exiting the editor and switching levels
-    // mid-session are two different destructive actions, and one modal meaning both risked "Discard and exit" when what's about to happen is "open a different level".
-    bool        forwardedOpenPrompt_ = false;
-    std::string forwardedOpenPath_;
+    // ONE PENDING OPEN, whatever asked for it. Three things now want to open a level -- File > Open
+    // Level's picker, a double-click in the Content Browser, and a path forwarded from a second
+    // launch -- and only the last of those used to exist. They are funnelled through one request so
+    // the unsaved-changes guard and the class-placement spawn happen once each, in one place,
+    // instead of once per caller with the third one forgetting.
+    //
+    // DEFERRED RATHER THAN IMMEDIATE, because cbOpenEntry (the Content Browser) has no Engine& to
+    // hand loadLevel -- nothing in this class stores one. The request is latched here and drained in
+    // onUpdate, which does, exactly as the forwarded-open poll beside it already works.
+    std::string pendingOpenPath_;
+    std::string pendingOpenWhy_;      // how it was asked for, for the modal's own sentence
+    // The modal shown when a pending open would discard unsaved work. Separate from exitPrompt_
+    // rather than reusing it: exiting the editor and switching levels mid-session are two different
+    // destructive actions, and one modal meaning both risked "Discard and exit" when what is about
+    // to happen is "open a different level".
+    bool        pendingOpenPrompt_ = false;
+    // File > Open Level's own picker: the list is rebuilt when it opens, not per frame.
+    bool        openLevelPicker_ = false;
+    bool        armOpenLevelPicker_ = false;   // --open-level-picker, consumed on the first draw
+    std::string openLevelByName_;              // --open-level, consumed on the first draw
+    std::vector<editor::LevelEntry> openLevelList_;
+    int         openLevelSelected_ = -1;
+    std::string openLevelError_;
     rhi::TextureHandle logoTexture_=0;   // 0 when logo.png was absent or undecodable
     rhi::TextureHandle fileIconsTexture_=0;     // the Content Browser file-type sprite sheet (4 tiles)
     u64 fileIconsUiId_=0;
@@ -17682,6 +17836,75 @@ private:
     }
 
     // Loads the project's start map, resolved against its content directory. Missing is not an error.
+    // Asks for a level to be opened. Returns false, with a reason in openLevelError_, when the file
+    // cannot be opened at all -- in which case NOTHING has happened yet and the current level is
+    // untouched.
+    //
+    // VALIDATED BEFORE ANYTHING IS TORN DOWN, and that is the whole reason this is not just a call to
+    // loadLevel. loadLevel's first statement is unloadLevel(eng), before it has looked at the path at
+    // all; if the file is then missing or unparseable it logs one AVER_WARN and returns, leaving the
+    // editor holding an empty world with nothing on screen to say why. That is exactly the "the world
+    // is empty" failure a picker would otherwise make easy to hit, so the check happens up front and
+    // the failure is reported where the person clicked.
+    bool requestOpenLevel(const std::string& path, const char* why) {
+        openLevelError_.clear();
+        std::error_code ec;
+        if (path.empty() || !std::filesystem::exists(path, ec)) {
+            openLevelError_ = "That level is not there any more.";
+            return false;
+        }
+        // Parsed, not merely stat'd. A level that exists and does not parse would empty the world
+        // just as thoroughly. levelFileIsLegacyOcmap decides which grammar by CONTENT, so both are
+        // tried the same way loadLevel itself will.
+        {
+            fmt::OcWorldData probe;
+            fmt::OcMapData legacyProbe;
+            std::string parseWhy;
+            const bool ok = fmt::levelFileIsLegacyOcmap(path)
+                ? fmt::loadOcmap(path, legacyProbe, &parseWhy)
+                : fmt::loadOcworld(path, probe, &parseWhy);
+            if (!ok) {
+                openLevelError_ = parseWhy.empty() ? std::string("That level could not be read.")
+                                                   : parseWhy;
+                return false;
+            }
+        }
+        pendingOpenPath_ = path;
+        pendingOpenWhy_  = why ? why : "";
+        return true;
+    }
+
+    // Drains a pending open. Called once per frame from onUpdate, which is where an Engine& is.
+    void applyPendingOpen(Engine& eng) {
+        if (pendingOpenPath_.empty() || pendingOpenPrompt_) return;
+        // THE UNDO STACK IS THE ONLY "unsaved" SIGNAL THERE IS -- there is no per-level dirty flag
+        // anywhere in this editor, and unloadLevel clears the stack unconditionally, so it can only
+        // be read BEFORE the load. An empty stack does not prove nothing changed; a non-empty one
+        // proves the opposite, which is the direction that must never be wrong here.
+        if (canUndo()) { pendingOpenPrompt_ = true; return; }
+        const std::string path = pendingOpenPath_;
+        pendingOpenPath_.clear();
+        openLevelDirect(eng, path);
+    }
+
+    // The actual open, past every guard. The ONE place that pairs loadLevel with the class-placement
+    // spawn it needs -- see the comment inside for why that pairing is not optional.
+    void openLevelDirect(Engine& eng, const std::string& path) {
+        loadLevel(eng, path);
+        // GRAPH-AS-CLASS / any other class placement: loadLevel collects classPlacements_ but does
+        // not spawn them -- applyProject's "Starting scripts" stage is what normally does that after
+        // a fresh open. Every path that opens a level WITHOUT going through applyProject has to do it
+        // here, or class placements load unspawned with no warning. The forwarded-open path did not,
+        // which is why it belongs behind this function rather than calling loadLevel itself.
+#if AVER_MODULE_FRAMEWORK
+#if AVER_MODULE_SCRIPTING
+        if (scripts_.ready())
+#endif
+            spawnClassPlacements();
+#endif
+        AVER_INFO("[Level] opened {}", path);
+    }
+
     void loadStartMap(Engine& eng) {
         // A MAP NAMED ON THE COMMAND LINE OUTRANKS THE PROJECT'S START MAP, loaded even when the
         // project has no start map at all -- the whole point of naming one. Checked before
@@ -18855,10 +19078,19 @@ Application* createApplication(int argc, char** argv) {
         }
 
     u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; std::string shaderSourceDir; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool furnaceGrid=false; f32 furnaceTilt=0.0f; bool ptFurnace=false; bool ptScene=false; int deviceLostAt=0; int ptQualityRamp=0; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int aversrCycle=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=-1; int rt=-1; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int rtRenderMode=-1; int pt=-1; int ptBounces=-1; int layeredBsdf=-1; f32 coatWeight=0.0f; f32 coatRough=0.1f; f32 coatF0=0.04f; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool bloomSet=false, exposureSet=false; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string selectEntity; bool openLegacy=false; bool waterOn=false; f32 waterHeight=0.0f; std::string graphSelectNode; std::string graphTab; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false; bool bakeNav=false; f32 bakeNavCell=50.0f; std::string openMap; bool gbuffer=false; std::string gbufferDebug; std::string crashTest; std::string startMode;
+    bool openLevelPickerArg=false; std::string openLevelArg;
     for (int i=1;i<argc;++i){
         // HANDLED BEFORE THE else-if CHAIN BELOW, AND NOT BY PREFERENCE: one more `else if` there
         // hits MSVC's nesting limit (C1061). Anything added from here on wants this shape instead:
         // match, consume, `continue`.
+        // --open-level-picker: open File > Open Level's modal on the first frame, so a --frames run
+        // can screenshot it. In THIS loop for the C1061 reason above, like every flag added since.
+        if (!std::strcmp(argv[i],"--open-level-picker")) { openLevelPickerArg=true; continue; }
+        // --open-level <name-or-relative-path>: open a level of this project BY NAME, through the
+        // same requestOpenLevel funnel the picker and the Content Browser use. Two jobs: it is the
+        // convenient way to start on a level that is not the start map, and it is the only way a
+        // bounded --frames run can exercise that funnel at all -- the picker itself needs a click.
+        if (!std::strcmp(argv[i],"--open-level") && i+1<argc) { openLevelArg=argv[++i]; continue; }
         // --layered-bsdf N: 0=Off 1=Low 2=Medium 3=High 4=Epic. Off is the standard BRDF, unchanged.
         // ON ITS OWN THIS FLAG CHANGES NOTHING VISIBLE, correctly: it selects a shader variant that
         // can evaluate a coat, and every existing project authors coatWeight 0. Pair with --coat below.
@@ -19548,6 +19780,8 @@ Application* createApplication(int argc, char** argv) {
     app->setDrawerOpen(drawerOpen, drawerSub);
     app->setFocusScript(focusScript);
     app->setFocusTools(focusTools);
+    app->setOpenLevelPicker(openLevelPickerArg);
+    app->setOpenLevelByName(openLevelArg);
     app->setFocusCompileMenu(focusCompileMenu);
     if (!droneGraph.empty()) app->setDroneGraph(droneGraph);
     if (!landscapePath.empty()) app->setLandscapePath(landscapePath);
