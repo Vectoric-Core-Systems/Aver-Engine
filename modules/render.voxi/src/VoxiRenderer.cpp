@@ -1446,6 +1446,44 @@ void VoxiRenderer::giCacheTick() {
     // REPLACES an entry with the same key rather than accumulating duplicates -- re-baking the same
     // inputs is exactly what happens when an author moves the sun back to where it was.
     const u64 bytes = static_cast<u64>(entry.voxels.size());
+
+    // A CEILING ON ONE ENTRY, ABSOLUTE AND NOT A FRACTION OF THE BUDGET.
+    //
+    // The budget bounds how much is BUFFERED before a flush. It was never a statement that any
+    // single entry is worth writing, and keying this test on it gets the wrong answer twice over.
+    // MEASURED, both on PTTest at 512^3 where one volume is 1170 MB:
+    //   - at the 256 MB default, the entry went over budget the instant it was pushed and flushed
+    //     synchronously, every bake. 118 ms/frame of wall clock against 12.8 ms of GPU, and 9.4 GB
+    //     on disk in one session -- giCacheSweep keeps 8, so eight of these is the steady state.
+    //     Moving the camera in Play re-keys the volume often enough to do it over and over; it
+    //     reads as a hang, and was reported as a crash.
+    //   - at a 4096 MB budget it is WORSE, not better: four entries buffer to 4681 MB of RAM and
+    //     then write 4.8 GB in a single flush.
+    // A bigger budget buys a bigger stall. There is no setting of it that makes a gigabyte-per-bake
+    // write reasonable, which is what makes this a ceiling rather than a ratio.
+    //
+    // 256 MB, because that is the shipped default budget: an entry that cannot fit the cache as it
+    // ships is not one this system was built to carry. Above that line the derived data costs more
+    // to move than to derive -- the revoxelisation being avoided is ~8 ms of GPU, and the write is
+    // seconds of disk -- so the entry is dropped and the volume is simply rebuilt, which is the
+    // cache's own stated contract: losing it costs one rebuild.
+    //
+    // SAID ONCE, and it names the lever that actually helps. Raising the budget is NOT that lever,
+    // which is why it is not suggested: it makes the stall larger.
+    constexpr u64 kMaxCachedEntryBytes = 256ull * 1024ull * 1024ull;
+    if (bytes > kMaxCachedEntryBytes) {
+        if (!giCacheOversizeWarned_) {
+            giCacheOversizeWarned_ = true;
+            AVER_WARN("[Voxi] a {}^3 GI volume is {} MB, over the {} MB per-entry ceiling, so it is "
+                      "NOT cached and every open re-voxelises instead -- which costs about one frame. "
+                      "Writing it would block for seconds per bake and keep up to 8 copies on disk. "
+                      "Lower RENDER.VOXELRES if you want the cache back; raising the cache budget "
+                      "does not help, it only makes the flush bigger.",
+                      voxelResBuilt_, bytes / (1024 * 1024), kMaxCachedEntryBytes / (1024 * 1024));
+        }
+        return;
+    }
+
     bool replaced = false;
     for (fmt::GiCacheEntry& held : giCachePendingEntries_) {
         if (held.key != entry.key) continue;

@@ -1064,6 +1064,10 @@ private:
     // than a lighting session produces, and small enough to be unremarkable next to the volume
     // textures themselves. Editor Preferences > Derived Data Cache moves it.
     u64 giCacheRamBudget_ = 256ull * 1024ull * 1024ull;
+    // Latched so the "this volume is bigger than the whole budget" warning is said once rather than
+    // once per bake. Never cleared: raising the budget mid-session does not make the earlier
+    // explanation wrong, and a second copy of it would only be noise.
+    bool giCacheOversizeWarned_ = false;
 
 public:
     // The write-behind budget, in bytes. Lowering it below what is already buffered flushes
