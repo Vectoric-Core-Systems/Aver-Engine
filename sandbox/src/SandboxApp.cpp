@@ -4668,7 +4668,28 @@ public:
                 if (w.destroyPending(ent)) continue;
                 const scene::CMeshRenderer* mr =
                     w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
-                if (!mr || !(mr->flags & scene::kMeshRendererVisible) || mr->mesh == 0) continue;
+                // NO RENDERER, OR NOTHING ASSIGNED, IS THE ORDINARY CASE and says nothing: most
+                // entities in a level carry no mesh at all.
+                if (!mr || mr->mesh == 0) continue;
+                // A MESH IS NAMED AND THE VISIBLE BIT IS CLEAR, which is NOT ordinary -- it is the
+                // zero-fill trap. World::addComponent hands back zeroed storage and
+                // kMeshRendererVisible is positive-sense, so a renderer attached directly is
+                // attached, correct, and invisible; GraphComponentTree.cs:100-103 documents the same
+                // trap on the C# side and dodges it by going through Entity.SetVisible.
+                //
+                // SPLIT OUT OF THE COMPOSITE GUARD PURELY TO SAY SO. This loop used to drop the
+                // entity here with no diagnostic of any kind, which cost a day of bisection: an
+                // entity that cannot draw said nothing at all. ONCE PER ENTITY, because this is a
+                // per-entity per-frame walk and an unthrottled warning floods the log.
+                if (!(mr->flags & scene::kMeshRendererVisible)) {
+                    if (undrawnInvisible_.insert(static_cast<u64>(ent)).second)
+                        AVER_WARN("[Sandbox] entity {} names mesh id {} but its kMeshRendererVisible "
+                                  "bit is clear, so the scene walk skips it and it draws nothing. A "
+                                  "component attached directly arrives zero-filled -- attach through "
+                                  "Entity.SetVisible (EnsureMeshRenderer), which seeds the bit.",
+                                  static_cast<u64>(ent), mr->mesh);
+                    continue;
+                }
 
                 // ---- THE PLAYER START IS CHROME, AND IT DRAWS AS AN ICON INSTEAD ----
                 // Skipping it HERE, by identity, drops it from the opaque pass, shadow cascade, GI and
@@ -4682,7 +4703,24 @@ public:
                 if (ent == playerStart_ && viewportIconsReady_) continue;
 
                 const auto it = sceneMeshes_.find(mr->mesh);
-                if (it == sceneMeshes_.end()) continue;
+                if (it == sceneMeshes_.end()) {
+                    // AN ID THAT RESOLVES TO NOTHING. Said ONCE PER ID rather than per entity: many
+                    // entities can name the same missing mesh, and it is the id that identifies the
+                    // fault, not the entity that happened to reach it first.
+                    //
+                    // THE ID IS PRINTED RAW AND THAT IS NOT LAZINESS. meshPathById_ is populated by
+                    // loadProjectMeshes only for meshes that LOADED, so it is empty for exactly the
+                    // ids that land here -- there is nothing to translate with. fnv1a64 of the
+                    // authored path is what to grep the .ocgraph/.ocmap for.
+                    if (undrawnMissingMesh_.insert(mr->mesh).second)
+                        AVER_WARN("[Sandbox] mesh id {} (named by entity {}) is not in sceneMeshes_, "
+                                  "so every entity naming it draws nothing. Built-in primitives are "
+                                  "seeded at startup and .ocmesh files are registered by "
+                                  "loadProjectMeshes from the project's content root -- an id that is "
+                                  "missing was never loaded under the string that was authored.",
+                                  mr->mesh, static_cast<u64>(ent));
+                    continue;
+                }
                 const Mat4& wm = w.worldMatrix(ent);
 
                 // ---- OWNER HIDE, DECIDED BEFORE THE CULLS ----
@@ -18395,6 +18433,12 @@ private:
     // fnv1a64(asset path) -> mesh handle, for the scene-render pass.
     std::unordered_map<u64, rhi::MeshHandle> sceneMeshes_;
     std::unordered_map<u64, std::string>     meshPathById_;   // id -> project-relative path
+    // THE TWO WAYS THE SCENE WALK DROPS AN ENTITY, each reported once. Keyed differently on purpose:
+    // the invisible-bit fault belongs to an ENTITY (its own component is mis-seeded) while an
+    // unresolved id belongs to the ID (every entity naming it shares one fault). Never cleared on
+    // level unload -- a second report after a reload would be the same fault, not a new one.
+    std::unordered_set<u64> undrawnInvisible_;
+    std::unordered_set<u64> undrawnMissingMesh_;
     // Rest bounds per mesh id, in mesh space. Kept beside sceneMeshes_ because CMeshRenderer's own
     // aabb was hardcoded a UNIT CUBE at every spawn site, never from the asset -- picking a 100cm
     // character meant hitting a 2cm box at its origin. Skinned entities overwrite theirs per frame.
