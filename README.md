@@ -37,7 +37,27 @@ Requires Visual Studio 18 (C++ workload), which supplies CMake + Ninja + the Win
 
 Output goes to `build/bin/` (`build-release/bin/` for `-Release`). The two trees coexist on purpose: each has its own gates baseline, and optimisation changes floating-point codegen, so comparing one build against the other's numbers is a mistake the pairing exists to prevent. `scripts/run.ps1` always builds and launches the Debug tree. Vulkan stays compiled out (`-DAVER_RHI_VULKAN=ON` to enable once the SDK is installed).
 
-The test executables land beside `Sandbox.exe` and each is a standalone `.exe` you run directly — `UiTest`, `UiRenderTest`, `ActorPreviewTest`, `AudioTest`, `OcAudioTest`, `FormatTest`, `JsonTest`, `GltfTest`, `MeshTest`, `MaterialTest`, `ActorScriptTest`, `SceneTest`, `FrameworkTest`, `PhysicsTest`. None needs a GPU: the two renderer tests stand up their own mock `IDevice` and assert on what was recorded, rather than needing a backend. Which ones exist depends on the `AVER_MODULE_*` switches, since a test is added with its module.
+Run the headless suites — about a hundred of them — with one command:
+
+```
+./scripts/test.ps1                  # every suite, Debug
+./scripts/test.ps1 -Release         # every suite, Release
+./scripts/test.ps1 -Filter Import   # just the ones whose name matches
+./scripts/test.ps1 -Rerun           # only what failed last time, verbosely
+```
+
+It drives CTest over a tree you have already built, in parallel; a full pass takes seconds. A suite
+passes only if it both exits 0 **and** prints no failure — several here have historically returned 0
+however they went, so the exit code alone is not trusted.
+
+The executables land beside `Sandbox.exe` and each still runs standalone if you want one on its own.
+None needs a GPU: the two renderer tests stand up their own mock `IDevice` and assert on what was
+recorded, rather than needing a backend. Which ones exist depends on the `AVER_MODULE_*` switches,
+since a test is added with its module — which is why they are registered by a walk over the built
+targets rather than a hand-maintained list.
+
+`scripts/test.ps1` covers the headless suites only. `scripts/gates.ps1` is the separate render
+oracle and needs a GPU.
 
 ## Layout
 
