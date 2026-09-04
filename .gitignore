@@ -68,3 +68,14 @@ __pycache__/
 # change to the baker look gate-clean while the file in the tree still described the old behaviour.
 # A real project's .ocnav is shipped content and is NOT covered by this -- the path is deliberate.
 test-content/**/*.ocnav
+
+# THE GI DERIVED DATA CACHE, wherever it appears. Its own header states the case: nothing in it is
+# authored and nothing in it is precious -- the whole directory can be deleted at any time and the
+# only cost is one rebuild. Six of these accumulated untracked under test-content/ and were pure
+# `git add -A` hazards.
+#
+# UNANCHORED, unlike the test-content/**/*.ocnav rule just above, and the difference is deliberate.
+# A .ocnav IS shippable content for a real project, so that rule is scoped to test content on
+# purpose. A DerivedDataCache never is, anywhere -- it is regenerable by definition -- so there is
+# no location where committing one would be right.
+DerivedDataCache/
