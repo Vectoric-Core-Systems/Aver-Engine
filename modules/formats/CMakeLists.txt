@@ -69,6 +69,10 @@ if(AVER_MODULE_PBR)
     SOURCES
       src/OcMat.cpp
       src/MaterialScript.cpp
+      # Turning an imported glTF's materials into .ocmat. Here rather than beside GltfImport.cpp for
+      # exactly the reason this target exists: it is the step that needs pbr::MaterialDesc, and
+      # GltfImport.cpp must stay in the PBR-free base target.
+      src/GltfMaterialCook.cpp
     DEPS
       Aver.Formats
       Aver.Render.PBR

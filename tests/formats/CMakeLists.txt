@@ -170,6 +170,14 @@ set_target_properties(ConvertTool PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BI
 if(TARGET Aver.Trifactor)
   target_link_libraries(ConvertTool PRIVATE Aver.Trifactor)
 endif()
+# Cooking the imported glTF's materials is optional for the same reason clustering is, and guarded
+# the same way: `if(TARGET ...)`, not `if(AVER_MODULE_PBR)`, so ConvertTool still builds and still
+# imports geometry in a tree where PBR is off. With the target absent, the tool says materials were
+# skipped rather than leaving the user to wonder where they went.
+if(TARGET Aver.Formats.Material)
+  target_link_libraries(ConvertTool PRIVATE Aver.Formats.Material)
+  target_compile_definitions(ConvertTool PRIVATE AVER_HAVE_MATERIAL_COOK=1)
+endif()
 
 # MakeRig -- writes content/dev/Rig.gltf, the tree's ONLY skinned asset source. Registered here for
 # ConvertTool's reason rather than because it is a test: this is where Aver.Formats is already linked.
