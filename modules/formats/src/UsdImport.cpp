@@ -189,6 +189,12 @@ struct MeshAttrs {
     std::string orientation;
     std::string normalsInterp;      // the `interpolation` metadata on `normals`, when stated
     std::string uvInterp;
+    // The prim path a `rel material:binding` named, unresolved. Resolved AFTER the walk, because
+    // USD does not require a Material to be declared before the mesh that binds it.
+    std::string materialBinding;
+    // USD puts doubleSided on the GEOMETRY; glTF and .ocmat put it on the material. Carried here and
+    // folded into the bound material by resolveBindings.
+    bool doubleSided = false;
     bool hasPoints = false;
 };
 
@@ -197,6 +203,22 @@ struct Ctx {
     const UsdImportOptions* opt;
     f32 unitScale = 100.0f;         // stage metersPerUnit folded with opt->scale
     bool yUp = true;
+
+    std::string baseDir;            // resolves a UsdUVTexture's `@path@`; empty refuses them
+
+    // Parallel to out->meshes: the prim path each mesh's `rel material:binding` named, or empty.
+    // A second array rather than a field on OcMeshData because the binding is a USD concept that
+    // does not survive into the engine's mesh -- only the resolved slot name does.
+    std::vector<std::string> meshBinding;
+    std::vector<bool>        meshDoubleSided;   // parallel to out->meshes
+    // Every Material prim path, and the out->materials entry it resolved to. NOT parallel to
+    // out->materials: several paths may share one entry -- see parseMaterial's dedup.
+    std::vector<std::pair<std::string, usize>> materialPaths;
+    // Parallel to out->images: the RESOLVED path each was read from, so two materials naming the
+    // same texture share one image rather than writing its bytes twice under two names.
+    std::vector<std::string> imageSources;
+    bool sawUnreadableTexture = false;
+    bool sawUnresolvedBinding = false;
     bool sawNonUniformScale = false;
     bool sawTimeSamples = false;
     bool sawReference = false;
@@ -350,6 +372,8 @@ void buildMesh(Ctx& c, const MeshAttrs& a, const M4& world, const std::string& p
     if (m.positions.empty() || m.indices.empty()) return;
     if (!haveNormals && c.opt->generateMissingNormals) generateNormals(m);
 
+    // EMPTY FOR NOW, always. The binding names a prim path that may not have been read yet, so the
+    // slot is filled in after the walk -- see resolveBindings.
     m.materialSlots.push_back(std::string());
     OcMeshSubmesh sm;
     sm.name         = primPath;
@@ -363,6 +387,373 @@ void buildMesh(Ctx& c, const MeshAttrs& a, const M4& world, const std::string& p
 
     c.out->meshes.push_back(std::move(m));
     c.out->meshNames.push_back(primPath);
+    c.meshBinding.push_back(a.materialBinding);
+    c.meshDoubleSided.push_back(a.doubleSided);
+}
+
+// ---- materials --------------------------------------------------------------------------------
+//
+// The subset is UsdPreviewSurface, the one shading model USD itself specifies rather than leaves to
+// a renderer. Anything else (a MaterialX graph, a renderer-specific shader like PxrSurface) has no
+// mapping onto pbr::MaterialDesc that would not be invented, so it is left alone and the mesh keeps
+// an unbound slot -- which is visible -- rather than a guess, which is not.
+//
+// SHAPE OF WHAT IS BEING READ:
+//
+//   def Material "Bark" {
+//       token outputs:surface.connect = </Looks/Bark/Surface.outputs:surface>
+//       def Shader "Surface" {
+//           uniform token info:id = "UsdPreviewSurface"
+//           color3f inputs:diffuseColor.connect = </Looks/Bark/Albedo.outputs:rgb>
+//           float   inputs:roughness = 0.7
+//       }
+//       def Shader "Albedo" {
+//           uniform token info:id = "UsdUVTexture"
+//           asset inputs:file = @textures/bark_c.png@
+//       }
+//   }
+//
+// so a surface input is EITHER a literal value OR a `.connect` naming a sibling texture shader. Both
+// forms occur in the same material, which is why every input below is read twice: once as a value,
+// once as a connection.
+
+// One Shader prim, flattened. `values` and `connects` are small enough that a linear scan beats a
+// map: a UsdPreviewSurface has at most a dozen inputs.
+struct ShaderPrim {
+    std::string path;
+    std::string id;                                              // info:id
+    std::vector<std::pair<std::string, std::string>> values;     // input name -> raw text
+    std::vector<std::pair<std::string, std::string>> connects;   // input name -> source prim path
+    std::string file;                                            // inputs:file, @@ stripped
+
+    const std::string* value(const char* n) const {
+        for (const auto& v : values) if (v.first == n) return &v.second;
+        return nullptr;
+    }
+    const std::string* connect(const char* n) const {
+        for (const auto& v : connects) if (v.first == n) return &v.second;
+        return nullptr;
+    }
+};
+
+// `@foo.png@` or `@@@foo@bar.png@@@` -> the path. USD's triple form exists so a path may contain a
+// single '@'; anything else is returned as-is so a malformed value stays visible rather than being
+// silently truncated.
+std::string assetPath(std::string_view raw) {
+    usize a = 0, b = raw.size();
+    while (a < b && (raw[a] == ' ' || raw[a] == '\t' || raw[a] == '\r' || raw[a] == '\n')) ++a;
+    while (b > a && (raw[b - 1] == ' ' || raw[b - 1] == '\t' || raw[b - 1] == '\r' || raw[b - 1] == '\n')) --b;
+    const std::string_view t = raw.substr(a, b - a);
+    if (t.size() >= 6 && t.compare(0, 3, "@@@") == 0 && t.compare(t.size() - 3, 3, "@@@") == 0)
+        return std::string(t.substr(3, t.size() - 6));
+    if (t.size() >= 2 && t.front() == '@' && t.back() == '@')
+        return std::string(t.substr(1, t.size() - 2));
+    return std::string(t);
+}
+
+// `</Looks/Bark/Albedo.outputs:rgb>` -> `/Looks/Bark/Albedo`. The output name is dropped: this
+// importer binds a whole texture to a slot, so which channel set the connection named tells it
+// nothing it can act on.
+std::string connectionTarget(std::string_view raw) {
+    const usize lt = raw.find('<');
+    const usize gt = raw.rfind('>');
+    if (lt == std::string_view::npos || gt == std::string_view::npos || gt <= lt) return {};
+    std::string_view t = raw.substr(lt + 1, gt - lt - 1);
+    const usize dot = t.find(".outputs:");
+    if (dot != std::string_view::npos) t = t.substr(0, dot);
+    return std::string(t);
+}
+
+// Reads one attribute's value text, leaving the scanner just past it. Shared by the two readers
+// below so the forms a USD value can take -- bracketed, parenthesised, quoted, or bare to the end of
+// the line -- are handled in exactly one place.
+std::string attrValue(Scanner& s, std::string* quoted) {
+    std::string raw;
+    const char c0 = s.peek();
+    if (c0 == '[')      raw = std::string(s.balanced('[', ']'));
+    else if (c0 == '(') raw = std::string(s.balanced('(', ')'));
+    else if (c0 == '"' || c0 == 39) { raw = s.quoted(); if (quoted) *quoted = raw; }
+    else {
+        const char* start = s.p;
+        while (s.p < s.end && *s.p != '\n' && *s.p != '(') ++s.p;
+        raw.assign(start, static_cast<usize>(s.p - start));
+    }
+    if (s.peek() == '(') s.balanced('(', ')');   // trailing metadata
+    return raw;
+}
+
+// Skips the qualifier keywords that may stack in front of an attribute's type. `rel` is absent for
+// the reason parseMember's own copy explains: it is a declaration keyword, not a type.
+std::string_view skipQualifiers(Scanner& s, std::string_view kw) {
+    std::string_view type = kw;
+    while (type == "uniform" || type == "custom" || type == "varying" || type == "prepend" ||
+           type == "append" || type == "add" || type == "delete")
+        type = s.ident();
+    return type;
+}
+
+// Reads a Shader body. Deliberately its own reader rather than a branch inside parseMember: that one
+// is a mesh reader with a transform stack and a deferred-child list, none of which a Shader has.
+void parseShaderBody(Scanner& s, ShaderPrim& sh) {
+    while (!s.eof()) {
+        if (s.peek() == '}') { ++s.p; return; }
+        const std::string_view kw = s.ident();
+        if (kw.empty()) { if (s.p < s.end) ++s.p; continue; }
+
+        // A nested prim inside a Shader is not something UsdPreviewSurface has; its body is skipped
+        // whole so the scan stays in sync rather than reading its attributes as this shader's.
+        if (kw == "def" || kw == "over" || kw == "class") {
+            if (s.peek() != '"') s.ident();
+            s.quoted();
+            if (s.peek() == '(') s.balanced('(', ')');
+            if (s.peek() == '{') s.balanced('{', '}');
+            continue;
+        }
+
+        skipQualifiers(s, kw);
+        const std::string_view name = s.ident();
+        if (name.empty()) continue;
+        if (!s.accept('=')) { if (s.peek() == '(') s.balanced('(', ')'); continue; }
+
+        std::string strVal;
+        std::string raw = attrValue(s, &strVal);
+
+        if (name == "info:id") { sh.id = strVal; continue; }
+        if (name.rfind("inputs:", 0) != 0) continue;
+
+        const std::string input(name.substr(7));
+        const usize dot = input.find(".connect");
+        if (dot != std::string::npos) {
+            std::string target = connectionTarget(raw);
+            if (!target.empty()) sh.connects.emplace_back(input.substr(0, dot), std::move(target));
+            continue;
+        }
+        if (input == "file") sh.file = assetPath(raw);
+        sh.values.emplace_back(input, std::move(raw));
+    }
+}
+
+// Collects every Shader in a Material's body, including any nested one level down inside a Scope --
+// the shape a DCC that groups its texture nodes writes.
+void collectShaders(Scanner& s, const std::string& path, std::vector<ShaderPrim>& out,
+                    std::string& surfaceConnect, int depth) {
+    while (!s.eof()) {
+        if (s.peek() == '}') { ++s.p; return; }
+        const std::string_view kw = s.ident();
+        if (kw.empty()) { if (s.p < s.end) ++s.p; continue; }
+
+        if (kw == "def" || kw == "over" || kw == "class") {
+            std::string_view type;
+            if (s.peek() != '"') type = s.ident();
+            const std::string name = s.quoted();
+            if (s.peek() == '(') s.balanced('(', ')');
+            if (s.peek() != '{') continue;
+            const std::string childPath = path + "/" + name;
+            const std::string_view body = s.balanced('{', '}');
+            Scanner cs{body.data(), body.data() + body.size()};
+            if (type == "Shader") {
+                ShaderPrim sh;
+                sh.path = childPath;
+                parseShaderBody(cs, sh);
+                out.push_back(std::move(sh));
+            } else if (depth < 2) {
+                std::string ignored;
+                collectShaders(cs, childPath, out, ignored, depth + 1);
+            }
+            continue;
+        }
+
+        skipQualifiers(s, kw);
+        const std::string_view name = s.ident();
+        if (name.empty()) continue;
+        if (!s.accept('=')) { if (s.peek() == '(') s.balanced('(', ')'); continue; }
+        const std::string raw = attrValue(s, nullptr);
+        if (name == "outputs:surface.connect" && surfaceConnect.empty())
+            surfaceConnect = connectionTarget(raw);
+    }
+}
+
+// Loads one texture file, or records why it could not be. Returns the index into out->images, or -1.
+i32 loadUsdTexture(Ctx& c, const std::string& rel) {
+    if (rel.empty()) return -1;
+    std::string clean = rel;
+    while (clean.rfind("./", 0) == 0) clean.erase(0, 2);
+    for (char& ch : clean) if (ch == '\\') ch = '/';
+
+    // An absolute or rooted path is taken as written; USD allows both, and rewriting one would be
+    // this importer inventing an asset resolver it does not have.
+    const bool rooted = (clean.size() > 1 && clean[1] == ':') || (!clean.empty() && clean[0] == '/');
+    const std::string full = (rooted || c.baseDir.empty()) ? clean : c.baseDir + "/" + clean;
+
+    for (usize i = 0; i < c.imageSources.size(); ++i)
+        if (c.imageSources[i] == full) return c.out->images[i].ok ? static_cast<i32>(i) : -1;
+
+    ImportedImage img;
+    img.sourcePath = clean;
+    std::string stem = clean;
+    const usize slash = stem.find_last_of('/');
+    if (slash != std::string::npos) stem = stem.substr(slash + 1);
+    const usize dot = stem.find_last_of('.');
+    img.ext = (dot == std::string::npos) ? std::string(".png") : stem.substr(dot);
+    if (dot != std::string::npos) stem = stem.substr(0, dot);
+    for (char& ch : stem) {
+        const bool ok = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+                        (ch >= '0' && ch <= '9') || ch == '-' || ch == '_';
+        if (!ok) ch = '_';
+    }
+    img.suggestedName = stem;
+
+    std::ifstream f(full, std::ios::binary | std::ios::ate);
+    if (f) {
+        const std::streamoff n = f.tellg();
+        img.bytes.resize(usize(n > 0 ? n : 0));
+        f.seekg(0);
+        if (!img.bytes.empty())
+            f.read(reinterpret_cast<char*>(img.bytes.data()), std::streamsize(img.bytes.size()));
+        img.ok = !img.bytes.empty();
+    }
+    if (!img.ok) c.sawUnreadableTexture = true;
+
+    const bool ok = img.ok;
+    c.out->images.push_back(std::move(img));
+    c.imageSources.push_back(full);
+    return ok ? static_cast<i32>(c.out->images.size() - 1) : -1;
+}
+
+// Two materials that differ only in name are the SAME look. Used to collapse the copies a DCC
+// writes per object; see the call site for why that shape is the common one.
+bool sameLook(const ImportedMaterial& a, const ImportedMaterial& b) {
+    const auto tex = [](const ImportedTexture& x, const ImportedTexture& y) {
+        return x.imageIndex == y.imageIndex && x.texCoord == y.texCoord;
+    };
+    for (int k = 0; k < 4; ++k) if (a.baseColorFactor[k] != b.baseColorFactor[k]) return false;
+    for (int k = 0; k < 3; ++k) if (a.emissiveFactor[k]  != b.emissiveFactor[k])  return false;
+    return a.metallicFactor == b.metallicFactor && a.roughnessFactor == b.roughnessFactor &&
+           a.normalScale == b.normalScale && a.occlusionStrength == b.occlusionStrength &&
+           a.alphaCutoff == b.alphaCutoff && a.alphaMode == b.alphaMode &&
+           a.doubleSided == b.doubleSided &&
+           tex(a.baseColorTex, b.baseColorTex) && tex(a.metalRoughTex, b.metalRoughTex) &&
+           tex(a.normalTex, b.normalTex) && tex(a.occlusionTex, b.occlusionTex) &&
+           tex(a.emissiveTex, b.emissiveTex);
+}
+
+// Parses one `def Material` body into an ImportedMaterial, appended to out->materials.
+void parseMaterial(Scanner& s, Ctx& c, const std::string& path) {
+    std::vector<ShaderPrim> shaders;
+    std::string surfacePath;
+    collectShaders(s, path, shaders, surfacePath, 0);
+    if (shaders.empty()) return;
+
+    const ShaderPrim* surface = nullptr;
+    for (const ShaderPrim& sh : shaders)
+        if (sh.path == surfacePath) { surface = &sh; break; }
+    // NO outputs:surface, or one naming a prim that is not here. Falling back to the material's
+    // single UsdPreviewSurface is right far more often than giving up: the connection is boilerplate
+    // a hand-written .usda routinely omits, and a material with two surfaces is a multi-purpose
+    // binding this importer could not choose between anyway -- so that case gives up, deliberately.
+    if (!surface) {
+        for (const ShaderPrim& sh : shaders)
+            if (sh.id == "UsdPreviewSurface") {
+                if (surface) { surface = nullptr; break; }
+                surface = &sh;
+            }
+    }
+    if (!surface || surface->id != "UsdPreviewSurface") return;
+
+    const auto shaderAt = [&](const std::string& p) -> const ShaderPrim* {
+        for (const ShaderPrim& sh : shaders) if (sh.path == p) return &sh;
+        return nullptr;
+    };
+
+    ImportedMaterial m;
+
+    // ---- the literal values ----
+    const auto rgb = [&](const char* input, f32* dst) {
+        const std::string* v = surface->value(input);
+        if (!v) return;
+        std::vector<f32> n;
+        allNumbers(*v, n);
+        if (n.size() >= 3) { dst[0] = n[0]; dst[1] = n[1]; dst[2] = n[2]; }
+    };
+    const auto scalar = [&](const char* input, f32& dst) {
+        const std::string* v = surface->value(input);
+        if (!v) return false;
+        std::vector<f32> n;
+        allNumbers(*v, n);
+        if (n.empty()) return false;
+        dst = n[0];
+        return true;
+    };
+
+    rgb("diffuseColor", m.baseColorFactor);
+    rgb("emissiveColor", m.emissiveFactor);
+    // UsdPreviewSurface's OWN defaults are metallic 0 and roughness 0.5, not the glTF defaults of 1
+    // and 1 that ImportedMaterial carries. A surface stating neither is a mid-rough dielectric here,
+    // and would arrive as a fully rough metal if the struct's defaults were left standing.
+    m.metallicFactor  = 0.0f;
+    m.roughnessFactor = 0.5f;
+    scalar("metallic", m.metallicFactor);
+    scalar("roughness", m.roughnessFactor);
+    scalar("opacity", m.baseColorFactor[3]);
+    // opacityThreshold is USD's cutout: > 0 means alpha test, which is exactly glTF's MASK. Blend is
+    // inferred from a partial opacity instead, because USD has no blend mode of its own to read.
+    if (scalar("opacityThreshold", m.alphaCutoff) && m.alphaCutoff > 0.0f) m.alphaMode = "MASK";
+    else if (m.baseColorFactor[3] < 1.0f) m.alphaMode = "BLEND";
+
+    // ---- the connections ----
+    const auto bindTex = [&](const char* input, ImportedTexture& slot) {
+        const std::string* target = surface->connect(input);
+        if (!target) return;
+        const ShaderPrim* tex = shaderAt(*target);
+        if (!tex || tex->id != "UsdUVTexture" || tex->file.empty()) return;
+        slot.imageIndex = loadUsdTexture(c, tex->file);
+    };
+    bindTex("diffuseColor",  m.baseColorTex);
+    bindTex("normal",        m.normalTex);
+    bindTex("occlusion",     m.occlusionTex);
+    bindTex("emissiveColor", m.emissiveTex);
+    // ROUGHNESS AND METAL SHARE ONE .ocmat SLOT (glTF's ORM packing) while USD connects them
+    // separately -- and, in practice, usually to the same packed file's G and B channels, so binding
+    // either one gets the right texture. Roughness first, because it is the channel the engine's
+    // shading is most sensitive to.
+    bindTex("roughness", m.metalRoughTex);
+    if (m.metalRoughTex.empty()) bindTex("metallic", m.metalRoughTex);
+
+    // ---- one entry per DISTINCT look, however many prims declare it ----------------------------
+    //
+    // Blender's USD exporter writes a full copy of a Material under EVERY object that uses it, so
+    // grass_B_classes.usda declares `MI_Grass_02_TwoSided` five times at five paths with identical
+    // bodies. Without this, that is five .ocmat files and five names for one look -- and, worse, the
+    // name-collision rule below would rename four of them to path-shaped stems, so the same plant
+    // would arrive wearing four differently-named copies of the same material.
+    //
+    // IDENTITY IS THE PARSED CONTENT, not the prim name: two prims with the same name and different
+    // bodies are genuinely two materials and still get distinct names, which is what the collision
+    // rule underneath is for.
+    for (usize k = 0; k < c.out->materials.size(); ++k)
+        if (sameLook(c.out->materials[k], m)) {
+            c.materialPaths.emplace_back(path, k);
+            return;
+        }
+
+    // ---- the name, which is what the mesh's slot will hold ----
+    std::string name = path;
+    const usize slash = name.find_last_of('/');
+    if (slash != std::string::npos) name = name.substr(slash + 1);
+    // TWO DIFFERENT LOOKS MAY SHARE A PRIM NAME at different paths, and the slot rewrite downstream
+    // matches on this string -- so a duplicate would silently give both meshes the first one. The
+    // full path, sanitised, is unique by construction.
+    for (const ImportedMaterial& prev : c.out->materials)
+        if (prev.name == name) {
+            const usize first = path.find_first_not_of('/');
+            name = (first == std::string::npos) ? path : path.substr(first);
+            for (char& ch : name) if (ch == '/') ch = '_';
+            break;
+        }
+    m.name = std::move(name);
+
+    c.out->materials.push_back(std::move(m));
+    c.materialPaths.emplace_back(path, c.out->materials.size() - 1);
 }
 
 // ---- the prim walk ----------------------------------------------------------------------------
@@ -373,6 +764,7 @@ void parsePrimBody(Scanner& s, Ctx& c, const M4& parent, const std::string& path
 struct DeferredChild {
     std::string      path;
     std::string_view body;
+    std::string      type;   // the prim's declared type, so a Material can take its own reader
 };
 
 // Reads one attribute or nested prim inside a prim body. Returns false at the end of the body.
@@ -403,16 +795,23 @@ bool parseMember(Scanner& s, Ctx& c, MeshAttrs& attrs,
         // walking now would hand the child its GRANDparent's matrix. So the body is set aside and
         // parsePrimBody comes back to it once the transform is actually known.
         if (s.peek() == '{')
-            children.push_back(DeferredChild{path + "/" + name, s.balanced('{', '}')});
+            children.push_back(DeferredChild{path + "/" + name, s.balanced('{', '}'), std::string(type)});
         return true;
     }
 
     if (kw == "variantSet") { c.sawVariant = true; s.quoted(); if (s.peek() == '{') s.balanced('{', '}'); return true; }
 
-    // An attribute. Possible prefixes first.
+    // An attribute. Qualifier keywords stack (`custom uniform float`, `prepend rel`), so this is a
+    // loop rather than the single step it used to be.
+    //
+    // `rel` IS NOT A QUALIFIER, which is why it left this list. A relationship is written
+    // `rel material:binding = </X>` -- no type token at all -- so consuming it like `uniform` took
+    // the NAME as the type, left `name` empty, and dropped out with the `= </X>` still unread, for
+    // the resync path below to grind through one character at a time. `prepend rel material:binding`
+    // happened to work, which is why this went unnoticed: there the qualifier step ate `rel`.
     std::string_view type = kw;
-    if (type == "uniform" || type == "custom" || type == "varying" || type == "prepend" ||
-        type == "append" || type == "add" || type == "delete" || type == "rel")
+    while (type == "uniform" || type == "custom" || type == "varying" || type == "prepend" ||
+           type == "append" || type == "add" || type == "delete")
         type = s.ident();
 
     const std::string_view name = s.ident();
@@ -461,6 +860,18 @@ bool parseMember(Scanner& s, Ctx& c, MeshAttrs& attrs,
     }
     else if (is("subdivisionScheme")) { attrs.subdivisionScheme = strVal; if (!strVal.empty() && strVal != "none") c.sawSubdiv = true; }
     else if (is("orientation")) attrs.orientation = strVal;
+    else if (is("doubleSided")) {
+        // `uniform bool doubleSided = 1`, or `= true`. Both spellings occur.
+        attrs.doubleSided = region.find('1') != std::string_view::npos ||
+                            region.find("true") != std::string_view::npos;
+    }
+    else if (name.rfind("material:binding", 0) == 0) {
+        // `rel material:binding = </Looks/Bark>`, and the purpose-qualified forms
+        // `material:binding:preview` / `:full`. Recorded, not resolved: the Material it names may
+        // be declared later in the file. The first one wins, so an unqualified binding beats a
+        // purpose-qualified one that follows it and neither silently replaces the other.
+        if (attrs.materialBinding.empty()) attrs.materialBinding = connectionTarget(region);
+    }
     else if (is("xformOp:translate")) {
         std::vector<f32> v; allNumbers(region, v);
         if (v.size() >= 3) ops.emplace_back("translate", translate(v[0], v[1], v[2]));
@@ -509,7 +920,10 @@ void parsePrimBody(Scanner& s, Ctx& c, const M4& parent, const std::string& path
     // NOW the children, with a transform that finally includes this prim's own ops.
     for (const DeferredChild& ch : children) {
         Scanner cs{ch.body.data(), ch.body.data() + ch.body.size()};
-        parsePrimBody(cs, c, world, ch.path);
+        // A Material carries no geometry and no transform, so it goes to the shader reader rather
+        // than through the mesh walk that would tokenise its inputs and drop every one.
+        if (ch.type == "Material") parseMaterial(cs, c, ch.path);
+        else                       parsePrimBody(cs, c, world, ch.path);
     }
 }
 
@@ -535,8 +949,41 @@ const char* usdEncodingName(UsdEncoding e) {
     }
 }
 
-bool importUsdFromMemory(const u8* bytes, usize size, UsdImportResult& out,
-                         const UsdImportOptions& opt, std::string* why) {
+// Fills each mesh's material slot from the prim path its `rel material:binding` named. Runs after
+// the whole stage is walked, which is the point: USD does not require a Material to be declared
+// before the mesh that binds it, and a Looks scope written after the geometry is an ordinary shape
+// for an exported stage.
+void resolveBindings(Ctx& c) {
+    for (usize i = 0; i < c.out->meshes.size() && i < c.meshBinding.size(); ++i) {
+        const std::string& want = c.meshBinding[i];
+        if (want.empty() || c.out->meshes[i].materialSlots.empty()) continue;
+        bool found = false;
+        for (const auto& mp : c.materialPaths)
+            if (mp.first == want) {
+                c.out->meshes[i].materialSlots[0] = c.out->materials[mp.second].name;
+                // DOUBLE-SIDEDNESS CROSSES HERE, because USD authors it on the geometry while .ocmat
+                // carries it on the material -- Jungle Ruins' foliage cards are `doubleSided = 1`
+                // meshes bound to a Material that says nothing about culling, so without this every
+                // leaf is invisible from behind.
+                //
+                // ORed across every mesh that binds the material rather than split into two
+                // materials: if two binders disagree, the merged answer draws backfaces that one of
+                // them did not ask for, which is a shading difference, while the other direction
+                // makes geometry vanish.
+                if (i < c.meshDoubleSided.size() && c.meshDoubleSided[i])
+                    c.out->materials[mp.second].doubleSided = true;
+                found = true;
+                break;
+            }
+        // A binding this file cannot satisfy -- almost always a Material behind a reference this
+        // importer does not compose. The slot stays EMPTY rather than being pointed at a name that
+        // is not there, which would read downstream as a missing material file.
+        if (!found) c.sawUnresolvedBinding = true;
+    }
+}
+
+bool importUsdFromMemory(const u8* bytes, usize size, const std::string& baseDir,
+                         UsdImportResult& out, const UsdImportOptions& opt, std::string* why) {
     out = UsdImportResult{};
     out.encoding = usdSniff(bytes, size);
 
@@ -566,6 +1013,8 @@ bool importUsdFromMemory(const u8* bytes, usize size, UsdImportResult& out,
     Ctx c;
     c.out = &out;
     c.opt = &opt;
+    c.baseDir = baseDir;
+    while (!c.baseDir.empty() && (c.baseDir.back() == '/' || c.baseDir.back() == '\\')) c.baseDir.pop_back();
 
     f32 metersPerUnit = 1.0f;
     if (s.peek() == '(') {
@@ -615,7 +1064,10 @@ bool importUsdFromMemory(const u8* bytes, usize size, UsdImportResult& out,
             }
             if (type == "PointInstancer") c.sawInstancing = true;
             if (type == "Material" || type == "Shader") c.sawMaterial = true;
-            if (s.peek() == '{') { ++s.p; parsePrimBody(s, c, root, "/" + name); }
+            if (s.peek() == '{') {
+                if (type == "Material") { ++s.p; parseMaterial(s, c, "/" + name); }
+                else                    { ++s.p; parsePrimBody(s, c, root, "/" + name); }
+            }
             continue;
         }
         // Anything else at stage scope: skip its value so the walk stays in sync.
@@ -628,10 +1080,22 @@ bool importUsdFromMemory(const u8* bytes, usize size, UsdImportResult& out,
         }
     }
 
+    // THE JOIN, and it has to be here rather than in buildMesh: a `rel material:binding` names a
+    // prim path, and USD does not require that prim to appear first.
+    resolveBindings(c);
+
     if (c.sawReference)   out.unsupported.push_back("references, payloads and `over` opinions were not composed; only geometry written directly in this file was read");
     if (c.sawVariant)     out.unsupported.push_back("variant sets were not resolved; no variant selection was applied");
     if (c.sawInstancing)  out.unsupported.push_back("PointInstancer prims were skipped; instanced geometry did not import");
-    if (c.sawMaterial)    out.unsupported.push_back("Material and Shader prims were skipped; meshes import with an empty material slot");
+    if (c.sawMaterial && out.materials.empty())
+        out.unsupported.push_back("Material prims were present but none used UsdPreviewSurface, which "
+                                  "is the only shading model this importer reads; meshes import with an empty material slot");
+    if (c.sawUnresolvedBinding)
+        out.unsupported.push_back("a mesh bound a Material this file does not declare -- almost always one "
+                                  "behind a reference; that mesh imports with an empty material slot");
+    if (c.sawUnreadableTexture)
+        out.unsupported.push_back("a texture a material named could not be read from disk; that slot is "
+                                  "unbound rather than pointing at a file that is not there");
     if (c.sawTimeSamples) out.unsupported.push_back("time-sampled attributes were ignored; the default (non-animated) value was used");
     if (c.sawSubdiv)      out.unsupported.push_back("subdivisionScheme was not 'none'; the control cage was imported as-is, NOT subdivided, so the model will look faceted");
     if (c.sawNonUniformScale) out.unsupported.push_back("a non-uniform xformOp:scale was applied to normals without an inverse-transpose, so shading on that prim is approximate");
@@ -652,7 +1116,9 @@ bool importUsd(const std::string& path, UsdImportResult& out,
     f.seekg(0);
     f.read(reinterpret_cast<char*>(bytes.data()), n);
     if (!f) return fail(why, "USD: short read on " + path);
-    return importUsdFromMemory(bytes.data(), bytes.size(), out, opt, why);
+    const usize slash = path.find_last_of("/\\");
+    const std::string baseDir = slash == std::string::npos ? std::string() : path.substr(0, slash);
+    return importUsdFromMemory(bytes.data(), bytes.size(), baseDir, out, opt, why);
 }
 
 } // namespace aver::fmt

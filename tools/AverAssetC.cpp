@@ -31,7 +31,7 @@
 // Under the SAME guard as the `material` subcommand, and reusing its macro rather than adding a
 // second one: both need exactly Aver.Formats.Material to be linked, and two names for one condition
 // is a worse thing to keep in step than one name doing two jobs.
-#include "aver/formats/GltfMaterialCook.hpp"
+#include "aver/formats/MaterialCook.hpp"
 #endif
 
 // Material generation (texture set -> .ocmat) is OPTIONAL for the same reason audio import above is:
@@ -821,6 +821,69 @@ bool writeMeshItems(const std::string& input, const std::string& outDir, const s
     return anyFailed;
 }
 
+
+// Cooks `materials` and `images` into the project's Content/Materials and Content/Textures, then
+// rewrites every mesh's material slots to the stems that were actually written. Shared by all three
+// mesh formats, which is the point: cooking lives in ONE place so the reserved-name policy, the
+// collision suffixes and the slot rewrite cannot drift apart between importers.
+//
+// THE ORDER IS LOAD-BEARING and is why this takes `meshes` by reference rather than returning the
+// names. Cooking renames each material to a prefixed, collision-free stem, and materialSlots has to
+// be rewritten to match BEFORE the meshes are copied into MeshItems -- writeMeshItems serialises
+// those copies, so a rewrite afterwards would leave the .ocmesh naming a material that is not on
+// disk under that name.
+//
+// A no-op when `contentDir` is empty, which is the launcher-less case: geometry still imports, and
+// the caller is told what it is leaving behind rather than losing it silently.
+void cookAndRewriteSlots(const std::vector<fmt::ImportedMaterial>& materials,
+                         const std::vector<fmt::ImportedImage>& images,
+                         const std::string& contentDir, const std::string& base,
+                         std::vector<fmt::OcMeshData>& meshes) {
+    if (materials.empty() && images.empty()) return;
+    // Only the READABLE images are worth counting at the user: an entry whose bytes could not be
+    // loaded is carried so a second material naming the same missing file is not retried, and
+    // reporting it here would name a texture the cook is never going to write either way.
+    usize readable = 0;
+    for (const fmt::ImportedImage& img : images) if (img.ok) ++readable;
+#if AVER_HAVE_MATERIAL_COMPILE
+    if (contentDir.empty()) {
+        AVER_WARN("this file has {} material(s) and {} image(s); pass --content-dir <dir> to "
+                  "write them, otherwise only geometry is imported",
+                  materials.size(), readable);
+        return;
+    }
+    fmt::MaterialCookOptions copt;
+    copt.contentDir = contentDir;
+    copt.assetBase  = base;
+    // A stated output directory is a directive: this tool is invoked per asset by the launcher, and
+    // a re-import that silently kept the old material would be a worse surprise than one that
+    // replaced it.
+    copt.overwriteExisting = true;
+    fmt::MaterialCookResult cres;
+    std::vector<std::string> cwarn;
+    std::string cerr;
+    if (!fmt::cookMaterials(materials, images, copt, cres, &cwarn, &cerr)) {
+        AVER_WARN("materials: {}", cerr);
+        return;
+    }
+    for (const std::string& w : cwarn) AVER_WARN("materials: {}", w);
+    for (usize i = 0; i < materials.size() && i < cres.materialSlotNames.size(); ++i) {
+        if (cres.materialSlotNames[i].empty()) continue;   // did not cook; keep the old name
+        const std::string& from = materials[i].name;
+        const std::string& to   = cres.materialSlotNames[i];
+        for (fmt::OcMeshData& m : meshes)
+            for (std::string& slot : m.materialSlots)
+                if (slot == from) slot = to;
+    }
+    AVER_INFO("wrote {} material(s) and {} texture(s) under {}",
+              cres.materialsWritten, cres.texturesWritten, contentDir);
+#else
+    (void)contentDir; (void)base; (void)meshes;
+    AVER_WARN("this build has no PBR module, so the file's {} material(s) and {} image(s) were not "
+              "imported; geometry only", materials.size(), readable);
+#endif
+}
+
 } // namespace
 
 // `convert` converts argv[2] (a glTF/GLB, OBJ, USDA, or -- when this build has audio import -- a
@@ -900,52 +963,11 @@ int main(int argc, char** argv) {
 
         // ---- materials and their textures, BEFORE the meshes are copied into `items` ----
         //
-        // THE ORDER IS LOAD-BEARING. Cooking renames each material to a prefixed, collision-free
-        // stem, and OcMeshData::materialSlots has to be rewritten to match. `items` below COPIES
-        // res.meshes, and writeMeshItems serialises those copies -- so a rewrite after this point
-        // would leave the .ocmesh naming a material that is not on disk under that name.
-        //
         // THIS TOOL, NOT JUST THE HARNESS. The cook shipped first in tests/formats ConvertTool,
         // which is the dev harness; this is the compiler the launcher actually invokes, so until
         // now a glTF imported by the product arrived with its materials thrown away while the same
         // file imported by the harness did not.
-#if AVER_HAVE_MATERIAL_COMPILE
-        if (!contentDir.empty() && (!res.materials.empty() || !res.images.empty())) {
-            fmt::GltfMaterialCookOptions copt;
-            copt.contentDir = contentDir;
-            copt.gltfBase   = base;
-            // A stated output directory is a directive: this tool is invoked per asset by the
-            // launcher, and a re-import that silently kept the old material would be a worse
-            // surprise than one that replaced it.
-            copt.overwriteExisting = true;
-            fmt::GltfMaterialCookResult cres;
-            std::vector<std::string> cwarn;
-            std::string cerr;
-            if (!fmt::cookGltfMaterials(res, copt, cres, &cwarn, &cerr)) {
-                AVER_WARN("materials: {}", cerr);
-            } else {
-                for (const std::string& w : cwarn) AVER_WARN("materials: {}", w);
-                for (usize i = 0; i < res.materials.size() && i < cres.materialSlotNames.size(); ++i) {
-                    if (cres.materialSlotNames[i].empty()) continue;   // did not cook; keep the old name
-                    const std::string& from = res.materials[i].name;
-                    const std::string& to   = cres.materialSlotNames[i];
-                    for (fmt::OcMeshData& m : res.meshes)
-                        for (std::string& slot : m.materialSlots)
-                            if (slot == from) slot = to;
-                }
-                AVER_INFO("wrote {} material(s) and {} texture(s) under {}",
-                          cres.materialsWritten, cres.texturesWritten, contentDir);
-            }
-        } else if (contentDir.empty() && (!res.materials.empty() || !res.images.empty())) {
-            AVER_WARN("this file has {} material(s) and {} image(s); pass --content-dir <dir> to "
-                      "write them, otherwise only geometry is imported",
-                      res.materials.size(), res.images.size());
-        }
-#else
-        if (!res.materials.empty() || !res.images.empty())
-            AVER_WARN("this build has no PBR module, so the file's {} material(s) and {} image(s) "
-                      "were not imported; geometry only", res.materials.size(), res.images.size());
-#endif
+        cookAndRewriteSlots(res.materials, res.images, contentDir, base, res.meshes);
 
         std::vector<MeshItem> items;
         items.reserve(res.meshes.size());
@@ -1011,6 +1033,23 @@ int main(int argc, char** argv) {
             emitSummary(input, stats, 1);
             return 1;
         }
+
+        // ---- the .mtl's materials, which until now were parsed and then dropped ----
+        //
+        // The map_* paths a .mtl writes are relative to the .obj's OWN directory, not to the
+        // project content root, so that is what the converter resolves against. Warnings from it
+        // name any texture the file points at and does not have.
+        {
+            std::vector<fmt::ImportedMaterial> mats;
+            std::vector<fmt::ImportedImage> imgs;
+            std::vector<std::string> mwarn;
+            const usize slash = input.find_last_of("/\\");
+            const std::string baseDir = slash == std::string::npos ? std::string() : input.substr(0, slash);
+            fmt::objMaterialsToImported(res.materials, baseDir, mats, imgs, &mwarn);
+            for (const std::string& w : mwarn) AVER_WARN("materials: {}", w);
+            cookAndRewriteSlots(mats, imgs, contentDir, base, res.meshes);
+        }
+
         std::vector<MeshItem> items;
         items.reserve(res.meshes.size());
         for (usize i = 0; i < res.meshes.size(); ++i) {
@@ -1036,6 +1075,13 @@ int main(int argc, char** argv) {
             emitSummary(input, stats, 1);
             return 1;
         }
+
+        // The importer has already resolved each mesh's `rel material:binding` to the material's own
+        // name, so this rewrites those names to the cooked stems exactly as the glTF path does. A
+        // mesh whose slot stayed empty -- no binding, or one behind a reference this importer does
+        // not compose -- is untouched, and the import said so under `unsupported`.
+        cookAndRewriteSlots(res.materials, res.images, contentDir, base, res.meshes);
+
         std::vector<MeshItem> items;
         items.reserve(res.meshes.size());
         for (usize i = 0; i < res.meshes.size(); ++i) {

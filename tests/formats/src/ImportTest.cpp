@@ -42,10 +42,10 @@ static bool obj(const std::string& text, fmt::ObjImportResult& out,
 }
 
 static bool usda(const std::string& text, fmt::UsdImportResult& out,
-                 const fmt::UsdImportOptions& opt = {}) {
+                 const fmt::UsdImportOptions& opt = {}, const std::string& baseDir = {}) {
     std::string why;
     const bool ok = fmt::importUsdFromMemory(reinterpret_cast<const u8*>(text.data()), text.size(),
-                                             out, opt, &why);
+                                             baseDir, out, opt, &why);
     if (!ok) AVER_INFO("    (importUsd said: {})", why);
     return ok;
 }
@@ -327,7 +327,7 @@ int main() {
         std::string why;
         const char crate[] = "PXR-USDC\0\0\0\0";
         const bool ok = fmt::importUsdFromMemory(reinterpret_cast<const u8*>(crate), sizeof(crate) - 1,
-                                                 r, {}, &why);
+                                                 {}, r, {}, &why);
         check(!ok, "a USDC crate is REFUSED");
         check(r.encoding == fmt::UsdEncoding::Usdc, "and identified as USDC");
         check(why.find("usdcat") != std::string::npos, "with the conversion command in the message");
@@ -337,7 +337,7 @@ int main() {
         std::string why;
         const char zip[] = "PK\x03\x04rest";
         const bool ok = fmt::importUsdFromMemory(reinterpret_cast<const u8*>(zip), sizeof(zip) - 1,
-                                                 r, {}, &why);
+                                                 {}, r, {}, &why);
         check(!ok, "a USDZ archive is REFUSED");
         check(r.encoding == fmt::UsdEncoding::Usdz, "and identified as USDZ");
     }
@@ -346,7 +346,7 @@ int main() {
         std::string why;
         const char junk[] = "this is not a usd file at all";
         const bool ok = fmt::importUsdFromMemory(reinterpret_cast<const u8*>(junk), sizeof(junk) - 1,
-                                                 r, {}, &why);
+                                                 {}, r, {}, &why);
         check(!ok, "and a non-USD file is refused too");
     }
 
@@ -358,7 +358,7 @@ int main() {
             "#usda 1.0\n(\n    upAxis = \"Z\"\n)\n"
             "def Xform \"empty\"\n{\n}\n";
         const bool ok = fmt::importUsdFromMemory(reinterpret_cast<const u8*>(text.data()), text.size(),
-                                                 r, {}, &why);
+                                                 {}, r, {}, &why);
         check(!ok, "a stage with no UsdGeomMesh FAILS rather than succeeding with zero meshes");
         check(why.find("no UsdGeomMesh") != std::string::npos, "and says exactly that");
     }
@@ -379,6 +379,383 @@ int main() {
         for (const std::string& u : r.unsupported)
             if (u.find("subdivisionScheme") != std::string::npos) told = true;
         check(told, "and says it was NOT subdivided");
+    }
+
+    // ---- .mtl -> the shared import shape, which is what finally gives OBJ materials -----------
+    //
+    // These go through objMaterialsToImported rather than importObj, because the conversion is the
+    // part with judgement in it: the parse just records what the file said.
+    {
+        std::vector<fmt::ObjMaterial> in;
+        fmt::ObjMaterial phong;
+        phong.name = "Classic";
+        phong.baseColor[0] = 0.8f; phong.baseColor[1] = 0.2f; phong.baseColor[2] = 0.1f;
+        phong.emissive[1] = 0.5f;
+        phong.shininess = 200.0f;
+        phong.opacity = 0.5f;
+        in.push_back(phong);
+
+        fmt::ObjMaterial pbr;
+        pbr.name = "Modern";
+        pbr.hasPbr = true;
+        pbr.roughness = 0.35f;
+        pbr.metallic = 1.0f;
+        in.push_back(pbr);
+
+        std::vector<fmt::ImportedMaterial> mats;
+        std::vector<fmt::ImportedImage> imgs;
+        std::vector<std::string> warn;
+        fmt::objMaterialsToImported(in, {}, mats, imgs, &warn);
+
+        check(mats.size() == 2, "both .mtl materials converted");
+        if (mats.size() == 2) {
+            check(std::fabs(mats[0].baseColorFactor[0] - 0.8f) < 1e-5f, "Kd became baseColorFactor");
+            check(std::fabs(mats[0].baseColorFactor[3] - 0.5f) < 1e-5f, "and d became its alpha");
+            check(mats[0].alphaMode == "BLEND", "which makes it BLEND -- .mtl has no cutoff to mean MASK");
+            check(std::fabs(mats[0].emissiveFactor[1] - 0.5f) < 1e-5f, "Ke became emissiveFactor");
+            // NO Pr/Pm, so roughness is DERIVED from Ns: sqrt(2 / (200 + 2)) = 0.0995. Leaving the
+            // shared struct's default of 1.0 standing would make every classic .mtl uniformly matte,
+            // and its metallic default of 1.0 would make every one of them metal.
+            check(std::fabs(mats[0].roughnessFactor - 0.0995037f) < 1e-4f,
+                  "and with no Pr, roughness is derived from the Phong exponent Ns");
+            check(mats[0].metallicFactor == 0.0f, "with metallic 0: a .mtl with no Pm is a dielectric");
+
+            check(std::fabs(mats[1].roughnessFactor - 0.35f) < 1e-5f, "a stated Pr wins outright");
+            check(mats[1].metallicFactor == 1.0f, "as does a stated Pm");
+            check(mats[1].alphaMode == "OPAQUE", "and d of 1 stays opaque");
+        }
+    }
+
+    // ---- a texture the .mtl names but which is not there -------------------------------------
+    {
+        std::vector<fmt::ObjMaterial> in;
+        fmt::ObjMaterial m;
+        m.name = "Missing";
+        m.mapBaseColor = "no_such_file_anywhere.png";
+        in.push_back(m);
+
+        std::vector<fmt::ImportedMaterial> mats;
+        std::vector<fmt::ImportedImage> imgs;
+        std::vector<std::string> warn;
+        fmt::objMaterialsToImported(in, {}, mats, imgs, &warn);
+
+        check(mats.size() == 1 && mats[0].baseColorTex.empty(),
+              "a texture that cannot be read leaves its slot UNBOUND");
+        bool named = false;
+        for (const std::string& w : warn)
+            if (w.find("no_such_file_anywhere.png") != std::string::npos) named = true;
+        check(named, "and the file is named in the warnings, not swallowed");
+    }
+
+    // ---- map_Pr and map_Pm both stated, when .ocmat has one packed slot -----------------------
+    {
+        std::vector<fmt::ObjMaterial> in;
+        fmt::ObjMaterial m;
+        m.name = "Both";
+        m.mapRoughness = "r.png";
+        m.mapMetallic  = "m.png";
+        in.push_back(m);
+
+        std::vector<fmt::ImportedMaterial> mats;
+        std::vector<fmt::ImportedImage> imgs;
+        std::vector<std::string> warn;
+        fmt::objMaterialsToImported(in, {}, mats, imgs, &warn);
+
+        bool told = false;
+        for (const std::string& w : warn)
+            if (w.find("map_Pm dropped") != std::string::npos) told = true;
+        check(told, "naming separate map_Pr and map_Pm says which one was dropped");
+    }
+
+    // ---- UsdPreviewSurface: the values, the connections, and the mesh->material join ----------
+    //
+    // The three meshes are the three outcomes the join can have, and they are here together because
+    // the bound one alone would pass just as well with the resolution deleted and every slot filled
+    // by accident: `Unbound` proves an unbound mesh stays unbound, and `Dangling` proves a binding
+    // this file cannot satisfy does NOT invent a name.
+    {
+        fmt::UsdImportResult r;
+        const bool ok = usda(
+            "#usda 1.0\n(\n    upAxis = \"Y\"\n)\n"
+            "def Xform \"root\"\n{\n"
+            "    def Mesh \"Bound\"\n    {\n"
+            "        rel material:binding = </root/Looks/Bark>\n"
+            "        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 0, 1)]\n"
+            "        int[] faceVertexCounts = [3]\n"
+            "        int[] faceVertexIndices = [0, 1, 2]\n"
+            "    }\n"
+            "    def Mesh \"Unbound\"\n    {\n"
+            "        point3f[] points = [(2, 0, 0), (3, 0, 0), (2, 0, 1)]\n"
+            "        int[] faceVertexCounts = [3]\n"
+            "        int[] faceVertexIndices = [0, 1, 2]\n"
+            "    }\n"
+            "    def Mesh \"Dangling\"\n    {\n"
+            "        prepend rel material:binding = </root/Looks/NotHere>\n"
+            "        point3f[] points = [(4, 0, 0), (5, 0, 0), (4, 0, 1)]\n"
+            "        int[] faceVertexCounts = [3]\n"
+            "        int[] faceVertexIndices = [0, 1, 2]\n"
+            "    }\n"
+            "    def Scope \"Looks\"\n    {\n"
+            "        def Material \"Bark\"\n        {\n"
+            "            token outputs:surface.connect = </root/Looks/Bark/Surface.outputs:surface>\n"
+            "            def Shader \"Surface\"\n            {\n"
+            "                uniform token info:id = \"UsdPreviewSurface\"\n"
+            "                color3f inputs:diffuseColor = (0.25, 0.5, 0.75)\n"
+            "                color3f inputs:emissiveColor = (0.1, 0.2, 0.3)\n"
+            "                float inputs:roughness = 0.7\n"
+            "                float inputs:metallic = 0.25\n"
+            "                normal3f inputs:normal.connect = </root/Looks/Bark/Nrm.outputs:rgb>\n"
+            "                token outputs:surface\n"
+            "            }\n"
+            "            def Shader \"Nrm\"\n            {\n"
+            "                uniform token info:id = \"UsdUVTexture\"\n"
+            "                asset inputs:file = @./textures/bark_n.png@\n"
+            "                float3 outputs:rgb\n"
+            "            }\n"
+            "        }\n"
+            "    }\n"
+            "}\n", r);
+        check(ok, "a stage with a Looks scope imports");
+        check(r.meshes.size() == 3, "all three meshes came through");
+        check(r.materials.size() == 1, "and its one UsdPreviewSurface became one material");
+        if (r.materials.size() == 1) {
+            const fmt::ImportedMaterial& m = r.materials[0];
+            check(m.name == "Bark", "named after the Material prim");
+            check(std::fabs(m.baseColorFactor[0] - 0.25f) < 1e-5f &&
+                  std::fabs(m.baseColorFactor[1] - 0.5f)  < 1e-5f &&
+                  std::fabs(m.baseColorFactor[2] - 0.75f) < 1e-5f,
+                  "diffuseColor became baseColorFactor");
+            check(std::fabs(m.emissiveFactor[2] - 0.3f) < 1e-5f, "emissiveColor came across");
+            check(std::fabs(m.roughnessFactor - 0.7f) < 1e-5f, "roughness came across");
+            check(std::fabs(m.metallicFactor - 0.25f) < 1e-5f, "metallic came across");
+            check(m.alphaMode == "OPAQUE", "and with no opacity stated it is opaque");
+            // The texture file is not on disk in this test, so the SLOT must stay unset -- a
+            // material pointing at a file that is not there reads downstream as a renderer fault
+            // rather than the import failure it is.
+            check(m.normalTex.empty(), "a normal map that could not be read leaves its slot UNBOUND");
+        }
+        bool toldTexture = false, toldBinding = false;
+        for (const std::string& u : r.unsupported) {
+            if (u.find("could not be read") != std::string::npos) toldTexture = true;
+            if (u.find("does not declare") != std::string::npos)  toldBinding = true;
+        }
+        check(toldTexture, "and names the unreadable texture as unsupported");
+
+        // THE JOIN.
+        if (r.meshes.size() == 3) {
+            check(!r.meshes[0].materialSlots.empty() && r.meshes[0].materialSlots[0] == "Bark",
+                  "the bound mesh got the material's name in its slot");
+            check(!r.meshes[1].materialSlots.empty() && r.meshes[1].materialSlots[0].empty(),
+                  "the mesh with NO binding still has an empty slot");
+            check(!r.meshes[2].materialSlots.empty() && r.meshes[2].materialSlots[0].empty(),
+                  "and a binding this file cannot satisfy leaves the slot empty rather than guessing");
+        }
+        check(toldBinding, "which is reported, not silent");
+    }
+
+    // ---- UsdPreviewSurface's own defaults, which are NOT ImportedMaterial's -------------------
+    //
+    // THIS TEST HAS TO STATE ONE AND OMIT THE OTHER. A surface stating neither would pass against
+    // the wrong defaults too, because the two omissions are indistinguishable from a struct that
+    // happened to be initialised the same way. Roughness is stated, metallic is not: if the shared
+    // struct's metallic default of 1.0 (glTF's) were left standing, this material would arrive as a
+    // fully rough metal instead of the dielectric the file describes.
+    {
+        fmt::UsdImportResult r;
+        const bool ok = usda(
+            "#usda 1.0\n(\n    upAxis = \"Z\"\n)\n"
+            "def Mesh \"m\"\n{\n"
+            "    rel material:binding = </Look>\n"
+            "    point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]\n"
+            "    int[] faceVertexCounts = [3]\n"
+            "    int[] faceVertexIndices = [0, 1, 2]\n"
+            "}\n"
+            "def Material \"Look\"\n{\n"
+            "    def Shader \"S\"\n    {\n"
+            "        uniform token info:id = \"UsdPreviewSurface\"\n"
+            "        float inputs:roughness = 0.9\n"
+            "    }\n"
+            "}\n", r);
+        check(ok, "a Material at stage scope with no outputs:surface still imports");
+        check(r.materials.size() == 1, "falling back to its single UsdPreviewSurface");
+        if (r.materials.size() == 1) {
+            check(std::fabs(r.materials[0].roughnessFactor - 0.9f) < 1e-5f, "the stated roughness wins");
+            check(r.materials[0].metallicFactor == 0.0f,
+                  "and an UNSTATED metallic is 0, UsdPreviewSurface's default, not the struct's 1");
+        }
+        if (!r.meshes.empty() && !r.meshes[0].materialSlots.empty())
+            check(r.meshes[0].materialSlots[0] == "Look",
+                  "and a binding to a stage-scope Material resolves");
+    }
+
+    // ---- opacity and opacityThreshold, USD's only two blend signals ---------------------------
+    {
+        fmt::UsdImportResult r;
+        const bool ok = usda(
+            "#usda 1.0\n(\n    upAxis = \"Z\"\n)\n"
+            "def Mesh \"m\"\n{\n"
+            "    point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]\n"
+            "    int[] faceVertexCounts = [3]\n"
+            "    int[] faceVertexIndices = [0, 1, 2]\n"
+            "}\n"
+            "def Material \"Fade\"\n{\n"
+            "    def Shader \"S\"\n    {\n"
+            "        uniform token info:id = \"UsdPreviewSurface\"\n"
+            "        float inputs:opacity = 0.4\n"
+            "    }\n"
+            "}\n"
+            "def Material \"Cutout\"\n{\n"
+            "    def Shader \"S\"\n    {\n"
+            "        uniform token info:id = \"UsdPreviewSurface\"\n"
+            "        float inputs:opacityThreshold = 0.33\n"
+            "    }\n"
+            "}\n", r);
+        check(ok, "two materials on one stage import");
+        check(r.materials.size() == 2, "as two");
+        if (r.materials.size() == 2) {
+            check(r.materials[0].alphaMode == "BLEND" &&
+                  std::fabs(r.materials[0].baseColorFactor[3] - 0.4f) < 1e-5f,
+                  "a partial opacity becomes BLEND with alpha in baseColorFactor.a");
+            check(r.materials[1].alphaMode == "MASK" &&
+                  std::fabs(r.materials[1].alphaCutoff - 0.33f) < 1e-5f,
+                  "and opacityThreshold becomes MASK at that cutoff");
+        }
+    }
+
+    // ---- a shading model this importer does not read is refused BY NAME, not guessed at --------
+    {
+        fmt::UsdImportResult r;
+        const bool ok = usda(
+            "#usda 1.0\n(\n    upAxis = \"Z\"\n)\n"
+            "def Mesh \"m\"\n{\n"
+            "    rel material:binding = </Fancy>\n"
+            "    point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]\n"
+            "    int[] faceVertexCounts = [3]\n"
+            "    int[] faceVertexIndices = [0, 1, 2]\n"
+            "}\n"
+            "def Material \"Fancy\"\n{\n"
+            "    def Shader \"S\"\n    {\n"
+            "        uniform token info:id = \"PxrSurface\"\n"
+            "        color3f inputs:diffuseColor = (1, 0, 0)\n"
+            "    }\n"
+            "}\n", r);
+        check(ok, "a stage whose only Material is a renderer-specific shader still imports geometry");
+        check(r.materials.empty(), "and produces NO material rather than a guess at one");
+        bool told = false;
+        for (const std::string& u : r.unsupported)
+            if (u.find("UsdPreviewSurface") != std::string::npos) told = true;
+        check(told, "saying which shading model it does read");
+    }
+
+    // ---- two Material prims may share a name; the slot rewrite downstream matches on it --------
+    {
+        fmt::UsdImportResult r;
+        const bool ok = usda(
+            "#usda 1.0\n(\n    upAxis = \"Z\"\n)\n"
+            "def Mesh \"m\"\n{\n"
+            "    rel material:binding = </B/Look>\n"
+            "    point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]\n"
+            "    int[] faceVertexCounts = [3]\n"
+            "    int[] faceVertexIndices = [0, 1, 2]\n"
+            "}\n"
+            "def Scope \"A\"\n{\n    def Material \"Look\"\n    {\n"
+            "        def Shader \"S\"\n        {\n"
+            "            uniform token info:id = \"UsdPreviewSurface\"\n"
+            "            float inputs:roughness = 0.1\n"
+            "        }\n    }\n}\n"
+            "def Scope \"B\"\n{\n    def Material \"Look\"\n    {\n"
+            "        def Shader \"S\"\n        {\n"
+            "            uniform token info:id = \"UsdPreviewSurface\"\n"
+            "            float inputs:roughness = 0.9\n"
+            "        }\n    }\n}\n", r);
+        check(ok, "two same-named Materials in different scopes import");
+        check(r.materials.size() == 2, "as two materials");
+        if (r.materials.size() == 2)
+            check(r.materials[0].name != r.materials[1].name,
+                  "with DISTINCT names, or the slot rewrite would give both meshes the first look");
+        if (!r.meshes.empty() && !r.meshes[0].materialSlots.empty() && r.materials.size() == 2)
+            check(r.meshes[0].materialSlots[0] == r.materials[1].name,
+                  "and the binding picked the one it actually named");
+    }
+
+    // ---- the copies a DCC writes per object collapse to one look ------------------------------
+    //
+    // Blender's USD exporter puts a full copy of a Material under EVERY object that uses it, which
+    // is why Jungle Ruins' grass_B_classes.usda declares MI_Grass_02_TwoSided five times. Five
+    // .ocmat files for one look would be waste; five DIFFERENT NAMES for it would be worse, because
+    // the same plant would then arrive wearing four renamed copies of its own material.
+    {
+        fmt::UsdImportResult r;
+        const std::string one =
+            "        def Material \"Shared\"\n        {\n"
+            "            def Shader \"S\"\n            {\n"
+            "                uniform token info:id = \"UsdPreviewSurface\"\n"
+            "                color3f inputs:diffuseColor = (0.3, 0.6, 0.2)\n"
+            "                float inputs:roughness = 0.8\n"
+            "            }\n        }\n";
+        const bool ok = usda(
+            "#usda 1.0\n(\n    upAxis = \"Z\"\n)\n"
+            "def Xform \"A\"\n{\n"
+            "    def Mesh \"m\"\n    {\n"
+            "        rel material:binding = </A/Looks/Shared>\n"
+            "        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]\n"
+            "        int[] faceVertexCounts = [3]\n"
+            "        int[] faceVertexIndices = [0, 1, 2]\n"
+            "    }\n"
+            "    def Scope \"Looks\"\n    {\n" + one + "    }\n}\n"
+            "def Xform \"B\"\n{\n"
+            "    def Mesh \"m\"\n    {\n"
+            "        rel material:binding = </B/Looks/Shared>\n"
+            "        point3f[] points = [(2, 0, 0), (3, 0, 0), (2, 1, 0)]\n"
+            "        int[] faceVertexCounts = [3]\n"
+            "        int[] faceVertexIndices = [0, 1, 2]\n"
+            "    }\n"
+            "    def Scope \"Looks\"\n    {\n" + one + "    }\n}\n", r);
+        check(ok, "two objects each carrying their own copy of one material import");
+        check(r.materials.size() == 1, "as ONE material, because the two bodies are identical");
+        if (r.materials.size() == 1)
+            check(r.materials[0].name == "Shared", "keeping the prim's own name, un-disambiguated");
+        if (r.meshes.size() == 2 && r.materials.size() == 1) {
+            check(r.meshes[0].materialSlots[0] == "Shared" &&
+                  r.meshes[1].materialSlots[0] == "Shared",
+                  "and BOTH bindings resolve to it, from their two different prim paths");
+        }
+    }
+
+    // ---- doubleSided is authored on the GEOMETRY in USD and on the MATERIAL in .ocmat ----------
+    {
+        fmt::UsdImportResult r;
+        const bool ok = usda(
+            "#usda 1.0\n(\n    upAxis = \"Z\"\n)\n"
+            "def Mesh \"card\"\n{\n"
+            "    uniform bool doubleSided = 1\n"
+            "    rel material:binding = </Leaf>\n"
+            "    point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]\n"
+            "    int[] faceVertexCounts = [3]\n"
+            "    int[] faceVertexIndices = [0, 1, 2]\n"
+            "}\n"
+            "def Mesh \"solid\"\n{\n"
+            "    rel material:binding = </Rock>\n"
+            "    point3f[] points = [(2, 0, 0), (3, 0, 0), (2, 1, 0)]\n"
+            "    int[] faceVertexCounts = [3]\n"
+            "    int[] faceVertexIndices = [0, 1, 2]\n"
+            "}\n"
+            "def Material \"Leaf\"\n{\n    def Shader \"S\"\n    {\n"
+            "        uniform token info:id = \"UsdPreviewSurface\"\n"
+            "        float inputs:roughness = 0.8\n"
+            "    }\n}\n"
+            "def Material \"Rock\"\n{\n    def Shader \"S\"\n    {\n"
+            "        uniform token info:id = \"UsdPreviewSurface\"\n"
+            "        float inputs:roughness = 0.2\n"
+            "    }\n}\n", r);
+        check(ok, "a doubleSided mesh imports");
+        check(r.materials.size() == 2, "with both materials");
+        if (r.materials.size() == 2) {
+            check(r.materials[0].doubleSided,
+                  "and the mesh's doubleSided crossed onto the material it bound");
+            check(!r.materials[1].doubleSided,
+                  "while a material bound only by a single-sided mesh stays single-sided");
+        }
     }
 
     if (g_failures == 0) AVER_INFO("=== all import tests passed ===");

@@ -1,7 +1,8 @@
-#include "aver/formats/GltfMaterialCook.hpp"
+#include "aver/formats/MaterialCook.hpp"
 
 #include "aver/formats/OcMat.hpp"
 
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 
@@ -22,13 +23,34 @@ constexpr const char* kReservedLookNames[] = {
     "M_Glass",  "M_Metal", "M_Rock",    "M_Target", "M_Trim",  "M_Wall",
 };
 
-bool isReserved(const std::string& stem) {
-    for (const char* r : kReservedLookNames) if (stem == r) return true;
-    return false;
-}
-
 void warn(std::vector<std::string>* out, std::string what) {
     if (out) out->push_back(std::move(what));
+}
+
+// A container the engine's decoder positively cannot read, named. stb_image -- the one decoder in
+// the tree (platform/src/Image.cpp) -- handles JPEG, PNG, TGA, BMP, PSD, GIF, HDR, PIC and PNM, and
+// nothing else.
+//
+// A REFUSAL LIST, NOT AN ACCEPT LIST, and deliberately: TGA has no magic bytes at all, so an
+// accept-list would have to fall back on the extension and would reject every valid .tga whose name
+// said something else. This says nothing about a file it does not recognise, and lets it through.
+//
+// WHY IT MATTERS: Intel's Jungle Ruins binds `.tif` base colours through UsdPreviewSurface. Copying
+// one into the project and writing a TEX record for it produces a material that fails to load at
+// run time, a long way from the import that caused it.
+const char* undecodableContainer(const std::vector<u8>& b) {
+    const auto has = [&](usize off, const char* magic, usize n) {
+        if (b.size() < off + n) return false;
+        return std::memcmp(b.data() + off, magic, n) == 0;
+    };
+    if (has(0, "II*\0", 4) || has(0, "MM\0*", 4))          return "TIFF";
+    if (has(0, "RIFF", 4) && has(8, "WEBP", 4))            return "WebP";
+    if (has(0, "\x76\x2f\x31\x01", 4))                     return "OpenEXR";
+    if (has(0, "DDS ", 4))                                 return "DDS";
+    if (has(1, "KTX", 3) && b.size() > 0 && b[0] == 0xAB)  return "KTX";
+    if (has(4, "ftypavif", 8))                             return "AVIF";
+    if (has(4, "ftypheic", 8) || has(4, "ftypheix", 8))    return "HEIF";
+    return nullptr;
 }
 
 // Content-relative, forward slashes -- the form a TEX record takes and the form the engine resolves
@@ -39,31 +61,47 @@ std::string contentRel(const std::string& sub, const std::string& file) {
 
 } // namespace
 
-bool cookGltfMaterials(const GltfImportResult& res, const GltfMaterialCookOptions& opt,
-                       GltfMaterialCookResult& out, std::vector<std::string>* warnings,
-                       std::string* err) {
-    out.materialSlotNames.assign(res.materials.size(), std::string());
-    out.texturePaths.assign(res.images.size(), std::string());
+bool isReservedLookName(const std::string& stem) {
+    for (const char* r : kReservedLookNames) if (stem == r) return true;
+    return false;
+}
+
+
+bool cookMaterials(const std::vector<ImportedMaterial>& materials,
+                   const std::vector<ImportedImage>& images,
+                   const MaterialCookOptions& opt, MaterialCookResult& out,
+                   std::vector<std::string>* warnings, std::string* err) {
+    out.materialSlotNames.assign(materials.size(), std::string());
+    out.texturePaths.assign(images.size(), std::string());
 
     if (opt.contentDir.empty()) {
-        if (err) *err = "cookGltfMaterials: no content directory was given, so there is nowhere to write";
+        if (err) *err = "cookMaterials: no content directory was given, so there is nowhere to write";
         return false;
     }
-    if (res.materials.empty() && res.images.empty()) return true;   // nothing to do is not a failure
+    if (materials.empty() && images.empty()) return true;   // nothing to do is not a failure
 
-    const std::string base = opt.gltfBase.empty() ? std::string("Imported") : opt.gltfBase;
+    const std::string base = opt.assetBase.empty() ? std::string("Imported") : opt.assetBase;
     std::error_code ec;
 
     // ---- 1. the images ---------------------------------------------------------------------
     // Written first, because a material's TEX record needs the path this produces. An image that
-    // could not be read upstream (GltfImage::ok false) is skipped here WITHOUT a second complaint:
+    // could not be read upstream (ImportedImage::ok false) is skipped here WITHOUT a second complaint:
     // GltfImport already said which file and why, and repeating it per referencing material would
     // bury the one message that matters.
     const std::filesystem::path texDir =
         std::filesystem::path(opt.contentDir) / "Textures" / base;
-    for (usize i = 0; i < res.images.size(); ++i) {
-        const GltfImage& img = res.images[i];
+    for (usize i = 0; i < images.size(); ++i) {
+        const ImportedImage& img = images[i];
         if (!img.ok || img.bytes.empty()) continue;
+        if (const char* container = undecodableContainer(img.bytes)) {
+            // NOT written and NOT bound. Copying it in and pointing a TEX record at it would turn a
+            // stated import limit into a material that looks broken at run time for no given reason
+            // -- the same policy as an image that could not be read at all.
+            warn(warnings, "'" + (img.sourcePath.empty() ? img.suggestedName : img.sourcePath) +
+                           "' is " + container + ", which the engine's image decoder does not read; "
+                           "the slot is left unbound. Convert it to PNG or TGA and re-import.");
+            continue;
+        }
 
         std::string stem = img.suggestedName.empty() ? ("image" + std::to_string(i)) : img.suggestedName;
         // Two images in one file may sanitise to the same stem; the index disambiguates rather than
@@ -100,8 +138,8 @@ bool cookGltfMaterials(const GltfImportResult& res, const GltfMaterialCookOption
     const std::filesystem::path matDir = std::filesystem::path(opt.contentDir) / "Materials";
     std::filesystem::create_directories(matDir, ec);
 
-    for (usize i = 0; i < res.materials.size(); ++i) {
-        const GltfMaterial& gm = res.materials[i];
+    for (usize i = 0; i < materials.size(); ++i) {
+        const ImportedMaterial& gm = materials[i];
 
         pbr::MaterialDesc d;
         d.name = base + "_" + (gm.name.empty() ? ("Material_" + std::to_string(i)) : gm.name);
@@ -119,7 +157,7 @@ bool cookGltfMaterials(const GltfImportResult& res, const GltfMaterialCookOption
 
         // A slot whose image could not be read stays EMPTY. Pointing it at a path that is not there
         // would turn a stated import failure into a material that looks broken for no given reason.
-        const auto bind = [&](const GltfMaterial::TexRef& t, pbr::TextureSlot slot) {
+        const auto bind = [&](const ImportedTexture& t, pbr::TextureSlot slot) {
             if (t.imageIndex < 0 || usize(t.imageIndex) >= out.texturePaths.size()) return;
             const std::string& p = out.texturePaths[usize(t.imageIndex)];
             if (p.empty()) return;
@@ -145,7 +183,12 @@ bool cookGltfMaterials(const GltfImportResult& res, const GltfMaterialCookOption
             stem.push_back(ok ? c : '_');
         }
         if (stem.empty()) stem = "Material_" + std::to_string(i);
-        if (isReserved(stem)) {
+        // A BACKSTOP, AND CURRENTLY UNREACHABLE. `stem` is derived from d.name, which always carries
+        // the assetBase prefix, so a source material called M_Crate is already written as
+        // Fixture_M_Crate and cannot collide -- THE PREFIX is what protects the built-in looks, not
+        // this. Kept for an assetBase policy that ever allowed an empty prefix; MaterialTest's
+        // testCook asserts the prefix, not this branch, for exactly that reason.
+        if (isReservedLookName(stem)) {
             const std::string was = stem;
             stem += "_imported";
             warn(warnings, "material '" + was + "' shares a name with a built-in look; written as '" +

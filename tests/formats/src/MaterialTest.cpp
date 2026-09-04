@@ -2,13 +2,18 @@
 // the mip filter, and the C# material-script rewriter. CPU only; no GPU is touched.
 #include <cstddef>
 #include "aver/formats/OcMat.hpp"
+#include "aver/formats/MaterialCook.hpp"
 #include "aver/formats/MaterialScript.hpp"
 #include "aver/formats/Texture.hpp"
 #include "aver/pbr/MaterialGpu.hpp"
 #include "aver/core/Log.hpp"
 
 #include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
+#include <vector>
 
 using namespace aver;
 
@@ -1001,6 +1006,107 @@ static void testScriptRewrite() {
     }
 }
 
+// ---- the shared material cook: glTF, OBJ and USD all land here --------------------------------
+//
+// Writes into a scratch directory rather than the project, because that is the only way to exercise
+// the part with judgement in it: which files get written, under what names, and which texture slots
+// end up bound. The .ocmat CONTENT is already covered above by the parser tests -- this is about the
+// step between an importer and those files.
+static void testCook() {
+    AVER_INFO("=== the shared material cook ===");
+
+    const std::filesystem::path dir =
+        std::filesystem::temp_directory_path() / "aver_material_cook_test";
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+
+    // Two images the cook is asked to write. Only the magic bytes matter: the cook copies bytes and
+    // never decodes, so the sniff is the only thing reading them.
+    const u8 kPngMagic[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n'};
+    const u8 kTiffMagic[4] = {'I', 'I', '*', 0x00};
+
+    std::vector<fmt::ImportedImage> images(2);
+    images[0].bytes.assign(kPngMagic, kPngMagic + 8);
+    images[0].bytes.resize(64, 0);
+    images[0].ext = ".png";
+    images[0].suggestedName = "colour";
+    images[0].sourcePath = "colour.png";
+    images[0].ok = true;
+
+    images[1].bytes.assign(kTiffMagic, kTiffMagic + 4);
+    images[1].bytes.resize(64, 0);
+    images[1].ext = ".tif";
+    images[1].suggestedName = "basecolour";
+    images[1].sourcePath = "textures/basecolour.tif";
+    images[1].ok = true;
+
+    std::vector<fmt::ImportedMaterial> mats(3);
+    mats[0].name = "Good";
+    mats[0].baseColorTex.imageIndex = 0;
+    mats[1].name = "Tiffy";
+    mats[1].baseColorTex.imageIndex = 1;
+    // A generated material that happened to be called M_Crate would silently repaint every crate in
+    // the project, because an authored .ocmat WINS over the built-in look of the same name.
+    mats[2].name = "M_Crate";
+
+    fmt::MaterialCookOptions opt;
+    opt.contentDir = dir.string();
+    opt.assetBase  = "Fixture";
+    opt.overwriteExisting = true;
+
+    fmt::MaterialCookResult res;
+    std::vector<std::string> warn;
+    std::string err;
+    check(fmt::cookMaterials(mats, images, opt, res, &warn, &err), "the cook runs: " + err);
+    check(res.materialsWritten == 3, "all three materials were written");
+    check(res.texturesWritten == 1, "but only ONE texture -- the TIFF is not copied in");
+
+    check(std::filesystem::exists(dir / "Textures" / "Fixture" / "colour.png", ec),
+          "the PNG landed under Textures/<assetBase>/");
+    check(!std::filesystem::exists(dir / "Textures" / "Fixture" / "basecolour.tif", ec),
+          "and the TIFF did NOT, because nothing in the engine could decode it");
+
+    check(!res.texturePaths[0].empty() && res.texturePaths[1].empty(),
+          "so only the PNG has a content-relative path");
+
+    bool namedTiff = false;
+    for (const std::string& w : warn)
+        if (w.find("basecolour.tif") != std::string::npos && w.find("TIFF") != std::string::npos)
+            namedTiff = true;
+    check(namedTiff, "the refusal names the file AND the container, rather than failing silently");
+
+    // THE DISCRIMINATING PART for the sniff: the material must come out UNTEXTURED. Writing the file
+    // and emitting a TEX record for it would turn a stated import limit into a material that fails
+    // to load at run time, a long way from the import that caused it.
+    std::string text;
+    {
+        std::ifstream f(dir / "Materials" / "Fixture_Tiffy.ocmat");
+        text.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    }
+    check(!text.empty(), "the TIFF material was still written -- geometry keeps a material to bind");
+    check(text.find("TEX baseColor") == std::string::npos,
+          "with NO baseColor TEX record, so its slot is unbound rather than pointing at nothing");
+
+    std::string good;
+    {
+        std::ifstream f(dir / "Materials" / "Fixture_Good.ocmat");
+        good.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    }
+    check(good.find("TEX baseColor {path:Textures/Fixture/colour.png}") != std::string::npos,
+          "while the decodable one IS bound, by a content-relative path");
+
+    // THE PREFIX IS WHAT PROTECTS THE BUILT-IN LOOKS, not the reserved-name check underneath it: a
+    // source material called M_Crate is written as <assetBase>_M_Crate, which cannot collide. The
+    // check stays as a backstop for an assetBase policy that ever allowed an empty prefix, but it is
+    // unreachable today -- so this asserts the protection that is actually load-bearing.
+    check(!res.materialSlotNames[2].empty() && !fmt::isReservedLookName(res.materialSlotNames[2]),
+          "a source material named after a built-in look cannot be written under that name");
+    check(res.materialSlotNames[2] == "Fixture_M_Crate",
+          "because the assetBase prefix is what keeps it out of the built-ins' namespace");
+
+    std::filesystem::remove_all(dir, ec);
+}
+
 // Runs every material test. Returns the failure count.
 int main() {
     testFullParse();
@@ -1015,6 +1121,7 @@ int main() {
     testMipChain();
     testGeneratedByCsharp();
     testScriptRewrite();
+    testCook();
 
     if (g_failures == 0) AVER_INFO("=== all material tests passed ===");
     else AVER_ERROR("=== {} material assertion(s) failed ===", g_failures);

@@ -547,4 +547,104 @@ bool importMtl(const std::string& path, std::vector<ObjMaterial>& out, std::stri
     return parseMtlText(bytes.data(), bytes.size(), out);
 }
 
+// ---- .mtl -> the shared import shape ------------------------------------------------------------
+
+namespace {
+
+// One texture file, read whole. Returns the index into `images`, or -1 with a named warning.
+i32 loadObjTexture(const std::string& baseDir, const std::string& rel,
+                   std::vector<ImportedImage>& images, std::vector<std::string>* warnings) {
+    if (rel.empty()) return -1;
+    // Already loaded by an earlier material in the same .mtl -- share it rather than writing a
+    // second copy of the same bytes under a second name.
+    for (usize i = 0; i < images.size(); ++i)
+        if (images[i].sourcePath == rel) return images[i].ok ? static_cast<i32>(i) : -1;
+
+    ImportedImage img;
+    img.sourcePath = rel;
+    std::string stem = rel;
+    const usize slash = stem.find_last_of("/\\");
+    if (slash != std::string::npos) stem = stem.substr(slash + 1);
+    const usize dot = stem.find_last_of('.');
+    img.ext = (dot == std::string::npos) ? std::string(".png") : stem.substr(dot);
+    if (dot != std::string::npos) stem = stem.substr(0, dot);
+    for (char& c : stem) {
+        const bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                        (c >= '0' && c <= '9') || c == '-' || c == '_';
+        if (!ok) c = '_';
+    }
+    img.suggestedName = stem;
+
+    const std::string full = baseDir.empty() ? rel : baseDir + "\\" + rel;
+    std::ifstream f(full, std::ios::binary | std::ios::ate);
+    if (!f) {
+        if (warnings) warnings->push_back("a texture the .mtl names but which is not there: '" + rel + "'");
+        images.push_back(std::move(img));           // remembered as unread, so it is not retried
+        return -1;
+    }
+    const std::streamoff n = f.tellg();
+    img.bytes.resize(usize(n > 0 ? n : 0));
+    f.seekg(0);
+    if (!img.bytes.empty()) f.read(reinterpret_cast<char*>(img.bytes.data()), std::streamsize(img.bytes.size()));
+    img.ok = true;
+    images.push_back(std::move(img));
+    return static_cast<i32>(images.size() - 1);
+}
+
+} // namespace
+
+void objMaterialsToImported(const std::vector<ObjMaterial>& in, const std::string& baseDir,
+                            std::vector<ImportedMaterial>& outMats,
+                            std::vector<ImportedImage>& outImages,
+                            std::vector<std::string>* warnings) {
+    outMats.clear();
+    outMats.reserve(in.size());
+    for (const ObjMaterial& m : in) {
+        ImportedMaterial o;
+        o.name = m.name;
+        for (int k = 0; k < 3; ++k) o.baseColorFactor[k] = m.baseColor[k];
+        o.baseColorFactor[3] = m.opacity;
+        for (int k = 0; k < 3; ++k) o.emissiveFactor[k] = m.emissive[k];
+
+        if (m.hasPbr) {
+            // The file said so outright -- Pr/Pm, written by Blender, Substance and every modern
+            // exporter. Nothing to infer.
+            o.roughnessFactor = m.roughness;
+            o.metallicFactor  = m.metallic;
+        } else {
+            // NO PBR TERMS, so roughness is derived from the Phong exponent rather than defaulted.
+            // alpha = sqrt(2 / (Ns + 2)) is the standard Blinn-Phong-to-roughness mapping; Ns 0
+            // gives 1.0 (fully rough) and Ns 1000 gives ~0.045. Defaulting to the shared struct's
+            // 1.0 would make every classic .mtl uniformly matte, and defaulting metallic to ITS
+            // default of 1.0 would make every one of them metal -- a .mtl with no Pm is a
+            // dielectric, so this is the one place the shared defaults must not be leaned on.
+            o.roughnessFactor = std::sqrt(2.0f / (m.shininess + 2.0f));
+            o.metallicFactor  = 0.0f;
+        }
+
+        // d < 1 is the only blend signal a .mtl carries. MASK is not expressible: there is no
+        // cutoff in the format.
+        o.alphaMode = m.opacity < 1.0f ? "BLEND" : "OPAQUE";
+
+        const auto bind = [&](const std::string& rel, ImportedTexture& slot) {
+            slot.imageIndex = loadObjTexture(baseDir, rel, outImages, warnings);
+        };
+        bind(m.mapBaseColor,         o.baseColorTex);
+        bind(m.mapNormal,            o.normalTex);
+        bind(m.mapEmissive,          o.emissiveTex);
+        bind(m.mapAmbientOcclusion,  o.occlusionTex);
+        // ROUGHNESS AND METAL SHARE ONE SLOT, because .ocmat has one metalRough texture (glTF's ORM
+        // packing) while .mtl names them separately. Roughness wins when both are present: it is the
+        // one the engine's shading is most sensitive to, and merging two files into one packed
+        // texture is a cook-time image operation this layer deliberately does not do.
+        if (!m.mapRoughness.empty())      bind(m.mapRoughness, o.metalRoughTex);
+        else if (!m.mapMetallic.empty())  bind(m.mapMetallic,  o.metalRoughTex);
+        if (!m.mapRoughness.empty() && !m.mapMetallic.empty() && warnings)
+            warnings->push_back("'" + m.name + "' names separate map_Pr and map_Pm; .ocmat has one "
+                                "packed metalRough slot, so map_Pr was used and map_Pm dropped");
+
+        outMats.push_back(std::move(o));
+    }
+}
+
 } // namespace aver::fmt

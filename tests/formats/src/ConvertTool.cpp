@@ -8,7 +8,7 @@
 #if AVER_HAVE_MATERIAL_COOK
 // Reached only through the link interface, the same way Aver.Trifactor is below: the header pulls
 // in pbr::MaterialDesc, which does not exist in a tree built with AVER_MODULE_PBR off.
-#include "aver/formats/GltfMaterialCook.hpp"
+#include "aver/formats/MaterialCook.hpp"
 #endif
 #include "aver/formats/OcMesh.hpp"
 #include "aver/formats/OcAnim.hpp"
@@ -129,14 +129,14 @@ int main(int argc, char** argv) {
     // not on disk under that name.
 #if AVER_HAVE_MATERIAL_COOK
     if (!contentDir.empty() && (!res.materials.empty() || !res.images.empty())) {
-        fmt::GltfMaterialCookOptions copt;
+        fmt::MaterialCookOptions copt;
         copt.contentDir = contentDir;
-        copt.gltfBase   = base;
+        copt.assetBase  = base;
         copt.overwriteExisting = true;   // a cook tool writing to a stated directory replaces
-        fmt::GltfMaterialCookResult cres;
+        fmt::MaterialCookResult cres;
         std::vector<std::string> cwarn;
         std::string cerr;
-        if (!fmt::cookGltfMaterials(res, copt, cres, &cwarn, &cerr)) {
+        if (!fmt::cookMaterials(res.materials, res.images, copt, cres, &cwarn, &cerr)) {
             AVER_ERROR("materials: {}", cerr);
         } else {
             for (const std::string& w : cwarn) AVER_WARN("materials: {}", w);
