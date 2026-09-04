@@ -201,6 +201,9 @@ void showCmakeHint(const char* what, const std::string& line, f32 dpi) {
 // Joins any build thread still running.
 ToolsMenu::~ToolsMenu() {
     if (compileThread_.joinable()) compileThread_.join();
+    // Joined, not detached. The thread writes into package_, which this object owns; letting it
+    // outlive the editor is a write into freed memory on the way out of main.
+    if (packageThread_.joinable()) packageThread_.join();
 }
 
 // Queues a modal to open next frame and clears the previous one's state.
@@ -247,6 +250,7 @@ void ToolsMenu::drawMenu(const fmt::ProjectDesc& project) {
 // frame whether or not anything is open.
 void ToolsMenu::drawModals(const fmt::ProjectDesc& project, f32 dpi) {
     reapCompile();
+    reapPackage();
     const std::vector<IdeInfo>& ides = detectedIdes();
     if (!idesLogged_ && ideDetectionFinished()) {
         idesLogged_ = true;
@@ -281,6 +285,7 @@ void ToolsMenu::drawModals(const fmt::ProjectDesc& project, f32 dpi) {
         case Modal::CppModule: ImGui::OpenPopup("New C++ Module"); break;
         case Modal::CppClass:  ImGui::OpenPopup("New C++ Class"); break;
         case Modal::Compile:   ImGui::OpenPopup("Compile Scripts"); break;
+        case Modal::Package:   ImGui::OpenPopup("Package Project"); break;
         case Modal::Reload:    ImGui::OpenPopup("Reload Scripts"); break;
         case Modal::None:      break;
     }
@@ -292,6 +297,7 @@ void ToolsMenu::drawModals(const fmt::ProjectDesc& project, f32 dpi) {
     drawCppClassModal(dpi);
     drawCompileModal(dpi, false);
     drawCompileModal(dpi, true);
+    drawPackageModal(project, dpi);
 #endif
 }
 
@@ -1017,6 +1023,146 @@ void ToolsMenu::drawCompileButton(const fmt::ProjectDesc& project, f32 dpi, u64 
 void ToolsMenu::refreshScriptStatus(const fmt::ProjectDesc&) {}
 void ToolsMenu::drawScriptItems(const fmt::ProjectDesc&) {}
 void ToolsMenu::drawCompileButton(const fmt::ProjectDesc&, f32, u64) {}
+#endif // AVER_WITH_IMGUI
+
+
+// --------------------------------------------------------------------------------------------------
+// Packaging. The MENU IS A SHELL OVER THE SCRIPT, never a second implementation of it: everything
+// here runs scripts/stage-game.ps1 and scripts/verify-game.ps1, the same two a human or CI runs.
+// A packaging path that only exists behind a button is one that cannot be checked in CI.
+// --------------------------------------------------------------------------------------------------
+void ToolsMenu::startPackage(const fmt::ProjectDesc& project, const std::string& outDir, bool verify) {
+    if (packageThread_.joinable()) return;
+    if (engineRoot().empty()) {
+        AVER_ERROR("[Package] cannot locate the engine's scripts directory; run "
+                   "scripts/stage-game.ps1 from a shell instead");
+        return;
+    }
+
+    auto job = std::make_shared<Package>();
+    job->outDir = outDir;
+    job->verify = verify;
+    package_ = job;
+
+    const std::string manifest = project.manifestPath;
+    // engineRoot() walks up from the executable looking for cmake/AvModule.cmake AND modules/, so a
+    // downloaded engine finds its own install rather than the tree it was built in. Empty when the
+    // scripts are not present at all -- a payload ships stage-game.ps1 but not the whole repo.
+    const std::string root = engineRoot();
+
+    packageThread_ = std::thread([job, manifest, outDir, root, verify] {
+        std::string out;
+        int code = -1;
+#if defined(_WIN32)
+        // -BuildDir build-game, NOT the editor's tree. stage-game.ps1 refuses a tree configured
+        // AVER_ENABLE_UI=ON because its AverGame.exe links Dear ImGui and must not ship; pointing
+        // the button at build-release would make every click fail with a message about a switch the
+        // user never touched. The script still refuses if build-game is itself a UI tree.
+        const std::wstring cmd =
+            L"powershell -NoProfile -ExecutionPolicy Bypass -File \"" + widen(root) +
+            L"\\scripts\\stage-game.ps1\" -Project \"" + widen(manifest) +
+            L"\" -Out \"" + widen(outDir) + L"\" -Config Release -BuildDir build-game -Force";
+        if (!runCaptured(cmd, widen(root), out, code)) {
+            out = "Could not start powershell.";
+            code = -1;
+        }
+        if (code == 0 && verify) {
+            std::string vout;
+            int vcode = -1;
+            const std::wstring vcmd =
+                L"powershell -NoProfile -ExecutionPolicy Bypass -File \"" + widen(root) +
+                L"\\scripts\\verify-game.ps1\" -Package \"" + widen(outDir) + L"\"";
+            if (!runCaptured(vcmd, widen(root), vout, vcode)) {
+                vout = "Could not start powershell for verification.";
+                vcode = -1;
+            }
+            job->verifyOutput = std::move(vout);
+            job->verifyCode = vcode;
+            job->verified = true;
+        }
+#else
+        (void)manifest; (void)outDir; (void)root; (void)verify;
+        out = "Packaging is implemented for Windows only.";
+#endif
+        job->output = std::move(out);
+        job->exitCode = code;
+        job->done.store(true);   // last: the UI thread reads output/exitCode once this is set
+    });
+}
+
+void ToolsMenu::reapPackage() {
+    if (!package_ || !package_->done.load()) return;
+    if (packageThread_.joinable()) packageThread_.join();
+
+    const Package& p = *package_;
+    if (p.exitCode == 0 && (!p.verify || p.verifyCode == 0)) {
+        AVER_INFO("[Package] '{}' packaged{}", p.outDir, p.verify ? " and verified" : "");
+    } else if (p.exitCode != 0) {
+        AVER_ERROR("[Package] staging failed with {} error(s) - see the modal", p.exitCode);
+    } else {
+        AVER_ERROR("[Package] the package staged but FAILED verification with {} error(s)", p.verifyCode);
+    }
+}
+
+#if AVER_WITH_IMGUI
+void ToolsMenu::drawPackageModal(const fmt::ProjectDesc& project, f32 dpi) {
+    ImGui::SetNextWindowSize(ImVec2(760.0f * dpi, 460.0f * dpi), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal("Package Project", nullptr, ImGuiWindowFlags_NoSavedSettings)) return;
+
+    const bool running = packageThread_.joinable() && package_ && !package_->done.load();
+
+    ImGui::TextWrapped("Stages '%s' into a standalone, runnable game directory.", project.name.c_str());
+    ImGui::Spacing();
+    ImGui::TextDisabled("Runs scripts/stage-game.ps1 from the build-game tree. Everything this "
+                        "button does can be run from a shell, and should be, in CI.");
+    ImGui::Spacing();
+
+    if (packageOut_.empty() && project.valid()) {
+        packageOut_ = project.dir + "\\Packaged\\" + project.name;
+    }
+    char buf[512];
+    std::snprintf(buf, sizeof(buf), "%s", packageOut_.c_str());
+    ImGui::BeginDisabled(running);
+    ImGui::SetNextItemWidth(-1.0f);
+    if (ImGui::InputText("##packageOut", buf, sizeof(buf))) packageOut_ = buf;
+    ImGui::Checkbox("Verify the package after staging", &packageVerify_);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Copies the result somewhere else and runs it with the working directory\n"
+                          "outside the package, asserting it opens no file outside itself.\n"
+                          "An unverified package is a guess.");
+    ImGui::EndDisabled();
+
+    ImGui::Spacing();
+    ImGui::BeginDisabled(running || packageOut_.empty() || !project.valid());
+    if (ImGui::Button("Package", ImVec2(140.0f * dpi, 0.0f))) {
+        startPackage(project, packageOut_, packageVerify_);
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::BeginDisabled(running);
+    if (ImGui::Button("Close", ImVec2(100.0f * dpi, 0.0f))) ImGui::CloseCurrentPopup();
+    ImGui::EndDisabled();
+
+    if (running) { ImGui::SameLine(); ImGui::TextUnformatted("packaging..."); }
+
+    ImGui::Separator();
+    if (package_ && package_->done.load()) {
+        const Package& p = *package_;
+        const bool good = p.exitCode == 0 && (!p.verify || p.verifyCode == 0);
+        ImGui::TextColored(good ? ImVec4(0.55f, 0.85f, 0.55f, 1.0f) : ImVec4(0.95f, 0.45f, 0.40f, 1.0f),
+                           good ? "OK" : "FAILED");
+        ImGui::SameLine();
+        ImGui::TextDisabled("stage exit %d%s", p.exitCode,
+                            p.verified ? (std::string(", verify exit ") + std::to_string(p.verifyCode)).c_str() : "");
+    }
+    ImGui::BeginChild("##packagelog", ImVec2(0, 0), true, ImGuiWindowFlags_HorizontalScrollbar);
+    if (package_) {
+        if (!package_->output.empty())       ImGui::TextUnformatted(package_->output.c_str());
+        if (!package_->verifyOutput.empty()) ImGui::TextUnformatted(package_->verifyOutput.c_str());
+    }
+    ImGui::EndChild();
+    ImGui::EndPopup();
+}
 #endif // AVER_WITH_IMGUI
 
 } // namespace aver::editor

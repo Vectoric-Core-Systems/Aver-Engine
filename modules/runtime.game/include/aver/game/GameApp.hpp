@@ -47,6 +47,11 @@ struct GameConfig {
     bool inputEcho = false;
     // Logs every path the engine opens, so verify-game.ps1 can assert none is outside the package.
     bool traceOpens = false;
+    // --scene-census: print one line describing what the loaded level put in the world, in the
+    // format aver::world::formatSceneCensus defines. Sandbox.exe prints the identical line for the
+    // identical project, and scripts/verify-game.ps1 compares the two. See SceneCensus.hpp for why
+    // this is a census and not a pixel diff.
+    bool sceneCensus = false;
     // Fills a density volume on the GPU and compares every voxel against the CPU mirror, then
     // exits. The only way to check the HLSL against its reference: HLSL compiles at RUNTIME, so a
     // green build says nothing about whether the shader agrees with anything.

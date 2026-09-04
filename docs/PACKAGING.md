@@ -1,17 +1,32 @@
 # Packaging an Aver project into a shippable game
 
-> **STATUS: REMOVED, 2026-08-17. THIS DOCUMENT IS HISTORY, NOT A DESCRIPTION OF THE ENGINE.**
-> `AverGame.exe` (`game/`), `scripts/stage-game.ps1`, `scripts/verify-game.ps1`,
-> `scripts/game.allowlist` and the editor's **Package Project** item have all been deleted. Nothing
-> below can be run today, and the file paths it cites no longer exist. It is kept because the design
-> reasoning — the allowlist split, the `--trace-opens` verification, the ImGui/RHI separation it
-> forced — outlived the feature and is cited from live code comments.
+> **STATUS: LIVE AGAIN, 2026-09-05, WITH THE CHECK THAT WAS MISSING.** Removed 2026-08-17
+> (`b262c73`), restored today. `AverGame.exe` (`game/`), `scripts/stage-game.ps1`,
+> `scripts/verify-game.ps1`, `scripts/game.allowlist` and the editor's **Package Project** item all
+> exist and all work; everything below can be run.
 >
-> **What replaced it: nothing, deliberately.** The editor is how a project is run. A second host that
-> rendered a different subset of the scene was a standing source of confusion about what "the game"
-> actually shows, and it was the reason a graph-only project appeared broken when the real gap was
-> elsewhere. `modules/runtime.game` survives as a LIBRARY, driven by `tests/game`, which is what the
-> `AVER_BUILD_GAME` option now switches.
+> **WHY IT WAS REMOVED, AND WHAT IS DIFFERENT NOW.** The stated reason was real: a second host
+> "rendered a different subset of the scene than the editor", and nothing in the tree could notice
+> — no CI, no packaging test, and `verify-payload.ps1` compares `Sandbox.exe` against
+> `Sandbox.exe`. Restoring the executable without answering that would have restored the problem.
+>
+> `verify-game.ps1` now runs a **divergence gate**: both hosts open the same project with
+> `--scene-census` and their censuses must match — entity counts, distinct meshes and materials,
+> and an order-independent hash of every (mesh, material) pair. It is a census and not a frame
+> comparison on purpose; see `modules/world/include/aver/world/SceneCensus.hpp` for why (different
+> viewports, different aspect ratios, different cameras by design).
+>
+> **It found a real defect on its first run.** A staged package reported
+> `VSMain (vs_6_0): error: missing entry point definition`, fell back to `backend=Null` and refused
+> every mesh. The cause was not a shader bug: `game.allowlist` predated the migration of HLSL out of
+> C++ literals into `modules/*/shaders/`, so the package shipped the HLSL compiler and no HLSL —
+> the same hole `payload.allowlist` had already grown an entry to close. A missing shader file is
+> deliberately non-fatal, which is exactly why this surfaced as something that looks like a shader
+> bug rather than a packaging one.
+>
+> The runtime never left: `modules/runtime.game` kept building and growing for the nineteen days it
+> had no executable, and `GameApp::onInit` is a superset of the editor's `applyProject`. What was
+> deleted was ~30 lines of glue and three scripts.
 >
 > **Was BUILT before removal, further than this header used to admit.** A project did package, ran
 > from a scratch directory with the working directory outside the tree, and failed correctly when a

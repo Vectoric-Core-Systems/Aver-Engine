@@ -213,6 +213,9 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "aver/scene/Components.hpp"
 // The placement -> entity loop, shared with the game runtime. See modules/world/README.md.
 #include "aver/world/LevelInstance.hpp"
+// The divergence census both hosts print -- see SceneCensus.hpp for why it is a census of what the
+// level loaded and not a comparison of frames.
+#include "aver/world/SceneCensus.hpp"
 // Opt-in chunk streaming around the editor camera. See SandboxApp::setChunkStreamingEnabled.
 #include "aver/world/ChunkWorld.hpp"
 // A level's SCATTER records -> the generator's palette. The editor does not do this conversion
@@ -2587,6 +2590,17 @@ public:
         // since window_->pumpEvents() runs BEFORE onUpdate and WM_COPYDATA is synchronous on this thread.
         maybeAutosave(t.dt);
         maybeAutosavePrefs(t.dt);
+        // ONE LINE, ONCE, and not before frame 2. applyProject's scripting stage and
+        // spawnClassPlacements both run during startup, so a census taken on the first frame would
+        // report a world that is still filling -- and would then differ from the game's for a
+        // reason that is about timing rather than about content.
+#if AVER_MODULE_SCENE
+        if (sceneCensus_ && !sceneCensusDone_ && t.frame >= 2) {
+            sceneCensusDone_ = true;
+            AVER_INFO("[Census] {}",
+                      world::formatSceneCensus(world::takeSceneCensus(scene::World::instance())));
+        }
+#endif
 #if AVER_MODULE_SCENE
         // --save-level <out>: write the OPEN level to another path and log the result.
         //
@@ -5534,7 +5548,8 @@ public:
         // NOT GATED ON maxFrames_, unlike the outline: the outline responds to a click, meaningless in
         // a bounded run; the marker is part of what the level LOOKS like.
 #if AVER_MODULE_SCENE
-        if (viewportIconsReady_ && !anyPlayActive() && playerStart_ != scene::kInvalidEntity) {
+        if (viewportIconsReady_ && !noEditorChrome_ && !anyPlayActive() &&
+            playerStart_ != scene::kInvalidEntity) {
             const scene::World& psw = scene::World::instance();
             if (psw.valid(playerStart_)) {
                 // Raised by its own half-height so the pin's TIP lands on the marker's origin
@@ -5552,12 +5567,12 @@ public:
         // unlit on here would flatten the grid, the gizmo and every other piece of chrome drawn
         // after the scene.
         e.device()->setUnlit(false);
-        if (showGrid_) {
+        if (showGrid_ && !noEditorChrome_) {
             const Mat4 g = Mat4::identity();
             e.device()->drawLines(gridMesh_, &g.m[0][0]);
         }
 #if AVER_MODULE_SYNAPSE
-        if (showNav_ && navMesh_) {
+        if (showNav_ && navMesh_ && !noEditorChrome_) {
             // Already in world space -- buildNavOverlay emits absolute cell corners, because a
             // grid has an origin of its own and folding it into a matrix would mean two places
             // could disagree about where the navmesh is.
@@ -5565,10 +5580,14 @@ public:
             e.device()->drawLines(navMesh_, &n.m[0][0]);
         }
 #endif
-        drawGizmo(e);
+        // GIZMO AND SCULPT CURSOR are chrome too -- and the gizmo is the loudest of the lot, since
+        // it draws on top of geometry by design.
+        if (!noEditorChrome_) {
+            drawGizmo(e);
 #if AVER_MODULE_LANDSCAPE
-        drawSculptCursor(e);
+            drawSculptCursor(e);
 #endif
+        }
         buildUI(e);
 #if AVER_WITH_IMGUI
         uiReg_.endFrame();
@@ -6089,6 +6108,8 @@ public:
     void setFocusScript(bool b) { tools_.armNewScript(b); }  // --new-script
     void setFocusTools(bool b) { tools_.armToolsMenu(b); }   // --tools-menu
     void setOpenLevelPicker(bool b) { armOpenLevelPicker_ = b; }   // --open-level-picker
+    void setNoEditorChrome(bool b) { noEditorChrome_ = b; }        // --no-editor-chrome
+    void setSceneCensus(bool b) { sceneCensus_ = b; }              // --scene-census
     void setOpenLevelByName(std::string n) { openLevelByName_ = std::move(n); }   // --open-level
     void setFocusCompileMenu(bool b) { tools_.armCompileMenu(b); }   // --compile-menu
 #if AVER_MODULE_MCP
@@ -10096,6 +10117,18 @@ private:
     int landCreateSamples_ = 513;
     f32 landCreateSpacingCm_ = 100.0f;
 
+    // --no-editor-chrome: suppress everything the editor draws ON TOP of the scene, so a capture
+    // can be compared against AverGame.exe's. Run-scoped and never persisted -- see the flag's own
+    // comment in the argv loop for why it is not routed through showGrid_.
+    bool noEditorChrome_ = false;
+
+    // --scene-census, and the latch that makes it fire exactly once. Emitted from onUpdate rather
+    // than from the load, because a project's class placements are spawned by a LATER stage than
+    // loadLevel and a census taken at load would miss every one of them -- which is precisely the
+    // class of divergence this is here to catch.
+    bool sceneCensus_ = false;
+    bool sceneCensusDone_ = false;
+
     scene::Entity outlinerRenaming_ = scene::kInvalidEntity;
     bool outlinerRenameFocus_ = false;
     char outlinerRenameBuf_[128] = {0};
@@ -12379,6 +12412,26 @@ private:
                             : "This section has no file path to save back to.");
                 }
 #endif
+                ImGui::Separator();
+                // Packaging. Disabled with a SPECIFIC reason rather than a generic one: "greyed
+                // out" with no explanation is the single most common way an editor wastes somebody's
+                // afternoon. The item is a shell over scripts/stage-game.ps1 and adds nothing of its
+                // own -- a packaging path that exists only behind a button cannot run in CI.
+                {
+                    const bool haveProj = project_.valid();
+                    const bool haveScripts = haveProj &&
+                        std::filesystem::exists(editor::scriptsBinaryDir(project_));
+                    ImGui::BeginDisabled(!haveProj || tools_.compiling());
+                    if (ImGui::MenuItem("Package Project...")) tools_.openPackageProject();
+                    ImGui::EndDisabled();
+                    uiReg_.track("file.packageProject");
+                    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                        if (!haveProj)              ImGui::SetTooltip("Open a project first.");
+                        else if (tools_.compiling()) ImGui::SetTooltip("A script build is running; packaging would stage a half-written assembly.");
+                        else if (!haveScripts)       ImGui::SetTooltip("No compiled scripts yet - run Compile .NET first.\nThe packager refuses a project whose Binaries\\Scripts is empty.");
+                        else                         ImGui::SetTooltip("Stage this project into a standalone, runnable game directory.\nRuns scripts/stage-game.ps1, which you can also run from a shell.");
+                    }
+                }
                 ImGui::Separator(); if(ImGui::MenuItem("Exit")) requestExitChecked(e); ImGui::EndMenu(); }
                         const bool open_edit = ImGui::BeginMenu("Edit");
             uiReg_.track("menu.edit");
@@ -20348,7 +20401,7 @@ Application* createApplication(int argc, char** argv) {
         }
 
     u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; std::string shaderSourceDir; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool furnaceGrid=false; f32 furnaceTilt=0.0f; bool ptFurnace=false; bool ptScene=false; int deviceLostAt=0; int ptQualityRamp=0; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int aversrCycle=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=-1; int rt=-1; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int rtRenderMode=-1; int pt=-1; int ptBounces=-1; int layeredBsdf=-1; f32 coatWeight=0.0f; f32 coatRough=0.1f; f32 coatF0=0.04f; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool bloomSet=false, exposureSet=false; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string selectEntity; bool openLegacy=false; bool waterOn=false; f32 waterHeight=0.0f; std::string graphSelectNode; std::string graphTab; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false; bool bakeNav=false; f32 bakeNavCell=50.0f; std::string openMap; bool gbuffer=false; std::string gbufferDebug; std::string crashTest; std::string startMode;
-    bool openLevelPickerArg=false; std::string openLevelArg;
+    bool openLevelPickerArg=false; std::string openLevelArg; bool noEditorChrome=false; bool sceneCensus=false;
     for (int i=1;i<argc;++i){
         // HANDLED BEFORE THE else-if CHAIN BELOW, AND NOT BY PREFERENCE: one more `else if` there
         // hits MSVC's nesting limit (C1061). Anything added from here on wants this shape instead:
@@ -20356,6 +20409,25 @@ Application* createApplication(int argc, char** argv) {
         // --open-level-picker: open File > Open Level's modal on the first frame, so a --frames run
         // can screenshot it. In THIS loop for the C1061 reason above, like every flag added since.
         if (!std::strcmp(argv[i],"--open-level-picker")) { openLevelPickerArg=true; continue; }
+        // --no-editor-chrome: draw the SCENE and nothing the editor adds on top of it -- no grid, no
+        // navmesh overlay, no gizmo, no sculpt cursor, no viewport icons.
+        //
+        // IT EXISTS SO TWO HOSTS CAN BE COMPARED. scripts/verify-game.ps1 opens the same project and
+        // level in Sandbox.exe and AverGame.exe and diffs their probe codes, which is the check whose
+        // absence got the packaged game deleted in the first place ("a second host rendered a
+        // different subset of the scene"). Without this the diff would be dominated by the grid the
+        // game correctly does not draw, and would prove nothing about the scene.
+        //
+        // NOT A VIEW PREFERENCE and deliberately not routed through showGrid_: that one persists to
+        // editor.ini, and a comparison run must not change what the next interactive session looks
+        // like. This is a run-scoped override the draw sites read alongside their own flags.
+        if (!std::strcmp(argv[i],"--no-editor-chrome")) { noEditorChrome=true; continue; }
+        // --scene-census: print one canonical line describing what the loaded level put in
+        // the world. AverGame.exe accepts the identical flag and prints the identical format,
+        // and scripts/verify-game.ps1 compares the two -- the divergence check whose absence
+        // is why the packaged game was deleted. See world/SceneCensus.hpp for why a census
+        // rather than a frame comparison.
+        if (!std::strcmp(argv[i],"--scene-census")) { sceneCensus=true; continue; }
         // --open-level <name-or-relative-path>: open a level of this project BY NAME, through the
         // same requestOpenLevel funnel the picker and the Content Browser use. Two jobs: it is the
         // convenient way to start on a level that is not the start map, and it is the only way a
@@ -21051,6 +21123,8 @@ Application* createApplication(int argc, char** argv) {
     app->setFocusScript(focusScript);
     app->setFocusTools(focusTools);
     app->setOpenLevelPicker(openLevelPickerArg);
+    app->setNoEditorChrome(noEditorChrome);
+    app->setSceneCensus(sceneCensus);
     app->setOpenLevelByName(openLevelArg);
     app->setFocusCompileMenu(focusCompileMenu);
     if (!droneGraph.empty()) app->setDroneGraph(droneGraph);

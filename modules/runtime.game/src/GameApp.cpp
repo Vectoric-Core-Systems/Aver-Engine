@@ -36,6 +36,9 @@
 #  include "aver/core/Hash.hpp"
 #endif
 #include "aver/assets/LevelSky.hpp"
+// The divergence census both hosts print, so "the game draws what the editor draws" is a check
+// rather than a claim. Header-only; see SceneCensus.hpp for why a census and not a pixel diff.
+#include "aver/world/SceneCensus.hpp"
 #if AVER_MODULE_VOXI
 #  include "aver/voxi/Voxi.hpp"
 #endif
@@ -331,6 +334,11 @@ GameConfig parseArgs(int argc, char** argv) {
         else if (std::strcmp(a, "--project") == 0)     { c.projectPath = valueAfter(argc, argv, i, ""); ++i; }
         else if (std::strcmp(a, "--input-echo") == 0)  { c.inputEcho = true; }
         else if (std::strcmp(a, "--trace-opens") == 0) { c.traceOpens = true; }
+        // --scene-census: print one canonical line describing what the level actually put in
+        // the world, and exit-safe either way. scripts/verify-game.ps1 asks BOTH hosts for it
+        // and compares -- the divergence check whose absence is why this executable was
+        // deleted. Sandbox.exe accepts the identical flag and prints the identical format.
+        else if (std::strcmp(a, "--scene-census") == 0) { c.sceneCensus = true; }
         else if (std::strcmp(a, "--pcg-volume-test") == 0) { c.pcgVolumeTest = true; }
         else if (std::strcmp(a, "--no-particle-gi") == 0)  { c.noParticleGi = true; }
         else if (std::strcmp(a, "--particle-test") == 0)   { c.particleTest = true; }
@@ -1467,6 +1475,24 @@ void GameApp::onInit(Engine& e) {
     // just above (so a reader sees what loaded before seeing whether it started playing). See this
     // function's own comment for why "declares a GameMode" is the generic, content-driven switch this
     // is gated on, matching the shape haveGraphs/haveScriptAssembly already uses just above.
+    // BEFORE beginPlay, and that placement is the whole point.
+    //
+    // Taken after it instead, this host reported entities=24 meshRenderers=20 against the editor's
+    // 20/19 -- a difference that is REAL and entirely legitimate: the game had spawned and possessed
+    // a pawn, and the editor was still editing. Comparing a playing host against an editing one
+    // measures the lifecycle, not the content, and would have made this gate cry wolf on every
+    // project that declares a GameMode.
+    //
+    // What the census is for is the LEVEL's content -- the placements, the meshes and the materials
+    // each host resolved -- which is what b262c73 meant by "a different subset of the scene". So it
+    // is taken at the point both hosts have finished loading the level and spawning its class
+    // placements, and neither has started playing.
+#if AVER_MODULE_SCENE
+    if (cfg_.sceneCensus) {
+        AVER_INFO("[Census] {}",
+                  world::formatSceneCensus(world::takeSceneCensus(scene::World::instance())));
+    }
+#endif
     beginPlayIfGameModeDeclared();
     AVER_INFO("[Game] ready");
 }

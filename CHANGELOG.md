@@ -200,9 +200,12 @@ instead of writing C#.
   upgrading a project deliberately does not go and edit graphs you own. Open your character graph,
   find the `COMP` line for the body mesh, and add ` hidden=owner` to it. A project created fresh in
   0.4.0 already has it.
-- **There is no packaged-game path.** `AverGame.exe` was deliberately removed in 0.3.0 and nothing
-  replaced it. The editor is how a project runs. Anything in the documentation describing a
-  standalone build is describing something that no longer exists.
+- **The packaged-game path is back, with a divergence gate.** `AverGame.exe` was deliberately removed
+  in 0.3.0 because a second host could render a different subset of the scene and nothing could
+  notice. It is restored, and `scripts/verify-game.ps1` now compares both hosts' scene censuses
+  (entities, meshes, materials, and a hash of every mesh/material pair) so that divergence fails
+  instead of going unseen. The gate found a real defect immediately: `game.allowlist` shipped the
+  HLSL compiler and no HLSL, so a package fell back to the Null backend and drew nothing.
 - **No 2D HUD from a graph.** Nothing in the node vocabulary draws text or 2D, so a game's score can
   still only be read from the Output Log. Unchanged from 0.3.0.
 - **Saving a level reloads it.** The editor watches its own files, so a save triggers a reload that

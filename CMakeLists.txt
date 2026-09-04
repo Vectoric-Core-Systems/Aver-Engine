@@ -423,12 +423,22 @@ if(AVER_BUILD_SANDBOX)
   add_subdirectory(sandbox)
 endif()
 
-# THERE IS NO STANDALONE GAME EXECUTABLE. `game/` (AverGame.exe) and the packaged-game staging path
-# (scripts/stage-game.ps1, verify-game.ps1, game.allowlist, and the editor's Package Project item)
-# were removed deliberately: the editor is how a project is run, and a second host that rendered a
-# different subset of the scene was a standing source of confusion about what "the game" actually
-# shows. Aver.Runtime.Game survives as a LIBRARY -- tests/game drives it directly -- which is what
-# AVER_BUILD_GAME now switches.
+# THE STANDALONE GAME EXECUTABLE, restored -- with the check whose absence is why it was removed.
+#
+# `game/` (AverGame.exe) and the packaged-game staging path went in b262c73 for a stated reason, and
+# it was a real one: a second host "rendered a different subset of the scene than the editor", and
+# nothing in the tree could notice. The runtime itself never left -- Aver.Runtime.Game kept being
+# built and kept growing, and GameApp::onInit is a SUPERSET of the editor's applyProject -- so what
+# was deleted was ~30 lines of glue plus three scripts, and roughly 3,500 lines of game host sat
+# compiled and unlinked for nineteen days.
+#
+# WHAT IS DIFFERENT THIS TIME: scripts/verify-game.ps1 now runs a DIVERGENCE gate. It opens the same
+# project and level in both hosts under --frames and compares their probe codes, so "the game draws
+# what the editor draws" is a check that fails rather than a claim nobody can test. Restoring the
+# executable without that would be restoring the problem.
+if(AVER_BUILD_GAME)
+  add_subdirectory(game)
+endif()
 
 # THE MODULE DAG CHECK, here rather than inside aver_add_module.
 #
