@@ -1311,6 +1311,68 @@ public:
         AVER_INFO("[Sandbox] Compile C# status icons decoded from {} ({}x{})", path, img.width, img.height);
     }
 
+    // ---- THE GAME UI'S FONT -----------------------------------------------------------------
+    //
+    // Aver.UI could not draw a character until now, so this is the first thing that gives it one.
+    // The .ocfont and its atlas are staged beside the exe exactly like splash.png and the icon
+    // sheets, and loaded the same way -- decodeImage plus createTexture plus uiTextureId, which is
+    // the path the Compile C# icons already use.
+    //
+    // NON-FATAL, deliberately: a missing font leaves uiFont_ invalid, addText draws nothing, and
+    // the HUD is a HUD without labels. An editor that refuses to start because a font is missing
+    // would be a worse trade than one whose demo overlay is quieter.
+    void loadGameUiFont(Engine& e) {
+        rhi::IResourceFactory* res = e.device()->resources();
+        if (!res) return;
+
+        const std::string fontPath = executableDir() + "\\Roboto-Regular.ocfont";
+        std::string text;
+        if (!readFileText(fontPath, text)) {
+            AVER_INFO("[Sandbox] no game-UI font at {} -- the HUD draws without text", fontPath);
+            return;
+        }
+        std::string why;
+        if (!ui::parseOcfont(text, uiFont_, &why)) {
+            AVER_WARN("[Sandbox] '{}': {}", fontPath, why);
+            return;
+        }
+
+        // The atlas sits beside the .ocfont. Its ATLAS key is content-relative for a project that
+        // ships one; the editor's own copy is staged flat, so only the file name is used.
+        std::string atlas = uiFont_.atlasPath;
+        const usize slash = atlas.find_last_of("/\\");
+        if (slash != std::string::npos) atlas = atlas.substr(slash + 1);
+        const std::string atlasPath = executableDir() + "\\" + atlas;
+
+        ImageData img;
+        if (!decodeImage(atlasPath, img, &why)) {
+            AVER_WARN("[Sandbox] the game-UI font atlas '{}' could not be read ({})", atlasPath, why);
+            uiFont_ = ui::UiFont{};   // no atlas means no glyphs worth drawing
+            return;
+        }
+        rhi::TextureDesc td;
+        td.width = img.width;
+        td.height = img.height;
+        td.format = rhi::Format::RGBA8Unorm;
+        td.bind = rhi::ResourceBind::ShaderResource;
+        td.initialState = rhi::ResourceState::ShaderResource;
+        td.debugName = "GameUiFontAtlas";
+        const void* levels[1] = {img.pixels.data()};
+        td.initialData = levels;
+        td.initialDataCount = 1;
+        td.initialRowPitch = img.rowPitch();
+        uiFontTexture_ = res->createTexture(td);
+        if (!uiFontTexture_) { AVER_WARN("[Sandbox] the game-UI font atlas could not be uploaded"); return; }
+        // THE RAW TextureHandle, NOT uiTextureId(). UiDrawCmd::texture is cast straight back to an
+        // rhi::TextureHandle by UiRenderer (`static_cast<rhi::TextureHandle>(c.texture)`), so this
+        // is the game UI's own texture channel and not ImGui's. uiTextureId returns a DESCRIPTOR
+        // handle for ImTextureID, and handing one to this path produced exactly what you would
+        // expect: "[RHI.D3D12] setSrv with an invalid handle", and no text.
+        uiFont_.atlasTexture = static_cast<u64>(uiFontTexture_);
+        AVER_INFO("[Sandbox] game-UI font '{}' loaded: {} glyph(s), atlas {}x{}",
+                  uiFont_.name, uiFont_.glyphs.size(), img.width, img.height);
+    }
+
     // Uploads an N-tile sprite sheet staged next to the exe and measures its tile aspect. False on any miss.
     bool loadIconSheet(Engine& e, const char* file, int tiles, const char* debugName,
                        rhi::TextureHandle& outTex, u64& outId, f32& outAspect) {
@@ -1631,6 +1693,8 @@ public:
             loadIconSheet(e, "file-icons.png",   kFileIconTiles, "FileTypeIcons", fileIconsTexture_,   fileIconsUiId_,   fileIconAspect_);
             loadIconSheet(e, "folder-icons.png", kFolderIconTiles, "FolderIcons",  folderIconsTexture_, folderIconsUiId_, folderIconAspect_);
             loadIconSheet(e, "asset-icons.png",  kAssetIconTiles,  "AssetTypeIcons", assetIconsTexture_,  assetIconsUiId_,  assetIconAspect_);
+            // The game UI's font, staged the same way and loaded through the same decode path.
+            loadGameUiFont(e);
             if (const std::string er = editor::engineRoot(); !er.empty()) {
                 std::error_code ec;
                 const std::filesystem::path cs = std::filesystem::path(er) / "scripting" / "csharp";
@@ -5709,6 +5773,32 @@ public:
         aver_ui_rect(barX + 1, barY + 1, (barW - 2) * uiDemoHealth_, barH - 2, kHealth);
         aver_ui_rect(barX, barY + barH + 6, barW, barH, kFrame);
         aver_ui_rect(barX + 1, barY + barH + 7, (barW - 2) * uiDemoStamina_, barH - 2, kStamina);
+
+        // ---- TEXT, which this HUD could not draw until the font landed --------------------------
+        //
+        // Straight onto the SAME draw list the bars above went into, through the C++ API rather than
+        // the C ABI: aver_ui_text takes a font, and a font is a C++ type. The ABI seam for text is
+        // the next slice; what this proves is that the geometry, the atlas and the renderer's
+        // texture path all line up, which is the part that had never been exercised.
+        if (uiFont_.valid()) {
+            // const_cast because aver_ui_draw_list() hands back a const void* -- the ABI's read-only
+            // view of the list it owns. Appending to it is exactly what every aver_ui_rect call
+            // above already does through the C side; this reaches the same object by the C++ type.
+            if (auto* dl = const_cast<aver::ui::UiDrawList*>(
+                    static_cast<const aver::ui::UiDrawList*>(aver_ui_draw_list()))) {
+                constexpr u32 kLabel = 0xFFD8D2C8;
+                char buf[64];
+                std::snprintf(buf, sizeof buf, "HEALTH  %d%%", static_cast<int>(uiDemoHealth_ * 100.0f + 0.5f));
+                dl->addText(barX, barY - 6.0f, buf, uiFont_, kLabel);
+                std::snprintf(buf, sizeof buf, "STAMINA %d%%", static_cast<int>(uiDemoStamina_ * 100.0f + 0.5f));
+                dl->addText(barX, barY + barH * 2.0f + 18.0f, buf, uiFont_, kLabel);
+                // RIGHT-ALIGNED, which is what uiTextWidth is for: measuring before drawing is the
+                // only way to place anything that is not left-aligned.
+                const char* title = "Aver.UI can draw text";
+                dl->addText(ox + sw - 12.0f - ui::uiTextWidth(uiFont_, title), oy + 24.0f,
+                            title, uiFont_, kLabel);
+            }
+        }
 
         const f32 cx = ox + sw * 0.5f, cy = oy + sh * 0.5f;
         aver_ui_rect(cx - 11, cy - 1, 7, 2, kInk);
@@ -18557,6 +18647,10 @@ private:
     std::string upgradeStatus_;
     f32         upgradeStatusAge_ = 0.0f;   // seconds since it was set; see setUpgradeStatus
     f32  uiDemoHealth_ = 0.72f, uiDemoStamina_ = 0.44f, uiDemoScroll_ = 0.0f, uiDemoClock_ = 0.0f;
+    // The game UI's font. Invalid until loadGameUiFont finds one beside the exe; addText on an
+    // invalid font draws nothing, which is what makes a missing font non-fatal.
+    ui::UiFont uiFont_;
+    rhi::TextureHandle uiFontTexture_ = 0;
 
     rhi::MeshHandle cubeMesh_=0; u32 cubeTris_=0; int spawnCount_=0;
     // The built-in look for a named surface with no material asset behind it.
