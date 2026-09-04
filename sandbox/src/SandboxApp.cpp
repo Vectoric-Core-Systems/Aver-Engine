@@ -2110,6 +2110,28 @@ public:
             di.shaderModel = caps.shaderModel; di.meshShaderTier = caps.meshShaderTier;
             di.dxcAvailable = caps.dxcAvailable;
             voxi::Renderer::get().setDeviceInfo(di);
+
+            // THE PROJECT MANIFEST GOES IN HERE, BEFORE THE FLAGS AND BEFORE init().
+            //
+            // WHY BEFORE init(): init() calls createVoxelVolume(settings_.voxelResolution) and that
+            // is the ONLY place the volume is ever sized -- nothing in the renderer watches the field
+            // afterwards. The manifest used to arrive after init, via the post-attach
+            // applyProjectRenderSettings call, so every project ran the 128^3 default no matter what
+            // it asked for. PTTest states RENDER.VOXELRES 512 and ran a grid 64x smaller in every
+            // dimension, while the log said "applied render settings from ...". Seeding here means
+            // the volume is simply CREATED at the right size: no resize, no descriptor rebind, and
+            // no GPU resource recreated at a moment that could remove the device.
+            //
+            // WHY BEFORE THE FLAGS: `s` below is seeded FROM this singleton, and the flag block that
+            // follows writes over it. Putting the manifest first is what keeps "a flag is a human
+            // standing right there, a manifest is a recorded preference" true at startup, with no
+            // second precedence pass needed here -- the ordering does it. (applyProjectRenderSettings
+            // still runs its own take() pass later, for the mid-session project-open path where the
+            // flags were consumed long ago.)
+            //
+            // AFTER setDeviceInfo, because setSettings clamps against the device it is told about.
+            applyProjectVoxiSettings();
+
             voxi::Settings s = voxi::Renderer::get().settings();
             s.msaa = static_cast<voxi::Msaa>(e.device()->sampleCount());
             if (msaaOverride_) s.msaa = static_cast<voxi::Msaa>(msaaOverride_);
@@ -7097,30 +7119,67 @@ private:
 
 #if AVER_MODULE_VOXI
     // Pushes the manifest's render settings into Voxi. Defers until the device info is known.
+    // The manifest's voxi::Settings half, SPLIT OUT so it can run BEFORE VoxiRenderer::init().
+    //
+    // WHY IT HAS TO RUN FIRST. init() calls createVoxelVolume(settings_.voxelResolution) and that is
+    // the only place the volume is ever created -- nothing in the renderer watches voxelResolution
+    // afterwards. Applying the manifest after init therefore wrote 512 into the struct and left a
+    // 128^3 volume running: a project asking for Epic GI got a grid 64x smaller than it stated, and
+    // said "applied render settings" while doing it. Seeding the settings before init means the
+    // volume is simply CREATED at the right size, so there is no resize, no descriptor rebind, and
+    // no GPU resource torn down mid-frame -- the failure mode that has removed this device twice.
+    //
+    // SAFE TO CALL BEFORE ATTACH, deliberately: it touches only the voxi::Renderer singleton's
+    // settings, never voxiRenderer_ or the device. That is the same thing the startup block does
+    // before init.
+    void applyProjectVoxiSettings() {
+        if (!project_.valid() || !project_.hasRenderSettings()) return;
+
+        voxi::Renderer& vx = voxi::Renderer::get();
+
+        // TIERS FIRST, IN THEIR OWN CALL, for the reason the startup path documents at length:
+        // setSettings decides "did the caller set this" BY VALUE, so a knob asked for at the value
+        // it already holds is indistinguishable from one never asked for, and the tier's derived
+        // rung silently wins. This function used to push tiers and knobs in ONE call, so a manifest
+        // stating RENDER.GI 4 beside a RENDER.VOXELRES that happened to equal the live value had
+        // that resolution overwritten by the tier -- the same "accepted and ignored" class as the
+        // bug above, just needing a coincidence to show. PTTest escaped it only because 512 differs
+        // from the default.
+        voxi::Settings s = vx.settings();
+        if (project_.giQuality   >= 0) s.globalIllumination = static_cast<voxi::Quality>(project_.giQuality);
+        if (project_.rayTracing  >= 0) s.rayTracing         = static_cast<voxi::Quality>(project_.rayTracing);
+        if (project_.pathTracing >= 0) s.pathTracing        = static_cast<voxi::Quality>(project_.pathTracing);
+        if (project_.layeredBsdf >= 0) s.layeredBsdf        = static_cast<voxi::Quality>(project_.layeredBsdf);
+        vx.setSettings(s);
+
+        // SECOND CALL: every knob a tier derives. Read back first, so these are compared against
+        // what the tiers just settled on rather than against pre-tier values.
+        voxi::Settings k = vx.settings();
+        if (project_.voxelResolution >  0)    k.voxelResolution    = static_cast<u32>(project_.voxelResolution);
+        if (project_.giIntensity     >= 0.0f) k.giIntensity        = project_.giIntensity;
+        if (project_.giMaxDistance   >= 0.0f) k.giMaxDistance      = project_.giMaxDistance;
+        if (project_.rtShadowRays       >= 0) k.rtShadowRays       = static_cast<u32>(project_.rtShadowRays);
+        if (project_.rtPixelsPerRayTile >= 0) k.rtPixelsPerRayTile = static_cast<u32>(project_.rtPixelsPerRayTile);
+        if (project_.rtShadowDenoise    >= 0) k.rtShadowDenoise    = static_cast<u32>(project_.rtShadowDenoise);
+        if (project_.rtRenderMode       >= 0) k.rtRenderMode       = static_cast<u32>(project_.rtRenderMode);
+        if (project_.ptBounces          >= 0) k.ptBounces          = static_cast<u32>(project_.ptBounces);
+        if (project_.giCones            >= 0) k.giCones            = static_cast<u32>(project_.giCones);
+        if (project_.refractionMode     >= 0) k.refractionMode     = static_cast<u32>(project_.refractionMode);
+        if (project_.refractionStrength >= 0.0f) k.refractionStrength = project_.refractionStrength;
+        if (project_.refractionEdgeFade >= 0.0f) k.refractionEdgeFade = project_.refractionEdgeFade;
+        vx.setSettings(k);   // clamps to this device; the manifest keeps what was asked for
+    }
+
     void applyProjectRenderSettings() {
         if (!project_.valid() || !project_.hasRenderSettings()) return;
         if (!voxiAttached_) { projectRenderPending_ = true; return; }
         projectRenderPending_ = false;
 
+        // Idempotent by the time we get here on the startup path -- the settings were already seeded
+        // before init(). Still called, because the mid-session project-open path reaches this
+        // function with a device that has been attached for a while.
+        applyProjectVoxiSettings();
         voxi::Renderer& vx = voxi::Renderer::get();
-        voxi::Settings s = vx.settings();
-        if (project_.giQuality       >= 0)    s.globalIllumination = static_cast<voxi::Quality>(project_.giQuality);
-        if (project_.rayTracing      >= 0)    s.rayTracing         = static_cast<voxi::Quality>(project_.rayTracing);
-        if (project_.pathTracing     >= 0)    s.pathTracing        = static_cast<voxi::Quality>(project_.pathTracing);
-        if (project_.voxelResolution >  0)    s.voxelResolution    = static_cast<u32>(project_.voxelResolution);
-        if (project_.giIntensity     >= 0.0f) s.giIntensity        = project_.giIntensity;
-        if (project_.giMaxDistance   >= 0.0f) s.giMaxDistance      = project_.giMaxDistance;
-        if (project_.rtShadowRays       >= 0) s.rtShadowRays       = static_cast<u32>(project_.rtShadowRays);
-        if (project_.rtPixelsPerRayTile >= 0) s.rtPixelsPerRayTile = static_cast<u32>(project_.rtPixelsPerRayTile);
-        if (project_.rtShadowDenoise    >= 0) s.rtShadowDenoise    = static_cast<u32>(project_.rtShadowDenoise);
-        if (project_.rtRenderMode       >= 0) s.rtRenderMode       = static_cast<u32>(project_.rtRenderMode);
-        if (project_.ptBounces          >= 0) s.ptBounces          = static_cast<u32>(project_.ptBounces);
-        if (project_.layeredBsdf        >= 0) s.layeredBsdf        = static_cast<voxi::Quality>(project_.layeredBsdf);
-        if (project_.giCones            >= 0) s.giCones            = static_cast<u32>(project_.giCones);
-        if (project_.refractionMode     >= 0) s.refractionMode     = static_cast<u32>(project_.refractionMode);
-        if (project_.refractionStrength >= 0.0f) s.refractionStrength = project_.refractionStrength;
-        if (project_.refractionEdgeFade >= 0.0f) s.refractionEdgeFade = project_.refractionEdgeFade;
-        vx.setSettings(s);   // clamps to this device; the manifest keeps what was asked for
 
         // THE THREE THAT ARE NOT VOXI SETTINGS. LOD select, occlusion culling and the depth
         // pre-pass are editor-side per-frame flags rather than fields on voxi::Settings, so they
