@@ -5580,6 +5580,22 @@ public:
             e.device()->drawLines(navMesh_, &n.m[0][0]);
         }
 #endif
+#if AVER_MODULE_PHYSICS
+        // ---- COLLIDERS, which could not be seen at all until now --------------------------------
+        //
+        // There was no collider overlay, no toggle and no wireframe anywhere in this editor, so
+        // "does the collision match the art" was answerable only by dropping something on it and
+        // watching what happened. The drawLines infrastructure was already here for the navmesh.
+        //
+        // REBUILT EVERY FRAME, deliberately, unlike the navmesh's cached overlay: a dynamic body
+        // moves, so a cached mesh would draw last frame's boxes. It costs one line mesh per frame
+        // while the toggle is on and nothing at all while it is off.
+        if (showColliders_ && !noEditorChrome_) rebuildColliderOverlay(e);
+        if (showColliders_ && !noEditorChrome_ && colliderMesh_) {
+            const Mat4 cm = Mat4::identity();   // world space already, same as the navmesh
+            e.device()->drawLines(colliderMesh_, &cm.m[0][0]);
+        }
+#endif
         // GIZMO AND SCULPT CURSOR are chrome too -- and the gizmo is the loudest of the lot, since
         // it draws on top of geometry by design.
         if (!noEditorChrome_) {
@@ -6174,6 +6190,149 @@ public:
     // Rebuilds the overlay line mesh from nav_. Destroying the old one FIRST is the point: this
     // runs on every bake and every level open, and before destroyLineMesh existed each call
     // leaked one committed upload buffer for as long as the editor stayed open.
+#if AVER_MODULE_PHYSICS
+    // Twelve edges per body's world-space AABB, in world space, rebuilt each frame the toggle is on.
+    //
+    // AN AABB PER BODY, and the overlay says so on the toggle's tooltip rather than letting someone
+    // read a box around a sphere as the sphere's own shape. See aver_phys_body_aabb for why the ABI
+    // reports a bound rather than the shape tree.
+    void rebuildColliderOverlay(Engine& e) {
+        if (colliderMesh_) { e.device()->destroyLineMesh(colliderMesh_); colliderMesh_ = 0; }
+        const int32_t n = aver_phys_body_count();
+        if (n <= 0) return;
+
+        std::vector<rhi::LineVertex> lines;
+        lines.reserve(static_cast<usize>(n) * 24);
+        for (int32_t i = 0; i < n; ++i) {
+            const int32_t body = aver_phys_body_at(i);
+            if (!body) continue;
+            f32 lo[3], hi[3];
+            if (!aver_phys_body_aabb(body, lo, hi)) continue;
+
+            // GREEN FOR STATIC, AMBER FOR ANYTHING THAT MOVES. The distinction is the one a person
+            // is usually looking for -- "why is this not falling" and "why is this not stopping
+            // anything" are different questions and this separates them at a glance.
+            const int32_t motion = aver_phys_body_motion_type(body);
+            const f32 r = (motion == 0) ? 0.35f : 1.0f;
+            const f32 g = (motion == 0) ? 0.95f : 0.72f;
+            const f32 b = (motion == 0) ? 0.45f : 0.25f;
+
+            const f32 xs[2] = {lo[0], hi[0]};
+            const f32 ys[2] = {lo[1], hi[1]};
+            const f32 zs[2] = {lo[2], hi[2]};
+            const auto edge = [&](int x0, int y0, int z0, int x1, int y1, int z1) {
+                rhi::LineVertex a{}, c{};
+                a.px = xs[x0]; a.py = ys[y0]; a.pz = zs[z0]; a.r = r; a.g = g; a.b = b;
+                c.px = xs[x1]; c.py = ys[y1]; c.pz = zs[z1]; c.r = r; c.g = g; c.b = b;
+                lines.push_back(a);
+                lines.push_back(c);
+            };
+            // Four along each axis: the twelve edges of a box, written out rather than looped so
+            // the shape is legible and a wrong corner is visible in the source.
+            edge(0,0,0, 1,0,0); edge(0,1,0, 1,1,0); edge(0,0,1, 1,0,1); edge(0,1,1, 1,1,1);
+            edge(0,0,0, 0,1,0); edge(1,0,0, 1,1,0); edge(0,0,1, 0,1,1); edge(1,0,1, 1,1,1);
+            edge(0,0,0, 0,0,1); edge(1,0,0, 1,0,1); edge(0,1,0, 0,1,1); edge(1,1,0, 1,1,1);
+        }
+        if (!lines.empty())
+            colliderMesh_ = e.device()->createLineMesh(lines.data(), static_cast<u32>(lines.size()));
+    }
+#endif
+
+    // ---- The GPU profiler, as a panel rather than as scrolling text -----------------------------
+    //
+    // D3D12Device has kept a full hierarchical timestamp profiler for a long time and its ONLY
+    // consumer was the interactive `frametime` console command -- so a per-pass tree existed and
+    // could only be read as a wall of text that scrolled away. GpuTimingReport is already
+    // structural (label, inclusive ms, parent index), so this is genuinely a view over data that
+    // was there: no new instrumentation, no new cost.
+    //
+    // EXCLUSIVE TIME IS DERIVED HERE, not reported: the nodes carry INCLUSIVE ms and a parent
+    // index, and "how much of this pass is not its children" is the number that actually points at
+    // what to optimise. Deriving it in the view keeps the ABI carrying one number per node.
+    void buildProfilerPanel(Engine& e) {
+#if AVER_WITH_IMGUI
+        if (!showProfiler_) return;
+        ImGui::SetNextWindowSize(ImVec2(520.0f * dpi_, 420.0f * dpi_), ImGuiCond_FirstUseEver);
+        if (!ImGui::Begin("GPU Profiler", &showProfiler_)) { ImGui::End(); return; }
+
+        const rhi::GpuTimingReport r = e.device()->gpuTiming();
+        if (!r.supported) {
+            // THE TWO "NO DATA" AXES ARE DIFFERENT QUESTIONS and the panel says which one it is
+            // rather than showing an empty tree. Vulkan has no timestamp machinery at all today.
+            ImGui::TextWrapped("This backend does not report GPU timings. D3D12 does; the Vulkan "
+                               "backend has no timestamp machinery yet.");
+            ImGui::End();
+            return;
+        }
+        if (r.framesAccumulated == 0 || r.nodes.empty()) {
+            ImGui::TextWrapped("No timings collected yet. Pass --gpu-timing, or run a few frames.");
+            ImGui::End();
+            return;
+        }
+
+        // Exclusive = inclusive minus the inclusive time of the direct children.
+        std::vector<f64> childSum(r.nodes.size(), 0.0);
+        for (usize i = 0; i < r.nodes.size(); ++i) {
+            const u32 p = r.nodes[i].parent;
+            if (p != rhi::GpuTimingNode::kNoParent && p < childSum.size()) childSum[p] += r.nodes[i].ms;
+        }
+        f64 total = 0.0;
+        for (usize i = 0; i < r.nodes.size(); ++i)
+            if (r.nodes[i].parent == rhi::GpuTimingNode::kNoParent) total += r.nodes[i].ms;
+
+        ImGui::Text("%.2f ms over %u frames", total, r.framesAccumulated);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("An AVERAGE since boot, not one sampled frame -- see the device's own\n"
+                              "comment on why. A number here lags a change by a few frames.");
+        ImGui::SameLine();
+        ImGui::TextDisabled("(marked passes only)");
+        ImGui::Separator();
+
+        if (ImGui::BeginTable("##passes", 4,
+                              ImGuiTableFlags_Resizable | ImGuiTableFlags_RowBg |
+                              ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_ScrollY)) {
+            ImGui::TableSetupColumn("Pass", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("incl ms", ImGuiTableColumnFlags_WidthFixed, 70.0f * dpi_);
+            ImGui::TableSetupColumn("excl ms", ImGuiTableColumnFlags_WidthFixed, 70.0f * dpi_);
+            ImGui::TableSetupColumn("% GPU",   ImGuiTableColumnFlags_WidthFixed, 60.0f * dpi_);
+            ImGui::TableSetupScrollFreeze(0, 1);
+            ImGui::TableHeadersRow();
+
+            // ONE PASS, PARENT-BEFORE-CHILD, using the depth the parent chain implies rather than a
+            // recursive walk: the report is emitted in that order already, and indenting by computed
+            // depth keeps this immune to a node whose parent index points forward.
+            for (usize i = 0; i < r.nodes.size(); ++i) {
+                const rhi::GpuTimingNode& n = r.nodes[i];
+                int depth = 0;
+                for (u32 p = n.parent; p != rhi::GpuTimingNode::kNoParent && depth < 8; ++depth) {
+                    if (p >= r.nodes.size()) break;
+                    p = r.nodes[p].parent;
+                }
+                const f64 excl = n.ms - childSum[i];
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::Indent(depth * 14.0f * dpi_);
+                ImGui::TextUnformatted(n.label.c_str());
+                ImGui::Unindent(depth * 14.0f * dpi_);
+                ImGui::TableSetColumnIndex(1); ImGui::Text("%.2f", n.ms);
+                ImGui::TableSetColumnIndex(2);
+                // THE COLUMN WORTH READING, so it is the one that gets colour: a pass whose own
+                // time dominates is where the work is, and a parent that is nearly all children is
+                // just a label.
+                const f64 frac = total > 0.0 ? (excl / total) : 0.0;
+                if (frac > 0.20)      ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.35f, 1.0f), "%.2f", excl);
+                else if (frac > 0.08) ImGui::TextColored(ImVec4(1.0f, 0.80f, 0.40f, 1.0f), "%.2f", excl);
+                else                  ImGui::Text("%.2f", excl);
+                ImGui::TableSetColumnIndex(3); ImGui::Text("%.1f%%", frac * 100.0);
+            }
+            ImGui::EndTable();
+        }
+        ImGui::End();
+#else
+        (void)e;
+#endif
+    }
+
     void rebuildNavOverlay(Engine& e) {
         if (navMesh_) { e.device()->destroyLineMesh(navMesh_); navMesh_ = 0; }
         if (nav_.cells.empty()) return;
@@ -12526,6 +12685,10 @@ private:
                     if (ImGui::MenuItem("Chunk Streaming", nullptr, streamOn)) setChunkStreamingEnabled(!streamOn);
                     ImGui::EndDisabled();
                     uiReg_.track("window.chunkStreaming");
+                    // The per-pass GPU tree, which existed for a long time and could only be read
+                    // as scrolling console text from the `frametime` command.
+                    ImGui::MenuItem("GPU Profiler", nullptr, &showProfiler_);
+                    uiReg_.track("window.gpuProfiler");
                     if (!project_.valid() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                         ImGui::SetTooltip("Open or create a project first - a streamed world belongs to one.");
                     else if (ImGui::IsItemHovered())
@@ -12590,6 +12753,15 @@ private:
                                       "Colours in the overlay are REGIONS: two patches of floor "
                                       "in different colours have no path between them.");
                 ImGui::MenuItem("Show Navigation", nullptr, &showNav_);
+#if AVER_MODULE_PHYSICS
+                ImGui::MenuItem("Show Colliders", nullptr, &showColliders_);
+                uiReg_.track("view.showColliders");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Every physics body's WORLD-SPACE BOUNDING BOX.\n"
+                                      "Green = static, amber = it moves.\n"
+                                      "A box collider is drawn exactly; a sphere, capsule or mesh\n"
+                                      "is drawn as its bound, not its outline.");
+#endif
                 if (ImGui::MenuItem("Region Colours", nullptr, &navRegionColours_))
                     rebuildNavOverlay(e);
 #endif
@@ -12826,6 +12998,7 @@ private:
         buildEditorPrefs();
         buildProjectSettings();
         buildWorldSettings();
+        buildProfilerPanel(e);
 #if AVER_MODULE_SCENE
 #if AVER_WITH_IMGUI
         buildChunkStreamingPanel();
@@ -15836,6 +16009,7 @@ private:
         logLevelFilter_     = prefInt  ("outputLog.levelFilter",         logLevelFilter_);
         consoleAutoScroll_  = prefBool ("console.autoScroll",            consoleAutoScroll_);
         showGrid_           = prefBool ("viewport.showGrid",             showGrid_);
+        showColliders_      = prefBool ("viewport.showColliders",        showColliders_);
         wireframe_          = prefBool ("viewport.wireframe",            wireframe_);
         // Toggled from the Window menu rather than the Preferences panel, so these ride
         // onShutdown's sync rather than buildEditorPrefs' own save-on-close.
@@ -15959,6 +16133,7 @@ private:
         setPrefInt  ("outputLog.levelFilter",        logLevelFilter_);
         setPrefBool ("console.autoScroll",           consoleAutoScroll_);
         setPrefBool ("viewport.showGrid",            showGrid_);
+        setPrefBool ("viewport.showColliders",       showColliders_);
         setPrefBool ("viewport.wireframe",           wireframe_);
         setPrefBool ("panels.worldOutliner",         showOutliner_);
         setPrefBool ("panels.details",               showDetails_);
@@ -17780,6 +17955,15 @@ private:
     fmt::OcNavData  nav_;
     rhi::LineHandle navMesh_=0;
     bool showNav_=false;
+    // Collider overlay: the world-space AABB of every physics body. There was no way to see
+    // collision in this editor at all before it -- no toggle, no wireframe, nothing. Persisted
+    // through editor.ini like the other view toggles, because it is a property of the VIEW and not
+    // of the level.
+    bool showColliders_=false;
+    // The GPU profiler panel. A view over GpuTimingReport, which the device has always
+    // produced and only the console ever read.
+    bool showProfiler_=false;
+    rhi::LineHandle colliderMesh_=0;
     bool navRegionColours_=true;
     // --bake-nav: bake once at startup, then carry on. Deferred to a frame rather than done at
     // init because the bake reads PHYSICS BODIES, and a level's bodies are built by

@@ -389,6 +389,47 @@ int32_t aver_phys_body_position(int32_t body, float* outXyz) {
     return 1;
 }
 
+// Writes a body's WORLD-SPACE bounding box into outMin/outMax.
+//
+// WHY AN AABB AND NOT THE SHAPE ITSELF. There is no way to see a collider in this editor at all --
+// no toggle, no wireframe, nothing -- so "does the collision match the art" has only ever been
+// answerable by dropping something on it and watching. A box's world AABB IS the box for the
+// axis-aligned case that most level collision actually is, and for a sphere, capsule or mesh it is
+// an honest bound rather than a wrong outline. Exposing Jolt's full shape tree would mean an ABI
+// that can describe every shape type and a debug renderer that can draw them; this answers the
+// question people actually have -- where is the collision, and how big -- for one entry point.
+//
+// THROUGH THE SHAPE, not Body::GetWorldSpaceBounds(): that accessor is on Body, which would need a
+// BodyLockRead to reach, while BodyInterface exposes the shape and the centre-of-mass transform
+// without locking. Same answer, computed the way this ABI's other accessors already reach a body.
+int32_t aver_phys_body_aabb(int32_t body, float* outMin, float* outMax) {
+    const JPH::BodyID* id = findBody(body);
+    if (!id || !outMin || !outMax) return 0;
+    const JPH::RefConst<JPH::Shape> shape = bi().GetShape(*id);
+    if (!shape) return 0;
+    const JPH::AABox box =
+        shape->GetWorldSpaceBounds(bi().GetCenterOfMassTransform(*id), JPH::Vec3::sOne());
+    writeVec(outMin, fromJolt(box.mMin));
+    writeVec(outMax, fromJolt(box.mMax));
+    return 1;
+}
+
+// The body handle at a dense index, or 0. Pairs with aver_phys_body_count, which has been
+// answerable since this ABI existed while "which bodies" was not -- so nothing could iterate them.
+//
+// INDICES SHIFT when a body is added or removed, exactly like scene::World::at: this is for a
+// walk that completes within one frame, not a handle to keep.
+int32_t aver_phys_body_at(int32_t index) {
+    if (!g_world || index < 0) return 0;
+    if (static_cast<usize>(index) >= g_world->bodies.size()) return 0;
+    // std::unordered_map has no positional access; the walk is O(n) per call and this is a debug
+    // path that runs only while the collider overlay is on. Said plainly rather than hidden behind
+    // a cached vector that would then need invalidating on every add and remove.
+    auto it = g_world->bodies.begin();
+    std::advance(it, index);
+    return it->first;
+}
+
 // Writes a body's rotation into outQuat as xyzw.
 int32_t aver_phys_body_rotation(int32_t body, float* outQuat) {
     const JPH::BodyID* id = findBody(body);

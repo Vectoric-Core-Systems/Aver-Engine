@@ -71,6 +71,17 @@ AVER_PHYS_API int32_t aver_phys_body_set_velocity(int32_t body, float x, float y
 // How many bodies are live.
 AVER_PHYS_API int32_t aver_phys_body_count(void);
 
+/* The body handle at a dense index, or 0. Pairs with aver_phys_body_count, which could always say
+   HOW MANY bodies exist while nothing could ask WHICH -- so no caller could iterate them.
+   Indices shift on add/remove, like scene::World::at: for a walk inside one frame, not a handle. */
+AVER_PHYS_API int32_t aver_phys_body_at(int32_t index);
+
+/* A body's WORLD-SPACE bounding box, for a collider overlay. An AABB rather than the shape itself:
+   for the axis-aligned boxes most level collision is, the box IS the shape; for a sphere, capsule
+   or mesh it is an honest bound. Drawing every Jolt shape type would need an ABI that can describe
+   them all. Returns 0 on an invalid handle or a null pointer. */
+AVER_PHYS_API int32_t aver_phys_body_aabb(int32_t body, float* outMin, float* outMax);
+
 // ---- Body dynamics --------------------------------------------------------------------------------
 // Everything above lets a caller PLACE a body and read where it ended up. This is the half that lets
 // gameplay push one around: forces, impulses, spin, and the material properties that decide how it
