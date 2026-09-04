@@ -72,7 +72,13 @@ Fullscreen host window with a **pass-through central node** — the DX12 backbuf
 
 - Host flags: `NoTitleBar|NoResize|NoMove|NoBringToFrontOnFocus|NoNavFocus|MenuBar|NoBackground`, `WindowRounding=0`, `WindowPadding={0,0}`.
 - `DockSpace(id, {0,0}, ImGuiDockNodeFlags_PassthruCentralNode)`.
-- First-run default layout via `DockBuilder`, then persisted by `imgui.ini`: Left 0.18 → **Outliner**; Right 0.24 → **Inspector**; Down 0.22 → **Console**; central node = Viewport (never covered).
+- Default layout via `DockBuilder`, rebuilt **every launch** — Left 0.18 → **Outliner**; Right 0.24 → **Inspector**; Down 0.22 → **Console**; central node = Viewport (never covered).
+- **Nothing is persisted by `imgui.ini`.** `io.IniFilename` is set to `nullptr` in both UI
+  backends, so window sizes, dock arrangement, table column widths and collapsing-header state
+  are all discarded on exit. The one-shot `DockBuilder` pass (guarded by `dockBuilt_`) is what
+  reproduces the layout instead. Per-widget state that genuinely needs to survive is hand-rolled
+  into `editor.ini` through `EditorPrefs` — `actorEditor.leftColumn` is the pattern. Turning
+  ImGui's own persistence on is a separate decision, not an oversight.
 
 Layout target:
 ```

@@ -2586,6 +2586,7 @@ public:
         // with no string field), latched on window_ and drained unconditionally every frame -- safe
         // since window_->pumpEvents() runs BEFORE onUpdate and WM_COPYDATA is synchronous on this thread.
         maybeAutosave(t.dt);
+        maybeAutosavePrefs(t.dt);
 #if AVER_MODULE_SCENE
         // --save-level <out>: write the OPEN level to another path and log the result.
         //
@@ -6641,6 +6642,38 @@ private:
         return true;
     }
 
+    // ---- editor preferences, written while the editor is still running --------------------------
+    //
+    // THEY ONLY REACHED DISK ON A CLEAN EXIT. saveEditorPreferences() had exactly two callers: the
+    // tail of buildEditorPrefs(), which runs only while the Preferences WINDOW is open, and
+    // onShutdown(). Everything adjusted through a convenient control instead of that window --
+    // fly speed on the mouse wheel, the wireframe toggle, Content Browser tile size, the drawer
+    // grip, snap steps -- survived only if the process was closed politely. A crash, a kill, or a
+    // device loss the user then closed lost the lot.
+    //
+    // CHEAP BY CONSTRUCTION, so a timer is all this needs: saveEditorPreferences() pushes every
+    // member through setPrefString, which compares against the stored value and does not dirty on
+    // a match, and flushEditorPrefs() early-outs when nothing is dirty. A tick that changed
+    // nothing costs a few dozen map lookups and no I/O at all -- which is precisely what
+    // onShutdown's own comment already asserted about calling it unconditionally.
+    //
+    // PERSIST ONLY, NEVER APPLY. This runs from onUpdate(), and it must stay that way: the
+    // preference LOAD path pokes the device (setVSync/setRenderScale) and runs from buildUI(),
+    // between beginFrame() and endFrame(), which removed the device at Present once already
+    // (D3D12Device.cpp's "DEFERRED TO A FRAME BOUNDARY, ALWAYS"). Writing a file is safe anywhere;
+    // re-applying is not, and nothing here re-applies.
+    void maybeAutosavePrefs(f32 dt) {
+        // NOT DURING A CAPTURE RUN. A --frames run sets view flags and the post chain from the
+        // command line, and saveEditorPreferences() writes those back under `maxFrames_ == 0`
+        // guards -- but the honest rule is that a bounded run must leave no trace in the user's
+        // profile at all, or one machine's gate results start depending on what was captured last.
+        if (maxFrames_ != 0) return;
+        prefsAutosaveAccum_ += dt;
+        if (prefsAutosaveAccum_ < kPrefsAutosaveSec) return;
+        prefsAutosaveAccum_ = 0.0f;
+        saveEditorPreferences();
+    }
+
     // ---- autosave, and the recovery it exists for -----------------------------------------------
     //
     // There was none. Not a timer, not a sidecar, not a marker -- a repo-wide search for autosave,
@@ -9886,6 +9919,11 @@ private:
     // enough that saveLevel's cost never shows: it walks the world once per write.
     f32 autosaveIntervalSec_ = 30.0f;
     f32 autosaveAccum_ = 0.0f;
+    // Preferences are cheap to check and tiny to write, so this can be far tighter than the level
+    // autosave above: two seconds is short enough that nothing a person adjusts is worth losing,
+    // and a tick that changed nothing does no I/O at all.
+    static constexpr f32 kPrefsAutosaveSec = 2.0f;
+    f32 prefsAutosaveAccum_ = 0.0f;
     bool autosaveWritten_ = false;
     bool autosaveFailedWarned_ = false;
     std::string recoveryPath_;      // a sidecar newer than its level, waiting to be offered
@@ -15594,6 +15632,12 @@ private:
             post_.exposureMax    = prefFloat("post.exposureMax",    post_.exposureMax);
             post_.bloomThreshold = prefFloat("post.bloomThreshold", post_.bloomThreshold);
             post_.bloomKnee      = prefFloat("post.bloomKnee",      post_.bloomKnee);
+            // THE TWO FIELDS OF PostSettings THAT WERE STORED NOWHERE. Every other member of the
+            // struct rides in this block; these two were simply missed, so the auto-exposure
+            // histogram window reset to its compiled-in default on every launch while the nine
+            // knobs around it persisted.
+            post_.histogramLowPercent  = prefFloat("post.histogramLow",  post_.histogramLowPercent);
+            post_.histogramHighPercent = prefFloat("post.histogramHigh", post_.histogramHighPercent);
         }
 
         // The derived-data cache's write-behind budget, in MEGABYTES on the wire because that is
@@ -15695,6 +15739,8 @@ private:
             setPrefFloat("post.bloomIntensity", post_.bloomIntensity);
             setPrefFloat("post.bloomThreshold", post_.bloomThreshold);
             setPrefFloat("post.bloomKnee",      post_.bloomKnee);
+            setPrefFloat("post.histogramLow",   post_.histogramLowPercent);
+            setPrefFloat("post.histogramHigh",  post_.histogramHighPercent);
         }
 
         const std::vector<editor::IdeInfo>& ides = editor::detectedIdes();

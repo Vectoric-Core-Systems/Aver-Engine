@@ -6,6 +6,7 @@
 #include "aver/platform/FileSystem.hpp"
 
 #include <cmath>
+#include <filesystem>
 #include <string>
 
 using namespace aver;
@@ -122,6 +123,38 @@ int main() {
         std::string text;
         check(readFileText(path, text), "and the store still writes afterwards");
         check(text.find("aver.test.after=5") != std::string::npos, "with the new value present");
+    }
+
+    // ---- a flush that changed nothing writes nothing -------------------------------------------
+    //
+    // THE PROPERTY THE AUTOSAVE TIMER RESTS ON. saveEditorPreferences() is now called from
+    // onUpdate() every couple of seconds, pushing all ~40 members through setPref* every time.
+    // That is only free because setPrefString compares before dirtying and flushEditorPrefs
+    // early-outs on a clean store. If either stopped holding, the editor would rewrite this file
+    // hundreds of times a minute and nothing would fail loudly enough to notice.
+    //
+    // MEASURED BY MTIME, not by content: a rewrite with identical bytes is still a rewrite, and it
+    // is the I/O that matters here, not the result.
+    {
+        editor::setPrefFloat("aver.test.idle", 42.0f);
+        editor::flushEditorPrefs();
+        const auto first = std::filesystem::last_write_time(path);
+
+        // Same values, over and over -- exactly what the timer does on an idle editor.
+        for (int i = 0; i < 8; ++i) {
+            editor::setPrefFloat("aver.test.idle", 42.0f);
+            editor::setPrefString("aver.test.name", editor::prefString("aver.test.name", ""));
+            editor::flushEditorPrefs();
+        }
+        check(std::filesystem::last_write_time(path) == first,
+              "re-flushing unchanged values does NOT rewrite the file");
+
+        // And a real change still gets through, so the early-out is not simply stuck.
+        editor::setPrefFloat("aver.test.idle", 43.0f);
+        editor::flushEditorPrefs();
+        std::string text;
+        check(readFileText(path, text) && text.find("aver.test.idle=43") != std::string::npos,
+              "but a genuine change is still written");
     }
 
     // ---- restore the developer's own file -----------------------------------------------------
