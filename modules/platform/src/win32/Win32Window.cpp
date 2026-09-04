@@ -112,6 +112,13 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_CLOSE: {
             Event e; e.type = EventType::WindowClose;
             self->dispatch(e);
+            // ASK BEFORE CLOSING. A guard that returns false means the app has something unsaved and
+            // has put a prompt up; leaving shouldClose_ alone keeps the frame loop running so that
+            // prompt can actually be drawn and answered. Without this the editor's X button
+            // discarded an unsaved level with no warning -- Engine::run tests shouldClose() before
+            // frameStep(), so nothing the app might have done in response to the event above could
+            // ever reach the screen.
+            if (!self->mayClose()) return 0;
             self->requestClose();
             return 0;
         }

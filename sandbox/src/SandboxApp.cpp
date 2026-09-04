@@ -1455,6 +1455,12 @@ public:
             Window::registerAsSingleInstancePrimary(window_->nativeHandle());
             window_->setOpenRequestHook(&SandboxApp::onOpenRequestThunk, this);
         }
+        // THE WINDOW'S X BUTTON GOES THROUGH THE SAME UNSAVED-CHANGES CHECK AS File > Exit. It did
+        // not: WM_CLOSE set shouldClose_ and Engine::run tests that BEFORE the next frameStep, so
+        // the prompt could never be drawn and an unsaved level died with the window. Registered
+        // unconditionally, not behind singleInstanceEligible_ above -- a --frames capture wants this
+        // guard to say yes, which it does, rather than not to exist.
+        if (window_ && window_->valid()) window_->setCloseGuard(&SandboxApp::onCloseGuardThunk, this);
 
 #if AVER_MODULE_MCP
         if (mcpPort_) {
@@ -2818,6 +2824,33 @@ public:
                 if (io.MouseWheel != 0.0f) camPos_ += fwd * io.MouseWheel * (flySpeed_ * 0.15f);
                 if (io.MouseDown[2]) { camPos_ -= right * io.MouseDelta.x * 0.02f; camPos_ += up * io.MouseDelta.y * 0.02f; }
             }
+            // CTRL+S SAVES THE LEVEL, which the File menu has claimed it does for as long as that
+            // menu has existed -- the "Ctrl+S" beside Save Level is the shortcut-LABEL parameter of
+            // ImGui::MenuItem, which draws text and wires nothing. The only ImGuiKey_S in this file
+            // was the camera's strafe-left, so the shortcut a person reaches for by reflex while
+            // building a level did nothing at all, and there was no feedback to say so.
+            //
+            // NOT GATED ON levelFocused_, unlike F below: saving is not a viewport gesture and
+            // wanting it while the cursor sits over the Outliner is not a mistake. It IS gated on
+            // WantTextInput, or renaming an entity would save the level on the "s" of a name.
+            if (!io.WantTextInput && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false)) {
+                if (levelPath_.empty()) {
+                    // Never saved, so there is no file to write. Open the same prompt the menu does
+                    // rather than inventing a name -- Save As is what Ctrl+S means here.
+                    saveLevelAsName_[0] = '\0';
+                    std::snprintf(saveLevelAsName_, sizeof saveLevelAsName_, "%s",
+                                  levelName_.empty() ? "untitled" : levelName_.c_str());
+                    saveLevelAsError_.clear();
+                    wantSaveLevelAs_ = true;
+                } else if (saveLevel(levelPath_)) {
+                    setUpgradeStatus("Saved " + std::filesystem::path(levelPath_).filename().string());
+                } else {
+                    setUpgradeStatus("Could not save " +
+                                     std::filesystem::path(levelPath_).filename().string());
+                    AVER_ERROR("[Level] Ctrl+S: could not write {}", levelPath_);
+                }
+            }
+
             // F frames the selection at a distance derived from its radius.
             if (levelFocused_ && !io.WantCaptureKeyboard &&
                 keybinds_.pressed(editor::CommandId::ViewFrameSelected, io) && anySelected()) {
@@ -8997,6 +9030,10 @@ private:
                                  levelEntities_.end());
             entityLabels_.erase(static_cast<u32>(d));
             entityCollide_.erase(static_cast<u32>(d));
+            entitySnapZ_.erase(static_cast<u32>(d));
+            // Deleting the marker must clear the cache, or Add > Player Start keeps refusing to add
+            // one on the grounds that the level already has the entity that was just destroyed.
+            if (d == playerStart_) playerStart_ = scene::kInvalidEntity;
 #if AVER_MODULE_PHYSICS
             if (const auto it = entityBodies_.find(static_cast<u32>(d)); it != entityBodies_.end()) {
                 aver_phys_remove_body(it->second);
@@ -9414,6 +9451,8 @@ private:
 #endif
 
     void undo() {
+        // The Player Start's handle changes when an undo recreates it; see refreshPlayerStart.
+        struct RefreshOnExit { SandboxApp* a; ~RefreshOnExit() { a->refreshPlayerStart(); } } ro{this};
         if (undoStack_.empty()) return;
         EditCmd c = undoStack_.back(); undoStack_.pop_back();
         switch (c.kind) {
@@ -9455,6 +9494,7 @@ private:
     // Re-applies the newest undone command and moves it back to the undo stack. See undo()'s own
     // comment for why CreateObj/DestroyObj's raw objIndex addressing is safe.
     void redo() {
+        struct RefreshOnExit { SandboxApp* a; ~RefreshOnExit() { a->refreshPlayerStart(); } } ro{this};
         if (redoStack_.empty()) return;
         EditCmd c = redoStack_.back(); redoStack_.pop_back();
         switch (c.kind) {
@@ -9534,6 +9574,26 @@ private:
     // must not also be saved as a PLACE record -- two sources of truth, one invisible.
 #if AVER_MODULE_SCENE
     scene::Entity playerStart_ = scene::kInvalidEntity;
+
+    // Re-finds the Player Start by NAME, which is what makes an entity one (see makePlayerStart).
+    //
+    // WHY IT HAS TO BE RE-DERIVED. playerStart_ is a cached handle, and three things invalidate it
+    // without going anywhere near this cache: destroying the marker, undoing that destroy (which
+    // recreates the entity with a DIFFERENT handle), and redoing it again. The stale handle then
+    // either points at nothing -- Add > Player Start refuses to add a second one because it thinks
+    // one exists -- or, worse, at whatever entity id got reused, which the viewport then draws a
+    // spawn icon on. Cheap: one pass over the level's own entities, only on undo/redo and delete.
+    void refreshPlayerStart() {
+#if AVER_MODULE_SCENE
+        scene::World& w = scene::World::instance();
+        if (playerStart_ != scene::kInvalidEntity && w.valid(playerStart_) &&
+            w.name(playerStart_) == "PlayerStart")
+            return;                                  // still good, nothing to do
+        playerStart_ = scene::kInvalidEntity;
+        for (const scene::Entity e : levelEntities_)
+            if (w.valid(e) && w.name(e) == "PlayerStart") { playerStart_ = e; return; }
+#endif
+    }
 #endif
     f32 playerStartYaw_ = 0.0f;
 
@@ -9617,6 +9677,15 @@ private:
         playerStart_ = makePlayerStart(at, yaw);
         if (playerStart_ == scene::kInvalidEntity) return;
         sel_ = kSelScene; selEntity_ = playerStart_;
+        // AN UNDO ENTRY, WHICH THIS ALONE AMONG THE Add ITEMS DID NOT PUSH. spawnPrimitive and
+        // spawnFromAssetDrop both end with describeEntity()+pushEdit(); this did not, so Ctrl+Z
+        // after adding a Player Start did not remove it -- it silently undid whatever edit came
+        // BEFORE, which is worse than doing nothing.
+        {
+            EditCmd c = describeEntity(playerStart_);
+            c.kind = EditCmd::Kind::Create;
+            pushEdit(std::move(c));
+        }
         AVER_INFO("[Editor] Player Start at ({:.0f}, {:.0f}, {:.0f}) yaw {:.0f}",
                   at.x, at.y, at.z, yaw);
 #else
@@ -10951,12 +11020,44 @@ private:
         upgradeStatusAge_ = 0.0f;
     }
 
+    // May the window close? Called from inside WM_CLOSE, on the message thread -- so it decides and
+    // returns, and the prompt it arms is drawn by the ordinary frame loop that keeps running because
+    // this said no.
+    static bool onCloseGuardThunk(void* user) {
+        return static_cast<SandboxApp*>(user)->onCloseGuard();
+    }
+    bool onCloseGuard() {
+#if AVER_WITH_IMGUI
+        // ALREADY ASKING is not a reason to ask again: a second X click while the prompt is up must
+        // not stack a second prompt, and must still not close.
+        if (exitPrompt_) return false;
+        if (assetEditors_.anyDirty() || levelHasUnsavedEdits()) { exitPrompt_ = true; return false; }
+#endif
+        return true;
+    }
+
+    // Has the LEVEL been edited since it was opened?
+    //
+    // THE UNDO STACK IS THE ONLY SIGNAL THERE IS. There is no per-level dirty flag anywhere in this
+    // editor: saveLevel does not clear anything a later check could read, and unloadLevel wipes the
+    // stack unconditionally -- so this can only be asked BEFORE a load or an unload, never after.
+    // An empty stack does not PROVE nothing changed; a non-empty one proves the opposite, which is
+    // the direction that must never be wrong when the question is "may I throw this away".
+    //
+    // It over-reports after a save (the stack is not cleared), so the worst this costs is a prompt
+    // somebody dismisses. The other error costs them their level.
+    bool levelHasUnsavedEdits() const { return canUndo(); }
+
     // Exit, unless something is unsaved -- in which case ASK first.
     // Every exit used to call requestExit() straight through. AssetEditorHost::anyDirty() existed for
     // exactly this check and had no callers, so closing with an unsaved material silently discarded it.
+    //
+    // THE LEVEL ITSELF WAS NOT IN THAT CHECK, which is the bigger hole and the one that bites while
+    // building one: the level being edited in the viewport is never registered as an AssetEditor, so
+    // an hour of placing things and then File > Exit warned about exactly nothing.
     void requestExitChecked(Engine& e) {
 #if AVER_WITH_IMGUI
-        if (assetEditors_.anyDirty()) { exitPrompt_ = true; return; }
+        if (assetEditors_.anyDirty() || levelHasUnsavedEdits()) { exitPrompt_ = true; return; }
 #endif
         e.requestExit();
     }
@@ -11089,11 +11190,20 @@ private:
         ImGui::SetNextWindowSize(ImVec2(480.0f * dpi_, 0.0f), ImGuiCond_Appearing);
         if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
 
-        const std::vector<std::string> dirty = assetEditors_.dirtyTitles();
-        ImGui::TextWrapped("%zu open editor%s ha%s unsaved changes:",
+        std::vector<std::string> dirty = assetEditors_.dirtyTitles();
+        // The LEVEL first, because it is the thing most likely to represent an afternoon's work and
+        // the thing this prompt used not to mention at all.
+        const bool levelDirty = levelHasUnsavedEdits();
+        if (levelDirty)
+            dirty.insert(dirty.begin(),
+                         "Level: " + (levelName_.empty() ? std::string("untitled") : levelName_));
+        ImGui::TextWrapped("%zu item%s ha%s unsaved changes:",
                            dirty.size(), dirty.size() == 1 ? "" : "s", dirty.size() == 1 ? "s" : "ve");
         ImGui::Spacing();
         for (const std::string& t : dirty) ImGui::BulletText("%s", t.c_str());
+        if (levelDirty && levelPath_.empty())
+            ImGui::TextDisabled("This level has never been saved -- \"Save all\" cannot name a file "
+                                "for it. Cancel, then File > Save Level As.");
         if (!exitPromptError_.empty()) {
             ImGui::Spacing();
             ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.40f, 1.0f), "%s", exitPromptError_.c_str());
@@ -11103,7 +11213,14 @@ private:
 
         if (ImGui::Button("Save all and exit", ImVec2(150.0f * dpi_, 0.0f))) {
             std::string why;
-            const usize failed = assetEditors_.saveAllDirty(&why);
+            usize failed = assetEditors_.saveAllDirty(&why);
+            // The level too, and only when it already HAS a path: a never-saved level has no name to
+            // write to, and inventing one here would put a file somewhere the user did not choose.
+            // The line above the buttons says so, and Cancel -> Save Level As is the way out.
+            if (levelDirty && !levelPath_.empty() && !saveLevel(levelPath_)) {
+                ++failed;
+                why += (why.empty() ? "" : "; ") + std::string("could not save the level to ") + levelPath_;
+            }
             if (failed == 0) {
                 ImGui::CloseCurrentPopup();
                 exitPrompt_ = false;
@@ -11118,7 +11235,7 @@ private:
         }
         ImGui::SameLine();
         if (ImGui::Button("Discard and exit", ImVec2(150.0f * dpi_, 0.0f))) {
-            AVER_WARN("[Editor] exiting with {} unsaved editor(s); the changes are gone", dirty.size());
+            AVER_WARN("[Editor] exiting with {} unsaved item(s); the changes are gone", dirty.size());
             ImGui::CloseCurrentPopup();
             exitPrompt_ = false;
             e.requestExit();
@@ -11263,7 +11380,7 @@ private:
     // it used to serve only the forwarded case because that was the only case that existed.
     void drawPendingOpenPrompt(Engine& e) {
 #if AVER_WITH_IMGUI
-        if (!pendingOpenPrompt_) return;
+        if (!pendingOpenPrompt_ && !pendingNewLevel_) return;
         constexpr const char* kTitle = "Unsaved changes";
         if (!ImGui::IsPopupOpen(kTitle)) ImGui::OpenPopup(kTitle);
         const ImVec2 centre = ImGui::GetMainViewport()->GetCenter();
@@ -11271,38 +11388,58 @@ private:
         ImGui::SetNextWindowSize(ImVec2(480.0f * dpi_, 0.0f), ImGuiCond_Appearing);
         if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
 
-        ImGui::TextWrapped("'%s' is about to be %s. The current level has unsaved changes.",
-                           std::filesystem::path(pendingOpenPath_).filename().string().c_str(),
-                           pendingOpenWhy_.empty() ? "opened" : pendingOpenWhy_.c_str());
+        if (pendingNewLevel_)
+            ImGui::TextWrapped("The current level has unsaved changes. Starting a new level "
+                               "discards them.");
+        else
+            ImGui::TextWrapped("'%s' is about to be %s. The current level has unsaved changes.",
+                               std::filesystem::path(pendingOpenPath_).filename().string().c_str(),
+                               pendingOpenWhy_.empty() ? "opened" : pendingOpenWhy_.c_str());
+        if (levelPath_.empty())
+            ImGui::TextDisabled("This level has never been saved, so there is no file to save it to. "
+                                "Cancel, then File > Save Level As.");
         ImGui::Spacing();
         ImGui::Separator();
 
-        if (ImGui::Button("Save and open", ImVec2(150.0f * dpi_, 0.0f))) {
-            if (levelPath_.empty() || saveLevel(levelPath_)) {
+        // DISABLED WITH NO PATH TO SAVE TO. It used to treat "never saved" as success and open
+        // straight through -- the one case where "Save and open" was a button that discarded.
+        ImGui::BeginDisabled(levelPath_.empty());
+        if (ImGui::Button(pendingNewLevel_ ? "Save and continue" : "Save and open",
+                          ImVec2(160.0f * dpi_, 0.0f))) {
+            if (saveLevel(levelPath_)) {
                 const std::string toOpen = pendingOpenPath_;
+                const bool wasNew = pendingNewLevel_;
                 ImGui::CloseCurrentPopup();
                 pendingOpenPrompt_ = false;
+                pendingNewLevel_ = false;
                 pendingOpenPath_.clear();
-                openLevelDirect(e, toOpen);
+                if (wasNew) startNewLevel(e);
+                else        openLevelDirect(e, toOpen);
             } else {
                 // STAY OPEN on a failed save -- same reasoning as drawExitPrompt's identical guard:
                 // proceeding anyway would discard exactly the work this prompt exists to protect.
                 AVER_ERROR("[Sandbox] could not save '{}'; the forwarded open was cancelled", levelPath_);
             }
         }
+        ImGui::EndDisabled();
         ImGui::SameLine();
-        if (ImGui::Button("Discard and open", ImVec2(150.0f * dpi_, 0.0f))) {
+        if (ImGui::Button(pendingNewLevel_ ? "Discard and continue" : "Discard and open",
+                          ImVec2(170.0f * dpi_, 0.0f))) {
             const std::string toOpen = pendingOpenPath_;
-            AVER_WARN("[Sandbox] opening '{}'; the current level's unsaved changes are gone", toOpen);
+            const bool wasNew = pendingNewLevel_;
+            AVER_WARN("[Sandbox] the current level's unsaved changes are gone");
             ImGui::CloseCurrentPopup();
             pendingOpenPrompt_ = false;
+            pendingNewLevel_ = false;
             pendingOpenPath_.clear();
-            openLevelDirect(e, toOpen);
+            if (wasNew) startNewLevel(e);
+            else        openLevelDirect(e, toOpen);
         }
         ImGui::SameLine();
         if (ImGui::Button("Cancel", ImVec2(110.0f * dpi_, 0.0f))) {
             ImGui::CloseCurrentPopup();
             pendingOpenPrompt_ = false;
+            pendingNewLevel_ = false;
             pendingOpenPath_.clear();
         }
         ImGui::EndPopup();
@@ -11431,7 +11568,13 @@ private:
 #if AVER_MODULE_SCENE
                 const bool haveProject = project_.valid();
                 ImGui::BeginDisabled(!haveProject);
-                if (ImGui::MenuItem("New Level")) { unloadLevel(e); levelName_ = "untitled"; levelPath_.clear(); }
+                // ASKS FIRST NOW. This called unloadLevel() straight through, which clears the undo
+                // stack and every entity with no prompt -- so one wrong click on a level somebody had
+                // been building for an hour threw all of it away, silently, with Cancel nowhere.
+                if (ImGui::MenuItem("New Level")) {
+                    if (levelHasUnsavedEdits()) pendingNewLevel_ = true;
+                    else                        startNewLevel(e);
+                }
                 uiReg_.track("file.newLevel");
                 // OPENS A PICKER NOW. It used to call loadStartMap(), which reopens the project's ONE
                 // start map -- so a project with three levels had two the editor could not reach, and
@@ -16481,6 +16624,7 @@ private:
     // destructive actions, and one modal meaning both risked "Discard and exit" when what is about
     // to happen is "open a different level".
     bool        pendingOpenPrompt_ = false;
+    bool        pendingNewLevel_ = false;   // File > New Level, waiting on the unsaved-changes prompt
     // File > Open Level's own picker: the list is rebuilt when it opens, not per frame.
     bool        openLevelPicker_ = false;
     bool        armOpenLevelPicker_ = false;   // --open-level-picker, consumed on the first draw
@@ -16832,6 +16976,8 @@ private:
     // a load-time instruction and nothing on the entity records it afterwards, so without this the
     // save forced `collide = true` on everything and `nocollide` never survived a round trip.
     std::unordered_map<u32, bool> entityCollide_;
+    // Entities placed with `snap`, and the AUTHORED z offset each was placed at. Absent = not snapped.
+    std::unordered_map<u32, f64> entitySnapZ_;
 
     // TRUE WHILE THE OPEN LEVEL WAS LOADED THROUGH THE LEGACY OCMAP PATH (loadLegacyOcmapLevel),
     // rather than the ordinary OCWORLD one -- decided by which RECORDS the file uses, not its header
@@ -17544,6 +17690,15 @@ private:
             // instruction nothing records afterwards. Inferring it from entityBodies_ would be wrong:
             // a level opened before aver_phys_init has no bodies for ANY placement.
             entityCollide_[static_cast<u32>(e)] = p.collide;
+            // AND `snap`, FOR THE SAME REASON AND A WORSE FAILURE. snapToGround has no component
+            // either, but unlike nocollide it also changes what z MEANS: with it set, the authored z
+            // is an offset ABOVE the terrain, and world::instantiate resolves it to ground + offset
+            // before it ever reaches CLocal. So a save that rebuilt the placement from the live
+            // transform wrote the resolved height back as if it were the offset AND dropped the
+            // token -- baking the terrain into the file, on an open-and-save with no edits at all.
+            // LevelClassSave.hpp already says exactly this and already handles it, for CLASS
+            // placements only; this is the ordinary-placement half.
+            if (p.snapToGround) entitySnapZ_[static_cast<u32>(e)] = p.z;
 #if AVER_MODULE_PHYSICS
             if (inst.entityBody[k] >= 0) entityBodies_[static_cast<u32>(e)] = inst.entityBody[k];
 #endif
@@ -17887,6 +18042,16 @@ private:
         openLevelDirect(eng, path);
     }
 
+    // A blank level. The one place that does it, so the guard above and the prompt's Discard
+    // button cannot drift apart about what "new" clears.
+    void startNewLevel(Engine& eng) {
+        unloadLevel(eng);
+        levelName_ = "untitled";
+        // CLEARED, so the next Ctrl+S cannot silently overwrite the level that was open before this
+        // one. saveLevel takes whatever path it is given and asks nothing.
+        levelPath_.clear();
+    }
+
     // The actual open, past every guard. The ONE place that pairs loadLevel with the class-placement
     // spawn it needs -- see the comment inside for why that pairing is not optional.
     void openLevelDirect(Engine& eng, const std::string& path) {
@@ -17963,6 +18128,7 @@ private:
         levelPcgVolumes_.clear();
         levelHeader_ = fmt::OcWorldData{};
         entityCollide_.clear();
+        entitySnapZ_.clear();
         // The legacy OCMAP state, cleared with the rest -- see levelIsLegacyOcmap_'s own comment
         // for why a stale `true` here would be worse than a stale levelHeader_: it would route the
         // NEXT level's save through the wrong writer entirely, not just lose a field it carries.
@@ -18133,6 +18299,16 @@ private:
             // Entities created in the editor are absent from the map and keep the true default.
             const auto collideIt = entityCollide_.find(static_cast<u32>(e));
             p.collide = collideIt == entityCollide_.end() ? true : collideIt->second;
+            // A SNAPPED PLACEMENT KEEPS ITS OFFSET, not the resolved world height. See the load site
+            // for why writing loc->xf.position.z here bakes the terrain into the level.
+            //
+            // The offset is restored VERBATIM rather than recomputed as (live z - ground): the
+            // ground under it may have been sculpted since the load, and re-deriving would silently
+            // rewrite an authored number the user never touched. Moving a snapped object in the
+            // viewport therefore does not yet move it in the file -- which is the honest behaviour
+            // until the editor grows a way to show and edit a snap offset.
+            const auto snapIt = entitySnapZ_.find(static_cast<u32>(e));
+            if (snapIt != entitySnapZ_.end()) { p.snapToGround = true; p.z = snapIt->second; }
             w.placements.push_back(std::move(p));
         }
 
