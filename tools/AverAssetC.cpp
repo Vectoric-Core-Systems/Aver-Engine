@@ -908,11 +908,22 @@ bool foldOpacityInto(std::vector<fmt::ImportedImage>& images, fmt::ImportedMater
         return false;
     }
 
-    // The RED channel, because that is what the source connected: `inputs:opacity.connect` names
-    // `.outputs:r` on the texture, and .mtl's map_d is greyscale. Averaging RGB would differ on a
-    // map that is not actually grey, and would differ from what the authoring tool showed.
+    // THE CHANNEL THE SOURCE NAMED, not a fixed one.
+    //
+    // This used to be hardcoded to RED, on the reasoning that `inputs:opacity.connect` names
+    // `.outputs:r` and .mtl's map_d is greyscale. That holds for a genuinely separate greyscale
+    // mask and is wrong the moment a file names a different channel -- and USD files routinely
+    // name `.outputs:a`. Reading red out of an image whose mask lives in alpha produces a cutout
+    // shaped like the picture's brightness, which on foliage is close to the worst possible answer.
+    //
+    // Averaging RGB is still not offered: it would differ on a map that is not actually grey, and
+    // would differ from what the authoring tool showed.
+    const usize lane = (m.opacityTex.channel == 'g')   ? 1
+                     : (m.opacityTex.channel == 'b')   ? 2
+                     : (m.opacityTex.channel == 'a')   ? 3
+                                                       : 0;   // 'r' and unstated
     const usize n = usize(base.width) * base.height;
-    for (usize i = 0; i < n; ++i) base.pixels[i * 4 + 3] = mask.pixels[i * 4];
+    for (usize i = 0; i < n; ++i) base.pixels[i * 4 + 3] = mask.pixels[i * 4 + lane];
 
     std::vector<u8> encoded;
     const auto sink = [](void* ctx, void* data, int len) {

@@ -42,6 +42,16 @@ struct ImportedTexture {
     i32 imageIndex = -1;   // index into the parallel images array; -1 = unset
     u32 texCoord   = 0;    // always 0 in practice: OcMeshData carries one UV stream
 
+    // WHICH CHANNEL OF THAT IMAGE THE SOURCE ASKED FOR: 'r', 'g', 'b', 'a', or 0 for "the colour
+    // channels" / unstated. Only a single-value slot can honour it -- an opacity map is one number
+    // per texel and the file has to say which one.
+    //
+    // WHY IT IS NOT COSMETIC. USD routinely connects opacity and diffuseColor to the SAME
+    // UsdUVTexture prim, differing only by `.outputs:a` versus `.outputs:rgb`. With the channel
+    // dropped, the two slots become indistinguishable and the opacity fold reads the base colour's
+    // RED channel as if it were a mask -- which on green foliage yields nearly transparent leaves.
+    char channel = 0;
+
     bool empty() const { return imageIndex < 0; }
 };
 

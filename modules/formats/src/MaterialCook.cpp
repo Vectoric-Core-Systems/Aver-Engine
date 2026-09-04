@@ -1,6 +1,7 @@
 #include "aver/formats/MaterialCook.hpp"
 
 #include "aver/formats/OcMat.hpp"
+#include "aver/platform/Image.hpp"
 
 #include <cstring>
 #include <filesystem>
@@ -27,31 +28,10 @@ void warn(std::vector<std::string>* out, std::string what) {
     if (out) out->push_back(std::move(what));
 }
 
-// A container the engine's decoder positively cannot read, named. stb_image -- the one decoder in
-// the tree (platform/src/Image.cpp) -- handles JPEG, PNG, TGA, BMP, PSD, GIF, HDR, PIC and PNM, and
-// nothing else.
-//
-// A REFUSAL LIST, NOT AN ACCEPT LIST, and deliberately: TGA has no magic bytes at all, so an
-// accept-list would have to fall back on the extension and would reject every valid .tga whose name
-// said something else. This says nothing about a file it does not recognise, and lets it through.
-//
-// WHY IT MATTERS: Intel's Jungle Ruins binds `.tif` base colours through UsdPreviewSurface. Copying
-// one into the project and writing a TEX record for it produces a material that fails to load at
-// run time, a long way from the import that caused it.
-const char* undecodableContainer(const std::vector<u8>& b) {
-    const auto has = [&](usize off, const char* magic, usize n) {
-        if (b.size() < off + n) return false;
-        return std::memcmp(b.data() + off, magic, n) == 0;
-    };
-    if (has(0, "II*\0", 4) || has(0, "MM\0*", 4))          return "TIFF";
-    if (has(0, "RIFF", 4) && has(8, "WEBP", 4))            return "WebP";
-    if (has(0, "\x76\x2f\x31\x01", 4))                     return "OpenEXR";
-    if (has(0, "DDS ", 4))                                 return "DDS";
-    if (has(1, "KTX", 3) && b.size() > 0 && b[0] == 0xAB)  return "KTX";
-    if (has(4, "ftypavif", 8))                             return "AVIF";
-    if (has(4, "ftypheic", 8) || has(4, "ftypheix", 8))    return "HEIF";
-    return nullptr;
-}
+// MOVED TO aver::undecodableContainer (platform/Image.hpp), beside the decoder whose reach it
+// actually describes. Two callers need it now: this cook, which refuses to bind a slot it cannot
+// decode, and the importers, which look on disk for a same-stem sibling they can -- and an importer
+// in the base Aver.Formats target cannot reach into this PBR-gated one to ask.
 
 // Content-relative, forward slashes -- the form a TEX record takes and the form the engine resolves
 // against the content root. Never the absolute path: that would bake this machine into the asset.
@@ -109,7 +89,7 @@ bool cookMaterials(const std::vector<ImportedMaterial>& materials,
     for (usize i = 0; i < images.size(); ++i) {
         const ImportedImage& img = images[i];
         if (!img.ok || img.bytes.empty() || !referenced[i]) continue;
-        if (const char* container = undecodableContainer(img.bytes)) {
+        if (const char* container = aver::undecodableContainer(img.bytes)) {
             // NOT written and NOT bound. Copying it in and pointing a TEX record at it would turn a
             // stated import limit into a material that looks broken at run time for no given reason
             // -- the same policy as an image that could not be read at all.

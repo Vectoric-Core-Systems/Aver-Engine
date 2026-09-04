@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -39,6 +40,23 @@ static bool obj(const std::string& text, fmt::ObjImportResult& out,
     const bool ok = fmt::importObjFromMemory(text.data(), text.size(), std::string(), out, opt, &why);
     if (!ok) AVER_INFO("    (importObj said: {})", why);
     return ok;
+}
+
+// A real 1x1 RGBA PNG. Its alpha is 0x40 -- a value nothing else here produces, so a test that
+// finds those bytes knows they came from THIS file and were not invented somewhere along the way.
+static const u8 kPng[] = {
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+    0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
+    0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0x10,
+    0x54, 0x32, 0x76, 0x00, 0x00, 0x01, 0x55, 0x00, 0xa7, 0x07, 0x84, 0x51, 0x51, 0x00, 0x00,
+    0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+};
+// Little-endian TIFF magic, then filler. Enough for the container sniff; it is never decoded.
+static const u8 kTiff[] = { 0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00 };
+
+static void putFile(const std::filesystem::path& p, const u8* b, usize n) {
+    std::ofstream f(p, std::ios::binary);
+    f.write(reinterpret_cast<const char*>(b), std::streamsize(n));
 }
 
 static bool usda(const std::string& text, fmt::UsdImportResult& out,
@@ -931,6 +949,189 @@ int main() {
             check(r.materials[0].alphaMode == "MASK",
                   "and a material with an opacity map is a cutout, not opaque");
         }
+    }
+
+    // ---- an undecodable container, answered by the sibling beside it on disk -------------------
+    //
+    // Intel's Jungle Ruins binds every base colour as a .tif, and stb_image -- the one decoder in
+    // the tree -- reads no TIFF. The cook's standing advice was "convert it to PNG or TGA and
+    // re-import", which on its own could never work: re-importing reads the .tif path straight back
+    // out of the .usda and never looks at the converted file.
+    //
+    // ON DISK, not in memory, because the whole point is a lookup relative to a resolved path.
+    {
+        namespace fs = std::filesystem;
+        const fs::path dir = fs::temp_directory_path() / "aver_import_sibling_test";
+        std::error_code ec;
+        fs::remove_all(dir, ec);
+        fs::create_directories(dir, ec);
+
+        putFile(dir / "bark.tif", kTiff, sizeof kTiff);
+        putFile(dir / "bark.png", kPng, sizeof kPng);
+        putFile(dir / "lonely.tif", kTiff, sizeof kTiff);  // no sibling: must stay refused
+
+        const std::string doc =
+            "#usda 1.0\n"
+            "(\n    defaultPrim = \"root\"\n    metersPerUnit = 0.01\n    upAxis = \"Z\"\n)\n"
+            "def Xform \"root\"\n{\n"
+            "    def Mesh \"m\" (apiSchemas = [\"MaterialBindingAPI\"])\n    {\n"
+            "        int[] faceVertexCounts = [3]\n"
+            "        int[] faceVertexIndices = [0, 1, 2]\n"
+            "        point3f[] points = [(0,0,0), (1,0,0), (0,1,0)]\n"
+            "        rel material:binding = </root/M>\n    }\n"
+            "    def Material \"M\"\n    {\n"
+            "        token outputs:surface.connect = </root/M/S.outputs:surface>\n"
+            "        def Shader \"S\"\n        {\n"
+            "            uniform token info:id = \"UsdPreviewSurface\"\n"
+            "            color3f inputs:diffuseColor.connect = </root/M/Alb.outputs:rgb>\n"
+            "            normal3f inputs:normal.connect = </root/M/Nrm.outputs:rgb>\n"
+            "        }\n"
+            "        def Shader \"Alb\"\n        {\n"
+            "            uniform token info:id = \"UsdUVTexture\"\n"
+            "            asset inputs:file = @bark.tif@\n        }\n"
+            "        def Shader \"Nrm\"\n        {\n"
+            "            uniform token info:id = \"UsdUVTexture\"\n"
+            "            asset inputs:file = @lonely.tif@\n        }\n"
+            "    }\n}\n";
+
+        fmt::UsdImportResult r;
+        const bool ok = usda(doc, r, {}, dir.string());
+        check(ok, "a USDA naming a TIFF base colour imports");
+        if (ok && r.materials.size() == 1) {
+            const i32 bi = r.materials[0].baseColorTex.imageIndex;
+            const i32 ni = r.materials[0].normalTex.imageIndex;
+            check(bi >= 0 && usize(bi) < r.images.size(), "its base colour resolved to an image");
+            if (bi >= 0 && usize(bi) < r.images.size()) {
+                const fmt::ImportedImage& im = r.images[usize(bi)];
+                // THE BYTES, not the name: the .usda still says .tif and always will, so the only
+                // honest proof the substitution happened is what was actually loaded.
+                check(im.bytes.size() == sizeof kPng &&
+                          std::memcmp(im.bytes.data(), kPng, sizeof kPng) == 0,
+                      "and the PNG sibling's bytes were loaded in place of the TIFF's");
+                check(im.ext == ".png", "with the extension corrected to match the bytes");
+            }
+            if (ni >= 0 && usize(ni) < r.images.size()) {
+                // NO SIBLING MEANS NO SUBSTITUTION. Falling back to some other image in the folder
+                // would put the wrong picture on the slot, which is worse than leaving it unbound.
+                const fmt::ImportedImage& im = r.images[usize(ni)];
+                check(im.bytes.size() == sizeof kTiff,
+                      "a TIFF with no sibling is left exactly as it was, for the cook to refuse");
+            }
+            bool told = false;
+            for (const std::string& u : r.unsupported)
+                if (u.find("sibling") != std::string::npos) told = true;
+            check(told, "and the substitution is REPORTED rather than made silently");
+        }
+        fs::remove_all(dir, ec);
+    }
+
+    // ---- opacity that names the base colour's OWN alpha channel --------------------------------
+    //
+    // Blender's USD exporter connects inputs:opacity and inputs:diffuseColor to the SAME
+    // UsdUVTexture, differing only by `.outputs:a` versus `.outputs:rgb`. With the output name
+    // dropped the two slots became indistinguishable, and the downstream fold copied that image's
+    // RED channel into alpha -- which on a green leaf atlas is very nearly a full erase.
+    //
+    // THE FILE HAS TO BE ON DISK or this case proves nothing: an unresolved slot is empty already,
+    // so "the opacity slot is cleared" would pass without the clearing code ever running.
+    {
+        namespace fs = std::filesystem;
+        const fs::path dir = fs::temp_directory_path() / "aver_import_ownalpha_test";
+        std::error_code ec;
+        fs::remove_all(dir, ec);
+        fs::create_directories(dir, ec);
+        putFile(dir / "leaf.png", kPng, sizeof kPng);
+
+        const std::string doc =
+            "#usda 1.0\n"
+            "(\n    defaultPrim = \"root\"\n    metersPerUnit = 0.01\n    upAxis = \"Z\"\n)\n"
+            "def Xform \"root\"\n{\n"
+            "    def Mesh \"m\" (apiSchemas = [\"MaterialBindingAPI\"])\n    {\n"
+            "        int[] faceVertexCounts = [3]\n"
+            "        int[] faceVertexIndices = [0, 1, 2]\n"
+            "        point3f[] points = [(0,0,0), (1,0,0), (0,1,0)]\n"
+            "        rel material:binding = </root/M>\n    }\n"
+            "    def Material \"M\"\n    {\n"
+            "        token outputs:surface.connect = </root/M/S.outputs:surface>\n"
+            "        def Shader \"S\"\n        {\n"
+            "            uniform token info:id = \"UsdPreviewSurface\"\n"
+            "            color3f inputs:diffuseColor.connect = </root/M/Alb.outputs:rgb>\n"
+            "            float inputs:opacity.connect = </root/M/Alb.outputs:a>\n"
+            "            float inputs:opacityThreshold = 0.5\n"
+            "        }\n"
+            "        def Shader \"Alb\"\n        {\n"
+            "            uniform token info:id = \"UsdUVTexture\"\n"
+            "            asset inputs:file = @leaf.png@\n        }\n"
+            "    }\n}\n";
+        fmt::UsdImportResult r;
+        const bool ok = usda(doc, r, {}, dir.string());
+        check(ok, "a material whose opacity names its own base colour's alpha imports");
+        if (ok && r.materials.size() == 1) {
+            const fmt::ImportedMaterial& m = r.materials[0];
+            // GUARD AGAINST A VACUOUS PASS: the base colour must actually have resolved, or the
+            // "cleared" assertion below is just describing a slot that was never filled.
+            check(!m.baseColorTex.empty(), "its base colour resolved to a real image on disk");
+            check(m.opacityTex.empty(),
+                  "the opacity slot is CLEARED -- the base colour's own alpha already is the cutout");
+            check(m.alphaMode == "MASK",
+                  "but the material is still a cutout, because the connection said so");
+            checkNear(m.alphaCutoff, 0.5f, 1e-6f, "and opacityThreshold survives as the cutoff");
+        }
+        fs::remove_all(dir, ec);
+    }
+
+    // A separate mask is still a separate mask. This is the case the old hardcoded-red fold was
+    // written for, and it must keep working -- with the channel now recorded rather than assumed.
+    //
+    // BOTH FILES MUST EXIST. An unresolved slot lands at imageIndex -1, and two unresolved slots
+    // compare equal at -1 -- so a version of this case with no files on disk would assert that two
+    // absent images are "different" and pass or fail for reasons unrelated to what it is testing.
+    {
+        namespace fs = std::filesystem;
+        const fs::path dir = fs::temp_directory_path() / "aver_import_mask_test";
+        std::error_code ec;
+        fs::remove_all(dir, ec);
+        fs::create_directories(dir, ec);
+        // Same bytes, two names: the importer dedupes images by resolved PATH, so these are two
+        // distinct entries -- which is exactly the shape being asserted.
+        putFile(dir / "leaf_albedo.png", kPng, sizeof kPng);
+        putFile(dir / "leaf_mask.png", kPng, sizeof kPng);
+
+        const std::string doc =
+            "#usda 1.0\n"
+            "(\n    defaultPrim = \"root\"\n    metersPerUnit = 0.01\n    upAxis = \"Z\"\n)\n"
+            "def Xform \"root\"\n{\n"
+            "    def Mesh \"m\" (apiSchemas = [\"MaterialBindingAPI\"])\n    {\n"
+            "        int[] faceVertexCounts = [3]\n"
+            "        int[] faceVertexIndices = [0, 1, 2]\n"
+            "        point3f[] points = [(0,0,0), (1,0,0), (0,1,0)]\n"
+            "        rel material:binding = </root/M>\n    }\n"
+            "    def Material \"M\"\n    {\n"
+            "        token outputs:surface.connect = </root/M/S.outputs:surface>\n"
+            "        def Shader \"S\"\n        {\n"
+            "            uniform token info:id = \"UsdPreviewSurface\"\n"
+            "            color3f inputs:diffuseColor.connect = </root/M/Alb.outputs:rgb>\n"
+            "            float inputs:opacity.connect = </root/M/Cut.outputs:r>\n"
+            "        }\n"
+            "        def Shader \"Alb\"\n        {\n"
+            "            uniform token info:id = \"UsdUVTexture\"\n"
+            "            asset inputs:file = @leaf_albedo.png@\n        }\n"
+            "        def Shader \"Cut\"\n        {\n"
+            "            uniform token info:id = \"UsdUVTexture\"\n"
+            "            asset inputs:file = @leaf_mask.png@\n        }\n"
+            "    }\n}\n";
+        fmt::UsdImportResult r;
+        const bool ok = usda(doc, r, {}, dir.string());
+        check(ok, "a material with a genuinely separate opacity map imports");
+        if (ok && r.materials.size() == 1) {
+            const fmt::ImportedMaterial& m = r.materials[0];
+            check(!m.opacityTex.empty(), "its opacity slot is KEPT, because the mask is another image");
+            check(m.opacityTex.imageIndex != m.baseColorTex.imageIndex,
+                  "and it is a different image from the base colour");
+            check(m.opacityTex.channel == 'r',
+                  "with the channel the connection named recorded, not assumed");
+        }
+        fs::remove_all(dir, ec);
     }
 
     if (g_failures == 0) AVER_INFO("=== all import tests passed ===");

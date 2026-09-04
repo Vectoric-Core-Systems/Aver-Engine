@@ -1,5 +1,7 @@
 #include "aver/formats/UsdImport.hpp"
 
+#include "aver/platform/Image.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -237,6 +239,7 @@ struct Ctx {
     std::vector<std::string> imageSources;
     bool sawPartialSubsetCover = false;
     bool sawUnreadableTexture = false;
+    bool sawTextureSubstituted = false;
     bool sawUnresolvedBinding = false;
     bool sawNonUniformScale = false;
     bool sawTimeSamples = false;
@@ -497,6 +500,7 @@ struct ShaderPrim {
     std::string id;                                              // info:id
     std::vector<std::pair<std::string, std::string>> values;     // input name -> raw text
     std::vector<std::pair<std::string, std::string>> connects;   // input name -> source prim path
+    std::vector<std::pair<std::string, char>> connectOuts;       // input name -> named channel, or 0
     std::string file;                                            // inputs:file, @@ stripped
 
     const std::string* value(const char* n) const {
@@ -506,6 +510,12 @@ struct ShaderPrim {
     const std::string* connect(const char* n) const {
         for (const auto& v : connects) if (v.first == n) return &v.second;
         return nullptr;
+    }
+    // The channel `n`'s connection named, or 0 if it named none. Kept parallel to `connects` rather
+    // than folded into it so every existing caller that only wants the target prim is untouched.
+    char connectOut(const char* n) const {
+        for (const auto& v : connectOuts) if (v.first == n) return v.second;
+        return 0;
     }
 };
 
@@ -524,9 +534,9 @@ std::string assetPath(std::string_view raw) {
     return std::string(t);
 }
 
-// `</Looks/Bark/Albedo.outputs:rgb>` -> `/Looks/Bark/Albedo`. The output name is dropped: this
-// importer binds a whole texture to a slot, so which channel set the connection named tells it
-// nothing it can act on.
+// `</Looks/Bark/Albedo.outputs:rgb>` -> `/Looks/Bark/Albedo`. The output name is dropped HERE and
+// recovered by connectionOutput() below, because most slots bind a whole texture and genuinely do
+// not care which channel set was named.
 std::string connectionTarget(std::string_view raw) {
     const usize lt = raw.find('<');
     const usize gt = raw.rfind('>');
@@ -535,6 +545,22 @@ std::string connectionTarget(std::string_view raw) {
     const usize dot = t.find(".outputs:");
     if (dot != std::string_view::npos) t = t.substr(0, dot);
     return std::string(t);
+}
+
+// The other half of the same text: `</…/Albedo.outputs:a>` -> 'a'. Returns 0 for `rgb`, for a
+// missing output, or for anything longer than one letter -- all of which mean "not a single named
+// channel", which is the only thing a caller can act on.
+char connectionOutput(std::string_view raw) {
+    const usize lt = raw.find('<');
+    const usize gt = raw.rfind('>');
+    if (lt == std::string_view::npos || gt == std::string_view::npos || gt <= lt) return 0;
+    std::string_view t = raw.substr(lt + 1, gt - lt - 1);
+    const usize dot = t.find(".outputs:");
+    if (dot == std::string_view::npos) return 0;
+    const std::string_view out = t.substr(dot + 9);
+    if (out.size() != 1) return 0;                       // "rgb", "surface", …
+    const char ch = out[0];
+    return (ch == 'r' || ch == 'g' || ch == 'b' || ch == 'a') ? ch : 0;
 }
 
 // Reads one attribute's value text, leaving the scanner just past it. Shared by the two readers
@@ -598,7 +624,11 @@ void parseShaderBody(Scanner& s, ShaderPrim& sh) {
         const usize dot = input.find(".connect");
         if (dot != std::string::npos) {
             std::string target = connectionTarget(raw);
-            if (!target.empty()) sh.connects.emplace_back(input.substr(0, dot), std::move(target));
+            if (!target.empty()) {
+                std::string in = input.substr(0, dot);
+                sh.connectOuts.emplace_back(in, connectionOutput(raw));
+                sh.connects.emplace_back(std::move(in), std::move(target));
+            }
             continue;
         }
         if (input == "file") sh.file = assetPath(raw);
@@ -676,14 +706,42 @@ i32 loadUsdTexture(Ctx& c, const std::string& rel) {
     }
     img.suggestedName = stem;
 
-    std::ifstream f(full, std::ios::binary | std::ios::ate);
-    if (f) {
+    const auto readAll = [](const std::string& path, std::vector<u8>& into) {
+        std::ifstream f(path, std::ios::binary | std::ios::ate);
+        if (!f) return false;
         const std::streamoff n = f.tellg();
-        img.bytes.resize(usize(n > 0 ? n : 0));
+        into.resize(usize(n > 0 ? n : 0));
         f.seekg(0);
-        if (!img.bytes.empty())
-            f.read(reinterpret_cast<char*>(img.bytes.data()), std::streamsize(img.bytes.size()));
-        img.ok = !img.bytes.empty();
+        if (!into.empty()) f.read(reinterpret_cast<char*>(into.data()), std::streamsize(into.size()));
+        return !into.empty();
+    };
+    img.ok = readAll(full, img.bytes);
+
+    // A CONTAINER THE ENGINE CANNOT DECODE, ANSWERED WITH THE SIBLING BESIDE IT.
+    //
+    // The cook's advice for this case has always been "convert it to PNG or TGA and re-import" --
+    // which could never work on its own, because re-importing reads the .tif path straight back out
+    // of the .usda and never looks at the converted file. This closes that loop.
+    //
+    // IT MUST HAPPEN HERE, not in the cook. This is the single call site behind every slot --
+    // baseColor, normal, occlusion, emissive, metalRough AND opacity -- and, decisively, it runs
+    // before AverAssetC's mergeOpacityMaps, which gives up on an undecodable mask and then discards
+    // it unconditionally. By the time the cook sees these images the opacity map is already gone.
+    if (img.ok) {
+        if (const char* container = aver::undecodableContainer(img.bytes)) {
+            const std::string alt = aver::findDecodableSibling(full);
+            std::vector<u8> altBytes;
+            if (!alt.empty() && readAll(alt, altBytes)) {
+                img.bytes = std::move(altBytes);
+                const usize adot = alt.find_last_of('.');
+                if (adot != std::string::npos) img.ext = alt.substr(adot);
+                c.sawTextureSubstituted = true;
+            } else {
+                // Left as-is on purpose: the cook's existing refusal is the right backstop, and it
+                // names the container in a message this function has no way to phrase as well.
+                (void)container;
+            }
+        }
     }
     if (!img.ok) c.sawUnreadableTexture = true;
 
@@ -697,7 +755,9 @@ i32 loadUsdTexture(Ctx& c, const std::string& rel) {
 // writes per object; see the call site for why that shape is the common one.
 bool sameLook(const ImportedMaterial& a, const ImportedMaterial& b) {
     const auto tex = [](const ImportedTexture& x, const ImportedTexture& y) {
-        return x.imageIndex == y.imageIndex && x.texCoord == y.texCoord;
+        // CHANNEL IS PART OF IDENTITY: two slots on the same image reading different channels are
+        // two different looks, and collapsing them would give one of them the other's mask.
+        return x.imageIndex == y.imageIndex && x.texCoord == y.texCoord && x.channel == y.channel;
     };
     for (int k = 0; k < 4; ++k) if (a.baseColorFactor[k] != b.baseColorFactor[k]) return false;
     for (int k = 0; k < 3; ++k) if (a.emissiveFactor[k]  != b.emissiveFactor[k])  return false;
@@ -780,6 +840,7 @@ void parseMaterial(Scanner& s, Ctx& c, const std::string& path) {
         const ShaderPrim* tex = shaderAt(*target);
         if (!tex || tex->id != "UsdUVTexture" || tex->file.empty()) return;
         slot.imageIndex = loadUsdTexture(c, tex->file);
+        slot.channel = surface->connectOut(input);
     };
     bindTex("diffuseColor",  m.baseColorTex);
     bindTex("normal",        m.normalTex);
@@ -795,6 +856,24 @@ void parseMaterial(Scanner& s, Ctx& c, const std::string& path) {
     // this is recorded for the tool to fold in, not bound. Without it every leaf on a tree whose
     // albedo is a JPEG is a solid quad, because a JPEG cannot carry alpha at all.
     bindTex("opacity", m.opacityTex);
+
+    // THE CUTOUT IS ALREADY IN THE BASE COLOUR, so there is nothing to fold.
+    //
+    // Blender's USD exporter connects `inputs:opacity` and `inputs:diffuseColor` to the SAME
+    // UsdUVTexture prim, differing only by `.outputs:a` versus `.outputs:rgb` -- it is how every
+    // Jungle Ruins plant is authored. Left as a separate opacity map, the downstream fold treats
+    // that image as a standalone mask and copies its RED channel into alpha, so a green leaf atlas
+    // becomes almost entirely transparent: worse than not folding at all, and silently so.
+    //
+    // Clearing the slot is the whole fix. The base colour's own alpha IS the mask the source asked
+    // for, alphaMode below still records that this is a cutout material, and the fold is skipped
+    // rather than performed wrongly. A genuinely separate mask -- a different image, or the same
+    // one read through a different channel -- is left alone and folded as before.
+    if (!m.opacityTex.empty() && m.opacityTex.imageIndex == m.baseColorTex.imageIndex &&
+        m.opacityTex.channel == 'a') {
+        m.opacityTex = ImportedTexture{};
+    }
+
     // MASK FROM THE CONNECTION, NOT FROM THE LOAD. A file that drives opacity from a texture is
     // describing a cutout whether or not this machine could read that texture -- and the two are
     // different questions, which the unbound-slot rule elsewhere would otherwise conflate. With no
@@ -1209,6 +1288,10 @@ bool importUsdFromMemory(const u8* bytes, usize size, const std::string& baseDir
     if (c.sawUnreadableTexture)
         out.unsupported.push_back("a texture a material named could not be read from disk; that slot is "
                                   "unbound rather than pointing at a file that is not there");
+    if (c.sawTextureSubstituted)
+        out.unsupported.push_back("a texture this file named is in a container the engine cannot decode "
+                                  "(TIFF, EXR and the like); a same-named sibling beside it on disk was "
+                                  "used instead -- check it is the image the source intended");
     if (c.sawTimeSamples) out.unsupported.push_back("time-sampled attributes were ignored; the default (non-animated) value was used");
     if (c.sawSubdiv)      out.unsupported.push_back("subdivisionScheme was not 'none'; the control cage was imported as-is, NOT subdivided, so the model will look faceted");
     if (c.sawNonUniformScale) out.unsupported.push_back("a non-uniform xformOp:scale was applied to normals without an inverse-transpose, so shading on that prim is approximate");
