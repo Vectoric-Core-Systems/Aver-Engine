@@ -430,6 +430,84 @@ float3 averRtPerturbNormal(RtMaterial mat, RtInstance inst, float3 N, float3 nTS
 // their actual slot differs from t9, move THIS line.
 StructuredBuffer<RtMaterial> gRtMaterials : register(t9);
 
+// ---- ALPHA-TESTED GEOMETRY, SEEN BY A RAY --------------------------------------------------------
+//
+// THE HOLE A LEAF CARD IS MADE OF DID NOT EXIST FOR ANY RAY. createBlas marks every geometry OPAQUE
+// and, until this change, only a BLENDED material un-opaqued its instance -- so an alpha-MASKED
+// material (foliage, chain-link, grates: opaque where it is opaque, absent where it is not) was
+// traced as a solid sheet. The raster depth prepass clips it correctly (material_prelude.hlsl's
+// `clip(s.alpha - a.alphaCutoff)`), so the two paths disagreed, and the ray-driven path -- the
+// standing default -- was the wrong one. Every leaf rendered as its bounding rectangle.
+//
+// WHAT THE FIX COSTS: an alpha-masked instance is now FORCE_NON_OPAQUE, which gives up the
+// hardware's right to skip any-hit on it. Each candidate on such an instance pays an index fetch,
+// three vertex reads and one texture sample. Opaque geometry is untouched and keeps the fast path.
+//
+// TAKES THE RayQuery BY REFERENCE and is written against the ONE template argument every trace in
+// this file uses. A second flag set would need its own copy -- HLSL has no way to be generic over
+// the flags, which is exactly why the loops below call this rather than inlining it six times.
+// GUARDED ON AVER_RT_BINDLESS, which is what gates the material and texture tables this reads
+// (averRtSampleSlot and averRtSurfaceUV are both inside that block). Without them a cutout cannot be
+// expressed at all -- there is no alpha to fetch -- so every candidate is exactly as solid as its
+// geometry says, which is the behaviour this file had before any of this.
+bool averRtCandidateOpaque(inout RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q) {
+#ifndef AVER_RT_BINDLESS
+    return true;
+#else
+    const RtInstance inst = gRtInstances[q.CandidateInstanceID()];
+    const RtMaterial mat  = gRtMaterials[inst.materialIndex];
+    // NOT ALPHA-MASKED MEANS OPAQUE. A translucent pane also arrives here as a candidate; it is not
+    // this function's business and must not be committed by it -- the callers that care about
+    // transmittance test the material themselves before consulting this.
+    if ((mat.flags & AVER_MAT_ALPHA_MASK) == 0) return true;
+
+    const uint tri = inst.firstIndex + q.CandidatePrimitiveIndex() * 3;
+    const uint i0  = inst.firstVertex + gRtIndices[tri + 0];
+    const uint i1  = inst.firstVertex + gRtIndices[tri + 1];
+    const uint i2  = inst.firstVertex + gRtIndices[tri + 2];
+
+    const float2 bary = q.CandidateTriangleBarycentrics();
+    const float3 w    = float3(1.0 - bary.x - bary.y, bary.x, bary.y);
+    float2 uv = gRtVerts[i0].uv * w.x + gRtVerts[i1].uv * w.y + gRtVerts[i2].uv * w.z;
+
+    // WORLD-ALIGNED UV IS RESOLVED, NOT IGNORED. A masked material using the planar projection is
+    // unusual, but sampling its mesh UV instead would cut holes in the wrong places -- silently, and
+    // only on that one material. The geometric normal is enough for the projection's axis choice,
+    // so no interpolated normal is needed here.
+    if (mat.flags & AVER_MAT_WORLD_UV) {
+        const float3 p0 = gRtVerts[i0].pos, p1 = gRtVerts[i1].pos, p2 = gRtVerts[i2].pos;
+        const float3 nObj = cross(p1 - p0, p2 - p0);
+        const float3 N    = normalize(mul(float4(nObj, 0.0), inst.objectToWorld).xyz);
+        const float3 wpos = q.WorldRayOrigin() + q.WorldRayDirection() * q.CandidateTriangleRayT();
+        uv = averRtSurfaceUV(mat, inst, wpos, N, uv);
+    }
+
+    // SampleLevel, via averRtSampleSlot -- ddx/ddy is undefined at a ray hit, and an UNBOUND slot
+    // returns opaque white, so a masked material whose atlas failed to load stays solid rather than
+    // vanishing entirely. Slot 0 is BaseColor (pbr::TextureSlot::BaseColor).
+    const float alpha = averRtSampleSlot(mat, 0, uv, float2(0, 0), float2(0, 0),
+                                         float4(1, 1, 1, 1)).a * mat.baseColorFactor.a;
+    return alpha >= mat.alphaCutoff;
+#endif
+}
+
+// Runs a query to its nearest genuinely-solid hit, honouring cutouts on the way.
+//
+// REPLACES `RAY_FLAG_FORCE_OPAQUE` + a single `Proceed()`. That idiom was correct while the only
+// non-opaque instances were translucent ones, which these rays exclude by mask -- its own comment
+// called FORCE_OPAQUE "provably a no-op here", and it was, right up until an alpha-masked instance
+// could appear in the opaque lane. With the flag left on, the hardware commits the leaf card and
+// never asks; without it, a candidate arrives and this decides.
+//
+// STILL BOUNDED IN PRACTICE by the mask: only alpha-masked instances produce candidates on these
+// rays, so a scene with no cutout materials loops exactly as many times as it used to.
+void averRtProceedSolid(inout RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q) {
+    while (q.Proceed()) {
+        if (q.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE && averRtCandidateOpaque(q))
+            q.CommitNonOpaqueTriangleHit();
+    }
+}
+
 // Ray-traced sun-shadow history: last frame's resolved (visibility, depth) (t6) and this frame's
 // (u2, becomes t6 next frame). Ping-ponged in VoxiRenderer.hpp's rtShadowHist_, never the same
 // texture in one frame. x = visibility [0,1], y = linear depth in cm, for rtReprojectHistory.
@@ -599,6 +677,25 @@ float3 rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float
             // the t9 material table were built for, and until now never used by a shadow ray.
             const uint iid = q.CandidateInstanceID();
             const RtMaterial m = gRtMaterials[gRtInstances[iid].materialIndex];
+
+            // ---- A CUTOUT IS NOT A MEDIUM -------------------------------------------------------
+            //
+            // Alpha-masked instances are non-opaque now, so they arrive here alongside glass. They
+            // must NOT fall into the transmittance walk below: a leaf is not a pane, it has no
+            // thickness and no attenuation colour, and treating it as one would tint the shadow it
+            // casts by whatever the fallback medium happens to be.
+            //
+            // The rule is binary. Above the cutoff the leaf is solid: commit it and the ray is
+            // blocked, exactly as an opaque hit would have been. Below it, the ray is passing
+            // through a hole and the leaf is not there at all -- continue without touching
+            // transmittance, so a gap between leaves casts no shadow.
+            if (m.flags & AVER_MAT_ALPHA_MASK) {
+                if ((m.flags & AVER_MAT_CAST_SHADOW) && averRtCandidateOpaque(q)) {
+                    q.CommitNonOpaqueTriangleHit();
+                    break;                       // fully blocked; nothing past it can matter
+                }
+                continue;
+            }
 
             if ((m.flags & AVER_MAT_CAST_SHADOW) == 0) continue;   // casts nothing at all
 
@@ -942,14 +1039,16 @@ float3 rtReflection(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, flo
     r.TMax      = 100000.0;
 
     RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
-    // Opaque lane only (AVER_RT_MASK_OPAQUE): a single Proceed() can't correctly traverse past a
-    // non-opaque candidate, and this ray has no reason to want one.
-    // FORCE_OPAQUE IS PROVABLY A NO-OP HERE: createBlas marks every geometry OPAQUE, and only
-    // TlasInstanceFlag_ForceNonOpaque un-opaques an instance, set ONLY on the translucent lane this
-    // mask already excludes -- so it just skips any-hit bookkeeping. NOT on the shadow ray, where
-    // AVER_RT_MASK_ALL lets glass attenuate it; forcing opaque there would make every pane a wall.
-    q.TraceRayInline(gScene, RAY_FLAG_FORCE_OPAQUE, AVER_RT_MASK_OPAQUE_ALL, r);
-    q.Proceed();
+    // Opaque lane only (AVER_RT_MASK_OPAQUE_ALL): this ray wants solid surfaces, and excludes the
+    // translucent lane by mask rather than by flag.
+    //
+    // FORCE_OPAQUE USED TO BE A PROVABLE NO-OP HERE and is now provably WRONG. The old proof was
+    // that createBlas marks every geometry OPAQUE and only the translucent lane -- excluded by this
+    // mask -- was ever un-opaqued. Alpha-masked instances broke that: they stay in the OPAQUE lane
+    // (they occlude, they cast shadow) and are non-opaque so a ray can see the holes in them. With
+    // the flag on, the hardware committed the leaf card and never asked.
+    q.TraceRayInline(gScene, RAY_FLAG_NONE, AVER_RT_MASK_OPAQUE_ALL, r);
+    averRtProceedSolid(q);
     if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) return 0.0;
 
     RtInstance inst = gRtInstances[q.CommittedInstanceID()];
@@ -1028,10 +1127,11 @@ float3 rtReflection(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, flo
 // ~8.7m path, so a pool's side came out fully opaque and bright (the PTTest pit's blown-out white
 // slab). A ray doesn't have to guess; it measures.
 //
-// FORCE_OPAQUE, DELIBERATELY: the one flag making a single Proceed() correct here. Translucent
-// instances sit as FORCE_NON_OPAQUE (mask comment at top of file), so ordinary traversal would stop
-// AT a candidate uncommitted; this overrides it for this ray, committing the nearest hit in either
-// lane -- exactly "what is the first thing along this ray, of any kind".
+// COMMITS EVERY CANDIDATE EXCEPT A FAILED CUTOUT, which is what FORCE_OPAQUE used to do here and
+// why it stood: translucent instances sit as FORCE_NON_OPAQUE, so ordinary traversal would stop AT
+// a candidate uncommitted. averRtProceedSolid commits any non-alpha-masked candidate on sight, so
+// this ray still answers "what is the first thing along it, of any kind" -- with the one refinement
+// that a hole in a cutout material is no longer a thing.
 //
 // BOTH LANES, because both can end the path: the volume's own BACK FACE, or an opaque object inside
 // it (a rock, the pool floor). Nearest-of-the-two makes absorption respond to real geometry instead
@@ -1114,8 +1214,8 @@ float2 averRefractedBackdropUV(AverSurface s, float3 wpos, float thicknessCm,
         rr.TMin = 0.0;
         rr.TMax = 100000.0;
         RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> rq;
-        rq.TraceRayInline(gScene, RAY_FLAG_FORCE_OPAQUE, AVER_RT_MASK_OPAQUE_ALL, rr);
-        rq.Proceed();
+        rq.TraceRayInline(gScene, RAY_FLAG_NONE, AVER_RT_MASK_OPAQUE_ALL, rr);
+        averRtProceedSolid(rq);   // cutouts, not cards -- see averRtProceedSolid
         if (rq.CommittedStatus() == COMMITTED_TRIANGLE_HIT)
             target = target + R * rq.CommittedRayT();
     }
@@ -1221,9 +1321,12 @@ float averVolumeThickness(float3 wpos, float3 N, float3 viewDir) {
     r.TMax      = 100000.0;
 
     RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
-    q.TraceRayInline(gScene, RAY_FLAG_FORCE_OPAQUE,
+    // BOTH LANES, and every candidate committed on sight EXCEPT a failed cutout: this measures the
+    // distance to the far side of a medium, so a pane is a real boundary here. averRtProceedSolid
+    // commits any non-alpha-masked candidate, which preserves exactly what FORCE_OPAQUE did.
+    q.TraceRayInline(gScene, RAY_FLAG_NONE,
                      AVER_RT_MASK_OPAQUE_ALL | AVER_RT_MASK_TRANSLUCENT, r);
-    q.Proceed();
+    averRtProceedSolid(q);
     if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) return 0.0;
     return q.CommittedRayT() + bias;
 }
@@ -1971,12 +2074,16 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     r.TMax      = 1.0e7;
 
     RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
-    // Opaque lane, FORCE_OPAQUE a free no-op (see rtReflection's ray setup). THE ONE RAY USING THE
-    // NARROW LANE though: AVER_RT_MASK_OPAQUE, not _OPAQUE_ALL -- starts inside the viewer's own
-    // head, so it's the one traversal that must not see AVER_RT_MASK_OWNER_HIDDEN. Every other
-    // opaque query in this file asks for _ALL.
-    q.TraceRayInline(gScene, RAY_FLAG_FORCE_OPAQUE, AVER_RT_MASK_OPAQUE, r);
-    q.Proceed();
+    // Opaque lane. THE ONE RAY USING THE NARROW LANE: AVER_RT_MASK_OPAQUE, not _OPAQUE_ALL -- it
+    // starts inside the viewer's own head, so it is the one traversal that must not see
+    // AVER_RT_MASK_OWNER_HIDDEN. Every other opaque query in this file asks for _ALL.
+    //
+    // THIS IS PRIMARY VISIBILITY, so it is the ray the cutout matters most on: whatever it commits
+    // is literally what you see. FORCE_OPAQUE here made every leaf card a solid rectangle while the
+    // raster path clipped the same material correctly -- and since ray-driven is the standing
+    // default, the wrong one was the one on screen.
+    q.TraceRayInline(gScene, RAY_FLAG_NONE, AVER_RT_MASK_OPAQUE, r);
+    averRtProceedSolid(q);
 
     if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {
         // A miss is the sky at the far plane. Depth 1, not 0: this projection isn't reversed, so 0
@@ -2457,8 +2564,8 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> qb;
         // Opaque lane only -- see AVER_RT_MASK_OPAQUE.
         // Same proof as the primary ray above: this mask cannot see a non-opaque candidate.
-        qb.TraceRayInline(gScene, RAY_FLAG_FORCE_OPAQUE, AVER_RT_MASK_OPAQUE_ALL, rb);
-        qb.Proceed();
+        qb.TraceRayInline(gScene, RAY_FLAG_NONE, AVER_RT_MASK_OPAQUE_ALL, rb);
+        averRtProceedSolid(qb);
 
         if (qb.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {
             // Escaped: path ends, deliberately without adding sky (averShadeIndirect already gave

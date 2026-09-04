@@ -67,6 +67,13 @@ constexpr u32 kMaxDraws = 16384;
 // the structure" is the first question a missing-translucent-shadow debug needs answered.
 u32 tlasTranslucentThisBuild_ = 0;
 u32 tlasTranslucentLogged_    = 0;
+// Alpha-MASKED instances this build. Reported for the same reason and separately, because the two
+// lanes answer different questions: a translucent pane is in the structure so a shadow ray can
+// attenuate THROUGH it, while a cutout instance is there so any ray can see the holes in it. Both
+// give up the hardware's any-hit skip, so knowing how many there are is the first thing a
+// "why did the foliage get expensive" question needs.
+u32 tlasAlphaMaskedThisBuild_ = 0;
+u32 tlasAlphaMaskedLogged_    = 0;
 constexpr u32 kRtMaskOpaque      = 0x01;
 constexpr u32 kRtMaskTranslucent = 0x02;
 // The viewer's own first-person body -- see AVER_RT_MASK_OWNER_HIDDEN in voxi.hlsl (must match; full
@@ -822,6 +829,7 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
     rhi::ScopedGpuStat gpuStat(ctx, "Voxi acceleration structures");
     std::vector<rhi::TlasInstance> inst;
     tlasTranslucentThisBuild_ = 0;
+    tlasAlphaMaskedThisBuild_ = 0;
     inst.reserve(drawsPrev_.size());
     rtInstanceData_.clear();
     rtInstanceMesh_.clear();
@@ -990,6 +998,29 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
         }
         rtInstanceMatKey_.push_back(matKey);
 
+        // ---- ALPHA-MASKED GEOMETRY JOINS THE NON-OPAQUE LANE ------------------------------------
+        //
+        // Until this, `translucent` was the ONLY thing that un-opaqued an instance, so a cutout
+        // material -- foliage, grates, chain-link -- was traced as the solid sheet its triangles
+        // describe. Every leaf card was its own bounding rectangle in shadows, reflections, GI and
+        // (since ray-driven is the default) in primary visibility too, while the raster prepass
+        // clipped the same material correctly. The two paths disagreed and the default was wrong.
+        //
+        // PATCHED ONTO THE INSTANCE ALREADY PUSHED, because the material cannot be resolved any
+        // earlier: matKey is only known here, several statements after inst.push_back(i). Reordering
+        // the loop to resolve it first would work too and is a bigger change to a loop whose
+        // instanceId/rtInstanceData_ lockstep is load-bearing and documented as such above.
+        //
+        // NOT THE MASK, only the flags: this geometry still belongs to the OPAQUE lane. It occludes,
+        // casts shadow and is a valid reflection hit -- it simply has holes, which is what any-hit
+        // is for. Moving it to kRtMaskTranslucent would hide it from every ray that asks for solid
+        // surfaces only.
+        if (!d.translucent &&
+            (matConstantsByKey.at(matKey).flags & pbr::MaterialFlag_AlphaMask) != 0) {
+            inst.back().flags |= rhi::TlasInstanceFlag_ForceNonOpaque;
+            ++tlasAlphaMaskedThisBuild_;
+        }
+
         rtInstanceData_.push_back(ri);
         rtInstanceMesh_.push_back(d.mesh);
 
@@ -1063,6 +1094,11 @@ void VoxiRenderer::buildAccelerationStructures(rhi::IRenderContext& ctx) {
         AVER_INFO("[Voxi] acceleration structure: {} instance(s), {} in the translucent lane "
                   "(non-opaque, visible to shadow rays only)",
                   inst.size(), tlasTranslucentThisBuild_);
+    }
+    if (tlasAlphaMaskedThisBuild_ && tlasAlphaMaskedLogged_ != tlasAlphaMaskedThisBuild_) {
+        tlasAlphaMaskedLogged_ = tlasAlphaMaskedThisBuild_;
+        AVER_INFO("[Voxi] acceleration structure: {} instance(s) alpha-masked (non-opaque, so every "
+                  "ray tests the cutout instead of hitting the card)", tlasAlphaMaskedThisBuild_);
     }
     rtActive_ = true;
     cb_.shadowParams[2] = 1.0f;
