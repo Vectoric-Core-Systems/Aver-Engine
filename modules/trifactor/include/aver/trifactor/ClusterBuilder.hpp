@@ -70,7 +70,7 @@ inline constexpr u32 kMaxClusterTriangles = fmt::kMaxMeshletTriangles;
 // under. It is also, not incidentally, the FIRST version this field is able to record at all: nothing
 // before this task ever wrote anything but 0 here, so there is no "version 0 algorithm" to distinguish
 // this one from on disk -- 0 already carries that meaning by the paragraph above.
-inline constexpr u32 kBuilderVersion = 1;
+inline constexpr u32 kBuilderVersion = 2;
 
 // ---- Stage 4: streaming topology (fallbackAncestorId, ownerGroupId, ClusterGroupNode) ----------
 //

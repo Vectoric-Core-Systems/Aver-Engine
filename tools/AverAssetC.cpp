@@ -853,6 +853,121 @@ std::vector<TexRole> imageRoles(const std::vector<fmt::ImportedMaterial>& materi
     return roles;
 }
 
+// Folds a material's SEPARATE opacity map into its base colour's alpha channel, which is the only
+// place .ocmat can express cutout.
+//
+// WHY THIS IS NEEDED AT ALL. glTF puts alpha in the base colour and the engine followed it, but USD
+// and .mtl both name opacity as its own file, and Intel's Jungle Ruins trees are authored that way:
+// a JPEG albedo -- which cannot carry an alpha channel at all -- plus a greyscale *_opacity.jpg
+// beside it. Dropping that map does not fail; it renders every leaf as a solid quad, and the tree
+// looks like a bush made of cardboard.
+//
+// WHY IN THE TOOL. Same reason as the size cap: the cook writes the bytes it is handed and has no
+// decoder. This one does, and needs one, because folding two encoded images together means decoding
+// both.
+//
+// THE RESULT IS ALWAYS A NEW IMAGE, never a write into the shared base colour: two materials may
+// share one albedo and have different opacity maps -- which is exactly how a tree's leaves and its
+// dead leaves are authored -- and mutating the shared one would give the second material the first
+// one's cutout.
+bool foldOpacityInto(std::vector<fmt::ImportedImage>& images, fmt::ImportedMaterial& m,
+                     std::string* note) {
+    if (m.opacityTex.empty()) return false;
+    const usize oi = usize(m.opacityTex.imageIndex);
+    if (oi >= images.size() || !images[oi].ok || images[oi].bytes.empty()) return false;
+    if (m.baseColorTex.empty()) {
+        // Nothing to fold INTO. Leaving the slot alone is right: an opacity map with no base colour
+        // has no channel to live in, and inventing a white base colour to carry it would put a
+        // texture on a material the source never gave one.
+        if (note) *note = "'" + m.name + "' has an opacity map but no base colour to fold it into; "
+                          "the cutout is lost";
+        m.opacityTex = {};
+        return false;
+    }
+    const usize bi = usize(m.baseColorTex.imageIndex);
+    if (bi >= images.size() || !images[bi].ok || images[bi].bytes.empty()) return false;
+
+    ImageData base, mask;
+    std::string derr;
+    if (!decodeImage(images[bi].bytes.data(), images[bi].bytes.size(), base, &derr) ||
+        !decodeImage(images[oi].bytes.data(), images[oi].bytes.size(), mask, &derr)) {
+        if (note) *note = "'" + m.name + "' could not fold its opacity map: " + derr;
+        return false;
+    }
+    if (mask.width != base.width || mask.height != base.height) {
+        // A resample would be easy and is deliberately not done: differing sizes mean the two maps
+        // were not authored against the same UV layout, and stretching one to fit is a guess that
+        // would show up as a cutout that does not follow the leaf.
+        if (note) {
+            char buf[256];
+            std::snprintf(buf, sizeof buf,
+                          "'%s' opacity map is %ux%u but its base colour is %ux%u; not folded",
+                          m.name.c_str(), mask.width, mask.height, base.width, base.height);
+            *note = buf;
+        }
+        return false;
+    }
+
+    // The RED channel, because that is what the source connected: `inputs:opacity.connect` names
+    // `.outputs:r` on the texture, and .mtl's map_d is greyscale. Averaging RGB would differ on a
+    // map that is not actually grey, and would differ from what the authoring tool showed.
+    const usize n = usize(base.width) * base.height;
+    for (usize i = 0; i < n; ++i) base.pixels[i * 4 + 3] = mask.pixels[i * 4];
+
+    std::vector<u8> encoded;
+    const auto sink = [](void* ctx, void* data, int len) {
+        auto* v = static_cast<std::vector<u8>*>(ctx);
+        const u8* p = static_cast<const u8*>(data);
+        v->insert(v->end(), p, p + len);
+    };
+    if (!stbi_write_png_to_func(sink, &encoded, static_cast<int>(base.width),
+                                static_cast<int>(base.height), 4, base.pixels.data(),
+                                static_cast<int>(base.width * 4)) || encoded.empty()) {
+        if (note) *note = "'" + m.name + "' opacity fold failed to re-encode";
+        return false;
+    }
+
+    fmt::ImportedImage merged;
+    merged.bytes = std::move(encoded);
+    merged.ext = ".png";                        // PNG because it has to carry alpha; a JPEG cannot
+    merged.suggestedName = images[bi].suggestedName + "_cut";
+    // NOT the base colour's own path: that is the file this one replaced, and reusing it makes every
+    // later diagnostic -- the size cap's line, most visibly -- name a file that is no longer what is
+    // being written.
+    merged.sourcePath = images[bi].suggestedName + " + " + images[oi].suggestedName + " (merged)";
+    merged.ok = true;
+    if (note) *note = "'" + m.name + "' folded " +
+                      (images[oi].sourcePath.empty() ? images[oi].suggestedName : images[oi].sourcePath) +
+                      " into the alpha of " + merged.suggestedName;
+
+    images.push_back(std::move(merged));
+    m.baseColorTex.imageIndex = i32(images.size() - 1);
+    m.opacityTex = {};                          // consumed; the cook must not see it as unhandled
+    if (m.alphaMode == "OPAQUE") m.alphaMode = "MASK";
+    return true;
+}
+
+// Applies the fold across a whole import. Runs BEFORE the size cap so the cap sees, and shrinks, the
+// merged image rather than the original the merge replaced.
+void mergeOpacityMaps(std::vector<fmt::ImportedImage>& images,
+                      std::vector<fmt::ImportedMaterial>& materials) {
+    u32 folded = 0, lost = 0;
+    for (fmt::ImportedMaterial& m : materials) {
+        if (m.opacityTex.empty()) continue;
+        std::string note;
+        const bool ok = foldOpacityInto(images, m, &note);
+        if (!note.empty()) {
+            if (ok) AVER_INFO("opacity {}", note);
+            else    AVER_WARN("opacity {}", note);
+        }
+        if (ok) ++folded; else ++lost;
+        m.opacityTex = {};   // whatever happened, it is not the cook's business
+    }
+    if (folded) AVER_INFO("folded {} separate opacity map(s) into base-colour alpha", folded);
+    if (lost)   AVER_WARN("{} material(s) had an opacity map that could NOT be folded; their cutout "
+                          "is lost and they will render solid", lost);
+}
+
 // One image, halved until neither side exceeds `cap`, and re-encoded as PNG. Returns false and
 // leaves `img` untouched when it is already small enough, cannot be decoded, or would not re-encode.
 //
@@ -948,7 +1063,7 @@ void capImageSizes(std::vector<fmt::ImportedImage>& images,
 //
 // A no-op when `contentDir` is empty, which is the launcher-less case: geometry still imports, and
 // the caller is told what it is leaving behind rather than losing it silently.
-void cookAndRewriteSlots(const std::vector<fmt::ImportedMaterial>& materials,
+void cookAndRewriteSlots(std::vector<fmt::ImportedMaterial>& materials,
                          std::vector<fmt::ImportedImage>& images,
                          const std::string& contentDir, const std::string& base,
                          std::vector<fmt::OcMeshData>& meshes, u32 maxTexture) {
@@ -966,7 +1081,9 @@ void cookAndRewriteSlots(const std::vector<fmt::ImportedMaterial>& materials,
         return;
     }
     // BEFORE the cook, because the cook writes the bytes it is given. Capping afterwards would
-    // mean writing the 4K file and then a second one beside it.
+    // mean writing the 4K file and then a second one beside it. The opacity fold goes first so the
+    // cap shrinks the MERGED image rather than the original it replaced.
+    mergeOpacityMaps(images, materials);
     capImageSizes(images, materials, maxTexture);
 
     fmt::MaterialCookOptions copt;
@@ -1208,8 +1325,16 @@ int main(int argc, char** argv) {
         std::vector<MeshItem> items;
         items.reserve(res.meshes.size());
         for (usize i = 0; i < res.meshes.size(); ++i) {
-            items.push_back(MeshItem{i < res.meshNames.size() ? res.meshNames[i] : std::string{},
-                                     res.meshes[i], -1});
+            // THE LEAF OF THE PRIM PATH, not the whole path. UsdImportResult::meshNames holds
+            // "/root/Grass_B_02/Grass_B_02" because that is what identifies a prim; safe() then
+            // strips the slashes for a filename and produces rootGrass_B_02Grass_B_02.ocmesh, which
+            // is unreadable and gets worse the deeper a scene nests. writeMeshItems already
+            // de-duplicates a stem it has used before, so two prims sharing a leaf name are still
+            // told apart -- by a numeric suffix rather than by a path nobody can read.
+            std::string name = i < res.meshNames.size() ? res.meshNames[i] : std::string{};
+            const usize leaf = name.find_last_of('/');
+            if (leaf != std::string::npos) name = name.substr(leaf + 1);
+            items.push_back(MeshItem{std::move(name), res.meshes[i], -1});
         }
         const bool anyFailed = writeMeshItems(input, outDir, base, items, merge, lodRatio, stats);
         emitSummary(input, stats, anyFailed ? 1 : 0);

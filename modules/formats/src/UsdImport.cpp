@@ -192,10 +192,26 @@ struct MeshAttrs {
     // The prim path a `rel material:binding` named, unresolved. Resolved AFTER the walk, because
     // USD does not require a Material to be declared before the mesh that binds it.
     std::string materialBinding;
+    // A GeomSubset's own fields, read through this same struct because a subset body is parsed with
+    // the same member reader. `indices` on a face subset are FACE numbers, which is why they cannot
+    // share faceVertexIndices.
+    std::string      subsetElementType;
+    std::vector<i32> subsetIndices;
     // USD puts doubleSided on the GEOMETRY; glTF and .ocmat put it on the material. Carried here and
     // folded into the bound material by resolveBindings.
     bool doubleSided = false;
     bool hasPoints = false;
+};
+
+// One `def GeomSubset` under a Mesh: a named set of FACE indices with its own material binding.
+// This is how a DCC exports a single mesh painted with several materials, and it is how every tree
+// in Intel's Jungle Ruins is authored -- trunk, branches and leaves are three subsets of one mesh.
+// Without it a tree imports entirely as its mesh-level binding, which is the bark: a tree with no
+// leaves, and no error to say so.
+struct GeomSubsetDef {
+    std::string      name;
+    std::string      binding;   // the prim path its `rel material:binding` named, unresolved
+    std::vector<i32> faces;     // indices into faceVertexCounts, NOT into faceVertexIndices
 };
 
 struct Ctx {
@@ -209,7 +225,9 @@ struct Ctx {
     // Parallel to out->meshes: the prim path each mesh's `rel material:binding` named, or empty.
     // A second array rather than a field on OcMeshData because the binding is a USD concept that
     // does not survive into the engine's mesh -- only the resolved slot name does.
-    std::vector<std::string> meshBinding;
+    // Parallel to out->meshes, and one entry per MATERIAL SLOT of that mesh: a mesh with GeomSubsets
+    // has several. Empty where a slot had no binding.
+    std::vector<std::vector<std::string>> meshBinding;
     std::vector<bool>        meshDoubleSided;   // parallel to out->meshes
     // Every Material prim path, and the out->materials entry it resolved to. NOT parallel to
     // out->materials: several paths may share one entry -- see parseMaterial's dedup.
@@ -217,6 +235,7 @@ struct Ctx {
     // Parallel to out->images: the RESOLVED path each was read from, so two materials naming the
     // same texture share one image rather than writing its bytes twice under two names.
     std::vector<std::string> imageSources;
+    bool sawPartialSubsetCover = false;
     bool sawUnreadableTexture = false;
     bool sawUnresolvedBinding = false;
     bool sawNonUniformScale = false;
@@ -278,7 +297,8 @@ void generateNormals(OcMeshData& m) {
 }
 
 // Turns a gathered UsdGeomMesh into an OcMeshData in engine space.
-void buildMesh(Ctx& c, const MeshAttrs& a, const M4& world, const std::string& primPath) {
+void buildMesh(Ctx& c, const MeshAttrs& a, const M4& world, const std::string& primPath,
+               const std::vector<GeomSubsetDef>& subsets) {
     if (!a.hasPoints || a.points.size() < 9) return;
     if (a.faceVertexIndices.empty() || a.faceVertexCounts.empty()) return;
 
@@ -306,10 +326,18 @@ void buildMesh(Ctx& c, const MeshAttrs& a, const M4& world, const std::string& p
     const bool srcLeftHanded = a.orientation == "leftHanded";
     const bool flipWinding = c.opt->convertAxes ? !srcLeftHanded : srcLeftHanded;
 
+    // WHERE EACH SOURCE FACE'S TRIANGLES LANDED, so GeomSubsets -- which address faces, not
+    // triangles -- can be turned into submeshes below. A face this loop SKIPS still gets an entry,
+    // empty: subset indices count every face the source declared, degenerate ones included, and
+    // dropping those entries would shift every later face's number.
+    std::vector<std::pair<u32, u32>> faceRange;
+    faceRange.reserve(a.faceVertexCounts.size());
+
     usize corner = 0;
     for (const i32 rawCount : a.faceVertexCounts) {
         const usize n = rawCount > 0 ? static_cast<usize>(rawCount) : 0;
-        if (n < 3 || corner + n > cornerCount) { corner += n; continue; }
+        if (n < 3 || corner + n > cornerCount) { corner += n; faceRange.emplace_back(0u, 0u); continue; }
+        const u32 faceIndexStart = static_cast<u32>(m.indices.size());
 
         const u32 base = static_cast<u32>(m.positions.size() / 3);
         for (usize k = 0; k < n; ++k) {
@@ -366,28 +394,73 @@ void buildMesh(Ctx& c, const MeshAttrs& a, const M4& world, const std::string& p
                 m.indices.push_back(base + static_cast<u32>(k + 1));
             }
         }
+        faceRange.emplace_back(faceIndexStart,
+                               static_cast<u32>(m.indices.size()) - faceIndexStart);
         corner += n;
     }
 
     if (m.positions.empty() || m.indices.empty()) return;
     if (!haveNormals && c.opt->generateMissingNormals) generateNormals(m);
 
-    // EMPTY FOR NOW, always. The binding names a prim path that may not have been read yet, so the
-    // slot is filled in after the walk -- see resolveBindings.
-    m.materialSlots.push_back(std::string());
-    OcMeshSubmesh sm;
-    sm.name         = primPath;
-    sm.materialSlot = 0;
-    sm.indexStart   = 0;
-    sm.indexCount   = static_cast<u32>(m.indices.size());
-    sm.baseVertex   = 0;
-    sm.vertexCount  = m.vertexCount();
-    m.submeshes.push_back(std::move(sm));
+    // ---- submeshes -----------------------------------------------------------------------
+    //
+    // THE INDEX BUFFER IS REORDERED, because a submesh is a contiguous [indexStart, indexCount) run
+    // and a subset's faces are scattered through the source. The VERTEX buffer is left alone and
+    // every submesh spans all of it -- the same shape the glTF path produces, where baseVertex is 0
+    // and vertexCount is the whole mesh.
+    //
+    // A face in no subset keeps the mesh-level binding, in a LAST slot. Blender writes subsets that
+    // cover every face, so that group is usually empty; a partial cover would otherwise lose
+    // geometry silently, which is the one outcome worth writing code to avoid.
+    std::vector<std::string> slotBinding;
+    std::vector<u32> reordered;
+    reordered.reserve(m.indices.size());
+    std::vector<bool> claimed(faceRange.size(), false);
+
+    const auto appendGroup = [&](const std::vector<i32>& faces, const std::string& binding,
+                                 const std::string& name) {
+        const u32 start = static_cast<u32>(reordered.size());
+        for (const i32 f : faces) {
+            if (f < 0 || usize(f) >= faceRange.size()) continue;
+            const auto& r = faceRange[usize(f)];
+            reordered.insert(reordered.end(), m.indices.begin() + r.first,
+                             m.indices.begin() + r.first + r.second);
+            claimed[usize(f)] = true;
+        }
+        const u32 count = static_cast<u32>(reordered.size()) - start;
+        if (count == 0) return;
+        OcMeshSubmesh sm;
+        sm.name         = name;
+        sm.materialSlot = static_cast<u32>(slotBinding.size());
+        sm.indexStart   = start;
+        sm.indexCount   = count;
+        sm.baseVertex   = 0;
+        sm.vertexCount  = m.vertexCount();
+        m.submeshes.push_back(std::move(sm));
+        slotBinding.push_back(binding);
+    };
+
+    for (const GeomSubsetDef& g : subsets)
+        appendGroup(g.faces, g.binding, primPath + "/" + g.name);
+
+    std::vector<i32> leftover;
+    for (usize f = 0; f < faceRange.size(); ++f)
+        if (!claimed[f] && faceRange[f].second) leftover.push_back(static_cast<i32>(f));
+    if (!subsets.empty() && !leftover.empty())
+        c.sawPartialSubsetCover = true;
+    if (subsets.empty() || !leftover.empty())
+        appendGroup(leftover, a.materialBinding, primPath);
+
+    if (m.submeshes.empty()) return;
+    m.indices = std::move(reordered);
+    // EMPTY FOR NOW, always: a binding names a prim path that may not have been read yet, so the
+    // slots are filled in after the walk -- see resolveBindings.
+    m.materialSlots.assign(slotBinding.size(), std::string());
     computeBounds(m);
 
     c.out->meshes.push_back(std::move(m));
     c.out->meshNames.push_back(primPath);
-    c.meshBinding.push_back(a.materialBinding);
+    c.meshBinding.push_back(std::move(slotBinding));
     c.meshDoubleSided.push_back(a.doubleSided);
 }
 
@@ -718,6 +791,16 @@ void parseMaterial(Scanner& s, Ctx& c, const std::string& path) {
     // shading is most sensitive to.
     bindTex("roughness", m.metalRoughTex);
     if (m.metalRoughTex.empty()) bindTex("metallic", m.metalRoughTex);
+    // A SEPARATE opacity map. .ocmat has no slot for one -- cutout is the base colour's alpha -- so
+    // this is recorded for the tool to fold in, not bound. Without it every leaf on a tree whose
+    // albedo is a JPEG is a solid quad, because a JPEG cannot carry alpha at all.
+    bindTex("opacity", m.opacityTex);
+    // MASK FROM THE CONNECTION, NOT FROM THE LOAD. A file that drives opacity from a texture is
+    // describing a cutout whether or not this machine could read that texture -- and the two are
+    // different questions, which the unbound-slot rule elsewhere would otherwise conflate. With no
+    // map bound the alpha stays 1, so a masked material with a missing mask renders as the opaque
+    // one it would have been anyway; what is preserved is what the source said.
+    if (surface->connect("opacity") && m.alphaMode == "OPAQUE") m.alphaMode = "MASK";
 
     // ---- one entry per DISTINCT look, however many prims declare it ----------------------------
     //
@@ -860,6 +943,8 @@ bool parseMember(Scanner& s, Ctx& c, MeshAttrs& attrs,
     }
     else if (is("subdivisionScheme")) { attrs.subdivisionScheme = strVal; if (!strVal.empty() && strVal != "none") c.sawSubdiv = true; }
     else if (is("orientation")) attrs.orientation = strVal;
+    else if (is("elementType")) attrs.subsetElementType = strVal;
+    else if (is("indices")) allInts(region, attrs.subsetIndices);
     else if (is("doubleSided")) {
         // `uniform bool doubleSided = 1`, or `= true`. Both spellings occur.
         attrs.doubleSided = region.find('1') != std::string_view::npos ||
@@ -915,13 +1000,37 @@ void parsePrimBody(Scanner& s, Ctx& c, const M4& parent, const std::string& path
     for (const auto& o : ops) if (o.first == "translate") node = mul(node, o.second);
 
     const M4 world = mul(node, parent);
-    if (attrs.hasPoints) buildMesh(c, attrs, world, path);
+    // THE SUBSETS FIRST, and this is why they cannot wait with the other children: they decide how
+    // many material slots the mesh has, and buildMesh writes those slots.
+    std::vector<GeomSubsetDef> subsets;
+    for (const DeferredChild& ch : children) {
+        if (ch.type != "GeomSubset") continue;
+        Scanner ss{ch.body.data(), ch.body.data() + ch.body.size()};
+        MeshAttrs sa;
+        std::vector<std::pair<std::string, M4>> sops;
+        std::vector<DeferredChild> skids;
+        while (parseMember(ss, c, sa, sops, skids, ch.path)) {}
+        // `face` is the only elementType this can act on; a "point" or "edge" subset addresses
+        // something OcMeshData has no submesh concept for. familyName is not required to be
+        // materialBind, but a subset with no binding at all has nothing to contribute.
+        if (sa.subsetElementType != "face" || sa.materialBinding.empty()) continue;
+        GeomSubsetDef g;
+        const usize slash = ch.path.find_last_of('/');
+        g.name    = slash == std::string::npos ? ch.path : ch.path.substr(slash + 1);
+        g.binding = sa.materialBinding;
+        g.faces   = std::move(sa.subsetIndices);
+        if (!g.faces.empty()) subsets.push_back(std::move(g));
+    }
+
+    if (attrs.hasPoints) buildMesh(c, attrs, world, path, subsets);
 
     // NOW the children, with a transform that finally includes this prim's own ops.
     for (const DeferredChild& ch : children) {
         Scanner cs{ch.body.data(), ch.body.data() + ch.body.size()};
         // A Material carries no geometry and no transform, so it goes to the shader reader rather
-        // than through the mesh walk that would tokenise its inputs and drop every one.
+        // than through the mesh walk that would tokenise its inputs and drop every one. A GeomSubset
+        // was already consumed above, and walking it again would only re-parse its index array.
+        if (ch.type == "GeomSubset") continue;
         if (ch.type == "Material") parseMaterial(cs, c, ch.path);
         else                       parsePrimBody(cs, c, world, ch.path);
     }
@@ -954,13 +1063,14 @@ const char* usdEncodingName(UsdEncoding e) {
 // before the mesh that binds it, and a Looks scope written after the geometry is an ordinary shape
 // for an exported stage.
 void resolveBindings(Ctx& c) {
-    for (usize i = 0; i < c.out->meshes.size() && i < c.meshBinding.size(); ++i) {
-        const std::string& want = c.meshBinding[i];
-        if (want.empty() || c.out->meshes[i].materialSlots.empty()) continue;
+    for (usize i = 0; i < c.out->meshes.size() && i < c.meshBinding.size(); ++i)
+    for (usize sl = 0; sl < c.meshBinding[i].size() && sl < c.out->meshes[i].materialSlots.size(); ++sl) {
+        const std::string& want = c.meshBinding[i][sl];
+        if (want.empty()) continue;
         bool found = false;
         for (const auto& mp : c.materialPaths)
             if (mp.first == want) {
-                c.out->meshes[i].materialSlots[0] = c.out->materials[mp.second].name;
+                c.out->meshes[i].materialSlots[sl] = c.out->materials[mp.second].name;
                 // DOUBLE-SIDEDNESS CROSSES HERE, because USD authors it on the geometry while .ocmat
                 // carries it on the material -- Jungle Ruins' foliage cards are `doubleSided = 1`
                 // meshes bound to a Material that says nothing about culling, so without this every
@@ -1093,6 +1203,9 @@ bool importUsdFromMemory(const u8* bytes, usize size, const std::string& baseDir
     if (c.sawUnresolvedBinding)
         out.unsupported.push_back("a mesh bound a Material this file does not declare -- almost always one "
                                   "behind a reference; that mesh imports with an empty material slot");
+    if (c.sawPartialSubsetCover)
+        out.unsupported.push_back("a mesh's GeomSubsets did not cover every face; the remainder kept "
+                                  "the mesh-level material binding rather than being dropped");
     if (c.sawUnreadableTexture)
         out.unsupported.push_back("a texture a material named could not be read from disk; that slot is "
                                   "unbound rather than pointing at a file that is not there");

@@ -62,6 +62,19 @@ struct ImportedMaterial {
     bool doubleSided        = false;
 
     ImportedTexture baseColorTex, metalRoughTex, normalTex, occlusionTex, emissiveTex;
+
+    // A SEPARATE opacity map, which .ocmat has no slot for: cutout there is the base colour's alpha
+    // channel, exactly as glTF defines it. USD and .mtl both name opacity as its own file
+    // (`inputs:opacity.connect` to a UsdUVTexture, `map_d`), and Intel's Jungle Ruins trees are
+    // authored that way -- a JPEG albedo, which cannot carry alpha at all, plus a greyscale
+    // `*_opacity.jpg` beside it.
+    //
+    // RECORDED HERE, FOLDED IN LATER. This layer states what the file said; it does not decode. The
+    // fold into baseColorTex's alpha happens in the tool, where a decoder and an encoder already
+    // are (AverAssetC's mergeOpacityMaps) -- the same split that keeps --max-texture out of the
+    // cook. A material still carrying this by the time it reaches cookMaterials has an opacity map
+    // that could not be folded, and the cook ignores it rather than writing a file nothing samples.
+    ImportedTexture opacityTex;
 };
 
 } // namespace aver::fmt

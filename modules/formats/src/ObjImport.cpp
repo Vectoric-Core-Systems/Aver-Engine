@@ -630,6 +630,9 @@ void objMaterialsToImported(const std::vector<ObjMaterial>& in, const std::strin
             slot.imageIndex = loadObjTexture(baseDir, rel, outImages, warnings);
         };
         bind(m.mapBaseColor,         o.baseColorTex);
+        // map_d, which was parsed and then dropped: .ocmat carries cutout as the base colour's
+        // alpha, so this is recorded for the tool to fold in rather than bound to a slot.
+        bind(m.mapOpacity,           o.opacityTex);
         bind(m.mapNormal,            o.normalTex);
         bind(m.mapEmissive,          o.emissiveTex);
         bind(m.mapAmbientOcclusion,  o.occlusionTex);

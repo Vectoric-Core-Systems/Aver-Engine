@@ -90,9 +90,25 @@ bool cookMaterials(const std::vector<ImportedMaterial>& materials,
     // bury the one message that matters.
     const std::filesystem::path texDir =
         std::filesystem::path(opt.contentDir) / "Textures" / base;
+
+    // ONLY THE IMAGES A SLOT ACTUALLY NAMES. A source file routinely carries images no material
+    // binds -- a glTF with an unused texture, or, concretely, the separate opacity map and the
+    // original albedo that AverAssetC's fold has just replaced with a merged one. Writing those
+    // copies bytes into the project that nothing will ever sample, and leaves a reader of
+    // Content/Textures unable to tell which files matter.
+    std::vector<bool> referenced(images.size(), false);
+    const auto refer = [&](const ImportedTexture& t) {
+        if (t.imageIndex >= 0 && usize(t.imageIndex) < referenced.size())
+            referenced[usize(t.imageIndex)] = true;
+    };
+    for (const ImportedMaterial& m : materials) {
+        refer(m.baseColorTex); refer(m.metalRoughTex); refer(m.normalTex);
+        refer(m.occlusionTex); refer(m.emissiveTex);
+    }
+
     for (usize i = 0; i < images.size(); ++i) {
         const ImportedImage& img = images[i];
-        if (!img.ok || img.bytes.empty()) continue;
+        if (!img.ok || img.bytes.empty() || !referenced[i]) continue;
         if (const char* container = undecodableContainer(img.bytes)) {
             // NOT written and NOT bound. Copying it in and pointing a TEX record at it would turn a
             // stated import limit into a material that looks broken at run time for no given reason

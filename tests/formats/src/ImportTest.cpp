@@ -758,6 +758,181 @@ int main() {
         }
     }
 
+    // ---- GeomSubsets: several materials on one mesh -------------------------------------------
+    //
+    // This is how every tree in Intel's Jungle Ruins is authored -- trunk, branches and leaves are
+    // three face subsets of a single Mesh -- and it is the difference between importing a tree and
+    // importing a tree-shaped piece of bark. The failure has no error: the mesh-level binding wins
+    // for every face and the leaf material is simply never referenced.
+    //
+    // FOUR faces, so the subsets can be non-contiguous: 0 and 2 to one material, 1 and 3 to another.
+    // Contiguous subsets would pass even if the reordering below were a no-op.
+    {
+        fmt::UsdImportResult r;
+        const bool ok = usda(
+            "#usda 1.0\n(\n    upAxis = \"Z\"\n)\n"
+            "def Mesh \"tree\"\n{\n"
+            "    uniform bool doubleSided = 1\n"
+            "    rel material:binding = </Bark>\n"
+            "    point3f[] points = [(0,0,0), (1,0,0), (2,0,0), (3,0,0), (4,0,0),\n"
+            "                        (0,1,0), (1,1,0), (2,1,0), (3,1,0), (4,1,0)]\n"
+            "    int[] faceVertexCounts = [3, 3, 3, 3]\n"
+            "    int[] faceVertexIndices = [0,1,5,  1,2,6,  2,3,7,  3,4,8]\n"
+            "    def GeomSubset \"Bark\"\n    {\n"
+            "        uniform token elementType = \"face\"\n"
+            "        uniform token familyName = \"materialBind\"\n"
+            "        int[] indices = [0, 2]\n"
+            "        rel material:binding = </Bark>\n"
+            "    }\n"
+            "    def GeomSubset \"Leaves\"\n    {\n"
+            "        uniform token elementType = \"face\"\n"
+            "        uniform token familyName = \"materialBind\"\n"
+            "        int[] indices = [1, 3]\n"
+            "        rel material:binding = </Leaves>\n"
+            "    }\n"
+            "}\n"
+            "def Material \"Bark\"\n{\n    def Shader \"S\"\n    {\n"
+            "        uniform token info:id = \"UsdPreviewSurface\"\n"
+            "        float inputs:roughness = 0.9\n    }\n}\n"
+            "def Material \"Leaves\"\n{\n    def Shader \"S\"\n    {\n"
+            "        uniform token info:id = \"UsdPreviewSurface\"\n"
+            "        float inputs:roughness = 0.2\n    }\n}\n", r);
+        check(ok, "a mesh with GeomSubsets imports");
+        check(r.meshes.size() == 1, "as ONE mesh");
+        if (r.meshes.size() == 1) {
+            const fmt::OcMeshData& m = r.meshes[0];
+            check(m.submeshes.size() == 2, "with one submesh per subset (got " +
+                  std::to_string(m.submeshes.size()) + ")");
+            check(m.materialSlots.size() == 2, "and one material slot per submesh");
+            check(m.indices.size() == 12, "with every triangle kept: 4 faces, 12 indices");
+            if (m.submeshes.size() == 2 && m.materialSlots.size() == 2) {
+                check(m.materialSlots[0] == "Bark" && m.materialSlots[1] == "Leaves",
+                      "each slot resolved to ITS subset's material, in declaration order");
+                // THE REORDER IS THE POINT. Faces 0 and 2 are not adjacent in the source, so a
+                // submesh that is a contiguous [start, count) run can only exist if the index
+                // buffer was rebuilt. Overlapping or zero-length runs would mean it was not.
+                check(m.submeshes[0].indexStart == 0 && m.submeshes[0].indexCount == 6,
+                      "the first subset is a contiguous run from 0");
+                check(m.submeshes[1].indexStart == 6 && m.submeshes[1].indexCount == 6,
+                      "and the second follows it, so scattered faces became contiguous runs");
+                check(m.submeshes[0].vertexCount == m.vertexCount() &&
+                      m.submeshes[1].vertexCount == m.vertexCount(),
+                      "both span the whole vertex buffer, as the glTF path's submeshes do");
+            }
+        }
+        if (r.materials.size() == 2) {
+            check(r.materials[0].doubleSided && r.materials[1].doubleSided,
+                  "and the mesh's doubleSided reached BOTH of its subsets' materials");
+        }
+    }
+
+    // ---- a subset that does not cover every face keeps the rest, and says so -------------------
+    {
+        fmt::UsdImportResult r;
+        const bool ok = usda(
+            "#usda 1.0\n(\n    upAxis = \"Z\"\n)\n"
+            "def Mesh \"partial\"\n{\n"
+            "    rel material:binding = </Rest>\n"
+            "    point3f[] points = [(0,0,0), (1,0,0), (2,0,0), (0,1,0), (1,1,0)]\n"
+            "    int[] faceVertexCounts = [3, 3]\n"
+            "    int[] faceVertexIndices = [0,1,3,  1,2,4]\n"
+            "    def GeomSubset \"Half\"\n    {\n"
+            "        uniform token elementType = \"face\"\n"
+            "        int[] indices = [0]\n"
+            "        rel material:binding = </Half>\n"
+            "    }\n"
+            "}\n"
+            "def Material \"Half\"\n{\n    def Shader \"S\"\n    {\n"
+            "        uniform token info:id = \"UsdPreviewSurface\"\n    }\n}\n"
+            "def Material \"Rest\"\n{\n    def Shader \"S\"\n    {\n"
+            "        uniform token info:id = \"UsdPreviewSurface\"\n"
+            "        float inputs:roughness = 0.3\n    }\n}\n", r);
+        check(ok, "a mesh whose subsets cover only some faces imports");
+        if (!r.meshes.empty()) {
+            const fmt::OcMeshData& m = r.meshes[0];
+            check(m.submeshes.size() == 2,
+                  "the uncovered faces become their own submesh rather than vanishing");
+            check(m.indices.size() == 6, "so no triangle is lost");
+            if (m.materialSlots.size() == 2)
+                check(m.materialSlots[1] == "Rest",
+                      "and they keep the MESH-level binding, not the subset's");
+        }
+        bool told = false;
+        for (const std::string& u : r.unsupported)
+            if (u.find("did not cover every face") != std::string::npos) told = true;
+        check(told, "which is reported rather than left for the eye to find");
+    }
+
+    // ---- a subset this importer cannot act on is ignored, not half-applied ---------------------
+    {
+        fmt::UsdImportResult r;
+        const bool ok = usda(
+            "#usda 1.0\n(\n    upAxis = \"Z\"\n)\n"
+            "def Mesh \"pts\"\n{\n"
+            "    rel material:binding = </Only>\n"
+            "    point3f[] points = [(0,0,0), (1,0,0), (0,1,0)]\n"
+            "    int[] faceVertexCounts = [3]\n"
+            "    int[] faceVertexIndices = [0,1,2]\n"
+            "    def GeomSubset \"Verts\"\n    {\n"
+            "        uniform token elementType = \"point\"\n"
+            "        int[] indices = [0, 1]\n"
+            "        rel material:binding = </Other>\n"
+            "    }\n"
+            "}\n"
+            "def Material \"Only\"\n{\n    def Shader \"S\"\n    {\n"
+            "        uniform token info:id = \"UsdPreviewSurface\"\n    }\n}\n", r);
+        check(ok, "a POINT subset does not break the import");
+        if (!r.meshes.empty()) {
+            check(r.meshes[0].submeshes.size() == 1,
+                  "it is ignored -- .ocmesh has no submesh concept for a set of vertices");
+            if (!r.meshes[0].materialSlots.empty())
+                check(r.meshes[0].materialSlots[0] == "Only",
+                      "and the mesh-level binding still applies to the whole thing");
+        }
+    }
+
+    // ---- a SEPARATE opacity map is recorded, because .ocmat has nowhere to put it -------------
+    //
+    // The fold into base-colour alpha happens in AverAssetC, where a decoder is; what the importer
+    // owes is the FACT that the file named one. Losing it here renders every leaf on a tree with a
+    // JPEG albedo as a solid quad, and a JPEG cannot carry alpha at all.
+    {
+        fmt::UsdImportResult r;
+        const bool ok = usda(
+            "#usda 1.0\n(\n    upAxis = \"Z\"\n)\n"
+            "def Mesh \"leaf\"\n{\n"
+            "    rel material:binding = </Leaf>\n"
+            "    point3f[] points = [(0,0,0), (1,0,0), (0,1,0)]\n"
+            "    int[] faceVertexCounts = [3]\n"
+            "    int[] faceVertexIndices = [0,1,2]\n"
+            "}\n"
+            "def Material \"Leaf\"\n{\n"
+            "    def Shader \"S\"\n    {\n"
+            "        uniform token info:id = \"UsdPreviewSurface\"\n"
+            "        color3f inputs:diffuseColor.connect = </Leaf/Alb.outputs:rgb>\n"
+            "        float inputs:opacity.connect = </Leaf/Cut.outputs:r>\n"
+            "    }\n"
+            "    def Shader \"Alb\"\n    {\n"
+            "        uniform token info:id = \"UsdUVTexture\"\n"
+            "        asset inputs:file = @leaf_albedo.jpg@\n    }\n"
+            "    def Shader \"Cut\"\n    {\n"
+            "        uniform token info:id = \"UsdUVTexture\"\n"
+            "        asset inputs:file = @leaf_opacity.jpg@\n    }\n"
+            "}\n", r);
+        check(ok, "a material with a separate opacity map imports");
+        if (r.materials.size() == 1) {
+            // Neither file is on disk here, so BOTH slots stay unbound -- what is being asserted is
+            // that the importer looked for the opacity map at all, which the image list proves.
+            bool sawOpacityFile = false;
+            for (const fmt::ImportedImage& im : r.images)
+                if (im.sourcePath.find("leaf_opacity") != std::string::npos) sawOpacityFile = true;
+            check(sawOpacityFile,
+                  "the opacity texture was FOLLOWED, not skipped with the other unread inputs");
+            check(r.materials[0].alphaMode == "MASK",
+                  "and a material with an opacity map is a cutout, not opaque");
+        }
+    }
+
     if (g_failures == 0) AVER_INFO("=== all import tests passed ===");
     else                 AVER_ERROR("=== {} FAILED ===", g_failures);
     return g_failures == 0 ? 0 : 1;
