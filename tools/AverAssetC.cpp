@@ -27,6 +27,12 @@
 #if AVER_HAVE_AUDIO_IMPORT
 #include "aver/formats/OcAudio.hpp"
 #endif
+#if AVER_HAVE_MATERIAL_COMPILE
+// Under the SAME guard as the `material` subcommand, and reusing its macro rather than adding a
+// second one: both need exactly Aver.Formats.Material to be linked, and two names for one condition
+// is a worse thing to keep in step than one name doing two jobs.
+#include "aver/formats/GltfMaterialCook.hpp"
+#endif
 
 // Material generation (texture set -> .ocmat) is OPTIONAL for the same reason audio import above is:
 // Aver.Formats.Material only builds under AVER_MODULE_PBR (see its own CMakeLists.txt comment), so a
@@ -828,6 +834,9 @@ int main(int argc, char** argv) {
     static const char* kUsage =
         "usage: AverAssetC convert <input-file> --out-dir <dir> [--base <name>] [--merge] [--lod <ratio>]"
 #if AVER_HAVE_MATERIAL_COMPILE
+        "\n                          [--content-dir <dir>]   write materials and textures too"
+#endif
+#if AVER_HAVE_MATERIAL_COMPILE
         "\n       AverAssetC material <texture-file>... --out-dir <dir> --base <name>"
 #endif
         ;
@@ -847,7 +856,7 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    std::string input, outDir, baseOverride;
+    std::string input, outDir, baseOverride, contentDir;
     bool merge = false;
     bool haveInput = false;
     f32 lodRatio = 0.0f;
@@ -857,6 +866,11 @@ int main(int argc, char** argv) {
         else if (a == "--base" && i + 1 < argc)    baseOverride = argv[++i];
         else if (a == "--merge")                   merge = true;
         else if (a == "--lod" && i + 1 < argc)      lodRatio = static_cast<f32>(std::atof(argv[++i]));
+        // A SEPARATE FLAG FROM --out-dir, deliberately. The out-directory is where meshes go and is
+        // routinely a scratch path; the content root is where the engine looks for Materials/ and
+        // Textures/. Inferring one from the other would be a second fragile convention beside the
+        // one kContentRelPrefix already admits is an assumption.
+        else if (a == "--content-dir" && i + 1 < argc) contentDir = argv[++i];
         else if (!haveInput) { input = a; haveInput = true; }
     }
     if (!haveInput || outDir.empty()) {
@@ -883,6 +897,55 @@ int main(int argc, char** argv) {
             emitSummary(input, stats, 1);
             return 1;
         }
+
+        // ---- materials and their textures, BEFORE the meshes are copied into `items` ----
+        //
+        // THE ORDER IS LOAD-BEARING. Cooking renames each material to a prefixed, collision-free
+        // stem, and OcMeshData::materialSlots has to be rewritten to match. `items` below COPIES
+        // res.meshes, and writeMeshItems serialises those copies -- so a rewrite after this point
+        // would leave the .ocmesh naming a material that is not on disk under that name.
+        //
+        // THIS TOOL, NOT JUST THE HARNESS. The cook shipped first in tests/formats ConvertTool,
+        // which is the dev harness; this is the compiler the launcher actually invokes, so until
+        // now a glTF imported by the product arrived with its materials thrown away while the same
+        // file imported by the harness did not.
+#if AVER_HAVE_MATERIAL_COMPILE
+        if (!contentDir.empty() && (!res.materials.empty() || !res.images.empty())) {
+            fmt::GltfMaterialCookOptions copt;
+            copt.contentDir = contentDir;
+            copt.gltfBase   = base;
+            // A stated output directory is a directive: this tool is invoked per asset by the
+            // launcher, and a re-import that silently kept the old material would be a worse
+            // surprise than one that replaced it.
+            copt.overwriteExisting = true;
+            fmt::GltfMaterialCookResult cres;
+            std::vector<std::string> cwarn;
+            std::string cerr;
+            if (!fmt::cookGltfMaterials(res, copt, cres, &cwarn, &cerr)) {
+                AVER_WARN("materials: {}", cerr);
+            } else {
+                for (const std::string& w : cwarn) AVER_WARN("materials: {}", w);
+                for (usize i = 0; i < res.materials.size() && i < cres.materialSlotNames.size(); ++i) {
+                    if (cres.materialSlotNames[i].empty()) continue;   // did not cook; keep the old name
+                    const std::string& from = res.materials[i].name;
+                    const std::string& to   = cres.materialSlotNames[i];
+                    for (fmt::OcMeshData& m : res.meshes)
+                        for (std::string& slot : m.materialSlots)
+                            if (slot == from) slot = to;
+                }
+                AVER_INFO("wrote {} material(s) and {} texture(s) under {}",
+                          cres.materialsWritten, cres.texturesWritten, contentDir);
+            }
+        } else if (contentDir.empty() && (!res.materials.empty() || !res.images.empty())) {
+            AVER_WARN("this file has {} material(s) and {} image(s); pass --content-dir <dir> to "
+                      "write them, otherwise only geometry is imported",
+                      res.materials.size(), res.images.size());
+        }
+#else
+        if (!res.materials.empty() || !res.images.empty())
+            AVER_WARN("this build has no PBR module, so the file's {} material(s) and {} image(s) "
+                      "were not imported; geometry only", res.materials.size(), res.images.size());
+#endif
 
         std::vector<MeshItem> items;
         items.reserve(res.meshes.size());
