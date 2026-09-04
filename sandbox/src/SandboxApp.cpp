@@ -8618,7 +8618,7 @@ private:
     // captures every component via EntitySnapshot -- see EditorEntitySnapshot.hpp for what it
     // deliberately omits (hierarchy; CName's internal blob offsets).
     struct EditCmd {
-        enum class Kind { Transform, Create, Destroy, CreateObj, DestroyObj, LandscapeStroke, FoliageStroke, Reparent };
+        enum class Kind { Transform, Create, Destroy, CreateObj, DestroyObj, LandscapeStroke, FoliageStroke, Reparent, Material };
         Kind kind = Kind::Transform;
         EditId id = 0;            // a scene entity, through the indirection
         int objIndex = -1;        // or an objects_ index, for the placeholder scene
@@ -8630,6 +8630,14 @@ private:
         bool hadBody = false;
         Vec3 bodyHalf{0,0,0};
         MeshObj objSnapshot{};    // CreateObj/DestroyObj payload; MeshObj is trivially copyable
+#if AVER_MODULE_PBR
+        // Material payload. THE WHOLE DESC, BOTH SIDES, not the one slider that moved: a MaterialDesc
+        // is a few hundred bytes and the panel's controls interact (ior against reflectance, alpha
+        // mode against transmission), so replaying "roughness was 0.4" would restore a state that
+        // never existed if two knobs moved in one interaction. Undo depth is 64, which bounds it.
+        pbr::MaterialHandle matHandle = 0;
+        pbr::MaterialDesc matBefore{}, matAfter{};
+#endif
 
         // LandscapeStroke payload: the heightfield sub-rectangle a brush stroke touched, before and
         // after.
@@ -8721,6 +8729,23 @@ private:
     }
 
     // Pushes a command onto the undo stack and clears the redo stack.
+#if AVER_MODULE_PBR
+    // Puts a whole MaterialDesc back and tells the library it moved.
+    //
+    // NAME IS PRESERVED FROM THE LIVE DESC, not restored from the snapshot: the name is the material's
+    // IDENTITY (surfaceMaterials_ and every .ocmat TEX record key on it), not part of what the panel
+    // edits, and writing a stale one back would rename a material as a side effect of undoing a
+    // roughness slider.
+    void applyMaterialDesc(pbr::MaterialHandle h, const pbr::MaterialDesc& want) {
+        pbr::MaterialDesc* d = pbr::MaterialLibrary::get().mutableDesc(h);
+        if (!d) return;                       // the material went away; nothing to put back
+        std::string keepName = d->name;
+        *d = want;
+        d->name = std::move(keepName);
+        pbr::MaterialLibrary::get().touch(h);
+    }
+#endif
+
     void pushEdit(EditCmd c) {
         undoStack_.push_back(std::move(c));
         redoStack_.clear();
@@ -9497,6 +9522,9 @@ private:
             case EditCmd::Kind::Destroy:   recreateFrom(c); break;
             case EditCmd::Kind::Reparent:  applyReparentTo(c, c.reparentOldParentId, c.before); break;
 #endif
+#if AVER_MODULE_PBR
+            case EditCmd::Kind::Material:  applyMaterialDesc(c.matHandle, c.matBefore); break;
+#endif
             case EditCmd::Kind::CreateObj:   // undo a create: take it back out
                 if (c.objIndex >= 0 && c.objIndex < (int)objects_.size()) {
                     objects_.erase(objects_.begin() + c.objIndex);
@@ -9538,6 +9566,9 @@ private:
             case EditCmd::Kind::Destroy:   destroyEntity(entityForEdit(c.id));
                                            sel_ = -1; selEntity_ = scene::kInvalidEntity; break;
             case EditCmd::Kind::Reparent:  applyReparentTo(c, c.reparentNewParentId, c.after); break;
+#endif
+#if AVER_MODULE_PBR
+            case EditCmd::Kind::Material:  applyMaterialDesc(c.matHandle, c.matAfter); break;
 #endif
             case EditCmd::Kind::CreateObj:   // redo a create: put it back
                 if (c.objIndex >= 0 && c.objIndex <= (int)objects_.size())
@@ -10818,6 +10849,75 @@ private:
                 sel_ = kSelScene; selEntity_ = dp; deleteSelection(); w.flush();
                 check(w.count() == dbase, "the copy phase cleaned up after itself");
             }
+
+            // ---- a material edit is an undoable COMMAND -------------------------------------
+            //
+            // materialPanel wrote straight through a MaterialDesc* and called touch(); EditCmd::Kind
+            // had no Material case, so nothing was ever pushed. Ctrl+Z after darkening a wall undid
+            // whatever the user did BEFORE the wall and left the wall dark -- the same shape as the
+            // Player Start bug, and worse, because a material is shared: one slider changes every
+            // entity drawing with it.
+            //
+            // THE PANEL ITSELF NEEDS ImGui AND A MOUSE, so what is exercised here is the half that
+            // does not: the command, its two appliers, and the undo/redo stacks it lives on. The
+            // bracketing (one entry per interaction, not per frame) is the panel's own and is
+            // asserted by reading, not by this test -- see materialPanel's comment.
+#if AVER_MODULE_PBR
+            {
+                pbr::MaterialDesc md;
+                md.name = "M_UndoTestProbe";
+                md.roughnessFactor = 0.20f;
+                md.metallicFactor  = 0.00f;
+                const pbr::MaterialHandle mh = pbr::MaterialLibrary::get().create(md);
+                check(mh != 0, "a probe material was created");
+
+                const usize stackBefore = undoStack_.size();
+
+                // What the panel does on release: snapshot before, mutate, push one command.
+                pbr::MaterialDesc* live = pbr::MaterialLibrary::get().mutableDesc(mh);
+                check(live != nullptr, "and its desc is reachable");
+                if (live) {
+                    const pbr::MaterialDesc beforeDesc = *live;
+                    live->roughnessFactor = 0.90f;
+                    live->metallicFactor  = 1.00f;
+                    EditCmd mc;
+                    mc.kind = EditCmd::Kind::Material;
+                    mc.matHandle = mh;
+                    mc.matBefore = beforeDesc;
+                    mc.matAfter  = *live;
+                    pushEdit(std::move(mc));
+                    check(undoStack_.size() == stackBefore + 1,
+                          "a material edit puts exactly ONE entry on the undo stack");
+
+                    undo();
+                    const pbr::MaterialDesc* afterUndo = pbr::MaterialLibrary::get().desc(mh);
+                    check(afterUndo && std::fabs(afterUndo->roughnessFactor - 0.20f) < 1e-4f
+                                    && std::fabs(afterUndo->metallicFactor) < 1e-4f,
+                          "undo restores BOTH sliders, not just the last one moved");
+                    // The name is identity, not an edited value: restoring a stale one would rename
+                    // a material as a side effect of undoing a roughness drag.
+                    check(afterUndo && afterUndo->name == "M_UndoTestProbe",
+                          "and does NOT rewrite the material's name");
+
+                    // A SENTINEL BEFORE THE REDO, so the redo assertion can actually fail. Without
+                    // it the check reads "roughness is 0.90" -- which is still true if BOTH undo and
+                    // redo did nothing, because 0.90 is what the edit left behind. Poking a third
+                    // value in first means only a redo that really re-applies can restore it.
+                    if (pbr::MaterialDesc* poke = pbr::MaterialLibrary::get().mutableDesc(mh))
+                        poke->roughnessFactor = 0.55f;
+                    redo();
+                    const pbr::MaterialDesc* afterRedo = pbr::MaterialLibrary::get().desc(mh);
+                    check(afterRedo && std::fabs(afterRedo->roughnessFactor - 0.90f) < 1e-4f
+                                    && std::fabs(afterRedo->metallicFactor - 1.00f) < 1e-4f,
+                          "redo re-applies the edit");
+                    check(afterRedo && afterRedo->name == "M_UndoTestProbe",
+                          "with the name still intact");
+
+                    undo();   // leave the library as this phase found it
+                }
+                pbr::MaterialLibrary::get().destroy(mh);
+            }
+#endif
 
             // ---- the Outliner's reparent, as a command --------------------------------------
             //
@@ -13802,13 +13902,35 @@ private:
         pbr::MaterialDesc* d = pbr::MaterialLibrary::get().mutableDesc(handle);
         if (!d) { ImGui::TextDisabled("No material (drawing with the fallback)"); return; }
         bool changed = false;
-        changed |= ImGui::SliderFloat("Metallic", &d->metallicFactor, 0.0f, 1.0f);
-        changed |= ImGui::SliderFloat("Roughness", &d->roughnessFactor, 0.045f, 1.0f);
-        changed |= ImGui::SliderFloat("Normal Scale", &d->normalScale, 0.0f, 4.0f);
-        changed |= ImGui::SliderFloat("Occlusion", &d->occlusionStrength, 0.0f, 1.0f);
+
+        // ---- ONE UNDO ENTRY PER INTERACTION, not per frame -------------------------------------
+        //
+        // Every control below writes straight through a MaterialDesc* and called touch(); nothing
+        // was ever pushed, so Ctrl+Z after darkening a wall undid whatever came BEFORE it and left
+        // the wall dark. EditCmd::Kind had no Material case at all.
+        //
+        // A DRAG IS ONE EDIT. `changed` is true on every frame of a slider drag, so pushing on it
+        // would put a hundred entries on a 64-deep stack and evict everything else the user did.
+        // ImGui's IsItemActivated/IsItemDeactivatedAfterEdit bracket the whole interaction, which is
+        // the same begin/end shape beginTransformEdit/endTransformEdit already uses for the gizmo.
+        //
+        // `before` IS SNAPSHOTTED AT THE TOP OF THE FRAME, while nothing is active -- not on the
+        // activation frame itself, because ImGui has already written the first drag delta into *d by
+        // the time IsItemActivated() can be asked.
+        if (!matEditActive_) { matEditBefore_ = *d; matEditHandle_ = handle; }
+        bool started = false, finished = false;
+        const auto track = [&](bool c) {
+            started  |= ImGui::IsItemActivated();
+            finished |= ImGui::IsItemDeactivatedAfterEdit();
+            return c;
+        };
+        changed |= track(ImGui::SliderFloat("Metallic", &d->metallicFactor, 0.0f, 1.0f));
+        changed |= track(ImGui::SliderFloat("Roughness", &d->roughnessFactor, 0.045f, 1.0f));
+        changed |= track(ImGui::SliderFloat("Normal Scale", &d->normalScale, 0.0f, 4.0f));
+        changed |= track(ImGui::SliderFloat("Occlusion", &d->occlusionStrength, 0.0f, 1.0f));
         // 0..0.2 covers water (~0.02) through gemstone (~0.17).
-        changed |= ImGui::SliderFloat("Reflectance", &d->reflectance, 0.0f, 0.2f, "%.3f");
-        changed |= ImGui::SliderFloat("Grazing (f90)", &d->f90, 0.0f, 1.0f);
+        changed |= track(ImGui::SliderFloat("Reflectance", &d->reflectance, 0.0f, 0.2f, "%.3f"));
+        changed |= track(ImGui::SliderFloat("Grazing (f90)", &d->f90, 0.0f, 1.0f));
 
         // IOR AND REFLECTANCE ARE THE SAME PHYSICAL FACT TWICE, which is why this control reports the
         // disagreement instead of quietly letting the two drift. F0 = ((1-n)/(1+n))^2, so 1.52 glass
@@ -13816,7 +13938,7 @@ private:
         // until a grazing angle or the critical angle.
         // REPORTED, NOT ENFORCED: clamping reflectance to the ior would take away a knob authors
         // legitimately reach for (a thin film or coated lens really does deviate).
-        changed |= ImGui::SliderFloat("IOR", &d->ior, 1.0f, 2.5f, "%.3f");
+        changed |= track(ImGui::SliderFloat("IOR", &d->ior, 1.0f, 2.5f, "%.3f"));
         {
             const float n  = d->ior <= 0.0f ? 1.0f : d->ior;
             const float f0 = ((1.0f - n) / (1.0f + n)) * ((1.0f - n) / (1.0f + n));
@@ -13832,7 +13954,7 @@ private:
         // Transmission is the SUBSTRATE's property and applies whether or not the material is
         // blended: it scales the diffuse lobe (a transmissive surface must not also scatter its full
         // base colour back at you) and, on a blended material, pulls coverage toward 1 - transmission.
-        changed |= ImGui::SliderFloat("Transmission", &d->transmission, 0.0f, 1.0f);
+        changed |= track(ImGui::SliderFloat("Transmission", &d->transmission, 0.0f, 1.0f));
         if (d->transmission > 0.0f && d->alphaMode != pbr::AlphaMode::Blend) {
             ImGui::SameLine();
             ImGui::TextColored(ImVec4(1.00f, 0.62f, 0.15f, 1.0f), "(opaque)");
@@ -13843,13 +13965,13 @@ private:
         // WEIGHT is the on/off: 0 skips the wrap-diffuse and back-scatter terms entirely, so RADIUS
         // (which only widens the back-scatter lobe those terms produce) has nothing to widen until
         // Weight is above 0. Disabling it at 0 keeps the panel from offering a control that does nothing.
-        changed |= ImGui::SliderFloat("Subsurface Weight", &d->subsurfaceWeight, 0.0f, 1.0f);
+        changed |= track(ImGui::SliderFloat("Subsurface Weight", &d->subsurfaceWeight, 0.0f, 1.0f));
         ImGui::BeginDisabled(d->subsurfaceWeight <= 0.0f);
-        changed |= ImGui::SliderFloat("Subsurface Radius", &d->subsurfaceRadius, 0.0f, 1.0f);
+        changed |= track(ImGui::SliderFloat("Subsurface Radius", &d->subsurfaceRadius, 0.0f, 1.0f));
         ImGui::EndDisabled();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
             ImGui::SetTooltip("Only does anything when Subsurface Weight is above 0.");
-        changed |= ImGui::DragFloat3("Emissive", d->emissiveFactor, 0.01f, 0.0f, 32.0f);
+        changed |= track(ImGui::DragFloat3("Emissive", d->emissiveFactor, 0.01f, 0.0f, 32.0f));
 
         ImGui::Separator();
         int uvMode = static_cast<int>(d->uvMode);
@@ -13857,9 +13979,14 @@ private:
             d->uvMode = static_cast<pbr::UvMode>(uvMode);
             changed = true;
         }
+        // TRACKED THE SAME WAY, but read AFTER the widget and OUTSIDE its own if: a Combo that was
+        // opened and dismissed without a change still activated and deactivated, and an interaction
+        // that begins here must still close the bracket rather than leaving it open for whatever
+        // control the user touches next.
+        track(false);
         if (d->uvMode == pbr::UvMode::WorldAligned) {
-            changed |= ImGui::SliderFloat("Tile Size (cm)", &d->uvTiling, 5.0f, 2000.0f, "%.0f",
-                                          ImGuiSliderFlags_Logarithmic);
+            changed |= track(ImGui::SliderFloat("Tile Size (cm)", &d->uvTiling, 5.0f, 2000.0f, "%.0f",
+                                          ImGuiSliderFlags_Logarithmic));
         }
 
         ImGui::Separator();
@@ -13872,8 +13999,34 @@ private:
                 d->textures[s].path = buf;
                 changed = true;
             }
+            // A TEXT FIELD IS THE CASE THE BRACKET EXISTS FOR: InputText reports `changed` on every
+            // keystroke, so pushing per frame would put one undo entry per LETTER typed into a
+            // texture path. IsItemDeactivatedAfterEdit fires once, when focus leaves.
+            track(false);
         }
-        if (changed) pbr::MaterialLibrary::get().touch(handle);
+        if (started) matEditActive_ = true;
+        // WHETHER ANYTHING MOVED IS ImGui'S ANSWER, NOT A COMPARISON. Diffing the two descs would
+        // mean either a memcmp -- wrong, MaterialDesc holds std::strings whose pointers differ
+        // without the value differing -- or an enumeration of every field the panel edits, which is
+        // a list that goes stale the next time a control is added. Each control's own return value
+        // already means "this was edited"; latching that across the interaction is the same fact,
+        // and it cannot drift.
+        if (changed) { matEditDirty_ = true; pbr::MaterialLibrary::get().touch(handle); }
+        // PUSHED ON RELEASE. Clicking a slider without moving it still fires
+        // IsItemDeactivatedAfterEdit on some widgets, and an entry that restores the state it was
+        // already in is worse than none: it makes Ctrl+Z visibly do nothing, once.
+        if (finished && matEditActive_ && matEditHandle_ == handle) {
+            matEditActive_ = false;
+            if (matEditDirty_) {
+                matEditDirty_ = false;
+                EditCmd c;
+                c.kind = EditCmd::Kind::Material;
+                c.matHandle = handle;
+                c.matBefore = matEditBefore_;
+                c.matAfter  = *d;
+                pushEdit(std::move(c));
+            }
+        }
 
         ImGui::Separator();
         ImGui::BeginDisabled(!project_.valid() || d->name.empty());
@@ -16339,6 +16492,16 @@ private:
         MeshObj object{};
     };
     EditorClipboard clipboard_;
+
+#if AVER_MODULE_PBR
+    // One material edit in flight: the desc as it was before this interaction began, and which
+    // material it belongs to. See materialPanel for why `before` is snapshotted at the top of a
+    // frame rather than when a control reports it was activated.
+    bool matEditActive_ = false;
+    bool matEditDirty_  = false;
+    pbr::MaterialHandle matEditHandle_ = 0;
+    pbr::MaterialDesc   matEditBefore_{};
+#endif
 
     // What chord means what command, defaults matching every hardcoded key this file used before
     // this registry existed. See EditorKeybinds.hpp for why it lives in its own file.
