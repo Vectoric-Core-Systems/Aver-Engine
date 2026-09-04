@@ -364,6 +364,45 @@ BootConfig GameApp::config() const {
     b.useWarp          = cfg_.useWarp;
     b.enableDebugLayer = cfg_.debugLayer;
     b.backend          = cfg_.backend.empty() ? nullptr : cfg_.backend.c_str();
+
+    // ---- WINDOW.* FROM THE MANIFEST, read HERE and not in onInit ------------------------------
+    //
+    // This is the only moment the answer is usable: the window is created from this BootConfig,
+    // before onInit runs, so a title or resolution the project states has to be known now. That is
+    // why the manifest is read twice -- once here for four keys, once in openProject for everything
+    // -- and reading a small text file twice is a much smaller price than a window that has to be
+    // resized after it is already on screen.
+    //
+    // THE SAME TWO PLACES openProject looks, in the same order: an explicit path, else
+    // Game.ocproject beside the executable, which is what stage-game.ps1 writes for a packaged game
+    // launched with no arguments at all.
+    //
+    // THE COMMAND LINE STILL WINS, and that is the standing rule in this repo rather than a
+    // preference here: a flag exists so a human at the keyboard can override recorded state, so
+    // --width/--height/--title are applied over the manifest, not under it. Only a value the caller
+    // did NOT state falls through to the project.
+    {
+        std::string manifest = cfg_.projectPath;
+        if (manifest.empty()) {
+            const std::string beside = executableDir() + "\\Game.ocproject";
+            std::error_code ec;
+            if (std::filesystem::exists(beside, ec)) manifest = beside;
+        }
+        if (!manifest.empty()) {
+            fmt::ProjectDesc d;
+            std::string why;
+            if (fmt::loadOcproject(manifest, d, &why)) {
+                if (cfg_.title.empty() || cfg_.title == GameConfig::kDefaultTitle) {
+                    // The project's own WINDOW.TITLE, else its NAME -- a shipped game showing the
+                    // engine's default title is the sort of thing nobody notices until a player does.
+                    windowTitleOwned_ = !d.windowTitle.empty() ? d.windowTitle : d.name;
+                    if (!windowTitleOwned_.empty()) b.windowTitle = windowTitleOwned_.c_str();
+                }
+                if (cfg_.width  == GameConfig::kDefaultWidth  && d.windowWidth  > 0) b.windowWidth  = static_cast<u32>(d.windowWidth);
+                if (cfg_.height == GameConfig::kDefaultHeight && d.windowHeight > 0) b.windowHeight = static_cast<u32>(d.windowHeight);
+            }
+        }
+    }
     return b;
 }
 

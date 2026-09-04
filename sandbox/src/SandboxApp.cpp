@@ -7647,7 +7647,21 @@ private:
         if (project_.refractionMode     >= 0) k.refractionMode     = static_cast<u32>(project_.refractionMode);
         if (project_.refractionStrength >= 0.0f) k.refractionStrength = project_.refractionStrength;
         if (project_.refractionEdgeFade >= 0.0f) k.refractionEdgeFade = project_.refractionEdgeFade;
+        // THE THREE NEW KEYS. msaa and meshShaders are not tier-derived, so they could equally have
+        // gone in the first call; they sit here because this is the call that carries every knob a
+        // manifest can state, and splitting them by derivation would be a distinction only this
+        // file's history explains.
+        if (project_.msaa            >  0) k.msaa             = static_cast<voxi::Msaa>(project_.msaa);
+        if (project_.meshShaders     >= 0) k.meshShaders      = project_.meshShaders != 0;
+        if (project_.giUpdateInterval >= 0) k.giUpdateInterval = static_cast<u32>(project_.giUpdateInterval);
         vx.setSettings(k);   // clamps to this device; the manifest keeps what was asked for
+
+        // The GI volume, which is not a voxi::Settings field at all -- it is set through
+        // setVolume(centre, extent), so it has to be applied separately from the knob block above.
+        if (project_.hasGiVolume) {
+            giCenter_ = Vec3{project_.giCenter[0], project_.giCenter[1], project_.giCenter[2]};
+            giExtent_ = project_.giExtent;
+        }
     }
 
     void applyProjectRenderSettings() {
@@ -7740,6 +7754,14 @@ private:
             take(layeredBsdfOverride_,     reinterpret_cast<u32&>(k.layeredBsdf), "--layered-bsdf");
             if (rtRaysOverride_ > 0)         take(rtRaysOverride_,        k.rtShadowRays,      "--rt-rays");
             if (rtPixelsPerRayOverride_ > 0) take(rtPixelsPerRayOverride_, k.rtPixelsPerRayTile, "--rt-pixels-per-ray");
+            // THE FOURTH INSTANCE OF THE SAME BUG CLASS, closed. --gi-update-interval had no
+            // manifest key AND no entry here, while giUpdateInterval IS tier-derived inside
+            // setSettings -- so opening a project whose RENDER.GI differed from the live tier
+            // silently re-derived over the flag with nothing logged. The three fixes before this one
+            // each closed a subset and left this behind; the rule is that a flag exists so a human
+            // at the keyboard can override recorded state, which means it is applied LAST and a
+            // disagreement is said out loud.
+            if (giUpdateIntervalOverride_ > 0) take(giUpdateIntervalOverride_, k.giUpdateInterval, "--gi-update-interval");
             // THE THIRD INSTANCE, predicted above: --no-gi/--no-rt are BOOLEANS, not the -1-sentinel
             // integers `take` understands, so closing the rule for integers left these two behind.
             // Measured cost: on RENDER.RAYTRACING 4, `--no-rt` was silently discarded and an A/B built
@@ -7823,6 +7845,18 @@ private:
         project_.lodThresholdPx     = lodErrorThresholdPx_;
         project_.occlusionCull      = occlusionCullEnabled_ ? 1 : 0;
         project_.depthPrepass       = depthPrepassOverride_ ? 1 : 0;
+        // FOUR THAT WERE MISSING, each of them a control on this very window that applied live and
+        // then vanished on the next open. See ProjectDesc for the shape of each key.
+        project_.msaa            = static_cast<int>(requested.msaa);
+        project_.meshShaders     = requested.meshShaders ? 1 : 0;
+        project_.giUpdateInterval = static_cast<int>(requested.giUpdateInterval);
+        // The GI volume's placement, which had no key at all -- so a level whose geometry is not at
+        // the origin could never record where its indirect light should be gathered.
+        project_.hasGiVolume = true;
+        project_.giCenter[0] = giCenter_.x;
+        project_.giCenter[1] = giCenter_.y;
+        project_.giCenter[2] = giCenter_.z;
+        project_.giExtent    = giExtent_;
         projectDirty_ = true;
     }
 #else
@@ -16322,6 +16356,12 @@ private:
         // them under it would say they were.
         if (ImGui::Selectable("Physics",                settingsPage_==5)) settingsPage_=5;
         if (ImGui::Selectable("Audio",                  settingsPage_==6)) settingsPage_=6;
+        // THREE CATEGORIES A PROJECT COULD NOT STATE AT ALL until now. Each corresponds to a real
+        // options struct the engine already had and no file could reach: platform::WindowDesc,
+        // the four importers' options, and world::StreamSettings.
+        if (ImGui::Selectable("Window",                 settingsPage_==7)) settingsPage_=7;
+        if (ImGui::Selectable("Import Defaults",        settingsPage_==8)) settingsPage_=8;
+        if (ImGui::Selectable("World Streaming",        settingsPage_==9)) settingsPage_=9;
         ImGui::Unindent();
         ImGui::EndChild();
 
@@ -16373,20 +16413,8 @@ private:
                     ImGui::TextDisabled("This project states no render settings yet.");
                 ImGui::Spacing();
 
-                ImGui::BeginDisabled(!projectDirty_);
-                if (ImGui::Button("Save Project Settings", ImVec2(260.0f * dpi_, 0.0f))) {
-                    std::string why;
-                    projectSaveStatus_ = saveProjectManifest(&why) ? "Saved." : ("Save failed: " + why);
-                }
-                ImGui::EndDisabled();
-                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                    ImGui::SetTooltip(projectDirty_
-                        ? "Writes this page and the Rendering page into the .ocproject.\nComments and any keys this build does not know are preserved."
-                        : "Nothing has changed since the manifest was last read.");
-                if (!projectSaveStatus_.empty()) {
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("%s", projectSaveStatus_.c_str());
-                }
+                // The Save/Revert pair moved to a FOOTER shared by every page -- see the end of
+                // buildProjectSettings for why it could not stay here.
                 ImGui::TextDisabled("Rendering settings are the game's, so they go in the project.");
                 ImGui::TextDisabled("The editor's own preferences are per-machine and do not.");
             } else {
@@ -16397,6 +16425,12 @@ private:
             buildPhysicsSettings();
         } else if (settingsPage_ == 6) {
             buildAudioSettings();
+        } else if (settingsPage_ == 7) {
+            buildWindowSettings();
+        } else if (settingsPage_ == 8) {
+            buildImportSettings();
+        } else if (settingsPage_ == 9) {
+            buildStreamSettings();
         } else {
 #if AVER_MODULE_VOXI
             buildRenderingSettings(settingsPage_);
@@ -16407,6 +16441,61 @@ private:
 #endif
         }
         ImGui::EndChild();
+
+        // ---- THE SAVE FOOTER, ON EVERY PAGE ---------------------------------------------------
+        //
+        // It used to live inside the Description page and nowhere else. Every other page sets
+        // projectDirty_ correctly -- gravity, the audio mix, every render knob -- so editing any of
+        // them armed a save whose button was two clicks away on a different page, with nothing on
+        // screen saying so. The most common outcome is the obvious one: the edit is made, the window
+        // is closed, and the change is gone.
+        //
+        // A FOOTER RATHER THAN AUTOSAVE, and that is a deliberate difference from editor.ini.
+        // The .ocproject is a source-controlled project file that other people diff and merge;
+        // writing it on every slider drag would produce noise nobody asked for. Preferences are
+        // per-machine and disposable, which is why THEY autosave (see maybeAutosavePrefs).
+        if (project_.valid()) {
+            ImGui::Separator();
+            ImGui::BeginDisabled(!projectDirty_);
+            if (ImGui::Button("Save Project Settings", ImVec2(220.0f * dpi_, 0.0f))) {
+                std::string why;
+                projectSaveStatus_ = saveProjectManifest(&why) ? "Saved." : ("Save failed: " + why);
+            }
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip(projectDirty_
+                    ? "Writes EVERY page into the .ocproject.\nComments and any keys this build does not know are preserved."
+                    : "Nothing has changed since the manifest was last read.");
+
+            // REVERT IS RE-READ, not an undo stack. saveProjectManifest's inverse is simply loading
+            // the file again, and a manifest is small enough that re-reading it is exact where a
+            // remembered snapshot would drift the moment a field is added.
+            ImGui::SameLine();
+            ImGui::BeginDisabled(!projectDirty_);
+            if (ImGui::Button("Revert", ImVec2(110.0f * dpi_, 0.0f))) {
+                fmt::ProjectDesc fresh;
+                std::string why;
+                if (fmt::loadOcproject(project_.manifestPath, fresh, &why)) {
+                    project_ = fresh;
+                    projectDirty_ = false;
+                    projectSaveStatus_ = "Reverted to the file on disk.";
+                } else {
+                    projectSaveStatus_ = "Revert failed: " + why;
+                }
+            }
+            ImGui::EndDisabled();
+
+            // THE DIRTY MARK ITSELF. Without it the only signal was a button on another page going
+            // from grey to enabled, which nobody watches.
+            if (projectDirty_) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f), "unsaved changes");
+            }
+            if (!projectSaveStatus_.empty()) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("%s", projectSaveStatus_.c_str());
+            }
+        }
         ImGui::End();
     }
 
@@ -16425,6 +16514,174 @@ private:
     // Path Tracing). Each feature reports its real status and is disabled when the renderer or GPU
     // can't do it. Reads and writes the WHOLE Settings struct regardless of which sub-page is showing.
     // Project Settings > Physics. World-wide defaults, written to PHYSICS.* in the manifest.
+    // A small helper for the three pages below: an int field that is UNSTATED at -1 rather than
+    // zero, which is the convention every RENDER.*/STREAM.* key uses. Without the checkbox there is
+    // no way to author "this project does not state a value", and a project that states everything
+    // pins defaults it never meant to pin.
+    bool settingInt(const char* label, int* v, int lo, int hi, int whenEnabled, const char* tip) {
+#if AVER_WITH_IMGUI
+        ImGui::PushID(label);
+        bool stated = (*v >= 0);
+        bool changed = false;
+        if (ImGui::Checkbox("##stated", &stated)) { *v = stated ? whenEnabled : -1; changed = true; }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Unticked: this project does not state it,\nand the engine's own default applies.");
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!stated);
+        ImGui::SetNextItemWidth(180.0f * dpi_);
+        if (ImGui::SliderInt(label, v, lo, hi)) changed = true;
+        ImGui::EndDisabled();
+        if (tip && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("%s", tip);
+        ImGui::PopID();
+        if (changed) projectDirty_ = true;
+        return changed;
+#else
+        (void)label; (void)v; (void)lo; (void)hi; (void)whenEnabled; (void)tip; return false;
+#endif
+    }
+
+    // ---- Window: how a shipped game presents itself ---------------------------------------------
+    //
+    // docs/PACKAGING.md named this gap in as many words: ".ocproject cannot describe a shipped game.
+    // It has no entry point, no window/resolution defaults, no build id, no icon." The old design
+    // put them in a side-car game.json, for which no reader or writer ever existed.
+    void buildWindowSettings() {
+#if AVER_WITH_IMGUI
+        ImGui::TextUnformatted("Window");
+        ImGui::Separator();
+        if (!project_.valid()) { ImGui::TextDisabled("No project loaded."); return; }
+
+        ImGui::TextDisabled("What a PACKAGED GAME opens as. The editor ignores all of it -- its own");
+        ImGui::TextDisabled("window is an editor concern and lives in editor.ini.");
+        ImGui::Spacing();
+
+        {
+            char buf[128];
+            std::snprintf(buf, sizeof buf, "%s", project_.windowTitle.c_str());
+            ImGui::SetNextItemWidth(320.0f * dpi_);
+            if (ImGui::InputTextWithHint("Title", project_.name.c_str(), buf, sizeof buf)) {
+                project_.windowTitle = buf;
+                projectDirty_ = true;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Empty uses the project's NAME.");
+        }
+        {
+            int wh[2] = {project_.windowWidth > 0 ? project_.windowWidth : 1280,
+                         project_.windowHeight > 0 ? project_.windowHeight : 720};
+            bool stated = project_.windowWidth > 0 && project_.windowHeight > 0;
+            ImGui::PushID("size");
+            if (ImGui::Checkbox("##stated", &stated)) {
+                project_.windowWidth  = stated ? wh[0] : -1;
+                project_.windowHeight = stated ? wh[1] : -1;
+                projectDirty_ = true;
+            }
+            ImGui::SameLine();
+            ImGui::BeginDisabled(!stated);
+            ImGui::SetNextItemWidth(220.0f * dpi_);
+            if (ImGui::InputInt2("Size", wh)) {
+                project_.windowWidth  = wh[0];
+                project_.windowHeight = wh[1];
+                projectDirty_ = true;
+            }
+            ImGui::EndDisabled();
+            ImGui::PopID();
+        }
+        settingInt("Resizable", &project_.windowResizable, 0, 1, 1, "0 or 1.");
+        settingInt("Fullscreen", &project_.windowFullscreen, 0, 1, 0,
+                   "Borderless-fullscreen INTENT. Recorded now; WindowDesc has no fullscreen\n"
+                   "field yet, so nothing consumes it -- see the note below.");
+        ImGui::Spacing();
+        ImGui::TextDisabled("Title, size and resizable reach platform::WindowDesc through the game's");
+        ImGui::TextDisabled("BootConfig. FULLSCREEN IS RECORDED BUT NOT YET APPLIED: WindowDesc is");
+        ImGui::TextDisabled("{title,width,height,resizable,activate} and has no fullscreen field.");
+#endif
+    }
+
+    // ---- Import defaults: what the asset compiler assumes when a file does not say ---------------
+    void buildImportSettings() {
+#if AVER_WITH_IMGUI
+        ImGui::TextUnformatted("Import Defaults");
+        ImGui::Separator();
+        if (!project_.valid()) { ImGui::TextDisabled("No project loaded."); return; }
+
+        ImGui::TextDisabled("What an import assumes when the source file does not say. Every importer");
+        ImGui::TextDisabled("already had these as an options struct; none of them was reachable from");
+        ImGui::TextDisabled("a project, so \"this project's art is in metres\" had to be re-typed on");
+        ImGui::TextDisabled("every command line.");
+        ImGui::Spacing();
+
+        {
+            f32 v = project_.importScale >= 0.0f ? project_.importScale : 100.0f;
+            bool stated = project_.importScale >= 0.0f;
+            ImGui::PushID("scale");
+            if (ImGui::Checkbox("##stated", &stated)) { project_.importScale = stated ? v : -1.0f; projectDirty_ = true; }
+            ImGui::SameLine();
+            ImGui::BeginDisabled(!stated);
+            ImGui::SetNextItemWidth(180.0f * dpi_);
+            if (ImGui::DragFloat("Unit scale", &v, 0.5f, 0.001f, 10000.0f, "%.3f")) {
+                project_.importScale = v;
+                projectDirty_ = true;
+            }
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("Source unit -> centimetres. 100 = the source is in metres,\n"
+                                  "which is what glTF, USD and most DCCs export.");
+            ImGui::PopID();
+        }
+        settingInt("Convert axes", &project_.importConvertAxes, 0, 1, 1,
+                   "Y-up right-handed -> this engine's Z-up left-handed.");
+        settingInt("Generate normals", &project_.importGenNormals, 0, 1, 1,
+                   "Synthesise normals a source file omitted.");
+        settingInt("Generate mips", &project_.importGenMips, 0, 1, 1, nullptr);
+        settingInt("Max texture (px)", &project_.importMaxTexture, 0, 8192, 2048,
+                   "Downscale ceiling. 0 means no cap.\n"
+                   "A 4K import is tens of MB per texture once mipped.");
+        ImGui::Spacing();
+        ImGui::TextDisabled("RECORDED, NOT YET CONSUMED: AverAssetC takes these on its command line");
+        ImGui::TextDisabled("and does not read the manifest. The keys exist so a project can state");
+        ImGui::TextDisabled("them and they survive a save; wiring the compiler to them is separate.");
+#endif
+    }
+
+    // ---- World streaming budgets ----------------------------------------------------------------
+    void buildStreamSettings() {
+#if AVER_WITH_IMGUI
+        ImGui::TextUnformatted("World Streaming");
+        ImGui::Separator();
+        if (!project_.valid()) { ImGui::TextDisabled("No project loaded."); return; }
+
+        ImGui::TextDisabled("world::StreamSettings -- the knobs a shipping title tunes per platform.");
+        ImGui::Spacing();
+        settingInt("Load radius",     &project_.streamLoadRadius,     1, 16, 3, "Chunks loaded around the camera.");
+        settingInt("Evict radius",    &project_.streamEvictRadius,    1, 32, 5,
+                   "Must exceed the load radius, or a chunk is evicted the frame after it loads.");
+        settingInt("Load budget",     &project_.streamLoadBudget,     1, 32, 2,
+                   "Chunks loaded per frame. THE ONLY THING BOUNDING THE FRAME HITCH:\n"
+                   "the load is synchronous, so this is a frame-time dial, not a memory one.");
+        settingInt("Evict budget",    &project_.streamEvictBudget,    1, 32, 4, nullptr);
+        settingInt("Vertical radius", &project_.streamVerticalRadius, 0, 8,  1, nullptr);
+        {
+            f32 v = project_.streamLeadSeconds >= 0.0f ? project_.streamLeadSeconds : 1.5f;
+            bool stated = project_.streamLeadSeconds >= 0.0f;
+            ImGui::PushID("lead");
+            if (ImGui::Checkbox("##stated", &stated)) { project_.streamLeadSeconds = stated ? v : -1.0f; projectDirty_ = true; }
+            ImGui::SameLine();
+            ImGui::BeginDisabled(!stated);
+            ImGui::SetNextItemWidth(180.0f * dpi_);
+            if (ImGui::SliderFloat("Lead seconds", &v, 0.0f, 10.0f, "%.2f")) {
+                project_.streamLeadSeconds = v;
+                projectDirty_ = true;
+            }
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("How far ahead of the camera's velocity to pre-load.");
+            ImGui::PopID();
+        }
+        ImGui::Spacing();
+        ImGui::TextDisabled("RECORDED, NOT YET CONSUMED: ChunkStreamer takes its settings at");
+        ImGui::TextDisabled("construction and nothing re-reads them from the manifest yet.");
+#endif
+    }
+
     void buildPhysicsSettings() {
         ImGui::TextUnformatted("Physics");
         ImGui::SameLine(); ImGui::TextDisabled("(Jolt, behind the plain-C seam)");

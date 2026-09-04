@@ -167,6 +167,41 @@ static void checkOcproject() {
         check(writeOcproject(b2, w) == w, "and a second write is byte-identical -- isOwnedKey covers them");
     }
     {
+        // ---- the four the UI could set and the file could not hold ----------------------------
+        //
+        // MSAA, mesh shaders and the GI volume were live controls in Project Settings that applied
+        // immediately and were gone on the next open, because nothing captured them and no key
+        // existed. RENDER.GIUPDATEINTERVAL closes a different hole: --gi-update-interval had a flag
+        // and no key, while giUpdateInterval is tier-derived, so a project open could silently
+        // re-derive over the flag.
+        ProjectDesc n;
+        check(parseOcproject("OCPROJECT 1\nNAME N\n"
+                             "RENDER.MSAA 8\nRENDER.MESHSHADERS 1\n"
+                             "RENDER.GIUPDATEINTERVAL 4\n"
+                             "RENDER.GIVOLUME -250 100 300 1800\n", n, &err),
+              "the four newest render keys parse");
+        check(n.msaa == 8 && n.meshShaders == 1, "MSAA and mesh shaders survive");
+        check(n.giUpdateInterval == 4, "and the GI update interval");
+        check(n.hasGiVolume, "the GI volume reports itself present");
+        // A NEGATIVE CENTRE COMPONENT, deliberately: this is why the volume needs a presence flag
+        // rather than appendKey's "negative means unstated" rule, exactly as gravity does below.
+        check(std::fabs(n.giCenter[0] + 250.0f) < 1e-3f &&
+              std::fabs(n.giCenter[1] - 100.0f) < 1e-3f &&
+              std::fabs(n.giCenter[2] - 300.0f) < 1e-3f, "with a negative centre component intact");
+        check(std::fabs(n.giExtent - 1800.0f) < 1e-3f, "and a scalar extent -- the volume is a cube");
+        check(n.hasRenderSettings(), "and hasRenderSettings grew with them");
+
+        const std::string w = writeOcproject(n, "");
+        check(w.find("RENDER.MSAA") != std::string::npos, "MSAA is written");
+        check(w.find("RENDER.GIVOLUME") != std::string::npos, "and the GI volume");
+        ProjectDesc b4;
+        check(parseOcproject(w, b4, &err), "they parse back");
+        check(b4.msaa == 8 && b4.giUpdateInterval == 4 && b4.hasGiVolume, "with the same values");
+        // THE FOURTH OF THE FIVE PLACES: without an isOwnedKey entry the writer would append a
+        // SECOND copy of each key beside the one it copied through, and only this catches it.
+        check(writeOcproject(b4, w) == w, "and a second write is byte-identical -- isOwnedKey covers them");
+    }
+    {
         // GRAVITY POINTS DOWN, which is exactly why it needs a presence flag and not appendKey's
         // "negative means unstated" rule. A sentinel here would make the only value anybody would
         // ever write unwritable.

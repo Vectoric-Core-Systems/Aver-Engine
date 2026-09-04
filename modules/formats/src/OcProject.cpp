@@ -110,6 +110,62 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
             if (t.size() > 1) out.occlusionCull = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.DEPTHPREPASS")) {
             if (t.size() > 1) out.depthPrepass = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.MSAA")) {
+            if (t.size() > 1) out.msaa = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.MESHSHADERS")) {
+            if (t.size() > 1) out.meshShaders = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.GIUPDATEINTERVAL")) {
+            if (t.size() > 1) out.giUpdateInterval = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.GIVOLUME")) {
+            // ALL FOUR OR NONE, for PHYSICS.GRAVITY's reason immediately below: a half-stated volume
+            // would keep defaults the author believed they had replaced.
+            if (t.size() > 4) {
+                for (int i = 0; i < 3; ++i) out.giCenter[i] = static_cast<f32>(parseF64(t[1 + i]));
+                out.giExtent = static_cast<f32>(parseF64(t[4]));
+                out.hasGiVolume = true;
+            }
+        } else if (equalsCI(key, "WINDOW.TITLE")) {
+            out.windowTitle = std::string(restOfLine(line, key));
+        } else if (equalsCI(key, "WINDOW.SIZE")) {
+            // BOTH OR NEITHER: half a resolution is not a resolution.
+            if (t.size() > 2) {
+                out.windowWidth  = parseI32(t[1], -1);
+                out.windowHeight = parseI32(t[2], -1);
+            }
+        } else if (equalsCI(key, "WINDOW.RESIZABLE")) {
+            if (t.size() > 1) out.windowResizable = parseI32(t[1], -1);
+        } else if (equalsCI(key, "WINDOW.FULLSCREEN")) {
+            if (t.size() > 1) out.windowFullscreen = parseI32(t[1], -1);
+        } else if (equalsCI(key, "IMPORT.SCALE")) {
+            if (t.size() > 1) out.importScale = static_cast<f32>(parseF64(t[1], -1.0));
+        } else if (equalsCI(key, "IMPORT.CONVERTAXES")) {
+            if (t.size() > 1) out.importConvertAxes = parseI32(t[1], -1);
+        } else if (equalsCI(key, "IMPORT.GENNORMALS")) {
+            if (t.size() > 1) out.importGenNormals = parseI32(t[1], -1);
+        } else if (equalsCI(key, "IMPORT.GENMIPS")) {
+            if (t.size() > 1) out.importGenMips = parseI32(t[1], -1);
+        } else if (equalsCI(key, "IMPORT.MAXTEXTURE")) {
+            if (t.size() > 1) out.importMaxTexture = parseI32(t[1], -1);
+        } else if (equalsCI(key, "STREAM.LOADRADIUS")) {
+            if (t.size() > 1) out.streamLoadRadius = parseI32(t[1], -1);
+        } else if (equalsCI(key, "STREAM.EVICTRADIUS")) {
+            if (t.size() > 1) out.streamEvictRadius = parseI32(t[1], -1);
+        } else if (equalsCI(key, "STREAM.LOADBUDGET")) {
+            if (t.size() > 1) out.streamLoadBudget = parseI32(t[1], -1);
+        } else if (equalsCI(key, "STREAM.EVICTBUDGET")) {
+            if (t.size() > 1) out.streamEvictBudget = parseI32(t[1], -1);
+        } else if (equalsCI(key, "STREAM.VERTICALRADIUS")) {
+            if (t.size() > 1) out.streamVerticalRadius = parseI32(t[1], -1);
+        } else if (equalsCI(key, "STREAM.LEADSECONDS")) {
+            if (t.size() > 1) out.streamLeadSeconds = static_cast<f32>(parseF64(t[1], -1.0));
+        } else if (equalsCI(key, "PHYSICS.MAXBODIES")) {
+            if (t.size() > 1) out.physMaxBodies = parseI32(t[1], -1);
+        } else if (equalsCI(key, "PHYSICS.MAXBODYPAIRS")) {
+            if (t.size() > 1) out.physMaxBodyPairs = parseI32(t[1], -1);
+        } else if (equalsCI(key, "PHYSICS.MAXCONTACTS")) {
+            if (t.size() > 1) out.physMaxContacts = parseI32(t[1], -1);
+        } else if (equalsCI(key, "PHYSICS.TEMPALLOCMB")) {
+            if (t.size() > 1) out.physTempAllocatorMb = parseI32(t[1], -1);
         } else if (equalsCI(key, "PHYSICS.GRAVITY")) {
             // All three or none: a partial vector is worse than no vector, because two of the axes
             // would silently keep a default the author thought they had replaced.
@@ -202,6 +258,13 @@ bool isOwnedKey(std::string_view line) {
         "RENDER.GICONES", "RENDER.REFRACTIONMODE", "RENDER.REFRACTIONSTRENGTH",
         "RENDER.REFRACTIONEDGEFADE", "RENDER.LODSELECT", "RENDER.LODTHRESHOLD",
         "RENDER.OCCLUSIONCULL", "RENDER.DEPTHPREPASS",
+        "RENDER.MSAA", "RENDER.MESHSHADERS", "RENDER.GIUPDATEINTERVAL", "RENDER.GIVOLUME",
+        "WINDOW.TITLE", "WINDOW.SIZE", "WINDOW.RESIZABLE", "WINDOW.FULLSCREEN",
+        "IMPORT.SCALE", "IMPORT.CONVERTAXES", "IMPORT.GENNORMALS", "IMPORT.GENMIPS",
+        "IMPORT.MAXTEXTURE",
+        "STREAM.LOADRADIUS", "STREAM.EVICTRADIUS", "STREAM.LOADBUDGET", "STREAM.EVICTBUDGET",
+        "STREAM.VERTICALRADIUS", "STREAM.LEADSECONDS",
+        "PHYSICS.MAXBODIES", "PHYSICS.MAXBODYPAIRS", "PHYSICS.MAXCONTACTS", "PHYSICS.TEMPALLOCMB",
         "PHYSICS.GRAVITY", "PHYSICS.FIXEDSTEP", "AUDIO.MASTER", "AUDIO.BUS",
     };
     const std::vector<std::string_view> t = splitWhitespace(l);
@@ -256,6 +319,48 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     appendKey(owned, "RENDER.LODTHRESHOLD", d.lodThresholdPx);
     appendKey(owned, "RENDER.OCCLUSIONCULL", d.occlusionCull);
     appendKey(owned, "RENDER.DEPTHPREPASS", d.depthPrepass);
+    appendKey(owned, "RENDER.MSAA", d.msaa);
+    appendKey(owned, "RENDER.MESHSHADERS", d.meshShaders);
+    appendKey(owned, "RENDER.GIUPDATEINTERVAL", d.giUpdateInterval);
+    // Same presence-flag shape as PHYSICS.GRAVITY below, and written with snprintf for the same
+    // reason: %g gives the shortest round-tripping spelling, so a value the author typed comes back
+    // looking like what they typed.
+    if (d.hasGiVolume) {
+        char b[200];
+        std::snprintf(b, sizeof b, "RENDER.GIVOLUME %g %g %g %g\n",
+                      static_cast<double>(d.giCenter[0]), static_cast<double>(d.giCenter[1]),
+                      static_cast<double>(d.giCenter[2]), static_cast<double>(d.giExtent));
+        owned += b;
+    }
+
+    // WINDOW.* -- how a shipped game presents itself. TITLE is prose, so it is written directly
+    // rather than through appendKey, which is numeric.
+    if (!d.windowTitle.empty()) owned += "WINDOW.TITLE " + d.windowTitle + "\n";
+    if (d.windowWidth > 0 && d.windowHeight > 0) {
+        char b[96];
+        std::snprintf(b, sizeof b, "WINDOW.SIZE %d %d\n", d.windowWidth, d.windowHeight);
+        owned += b;
+    }
+    appendKey(owned, "WINDOW.RESIZABLE", d.windowResizable);
+    appendKey(owned, "WINDOW.FULLSCREEN", d.windowFullscreen);
+
+    appendKey(owned, "IMPORT.SCALE", d.importScale);
+    appendKey(owned, "IMPORT.CONVERTAXES", d.importConvertAxes);
+    appendKey(owned, "IMPORT.GENNORMALS", d.importGenNormals);
+    appendKey(owned, "IMPORT.GENMIPS", d.importGenMips);
+    appendKey(owned, "IMPORT.MAXTEXTURE", d.importMaxTexture);
+
+    appendKey(owned, "STREAM.LOADRADIUS", d.streamLoadRadius);
+    appendKey(owned, "STREAM.EVICTRADIUS", d.streamEvictRadius);
+    appendKey(owned, "STREAM.LOADBUDGET", d.streamLoadBudget);
+    appendKey(owned, "STREAM.EVICTBUDGET", d.streamEvictBudget);
+    appendKey(owned, "STREAM.VERTICALRADIUS", d.streamVerticalRadius);
+    appendKey(owned, "STREAM.LEADSECONDS", d.streamLeadSeconds);
+
+    appendKey(owned, "PHYSICS.MAXBODIES", d.physMaxBodies);
+    appendKey(owned, "PHYSICS.MAXBODYPAIRS", d.physMaxBodyPairs);
+    appendKey(owned, "PHYSICS.MAXCONTACTS", d.physMaxContacts);
+    appendKey(owned, "PHYSICS.TEMPALLOCMB", d.physTempAllocatorMb);
 
     // WRITTEN ON THEIR PRESENCE FLAG, not on a sentinel -- appendKey's "negative means unstated"
     // rule cannot express a downward gravity or a muted bus. See OcProjectDesc for both reasons.

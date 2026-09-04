@@ -33,9 +33,16 @@ namespace aver::game {
 
 // Everything GameApp needs that comes off the command line or out of game.json.
 struct GameConfig {
-    std::string title = "Aver Game";
-    u32 width = 1280;
-    u32 height = 720;
+    // NAMED CONSTANTS, so config() can tell "the caller asked for 1280" apart from "nobody said".
+    // Without that distinction a project's WINDOW.SIZE could never win, because the field is never
+    // empty -- it always holds something.
+    static constexpr const char* kDefaultTitle = "Aver Game";
+    static constexpr u32 kDefaultWidth  = 1280;
+    static constexpr u32 kDefaultHeight = 720;
+
+    std::string title = kDefaultTitle;
+    u32 width = kDefaultWidth;
+    u32 height = kDefaultHeight;
     u64 maxFrames = 0;      // 0 = run until the window closes
     bool headless = false;
     bool useWarp = false;
@@ -120,6 +127,11 @@ public:
     f32 viewAspect(const Engine&) const;
 
 private:
+    // Backing store for the window title config() may take from the project. BootConfig holds a
+    // `const char*`, so the string it points at has to outlive the call -- and config() is const,
+    // which is why this is mutable rather than a local.
+    mutable std::string windowTitleOwned_;
+
     // Loads cfg_.projectPath. Logs and leaves project_ invalid on failure rather than aborting: a
     // game with no world is a diagnosable state, and a process that dies before its first frame
     // tells the player nothing.
