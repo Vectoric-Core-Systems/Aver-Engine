@@ -3620,6 +3620,7 @@ public:
             meshPathById_[id] = rel;
             meshBounds_[id] = {md.boundsMin, md.boundsMax};
             meshTris_[id] = static_cast<u32>(md.indices.size() / 3);
+            buildMeshParts(e, id, md, verts, rel);
             if (md.hasSkin()) skinnedMeshIds_.insert(id);
             projectMeshIds_.push_back(id);
             ++loaded;
@@ -4008,6 +4009,13 @@ public:
         // its own #if AVER_MODULE_SCENE above), so there is nothing here to erase from it either.
 #if AVER_MODULE_SCENE
         for (const u64 id : projectMeshIds_) {
+            // The per-material split parts own REAL GPU meshes of their own -- destroyed explicitly
+            // for clusterCutCache_'s reason immediately below, and not merely erased from the map.
+            if (const auto pit = meshParts_.find(id); pit != meshParts_.end()) {
+                for (const MeshPart& p : pit->second)
+                    if (p.mesh) e.device()->destroyMesh(p.mesh);
+                meshParts_.erase(pit);
+            }
             sceneMeshes_.erase(id); meshTris_.erase(id);
 #if AVER_MODULE_TRIFACTOR
             meshLods_.erase(id);
@@ -5355,8 +5363,23 @@ public:
                 // answer" -- a set/restore pair is a trap for the next `continue` added between them,
                 // and this loop already has several.
                 e.device()->setDrawBlended(blended);
-                if (!clusterDispatched)
-                    e.device()->drawMesh(mesh, &wm.m[0][0], col, metallic, roughness);
+                if (!clusterDispatched) {
+                    // A MESH THAT NAMES SEVERAL MATERIALS DRAWS AS SEVERAL MESHES, one per slot.
+                    //
+                    // GATED ON `mesh == it->second`, which is the LOD and skinning exclusion stated
+                    // as a condition rather than a comment: both substitute a DIFFERENT MeshHandle
+                    // (a LOD level, or the compute-posed copy), and the split parts were cut from
+                    // the unsubstituted geometry. A substituted handle keeps today's single draw and
+                    // the entity's own material -- which is also the right answer for LOD >= 1,
+                    // where Trifactor's clustering straddles submesh boundaries anyway
+                    // (see OcMesh.cpp's own note on meshlets crossing two submeshes).
+                    const auto pit = (mesh == it->second) ? meshParts_.find(mr->mesh)
+                                                          : meshParts_.end();
+                    if (pit != meshParts_.end())
+                        drawMeshParts(e, pit->second, &wm.m[0][0], mat, col, metallic, roughness);
+                    else
+                        e.device()->drawMesh(mesh, &wm.m[0][0], col, metallic, roughness);
+                }
                 if (sel_ == kSelScene && ent == selEntity_)
                     selectionOutline_ = wm, selectionMesh_ = mesh, hasSelection_ = true;
                 ++drawn;
@@ -6672,6 +6695,148 @@ private:
         if (prefsAutosaveAccum_ < kPrefsAutosaveSec) return;
         prefsAutosaveAccum_ = 0.0f;
         saveEditorPreferences();
+    }
+
+    // ---- ONE MESH PER MATERIAL, for an asset that names more than one -------------------------
+    //
+    // .ocmesh has carried `submeshes` and `materialSlots` since it existed, all three importers
+    // write them, and the format's own header says "the renderer draws a submesh with the material
+    // bound for its slot". Nothing ever read them: scene::CMeshRenderer holds a single `i32
+    // material`, and every draw path issues one drawMesh with one material. Every multi-material
+    // asset in this engine -- OBJ, glTF and USD alike -- rendered flat.
+    //
+    // SPLIT AT LOAD RATHER THAN DRAWN AS RANGES, and that is the whole reason this is tractable.
+    // A range draw would need drawMeshRange through IDevice, IRenderFeature and both backends --
+    // and it would STILL not work in the renderer that is actually on screen, because createBlas()
+    // builds ONE geometry per mesh and the TLAS carries ONE materialIndex per instance.
+    // Per-submesh materials in the ray path would need multi-geometry BLASes, a per-geometry
+    // material table and a CommittedGeometryIndex() lookup in every trace.
+    //
+    // Splitting sidesteps all of it: each part is an ordinary single-material mesh, which is the
+    // case the raster path, the shadow cascade, voxelisation, the TLAS and the GI already handle
+    // correctly. The cost is draw calls and bottom-level structures -- 3 to 7 per tree in Jungle
+    // Ruins, against 1 -- and a single-slot mesh (37 of those 53) is untouched.
+    struct MeshPart {
+        rhi::MeshHandle mesh = 0;
+        i32             material = 0;   // aver_scene_material(0, slot name); 0 = the slot named nothing
+    };
+
+    // Splits a mesh that names more than one material into one MeshHandle per slot.
+    //
+    // COMPACTED PER PART, not sharing the parent's vertex array. createMesh COPIES what it is given,
+    // so handing all seven parts of a palm the whole vertex buffer would upload that buffer seven
+    // times. The remap also gives each part honest bounds, which is what the culler and the GI
+    // volume want anyway.
+    void buildMeshParts(Engine& e, u64 id, const fmt::OcMeshData& md,
+                        const std::vector<rhi::MeshVertex>& verts, const std::string& rel) {
+        if (md.submeshes.size() <= 1) return;   // the common case: nothing to split
+
+        std::vector<MeshPart> parts;
+        parts.reserve(md.submeshes.size());
+        std::unordered_map<u32, u32> remap;
+        std::vector<rhi::MeshVertex> pv;
+        std::vector<u32> pi;
+
+        for (const fmt::OcMeshSubmesh& sm : md.submeshes) {
+            if (sm.indexCount == 0) continue;
+            const usize end = usize(sm.indexStart) + sm.indexCount;
+            if (end > md.indices.size()) {
+                AVER_WARN("[Mesh] '{}' submesh '{}' runs past the index buffer; skipped", rel, sm.name);
+                continue;
+            }
+            remap.clear(); pv.clear(); pi.clear();
+            pi.reserve(sm.indexCount);
+            bool bad = false;
+            for (usize k = sm.indexStart; k < end; ++k) {
+                const u32 vi = md.indices[k];
+                if (vi >= verts.size()) { bad = true; break; }
+                const auto [it2, inserted] = remap.try_emplace(vi, static_cast<u32>(pv.size()));
+                if (inserted) pv.push_back(verts[vi]);
+                pi.push_back(it2->second);
+            }
+            if (bad || pv.empty()) {
+                AVER_WARN("[Mesh] '{}' submesh '{}' indexes a vertex it does not have; skipped", rel, sm.name);
+                continue;
+            }
+
+            MeshPart part;
+            part.mesh = e.device()->createMesh(pv.data(), static_cast<u32>(pv.size()),
+                                               pi.data(), static_cast<u32>(pi.size()));
+            if (!part.mesh) {
+                AVER_WARN("[Mesh] the device refused submesh '{}' of '{}'", sm.name, rel);
+                continue;
+            }
+            // THE SLOT NAMES THE MATERIAL, which is the whole point of the format's slot table --
+            // and the cook writes those names as the .ocmat stems it produced, so a name resolves
+            // through exactly the path an authored material does.
+            if (sm.materialSlot < md.materialSlots.size()) {
+                const std::string& slot = md.materialSlots[sm.materialSlot];
+                if (!slot.empty()) part.material = aver_scene_material(0, slot.c_str());
+            }
+            parts.push_back(part);
+        }
+
+        // ONE SURVIVING PART IS NOT A SPLIT. Falling through to the ordinary single-mesh path costs
+        // a draw call less and keeps the entity's own material override meaningful.
+        if (parts.size() <= 1) {
+            for (const MeshPart& p : parts) e.device()->destroyMesh(p.mesh);
+            return;
+        }
+        AVER_INFO("[Mesh] '{}' names {} materials; split into {} part(s) so each draws its own",
+                  rel, md.materialSlots.size(), parts.size());
+        meshParts_[id] = std::move(parts);
+    }
+
+    // Draws one entity's split parts, each with the material its own slot named.
+    //
+    // MIRRORS THE ENTITY LOOP'S OWN RESOLUTION, deliberately and in the same order (authored .ocmat
+    // first, then a built-in SurfaceLook, then the caller's colour). It does NOT re-warn about a
+    // material that resolves to neither: the entity loop already said it once per name, and saying
+    // it again per part would multiply one missing material into seven lines.
+    //
+    // A PART WHOSE SLOT NAMED NOTHING falls back to the entity's own material, so a mesh that
+    // half-declares its slots still draws the way it did before the split.
+    void drawMeshParts(Engine& e, const std::vector<MeshPart>& parts, const f32 world[16],
+                       i32 entityMat, const f32 entityCol[4], f32 entityMetallic, f32 entityRoughness) {
+        for (const MeshPart& p : parts) {
+            if (!p.mesh) continue;
+            const i32 mat = p.material ? p.material : entityMat;
+
+            f32 col[4] = {entityCol[0], entityCol[1], entityCol[2], entityCol[3]};
+            f32 metallic = entityMetallic, roughness = entityRoughness;
+            bool blended = false;
+            u32 authored = 0;
+#if AVER_MODULE_PBR
+            if (const auto it = surfaceMaterials_.find(mat); it != surfaceMaterials_.end())
+                authored = it->second;
+            if (authored) {
+                if (const pbr::MaterialDesc* d = pbr::MaterialLibrary::get().desc(authored))
+                    blended = pbr::isTranslucent(*d);
+            }
+#endif
+            if (authored) {
+                // The material's own texture/factor pair supplies everything; the per-draw colour
+                // becomes the identity, exactly as the entity loop does it.
+                col[0] = col[1] = col[2] = col[3] = 1.0f;
+                metallic = roughness = 1.0f;
+            } else if (const auto look = surfaceLooks_.find(mat); look != surfaceLooks_.end()) {
+                col[0] = look->second.col[0];
+                col[1] = look->second.col[1];
+                col[2] = look->second.col[2];
+                metallic = look->second.metallic;
+                roughness = look->second.roughness;
+            }
+#if AVER_MODULE_PBR && AVER_MODULE_VOXI
+            if (pbr::MaterialSystem& ms = voxiRenderer_.materials(); ms.ready()) {
+                e.device()->setDrawBinding(ms.bindingSet(authored), &ms.constants(authored),
+                                           sizeof(pbr::MaterialConstants));
+            }
+#endif
+            // PER PART, both of them: setDrawBlended is a per-draw switch and the parts of one tree
+            // genuinely differ -- a trunk is opaque where its leaves are cutout or blended.
+            e.device()->setDrawBlended(blended);
+            e.device()->drawMesh(p.mesh, world, col, metallic, roughness);
+        }
     }
 
     // ---- autosave, and the recovery it exists for -----------------------------------------------
@@ -19820,6 +19985,32 @@ private:
     // fnv1a64(asset path) -> mesh handle, for the scene-render pass.
     std::unordered_map<u64, rhi::MeshHandle> sceneMeshes_;
     std::unordered_map<u64, std::string>     meshPathById_;   // id -> project-relative path
+
+    // ---- ONE MESH PER MATERIAL, for an asset that names more than one -------------------------
+    //
+    // .ocmesh has carried `submeshes` and `materialSlots` since it existed, all three importers
+    // write them, and the format's own header says "the renderer draws a submesh with the material
+    // bound for its slot". Nothing ever read them: scene::CMeshRenderer holds a single `i32
+    // material`, and every draw path issues one drawMesh with one material. Every multi-material
+    // asset in this engine -- OBJ, glTF and USD alike -- rendered flat.
+    //
+    // SPLIT AT LOAD RATHER THAN DRAWN AS RANGES, and that is the whole reason this is tractable.
+    // A range draw would need drawMeshRange through IDevice, IRenderFeature and both backends --
+    // and it would still not work in the renderer that is actually on screen, because
+    // createBlas() builds ONE geometry per mesh and the TLAS carries ONE materialIndex per
+    // instance. Per-submesh materials in the ray path would need multi-geometry BLASes, a
+    // per-geometry material table and a CommittedGeometryIndex() lookup in every trace.
+    //
+    // Splitting sidesteps all of it: each part is an ordinary single-material mesh, which is the
+    // case the raster path, the shadow cascade, voxelisation, the TLAS and the GI already handle
+    // correctly. The cost is draw calls and bottom-level structures -- 3 to 7 per tree in Jungle
+    // Ruins, against 1 -- and the small plants (37 of 53) have one slot and are untouched.
+    // MeshPart itself is declared further up, beside buildMeshParts: an in-class member function
+    // BODY sees types declared later in the class, but a parameter type in its SIGNATURE does not.
+    //
+    // Only ever populated for a mesh with MORE THAN ONE submesh. Its absence is the fast path, and
+    // is what every existing asset takes.
+    std::unordered_map<u64, std::vector<MeshPart>> meshParts_;
     // THE TWO WAYS THE SCENE WALK DROPS AN ENTITY, each reported once. Keyed differently on purpose:
     // the invisible-bit fault belongs to an ENTITY (its own component is mis-seeded) while an
     // unresolved id belongs to the ID (every entity naming it shares one fault). Never cleared on
