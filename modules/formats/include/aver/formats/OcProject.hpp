@@ -61,7 +61,11 @@ struct ProjectDesc {
     int giQuality       = -1;   // RENDER.GI            0=Off 1=Low 2=Medium 3=High 4=Epic
     int rayTracing      = -1;   // RENDER.RAYTRACING    same scale
     int pathTracing     = -1;   // RENDER.PATHTRACING   same scale
-    int voxelResolution = -1;   // RENDER.VOXELRES      64 / 128 / 256
+    // Clamped to [32, 512] by Voxi.cpp's setSettings, and Epic's own derived rung IS 512 -- the
+    // comment here used to say "64 / 128 / 256", which named neither the real floor nor the real
+    // ceiling and made a legal 512 look like a typo. 512^3 RGBA16F is ~1.2 GiB with its mip chain,
+    // so the ceiling is a real choice rather than a formality.
+    int voxelResolution = -1;   // RENDER.VOXELRES      grid edge, 32..512 (Epic derives 512)
     f32 giIntensity     = -1.0f;// RENDER.GIINTENSITY   indirect bounce multiplier
     f32 giMaxDistance   = -1.0f;// RENDER.GIDISTANCE    cone trace range, centimetres
     int rtShadowRays       = -1; // RENDER.RTSHADOWRAYS     sun occlusion rays/pixel, [1,32]

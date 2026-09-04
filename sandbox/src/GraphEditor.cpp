@@ -2515,7 +2515,13 @@ constexpr GraphComponentKind kGraphComponentKinds[] = {
     {"Scene",        "A named transform and nothing else -- a muzzle, a socket, an attach point."},
     {"Mesh",         "A drawn mesh. `mesh=` is content-relative, e.g. Meshes/cube.ocmesh."},
     {"SkeletalMesh", "A mesh plus the skeleton that poses it."},
-    {"Animator",     "A clip and the clock running it, on whatever this is parented to."},
+    // NOT "on whatever this is parented to", which is what this said and which is false.
+    // GraphComponentTree.Build creates ONE ENTITY PER COMP RECORD, and AnimSystem::tick poses an
+    // entity only when CAnimator and CSkeletalMesh sit on the SAME one -- so a parented Animator is
+    // a sibling of the mesh it means to drive, its clock ticks, and nothing moves. The old blurb
+    // described the arrangement an author would reach for and get nothing from.
+    {"Animator",     "A clip and the clock running it. Each COMP is its own entity, so this cannot "
+                     "pose a SkeletalMesh beside it -- use the PlayAnimation node for that."},
     {"Particles",    "One emitter instance, playing a .ocparticle effect."},
     {"Camera",       "Camera parameters. Stored correctly; no renderer reads CCamera yet."},
     {"Light",        "A light. Stored correctly; no renderer reads CLight yet."},
