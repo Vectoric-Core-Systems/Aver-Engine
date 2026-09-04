@@ -41,6 +41,10 @@
 // these are separate executables with no duplicate symbol to collide.
 #if AVER_HAVE_MATERIAL_COMPILE
 #include "aver/formats/OcMat.hpp"
+// Texture.hpp for generateMipChain, which --max-texture downscales THROUGH rather than beside: it is
+// the filter the renderer's own mip chain is built with, so a texture imported at 2048 comes out
+// bit-identical to mip 1 of the same texture imported at 4096.
+#include "aver/formats/Texture.hpp"
 #include "aver/platform/Image.hpp"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -822,6 +826,115 @@ bool writeMeshItems(const std::string& input, const std::string& outDir, const s
 }
 
 
+#if AVER_HAVE_MATERIAL_COMPILE
+// How a texture is going to be READ, which is what decides how it may be filtered. Colour has to be
+// averaged in linear space, a normal map as vectors and then renormalised, and data (roughness,
+// metal, occlusion) straight -- getting this wrong does not fail, it just shades subtly wrong, which
+// is the worst kind of wrong to ship.
+enum class TexRole { Colour, Data, Normal };
+
+// Derives each image's role from the SLOTS that reference it. An image nothing references keeps the
+// conservative default (Data, filtered straight): it is about to be dropped by the cook anyway, and
+// guessing sRGB on an unreferenced file would only matter if that guess were wrong.
+std::vector<TexRole> imageRoles(const std::vector<fmt::ImportedMaterial>& materials, usize imageCount) {
+    std::vector<TexRole> roles(imageCount, TexRole::Data);
+    const auto mark = [&](const fmt::ImportedTexture& t, TexRole r) {
+        if (t.imageIndex >= 0 && usize(t.imageIndex) < roles.size()) roles[usize(t.imageIndex)] = r;
+    };
+    for (const fmt::ImportedMaterial& m : materials) {
+        mark(m.metalRoughTex, TexRole::Data);
+        mark(m.occlusionTex,  TexRole::Data);
+        mark(m.normalTex,     TexRole::Normal);
+        // Colour LAST so that an image serving as both -- an ORM map also wired to base colour, which
+        // an exporter can produce -- ends up filtered as colour, the reading that is visible.
+        mark(m.baseColorTex,  TexRole::Colour);
+        mark(m.emissiveTex,   TexRole::Colour);
+    }
+    return roles;
+}
+
+// One image, halved until neither side exceeds `cap`, and re-encoded as PNG. Returns false and
+// leaves `img` untouched when it is already small enough, cannot be decoded, or would not re-encode.
+//
+// WHY IN THE TOOL AND NOT THE COOK. cookMaterials' contract is that it writes the bytes it is given;
+// it has no decoder and should not grow one, because every caller that wants verbatim bytes would
+// then be paying for a decode it does not want. A size cap is a POLICY about a particular import,
+// which is the tool's business -- and this is where the decoder and the PNG writer already are.
+//
+// THE FILTER IS THE ENGINE'S OWN. generateMipChain is the function that builds the mip chain the
+// renderer samples, so capping through it means a texture imported at 2048 is bit-identical to mip 1
+// of the same texture imported at 4096. A second box filter here would drift from that.
+bool capImageSize(fmt::ImportedImage& img, u32 cap, TexRole role, std::string* note) {
+    if (!img.ok || img.bytes.empty() || cap == 0) return false;
+
+    ImageData src;
+    std::string derr;
+    if (!decodeImage(img.bytes.data(), img.bytes.size(), src, &derr)) {
+        // NOT an error: the undecodable-container check in the cook reports these by name, and a
+        // format this build cannot read is not one the cap can do anything about either way.
+        return false;
+    }
+    if (src.width <= cap && src.height <= cap) return false;
+
+    fmt::TextureData t;
+    t.width  = src.width;
+    t.height = src.height;
+    t.srgb   = (role == TexRole::Colour);
+    t.levels.push_back(std::move(src));
+    fmt::generateMipChain(t, role == TexRole::Normal);
+
+    usize level = 0;
+    while (level + 1 < t.levels.size() &&
+           (t.levels[level].width > cap || t.levels[level].height > cap))
+        ++level;
+    const ImageData& out = t.levels[level];
+    if (!out.valid()) return false;
+
+    // stbi_write_png_to_func rather than the file form: the cook still owns where this lands, and a
+    // temporary file here would be a second place for an import to fail.
+    std::vector<u8> encoded;
+    const auto sink = [](void* ctx, void* data, int len) {
+        auto* v = static_cast<std::vector<u8>*>(ctx);
+        const u8* p = static_cast<const u8*>(data);
+        v->insert(v->end(), p, p + len);
+    };
+    if (!stbi_write_png_to_func(sink, &encoded, static_cast<int>(out.width),
+                                static_cast<int>(out.height), 4, out.pixels.data(),
+                                static_cast<int>(out.width * 4)) || encoded.empty())
+        return false;
+
+    if (note) {
+        char buf[256];
+        std::snprintf(buf, sizeof buf, "%s: %ux%u -> %ux%u (%.1f MB -> %.1f MB)",
+                      (img.sourcePath.empty() ? img.suggestedName : img.sourcePath).c_str(),
+                      t.levels[0].width, t.levels[0].height, out.width, out.height,
+                      double(img.bytes.size()) / 1e6, double(encoded.size()) / 1e6);
+        *note = buf;
+    }
+    img.bytes = std::move(encoded);
+    // PNG NO MATTER WHAT WENT IN. A JPEG re-encoded as a JPEG would compound its own artefacts, and
+    // the extension has to follow the bytes or the engine's decoder is handed a lie.
+    img.ext = ".png";
+    return true;
+}
+
+// Applies the cap across a whole import, in place, and says what it did.
+void capImageSizes(std::vector<fmt::ImportedImage>& images,
+                   const std::vector<fmt::ImportedMaterial>& materials, u32 cap) {
+    if (cap == 0 || images.empty()) return;
+    const std::vector<TexRole> roles = imageRoles(materials, images.size());
+    u32 changed = 0;
+    for (usize i = 0; i < images.size(); ++i) {
+        std::string note;
+        if (capImageSize(images[i], cap, roles[i], &note)) {
+            AVER_INFO("texture cap {}", note);
+            ++changed;
+        }
+    }
+    if (changed) AVER_INFO("capped {} texture(s) at {}px", changed, cap);
+}
+#endif // AVER_HAVE_MATERIAL_COMPILE
+
 // Cooks `materials` and `images` into the project's Content/Materials and Content/Textures, then
 // rewrites every mesh's material slots to the stems that were actually written. Shared by all three
 // mesh formats, which is the point: cooking lives in ONE place so the reserved-name policy, the
@@ -836,9 +949,9 @@ bool writeMeshItems(const std::string& input, const std::string& outDir, const s
 // A no-op when `contentDir` is empty, which is the launcher-less case: geometry still imports, and
 // the caller is told what it is leaving behind rather than losing it silently.
 void cookAndRewriteSlots(const std::vector<fmt::ImportedMaterial>& materials,
-                         const std::vector<fmt::ImportedImage>& images,
+                         std::vector<fmt::ImportedImage>& images,
                          const std::string& contentDir, const std::string& base,
-                         std::vector<fmt::OcMeshData>& meshes) {
+                         std::vector<fmt::OcMeshData>& meshes, u32 maxTexture) {
     if (materials.empty() && images.empty()) return;
     // Only the READABLE images are worth counting at the user: an entry whose bytes could not be
     // loaded is carried so a second material naming the same missing file is not retried, and
@@ -852,6 +965,10 @@ void cookAndRewriteSlots(const std::vector<fmt::ImportedMaterial>& materials,
                   materials.size(), readable);
         return;
     }
+    // BEFORE the cook, because the cook writes the bytes it is given. Capping afterwards would
+    // mean writing the 4K file and then a second one beside it.
+    capImageSizes(images, materials, maxTexture);
+
     fmt::MaterialCookOptions copt;
     copt.contentDir = contentDir;
     copt.assetBase  = base;
@@ -878,7 +995,7 @@ void cookAndRewriteSlots(const std::vector<fmt::ImportedMaterial>& materials,
     AVER_INFO("wrote {} material(s) and {} texture(s) under {}",
               cres.materialsWritten, cres.texturesWritten, contentDir);
 #else
-    (void)contentDir; (void)base; (void)meshes;
+    (void)contentDir; (void)base; (void)meshes; (void)maxTexture;
     AVER_WARN("this build has no PBR module, so the file's {} material(s) and {} image(s) were not "
               "imported; geometry only", materials.size(), readable);
 #endif
@@ -898,6 +1015,7 @@ int main(int argc, char** argv) {
         "usage: AverAssetC convert <input-file> --out-dir <dir> [--base <name>] [--merge] [--lod <ratio>]"
 #if AVER_HAVE_MATERIAL_COMPILE
         "\n                          [--content-dir <dir>]   write materials and textures too"
+        "\n                          [--max-texture <n>]     downscale imported textures to n px"
 #endif
 #if AVER_HAVE_MATERIAL_COMPILE
         "\n       AverAssetC material <texture-file>... --out-dir <dir> --base <name>"
@@ -920,6 +1038,7 @@ int main(int argc, char** argv) {
     }
 
     std::string input, outDir, baseOverride, contentDir;
+    u32 maxTexture = 0;             // 0 = every texture through at its source resolution
     bool merge = false;
     bool haveInput = false;
     f32 lodRatio = 0.0f;
@@ -934,6 +1053,10 @@ int main(int argc, char** argv) {
         // Textures/. Inferring one from the other would be a second fragile convention beside the
         // one kContentRelPrefix already admits is an assumption.
         else if (a == "--content-dir" && i + 1 < argc) contentDir = argv[++i];
+        // --max-texture <n>: no imported texture wider or taller than n pixels. A 4K set costs 87 MB
+        // of mips PER TEXTURE once the engine builds the chain, so three maps on each of a dozen
+        // plants is a gigabyte of VRAM before anything else is in the scene.
+        else if (a == "--max-texture" && i + 1 < argc) maxTexture = u32(std::atoi(argv[++i]));
         else if (!haveInput) { input = a; haveInput = true; }
     }
     if (!haveInput || outDir.empty()) {
@@ -967,7 +1090,7 @@ int main(int argc, char** argv) {
         // which is the dev harness; this is the compiler the launcher actually invokes, so until
         // now a glTF imported by the product arrived with its materials thrown away while the same
         // file imported by the harness did not.
-        cookAndRewriteSlots(res.materials, res.images, contentDir, base, res.meshes);
+        cookAndRewriteSlots(res.materials, res.images, contentDir, base, res.meshes, maxTexture);
 
         std::vector<MeshItem> items;
         items.reserve(res.meshes.size());
@@ -1047,7 +1170,7 @@ int main(int argc, char** argv) {
             const std::string baseDir = slash == std::string::npos ? std::string() : input.substr(0, slash);
             fmt::objMaterialsToImported(res.materials, baseDir, mats, imgs, &mwarn);
             for (const std::string& w : mwarn) AVER_WARN("materials: {}", w);
-            cookAndRewriteSlots(mats, imgs, contentDir, base, res.meshes);
+            cookAndRewriteSlots(mats, imgs, contentDir, base, res.meshes, maxTexture);
         }
 
         std::vector<MeshItem> items;
@@ -1080,7 +1203,7 @@ int main(int argc, char** argv) {
         // name, so this rewrites those names to the cooked stems exactly as the glTF path does. A
         // mesh whose slot stayed empty -- no binding, or one behind a reference this importer does
         // not compose -- is untouched, and the import said so under `unsupported`.
-        cookAndRewriteSlots(res.materials, res.images, contentDir, base, res.meshes);
+        cookAndRewriteSlots(res.materials, res.images, contentDir, base, res.meshes, maxTexture);
 
         std::vector<MeshItem> items;
         items.reserve(res.meshes.size());

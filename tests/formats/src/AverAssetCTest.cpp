@@ -17,6 +17,7 @@
 // reportable rather than silent. Pinning the numbers too would make this fail every time the
 // importer legitimately improved, and a test that cries wolf gets deleted.
 #include "aver/core/Log.hpp"
+#include "aver/platform/Image.hpp"
 
 #include <cstdio>
 #include <filesystem>
@@ -295,6 +296,104 @@ int main() {
               "NoMetalMat.ocmat writes PARAM metallicFactor 0, not the glTF default of 1");
     }
     std::filesystem::remove_all(noMetalOutDir, ec);
+
+    // ---- --max-texture, and the thing about it that can silently be wrong -------------------
+    //
+    // Resizing is the easy half; FILTERING IN THE RIGHT SPACE is the half that fails invisibly.
+    // Colour has to be averaged in linear light, data (roughness, metal, occlusion) straight, and a
+    // normal map as vectors -- and the cap only knows which is which by looking at the SLOTS that
+    // reference each image. Get that map wrong and every texture still comes out the right size.
+    //
+    // So this feeds the tool TWO IDENTICAL IMAGES and binds them differently. Same bytes in, and if
+    // the role plumbing works, different bytes out: 188 for the colour map (the linear average 0.5,
+    // re-encoded to sRGB) and 128 for the data map (the straight byte average). A build that gave
+    // every image one role would return the same number twice, whichever number that was.
+    AVER_INFO("-- --max-texture downscales, and filters each map in ITS OWN space --");
+    {
+        const std::filesystem::path capDir = outDir / "cap";
+        const std::filesystem::path capContent = capDir / "content";
+        std::filesystem::create_directories(capDir, ec);
+
+        // A 2x2 24-bit BMP, half black and half white. BMP because it needs no encoder: stb_image
+        // reads it, and hand-writing 70 bytes beats linking a PNG writer into a test.
+        const auto writeBmp = [&](const std::filesystem::path& p) {
+            const u8 hdr[54] = {
+                'B','M',  70,0,0,0,  0,0,0,0,  54,0,0,0,        // file header, 70 bytes total
+                40,0,0,0,  2,0,0,0,  2,0,0,0,  1,0,  24,0,      // DIB: 2x2, 1 plane, 24bpp
+                0,0,0,0,  16,0,0,0,  0,0,0,0,  0,0,0,0,  0,0,0,0,  0,0,0,0,
+            };
+            // Bottom-up, BGR, rows padded to 4 bytes. Two white and two black texels either way up.
+            const u8 rows[16] = {
+                255,255,255,  0,0,0,      0,0,          // bottom row: white, black, 2 pad
+                0,0,0,        255,255,255, 0,0,         // top row:    black, white, 2 pad
+            };
+            std::ofstream f(p, std::ios::binary);
+            f.write(reinterpret_cast<const char*>(hdr), sizeof hdr);
+            f.write(reinterpret_cast<const char*>(rows), sizeof rows);
+        };
+        writeBmp(capDir / "colour.bmp");
+        writeBmp(capDir / "data.bmp");
+
+        {
+            std::ofstream f(capDir / "cap.mtl");
+            f << "newmtl CapMat\nKd 1 1 1\nmap_Kd colour.bmp\nmap_Pr data.bmp\n";
+        }
+        {
+            std::ofstream f(capDir / "cap.obj");
+            f << "mtllib cap.mtl\no Tri\nv 0 0 0\nv 1 0 0\nv 0 1 0\n"
+                 "vt 0 0\nvt 1 0\nvt 0 1\nusemtl CapMat\nf 1/1 2/2 3/3\n";
+        }
+
+        std::string capOut;
+        const std::string cmd = "\"" + exe.string() + "\" convert \"" +
+                                (capDir / "cap.obj").string() + "\" --out-dir \"" + capDir.string() +
+                                "\" --content-dir \"" + capContent.string() +
+                                "\" --base Cap --max-texture 1";
+        const int capCode = runCapture(cmd, capOut);
+        check(capCode == 0, "the cap run exits 0 (got " + std::to_string(capCode) + ")");
+        check(capOut.find("2x2 -> 1x1") != std::string::npos,
+              "and reports what it resized, rather than doing it silently");
+
+        // The extension follows the bytes: whatever went in, a re-encoded texture comes out PNG.
+        const std::filesystem::path colourPng = capContent / "Textures" / "Cap" / "colour.png";
+        const std::filesystem::path dataPng   = capContent / "Textures" / "Cap" / "data.png";
+        check(std::filesystem::exists(colourPng, ec) && std::filesystem::exists(dataPng, ec),
+              "both capped textures were written as .png");
+
+        ImageData colour, data;
+        std::string derr;
+        const bool gotColour = decodeImage(colourPng.string(), colour, &derr);
+        const bool gotData   = decodeImage(dataPng.string(), data, &derr);
+        check(gotColour && gotData, "and both decode: " + derr);
+        if (gotColour && gotData) {
+            check(colour.width == 1 && colour.height == 1 && data.width == 1 && data.height == 1,
+                  "2x2 capped at 1 is 1x1");
+            const int c = colour.pixels.empty() ? -1 : int(colour.pixels[0]);
+            const int d = data.pixels.empty()   ? -1 : int(data.pixels[0]);
+            check(c >= 186 && c <= 190,
+                  "the BASE COLOUR map averaged in linear light (got " + std::to_string(c) +
+                  ", want ~188, not ~128)");
+            check(d >= 127 && d <= 129,
+                  "the ROUGHNESS map averaged straight (got " + std::to_string(d) +
+                  ", want ~128, not ~188)");
+            check(c != d, "so the two roles are genuinely told apart, not filtered identically");
+        }
+
+        // Without the flag nothing is touched: the cap is opt-in, so an existing import pipeline
+        // that never passes it keeps handing the engine the author's own pixels.
+        const std::filesystem::path plainContent = capDir / "plain";
+        std::string plainOut;
+        const std::string plainCmd = "\"" + exe.string() + "\" convert \"" +
+                                     (capDir / "cap.obj").string() + "\" --out-dir \"" +
+                                     capDir.string() + "\" --content-dir \"" +
+                                     plainContent.string() + "\" --base Cap";
+        runCapture(plainCmd, plainOut);
+        ImageData plain;
+        check(decodeImage((plainContent / "Textures" / "Cap" / "colour.bmp").string(), plain, &derr) &&
+              plain.width == 2 && plain.height == 2,
+              "and with no --max-texture the source is copied through untouched, extension and all");
+    }
+    std::filesystem::remove_all(outDir / "cap", ec);
 
     // ---- the failure path -------------------------------------------------------------------
     AVER_INFO("-- and a bad input FAILS detectably, rather than silently --");
