@@ -2585,6 +2585,7 @@ public:
         // Single-instance forwarding, drain. Polled rather than an Event (Event.hpp is a fixed POD
         // with no string field), latched on window_ and drained unconditionally every frame -- safe
         // since window_->pumpEvents() runs BEFORE onUpdate and WM_COPYDATA is synchronous on this thread.
+        maybeAutosave(t.dt);
 #if AVER_MODULE_SCENE
         // --save-level <out>: write the OPEN level to another path and log the result.
         //
@@ -6640,6 +6641,196 @@ private:
         return true;
     }
 
+    // ---- autosave, and the recovery it exists for -----------------------------------------------
+    //
+    // There was none. Not a timer, not a sidecar, not a marker -- a repo-wide search for autosave,
+    // backup or recovery finds nothing, so a crash or a power cut cost the whole session, and the
+    // crash reporter that already exists had nothing to offer the person reading it.
+    //
+    // WRITTEN BESIDE THE LEVEL, as "<name>.ocworld.autosave", not into a temp directory: it has to
+    // be findable by a person who does not know this function exists, and it has to travel with the
+    // project if they copy the folder to ask someone else about it. The extension chain also keeps
+    // it out of listLevels(), which matches on the last extension, so a recovery file never appears
+    // in the Open Level picker as if it were a level of its own.
+    //
+    // NEVER OVER THE LEVEL. An autosave that overwrites the file is not a safety net, it is an
+    // unrequested save -- it would defeat the whole point of "close without saving", and it would
+    // write half-finished work over the last good version. The sidecar is offered on the next open
+    // and deleted the moment the real file is saved.
+    std::string autosavePathFor(const std::string& levelPath) const {
+        return levelPath.empty() ? std::string() : levelPath + ".autosave";
+    }
+
+    void maybeAutosave(f32 dt) {
+#if AVER_MODULE_SCENE
+        if (autosaveIntervalSec_ <= 0.0f) return;
+        // NOTHING TO SAVE is the common case and must cost nothing: no level, never saved (so there
+        // is nowhere to put the sidecar), or nothing edited since it was opened.
+        if (levelPath_.empty() || !levelHasUnsavedEdits()) { autosaveAccum_ = 0.0f; return; }
+        autosaveAccum_ += dt;
+        if (autosaveAccum_ < autosaveIntervalSec_) return;
+        autosaveAccum_ = 0.0f;
+
+        const std::string dst = autosavePathFor(levelPath_);
+        if (saveLevel(dst)) {
+            autosaveWritten_ = true;
+            AVER_INFO("[Autosave] wrote {}", dst);
+        } else {
+            // ONCE, not every interval: a directory that cannot be written will not start working,
+            // and a log line every thirty seconds would bury everything else.
+            if (!autosaveFailedWarned_) {
+                autosaveFailedWarned_ = true;
+                AVER_WARN("[Autosave] could not write {} -- autosave is off for this session", dst);
+            }
+            autosaveIntervalSec_ = 0.0f;
+        }
+#else
+        (void)dt;
+#endif
+    }
+
+    // Drops the sidecar. Called when the level is saved for real, and when its recovery is declined.
+    void clearAutosave() {
+        const std::string p = autosavePathFor(levelPath_);
+        if (p.empty()) return;
+        std::error_code ec;
+        std::filesystem::remove(p, ec);
+        autosaveWritten_ = false;
+        autosaveAccum_ = 0.0f;
+    }
+
+    // Offers a newer sidecar after a level opens. Answering is the point -- an autosave nobody is
+    // told about is a file, not a recovery.
+    void checkForRecovery() {
+#if AVER_MODULE_SCENE
+        recoveryPath_.clear();
+        const std::string p = autosavePathFor(levelPath_);
+        if (p.empty()) return;
+        std::error_code ec;
+        if (!std::filesystem::exists(p, ec)) return;
+        // NEWER THAN THE LEVEL, or there is nothing to recover: a sidecar older than the file it
+        // shadows is the leftover of a session that ended by saving properly, and offering it would
+        // invite someone to overwrite good work with stale work.
+        const auto sideT = std::filesystem::last_write_time(p, ec);
+        if (ec) return;
+        const auto liveT = std::filesystem::last_write_time(levelPath_, ec);
+        if (ec || sideT <= liveT) { std::filesystem::remove(p, ec); return; }
+        recoveryPath_ = p;
+        AVER_WARN("[Autosave] '{}' has unsaved changes from a previous session", levelPath_);
+#endif
+    }
+
+    void drawRecoveryPrompt(Engine& e) {
+#if AVER_WITH_IMGUI && AVER_MODULE_SCENE
+        if (recoveryPath_.empty()) return;
+        constexpr const char* kTitle = "Recover unsaved changes?";
+        if (!ImGui::IsPopupOpen(kTitle)) ImGui::OpenPopup(kTitle);
+        const ImVec2 centre = ImGui::GetMainViewport()->GetCenter();
+        ImGui::SetNextWindowPos(centre, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowSize(ImVec2(520.0f * dpi_, 0.0f), ImGuiCond_Appearing);
+        if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+
+        ImGui::TextWrapped("'%s' was left with unsaved changes -- the editor closed before they were "
+                           "saved.", std::filesystem::path(levelPath_).filename().string().c_str());
+        ImGui::TextDisabled("Recovering opens the autosave. The level on disk is not touched until "
+                            "you save.");
+        ImGui::Spacing();
+        ImGui::Separator();
+        if (ImGui::Button("Recover", ImVec2(120.0f * dpi_, 0.0f))) {
+            const std::string p = recoveryPath_;
+            recoveryPath_.clear();
+            ImGui::CloseCurrentPopup();
+            // Loaded like any other level, then RE-POINTED at the real file: recovering must not
+            // leave levelPath_ aimed at the sidecar, or the next Ctrl+S would save into it and the
+            // level would never actually be written.
+            const std::string real = levelPath_;
+            openLevelDirect(e, p);
+            levelPath_ = real;
+            levelName_ = std::filesystem::path(real).stem().string();
+            setUpgradeStatus("Recovered - not yet saved");
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Discard", ImVec2(120.0f * dpi_, 0.0f))) {
+            std::error_code ec;
+            std::filesystem::remove(recoveryPath_, ec);
+            recoveryPath_.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+#else
+        (void)e;
+#endif
+    }
+
+    // Makes this level a landscape it does not have: synthesises tile (0,0) from the panel's own
+    // noise parameters, writes it to Content/Landscape/<level>.ocland, loads it, and RECORDS IT IN
+    // THE LEVEL so the next open finds it.
+    //
+    // WHY THIS DID NOT EXIST. A landscape could only become resident three ways -- a file already
+    // sitting next to the level under the <levelname>.ocland convention, the --landscape CLI
+    // override, or a LANDSCAPE record a person hand-wrote into the .ocworld. The Landscape editor
+    // mode, faced with a level that had none, printed "This level has no landscape section." and
+    // rendered no controls at all: the one mode whose whole job is terrain could not make any.
+    //
+    // synthesizeTerrainTile is the SAME generator the streaming ring already uses for the tiles
+    // around an authored section, so a created section and its neighbours come out of one function
+    // rather than two that have to agree.
+    bool createLandscapeForLevel(rhi::IDevice* device, u32 samples, f32 spacingCm) {
+        if (!project_.valid()) { setUpgradeStatus("Open a project first."); return false; }
+        const std::string stem = levelName_.empty() ? std::string("untitled") : levelName_;
+        const std::filesystem::path dir = std::filesystem::path(project_.contentDir()) / "Landscape";
+        const std::filesystem::path dst = dir / (stem + ".ocland");
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+
+        fmt::OcLandData data;
+        const f32 tileSizeCm = static_cast<f32>(samples - 1) * spacingCm;
+        if (!landscape::synthesizeTerrainTile(landscape::TileCoord{0, 0}, 0.0f, 0.0f, tileSizeCm,
+                                              samples, landscapeNoiseParams_, data)) {
+            setUpgradeStatus("Could not synthesise a landscape at that size.");
+            return false;
+        }
+        std::string why;
+        if (!fmt::saveOcLand(dst.string(), data, &why)) {
+            AVER_ERROR("[Landscape] could not write '{}': {}", dst.string(), why);
+            setUpgradeStatus("Could not write " + dst.filename().string());
+            return false;
+        }
+        if (!loadLandscape(device, dst.string())) {
+            setUpgradeStatus("Wrote " + dst.filename().string() + " but could not load it back.");
+            return false;
+        }
+        recordLandscapeInLevel();
+        cbInvalidate(dir.string());
+        setUpgradeStatus("Created " + dst.filename().string());
+        AVER_INFO("[Landscape] created {} ({}x{} samples, {:.0f}cm spacing, {:.0f}cm across)",
+                  dst.string(), samples, samples, spacingCm, tileSizeCm);
+        return true;
+    }
+
+    // Makes the level's LANDSCAPE record agree with what is actually resident.
+    //
+    // THE EDITOR COULD NEVER WRITE THIS RECORD. saveLevel copies levelHeader_ wholesale, so a
+    // landscape that arrived through the <levelname>.ocland naming convention or through
+    // --landscape was never named in the file -- the level looked terrain-less to anything but this
+    // machine's directory listing, and moving the project broke it silently.
+    void recordLandscapeInLevel() {
+        if (!landscapeLoaded_ || landscapePath_.empty() || !project_.valid()) return;
+        std::error_code ec;
+        std::string rel = std::filesystem::relative(landscapePath_, project_.contentDir(), ec).string();
+        if (ec || rel.empty()) rel = landscapePath_;
+        for (char& c : rel) if (c == '\\') c = '/';
+
+        fmt::OcLandscapePlacement lp;
+        if (!levelHeader_.landscapes.empty()) lp = levelHeader_.landscapes.front();   // keep name/material
+        lp.section = rel;
+        if (lp.name.empty()) lp.name = levelName_.empty() ? std::string("Landscape") : levelName_;
+        lp.x = landscapeData_.originCm[0];
+        lp.y = landscapeData_.originCm[1];
+        lp.z = landscapeData_.originCm[2];
+        levelHeader_.landscapes.assign(1, std::move(lp));
+    }
+
     // Points a live chunk generator at the resident section, so scattered entities sit ON the
     // terrain instead of on the flat plane at the chunk's origin Z.
     // CALLED FROM BOTH DIRECTIONS, because either can happen first: a level load can bring terrain in
@@ -8618,7 +8809,7 @@ private:
     // captures every component via EntitySnapshot -- see EditorEntitySnapshot.hpp for what it
     // deliberately omits (hierarchy; CName's internal blob offsets).
     struct EditCmd {
-        enum class Kind { Transform, Create, Destroy, CreateObj, DestroyObj, LandscapeStroke, FoliageStroke, Reparent, Material };
+        enum class Kind { Transform, Create, Destroy, CreateObj, DestroyObj, LandscapeStroke, FoliageStroke, Reparent, Material, Rename };
         Kind kind = Kind::Transform;
         EditId id = 0;            // a scene entity, through the indirection
         int objIndex = -1;        // or an objects_ index, for the placeholder scene
@@ -8638,6 +8829,10 @@ private:
         pbr::MaterialHandle matHandle = 0;
         pbr::MaterialDesc matBefore{}, matAfter{};
 #endif
+        // Rename payload. `label` above already carries the NEW name for a Create; these two are the
+        // pair a Rename swaps between, and they are the outliner label rather than CName -- see
+        // applyEntityLabel for why the editor's display name is the one being edited.
+        std::string renameBefore, renameAfter;
 
         // LandscapeStroke payload: the heightfield sub-rectangle a brush stroke touched, before and
         // after.
@@ -8743,6 +8938,44 @@ private:
         *d = want;
         d->name = std::move(keepName);
         pbr::MaterialLibrary::get().touch(h);
+    }
+#endif
+
+#if AVER_MODULE_SCENE
+    // Sets an entity's OUTLINER LABEL -- entityLabels_, not scene::CName.
+    //
+    // WHY THE LABEL AND NOT THE NAME. CName is the ASSET the placement names ("Meshes/cube.ocmesh"),
+    // which is what saveLevel writes back as the PLACE record's asset and what resolves the mesh.
+    // Renaming that would repoint the placement at a file that does not exist. entityLabels_ is the
+    // editor's own display string, shown in the Outliner and the Details panel, and it is the thing
+    // a person means by "call this one Doorway".
+    //
+    // NOT PERSISTED YET, and that is worth knowing before relying on it: the .ocworld PLACE grammar
+    // has no field for a display name, so a label survives the session and not the save. Renaming
+    // being impossible was still the worse of the two -- an unnamed pile of "Cube 4" is unworkable
+    // long before persistence matters.
+    void applyEntityLabel(EditId id, const std::string& label) {
+        const scene::Entity e = entityForEdit(id);
+        if (e == scene::kInvalidEntity || !scene::World::instance().valid(e)) return;
+        if (label.empty()) entityLabels_.erase(static_cast<u32>(e));
+        else               entityLabels_[static_cast<u32>(e)] = label;
+    }
+
+    // Renames the selected entity, as one undoable command. No-ops when the name did not change, so
+    // committing an unedited field does not put a do-nothing entry on the stack.
+    void renameEntity(scene::Entity e, const std::string& to) {
+        if (e == scene::kInvalidEntity || !scene::World::instance().valid(e)) return;
+        std::string from;
+        if (const auto it = entityLabels_.find(static_cast<u32>(e)); it != entityLabels_.end())
+            from = it->second;
+        if (from == to) return;
+        EditCmd c;
+        c.kind = EditCmd::Kind::Rename;
+        c.id = editIdFor(e);
+        c.renameBefore = from;
+        c.renameAfter = to;
+        applyEntityLabel(c.id, to);
+        pushEdit(std::move(c));
     }
 #endif
 
@@ -9525,6 +9758,9 @@ private:
 #if AVER_MODULE_PBR
             case EditCmd::Kind::Material:  applyMaterialDesc(c.matHandle, c.matBefore); break;
 #endif
+#if AVER_MODULE_SCENE
+            case EditCmd::Kind::Rename:    applyEntityLabel(c.id, c.renameBefore); break;
+#endif
             case EditCmd::Kind::CreateObj:   // undo a create: take it back out
                 if (c.objIndex >= 0 && c.objIndex < (int)objects_.size()) {
                     objects_.erase(objects_.begin() + c.objIndex);
@@ -9569,6 +9805,9 @@ private:
 #endif
 #if AVER_MODULE_PBR
             case EditCmd::Kind::Material:  applyMaterialDesc(c.matHandle, c.matAfter); break;
+#endif
+#if AVER_MODULE_SCENE
+            case EditCmd::Kind::Rename:    applyEntityLabel(c.id, c.renameAfter); break;
 #endif
             case EditCmd::Kind::CreateObj:   // redo a create: put it back
                 if (c.objIndex >= 0 && c.objIndex <= (int)objects_.size())
@@ -9639,6 +9878,34 @@ private:
     // must not also be saved as a PLACE record -- two sources of truth, one invisible.
 #if AVER_MODULE_SCENE
     scene::Entity playerStart_ = scene::kInvalidEntity;
+
+    // The Outliner row currently being renamed in place, and its edit buffer.
+    // Create-a-landscape controls; the shape knobs are landscapeNoiseParams_, shared with the ring
+    // generator so a created section and the tiles around it come from one set of numbers.
+    // Autosave. Thirty seconds is short enough that a crash costs a gesture or two and long
+    // enough that saveLevel's cost never shows: it walks the world once per write.
+    f32 autosaveIntervalSec_ = 30.0f;
+    f32 autosaveAccum_ = 0.0f;
+    bool autosaveWritten_ = false;
+    bool autosaveFailedWarned_ = false;
+    std::string recoveryPath_;      // a sidecar newer than its level, waiting to be offered
+
+    int landCreateSamples_ = 513;
+    f32 landCreateSpacingCm_ = 100.0f;
+
+    scene::Entity outlinerRenaming_ = scene::kInvalidEntity;
+    bool outlinerRenameFocus_ = false;
+    char outlinerRenameBuf_[128] = {0};
+
+    // Starts an inline rename on a row, seeded with the name it already shows.
+    void beginOutlinerRename(scene::Entity e) {
+        outlinerRenaming_ = e;
+        outlinerRenameFocus_ = true;
+        const auto it = entityLabels_.find(static_cast<u32>(e));
+        const std::string cur = it != entityLabels_.end() ? it->second
+                                                          : scene::World::instance().name(e);
+        std::snprintf(outlinerRenameBuf_, sizeof outlinerRenameBuf_, "%s", cur.c_str());
+    }
 
     // Re-finds the Player Start by NAME, which is what makes an entity one (see makePlayerStart).
     //
@@ -10918,6 +11185,53 @@ private:
                 pbr::MaterialLibrary::get().destroy(mh);
             }
 #endif
+
+            // ---- renaming an entity is an undoable COMMAND ---------------------------------
+            //
+            // Nothing anywhere in the editor could rename a placed entity: no F2, no context menu,
+            // no field in Details. entityLabels_ was written at spawn/paste/duplicate/load and never
+            // from anything a person did, so a level of "Cube 1..40" stayed that way.
+            //
+            // THE UI NEEDS ImGui; the command does not. What is exercised here is the half that can
+            // be: renameEntity, its applier, and the stacks.
+            {
+                const u32 rnbase = w.count();
+                spawnCube(eng); w.flush();
+                const scene::Entity re = selEntity_;
+                const std::string spawned = entityLabels_.count(static_cast<u32>(re))
+                                          ? entityLabels_[static_cast<u32>(re)] : std::string();
+                const usize stackBefore = undoStack_.size();
+
+                renameEntity(re, "Doorway");
+                check(entityLabels_[static_cast<u32>(re)] == "Doorway", "renameEntity sets the label");
+                check(undoStack_.size() == stackBefore + 1, "and puts ONE entry on the undo stack");
+
+                // A rename to the SAME name is not an edit; pushing for it would make Ctrl+Z do
+                // nothing once, visibly.
+                renameEntity(re, "Doorway");
+                check(undoStack_.size() == stackBefore + 1, "renaming to the same name pushes nothing");
+
+                undo();
+                check((entityLabels_.count(static_cast<u32>(re))
+                       ? entityLabels_[static_cast<u32>(re)] : std::string()) == spawned,
+                      "undo restores the name it had before");
+                redo();
+                check(entityLabels_[static_cast<u32>(re)] == "Doorway", "redo re-applies the rename");
+
+                // THE ASSET NAME IS NOT TOUCHED. CName is the placement's asset path -- what
+                // saveLevel writes as the PLACE record and what resolves the mesh -- so a rename
+                // that reached it would repoint the placement at a file that does not exist.
+                // std::string, NOT ==: World::name returns a const char*, so comparing it to a
+                // literal compares POINTERS and is false however equal the text is. The first
+                // version of this assertion did exactly that and failed against a name that was
+                // already correct -- a test that could not pass rather than one that caught a bug.
+                check(std::string(w.name(re)) == "Meshes/cube.ocmesh",
+                      "and the entity's ASSET name is untouched by any of it");
+
+                undo();                       // put the label back
+                sel_ = kSelScene; selEntity_ = re; deleteSelection(); w.flush();
+                check(w.count() == rnbase, "the rename phase cleaned up after itself");
+            }
 
             // ---- the Outliner's reparent, as a command --------------------------------------
             //
@@ -12233,6 +12547,23 @@ private:
         if (!selectEntity_.empty() && frameNo_ > 5) {
             const std::string want = selectEntity_;
             selectEntity_.clear();
+            // THE OUTLINER'S PSEUDO-ENTRIES FIRST. Sun, Sky and Post Process are rows in the same
+            // list and open the same Details panel, but they are not entities, so a flag that
+            // enumerates the world could never reach them -- and this flag exists, by its own
+            // comment, to make the Details panel capturable. The level's WATER controls live under
+            // Sky + Atmosphere, and were the part that made the gap obvious.
+            {
+                struct Pseudo { int sel; const char* shown; };
+                static const Pseudo kPseudo[] = {
+                    {-2, "Directional Light (Sun)"}, {-3, "Sky + Atmosphere"}, {-4, "Post Process"},
+                };
+                for (const Pseudo& ps : kPseudo) {
+                    if (std::string(ps.shown).find(want) == std::string::npos) continue;
+                    sel_ = ps.sel; selEntity_ = kInvalidId;
+                    AVER_INFO("[Editor] --select matched '{}' for '{}'", ps.shown, want);
+                    return;
+                }
+            }
             scene::World& sw = scene::World::instance();
             scene::Entity found = kInvalidId;
             // ENUMERATED THE WAY THE OUTLINER ENUMERATES, via count()/at(), matched against the SAME
@@ -12312,6 +12643,7 @@ private:
         drawAboutPrompt(e);
         drawSaveLevelAsPrompt();
         drawOpenLevelPrompt(e);
+        drawRecoveryPrompt(e);
         drawExitPrompt(e);
         drawPendingOpenPrompt(e);
         // AFTER the modals, so a request made this frame is guarded by the prompt this frame rather
@@ -14176,11 +14508,166 @@ private:
 
 #if AVER_MODULE_LANDSCAPE
     // The landscape tool set. This is what the mode was missing.
-    void buildLandscapeModePanel(Engine& e) {
-        if (!landscapeLoaded_) {
-            ImGui::TextWrapped("This level has no landscape section.");
+    // The level's WATER record, as a panel.
+    //
+    // WHY THERE WAS NONE. levelHeader_.waters is populated only by the loader and copied wholesale
+    // by saveLevel, so a water plane could be authored by hand-editing the .ocworld and in no other
+    // way -- no menu item, no Add entry, no Outliner row, nothing in Details. The Add menu offers
+    // Cube, Player Start and Sphere, with Plane and Point Light greyed out.
+    //
+    // ONE RECORD, because WaterRenderer holds one level and one wave set; applyLevelWater already
+    // warns when a file declares more and renders the first. Offering a list here would let someone
+    // author a second surface the renderer then silently ignores.
+    void buildWaterPanel(Engine& e) {
+#if AVER_WITH_IMGUI && AVER_MODULE_SCENE
+        ImGui::TextDisabled("WATER");
+        if (levelHeader_.waters.empty()) {
+            ImGui::TextDisabled("This level has no water.");
+            if (ImGui::Button("Add Water", ImVec2(-1, 0))) {
+                fmt::OcWaterPlacement wp;
+                wp.name = "Water";
+                // AT THE CAMERA'S FEET, not at z=0: a plane at the origin is invisible in a level
+                // built up on terrain, and "nothing happened" is the worst answer a new button can
+                // give. Rounded so the number in the field is one somebody would have typed.
+                wp.levelCm = std::floor(camPos_.z / 10.0f) * 10.0f - 100.0;
+                wp.infinite = true;
+                levelHeader_.waters.assign(1, std::move(wp));
+                applyLevelWater(e);
+                setUpgradeStatus("Added water");
+            }
+            uiReg_.track("water.add");
+            ImGui::Separator();
             return;
         }
+
+        fmt::OcWaterPlacement& wp = levelHeader_.waters.front();
+        bool changed = false;
+
+        {
+            char nameBuf[96];
+            std::snprintf(nameBuf, sizeof nameBuf, "%s", wp.name.c_str());
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::InputTextWithHint("##watername", "Water", nameBuf, sizeof nameBuf)) {
+                wp.name = nameBuf; changed = true;
+            }
+        }
+        {
+            f32 level = static_cast<f32>(wp.levelCm);
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::DragFloat("Level (cm)", &level, 5.0f)) { wp.levelCm = level; changed = true; }
+        }
+        if (ImGui::Checkbox("Infinite", &wp.infinite)) changed = true;
+        if (!wp.infinite) {
+            // X AND Y ONLY. The record has no Z extent: the surface is a plane at `level`, and its
+            // bounds are the footprint it covers, which is why OcWaterPlacement's bounds are 2D.
+            f32 mn[2] = {static_cast<f32>(wp.boundsMin[0]), static_cast<f32>(wp.boundsMin[1])};
+            f32 mx[2] = {static_cast<f32>(wp.boundsMax[0]), static_cast<f32>(wp.boundsMax[1])};
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::DragFloat2("Min X/Y", mn, 10.0f)) {
+                wp.boundsMin[0] = mn[0]; wp.boundsMin[1] = mn[1]; changed = true;
+            }
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::DragFloat2("Max X/Y", mx, 10.0f)) {
+                wp.boundsMax[0] = mx[0]; wp.boundsMax[1] = mx[1]; changed = true;
+            }
+        }
+        {
+            char matBuf[96];
+            std::snprintf(matBuf, sizeof matBuf, "%s", wp.material.c_str());
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::InputTextWithHint("##watermat", "M_Water", matBuf, sizeof matBuf)) {
+                wp.material = matBuf; changed = true;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("An .ocmat name. Empty draws the renderer's own fallback look.");
+        }
+        // SIMULATE IS SHOWN BUT REFUSED WHEN INFINITE, which is the one pairing the format can carry
+        // and nothing can honour -- a simulated volume is a closed shell and needs a size.
+        // applyLevelWater says the same thing in a warning; saying it here stops the author reaching
+        // a state that only complains later.
+        ImGui::BeginDisabled(wp.infinite);
+        if (ImGui::Checkbox("Simulate", &wp.simulate)) changed = true;
+        ImGui::EndDisabled();
+        if (wp.infinite && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("A simulated volume needs bounds. Turn Infinite off first.");
+
+        if (ImGui::Button("Remove Water", ImVec2(-1, 0))) {
+            levelHeader_.waters.clear();
+            levelHeader_.waves.clear();   // a WAVE names a WATER by name; orphaned it means nothing
+            changed = true;
+            setUpgradeStatus("Removed water");
+        }
+        uiReg_.track("water.remove");
+
+        // RE-APPLIED ON EVERY EDIT, so the viewport agrees with the numbers. applyLevelWater is
+        // idempotent for the analytic path -- it rebuilds the surface from the record it is handed.
+        if (changed) applyLevelWater(e);
+        ImGui::Separator();
+#else
+        (void)e;
+#endif
+    }
+
+    void buildLandscapeModePanel(Engine& e) {
+        if (!landscapeLoaded_) {
+            // A DEAD END UNTIL NOW: this printed one sentence and returned, so the terrain mode
+            // offered nothing at all to a level without terrain -- and nothing anywhere else in the
+            // editor could make some either.
+            ImGui::TextWrapped("This level has no landscape section.");
+            ImGui::Spacing();
+            ImGui::TextDisabled("CREATE ONE");
+            ImGui::SetNextItemWidth(-1.0f);
+            ImGui::SliderInt("Samples", &landCreateSamples_, 129, 2049);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Grid resolution per side. Must satisfy the quadtree's tiling\n"
+                                  "rule, which every power-of-two-plus-one in this range does.");
+            ImGui::SetNextItemWidth(-1.0f);
+            ImGui::SliderFloat("Spacing (cm)", &landCreateSpacingCm_, 25.0f, 400.0f, "%.0f");
+            ImGui::TextDisabled("%.0f m across",
+                                (landCreateSamples_ - 1) * landCreateSpacingCm_ / 100.0f);
+            ImGui::Spacing();
+            ImGui::TextDisabled("SHAPE");
+            int seed = static_cast<int>(landscapeNoiseParams_.seed);
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::InputInt("Seed", &seed)) landscapeNoiseParams_.seed = static_cast<u32>(seed);
+            panelFloat("Feature Size (cm)", &landscapeNoiseParams_.featureSizeCm, 500.0f, 40000.0f,
+                       "%.0f", ImGuiSliderFlags_Logarithmic);
+            panelFloat("Amplitude (cm)", &landscapeNoiseParams_.amplitudeCm, 0.0f, 6000.0f, "%.0f");
+            ImGui::SetNextItemWidth(-1.0f);
+            ImGui::SliderInt("Octaves", &landscapeNoiseParams_.octaves, 1, 8);
+            ImGui::Spacing();
+            ImGui::BeginDisabled(!project_.valid());
+            if (ImGui::Button("Create Landscape", ImVec2(-1, 0)))
+                createLandscapeForLevel(e.device(), static_cast<u32>(landCreateSamples_),
+                                        landCreateSpacingCm_);
+            ImGui::EndDisabled();
+            uiReg_.track("landscape.create");
+            if (!project_.valid() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("Open or create a project first - a landscape is written into one.");
+            ImGui::TextDisabled("Writes <project>\\Content\\Landscape\\<Level>.ocland and adds the\n"
+                                "LANDSCAPE record, so the next open finds it.");
+            return;
+        }
+
+        // ---- where the section sits, which had no control at all -------------------------------
+        // The LANDSCAPE record's x/y/z were readable only by hand-editing the .ocworld. They are the
+        // section's own origin sample in world space, so this is how a terrain is aligned to the
+        // rest of a level rather than to wherever the heightfield happened to be authored.
+        ImGui::TextDisabled("PLACEMENT");
+        {
+            f32 org[3] = {landscapeData_.originCm[0], landscapeData_.originCm[1],
+                          landscapeData_.originCm[2]};
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::DragFloat3("Origin (cm)", org, 10.0f)) {
+                landscapeData_.originCm[0] = org[0];
+                landscapeData_.originCm[1] = org[1];
+                landscapeData_.originCm[2] = org[2];
+                landscapeDirty_ = true;
+                recordLandscapeInLevel();
+            }
+            uiReg_.track("landscape.origin");
+        }
+        ImGui::Spacing();
 
         ImGui::TextDisabled("SCULPT");
         for (int i = 0; i < 4; ++i) {
@@ -14296,9 +14783,11 @@ private:
     // guarded by its caller. These were one function submitting both unconditionally, which is why
     // their Window menu items could never do anything.
     void buildPanels(Engine& e) {
-        (void)e;
         if (showOutliner_) buildOutlinerPanel();
-        if (showDetails_)  buildDetailsPanel();
+        // TAKES THE ENGINE NOW: the Level branch of the Details panel edits the level's WATER
+        // record, and applying that to the live surface needs a device. The (void)e that used to sit
+        // here was the sign that nothing in these panels had yet needed one.
+        if (showDetails_)  buildDetailsPanel(e);
     }
 
 #if AVER_MODULE_SCENE
@@ -14389,12 +14878,49 @@ private:
             if (depth == 0) flags |= ImGuiTreeNodeFlags_DefaultOpen;
         }
 
+        // THE ROW BECOMES A TEXT FIELD while it is being renamed, rather than opening a dialog:
+        // the name is edited where it is read, which is what every file browser and every other
+        // editor's outliner does, and it keeps the tree's shape from jumping under the cursor.
+        if (outlinerRenaming_ == row.ent) {
+            ImGui::SetNextItemWidth(-1.0f);
+            if (outlinerRenameFocus_) { ImGui::SetKeyboardFocusHere(); outlinerRenameFocus_ = false; }
+            const bool done = ImGui::InputText(("##ren" + std::to_string((u32)row.ent)).c_str(),
+                                               outlinerRenameBuf_, sizeof outlinerRenameBuf_,
+                                               ImGuiInputTextFlags_EnterReturnsTrue);
+            // Escape abandons; Enter or clicking away commits. Deactivation covers both the click
+            // and the Escape, so the key has to be tested first.
+            if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+                outlinerRenaming_ = scene::kInvalidEntity;
+            } else if (done || ImGui::IsItemDeactivatedAfterEdit()) {
+                renameEntity(row.ent, outlinerRenameBuf_);
+                outlinerRenaming_ = scene::kInvalidEntity;
+            } else if (ImGui::IsItemDeactivated()) {
+                outlinerRenaming_ = scene::kInvalidEntity;   // clicked away without editing
+            }
+            // The children still have to be walked, or renaming a parent collapses the tree for a
+            // frame. TreeNodeEx is skipped, so nothing was pushed and nothing must be popped.
+            if (hasKids) for (const OutlinerRow* c : it->second) drawOutlinerRow(*c, children, depth + 1);
+            return;
+        }
+
         const std::string label = "  " + row.shown + "##e" + std::to_string((u32)row.ent);
         const bool open = ImGui::TreeNodeEx(label.c_str(), flags);
         // IsItemToggledOpen separates "clicked the arrow" from "clicked the label" on one node, so
         // expanding a parent does not also select it.
         if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
             sel_ = kSelScene; selEntity_ = row.ent;
+        }
+        // F2 AND RIGHT-CLICK > RENAME, the two gestures a file browser has trained everyone to
+        // expect -- and the ones the Content Browser next door already implements for a FILE. The
+        // Outliner had neither, for an entity.
+        if (ImGui::IsItemHovered() && ImGui::IsKeyPressed(ImGuiKey_F2, false)) {
+            sel_ = kSelScene; selEntity_ = row.ent;
+            beginOutlinerRename(row.ent);
+        }
+        if (ImGui::BeginPopupContextItem(("##ctx" + std::to_string((u32)row.ent)).c_str())) {
+            sel_ = kSelScene; selEntity_ = row.ent;
+            if (ImGui::MenuItem("Rename", "F2")) beginOutlinerRename(row.ent);
+            ImGui::EndPopup();
         }
         uiReg_.track(("outliner.row." + std::to_string((u32)row.ent)).c_str());
 
@@ -14497,7 +15023,7 @@ private:
         ImGui::End();
     }
 
-    void buildDetailsPanel() {
+    void buildDetailsPanel(Engine& e) {
         ImGui::Begin("Details", &showDetails_);
         if (sel_>=0 && sel_<(int)objects_.size()){
             MeshObj& o=objects_[sel_]; ImGui::TextUnformatted(o.name.c_str()); ImGui::Separator();
@@ -14529,9 +15055,27 @@ private:
             scene::World& w = scene::World::instance();
             const std::string nm = w.name(selEntity_);
             const auto lit = entityLabels_.find(static_cast<u32>(selEntity_));
-            ImGui::TextUnformatted(lit != entityLabels_.end() ? lit->second.c_str()
-                                                             : (nm.empty() ? "(unnamed entity)" : nm.c_str()));
-            ImGui::SameLine(); ImGui::TextDisabled("#%u  %s", (u32)selEntity_, nm.c_str());
+            // EDITABLE, WHICH IT HAS NEVER BEEN. This was TextUnformatted and there was no rename
+            // affordance anywhere in the editor -- not here, not in the Outliner, no F2, no context
+            // menu -- so a level of "Cube 1..40" stayed that way. entityLabels_ was written only at
+            // spawn/paste/duplicate/load and never from anything a person did.
+            //
+            // COMMITTED ON ENTER OR ON LOSING FOCUS, not per keystroke, for the reason the material
+            // panel spells out: otherwise every letter typed is its own undo entry.
+            {
+                char nameBuf[128];
+                std::snprintf(nameBuf, sizeof nameBuf, "%s",
+                              lit != entityLabels_.end() ? lit->second.c_str()
+                                                         : (nm.empty() ? "" : nm.c_str()));
+                ImGui::SetNextItemWidth(-1.0f);
+                const bool entered = ImGui::InputTextWithHint(
+                    "##entityname", nm.empty() ? "(unnamed entity)" : nm.c_str(),
+                    nameBuf, sizeof nameBuf, ImGuiInputTextFlags_EnterReturnsTrue);
+                if (entered || ImGui::IsItemDeactivatedAfterEdit())
+                    renameEntity(selEntity_, nameBuf);
+                uiReg_.track("details.entityName");
+            }
+            ImGui::TextDisabled("#%u  %s", (u32)selEntity_, nm.c_str());
             ImGui::Separator();
             if (const auto* loc = w.component<scene::CLocal>(selEntity_, scene::kComponentLocal)) {
                 if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -14890,6 +15434,13 @@ private:
             // the one cloud setting that could never be saved.
             markLevelRecordEdited(hasLevelClouds_);
             markLevelRecordEdited(hasLevelSky_);
+            // WATER LIVES BESIDE THE SKY, not in a mode of its own: it is a property OF THE LEVEL,
+            // exactly like the sun and the fog above it, and the panel a person already opens to set
+            // the weather is where they will look for it. No markLevelRecordEdited -- unlike SUN and
+            // FOG, waters ride through saveLevel as part of levelHeader_ rather than through a
+            // has-flag, so editing the vector IS the edit.
+            ImGui::Separator();
+            buildWaterPanel(e);
         } else if (sel_==-4){
             ImGui::TextUnformatted("Post Process"); ImGui::Separator();
             ImGui::BeginDisabled(post_.autoExposure);
@@ -16575,9 +17126,12 @@ private:
                 return true;
 #if AVER_MODULE_LANDSCAPE
             case EditorMode::Landscape:
-                if (!landscapeLoaded_)
-                    return no("This level has no landscape section. Add a LANDSCAPE record, or pass "
-                              "--landscape <file.ocland>.");
+                // ENTERED WITHOUT ONE, DELIBERATELY. This used to refuse, which made the mode whose
+                // whole job is terrain the one place you could not get to in order to MAKE terrain --
+                // and the message it refused with named two workarounds, a hand-written LANDSCAPE
+                // record and a CLI flag, neither of which is in the editor. The panel now offers a
+                // Create Landscape button when none is resident; every tool inside it is still gated
+                // on landscapeLoaded_ by that same early return.
                 return true;
             case EditorMode::Foliage:
                 if (!landscapeLoaded_)
@@ -18364,6 +18918,9 @@ private:
             spawnClassPlacements();
 #endif
         AVER_INFO("[Level] opened {}", path);
+        // A LEVEL THAT WAS LEFT UNSAVED LEAVES A SIDECAR; this is where it gets offered. After the
+        // load, so levelPath_ names the level the sidecar shadows.
+        checkForRecovery();
     }
 
     void loadStartMap(Engine& eng) {
@@ -18635,6 +19192,10 @@ private:
         std::string why;
         if (!fmt::saveOcworld(path, w, &why)) { AVER_WARN("[Level] save failed: {}", why); return false; }
         AVER_INFO("[Level] saved {} placement(s) to {}", w.placements.size(), path);
+        // A REAL SAVE RETIRES THE SIDECAR -- but only a save of THE LEVEL. saveLevel is also how the
+        // autosave itself and --save-level write, and deleting the recovery file on either would
+        // throw away the safety net at the moment it was being created.
+        if (path == levelPath_ && autosaveWritten_) clearAutosave();
         return true;
     }
 

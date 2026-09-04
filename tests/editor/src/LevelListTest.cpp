@@ -57,6 +57,14 @@ int main() {
     check(!editor::isLevelPath(".ocmap"), "a bare extension with no stem is NOT a level");
     check(editor::isLevelPath("C:/p/Content/Maps/A.b.ocworld"),
           "and a stem containing a dot still resolves on the LAST one");
+    // THE AUTOSAVE SIDECAR MUST NOT LOOK LIKE A LEVEL. It is written beside the level as
+    // "<name>.ocworld.autosave" so a person can find it, and the LAST extension is what decides --
+    // which is the whole reason that suffix was chosen over a prefix or a hidden directory. Offering
+    // it in the Open Level picker would invite someone to open a recovery file as if it were the
+    // level, edit it, and save over the wrong file.
+    check(!editor::isLevelPath("Maps/Arena.ocworld.autosave"),
+          "an autosave sidecar is NOT offered as a level");
+    check(!editor::isLevelPath("Maps/Default.ocmap.autosave"), "nor the .ocmap flavour of one");
 
     // ---- an empty or absent content root is empty, not a crash ------------------------------
     AVER_INFO("-- nothing to list --");
