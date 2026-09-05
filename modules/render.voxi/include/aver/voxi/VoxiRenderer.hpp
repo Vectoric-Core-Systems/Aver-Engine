@@ -996,6 +996,20 @@ private:
     u64 giDrawsKey() const;
 
     u64 giDrawsKey_ = 0;
+    // WHICH PART OF THE DRAW LIST MOVED. giDrawsKey_ alone says only "different", and knowing that
+    // was not enough twice over: making the hash order-independent was expected to stop the gate
+    // rejecting under camera rotation and changed the skip rate by two points. These split the same
+    // inputs into independent axes so the next answer is measured rather than guessed.
+    u64 giDrawsCount_ = 0;     // how many draws were hashed
+    u64 giDrawsMeshKey_ = 0;   // mesh handles only, order-independent
+    u64 giDrawsWorldKey_ = 0;  // world transforms only
+    u64 giDrawsMatKey_ = 0;    // colour/metallic/roughness only
+    mutable u64 giDrawsRejects_ = 0;
+    mutable u64 giDrawsCountMoved_ = 0, giDrawsMeshMoved_ = 0, giDrawsWorldMoved_ = 0, giDrawsMatMoved_ = 0;
+    mutable u64 giDrawsNextReport_ = 32;
+    std::vector<rhi::MeshHandle> giSnapMeshes_;   // sorted mesh multiset at the last bake
+    mutable u32 giDrawsDiffReports_ = 0;
+    void giDrawsSubKeys(u64& count, u64& mesh, u64& world, u64& mat) const;
     rhi::SkyAtmosphere giSky_{};
     f32 giSnapCenter_[3] = {};
     f32 giSnapExtent_ = -1.0f;   // negative = no snapshot yet, so the first tick always rebuilds

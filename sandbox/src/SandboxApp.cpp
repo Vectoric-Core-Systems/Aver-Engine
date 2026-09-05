@@ -4867,9 +4867,24 @@ public:
             // For scale: a crate at 5 m subtends ~0.2 rad and is kept; an ankle-height plant at 100 m
             // subtends ~0.003 rad and is not.
             constexpr f32 kMinCasterAngle = 0.02f;   // radians (~1.1 degrees)
+            // THIS FLOOR IS ASYMMETRIC, AND THAT ASYMMETRY IS THE BUG. It exists only on this path:
+            // an entity INSIDE the frustum reaches the renderer through drawMesh() with no size test
+            // at all, and the moment it rotates outside it arrives here and may be dropped. So an
+            // object sitting near ~1.1 degrees does not merely lose its shadow when it leaves the
+            // view -- it leaves the GI draw list entirely, changing what giDrawsKey hashes, and
+            // rejecting the rebuild gate on the frame it crosses. Panning past a field of small props
+            // re-bakes the whole volume once per prop.
+            //
+            // GATED ON WHETHER ANYONE BUT THE SHADOW CARES. Voxi's submission feeds voxelisation and
+            // the ray-traced TLAS as well as the cascades, and neither of those has any business
+            // being decided by a caster-size heuristic -- a prop too small to cast a resolvable
+            // shadow still occludes a ray and still bounces light. When Voxi is attached the floor is
+            // skipped and the draw goes through; the heuristic survives for the case it was written
+            // for, which is a build with no Voxi where this really is only feeding cascades.
             auto submitShadowOnly = [&](scene::Entity sEnt, rhi::MeshHandle baseMesh, const Mat4& sWm, i32 sMat,
                                         const Vec3& sCentre, f32 sRadius, bool sHiddenFromOwner) {
-                if (sRadius >= 0.0f) {
+                // Skipped entirely when Voxi is attached, per the note above.
+                if (!voxiAttached_ && sRadius >= 0.0f) {
                     const f32 dx = sCentre.x - camPos_.x, dy = sCentre.y - camPos_.y, dz = sCentre.z - camPos_.z;
                     const f32 dsq = dx * dx + dy * dy + dz * dz;
                     // Inside its own radius of the camera it is always kept: the ratio is meaningless
@@ -5088,7 +5103,16 @@ public:
                         if (outside) {
                             ++culled;
 #if AVER_MODULE_VOXI
-                            submitShadowOnly(ent, it->second, wm, mr->material,
+                            submitShadowOnly(ent, it->second, wm,
+                                             // THE SAME FALLBACK THE VISIBLE PATH RESOLVES a few
+                                             // dozen lines down (`mr->material ? ... : meshDefaultMaterial`).
+                                             // Passing the raw handle here meant a mesh whose material is 0 --
+                                             // "every plant", per meshDefaultMaterial's own comment -- baked a
+                                             // flat grey into GI on exactly the frames it was off-screen, and
+                                             // its authored look on the frames it was not. That flips a value
+                                             // inside giDrawsKey every time it crosses the frustum edge, so it
+                                             // rejected the GI rebuild gate as well as being wrong.
+                                             mr->material ? mr->material : meshDefaultMaterial(mr->mesh),
                                              Vec3{(wlo.x + whi.x) * 0.5f, (wlo.y + whi.y) * 0.5f, (wlo.z + whi.z) * 0.5f},
                                              0.5f * std::sqrt((whi.x - wlo.x) * (whi.x - wlo.x) +
                                                               (whi.y - wlo.y) * (whi.y - wlo.y) +
@@ -5111,7 +5135,16 @@ public:
                     // still throws a shadow through the doorway. Same reasoning as the frustum cull
                     // just above -- see submitShadowOnly.
 #if AVER_MODULE_VOXI
-                    submitShadowOnly(ent, it->second, wm, mr->material,
+                    submitShadowOnly(ent, it->second, wm,
+                                             // THE SAME FALLBACK THE VISIBLE PATH RESOLVES a few
+                                             // dozen lines down (`mr->material ? ... : meshDefaultMaterial`).
+                                             // Passing the raw handle here meant a mesh whose material is 0 --
+                                             // "every plant", per meshDefaultMaterial's own comment -- baked a
+                                             // flat grey into GI on exactly the frames it was off-screen, and
+                                             // its authored look on the frames it was not. That flips a value
+                                             // inside giDrawsKey every time it crosses the frustum edge, so it
+                                             // rejected the GI rebuild gate as well as being wrong.
+                                             mr->material ? mr->material : meshDefaultMaterial(mr->mesh),
                                      Vec3{(wlo.x + whi.x) * 0.5f, (wlo.y + whi.y) * 0.5f, (wlo.z + whi.z) * 0.5f},
                                      0.5f * std::sqrt((whi.x - wlo.x) * (whi.x - wlo.x) +
                                                       (whi.y - wlo.y) * (whi.y - wlo.y) +
@@ -5137,7 +5170,16 @@ public:
                         // primary visibility reads the acceleration structure instead, and the flag
                         // puts the instance in the AVER_RT_MASK_OWNER_HIDDEN lane, excluded only from
                         // the primary ray.
-                        submitShadowOnly(ent, it->second, wm, mr->material,
+                        submitShadowOnly(ent, it->second, wm,
+                                             // THE SAME FALLBACK THE VISIBLE PATH RESOLVES a few
+                                             // dozen lines down (`mr->material ? ... : meshDefaultMaterial`).
+                                             // Passing the raw handle here meant a mesh whose material is 0 --
+                                             // "every plant", per meshDefaultMaterial's own comment -- baked a
+                                             // flat grey into GI on exactly the frames it was off-screen, and
+                                             // its authored look on the frames it was not. That flips a value
+                                             // inside giDrawsKey every time it crosses the frustum edge, so it
+                                             // rejected the GI rebuild gate as well as being wrong.
+                                             mr->material ? mr->material : meshDefaultMaterial(mr->mesh),
                                          haveWorldBox
                                              ? Vec3{(wlo.x + whi.x) * 0.5f, (wlo.y + whi.y) * 0.5f, (wlo.z + whi.z) * 0.5f}
                                              : Vec3{0.0f, 0.0f, 0.0f},
@@ -5490,10 +5532,31 @@ public:
                             ++lodClusterStats_.rebuilds;
 
                             if (newHandle) {
-                                if (cache.handle) e.device()->destroyMesh(cache.handle);
+                                if (cache.handle) { depthProxy_.erase(cache.handle); e.device()->destroyMesh(cache.handle); }
                                 cache.handle = newHandle;
                                 cache.selectedIds = std::move(selectedIds);
                                 ++cache.rebuildCount;
+                                // A DEPTH PROXY FOR THE CUT, POINTING AT THE STABLE SOURCE MESH.
+                                //
+                                // The cut handle is born fresh every time the selected cluster set
+                                // changes, and under a rotating camera that is nearly every frame --
+                                // cluster selection is frustum- and cone-culled per view, so the
+                                // comment above ("expected to be STABLE frame to frame ... a cache hit
+                                // most frames once settled") holds for a still camera and fails for a
+                                // moving one. Without an entry here depthProxyLookup returns 0, Voxi's
+                                // submit() falls back to the cut handle, and the four depth-only
+                                // consumers -- the shadow cascades, the GI shadow map, voxelisation and
+                                // the TLAS -- all follow a handle that is destroyed and recreated
+                                // continuously. MEASURED: that is what churned the GI rebuild gate's
+                                // draw key (the delta log named consecutive handles arriving and
+                                // leaving), and it is where "createBlas for destroyed mesh" comes from.
+                                //
+                                // The SOURCE mesh, not the cut, is the right answer for all four: none
+                                // of them wants a view-dependent cluster subset. A depth-only pass wants
+                                // cheap, complete, stable geometry, and voxelisation in particular
+                                // resolves the world into 512^3 cells where a cluster-level cut is far
+                                // below one voxel. The cut still draws the colour pass, unchanged.
+                                depthProxy_[newHandle] = mr->mesh;
                             }
                             // newHandle == 0 (empty cut this frame, or the device refused): keep
                             // whatever handle the cache already had (fail-safe), or fall through to the

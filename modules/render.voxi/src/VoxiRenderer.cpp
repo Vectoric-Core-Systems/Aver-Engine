@@ -1166,13 +1166,36 @@ u64 VoxiRenderer::prevTransformGroupKey(rhi::MeshHandle mesh, rhi::BindingSetHan
 
 // Builds one orthographic light frustum per cascade, fitted to a slice of the camera's view, and
 // writes the matrices and splits into cb_. Returns the usable cascade count, 0 if there is no camera.
-// An order-sensitive hash of what voxelizePass would rasterise: every draw's mesh and full world
-// transform, the same FNV-style mix buildGeometryTable uses over rtInstanceMesh_. Order-sensitive on
-// purpose -- a reordered draw list changes the injection order into the atomic accumulator, so it is
-// NOT the same result. Hashed as raw float BITS, not compared with a tolerance: a cache that
-// tolerates "almost the same" transform shows the wrong lighting for a while and then stops.
+// A hash of what voxelizePass would rasterise: every draw's mesh and full world transform, the same
+// FNV-style mix buildGeometryTable uses over rtInstanceMesh_. Hashed as raw float BITS, not compared
+// with a tolerance: a cache that tolerates "almost the same" transform shows the wrong lighting for
+// a while and then stops.
+//
+// ORDER-INDEPENDENT, AND IT USED TO BE THE OPPOSITE ON PURPOSE. The old comment here argued that a
+// reordered draw list "changes the injection order into the atomic accumulator, so it is NOT the
+// same result". The premise is true and the conclusion did not follow, because it made the gate
+// answer a question nobody asked: the gate exists to say "would rebuilding produce the volume I
+// already have", and a float-rounding difference in the last bits of an atomic accumulation is not
+// a different volume in any sense a viewer can see. What it DID do was reject on pure reordering.
+//
+// MEASURED: PTTest sets RENDER.OCCLUSIONCULL 1, so the per-entity walk visits occlusionOrder_
+// (SandboxApp.cpp:4965), which is rebuilt every frame by partitioning entities on last frame's
+// hierarchical-Z result against the CURRENT viewProj. Rotating the camera reshuffles that partition,
+// so a completely static world submitted a differently-ORDERED draw list every tick, and this hash
+// rejected the gate on 92 of 128 ticks -- forcing a full revoxelisation of a volume whose contents
+// had not changed at all. The cost of that is in [[the commit that landed this]]; the cost of the
+// alternative is float noise in the low bits of a bounced-light accumulation.
+//
+// WRAPPING ADDITION over per-draw hashes, which is commutative, so reordering cannot change it.
+// Addition alone is weak against the obvious collisions -- swapping two draws' contents, or a draw
+// appearing twice -- so the COUNT is folded in at the end and each draw's hash is finalised
+// (xor-shift-multiply) before it is added, which decorrelates the addends. This was the one part of
+// the reviewed design marked mandatory rather than optional, and it is the reason a count exists here
+// at all: without it, a list that gains a draw and loses a different one summing to the same total
+// would read as unchanged.
 u64 VoxiRenderer::giDrawsKey() const {
-    u64 key = 1469598103934665603ull;
+    u64 key = 0;
+    u64 counted = 0;
     for (const Draw& d : drawsPrev_) {
         // Translucent draws are not voxelised (see voxelizePass); this skip must agree with that one
         // exactly, same contract as the skinned-mesh skip below.
@@ -1181,29 +1204,88 @@ u64 VoxiRenderer::giDrawsKey() const {
         // with voxelizePass's matching skip, or hashing a draw the pass doesn't inject would force
         // rebuilds that recompute an identical volume: all of the gate's cost, none of its benefit.
         if (dev_ && dev_->meshVertexBuffer(d.mesh)) continue;
-        key ^= static_cast<u64>(d.mesh);
-        key *= 1099511628211ull;
+        // PER DRAW, from the same offset basis the whole-list chain used to start from. Everything
+        // mixed in here is identical to before; only where the running value lives has changed.
+        u64 h = 1469598103934665603ull;
+        // depthMesh, NOT mesh. voxelizePass draws d.depthMesh (see its ctx.drawMesh /
+        // dispatchMeshFor), and this hash's whole contract is to agree with that pass exactly -- the
+        // skips below say so in as many words. Hashing d.mesh meant the gate watched a handle the
+        // pass never reads: with cluster LOD on, d.mesh is a per-frame cut rebuilt whenever the
+        // visible cluster set changes, so a rotating camera re-keyed a volume whose actual injected
+        // geometry (the stable depth proxy) had not moved at all.
+        h ^= static_cast<u64>(d.depthMesh);
+        h *= 1099511628211ull;
         for (u32 i = 0; i < 16; ++i) {
             u32 bits = 0;
             std::memcpy(&bits, &d.world[i], sizeof(bits));
-            key ^= static_cast<u64>(bits);
-            key *= 1099511628211ull;
+            h ^= static_cast<u64>(bits);
+            h *= 1099511628211ull;
         }
         // Colour and metallic/roughness reach PSVoxel through the object constants and land in the
         // baked radiance, so a material tweak with no movement must still rebuild.
         for (u32 i = 0; i < 4; ++i) {
             u32 bits = 0;
             std::memcpy(&bits, &d.color[i], sizeof(bits));
-            key ^= static_cast<u64>(bits);
-            key *= 1099511628211ull;
+            h ^= static_cast<u64>(bits);
+            h *= 1099511628211ull;
         }
         u32 mb = 0, rb = 0;
         std::memcpy(&mb, &d.metallic, sizeof(mb));
         std::memcpy(&rb, &d.roughness, sizeof(rb));
-        key ^= (static_cast<u64>(mb) << 32) ^ static_cast<u64>(rb);
-        key *= 1099511628211ull;
+        h ^= (static_cast<u64>(mb) << 32) ^ static_cast<u64>(rb);
+        h *= 1099511628211ull;
+        // FINALISE BEFORE ADDING. FNV's last step leaves neighbouring inputs correlated in the low
+        // bits, and plain addition of correlated values collides far more readily than addition of
+        // decorrelated ones. This is splitmix64's finaliser, used here only as an avalanche.
+        h ^= h >> 33; h *= 0xff51afd7ed558ccdull;
+        h ^= h >> 33; h *= 0xc4ceb9fe1a85ec53ull;
+        h ^= h >> 33;
+        key += h;          // wrapping, and commutative: this is the whole point
+        ++counted;
     }
+    // THE COUNT, mixed in rather than added, so "one more draw" can never be mistaken for "the same
+    // draws in another order". See the note above on why this is mandatory and not a nicety.
+    key ^= counted * 1099511628211ull;
     return key;
+}
+
+
+// Splits giDrawsKey's inputs into independent axes, so "draw list changed" can name WHICH axis.
+// Same skips and same per-draw finalise as giDrawsKey, so a difference here is a real difference
+// there. Order-independent for the same reason.
+void VoxiRenderer::giDrawsSubKeys(u64& count, u64& mesh, u64& world, u64& mat) const {
+    count = mesh = world = mat = 0;
+    auto mix = [](u64 h) {
+        h ^= h >> 33; h *= 0xff51afd7ed558ccdull;
+        h ^= h >> 33; h *= 0xc4ceb9fe1a85ec53ull;
+        h ^= h >> 33; return h;
+    };
+    for (const Draw& d : drawsPrev_) {
+        if (d.translucent) continue;
+        if (dev_ && dev_->meshVertexBuffer(d.mesh)) continue;
+        ++count;
+        mesh += mix(1469598103934665603ull ^ static_cast<u64>(d.depthMesh));
+        u64 w = 1469598103934665603ull;
+        for (u32 i = 0; i < 16; ++i) {
+            u32 bits = 0; std::memcpy(&bits, &d.world[i], sizeof(bits));
+            w ^= static_cast<u64>(bits); w *= 1099511628211ull;
+        }
+        // The mesh is folded into the world axis too: without it, two draws swapping transforms
+        // would read as unchanged on this axis and the report would point at the wrong thing.
+        w ^= static_cast<u64>(d.depthMesh); w *= 1099511628211ull;
+        world += mix(w);
+        u64 m = 1469598103934665603ull;
+        for (u32 i = 0; i < 4; ++i) {
+            u32 bits = 0; std::memcpy(&bits, &d.color[i], sizeof(bits));
+            m ^= static_cast<u64>(bits); m *= 1099511628211ull;
+        }
+        u32 mb = 0, rb = 0;
+        std::memcpy(&mb, &d.metallic, sizeof(mb));
+        std::memcpy(&rb, &d.roughness, sizeof(rb));
+        m ^= (static_cast<u64>(mb) << 32) ^ static_cast<u64>(rb); m *= 1099511628211ull;
+        m ^= static_cast<u64>(d.depthMesh); m *= 1099511628211ull;
+        mat += mix(m);
+    }
 }
 
 // True when every input to voxelizePass is identical to the last rebuild's.
@@ -1270,7 +1352,47 @@ bool VoxiRenderer::giSnapshotUnchanged() const {
     // long as nothing else moves.
     constexpr f32 kGiCloudStaleSeconds = 2.0f;
     if (now.cloudsEnabled && cloudTimeDelta > kGiCloudStaleSeconds) return reject(5, "clouds drifted");
-    if (giDrawsKey() != giDrawsKey_) return reject(4, "draw list changed");
+    if (giDrawsKey() != giDrawsKey_) {
+        // WHICH AXIS, not just "the draw list". See giDrawsSubKeys.
+        u64 c = 0, m = 0, w = 0, mt = 0;
+        giDrawsSubKeys(c, m, w, mt);
+        // COUNTED OVER THE RUN, NOT LATCHED ON THE FIRST REJECTION. The first version of this
+        // reported once per axis and so only ever described LOAD-IN (17 draws growing to 155),
+        // which is exactly the phase nobody is asking about. The steady state is the question.
+        ++giDrawsRejects_;
+        if (c  != giDrawsCount_)    ++giDrawsCountMoved_;
+        if (m  != giDrawsMeshKey_)  ++giDrawsMeshMoved_;
+        if (w  != giDrawsWorldKey_) ++giDrawsWorldMoved_;
+        if (mt != giDrawsMatKey_)   ++giDrawsMatMoved_;
+        if (c != giDrawsCount_ && giDrawsDiffReports_ < 3) {
+            ++giDrawsDiffReports_;
+            std::vector<rhi::MeshHandle> now2;
+            for (const Draw& d : drawsPrev_) {
+                if (d.translucent) continue;
+                if (dev_ && dev_->meshVertexBuffer(d.mesh)) continue;
+                now2.push_back(d.depthMesh);
+            }
+            std::sort(now2.begin(), now2.end());
+            std::vector<rhi::MeshHandle> added, removed;
+            std::set_difference(now2.begin(), now2.end(), giSnapMeshes_.begin(), giSnapMeshes_.end(),
+                                std::back_inserter(added));
+            std::set_difference(giSnapMeshes_.begin(), giSnapMeshes_.end(), now2.begin(), now2.end(),
+                                std::back_inserter(removed));
+            std::string a, r;
+            for (rhi::MeshHandle h : added)   { a += std::to_string(h); a += ' '; }
+            for (rhi::MeshHandle h : removed) { r += std::to_string(h); r += ' '; }
+            AVER_INFO("[Voxi] GI draw-list delta: +{} mesh(es) [{}] -{} mesh(es) [{}]",
+                      added.size(), a.empty() ? "-" : a.c_str(), removed.size(), r.empty() ? "-" : r.c_str());
+        }
+        if (giDrawsRejects_ >= giDrawsNextReport_) {
+            AVER_INFO("[Voxi] GI draw-list axes over {} rejection(s): count moved {}x, mesh set {}x, "
+                      "world transforms {}x, material values {}x  (last count {} vs {})",
+                      giDrawsRejects_, giDrawsCountMoved_, giDrawsMeshMoved_, giDrawsWorldMoved_,
+                      giDrawsMatMoved_, c, giDrawsCount_);
+            giDrawsNextReport_ *= 2;
+        }
+        return reject(4, "draw list changed");
+    }
     return true;
 }
 
@@ -1620,6 +1742,17 @@ u32 VoxiRenderer::giCacheFlush() {
 }
 
 void VoxiRenderer::takeGiSnapshot() {
+    giDrawsSubKeys(giDrawsCount_, giDrawsMeshKey_, giDrawsWorldKey_, giDrawsMatKey_);
+    // The mesh multiset itself, so giSnapshotUnchanged can say WHICH draws came and went rather
+    // than only that the count moved. Three hypotheses have now been refuted by measurement here
+    // (frustum culling, submission order, occlusion bucketing); naming the handles ends the guessing.
+    giSnapMeshes_.clear();
+    for (const Draw& d : drawsPrev_) {
+        if (d.translucent) continue;
+        if (dev_ && dev_->meshVertexBuffer(d.mesh)) continue;
+        giSnapMeshes_.push_back(d.depthMesh);
+    }
+    std::sort(giSnapMeshes_.begin(), giSnapMeshes_.end());
     giDrawsKey_ = giDrawsKey();
     // Same two-step on the stored side, so both sides of the memcmp have zero padding.
     if (dev_) { giSky_ = rhi::SkyAtmosphere{}; giSky_ = dev_->skyAtmosphere(); }
