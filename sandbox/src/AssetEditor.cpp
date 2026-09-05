@@ -342,15 +342,37 @@ private:
             if (!framed_) { preview->frameAll(); framed_ = true; }
         }
 
+        // FIT, NEVER STRETCH. This drew the preview at ImVec2(avail.x, h) -- the panel's shape, not
+        // the target's -- so the mesh was squashed or elongated by however far the two aspects
+        // disagreed. Docking the tab tall or wide visibly deformed the model, which on the one view
+        // whose whole job is judging a mesh's proportions is the worst place for it.
+        //
+        // LETTERBOXED RATHER THAN RESIZING THE TARGET, which is the other way to fix this and is
+        // what ActorEditor and AnimEditor do. Not here: this preview is SHARED (sharedPreview), so a
+        // resize from this tab is a resize for every other one, and two docked tabs of different
+        // shapes would take turns resizing it every frame. Fitting costs nothing and cannot fight.
         const ImVec2 avail = ImGui::GetContentRegionAvail();
         const f32 h = std::max(160.0f, avail.y);
-        ImGui::Image(static_cast<ImTextureID>(preview->uiTextureId()), ImVec2(avail.x, h));
+        const f32 texW = static_cast<f32>(preview->width());
+        const f32 texH = static_cast<f32>(preview->height());
+        const f32 fit  = std::min(avail.x / std::max(texW, 1.0f), h / std::max(texH, 1.0f));
+        ImGui::Image(static_cast<ImTextureID>(preview->uiTextureId()),
+                     ImVec2(std::max(texW * fit, 16.0f), std::max(texH * fit, 16.0f)));
         if (ImGui::IsItemHovered()) {
             const ImGuiIO& io = ImGui::GetIO();
             if (ImGui::IsMouseDragging(ImGuiMouseButton_Left))
                 preview->camera().addOrbit(io.MouseDelta.x * 0.4f, io.MouseDelta.y * 0.4f);
             if (io.MouseWheel != 0.0f)
                 preview->camera().addZoom(io.MouseWheel > 0.0f ? 0.9f : 1.1f);
+            // PAN, which orbit and zoom alone cannot substitute for: off-centre detail on a large
+            // mesh is unreachable when the camera can only swing about a fixed point. Middle and
+            // right both, matching the level viewport's own MMB pan so the gesture transfers.
+            for (const ImGuiMouseButton b : {ImGuiMouseButton_Middle, ImGuiMouseButton_Right}) {
+                if (!ImGui::IsMouseDragging(b)) continue;
+                const ImVec2 d = ImGui::GetMouseDragDelta(b);
+                ImGui::ResetMouseDragDelta(b);
+                preview->camera().panPixels(d.x, d.y, static_cast<f32>(preview->height()));
+            }
         }
         if (!mine) ImGui::TextDisabled("Click this tab to take the preview.");
     }

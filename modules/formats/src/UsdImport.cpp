@@ -1101,7 +1101,35 @@ void parsePrimBody(Scanner& s, Ctx& c, const M4& parent, const std::string& path
         if (!g.faces.empty()) subsets.push_back(std::move(g));
     }
 
-    if (attrs.hasPoints) buildMesh(c, attrs, world, path, subsets);
+    if (attrs.hasPoints) {
+        // THE TRANSLATION COMES OUT AND BECOMES A PLACEMENT, exactly as it now does for glTF, and
+        // for the same measured reason -- see UsdImportResult::meshes for what baking it cost.
+        // Rotation and scale stay in the geometry: they are what the mesh looks like.
+        //
+        // Row-vector, row-major (see xformPoint's own indices): the translation is m[12..14], so
+        // zeroing those three leaves precisely the rotation/scale basis behind. A copy and three
+        // assignments, with nothing to fail on -- no decomposition, so shear cannot break it.
+        M4 basis = world;
+        basis.m[12] = basis.m[13] = basis.m[14] = 0.0f;
+        const usize meshIndexBefore = c.out->meshes.size();
+
+        buildMesh(c, attrs, basis, path, subsets);
+
+        // Only when buildMesh actually produced one -- it can reject a prim (no faces, a degenerate
+        // topology), and a placement pointing at a mesh that was never written is a dangling path.
+        if (c.out->meshes.size() > meshIndexBefore) {
+            // Through the SAME conversion a vertex takes, so the placement lands in the space and
+            // unit its geometry did: axis convention, then the stage's metresPerUnit scale.
+            f32 eng[3];
+            const f32 t[3] = {world.m[12], world.m[13], world.m[14]};
+            toEngine(c.opt->convertAxes, c.yUp, t, eng);
+            UsdPlacement pl;
+            pl.meshIndex = static_cast<i32>(meshIndexBefore);
+            pl.position  = Vec3{eng[0] * c.unitScale, eng[1] * c.unitScale, eng[2] * c.unitScale};
+            pl.name      = path;
+            c.out->placements.push_back(std::move(pl));
+        }
+    }
 
     // NOW the children, with a transform that finally includes this prim's own ops.
     for (const DeferredChild& ch : children) {

@@ -333,9 +333,24 @@ int main() {
         check(ok, "a nested Mesh under an Xform imports");
         if (ok && r.meshes.size() == 1) {
             check(r.meshes[0].indices.size() == 6, "the quad becomes two triangles");
-            checkNear(r.meshes[0].positions[0], 10.0f, 1e-3f,
-                      "and the PARENT Xform's translate reached the child's points");
             check(r.meshNames[0] == "/root/quad", "the mesh is named by its prim path");
+
+            // THE PARENT'S TRANSLATE IS STILL COMPOSED -- it just no longer lands in the geometry.
+            // This assertion used to read positions[0] == 10 and so pinned the baking in place: a
+            // prim's translation welded into its vertices puts the mesh's pivot at the stage origin
+            // rather than on itself, which is what the glTF side of this was measured doing to all
+            // 115 pieces of Intel Sponza. Both halves are checked, because either alone passes while
+            // the feature is broken -- geometry at the origin with no placement has lost the stage,
+            // and a placement whose geometry is still displaced counts the offset twice.
+            checkNear(r.meshes[0].positions[0], 0.0f, 1e-3f,
+                      "the parent's translate is NOT welded into the child's points");
+            check(r.placements.size() == 1, "one placement, for the one mesh-bearing prim");
+            if (r.placements.size() == 1) {
+                check(r.placements[0].meshIndex == 0, "the placement names mesh 0");
+                checkNear(r.placements[0].position.x, 10.0f, 1e-3f,
+                          "and the parent Xform's translate is in the PLACEMENT instead");
+                check(r.placements[0].name == "/root/quad", "the placement carries the prim path");
+            }
         }
     }
 

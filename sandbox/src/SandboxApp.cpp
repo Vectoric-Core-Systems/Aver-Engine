@@ -905,6 +905,11 @@ static bool importGltfToDir(const std::string& src, const std::string& destDir,
 
     std::error_code ec;
     const std::string stem = std::filesystem::path(src).stem().string();
+    // Parallel to res.meshes: the stem each one was written under, or empty when it was skipped
+    // (invalid, or a file of that name already existed). The scene level below names these, rather
+    // than re-deriving the naming rule -- a second copy of it only has to disagree once to write a
+    // level full of paths that resolve to nothing.
+    std::vector<std::string> stems(res.meshes.size());
     for (usize i = 0; i < res.meshes.size(); ++i) {
         fmt::OcMeshData& m = res.meshes[i];
         if (!m.valid()) { AVER_WARN("[Import] mesh {} came out empty and was skipped", i); continue; }
@@ -922,7 +927,44 @@ static bool importGltfToDir(const std::string& src, const std::string& destDir,
         if (!fmt::saveOcMesh(outFile, m, &why)) { AVER_WARN("[Import] {}", why); continue; }
         AVER_INFO("[Import] {} -> {} ({} verts, {} tris)", std::filesystem::path(src).filename().string(),
                   base + ".ocmesh", m.vertexCount(), m.indices.size() / 3);
+        stems[i] = base;
         ++out.meshesWritten;
+    }
+
+    // THE SCENE, which this path used to throw away. The importer no longer welds a node's
+    // translation into its vertices -- that is what put every imported mesh's pivot metres from
+    // itself -- so without writing the placements down, a multi-part model imported through the
+    // editor's own Import button would arrive as a heap of correctly-centred pieces with no record
+    // of how they fit together. AverAssetC learned this at the same time; this is the same feature
+    // on the path the editor actually uses.
+    //
+    // ONLY WHEN IT IS A SCENE. A single-mesh file gets no level: one PLACE record is not worth a
+    // file, and the Content Browser would gain a stray .ocworld beside every chair somebody imports.
+    if (res.placements.size() > 1) {
+        fmt::OcWorldData w;
+        w.name = stem;
+        for (const fmt::GltfPlacement& p : res.placements) {
+            if (p.meshIndex < 0 || usize(p.meshIndex) >= stems.size()) continue;
+            if (stems[usize(p.meshIndex)].empty()) continue;
+            fmt::OcWorldPlacement op;
+            // Beside the meshes, so the reference is relative to the level's own folder the same way
+            // every other PLACE in a hand-authored level is relative to the content root.
+            op.asset = stems[usize(p.meshIndex)] + ".ocmesh";
+            op.x = p.position.x; op.y = p.position.y; op.z = p.position.z;
+            w.placements.push_back(std::move(op));
+        }
+        const std::string lvl = destDir + "\\" + stem + ".ocworld";
+        if (w.placements.empty()) {
+            // Nothing to say; not worth a file.
+        } else if (std::filesystem::exists(lvl, ec)) {
+            AVER_WARN("[Import] '{}.ocworld' already exists - not overwritten, so the scene layout "
+                      "was not written", stem);
+        } else if (!fmt::saveOcworld(lvl, w, &why)) {
+            AVER_WARN("[Import] could not write the scene layout: {}", why);
+        } else {
+            AVER_INFO("[Import] {} -> {}.ocworld ({} placement(s), the source scene's own layout)",
+                      std::filesystem::path(src).filename().string(), stem, w.placements.size());
+        }
     }
 
     // The RIG. This used to drop res.skeletons and res.animations on the floor, so glTF could

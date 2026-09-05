@@ -2852,6 +2852,31 @@ void GraphEditor::drawMaterialViewport(Engine& e, float dpi) {
     const f32 w = std::max(texW * fit, 16.0f * dpi);
     const f32 h = std::max(texH * fit, 16.0f * dpi);
     ImGui::Image(static_cast<ImTextureID>(preview->uiTextureId()), ImVec2(w, h));
+
+    // THE SPHERE TURNS NOW. This viewport drew the image and stopped, so the preview sat at whatever
+    // frameAll() picked once and never moved again -- and a material is exactly the thing you judge
+    // by moving it, because roughness, anisotropy and a clear coat only declare themselves as the
+    // highlight travels. Every sibling preview in this file and in AssetEditor already wires this
+    // same block; this was the one place it was missing.
+    //
+    // SAFE FROM THE onUpdate STALENESS TRAP: an asset editor's draw runs inside the UI pass, which
+    // is after ImGui::NewFrame, so io.MouseWheel here holds this frame's real value -- unlike the
+    // same read from onUpdate, which is always zero. See the fly-camera's own note on that.
+    if (ImGui::IsItemHovered()) {
+        ImGuiIO& io = ImGui::GetIO();
+        if (io.MouseWheel != 0.0f)
+            preview->camera().addZoom(io.MouseWheel > 0.0f ? 0.88f : 1.0f / 0.88f);
+        if (ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+            const ImVec2 d = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
+            ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
+            preview->camera().addOrbit(-d.x * 0.4f, d.y * 0.4f);
+        }
+        if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
+            const ImVec2 d = ImGui::GetMouseDragDelta(ImGuiMouseButton_Middle);
+            ImGui::ResetMouseDragDelta(ImGuiMouseButton_Middle);
+            preview->camera().panPixels(d.x, d.y, static_cast<f32>(preview->height()));
+        }
+    }
 }
 
 void GraphEditor::drawViewport(Engine& e, float dpi) {

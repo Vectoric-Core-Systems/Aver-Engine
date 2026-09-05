@@ -32,12 +32,31 @@ enum class UsdEncoding {
 UsdEncoding usdSniff(const u8* bytes, usize size);
 const char* usdEncodingName(UsdEncoding e);
 
+// WHERE A PRIM SAT IN THE STAGE. The USD twin of GltfPlacement, and it exists for the same measured
+// reason: baking a prim's TRANSLATION into its vertices puts the mesh's pivot wherever the stage's
+// origin happened to be, and every consumer of a pivot then reads that gap as real -- the gizmo, the
+// bounds, culling, the GI box, framing the selection.
+struct UsdPlacement {
+    i32  meshIndex = -1;                     // into UsdImportResult::meshes
+    Vec3 position{0, 0, 0};                  // engine space, centimetres
+    std::string name;                        // the prim path
+};
+
 struct UsdImportResult {
-    // One per UsdGeomMesh prim in the stage, with the prim's world transform already baked in —
-    // the engine has no stage concept to preserve it in, and an importer that dropped the transform
-    // would silently pile every mesh at the origin.
+    // One per UsdGeomMesh prim in the stage, with the prim's ROTATION AND SCALE baked in.
+    //
+    // NOT ITS TRANSLATION, ANY MORE, and the note that used to sit here -- "an importer that dropped
+    // the transform would silently pile every mesh at the origin" -- was right about the danger and
+    // wrong about the remedy. Dropping the translation with nowhere to put it does pile everything at
+    // the origin; baking it instead moves the pivot off the mesh, which is quieter and worse, because
+    // nothing looks broken until you try to move or frame the thing. The translation now comes out
+    // into `placements` below, so the stage is preserved AND the pivot is on the geometry.
     std::vector<OcMeshData>  meshes;
     std::vector<std::string> meshNames;      // the prim path, e.g. "/root/body"
+
+    // One per mesh-bearing prim, in stage order. A caller that wants the stage back writes these as
+    // placements; a caller that only wants the meshes can ignore them.
+    std::vector<UsdPlacement> placements;
 
     // The stage's UsdPreviewSurface materials, and the images they name. SHARED SHAPES, not USD's
     // own -- see ImportedMaterial.hpp -- so the same cook serves glTF, OBJ and USD.
