@@ -3309,6 +3309,7 @@ public:
         if (undoTestAutoFrames_ > 0 && --undoTestAutoFrames_ == 0) runUndoTest(e);
         if (multiSelTestFrames_ > 0 && --multiSelTestFrames_ == 0) runMultiSelectTest(e);
         if (cbMoveTestFrames_ > 0 && --cbMoveTestFrames_ == 0) runCbMoveTest(cbMoveTestDir_);
+        if (saveDirtyTestFrames_ > 0 && --saveDirtyTestFrames_ == 0) runSaveDirtyTest();
         if (keybindTestAutoFrames_ > 0 && --keybindTestAutoFrames_ == 0) runKeybindPersistTest(keybindTestMode_);
 #endif
 #if AVER_MODULE_SCRIPTING
@@ -6414,6 +6415,7 @@ public:
     void setWheelSpeedTest(int n) { wheelTestFrames_ = n; }                        // --wheel-speed-test
     void setMultiSelectTest(int n) { multiSelTestFrames_ = n; }                    // --multiselect-test
     void setCbMoveTest(const std::string& dir) { cbMoveTestDir_ = dir; cbMoveTestFrames_ = 10; }
+    void setSaveDirtyTest(int n) { saveDirtyTestFrames_ = n; }                     // --savedirty-test
     void setRecaptureTest(int n)   { recapFrames_ = n; }                          // --recapture-test
     void setViewmodelTest(int n)   { vmFrames_ = n; }                             // --viewmodel-test
     void setSkinSceneDir(std::string d) { skinSceneDir_ = std::move(d); }          // --skin-scene-test <dir>
@@ -7529,6 +7531,11 @@ private:
             openLevelDirect(e, p);
             levelPath_ = real;
             levelName_ = std::filesystem::path(real).stem().string();
+            // AND IT REALLY IS UNSAVED. loadLevel marks the document clean, which is right for
+            // every ordinary open and wrong for exactly this one: the content came from the
+            // autosave sidecar, so the file at levelPath_ does NOT contain it. Saying otherwise
+            // would let the recovered work be closed without a prompt -- losing it twice.
+            markLevelUnsaved();
             setUpgradeStatus("Recovered - not yet saved");
         }
         ImGui::SameLine();
@@ -9832,6 +9839,10 @@ private:
     struct EditCmd {
         enum class Kind { Transform, Create, Destroy, CreateObj, DestroyObj, LandscapeStroke, FoliageStroke, Reparent, Material, Rename };
         Kind kind = Kind::Transform;
+        // WHICH EDIT THIS IS, monotonically. Identifies the document's state so a save can record
+        // "clean as of here" -- see levelHasUnsavedEdits. Never reused, so undo and redo move the
+        // mark back and forth across a save point correctly.
+        u64 serial = 0;
         EditId id = 0;            // a scene entity, through the indirection
         int objIndex = -1;        // or an objects_ index, for the placeholder scene
         EditXform before{}, after{};
@@ -10017,6 +10028,7 @@ private:
 #endif
 
     void pushEdit(EditCmd c) {
+        c.serial = ++editSerialNext_;
         undoStack_.push_back(std::move(c));
         redoStack_.clear();
         if (undoStack_.size() > kUndoDepth) undoStack_.erase(undoStack_.begin());
@@ -10420,6 +10432,10 @@ private:
         }
     }
 #endif  // AVER_MODULE_SCENE
+
+    // The serial at the top of the undo stack, or 0 for an untouched document. This IS the
+    // document's state as far as saving is concerned.
+    u64 currentEditMark() const { return undoStack_.empty() ? 0ull : undoStack_.back().serial; }
 
     bool canUndo() const { return !undoStack_.empty(); }
     bool canRedo() const { return !redoStack_.empty(); }
@@ -12169,6 +12185,68 @@ private:
     std::string cbMoveTestDir_;   // --cbmove-test <dir>
     int cbMoveTestFrames_ = 0;
 
+    // --savedirty-test: does "unsaved changes" actually track the file?
+    //
+    // THE BUG THIS PINS: levelHasUnsavedEdits() was `return canUndo()`, so the exit prompt fired on
+    // every close no matter how recently the level had been written -- it could only go quiet by
+    // undoing the entire session. A prompt that cries wolf every time trains the reflex that
+    // dismisses it, and one day it is telling the truth.
+    //
+    // THE CASES THAT MATTER ARE THE UNDO ONES. Anyone can make "save clears the flag" work; the
+    // interesting question is what happens when you save, undo past that point, and redo back to it.
+    // A stack-DEPTH watermark gets that wrong the moment pushEdit trims from the front at
+    // kUndoDepth; a per-edit serial does not, and that is the whole reason for the serial.
+    void runSaveDirtyTest() {
+        int failures = 0;
+        auto check = [&](bool cond, const char* what) {
+            if (cond) AVER_INFO("[savedirty-test] PASS: {}", what);
+            else      { AVER_ERROR("[savedirty-test] FAIL: {}", what); ++failures; }
+        };
+
+        undoStack_.clear();
+        redoStack_.clear();
+        markLevelSaved();
+        check(!levelHasUnsavedEdits(), "a freshly loaded level is not dirty");
+
+        auto edit = [&]() { EditCmd c; c.kind = EditCmd::Kind::Transform; pushEdit(std::move(c)); };
+
+        edit();
+        check(levelHasUnsavedEdits(), "an edit makes it dirty");
+
+        markLevelSaved();
+        check(!levelHasUnsavedEdits(), "SAVING clears it -- the whole point");
+
+        edit();
+        check(levelHasUnsavedEdits(), "editing after a save makes it dirty again");
+
+        undo();
+        check(!levelHasUnsavedEdits(), "undoing back TO the save point is clean again");
+
+        redo();
+        check(levelHasUnsavedEdits(), "redoing away from it is dirty again");
+
+        // Save, then undo PAST the save point: the document no longer matches the file, even though
+        // the stack is shorter than it was when saved. Depth alone cannot tell this from clean.
+        markLevelSaved();
+        undo();
+        check(levelHasUnsavedEdits(), "undoing PAST the save point is dirty, not clean");
+
+        redo();
+        check(!levelHasUnsavedEdits(), "and redoing back to it is clean");
+
+        // A recovered sidecar is unsaved by construction, whatever the stack says.
+        undoStack_.clear();
+        redoStack_.clear();
+        markLevelUnsaved();
+        check(levelHasUnsavedEdits(), "recovered content reports unsaved even with an empty history");
+
+        undoStack_.clear();
+        redoStack_.clear();
+        markLevelSaved();
+        AVER_INFO("[savedirty-test] RESULT: {}", failures == 0 ? "PASS" : "FAIL");
+    }
+    int saveDirtyTestFrames_ = 0;
+
     void runMultiSelectTest(Engine& eng) {
         (void)eng;
         int failures = 0;
@@ -12708,7 +12786,7 @@ private:
                 // Leave the world as this phase found it.
                 sel_ = kSelScene; selEntity_ = ra; deleteSelection(); w.flush();
                 check(w.count() == rbase, "teardown: the reparent phase leaves no entities behind");
-                undoStack_.clear(); redoStack_.clear();
+                undoStack_.clear(); redoStack_.clear(); markLevelSaved();
             }
 
             sel_ = kSelScene; selEntity_ = parent;
@@ -12979,7 +13057,31 @@ private:
     //
     // It over-reports after a save (the stack is not cleared), so the worst this costs is a prompt
     // somebody dismisses. The other error costs them their level.
-    bool levelHasUnsavedEdits() const { return canUndo(); }
+    // TRUE WHEN THE LEVEL DIFFERS FROM WHAT IS ON DISK, which is not the same question as "has
+    // anything ever been edited" -- and it used to be answered with canUndo(), i.e. "is the undo
+    // stack non-empty".
+    //
+    // That could never become false by SAVING, because saving does not touch the undo stack. So the
+    // editor asked "you have unsaved changes" on close no matter how recently the level had been
+    // written, and the only way to be told otherwise was to undo every edit of the session. A prompt
+    // that cries wolf on every single exit is worse than no prompt: it trains the reflex that
+    // dismisses it, and one day it will have been telling the truth.
+    //
+    // NOT THE STACK'S SIZE EITHER, which is the tempting fix and is wrong here: pushEdit erases from
+    // the FRONT once kUndoDepth is reached, so the same depth can mean two different documents.
+    // A per-edit serial is stable under that trimming.
+    bool levelHasUnsavedEdits() const { return currentEditMark() != savedEditMark_; }
+
+    // Called wherever the document and the file agree: after a successful save, and after a load or
+    // a New Level, both of which start from a file nothing has edited yet.
+    void markLevelSaved() { savedEditMark_ = currentEditMark(); }
+    // Forces the dirty state on, for content that came from somewhere other than levelPath_.
+    // ~0 is a serial pushEdit can never produce, so no edit can accidentally match it.
+    void markLevelUnsaved() { savedEditMark_ = ~0ull; }
+
+    // The serial the level was last written at. 0 means "as loaded, unedited".
+    u64 savedEditMark_ = 0;
+    u64 editSerialNext_ = 0;
 
     // Exit, unless something is unsaved -- in which case ASK first.
     // Every exit used to call requestExit() straight through. AssetEditorHost::anyDirty() existed for
@@ -14193,6 +14295,18 @@ private:
     void drawOutputLog() {
         if (ImGui::SmallButton("Clear")) { std::lock_guard<std::mutex> lk(logMutex_); logLines_.clear(); }
         ImGui::SameLine();
+        // Same reasoning as the console's own Copy button: this text is not selectable either, and
+        // the log is the FIRST thing anyone is asked for when something goes wrong.
+        if (ImGui::SmallButton("Copy")) {
+            std::string all;
+            {
+                std::lock_guard<std::mutex> lk(logMutex_);
+                for (const LogLine& ln : logLines_) { all += ln.text; all += char(10); }
+            }
+            ImGui::SetClipboardText(all.c_str());
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copy the whole log to the clipboard");
+        ImGui::SameLine();
         ImGui::SetNextItemWidth(110.0f * dpi_);
         // APPENDED AFTER "Warn+", never inserted before it. This index is persisted verbatim as
         // outputLog.levelFilter in editor.ini, so inserting an entry earlier would silently change
@@ -14232,13 +14346,35 @@ private:
 
         if (ImGui::SmallButton("Clear")) consoleLines_.clear();
         ImGui::SameLine();
+        // COPY, BECAUSE THE TEXT CANNOT BE SELECTED. drawLogLine emits ImGui text, which draws a
+        // colour per severity and offers no drag-selection -- so the one thing a console exists for,
+        // getting output back OUT to paste somewhere, was impossible. Rendering the buffer into a
+        // read-only InputTextMultiline would make it selectable and would throw the severity colours
+        // away; a button keeps both. `frametime`'s tree is exactly the output somebody needs to hand
+        // to someone else.
+        if (ImGui::SmallButton("Copy")) {
+            std::string all;
+            for (const LogLine& ln : consoleLines_) { all += ln.text; all += char(10); }
+            ImGui::SetClipboardText(all.c_str());
+            consoleLines_.push_back({LogLevel::Info,
+                                     "[console] copied " + std::to_string(consoleLines_.size()) +
+                                     " line(s) to the clipboard"});
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copy every line here to the clipboard");
+        ImGui::SameLine();
         ImGui::Checkbox("Auto-scroll", &consoleAutoScroll_);
         ImGui::Separator();
 
         const f32 inputLineH = ImGui::GetFrameHeightWithSpacing();
         ImGui::BeginChild("##consolescroll", ImVec2(0, -inputLineH), false, ImGuiWindowFlags_HorizontalScrollbar);
         {
-            for (const LogLine& ln : consoleLines_) drawLogLine(ln.level, ln.text.c_str());
+            for (const LogLine& ln : consoleLines_) {
+                drawLogLine(ln.level, ln.text.c_str());
+                // ONE line, for when the whole buffer is not what is wanted. Right-click is where a
+                // person looks for this, and it costs nothing when unused.
+                if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+                    ImGui::SetClipboardText(ln.text.c_str());
+            }
         }
         if (consoleAutoScroll_ && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4.0f)
             ImGui::SetScrollHereY(1.0f);
@@ -20821,6 +20957,10 @@ private:
             frameCameraOn(w);
         }
 
+        // JUST LOADED MEANS JUST SAVED, as far as the exit prompt is concerned. openLevelDirect
+        // does NOT unload first, so without this a level opened after editing another would
+        // inherit that one's history and be reported dirty the instant it appeared.
+        markLevelSaved();
         AVER_INFO("[Level] '{}' loaded from {} ({} placement(s))", w.name, path, w.placements.size());
 
     }
@@ -21220,6 +21360,8 @@ private:
         entityLegacyMaterial_.clear();
         undoStack_.clear();
         redoStack_.clear();
+        // A cleared history means nothing is pending against the file either.
+        markLevelSaved();
         editToEntity_.clear();
         entityToEdit_.clear();
         editBeforeValid_ = false;
@@ -21448,6 +21590,9 @@ private:
         std::string why;
         if (!fmt::saveOcworld(path, w, &why)) { AVER_WARN("[Level] save failed: {}", why); return false; }
         AVER_INFO("[Level] saved {} placement(s) to {}", w.placements.size(), path);
+        // THE DOCUMENT AND THE FILE NOW AGREE. Without this the exit prompt claims unsaved
+        // changes forever -- see levelHasUnsavedEdits.
+        markLevelSaved();
         // A REAL SAVE RETIRES THE SIDECAR -- but only a save of THE LEVEL. saveLevel is also how the
         // autosave itself and --save-level write, and deleting the recovery file on either would
         // throw away the safety net at the moment it was being created.
@@ -21507,6 +21652,7 @@ private:
         std::string why;
         if (!fmt::saveOcmap(path, m, &why)) { AVER_WARN("[Level] save failed: {}", why); return false; }
         AVER_INFO("[Level] saved {} placement(s) to {} (legacy .ocmap)", m.placements.size(), path);
+        markLevelSaved();
         return true;
     }
 
@@ -22355,6 +22501,7 @@ Application* createApplication(int argc, char** argv) {
     int wheelSpeedArg = 0;
     int multiSelArg = 0;
     const char* cbMoveArg = nullptr;
+    int saveDirtyArg = 0;
     int recaptureArg = 0;
     int viewmodelArg = 0;
     // --gpu-timing takes no value, so it's matched in the i+1<argc loop below only incidentally --
@@ -22370,6 +22517,7 @@ Application* createApplication(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--wheel-speed-test"))     wheelSpeedArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--multiselect-test"))     multiSelArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--cbmove-test"))          cbMoveArg = argv[i + 1];
+        if (!std::strcmp(argv[i], "--savedirty-test"))       saveDirtyArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--recapture-test"))       recaptureArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--viewmodel-test"))       viewmodelArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--refraction"))           refraction = std::atoi(argv[i + 1]);
@@ -23279,6 +23427,7 @@ Application* createApplication(int argc, char** argv) {
     if (wheelSpeedArg > 0) app->setWheelSpeedTest(wheelSpeedArg);
     if (multiSelArg > 0) app->setMultiSelectTest(multiSelArg);
     if (cbMoveArg) app->setCbMoveTest(cbMoveArg);
+    if (saveDirtyArg > 0) app->setSaveDirtyTest(saveDirtyArg);
     if (recaptureArg > 0) app->setRecaptureTest(recaptureArg);
     if (viewmodelArg > 0) app->setViewmodelTest(viewmodelArg);
 #endif
