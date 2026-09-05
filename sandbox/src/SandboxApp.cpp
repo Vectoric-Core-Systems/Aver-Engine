@@ -1243,8 +1243,28 @@ public:
         // and the contract says be quick and do not log; the frame that draws it stamps it instead
         // (see drawGraphPrintOverlay), which is also the clock the fade needs to agree with.
         if (msg.rfind("[Graph] ", 0) == 0) {
-            self->graphPrints_.push_back({std::string(msg.substr(8)), -1.0});
-            if (self->graphPrints_.size() > kMaxGraphPrints) self->graphPrints_.pop_front();
+            std::string text(msg.substr(8));
+            // CONSECUTIVE DUPLICATES COLLAPSE, and this is not tidiness -- without it the feature is
+            // unusable. The editor ticks graph-class instances UNGATED on play state (see
+            // HostBridge.GraphTickBoundInstances), so a PrintString on an OnTick chain fires every
+            // frame just from having the level open: sixty identical lines a second, a ring buffer
+            // that churns faster than anyone can read, and an overlay that is a solid block of the
+            // same sentence. Collapsed, that same graph shows one line with a rising count, which is
+            // also strictly more information -- "still firing, 143 times now" rather than "firing".
+            //
+            // CONSECUTIVE only, deliberately, not deduplicated across the whole buffer: two prints
+            // alternating (a Branch taking each arm in turn) is exactly the pattern an author is
+            // watching for, and merging those into two static rows would hide the alternation that
+            // is the whole signal.
+            if (!self->graphPrints_.empty() && self->graphPrints_.back().text == text) {
+                ++self->graphPrints_.back().count;
+                // Back to unstamped, so the next frame re-stamps it to now: a print that is still
+                // firing must not fade out underneath its own rising count.
+                self->graphPrints_.back().at = -1.0;
+            } else {
+                self->graphPrints_.push_back({std::move(text), -1.0, 1});
+                if (self->graphPrints_.size() > kMaxGraphPrints) self->graphPrints_.pop_front();
+            }
         }
     }
 
@@ -3360,6 +3380,7 @@ public:
         if (findRefsFrames_ > 0 && --findRefsFrames_ == 0) runFindRefs();
         if (projectSwitchFrames_ > 0 && --projectSwitchFrames_ == 0) runProjectSwitchTest();
         if (validateGraphFrames_ > 0 && --validateGraphFrames_ == 0) runValidateGraph();
+        if (graphPrintTestFrames_ > 0 && --graphPrintTestFrames_ == 0) runGraphPrintTest();
         if (prefsWriteTestFrames_ > 0 && --prefsWriteTestFrames_ == 0) runPrefsWriteTest();
         if (keybindTestAutoFrames_ > 0 && --keybindTestAutoFrames_ == 0) runKeybindPersistTest(keybindTestMode_);
 #endif
@@ -6554,6 +6575,7 @@ public:
     void setFindRefs(const std::string& p) { findRefsPath_ = p; findRefsFrames_ = 8; }
     void setProjectSwitchTest(int frames) { projectSwitchFrames_ = frames > 0 ? frames : 8; }
     void setValidateGraph(const std::string& p) { validateGraphPath_ = p; validateGraphFrames_ = 8; }
+    void setGraphPrintTest(int frames) { graphPrintTestFrames_ = frames > 0 ? frames : 8; }
     void setRecaptureTest(int n)   { recapFrames_ = n; }                          // --recapture-test
     void setViewmodelTest(int n)   { vmFrames_ = n; }                             // --viewmodel-test
     void setSkinSceneDir(std::string d) { skinSceneDir_ = std::move(d); }          // --skin-scene-test <dir>
@@ -12838,6 +12860,78 @@ private:
     // export is reachable, that the buffer contract holds, or that the .NET runtime is even hosted.
     // Absence of the "exports no GraphValidate" warning at startup proves a symbol bound; this proves
     // it RUNS.
+    // --graph-print-test: drives the on-screen graph-print feed's SINK, which is where its only
+    // real logic lives. Not reachable from a headless suite: logSink is a static member of this
+    // class installed into the core logger, and what it does depends on this instance's deque.
+    //
+    // It logs through AVER_INFO rather than poking graphPrints_ directly, so the prefix match is
+    // part of what is under test -- a "[Graph] " that GraphInterop and this filter disagreed about
+    // would write to the log and never reach the overlay, silently.
+    int graphPrintTestFrames_ = 0;
+    void runGraphPrintTest() {
+        // NOTHING IS LOGGED WHILE logMutex_ IS HELD, and the first draft of this test got that
+        // wrong. Log.hpp's contract says a sink "must not itself log": logSink takes logMutex_, so a
+        // check() that logs from inside a lock_guard on it deadlocks against itself -- std::mutex is
+        // not recursive. It presented as the test stopping dead after its first PASS with no error,
+        // which is exactly what a self-deadlock looks like from outside.
+        //
+        // So every phase below reads what it needs under the lock into plain locals, releases, and
+        // only then reports. The lambda is deliberately not called anywhere a lock is held.
+        int failures = 0;
+        auto check = [&](bool cond, const char* what) {
+            if (cond) AVER_INFO("[graph-print-test] PASS: {}", what);
+            else      { AVER_ERROR("[graph-print-test] FAIL: {}", what); ++failures; }
+        };
+        auto clear = [this] { std::lock_guard<std::mutex> lk(logMutex_); graphPrints_.clear(); };
+
+        // The case that decides whether this feature is usable at all: the editor ticks graph
+        // instances ungated on play state, so a PrintString on an OnTick chain fires every frame.
+        clear();
+        for (int i = 0; i < 200; ++i) AVER_INFO("[Graph] hello: reached_the_tick");
+        usize rows = 0; u32 count = 0; std::string text;
+        {
+            std::lock_guard<std::mutex> lk(logMutex_);
+            rows = graphPrints_.size();
+            if (!graphPrints_.empty()) { count = graphPrints_.back().count; text = graphPrints_.back().text; }
+        }
+        check(rows == 1, "200 identical prints collapse to ONE row, not 200");
+        check(count == 200, "and the row counts every one of them");
+        check(text == "hello: reached_the_tick", "with the [Graph] prefix stripped and the rest kept verbatim");
+
+        // ALTERNATING PRINTS MUST NOT COLLAPSE. A Branch taking each arm in turn is exactly the
+        // pattern an author is watching for; merging those would hide the alternation that IS the
+        // signal. Six lines, two distinct, alternating -> six rows.
+        clear();
+        for (int i = 0; i < 3; ++i) {
+            AVER_INFO("[Graph] branch: took_true");
+            AVER_INFO("[Graph] branch: took_false");
+        }
+        { std::lock_guard<std::mutex> lk(logMutex_); rows = graphPrints_.size(); }
+        check(rows == 6, "alternating prints stay separate rows");
+
+        // A non-graph line must not reach the feed at all, or the overlay becomes a second log.
+        clear();
+        AVER_INFO("[Renderer] this is not a graph print");
+        AVER_INFO("[Graph] real: yes");
+        {
+            std::lock_guard<std::mutex> lk(logMutex_);
+            rows = graphPrints_.size();
+            text = graphPrints_.empty() ? std::string() : graphPrints_.back().text;
+        }
+        check(rows == 1, "only the [Graph] line is picked up");
+        check(text == "real: yes", "and it is the right one");
+
+        // The ring cap holds, so a long session cannot grow this without bound.
+        clear();
+        for (int i = 0; i < static_cast<int>(kMaxGraphPrints) + 20; ++i)
+            AVER_INFO("[Graph] n{}: distinct", i);
+        { std::lock_guard<std::mutex> lk(logMutex_); rows = graphPrints_.size(); }
+        check(rows == kMaxGraphPrints, "the feed is capped, oldest dropped");
+        clear();
+
+        AVER_INFO("[graph-print-test] RESULT: {}", failures == 0 ? "PASS" : "FAIL");
+    }
+
     std::string validateGraphPath_;
     int validateGraphFrames_ = 0;
     void runValidateGraph() {
@@ -15097,7 +15191,9 @@ private:
                 const f32 a = age <= fadeStart
                     ? 1.0f
                     : static_cast<f32>(1.0 - (age - fadeStart) / kGraphPrintFadeSec);
-                visible.emplace_back(gp.text, a);
+                visible.emplace_back(gp.count > 1 ? gp.text + "  (x" + std::to_string(gp.count) + ")"
+                                                  : gp.text,
+                                     a);
             }
             // Dropped here rather than in the sink, so the sink stays a push and a pop: an expired
             // line is only expired once something has had a chance to look at it.
@@ -23256,7 +23352,7 @@ private:
     std::deque<LogLine> logLines_;
     // The on-screen graph-print feed. `at` is negative until the first frame that draws the line,
     // which then stamps it -- see logSink for why the sink cannot take the time itself.
-    struct GraphPrint { std::string text; f64 at; };
+    struct GraphPrint { std::string text; f64 at; u32 count; };
     std::deque<GraphPrint> graphPrints_;
     bool                   graphPrintOverlay_ = true;
     bool                logAutoScroll_ = true;
@@ -23635,6 +23731,7 @@ Application* createApplication(int argc, char** argv) {
     const char* findRefsArg = nullptr;
     int projectSwitchArg = 0;
     const char* validateGraphArg = nullptr;
+    int graphPrintArg = 0;
     int recaptureArg = 0;
     int viewmodelArg = 0;
     // --gpu-timing takes no value, so it's matched in the i+1<argc loop below only incidentally --
@@ -23656,6 +23753,7 @@ Application* createApplication(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--find-refs"))            findRefsArg = argv[i + 1];
         if (!std::strcmp(argv[i], "--project-switch-test")) projectSwitchArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--validate-graph"))      validateGraphArg = argv[i + 1];
+        if (!std::strcmp(argv[i], "--graph-print-test"))   graphPrintArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--recapture-test"))       recaptureArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--viewmodel-test"))       viewmodelArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--refraction"))           refraction = std::atoi(argv[i + 1]);
@@ -24599,6 +24697,7 @@ Application* createApplication(int argc, char** argv) {
     if (findRefsArg) app->setFindRefs(findRefsArg);
     if (projectSwitchArg) app->setProjectSwitchTest(projectSwitchArg);
     if (validateGraphArg) app->setValidateGraph(validateGraphArg);
+    if (graphPrintArg) app->setGraphPrintTest(graphPrintArg);
     if (recaptureArg > 0) app->setRecaptureTest(recaptureArg);
     if (viewmodelArg > 0) app->setViewmodelTest(viewmodelArg);
 #endif
