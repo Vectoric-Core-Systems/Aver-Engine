@@ -1597,8 +1597,10 @@ the fallback was: a feature was being withheld from hardware perfectly capable o
 ### `./scripts/gates.ps1` — the oracle as a runner
 
 The single most useful thing here. Nine device configurations × seventeen gates, compared against
-`scripts/gates.baseline.txt`, TDRs counted before and after, launches spaced 800 ms, exit code = the
-number of failures.
+`scripts/gates.baseline.txt`, TDRs counted before and after, launches spaced 800 ms. **The exit code
+is no longer the number of failures** — it is the engine's shared table (0 ok, 1 failed, 2 usage,
+3 no build tree; `modules/core/include/aver/core/ErrorCodes.hpp`), because a count collides with
+every reserved meaning and vanishes entirely at 256. The count is on the run's last line.
 
 ```powershell
 ./scripts/gates.ps1                        # everything (allow ~25 min; WARP is ~19x slower)
