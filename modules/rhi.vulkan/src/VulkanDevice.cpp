@@ -131,6 +131,9 @@ size_t findCbufferBrace(const std::string& src, const char* name, size_t* declPo
 }
 
 bool patchPushConstants(std::string& src, bool mesh) {
+    // Same reason as the call in patchCbuffersForLayout: findCbufferBrace matches the declaration,
+    // but the body it extracts must not carry an unexpanded register macro into AverPcBlock.
+    expandCbufferRegisters(src);
     // NOT ON A cbuffer -- the first version put it there, and DXC rejects that outright:
     //     error: 'push_constant' attribute only applies to global variables of struct type
     // Invisible until a compiler that could actually emit SPIR-V surfaced it (compilation used to

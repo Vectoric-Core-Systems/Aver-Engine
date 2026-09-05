@@ -678,7 +678,43 @@ constexpr u32 kVkUavBindingBase = kMaxBindingSlots;
 // Vulkan-only DXC syntax, inserted into the assembled string this module owns; the shared prelude
 // is never modified and D3D12 never sees it. Same approach as patchPushConstants in
 // VulkanDevice.cpp.
+// Rewrites `register(AVER_CB_JOIN(b, AVER_<X>_CB))` to the plain `register(bN)` it expands to.
+//
+// THE ONE PLACE THE MACRO STOPS. Three separate parts of this backend read a cbuffer's register
+// number straight out of the HLSL text -- patchPerFrameSet below, patchPushConstants in
+// VulkanDevice.cpp, and findCbufferBlock/findNextCbuffer in VulkanResourceFactory.cpp. All three
+// were written when the prelude spelled `register(b1)`. RHIShaders.cpp now emits those numbers as
+// macros instead (shaderConstantsHlsl), so all three quietly stopped finding anything: PerFrame
+// landed in set 0, PerObject was never folded into push constants, and the AMD driver abort()ed on
+// the resulting pipeline with no message. Teaching each parser about macros would be three chances
+// to get it wrong; expanding once, here, restores the text every one of them already understands.
+//
+// SAFE BECAUSE IT IS THE SAME TOKEN. `AVER_CB_JOIN(b, AVER_OBJECT_CB)` and `b1` compile to the
+// identical register -- this substitutes the preprocessor's own answer, using the same constants
+// RHIShaders.cpp used to define the macros, so the two cannot drift apart. Idempotent: after it
+// runs there is no macro left to match.
+//
+// D3D12 NEVER SEES THIS. It is applied to the assembled copy this module owns, like every other
+// patch here.
+inline void expandCbufferRegisters(std::string& src) {
+    struct Reg { const char* macro; u32 value; };
+    const Reg regs[] = {
+        {"AVER_FRAME_CB",         kEngineFrameConstantRegister},
+        {"AVER_OBJECT_CB",        kObjectConstantRegister},
+        {"AVER_DRAW_CB",          kDrawConstantRegister},
+        {"AVER_FEATURE_FRAME_CB", kFeatureFrameConstantRegister},
+        {"AVER_MESH_GEOM_CB",     kMeshGeometryConstantRegister},
+    };
+    for (const Reg& r : regs) {
+        const std::string from = std::string("AVER_CB_JOIN(b, ") + r.macro + ")";
+        const std::string to   = "b" + std::to_string(r.value);
+        for (std::size_t p = src.find(from); p != std::string::npos; p = src.find(from, p + to.size()))
+            src.replace(p, from.size(), to);
+    }
+}
+
 inline bool patchPerFrameSet(std::string& src) {
+    expandCbufferRegisters(src);
     // AT THE HEAD OF A LINE, so a comment or a doc block that merely NAMES the cbuffer cannot be
     // patched instead of it -- several files in this tree discuss `cbuffer PerFrame` in prose, and
     // annotating one of those would silently produce a shader with the binding still on set 0 and no

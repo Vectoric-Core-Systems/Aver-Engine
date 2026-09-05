@@ -788,6 +788,11 @@ u32 shaderVariantKey(const PipelineLayout& layout, bool mesh, bool instanced) {
 
 bool patchCbuffersForLayout(std::string& src, const PipelineLayout& layout, bool mesh,
                             bool annotateDescriptors) {
+    // BEFORE ANY SCANNING. findCbufferBlock/findNextCbuffer below read the register number out of
+    // the text, and the prelude writes it as a macro now -- without this they find nothing, b1 is
+    // never folded into push constants, and the pipeline names a descriptor its layout does not
+    // declare. See expandCbufferRegisters for the whole story.
+    expandCbufferRegisters(src);
     const PushConstantLayout pc = pushConstantLayout(layout, mesh);
 
     // The slots pushConstantLayout gives bytes to, in the order it gives them: b1 first, then
@@ -2128,8 +2133,35 @@ VkShaderModule VulkanResourceFactory::moduleForLayout(RhiShader& s, const Pipeli
         // which is worse: the pipeline would exist and be wrong. Retrying WITHOUT the map restores
         // exactly the placement these shaders had before the map existed -- imperfect, but no
         // regression, and the shaders whose layouts ARE complete still get the correct one.
+        //
+        // EXCEPT FOR MESH STAGES, WHERE THAT REASONING DOES NOT HOLD AND THE PREDICTION ABOVE COMES
+        // TRUE. The "no regression" argument depends on the misplaced resources being ones DXC then
+        // eliminates. Mesh geometry is the opposite: gVerts/gIndices/MeshCB are what a mesh shader
+        // exists to read, they survive to the SPIR-V, and the fallback lands them on set 0 bindings
+        // this layout never declares. MEASURED with --debug-layer on MSVoxel:
+        //   uses descriptor [Set 0, Binding 19, variable "gVerts"] which has a VkDescriptorType mismatch
+        //   uses descriptor [Set 0, Binding 20, variable "gIndices"] but the binding was not declared
+        //   uses descriptor [Set 0, Binding 5,  variable "MeshCB"]  which has a VkDescriptorType mismatch
+        // and without the layer it is not a message at all -- AMD's LLPC calls abort(), so the
+        // editor dies at 0xC0000409 inside amdvlk64.dll with nothing logged.
+        //
+        // A FEATURE mesh pipeline is the only thing that reaches here: the FIXED mesh path builds in
+        // VulkanDevice.cpp against g_meshGeomLayout and is unaffected. Refusing returns a null
+        // pipeline, which every caller already treats as "this variant is unavailable" -- Voxi logs
+        // "mesh-shader voxelise variant unavailable; the GS path stands in" and draws the same
+        // picture the slower way. A missing fast path beats a dead process.
+        //
+        // THE REAL FIX is to describe mesh geometry in the PipelineLayout so buildRegisterBinds can
+        // map it, the way the instance buffer was fixed and is described two bullets up. Until then
+        // this is honest rather than lucky.
+        if (s.stage == ShaderStage::Mesh || s.stage == ShaderStage::Amplification) {
+            AVER_WARN("[RHI.Vulkan] '{}' is a mesh-stage shader whose PipelineLayout does not "
+                      "describe its geometry registers; refusing the pipeline rather than building "
+                      "one the driver aborts on. The caller's non-mesh path stands in.", s.entry);
+            return VK_NULL_HANDLE;
+        }
         AVER_WARN("[RHI.Vulkan] '{}' declares a register its PipelineLayout does not describe "
-                  "(mesh geometry, or a resource declared by a shared header and not used here); "
+                  "(a resource declared by a shared header and not used here); "
                   "falling back to the default register->set mapping", s.entry);
         var.spirv.clear();
         std::string fallbackSrc = s.source;
