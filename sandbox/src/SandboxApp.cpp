@@ -7510,7 +7510,22 @@ private:
     // write half-finished work over the last good version. The sidecar is offered on the next open
     // and deleted the moment the real file is saved.
     std::string autosavePathFor(const std::string& levelPath) const {
-        return levelPath.empty() ? std::string() : levelPath + ".autosave";
+        if (!levelPath.empty()) return levelPath + ".autosave";
+        // A LEVEL THAT HAS NEVER BEEN SAVED STILL GETS AUTOSAVED, and it is the session that most
+        // needs it: everything built since launch exists only in memory, and the old rule -- "no
+        // path, so nowhere to put the sidecar" -- meant a crash or a mis-click threw away
+        // strictly more work than any other case the feature covers.
+        //
+        // BESIDE THE PROJECT, NOT BESIDE A LEVEL THAT DOES NOT EXIST. `Saved/` is the convention the
+        // crash reporter already uses for exactly this kind of thing (recoverable state that is not
+        // authored content), and keeping it out of Content/ matters: a stray .ocworld under Content
+        // would show up in the Open Level list and in the Content Browser as if someone had made it.
+        //
+        // ONE FILE, NOT ONE PER UNTITLED LEVEL. Two unsaved levels cannot exist at once -- opening
+        // another closes this one, which already prompts -- so a name is not needed and a growing
+        // pile of Untitled-3.autosave files is avoided.
+        const std::string dir = project_.dir;
+        return dir.empty() ? std::string() : dir + "\\Saved\\Untitled.ocworld.autosave";
     }
 
     void maybeAutosave(f32 dt) {
@@ -7527,12 +7542,25 @@ private:
         if (autosaveIntervalSec_ <= 0.0f) return;
         // NOTHING TO SAVE is the common case and must cost nothing: no level, never saved (so there
         // is nowhere to put the sidecar), or nothing edited since it was opened.
-        if (levelPath_.empty() || !levelHasUnsavedEdits()) { autosaveAccum_ = 0.0f; return; }
+        // NOTHING TO SAVE is the common case and must cost nothing: nothing edited since the level
+        // was opened, or nowhere at all to write (no level AND no project, i.e. the placeholder
+        // scene, which is not the user's work). An UNTITLED level with a project open is now saved
+        // -- see autosavePathFor.
+        if (!levelHasUnsavedEdits()) { autosaveAccum_ = 0.0f; return; }
+        if (levelPath_.empty() && project_.dir.empty()) { autosaveAccum_ = 0.0f; return; }
         autosaveAccum_ += dt;
         if (autosaveAccum_ < autosaveIntervalSec_) return;
         autosaveAccum_ = 0.0f;
 
         const std::string dst = autosavePathFor(levelPath_);
+        if (dst.empty()) { autosaveAccum_ = 0.0f; return; }
+        // The untitled path lives under <project>/Saved, which need not exist yet. Harmless for the
+        // beside-the-level case, where the parent is the level's own folder.
+        {
+            std::error_code mkec;
+            const std::filesystem::path parent = std::filesystem::path(dst).parent_path();
+            if (!parent.empty()) std::filesystem::create_directories(parent, mkec);
+        }
         if (saveLevel(dst)) {
             autosaveWritten_ = true;
             AVER_INFO("[Autosave] wrote {}", dst);
@@ -7569,6 +7597,14 @@ private:
         if (p.empty()) return;
         std::error_code ec;
         if (!std::filesystem::exists(p, ec)) return;
+        // AN UNTITLED SIDECAR HAS NOTHING TO BE NEWER THAN. The comparison below exists to reject a
+        // sidecar older than the level it shadows; with no level there is no such file, so the test
+        // cannot be made and must not be faked -- offer it and let the author decide.
+        if (levelPath_.empty()) {
+            recoveryPath_ = p;
+            AVER_WARN("[Autosave] an unsaved level from a previous session is recoverable: {}", p);
+            return;
+        }
         // NEWER THAN THE LEVEL, or there is nothing to recover: a sidecar older than the file it
         // shadows is the leftover of a session that ended by saving properly, and offering it would
         // invite someone to overwrite good work with stale work.
@@ -12703,6 +12739,23 @@ private:
         markLevelUnsaved();
         check(levelHasUnsavedEdits(), "recovered content reports unsaved even with an empty history");
 
+        // AN EDIT WITH NO UNDO COMMAND MUST STILL BE DIRTY, and this is the case that was silently
+        // wrong: the Details panel's sun/fog/sky/clouds writes, Add Component and the emitter's
+        // effect assignment all push no EditCmd, and levelHasUnsavedEdits() is driven by the undo
+        // serial alone. So changing the sun angle and closing the editor prompted nothing, autosaved
+        // nothing, and lost the change. Asserted through markLevelUnsaved rather than by driving the
+        // panel, because the panel needs ImGui state a headless run does not have -- what is being
+        // pinned is the contract those call sites now rely on.
+        undoStack_.clear();
+        redoStack_.clear();
+        markLevelSaved();
+        check(!levelHasUnsavedEdits(), "a level with no history and no edits is clean");
+        markLevelUnsaved();
+        check(levelHasUnsavedEdits(),
+              "a non-undoable edit (sun, fog, Add Component, emitter effect) reports unsaved");
+        markLevelSaved();
+        check(!levelHasUnsavedEdits(), "and only SAVING clears it -- there is no command to undo");
+
         undoStack_.clear();
         redoStack_.clear();
         markLevelSaved();
@@ -17322,8 +17375,28 @@ private:
     // be selected also sets the flag. The cost of that false positive is one extra record in the
     // file, describing exactly the sun the author was already looking at. The cost of the false
     // NEGATIVE it replaces was silently discarding their work.
-    static void markLevelRecordEdited(bool& has) {
-        if (ImGui::IsAnyItemActive()) has = true;
+    // Notes that a level RECORD (sun, fog, clouds, sky) has been authored, so saveLevel writes it.
+    //
+    // AND MARKS THE DOCUMENT DIRTY, WHICH IT DID NOT. levelHasUnsavedEdits() is driven purely by the
+    // undo serial, and none of these panels push an EditCmd -- so changing the sun angle and closing
+    // the editor gave no prompt, no autosave, and the change was gone. The record flag alone only
+    // means "write this IF something else causes a save".
+    //
+    // THE TWO ARE THE SAME FACT. Setting `has` is exactly the statement that saveLevel will now emit
+    // a record it would not have emitted before, i.e. that the document differs from the file. That
+    // is the definition of dirty, so anything setting one must set the other.
+    //
+    // markLevelUnsaved() rather than a serial bump, because these edits are NOT undoable: there is
+    // no command to walk back to, so the mark must be the one that cannot be cleared by undoing.
+    // Saving clears it, which is the only thing that should.
+    //
+    // THE PREDICATE IS LOOSE AND STAYS LOOSE: IsAnyItemActive() is true for an active item ANYWHERE,
+    // not just in this section, so dragging an unrelated slider while a sun panel is open marks the
+    // level dirty. That looseness is pre-existing -- it already decided whether the record got
+    // written at all -- and the failure it now causes is a needless save prompt, against a failure
+    // it prevents of silently losing authored lighting. Not a trade worth agonising over.
+    void markLevelRecordEdited(bool& has) {
+        if (ImGui::IsAnyItemActive()) { has = true; markLevelUnsaved(); }
     }
 
     // Draws the World Outliner and the Details panel, each only when Window > ... has it on.
@@ -17770,6 +17843,10 @@ private:
                                 if (!content.empty() && !ec && !rel.empty()) {
                                     for (char& c : rel) if (c == '\\') c = '/';
                                     pe->effect = fnv1a64(std::string_view(rel));
+                                    // Same reason as Add Component: this writes a component field
+                                    // with no EditCmd behind it, so the level has to be marked dirty
+                                    // here or the assignment is lost on close with no prompt.
+                                    markLevelUnsaved();
                                     cbStatus_ = "Assigned " + std::filesystem::path(dropped).filename().string();
                                     AVER_INFO("[Particles] entity {} effect set to 0x{:016X} ('{}')",
                                               selEntity_, pe->effect, rel);
@@ -17905,6 +17982,11 @@ private:
                                 *c = scene::CSoftBody{};
                         }
                         cbStatus_ = std::string("Added ") + a.name;
+                        // NOT UNDOABLE, SO IT MUST AT LEAST BE DIRTY. Adding a component pushes no
+                        // EditCmd (there is no Kind for it, and Remove Component does not exist at
+                        // all), so without this the level closed clean and the component was gone.
+                        // A prompt the author can answer beats a silent loss.
+                        markLevelUnsaved();
                     }
                     ImGui::EndDisabled();
                     if (present && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
