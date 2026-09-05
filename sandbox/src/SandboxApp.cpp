@@ -3318,6 +3318,7 @@ public:
         if (multiSelTestFrames_ > 0 && --multiSelTestFrames_ == 0) runMultiSelectTest(e);
         if (cbMoveTestFrames_ > 0 && --cbMoveTestFrames_ == 0) runCbMoveTest(cbMoveTestDir_);
         if (saveDirtyTestFrames_ > 0 && --saveDirtyTestFrames_ == 0) runSaveDirtyTest();
+        if (findRefsFrames_ > 0 && --findRefsFrames_ == 0) runFindRefs();
         if (prefsWriteTestFrames_ > 0 && --prefsWriteTestFrames_ == 0) runPrefsWriteTest();
         if (keybindTestAutoFrames_ > 0 && --keybindTestAutoFrames_ == 0) runKeybindPersistTest(keybindTestMode_);
 #endif
@@ -6506,6 +6507,10 @@ public:
     void setCbMoveTest(const std::string& dir) { cbMoveTestDir_ = dir; cbMoveTestFrames_ = 10; }
     void setSaveDirtyTest(int n) { saveDirtyTestFrames_ = n; }                     // --savedirty-test
     void setPrefsWriteTest(int n) { prefsWriteTestFrames_ = n; }                   // --prefs-write-test
+    // --find-refs <content-relative-path>: print what references an asset and exit. The delete
+    // confirm's scan, reachable without a modal -- so the thing that stops someone destroying a
+    // shared asset can be tested rather than eyeballed once.
+    void setFindRefs(const std::string& p) { findRefsPath_ = p; findRefsFrames_ = 8; }
     void setRecaptureTest(int n)   { recapFrames_ = n; }                          // --recapture-test
     void setViewmodelTest(int n)   { vmFrames_ = n; }                             // --viewmodel-test
     void setSkinSceneDir(std::string d) { skinSceneDir_ = std::move(d); }          // --skin-scene-test <dir>
@@ -9960,6 +9965,9 @@ private:
     // read only by multiRange.
     std::vector<scene::Entity> outlinerOrder_;
     std::string outlinerFilter_;   // name filter box; empty = show everything
+    // Filled when the delete-confirm modal opens; see cbFindReferencesTo for what it can and
+    // cannot see. Cleared on delete or cancel so a later modal never shows a previous answer.
+    std::vector<std::string> cbDeleteRefs_;
 
     // Selects every row the World Outliner currently lists. The anchor becomes the FIRST row rather
     // than the last, so a following shift-click ranges downward from the top the way a person expects
@@ -12708,6 +12716,15 @@ private:
         AVER_INFO("[prefs-write-test] RESULT: {}", failures == 0 ? "PASS" : "FAIL");
     }
     int prefsWriteTestFrames_ = 0;
+    std::string findRefsPath_;
+    int findRefsFrames_ = 0;
+    void runFindRefs() {
+        const std::string abs = project_.valid()
+            ? (project_.contentDir() + "\\" + findRefsPath_) : findRefsPath_;
+        const std::vector<std::string> refs = cbFindReferencesTo(abs);
+        AVER_INFO("[find-refs] '{}' is referenced by {} file(s)", findRefsPath_, refs.size());
+        for (const std::string& r : refs) AVER_INFO("[find-refs]   {}", r);
+    }
 
     void runSaveDirtyTest() {
         int failures = 0;
@@ -15526,6 +15543,60 @@ private:
     // Content-relative, forward-slashed: the form a level's PLACE record and sceneMeshes_ both key
     // on. Returns the input unchanged when it is not under the content root, which simply means no
     // level can be naming it.
+    // ---- WHO REFERENCES THIS ASSET ------------------------------------------------------------
+    //
+    // THE FOOT-GUN THIS CLOSES: every reference in this project is a CONTENT-RELATIVE PATH, and
+    // ObjectIds are fnv1a64 of exactly that string (GameContent.cpp). So deleting a mesh six
+    // entities use, or renaming one, silently breaks every reference to it -- and the delete confirm
+    // said only "It goes to the recycle bin, so it can be restored", which is true and answers a
+    // different question than the one an author needs answered.
+    //
+    // A SCAN, NOT AN INDEX, and that is a deliberate limit rather than a first draft of something
+    // better. A real asset registry -- built at project load, kept current by the content watcher,
+    // queried in constant time -- is the right answer and is a subsystem. This runs over the text
+    // assets on demand, once, when someone is about to destroy something. A project with thousands
+    // of files pays a directory walk at the moment it is about to lose data, which is the one moment
+    // that trade is obviously correct.
+    //
+    // TEXT FORMATS ONLY, and it says which. .ocworld/.ocmap (MESH/MATERIAL), .ocmat (TEX, GRAPHREF),
+    // .ocgraph (mesh=, material=, effect=, path=), .ocproject (STARTMAP and friends). A binary
+    // .ocmesh cannot name another asset, so there is nothing to find in one. WHAT THIS CANNOT SEE:
+    // a reference constructed at runtime in C# from a computed string, and a reference held only as
+    // a hashed ObjectId with the original path nowhere on disk. Both are real and both are why this
+    // reports "found N" rather than "there are exactly N".
+    std::vector<std::string> cbFindReferencesTo(const std::string& absPath) const {
+        std::vector<std::string> out;
+        if (!project_.valid()) return out;
+        const std::string needle = cbRelativeToContent(absPath);
+        if (needle.empty() || needle == absPath) return out;   // outside the content root
+
+        // Compared case-insensitively, and with both separators, because these paths are authored by
+        // hand as often as by a tool: a .ocgraph written by a person may say Meshes\Cube.ocmesh where
+        // the browser reports Meshes/Cube.ocmesh, and a miss there reads as "nothing references it".
+        std::string want = lowerCopy(needle);
+        for (char& c : want) if (c == '\\') c = '/';
+
+        std::error_code ec;
+        const std::string content = project_.contentDir();
+        for (std::filesystem::recursive_directory_iterator it(content, ec), end; it != end; it.increment(ec)) {
+            if (ec) break;
+            if (!it->is_regular_file(ec)) continue;
+            const std::string p = it->path().string();
+            if (p == absPath) continue;                       // a file does not reference itself
+            const std::string ext = lowerExt(it->path());
+            if (ext != ".ocworld" && ext != ".ocmap" && ext != ".ocmat" &&
+                ext != ".ocgraph" && ext != ".ocproject") continue;
+            std::string text;
+            if (!readFileText(p, text)) continue;
+            std::string hay = lowerCopy(text);
+            for (char& c : hay) if (c == '\\') c = '/';
+            if (hay.find(want) != std::string::npos) out.push_back(cbRelativeToContent(p));
+        }
+        std::sort(out.begin(), out.end());
+        out.erase(std::unique(out.begin(), out.end()), out.end());
+        return out;
+    }
+
     std::string cbRelativeToContent(const std::string& abs) const {
         if (!project_.valid()) return abs;
         std::error_code ec;
@@ -15998,9 +16069,29 @@ private:
                 : "Delete this file?");
             ImGui::TextDisabled("%s", cbContextPath_.c_str());
             ImGui::TextDisabled("It goes to the recycle bin, so it can be restored.");
-            if (ImGui::Button("Delete")) { cbDeleteEntry(cbContextPath_); ImGui::CloseCurrentPopup(); }
+
+            // WHAT WILL BREAK, named before the deletion rather than discovered after it. Scanned
+            // once when the modal opens (IsWindowAppearing), not per frame -- it walks the content
+            // tree, and doing that every frame while a modal sits open would be absurd.
+            if (!cbContextIsDir_) {
+                if (ImGui::IsWindowAppearing()) cbDeleteRefs_ = cbFindReferencesTo(cbContextPath_);
+                if (!cbDeleteRefs_.empty()) {
+                    ImGui::Separator();
+                    ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.25f, 1.0f),
+                                       ICON_WARNING " %zu file(s) reference this asset:", cbDeleteRefs_.size());
+                    // Capped, because a shared material can be named by hundreds of levels and a
+                    // modal that grows past the screen cannot be dismissed.
+                    const usize shown = cbDeleteRefs_.size() < 12 ? cbDeleteRefs_.size() : usize(12);
+                    for (usize i = 0; i < shown; ++i) ImGui::BulletText("%s", cbDeleteRefs_[i].c_str());
+                    if (cbDeleteRefs_.size() > shown)
+                        ImGui::TextDisabled("   ...and %zu more", cbDeleteRefs_.size() - shown);
+                    ImGui::TextDisabled("References are stored as paths, so deleting this breaks them.");
+                    ImGui::Separator();
+                }
+            }
+            if (ImGui::Button("Delete")) { cbDeleteEntry(cbContextPath_); cbDeleteRefs_.clear(); ImGui::CloseCurrentPopup(); }
             ImGui::SameLine();
-            if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+            if (ImGui::Button("Cancel")) { cbDeleteRefs_.clear(); ImGui::CloseCurrentPopup(); }
             ImGui::EndPopup();
         }
 
@@ -23304,6 +23395,7 @@ Application* createApplication(int argc, char** argv) {
     int saveDirtyArg = 0;
     int prefsWriteArg = 0;
     f32 frameBudgetArg = 0.0f;
+    const char* findRefsArg = nullptr;
     int recaptureArg = 0;
     int viewmodelArg = 0;
     // --gpu-timing takes no value, so it's matched in the i+1<argc loop below only incidentally --
@@ -23322,6 +23414,7 @@ Application* createApplication(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--savedirty-test"))       saveDirtyArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--prefs-write-test"))     prefsWriteArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--frame-budget"))         frameBudgetArg = (f32)std::atof(argv[i + 1]);
+        if (!std::strcmp(argv[i], "--find-refs"))            findRefsArg = argv[i + 1];
         if (!std::strcmp(argv[i], "--recapture-test"))       recaptureArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--viewmodel-test"))       viewmodelArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--refraction"))           refraction = std::atoi(argv[i + 1]);
@@ -24262,6 +24355,7 @@ Application* createApplication(int argc, char** argv) {
     if (saveDirtyArg > 0) app->setSaveDirtyTest(saveDirtyArg);
     if (prefsWriteArg > 0) app->setPrefsWriteTest(prefsWriteArg);
     if (frameBudgetArg > 0.0f) app->setFrameBudget(frameBudgetArg);
+    if (findRefsArg) app->setFindRefs(findRefsArg);
     if (recaptureArg > 0) app->setRecaptureTest(recaptureArg);
     if (viewmodelArg > 0) app->setViewmodelTest(viewmodelArg);
 #endif
