@@ -261,6 +261,10 @@ static int Main()
         // gameplay graph in this repo hand-written.
         failures += SelfNodeTests.RunAll();
 
+        // PrintString: the first node that can say "control flow got here" with nothing wired but
+        // exec. See PrintStringTests.cs for why invoking it, not just compiling it, is the test.
+        failures += PrintStringTests.RunAll();
+
         if (failures == 0)
             Console.WriteLine("\nAll tests passed.");
         else

@@ -413,6 +413,17 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         pin("exec", "exec", false), pin("value", "int", false), pin("then", "exec", true)}});
     t.push_back({"Print", "Print", "Debug", {
         pin("exec", "exec", false), pin("value", "float", false), pin("then", "exec", true)}});
+    // -- PRINT STRING: the node that answers "did control flow reach here, and in what order".
+    //    Print and PrintInt cannot: both need a VALUE wired to say anything at all, so proving a
+    //    branch was taken meant inventing a number to print through it. There is no string PIN type
+    //    (PinType is Float/Int/Bool/Exec), so the message is a NODE-line ATTRIBUTE -- the same "the
+    //    value IS the data" treatment sound=/mesh=/clip= already get, and for the same reason.
+    //
+    //    It also fixes the labelling complaint the other two carry: Print labels its line with the
+    //    node's auto-generated id, so a log reads "print3 = 1" and the author works out which node
+    //    that was. Here the author writes the label.
+    t.push_back({"PrintString", "Print String", "Debug", {
+        pin("exec", "exec", false), pin("then", "exec", true)}, {attr("text", "Text")}});
     t.push_back({"Multiply", "Multiply", "Math", {pin("a", "float", false), pin("b", "float", false), pin("result", "float", true)}});
     t.push_back({"Subtract", "Subtract", "Math", {pin("a", "float", false), pin("b", "float", false), pin("result", "float", true)}});
     t.push_back({"Divide",   "Divide",   "Math", {pin("a", "float", false), pin("b", "float", false), pin("result", "float", true)}});

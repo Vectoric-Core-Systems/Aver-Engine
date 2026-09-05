@@ -574,6 +574,12 @@ public class OcGraphParser
                     {
                         node.SoundPath = v;
                     }
+                    // text= is the message a "printstring" node writes. Same treatment as sound=
+                    // above -- the value IS the data, and there is no string pin to carry it.
+                    else if (k == "text")
+                    {
+                        node.PrintText = v;
+                    }
                     // mesh= names the asset path a "setmesh" node writes (see Node.MeshPath).
                     else if (k == "mesh")
                     {
@@ -1867,6 +1873,17 @@ public class OcGraphParser
             case "print":
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "value", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                break;
+
+            // EXEC IN, EXEC OUT, AND NOTHING ELSE. PrintString's message is a NODE-line attribute
+            // (text=), not a pin -- PinType has no String member -- which is exactly what lets it
+            // answer "did control flow reach here" with nothing wired but the exec chain. Adding a
+            // value pin here would reintroduce the thing that made Print unusable for that question.
+            // Must match GraphNodeDefs.hpp's PrintString row exactly; see this file's own note on
+            // why the palette and the parser have to agree pin for pin.
+            case "printstring":
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
                 break;
 

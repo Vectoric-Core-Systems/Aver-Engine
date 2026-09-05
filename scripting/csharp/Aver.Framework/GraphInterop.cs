@@ -447,6 +447,18 @@ internal static class GraphInterop
         Log.Info($"[Graph] {label} = {value}");
     }
 
+    /// <summary>PrintString: an authored message, with the node id kept as a prefix so two nodes
+    /// carrying the same text are still tellable apart. The one print that needs nothing wired but
+    /// exec, which is what makes it the node for "did control flow reach here".
+    ///
+    /// The "[Graph] " prefix is load-bearing beyond tidiness: the editor's on-screen print overlay
+    /// filters the engine log on exactly that prefix (SandboxApp::logSink), so a line without it is
+    /// written to the log and never appears in the viewport.</summary>
+    internal static void PrintStringForGraph(string label, string text)
+    {
+        Log.Info($"[Graph] {label}: {text}");
+    }
+
     /// <summary>The character this entity is, or null with one warning line. Every character node
     /// below funnels through here so they all fail the same way and say the same thing -- the shape
     /// JumpForGraph and GetViewEntity already established.</summary>

@@ -1390,6 +1390,18 @@ public class GraphCompiler
     {
         if (_il == null) return;
         _il.Emit(OpCodes.Ldstr, node.Id);
+
+        // PRINTSTRING TAKES NO VALUE PIN, so it must not go through EmitPullInput at all -- pulling
+        // a pin that does not exist would emit a load of an unset local (the shape the exec-emitter
+        // rule already warns about) rather than failing. Both operands are compile-time constants
+        // here, which is the whole point: nothing has to be wired for this node to say something.
+        if (node.Type.Equals("printstring", StringComparison.OrdinalIgnoreCase))
+        {
+            _il.Emit(OpCodes.Ldstr, node.PrintText ?? string.Empty);
+            _il.Emit(OpCodes.Call, PrintStringMethod);
+            return;
+        }
+
         EmitPullInput(node, "value");
         _il.Emit(OpCodes.Call,
                  node.Type.Equals("printint", StringComparison.OrdinalIgnoreCase) ? PrintIntMethod : PrintMethod);
@@ -3154,7 +3166,8 @@ public class GraphCompiler
     /// so a predicate's name never stops describing what it matches.
     private static bool IsExecCapablePrintType(string type) =>
         type.Equals("print", StringComparison.OrdinalIgnoreCase) ||
-        type.Equals("printint", StringComparison.OrdinalIgnoreCase);
+        type.Equals("printint", StringComparison.OrdinalIgnoreCase) ||
+        type.Equals("printstring", StringComparison.OrdinalIgnoreCase);
 
     /// The four framework WRITE calls, grouped into ONE predicate (unlike Jump/CharacterMove): all
     /// share EmitExecApiCall exactly. The three transform writers share one emitter for the same
@@ -4887,6 +4900,10 @@ public class GraphCompiler
     private static readonly MethodInfo PrintIntMethod =
         typeof(GraphInterop).GetMethod("PrintIntForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.PrintIntForGraph was not found by reflection");
+    // PrintString: an authored message rather than a value, for a node that needs nothing wired.
+    private static readonly MethodInfo PrintStringMethod =
+        typeof(GraphInterop).GetMethod("PrintStringForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.PrintStringForGraph was not found by reflection");
     // Print: one line to the log, labelled with the node id the emitter pushes.
     private static readonly MethodInfo PrintMethod =
         typeof(GraphInterop).GetMethod("PrintForGraph", BindingFlags.NonPublic | BindingFlags.Static)

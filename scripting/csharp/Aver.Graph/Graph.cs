@@ -180,6 +180,17 @@ public class Node
     /// Null for every other node type.
     public string? SoundPath { get; set; }
 
+    /// The message a "printstring" node writes, from a `text=<message>` NODE-line attribute. Same
+    /// "the value IS the data" family as SoundPath above and for the identical reason: PinType has
+    /// no String member, so an authored message has no pin it could arrive on.
+    ///
+    /// WHY THE NODE EXISTS AT ALL. Print and PrintInt both need a VALUE wired before they say
+    /// anything, so proving a branch was taken meant inventing a number to route through it -- and
+    /// they label their line with the node's auto-generated id, so the log reads "print3 = 1" and
+    /// the author has to work out which node that was. Here the author writes the label, and the
+    /// node needs nothing wired but exec. Null for every other node type.
+    public string? PrintText { get; set; }
+
     // Which skeleton asset a "setskeleton" node binds, e.g. "Content/Skeletons/Hero.ocskel". Set
     // from the NODE line's "skeleton=<path>" attribute -- same "the value IS the data" mechanism
     // MeshPath uses (Assets.ObjectIdOf is a pure local hash, computed at INVOCATION time in

@@ -868,6 +868,13 @@ static void applyEditorColors() {
 // One captured log line for the Output Log panel.
 struct LogLine { LogLevel level; std::string text; };
 
+// How many graph prints the on-screen feed keeps. Small on purpose: it is a feed, not a log --
+// the Output Log already holds every one of these, without a fade.
+constexpr usize kMaxGraphPrints = 12;
+// How long a graph print stays on screen, and how much of that is spent fading out.
+constexpr f64 kGraphPrintHoldSec = 4.0;
+constexpr f64 kGraphPrintFadeSec = 1.0;
+
 // One entry in a Content Browser listing, with everything the views need already derived.
 struct DirEntry {
     std::filesystem::path path;
@@ -1222,6 +1229,23 @@ public:
         std::lock_guard<std::mutex> lock(self->logMutex_);
         self->logLines_.push_back({level, std::string(msg)});
         if (self->logLines_.size() > kMaxLogLines) self->logLines_.pop_front();
+
+        // GRAPH PRINTS ALSO GO ON SCREEN. Visual scripting had no debugging surface at all: a Print
+        // node wrote one line into a firehose of engine logging, so watching a graph run meant
+        // reading the Output Log for "[Graph]" among the render, asset and physics lines, and a
+        // print fired once during a jump was gone by the time you found it.
+        //
+        // FILTERED HERE rather than at draw time, and on the prefix GraphInterop writes, so the
+        // overlay costs one substring test per log line instead of a scan of the whole buffer every
+        // frame. rfind(x, 0) == 0 is "starts with" without allocating.
+        //
+        // NO TIMESTAMP TAKEN HERE. This runs under the core log mutex, from whichever thread logged,
+        // and the contract says be quick and do not log; the frame that draws it stamps it instead
+        // (see drawGraphPrintOverlay), which is also the clock the fade needs to agree with.
+        if (msg.rfind("[Graph] ", 0) == 0) {
+            self->graphPrints_.push_back({std::string(msg.substr(8)), -1.0});
+            if (self->graphPrints_.size() > kMaxGraphPrints) self->graphPrints_.pop_front();
+        }
     }
 
     // Returns the boot configuration for the editor window.
@@ -14811,6 +14835,7 @@ private:
             const f32 h = avail.y > 8.0f ? avail.y : 8.0f;
 
             vpX_ = at.x; vpY_ = at.y; vpW_ = w; vpH_ = h;
+            drawGraphPrintOverlay(at, ImVec2(at.x + w, at.y + h));
             levelFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
             levelHovered_ = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows |
                                                    ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
@@ -15042,6 +15067,63 @@ private:
     }
 
 #if AVER_WITH_IMGUI
+    // THE ON-SCREEN GRAPH PRINT FEED, drawn over the 3D viewport's bottom-left corner.
+    //
+    // Visual scripting had no debugging surface at all. A Print node wrote one line into the engine
+    // log, among the render, asset and physics lines, so watching a graph run meant reading the
+    // Output Log for "[Graph]" -- and a print fired once during a jump was already scrolled away by
+    // the time you found it. Nothing showed which node ran, when, or in what order.
+    //
+    // NOT A SECOND LOG. The Output Log still holds every one of these permanently; this is a
+    // transient feed of the last few, so it answers "what just happened" without becoming something
+    // to scroll. Oldest at the top, so a burst reads in the order it fired.
+    void drawGraphPrintOverlay(ImVec2 vpMin, ImVec2 vpMax) {
+        if (!graphPrintOverlay_) return;
+
+        const f64 now = ImGui::GetTime();
+        std::vector<std::pair<std::string, f32>> visible;   // text, alpha
+        {
+            std::lock_guard<std::mutex> lk(logMutex_);
+            for (auto& gp : graphPrints_) {
+                // STAMPED ON FIRST SIGHT, not when logged: logSink runs under the core log mutex on
+                // whichever thread logged, where it is contracted to be quick, and ImGui::GetTime is
+                // this thread's clock anyway. A line logged while the editor was minimised therefore
+                // gets its full few seconds when the editor comes back, rather than having expired
+                // unseen -- which is the behaviour you want from something you are watching for.
+                if (gp.at < 0.0) gp.at = now;
+                const f64 age = now - gp.at;
+                if (age > kGraphPrintHoldSec) continue;
+                const f64 fadeStart = kGraphPrintHoldSec - kGraphPrintFadeSec;
+                const f32 a = age <= fadeStart
+                    ? 1.0f
+                    : static_cast<f32>(1.0 - (age - fadeStart) / kGraphPrintFadeSec);
+                visible.emplace_back(gp.text, a);
+            }
+            // Dropped here rather than in the sink, so the sink stays a push and a pop: an expired
+            // line is only expired once something has had a chance to look at it.
+            while (!graphPrints_.empty() && graphPrints_.front().at >= 0.0 &&
+                   now - graphPrints_.front().at > kGraphPrintHoldSec)
+                graphPrints_.pop_front();
+        }
+        if (visible.empty()) return;
+
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const f32 pad = 8.0f * dpi_;
+        const f32 lineH = ImGui::GetTextLineHeight() + 2.0f * dpi_;
+        f32 y = vpMax.y - pad - lineH * static_cast<f32>(visible.size());
+        for (const auto& [text, alpha] : visible) {
+            const ImVec2 sz = ImGui::CalcTextSize(text.c_str());
+            // A backing plate, because the 3D viewport behind this is arbitrary: white text on a
+            // snow bank or a sunlit wall is unreadable, and this exists to be read at a glance.
+            dl->AddRectFilled(ImVec2(vpMin.x + pad - 4.0f * dpi_, y - 1.0f * dpi_),
+                              ImVec2(vpMin.x + pad + sz.x + 4.0f * dpi_, y + lineH - 1.0f * dpi_),
+                              IM_COL32(0, 0, 0, static_cast<int>(150.0f * alpha)), 3.0f * dpi_);
+            dl->AddText(ImVec2(vpMin.x + pad, y),
+                        IM_COL32(150, 230, 255, static_cast<int>(255.0f * alpha)), text.c_str());
+            y += lineH;
+        }
+    }
+
     // Draws the Output Log: clear / level filter / auto-scroll over the captured log, under logMutex_.
     // ONE severity palette, shared by the Output Log and the Console: four flat colours weren't worth
     // factoring out, but six levels with two carrying a row background made the two copies' agreement
@@ -23172,6 +23254,11 @@ private:
     static constexpr size_t kMaxLogLines = 4000;
     std::mutex          logMutex_;
     std::deque<LogLine> logLines_;
+    // The on-screen graph-print feed. `at` is negative until the first frame that draws the line,
+    // which then stamps it -- see logSink for why the sink cannot take the time itself.
+    struct GraphPrint { std::string text; f64 at; };
+    std::deque<GraphPrint> graphPrints_;
+    bool                   graphPrintOverlay_ = true;
     bool                logAutoScroll_ = true;
     int                 logLevelFilter_ = 0;      // 0 = all, 1 = Info+, 2 = Warn+
     // Console: its OWN scrollback, never logLines_ -- sharing the engine-wide log firehose would
