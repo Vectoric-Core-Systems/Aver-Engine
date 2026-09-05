@@ -120,12 +120,36 @@ file(GLOB AVER_BRIDGE_SOURCES CONFIGURE_DEPENDS
   ${AVER_CSHARP_DIR}/Aver.UI/*.cs
   ${AVER_CSHARP_DIR}/Aver.UI/*.csproj)
 
+# EVERY ASSEMBLY THE COMMAND ACTUALLY EMITS, not just the ones somebody remembered. `dotnet build -o`
+# stages the named project's whole transitive ProjectReference closure into the output directory, so
+# this list has to be that closure or Ninja is tracking a subset of what it produces:
+#
+#   Bridge -> Scripting, Framework, UI, Graph;  Framework -> Scripting, Scene, Physics
+#
+# Aver.Physics.dll and Aver.UI.dll were both being written here and declared NOWHERE, so neither
+# appeared in .ninja_log at all -- no rule owned them, nothing could tell when they were stale, and a
+# later command writing into this same directory could replace them silently. That is the same defect
+# the DEPENDS glob above already carries a scar from, one step further along: the glob fix made an
+# edit to Physics.cs or Hud.cs RE-RUN this command, and this fix makes the file it produces something
+# the build system can actually see.
+#
+# .dll only, matching the other library entries -- the .deps.json/.pdb/.xml land beside each one but
+# naming them buys no tracking the .dll does not already give, and every one that is named is another
+# path to keep in step by hand. The Bridge's runtimeconfig.json is named because it is the ENTRY
+# assembly's, and the host refuses to start without it.
+#
+# NOTE FOR ANYONE ADDING TO THIS LIST: Ninja forbids two commands declaring the same OUTPUT. The PCG
+# command below writes Framework/Scripting/Scene/Physics into this directory too (it references
+# Aver.Framework), and those overlaps therefore CANNOT be declared there -- the DEPENDS ordering it
+# already carries is the only available answer. See that command's own comment.
 set(AVER_BRIDGE_OUTPUTS
   ${AVER_BRIDGE_DIR}/Aver.Scripting.Bridge.dll
   ${AVER_BRIDGE_DIR}/Aver.Scripting.Bridge.runtimeconfig.json
   ${AVER_BRIDGE_DIR}/Aver.Scripting.dll
   ${AVER_BRIDGE_DIR}/Aver.Framework.dll
   ${AVER_BRIDGE_DIR}/Aver.Scene.dll
+  ${AVER_BRIDGE_DIR}/Aver.Physics.dll
+  ${AVER_BRIDGE_DIR}/Aver.UI.dll
   ${AVER_BRIDGE_DIR}/Aver.Graph.dll)
 
 add_custom_command(
@@ -342,6 +366,28 @@ add_dependencies(Aver.Scripting.Host Aver.FSharp.Sample)
 # DEPENDS on the bridge outputs, and that is ordering rather than a real dependency: both commands
 # write into the same directory, and Aver.Pcg.Apply references Aver.Framework, so letting Ninja run
 # the two in parallel would have them writing Aver.Framework.dll at the same time.
+#
+# WHICH FILES, EXACTLY, because a later reader deserves the list rather than the principle. This
+# command's closure is Pcg.Apply -> Framework, Pcg; Framework -> Scripting, Scene, Physics. So it can
+# rewrite four assemblies the bridge above already produced and declared:
+#
+#   Aver.Framework.dll  Aver.Scripting.dll  Aver.Scene.dll  Aver.Physics.dll
+#
+# CAN, not does-every-time: MSBuild's copy to -o is itself incremental, so it re-stages one only when
+# its own compiled copy is newer than what is already there. MEASURED both ways on 2026-09-05 -- a run
+# where it did (those four carried a 16:06 mtime while Aver.Graph.dll and Aver.Scripting.Bridge.dll,
+# which this closure does not reach, still read 13:07) and a run where it did not (Aver.Pcg.Apply.dll
+# 16:27:07, Aver.Physics.dll left untouched at 16:27:01). Either way no second .ninja_log row appears,
+# because these are not this command's declared outputs -- which is what makes the mtimes look wrong
+# to anyone auditing the tree, and is why this note exists.
+#
+# It is legitimate (same sources, same flags, so a second write is equivalent to the first) and the
+# DEPENDS above is what keeps it merely redundant instead of a race.
+#
+# AND IT CANNOT BE DECLARED AWAY. Ninja rejects two commands declaring the same OUTPUT, so these four
+# must NOT be added to AVER_PCG_OUTPUTS; the ordering edge is the whole mechanism. If this ever needs
+# to be properly separated, the fix is a private staging directory per command plus an explicit copy,
+# not a longer OUTPUT list.
 set(AVER_PCG_PROJ ${AVER_CSHARP_DIR}/Aver.Pcg.Apply/Aver.Pcg.Apply.csproj)
 
 file(GLOB AVER_PCG_SOURCES CONFIGURE_DEPENDS
