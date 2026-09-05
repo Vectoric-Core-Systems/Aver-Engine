@@ -9968,6 +9968,7 @@ private:
     // Filled when the delete-confirm modal opens; see cbFindReferencesTo for what it can and
     // cannot see. Cleared on delete or cancel so a later modal never shows a previous answer.
     std::vector<std::string> cbDeleteRefs_;
+    std::vector<std::string> cbRenameRefs_;   // the same, for the rename dialog
 
     // Selects every row the World Outliner currently lists. The anchor becomes the FIRST row rather
     // than the last, so a following shift-click ranges downward from the top the way a person expects
@@ -16052,14 +16053,45 @@ private:
                                                  ImGuiInputTextFlags_EnterReturnsTrue);
             const bool valid = cbRenameBuf_[0] != '\0' && !std::strpbrk(cbRenameBuf_, "\\/:*?\"<>|");
             if (!valid && cbRenameBuf_[0] != '\0') ImGui::TextColored(ImVec4(0.95f,0.5f,0.45f,1), "That name is not a legal filename.");
+
+            // RENAMING BREAKS EVERY REFERENCE, and this is the worse half of the defect the delete
+            // confirm just gained a warning for. An ObjectId is fnv1a64 of the content-relative
+            // PATH, so a rename changes the asset's id while every file naming the old path keeps
+            // naming it -- and cbRenameEntry is a std::filesystem::rename plus selection
+            // bookkeeping. Nothing scanned, nothing rewritten, nothing said.
+            //
+            // WARNS, DOES NOT REWRITE. Fixing the referrers means editing other people's files from
+            // inside a rename dialog: a write path that wants its own change, its own undo story and
+            // its own test. Telling someone what they are about to break is the honest half that can
+            // land now; doing it in silence is the part that had to stop.
+            if (!cbContextIsDir_) {
+                if (ImGui::IsWindowAppearing()) cbRenameRefs_ = cbFindReferencesTo(cbContextPath_);
+                if (!cbRenameRefs_.empty()) {
+                    ImGui::Separator();
+                    ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.25f, 1.0f),
+                                       ICON_WARNING " %zu file(s) reference this asset by its current path:",
+                                       cbRenameRefs_.size());
+                    const usize shown = cbRenameRefs_.size() < 8 ? cbRenameRefs_.size() : usize(8);
+                    for (usize i = 0; i < shown; ++i) ImGui::BulletText("%s", cbRenameRefs_[i].c_str());
+                    if (cbRenameRefs_.size() > shown)
+                        ImGui::TextDisabled("   ...and %zu more", cbRenameRefs_.size() - shown);
+                    ImGui::TextDisabled("Renaming will not update them -- they will stop resolving.");
+                    ImGui::Separator();
+                }
+            }
+
             ImGui::BeginDisabled(!valid);
             if (ImGui::Button("Rename") || (submit && valid)) {
+                if (!cbRenameRefs_.empty())
+                    AVER_WARN("[Editor] renamed '{}' while {} file(s) still reference its old path",
+                              cbContextPath_, cbRenameRefs_.size());
                 cbRenameEntry(cbContextPath_, cbRenameBuf_);
+                cbRenameRefs_.clear();
                 ImGui::CloseCurrentPopup();
             }
             ImGui::EndDisabled();
             ImGui::SameLine();
-            if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+            if (ImGui::Button("Cancel")) { cbRenameRefs_.clear(); ImGui::CloseCurrentPopup(); }
             ImGui::EndPopup();
         }
 
