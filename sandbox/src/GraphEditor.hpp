@@ -313,6 +313,20 @@ public:
     // next load. Public for the same reason addNodeFromCatalog is.
     void deleteSelection();
 
+    // Removes every link touching a selected node, keeping the nodes. The one graph command that had
+    // no keyboard shortcut and no menu item: before the node context menu existed, disconnecting a
+    // node meant clicking each wire and pressing Delete, one at a time. A method rather than three
+    // lines inside the popup so a headless test can drive it -- the popup itself cannot be reached
+    // from one.
+    //
+    // ONE UNDO STEP for however many wires it removes, which is why it pushes its own undo rather
+    // than leaving that to a caller.
+    void breakLinksOnSelection();
+
+    // True when at least one link touches a selected node -- what greys out the Break Links item so
+    // it cannot be a no-op that still costs an undo step.
+    bool selectionHasLinks() const;
+
     // ---- copy / paste / duplicate ---------------------------------------------------------------
     //
     // Absent until now, which for a node editor is the gap you feel first: building the same
@@ -593,6 +607,13 @@ private:
     // keyed by variable name: deleting a box mid-session must not hand its selection to whichever box
     // shuffled into its slot.
     std::string selectedComment_;
+
+    // WHAT THE RIGHT BUTTON WENT DOWN ON, recorded at press so the release can pick the right popup.
+    // Right button is ambiguous here: a drag pans and a click opens a menu, and which menu depends on
+    // what was under the cursor when the button went down -- by release the view may have panned away
+    // from it. Empty / -1 means empty canvas, which opens Add Node exactly as before.
+    std::string rightClickNode_;
+    int         rightClickLink_ = -1;
     std::string activeComment_;            // the box being moved or resized right now
     Vec2 commentDragStartPos_{}, commentDragStartSize_{};
     // Nodes captured when a MOVE began, and where each of them started. A comment box drags what it

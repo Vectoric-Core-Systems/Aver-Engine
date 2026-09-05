@@ -1204,6 +1204,29 @@ void GraphEditor::duplicateSelection() {
     clipLinks_ = std::move(keepLinks);
 }
 
+bool GraphEditor::selectionHasLinks() const {
+    return std::any_of(graph_.links.begin(), graph_.links.end(), [&](const fmt::OcGraphLink& l) {
+        return std::find(selectedNodes_.begin(), selectedNodes_.end(), l.sourceNode) != selectedNodes_.end()
+            || std::find(selectedNodes_.begin(), selectedNodes_.end(), l.destNode) != selectedNodes_.end();
+    });
+}
+
+void GraphEditor::breakLinksOnSelection() {
+    if (selectedNodes_.empty() || !selectionHasLinks()) return;   // never an undo step that changes nothing
+    pushUndo();
+    graph_.links.erase(
+        std::remove_if(graph_.links.begin(), graph_.links.end(), [&](const fmt::OcGraphLink& l) {
+            return std::find(selectedNodes_.begin(), selectedNodes_.end(), l.sourceNode) != selectedNodes_.end()
+                || std::find(selectedNodes_.begin(), selectedNodes_.end(), l.destNode) != selectedNodes_.end();
+        }),
+        graph_.links.end());
+    // The link selection is an INDEX into graph_.links, so it means something different now that the
+    // vector has shrunk -- and would point at an unrelated wire, or past the end. Cleared, the same
+    // thing deleteSelection does after it prunes.
+    selectedLink_ = -1;
+    dirty_ = true;
+}
+
 void GraphEditor::deleteSelection() {
     // A selected comment box is deleted on its own, BEFORE the node/link work, then returns -- not
     // folded into the same undo step, since a box and a node selection are never both live at once
@@ -1691,6 +1714,31 @@ void GraphEditor::drawEventGraph(float dpi) {
             dragStartScreen_ = mouseScreen;
             panAnchorPx_ = view_.panPx;
             pendingSpawnCanvasPos_ = mouseCanvas;
+
+            // WHICH POPUP THE RELEASE WILL OPEN, decided here at PRESS because the hit test has to
+            // run against the canvas position under the cursor when the button went down -- by
+            // release the view may have panned. Right-clicking a node used to open Add Node, the
+            // same as right-clicking empty space: there was no context menu anywhere in this editor,
+            // so copy, cut, paste, duplicate, delete and break-links were keyboard-only and
+            // undiscoverable. Right-clicking the thing you want to act on is the first gesture
+            // anyone tries.
+            const GraphHitResult rhit = hitTest(graph_, layouts_, mouseCanvas, style_, dpi);
+            rightClickNode_ = rhit.kind == GraphHitKind::Node ? rhit.nodeId : std::string{};
+            rightClickLink_ = rhit.kind == GraphHitKind::Link ? static_cast<int>(rhit.linkIndex) : -1;
+            // SELECT WHAT WAS RIGHT-CLICKED, unless it is already part of the selection -- so
+            // right-clicking one of five selected nodes acts on all five (what every editor does),
+            // while right-clicking outside the selection retargets to just that node rather than
+            // silently acting on something off-screen.
+            if (!rightClickNode_.empty()) {
+                const bool already = std::find(selectedNodes_.begin(), selectedNodes_.end(),
+                                               rightClickNode_) != selectedNodes_.end();
+                if (!already) { selectedNodes_ = {rightClickNode_}; selectedLink_ = -1; }
+                selectedComment_.clear();
+            } else if (rightClickLink_ >= 0) {
+                selectedNodes_.clear();
+                selectedLink_ = rightClickLink_;
+                selectedComment_.clear();
+            }
         } else if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
             const GraphHitResult hit = hitTest(graph_, layouts_, mouseCanvas, style_, dpi);
             const bool ctrl = io.KeyCtrl;
@@ -1791,7 +1839,11 @@ void GraphEditor::drawEventGraph(float dpi) {
                 const f32 travelled = vecLen(mouseScreen - dragStartScreen_);
                 if (travelled <= kRightClickDragThresholdPx * dpi) {
                     view_.panPx = panAnchorPx_; // a click must pan by exactly zero, not by a few stray px
-                    ImGui::OpenPopup("##graphAddNode"); // pendingSpawnCanvasPos_ was set at press time
+                    // On a node or a link: the context menu. On empty canvas: Add Node, as before.
+                    if (!rightClickNode_.empty() || rightClickLink_ >= 0)
+                        ImGui::OpenPopup("##graphNodeMenu");
+                    else
+                        ImGui::OpenPopup("##graphAddNode"); // pendingSpawnCanvasPos_ was set at press time
                 }
                 // else: a real drag happened. The pan already applied above stays; no popup.
             }
@@ -2177,6 +2229,46 @@ void GraphEditor::drawEventGraph(float dpi) {
 
     // ---- right-click "add node" palette, built entirely from graphNodeCatalog() -- see
     // GraphNodeDefs.hpp's own header comment for why this is the one place a node type is registered.
+    // THE NODE CONTEXT MENU. Every item here already existed as a keyboard shortcut and nowhere
+    // else -- an author who did not already know Ctrl+D duplicates could not find out from the
+    // editor. Shortcut labels are shown beside each item precisely so this menu teaches them.
+    //
+    // Acts on the SELECTION, not on rightClickNode_: the press handler has already made the two
+    // agree (it selects what was right-clicked unless that node is already part of a larger
+    // selection), so "Delete" on one of five selected nodes deletes five, as it does from the
+    // keyboard. Routing through the same copySelection/pasteClipboard/duplicateSelection/
+    // deleteSelection calls the shortcuts use means undo, id remapping and link pruning behave
+    // identically whichever way the command was issued -- there is no second implementation here to
+    // drift.
+    if (ImGui::BeginPopup("##graphNodeMenu")) {
+        const bool onNode = !rightClickNode_.empty();
+        const int  count  = static_cast<int>(selectedNodes_.size());
+        if (onNode) {
+            if (count > 1) ImGui::TextDisabled("%d nodes selected", count);
+            else            ImGui::TextDisabled("%s", rightClickNode_.c_str());
+            ImGui::Separator();
+            if (ImGui::MenuItem("Cut", "Ctrl+X"))       { copySelection(); deleteSelection(); }
+            if (ImGui::MenuItem("Copy", "Ctrl+C"))      copySelection();
+            if (ImGui::MenuItem("Paste", "Ctrl+V", false, !clipboardEmpty()))
+                pasteClipboard(pendingSpawnCanvasPos_);
+            if (ImGui::MenuItem("Duplicate", "Ctrl+D")) duplicateSelection();
+            ImGui::Separator();
+            // BREAK LINKS is the one command with no keyboard shortcut at all -- before this menu
+            // the only way to disconnect a node was to click each wire and press Delete.
+            if (ImGui::MenuItem("Break Links", nullptr, false, selectionHasLinks()))
+                breakLinksOnSelection();
+            ImGui::Separator();
+            if (ImGui::MenuItem("Delete", "Del")) deleteSelection();
+        } else {
+            // A link was right-clicked. Only two things can sensibly be done to a wire, and both
+            // are the same thing -- so this arm is short on purpose rather than padded to match.
+            ImGui::TextDisabled("Link");
+            ImGui::Separator();
+            if (ImGui::MenuItem("Delete", "Del")) deleteSelection();
+        }
+        ImGui::EndPopup();
+    }
+
     if (ImGui::BeginPopup("##graphAddNode")) {
         // Above the categories, not inside one: a comment box is not a node, has no pins, and
         // filing it under a node family would be the first place an author looked and the last

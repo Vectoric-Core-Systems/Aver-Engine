@@ -1674,6 +1674,72 @@ static void testWrongExtensionIsRejectedByFactory() {
     check(makeGraphEditor("something.OCGRAPH") != nullptr, "makeGraphEditor accepts .ocgraph case-insensitively");
 }
 
+// ==================================================================================== break links =
+// Break Links keeps the NODES and removes only the WIRES. Worth a test rather than an eyeball
+// because "delete the links touching these nodes" and "delete these nodes" are one careless
+// predicate apart, and the failure -- nodes silently gone -- would be blamed on Delete.
+//
+// It is also the only part of the new node context menu with any logic in it: the rest of that menu
+// calls copySelection/pasteClipboard/duplicateSelection/deleteSelection, which are already covered.
+static void testBreakLinksKeepsTheNodes() {
+    AVER_INFO("=== Break Links removes the wires on a selection and leaves everything else ===");
+
+    // c1 -> add.a, c2 -> add.b, and an UNTOUCHED pair d1 -> other.a, so this can tell "removed the
+    // selection's links" apart from "removed all links" -- a predicate bug would pass without it.
+    //
+    // A RAW STRING LITERAL, not a run of quoted lines: there is then no escape sequence anywhere in
+    // the fixture for a tool to mangle on the way in, which is what happened to this test's first
+    // draft (every "\n" arrived as a real newline and the file would not compile).
+    const std::string text = R"(OCGRAPH 1
+NODE c1 ConstFloat 0 0
+PIN c1 value out float 1
+NODE c2 ConstFloat 0 60
+PIN c2 value out float 2
+NODE add Add 200 0
+PIN add a in float
+PIN add b in float
+PIN add result out float
+NODE d1 ConstFloat 0 200
+PIN d1 value out float 3
+NODE other Add 200 200
+PIN other a in float
+PIN other b in float
+PIN other result out float
+LINK c1.value add.a
+LINK c2.value add.b
+LINK d1.value other.a
+)";
+
+    const std::string tmp = (std::filesystem::path(scratchDir()) / "break_links.ocgraph").string();
+    writeFile(tmp, text);
+
+    GraphEditor ed(tmp);
+    check(ed.graph().links.size() == 3, "three links to start with");
+    check(ed.graph().nodes.size() == 5, "five nodes to start with");
+
+    // Nothing selected: a no-op, and specifically not an undo step that changes nothing.
+    ed.breakLinksOnSelection();
+    check(ed.graph().links.size() == 3, "with nothing selected it does nothing");
+    check(!ed.dirty(), "and does not mark the document dirty for a no-op");
+
+    ed.selectNodes({"add"});
+    check(ed.selectionHasLinks(), "the Add node has links, so the menu item is enabled");
+    ed.breakLinksOnSelection();
+
+    check(ed.graph().nodes.size() == 5, "EVERY NODE SURVIVES -- this breaks wires, not nodes");
+    check(ed.graph().links.size() == 1, "the two links touching the selection are gone");
+    const bool untouchedSurvives = ed.graph().links.size() == 1 &&
+                                   ed.graph().links[0].sourceNode == "d1" &&
+                                   ed.graph().links[0].destNode == "other";
+    check(untouchedSurvives, "and the unrelated d1 -> other link is untouched");
+    check(ed.dirty(), "the document is dirty afterwards");
+    check(!ed.selectionHasLinks(), "the selection has no links left, so the item greys out again");
+
+    // ONE undo step for both wires, not one per wire -- the property that makes this usable.
+    ed.undoForTest();
+    check(ed.graph().links.size() == 3, "a single undo restores BOTH removed links");
+}
+
 int main() {
     AVER_INFO("======== GraphEditorLoadSaveTest ========");
     std::error_code ec;
@@ -1711,6 +1777,7 @@ int main() {
     testPaletteSearchRanksSensibly();
     testCopyPasteRemapsIdsAndLinks();
     testControlRigNodeCarriesItsWeightDefault();
+    testBreakLinksKeepsTheNodes();
 
     AVER_INFO("======== {} failure(s) ========", g_failures);
     return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
