@@ -104,7 +104,7 @@ Two spellings break the pattern, harmlessly but worth knowing: physics uses `AVE
 
 ## 3. `Aver.Scene` — `scene_abi.h`
 
-**Header** `modules/scene/include/aver/scene/scene_abi.h` · **DLL** `Aver.Scene` (SHARED, links `PUBLIC Aver.Core Aver.Assets` — `modules/scene/CMakeLists.txt:12, 21`) · **Version** `AVER_SCENE_ABI_VERSION` = `(1 << 16) | 0` (`scene_abi.h:54-57`) · **36 entry points** (was 35; `aver_scene_material_name(int32_t token)` was added since, the reverse of `aver_scene_material` below — it resolves an interned token back to the name it was interned from).
+**Header** `modules/scene/include/aver/scene/scene_abi.h` · **DLL** `Aver.Scene` (SHARED, links `PUBLIC Aver.Core Aver.Assets` — `modules/scene/CMakeLists.txt:12, 21`) · **Version** `AVER_SCENE_ABI_VERSION` = `(1 << 16) | 5` · **38 entry points**. The minors, each additive: 1 `aver_scene_material_name` (the reverse of `aver_scene_material` below — it resolves an interned token back to the name it was interned from), 2 and 3 two new built-in component ids, 4 `aver_scene_component` (resolving a *dynamically* registered component by name), 5 `aver_scene_last_error`.
 
 **Handle.** A `int32_t` entity. The C++ side is `aver::scene::Entity = AvId`: index in bits 0–23, generation in bits 24–30, bit 31 always clear (`Entity.hpp:23-42`). Index 0 is never handed out and a live generation starts at 1, so no live handle is 0 and every live handle crosses as a **positive** `int32_t`. A `static_assert` pins the bit-31 rule at compile time (`Entity.hpp:48-49`). Field ids and component ids are also `int32_t` with `0 == invalid`.
 
@@ -159,7 +159,16 @@ The flag is registered where the built-ins are declared, `modules/scene/src/Buil
 
 > **The `CHierarchy` case is a hang, not a tidiness rule.** `SceneAbi.cpp:240-242` records exactly what the flag prevents: `World::setParent` keeps the hierarchy acyclic — it refuses self-parenting and walks the ancestor chain — and a raw byte write through `set_ref` bypasses all of it. A single `set_ref(e, CHierarchy.parent, e)`, or a pair of writes forming a two-cycle, "makes `composeChain()`/`worldMatrix()` loop with no visited guard and grow unbounded (hang/`bad_alloc`)". There is no visited guard in the walk, and the read-only flag is what stands in for one. **Structural edits go through `aver_scene_set_parent`**; `get_ref` on those fields is a read and is unaffected. A binding that "helpfully" exposes generic field writes over the whole field table without honouring the rejection is handing scripts a way to hang the process.
 
-There is no ABI entry point that reports whether a field is read-only. A binding cannot ask; it can only observe the 0 and must not treat it as a stale handle.
+**Since scene ABI minor 5 a binding can ask why.** `aver_scene_last_error()` returns `-5`
+(`AbiError::Unsupported`) for exactly this case, distinct from `-1` (bad handle, whether the field id
+or the entity), `-6` (the field is real and of another kind) and `-2` (a null pointer). The setters
+themselves are unchanged and still return 1/0 — a negative code on *their* return would read as true
+under `if (aver_scene_set_...)` and invert every existing call site. See `docs/DIAGNOSTICS.md` for
+the full table and why the channel is a separate entry point.
+
+There is still no entry point that reports whether a field is read-only *before* you try to write it.
+The reason is available only after the rejection, which is enough to stop a binding misreporting a
+read-only field as a stale handle — the mistake this section exists to prevent.
 
 ### Entity lifetime and hierarchy editing
 *You are making, unmaking or re-parenting something, or checking whether a handle you kept from last frame still addresses anything.*
@@ -959,7 +968,7 @@ It is uniform, and **unenforceable by construction** — an `int32_t` return is 
 
 **The scheme.** `(major << 16) | minor`, **per module, versioned independently**. MAJOR changes when an existing entry point changes shape or meaning, and a binding compiled against a different major must refuse to run. MINOR changes when entry points are only **added**, so an older binding still works against a newer engine and checks `minor >= what it needs` (`scene_abi.h:44-57`; `framework_abi.h:50-58`; restated in prose at `modules/scene/README.md:91-95` and `modules/framework/README.md:53-57`). Independence is deliberate: the framework's surface will move while the scene's is still settling, and a single shared number would force a lockstep neither module needs (`framework_abi.h:50-52`).
 
-The encoding is real where it exists — Scene MAJOR 1 / MINOR 0 (`scene_abi.h:54-57`), Framework MAJOR 1 / MINOR 1 (`framework_abi.h:53-58`) — and both DLLs report the compiled-in constant rather than a header value (`modules/scene/src/SceneAbi.cpp:102-106`; `modules/framework/src/FrameworkAbi.cpp:361-363`). The minor-bump discipline is being followed by hand: the framework's bump to 1 carries its own justification in the header beside the two entry points that caused it. But **nothing in the build ties the constant to the surface** — an entry point could change shape with the major untouched and the build would be green. What would catch that: nothing automatic.
+The encoding is real where it exists — Scene MAJOR 1 / MINOR 5, Framework MAJOR 1 / MINOR 5 — and both DLLs report the compiled-in constant rather than a header value (`modules/scene/src/SceneAbi.cpp:102-106`; `modules/framework/src/FrameworkAbi.cpp:361-363`). The minor-bump discipline is being followed by hand: the framework's bump to 1 carries its own justification in the header beside the two entry points that caused it. But **nothing in the build ties the constant to the surface** — an entry point could change shape with the major untouched and the build would be green. What would catch that: nothing automatic.
 
 **The scheme exists on only two of the six seams.** `physics_abi.h`, `pbr_abi.h` and `voxi_abi.h` declare no version constant and export no version function at all (verified by reading all three headers end to end and by grepping the tree for `abi_version`: the only symbols that exist are `aver_scene_abi_version`, `aver_fw_abi_version`, `aver_fw_scene_abi_version` and `aver_fw_scene_abi_matches`). Three seams therefore have **no way** for a caller to detect a stale binary.
 
@@ -1052,25 +1061,42 @@ Everything below is what the audit found unenforced, unchecked, untested or unst
 - **`aver_fw_scene_abi_matches()` must keep genuinely calling into Aver.Scene** or the check becomes a tautology (`framework_abi.h:70-77`). It does today (`FrameworkAbi.cpp:376`), but nothing in the build enforces its presence — and the header's supporting argument, that the framework would otherwise import nothing from the scene, no longer holds: `FrameworkAbi.cpp:13-15` includes the scene's C++ headers and `:36` calls `World::instance()`.
 - **Read-only fields are enforced in code but stated in no header.** Six setters reject them (`SceneAbi.cpp:146, 169, 193, 215, 243, 268`); the flags are registered at `Builtins.cpp:44, 52, 63, 76, 93`; the only prose is `modules/scene/README.md:15-16`. `scene_abi.h` never uses the words, so a binding author reading only the header cannot know that a 0 from a setter may mean "this field is not yours to write". See §3 — and note that on `CHierarchy` the flag is what stands between a script and an unbounded loop in `composeChain()`/`worldMatrix()` (`SceneAbi.cpp:240-242`).
 
-### Hand-mirrored constants — at least ten pairs, and nothing checks any of them
-The headers themselves claim these are "pinned". They are not pinned by anything executable; the word describes an intention. `static_assert`s exist in exactly one file in the engine, `modules/scene/src/SceneAbi.cpp:25-42`, and they pin C constants to **C++** enums — never to C#. A grep for `static_assert` over `modules/render.pbr/src`, `modules/render.voxi/src`, `modules/physics/src` and `modules/framework/src` turns up one unrelated assert at `VoxiRenderer.cpp:36`.
+### Hand-mirrored constants — most are checked now; two are not
+When this audit was written the headers claimed these were "pinned" and nothing executable pinned
+them. **`tests/abi/src/AbiEnumTest.cpp` closed most of the gap since**: it reads the C headers and the
+`.cs` files as text and compares each group by normalised name, so adding a member to both sides needs
+no edit in the test and adding it to one side fails. It also compares the physics and audio *function
+signatures* — return type, parameter types, parameter names, in order.
+
+The "Checked by" column below is current. **One row is left**, and the table says so rather than being
+deleted: an unchecked pair fails silently and at run time, in whatever feature happens to use the
+wrong number.
 
 | # | Native | C# mirror | Checked by |
 |---|---|---|---|
 | 1 | `AVER_SCRIPTING_CONTRACT_VERSION` (`scripting_abi.h:35`) | `HostBridge.cs:27` | **run-time check** — boundary 1, §14 |
 | 2 | `AVER_FW_DISPATCH_VERSION` (`framework_hooks.h:128`) | `ManagedDispatch.cs:27` | **run-time check** — boundary 3 |
 | 3 | `AvManagedDispatch` field order (`framework_hooks.h:144-157`) | `ManagedDispatch.cs:35-46` | only indirectly, by the `structBytes` check |
-| 4 | `AVER_SCENE_COMP_*` (`scene_abi.h:85-92`) | `SceneIds.cs:18-25` | **nothing** |
-| 5 | `AVER_SCENE_KIND_*` (`scene_abi.h:70-83`) | no C# mirror; C++ side pinned at `SceneAbi.cpp:25-42` | C++ only |
-| 6 | `AVER_FW_CLASS_*` (`framework_abi.h:99-106`; the comment at `:97` says "pinned to Aver.Framework's ClassFlags (Enums.cs)") | `Enums.cs:69-76` | **nothing** |
-| 7 | `AVER_FW_TICK_*` (`framework_abi.h:109-112`; comment at `:108`) | `Enums.cs:48-50` | **nothing** |
-| 8 | `AVER_FW_PLAY_*` (`framework_abi.h:174-176`) | `Enums.cs:56-58` | **nothing** |
-| 9 | `AVER_FW_BEGIN_*` / `AVER_FW_END_*` (`framework_hooks.h:58-65`; comment at `:51-53` says they pin "integer for integer" to `Enums.cs`) | `Enums.cs:23-25` / `:35-38` | **nothing** |
-| 10 | `AVER_FW_KEY_*` (`framework_abi.h:205-218`) | `Input.cs:7-15` (`Key`), consumed by `EnhancedInput.cs` | **nothing** |
-| 11 | `AVER_PBR_FEATURE_*` / `_STATUS_*` / `_TEX_*` / `_ALPHA_*` / `_UV_*` (`pbr_abi.h:44-74`) | `Pbr.cs:6, 20, 31, 41, 52` | **nothing** |
-| 12 | `AVER_VOXI_FEATURE_*` / `_STATUS_*` / `_QUALITY_*` (`voxi_abi.h:31-48`) | `Voxi.cs:6, 17, 27` | **nothing** |
+| 4 | `AVER_FW_KEY_*` (`framework_abi.h:205-218`) | `Input.cs` (`Key`), consumed by `EnhancedInput.cs` | **nothing** — a key that never fires |
+| 5 | `AVER_SCENE_COMP_*` (`scene_abi.h:85-92`) | `SceneIds.cs` `SceneIds` | `AbiEnumTest` (via `csStrip`, since C# spells them `CLocal` where C says `AVER_SCENE_COMP_LOCAL`) |
+| 6 | `AVER_SCENE_KIND_*` (`scene_abi.h:70-83`) | no C# mirror; C++ side pinned at `SceneAbi.cpp:25-42` | `static_assert`, C++ only |
+| 7 | `AVER_FW_CLASS_*` (`framework_abi.h:99-106`) | `Enums.cs` `ClassFlags` | `AbiEnumTest` |
+| 8 | `AVER_FW_TICK_*` (`framework_abi.h:109-112`) | `Enums.cs` `TickGroup` | `AbiEnumTest` |
+| 9 | `AVER_FW_PLAY_*` (`framework_abi.h:174-176`) | `Enums.cs` `PlayState` | `AbiEnumTest` |
+| 10 | `AVER_FW_BEGIN_*` / `AVER_FW_END_*` (`framework_hooks.h:58-65`) | `Enums.cs` `BeginReason` / `EndReason` | `AbiEnumTest` |
+| 11 | `AVER_PBR_FEATURE_*` / `_STATUS_*` (`pbr_abi.h`) | `Pbr.cs` `PbrFeature` / `PbrStatus` | `AbiEnumTest` |
+| 12 | `AVER_VOXI_FEATURE_*` / `_STATUS_*` / `_QUALITY_*` (`voxi_abi.h`) | `Voxi.cs` | `AbiEnumTest` |
+| 13 | `AVER_UI_LAYER_*` (`ui_abi.h`) | `Aver.UI/Hud.cs` `Layer` | `AbiEnumTest` |
+| 14 | `AVER_SCRIPT_LOG_*` (`scripting_abi.h`) and `aver::LogLevel` (`Log.hpp`, by POSITION) | `Aver.Scripting/Log.cs` `Level` | `AbiEnumTest` |
+| 15 | `aver::AbiError` (`core/ErrorCodes.hpp`) | `Aver.Physics` `PhysicsError`, `Aver.Scene` `SceneError` | `AbiEnumTest` — all three compared |
 
-Rows 4 and 6–12 fail silently and at run time, in whatever feature happens to use the wrong number: a component that is never attached, a pawn flag that never matches, an actor placed in the wrong tick group, a key that never fires. None of it throws.
+Row 4 is the one still unchecked, and the obstacle is a parse shape rather than a decision. Both sides
+are **implicit-value enums** — `AVER_FW_KEY_A = 0, AVER_FW_KEY_B, AVER_FW_KEY_C, …` in C and
+`A = 0, B, C, …` in `Input.cs` — where the value of all but a handful of members comes from POSITION.
+`AbiEnumTest`'s two readers cannot see them: `cDefines` parses `#define`s and this is a C `enum`, and
+`csMembers` takes only members that carry an `=`, which here is 3 of 47. Closing it means an
+implicit-value enum reader on each side. Until that exists the row stays in this table saying
+"nothing", which is the point of keeping it.
 
 ### Two stale comments in the C# tree
 - **`scripting/csharp/Aver.Framework/Native.cs:16-18`** asserts that "The in-progress `Aver.Scene/Native.cs` currently uses ANSI `LPStr`; that is the defect". No longer true — `Aver.Scene/Native.cs` uses `LPUTF8Str` throughout and decodes with `PtrToStringUTF8` (`:36, 53, 67, 71, 76`). The file that still uses ANSI is `Aver.Scripting/Pbr.cs`.

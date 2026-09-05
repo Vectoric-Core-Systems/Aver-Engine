@@ -18,8 +18,16 @@
 #     global.json (SDK 10.0.400) and a NuGet.config with only a vendored source; that arrangement
 #     has been wrong about restoring without network before, so setup-dotnet is here to make the
 #     failure loud rather than to claim the problem is solved.
-#   * PACKAGING. There is no packaged-game path in this tree yet, and stage-payload.ps1 wants a
-#     built tree plus an allowlist audit that is not a CI-shaped question.
+#   * PACKAGING. scripts/stage-game.ps1 and verify-game.ps1 exist again, but verify-game runs the
+#     staged package and its divergence gate compares two hosts' scene censuses -- both want a real
+#     machine, and the allowlist audit is not a CI-shaped question either.
+#
+# EXIT CODES. Every script this workflow calls now speaks one table -- 0 ok, 1 failed, 2 usage,
+# 3 environment (modules/core/include/aver/core/ErrorCodes.hpp, and docs/DIAGNOSTICS.md). That
+# matters more here than locally: a 3 means the RUNNER is wrong (no build tree, no ctest) and a 1
+# means the ENGINE is wrong, and before this they were the same number. They used to be worse than
+# the same number -- test.ps1 forwarded ctest's own 8, and gates.ps1 exited the count of failed
+# gates, so two failures exited 2, which this table spells "you invoked me wrong".
 #
 # NOT YET RUN ANYWHERE. This file is committed by someone who cannot execute GitHub Actions; the
 # commands in it are the ones verified locally, but the workflow itself is unproven until it runs

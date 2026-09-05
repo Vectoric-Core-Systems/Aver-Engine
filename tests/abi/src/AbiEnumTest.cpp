@@ -509,6 +509,13 @@ struct Group {
     const char* csFile;      // repo-relative .cs
     const char* csType;      // the enum or static class that mirrors it
     const char* skip;        // one normalised C name to ignore, or "" -- see below
+    // A prefix carried by the C# spelling and not the C one, stripped before comparing. Exactly one
+    // group needs it and it is worth a field rather than a waiver: SceneIds names its constants
+    // CLocal/CMeshRenderer after the C++ struct, where the C side says AVER_SCENE_COMP_LOCAL and
+    // AVER_SCENE_COMP_MESH_RENDERER. That is a naming convention, not drift, and without somewhere to
+    // say so the only alternatives are to leave the pair unchecked -- which is what happened -- or to
+    // rename a public C# surface to suit a test.
+    const char* csStrip = "";
 };
 
 // SENTINELS ARE SKIPPED BY NAME, one per group at most. AVER_FW_TICK_COUNT and the two _COUNT
@@ -545,6 +552,11 @@ static const Group kGroups[] = {
      "scripting/csharp/Aver.Scripting/Voxi.cs",  "VoxiStatus",  ""},
     {"Voxi quality",          "modules/render.voxi/include/aver/voxi/voxi_abi.h",           "AVER_VOXI_QUALITY_",
      "scripting/csharp/Aver.Scripting/Voxi.cs",  "VoxiQuality", ""},
+    // THE BUILT-IN COMPONENT IDS. docs/ABI.md listed this pair as checked by "nothing", and the only
+    // thing standing in the way was the C prefix -- see csStrip. A wrong number here is a component
+    // that is silently never attached, which is exactly the failure mode that table describes.
+    {"scene component ids",   "modules/scene/include/aver/scene/scene_abi.h",               "AVER_SCENE_COMP_",
+     "scripting/csharp/Aver.Scene/SceneIds.cs",  "SceneIds",    "", "C"},
 };
 
 int main() {
@@ -562,7 +574,14 @@ int main() {
         if (!readText(root + g.csFile, cs))  { check(false, std::string(g.label) + ": cannot read " + g.csFile); continue; }
 
         std::map<std::string, long long> c = cDefines(hdr, g.prefix);
-        const std::map<std::string, long long> m = csMembers(cs, g.csType);
+        std::map<std::string, long long> m = csMembers(cs, g.csType);
+        if (*g.csStrip) {
+            const std::string strip = normalise(g.csStrip);
+            std::map<std::string, long long> stripped;
+            for (const auto& [name, v] : m)
+                stripped[name.rfind(strip, 0) == 0 ? name.substr(strip.size()) : name] = v;
+            m.swap(stripped);
+        }
         if (*g.skip) c.erase(g.skip);
 
         // A GROUP THAT MATCHES NOTHING IS A FAILURE, not a silent pass. If a header is reorganised or
