@@ -13204,7 +13204,17 @@ private:
                                     payload->DataSize > 0 ? static_cast<usize>(payload->DataSize - 1) : usize(0));
                                 const ImVec2 mp = ImGui::GetMousePos();
 #if AVER_MODULE_SCENE
-                                spawnFromAssetDrop(e, droppedPath, mp.x, mp.y);
+                                // ONE PATH PER LINE. A multi-selection drag sends every selected
+                                // placeable asset (see cbDragPayloadFor); a single drag sends one path
+                                // with no newline in it, which this loop yields unchanged.
+                                //
+                                // ALL AT THE SAME POINT, not fanned out: the cursor names one place,
+                                // and each lands on whatever is under it -- so a stack of assets
+                                // dropped together piles up rather than scattering to positions
+                                // nobody chose. Moving them apart afterwards is a drag each; guessing
+                                // a layout for them is not undoable in one gesture.
+                                for (const std::string& one : editor::splitDropPayload(droppedPath))
+                                    spawnFromAssetDrop(e, one, mp.x, mp.y);
 #else
                                 cbStatus_ = "Placing objects needs the scene module";
                                 AVER_WARN("[Editor] drop: scene module not compiled in, ignoring '{}'", droppedPath);
@@ -13628,14 +13638,22 @@ private:
         cbHistoryPos_ = static_cast<int>(cbHistory_.size()) - 1;
         cbSelectedDir_ = dir;
         cbSelectedFile_.clear();
+        cbSelection_.clear();
         cbFilter_[0] = '\0';
     }
 
     bool cbCanBack()    const { return cbHistoryPos_ > 0; }
     bool cbCanForward() const { return cbHistoryPos_ >= 0 &&
                                        cbHistoryPos_ + 1 < static_cast<int>(cbHistory_.size()); }
-    void cbBack()    { if (cbCanBack())    { cbSelectedDir_ = cbHistory_[static_cast<usize>(--cbHistoryPos_)]; cbSelectedFile_.clear(); } }
-    void cbForward() { if (cbCanForward()) { cbSelectedDir_ = cbHistory_[static_cast<usize>(++cbHistoryPos_)]; cbSelectedFile_.clear(); } }
+    // Every selected path in the current folder. See cbClickSelect for why cbSelectedFile_ stays
+    // alongside it rather than being replaced by it.
+    std::vector<std::string> cbSelection_;
+    // The paths the current folder is showing, refreshed every frame the browser draws. Ctrl+A's
+    // source; see drawFolderFiles.
+    std::vector<std::string> cbShownPaths_;
+
+    void cbBack()    { if (cbCanBack())    { cbSelectedDir_ = cbHistory_[static_cast<usize>(--cbHistoryPos_)]; cbClearSelection(); } }
+    void cbForward() { if (cbCanForward()) { cbSelectedDir_ = cbHistory_[static_cast<usize>(++cbHistoryPos_)]; cbClearSelection(); } }
 
     // Returns the parent folder, or empty at a mounted root.
     std::string cbParentDir() const {
@@ -13846,6 +13864,7 @@ private:
         cbInvalidate(src.parent_path().string());
         if (cbSelectedDir_ == from)  { cbSelectedDir_ = dst.string(); }
         if (cbSelectedFile_ == from) { cbSelectedFile_ = dst.string(); }
+        for (std::string& sp : cbSelection_) if (sp == from) sp = dst.string();
         cbRewriteHistory(from, dst.string());
         cbStatus_ = "Renamed to " + newName;
     }
@@ -13901,6 +13920,8 @@ private:
         if (!editor::moveToRecycleBin(path)) { cbStatus_ = "Could not delete " + src.filename().string(); return; }
         cbInvalidate(parent);
         if (cbSelectedFile_ == path) cbSelectedFile_.clear();
+        cbSelection_.erase(std::remove(cbSelection_.begin(), cbSelection_.end(), path),
+                           cbSelection_.end());
         if (cbSelectedDir_ == path) cbSelectedDir_ = parent;
         cbRewriteHistory(path, std::string());
         cbStatus_ = "Moved " + src.filename().string() + " to the recycle bin";
@@ -14139,6 +14160,15 @@ private:
         if (!ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) return;
         if (ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel)) return;
         const ImGuiIO& io = ImGui::GetIO();
+        // CTRL+A COMES FIRST, because it is the one key here that has to work with NOTHING
+        // selected -- which is exactly the state the guard below returns on.
+        if (!io.WantTextInput && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_A, false)) {
+            cbSelection_.clear();
+            for (const std::string& p : cbShownPaths_) cbSelection_.push_back(p);
+            if (!cbSelection_.empty() && !cbIsSelected(cbSelectedFile_)) cbSelectedFile_ = cbSelection_.front();
+            cbStatus_ = std::to_string(cbSelection_.size()) + " item(s) selected";
+            return;
+        }
         if (io.WantTextInput || io.WantCaptureKeyboard || cbSelectedFile_.empty()) return;
         std::error_code ec;
         const bool isDir = std::filesystem::is_directory(cbSelectedFile_, ec);
@@ -14525,6 +14555,100 @@ private:
         return false;
     }
 
+
+    // ---- Content Browser multi-selection ---------------------------------------------------------
+    //
+    // cbSelectedFile_ REMAINS THE ACTIVE ONE and keeps every meaning it had: it is what the footer
+    // names, what Enter opens, what F2 renames and what a shift-range measures from. cbSelection_ is
+    // the set, and it always CONTAINS cbSelectedFile_ when anything is selected. Keeping both is what
+    // lets the single-item actions stay single-item without a special case at each of them -- rename
+    // and duplicate mean nothing for eleven files at once.
+    bool cbIsSelected(const std::string& path) const {
+        return std::find(cbSelection_.begin(), cbSelection_.end(), path) != cbSelection_.end();
+    }
+
+    // Applies one click to the selection, with the modifier rules every file browser has trained
+    // people to expect: plain replaces, Ctrl toggles one, Shift takes the range from the active item.
+    //
+    // THE RANGE IS OVER `shown`, NOT THE FOLDER, deliberately: `shown` is what the search box left on
+    // screen, and shift-selecting across a filter would grab files the person cannot see.
+    void cbClickSelect(const std::vector<const DirEntry*>& shown, int index) {
+        if (index < 0 || index >= static_cast<int>(shown.size())) return;
+        const std::string& path = shown[static_cast<usize>(index)]->full;
+        const ImGuiIO& io = ImGui::GetIO();
+
+        if (io.KeyShift && !cbSelectedFile_.empty()) {
+            int anchor = -1;
+            for (int i = 0; i < static_cast<int>(shown.size()); ++i)
+                if (shown[static_cast<usize>(i)]->full == cbSelectedFile_) { anchor = i; break; }
+            if (anchor >= 0) {
+                const int lo = anchor < index ? anchor : index;
+                const int hi = anchor < index ? index : anchor;
+                cbSelection_.clear();
+                for (int i = lo; i <= hi; ++i) cbSelection_.push_back(shown[static_cast<usize>(i)]->full);
+                // The ACTIVE item does not move on a shift-click, so shift-clicking again from the
+                // same anchor grows and shrinks the range rather than walking it.
+                return;
+            }
+        }
+        if (io.KeyCtrl) {
+            const auto it = std::find(cbSelection_.begin(), cbSelection_.end(), path);
+            if (it != cbSelection_.end()) {
+                cbSelection_.erase(it);
+                // Ctrl-clicking the active item away has to hand "active" to something still selected,
+                // or the footer names a file that is no longer part of the selection.
+                if (cbSelectedFile_ == path)
+                    cbSelectedFile_ = cbSelection_.empty() ? std::string() : cbSelection_.back();
+                return;
+            }
+            cbSelection_.push_back(path);
+            cbSelectedFile_ = path;
+            return;
+        }
+        cbSelection_.assign(1, path);
+        cbSelectedFile_ = path;
+    }
+
+    // Ctrl+A: everything the current folder is showing, which is what the filter left visible.
+    void cbSelectAll(const std::vector<const DirEntry*>& shown) {
+        cbSelection_.clear();
+        for (const DirEntry* e : shown) cbSelection_.push_back(e->full);
+        if (!cbSelection_.empty() && !cbIsSelected(cbSelectedFile_)) cbSelectedFile_ = cbSelection_.front();
+    }
+
+    void cbClearSelection() { cbSelection_.clear(); cbSelectedFile_.clear(); }
+
+    // The drag payload for a Content Browser item: every SELECTED placeable asset when the dragged
+    // item is one of them, otherwise just the item under the cursor.
+    //
+    // NEWLINE-SEPARATED, and the viewport splits it. A payload is a flat byte blob, and one path per
+    // line is the least it can be while carrying several -- a path cannot contain a newline on any
+    // filesystem this runs on. A single-item drag produces a blob with no newline in it, byte for byte
+    // what the old single-path payload was, so nothing downstream had to change to keep working.
+    //
+    // FOLDERS AND NON-PLACEABLES ARE DROPPED FROM THE LIST, not refused: a selection of eleven files
+    // where two are .txt should still place the nine, and the viewport's drop target is documented as
+    // never having to reject a payload it received.
+    // What the drag preview says: the one name, or how many are coming.
+    static std::string cbDragLabel(const std::string& name, const std::string& blob) {
+        const usize n = static_cast<usize>(std::count(blob.begin(), blob.end(), '\n')) + 1;
+        return n <= 1 ? name : std::to_string(n) + " assets";
+    }
+
+    std::string cbDragPayloadFor(const std::string& dragged) const {
+        if (!cbIsSelected(dragged) || cbSelection_.size() <= 1) return dragged;
+        std::string blob;
+        for (const std::string& p : cbSelection_) {
+            std::error_code ec;
+            if (std::filesystem::is_directory(p, ec)) continue;
+            if (!isPlaceableAssetExt(lowerExt(std::filesystem::path(p)))) continue;
+            if (!blob.empty()) blob += '\n';
+            blob += p;
+        }
+        return blob.empty() ? dragged : blob;
+    }
+
+
     // True when hay contains needle, ignoring case. An empty needle matches.
     static bool containsNoCase(const std::string& hay, const char* needle) {
         if (!needle || !*needle) return true;
@@ -14580,20 +14704,26 @@ private:
                     ImGui::PushStyleColor(ImGuiCol_Header,        IM_COL32(0, 0, 0, 0));
                     ImGui::PushStyleColor(ImGuiCol_HeaderHovered, IM_COL32(0, 0, 0, 0));
                     ImGui::PushStyleColor(ImGuiCol_HeaderActive,  IM_COL32(0, 0, 0, 0));
-                    const bool selected = cbSelectedFile_ == e.full;
+                    const bool selected = cbIsSelected(e.full);
                     if (ImGui::Selectable("##cell", selected,
                                           ImGuiSelectableFlags_AllowDoubleClick, ImVec2(cellW, cellH))) {
-                        cbSelectedFile_ = e.full;
-                        if (ImGui::IsMouseDoubleClicked(0) || (e.isDir && !cbDoubleClickEnter_))
+                        cbClickSelect(shown, idx);
+                        // A double-click OPENS, and must not also leave a range behind: opening a
+                        // folder replaces the listing the selection indexes into.
+                        if (ImGui::IsMouseDoubleClicked(0) || (e.isDir && !cbDoubleClickEnter_)) {
+                            cbSelection_.assign(1, e.full);
+                            cbSelectedFile_ = e.full;
                             cbOpenEntry(e.full, e.isDir);
+                        }
                     }
                     ImGui::PopStyleColor(3);
                     const bool hot = ImGui::IsItemHovered();
                     // Only placeable assets start a drag (see isPlaceableAssetExt/spawnFromAssetDrop),
                     // so the viewport drop target never has to reject a payload it received.
                     if (!e.isDir && isPlaceableAssetExt(lowerExt(e.path)) && ImGui::BeginDragDropSource()) {
-                        ImGui::SetDragDropPayload(kAssetDragDropType, e.full.c_str(), e.full.size() + 1);
-                        ImGui::TextUnformatted(e.name.c_str());
+                        const std::string blob = cbDragPayloadFor(e.full);
+                        ImGui::SetDragDropPayload(kAssetDragDropType, blob.c_str(), blob.size() + 1);
+                        ImGui::TextUnformatted(cbDragLabel(e.name, blob).c_str());
                         ImGui::EndDragDropSource();
                     }
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", e.name.c_str());
@@ -14689,6 +14819,13 @@ private:
                                                         : "(nothing here matches the search)");
             return;
         }
+        // WHAT CTRL+A SELECTS, captured here because the key handler runs outside this function and
+        // `shown` is what the search box actually left visible -- selecting files a person has filtered
+        // away would be a surprise the moment they clear the box.
+        cbShownPaths_.clear();
+        cbShownPaths_.reserve(shown.size());
+        for (const DirEntry* p : shown) cbShownPaths_.push_back(p->full);
+
         if (cbGallery_) { drawFolderGallery(shown); return; }
 
         const f32 h = ImGui::GetTextLineHeight() * 1.3f;
@@ -14703,17 +14840,21 @@ private:
                 ImGui::Dummy(ImVec2(h * 0.78f, h));
                 ImGui::SameLine();
                 drawEntryIcon(dl, ImVec2(o.x + h*0.39f, o.y + h*0.5f), h*0.82f, e.isDir, e.tile, e.module, e.kindExt);
-                if (ImGui::Selectable(e.name.c_str(), cbSelectedFile_ == e.full,
+                if (ImGui::Selectable(e.name.c_str(), cbIsSelected(e.full),
                                       ImGuiSelectableFlags_AllowDoubleClick)) {
-                    cbSelectedFile_ = e.full;
-                    if (ImGui::IsMouseDoubleClicked(0) || (e.isDir && !cbDoubleClickEnter_))
+                    cbClickSelect(shown, i);
+                    if (ImGui::IsMouseDoubleClicked(0) || (e.isDir && !cbDoubleClickEnter_)) {
+                        cbSelection_.assign(1, e.full);
+                        cbSelectedFile_ = e.full;
                         cbOpenEntry(e.full, e.isDir);
+                    }
                 }
                 // Only placeable assets start a drag (see isPlaceableAssetExt/spawnFromAssetDrop),
                 // so the viewport drop target never has to reject a payload it received.
                 if (!e.isDir && isPlaceableAssetExt(lowerExt(e.path)) && ImGui::BeginDragDropSource()) {
-                    ImGui::SetDragDropPayload(kAssetDragDropType, e.full.c_str(), e.full.size() + 1);
-                    ImGui::TextUnformatted(e.name.c_str());
+                    const std::string blob = cbDragPayloadFor(e.full);
+                    ImGui::SetDragDropPayload(kAssetDragDropType, blob.c_str(), blob.size() + 1);
+                    ImGui::TextUnformatted(cbDragLabel(e.name, blob).c_str());
                     ImGui::EndDragDropSource();
                 }
                 cbItemContextMenu(e.full, e.name, e.isDir);

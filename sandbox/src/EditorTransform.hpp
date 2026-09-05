@@ -20,6 +20,8 @@
 #include "aver/core/Types.hpp"
 
 #include <cmath>
+#include <string>
+#include <vector>
 
 namespace aver::editor {
 
@@ -74,6 +76,30 @@ inline void multiplyEditorTransform(const f32 a[16], const f32 b[16], f32 out[16
 inline f32 dropRestLift(f32 boundsMinZ, f32 scaleZ) {
     const f32 lift = -boundsMinZ * (scaleZ != 0.0f ? scaleZ : 1.0f);
     return lift > 0.0f ? lift : 0.0f;
+}
+
+
+// Splits a Content Browser drag payload into the asset paths it carries.
+//
+// ONE PATH PER LINE. A drag payload is a flat byte blob, and one path per line is the least it can be
+// while carrying several -- a path cannot contain a newline on any filesystem this runs on. A
+// single-asset drag produces a blob with no newline in it, which this returns as one element, byte
+// for byte what the payload was before multi-selection existed.
+//
+// EMPTY LINES ARE DROPPED rather than returned as empty paths: a trailing newline is the easiest
+// thing for a producer to add, and an empty path reaching the placement code would be a "could not
+// resolve" warning for an asset nobody dragged.
+inline std::vector<std::string> splitDropPayload(const std::string& blob) {
+    std::vector<std::string> out;
+    usize from = 0;
+    while (from <= blob.size()) {
+        const usize nl = blob.find('\n', from);
+        const std::string one = blob.substr(from, nl == std::string::npos ? std::string::npos : nl - from);
+        if (!one.empty()) out.push_back(one);
+        if (nl == std::string::npos) break;
+        from = nl + 1;
+    }
+    return out;
 }
 
 } // namespace aver::editor
