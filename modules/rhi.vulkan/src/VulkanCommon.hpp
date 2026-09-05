@@ -74,6 +74,7 @@
 #include "aver/core/Log.hpp"
 
 #include <cmath>
+#include <cctype>
 #include <cstddef>
 #include <cstring>
 #include <deque>      // pipelines_ -- see its declaration for why it is not a vector
@@ -728,7 +729,15 @@ inline bool patchPerFrameSet(std::string& src) {
         bool blank = true;
         for (std::size_t i = lineStart; i < pos; ++i)
             if (src[i] != ' ' && src[i] != '\t') { blank = false; break; }
-        if (blank) {
+        // AND A WHOLE-WORD TEST, which findCbufferBrace in VulkanDevice.cpp has and this was written
+        // without -- so `cbuffer PerFrameExtra` would have been annotated as if it were PerFrame,
+        // putting the wrong block on kVkSetConstants and leaving the real one in set 0. No such
+        // cbuffer exists today; the asymmetry between two functions doing the same job is the defect,
+        // because the next person to add one would find out from a driver abort.
+        const std::size_t after = pos + needle.size();
+        const bool wholeWord = after >= src.size() ||
+                               (!std::isalnum(static_cast<unsigned char>(src[after])) && src[after] != '_');
+        if (blank && wholeWord) {
             src.insert(pos, "[[vk::binding(0, " + std::to_string(kVkSetConstants) + ")]] ");
             return true;
         }

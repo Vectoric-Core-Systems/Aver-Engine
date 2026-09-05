@@ -62,14 +62,13 @@ target_compile_definitions(Aver.RHI.Vulkan PRIVATE
   VK_USE_PLATFORM_WIN32_KHR=1
 )
 
-# In-window UI: NOT wired up in this pass. modules/rhi.d3d12 hosts Dear ImGui through
-# imgui_impl_dx12 (see its own CMakeLists.txt, gated on AVER_ENABLE_UI). Vulkan's equivalent is the
-# SEPARATE imgui_impl_vulkan backend -- a real, not-yet-vendored dependency (its own license check,
-# its own render-target/command-buffer contract) rather than a recompile of the same code against a
-# different header. Until it is vendored, VulkanDevice simply does not override IDevice's ui*
-# methods, which default to false/no-op (RHI.hpp) -- an honest "no UI on this backend yet". Revisit
-# alongside AVER_ENABLE_UI once imgui_impl_vulkan clears the same permissive-license bar as
-# everything else under third_party/.
+# In-window UI: DONE, and this comment said otherwise long after it stopped being true. It claimed
+# imgui_impl_vulkan was "a real, not-yet-vendored dependency" and that "VulkanDevice simply does not
+# override IDevice's ui* methods". Both are stale: modules/rhi.vulkan.imgui exists and is added by
+# the root CMakeLists under AVER_RHI_VULKAN AND AVER_ENABLE_UI, and a `--backend vulkan` run logs
+# "[RHI.Vulkan.ImGui] ImGui UI initialised (docking, dynamic rendering)" and draws the whole editor.
+# Left as a correction rather than deleted: this file's other stale claim (SPIR-V codegen) cost the
+# backend months of being dead, and the pattern is worth being able to see twice.
 
 # DXC redistributables (dxcompiler.dll / dxil.dll) are copied beside the executable by
 # modules/rhi.d3d12/CMakeLists.txt whenever that module is part of the build. VulkanShaderCompiler

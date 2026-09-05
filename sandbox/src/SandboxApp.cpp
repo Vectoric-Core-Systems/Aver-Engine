@@ -8482,7 +8482,14 @@ private:
         const bool tierOnlyChange = requested.globalIllumination != live.globalIllumination
                                   && requested.voxelResolution == live.voxelResolution;
         project_.backend = projectBackend_;
-        project_.frameBudgetMs = frameBudgetMs_;
+        // NOT WHEN --frame-budget SUPPLIED IT. frameBudgetMs_ holds either the project's own value or
+        // a CLI test override, and this function cannot tell them apart on its own -- so writing it
+        // unconditionally let a diagnostic flag become a persisted project setting. With settings now
+        // saving on edit, that is not hypothetical: run once with --frame-budget 33, touch any
+        // control on the Rendering page, and RENDER.FRAMEBUDGETMS 33 is in the .ocproject for good.
+        // The forced flag is exactly the distinction, and it already exists for the symmetric bug on
+        // the way in (applyProjectRenderSettings clobbering the flag from the manifest's default).
+        if (!frameBudgetForced_) project_.frameBudgetMs = frameBudgetMs_;
         project_.voxelResolution = tierOnlyChange ? -1 : static_cast<int>(requested.voxelResolution);
         project_.giIntensity     = requested.giIntensity;
         project_.giMaxDistance   = requested.giMaxDistance;
@@ -10058,6 +10065,29 @@ private:
         EditId id = 0;            // a scene entity, through the indirection
         int objIndex = -1;        // or an objects_ index, for the placeholder scene
         EditXform before{}, after{};
+
+        // EVERY OTHER ENTITY A MULTI-SELECTION MOVE TOOK WITH IT.
+        //
+        // THE BUG THIS EXISTS TO CLOSE, and it was silent scene corruption on an everyday gesture:
+        // the gizmo's multi-move applied the anchor's world delta to every other selected entity
+        // with a bare setLocalTransform and recorded nothing, while endTransformEdit pushed ONE
+        // command keyed on selEntity_. Select twenty props, drag them across the level, press
+        // Ctrl+Z -- the anchor snapped home and the other nineteen stayed where they had been
+        // dragged. Redo could not repair it either, because the redo had nothing to say about them.
+        //
+        // ONE COMMAND, NOT N. Delete takes the other road (one record per entity, so a five-object
+        // delete needs five undos) and says so in its own comment. A move is different in kind: a
+        // delete of five things is arguably five edits an author might want to unpick separately,
+        // but a drag is ONE gesture and undoing it half-way leaves the scene in a state the author
+        // never saw. Grouping them here is what makes Ctrl+Z mean "undo that drag".
+        //
+        // LOCAL TRANSFORMS, NOT WORLD. before/after above are world-space (selectedXform's own
+        // convention) and get converted on the way back in. These are stored exactly as they will be
+        // written, so undo cannot drift through a conversion -- and an entity whose PARENT is not in
+        // the selection is restored to the local transform it actually had, whatever that parent was
+        // doing at the time.
+        struct AlsoMoved { EditId id = 0; Transform beforeLocal, afterLocal; };
+        std::vector<AlsoMoved> alsoMoved;
         std::string label;        // outliner display name; editor-owned bookkeeping, not World's
 #if AVER_MODULE_SCENE
         editor::EntitySnapshot snap;    // scene entity: asset name, persisted id, every other component
@@ -10246,22 +10276,78 @@ private:
         if (undoStack_.size() > kUndoDepth) undoStack_.erase(undoStack_.begin());
     }
 
+    // The set the multi-move loop will actually touch: selected, valid, not the anchor, and not
+    // beneath another selected entity. THE SKIP RULE IS DUPLICATED FROM THAT LOOP ON PURPOSE and
+    // must stay identical to it -- recording a before-state for an entity the mover skips would
+    // restore something that never moved, and missing one the mover touches is the bug this whole
+    // mechanism exists to close. Sharing one helper is what keeps the two in step.
+    template <class F>
+    void forEachMultiMoved(F&& fn) {
+#if AVER_MODULE_SCENE
+        if (multiStale()) return;
+        scene::World& w = scene::World::instance();
+        for (const scene::Entity ent : multiSel_) {
+            if (ent == selEntity_ || !w.valid(ent)) continue;
+            bool ancestorSelected = false;
+            for (scene::Entity p = w.parent(ent); p != scene::kInvalidEntity; p = w.parent(p))
+                if (multiIsSelected(p)) { ancestorSelected = true; break; }
+            if (ancestorSelected) continue;
+            const auto* loc = w.component<scene::CLocal>(ent, scene::kComponentLocal);
+            if (!loc) continue;
+            fn(ent, loc->xf);
+        }
+#else
+        (void)fn;
+#endif
+    }
+
     // Records the selection's transform before a gesture. False when nothing is selected.
     bool beginTransformEdit() {
         if (!selectedXform(editBefore_)) return false;
         editBeforeValid_ = true;
+        // The rest of the selection, captured BEFORE the drag starts moving anything. The mover runs
+        // per frame and applies an incremental delta, so by the time the gesture ends the original
+        // is gone -- there is no later moment this could be read.
+        multiMoveBefore_.clear();
+#if AVER_MODULE_SCENE
+        forEachMultiMoved([this](scene::Entity e, const Transform& xf) {
+            multiMoveBefore_.push_back({editIdFor(e), xf});
+        });
+#endif
         return true;
     }
     // Closes the gesture and pushes a transform command, unless nothing actually moved.
     void endTransformEdit() {
         if (!editBeforeValid_) return;
         editBeforeValid_ = false;
+
+        // The rest of the set first, so the "did anything move at all" test below can consider them.
+        std::vector<EditCmd::AlsoMoved> also;
+#if AVER_MODULE_SCENE
+        if (!multiMoveBefore_.empty()) {
+            scene::World& w = scene::World::instance();
+            for (const auto& [id, beforeLocal] : multiMoveBefore_) {
+                const scene::Entity e = entityForEdit(id);
+                if (e == scene::kInvalidEntity || !w.valid(e)) continue;
+                const auto* loc = w.component<scene::CLocal>(e, scene::kComponentLocal);
+                if (!loc) continue;
+                if (nearlySameTransform(beforeLocal, loc->xf)) continue;
+                also.push_back({id, beforeLocal, loc->xf});
+            }
+            multiMoveBefore_.clear();
+        }
+#endif
+
         EditXform now;
         if (!selectedXform(now)) return;
-        if (nearlySameXform(editBefore_, now)) return;
+        // BOTH HALVES, because either can be the only thing that moved. An anchor pinned by a snap
+        // while the rest of the set slid is a real gesture, and returning early on the anchor alone
+        // would drop the whole record for it.
+        if (nearlySameXform(editBefore_, now) && also.empty()) return;
         EditCmd c;
         c.kind = EditCmd::Kind::Transform;
         c.before = editBefore_; c.after = now;
+        c.alsoMoved = std::move(also);
 #if AVER_MODULE_SCENE
         if (sel_ == kSelScene) c.id = editIdFor(selEntity_); else
 #endif
@@ -10277,8 +10363,33 @@ private:
     }
 
     // Applies a transform command's stored value to whichever target it names, and selects it.
-    void applyXformTo(const EditCmd& c, const EditXform& x) {
+    // True when two LOCAL transforms match to within 1e-4 on every component. The world-space twin
+    // of this is nearlySameXform; both exist because a gesture that ends where it began should push
+    // no command at all, and floating point makes "==" the wrong test for that.
+    static bool nearlySameTransform(const Transform& a, const Transform& b) {
+        auto v = [](const Vec3& p, const Vec3& q) {
+            return std::fabs(p.x-q.x) < 1e-4f && std::fabs(p.y-q.y) < 1e-4f && std::fabs(p.z-q.z) < 1e-4f;
+        };
+        return v(a.position, b.position) && v(a.scale, b.scale) &&
+               std::fabs(a.rotation.x-b.rotation.x) < 1e-4f && std::fabs(a.rotation.y-b.rotation.y) < 1e-4f &&
+               std::fabs(a.rotation.z-b.rotation.z) < 1e-4f && std::fabs(a.rotation.w-b.rotation.w) < 1e-4f;
+    }
+
+    // `undoing` picks which end of each alsoMoved pair to write. The anchor's own end is already
+    // chosen by the caller through `x`; this parameter exists because the rest of the set is stored
+    // as a before/after PAIR rather than a single value, so it cannot infer the direction from `x`.
+    void applyXformTo(const EditCmd& c, const EditXform& x, bool undoing = true) {
 #if AVER_MODULE_SCENE
+        // The rest of a multi-selection drag, restored in the same step as the anchor -- see
+        // EditCmd::alsoMoved for why this is one command and not N.
+        if (!c.alsoMoved.empty()) {
+            scene::World& w = scene::World::instance();
+            for (const EditCmd::AlsoMoved& m : c.alsoMoved) {
+                const scene::Entity e = entityForEdit(m.id);
+                if (e == scene::kInvalidEntity || !w.valid(e)) continue;
+                w.setLocalTransform(e, undoing ? m.beforeLocal : m.afterLocal);
+            }
+        }
         if (c.id) {
             const scene::Entity e = entityForEdit(c.id);
             scene::World& w = scene::World::instance();
@@ -11043,7 +11154,7 @@ private:
         if (undoStack_.empty()) return;
         EditCmd c = undoStack_.back(); undoStack_.pop_back();
         switch (c.kind) {
-            case EditCmd::Kind::Transform: applyXformTo(c, c.before); break;
+            case EditCmd::Kind::Transform: applyXformTo(c, c.before, /*undoing=*/true); break;
 #if AVER_MODULE_SCENE
             case EditCmd::Kind::Create:    destroyEntity(entityForEdit(c.id));
                                            sel_ = -1; selEntity_ = scene::kInvalidEntity; break;
@@ -11091,7 +11202,7 @@ private:
         if (redoStack_.empty()) return;
         EditCmd c = redoStack_.back(); redoStack_.pop_back();
         switch (c.kind) {
-            case EditCmd::Kind::Transform: applyXformTo(c, c.after); break;
+            case EditCmd::Kind::Transform: applyXformTo(c, c.after, /*undoing=*/false); break;
 #if AVER_MODULE_SCENE
             case EditCmd::Kind::Create:    recreateFrom(c); break;
             case EditCmd::Kind::Destroy:   destroyEntity(entityForEdit(c.id));
@@ -11979,27 +12090,21 @@ private:
                 // anchor? the centroid? each object's own?) and each answer is right for different
                 // work; picking one silently would be a worse answer than the honest gap. They still
                 // act on the anchor alone.
-                if (tool_ == Tool::Move && !multiStale()) {
+                if (tool_ == Tool::Move) {
                     const Vec3 delta = o.pos - before;
                     if (delta.x != 0.0f || delta.y != 0.0f || delta.z != 0.0f) {
+                        // THROUGH THE SHARED HELPER, which also decides what beginTransformEdit
+                        // recorded. The skip rule (not the anchor, not beneath another selected
+                        // entity -- a child would otherwise move twice, once with its parent's
+                        // transform and once on its own) used to be written out here and nowhere
+                        // else; the undo record now depends on matching it exactly, so the two read
+                        // from one place.
                         scene::World& w = scene::World::instance();
-                        for (const scene::Entity ent : multiSel_) {
-                            if (ent == selEntity_ || !w.valid(ent)) continue;
-                            // A CHILD OF SOMETHING ELSE IN THE SET WOULD MOVE TWICE -- once with its
-                            // parent's transform and once on its own. Skipping any entity whose
-                            // ancestor is also selected is what keeps a dragged hierarchy rigid.
-                            bool ancestorSelected = false;
-                            for (scene::Entity p = w.parent(ent); p != scene::kInvalidEntity;
-                                 p = w.parent(p)) {
-                                if (multiIsSelected(p)) { ancestorSelected = true; break; }
-                            }
-                            if (ancestorSelected) continue;
-                            const auto* loc = w.component<scene::CLocal>(ent, scene::kComponentLocal);
-                            if (!loc) continue;
-                            Transform t = loc->xf;
+                        forEachMultiMoved([&](scene::Entity ent, const Transform& xf) {
+                            Transform t = xf;
                             t.position += delta;
                             w.setLocalTransform(ent, t);
-                        }
+                        });
                     }
                 }
 #endif
@@ -12579,6 +12684,57 @@ private:
         multiSetSingle(a); multiToggle(b);
         w.destroy(b); w.flush();
         check(selectedEntities().size() == 1, "a destroyed entity leaves the reported selection");
+
+        // ---- UNDOING A MULTI-MOVE RETURNS THE WHOLE SET, NOT JUST THE ANCHOR -------------------
+        //
+        // THE BUG THIS PINS. The gizmo moved every non-anchor entity with a bare setLocalTransform
+        // and recorded nothing, while endTransformEdit pushed one command keyed on selEntity_. Drag
+        // twenty props, Ctrl+Z, and nineteen stayed dragged -- silent, unrepairable scene damage on
+        // an everyday gesture. Asserting the ANCHOR came back would have passed the whole time; the
+        // assertion has to be about the others, which is why it reads them by name below.
+        {
+            scene::Entity m0 = w.create("mvA"), m1 = w.create("mvB"), m2 = w.create("mvC");
+            auto place = [&](scene::Entity e, f32 x) {
+                Transform t; t.position = Vec3{x, 0.0f, 0.0f};
+                w.setLocalTransform(e, t);
+            };
+            place(m0, 0.0f); place(m1, 100.0f); place(m2, 200.0f);
+            outlinerOrder_ = {m0, m1, m2};
+            multiSetSingle(m0); multiToggle(m1); multiToggle(m2);
+            // The anchor must be one of them for the move path to run at all.
+            sel_ = kSelScene; selEntity_ = m0;
+
+            check(beginTransformEdit(), "a multi-selection opens a transform gesture");
+            // Move the anchor by hand, then the rest exactly as the gizmo does -- through the same
+            // shared helper, so this exercises the real path rather than a copy of it.
+            const Vec3 delta{0.0f, 0.0f, 500.0f};
+            Transform at = w.localTransform(m0); at.position += delta; w.setLocalTransform(m0, at);
+            forEachMultiMoved([&](scene::Entity e, const Transform& xf) {
+                Transform t = xf; t.position += delta; w.setLocalTransform(e, t);
+            });
+            endTransformEdit();
+
+            check(std::fabs(w.localTransform(m1).position.z - 500.0f) < 0.01f &&
+                  std::fabs(w.localTransform(m2).position.z - 500.0f) < 0.01f,
+                  "the non-anchor entities actually moved");
+
+            undo();
+            check(std::fabs(w.localTransform(m0).position.z) < 0.01f,
+                  "one undo returns the anchor");
+            check(std::fabs(w.localTransform(m1).position.z) < 0.01f &&
+                  std::fabs(w.localTransform(m2).position.z) < 0.01f,
+                  "and THE SAME undo returns every other entity in the set");
+
+            redo();
+            check(std::fabs(w.localTransform(m1).position.z - 500.0f) < 0.01f &&
+                  std::fabs(w.localTransform(m2).position.z - 500.0f) < 0.01f,
+                  "redo takes the whole set forward again, not just the anchor");
+
+            multiClear();
+            sel_ = -1; selEntity_ = scene::kInvalidEntity;
+            undoStack_.clear(); redoStack_.clear();
+            w.destroy(m0); w.destroy(m1); w.destroy(m2); w.flush();
+        }
 
         multiClear();
         sel_ = -1; selEntity_ = scene::kInvalidEntity;
@@ -19628,6 +19784,9 @@ private:
     EditId nextEditId_ = 1;
     EditXform editBefore_{};
     bool editBeforeValid_ = false;
+    // The rest of a multi-selection's LOCAL transforms as they were when the drag began. Only
+    // non-empty between beginTransformEdit and endTransformEdit; see EditCmd::alsoMoved.
+    std::vector<std::pair<EditId, Transform>> multiMoveBefore_;
 
     // Copy/Duplicate's source, and what Paste rebuilds from. hasScene/hasObject are set exclusively
     // of each other by copySelection() -- mirrors the existing loose pairing of sel_/selEntity_

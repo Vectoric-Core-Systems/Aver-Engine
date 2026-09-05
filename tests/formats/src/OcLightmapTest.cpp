@@ -194,6 +194,54 @@ int main() {
         check(!why.empty(), "and the rejection says why: " + why);
     }
 
+    // ---- a hostile header must be REFUSED, not allocated against ---------------------------------
+    //
+    // WHAT THIS DOES AND DOES NOT PROVE, stated because the first version of this comment claimed
+    // more than the test earns. It asserts a clean `false` + message for an absurd header. It does
+    // NOT demonstrate an integer overflow: running it with OcLightmap.cpp's size ceiling disabled
+    // still PASSES, because on a 64-bit build width*height (both u32) cannot overflow a usize, and
+    // the *4 wraps only to another enormous value that no real chunk size matches -- so the ordinary
+    // size check already rejects it. The ceiling is defence in depth for a 32-bit build and for
+    // absurd-but-representable sizes; this case guards the refusal, not a crash.
+    //
+    // BUILT BY PATCHING A REAL FILE, not by hand-assembling a container: the AVR1 header carries a
+    // CRC and per-chunk hashes, so a from-scratch forgery would be rejected by the container layer
+    // and prove nothing about this reader's own arithmetic. Taking a valid file and rewriting four
+    // bytes of the payload is what puts the hostile numbers past the container and in front of the
+    // code under test.
+    {
+        std::vector<u8> bytes;
+        const std::string hostile = tempPath("hostile.oclightmap");
+        if (readFileBytes(path, bytes)) {
+            // The header chunk's first eight bytes are width then height, little-endian. Find them
+            // by their known values (4 and 3 from the fixture) rather than by a hard-coded offset,
+            // which would silently stop testing anything if the container layout ever shifted.
+            bool patched = false;
+            for (usize i = 0; i + 8 <= bytes.size(); ++i) {
+                const u32 w = u32(bytes[i]) | (u32(bytes[i+1])<<8) | (u32(bytes[i+2])<<16) | (u32(bytes[i+3])<<24);
+                const u32 h = u32(bytes[i+4]) | (u32(bytes[i+5])<<8) | (u32(bytes[i+6])<<16) | (u32(bytes[i+7])<<24);
+                if (w == 4u && h == 3u) {
+                    for (int k = 0; k < 8; ++k) bytes[i + usize(k)] = 0xFFu;   // 4294967295 x 4294967295
+                    patched = true;
+                    break;
+                }
+            }
+            check(patched, "the fixture's width/height could be located for patching");
+            if (FILE* f = std::fopen(hostile.c_str(), "wb")) {
+                std::fwrite(bytes.data(), 1, bytes.size(), f);
+                std::fclose(f);
+            }
+            fmt::OcLightmap r;
+            std::string why;
+            // No try/catch: if this throws, the test process dies and the suite reports it, which is
+            // the correct outcome for a regression here -- a swallowed exception would let the very
+            // failure this guards against pass quietly.
+            check(!fmt::readOcLightmap(hostile, r, &why),
+                  "a header claiming a 4294967295x4294967295 atlas is refused cleanly");
+            check(!why.empty(), "and it says why rather than throwing: " + why);
+        }
+    }
+
     // ---- wrong magic ----------------------------------------------------------------------------
     {
         const std::string junk = tempPath("junk.oclightmap");

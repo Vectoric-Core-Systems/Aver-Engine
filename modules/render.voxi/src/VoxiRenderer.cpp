@@ -1243,8 +1243,13 @@ u64 VoxiRenderer::giDrawsKey() const {
         key += h;          // wrapping, and commutative: this is the whole point
         ++counted;
     }
-    // THE COUNT, mixed in rather than added, so "one more draw" can never be mistaken for "the same
-    // draws in another order". See the note above on why this is mandatory and not a nicety.
+    // THE COUNT, mixed in rather than added. IT DISTINGUISHES N DRAWS FROM N+1 AND NOTHING ELSE --
+    // the note above used to claim it also stopped "a list that gains a draw and loses a different
+    // one", and that is exactly the case it cannot help with: the length is identical either side, so
+    // this term contributes identical bits. What actually separates {A,B} from {A,C} is that two
+    // splitmix-finalised 64-bit hashes do not happen to sum alike, i.e. a ~2^-64 coincidence rather
+    // than a designed defence. Worth keeping (a pure add or remove IS caught here, cheaply) and not
+    // worth believing more of.
     key ^= counted * 1099511628211ull;
     return key;
 }

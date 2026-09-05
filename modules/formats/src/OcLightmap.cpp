@@ -209,6 +209,37 @@ bool readOcLightmap(const std::string& path, OcLightmap& out, std::string* err) 
         if (err) *err = path + ": the header describes an empty lightmap";
         return false;
     }
+
+    // A SANITY CEILING. DEFENCE IN DEPTH, NOT A CRASH FIX -- and the difference is worth writing
+    // down, because a review claimed the stronger thing and MEASURING IT SAID OTHERWISE.
+    //
+    // The claim was that `usize(width) * usize(height) * 4`, built from u32s read straight out of the
+    // file, could wrap to a SMALL value, sail past the size checks below, and then throw out of a
+    // resize -- from a function whose documented contract is to return false with `err` set. The
+    // test written to prove it (see OcLightmapTest's hostile-header case) passes with this block
+    // DISABLED, which is what settles it: on a 64-bit build width*height cannot overflow at all
+    // (both are u32, the product fits u64), and the *4 wraps only for absurd dimensions -- to a
+    // still-enormous number that no real chunk size matches, so the existing check rejects it
+    // cleanly. The reachable-crash story does not hold here.
+    //
+    // What this block DOES buy, and why it stays: a header claiming 40000x40000 is refused for six
+    // gigabytes' worth of arithmetic before anything is sized against it, the failure names the
+    // absurd number instead of a byte-count mismatch, and a 32-bit build -- where usize is 32 bits
+    // and the product genuinely can wrap small -- is covered by construction rather than by luck.
+    // 16384 on an edge is four times the largest atlas anything here produces.
+    constexpr u32 kMaxLightmapEdge = 16384;
+    constexpr u32 kMaxLightmapVerts = 1u << 28;   // 268M vertices, far past any real mesh
+    if (lm.width > kMaxLightmapEdge || lm.height > kMaxLightmapEdge) {
+        if (err) *err = path + ": the header claims a " + std::to_string(lm.width) + "x" +
+                        std::to_string(lm.height) + " atlas, past the " +
+                        std::to_string(kMaxLightmapEdge) + "-texel edge limit";
+        return false;
+    }
+    if (lm.vertexCount > kMaxLightmapVerts) {
+        if (err) *err = path + ": the header claims " + std::to_string(lm.vertexCount) +
+                        " vertices, past the supported limit";
+        return false;
+    }
     const usize wantUv  = usize(lm.vertexCount) * 2 * sizeof(f32);
     const usize wantTex = usize(lm.width) * usize(lm.height) * 4;
     if (uv->data.size() != wantUv) {

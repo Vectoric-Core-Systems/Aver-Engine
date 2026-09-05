@@ -93,7 +93,9 @@ struct ProjectDesc {
     //
     // READ EARLIER THAN EVERY OTHER KEY IN THIS STRUCT. The device is created before the editor
     // opens a project, so applying this the way the rest of RenderSettings is applied -- per frame,
-    // after load -- would be far too late to choose a device. See peekBackend().
+    // after load -- would be far too late to choose a device. The peek is inline in the sandbox's
+    // own main(), just before setBackend: search there for RENDER.BACKEND. (This comment named a
+    // `peekBackend()` helper that was never written.)
     std::string backend;        // RENDER.BACKEND  "d3d12" | "vulkan" | "d3d11"; empty = engine default
 
     // A FRAME TIME TO AIM AT, in milliseconds. <= 0 (the default) leaves quality exactly as
