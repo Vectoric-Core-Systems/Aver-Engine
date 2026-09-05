@@ -26,6 +26,9 @@
 //     init(); nothing below it re-derives a handle.
 #include "aver/rhi/vulkan/ImGuiUiBackend.hpp"
 #include "aver/core/Log.hpp"
+#include "aver/platform/FileSystem.hpp"   // userDataDir, for where the layout ini lives
+
+#include <string>
 
 #define VK_NO_PROTOTYPES
 // For vkCreateWin32SurfaceKHR, which Platform_CreateVkSurface below needs -- see its own comment
@@ -128,7 +131,16 @@ public:
         ImGui::CreateContext();
         ImGuiIO& io = ImGui::GetIO();
         io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-        io.IniFilename = nullptr;
+        // THE SAME FILE THE D3D12 BACKEND USES, on purpose: a layout is a property of the person
+        // sitting in front of the editor, not of which backend they happened to launch with. Two
+        // paths would mean dragging a panel and then losing it by passing --backend vulkan.
+        // See ImGuiUiBackend.cpp for why this is beside editor.ini and why the pointer is static.
+        static std::string s_iniPath;
+        if (s_iniPath.empty()) {
+            const std::string dir = aver::userDataDir();
+            if (!dir.empty()) s_iniPath = dir + "\\editor-layout.ini";
+        }
+        io.IniFilename = s_iniPath.empty() ? nullptr : s_iniPath.c_str();
         ImGui::StyleColorsDark();
 
         if (!ImGui_ImplWin32_Init(hwnd)) {

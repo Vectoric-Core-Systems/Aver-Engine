@@ -9910,6 +9910,17 @@ private:
     // The rows the outliner drew this frame, in draw order. Rebuilt every frame by drawOutlinerRow;
     // read only by multiRange.
     std::vector<scene::Entity> outlinerOrder_;
+
+    // Selects every row the World Outliner currently lists. The anchor becomes the FIRST row rather
+    // than the last, so a following shift-click ranges downward from the top the way a person expects
+    // after "select all" -- multiSetSingle + multiToggle would otherwise leave the anchor on whatever
+    // happened to be added last.
+    void selectAllInOutliner() {
+        if (outlinerOrder_.empty()) return;
+        multiSetSingle(outlinerOrder_.front());
+        for (usize i = 1; i < outlinerOrder_.size(); ++i) multiToggle(outlinerOrder_[i]);
+        sel_ = kSelScene; selEntity_ = outlinerOrder_.front();
+    }
 #endif
 
     bool movableSelected() const { return sel_ >= 0 && sel_ < (int)objects_.size(); }
@@ -11263,7 +11274,31 @@ private:
         if (!selectedXform(x)) return kEditorCubeHalf;
         const f32 s = std::fmax(std::fabs(x.scale.x), std::fmax(std::fabs(x.scale.y), std::fabs(x.scale.z)));
 #if AVER_MODULE_SCENE
-        if (sel_ == kSelScene) return std::fmax(1.0f, s);
+        if (sel_ == kSelScene) {
+            // THE MESH'S OWN BOUNDS, NOT ITS SCALE. This returned `max(1, s)` -- the largest scale
+            // COMPONENT -- and read no geometry at all. Almost every authored entity has scale 1, so
+            // this was 1.0 for essentially the whole scene, and focusOnSelection's
+            // `d = max(50, r/tan(30 deg)*1.6)` collapsed to a flat 50 cm. Press F on an imported
+            // building and the camera lands inside it. F is the most-pressed navigation key in any
+            // editor; it was wrong for every object bigger than a crate.
+            //
+            // The bounds were already there and already used three lines down by the placeholder
+            // branch, and by pick() for its ray test -- CMeshRenderer carries aabbMin/aabbMax in
+            // MESH space, so the half-extent is scaled into world space here the same way.
+            scene::World& w = scene::World::instance();
+            if (w.valid(selEntity_)) {
+                if (const auto* mr = w.component<scene::CMeshRenderer>(selEntity_, scene::kComponentMeshRenderer)) {
+                    const f32 ex = (mr->aabbMax[0] - mr->aabbMin[0]) * std::fabs(x.scale.x);
+                    const f32 ey = (mr->aabbMax[1] - mr->aabbMin[1]) * std::fabs(x.scale.y);
+                    const f32 ez = (mr->aabbMax[2] - mr->aabbMin[2]) * std::fabs(x.scale.z);
+                    const f32 half = 0.5f * std::fmax(ex, std::fmax(ey, ez));
+                    // A ZERO EXTENT IS NOT A TINY OBJECT, it is a mesh whose bounds were never
+                    // filled in -- fall through to the scale rather than framing a point.
+                    if (half > 1e-3f) return std::fmax(1.0f, half);
+                }
+            }
+            return std::fmax(1.0f, s);
+        }
 #endif
         if (movableSelected()) {
             const MeshObj& o = objects_[sel_];
@@ -12387,6 +12422,53 @@ private:
     void duplicateSelection() {
         const f32 delta = snapMove_ ? moveSnap_ : kDuplicateOffset;
 #if AVER_MODULE_SCENE
+        // THE WHOLE SELECTION, NOT JUST THE ANCHOR. This read selEntity_ alone, so Ctrl+D on five
+        // selected props duplicated one and silently dropped the other four -- the same
+        // "applies to the set, acts on the anchor" shape that made multi-move unundoable.
+        //
+        // ONE RECORD PER COPY, which is deleteSelection's precedent rather than multi-move's: N
+        // undos for N duplicates. A drag is one gesture whose half-undone state the author never
+        // saw; five duplicates are five objects that can reasonably be unpicked one at a time, and
+        // grouping Create commands would need a compound kind that recreates a whole set, which is
+        // a bigger change than this is worth.
+        //
+        // ANCESTORS SKIPPED for the reason the mover skips them: duplicating a parent already
+        // duplicates its children through captureSubtree, so a selected child would otherwise get a
+        // second, orphaned copy.
+        if (sel_ == kSelScene && !multiStale() && multiSel_.size() > 1) {
+            scene::World& w = scene::World::instance();
+            std::vector<scene::Entity> made;
+            for (const scene::Entity ent : multiSel_) {
+                if (!w.valid(ent)) continue;
+                bool ancestorSelected = false;
+                for (scene::Entity p = w.parent(ent); p != scene::kInvalidEntity; p = w.parent(p))
+                    if (multiIsSelected(p)) { ancestorSelected = true; break; }
+                if (ancestorSelected) continue;
+
+                EditCmd src = describeEntity(ent);
+                captureSubtree(src, ent);
+                EditXform x = src.after;
+                x.pos.x += delta; x.pos.y += delta;
+                const std::string label = makeEntityLabel(std::string(), src.snap.asset);
+                const scene::Entity e =
+                    spawnEntityFrom(src.snap, x, label, src.hadBody, src.bodyHalf, /*restoreObjectId=*/false);
+                if (e == scene::kInvalidEntity) continue;
+                spawnSubtreeUnder(e, src.subtree, /*restoreIds=*/false);
+                EditCmd c = describeEntity(e);
+                c.kind = EditCmd::Kind::Create;
+                captureSubtree(c, e);
+                pushEdit(std::move(c));
+                made.push_back(e);
+            }
+            if (made.empty()) return;
+            // The copies become the selection, so a drag straight after Ctrl+D moves what was just
+            // made -- which is what every editor does and what makes duplicate-then-place one motion.
+            multiSetSingle(made.front());
+            for (usize i = 1; i < made.size(); ++i) multiToggle(made[i]);
+            sel_ = kSelScene; selEntity_ = made.front();
+            AVER_INFO("[Editor] duplicated {} entities", made.size());
+            return;
+        }
         if (sel_ == kSelScene && selEntity_ != scene::kInvalidEntity && scene::World::instance().valid(selEntity_)) {
             EditCmd src = describeEntity(selEntity_);
             // The source's descendants, read BEFORE anything is spawned -- the copy is about to
@@ -12734,6 +12816,34 @@ private:
             sel_ = -1; selEntity_ = scene::kInvalidEntity;
             undoStack_.clear(); redoStack_.clear();
             w.destroy(m0); w.destroy(m1); w.destroy(m2); w.flush();
+        }
+
+        // ---- Select All takes the drawn order, and Ctrl+D copies the whole set ------------------
+        {
+            scene::Entity s0 = w.create("selA"), s1 = w.create("selB"), s2 = w.create("selC");
+            outlinerOrder_ = {s0, s1, s2};
+            multiClear();
+            sel_ = -1; selEntity_ = scene::kInvalidEntity;
+
+            selectAllInOutliner();
+            check(selectedEntities().size() == 3, "Select All takes every row the outliner listed");
+            check(selEntity_ == s0,
+                  "and anchors on the FIRST row, so a following shift-click ranges downward");
+
+            // Duplicate used to read selEntity_ alone: five selected props, one copy. Counting the
+            // WORLD is what catches that -- asserting the selection changed would not, because the
+            // single-entity path also reselects.
+            const usize beforeCount = w.count();
+            duplicateSelection();
+            check(w.count() == beforeCount + 3,
+                  "Ctrl+D on a set of three creates THREE copies, not one");
+            check(selectedEntities().size() == 3, "and the copies become the selection");
+            check(!multiIsSelected(s0), "leaving the originals deselected, so a drag moves the copies");
+
+            multiClear();
+            sel_ = -1; selEntity_ = scene::kInvalidEntity;
+            undoStack_.clear(); redoStack_.clear();
+            outlinerOrder_.clear();
         }
 
         multiClear();
@@ -14217,7 +14327,7 @@ private:
                 const bool assetTabActive = !levelVisible_ && assetEditors_.anyOpen();
                 if (ImGui::MenuItem(assetTabActive ? "Reset Tab Layout" : "Reset Layout")) {
                     if (assetTabActive) editor::resetActorEditorLayout();
-                    else                dockBuilt_ = false;
+                    else              { dockBuilt_ = false; dockResetRequested_ = true; }
                 }
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip(assetTabActive
@@ -14266,12 +14376,21 @@ private:
                 // Select All needs a selection SET -- selection here is two scalars and roughly ten
                 // consumers assume exactly one -- so it is disabled and says so rather than being an
                 // empty {} body that swallows the click.
-                ImGui::BeginDisabled(true);
-                ImGui::MenuItem("Select All");
+                // WAS DISABLED WITH A TOOLTIP THAT OUTLIVED ITS OWN TRUTH: "The editor selects one
+                // object at a time. Multi-selection is not built yet." Multi-selection shipped, and
+                // this kept telling people it had not -- worse than a missing feature, because it
+                // talks someone out of trying the one that exists.
+                //
+                // OVER THE OUTLINER'S DRAWN ORDER, not over World's entity list, and the difference
+                // matters: outlinerOrder_ is what the filter and the expanded folders left on screen,
+                // which is what "all" means to someone looking at it. It is also exactly what
+                // multiRange walks, so shift-click and this agree by construction.
+                ImGui::BeginDisabled(outlinerOrder_.empty());
+                if (ImGui::MenuItem("Select All", "Ctrl+A")) selectAllInOutliner();
                 ImGui::EndDisabled();
                 uiReg_.track("select.all");
-                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                    ImGui::SetTooltip("The editor selects one object at a time.\nMulti-selection is not built yet.");
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && outlinerOrder_.empty())
+                    ImGui::SetTooltip("Nothing is listed in the World Outliner to select.");
                 // BOTH, like every other deselect in this file. Clearing sel_ alone left selEntity_
                 // live; it happens to read correctly today only because every consumer tests sel_
                 // first, which is one refactor away from resurrecting a dead selection.
@@ -14402,7 +14521,35 @@ private:
         const ImVec2 dockSize(wsize.x, wsize.y - toolbarH - statusH);
         ImGui::DockSpace(dockId, ImVec2(0,0), ImGuiDockNodeFlags_PassthruCentralNode);
 
+        // DEFER TO A RESTORED LAYOUT. Now that io.IniFilename points at a real file (see the UI
+        // backend), ImGui rebuilds the dock tree from it before the first frame -- and this pass
+        // would then DockBuilderRemoveNode it straight back to the default, so the layout would be
+        // saved faithfully every exit and discarded every launch, which is worse than not saving it
+        // at all: the file would exist and appear to work.
+        //
+        // A node with children is a layout that came from somewhere. Reset Layout still forces this
+        // by clearing dockBuilt_, and that path deliberately ignores the check below -- it is the
+        // one case where overwriting a restored layout is exactly what was asked for.
+        // A node with children is a layout that came from somewhere -- the ini, restored before the
+        // first frame. Adopting it is the whole point of persisting; rebuilding over it would mean
+        // the file is written faithfully every exit and ignored every launch, which is worse than
+        // not saving at all because it would look like it worked.
+        const ImGuiDockNode* restored = ImGui::DockBuilderGetNode(dockId);
+        const bool adoptRestored = !dockBuilt_ && !dockResetRequested_ &&
+                                   restored && restored->IsSplitNode();
+        if (adoptRestored) {
+            dockBuilt_ = true;
+            // SAID ONCE, because "the layout persisted" and "the layout was silently rebuilt from
+            // the default" look identical on a first launch, when the default IS what you'd see
+            // either way. Without this line a regression here is invisible until someone notices,
+            // months later, that their panels moved back.
+            AVER_INFO("[Editor] dock layout restored from editor-layout.ini");
+        }
+
         if (!dockBuilt_ && dockSize.x > 1.0f && dockSize.y > 1.0f) {
+            // Reset Layout clears dockBuilt_ AND sets this, so it overrides the adopt above -- the
+            // one case where overwriting a restored layout is exactly what was asked for.
+            dockResetRequested_ = false;
             dockBuilt_ = true;
             ImGui::DockBuilderRemoveNode(dockId);
             ImGui::DockBuilderAddNode(dockId, ImGuiDockNodeFlags_DockSpace); // private flag, required here
@@ -20083,7 +20230,11 @@ private:
 #endif
     // 3D viewport rect, in backbuffer pixels. Latched by buildUI, consumed the next frame.
     f32 vpX_=0, vpY_=0, vpW_=1600, vpH_=900;
-    bool dockBuilt_=false;   // one-shot DockBuilder layout (nothing is persisted to an ini)
+    bool dockBuilt_=false;   // false = build the default layout on the next frame
+    // Set by View > Reset Layout so the builder overrides a layout restored from the ini.
+    // Without it, Reset would clear dockBuilt_ and the adopt-restored branch would immediately
+    // set it again -- the menu item would do nothing at all.
+    bool dockResetRequested_=false;
     // Warn ONCE about a missing icon font, not once per DPI change: applyDpi re-runs on every
     // monitor change, and a per-change warning would fill the log for one cosmetic asset.
     bool iconWarned_=false;

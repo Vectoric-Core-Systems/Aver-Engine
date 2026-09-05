@@ -8,6 +8,9 @@
 // behind (the generic descriptor-heap plumbing that has nothing to do with ImGui).
 #include "aver/rhi/d3d12/ImGuiUiBackend.hpp"
 #include "aver/core/Log.hpp"
+#include "aver/platform/FileSystem.hpp"   // userDataDir, for where the layout ini lives
+
+#include <string>
 
 #include <wrl/client.h>
 #include "imgui.h"
@@ -109,7 +112,27 @@ public:
         ImGui::CreateContext();
         ImGuiIO& io = ImGui::GetIO();
         io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-        io.IniFilename = nullptr;
+        // THE LAYOUT PERSISTS NOW, AND IT DELIBERATELY DID NOT BEFORE. `io.IniFilename = nullptr`
+        // meant every window size, dock arrangement, table column width and collapsing-header state
+        // was thrown away on exit, and a one-shot DockBuilder pass rebuilt the default each launch --
+        // so resizing the Outliner and restarting put it straight back. That was a real decision
+        // rather than an oversight (docs/EDITOR.md argued it), and it was the wrong one: it is paid
+        // on every single start, by everyone, forever.
+        //
+        // BESIDE editor.ini, not beside the executable, and for the same reason editor.ini lives
+        // there: this is per-machine, per-user, disposable state, and writing it next to a binary
+        // that may sit in Program Files fails on exactly the installs that matter. Held in a static
+        // because ImGui stores the POINTER and reads it at shutdown -- a local would dangle.
+        //
+        // THE ESCAPE HATCH ALREADY EXISTS: View > Reset Layout clears dockBuilt_ and rebuilds the
+        // default, which is what makes turning this on safe. A layout that ends up unusable is one
+        // menu item from being fixed rather than a reason to reinstall.
+        static std::string s_iniPath;
+        if (s_iniPath.empty()) {
+            const std::string dir = aver::userDataDir();
+            if (!dir.empty()) s_iniPath = dir + "\\editor-layout.ini";
+        }
+        io.IniFilename = s_iniPath.empty() ? nullptr : s_iniPath.c_str();
         ImGui::StyleColorsDark();
 
         if (!ImGui_ImplWin32_Init(hwnd)) {

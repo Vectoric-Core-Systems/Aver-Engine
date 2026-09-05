@@ -73,12 +73,24 @@ Fullscreen host window with a **pass-through central node** — the DX12 backbuf
 - Host flags: `NoTitleBar|NoResize|NoMove|NoBringToFrontOnFocus|NoNavFocus|MenuBar|NoBackground`, `WindowRounding=0`, `WindowPadding={0,0}`.
 - `DockSpace(id, {0,0}, ImGuiDockNodeFlags_PassthruCentralNode)`.
 - Default layout via `DockBuilder`, rebuilt **every launch** — Left 0.18 → **Outliner**; Right 0.24 → **Inspector**; Down 0.22 → **Console**; central node = Viewport (never covered).
-- **Nothing is persisted by `imgui.ini`.** `io.IniFilename` is set to `nullptr` in both UI
-  backends, so window sizes, dock arrangement, table column widths and collapsing-header state
-  are all discarded on exit. The one-shot `DockBuilder` pass (guarded by `dockBuilt_`) is what
-  reproduces the layout instead. Per-widget state that genuinely needs to survive is hand-rolled
-  into `editor.ini` through `EditorPrefs` — `actorEditor.leftColumn` is the pattern. Turning
-  ImGui's own persistence on is a separate decision, not an oversight.
+- **The layout persists**, to `%LOCALAPPDATA%\AverEngine\editor-layout.ini` — window sizes, dock
+  arrangement, table column widths and collapsing-header state. Both UI backends point
+  `io.IniFilename` at the SAME file, so a layout is not lost by launching with `--backend vulkan`.
+  This section used to say the opposite and argue for it ("Turning ImGui's own persistence on is a
+  separate decision, not an oversight"). It was a decision, and it was the wrong one: rebuilding the
+  default every launch is paid by everyone on every start, and an editor that forgets where you put
+  the Outliner is one nobody trusts with anything larger.
+  - The one-shot `DockBuilder` pass (guarded by `dockBuilt_`) now runs only when there is **no**
+    restored layout — a dockspace node with children is one that came from the ini. Rebuilding over
+    it would mean the file is written faithfully on exit and ignored on load, which is worse than
+    not saving at all, because it would look like it worked. A `[Editor] dock layout restored from
+    editor-layout.ini` line makes which path ran observable.
+  - **View ▸ Reset Layout** sets `dockResetRequested_` as well as clearing `dockBuilt_`, so it beats
+    the restore and rebuilds the default. That escape hatch is what makes persisting safe: a layout
+    that ends up unusable is one menu item from being fixed.
+  - Per-widget state that ImGui does not model still goes through `EditorPrefs` into `editor.ini` —
+    `actorEditor.leftColumn` is the pattern. The two files are separate on purpose: one is ImGui's
+    own format and disposable, the other is ours.
 
 Layout target:
 ```
