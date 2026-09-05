@@ -5682,9 +5682,18 @@ public:
                     else
                         e.device()->drawMesh(mesh, &wm.m[0][0], col, metallic, roughness);
                 }
-                if (sel_ == kSelScene && ent == selEntity_)
-                    selectionOutline_ = wm, selectionMesh_ = mesh, selectionMeshId_ = mr->mesh,
+                // EVERY SELECTED ENTITY, NOT ONLY THE ANCHOR. This kept one Mat4 and one mesh id,
+                // so a multi-selection was highlighted in the Outliner tree and invisible in the 3D
+                // view -- which is where the objects are. Selecting five props and dragging them
+                // showed an outline on one of the five.
+                if (sel_ == kSelScene && (ent == selEntity_ || multiIsSelected(ent))) {
+                    selectionOutline_ = wm; selectionMesh_ = mesh; selectionMeshId_ = mr->mesh;
                     hasSelection_ = true;
+                    // The anchor stays in the scalars above (other code reads them); the rest
+                    // accumulate here. Cleared with hasSelection_ at the draw site, so a stale
+                    // entry cannot outlive the frame that produced it.
+                    selectionOutlines_.push_back({wm, mr->mesh});
+                }
                 ++drawn;
             }
             // Closes "raster scene draws" HERE, at the end of the draw walk, rather than letting it
@@ -5818,10 +5827,14 @@ public:
         // copied; lines depth-test against the ray pass's own depth and sit exactly on the geometry,
         // so growing them would only lift the outline off the object it is meant to trace.
         if (hasSelection_ && maxFrames_ == 0 && !anyPlayActive() && !noEditorChrome_) {
-            if (const rhi::LineHandle lh = selectionOutlineLines(e, selectionMeshId_))
-                e.device()->drawLines(lh, &selectionOutline_.m[0][0]);
+            // One drawLines per selected entity. selectionOutlineLines caches per MESH id, so N
+            // copies of the same asset share one line buffer and this costs N draws, not N buffers.
+            for (const auto& [xf, meshId] : selectionOutlines_)
+                if (const rhi::LineHandle lh = selectionOutlineLines(e, meshId))
+                    e.device()->drawLines(lh, &xf.m[0][0]);
         }
         hasSelection_ = false;
+        selectionOutlines_.clear();
 
         // ---- THE PLAYER START'S MARKER ----
         // Queued every frame rather than kept as scene state, matching how the rest of the editor's
@@ -13600,6 +13613,25 @@ private:
             }
         }
 #endif
+        // CTRL-CLICK EXTENDS THE SELECTION, and without this the viewport DESTROYED one.
+        //
+        // A bare assignment to selEntity_ is what multiStale() watches for -- an anchor landing
+        // outside the set means "this one thing now", which is right for a plain click and wrong for
+        // every modified one. So multi-select was reachable only by clicking rows in the Outliner,
+        // and a single click anywhere in the 3D view silently collapsed it. Selecting five props in
+        // the tree and then clicking one of them in the viewport to check it dropped the other four.
+        //
+        // ONLY CTRL, NOT SHIFT. Shift-range needs a defined ORDER to range across, which the outliner
+        // has (outlinerOrder_, what multiRange walks) and a 3D view does not -- "every entity between
+        // these two" is not a question a viewport can answer. Adding it here would mean inventing an
+        // order, and an order the user cannot see is worse than no gesture.
+#if AVER_MODULE_SCENE
+        const bool extend = ImGui::GetIO().KeyCtrl;
+        if (extend && bestEnt != kInvalidId) {
+            multiToggle(static_cast<scene::Entity>(bestEnt));
+            return;
+        }
+#endif
         if (bestEnt != kInvalidId) { sel_ = kSelScene; selEntity_ = bestEnt; }
         else                       { sel_ = best;     selEntity_ = kInvalidId; }
     }
@@ -20229,6 +20261,9 @@ private:
     scene::Entity firstPersonPawn_ = scene::kInvalidEntity;
     // Latched during the scene pass so the outline draws after every surface is down.
     Mat4 selectionOutline_{}; rhi::MeshHandle selectionMesh_ = 0; bool hasSelection_ = false;
+    // Every selected entity's (world transform, mesh id) for this frame's outline pass. Rebuilt
+    // during the draw walk and cleared right after drawing, so it can never describe a stale set.
+    std::vector<std::pair<Mat4, u64>> selectionOutlines_;
     f32 sunColor_[3]={1.0f,0.96f,0.9f}, sunAmbient_=1.0f;
     f32 skyZenith_[3]={0.19f,0.42f,0.78f}, skyHorizon_[3]={0.72f,0.80f,0.90f};
     // A tint on the in-scattered sky (white = clear air), and an extinction per cm.
