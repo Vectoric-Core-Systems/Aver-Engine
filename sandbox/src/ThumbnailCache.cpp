@@ -105,6 +105,10 @@ void ThumbnailCache::CopyPass::prePass(rhi::IRenderContext& ctx) {
     const rhi::TextureHandle previewColor = owner_.preview_ ? owner_.preview_->colorTexture() : 0;
     const auto entry = owner_.entries_.find(owner_.inFlight_);
     if (previewColor == 0 || entry == owner_.entries_.end() || entry->second.tex == 0) {
+        // TRANSIENT, AND NOW RETRIED. previewColor is 0 for exactly as long as ActorPreview is
+        // rebuilding its targets, which a viewport resize does mid-browse. Leaving the entry
+        // not-ready is still right -- it has no picture in it -- and request() will pick it up again
+        // rather than treating "present" as "finished".
         owner_.inFlight_ = 0;
         return;
     }
@@ -126,6 +130,8 @@ void ThumbnailCache::CopyPass::prePass(rhi::IRenderContext& ctx) {
     // READY ONLY NOW, and the ordering matters: textureId() returns 0 until this line runs, which is
     // what stops the browser drawing one frame of an uninitialised texture before the first copy.
     entry->second.uiId = owner_.dev_->uiTextureId(entry->second.tex);
+    // A zero descriptor leaves ready false, which -- since request() now retries -- means the next
+    // pass at this asset asks the backend again instead of blanking the tile for the whole run.
     entry->second.ready = entry->second.uiId != 0;
     owner_.inFlight_ = 0;
 }
@@ -202,7 +208,16 @@ void ThumbnailCache::shutdown() {
 
 void ThumbnailCache::request(u64 assetId, rhi::MeshHandle mesh) {
     if (!ready_) return;
-    if (entries_.find(assetId) != entries_.end()) return;   // resident, or already in flight
+    // RESIDENT MEANS FINISHED, NOT MERELY PRESENT. update() creates the entry before the copy runs,
+    // so "in entries_" used to include "attempted once and failed" -- and because nothing ever
+    // erased such an entry, that asset could never be requested again for the life of the process.
+    // A tile that failed once retries, up to kMaxThumbnailAttempts, reusing the destination texture
+    // it already owns rather than churning one per attempt.
+    if (const auto it = entries_.find(assetId); it != entries_.end()) {
+        if (it->second.ready) return;                          // genuinely done
+        if (it->second.attempts >= kMaxThumbnailAttempts) return;   // given up on, and said so
+        if (inFlight_ == assetId) return;                      // this frame's copy is still to run
+    }
     for (const auto& p : pending_)
         if (p.first == assetId) return;   // already queued
 
@@ -279,7 +294,14 @@ void ThumbnailCache::update() {
     preview_->setDrawList(std::move(draws));
     preview_->frameAll();
 
-    Entry& e = entries_[assetId];   // fresh: request() already refused a duplicate assetId
+    // NOT NECESSARILY FRESH ANY MORE: request() now re-queues an entry whose copy did not
+    // finish, which is the whole point -- it keeps the destination texture it already created.
+    Entry& e = entries_[assetId];
+    ++e.attempts;
+    if (e.attempts == kMaxThumbnailAttempts) {
+        AVER_WARN("[ThumbnailCache] asset {} has not produced a thumbnail in {} attempts; it draws "
+                 "the typed glyph from here on", assetId, kMaxThumbnailAttempts);
+    }
     if (!e.tex) {
         rhi::TextureDesc td;
         td.dim = rhi::TextureDim::Tex2D;

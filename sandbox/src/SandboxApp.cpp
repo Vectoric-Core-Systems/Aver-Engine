@@ -3700,6 +3700,12 @@ public:
             meshPathById_[id] = rel;
             meshBounds_[id] = {md.boundsMin, md.boundsMax};
             meshTris_[id] = static_cast<u32>(md.indices.size() / 3);
+            // SLOT 0 FOR EVERY MESH, split or not. buildMeshParts resolves the slots of a mesh
+            // it actually splits; this covers the one it returns early on, which is the common case
+            // and was the case nothing read. Recorded even for a multi-slot mesh so the entity's own
+            // fallback is its first slot rather than nothing when a split was refused.
+            if (!md.materialSlots.empty() && !md.materialSlots[0].empty())
+                meshSlot0Material_[id] = aver_scene_material(0, md.materialSlots[0].c_str());
             buildMeshParts(e, id, md, verts, rel);
             if (md.hasSkin()) skinnedMeshIds_.insert(id);
             projectMeshIds_.push_back(id);
@@ -4096,7 +4102,7 @@ public:
                     if (p.mesh) e.device()->destroyMesh(p.mesh);
                 meshParts_.erase(pit);
             }
-            sceneMeshes_.erase(id); meshTris_.erase(id);
+            sceneMeshes_.erase(id); meshTris_.erase(id); meshSlot0Material_.erase(id);
 #if AVER_MODULE_TRIFACTOR
             meshLods_.erase(id);
             meshClusterData_.erase(id);
@@ -5007,7 +5013,12 @@ public:
                         continue;
                     }
                 }
-                const i32 mat = mr->material;
+                // THE ONE READ everything downstream keys off: surfaceMaterials_, surfaceLooks_,
+                // the PBR binding set -- and, because VoxiRenderer::submitDraw stores whatever
+                // matSet/matConstants it is handed verbatim, the TLAS instance's materialIndex, GI
+                // voxelisation and the ray-driven alpha-mask cutout too. Resolving here is what makes
+                // one fallback reach the renderer that is actually on screen.
+                const i32 mat = mr->material ? mr->material : meshDefaultMaterial(mr->mesh);
                 f32 col[4] = {0.80f, 0.80f, 0.85f, 1.0f};
                 f32 metallic = 0.0f, roughness = 0.5f;
 
@@ -6992,6 +7003,25 @@ private:
         rhi::MeshHandle mesh = 0;
         i32             material = 0;   // aver_scene_material(0, slot name); 0 = the slot named nothing
     };
+
+    // THE MESH'S OWN MATERIAL, for an entity that never named one.
+    //
+    // WHY THIS EXISTS. .ocmesh carries a materialSlots table and every importer writes it, but until
+    // now the ONLY code that read it was buildMeshParts -- whose first line is
+    // `if (md.submeshes.size() <= 1) return;`. So a multi-material mesh got its slots resolved and a
+    // SINGLE-material one got nothing: CMeshRenderer.material stayed 0, surfaceMaterials_ found
+    // nothing to map, and the entity drew with the flat grey fallback. Importing 53 foliage meshes
+    // made that obvious -- 37 of them name exactly one material, which is every plant.
+    //
+    // 0 MEANS "ASK THE MESH", NOT "NO MATERIAL". That is the same rule drawMeshParts already applies
+    // one level down (`p.material ? p.material : entityMat`), and it is why this is a fallback rather
+    // than something written into CMeshRenderer at placement: the mesh already declares its material,
+    // and copying that name into every placement would be a second copy free to drift from it. A
+    // non-zero CMeshRenderer.material stays exactly what it has always been -- an override.
+    i32 meshDefaultMaterial(u64 meshId) const {
+        const auto it = meshSlot0Material_.find(meshId);
+        return it == meshSlot0Material_.end() ? 0 : it->second;
+    }
 
     // Splits a mesh that names more than one material into one MeshHandle per slot.
     //
@@ -15672,8 +15702,12 @@ private:
                 // a panel should say out loud rather than let somebody discover.
 #if AVER_MODULE_PBR
                 if (ImGui::CollapsingHeader("Material", ImGuiTreeNodeFlags_DefaultOpen)) {
-                    const char* surfaceName = aver_scene_material_name(mr->material);
-                    const auto it = surfaceMaterials_.find(mr->material);
+                    // THE SAME FALLBACK THE DRAW USES. This panel reads mr->material directly, so
+                    // without this it would report "(none)" for an entity the renderer is happily
+                    // drawing with the mesh's own material -- a panel disagreeing with the picture.
+                    const i32 shown = mr->material ? mr->material : meshDefaultMaterial(mr->mesh);
+                    const char* surfaceName = aver_scene_material_name(shown);
+                    const auto it = surfaceMaterials_.find(shown);
                     if (it == surfaceMaterials_.end() || !it->second) {
                         ImGui::TextDisabled("Surface '%s' has no .ocmat loaded.",
                                             surfaceName && *surfaceName ? surfaceName : "(none)");
@@ -18669,6 +18703,8 @@ private:
     std::unordered_map<std::string, pbr::MaterialHandle> materialAssets_;
     // The same answer keyed by the token the scene interns, which is what a CMeshRenderer carries.
     std::unordered_map<i32, pbr::MaterialHandle> surfaceMaterials_;
+    // mesh id -> the material token its materialSlots[0] names. See meshDefaultMaterial.
+    std::unordered_map<u64, i32> meshSlot0Material_;
 #endif
 
     // ---------------- landscape (opt-in; --landscape <path>, or <levelname>.ocland beside the level) ----------------

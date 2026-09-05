@@ -118,7 +118,12 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
         // itself did not.
         bool blended = false;
 #if AVER_MODULE_PBR && AVER_MODULE_SCENE
-        authored = content.authoredFor(mr->material);
+        // THE SAME FALLBACK THE EDITOR APPLIES: 0 means "ask the mesh", not "no material".
+        // Resolved into a local rather than inline so every later read in this loop -- the
+        // blended test, the binding set, the per-draw colour -- sees the one value, the way
+        // the editor's own `mat` local does.
+        const i32 mat = mr->material ? mr->material : content.meshDefaultMaterial(mr->mesh);
+        authored = content.authoredFor(mat);
         if (authored) {
             // The packaged game's copy of the same rule. BOTH ROOTS OR NEITHER -- a predicate the
             // editor honours and the game does not is this repo's most-repeated defect shape.
@@ -133,10 +138,10 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
             // world that looks correct but uniformly dingy.
             col[0] = col[1] = col[2] = 1.0f;
             metallic = roughness = 1.0f;
-        } else if (const GameContent::SurfaceLook* look = content.lookFor(mr->material)) {
+        } else if (const GameContent::SurfaceLook* look = content.lookFor(mat)) {
             col[0] = look->col[0]; col[1] = look->col[1]; col[2] = look->col[2];
             metallic = look->metallic; roughness = look->roughness;
-        } else if (mr->material != 0) {
+        } else if (mat != 0) {
             // Neither an authored .ocmat nor a built-in SurfaceLook claimed this entity's named
             // surface -- it is about to draw the flat 0.80/0.80/0.85 gray fallback above with no
             // record anywhere that anything went wrong. This is EXACTLY the failure a prior
@@ -156,10 +161,10 @@ void drawWorld(rhi::IDevice& device, const Mat4& viewProj, GameContent& content,
             // because the token's value is process-startup-order dependent (scene_abi.h's own
             // comment on that function) and means nothing to a person reading the log.
             static std::unordered_set<i32> warnedUnresolvedMaterials;
-            if (warnedUnresolvedMaterials.insert(mr->material).second) {
+            if (warnedUnresolvedMaterials.insert(mat).second) {
                 AVER_WARN("[Game] surface '{}' has no authored .ocmat and no built-in look; "
                           "rendering the flat gray fallback (0.80, 0.80, 0.85) instead",
-                          aver_scene_material_name(mr->material));
+                          aver_scene_material_name(mat));
             }
         }
 
