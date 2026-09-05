@@ -4234,8 +4234,18 @@ public:
         e.device()->setUnlit(unlit_);
         // levelEntities_ exists only under AVER_MODULE_SCENE; with it off there is no loaded level to
         // hide the editor placeholders for, so the OR term is simply absent rather than always-false.
+        // WHETHER A LEVEL IS OPEN, not whether it has anything in it yet.
+        //
+        // This read `|| !levelEntities_.empty()`, which made the built-in Floor and Cube disappear the
+        // instant the FIRST object was added to an empty level. Reported as "drag and drop replaces the
+        // default stuff": nothing was replaced -- the dropped object appeared and the placeholders hid
+        // themselves in the same frame, which from the outside is indistinguishable.
+        //
+        // The placeholders mean "there is no level here". That is a fact about the LEVEL, not about its
+        // contents, so an empty level hides them exactly as a full one does -- and adding the first
+        // object to a level changes nothing about what else is on screen.
 #if AVER_MODULE_SCENE
-        hideEditorScene_ = playSessionActive() || !levelEntities_.empty();
+        hideEditorScene_ = playSessionActive() || !levelPath_.empty();
 #else
         hideEditorScene_ = playSessionActive();
 #endif
@@ -9355,6 +9365,18 @@ private:
 #endif
         bool hadBody = false;
         Vec3 bodyHalf{0,0,0};
+        // THE TWO AUTHORING FLAGS THAT ARE NOT COMPONENTS, and so are not in `snap`.
+        //
+        // nocollide and snapToGround are load-time instructions carried by the .ocworld PLACE record
+        // and held afterwards only in entityCollide_/entitySnapZ_ -- there is no component for
+        // captureEntity to find. destroyEntity erases both maps, and nothing put them back, so
+        // deleting a walk-through prop and pressing Ctrl+Z restored the entity while silently
+        // dropping its nocollide. The next save then wrote collide=true, and the next LOAD gave it a
+        // static body it never had: a decoration you could walk through became solid, one undo and
+        // one save later, with nothing logged.
+        bool  hadCollide = true;      // the default saveLevel writes for an entity it has no entry for
+        bool  hadSnapZ   = false;
+        f32   snapZ      = 0.0f;
         MeshObj objSnapshot{};    // CreateObj/DestroyObj payload; MeshObj is trivially copyable
 #if AVER_MODULE_PBR
         // Material payload. THE WHOLE DESC, BOTH SIDES, not the one slider that moved: a MaterialDesc
@@ -9410,6 +9432,10 @@ private:
             editor::EntitySnapshot snap;
             bool hadBody = false;
             Vec3 bodyHalf{0,0,0};
+            // See EditCmd's own copy above: not components, so not in snap.
+            bool  hadCollide = true;
+            bool  hadSnapZ   = false;
+            f32   snapZ      = 0.0f;
         };
         std::vector<DestroyedNode> subtree;
 
@@ -9595,6 +9621,15 @@ private:
             c.bodyHalf = c.after.scale;
         }
 #endif
+        // ABSENT MEANS "the default", exactly as saveLevel reads these maps: an entity created in the
+        // editor has no entry and collides. Recording the absence as the default is what makes the
+        // restore below a no-op for those, rather than inventing an entry they never had.
+        if (const auto it = entityCollide_.find(static_cast<u32>(e)); it != entityCollide_.end())
+            c.hadCollide = it->second;
+        if (const auto it = entitySnapZ_.find(static_cast<u32>(e)); it != entitySnapZ_.end()) {
+            c.hadSnapZ = true;
+            c.snapZ    = it->second;
+        }
         return c;
     }
 
@@ -9608,7 +9643,8 @@ private:
     scene::Entity spawnEntityFrom(const editor::EntitySnapshot& snap, const EditXform& xf,
                                    const std::string& label, bool hadBody, const Vec3& bodyHalf,
                                    bool restoreObjectId = true,
-                                   scene::Entity parent = scene::kInvalidEntity) {
+                                   scene::Entity parent = scene::kInvalidEntity,
+                                   bool collide = true, bool hasSnapZ = false, f32 snapZ = 0.0f) {
         scene::World& w = scene::World::instance();
         Transform t; t.position = xf.pos; t.rotation = quatFromEulerDeg(xf.rotDeg); t.scale = xf.scale;
         const scene::Entity e = editor::instantiateEntity(w, snap, t, parent, restoreObjectId);
@@ -9618,6 +9654,11 @@ private:
         }
         levelEntities_.push_back(e);
         if (!label.empty()) entityLabels_[static_cast<u32>(e)] = label;
+        // The two non-component flags, put back. Only when they differ from the default, so an entity
+        // that never had an entry does not gain one -- saveLevel treats present-and-true the same as
+        // absent, but an editor-created entity gaining a map entry would be a difference for no reason.
+        if (!collide) entityCollide_[static_cast<u32>(e)] = false;
+        if (hasSnapZ) entitySnapZ_[static_cast<u32>(e)] = snapZ;
 #if AVER_MODULE_PHYSICS
         if (hadBody && aver_phys_ready()) {
             const int32_t body = aver_phys_add_static_box(t.position.x, t.position.y, t.position.z,
@@ -9646,7 +9687,7 @@ private:
         }
 #endif
         const scene::Entity e = spawnEntityFrom(c.snap, c.after, c.label, c.hadBody, c.bodyHalf,
-                                                true, par);
+                                                true, par, c.hadCollide, c.hadSnapZ, c.snapZ);
         if (e == scene::kInvalidEntity) return;
         rebindEdit(c.id, e);
 
@@ -9681,7 +9722,8 @@ private:
             if (n.parent >= 0 && n.parent < static_cast<i32>(made.size()))
                 par = made[static_cast<usize>(n.parent)];
             const scene::Entity ce =
-                spawnEntityFrom(n.snap, n.xf, n.label, n.hadBody, n.bodyHalf, restoreIds, par);
+                spawnEntityFrom(n.snap, n.xf, n.label, n.hadBody, n.bodyHalf, restoreIds, par,
+                                n.hadCollide, n.hadSnapZ, n.snapZ);
             made.push_back(ce);
             if (restoreIds && ce != scene::kInvalidEntity) rebindEdit(n.id, ce);
         }
@@ -9818,6 +9860,14 @@ private:
             if (const auto lb = entityLabels_.find(static_cast<u32>(d)); lb != entityLabels_.end())
                 n.label = lb->second;
             n.snap = editor::captureEntity(w, d);
+            // Same two non-component flags the root carries; a subtree restored without them has the
+            // identical silent-solidify problem one level down.
+            if (const auto ci = entityCollide_.find(static_cast<u32>(d)); ci != entityCollide_.end())
+                n.hadCollide = ci->second;
+            if (const auto si = entitySnapZ_.find(static_cast<u32>(d)); si != entitySnapZ_.end()) {
+                n.hadSnapZ = true;
+                n.snapZ    = si->second;
+            }
 #  if AVER_MODULE_PHYSICS
             if (entityBodies_.find(static_cast<u32>(d)) != entityBodies_.end()) {
                 n.hadBody = true;
@@ -9861,6 +9911,12 @@ private:
             // Deleting the marker must clear the cache, or Add > Player Start keeps refusing to add
             // one on the grounds that the level already has the entity that was just destroyed.
             if (d == playerStart_) playerStart_ = scene::kInvalidEntity;
+            // AND THE SELECTION, if it named this entity. anySelected() validates the handle so a
+            // stale one reads as "nothing selected", but selEntity_ kept pointing at a dead entity --
+            // and every path that destroys without going through deleteSelection (the foliage eraser,
+            // an undone Create, a level reload) left it that way. Cleared where the destruction
+            // actually happens, so no caller can forget.
+            if (sel_ == kSelScene && d == selEntity_) { sel_ = -1; selEntity_ = scene::kInvalidEntity; }
 #if AVER_MODULE_PHYSICS
             if (const auto it = entityBodies_.find(static_cast<u32>(d)); it != entityBodies_.end()) {
                 aver_phys_remove_body(it->second);
@@ -10689,7 +10745,23 @@ private:
         viewportRay(screenX, screenY, ro, rd);
 
         f32 bestT = 1e30f; bool hit = false;
-        if (!hideEditorScene_) {
+
+        // NO TEST AGAINST THE PLACEHOLDER Floor/Cube, and that is a statement rather than an omission.
+        // They are on screen only while hideEditorScene_ is false, which is now exactly "no level is
+        // open" -- and spawnFromAssetDrop refuses a drop in that state. A loop over them here could
+        // never run. Written down because the obvious next edit is to add one.
+
+        // THE SCENE ENTITIES, ALWAYS -- and this guard being here was the whole bug.
+        //
+        // This loop used to sit inside `if (!hideEditorScene_)`, and hideEditorScene_ is true exactly
+        // WHEN THE LEVEL HAS ENTITIES. So the drop ray tested the level's objects only while the level
+        // had none: the moment there was anything to land on, every object was ignored and the drop
+        // fell through to the ground plane at Z = 0. Aim at the top of a crate, get the floor.
+        //
+        // pick() one screen away has had it right the whole time -- placeholders under the visibility
+        // guard, scene entities unconditional -- which is what this now mirrors. Two ray loops over the
+        // same world that disagreed about which objects exist.
+        {
             scene::World& w = scene::World::instance();
             const u32 n = w.count();
             for (u32 i = 0; i < n; ++i) {
@@ -10711,7 +10783,8 @@ private:
             if (std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z)) return p;
         }
 
-        // Ground plane: Z = 0.
+        // Ground plane: Z = 0. Reached only when the ray met nothing at all, now that it actually
+        // tests what is in front of it.
         if (std::fabs(rd.z) > 1e-6f) {
             const f32 t = -ro.z / rd.z;
             if (t > 0.0f) {
@@ -11110,7 +11183,18 @@ private:
             }
         }
 
-        if (levelFocused_ && !io.WantTextInput) {
+        // THE OUTLINER AND DETAILS COUNT AS "THE LEVEL", for the edit verbs.
+        //
+        // This was `levelFocused_` alone, and levelFocused_ is only true while the 3D VIEWPORT holds
+        // ImGui's keyboard focus. Clicking a row in the World Outliner -- the ordinary way to select
+        // something, and the way that names it -- moves focus to that panel, so Delete, Copy, Paste,
+        // Duplicate and even UNDO all silently stopped working. Select in the list, press Delete,
+        // nothing happens, with no message: reported as "deleting is a bit broken".
+        //
+        // NOT a blanket "any window": a text field is excluded by WantTextInput below, and the Content
+        // Browser deliberately keeps its own Delete (which deletes a FILE) -- widening this to its
+        // panel would put two different destructive meanings on one key.
+        if ((levelFocused_ || outlinerFocused_ || detailsFocused_) && !io.WantTextInput) {
             if (keybinds_.pressed(editor::CommandId::EditDelete, io))    deleteSelection();
             if (keybinds_.pressed(editor::CommandId::EditCopy, io))      copySelection();
             if (keybinds_.pressed(editor::CommandId::EditPaste, io))     pasteClipboard();
@@ -15533,6 +15617,19 @@ private:
         if (ImGui::BeginPopupContextItem(("##ctx" + std::to_string((u32)row.ent)).c_str())) {
             sel_ = kSelScene; selEntity_ = row.ent;
             if (ImGui::MenuItem("Rename", "F2")) beginOutlinerRename(row.ent);
+            // THE OTHER HALF OF WHAT A RIGHT-CLICK IS FOR. This menu offered Rename and nothing else,
+            // so the one place a person looks to delete a thing in a tree had no way to. Goes through
+            // deleteSelection() rather than destroyEntity() so it captures the subtree for undo -- the
+            // row above has already made this entity the selection.
+            // DEFERRED, NOT DONE HERE, for two reasons that both bite. TreeNodeEx has already
+            // PUSHED for a row with children, and the matching TreePop is below -- returning early
+            // from here would leave ImGui's tree stack unbalanced. And this walk holds references
+            // into `children` and `row`, which destroying an entity mid-walk invalidates. The
+            // request is answered after the whole tree is drawn.
+            if (ImGui::MenuItem("Delete", editor::chordToString(
+                    keybinds_.chordFor(editor::CommandId::EditDelete)).c_str())) {
+                outlinerDeleteRequest_ = row.ent;
+            }
             ImGui::EndPopup();
         }
         uiReg_.track(("outliner.row." + std::to_string((u32)row.ent)).c_str());
@@ -15549,6 +15646,8 @@ private:
 
     void buildOutlinerPanel() {
         ImGui::Begin("World Outliner", &showOutliner_);
+        // So the edit verbs work on a selection made HERE -- see the dispatch in handleManip.
+        outlinerFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
         if (!hideEditorScene_)
             for (int i=0;i<(int)objects_.size();++i) {
                 if (ImGui::Selectable((std::string("  ")+objects_[i].name).c_str(), sel_==i)) { sel_=i; selEntity_=kInvalidId; }
@@ -15610,6 +15709,18 @@ private:
             if (!roots.empty() && !hideEditorScene_) ImGui::Separator();
             for (const OutlinerRow* r : roots) drawOutlinerRow(*r, children, 0);
 
+            // THE DEFERRED DELETE, answered here: the tree is fully drawn, every TreePop is paired,
+            // and nothing below reads the row structures any more. Routed through deleteSelection so
+            // it captures the subtree for undo exactly as the menu and the key do.
+            if (outlinerDeleteRequest_ != scene::kInvalidEntity) {
+                const scene::Entity doomed = outlinerDeleteRequest_;
+                outlinerDeleteRequest_ = scene::kInvalidEntity;
+                if (scene::World::instance().valid(doomed)) {
+                    sel_ = kSelScene; selEntity_ = doomed;
+                    deleteSelection();
+                }
+            }
+
             // DROP HERE TO UNPARENT. Promoting something to a root can never cycle, so this target
             // needs no legality peek; pushReparent still refuses an off-level entity.
             ImGui::InvisibleButton("##outlinerRootDrop",
@@ -15638,6 +15749,7 @@ private:
 
     void buildDetailsPanel(Engine& e) {
         ImGui::Begin("Details", &showDetails_);
+        detailsFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
         if (sel_>=0 && sel_<(int)objects_.size()){
             MeshObj& o=objects_[sel_]; ImGui::TextUnformatted(o.name.c_str()); ImGui::Separator();
             if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -18615,6 +18727,12 @@ private:
     std::string matSaveStatus_;   // what the last 'Save to C#' did
     unsigned centralDock_ = 0;    // the dock node an opened asset editor lands in
     bool levelFocused_ = true;    // the Level tab holds the keyboard
+    // The two panels a selection is also made from, so the edit verbs reach a selection made
+    // there. False when their window is closed, which is correct: a hidden panel holds no focus.
+    bool outlinerFocused_ = false;
+    // A row asked to be deleted; answered after the tree walk. See drawOutlinerRow.
+    scene::Entity outlinerDeleteRequest_ = scene::kInvalidEntity;
+    bool detailsFocused_  = false;
     bool levelHovered_ = true;    // the cursor is over the Level tab and it is topmost there
     bool inputProbe_ = false;
     bool levelVisible_ = true;    // the Level tab is the selected tab
