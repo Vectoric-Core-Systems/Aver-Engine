@@ -694,6 +694,21 @@ static constexpr const char* kAssetDragDropType = "AVER_ASSET_PATH";
 // unknown length and cannot.
 static constexpr const char* kOutlinerReparentDragDropType = "AVER_OUTLINER_ENTITY";
 
+// Dragging assets BETWEEN Content Browser folders, which is a different question from dragging one
+// into the level.
+//
+// A SECOND TYPE, NOT A REUSE OF kAssetDragDropType, and the difference is what the payload may
+// contain. That one exists so the VIEWPORT never receives something it cannot place, so it is
+// filtered to .ocmesh/.ocparticle and drops folders on the floor. Moving files has no such
+// restriction -- somebody reorganising a project moves materials, textures, scripts, graphs and
+// whole folders -- so reusing it would silently move a SUBSET of what was selected and leave the
+// rest behind, which is the worst available outcome for a file operation.
+//
+// Both payloads are set from the SAME drag: ImGui allows several types per source, so one drag can
+// be placeable in the viewport and movable in the browser at once, each target taking only the
+// type it understands.
+static constexpr const char* kCbMoveDragDropType = "AVER_CB_MOVE_SET";
+
 // One placed object in the editor scene: mesh, transform, and surface parameters.
 struct MeshObj {
     std::string name;
@@ -3292,6 +3307,7 @@ public:
 #if AVER_WITH_IMGUI
         if (undoTestAutoFrames_ > 0 && --undoTestAutoFrames_ == 0) runUndoTest(e);
         if (multiSelTestFrames_ > 0 && --multiSelTestFrames_ == 0) runMultiSelectTest(e);
+        if (cbMoveTestFrames_ > 0 && --cbMoveTestFrames_ == 0) runCbMoveTest(cbMoveTestDir_);
         if (keybindTestAutoFrames_ > 0 && --keybindTestAutoFrames_ == 0) runKeybindPersistTest(keybindTestMode_);
 #endif
 #if AVER_MODULE_SCRIPTING
@@ -6396,6 +6412,7 @@ public:
     void setInputSourceTest(int n) { inputSrcFrames_ = n; }                        // --input-source-test
     void setWheelSpeedTest(int n) { wheelTestFrames_ = n; }                        // --wheel-speed-test
     void setMultiSelectTest(int n) { multiSelTestFrames_ = n; }                    // --multiselect-test
+    void setCbMoveTest(const std::string& dir) { cbMoveTestDir_ = dir; cbMoveTestFrames_ = 10; }
     void setRecaptureTest(int n)   { recapFrames_ = n; }                          // --recapture-test
     void setViewmodelTest(int n)   { vmFrames_ = n; }                             // --viewmodel-test
     void setSkinSceneDir(std::string d) { skinSceneDir_ = std::move(d); }          // --skin-scene-test <dir>
@@ -12075,6 +12092,80 @@ private:
     // directly collapse the selection instead of leaving a set the user cannot see; if that ever
     // silently stops working, Delete starts removing things nobody highlighted. That is worth a
     // witness, and this file has learned twice today what an unwitnessed control costs.
+    // --cbmove-test <dir>: exercises the Content Browser's copy/move against a scratch directory.
+    //
+    // THE FILE OPERATIONS, NOT THE DRAG. Dropping onto a folder is an ImGui gesture no headless run
+    // can perform; what can be checked is the part that actually touches the disk, which is also the
+    // part that can lose somebody's work. Untested destructive file operations are not a thing to
+    // ship into a project full of assets.
+    //
+    // WRITES ONLY UNDER THE DIRECTORY IT IS GIVEN, and creates its own fixture there.
+    void runCbMoveTest(const std::string& root) {
+        int failures = 0;
+        auto check = [&](bool cond, const char* what) {
+            if (cond) AVER_INFO("[cbmove-test] PASS: {}", what);
+            else      { AVER_ERROR("[cbmove-test] FAIL: {}", what); ++failures; }
+        };
+        namespace fs = std::filesystem;
+        std::error_code ec;
+
+        const fs::path base = fs::path(root) / "cbmove";
+        fs::remove_all(base, ec);
+        const fs::path src = base / "src";
+        const fs::path dst = base / "dst";
+        const fs::path sub = src / "sub";
+        fs::create_directories(sub, ec);
+        fs::create_directories(dst, ec);
+        auto put = [&](const fs::path& p, const char* text) {
+            std::ofstream f(p, std::ios::binary); f << text;
+        };
+        put(src / "a.ocmesh", "A");
+        put(src / "b.ocmat", "B");
+        put(sub / "inner.txt", "I");
+
+        // ---- copy leaves the original ----
+        check(cbCopyEntryTo((src / "a.ocmesh").string(), dst.string()), "copy reports success");
+        check(fs::exists(dst / "a.ocmesh", ec), "the copy landed in the destination");
+        check(fs::exists(src / "a.ocmesh", ec), "and the original is still there");
+
+        // ---- a collision is refused, not overwritten ----
+        check(!cbCopyEntryTo((src / "a.ocmesh").string(), dst.string()),
+              "copying over an existing name is REFUSED");
+        {
+            std::ifstream f(dst / "a.ocmesh", std::ios::binary);
+            std::string got; f >> got;
+            check(got == "A", "and the existing file was not clobbered");
+        }
+
+        // ---- move takes the original with it ----
+        check(cbMoveEntryTo((src / "b.ocmat").string(), dst.string()), "move reports success");
+        check(fs::exists(dst / "b.ocmat", ec), "the moved file is in the destination");
+        check(!fs::exists(src / "b.ocmat", ec), "and is GONE from the source");
+
+        // ---- a folder copies whole ----
+        check(cbCopyEntryTo(sub.string(), dst.string()), "a folder copies");
+        check(fs::exists(dst / "sub" / "inner.txt", ec), "with its contents");
+
+        // ---- the containment primitive the cycle guard rests on ----
+        check(cbIsUnder(sub.string(), src.string()), "a child is under its parent");
+        check(cbIsUnder(src.string(), src.string()), "a folder is under itself");
+        check(!cbIsUnder(src.string(), sub.string()), "a parent is NOT under its child");
+        check(!cbIsUnder(dst.string(), src.string()), "unrelated folders are not related");
+
+        // ---- and the one that stops a double move ----
+        {
+            const std::vector<std::string> in = {src.string(), (sub / "inner.txt").string()};
+            const std::vector<std::string> out = cbPruneNested(in);
+            check(out.size() == 1 && out[0] == src.string(),
+                  "dragging a folder AND something inside it moves only the folder");
+        }
+
+        fs::remove_all(base, ec);
+        AVER_INFO("[cbmove-test] RESULT: {}", failures == 0 ? "PASS" : "FAIL");
+    }
+    std::string cbMoveTestDir_;   // --cbmove-test <dir>
+    int cbMoveTestFrames_ = 0;
+
     void runMultiSelectTest(Engine& eng) {
         (void)eng;
         int failures = 0;
@@ -14352,6 +14443,12 @@ private:
     // False for engine content, which the browser mounts read-only.
     bool cbIsEditable(const std::string& path) const { return !isEnginePath(path); }
 
+    // A drop onto a folder, latched at drop time and answered by the Copy/Move prompt a frame
+    // later. See cbFolderDropTarget for why it cannot be answered where it happens.
+    std::vector<std::string> cbMoveSources_;
+    std::string              cbMoveDest_;
+    bool                     cbWantMoveOrCopy_ = false;
+
     // ---- creating a new asset in the browser ----
     // Three formats can be created here and share everything except the bytes they write, so the
     // common half is these two helpers rather than a fourth copy of the same loop. Each "New X" item
@@ -14487,6 +14584,171 @@ private:
     }
 
     // Renames a file or folder and follows the rename in the selection and the history.
+    // The drag payload for a BROWSER move: everything selected, unfiltered. Mirrors
+    // cbDragPayloadFor's "a drag starting outside the selection carries just that item" rule, because
+    // grabbing an unselected file and dragging it is unambiguously about that file.
+    std::string cbMoveDragPayloadFor(const std::string& dragged) const {
+        if (!cbIsSelected(dragged) || cbSelection_.size() <= 1) return dragged;
+        std::string blob;
+        for (const std::string& p : cbSelection_) {
+            if (!blob.empty()) blob += char(10);
+            blob += p;
+        }
+        return blob.empty() ? dragged : blob;
+    }
+
+    // True when `path` is `dir` itself or lives somewhere beneath it.
+    static bool cbIsUnder(const std::string& path, const std::string& dir) {
+        std::error_code ec;
+        const auto a = std::filesystem::weakly_canonical(std::filesystem::path(dir), ec);
+        if (ec) return false;
+        const auto b = std::filesystem::weakly_canonical(std::filesystem::path(path), ec);
+        if (ec) return false;
+        auto ai = a.begin();
+        auto bi = b.begin();
+        for (; ai != a.end(); ++ai, ++bi) {
+            if (bi == b.end() || *ai != *bi) return false;
+        }
+        return true;
+    }
+
+    // A drop target on a folder, offered only when the drop would mean something.
+    //
+    // PEEKS BEFORE IT OPENS, the idiom drawOutlinerDropTarget uses to refuse a reparent that would
+    // make a cycle: a target that must be rejected is better never LIT than lit and then refused,
+    // because the highlight is the promise. Declines three cases -- the folder the items already live
+    // in (a no-op), a dragged folder onto itself, and a dragged folder onto its own descendant, which
+    // would move a directory inside itself.
+    void cbFolderDropTarget(const std::string& folderPath) {
+        const ImGuiPayload* peek = ImGui::GetDragDropPayload();
+        if (!peek || !peek->IsDataType(kCbMoveDragDropType) || !peek->Data) return;
+        if (!cbIsEditable(folderPath)) return;   // engine content is read-only
+        const std::vector<std::string> srcs =
+            editor::splitDropPayload(std::string(static_cast<const char*>(peek->Data)));
+        if (srcs.empty()) return;
+
+        bool anyUseful = false;
+        for (const std::string& sp : srcs) {
+            std::error_code ec;
+            const std::filesystem::path p(sp);
+            if (p.parent_path().string() == folderPath) continue;                     // already here
+            if (std::filesystem::is_directory(p, ec) && cbIsUnder(folderPath, sp)) return;  // into itself
+            anyUseful = true;
+        }
+        if (!anyUseful) return;
+
+        if (!ImGui::BeginDragDropTarget()) return;
+        if (const ImGuiPayload* pl = ImGui::AcceptDragDropPayload(kCbMoveDragDropType)) {
+            if (pl->Data) {
+                // LATCHED, NOT ACTED ON. A modal cannot open from inside a drag -- ImGui is mid
+                // gesture and the popup would fight it -- so this records the request and
+                // cbFileOpModals opens the prompt on a later frame, outside every child window. The
+                // same shape as cbWantRename_ and outlinerDeleteRequest_.
+                cbMoveSources_ = editor::splitDropPayload(std::string(static_cast<const char*>(pl->Data)));
+                cbMoveDest_ = folderPath;
+                cbWantMoveOrCopy_ = true;
+            }
+        }
+        ImGui::EndDragDropTarget();
+    }
+
+    // Drops any dragged path that lives inside another dragged FOLDER.
+    //
+    // WHY: a directory rename or copy carries its contents with it, so a selection holding both a
+    // folder and something inside it would move the child TWICE -- once with its parent, then again
+    // from a path that no longer exists, reporting a failure for an operation that in fact succeeded.
+    // Filtering first is cheaper and clearer than teaching the loop to forgive it.
+    std::vector<std::string> cbPruneNested(const std::vector<std::string>& in) const {
+        std::vector<std::string> out;
+        for (const std::string& p : in) {
+            bool nested = false;
+            for (const std::string& q : in) {
+                if (p == q) continue;
+                std::error_code ec;
+                if (std::filesystem::is_directory(std::filesystem::path(q), ec) && cbIsUnder(p, q)) {
+                    nested = true;
+                    break;
+                }
+            }
+            if (!nested) out.push_back(p);
+        }
+        return out;
+    }
+
+    // Copies one entry into `destDir`. Refuses a collision rather than overwriting, matching
+    // cbRenameEntry and importAsset -- clobbering somebody's file is not a thing to do quietly.
+    bool cbCopyEntryTo(const std::string& src, const std::string& destDir) {
+        std::error_code ec;
+        const std::filesystem::path s(src);
+        const std::filesystem::path d = std::filesystem::path(destDir) / s.filename();
+        if (std::filesystem::exists(d, ec)) {
+            cbStatus_ = "'" + s.filename().string() + "' is already in that folder";
+            return false;
+        }
+        if (std::filesystem::is_directory(s, ec))
+            std::filesystem::copy(s, d, std::filesystem::copy_options::recursive, ec);
+        else
+            std::filesystem::copy_file(s, d, ec);
+        if (ec) { cbStatus_ = "Copy failed: " + ec.message(); return false; }
+        cbInvalidate(destDir);
+        return true;
+    }
+
+    // Moves one entry into `destDir`, and repairs what pointed at its old path.
+    bool cbMoveEntryTo(const std::string& src, const std::string& destDir) {
+        std::error_code ec;
+        const std::filesystem::path s(src);
+        const std::filesystem::path d = std::filesystem::path(destDir) / s.filename();
+        if (!cbIsEditable(src)) { cbStatus_ = "Engine content cannot be moved"; return false; }
+        if (std::filesystem::exists(d, ec)) {
+            cbStatus_ = "'" + s.filename().string() + "' is already in that folder";
+            return false;
+        }
+        std::filesystem::rename(s, d, ec);
+        if (ec) { cbStatus_ = "Move failed: " + ec.message(); return false; }
+        // BOTH FOLDERS, which is the one thing no existing helper has to do: rename, duplicate and
+        // create all stay put, so they invalidate one listing. A move empties one and fills another,
+        // and forgetting the source leaves a ghost tile behind that opens nothing.
+        cbInvalidate(s.parent_path().string());
+        cbInvalidate(destDir);
+        // The same bookkeeping cbRenameEntry does, for the same reason: here the path IS the identity.
+        if (cbSelectedDir_ == src)  cbSelectedDir_ = d.string();
+        if (cbSelectedFile_ == src) cbSelectedFile_ = d.string();
+        for (std::string& sp : cbSelection_) if (sp == src) sp = d.string();
+        cbRewriteHistory(src, d.string());
+        return true;
+    }
+
+    // Content-relative, forward-slashed: the form a level's PLACE record and sceneMeshes_ both key
+    // on. Returns the input unchanged when it is not under the content root, which simply means no
+    // level can be naming it.
+    std::string cbRelativeToContent(const std::string& abs) const {
+        if (!project_.valid()) return abs;
+        std::error_code ec;
+        const auto rel = std::filesystem::relative(std::filesystem::path(abs),
+                                                   std::filesystem::path(project_.contentDir()), ec);
+        if (ec || rel.empty()) return abs;
+        std::string out = rel.generic_string();
+        return out;
+    }
+
+    // Run after a copy or a move, whichever way it went.
+    //
+    // A MESH RELOAD IS NEEDED FOR BOTH, which is easy to get wrong by assuming only a move matters.
+    // sceneMeshes_ is keyed by fnv1a64 of the content-relative path, so a COPY creates a NEW id that
+    // nothing has registered -- its tile would draw the type glyph and dragging it into the level
+    // would find no mesh. A move invalidates the old id the same way.
+    void cbAfterMoveOrCopy(const std::vector<std::string>& srcs) {
+        for (const std::string& sp : srcs) {
+            const std::string ext = lowerExt(std::filesystem::path(sp));
+            if (ext == ".ocmesh" || ext == ".ocparticle") { wantMeshReload_ = true; break; }
+            std::error_code ec;
+            if (std::filesystem::is_directory(std::filesystem::path(sp), ec)) { wantMeshReload_ = true; break; }
+        }
+        cbMoveSources_.clear();
+        cbMoveDest_.clear();
+    }
+
     void cbRenameEntry(const std::string& from, const std::string& newName) {
         if (newName.empty()) return;
         std::error_code ec;
@@ -14743,6 +15005,7 @@ private:
             ImGui::PushID(r.label);
             const bool open = ImGui::TreeNodeEx(r.label, rootFlags);
             if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) cbNavigate(r.path);
+            cbFolderDropTarget(r.path);
             if (open) { drawFolderTree(r.path); ImGui::TreePop(); }
             ImGui::PopID();
         }
@@ -14829,6 +15092,82 @@ private:
         if (cbWantDelete_)    { ImGui::OpenPopup("cbDelete");    cbWantDelete_ = false; }
         if (cbWantNewFolder_) { ImGui::OpenPopup("cbNewFolder"); cbWantNewFolder_ = false; }
         if (cbWantImport_)    { ImGui::OpenPopup("Import Asset"); cbWantImport_ = false; }
+
+        if (cbWantMoveOrCopy_) { ImGui::OpenPopup("cbMoveOrCopy"); cbWantMoveOrCopy_ = false; }
+
+        // COPY HERE / MOVE HERE / CANCEL, which is what a drop onto a folder asks in Unreal and in
+        // every file manager. Deliberately NOT a silent move: a drag is easy to do by accident, and
+        // the difference between copying and moving an asset is the difference between a duplicate
+        // and a broken reference. Asking costs one click and removes a whole class of "where did my
+        // file go".
+        if (ImGui::BeginPopupModal("cbMoveOrCopy", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            const std::vector<std::string> srcs = cbPruneNested(cbMoveSources_);
+            ImGui::TextDisabled("To  %s", std::filesystem::path(cbMoveDest_).filename().string().c_str());
+            ImGui::Separator();
+
+            // The names, capped: a hundred-file drag should not grow a modal taller than the screen.
+            const usize kShow = 12;
+            for (usize i = 0; i < srcs.size() && i < kShow; ++i)
+                ImGui::BulletText("%s", std::filesystem::path(srcs[i]).filename().string().c_str());
+            if (srcs.size() > kShow)
+                ImGui::TextDisabled("   ...and %d more", static_cast<int>(srcs.size() - kShow));
+
+            // WHAT A MOVE WOULD COST, checked in memory only. A level stores a placement's asset as a
+            // content-relative PATH and hashes that string for the id, so moving a mesh a level places
+            // leaves that placement pointing at nothing -- it simply stops drawing, with no error. The
+            // engine cannot cheaply rewrite every level in the project, so it says so instead of
+            // pretending. A COPY needs none of this: the original stays put.
+            int referenced = 0;
+#if AVER_MODULE_SCENE
+            {
+                scene::World& w = scene::World::instance();
+                for (const std::string& sp : srcs) {
+                    // The id IS the hash of the content-relative path -- see loadProjectMeshes, which
+                    // registers every mesh under exactly this. Hashing here rather than looking up a
+                    // reverse map keeps the two in step by construction: if the keying ever changes,
+                    // this breaks loudly at the same line rather than quietly disagreeing.
+                    const u64 id = fnv1a64(std::string_view(cbRelativeToContent(sp)));
+                    if (sceneMeshes_.find(id) == sceneMeshes_.end()) continue;
+                    const u32 n = w.count();
+                    for (u32 i = 0; i < n; ++i) {
+                        const scene::Entity ent = w.at(i);
+                        if (!w.valid(ent)) continue;
+                        const auto* mr = w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
+                        if (mr && mr->mesh == id) { ++referenced; break; }
+                    }
+                }
+            }
+#endif
+            if (referenced > 0) {
+                ImGui::Separator();
+                ImGui::TextWrapped("Moving will break %d placement(s) in the open level - a level names "
+                                   "an asset by its path. Copy is safe.", referenced);
+            }
+
+            ImGui::Separator();
+            if (ImGui::Button("Copy Here", ImVec2(120.0f * dpi_, 0))) {
+                int ok = 0;
+                for (const std::string& sp : srcs) if (cbCopyEntryTo(sp, cbMoveDest_)) ++ok;
+                if (ok) cbStatus_ = "Copied " + std::to_string(ok) + " item(s)";
+                cbAfterMoveOrCopy(srcs);
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Move Here", ImVec2(120.0f * dpi_, 0))) {
+                int ok = 0;
+                for (const std::string& sp : srcs) if (cbMoveEntryTo(sp, cbMoveDest_)) ++ok;
+                if (ok) cbStatus_ = "Moved " + std::to_string(ok) + " item(s)";
+                cbAfterMoveOrCopy(srcs);
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(100.0f * dpi_, 0)) ||
+                ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+                cbMoveSources_.clear();
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
 
         if (ImGui::BeginPopupModal("cbRename", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
             ImGui::TextDisabled("Rename %s", cbContextIsDir_ ? "folder" : "file");
@@ -14966,6 +15305,9 @@ private:
             if (cbSelectedDir_ == full) flags |= ImGuiTreeNodeFlags_Selected;
             const bool open = ImGui::TreeNodeEx(name.c_str(), flags);
             if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) cbNavigate(full);
+            // The tree is the other half of the gesture: dragging to a folder you can SEE but are not
+            // currently inside is the whole point, and the grid only shows the current folder.
+            cbFolderDropTarget(full);
             if (open) { drawFolderTree(full); ImGui::TreePop(); }
         }
     }
@@ -15352,14 +15694,27 @@ private:
                     }
                     ImGui::PopStyleColor(3);
                     const bool hot = ImGui::IsItemHovered();
-                    // Only placeable assets start a drag (see isPlaceableAssetExt/spawnFromAssetDrop),
-                    // so the viewport drop target never has to reject a payload it received.
-                    if (!e.isDir && isPlaceableAssetExt(lowerExt(e.path)) && ImGui::BeginDragDropSource()) {
-                        const std::string blob = cbDragPayloadFor(e.full);
-                        ImGui::SetDragDropPayload(kAssetDragDropType, blob.c_str(), blob.size() + 1);
-                        ImGui::TextUnformatted(cbDragLabel(e.name, blob).c_str());
+                    // EVERY ENTRY IS DRAGGABLE, folders included. This used to be gated on "placeable
+                    // in the viewport", which is the right question for the VIEWPORT and the wrong one
+                    // for the browser: a folder could not be dragged at all, and a selection holding
+                    // one silently left it behind. Two payloads now ride the same drag, each target
+                    // taking the type it understands -- so viewport placement is unchanged while the
+                    // browser gets the whole, unfiltered selection.
+                    if (ImGui::BeginDragDropSource()) {
+                        if (!e.isDir && isPlaceableAssetExt(lowerExt(e.path))) {
+                            const std::string blob = cbDragPayloadFor(e.full);
+                            ImGui::SetDragDropPayload(kAssetDragDropType, blob.c_str(), blob.size() + 1);
+                        }
+                        const std::string moveBlob = cbMoveDragPayloadFor(e.full);
+                        ImGui::SetDragDropPayload(kCbMoveDragDropType, moveBlob.c_str(), moveBlob.size() + 1);
+                        // The label is emitted unconditionally now: it is the drag's only visual, and
+                        // a folder drag with no preview looks like nothing is happening.
+                        ImGui::TextUnformatted(cbDragLabel(e.name, moveBlob).c_str());
                         ImGui::EndDragDropSource();
                     }
+                    // A FOLDER TILE ACCEPTS A DROP. Registered right after the Selectable so it binds
+                    // to that widget's rect -- the full card -- rather than to whatever is drawn next.
+                    if (e.isDir) cbFolderDropTarget(e.full);
                     if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", e.name.c_str());
                     cbItemContextMenu(e.full, e.name, e.isDir);
                     // ---- the card ----
@@ -15485,12 +15840,17 @@ private:
                 }
                 // Only placeable assets start a drag (see isPlaceableAssetExt/spawnFromAssetDrop),
                 // so the viewport drop target never has to reject a payload it received.
-                if (!e.isDir && isPlaceableAssetExt(lowerExt(e.path)) && ImGui::BeginDragDropSource()) {
-                    const std::string blob = cbDragPayloadFor(e.full);
-                    ImGui::SetDragDropPayload(kAssetDragDropType, blob.c_str(), blob.size() + 1);
-                    ImGui::TextUnformatted(cbDragLabel(e.name, blob).c_str());
+                if (ImGui::BeginDragDropSource()) {   // see the gallery's note: folders drag too
+                    if (!e.isDir && isPlaceableAssetExt(lowerExt(e.path))) {
+                        const std::string blob = cbDragPayloadFor(e.full);
+                        ImGui::SetDragDropPayload(kAssetDragDropType, blob.c_str(), blob.size() + 1);
+                    }
+                    const std::string moveBlob = cbMoveDragPayloadFor(e.full);
+                    ImGui::SetDragDropPayload(kCbMoveDragDropType, moveBlob.c_str(), moveBlob.size() + 1);
+                    ImGui::TextUnformatted(cbDragLabel(e.name, moveBlob).c_str());
                     ImGui::EndDragDropSource();
                 }
+                if (e.isDir) cbFolderDropTarget(e.full);
                 cbItemContextMenu(e.full, e.name, e.isDir);
                 ImGui::PopID();
             }
@@ -21991,6 +22351,7 @@ Application* createApplication(int argc, char** argv) {
     int inputSourceArg = 0;
     int wheelSpeedArg = 0;
     int multiSelArg = 0;
+    const char* cbMoveArg = nullptr;
     int recaptureArg = 0;
     int viewmodelArg = 0;
     // --gpu-timing takes no value, so it's matched in the i+1<argc loop below only incidentally --
@@ -22005,6 +22366,7 @@ Application* createApplication(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--input-source-test"))    inputSourceArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--wheel-speed-test"))     wheelSpeedArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--multiselect-test"))     multiSelArg = std::atoi(argv[i + 1]);
+        if (!std::strcmp(argv[i], "--cbmove-test"))          cbMoveArg = argv[i + 1];
         if (!std::strcmp(argv[i], "--recapture-test"))       recaptureArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--viewmodel-test"))       viewmodelArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--refraction"))           refraction = std::atoi(argv[i + 1]);
@@ -22913,6 +23275,7 @@ Application* createApplication(int argc, char** argv) {
     if (inputSourceArg > 0) app->setInputSourceTest(inputSourceArg);
     if (wheelSpeedArg > 0) app->setWheelSpeedTest(wheelSpeedArg);
     if (multiSelArg > 0) app->setMultiSelectTest(multiSelArg);
+    if (cbMoveArg) app->setCbMoveTest(cbMoveArg);
     if (recaptureArg > 0) app->setRecaptureTest(recaptureArg);
     if (viewmodelArg > 0) app->setViewmodelTest(viewmodelArg);
 #endif
