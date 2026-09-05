@@ -225,8 +225,12 @@ def make_jungle_ground(out_dir, rng):
     litter = fbm(5, 48, rng)                    # leaf-litter grain, centimetres
     grit   = fbm(3, 160, rng)                   # fine speckle, breaks up the mip chain
 
-    soil = np.array([0.135, 0.105, 0.075], dtype=np.float32)   # wet earth, deliberately dark
-    moss = np.array([0.115, 0.170, 0.070], dtype=np.float32)   # damp moss, no brighter than the soil
+    # BRIGHTER THAN "REALISTIC" WET EARTH, on purpose. Measured: 0.135 soil under this project's sky
+    # renders very nearly black, and a ground plane a level is built on has to be legible before it is
+    # accurate -- you cannot place anything against a surface you cannot see. These are dry-earth
+    # values, which is also what a jungle floor in daylight actually reads as once it is not sodden.
+    soil = np.array([0.290, 0.230, 0.165], dtype=np.float32)
+    moss = np.array([0.230, 0.310, 0.140], dtype=np.float32)   # damp moss, still no brighter than soil in R
 
     # Moss where the ground is LOW and the broad field agrees; the exponent keeps it in patches
     # rather than smearing it over everything.

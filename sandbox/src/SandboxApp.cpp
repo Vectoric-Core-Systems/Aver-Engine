@@ -2953,7 +2953,14 @@ public:
             }
 
             // F frames the selection at a distance derived from its radius.
-            if (levelFocused_ && !io.WantCaptureKeyboard &&
+            //
+            // THE OUTLINER AND DETAILS COUNT, for the reason the edit verbs below do: levelFocused_ is
+            // true only while the 3D VIEWPORT holds ImGui's keyboard focus, and clicking a row in the
+            // World Outliner -- the ordinary way to pick the thing you then want to look at -- moves
+            // focus to that panel. Select in the list, press F, nothing happens. Reported as "press F
+            // to focus is broken", and it is the identical gate that had Delete and Undo silently
+            // doing nothing from the same panel.
+            if ((levelFocused_ || outlinerFocused_ || detailsFocused_) && !io.WantCaptureKeyboard &&
                 keybinds_.pressed(editor::CommandId::ViewFrameSelected, io) && anySelected()) {
                 EditXform x;
                 if (selectedXform(x)) {
