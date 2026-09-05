@@ -161,11 +161,35 @@ int32_t aver_audio_playing(int32_t voice);
 void    aver_audio_set_voice_volume(int32_t voice, float v);
 void    aver_audio_set_voice_position(int32_t voice, float x, float y, float z);
 void    aver_audio_set_listener(const float* pos3, const float* forward3, const float* up3);
-void    aver_audio_set_bus_volume(int32_t bus, float v);   // master / sfx / music / voice
+void    aver_audio_set_bus_volume(int32_t bus, float v);   // sfx / music / voice / ui
 int32_t aver_audio_underruns(void);                        // 0 is the only acceptable value
 ```
 
 Buses are named constants, not handles — there are four and they are the same four in every game.
+
+**AS SHIPPED, and two details of this sketch did not survive contact.** The signatures above take a
+path; the real `aver_audio_play` takes a `sound` handle from `aver_audio_load`, so the same file is
+decoded once however many call sites play it. And the four buses are **sfx, music, voice and ui** —
+the comment above said "master" because master is not a bus at all, it is
+`aver_audio_master_volume()`, applied after the four are summed.
+
+They are named on all three sides now, and pinned on all three: `aver::audio::Bus` (`Sound.hpp`),
+`AVER_AUDIO_BUS_*` (`audio_abi.h`) and `Aver.Framework.Bus` (`Audio.cs`). `AudioAbi.cpp`
+`static_assert`s the first two against each other — including `Bus::Count == 4`, so adding a bus
+without its macro fails to compile — and `tests/abi/src/AbiEnumTest.cpp` compares the third.
+
+From a script:
+
+```csharp
+Sound step = Audio.Load("Content/Sounds/step.ocsnd");
+Audio.Play(step, volume: 0.8f, bus: Bus.Sfx);
+Audio.SetBusVolume(Bus.Music, 0.3f);        // what a settings slider drives
+Audio.MasterVolume = 0.9f;                  // NOT a bus; applied after the four are summed
+```
+
+An unrecognised bus is folded to `Sfx` by the native side rather than rejected — an ABI must not
+trust its caller. The one place an out-of-range value can still arrive is a **Set Bus Volume graph
+node**, whose bus pin is an integer someone typed, and that path logs a warning naming the four.
 
 `docs/ABI.md` gains a section 11 and its counts move again.
 

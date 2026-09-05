@@ -1061,7 +1061,7 @@ Everything below is what the audit found unenforced, unchecked, untested or unst
 - **`aver_fw_scene_abi_matches()` must keep genuinely calling into Aver.Scene** or the check becomes a tautology (`framework_abi.h:70-77`). It does today (`FrameworkAbi.cpp:376`), but nothing in the build enforces its presence — and the header's supporting argument, that the framework would otherwise import nothing from the scene, no longer holds: `FrameworkAbi.cpp:13-15` includes the scene's C++ headers and `:36` calls `World::instance()`.
 - **Read-only fields are enforced in code but stated in no header.** Six setters reject them (`SceneAbi.cpp:146, 169, 193, 215, 243, 268`); the flags are registered at `Builtins.cpp:44, 52, 63, 76, 93`; the only prose is `modules/scene/README.md:15-16`. `scene_abi.h` never uses the words, so a binding author reading only the header cannot know that a 0 from a setter may mean "this field is not yours to write". See §3 — and note that on `CHierarchy` the flag is what stands between a script and an unbounded loop in `composeChain()`/`worldMatrix()` (`SceneAbi.cpp:240-242`).
 
-### Hand-mirrored constants — twenty-one checked, three that a text comparison cannot reach
+### Hand-mirrored constants — twenty-two checked, two that a text comparison cannot reach
 When this audit was written the headers claimed these were "pinned" and nothing executable pinned
 them. **`tests/abi/src/AbiEnumTest.cpp` closed most of the gap since**: it reads the C headers and the
 `.cs` files as text and compares each group by normalised name, so adding a member to both sides needs
@@ -1072,7 +1072,8 @@ signatures* — return type, parameter types, parameter names, in order.
 of these, long after `AbiEnumTest` had started checking eight. Corrected, it then listed *one*
 remaining gap — because it only ever listed the pairs somebody had happened to notice. A sweep of
 every ABI header against every C# mirror found **fourteen** unchecked pairs, not one. All fourteen are
-now checked, and the three genuinely uncheckable cases are named below rather than left off.
+now checked, a fifteenth was closed by writing the mirror that was missing, and the two genuinely
+uncheckable cases are named below rather than left off.
 
 The lesson is the table's own: a list of known gaps is not a list of gaps. What follows is derived
 from `kGroups` in `tests/abi/src/AbiEnumTest.cpp`, which is the thing that actually runs.
@@ -1100,17 +1101,37 @@ from `kGroups` in `tests/abi/src/AbiEnumTest.cpp`, which is the thing that actua
 | 19 | `AVER_UI_LAYER_*` (`ui_abi.h`) | `Aver.UI/Hud.cs` `Layer` | `AbiEnumTest` |
 | 20 | `AVER_SCRIPT_LOG_*` (`scripting_abi.h`) and `aver::LogLevel` (`Log.hpp`, by POSITION) | `Aver.Scripting/Log.cs` `Level` | `AbiEnumTest` |
 | 21 | `aver::AbiError` (`core/ErrorCodes.hpp`) | `Aver.Physics` `PhysicsError`, `Aver.Scene` `SceneError` | `AbiEnumTest` — all three compared |
-| 22 | `AVER_AUDIO_BUS_*` (`audio_abi.h`) | **no C# mirror exists** | n/a — see below |
+| 22 | `AVER_AUDIO_BUS_*` (`audio_abi.h`) | `Aver.Framework/Audio.cs` `Bus` | `AbiEnumTest` — see below |
 | 23 | `AVER_SCRIPT_OK` / `_ERR_CONTRACT` / `_ERR_MANAGED_FAULT` (`scripting_abi.h`) | three private fields of `HostBridge` | **nothing** — see below |
 
-### The three that a text comparison cannot reach
+### The audio buses: the mirror was missing, not drifting
+
+This pair was listed here as unreachable because **there was no C# side at all** — `Audio.Play` and
+`SetBusVolume` took a bare `int bus = 0`, so a script naming a bus wrote the number. That is worth
+separating from the two below it: those cannot be checked, this one had nothing to check.
+
+The two native halves have been pinned to each other by `static_assert` since they were written —
+`AudioAbi.cpp` is the one translation unit that includes both `audio_abi.h` and `Sound.hpp`, and it
+asserts all four values *and* `Bus::Count == 4`, so adding a bus without its macro fails to compile.
+That file's own comment names the failure those asserts cannot reach:
+
+> every managed `SetBusVolume(1, ...)` meant for Music keeps compiling and starts moving whatever
+> landed in that slot, with no error anywhere
+
+`Aver.Framework.Bus` is that third copy, and row 22 is what pins it. `Play`, `PlayAt`, `PlayFile`,
+`GetBusVolume` and `SetBusVolume` now take `Bus` rather than `int`.
+
+**An out-of-range value is still folded to Sfx, not rejected.** `busOf` on the native side does that
+deliberately, because an ABI must not trust its caller, and throwing on the managed side would make
+one call behave differently depending on which language made it. The one place an out-of-range bus
+can still arrive is a **graph pin** — an integer a person typed into a Set Bus Volume node — so
+`GraphInterop.BusOfPin` logs a warning there. The behaviour is unchanged; it is no longer silent.
+
+### The two that a text comparison cannot reach
 
 These are not oversights, and none of them is one `kGroups` row away. Each is here so the list above
 can be read as complete.
 
-- **`AVER_AUDIO_BUS_*` has no C# mirror at all.** `Aver.Framework/Audio.cs`'s `Play`/`PlayAt` take a
-  bare `int bus = 0` with no named constants, so there is nothing to drift *from*. That is a missing
-  API, not a mirror gap: a script naming a bus has to write the integer.
 - **`AVER_SCENE_KIND_*`'s C# side is not a type.** `GraphCompiler.cs` declares two of the nine as
   private `const int` fields on the compiler class, and `HostBridge.cs`'s `SceneKindOf` is a `switch`
   *expression* mapping three `PinType`s to bare literals with the constant named only in a trailing

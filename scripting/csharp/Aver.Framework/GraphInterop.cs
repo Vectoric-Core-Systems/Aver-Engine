@@ -651,13 +651,27 @@ internal static class GraphInterop
     // native-side (the same path returns the same handle without decoding again), so calling these
     // every time the node runs costs a dictionary probe, not a decode.
 
+    /// <summary>Turns a graph's raw int pin into a <see cref="Bus"/>, saying so when it is not one.</summary>
+    ///
+    /// <remarks>THE ONE PLACE AN OUT-OF-RANGE BUS CAN ARRIVE. Every other caller now names a bus
+    /// through the enum, but a graph pin is an integer a person typed into a node. Native
+    /// <c>busOf</c> folds anything it does not recognise into Sfx and is right to -- but silently, so
+    /// a Set Bus Volume node set to 7 moves the SFX slider and nothing anywhere says why. This does
+    /// not change that behaviour, it just stops it being silent.</remarks>
+    private static Bus BusOfPin(int bus, string node)
+    {
+        if (System.Enum.IsDefined(typeof(Bus), bus)) return (Bus)bus;
+        Aver.Scripting.Log.Warn($"[{node}] bus {bus} is not one of Sfx(0)/Music(1)/Voice(2)/Ui(3); it plays on Sfx.");
+        return Bus.Sfx;
+    }
+
     /// <summary>PlaySound's own surface: load-by-path then play flat, as one scalar call. Returns
     /// the VOICE handle so a graph can stop or steer it later, and 0 when there is no audio device
     /// at all -- which is a supported configuration, not an error (see Audio's own comment).</summary>
     internal static bool PlaySoundForGraph(string path, float volume, float pitch, bool looping, int bus,
                                            out int voice)
     {
-        Voice v = Audio.PlayFile(path, volume, pitch, looping, bus);
+        Voice v = Audio.PlayFile(path, volume, pitch, looping, BusOfPin(bus, "PlaySound"));
         voice = v.Handle;
         return v.IsValid;
     }
@@ -668,7 +682,8 @@ internal static class GraphInterop
                                               float volume, float pitch, bool looping, int bus,
                                               float innerCm, float outerCm, out int voice)
     {
-        Voice v = Audio.PlayAt(Audio.Load(path), new Vec3(x, y, z), volume, pitch, looping, bus, innerCm, outerCm);
+        Voice v = Audio.PlayAt(Audio.Load(path), new Vec3(x, y, z), volume, pitch, looping,
+                              BusOfPin(bus, "PlaySoundAt"), innerCm, outerCm);
         voice = v.Handle;
         return v.IsValid;
     }
@@ -698,7 +713,7 @@ internal static class GraphInterop
     /// <summary>SetBusVolume: how a settings menu gives the player separate SFX and music sliders.</summary>
     internal static bool SetBusVolumeForGraph(int bus, float volume)
     {
-        Audio.SetBusVolume(bus, volume);
+        Audio.SetBusVolume(BusOfPin(bus, "SetBusVolume"), volume);
         return true;
     }
 

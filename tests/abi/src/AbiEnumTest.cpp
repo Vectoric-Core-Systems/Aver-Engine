@@ -725,6 +725,13 @@ static const Group kGroups[] = {
      "scripting/csharp/Aver.Scripting/Pbr.cs",   "PbrAlphaMode", ""},
     {"PBR UV modes",          "modules/render.pbr/include/aver/pbr/pbr_abi.h",              "AVER_PBR_UV_",
      "scripting/csharp/Aver.Scripting/Pbr.cs",   "PbrUvMode",   ""},
+    // THE AUDIO BUSES. This pair could not be checked because the C# side did not exist -- scripts
+    // wrote the bare integer. AudioAbi.cpp static_asserts the C macros against aver::audio::Bus and
+    // its comment names the copy those asserts cannot reach: "every managed SetBusVolume(1, ...)
+    // meant for Music keeps compiling and starts moving whatever landed in that slot". Aver.Framework
+    // has that copy now, so this row is what pins the third corner of the triangle.
+    {"audio buses",           "modules/audio.abi/include/aver/audio/audio_abi.h",           "AVER_AUDIO_BUS_",
+     "scripting/csharp/Aver.Framework/Audio.cs", "Bus",         ""},
 };
 
 int main() {
