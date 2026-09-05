@@ -24,10 +24,29 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
-# --- RHI backend options (Vulkan OFF until the LunarG SDK is installed) ---
+# --- RHI backend options ---
+#
+# VULKAN IS ON, AND THE COMMENT THAT USED TO SIT HERE SAID IT WAS "OFF UNTIL THE LUNARG SDK IS
+# INSTALLED". That premise was already false in two directions when it was written, and both are
+# worth stating because they are why this can be ON without adding a build dependency:
+#
+#   - The SDK is NOT needed to COMPILE. Vulkan headers are vendored (third_party/vulkan-headers,
+#     Apache-2.0), and no import library is linked at all: modules/rhi.vulkan builds every TU with
+#     VK_NO_PROTOTYPES and resolves every entry point at runtime from vulkan-1.dll, which ships with
+#     the GPU driver rather than the SDK. See that module's CMakeLists for the full argument.
+#   - The SDK is NOT needed for SPIR-V either, which was the real blocker for far longer. The
+#     Windows SDK's dxcompiler.dll is built WITHOUT the SPIR-V backend, so `-spirv` was accepted and
+#     then refused at codegen, and the backend died on its first shader. A SPIR-V-capable DXC is now
+#     vendored at third_party/dxc-spirv (official Microsoft DXC v1.9.2607, MIT/LLVM), and
+#     modules/rhi.d3d12/CMakeLists.txt already prefers it when copying dxcompiler.dll beside the exe.
+#
+# So the cost of ON is build time, not a dependency. What it does NOT promise is a correct picture:
+# the Vulkan cascade shadow map is still known-broken (pushRenderScope discards the caller's render
+# targets, so the cascade atlas is never written; RT shadows mask it). ON here means SELECTABLE and
+# COMPILED, which is what RENDER.BACKEND in a .ocproject needs to mean anything -- not "at parity".
 option(AVER_RHI_D3D12  "DirectX 12 backend (primary)" ON)
 option(AVER_RHI_D3D11  "DirectX 11 backend"           ON)
-option(AVER_RHI_VULKAN "Vulkan backend (needs Vulkan SDK)" OFF)
+option(AVER_RHI_VULKAN "Vulkan backend (headers vendored; no SDK required)" ON)
 option(AVER_BUILD_SANDBOX "Build the sandbox sample app" ON)
 # The game-runtime LIBRARY (Aver.Runtime.Game) and the tests that exercise it. There is no longer a
 # standalone AverGame.exe or a packaged-game staging path: the editor is how a project is run, and the

@@ -648,10 +648,27 @@ constexpr u32 kVkUavBindingBase = kMaxBindingSlots;
 // actually binds it in. MUST be applied to any HLSL including sharedShaderPrelude() before
 // compiling.
 //
-// WHY: the prelude (modules/rhi/src/RHIShaders.cpp, shared with D3D12) declares
-// `cbuffer PerFrame : register(b0)` with no register space, so DXC maps it to SPIR-V set 0
-// (table 0, SRVs/UAVs) instead of kVkSetConstants where the per-frame UBO actually lives --
-// every shader touching gViewProj named a descriptor its own pipeline layout didn't contain.
+// WHY: the prelude (modules/rhi/shaders/shared_prelude.hlsl, shared with D3D12) declares the
+// per-frame cbuffer with no register space, so DXC maps it to SPIR-V set 0 (table 0, SRVs/UAVs)
+// instead of kVkSetConstants where the per-frame UBO actually lives -- every shader touching
+// gViewProj named a descriptor its own pipeline layout didn't contain.
+//
+// MATCHED ON THE DECLARATION, NOT THE REGISTER, AND THAT IS THE SECOND TIME THIS BROKE SILENTLY.
+// The needle here used to be the literal `cbuffer PerFrame : register(b0)`. Two migrations later
+// the prelude reads
+//
+//     cbuffer PerFrame : register(AVER_CB_JOIN(b, AVER_FRAME_CB)) {
+//
+// -- the register number is emitted from C++ now rather than spelled in HLSL -- so the find()
+// returned npos, every fixed scene pipeline refused to build, and the backend fell back to D3D12
+// with a warning. NOTHING CAUGHT IT because AVER_RHI_VULKAN was OFF in every configuration that
+// ships, so the whole backend compiled green while being dead. That is the same shape as the
+// SPIR-V codegen blocker one layer down; see this module's CMakeLists.
+//
+// So match `cbuffer PerFrame` at the head of a line and let the register spelling be whatever the
+// prelude wants. The insertion point is before the keyword either way, and
+// [[vk::binding(binding, set)]] overrides only the SPIR-V placement -- whatever `register(...)`
+// resolves to still names the D3D-side slot, which is what keeps this a Vulkan-only edit.
 //
 // TRAP: AMD's two compilers disagreed on the symptom -- the integrated GPU gave a diagnosable
 // VK_ERROR_INVALID_SHADER_NV, but the discrete card's LLPC called abort() instead, surfacing as
@@ -662,13 +679,26 @@ constexpr u32 kVkUavBindingBase = kMaxBindingSlots;
 // is never modified and D3D12 never sees it. Same approach as patchPushConstants in
 // VulkanDevice.cpp.
 inline bool patchPerFrameSet(std::string& src) {
-    const std::string needle = "cbuffer PerFrame : register(b0)";
-    const std::size_t pos = src.find(needle);
-    if (pos == std::string::npos) return false;
-    // Prefixed rather than rewriting the register: `register(b0)` still names the D3D-side slot,
-    // and [[vk::binding(binding, set)]] overrides only the SPIR-V placement.
-    src.insert(pos, "[[vk::binding(0, " + std::to_string(kVkSetConstants) + ")]] ");
-    return true;
+    // AT THE HEAD OF A LINE, so a comment or a doc block that merely NAMES the cbuffer cannot be
+    // patched instead of it -- several files in this tree discuss `cbuffer PerFrame` in prose, and
+    // annotating one of those would silently produce a shader with the binding still on set 0 and no
+    // error to show for it.
+    const std::string needle = "cbuffer PerFrame";
+    std::size_t pos = src.find(needle);
+    while (pos != std::string::npos) {
+        // Only whitespace may precede it on its line.
+        std::size_t lineStart = src.rfind('\n', pos);
+        lineStart = (lineStart == std::string::npos) ? 0 : lineStart + 1;
+        bool blank = true;
+        for (std::size_t i = lineStart; i < pos; ++i)
+            if (src[i] != ' ' && src[i] != '\t') { blank = false; break; }
+        if (blank) {
+            src.insert(pos, "[[vk::binding(0, " + std::to_string(kVkSetConstants) + ")]] ");
+            return true;
+        }
+        pos = src.find(needle, pos + needle.size());
+    }
+    return false;
 }
 
 // patchPerFrameSet handles only b0 deliberately: it runs at createShader time, before any

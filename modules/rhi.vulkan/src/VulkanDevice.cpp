@@ -16,6 +16,7 @@
 #include "aver/rhi/Atmosphere.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -88,6 +89,47 @@ const std::string& sceneShaderSource() {
 // spelling for a bare pointer -- see dispatchMesh() for how the fixed mesh pipeline binds them
 // instead (a fresh descriptor set per draw), this backend's sharpest divergence from D3D12's raw
 // root-SRV bind.
+// Finds `cbuffer <name>` where it is DECLARED -- at the head of a line -- and returns the offset of
+// its opening brace, or npos.
+//
+// BY NAME, NOT BY REGISTER, AND THAT IS THE WHOLE POINT. Every needle in this file used to spell the
+// register out: "cbuffer PerObject : register(b1) {". The shared prelude now emits register numbers
+// from C++ instead of hardcoding them --
+//     cbuffer PerObject : register(AVER_CB_JOIN(b, AVER_OBJECT_CB)) {
+// -- so every one of those needles missed, every fixed pipeline refused to build, and the backend
+// fell back to D3D12 with a warning. It compiled green the whole time, because AVER_RHI_VULKAN was
+// OFF in every shipped configuration. Matching the declaration and letting the register spelling be
+// whatever the prelude wants removes a tripwire that fires on an unrelated edit and is invisible
+// until someone turns this backend on.
+//
+// The line-head test keeps prose out: several files here discuss these cbuffers in comments, and
+// patching one of those would produce a silently wrong shader instead of an error.
+size_t findCbufferBrace(const std::string& src, const char* name, size_t* declPos = nullptr) {
+    const std::string needle = std::string("cbuffer ") + name;
+    size_t pos = src.find(needle);
+    while (pos != std::string::npos) {
+        size_t lineStart = src.rfind('\n', pos);
+        lineStart = (lineStart == std::string::npos) ? 0 : lineStart + 1;
+        bool blank = true;
+        for (size_t i = lineStart; i < pos; ++i)
+            if (src[i] != ' ' && src[i] != '\t') { blank = false; break; }
+        // The character after the name must not be an identifier character, or "PerObject" would
+        // match a hypothetical "PerObjectExtra".
+        const size_t after = pos + needle.size();
+        const bool wholeWord = after >= src.size() ||
+                               (!std::isalnum(static_cast<unsigned char>(src[after])) && src[after] != '_');
+        if (blank && wholeWord) {
+            const size_t brace = src.find('{', pos);
+            if (brace != std::string::npos) {
+                if (declPos) *declPos = pos;
+                return brace;
+            }
+        }
+        pos = src.find(needle, pos + needle.size());
+    }
+    return std::string::npos;
+}
+
 bool patchPushConstants(std::string& src, bool mesh) {
     // NOT ON A cbuffer -- the first version put it there, and DXC rejects that outright:
     //     error: 'push_constant' attribute only applies to global variables of struct type
@@ -100,29 +142,42 @@ bool patchPushConstants(std::string& src, bool mesh) {
     //
     // THE ALIAS LIST IS HARDCODED AGAINST THE PRELUDE: if PerObject gains/loses a field this stops
     // matching and says so, rather than silently compiling a layout that disagrees with PushConstantLayout.
-    const std::string needle = "cbuffer PerObject : register(b1) {";
-    const size_t pos = src.find(needle);
-    if (pos == std::string::npos) {
-        AVER_ERROR("[RHI.Vulkan] shader source no longer contains the exact PerObject cbuffer text "
-                   "this backend's push-constant patch matches against; the shared prelude has "
-                   "drifted and this backend's fixed pipelines cannot compile correctly");
+    size_t pos = std::string::npos;
+    const size_t openBrace = findCbufferBrace(src, "PerObject", &pos);
+    if (openBrace == std::string::npos) {
+        AVER_ERROR("[RHI.Vulkan] the shared prelude no longer DECLARES a `cbuffer PerObject` at the "
+                   "head of a line; this backend's push-constant patch has nothing to rewrite and "
+                   "its fixed pipelines cannot compile correctly");
         return false;
     }
-    const size_t close = src.find("};", pos);
+    const size_t close = src.find("};", openBrace);
     if (close == std::string::npos) {
         AVER_ERROR("[RHI.Vulkan] PerObject cbuffer has no closing brace; the shared prelude has drifted");
         return false;
     }
     // Kept verbatim (comments too) so the byte layout PushConstantLayout assumes stays exact.
-    const size_t bodyBegin = pos + needle.size();
+    // From just past the opening brace, so the register spelling -- however the prelude writes it --
+    // is dropped along with the `cbuffer PerObject : register(...)` header itself.
+    const size_t bodyBegin = openBrace + 1;
     std::string body = src.substr(bodyBegin, close - bodyBegin);
 
-    // Folded into the SAME block (see file header) -- its own declaration is deleted below.
-    const std::string meshNeedle = "cbuffer MeshCB : register(b5) { uint gTriCount; uint3 _msPad; }";
-    const bool haveMesh = mesh && src.find(meshNeedle) != std::string::npos;
+    // Folded into the SAME block (see file header) -- its own declaration is deleted below. Located
+    // the same way and for the same reason as PerObject: its register is emitted from C++ too.
+    size_t meshDecl = std::string::npos;
+    const size_t meshBrace = mesh ? findCbufferBrace(src, "MeshCB", &meshDecl) : std::string::npos;
+    size_t meshEnd = std::string::npos;
+    if (meshBrace != std::string::npos) {
+        meshEnd = src.find('}', meshBrace);
+        if (meshEnd != std::string::npos) {
+            // Take the trailing ';' with it when there is one, so erasing leaves no stray statement.
+            ++meshEnd;
+            if (meshEnd < src.size() && src[meshEnd] == ';') ++meshEnd;
+        }
+    }
+    const bool haveMesh = mesh && meshBrace != std::string::npos && meshEnd != std::string::npos;
     if (mesh && !haveMesh) {
-        AVER_ERROR("[RHI.Vulkan] shader source no longer contains the exact MeshCB cbuffer text this "
-                   "backend's push-constant patch matches against");
+        AVER_ERROR("[RHI.Vulkan] the shared prelude no longer DECLARES a `cbuffer MeshCB` this "
+                   "backend's push-constant patch can fold into the push-constant block");
         return false;
     }
     if (haveMesh) body += "\n    uint gTriCount; uint3 _msPad;\n";
@@ -141,10 +196,20 @@ bool patchPushConstants(std::string& src, bool mesh) {
 
     src.replace(pos, (close + 2) - pos, repl);
 
-    // Delete MeshCB's own block now that its fields live in AverPcBlock.
+    // Delete MeshCB's own block now that its fields live in AverPcBlock. RE-LOCATED rather than
+    // reusing the offsets found above: the replace() just above changed the string's length, so
+    // meshDecl/meshEnd are stale the moment PerObject is rewritten.
     if (haveMesh) {
-        const size_t meshPos = src.find(meshNeedle);
-        if (meshPos != std::string::npos) src.erase(meshPos, meshNeedle.size());
+        size_t decl2 = std::string::npos;
+        const size_t brace2 = findCbufferBrace(src, "MeshCB", &decl2);
+        if (brace2 != std::string::npos) {
+            size_t end2 = src.find('}', brace2);
+            if (end2 != std::string::npos) {
+                ++end2;
+                if (end2 < src.size() && src[end2] == ';') ++end2;
+                src.erase(decl2, end2 - decl2);
+            }
+        }
     }
     return true;
 }
