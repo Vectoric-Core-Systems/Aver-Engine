@@ -209,6 +209,39 @@ def make_crate(out_dir, rng):
 
 
 
+def make_jungle_ground(out_dir, rng):
+    """Damp forest floor -- leaf litter and soil under a moss break-up, for a level's ground plane.
+
+    TWO SCALES ON PURPOSE, because a ground plane is the one surface seen at every distance at once:
+    a broad soil/moss variation that reads from across the level, and a fine litter grain that only
+    appears underfoot. A single octave band gives a floor that looks either tiled from far away or
+    flat from close up, and which of the two you get is decided by nothing but the camera.
+
+    GREEN IS A MASK, NOT A TINT. Moss sits in the LOW ground, because that is where damp collects --
+    so the same height field drives both the normal and where the green goes, and the two cannot
+    disagree. Tinting uniformly green instead is what makes a procedural ground read as felt.
+    """
+    broad  = normalize01(fbm(6, 6, rng))        # soil/moss patches, metres across
+    litter = fbm(5, 48, rng)                    # leaf-litter grain, centimetres
+    grit   = fbm(3, 160, rng)                   # fine speckle, breaks up the mip chain
+
+    soil = np.array([0.135, 0.105, 0.075], dtype=np.float32)   # wet earth, deliberately dark
+    moss = np.array([0.115, 0.170, 0.070], dtype=np.float32)   # damp moss, no brighter than the soil
+
+    # Moss where the ground is LOW and the broad field agrees; the exponent keeps it in patches
+    # rather than smearing it over everything.
+    damp = np.clip((broad - 0.42) / 0.38, 0, 1) ** 1.4
+    albedo = soil[None, None, :] * (1.0 - damp[..., None]) + moss[None, None, :] * damp[..., None]
+    albedo *= (0.80 + litter * 0.34)[..., None]                # litter shading
+    albedo -= (grit * 0.035)[..., None]
+
+    height = broad * 0.55 + litter * 0.40 + grit * 0.12
+    # Damp moss is ROUGHER than bare soil, not shinier. A wet-looking forest floor is a lit highlight,
+    # and a highlight the size of a level reads as plastic.
+    rough = 0.80 + damp * 0.10 - litter * 0.12
+    save_set(out_dir, "jungle_ground", albedo, height, rough, np.zeros_like(rough), 2.1)
+
+
 def make_glass(out_dir, rng):
     """Float glass -- the smudges and waviness that are the only things a clear surface HAS.
 
@@ -269,6 +302,7 @@ def main():
     make_floor_tiles(out_dir, rng)
     make_concrete(out_dir, rng)
     make_crate(out_dir, rng)
+    make_jungle_ground(out_dir, rng)
     make_glass(out_dir, rng)
     return 0
 

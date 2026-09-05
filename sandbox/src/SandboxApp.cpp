@@ -7317,6 +7317,15 @@ private:
 
     void maybeAutosave(f32 dt) {
 #if AVER_MODULE_SCENE
+        // NOT DURING A CAPTURE RUN, for maybeAutosavePrefs' reason and a sharper one: that guard
+        // says a bounded run must leave no trace in the user's PROFILE, and this is their PROJECT.
+        //
+        // MEASURED, by doing it. A --frames run that opened a start map and then switched to another
+        // level with --open-level tripped this timer DURING the switch and wrote a sidecar holding a
+        // SUN record and no placements at all. That sidecar is newer than the level, so the next
+        // interactive open offers to "recover unsaved changes" from it -- and accepting would have
+        // replaced a working level with an empty one. A capture must not be able to do that.
+        if (maxFrames_ != 0) { autosaveAccum_ = 0.0f; return; }
         if (autosaveIntervalSec_ <= 0.0f) return;
         // NOTHING TO SAVE is the common case and must cost nothing: no level, never saved (so there
         // is nowhere to put the sidecar), or nothing edited since it was opened.
