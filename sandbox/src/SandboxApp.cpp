@@ -2725,6 +2725,9 @@ public:
         // believed.
         multiSyncToAnchor();
 #endif
+        // Project settings follow the same rule preferences do now: an edit reaches the file
+        // without anybody having to find a button.
+        maybeAutosaveProject(t.dt);
         // ONE LINE, ONCE, and not before frame 2. applyProject's scripting stage and
         // spawnClassPlacements both run during startup, so a census taken on the first frame would
         // report a world that is still filling -- and would then differ from the game's for a
@@ -3310,6 +3313,7 @@ public:
         if (multiSelTestFrames_ > 0 && --multiSelTestFrames_ == 0) runMultiSelectTest(e);
         if (cbMoveTestFrames_ > 0 && --cbMoveTestFrames_ == 0) runCbMoveTest(cbMoveTestDir_);
         if (saveDirtyTestFrames_ > 0 && --saveDirtyTestFrames_ == 0) runSaveDirtyTest();
+        if (prefsWriteTestFrames_ > 0 && --prefsWriteTestFrames_ == 0) runPrefsWriteTest();
         if (keybindTestAutoFrames_ > 0 && --keybindTestAutoFrames_ == 0) runKeybindPersistTest(keybindTestMode_);
 #endif
 #if AVER_MODULE_SCRIPTING
@@ -6416,6 +6420,7 @@ public:
     void setMultiSelectTest(int n) { multiSelTestFrames_ = n; }                    // --multiselect-test
     void setCbMoveTest(const std::string& dir) { cbMoveTestDir_ = dir; cbMoveTestFrames_ = 10; }
     void setSaveDirtyTest(int n) { saveDirtyTestFrames_ = n; }                     // --savedirty-test
+    void setPrefsWriteTest(int n) { prefsWriteTestFrames_ = n; }                   // --prefs-write-test
     void setRecaptureTest(int n)   { recapFrames_ = n; }                          // --recapture-test
     void setViewmodelTest(int n)   { vmFrames_ = n; }                             // --viewmodel-test
     void setSkinSceneDir(std::string d) { skinSceneDir_ = std::move(d); }          // --skin-scene-test <dir>
@@ -8467,7 +8472,12 @@ private:
         std::string existing;
         readFileText(project_.manifestPath, existing);
         const std::string out = fmt::writeOcproject(project_, existing);
-        if (!writeFileText(project_.manifestPath, out)) {
+        // ATOMIC NOW THAT THIS RUNS ON A TIMER. A plain writeFileText truncates and then writes, so
+        // the window where the manifest is empty or half-written used to be one click wide and is now
+        // entered every half second of editing. Losing a project file to a crash landing inside that
+        // window is exactly the trade the autosave was not meant to make -- same write-temp-then-swap
+        // the level save and editor.ini already use.
+        if (!writeFileTextAtomic(project_.manifestPath, out)) {
             if (why) *why = "could not write " + project_.manifestPath;
             return false;
         }
@@ -8476,6 +8486,34 @@ private:
         return true;
     }
     bool projectDirty_ = false;
+
+    // SAVED ON EDIT, NOT ON A BUTTON. The footer below argues for a button on the grounds that a
+    // .ocproject is source-controlled and writing it on every slider drag makes noise nobody asked
+    // for. That argument is real, and it lost to a simpler one: a settings page that requires a
+    // separate click to mean anything will be edited and closed, and the edit will be gone. Twice
+    // reported here. The button stays for anyone who wants it; it is now a confirmation rather than
+    // the only way through.
+    //
+    // HALF A SECOND, twice the preferences debounce, because this file is bigger, is read by other
+    // people, and is rewritten whole (writeOcproject preserves comments and unknown keys, so every
+    // save re-serialises the document). A drag settles before it is written.
+    static constexpr f32 kProjectAutosaveSec = 0.5f;
+    f32 projectAutosaveAccum_ = 0.0f;
+
+    void maybeAutosaveProject(f32 dt) {
+        // NOT DURING A CAPTURE RUN, the same rule maybeAutosavePrefs follows and for a sharper
+        // reason: --frames sets render settings from the command line, and applyProjectRenderSettings
+        // marks the project dirty when it does, so a bounded run would write those flags into the
+        // user's manifest as if they had chosen them.
+        if (maxFrames_ != 0) { projectAutosaveAccum_ = 0.0f; return; }
+        if (!projectDirty_ || !project_.valid()) { projectAutosaveAccum_ = 0.0f; return; }
+        projectAutosaveAccum_ += dt;
+        if (projectAutosaveAccum_ < kProjectAutosaveSec) return;
+        projectAutosaveAccum_ = 0.0f;
+        std::string why;
+        if (saveProjectManifest(&why)) projectSaveStatus_ = "Saved.";
+        else                           projectSaveStatus_ = "Save failed: " + why;
+    }
     bool projectRenderPending_ = false;   // manifest read before the device attached
     std::string projectSaveStatus_;
 
@@ -10972,7 +11010,17 @@ private:
     // Preferences are cheap to check and tiny to write, so this can be far tighter than the level
     // autosave above: two seconds is short enough that nothing a person adjusts is worth losing,
     // and a tick that changed nothing does no I/O at all.
-    static constexpr f32 kPrefsAutosaveSec = 2.0f;
+    // WAS 2 SECONDS, AND THAT WAS TOO LONG TO BE BELIEVED. A preference changed and then not seen
+    // in the file is indistinguishable from one that never saved, and the gap was wide enough to
+    // lose a change to any abrupt exit inside it.
+    //
+    // NOT ZERO, which would be the literal reading of "save directly": a slider being dragged dirties
+    // the store on every frame, and at zero that is a file write per frame. A quarter second reads as
+    // instant to a person and collapses a one-second drag into four writes instead of sixty. The
+    // write itself only happens when something actually CHANGED -- setPrefString compares before
+    // dirtying and flushEditorPrefs early-outs when nothing is dirty -- so an idle editor still does
+    // no I/O at all, however short this is.
+    static constexpr f32 kPrefsAutosaveSec = 0.25f;
     f32 prefsAutosaveAccum_ = 0.0f;
     bool autosaveWritten_ = false;
     bool autosaveFailedWarned_ = false;
@@ -12196,6 +12244,60 @@ private:
     // interesting question is what happens when you save, undo past that point, and redo back to it.
     // A stack-DEPTH watermark gets that wrong the moment pushEdit trims from the front at
     // kUndoDepth; a per-edit serial does not, and that is the whole reason for the serial.
+    // --prefs-write-test: does a preference actually reach disk?
+    //
+    // editor.ini has not been written since 15:53 on the day this was added, across many sessions --
+    // so "preferences do not save" is a WRITE failing, not merely nothing having been dirtied. Every
+    // layer of that write reads correctly (setPrefString dirties on a real change, flushEditorPrefs
+    // writes through writeFileTextAtomic and only clears the dirty bit on success, the atomic write
+    // is write-temp-then-MoveFileEx). Reading further was not going to settle it, so this reports
+    // each step against the real file instead.
+    void runPrefsWriteTest() {
+        int failures = 0;
+        auto check = [&](bool cond, const char* what) {
+            if (cond) AVER_INFO("[prefs-write-test] PASS: {}", what);
+            else      { AVER_ERROR("[prefs-write-test] FAIL: {}", what); ++failures; }
+        };
+
+        const std::string path = editor::editorPrefsPath();
+        AVER_INFO("[prefs-write-test] the store says its path is: '{}'", path);
+        check(!path.empty(), "the store has a path at all");
+        if (path.empty()) { AVER_INFO("[prefs-write-test] RESULT: FAIL"); return; }
+
+        std::error_code ec;
+        const bool existed = std::filesystem::exists(path, ec);
+        const auto sizeBefore = existed ? std::filesystem::file_size(path, ec) : 0u;
+        AVER_INFO("[prefs-write-test] before: exists={} size={}", existed ? 1 : 0,
+                  static_cast<unsigned long long>(sizeBefore));
+
+        // A key nothing else uses, with a value that cannot already be there.
+        const std::string sentinel = "diagnostic.writeProbe";
+        editor::setPrefString(sentinel, "probe-2026");
+        editor::flushEditorPrefs();
+
+        // Read the FILE back, not the in-memory store -- the store would report success even if the
+        // write never happened, which is precisely the failure being hunted.
+        std::string text;
+        const bool read = readFileText(path, text);
+        check(read, "the file can be read back after the flush");
+        check(read && text.find("diagnostic.writeProbe=probe-2026") != std::string::npos,
+              "and the probe value is IN the file on disk");
+
+        const auto sizeAfter = std::filesystem::exists(path, ec)
+                             ? std::filesystem::file_size(path, ec) : 0u;
+        AVER_INFO("[prefs-write-test] after:  size={}", static_cast<unsigned long long>(sizeAfter));
+
+        // Also prove the directory is writable at all, independently of the prefs store, so a
+        // failure can be told apart from a permissions problem.
+        const std::string probe = std::filesystem::path(path).parent_path().string() + "/writeprobe.tmp";
+        const bool direct = writeFileTextAtomic(probe, "x");
+        check(direct, "writeFileTextAtomic can write to that directory directly");
+        std::filesystem::remove(probe, ec);
+
+        AVER_INFO("[prefs-write-test] RESULT: {}", failures == 0 ? "PASS" : "FAIL");
+    }
+    int prefsWriteTestFrames_ = 0;
+
     void runSaveDirtyTest() {
         int failures = 0;
         auto check = [&](bool cond, const char* what) {
@@ -18204,10 +18306,13 @@ private:
         // screen saying so. The most common outcome is the obvious one: the edit is made, the window
         // is closed, and the change is gone.
         //
-        // A FOOTER RATHER THAN AUTOSAVE, and that is a deliberate difference from editor.ini.
-        // The .ocproject is a source-controlled project file that other people diff and merge;
-        // writing it on every slider drag would produce noise nobody asked for. Preferences are
-        // per-machine and disposable, which is why THEY autosave (see maybeAutosavePrefs).
+        // THIS IS NO LONGER THE ONLY WAY TO SAVE, and the comment that used to sit here argued it
+        // should be: a .ocproject is source-controlled, so writing it on every slider drag makes
+        // noise nobody asked for. True, and it still lost -- a settings page that needs a separate
+        // click to mean anything gets edited and closed, and the edit is gone. See
+        // maybeAutosaveProject, which now writes half a second after the last change. The button
+        // remains for anyone who wants to save deliberately, and the dirty mark below still shows
+        // the brief window before the debounce fires.
         if (project_.valid()) {
             ImGui::Separator();
             ImGui::BeginDisabled(!projectDirty_);
@@ -22502,6 +22607,7 @@ Application* createApplication(int argc, char** argv) {
     int multiSelArg = 0;
     const char* cbMoveArg = nullptr;
     int saveDirtyArg = 0;
+    int prefsWriteArg = 0;
     int recaptureArg = 0;
     int viewmodelArg = 0;
     // --gpu-timing takes no value, so it's matched in the i+1<argc loop below only incidentally --
@@ -22518,6 +22624,7 @@ Application* createApplication(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--multiselect-test"))     multiSelArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--cbmove-test"))          cbMoveArg = argv[i + 1];
         if (!std::strcmp(argv[i], "--savedirty-test"))       saveDirtyArg = std::atoi(argv[i + 1]);
+        if (!std::strcmp(argv[i], "--prefs-write-test"))     prefsWriteArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--recapture-test"))       recaptureArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--viewmodel-test"))       viewmodelArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--refraction"))           refraction = std::atoi(argv[i + 1]);
@@ -23428,6 +23535,7 @@ Application* createApplication(int argc, char** argv) {
     if (multiSelArg > 0) app->setMultiSelectTest(multiSelArg);
     if (cbMoveArg) app->setCbMoveTest(cbMoveArg);
     if (saveDirtyArg > 0) app->setSaveDirtyTest(saveDirtyArg);
+    if (prefsWriteArg > 0) app->setPrefsWriteTest(prefsWriteArg);
     if (recaptureArg > 0) app->setRecaptureTest(recaptureArg);
     if (viewmodelArg > 0) app->setViewmodelTest(viewmodelArg);
 #endif
