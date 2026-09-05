@@ -6,6 +6,7 @@
 #include "aver/platform/FileSystem.hpp"
 #include "aver/core/Version.hpp"
 
+#include <cctype>
 #include <charconv>
 #include <filesystem>
 #include <string>
@@ -110,6 +111,11 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
             if (t.size() > 1) out.occlusionCull = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.DEPTHPREPASS")) {
             if (t.size() > 1) out.depthPrepass = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.BACKEND")) {
+            // Stored verbatim and lowercased; validated where it is USED, not here. A manifest naming
+            // a backend this build has no support for is not a broken manifest -- the same file is
+            // meant to open on a machine that does.
+            if (t.size() > 1) { out.backend = t[1]; for (char& ch : out.backend) ch = static_cast<char>(::tolower(ch)); }
         } else if (equalsCI(key, "RENDER.MSAA")) {
             if (t.size() > 1) out.msaa = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.MESHSHADERS")) {
@@ -233,6 +239,10 @@ bool loadOcproject(const std::string& path, ProjectDesc& out, std::string* err) 
 namespace {
 
 // Appends one "KEY value" line, or nothing when the value is negative.
+void appendKey(std::string& out, const char* key, const std::string& v) {
+    if (v.empty()) return;
+    out += key; out += ' '; out += v; out += '\n';
+}
 void appendKey(std::string& out, const char* key, int v) {
     if (v < 0) return;
     out += key; out += ' '; out += std::to_string(v); out += '\n';
@@ -319,6 +329,7 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     appendKey(owned, "RENDER.LODTHRESHOLD", d.lodThresholdPx);
     appendKey(owned, "RENDER.OCCLUSIONCULL", d.occlusionCull);
     appendKey(owned, "RENDER.DEPTHPREPASS", d.depthPrepass);
+    if (!d.backend.empty()) appendKey(owned, "RENDER.BACKEND", d.backend);
     appendKey(owned, "RENDER.MSAA", d.msaa);
     appendKey(owned, "RENDER.MESHSHADERS", d.meshShaders);
     appendKey(owned, "RENDER.GIUPDATEINTERVAL", d.giUpdateInterval);

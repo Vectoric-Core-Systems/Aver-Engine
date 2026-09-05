@@ -83,6 +83,19 @@ struct ProjectDesc {
     int occlusionCull      = -1; // RENDER.OCCLUSIONCULL    0/1
     int depthPrepass       = -1; // RENDER.DEPTHPREPASS     0/1
 
+    // WHICH RHI BACKEND THIS PROJECT WANTS. Empty = whatever the engine picks on its own, which is
+    // the behaviour every project had before this key existed, so an old manifest is unaffected.
+    //
+    // A PREFERENCE, NOT A GUARANTEE, and it cannot be otherwise: a backend has to be COMPILED IN to
+    // be selectable (AVER_RHI_VULKAN is OFF in the default CMake configuration), and even a compiled
+    // one can fail to create a device on a given machine. Engine::run already falls back in that
+    // case; the only thing this key changes is which backend is ASKED FOR first.
+    //
+    // READ EARLIER THAN EVERY OTHER KEY IN THIS STRUCT. The device is created before the editor
+    // opens a project, so applying this the way the rest of RenderSettings is applied -- per frame,
+    // after load -- would be far too late to choose a device. See peekBackend().
+    std::string backend;        // RENDER.BACKEND  "d3d12" | "vulkan" | "d3d11"; empty = engine default
+
     // ---- FOUR THINGS THE UI COULD SET AND THE FILE COULD NOT HOLD ------------------------------
     //
     // Each of these was a live control in Project Settings that applied immediately and then
@@ -121,7 +134,8 @@ struct ProjectDesc {
                giCones >= 0 || refractionMode >= 0 || refractionStrength >= 0.0f ||
                refractionEdgeFade >= 0.0f || lodSelect >= 0 || lodThresholdPx >= 0.0f ||
                occlusionCull >= 0 || depthPrepass >= 0 ||
-               msaa >= 0 || meshShaders >= 0 || giUpdateInterval >= 0 || hasGiVolume;
+               msaa >= 0 || meshShaders >= 0 || giUpdateInterval >= 0 || hasGiVolume ||
+               !backend.empty();
     }
 
     // ---- WINDOW.* -- how a shipped game presents itself -----------------------------------------

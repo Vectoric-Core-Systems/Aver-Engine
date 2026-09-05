@@ -1494,6 +1494,9 @@ public:
     // Builds the editor: asset editors, MCP, physics, the placeholder scene, gizmos, and the render features.
     void onInit(Engine& e) override {
         AVER_INFO("[Sandbox] backend={} adapter='{}'", rhi::backendName(e.device()->backend()), e.device()->adapterName());
+        // Latched once, because the Project Settings page shows it next to the backend the
+        // project ASKS for and has no Engine& in scope to ask again.
+        runningBackend_ = rhi::backendName(e.device()->backend());
 #if AVER_MODULE_SR
         // AverSR quality sets the same renderScaleOverride_ knob --render-scale drives, so an explicit
         // --render-scale still wins (same 1.0-sentinel precedent loadEditorPreferences() uses). At Off
@@ -8323,6 +8326,8 @@ private:
         else if (project_.lodThresholdPx >= 0.0f)
             setLodSelect(lodSelectEnabled_, project_.lodThresholdPx);
         if (project_.occlusionCull >= 0) occlusionCullEnabled_ = project_.occlusionCull != 0;
+        // Applied to the UI only -- main() has already used this to pick the device.
+        projectBackend_ = project_.backend;
         if (project_.depthPrepass  >= 0) depthPrepassOverride_ = project_.depthPrepass != 0;
 
         // ---- PHYSICS AND AUDIO, which no manifest could state until now -------------------------
@@ -8466,6 +8471,7 @@ private:
         const voxi::Settings& live = voxi::Renderer::get().settings();
         const bool tierOnlyChange = requested.globalIllumination != live.globalIllumination
                                   && requested.voxelResolution == live.voxelResolution;
+        project_.backend = projectBackend_;
         project_.voxelResolution = tierOnlyChange ? -1 : static_cast<int>(requested.voxelResolution);
         project_.giIntensity     = requested.giIntensity;
         project_.giMaxDistance   = requested.giMaxDistance;
@@ -18796,6 +18802,35 @@ private:
                 uiReg_.track("project.occlusionCull");
                 if (ImGui::Checkbox("Depth pre-pass", &depthPrepassOverride_)) projectDirty_ = true;
                 uiReg_.track("project.depthPrepass");
+
+                ImGui::Separator();
+                // THE RENDERER THIS PROJECT ASKS FOR. Unlike everything else on this page, changing
+                // it does nothing until the editor is restarted -- the device is created before a
+                // project is open, so the manifest is peeked for this one key before startup (see
+                // main). Saying so on the control is the difference between a setting that looks
+                // broken and one that is understood.
+                {
+                    static const char* kNames[] = {"Engine default", "D3D12", "Vulkan", "D3D11"};
+                    static const char* kKeys[]  = {"", "d3d12", "vulkan", "d3d11"};
+                    int cur = 0;
+                    for (int i = 1; i < 4; ++i) if (projectBackend_ == kKeys[i]) { cur = i; break; }
+                    if (ImGui::Combo("Renderer", &cur, kNames, 4)) {
+                        projectBackend_ = kKeys[cur];
+                        projectDirty_ = true;
+                    }
+                    uiReg_.track("project.backend");
+                    // WHAT IS ACTUALLY RUNNING, beside what was asked for. A backend has to be
+                    // compiled in to be selectable at all, and the default CMake configuration has
+                    // AVER_RHI_VULKAN OFF -- so a project can name Vulkan on a build that cannot
+                    // give it one. The RHI already warns in the log when that happens; this puts the
+                    // same fact where the choice is made.
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(now: %s)", runningBackend_.c_str());
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Takes effect on the next launch.\n"
+                                          "A backend must be compiled into the build to be usable:\n"
+                                          "configure with -DAVER_RHI_VULKAN=ON for Vulkan.");
+                }
             }
         }
 
@@ -19918,6 +19953,12 @@ private:
     f32  pitchOverride_=0.0f, yawOverride_=0.0f;   // radians, converted in setCamera
     bool useWarp_=false;             // --warp: run on the D3D12 software rasteriser
     std::string backendName_;   // --backend: which RHI backend to ask for first
+    // RENDER.BACKEND as the OPEN PROJECT states it. Separate from backendName_, which is what
+    // this RUN was actually launched with: editing the project's choice must not retarget the
+    // device under a running editor, and showing the running backend beside the setting is only
+    // honest if the two are distinct values.
+    std::string projectBackend_;
+    std::string runningBackend_ = "?";   // what the device actually came back as, latched at init
     bool debugLayer_=false;          // --debug-layer: validate every graphics call (a real per-call tax)
     std::string scriptsDir_;         // --scripts <dir>: where to look for user script assemblies
     std::string spawnTestClass_;     // --spawn-test <ClassName>: headless actor-loop test trigger
@@ -23444,7 +23485,35 @@ Application* createApplication(int argc, char** argv) {
     app->setSaveProject(saveProject);
     app->setImportOnce(importSrc, importDst);
     app->setUseWarp(warp);
-    if (!backendName.empty()) app->setBackend(backendName);
+    // THE BACKEND, FROM THE PROJECT, READ BEFORE THE DEVICE EXISTS.
+    //
+    // Every other RENDER.* key is applied from the loaded project once per frame, which works
+    // because those settings can change at any time. A backend cannot: the device is created during
+    // Engine::run, long before the editor opens a project, so by the time project_ is populated the
+    // choice has already been made. So the manifest is peeked here -- parsed once, for one key,
+    // before anything is constructed.
+    //
+    // THE COMMAND LINE STILL WINS, same precedence every other flag/manifest pair follows here, and
+    // it is logged when they disagree. That precedence is not cosmetic: a manifest silently
+    // outranking a render flag has corrupted measurements in this repo before, so the rule is that
+    // the explicit thing a person just typed beats the stored one, out loud.
+    std::string wantBackend = backendName;
+    if (wantBackend.empty() && !project.empty()) {
+        fmt::ProjectDesc peek;
+        std::string perr;
+        if (fmt::loadOcproject(project, peek, &perr) && !peek.backend.empty()) {
+            wantBackend = peek.backend;
+            AVER_INFO("[Sandbox] RENDER.BACKEND '{}' from the project manifest", wantBackend);
+        }
+    } else if (!backendName.empty() && !project.empty()) {
+        fmt::ProjectDesc peek;
+        std::string perr;
+        if (fmt::loadOcproject(project, peek, &perr) && !peek.backend.empty() &&
+            peek.backend != backendName)
+            AVER_INFO("[Sandbox] --backend: the command line asked for {} and the project manifest "
+                      "for {}; the command line wins", backendName, peek.backend);
+    }
+    if (!wantBackend.empty()) app->setBackend(wantBackend);
     app->setDebugLayer(debugLayer);
     app->setUnlitMode(unlitArg);
     app->setSaveLevelTo(saveLevelArg);
