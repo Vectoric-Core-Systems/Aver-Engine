@@ -2704,6 +2704,12 @@ public:
         // since window_->pumpEvents() runs BEFORE onUpdate and WM_COPYDATA is synchronous on this thread.
         maybeAutosave(t.dt);
         maybeAutosavePrefs(t.dt);
+#if AVER_MODULE_SCENE
+        // See multiStale(): anything that moved the anchor without touching the set means the
+        // selection collapsed to one, and this is where that is made true rather than merely
+        // believed.
+        multiSyncToAnchor();
+#endif
         // ONE LINE, ONCE, and not before frame 2. applyProject's scripting stage and
         // spawnClassPlacements both run during startup, so a census taken on the first frame would
         // report a world that is still filling -- and would then differ from the game's for a
@@ -3285,6 +3291,7 @@ public:
         // commands it proves, so this call site needs the same guard.
 #if AVER_WITH_IMGUI
         if (undoTestAutoFrames_ > 0 && --undoTestAutoFrames_ == 0) runUndoTest(e);
+        if (multiSelTestFrames_ > 0 && --multiSelTestFrames_ == 0) runMultiSelectTest(e);
         if (keybindTestAutoFrames_ > 0 && --keybindTestAutoFrames_ == 0) runKeybindPersistTest(keybindTestMode_);
 #endif
 #if AVER_MODULE_SCRIPTING
@@ -6388,6 +6395,7 @@ public:
     void setInputStuckTest(int n) { inputStuckFrames_ = n; }                       // --input-stuck-test
     void setInputSourceTest(int n) { inputSrcFrames_ = n; }                        // --input-source-test
     void setWheelSpeedTest(int n) { wheelTestFrames_ = n; }                        // --wheel-speed-test
+    void setMultiSelectTest(int n) { multiSelTestFrames_ = n; }                    // --multiselect-test
     void setRecaptureTest(int n)   { recapFrames_ = n; }                          // --recapture-test
     void setViewmodelTest(int n)   { vmFrames_ = n; }                             // --viewmodel-test
     void setSkinSceneDir(std::string d) { skinSceneDir_ = std::move(d); }          // --skin-scene-test <dir>
@@ -9563,6 +9571,101 @@ private:
     Vec3 camForward() const {
         return Vec3{ std::cos(pitch_)*std::cos(yaw_), std::cos(pitch_)*std::sin(yaw_), std::sin(pitch_) };
     }
+
+#if AVER_MODULE_SCENE
+    // ---- MULTI-SELECTION -------------------------------------------------------------------------
+    //
+    // ANCHOR PLUS SET, and the anchor is the existing sel_/selEntity_ pair rather than a replacement
+    // for it. Selection is read in dozens of places -- the Details panel, the gizmo, F-focus, the
+    // outline, copy, rename, the status line -- and every one of them wants ONE entity to talk about.
+    // Rewriting them all to ask "which of the several?" would be a much larger change for no gain,
+    // so selEntity_ keeps meaning exactly what it meant and multiSel_ is the rest.
+    //
+    // THE INVARIANT, copied verbatim from the Content Browser's own multi-select (cbSelection_, which
+    // already works and which this deliberately mirrors so the two behave the same under the same
+    // keys): multiSel_ CONTAINS selEntity_ whenever anything is selected. A caller that iterates
+    // multiSel_ therefore sees the whole selection including the anchor, and never has to remember to
+    // add it back -- forgetting that is how "delete removed all but one" bugs happen.
+    std::vector<scene::Entity> multiSel_;
+
+    // THE INVARIANT IS A VALIDITY TEST, NOT A CHORE FOR FORTY CALL SITES.
+    //
+    // sel_/selEntity_ are assigned directly in about forty places -- viewport pick, undo, paste,
+    // spawn, drag-drop, Play, the Details panel's Select buttons, several delete paths. Teaching
+    // every one of them to also maintain multiSel_ would work exactly until somebody adds the
+    // forty-first, and the failure is silent and nasty: a stale set means a later Delete removes
+    // objects the user cannot see highlighted.
+    //
+    // So the set is only BELIEVED while it still contains the anchor. Anything that moves the anchor
+    // on its own therefore collapses the selection to one, which is the correct and safe default for
+    // every one of those sites -- picking in the viewport, undoing, pasting and spawning all mean
+    // "this one thing is now selected". The outliner's own multi paths keep the anchor inside the
+    // set, so they stay multi.
+    bool multiStale() const {
+        return !multiSel_.empty() &&
+               std::find(multiSel_.begin(), multiSel_.end(), selEntity_) == multiSel_.end();
+    }
+    bool multiIsSelected(scene::Entity e) const {
+        if (multiStale()) return false;
+        return std::find(multiSel_.begin(), multiSel_.end(), e) != multiSel_.end();
+    }
+    // Drops a set the anchor has left. Called once a frame so a stale set cannot come back to life
+    // later by the anchor happening to land on one of its members again.
+    void multiSyncToAnchor() { if (multiStale()) multiSel_.clear(); }
+    void multiClear() { multiSel_.clear(); }
+    // Plain click: this one becomes the whole selection.
+    void multiSetSingle(scene::Entity e) {
+        multiSel_.assign(1, e);
+        sel_ = kSelScene; selEntity_ = e;
+    }
+    // Ctrl+click: add or remove one, and keep the anchor pointing at something that is still selected.
+    void multiToggle(scene::Entity e) {
+        const auto it = std::find(multiSel_.begin(), multiSel_.end(), e);
+        if (it != multiSel_.end()) {
+            multiSel_.erase(it);
+            if (selEntity_ == e) {
+                // The anchor was just deselected. Hand it to whatever is left rather than leaving it
+                // pointing at something the user can no longer see highlighted.
+                if (multiSel_.empty()) { sel_ = -1; selEntity_ = scene::kInvalidEntity; }
+                else selEntity_ = multiSel_.back();
+            }
+            return;
+        }
+        multiSel_.push_back(e);
+        sel_ = kSelScene; selEntity_ = e;
+    }
+    // Shift+click: everything between the anchor and this row, in the order the rows are DRAWN.
+    // Visible order, not creation order -- a range selection means "what I can see between these
+    // two", and the outliner's order is a filtered, sorted tree walk that matches nothing else.
+    void multiRange(scene::Entity to) {
+        const auto& ord = outlinerOrder_;
+        const auto a = std::find(ord.begin(), ord.end(), selEntity_);
+        const auto b = std::find(ord.begin(), ord.end(), to);
+        if (a == ord.end() || b == ord.end()) { multiSetSingle(to); return; }
+        auto lo = a, hi = b;
+        if (lo > hi) std::swap(lo, hi);
+        multiSel_.clear();
+        for (auto i = lo; i <= hi; ++i) multiSel_.push_back(*i);
+        // The anchor STAYS where it was, so a second shift-click re-ranges from the same origin
+        // instead of walking the anchor along with it -- which is what every file browser does.
+        sel_ = kSelScene;
+        if (!multiIsSelected(selEntity_)) selEntity_ = to;
+    }
+    // The live selection, skipping anything destroyed since it was selected. Callers must not assume
+    // multiSel_ itself is clean: an entity can be deleted by a script, by streaming, or by an undo.
+    std::vector<scene::Entity> selectedEntities() const {
+        std::vector<scene::Entity> out;
+        const scene::World& w = scene::World::instance();
+        if (!multiStale())
+            for (const scene::Entity e : multiSel_) if (w.valid(e)) out.push_back(e);
+        if (out.empty() && sel_ == kSelScene && w.valid(selEntity_)) out.push_back(selEntity_);
+        return out;
+    }
+    // The rows the outliner drew this frame, in draw order. Rebuilt every frame by drawOutlinerRow;
+    // read only by multiRange.
+    std::vector<scene::Entity> outlinerOrder_;
+#endif
+
     bool movableSelected() const { return sel_ >= 0 && sel_ < (int)objects_.size(); }
 
     // True while a play session owns the input, so editor interaction must stand down.
@@ -11602,10 +11705,46 @@ private:
             EditXform o;
             if (selectedXform(o)) {
                 const f32 dx=mx-prevMouseX_, dy=my-prevMouseY_;
+                const Vec3 before = o.pos;
                 if (tool_==Tool::Move)        applyMove(o, dx, dy);
                 else if (tool_==Tool::Rotate) applyRotate(o, prevMouseX_, prevMouseY_, mx, my);
                 else if (tool_==Tool::Scale)  applyScale(o, dx, dy);
                 setSelectedXform(o);
+#if AVER_MODULE_SCENE
+                // THE REST OF THE SELECTION FOLLOWS, by the same world-space DELTA the anchor just
+                // moved -- which is why this reads `before` rather than recomputing anything: grid
+                // snap, axis constraint and the screen-plane projection have all already been applied
+                // to the anchor, and re-deriving them per entity would let a snapped anchor drag an
+                // unsnapped crowd, or worse, snap each one separately and change their spacing.
+                //
+                // MOVE ONLY. Rotate and scale about a shared pivot need a pivot to be CHOSEN (the
+                // anchor? the centroid? each object's own?) and each answer is right for different
+                // work; picking one silently would be a worse answer than the honest gap. They still
+                // act on the anchor alone.
+                if (tool_ == Tool::Move && !multiStale()) {
+                    const Vec3 delta = o.pos - before;
+                    if (delta.x != 0.0f || delta.y != 0.0f || delta.z != 0.0f) {
+                        scene::World& w = scene::World::instance();
+                        for (const scene::Entity ent : multiSel_) {
+                            if (ent == selEntity_ || !w.valid(ent)) continue;
+                            // A CHILD OF SOMETHING ELSE IN THE SET WOULD MOVE TWICE -- once with its
+                            // parent's transform and once on its own. Skipping any entity whose
+                            // ancestor is also selected is what keeps a dragged hierarchy rigid.
+                            bool ancestorSelected = false;
+                            for (scene::Entity p = w.parent(ent); p != scene::kInvalidEntity;
+                                 p = w.parent(p)) {
+                                if (multiIsSelected(p)) { ancestorSelected = true; break; }
+                            }
+                            if (ancestorSelected) continue;
+                            const auto* loc = w.component<scene::CLocal>(ent, scene::kComponentLocal);
+                            if (!loc) continue;
+                            Transform t = loc->xf;
+                            t.position += delta;
+                            w.setLocalTransform(ent, t);
+                        }
+                    }
+                }
+#endif
             }
             prevMouseX_=mx; prevMouseY_=my;
         }
@@ -11750,6 +11889,33 @@ private:
     // placeholder object (the default path with no level loaded) was silently non-undoable.
     void deleteSelection() {
 #if AVER_MODULE_SCENE
+        // EVERY SELECTED ENTITY, not just the anchor. Selecting five rows and pressing Delete used to
+        // remove one and leave four still highlighted, which is the most confusing way for a
+        // multi-select to be half-finished.
+        //
+        // ONE UNDO RECORD PER ENTITY, honestly: EditCmd describes a single destroy, so undoing a
+        // five-object delete takes five Ctrl+Z. Grouping them needs a compound command the undo stack
+        // does not have, and inventing one here -- inside a delete -- is how an undo stack acquires a
+        // shape nothing else understands. Stated rather than hidden.
+        {
+            const std::vector<scene::Entity> victims = selectedEntities();
+            if (victims.size() > 1) {
+                for (const scene::Entity v : victims) {
+                    scene::World& w = scene::World::instance();
+                    if (!w.valid(v)) continue;
+                    EditCmd c = describeEntity(v);
+                    c.kind = EditCmd::Kind::Destroy;
+                    captureSubtree(c, v);
+                    destroyEntity(v);
+                    pushEdit(std::move(c));
+                }
+                AVER_INFO("[Editor] deleted {} selected entities", victims.size());
+                multiClear();
+                selEntity_ = scene::kInvalidEntity;
+                sel_ = -1;
+                return;
+            }
+        }
         if (sel_ == kSelScene && selEntity_ != scene::kInvalidEntity) {
             scene::World& w = scene::World::instance();
             if (w.valid(selEntity_)) {
@@ -11765,6 +11931,7 @@ private:
                 destroyEntity(selEntity_);
                 pushEdit(std::move(c));
             }
+            multiClear();
             selEntity_ = scene::kInvalidEntity;
             sel_ = -1;
             return;
@@ -11899,6 +12066,80 @@ private:
     // Two phases: A forces the scene-entity branch (hideEditorScene_=true); B forces the placeholder-
     // object branch (no level) against the SAME six commands -- the path that, before this change,
     // silently pushed no undo entry for Create/Destroy at all. B runs even with SCENE off.
+    // --multiselect-test: drives the multi-selection MODEL directly and asserts its semantics.
+    //
+    // THE MODEL, NOT THE CLICKS. Shift and Ctrl reach it through the outliner's ImGui tree, which a
+    // headless run has no way to click; what CAN be checked headlessly is the part that actually
+    // decides behaviour -- what the set contains after each gesture, and above all the staleness
+    // rule, which is the subtle one. multiStale() exists so that ~40 places that assign selEntity_
+    // directly collapse the selection instead of leaving a set the user cannot see; if that ever
+    // silently stops working, Delete starts removing things nobody highlighted. That is worth a
+    // witness, and this file has learned twice today what an unwitnessed control costs.
+    void runMultiSelectTest(Engine& eng) {
+        (void)eng;
+        int failures = 0;
+        auto check = [&](bool cond, const char* what) {
+            if (cond) AVER_INFO("[multiselect-test] PASS: {}", what);
+            else      { AVER_ERROR("[multiselect-test] FAIL: {}", what); ++failures; }
+        };
+#if AVER_MODULE_SCENE
+        scene::World& w = scene::World::instance();
+        scene::Entity a = w.create("msA"), b = w.create("msB"), c = w.create("msC");
+        // A fourth, deliberately never added to the set: staleness is about the anchor landing
+        // OUTSIDE the selection, and pointing it at a member is correctly not stale.
+        scene::Entity d = w.create("msD");
+
+        multiSetSingle(a);
+        check(selEntity_ == a && selectedEntities().size() == 1, "a plain click selects exactly one");
+
+        multiToggle(b);
+        check(selectedEntities().size() == 2 && multiIsSelected(a) && multiIsSelected(b),
+              "ctrl+click adds a second without dropping the first");
+        check(selEntity_ == b, "and the newly added one becomes the anchor");
+
+        multiToggle(b);
+        check(selectedEntities().size() == 1 && !multiIsSelected(b),
+              "ctrl+click again removes it");
+        check(selEntity_ == a, "and the anchor moves to something still selected");
+
+        // The range walk needs a drawn order; supply one directly, which is what the outliner does.
+        outlinerOrder_ = {a, b, c};
+        multiSetSingle(a);
+        multiRange(c);
+        check(selectedEntities().size() == 3, "shift+click takes the whole range in DRAWN order");
+        check(selEntity_ == a, "and the anchor stays put so a second shift re-ranges from it");
+
+        // Pointing the anchor at something ALREADY selected is an ordinary act -- the right-click
+        // menu does it -- and must NOT collapse the set. Asserted because getting this wrong is the
+        // easy over-correction, and it would make right-clicking one of five selected rows silently
+        // drop the other four.
+        sel_ = kSelScene; selEntity_ = b;
+        check(!multiStale(), "moving the anchor WITHIN the set is not stale");
+        check(selectedEntities().size() == 3, "and the set survives it");
+
+        // THE ONE THAT MATTERS. Simulate any of the ~40 sites that assign the anchor on their own --
+        // a viewport pick, an undo, a paste, a spawn -- all of which mean "this one thing now".
+        sel_ = kSelScene; selEntity_ = d;
+        check(multiStale(), "an anchor assigned OUTSIDE the set marks it stale");
+        check(selectedEntities().size() == 1 && selectedEntities()[0] == d,
+              "and the selection collapses to that one entity rather than staying three");
+        check(!multiIsSelected(a), "the stale set stops reporting membership");
+        multiSyncToAnchor();
+        check(multiSel_.empty(), "the once-a-frame sync then actually drops it");
+
+        // A destroyed entity must not survive in the selection.
+        multiSetSingle(a); multiToggle(b);
+        w.destroy(b); w.flush();
+        check(selectedEntities().size() == 1, "a destroyed entity leaves the reported selection");
+
+        multiClear();
+        sel_ = -1; selEntity_ = scene::kInvalidEntity;
+        w.destroy(a); w.destroy(c); w.destroy(d); w.flush();
+#endif
+        AVER_INFO("[multiselect-test] RESULT: {}", failures == 0 ? "PASS" : "FAIL");
+    }
+    int multiSelTestFrames_ = 0;   // --multiselect-test: frames left before it fires
+
     void runUndoTest(Engine& eng) {
         int failures = 0;
         auto check = [&](bool cond, const char* what) {
@@ -16100,7 +16341,11 @@ private:
         // nothing to hold and the reason is worth writing down. SpanAvailWidth matches the Content
         // Browser's own folder tree rather than inventing a second convention.
         ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_SpanAvailWidth;
-        if (sel_ == kSelScene && selEntity_ == row.ent) flags |= ImGuiTreeNodeFlags_Selected;
+        // THE WHOLE SET IS HIGHLIGHTED, not just the anchor -- a multi-select the user cannot SEE
+        // is indistinguishable from a broken one, and the first thing they would do is click again
+        // and lose it.
+        if (sel_ == kSelScene && (selEntity_ == row.ent || multiIsSelected(row.ent)))
+            flags |= ImGuiTreeNodeFlags_Selected;
         if (!hasKids) {
             flags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
         } else {
@@ -16134,22 +16379,44 @@ private:
             return;
         }
 
+        // EVERY DRAWN ROW, IN ORDER, so a shift-click has a range to walk. Recorded here rather
+        // than rebuilt on demand because only this walk knows the tree's filtered, sorted, expanded
+        // shape -- the same reason the Content Browser ranges over its `shown` list and not the
+        // folder's contents.
+        outlinerOrder_.push_back(row.ent);
+
         const std::string label = "  " + row.shown + "##e" + std::to_string((u32)row.ent);
         const bool open = ImGui::TreeNodeEx(label.c_str(), flags);
         // IsItemToggledOpen separates "clicked the arrow" from "clicked the label" on one node, so
         // expanding a parent does not also select it.
         if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
-            sel_ = kSelScene; selEntity_ = row.ent;
+            // SAME KEYS AS THE CONTENT BROWSER NEXT DOOR, and as every file browser: shift extends a
+            // range from the anchor, ctrl toggles one, a bare click replaces. Making the two panels
+            // disagree about this would be worse than either behaviour on its own.
+            const ImGuiIO& cio = ImGui::GetIO();
+            if (cio.KeyShift && sel_ == kSelScene && selEntity_ != scene::kInvalidEntity)
+                multiRange(row.ent);
+            else if (cio.KeyCtrl)
+                multiToggle(row.ent);
+            else
+                multiSetSingle(row.ent);
         }
         // F2 AND RIGHT-CLICK > RENAME, the two gestures a file browser has trained everyone to
         // expect -- and the ones the Content Browser next door already implements for a FILE. The
         // Outliner had neither, for an entity.
         if (ImGui::IsItemHovered() && ImGui::IsKeyPressed(ImGuiKey_F2, false)) {
-            sel_ = kSelScene; selEntity_ = row.ent;
+            // Renaming is a one-entity act, so it collapses the selection rather than renaming the
+            // anchor of a set and leaving the rest looking selected but untouched.
+            multiSetSingle(row.ent);
             beginOutlinerRename(row.ent);
         }
         if (ImGui::BeginPopupContextItem(("##ctx" + std::to_string((u32)row.ent)).c_str())) {
-            sel_ = kSelScene; selEntity_ = row.ent;
+            // A right-click on a row that is ALREADY part of the selection keeps the whole set --
+            // otherwise "select five, right-click, Delete" would delete one, which is the single most
+            // annoying way for a multi-select to be half-implemented. Right-clicking OUTSIDE the set
+            // selects just that row, as everywhere else.
+            if (!multiIsSelected(row.ent)) multiSetSingle(row.ent);
+            else { sel_ = kSelScene; selEntity_ = row.ent; }
             if (ImGui::MenuItem("Rename", "F2")) beginOutlinerRename(row.ent);
             // THE OTHER HALF OF WHAT A RIGHT-CLICK IS FOR. This menu offered Rename and nothing else,
             // so the one place a person looks to delete a thing in a tree had no way to. Goes through
@@ -16241,6 +16508,9 @@ private:
             for (auto& kv : children) std::sort(kv.second.begin(), kv.second.end(), byLabel);
 
             if (!roots.empty() && !hideEditorScene_) ImGui::Separator();
+            // Rebuilt from scratch every frame: rows appear and vanish as folders expand and the
+            // filter changes, and a stale order would range over rows that are no longer on screen.
+            outlinerOrder_.clear();
             for (const OutlinerRow* r : roots) drawOutlinerRow(*r, children, 0);
 
             // THE DEFERRED DELETE, answered here: the tree is fully drawn, every TreePop is paired,
@@ -21720,6 +21990,7 @@ Application* createApplication(int argc, char** argv) {
     int inputStuckArg = 0;
     int inputSourceArg = 0;
     int wheelSpeedArg = 0;
+    int multiSelArg = 0;
     int recaptureArg = 0;
     int viewmodelArg = 0;
     // --gpu-timing takes no value, so it's matched in the i+1<argc loop below only incidentally --
@@ -21733,6 +22004,7 @@ Application* createApplication(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--input-stuck-test"))     inputStuckArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--input-source-test"))    inputSourceArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--wheel-speed-test"))     wheelSpeedArg = std::atoi(argv[i + 1]);
+        if (!std::strcmp(argv[i], "--multiselect-test"))     multiSelArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--recapture-test"))       recaptureArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--viewmodel-test"))       viewmodelArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--refraction"))           refraction = std::atoi(argv[i + 1]);
@@ -22640,6 +22912,7 @@ Application* createApplication(int argc, char** argv) {
     if (inputStuckArg > 0) app->setInputStuckTest(inputStuckArg);
     if (inputSourceArg > 0) app->setInputSourceTest(inputSourceArg);
     if (wheelSpeedArg > 0) app->setWheelSpeedTest(wheelSpeedArg);
+    if (multiSelArg > 0) app->setMultiSelectTest(multiSelArg);
     if (recaptureArg > 0) app->setRecaptureTest(recaptureArg);
     if (viewmodelArg > 0) app->setViewmodelTest(viewmodelArg);
 #endif
