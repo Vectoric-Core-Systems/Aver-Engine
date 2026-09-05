@@ -2866,8 +2866,17 @@ public:
                 yaw_   += io.MouseDelta.x * lookSpeed_;
                 pitch_ -= io.MouseDelta.y * lookSpeed_;
                 pitch_ = pitch_ < -1.54f ? -1.54f : (pitch_ > 1.54f ? 1.54f : pitch_);
+                // WHEEL WHILE FLYING CHANGES SPEED, and SCROLL DOWN MAKES IT FASTER. That is the
+                // inverse of the previous behaviour and is what was asked for; note it is also the
+                // inverse of Unreal's own default, where wheel-up speeds up. Kept as asked rather
+                // than "corrected" -- which way a wheel means "more" is a preference, not a fact.
+                //
+                // MULTIPLICATIVE, so a notch feels the same at 1 as it does at 20: an additive step
+                // would be imperceptible when flying fast and violent when creeping. 1.25 per notch
+                // is roughly three notches to double, which is coarse enough to be useful in one
+                // flick and fine enough to settle on a speed.
                 if (io.MouseWheel != 0.0f) {
-                    flySpeed_ *= (1.0f + io.MouseWheel * 0.15f);
+                    flySpeed_ *= std::pow(1.25f, -io.MouseWheel);
                     flySpeed_ = flySpeed_ < 20.0f ? 20.0f : (flySpeed_ > 40000.0f ? 40000.0f : flySpeed_);
                 }
             }
@@ -2934,23 +2943,8 @@ public:
             // NOT GATED ON levelFocused_, unlike F below: saving is not a viewport gesture and
             // wanting it while the cursor sits over the Outliner is not a mistake. It IS gated on
             // WantTextInput, or renaming an entity would save the level on the "s" of a name.
-            if (!io.WantTextInput && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false)) {
-                if (levelPath_.empty()) {
-                    // Never saved, so there is no file to write. Open the same prompt the menu does
-                    // rather than inventing a name -- Save As is what Ctrl+S means here.
-                    saveLevelAsName_[0] = '\0';
-                    std::snprintf(saveLevelAsName_, sizeof saveLevelAsName_, "%s",
-                                  levelName_.empty() ? "untitled" : levelName_.c_str());
-                    saveLevelAsError_.clear();
-                    wantSaveLevelAs_ = true;
-                } else if (saveLevel(levelPath_)) {
-                    setUpgradeStatus("Saved " + std::filesystem::path(levelPath_).filename().string());
-                } else {
-                    setUpgradeStatus("Could not save " +
-                                     std::filesystem::path(levelPath_).filename().string());
-                    AVER_ERROR("[Level] Ctrl+S: could not write {}", levelPath_);
-                }
-            }
+            if (!io.WantTextInput && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false))
+                saveLevelInteractive();
 
             // F frames the selection at a distance derived from its radius.
             //
@@ -8391,6 +8385,36 @@ private:
     bool hudTestReported_ = false;
     f32 hudRectX_ = 0, hudRectY_ = 0, hudRectW_ = 0, hudRectH_ = 0;
 
+    // SAVING, AS A PERSON ASKED FOR IT -- the one path Ctrl+S, the toolbar button and File > Save
+    // Level all take.
+    //
+    // WHY IT EXISTS: those three used to be three different behaviours. Ctrl+S reported "Saved X" or
+    // "Could not save X" and opened Save As when the level had never been written; the toolbar button
+    // and the menu item both called saveLevel(levelPath_) and THREW THE RESULT AWAY. So the button
+    // was silent whether it worked or not -- reported as "the save button is broken", and from the
+    // outside a silent success and a silent failure are the same button.
+    void saveLevelInteractive() {
+#if AVER_MODULE_SCENE
+        if (levelPath_.empty()) {
+            // Never written, so there is no file to overwrite. Open the same prompt the menu does
+            // rather than inventing a name: Save As is what Save means for a level with no path.
+            saveLevelAsName_[0] = '\0';
+            std::snprintf(saveLevelAsName_, sizeof saveLevelAsName_, "%s",
+                          levelName_.empty() ? "untitled" : levelName_.c_str());
+            saveLevelAsError_.clear();
+            wantSaveLevelAs_ = true;
+            return;
+        }
+        const std::string name = std::filesystem::path(levelPath_).filename().string();
+        if (saveLevel(levelPath_)) {
+            setUpgradeStatus("Saved " + name);
+        } else {
+            setUpgradeStatus("Could not save " + name);
+            AVER_ERROR("[Level] save: could not write {}", levelPath_);
+        }
+#endif
+    }
+
     // Starts watching the project's content root, recursively, for changes made outside the editor.
     void startContentWatch() {
         contentWatch_.stop();
@@ -12959,7 +12983,7 @@ private:
                 }
                 ImGui::EndDisabled();
                 uiReg_.track("file.reloadStartLevel");
-                if (ImGui::MenuItem("Save Level", "Ctrl+S") && !levelPath_.empty()) saveLevel(levelPath_);
+                if (ImGui::MenuItem("Save Level", "Ctrl+S")) saveLevelInteractive();
                 uiReg_.track("file.saveLevel");
                 // SAVE LEVEL AS, which the toolbar's own Save tooltip has been telling people to use
                 // for as long as it has existed -- "File > New Level, then Save Level As" -- while
@@ -13207,12 +13231,14 @@ private:
         // path or save without a world), matching the File-menu Save Level item's own guard above --
         // this toolbar button was the same feature, unguarded.
 #if AVER_MODULE_SCENE
-        ImGui::BeginDisabled(levelPath_.empty());
-        if (ImGui::Button(ICON_SAVE " Save")) saveLevel(levelPath_);
+        // NOT DISABLED WHEN THE LEVEL HAS NO PATH ANY MORE. A level that has never been written is
+        // exactly when a person most wants this button, and greying it out to explain that in a
+        // tooltip is a worse answer than opening Save As, which is what it does now.
+        if (ImGui::Button(ICON_SAVE " Save")) saveLevelInteractive();
         uiReg_.track("toolbar.save");
-        ImGui::EndDisabled();
-        if (levelPath_.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-            ImGui::SetTooltip("No level loaded - File > New Level, then File > Save Level As...");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(levelPath_.empty() ? "Save Level As..."
+                                                 : "Save Level (Ctrl+S)");
 #else
         ImGui::BeginDisabled(true);
         ImGui::Button("Save");
@@ -16852,8 +16878,18 @@ private:
             uiReg_.track("prefs.viewport.showStaticMeshes");
             ImGui::Checkbox("Show atmosphere", &showAtmosphere_);
             uiReg_.track("prefs.viewport.showAtmosphere");
-            ImGui::SliderFloat("Fly speed (cm/s)", &flySpeed_, 20.0f, 20000.0f, "%.0f",
-                               ImGuiSliderFlags_Logarithmic);
+            // THE SAME DIAL AS THE VIEWPORT CHIP, not the raw rate. Two places showing one setting
+            // in two different units is how a person ends up believing they are two settings -- and
+            // this one is the more misleading of the pair, since it is the page you go to when the
+            // chip's number is not what you expected.
+            {
+                f32 dial = flySpeed_ / kCamSpeedUnit;
+                if (ImGui::SliderFloat("Fly speed", &dial, 20.0f / kCamSpeedUnit,
+                                       20000.0f / kCamSpeedUnit, "%.2f", ImGuiSliderFlags_Logarithmic))
+                    flySpeed_ = dial * kCamSpeedUnit;
+                ImGui::SameLine();
+                ImGui::TextDisabled("(%.0f cm/s)", flySpeed_);
+            }
             uiReg_.track("prefs.viewport.flySpeed");
             ImGui::SliderFloat("Look sensitivity", &lookSpeed_, 0.001f, 0.02f, "%.4f");
             uiReg_.track("prefs.viewport.lookSensitivity");
@@ -18044,10 +18080,23 @@ private:
         }
 
         ImGui::SameLine(0, gap);
-        char camLbl[32]; std::snprintf(camLbl, sizeof camLbl, "Cam %.0f", flySpeed_);
+        // "Cam 1" at the default 800 cm/s -- %g rather than %f so the default reads as "Cam 1" and
+        // not "Cam 1.00", while the slow end, where a person placing something cares about 0.25
+        // against 0.5, keeps three significant figures. Whole numbers above 10 only: at speed 18 the
+        // decimals would be false accuracy.
+        char camLbl[32];
+        const f32 camDial = flySpeed_ / kCamSpeedUnit;
+        std::snprintf(camLbl, sizeof camLbl, camDial < 10.0f ? "Cam %.3g" : "Cam %.0f", camDial);
         if (dropButton(camLbl)) ImGui::OpenPopup("camSpeed");
         if (ImGui::BeginPopup("camSpeed")) {
-            ImGui::SliderFloat("Speed (cm/s)", &flySpeed_, 20.0f, 20000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
+            f32 dial = flySpeed_ / kCamSpeedUnit;
+            if (ImGui::SliderFloat("Speed", &dial, 20.0f / kCamSpeedUnit, 20000.0f / kCamSpeedUnit,
+                                   "%.2f", ImGuiSliderFlags_Logarithmic))
+                flySpeed_ = dial * kCamSpeedUnit;
+            // The rate is still what the camera actually moves at, and somebody measuring a fly-through
+            // needs it -- so it is shown, just not as the number you steer by.
+            ImGui::TextDisabled("%.0f cm/s", flySpeed_);
+            ImGui::TextDisabled("Right-drag the viewport and scroll DOWN to speed up.");
             ImGui::EndPopup();
         }
 
@@ -18477,6 +18526,15 @@ private:
     // Free-fly editor camera: position plus yaw/pitch.
     Vec3 camPos_{7.0f, 7.0f, 4.5f};
     f32 yaw_ = 0.0f, pitch_ = 0.0f, flySpeed_ = 800.0f, lookSpeed_ = 0.005f;   // cm/s
+
+    // WHAT "1" ON THE CAMERA-SPEED DIAL MEANS, in cm/s.
+    //
+    // flySpeed_ stays in centimetres per second because that is what the movement integration and
+    // the saved preference are in, and changing the stored unit would silently reinterpret every
+    // editor.ini in existence. This is a DISPLAY scale only: the chip and the slider divide by it,
+    // so the default speed reads as "1" rather than "800" -- the number a person tunes by feel, the
+    // way Unreal's 1-8 camera speed does, instead of a raw rate they have to convert in their head.
+    static constexpr f32 kCamSpeedUnit = 800.0f;
     bool flying_ = false;
     // The pawn currently viewed in FIRST PERSON this frame, or kInvalidEntity -- set by
     // drivePlayCamera(), read by the owner-hide check beside the frustum/occlusion culls. A mesh
