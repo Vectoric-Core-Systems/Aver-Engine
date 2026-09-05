@@ -1091,6 +1091,9 @@ private:
     bool giCacheRestore(rhi::IRenderContext& ctx);
     // Schedules a readback of voxelTex_ so it can be written out once the GPU is past it.
     void giCacheScheduleDump(rhi::IRenderContext& ctx);
+    // Warns once that a volume is too big to cache. Shared by the two places that can decide it:
+    // giCacheScheduleDump before the readback, giCacheTick as a guard after it.
+    void giCacheWarnOversize(u64 bytes);
     // Ticks the countdown and writes the file when it reaches zero.
     void giCacheTick();
     // Sizes giCacheReadback_/giCacheUpload_ and giCacheMipOffsets_ for the current volume.

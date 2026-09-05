@@ -1426,14 +1426,74 @@ bool VoxiRenderer::giCacheRestore(rhi::IRenderContext& ctx) {
     return true;
 }
 
+// A CEILING ON ONE ENTRY, ABSOLUTE AND NOT A FRACTION OF THE BUDGET.
+//
+// The RAM budget bounds how much is BUFFERED before a flush. It was never a statement that any
+// single entry is worth writing, and keying this test on it gets the wrong answer twice over.
+// MEASURED, both on PTTest at 512^3 where one volume is 1170 MB:
+//   - at the 256 MB default, the entry went over budget the instant it was pushed and flushed
+//     synchronously, every bake. 118 ms/frame of wall clock against 12.8 ms of GPU, and 9.4 GB
+//     on disk in one session -- giCacheSweep keeps 8, so eight of these is the steady state.
+//     Moving the camera in Play re-keys the volume often enough to do it over and over; it
+//     reads as a hang, and was reported as a crash.
+//   - at a 4096 MB budget it is WORSE, not better: four entries buffer to 4681 MB of RAM and
+//     then write 4.8 GB in a single flush.
+// A bigger budget buys a bigger stall. There is no setting of it that makes a gigabyte-per-bake
+// write reasonable, which is what makes this a ceiling rather than a ratio.
+//
+// 256 MB, because that is the shipped default budget: an entry that cannot fit the cache as it
+// ships is not one this system was built to carry. Above that line the derived data costs more
+// to move than to derive -- the revoxelisation being avoided is ~8 ms of GPU, and the write is
+// seconds of disk -- so the entry is dropped and the volume is simply rebuilt, which is the
+// cache's own stated contract: losing it costs one rebuild.
+//
+// FILE SCOPE, not a local in giCacheTick, because giCacheScheduleDump has to consult it BEFORE
+// issuing the readback -- see the note there on what testing it too late used to cost.
+static constexpr u64 kMaxCachedGiEntryBytes = 256ull * 1024ull * 1024ull;
+
+// SAID ONCE, and it names the lever that actually helps. Raising the budget is NOT that lever,
+// which is why it is not suggested: it makes the stall larger.
+void VoxiRenderer::giCacheWarnOversize(u64 bytes) {
+    if (giCacheOversizeWarned_) return;
+    giCacheOversizeWarned_ = true;
+    AVER_WARN("[Voxi] a {}^3 GI volume is {} MB, over the {} MB per-entry ceiling, so it is "
+              "NOT cached and every open re-voxelises instead -- which costs about one frame. "
+              "Writing it would block for seconds per bake and keep up to 8 copies on disk. "
+              "Lower RENDER.VOXELRES if you want the cache back; raising the cache budget "
+              "does not help, it only makes the flush bigger.",
+              voxelResBuilt_, bytes / (1024 * 1024), kMaxCachedGiEntryBytes / (1024 * 1024));
+}
+
 // Schedules a readback of the freshly baked volume. Nothing is written yet -- see the countdown.
 void VoxiRenderer::giCacheScheduleDump(rhi::IRenderContext& ctx) {
     if (giCacheDir_.empty() || giCacheUnsupported_) return;
     if (giCacheDumpCountdown_) return;   // one in flight is enough
-    if (!giCacheEnsureBuffers()) return;
 
     giCachePendingKey_ = giCacheKey();
     if (giCachePendingKey_.resolution == 0) return;
+
+    // THE CEILING IS TESTED HERE, BEFORE ANYTHING IS COPIED, AND IT USED TO BE TESTED ONLY IN
+    // giCacheTick -- after the copy had already run. That ordering made the "not cached" path the
+    // MOST expensive one in the renderer rather than a free early-out: at 512^3 every rebuild issued
+    // a 1170 MB GPU->CPU copy of all nine mips, allocated a 1170 MB readback buffer to hold it and a
+    // 1170 MB std::vector to receive it, and then dropped the result on the size test below. The
+    // volume is only written when the entry FITS, so nothing above that line was ever going to be
+    // kept -- the whole readback was work done to reach a `return`.
+    //
+    // MEASURED, PTTest/Sponza with --cam-wobble: the gate rejects on ~72% of ticks while the camera
+    // moves, so this ran about a hundred times in 151 frames. It is unmarked GPU work inside the
+    // "Voxi GI update" scope, which is why that scope's EXCLUSIVE time read 10.79 ms moving against
+    // 0.66 ms still -- a number the comment at the top of prePass attributed to
+    // beginShadowHistory/endShadowHistory, neither of which has any camera-dependent cost at all.
+    //
+    // NOT A BEHAVIOUR CHANGE: an over-ceiling volume was never cached before this and still is not.
+    // The only difference is that it now costs nothing to not cache it.
+    if (fmt::giCacheTotalBytes(giCachePendingKey_) > kMaxCachedGiEntryBytes) {
+        giCacheWarnOversize(fmt::giCacheTotalBytes(giCachePendingKey_));
+        return;
+    }
+
+    if (!giCacheEnsureBuffers()) return;
 
     // filterMips left the whole resource in ShaderResource; put it back there afterwards so the
     // cone trace later this frame reads it exactly as it would have.
@@ -1483,40 +1543,13 @@ void VoxiRenderer::giCacheTick() {
     // inputs is exactly what happens when an author moves the sun back to where it was.
     const u64 bytes = static_cast<u64>(entry.voxels.size());
 
-    // A CEILING ON ONE ENTRY, ABSOLUTE AND NOT A FRACTION OF THE BUDGET.
-    //
-    // The budget bounds how much is BUFFERED before a flush. It was never a statement that any
-    // single entry is worth writing, and keying this test on it gets the wrong answer twice over.
-    // MEASURED, both on PTTest at 512^3 where one volume is 1170 MB:
-    //   - at the 256 MB default, the entry went over budget the instant it was pushed and flushed
-    //     synchronously, every bake. 118 ms/frame of wall clock against 12.8 ms of GPU, and 9.4 GB
-    //     on disk in one session -- giCacheSweep keeps 8, so eight of these is the steady state.
-    //     Moving the camera in Play re-keys the volume often enough to do it over and over; it
-    //     reads as a hang, and was reported as a crash.
-    //   - at a 4096 MB budget it is WORSE, not better: four entries buffer to 4681 MB of RAM and
-    //     then write 4.8 GB in a single flush.
-    // A bigger budget buys a bigger stall. There is no setting of it that makes a gigabyte-per-bake
-    // write reasonable, which is what makes this a ceiling rather than a ratio.
-    //
-    // 256 MB, because that is the shipped default budget: an entry that cannot fit the cache as it
-    // ships is not one this system was built to carry. Above that line the derived data costs more
-    // to move than to derive -- the revoxelisation being avoided is ~8 ms of GPU, and the write is
-    // seconds of disk -- so the entry is dropped and the volume is simply rebuilt, which is the
-    // cache's own stated contract: losing it costs one rebuild.
-    //
-    // SAID ONCE, and it names the lever that actually helps. Raising the budget is NOT that lever,
-    // which is why it is not suggested: it makes the stall larger.
-    constexpr u64 kMaxCachedEntryBytes = 256ull * 1024ull * 1024ull;
-    if (bytes > kMaxCachedEntryBytes) {
-        if (!giCacheOversizeWarned_) {
-            giCacheOversizeWarned_ = true;
-            AVER_WARN("[Voxi] a {}^3 GI volume is {} MB, over the {} MB per-entry ceiling, so it is "
-                      "NOT cached and every open re-voxelises instead -- which costs about one frame. "
-                      "Writing it would block for seconds per bake and keep up to 8 copies on disk. "
-                      "Lower RENDER.VOXELRES if you want the cache back; raising the cache budget "
-                      "does not help, it only makes the flush bigger.",
-                      voxelResBuilt_, bytes / (1024 * 1024), kMaxCachedEntryBytes / (1024 * 1024));
-        }
+    // BELT AND BRACES. giCacheScheduleDump refuses to even issue the readback for an entry over
+    // kMaxCachedGiEntryBytes, so reaching here with an oversize entry means the key changed between
+    // scheduling the copy and reading it back -- possible in principle if the volume were resized
+    // mid-flight. Keep the test: it costs one comparison, and without it that case would write a
+    // gigabyte file the ceiling exists to prevent.
+    if (bytes > kMaxCachedGiEntryBytes) {
+        giCacheWarnOversize(bytes);
         return;
     }
 
