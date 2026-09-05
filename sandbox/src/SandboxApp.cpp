@@ -11486,7 +11486,45 @@ private:
                     rotDragDeg_=0.0f; rotAppliedDeg_=0.0f;   // see applyRotate
                     beginTransformEdit();
                 }
-                else pick(e, io);
+                else {
+                    // DRAGGING THE OBJECT ITSELF MOVES IT, not just the three hairline axis handles.
+                    //
+                    // Reaching a gizmo handle means landing within 16px of a two-pixel line, and
+                    // until now that was the ONLY way to move anything: a click anywhere on the
+                    // object's own body fell straight through to a re-pick, so the obvious gesture --
+                    // grab the thing and drag -- did nothing at all and read as "the editor cannot
+                    // move objects".
+                    //
+                    // ALREADY-SELECTED IS THE TEST, and it is what keeps this safe. pick() is left to
+                    // decide what was hit, exactly as before; if it lands on what was ALREADY
+                    // selected, the click is a grab rather than a selection change. So the first
+                    // click still only selects -- nothing can be nudged by the click that selected
+                    // it -- and a click on empty space or on a different object keeps its old
+                    // meaning entirely.
+                    //
+                    // AXIS 3 is applyMove's screen-plane branch, which already existed and was
+                    // reachable only through a 13px invisible hotspot at the pivot. This gives it the
+                    // whole silhouette to be grabbed by.
+                    //
+                    // No drag threshold is needed: a click that does not move produces no transform
+                    // change, and endTransformEdit already drops a no-op edit (nearlySameXform).
+                    const int  prevSel = sel_;
+#if AVER_MODULE_SCENE
+                    const scene::Entity prevEnt = selEntity_;
+#endif
+                    const bool hadSel = anySelected();
+                    pick(e, io);
+                    const bool sameTarget = hadSel && anySelected() && sel_ == prevSel
+#if AVER_MODULE_SCENE
+                                            && selEntity_ == prevEnt
+#endif
+                        ;
+                    if (haveGizmo && sameTarget && tool_ == Tool::Move) {
+                        dragging_=true; activeAxis_=3; prevMouseX_=mx; prevMouseY_=my;
+                        rotDragDeg_=0.0f; rotAppliedDeg_=0.0f;
+                        beginTransformEdit();
+                    }
+                }
             }
             if (!io.MouseDown[0]) {
                 if (dragging_) endTransformEdit();
@@ -18432,7 +18470,13 @@ private:
     bool gpuTiming_ = false;      // --gpu-timing: dump the per-pass GPU tree once, near the end
     bool gpuTimingDone_ = false;
     u32 resizeStep_ = 0;
-    Tool initialTool_ = Tool::Select;
+    // MOVE, NOT SELECT, and the difference is whether a gizmo exists at all. Select draws none
+    // (see drawGizmo's tool_ test), so an editor that opened in Select showed nothing to grab on a
+    // freshly picked object and gave no hint that 2 would summon one -- "I cannot move things" is
+    // the accurate description of that state, not a misunderstanding of it. Unreal likewise always
+    // has a transform gizmo up on a selected actor. Select is still one keypress away on 1, and
+    // --tool still overrides this.
+    Tool initialTool_ = Tool::Move;
     std::vector<MeshObj> objects_;
     // The selection addresses either world: sel_ >= 0 is an objects_ index, -1 is nothing,
     // -2/-3/-4 are the sun/sky/post pseudo-entries, kSelScene means selEntity_ names a scene entity.
@@ -18516,7 +18560,7 @@ private:
         if (base.empty()) base = "Entity";
         return base + " " + std::to_string(++labelCounts_[base]);
     }
-    Tool tool_ = Tool::Select;
+    Tool tool_ = Tool::Move;   // see initialTool_ for why this is Move and not Select
 
     // Which mode the viewport is in, and the brush the Landscape mode is holding. Both members are
     // UNGUARDED even though sculpting is AVER_MODULE_LANDSCAPE-only: the mode switch, viewport hint

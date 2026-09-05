@@ -29,7 +29,20 @@ namespace {
 // now a plain member instead of a file-static global: this module only ever has one instance anyway
 // (Sandbox constructs exactly one), but a member is one fewer global for no cost.
 struct UiSrvPool {
-    static constexpr u32 kCount = 16;
+    // 16 UNTIL IT WAS MEASURED AGAINST WHAT ACTUALLY WANTS A SLOT, and 16 was far too few. The
+    // permanent residents alone -- three icon sheets, the splash logo, the compile-status icon, the
+    // scene viewport, the shared asset-editor preview, and the thumbnail cache's own preview target
+    // -- account for about eight before ImGui's atlases are subtracted. That left roughly half a
+    // dozen for Content Browser thumbnails, while ThumbnailCache advertises a cap of 64: the coded
+    // cap was an order of magnitude above the real ceiling, so browsing a folder of meshes silently
+    // stopped generating previews after the first few tiles and fell back to the type glyph.
+    //
+    // 512 IS STILL SMALL. A shader-visible CBV/SRV/UAV heap can hold a million descriptors; this one
+    // is 512 * 32 bytes, about 16 KB of GPU memory. The number is not a budget, it is a headroom
+    // choice -- the real budget is ThumbnailCache's own VRAM cap, which is what should decide how
+    // many thumbnails live at once. Sizing this so the descriptor heap is never the binding
+    // constraint puts that decision back where it is actually reasoned about.
+    static constexpr u32 kCount = 512;
     u64 cpuBase = 0, gpuBase = 0;
     u32 stride = 0;
     bool used[kCount] = {};

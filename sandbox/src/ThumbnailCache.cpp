@@ -214,6 +214,11 @@ void ThumbnailCache::request(u64 assetId, rhi::MeshHandle mesh) {
     // A tile that failed once retries, up to kMaxThumbnailAttempts, reusing the destination texture
     // it already owns rather than churning one per attempt.
     if (const auto it = entries_.find(assetId); it != entries_.end()) {
+        // TOUCHED FIRST, AND ON EVERY PATH, because the early returns below are the COMMON case:
+        // a finished, visible thumbnail returns on the very next line, and if recency were stamped
+        // after that, the entries most worth keeping would be exactly the ones that never recorded
+        // being used, and LRU would evict them first.
+        it->second.lastSeen = frame_;
         if (it->second.ready) return;                          // genuinely done
         if (it->second.attempts >= kMaxThumbnailAttempts) return;   // given up on, and said so
         if (inFlight_ == assetId) return;                      // this frame's copy is still to run
@@ -221,11 +226,14 @@ void ThumbnailCache::request(u64 assetId, rhi::MeshHandle mesh) {
     for (const auto& p : pending_)
         if (p.first == assetId) return;   // already queued
 
-    if (entries_.size() >= kMaxThumbnails) {
+    if (entries_.size() >= kMaxThumbnails && !evictColdest(assetId)) {
+        // Only reachable when every resident entry was touched this same frame -- i.e. more tiles
+        // are visible at once than the budget holds. Dropping is then correct: evicting something
+        // also on screen would just thrash it back in next frame.
         if (!cappedWarned_) {
-            AVER_WARN("[ThumbnailCache] at the {}-thumbnail cap; further requests are dropped for "
-                     "the rest of this run rather than evicting an older one -- see the header's "
-                     "own comment on kMaxThumbnails for why there is no LRU here yet", kMaxThumbnails);
+            AVER_WARN("[ThumbnailCache] {} thumbnails are visible at once, which is the whole "
+                     "budget; the rest draw the typed glyph until something scrolls away",
+                     kMaxThumbnails);
             cappedWarned_ = true;
         }
         return;
@@ -239,8 +247,38 @@ u64 ThumbnailCache::textureId(u64 assetId) const {
     return it->second.uiId;
 }
 
+// Frees the coldest resident thumbnail so a newly visible one can take its slot.
+//
+// SKIPS ANYTHING TOUCHED THIS FRAME. Those are the tiles currently on screen, and evicting one to
+// make room for another on-screen tile would thrash both: each would destroy the other's texture
+// every frame and neither would ever finish. Refusing instead is what the caller's "budget is full"
+// message reports, and it is the honest answer -- the budget really is too small for that view.
+//
+// SKIPS THE IN-FLIGHT ASSET AND THE ONE BEING REQUESTED for the same reason a copy must not have its
+// destination pulled out from under it mid-frame.
+bool ThumbnailCache::evictColdest(u64 protectId) {
+    u64 victim = 0;
+    u64 oldest = ~0ull;
+    for (const auto& kv : entries_) {
+        if (kv.first == protectId || kv.first == inFlight_) continue;
+        if (kv.second.lastSeen >= frame_) continue;   // on screen right now
+        if (kv.second.lastSeen < oldest) { oldest = kv.second.lastSeen; victim = kv.first; }
+    }
+    if (!victim) return false;
+    const auto it = entries_.find(victim);
+    // destroyTexture also releases the UI descriptor slot the thumbnail held (the backend frees it
+    // in its own destroy path), which is the half that actually mattered: descriptors, not VRAM,
+    // were the binding constraint before the pool was resized.
+    if (it != entries_.end()) {
+        if (it->second.tex) res_->destroyTexture(it->second.tex);
+        entries_.erase(it);
+    }
+    return true;
+}
+
 void ThumbnailCache::update() {
     if (!ready_) return;
+    ++frame_;
 
     // Last frame's copy, if any, ran in CopyPass::prePass -- which happens AFTER this method, since
     // the host calls update() before the render features run (see the header). So by the time THIS
@@ -262,10 +300,10 @@ void ThumbnailCache::update() {
     // one at a time -- has caught up enough for request()'s own entries_.size() check to start
     // rejecting them. Without this, a big enough burst would walk entries_ straight past the cap
     // this class exists to enforce, one resident per frame, silently.
-    if (entries_.size() >= kMaxThumbnails) {
+    if (entries_.size() >= kMaxThumbnails && !evictColdest(assetId)) {
         if (!cappedWarned_) {
-            AVER_WARN("[ThumbnailCache] at the {}-thumbnail cap while draining a request backlog; "
-                     "the rest of the backlog is dropped as it is popped", kMaxThumbnails);
+            AVER_WARN("[ThumbnailCache] the whole {}-thumbnail budget is on screen while draining a "
+                     "backlog; the rest is dropped as it is popped", kMaxThumbnails);
             cappedWarned_ = true;
         }
         return;
@@ -297,6 +335,10 @@ void ThumbnailCache::update() {
     // NOT NECESSARILY FRESH ANY MORE: request() now re-queues an entry whose copy did not
     // finish, which is the whole point -- it keeps the destination texture it already created.
     Entry& e = entries_[assetId];
+    // Stamped here too, not only in request(): this is the path that CREATES the entry, and an entry
+    // born with lastSeen 0 would be the coldest thing in the map the instant it existed and could be
+    // evicted before its own copy ever ran.
+    e.lastSeen = frame_;
     ++e.attempts;
     if (e.attempts == kMaxThumbnailAttempts) {
         AVER_WARN("[ThumbnailCache] asset {} has not produced a thumbnail in {} attempts; it draws "
