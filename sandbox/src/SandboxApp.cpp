@@ -9959,6 +9959,7 @@ private:
     // The rows the outliner drew this frame, in draw order. Rebuilt every frame by drawOutlinerRow;
     // read only by multiRange.
     std::vector<scene::Entity> outlinerOrder_;
+    std::string outlinerFilter_;   // name filter box; empty = show everything
 
     // Selects every row the World Outliner currently lists. The anchor becomes the FIRST row rather
     // than the last, so a following shift-click ranges downward from the top the way a person expects
@@ -17450,6 +17451,13 @@ private:
     // parent is itself listed is a separate question, decided in buildOutlinerPanel's second pass.
     struct OutlinerRow { scene::Entity ent; scene::Entity par; std::string shown; };
 
+    // ASCII lowercase, matching the Content Browser's own filter rather than inventing a second
+    // rule: a name here is an editor label, not user text needing locale-aware folding.
+    static std::string lowerCopy(std::string v) {
+        for (char& c : v) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        return v;
+    }
+
     // The name a row and a drag preview show for an entity.
     std::string outlinerLabelFor(scene::Entity e) const {
         const scene::World& w = scene::World::instance();
@@ -17632,6 +17640,22 @@ private:
         ImGui::Begin("World Outliner", &showOutliner_);
         // So the edit verbs work on a selection made HERE -- see the dispatch in handleManip.
         outlinerFocused_ = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+
+        // A FILTER, because an alphabetical tree of six thousand entities is a list you scroll past,
+        // not one you find anything in. Sponza alone lists a few hundred.
+        //
+        // MATCHES A ROW BY NAME AND KEEPS ITS ANCESTORS. Hiding a parent whose child matched would
+        // orphan the match -- the tree is drawn by walking roots down, so a row whose parent is gone
+        // is never reached and the filter would appear to find nothing. Keeping the chain is what
+        // makes a hit visible in the place it actually lives.
+        {
+            char buf[128];
+            std::snprintf(buf, sizeof buf, "%s", outlinerFilter_.c_str());
+            ImGui::SetNextItemWidth(-1.0f);
+            if (ImGui::InputTextWithHint("##outlinerFilter", ICON_SEARCH " Filter by name", buf, sizeof buf))
+                outlinerFilter_ = buf;
+            uiReg_.track("outliner.filter");
+        }
         if (!hideEditorScene_)
             for (int i=0;i<(int)objects_.size();++i) {
                 if (ImGui::Selectable((std::string("  ")+objects_[i].name).c_str(), sel_==i)) { sel_=i; selEntity_=kInvalidId; }
@@ -17669,6 +17693,41 @@ private:
                 if (!mr && nm.empty() && w.childCount(ent) == 0) continue;
                 rows.push_back(OutlinerRow{ent, w.parent(ent), outlinerLabelFor(ent)});
                 survived.insert(static_cast<u32>(ent));
+            }
+
+            // PASS 1b: THE NAME FILTER, applied after the rows exist so ancestors can be kept.
+            //
+            // A row matches on a case-insensitive substring of its shown label. Its ANCESTORS are
+            // kept too, even when they do not match: the tree below is drawn by walking roots
+            // downward, so a row whose parent was dropped is simply never visited -- filtering
+            // naively would hide every nested match and the box would look broken on exactly the
+            // deep hierarchies it is most needed for. Descendants of a match are NOT kept: "show me
+            // the thing I named" should not unfold its entire subtree.
+            if (!outlinerFilter_.empty()) {
+                const std::string needle = lowerCopy(outlinerFilter_);
+                std::unordered_map<u32, const OutlinerRow*> byEnt;
+                for (const OutlinerRow& r : rows) byEnt[static_cast<u32>(r.ent)] = &r;
+
+                std::unordered_set<u32> keep;
+                for (const OutlinerRow& r : rows) {
+                    if (lowerCopy(r.shown).find(needle) == std::string::npos) continue;
+                    keep.insert(static_cast<u32>(r.ent));
+                    // Walk up through the rows we actually have, not through World: an ancestor that
+                    // was already excluded by the filters above is not a row and must not be revived.
+                    for (scene::Entity p = r.par; p != scene::kInvalidEntity;) {
+                        const auto it = byEnt.find(static_cast<u32>(p));
+                        if (it == byEnt.end()) break;
+                        if (!keep.insert(static_cast<u32>(p)).second) break;   // already walked
+                        p = it->second->par;
+                    }
+                }
+                std::vector<OutlinerRow> kept;
+                kept.reserve(keep.size());
+                for (const OutlinerRow& r : rows)
+                    if (keep.count(static_cast<u32>(r.ent))) kept.push_back(r);
+                rows.swap(kept);
+                survived.clear();
+                for (const OutlinerRow& r : rows) survived.insert(static_cast<u32>(r.ent));
             }
 
             // PASS TWO, and it HAS to be a second pass: w.at() walks the dense array, which is
