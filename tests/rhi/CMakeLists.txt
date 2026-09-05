@@ -72,3 +72,14 @@ if(AVER_RHI_VULKAN)
   endif()
   set_target_properties(RegisterBindMapTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# ShaderCacheSweepTest -- the DXIL blob cache's size bound, with no device and no backend.
+#
+# Unconditional and Aver.RHI-only: the sweeper is header-only std::filesystem over a temp directory,
+# and the property it decides is one no launch can show you. An unbounded cache WORKS -- it just
+# grows forever -- so on any machine whose cache has not filled yet, a sweeper that deleted
+# everything, nothing, or the newest files instead of the oldest would look identical to a correct
+# one. That is exactly the shape of defect this repo has been bitten by before.
+add_executable(ShaderCacheSweepTest src/ShaderCacheSweepTest.cpp)
+target_link_libraries(ShaderCacheSweepTest PRIVATE Aver.RHI Aver.Core Aver.Platform)
+set_target_properties(ShaderCacheSweepTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

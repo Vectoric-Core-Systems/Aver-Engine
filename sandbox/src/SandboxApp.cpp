@@ -10,6 +10,7 @@
 #include "aver/platform/InputState.hpp"
 #include "aver/rhi/ShaderFiles.hpp"
 #include "aver/rhi/RHI.hpp"
+#include "aver/rhi/ShaderCacheSweep.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/CrashReport.hpp"
 #include "aver/core/Assert.hpp"
@@ -3381,6 +3382,7 @@ public:
         if (projectSwitchFrames_ > 0 && --projectSwitchFrames_ == 0) runProjectSwitchTest();
         if (validateGraphFrames_ > 0 && --validateGraphFrames_ == 0) runValidateGraph();
         if (graphPrintTestFrames_ > 0 && --graphPrintTestFrames_ == 0) runGraphPrintTest();
+        if (clearShaderCacheFrames_ > 0 && --clearShaderCacheFrames_ == 0) runClearShaderCache();
         if (prefsWriteTestFrames_ > 0 && --prefsWriteTestFrames_ == 0) runPrefsWriteTest();
         if (keybindTestAutoFrames_ > 0 && --keybindTestAutoFrames_ == 0) runKeybindPersistTest(keybindTestMode_);
 #endif
@@ -6576,6 +6578,9 @@ public:
     void setProjectSwitchTest(int frames) { projectSwitchFrames_ = frames > 0 ? frames : 8; }
     void setValidateGraph(const std::string& p) { validateGraphPath_ = p; validateGraphFrames_ = 8; }
     void setGraphPrintTest(int frames) { graphPrintTestFrames_ = frames > 0 ? frames : 8; }
+    void setClearShaderCache(const std::string& dir = {}) {
+        clearShaderCacheDir_ = dir; clearShaderCacheFrames_ = 4;
+    }
     void setRecaptureTest(int n)   { recapFrames_ = n; }                          // --recapture-test
     void setViewmodelTest(int n)   { vmFrames_ = n; }                             // --viewmodel-test
     void setSkinSceneDir(std::string d) { skinSceneDir_ = std::move(d); }          // --skin-scene-test <dir>
@@ -12930,6 +12935,46 @@ private:
         clear();
 
         AVER_INFO("[graph-print-test] RESULT: {}", failures == 0 ? "PASS" : "FAIL");
+    }
+
+    // --clear-shader-cache: empty the DXIL blob cache and report what went.
+    //
+    // THE SECOND HALF OF THE UNBOUNDED-CACHE PROBLEM. A size bound stops it growing without limit
+    // (D3D12Device::init sweeps to a budget at startup), but there was still no way for a person to
+    // clear it deliberately -- and there are real reasons to want that: a DXC upgrade that emits
+    // different DXIL for identical input is invisible to a content-keyed cache, and a machine short
+    // on disk should not have to be told to go and find a hex-named directory under LOCALAPPDATA.
+    //
+    // A FLAG, NOT A MENU ITEM, for now: this is a maintenance action, not authoring, and a flag can
+    // be run without opening the editor on a machine that is already short on space.
+    int clearShaderCacheFrames_ = 0;
+    // Which cache to clear. Empty means the real one under the user's data directory, which is what
+    // a person running this wants. AN EXPLICIT PATH IS ACCEPTED because a command that deletes files
+    // should be checkable end to end without deleting the ones you actually have -- verifying it by
+    // running it against the developer's own 59 MB of blobs would cost them a recompile they never
+    // asked for. It is also the form a CI workspace or a build server wants.
+    std::string clearShaderCacheDir_;
+    void runClearShaderCache() {
+        std::filesystem::path dir;
+        if (!clearShaderCacheDir_.empty()) {
+            dir = clearShaderCacheDir_;
+        } else {
+            const std::string udir = userDataDir();
+            if (udir.empty()) {
+                AVER_ERROR("[shader-cache] no user data directory, so there is no cache to clear");
+                return;
+            }
+            dir = std::filesystem::path(udir) / "ShaderCache";
+        }
+        const auto before = rhi::sweepShaderCache(dir, ~0ull);   // a budget nothing can exceed: measure only
+        AVER_INFO("[shader-cache] {} holds {} blob(s), {:.1f} MB", dir.string(), before.filesRemaining,
+                  static_cast<f64>(before.bytesRemaining) / (1024.0 * 1024.0));
+        const auto r = rhi::sweepShaderCache(dir, 0);
+        AVER_INFO("[shader-cache] cleared {} blob(s), {:.1f} MB freed", r.filesRemoved,
+                  static_cast<f64>(r.bytesRemoved) / (1024.0 * 1024.0));
+        // Named because it is the reassurance that matters: the cache lives under the user's own
+        // data directory, and the sweeper touches only .dxil, so anything else there is still there.
+        AVER_INFO("[shader-cache] only .dxil blobs were touched; the shaders recompile on next launch");
     }
 
     std::string validateGraphPath_;
@@ -23769,6 +23814,19 @@ Application* createApplication(int argc, char** argv) {
     bool unlitArg = false;
     for (int i = 1; i < argc; ++i)
         if (!std::strcmp(argv[i], "--unlit")) unlitArg = true;
+    // --clear-shader-cache: a maintenance action, valueless, so it gets its own full-length loop
+    // for --gpu-timing's reason -- matched only in the i+1<argc loop, a trailing one would be
+    // silently ignored, which for a "did it clear?" command is the worst possible failure.
+    bool clearShaderCacheArg = false;
+    std::string clearShaderCacheDirArg;
+    for (int i = 1; i < argc; ++i)
+        if (!std::strcmp(argv[i], "--clear-shader-cache")) {
+            clearShaderCacheArg = true;
+            // The path is OPTIONAL, and is only consumed when it does not itself look like a flag --
+            // otherwise "--clear-shader-cache --frames 4" would silently take "--frames" as the
+            // directory to clear and then find nothing there, reporting a clean success.
+            if (i + 1 < argc && argv[i + 1][0] != '-') clearShaderCacheDirArg = argv[i + 1];
+        }
     std::string saveLevelArg;
     for (int i = 1; i + 1 < argc; ++i)
         if (!std::strcmp(argv[i], "--save-level")) saveLevelArg = argv[i + 1];
@@ -24698,6 +24756,7 @@ Application* createApplication(int argc, char** argv) {
     if (projectSwitchArg) app->setProjectSwitchTest(projectSwitchArg);
     if (validateGraphArg) app->setValidateGraph(validateGraphArg);
     if (graphPrintArg) app->setGraphPrintTest(graphPrintArg);
+    if (clearShaderCacheArg) app->setClearShaderCache(clearShaderCacheDirArg);
     if (recaptureArg > 0) app->setRecaptureTest(recaptureArg);
     if (viewmodelArg > 0) app->setViewmodelTest(viewmodelArg);
 #endif

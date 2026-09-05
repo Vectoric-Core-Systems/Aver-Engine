@@ -5,6 +5,7 @@
 // and the generic resource factory and render context. Hand-rolled D3D12 structs (no d3dx12.h).
 #include "aver/rhi/RHI.hpp"
 #include "aver/platform/FileSystem.hpp"
+#include "aver/rhi/ShaderCacheSweep.hpp"
 #include "aver/rhi/FrameConstants.hpp"
 #include "aver/rhi/DxcShaderInclude.hpp"
 #include "aver/core/Log.hpp"
@@ -37,6 +38,13 @@
 using Microsoft::WRL::ComPtr;
 
 namespace aver::rhi {
+
+// How much disk the shader blob cache may keep. 256 MB is roughly two orders of magnitude more than
+// one full set of this engine's shaders, so an ordinary user never reaches it while a developer's
+// months of accumulated variants are trimmed to a working set rather than to nothing. Evicting to
+// zero on every launch would defeat the cache; not evicting at all is what this replaces. See
+// aver/rhi/ShaderCacheSweep.hpp for why the bound is bytes and the order is oldest-first.
+static constexpr u64 kShaderCacheBudgetBytes = 256ull * 1024ull * 1024ull;
 namespace {
 
 constexpr u32 kFrameCount = 2;
@@ -1957,6 +1965,28 @@ bool D3D12Device::init(const DeviceDesc& desc) {
     qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
     if (!hrOk(device_->CreateCommandQueue(&qd, IID_PPV_ARGS(&queue_)), "CreateCommandQueue")) return false;
     initGpuTiming();
+
+    // BOUND THE SHADER BLOB CACHE. Its key is the whole compiler input, which is what makes it
+    // correct with no invalidation logic -- a changed input simply misses -- and the price of that is
+    // that nothing ever becomes stale, so nothing was ever removed. Every shader edit left its
+    // predecessor behind in a machine-wide directory no UI and no CLI could clear. On a machine that
+    // has been developing shaders for months, that is the whole history of every variant compiled.
+    //
+    // ONCE AT DEVICE INIT, not per compile: the sweep is a directory walk, and doing it per miss
+    // would put a stat of the whole cache on the path whose cost the cache exists to remove.
+    // Failure is ignored on purpose -- a cache that cannot be swept still serves hits, and a startup
+    // that refused to run because it could not delete a file would be a far worse trade.
+    {
+        const std::string udir = aver::userDataDir();
+        if (!udir.empty()) {
+            const auto res = rhi::sweepShaderCache(std::filesystem::path(udir) / "ShaderCache",
+                                                   kShaderCacheBudgetBytes);
+            if (res.filesRemoved)
+                AVER_INFO("[RHI.D3D12] shader cache swept: {} blob(s), {:.1f} MB freed; {:.1f} MB in {} file(s) kept",
+                          res.filesRemoved, static_cast<f64>(res.bytesRemoved) / (1024.0 * 1024.0),
+                          static_cast<f64>(res.bytesRemaining) / (1024.0 * 1024.0), res.filesRemaining);
+        }
+    }
 
     if (!hrOk(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence_)), "CreateFence")) return false;
     fenceEvent_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
