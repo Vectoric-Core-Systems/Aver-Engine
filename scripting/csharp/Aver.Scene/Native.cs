@@ -66,6 +66,9 @@ internal static class Native
     /// <summary>Resolves a material name to the opaque I32 handle CMeshRenderer.material stores.</summary>
     [DllImport(Lib)] internal static extern int aver_scene_material(int name0, [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
 
+    /// <summary>Why the last scene call on THIS thread failed. See <see cref="Aver.Scene.SceneError"/>.</summary>
+    [DllImport(Lib)] internal static extern int aver_scene_last_error();
+
     /// <summary>Decodes a UTF-8 string returned as a pointer; "?" if null.</summary>
     internal static string Str(System.IntPtr p) => Marshal.PtrToStringUTF8(p) ?? "?";
 }
@@ -88,4 +91,50 @@ public static class Assets
         }
         return unchecked((long)h);
     }
+}
+
+/// <summary>Why a scene call failed, mirroring aver::AbiError in
+/// modules/core/include/aver/core/ErrorCodes.hpp. Every value except <see cref="Ok"/> is negative,
+/// so <c>(int)code &lt; 0</c> means "failed" even for a code added after this assembly was built.
+/// </summary>
+public enum SceneError
+{
+    /// <summary>No error was recorded by the last call that records one.</summary>
+    Ok = 0,
+    /// <summary>No field has that id, or the entity is dead or lacks the field's component.</summary>
+    BadHandle = -1,
+    /// <summary>A required out-parameter was null.</summary>
+    NullPointer = -2,
+    /// <summary>The module's world does not exist yet.</summary>
+    NotInitialised = -3,
+    /// <summary>An index past the end of what exists.</summary>
+    OutOfRange = -4,
+    /// <summary>The field is real and of the right kind, and is READ-ONLY. CWorld.matrix is the one
+    /// people meet.</summary>
+    Unsupported = -5,
+    /// <summary>The field is real but of another kind than this accessor reads, or a name resolved to
+    /// nothing.</summary>
+    InvalidArgument = -6,
+    /// <summary>The request was legal and the memory was not there.</summary>
+    AllocationFailed = -7,
+}
+
+/// <summary>Reads the reason the last scene call failed.</summary>
+///
+/// <remarks>WHY THIS IS NOT ON THE CALL ITSELF. Every setter in the scene ABI returns 1 for success
+/// and 0 for failure, and every caller here writes <c>if (Native.aver_scene_set_f32(...))</c>. A
+/// negative code returned from those would be TRUE, silently inverting each of those call sites with
+/// no compile error -- so the reason travels on its own entry point and nothing else changes.
+///
+/// THREAD-LOCAL. It is about the calling thread's own last failure, which is what makes it safe to
+/// read while other threads are also calling in.</remarks>
+public static class Scene
+{
+    /// <summary>Why the last scene call on this thread failed, or <see cref="SceneError.Ok"/>.</summary>
+    public static SceneError LastError => (SceneError)Native.aver_scene_last_error();
+
+    /// <summary>True when the last scene call on this thread recorded a failure. Written as
+    /// <c>&lt; 0</c> rather than a switch, so a code added after this build still reads as a
+    /// failure rather than falling through to "fine".</summary>
+    public static bool LastCallFailed => Native.aver_scene_last_error() < 0;
 }

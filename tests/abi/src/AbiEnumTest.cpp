@@ -28,6 +28,8 @@
 // the C# type that mirrors it) and members are matched by normalising both spellings:
 // AVER_FW_TICK_PRE_PHYSICS -> "prephysics" <- PrePhysics. Adding a member to BOTH sides needs no
 // edit here. Adding it to one side fails, which is the entire point.
+#include "aver/core/CrashReport.hpp"
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 
 #include <algorithm>
@@ -71,6 +73,14 @@ static std::string normalise(std::string s) {
     return out;
 }
 
+// Whitespace off both ends. Beside normalise() because it does the same kind of job: turn a raw
+// spelling into one that can be compared.
+static std::string trimmed(const std::string& s) {
+    const auto b = s.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return "";
+    return s.substr(b, s.find_last_not_of(" \t\r\n") - b + 1);
+}
+
 // Parses `#define <PREFIX><NAME> <int>` -- decimal or 0x hex, which the flag groups use. Returns
 // normalised name -> value. Anything that is not a plain integer literal (a macro referring to
 // another macro, a cast, an expression) is skipped rather than guessed at.
@@ -100,6 +110,73 @@ static std::map<std::string, long long> cDefines(const std::string& text, const 
             const long long v = std::stoll(value, nullptr, 0);   // base 0: handles 0x
             out[normalise(name.substr(prefix.size()))] = v;
         } catch (...) { /* not an integer literal; not ours to interpret */ }
+    }
+    return out;
+}
+
+// The MEMBER NAMES of one C++ `enum class X { ... }`, in declaration order. Order is what this
+// returns because that is what the caller needs: an enum that assigns no values gives each member
+// its number by POSITION, so position is the contract and a reorder is a silent renumbering.
+static std::vector<std::string> enumOrder(const std::string& text, const std::string& typeName) {
+    std::vector<std::string> out;
+    const auto e = text.find("enum class " + typeName);
+    if (e == std::string::npos) return out;
+    const auto open = text.find('{', e);
+    if (open == std::string::npos) return out;
+    const auto close = text.find('}', open);
+    if (close == std::string::npos) return out;
+
+    std::string cur;
+    for (auto i = open + 1; i < close; ++i) {
+        const char ch = text[i];
+        if (ch == ',') { out.push_back(trimmed(cur)); cur.clear(); }
+        else           { cur.push_back(ch); }
+    }
+    if (!trimmed(cur).empty()) out.push_back(trimmed(cur));
+
+    // An explicit `= N` would make the name-to-value mapping something other than the position, and
+    // this helper would be lying about what it returns. Refuse rather than guess.
+    for (std::string& n : out) {
+        if (n.find('=') != std::string::npos) { out.clear(); return out; }
+    }
+    return out;
+}
+
+// `<name> = <int>` out of one C++ `enum class X { ... }`, as normalised name -> value. The sibling
+// of enumOrder above, for the enums whose contract is the WRITTEN value rather than the position.
+//
+// LINE COMMENTS COME OFF FIRST, and that is not caution -- ErrorCodes.hpp documents several members
+// with a trailing // that contains commas ("a negative extent, an empty name, a NaN"), and a splitter
+// that did not strip them would read three members where there is one.
+static std::map<std::string, long long> cppEnumValues(const std::string& text, const std::string& typeName) {
+    std::map<std::string, long long> out;
+    const auto e = text.find("enum class " + typeName);
+    if (e == std::string::npos) return out;
+    const auto open = text.find('{', e);
+    const auto close = open == std::string::npos ? std::string::npos : text.find('}', open);
+    if (open == std::string::npos || close == std::string::npos) return out;
+
+    std::istringstream in(text.substr(open + 1, close - open - 1));
+    std::string line, body;
+    while (std::getline(in, line)) {
+        if (const auto c = line.find("//"); c != std::string::npos) line.erase(c);
+        body += line;
+        body += '\n';
+    }
+
+    std::istringstream chunks(body);
+    std::string chunk;
+    while (std::getline(chunks, chunk, ',')) {
+        const auto eq = chunk.find('=');
+        if (eq == std::string::npos) continue;
+        std::istringstream ns(chunk.substr(0, eq));
+        std::string tok, last;
+        while (ns >> tok) last = tok;
+        std::istringstream vs(chunk.substr(eq + 1));
+        std::string value;
+        if (!(vs >> value) || last.empty()) continue;
+        try { out[normalise(last)] = std::stoll(value, nullptr, 0); }
+        catch (...) { /* not an integer literal */ }
     }
     return out;
 }
@@ -451,6 +528,13 @@ static const Group kGroups[] = {
      "scripting/csharp/Aver.Framework/Enums.cs", "EndReason",   ""},
     {"UI layers",             "modules/ui.abi/include/aver/ui/ui_abi.h",                    "AVER_UI_LAYER_",
      "scripting/csharp/Aver.UI/Hud.cs",          "Layer",       ""},
+    // THE LOG LEVELS, which are mirrored THREE times and were checked zero. Log.hpp says the order
+    // "is load-bearing", names both mirrors by path, and warns that a value inserted in the middle
+    // "would silently renumber every one of those without a single compile error" -- and then
+    // nothing enforced it. This row covers the C-to-C# half; the C++ enum is checked below, because
+    // it is an `enum class` and not a #define group.
+    {"log levels",            "modules/scripting/include/aver/scripting/scripting_abi.h",   "AVER_SCRIPT_LOG_",
+     "scripting/csharp/Aver.Scripting/Log.cs",   "Level",       ""},
     {"PBR features",          "modules/render.pbr/include/aver/pbr/pbr_abi.h",              "AVER_PBR_FEATURE_",
      "scripting/csharp/Aver.Scripting/Pbr.cs",   "PbrFeature",  "count"},
     {"PBR status",            "modules/render.pbr/include/aver/pbr/pbr_abi.h",              "AVER_PBR_STATUS_",
@@ -579,6 +663,127 @@ int main() {
         // reported, not failed. The count moving is still worth seeing in the log.
         check(mirrored > 0, std::string(a.label) + ": " + std::to_string(mirrored) + " of " +
                             std::to_string(c.size()) + " C export(s) are mirrored in C#");
+    }
+
+    // ---- THE THIRD LOG MIRROR, and the two frozen numeric vocabularies ------------------------
+    //
+    // The group table above compares a C header against a .cs file. aver::LogLevel is neither: it is
+    // a C++ `enum class` in Log.hpp whose ORDER is what gives every value its number. Log.hpp warns
+    // in as many words that inserting a level "would silently renumber every one of those without a
+    // single compile error" -- so the order is read here and compared against the C constants.
+    AVER_INFO("=== the C++ side of the mirrors, and the frozen codes ===");
+    {
+        std::string log, abi;
+        const bool haveLog = readText(root + "modules/core/include/aver/core/Log.hpp", log);
+        const bool haveAbi = readText(root + "modules/scripting/include/aver/scripting/scripting_abi.h", abi);
+        check(haveLog, "log levels: can read Log.hpp");
+        check(haveAbi, "log levels: can read scripting_abi.h");
+        if (haveLog && haveAbi) {
+            const std::map<std::string, long long> c = cDefines(abi, "AVER_SCRIPT_LOG_");
+            const std::vector<std::string> names = enumOrder(log, "LogLevel");
+            check(!names.empty(), "log levels: LogLevel's body parses");
+            check(names.size() == c.size(),
+                  "log levels: " + std::to_string(names.size()) + " C++ level(s) and " +
+                  std::to_string(c.size()) + " C constant(s)");
+            // The POSITION of a name in the C++ enum is its value, because LogLevel assigns none.
+            // So the check is that position against the number the C header hands out under the same
+            // name -- derived on both sides, exactly like the group table above, so adding a level to
+            // both needs no edit here and adding it to one fails.
+            for (usize i = 0; i < names.size(); ++i) {
+                const std::string key = normalise(names[i]);
+                const auto it = c.find(key);
+                if (it == c.end()) {
+                    check(false, "log levels: LogLevel::" + names[i] + " has no AVER_SCRIPT_LOG_ constant");
+                    continue;
+                }
+                check(it->second == static_cast<long long>(i),
+                      "log levels: LogLevel::" + names[i] + " is " + std::to_string(i) +
+                      " and AVER_SCRIPT_LOG_ says " + std::to_string(it->second) +
+                      " -- the C++ value is its POSITION, so a reorder is an ABI break with no compile error");
+            }
+        }
+    }
+
+    // AbiError is mirrored in C# ONCE PER MODULE that exposes the channel, because each module's
+    // slot is its own (Aver.Core is a static library linked into each ABI DLL). Three copies of one
+    // numbering is exactly the shape this whole suite exists for, so they are compared here rather
+    // than trusted. Derived on both sides: adding a code to all three needs no edit in this file.
+    {
+        std::string hpp, phys, scene;
+        const bool ok = readText(root + "modules/core/include/aver/core/ErrorCodes.hpp", hpp) &
+                        readText(root + "scripting/csharp/Aver.Physics/Enums.cs", phys) &
+                        readText(root + "scripting/csharp/Aver.Scene/Native.cs", scene);
+        check(ok, "abi errors: can read ErrorCodes.hpp and both C# mirrors");
+        if (ok) {
+            const std::map<std::string, long long> c = cppEnumValues(hpp, "AbiError");
+            check(!c.empty(), "abi errors: AbiError parses");
+            const struct { const char* label; const std::string* text; const char* type; } kMirrors[] = {
+                {"Aver.Physics.PhysicsError", &phys,  "PhysicsError"},
+                {"Aver.Scene.SceneError",     &scene, "SceneError"},
+            };
+            for (const auto& mi : kMirrors) {
+                const std::map<std::string, long long> m = csMembers(*mi.text, mi.type);
+                check(!m.empty(), std::string("abi errors: found C# members of ") + mi.type);
+                check(c.size() == m.size(),
+                      std::string("abi errors: ") + std::to_string(c.size()) + " C++ code(s) and " +
+                      std::to_string(m.size()) + " in " + mi.label);
+                for (const auto& [name, v] : c) {
+                    const auto it = m.find(name);
+                    if (it == m.end()) {
+                        check(false, std::string("abi errors: ") + mi.label + " has no member for AbiError::" + name);
+                        continue;
+                    }
+                    check(it->second == v,
+                          std::string("abi errors: ") + name + " is " + std::to_string(v) + " in C++ and " +
+                          std::to_string(it->second) + " in " + mi.label);
+                }
+            }
+        }
+    }
+
+    // The two vocabularies in core/ErrorCodes.hpp. Frozen because both cross a boundary as bare
+    // integers: an exit code is read by a shell and by CI, and an AbiError is read by a binding that
+    // may have been built against an older header.
+    {
+        check(static_cast<int>(ExitCode::Ok) == 0 && static_cast<int>(ExitCode::Failed) == 1 &&
+              static_cast<int>(ExitCode::Usage) == 2 && static_cast<int>(ExitCode::Environment) == 3 &&
+              static_cast<int>(ExitCode::Interrupted) == 4,
+              "the exit codes are 0..4 and frozen -- a shell and a CI job read these");
+        check(std::string(exitCodeName(ExitCode::Usage)) == "usage", "and each one names itself");
+
+        check(static_cast<i32>(AbiError::Ok) == 0, "AbiError::Ok is 0, so `if (last_error())` reads as 'something failed'");
+        check(static_cast<i32>(AbiError::BadHandle) == -1 && static_cast<i32>(AbiError::NullPointer) == -2 &&
+              static_cast<i32>(AbiError::NotInitialised) == -3 && static_cast<i32>(AbiError::OutOfRange) == -4 &&
+              static_cast<i32>(AbiError::Unsupported) == -5 && static_cast<i32>(AbiError::InvalidArgument) == -6 &&
+              static_cast<i32>(AbiError::AllocationFailed) == -7,
+              "and the AbiError codes are -1..-7 and frozen -- append, never insert");
+        // EVERY code is NEGATIVE except Ok, which is what lets a caller test `code < 0` for "failed"
+        // without knowing the whole list -- including codes added after their binding was built.
+        check(static_cast<i32>(AbiError::AllocationFailed) < 0 && static_cast<i32>(AbiError::BadHandle) < 0,
+              "every error is negative, so `code < 0` means 'failed' even for codes this build knows nothing about");
+
+        check(std::string(abiErrorNameOf(-3)) == "not initialised", "a raw code names itself");
+        check(std::string(abiErrorNameOf(-999)) == "unknown error code",
+              "and an UNKNOWN code is named as unknown rather than switched over as if it were valid");
+        check(std::string(abiErrorNameOf(1)) == "not an error (positive)",
+              "a positive value is called out -- that is a success return handed to the wrong function");
+    }
+
+    // crash::Kind is written into every crash report as a number, so it outlives the build.
+    {
+        check(crash::kindCode(crash::Kind::Crash) == 0 && crash::kindCode(crash::Kind::Assert) == 1 &&
+              crash::kindCode(crash::Kind::Fatal) == 2 && crash::kindCode(crash::Kind::GpuCrash) == 3 &&
+              crash::kindCode(crash::Kind::Terminate) == 4,
+              "the five original crash kinds keep codes 0..4 -- reports already on disk carry them");
+        check(crash::kindCode(crash::Kind::OutOfMemory) == 5, "and OutOfMemory was APPENDED at 5");
+        // The name a report reader gets must match the name the writer used, for every kind.
+        for (int c = 0; c <= 5; ++c) {
+            check(std::string(crash::kindNameOf(c)) == std::string(crash::kindName(static_cast<crash::Kind>(c))),
+                  std::string("crash kind ") + std::to_string(c) + " reads back as it was written (" +
+                  crash::kindNameOf(c) + ")");
+        }
+        check(std::string(crash::kindNameOf(99)) == "Unknown",
+              "and a kind from a NEWER build reads as Unknown rather than falling off the switch");
     }
 
     if (g_failures == 0) AVER_INFO("=== every ABI constant and signature matches its C# mirror ===");

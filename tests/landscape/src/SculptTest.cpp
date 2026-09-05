@@ -1,6 +1,7 @@
 // The sculpt editor's CPU model: brush edits (raise/lower/smooth/flatten), the ray-vs-heightfield
 // pick a cursor needs, and (guarded) that editing a section invalidates exactly the resident meshes
 // an edit could have touched. Exit code = failure count. No device, no GPU, no .NET.
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/landscape/HeightfieldRay.hpp"
 #include "aver/landscape/LandscapeTree.hpp"
@@ -373,5 +374,5 @@ int main() {
 #endif
 
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

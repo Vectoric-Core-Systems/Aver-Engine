@@ -55,3 +55,27 @@ public enum GroundState
     /// <summary>Touching nothing.</summary>
     InAir = 3,
 }
+
+/// <summary>Why a physics call failed, mirroring aver::AbiError in
+/// modules/core/include/aver/core/ErrorCodes.hpp. Every value except <see cref="Ok"/> is negative,
+/// so <c>(int)code &lt; 0</c> means "failed" even for a code added after this assembly was built.
+/// </summary>
+public enum PhysicsError
+{
+    /// <summary>No error was recorded by the last call that records one.</summary>
+    Ok = 0,
+    /// <summary>The handle is zero, out of range, or names a body that has been removed.</summary>
+    BadHandle = -1,
+    /// <summary>A required out-parameter was null.</summary>
+    NullPointer = -2,
+    /// <summary>There is no physics world: Init() was never called, or Shutdown() already ran.</summary>
+    NotInitialised = -3,
+    /// <summary>An index or count past the end of what exists.</summary>
+    OutOfRange = -4,
+    /// <summary>A real request this build cannot serve.</summary>
+    Unsupported = -5,
+    /// <summary>A value that is not a handle and is not legal.</summary>
+    InvalidArgument = -6,
+    /// <summary>The request was legal and the memory was not there.</summary>
+    AllocationFailed = -7,
+}

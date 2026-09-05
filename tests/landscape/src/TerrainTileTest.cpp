@@ -1,5 +1,6 @@
 // The infinite-fill half of Aver.Landscape: terrainHeightAt's determinism, tile coordinates, seamless
 // synthesis across a tile boundary, and widenRimSkirts. Exit code = failure count. No device, no GPU.
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/landscape/LandscapeTree.hpp"
 #include "aver/landscape/TerrainTile.hpp"
@@ -176,5 +177,5 @@ int main() {
     }
 
     AVER_INFO("{} checks, {} failures", g_checks, g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

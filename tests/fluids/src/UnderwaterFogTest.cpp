@@ -4,6 +4,7 @@
 // describes the module boundary.
 #include "aver/fluids/Underwater.hpp"
 
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/rhi/RHI.hpp"
 
@@ -207,5 +208,5 @@ int main() {
     testAtSurfaceIsExactlyHalfway();
     testSweepIsMonotonic();
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

@@ -13,6 +13,7 @@
 //
 // A test that only checked the first would pass on a streamer that quietly lets a starved actor walk
 // into nothing, which is the failure that actually reaches a player.
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/scene/World.hpp"
 #include "aver/world/BodyRegistry.hpp"
@@ -262,5 +263,5 @@ int main() {
 
     if (g_failures == 0) AVER_INFO("=== {} assertions, 0 failed ===", g_checks);
     else AVER_ERROR("=== {} assertions, {} failed ===", g_checks, g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

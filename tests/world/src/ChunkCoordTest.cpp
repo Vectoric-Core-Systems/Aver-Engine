@@ -12,6 +12,7 @@
 //
 //   EXACT BOUNDARIES. Off-by-one errors hide at gc = -513/-512 and +511/+512, where the region rolls
 //   over, and at world positions that are exact multiples of the chunk size.
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/Math.hpp"
 #include "aver/world/ChunkCoord.hpp"
@@ -235,5 +236,5 @@ int main() {
 
     if (g_failures == 0) AVER_INFO("=== {} assertions, 0 failed ===", g_checks);
     else AVER_ERROR("=== {} assertions, {} failed ===", g_checks, g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

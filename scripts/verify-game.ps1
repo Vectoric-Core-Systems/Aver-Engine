@@ -297,7 +297,11 @@ if (-not $KeepScratch -and (Test-Path -LiteralPath $scratch)) {
 Write-Host ''
 if ($failures.Count -gt 0) {
     Write-Host "[verify] FAILED with $($failures.Count) error(s)" -ForegroundColor Red
-    exit $failures.Count
+    # The COUNT is on the line above, where a count belongs. The exit code is from the engine's own
+    # table (modules/core/include/aver/core/ErrorCodes.hpp): 0 ok, 1 failed. This used to exit the
+    # count, so two failures exited 2 -- which that table spells "you called it wrong" -- and 256 of
+    # them would have exited 0 once the shell truncated it to a byte.
+    exit 1
 }
 Note 'OK -- package verified (see the description for what this does NOT yet check)'
 exit 0

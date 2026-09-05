@@ -71,6 +71,27 @@ public static class Physics
     /// <summary>Destroys every body and character, then the world.</summary>
     public static void Shutdown() => Native.aver_phys_shutdown();
 
+    /// <summary>Why the last physics call on this thread failed, or <see cref="PhysicsError.Ok"/>.</summary>
+    ///
+    /// <remarks>WHY THIS IS NOT ON THE CALL ITSELF. Every entry point in the physics ABI returns 1 for
+    /// success and 0 for failure, and everything in this assembly tests them as a bool. A negative
+    /// code returned from those would be TRUE, silently inverting each of those call sites with no
+    /// compile error -- so the reason travels on its own entry point and nothing else changes.
+    ///
+    /// WHAT IT SEPARATES. <c>Body.Aabb</c> coming back false means the handle is dead
+    /// (<see cref="PhysicsError.BadHandle"/>) or there is no world at all
+    /// (<see cref="PhysicsError.NotInitialised"/>), and until now nothing told them apart.
+    ///
+    /// THREAD-LOCAL, which is what makes it safe to read while the physics job pool is running.
+    /// Set to Ok on success too, so a stale reason cannot outlive the failure that produced it.
+    /// </remarks>
+    public static PhysicsError LastError => (PhysicsError)Native.aver_phys_last_error();
+
+    /// <summary>True when the last physics call on this thread recorded a failure. Written as
+    /// <c>&lt; 0</c> rather than a switch, so a code added after this build still reads as a failure
+    /// rather than falling through to "fine".</summary>
+    public static bool LastCallFailed => Native.aver_phys_last_error() < 0;
+
     /// <summary>True while a world exists. False with physics compiled out.</summary>
     public static bool Ready
     {

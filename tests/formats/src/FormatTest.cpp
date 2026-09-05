@@ -5,6 +5,7 @@
 #include "aver/formats/OcProject.hpp"
 #include "aver/formats/OcWorld.hpp"
 #include "aver/assets/AssetId.hpp"
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/Hash.hpp"
 
@@ -1424,7 +1425,7 @@ int main(int argc, char** argv) {
     checkLevelFileIsLegacyOcmap();
     if (argc < 2) {
         AVER_INFO("usage: FormatTest <file.ocbeam|file.ocmap> [more...]");
-        return g_failures;
+        return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
     }
     for (int i = 1; i < argc; ++i) {
         const std::string path = argv[i];
@@ -1436,5 +1437,5 @@ int main(int argc, char** argv) {
     }
     AVER_INFO("==================================================");
     AVER_INFO("Format tests done: {} failure(s)", g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

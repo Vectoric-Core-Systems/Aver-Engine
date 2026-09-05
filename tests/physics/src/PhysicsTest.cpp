@@ -1,5 +1,6 @@
 // Hand-run test for Aver.Physics: the Aver<->Jolt conversion, then the simulation itself.
 // Exit code = failure count. Same shape as tests/scene and tests/formats.
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/Math.hpp"
 #include "aver/physics/physics_abi.h"
@@ -437,6 +438,54 @@ static void testCharacterIsRaycastVisible() {
 }
 
 // Runs every suite and returns the failure count.
+// aver_phys_last_error: WHY the call that just returned 0 returned 0.
+//
+// Every entry point in this ABI returns 1 for success and 0 for failure, and every caller -- C++ and
+// C# alike -- writes `if (aver_phys_...)`. A negative code returned from those would read as TRUE on
+// failure and silently invert each of those call sites with no compile error, so the reason travels
+// on its own entry point. This proves the causes are actually told apart; without it the codes are
+// several names for one thing.
+static void testLastError() {
+    AVER_INFO("-- the reason channel: aver_phys_last_error --");
+
+    // NO WORLD AT ALL. Run FIRST, before init, because it is the state this channel exists to
+    // separate from a dead handle -- and after a shutdown it is indistinguishable from one by return
+    // value alone. A test that only ever ran with a live world could never see the difference.
+    float p[3] = {0, 0, 0};
+    check(aver_phys_body_position(1, p) == 0, "with no world, a body query fails");
+    check(aver_phys_last_error() == -3, "  reason: not initialised -- NOT a bad handle");
+
+    check(aver_phys_init() == 1, "world starts");
+
+    const int32_t box = aver_phys_add_static_box(0, 0, 0, 50, 50, 50);
+    check(box != 0, "a body to ask about");
+
+    // SUCCESS CLEARS IT. A slot written only on failure reports a stale reason forever after one bad
+    // call, and the first caller to trust it is misled.
+    check(aver_phys_body_position(box, p) == 1, "a good query succeeds");
+    check(aver_phys_last_error() == 0, "and leaves the reason at ok, so no stale reason can outlive it");
+
+    // A HANDLE THAT WAS NEVER ISSUED, and then one that WAS and is now dead. Both are bad handles,
+    // and both are a different thing from having no world -- which is the whole point.
+    check(aver_phys_body_position(999999, p) == 0, "a handle never issued fails");
+    check(aver_phys_last_error() == -1, "  reason: bad handle");
+
+    check(aver_phys_remove_body(box) == 1, "the body is removed");
+    check(aver_phys_body_position(box, p) == 0, "and its handle no longer resolves");
+    check(aver_phys_last_error() == -1, "  reason: bad handle, with the world still very much alive");
+
+    // Every code is negative except ok, which is what lets a caller written today survive a code
+    // added tomorrow: `< 0` still means "failed" for a value this build has never heard of.
+    check(aver_phys_last_error() < 0, "a failure is always negative, whatever the specific code");
+
+    aver_phys_shutdown();
+
+    // AFTER SHUTDOWN the reason goes back to "no world", not "bad handle" -- the same call, the same
+    // arguments, a different cause, and now a caller can see which.
+    check(aver_phys_body_position(box, p) == 0, "after shutdown the same call fails again");
+    check(aver_phys_last_error() == -3, "  reason: not initialised, not bad handle -- the cause CHANGED");
+}
+
 int main() {
     testAxisMap();
     testRotationMap();
@@ -447,6 +496,7 @@ int main() {
     testHeightfieldKeepsEverySample();
     testEntityAssociation();
     testCharacterIsRaycastVisible();
+    testLastError();
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

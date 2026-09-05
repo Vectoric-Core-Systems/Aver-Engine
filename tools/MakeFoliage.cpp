@@ -21,6 +21,7 @@
 //   MakeFoliage.exe <mesh output directory> [forest level .ocworld] [texture output directory]
 #include "aver/formats/ObjImport.hpp"
 #include "aver/formats/OcMesh.hpp"
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -567,14 +568,14 @@ int main(int argc, char** argv) {
     if (argc < 2) {
         AVER_ERROR("usage: MakeFoliage <mesh output directory> [forest level .ocworld] [texture directory]");
         AVER_INFO("  writes Tree_Pine, Tree_Oak and Bush_Small as .ocmesh and .obj, plus foliage.mtl");
-        return 2;
+        return exitCode(ExitCode::Usage);
     }
     const std::filesystem::path dir = argv[1];
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
     if (!std::filesystem::is_directory(dir)) {
         AVER_ERROR("[MakeFoliage] not a directory and could not be created: {}", dir.string());
-        return 1;
+        return exitCode(ExitCode::Failed);
     }
 
     // Fixed seeds. A generator whose output moved between runs would make every forest built from it
@@ -599,7 +600,7 @@ int main(int argc, char** argv) {
         if (!writeTextures(tex)) { AVER_ERROR("[MakeFoliage] the textures could not be written"); ++bad; }
     }
 
-    if (bad) { AVER_ERROR("[MakeFoliage] {} output(s) failed", bad); return 1; }
+    if (bad) { AVER_ERROR("[MakeFoliage] {} output(s) failed", bad); return exitCode(ExitCode::Failed); }
     AVER_INFO("[MakeFoliage] done");
-    return 0;
+    return exitCode(ExitCode::Ok);
 }

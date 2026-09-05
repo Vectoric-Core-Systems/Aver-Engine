@@ -444,7 +444,9 @@ Write-Host ''
 Note ("package: {0} files, {1:N2} MB" -f $staged.Count, (($staged | Measure-Object Length -Sum).Sum / 1MB))
 if ($failures.Count -gt 0) {
     Write-Host "[game] FAILED with $($failures.Count) error(s)" -ForegroundColor Red
-    exit $failures.Count
+    # The count is on the line above. The code is from modules/core/include/aver/core/ErrorCodes.hpp:
+    # 0 ok, 1 failed. Exiting the count made two failures indistinguishable from a usage error.
+    exit 1
 }
 Note "OK -> $outFull"
 exit 0

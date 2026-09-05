@@ -21,6 +21,13 @@
 //                    cleanly, say nothing and go away. This is what "a Critical wakes the reporter"
 //                    means: the process that may be about to die spawns its own witness while it is
 //                    still healthy enough to spawn anything.
+//
+// ITS EXIT CODES ARE THE ENGINE'S, WRITTEN OUT BY HAND. Every other tool in tools/ names them from
+// core/ErrorCodes.hpp; this one cannot, because including that header is sharing a header with the
+// engine and the paragraph above is the whole reason this program exists. So the table is restated
+// here and must stay in step with it: 0 ok, 1 failed, 2 usage, 3 environment, 4 interrupted. There
+// is a second reason to keep the names out: `showWindow` already has a local `exitCode` holding what
+// GetExitCodeProcess returned, and an `exitCode()` function in scope would be shadowed by it.
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX

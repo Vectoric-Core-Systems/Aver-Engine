@@ -6,6 +6,9 @@
 #include "PhysicsInternal.hpp"  // the world and its handle tables, shared with the sibling ABI files
 
 #include "aver/core/Log.hpp"
+// The shared error vocabulary. findBody records the reason a handle lookup failed; aver_phys_last_error
+// hands it back. See ErrorCodes.hpp for why it is a separate channel from the return value.
+#include "aver/core/ErrorCodes.hpp"
 
 #include <Jolt/Jolt.h>
 #include <Jolt/Core/Factory.h>
@@ -163,9 +166,26 @@ int32_t addBody(const JPH::Shape* shape, const Vec3& centreCm, bool dynamic, flo
 }
 
 const JPH::BodyID* findBody(int32_t h) {
-    if (!g_world) return nullptr;
+    // ---- WHERE THE ERROR CODE IS RECORDED, and why here rather than at 179 call sites ----------
+    //
+    // Every ABI entry point in this module returns a bare 1/0, so a caller learned THAT a call
+    // failed and never WHY: `aver_phys_body_aabb` returning 0 is a dead handle, a null pointer, or
+    // no world at all, and nothing told them apart.
+    //
+    // This function is the choke point nearly every one of those failures passes through, and it
+    // ALREADY distinguishes the two interesting cases -- no world versus no such body. Setting the
+    // code here covers the whole surface with one edit, where hand-wiring each `return 0` would be
+    // 179 chances to instrument a return that is not an error at all (aver_phys_body_count()
+    // legitimately returns 0 with no world).
+    //
+    // The code travels on aver_phys_last_error(), NEVER on these functions' return values -- see
+    // ErrorCodes.hpp for why returning a negative code from a function whose callers write
+    // `if (aver_phys_...)` would silently invert every existing call site.
+    if (!g_world) { aver::setAbiError(aver::AbiError::NotInitialised); return nullptr; }
     auto it = g_world->bodies.find(h);
-    return it == g_world->bodies.end() ? nullptr : &it->second;
+    if (it == g_world->bodies.end()) { aver::setAbiError(aver::AbiError::BadHandle); return nullptr; }
+    aver::setAbiError(aver::AbiError::Ok);
+    return &it->second;
 }
 
 JPH::CharacterVirtual* findCharacter(int32_t h) {
@@ -465,6 +485,10 @@ int32_t aver_phys_body_set_velocity(int32_t body, float x, float y, float z) {
 
 // How many bodies are live.
 int32_t aver_phys_body_count(void) { return g_world ? static_cast<int32_t>(g_world->bodies.size()) : 0; }
+
+// The calling thread's last recorded reason. See the header for why this is a separate channel and
+// not a changed return value.
+int32_t aver_phys_last_error(void) { return static_cast<int32_t>(aver::lastAbiError()); }
 
 // Creates a character capsule. `height` is the TOTAL height including both caps. 0 if too short.
 int32_t aver_phys_character_create(float radius, float height, float x, float y, float z) {

@@ -13,6 +13,7 @@
 // included -- matching aver_phys_character_create rather than Jolt's own CapsuleShape, which takes the
 // half-height of the cylindrical middle. That was a decision with a real alternative, so it is checked
 // here rather than trusted: a 200 cm capsule must rest with its centre 100 cm up, not 200.
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/Math.hpp"
 #include "aver/physics/physics_abi.h"
@@ -256,5 +257,5 @@ int main() {
     AVER_INFO("==================================================");
     if (g_failures == 0) AVER_INFO("=== {} assertions, 0 failed ===", g_checks);
     else                 AVER_ERROR("=== {} assertions, {} FAILED ===", g_checks, g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

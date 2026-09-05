@@ -6,6 +6,7 @@
 #include "aver/formats/MaterialScript.hpp"
 #include "aver/formats/Texture.hpp"
 #include "aver/pbr/MaterialGpu.hpp"
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 
 #include <cmath>
@@ -1125,5 +1126,5 @@ int main() {
 
     if (g_failures == 0) AVER_INFO("=== all material tests passed ===");
     else AVER_ERROR("=== {} material assertion(s) failed ===", g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

@@ -9,6 +9,7 @@
 //
 // The second half checks the thing that is new, and checks it by OBSERVED COLLISION -- two bodies that
 // should pass through each other, and the same two that should not.
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/Math.hpp"
 #include "aver/physics/physics_abi.h"
@@ -213,5 +214,5 @@ int main() {
     AVER_INFO("==================================================");
     if (g_failures == 0) AVER_INFO("=== {} assertions, 0 failed ===", g_checks);
     else                 AVER_ERROR("=== {} assertions, {} FAILED ===", g_checks, g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

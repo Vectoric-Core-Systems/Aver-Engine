@@ -1,6 +1,7 @@
 // Hand-run test for the CPU half of Aver.Particles: burst and continuous spawning, the emission
 // accumulator, lifetime death, and gravity/damping integration. No RHI, no device -- ParticleSystem
 // has none, by design (see its own header comment). Exit code = failure count.
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/particles/ParticleEffectLibrary.hpp"
 #include "aver/particles/ParticleSystem.hpp"
@@ -197,5 +198,5 @@ int main() {
     }
 
     AVER_INFO("ParticleSystemTest: {}/{} checks passed", g_checks - g_failures, g_checks);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

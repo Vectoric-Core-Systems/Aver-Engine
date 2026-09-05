@@ -32,6 +32,7 @@
 // `dir` resolves to the same place as the input (a single file's own directory, or the input
 // directory itself) -- see main()'s own comment for how that comparison is made robust to a
 // not-yet-existing output directory.
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/formats/OcMesh.hpp"
 #include "aver/trifactor/ClusterBuilder.hpp"
@@ -246,7 +247,7 @@ void relod(const std::filesystem::path& path, const std::filesystem::path* write
 int main(int argc, char** argv) {
     if (argc < 2) {
         AVER_ERROR("usage: RelodTool <file-or-directory> [--write <output-directory>]");
-        return 2;
+        return exitCode(ExitCode::Usage);
     }
     const std::filesystem::path root = argv[1];
 
@@ -262,7 +263,7 @@ int main(int argc, char** argv) {
         if (std::string(argv[i]) == "--write") {
             if (i + 1 >= argc) {
                 AVER_ERROR("--write requires an output directory argument");
-                return 2;
+                return exitCode(ExitCode::Usage);
             }
             writeDirArg = argv[++i];
             doWrite = true;
@@ -310,7 +311,7 @@ int main(int argc, char** argv) {
                        eqEc ? "the filesystem could not confirm it differs from"
                             : "it resolves to the SAME directory as",
                        inputAnchor.string());
-            return 2;
+            return exitCode(ExitCode::Usage);
         }
         writeDir = writeDirArg;
         AVER_INFO("[Relod] --write: re-cooked copies will be saved to {} (inputs are never modified)",
@@ -348,5 +349,5 @@ int main(int argc, char** argv) {
     // driven off this ladder would produce cracks. Non-zero exit so a sweep cannot pass silently.
     // t.writeFailed is always 0 when --write was never passed (relod() never increments it outside
     // its `if (writeDir)` block), so this is exactly the original condition in that case.
-    return (t.failed || t.invalid || t.writeFailed) ? 1 : 0;
+    return exitCode((t.failed || t.invalid || t.writeFailed) ? ExitCode::Failed : ExitCode::Ok);
 }

@@ -42,7 +42,7 @@ if (-not [System.IO.Path]::IsPathRooted($BuildDir)) { $BuildDir = Join-Path $rep
 
 if (-not (Test-Path $BuildDir)) {
     Write-Host "[test] no build tree at $BuildDir -- configure and build it first" -ForegroundColor Red
-    exit 2
+    exit 3   # environment: nothing was run, and nothing is wrong with the code
 }
 # CTestTestfile.cmake is what registration produces. Its absence means the tree was configured
 # before CTest registration existed, or with -DAVER_BUILD_TESTS=OFF; either way, say which rather
@@ -50,7 +50,7 @@ if (-not (Test-Path $BuildDir)) {
 if (-not (Test-Path (Join-Path $BuildDir "CTestTestfile.cmake"))) {
     Write-Host "[test] $BuildDir has no CTest registration -- re-run CMake configure on it" -ForegroundColor Red
     Write-Host "[test] (a tree configured with -DAVER_BUILD_TESTS=OFF has none by design)"
-    exit 2
+    exit 3   # environment: the tree exists but was not configured to be testable
 }
 
 # ctest ships beside cmake; VS's bundled copy is the one this repo builds with.
@@ -64,7 +64,7 @@ if (-not $ctest) {
 }
 if (-not $ctest) {
     Write-Host "[test] ctest not found on PATH or beside a known CMake install" -ForegroundColor Red
-    exit 2
+    exit 3   # environment: a missing tool on this machine
 }
 
 if ($Jobs -le 0) {
@@ -87,4 +87,7 @@ if ($code -eq 0) {
     Write-Host "[test] FAILED (ctest exit $code) after $([Math]::Round($sw.Elapsed.TotalSeconds, 1))s" -ForegroundColor Red
     Write-Host "[test] re-run just the failures with: ./scripts/test.ps1 -Rerun$(if ($Release) { ' -Release' })"
 }
-exit $code
+# NOT `exit $code`. ctest has its own vocabulary -- 8 for "some tests failed", others for internal
+# errors -- and passing it through would put a foreign number where this repo's table says 8 means
+# nothing at all. The raw code is printed above for anyone debugging ctest itself.
+exit $(if ($code -eq 0) { 0 } else { 1 })

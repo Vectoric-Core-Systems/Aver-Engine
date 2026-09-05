@@ -22,6 +22,7 @@
 #include "aver/formats/UsdImport.hpp"
 #include "aver/formats/OcMesh.hpp"
 #include "aver/formats/OcAnim.hpp"
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 
 #if AVER_HAVE_AUDIO_IMPORT
@@ -545,7 +546,7 @@ int runMaterial(int argc, char** argv) {
     }
     if (inputs.empty() || outDir.empty()) {
         AVER_ERROR("usage: AverAssetC material <texture-file>... --out-dir <dir> --base <name>");
-        return 2;
+        return exitCode(ExitCode::Usage);
     }
     while (!outDir.empty() && (outDir.back() == '\\' || outDir.back() == '/')) outDir.pop_back();
     const std::string base = !baseOverride.empty() ? baseOverride : stemOf(inputs[0]);
@@ -1152,7 +1153,7 @@ int main(int argc, char** argv) {
 
     if (argc < 2) {
         AVER_ERROR("{}", kUsage);
-        return 2;
+        return exitCode(ExitCode::Usage);
     }
     const std::string subcommand = argv[1];
 
@@ -1162,7 +1163,7 @@ int main(int argc, char** argv) {
 
     if (subcommand != "convert") {
         AVER_ERROR("{}", kUsage);
-        return 2;
+        return exitCode(ExitCode::Usage);
     }
 
     std::string input, outDir, baseOverride, contentDir;
@@ -1189,7 +1190,7 @@ int main(int argc, char** argv) {
     }
     if (!haveInput || outDir.empty()) {
         AVER_ERROR("{}", kUsage);
-        return 2;
+        return exitCode(ExitCode::Usage);
     }
     while (!outDir.empty() && (outDir.back() == '\\' || outDir.back() == '/')) outDir.pop_back();
     const std::string base = !baseOverride.empty() ? baseOverride : stemOf(input);
@@ -1203,13 +1204,13 @@ int main(int argc, char** argv) {
         if (!fmt::importGltf(input, res, {}, &why)) {
             emitArtifact(input, {}, "mesh", false, false, why, stats);
             emitSummary(input, stats, 1);
-            return 1;
+            return exitCode(ExitCode::Failed);
         }
         for (const std::string& u : res.unsupported) AVER_WARN("unsupported: {}", u);
         if (res.meshes.empty()) {
             emitArtifact(input, {}, "mesh", false, false, "no meshes", stats);
             emitSummary(input, stats, 1);
-            return 1;
+            return exitCode(ExitCode::Failed);
         }
 
         // ---- materials and their textures, BEFORE the meshes are copied into `items` ----
@@ -1276,13 +1277,13 @@ int main(int argc, char** argv) {
         if (!fmt::importObj(input, res, {}, &why)) {
             emitArtifact(input, {}, "mesh", false, false, why, stats);
             emitSummary(input, stats, 1);
-            return 1;
+            return exitCode(ExitCode::Failed);
         }
         for (const std::string& u : res.unsupported) AVER_WARN("unsupported: {}", u);
         if (res.meshes.empty()) {
             emitArtifact(input, {}, "mesh", false, false, "no meshes", stats);
             emitSummary(input, stats, 1);
-            return 1;
+            return exitCode(ExitCode::Failed);
         }
 
         // ---- the .mtl's materials, which until now were parsed and then dropped ----
@@ -1318,13 +1319,13 @@ int main(int argc, char** argv) {
         if (!fmt::importUsd(input, res, {}, &why)) {
             emitArtifact(input, {}, "mesh", false, false, why, stats);
             emitSummary(input, stats, 1);
-            return 1;
+            return exitCode(ExitCode::Failed);
         }
         for (const std::string& u : res.unsupported) AVER_WARN("unsupported: {}", u);
         if (res.meshes.empty()) {
             emitArtifact(input, {}, "mesh", false, false, "no meshes", stats);
             emitSummary(input, stats, 1);
-            return 1;
+            return exitCode(ExitCode::Failed);
         }
 
         // The importer has already resolved each mesh's `rel material:binding` to the material's own
@@ -1359,14 +1360,14 @@ int main(int argc, char** argv) {
         if (!imp.ok) {
             emitArtifact(input, {}, "audio", false, false, imp.error, stats);
             emitSummary(input, stats, 1);
-            return 1;
+            return exitCode(ExitCode::Failed);
         }
         const std::string path = outDir + "/" + base + ".ocaudio";
         std::string why;
         if (!fmt::saveOcAudio(path, sound, stemOf(input), &why)) {
             emitArtifact(input, path, "audio", false, false, why, stats);
             emitSummary(input, stats, 1);
-            return 1;
+            return exitCode(ExitCode::Failed);
         }
         audio::SoundData back;
         const bool reloaded = fmt::loadOcAudio(path, back, &why);
@@ -1375,19 +1376,19 @@ int main(int argc, char** argv) {
                          !reloaded && !why.empty() ? why : "reloaded audio does not match the source",
                          stats);
             emitSummary(input, stats, 1);
-            return 1;
+            return exitCode(ExitCode::Failed);
         }
         emitArtifact(input, path, "audio", true, true, {}, stats,
                      "\"frames\":" + std::to_string(back.frames())
                      + ",\"channels\":" + std::to_string(back.channels)
                      + ",\"sampleRate\":" + std::to_string(back.sampleRate));
         emitSummary(input, stats, 0);
-        return 0;
+        return exitCode(ExitCode::Ok);
     }
 #endif
 
     AVER_ERROR("unsupported input format: {}", input);
     emitArtifact(input, {}, "unknown", false, false, "unsupported input format", stats);
     emitSummary(input, stats, 1);
-    return 1;
+    return exitCode(ExitCode::Failed);
 }

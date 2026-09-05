@@ -1,5 +1,6 @@
 // `.ocland`, the landscape heightfield: round trip, corruption, forward compatibility and the
 // file-based save/load path. CPU only, no device. Exit code = failure count.
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/formats/OcLand.hpp"
 
@@ -234,5 +235,5 @@ int main() {
     }
 
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

@@ -41,6 +41,9 @@ internal static class Native
     [DllImport(Lib)] internal static extern int aver_phys_body_set_position(int body, float x, float y, float z);
     [DllImport(Lib)] internal static extern int aver_phys_body_set_velocity(int body, float x, float y, float z);
     [DllImport(Lib)] internal static extern int aver_phys_body_count();
+    // The reason channel. Separate from every call above because they all return 1/0 and every
+    // caller tests them as a bool -- see physics_abi.h's own comment on this function.
+    [DllImport(Lib)] internal static extern int aver_phys_last_error();
 
     // ---- Body dynamics --------------------------------------------------------------------------------
 

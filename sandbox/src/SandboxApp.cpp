@@ -260,7 +260,9 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include <iterator>
 #include <memory>
 #include <mutex>
+#include <new>          // ::operator new, for --crash-test oom
 #include <optional>
+#include <stdexcept>    // std::runtime_error, for --crash-test throw
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -21600,8 +21602,27 @@ Application* createApplication(int argc, char** argv) {
                 // which is exactly what a release build does to an obvious null dereference.
                 volatile int* p = nullptr;
                 *p = 1;
+            } else if (crashTest == "oom") {
+                // Kind::OutOfMemory, through the hook that actually sees an allocation failure: the
+                // new-handler (crash::install). A REAL request that cannot be satisfied, not a thrown
+                // bad_alloc -- the first version of this test DID throw one, and the report came back
+                // as `Crash`, because on Windows an escaping C++ exception raises SEH 0xE06D7363 and
+                // the unhandled-exception filter takes it before std::terminate ever runs. That
+                // measurement is why the new-handler exists; keep this an allocation.
+                //
+                // volatile so the result cannot be optimised away as an unused allocation, which is
+                // exactly what a release build does to a `new` whose value is discarded.
+                volatile void* p = ::operator new(static_cast<size_t>(-1) / 2);
+                (void)p;
+            } else if (crashTest == "throw") {
+                // Kind::Terminate. The name says std::terminate and the mechanism is NOT it: on
+                // Windows an escaping C++ exception raises SEH 0xE06D7363, which the unhandled filter
+                // takes first. That is a surprising enough fact to be worth a test rather than a
+                // comment, since the obvious reading of set_terminate says otherwise.
+                throw std::runtime_error("deliberate --crash-test throw");
             } else {
-                AVER_ERROR("[Sandbox] --crash-test: unknown kind '{}'. Use critical, assert, fatal or av.",
+                AVER_ERROR("[Sandbox] --crash-test: unknown kind '{}'. "
+                           "Use critical, assert, fatal, av, oom or throw.",
                            crashTest);
                 return nullptr;
             }

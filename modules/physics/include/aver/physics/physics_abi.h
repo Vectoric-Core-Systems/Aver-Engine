@@ -71,6 +71,24 @@ AVER_PHYS_API int32_t aver_phys_body_set_velocity(int32_t body, float x, float y
 // How many bodies are live.
 AVER_PHYS_API int32_t aver_phys_body_count(void);
 
+/* WHY THE LAST CALL FAILED. 0 = ok; negative values are aver::AbiError (core/ErrorCodes.hpp):
+   -1 bad handle, -2 null pointer, -3 not initialised, -4 out of range, -5 unsupported,
+   -6 invalid argument, -7 allocation failed.
+
+   ADDITIVE, AND THE CODE NEVER TRAVELS ON A RETURN VALUE. Every function in this header returns
+   1 for success and 0 for failure, and every caller -- C++ and C# alike -- writes
+   `if (aver_phys_...)`. Returning a negative code from those would make `if (r)` TRUE on failure and
+   silently invert every existing call site without one compile error. So the reason travels here
+   instead, and nothing about the existing contract changes.
+
+   THREAD-LOCAL: the answer is about the calling thread's own last failure, which is what makes it
+   safe while the physics job pool is running.
+
+   SET BY ANY CALL THAT RESOLVES A BODY HANDLE -- which is nearly all of them, because they share one
+   lookup (findBody). Set to 0 on success too, so a stale reason cannot outlive the failure that
+   produced it. A call that never touches a handle leaves it alone. */
+AVER_PHYS_API int32_t aver_phys_last_error(void);
+
 /* The body handle at a dense index, or 0. Pairs with aver_phys_body_count, which could always say
    HOW MANY bodies exist while nothing could ask WHICH -- so no caller could iterate them.
    Indices shift on add/remove, like scene::World::at: for a walk inside one frame, not a handle. */

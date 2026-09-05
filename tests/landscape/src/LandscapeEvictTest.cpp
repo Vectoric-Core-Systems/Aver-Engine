@@ -11,6 +11,7 @@
 // Its own warning said so: "There is no destroyMesh, so residency cannot be reclaimed -- raise
 // maxResidentNodes or use smaller sections." Everything past the cap drew a coarser ancestor for the
 // rest of the session, and forgetAll() dropped the handles without freeing one byte.
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/landscape/LandscapeRenderer.hpp"
 #include "aver/landscape/LandscapeTree.hpp"
@@ -185,5 +186,5 @@ int main() {
 
     if (g_failures == 0) AVER_INFO("=== {} assertions, 0 failed ===", g_checks);
     else AVER_ERROR("=== {} assertions, {} failed ===", g_checks, g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

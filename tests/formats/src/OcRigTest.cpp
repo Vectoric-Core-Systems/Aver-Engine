@@ -3,6 +3,7 @@
 // THE ROUND TRIP IS THE POINT. A format whose writer and reader disagree corrupts a file every time
 // it is saved, and does it quietly -- the file still parses, it just says something slightly else.
 // So the central check here is parse -> write -> parse and compare the DATA, not the text.
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/formats/OcRig.hpp"
 
@@ -135,5 +136,5 @@ int main() {
     AVER_INFO("==================================================");
     if (g_failures == 0) AVER_INFO("=== {} assertions, 0 failed ===", g_checks);
     else                 AVER_ERROR("=== {} assertions, {} FAILED ===", g_checks, g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

@@ -9,6 +9,7 @@
 // streamedEntities()/owns() agree with the streamer's own resident-entity count at every step (the
 // property that did not exist before residentChunks() gave anything a way to enumerate it), and that
 // a world directory that does not exist yet is CREATED rather than refused.
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/platform/FileSystem.hpp"
 #include "aver/scene/World.hpp"
@@ -150,5 +151,5 @@ int main() {
 
     if (g_failures == 0) AVER_INFO("=== {} assertions, 0 failed ===", g_checks);
     else AVER_ERROR("=== {} assertions, {} failed ===", g_checks, g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

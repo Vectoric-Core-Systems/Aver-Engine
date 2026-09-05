@@ -29,13 +29,35 @@ extern "C" {
 /* MINOR 4 adds aver_scene_component, which resolves a DYNAMICALLY registered component type by
  * name. Additive only -- the AVER_SCENE_COMP_* built-ins keep their fixed ids and every existing
  * binding is unchanged. */
+/* MINOR 5 adds aver_scene_last_error, the reason channel. Additive only -- every existing
+ * entry point keeps its 1/0 return exactly, which is the whole design; see that function. */
 #define AVER_SCENE_ABI_VERSION_MAJOR 1
-#define AVER_SCENE_ABI_VERSION_MINOR 4
+#define AVER_SCENE_ABI_VERSION_MINOR 5
 #define AVER_SCENE_ABI_VERSION \
     ((AVER_SCENE_ABI_VERSION_MAJOR << 16) | AVER_SCENE_ABI_VERSION_MINOR)
 
 /* Returns AVER_SCENE_ABI_VERSION as the DLL was BUILT with, so a caller can catch a stale binary. */
 AVER_SCENE_ABI int32_t aver_scene_abi_version(void);
+
+/* WHY the last call failed, as an aver::AbiError (modules/core/include/aver/core/ErrorCodes.hpp):
+   0 ok, -1 bad handle, -2 null pointer, -4 out of range, -5 unsupported, -6 invalid argument.
+   Every code except 0 is negative, so `< 0` means "failed" even for one added after your binding.
+
+   A SEPARATE ENTRY POINT, not a changed return value, and that is the load-bearing decision. Every
+   setter here returns 1/0 and every caller writes `if (aver_scene_set_f32(...))`; a negative code on
+   those returns would be TRUE, silently inverting each of those call sites with no compile error.
+
+   WHAT IT SEPARATES. `aver_scene_set_f32` returning 0 currently means one of four different things
+   and says which of them nowhere: no field has that id (-1), the entity has no such component (-1),
+   the field is real but of another kind (-6), or the field is real, of the right kind, and READ-ONLY
+   (-5) -- CWorld.matrix being the case that has actually confused people.
+
+   THREAD-LOCAL, and per-DLL: it reports scene failures only. Aver.Core is linked statically into
+   each ABI DLL, so this slot and aver_phys_last_error's are different slots.
+
+   SET ON SUCCESS TOO (to 0), so a stale reason cannot outlive the failure that produced it. A call
+   that resolves neither a field nor an entity leaves it alone. */
+AVER_SCENE_ABI int32_t aver_scene_last_error(void);
 
 /* FIELD KINDS — pinned one-for-one to aver::scene::FieldKind in Fields.hpp. */
 #define AVER_SCENE_KIND_F32    0

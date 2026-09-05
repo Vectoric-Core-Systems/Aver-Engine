@@ -1,6 +1,7 @@
 // Hand-run test for Aver.Scene: entity packing, component storage, world lifetime, the field
 // tables, transform/hierarchy propagation and the exported C ABI. Exit code = failure count.
 #include "aver/core/Hash.hpp"
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/Math.hpp"
 #include "aver/scene/Components.hpp"
@@ -931,6 +932,64 @@ static void testSceneAbiQuery(World& world) {
     check(foundHe, "at() enumerates a live entity that was created");
 }
 
+
+// ---------------------------------------------------------------------------- the reason channel
+
+// aver_scene_last_error: WHY the call that just returned 0 returned 0.
+//
+// This is the half of the ABI that had no way to exist before. Every accessor here returns 1/0 and
+// every caller writes `if (aver_scene_set_f32(...))`, so a negative code on those returns would read
+// as TRUE on failure and silently invert each of those call sites. The reason travels on its own
+// entry point instead, and this is what proves each distinct cause is actually distinguished --
+// otherwise the codes are four names for one thing.
+static void testSceneAbiErrors(World& world) {
+    AVER_INFO("=== C ABI reasons: aver_scene_last_error ===");
+
+    const int32_t e     = aver_scene_create();
+    const int32_t fPos  = aver_scene_field("CLocal.position");   // Vec3, writable
+    const int32_t fWorld = aver_scene_field("CWorld.matrix");    // Mat4, READ-ONLY
+    check(fPos != 0 && fWorld != 0, "both probe fields resolve");
+
+    // SUCCESS CLEARS IT. A slot only ever written on failure reports a stale reason forever after one
+    // bad call, and the first person to trust it is misled -- so this is checked before anything else.
+    float pos[3] = {1.0f, 2.0f, 3.0f};
+    check(aver_scene_set_vec(e, fPos, pos) == 1, "a good write succeeds");
+    check(aver_scene_last_error() == 0, "and leaves the reason at ok, so no stale reason can outlive it");
+
+    // -1 BAD HANDLE, both flavours: a field id that names nothing, and an entity that is not there.
+    check(aver_scene_set_vec(e, 0, pos) == 0, "a field id of 0 is refused");
+    check(aver_scene_last_error() == -1, "  reason: bad handle");
+    check(aver_scene_set_vec(0, fPos, pos) == 0, "entity 0 is refused");
+    check(aver_scene_last_error() == -1, "  reason: bad handle");
+
+    // -2 NULL POINTER: the caller's own pointer, not the caller's handle. A different thing to fix.
+    check(aver_scene_set_vec(e, fPos, nullptr) == 0, "a null value pointer is refused");
+    check(aver_scene_last_error() == -2, "  reason: null pointer");
+    check(aver_scene_field(nullptr) == 0, "a null field name is refused");
+    check(aver_scene_last_error() == -2, "  reason: null pointer");
+
+    // -6 INVALID ARGUMENT: real field, wrong family for this accessor. The handle is fine.
+    check(aver_scene_set_i32(e, fPos, 7) == 0, "an I32 setter refuses a Vec3 field");
+    check(aver_scene_last_error() == -6, "  reason: invalid argument, NOT bad handle -- the field is real");
+    check(aver_scene_field("CLocal.nosuchfield") == 0, "an unknown field name resolves to 0");
+    check(aver_scene_last_error() == -6, "  reason: invalid argument");
+
+    // -5 UNSUPPORTED: real field, right family, and this build will not write it. THE case that has
+    // actually confused people, and the one indistinguishable from every other 0 until now.
+    float m[16] = {0};
+    check(aver_scene_set_vec(e, fWorld, m) == 0, "CWorld.matrix refuses a write");
+    check(aver_scene_last_error() == -5, "  reason: unsupported (read-only), NOT invalid argument");
+    check(aver_scene_get_vec(e, fWorld, m) == 1, "and reading the same field still succeeds");
+    check(aver_scene_last_error() == 0, "  with the reason back at ok");
+
+    // EVERY code is negative except ok, which is what lets a caller written today survive a code
+    // added tomorrow: `< 0` still means "failed" for a value this build has never heard of.
+    aver_scene_set_vec(0, fPos, pos);
+    check(aver_scene_last_error() < 0, "a failure is always negative, whatever the specific code");
+
+    world.flush();
+}
+
 // ---------------------------------------------------------------------------------------------- main
 
 // Runs every scene test in order. Returns the failure count.
@@ -949,7 +1008,8 @@ int main() {
     testSceneAbi(world);
     testSceneAbiRepairs(world);
     testSceneAbiQuery(world);
+    testSceneAbiErrors(world);
 
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

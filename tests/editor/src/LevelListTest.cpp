@@ -7,6 +7,7 @@
 // arrangement EditorEulerTest and GraphEditorGeometryTest already use.
 #include "LevelList.hpp"
 
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 
 #include <filesystem>
@@ -127,5 +128,5 @@ int main() {
     std::filesystem::remove_all(root, ec);
     if (g_failures == 0) AVER_INFO("=== {} assertions, 0 failed ===", g_checks);
     else                 AVER_ERROR("=== {} assertions, {} FAILED ===", g_checks, g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

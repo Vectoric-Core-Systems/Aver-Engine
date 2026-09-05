@@ -1,4 +1,5 @@
 // The editor control channel's wire protocol. Exit code = failure count. No socket, no window.
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/mcp/McpBridge.hpp"
 
@@ -175,5 +176,5 @@ int main() {
     }
 
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

@@ -11,6 +11,7 @@
 //   NAMED CORRUPTION      a damaged payload is refused BY CHUNK. "This region is corrupt" is not
 //                         something anyone can act on when a region is 16 km across.
 //   TORN-WRITE RECOVERY   one header destroyed, the other still opens the file.
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/platform/FileSystem.hpp"
 #include "aver/world/ChunkCodec.hpp"
@@ -357,5 +358,5 @@ int main() {
 
     if (g_failures == 0) AVER_INFO("=== {} assertions, 0 failed ===", g_checks);
     else AVER_ERROR("=== {} assertions, {} failed ===", g_checks, g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

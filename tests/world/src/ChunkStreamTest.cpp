@@ -7,6 +7,7 @@
 //
 // The whole thing is headless. The scene is real, the region files are real, and the only thing
 // standing in for the engine is the camera, which is a Vec3.
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/scene/Components.hpp"
 #include "aver/scene/World.hpp"
@@ -436,5 +437,5 @@ int main() {
 
     if (g_failures == 0) AVER_INFO("=== {} assertions, 0 failed ===", g_checks);
     else AVER_ERROR("=== {} assertions, {} failed ===", g_checks, g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

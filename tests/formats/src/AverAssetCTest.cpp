@@ -16,6 +16,7 @@
 // which keys exist, what type each holds, that a summary line closes the run, and that FAILURE is
 // reportable rather than silent. Pinning the numbers too would make this fail every time the
 // importer legitimately improved, and a test that cries wolf gets deleted.
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/platform/Image.hpp"
 
@@ -80,7 +81,7 @@ int main() {
     std::error_code ec;
     check(std::filesystem::exists(exe, ec), "AverAssetC.exe was built: " + exe.string());
     check(std::filesystem::exists(fixture, ec), "the glTF fixture exists: " + fixture.string());
-    if (g_failures) { AVER_ERROR("=== {} assertions, {} failed ===", g_checks, g_failures); return g_failures; }
+    if (g_failures) { AVER_ERROR("=== {} assertions, {} failed ===", g_checks, g_failures); return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok); }
 
     const std::filesystem::path outDir =
         std::filesystem::temp_directory_path() / "aver-assetc-test";
@@ -412,5 +413,5 @@ int main() {
 
     std::filesystem::remove_all(outDir, ec);
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

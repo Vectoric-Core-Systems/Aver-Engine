@@ -4,6 +4,7 @@
 // only, never Aver.Fluids).
 #include "aver/fluids/GerstnerWave.hpp"
 
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 
 #include <cmath>
@@ -193,5 +194,5 @@ int main() {
     testSteepnessClampPreventsFolding();
     testSnapToGridIsIdempotentAndMonotonic();
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

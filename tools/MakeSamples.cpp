@@ -1,4 +1,5 @@
 // Synthesises four short placeholder sounds as 16-bit mono .wav, for a template project to play.
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/Types.hpp"
 
@@ -117,7 +118,7 @@ int main(int argc, char** argv) {
     if (argc < 2) {
         AVER_INFO("usage: MakeSamples <output-directory>");
         AVER_INFO("  writes shot.wav, impact.wav, step.wav and cleared.wav");
-        return 2;
+        return exitCode(ExitCode::Usage);
     }
     const std::string dir = argv[1];
     std::error_code ec;
@@ -141,5 +142,11 @@ int main(int argc, char** argv) {
                       static_cast<f64>(pcm.size()) / static_cast<f64>(kRate));
         else { AVER_ERROR("[MakeSamples] could not write {}", path); ++failures; }
     }
-    return failures;
+    // A COUNT IS NOT AN EXIT CODE (core/ErrorCodes.hpp). This returned `failures` directly, so
+    // four unwritable files exited 4 -- a value the shared table spells Interrupted, and 256 of
+    // them would have exited 0. Report the number in the log, where a number belongs, and exit
+    // with a code that means exactly one thing.
+    if (failures) AVER_ERROR("[MakeSamples] {} of {} sample(s) could not be written",
+                             failures, static_cast<int>(std::size(items)));
+    return exitCode(failures ? ExitCode::Failed : ExitCode::Ok);
 }

@@ -3,6 +3,7 @@
 // here. Shape copied from tests/physics/src/SoftBodyTest.cpp deliberately, for the same reason that
 // file gives: one house style for "prints one line per assertion and returns the failure count".
 #include "aver/render/SoftBodyScene.hpp"
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 
 #include <cmath>
@@ -330,5 +331,5 @@ int main() {
     testNormalsAreComputedInLocalSpaceNotWorld();
     testOutOfRangeIndicesAreSkipped();
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

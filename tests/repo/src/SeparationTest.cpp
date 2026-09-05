@@ -17,6 +17,7 @@
 // provenance would be a step backwards. Comments are lexed away and ignored. The dangerous kind of
 // mention is a PATH or a code branch -- something the engine would act on -- and that lives in a
 // string literal, which is exactly what survives the lexer.
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 
 #include <algorithm>
@@ -364,6 +365,6 @@ int main() {
 
     if (g_failures == 0) { AVER_INFO("SeparationTest: ALL PASS"); return 0; }
     AVER_ERROR("SeparationTest: {} failure(s)", g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 #endif
 }

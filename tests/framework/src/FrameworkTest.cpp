@@ -1,6 +1,7 @@
 // Test for Aver.Framework: the class registry, defaults, spawn, possession, managed dispatch, the
 // play lifecycle and input. Drives the C ABI and reads back through the one process-global World.
 // Exit code = failure count.
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/Math.hpp"
 #include "aver/framework/framework_abi.h"
@@ -935,5 +936,5 @@ int main() {
     testActions();
 
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }
