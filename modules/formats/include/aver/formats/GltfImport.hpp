@@ -20,9 +20,35 @@ using GltfImage    = ImportedImage;
 
 
 // What an import produced, and what it had to drop.
+// WHERE A MESH SAT IN THE SOURCE SCENE, and the reason this type exists at all.
+//
+// A glTF node's transform used to be baked into the vertices whole -- rotation, scale AND
+// TRANSLATION -- so a mesh 20 m from its author's origin came out with its geometry 20 m from its
+// own. Every consumer of a pivot then read wrong: the gizmo drew 20 m away, rotation swung the
+// object around a point off in space, bounds grew to enclose the gap so culling and the GI box were
+// sized for nothing, and framing the selection framed empty air. Measured on Intel Sponza: 115 of
+// 115 meshes displaced, median 10.7 m, one arch piece reporting a 14.2 m bounding radius for
+// geometry a few metres across.
+//
+// The rotation and scale STAY baked -- they are what the mesh looks like, and a consumer with no
+// placement still wants a correctly-oriented mesh. Only the translation moves out here, which is
+// the part that was never geometry in the first place.
+//
+// ONE ENTRY PER NODE, NOT PER MESH, so a glTF that instances one mesh from several nodes yields
+// several placements sharing a meshIndex instead of the last node silently winning.
+struct GltfPlacement {
+    i32  meshIndex = -1;                     // into GltfImportResult::meshes
+    Vec3 position{0, 0, 0};                  // ENGINE space, centimetres -- already through toEngine
+    std::string name;                        // the node's name, or the mesh's when the node had none
+};
+
 struct GltfImportResult {
     std::vector<OcMeshData> meshes;          // one per glTF mesh, submeshes per primitive
     std::vector<std::string> meshNames;      // parallel to `meshes`; "" where the source had none
+
+    // Every node that instanced a mesh, in scene-graph order. Empty for a file whose meshes all sit
+    // at the origin, which is the common single-object export and needs no placements at all.
+    std::vector<GltfPlacement> placements;
 
     // Parallel to `meshes`: which `skeletons` entry a mesh's JOINTS_0/WEIGHTS_0 stream addresses,
     // or -1 when the mesh carries no skin. glTF puts the mesh-to-skin edge on the NODE that

@@ -21,6 +21,8 @@
 #include "aver/formats/ObjImport.hpp"
 #include "aver/formats/UsdImport.hpp"
 #include "aver/formats/OcMesh.hpp"
+#include "aver/formats/OcWorld.hpp"   // the scene level a multi-node glTF now writes
+#include "aver/platform/FileSystem.hpp"
 #include "aver/formats/OcAnim.hpp"
 #include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
@@ -792,9 +794,95 @@ fmt::OcMeshData mergeAll(const std::vector<MeshItem>& items, usize& mergedCount,
 // source meshes cannot overwrite one another in the staging directory. Shared by all three mesh
 // formats; glTF calls this and then separately writes its skeleton/clips, since OBJ and USD have
 // neither.
+// `outStems`, when given, receives the stem each item was written under, PARALLEL TO `items` --
+// empty for an item that was merged away. The scene writer needs it because the stem is decided
+// here, by safe()/dedup, and re-deriving it there would be a second implementation of a naming rule
+// that only has to disagree once to write a level full of dangling mesh paths.
+
+// Writes a level that puts the imported meshes back where the source scene had them.
+//
+// WHY THIS EXISTS. The importer used to bake a glTF node's translation into its vertices, so a
+// 115-piece scene imported as 115 meshes each carrying its own world position in its geometry: the
+// pieces lined up if you placed them all at the origin, and every one of them had its pivot metres
+// away from itself. Taking the translation out fixes the pivot but throws the scene away unless
+// somebody writes it down. This is somebody writing it down.
+//
+// CONTENT-RELATIVE, resolved the way the editor resolves it (contentDir + "\\" + ref), which is why
+// this needs --content-dir. Without one there is no way to express the mesh path so a level can find
+// it, and the level is skipped with a line saying so rather than written full of paths that resolve
+// to nothing.
+bool writeSceneLevel(const std::string& outDir, const std::string& contentDir,
+                     const std::string& base,
+                     const std::vector<fmt::GltfPlacement>& placements,
+                     const std::vector<std::string>& stems) {
+    if (placements.empty()) return true;                 // a single-object file needs no level
+    if (contentDir.empty()) {
+        AVER_WARN("{} placement(s) were recovered from the scene graph, but --content-dir was not "
+                  "given, so a mesh path cannot be made content-relative and no level was written. "
+                  "The meshes are correct and centred; place them by hand, or re-run with "
+                  "--content-dir.", placements.size());
+        return true;
+    }
+
+    std::error_code ec;
+    std::filesystem::path rel =
+        std::filesystem::relative(std::filesystem::path(outDir), std::filesystem::path(contentDir), ec);
+    if (ec || rel.empty() || rel.generic_string().rfind("..", 0) == 0) {
+        AVER_WARN("--out-dir is not inside --content-dir, so mesh paths cannot be made "
+                  "content-relative; no level was written");
+        return true;
+    }
+    std::string prefix = rel.generic_string();
+    if (prefix == ".") prefix.clear(); else prefix += "/";
+
+    fmt::OcWorldData w;
+    w.name = base;
+    for (const fmt::GltfPlacement& p : placements) {
+        if (p.meshIndex < 0 || usize(p.meshIndex) >= stems.size()) continue;
+        const std::string& stem = stems[usize(p.meshIndex)];
+        if (stem.empty()) continue;                      // merged away, or failed to write
+        fmt::OcWorldPlacement op;
+        op.asset = prefix + stem + ".ocmesh";
+        op.x = p.position.x; op.y = p.position.y; op.z = p.position.z;
+        // Rotation and scale stay baked in the geometry, so the placement is a pure translation.
+        w.placements.push_back(std::move(op));
+    }
+    if (w.placements.empty()) return true;
+
+    // Into <content>/Maps, where the editor's level list looks, rather than beside the meshes: a
+    // .ocworld sitting in a Meshes folder is findable by nothing.
+    const std::string mapsDir = contentDir + "/Maps";
+    createDirectories(mapsDir);
+    // NEVER OVERWRITE A LEVEL THAT IS ALREADY THERE. The level is named after the SOURCE FILE, so
+    // importing a "JungleRuins.gltf" into a project that already has a JungleRuins.ocworld would
+    // replace a level somebody has been building with a bare list of freshly imported meshes. An
+    // import is not a thing anyone expects to destroy their work, and this one runs unattended from
+    // the launcher. Suffixing is the boring, recoverable answer.
+    std::string path = mapsDir + "/" + base + ".ocworld";
+    if (fileExists(path)) {
+        int n = 2;
+        std::string alt;
+        do { alt = mapsDir + "/" + base + "_" + std::to_string(n++) + ".ocworld"; }
+        while (fileExists(alt) && n < 1000);
+        AVER_WARN("{} already exists and was NOT touched; the imported scene went to {} instead",
+                  path, alt);
+        path = alt;
+    }
+    std::string why;
+    if (!fmt::saveOcworld(path, w, &why)) {
+        AVER_WARN("could not write the scene level {}: {}", path, why);
+        return false;
+    }
+    AVER_INFO("wrote {} with {} placement(s) -- open it to see the source scene reassembled",
+              path, w.placements.size());
+    return true;
+}
+
 bool writeMeshItems(const std::string& input, const std::string& outDir, const std::string& base,
-                    const std::vector<MeshItem>& items, bool merge, f32 lodRatio, RunStats& stats) {
+                    const std::vector<MeshItem>& items, bool merge, f32 lodRatio, RunStats& stats,
+                    std::vector<std::string>* outStems = nullptr) {
     bool anyFailed = false;
+    if (outStems) outStems->assign(items.size(), std::string{});
     if (merge && items.size() > 1) {
         usize mergedCount = 0;
         std::string warn;
@@ -804,6 +892,9 @@ bool writeMeshItems(const std::string& input, const std::string& outDir, const s
         applyLodAndClustering(m, lodRatio, base);
 #endif
         if (!writeAndVerifyMesh(input, outDir + "/" + base + ".ocmesh", m, stats)) anyFailed = true;
+        // Merged: one file, so there is no per-item stem to report and a scene cannot be rebuilt
+        // from it. Left empty rather than pointing every placement at the merged mesh, which would
+        // stamp the whole model once per placement.
         return anyFailed;
     }
 
@@ -822,6 +913,7 @@ bool writeMeshItems(const std::string& input, const std::string& outDir, const s
             candidate = stem + "_" + std::to_string(++suffix);
         used.push_back(candidate);
         if (!writeAndVerifyMesh(input, outDir + "/" + candidate + ".ocmesh", m, stats)) anyFailed = true;
+        else if (outStems) (*outStems)[i] = candidate;
     }
     return anyFailed;
 }
@@ -1230,7 +1322,9 @@ int main(int argc, char** argv) {
                 i < res.meshSkinIndex.size() ? res.meshSkinIndex[i] : -1});
         }
 
-        bool anyFailed = writeMeshItems(input, outDir, base, items, merge, lodRatio, stats);
+        std::vector<std::string> stems;
+        bool anyFailed = writeMeshItems(input, outDir, base, items, merge, lodRatio, stats, &stems);
+        if (!writeSceneLevel(outDir, contentDir, base, res.placements, stems)) anyFailed = true;
 
         bool anySkinned = false;
         for (const fmt::OcMeshData& mesh : res.meshes) if (mesh.hasSkin()) { anySkinned = true; break; }

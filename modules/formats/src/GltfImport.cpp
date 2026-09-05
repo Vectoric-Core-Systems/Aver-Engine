@@ -1213,9 +1213,32 @@ bool Gltf::run(std::string* why) {
 
         const i64 meshIdx = n["mesh"].asInt(-1);
         if (meshIdx >= 0 && usize(meshIdx) < meshes.size()) {
-            if (!importMesh(meshes[usize(meshIdx)], world, r_.meshes[usize(meshIdx)], why)) return false;
+            // THE TRANSLATION COMES OUT OF THE GEOMETRY AND BECOMES A PLACEMENT. Rotation and scale
+            // stay baked -- they are what the mesh IS -- but the node's position never was geometry,
+            // and baking it put every mesh's pivot wherever the author's world origin happened to be.
+            // See GltfPlacement for what that cost, measured.
+            //
+            // Row-major, row-vector: the translation is row 3, elements 12..14 (see nodeLocal's own
+            // comment). Zeroing that row leaves exactly the rotation/scale basis in rows 0-2, so the
+            // split is a copy and two assignments rather than a decomposition that could fail on
+            // shear the way splitTrs() has to worry about.
+            f32 basis[16];
+            std::memcpy(basis, world, sizeof(basis));
+            basis[12] = basis[13] = basis[14] = 0.0f;
+
+            if (!importMesh(meshes[usize(meshIdx)], basis, r_.meshes[usize(meshIdx)], why)) return false;
             visited[usize(meshIdx)] = 1;
             if (n.has("skin")) meshRawSkin_[usize(meshIdx)] = static_cast<i32>(n["skin"].asInt(-1));
+
+            // THROUGH toEngine, exactly as a vertex position is, so the placement lands in the same
+            // space and unit as the geometry it positions -- axis-swapped and metres-to-centimetres.
+            // Doing this by hand here is how a 100x or a Y/Z swap gets in.
+            GltfPlacement pl;
+            pl.meshIndex = static_cast<i32>(meshIdx);
+            pl.position  = toEngine(world[12], world[13], world[14], false);
+            pl.name      = n["name"].asString("");
+            if (pl.name.empty()) pl.name = r_.meshNames[usize(meshIdx)];
+            r_.placements.push_back(std::move(pl));
         }
         const JsonValue& kids = n["children"];
         for (usize i = 0; i < kids.size(); ++i) {

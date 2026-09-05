@@ -221,8 +221,20 @@ int main() {
         check(res.meshes[0].indices[1] == 1 && res.meshes[0].indices[2] == 2, "winding untouched when not converting");
     }
 
-    AVER_INFO("=== node transforms are applied ===");
+    AVER_INFO("=== a node's TRANSLATION becomes a placement, not geometry ===");
     {
+        // THIS TEST USED TO ASSERT THE OPPOSITE, and asserting it is what kept the bug alive: it
+        // checked that a node translated by 2 m produced a VERTEX at 200 cm, i.e. that the
+        // translation had been welded into the geometry. That is exactly what put every imported
+        // mesh's pivot metres away from itself -- measured on Intel Sponza as 115 of 115 meshes
+        // displaced, median 10.7 m, and an arch piece reporting a 14.2 m bounding radius for
+        // geometry a few metres across. The gizmo, the bounds, culling and F-focus all read that
+        // gap as real.
+        //
+        // The contract now: rotation and scale stay baked (they are what the mesh looks like), the
+        // translation comes out as a GltfPlacement. Both halves are asserted, because either alone
+        // can pass while the feature is broken -- geometry at the origin with no placement has
+        // simply lost the scene, and a placement whose geometry is still displaced double-counts.
         std::string json = triangleJson(tri.posOff, tri.posLen, tri.idxOff, tri.idxLen, true, b64(tri.bin));
         const std::string from = "\"nodes\":[{\"mesh\":0}]";
         const std::string to   = "\"nodes\":[{\"mesh\":0,\"translation\":[2,0,0]}]";
@@ -233,7 +245,39 @@ int main() {
         fmt::GltfImportResult res; std::string why;
         check(fmt::importGltfFromMemory(reinterpret_cast<const u8*>(json.data()), json.size(), "", res, {}, &why),
               "imports with a node translation: " + why);
-        checkNear(res.meshes[0].positions[1], 200.0f, 1e-2f, "node translation lands on engine +Y in centimetres");
+
+        // The vertex is where it would have been with no node transform at all: glTF +X (the
+        // triangle's own second vertex) still maps to engine +Y at 100 cm, NOT 300 cm.
+        checkNear(res.meshes[0].positions[4], 100.0f, 1e-2f,
+                  "the node translation is NOT welded into the vertex");
+        checkNear(res.meshes[0].positions[1], 0.0f, 1e-2f,
+                  "and the first vertex stays at the mesh's own origin");
+
+        // ...and the 2 m the geometry no longer carries is in the placement instead, through the
+        // same axis/unit conversion a position gets: glTF +X -> engine +Y, metres -> centimetres.
+        check(res.placements.size() == 1, "one placement, for the one node that instances a mesh");
+        if (res.placements.size() == 1) {
+            check(res.placements[0].meshIndex == 0, "the placement names mesh 0");
+            checkNear(res.placements[0].position.y, 200.0f, 1e-2f,
+                      "glTF +X translation of 2 m becomes engine +Y at 200 cm in the placement");
+            checkNear(res.placements[0].position.x, 0.0f, 1e-2f, "nothing on engine X");
+            checkNear(res.placements[0].position.z, 0.0f, 1e-2f, "nothing on engine Z");
+        }
+    }
+
+    AVER_INFO("=== a node at the origin produces a placement at the origin ===");
+    {
+        // The ordinary single-object export. A placement still exists -- one per node that
+        // instances a mesh -- it is simply at zero, so a caller can treat placements uniformly
+        // rather than special-casing "no transform".
+        const std::string json = triangleJson(tri.posOff, tri.posLen, tri.idxOff, tri.idxLen, true, b64(tri.bin));
+        fmt::GltfImportResult res; std::string why;
+        check(fmt::importGltfFromMemory(reinterpret_cast<const u8*>(json.data()), json.size(), "", res, {}, &why),
+              "imports the untransformed fixture: " + why);
+        check(res.placements.size() == 1, "an untransformed node still yields one placement");
+        if (res.placements.size() == 1)
+            checkNear(res.placements[0].position.x + res.placements[0].position.y +
+                      res.placements[0].position.z, 0.0f, 1e-4f, "and it sits at the origin");
     }
 
     AVER_INFO("=== generated normals face outward ===");
