@@ -90,7 +90,12 @@ $pkg = (Resolve-Path -LiteralPath $Package).Path
 # ---------------------------------------------------------------------------------------------
 # 1. Static checks. These cost nothing and catch the things a run cannot.
 # ---------------------------------------------------------------------------------------------
-foreach ($required in @('AverGame.exe', 'game.json', 'Game.ocproject', 'THIRD-PARTY-NOTICES.txt')) {
+# AverCrashReporter.exe is on this list because its absence was invisible in exactly the way this
+# script exists to prevent: the game installs the crash handler, writes a complete crash folder, and
+# then spawns a reporter that is not in the package. Nothing fails, nothing logs, and the player sees
+# the process disappear. A missing file that only matters after a crash will not be noticed by
+# testing the happy path, so it has to be asserted here.
+foreach ($required in @('AverGame.exe', 'AverCrashReporter.exe', 'game.json', 'Game.ocproject', 'THIRD-PARTY-NOTICES.txt')) {
     if (-not (Test-Path -LiteralPath (Join-Path $pkg $required))) { Fail "the package has no $required" }
 }
 

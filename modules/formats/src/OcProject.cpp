@@ -54,6 +54,22 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
         if (equalsCI(key, "OCPROJECT")) {
             sawHeader = true;
             if (t.size() > 1) out.version = parseI32(t[1], 1);
+            // REFUSED, RATHER THAN READ AS VERSION 1. This number was parsed, round-tripped and
+            // never once compared to anything, so a future OCPROJECT 2 -- whatever it came to mean --
+            // would be read by THIS build as if every key still meant what it means today, and then
+            // written back out having quietly dropped whatever it did not understand. `.ocmat` and
+            // the AVR1 container both refuse an unsupported version; these text formats were the
+            // odd ones out, and a version field nobody checks is a field that cannot be used.
+            //
+            // A CEILING, NOT AN EQUALITY: a project written by an OLDER engine is the migration
+            // system's business (modules/upgrade), and it opens those on purpose. Only the future is
+            // unreadable.
+            if (out.version > kOcProjectVersion) {
+                if (err) *err = "this project is OCPROJECT version " + std::to_string(out.version) +
+                                ", and this engine understands up to " +
+                                std::to_string(kOcProjectVersion) + " -- it was written by a newer build";
+                return false;
+            }
         } else if (equalsCI(key, "NAME")) {
             out.name = std::string(restOfLine(line, key));
         } else if (equalsCI(key, "ENGINE")) {

@@ -145,6 +145,23 @@ static void checkOcproject() {
     // EVERY ONE OF THESE COSTS FIVE PLACES in this format -- the field, hasRenderSettings, the
     // parse branch, isOwnedKey, and the writer -- and missing the fourth is invisible until a save
     // strips a key it never replaced. The byte-stable second write below is what catches that.
+    // A VERSION FROM THE FUTURE IS REFUSED, not read as version 1. The number was parsed and
+    // round-tripped and never compared to anything, so an OCPROJECT 2 would have been read as if
+    // every key still meant what it means today and then written back out having silently dropped
+    // whatever this build did not understand. Both halves are asserted: the refusal, and that the
+    // CURRENT version still opens -- a ceiling that rejects everything is the easy over-correction.
+    {
+        ProjectDesc future;
+        std::string ferr;
+        check(!parseOcproject("OCPROJECT 99\nNAME FromTheFuture\n", future, &ferr),
+              "an OCPROJECT version above this build's ceiling is REFUSED");
+        check(ferr.find("newer build") != std::string::npos,
+              "and the message says why rather than blaming the syntax: " + ferr);
+        ProjectDesc current;
+        check(parseOcproject("OCPROJECT 1\nNAME Current\n", current, &ferr),
+              "while the current version still parses");
+    }
+
     {
         ProjectDesc r;
         check(parseOcproject("OCPROJECT 1\nNAME R\n"

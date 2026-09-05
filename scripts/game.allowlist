@@ -18,6 +18,19 @@
 # this file leaves out.
 AverGame.exe
 
+# The crash reporter, and its absence here was a real hole rather than a judgement call.
+#
+# game/src/GameMain.cpp calls crash::install() as the FIRST statement of main(), exactly as the
+# editor does. On a crash it writes the whole folder -- minidump, CrashContext.runtime-xml with a
+# symbolicated stack, and the log ring -- and then spawns AverCrashReporter.exe to show it. That exe
+# was never staged, so a shipped game did all of that work and then launched a file that was not
+# there: the player saw the process vanish with no window, no message, and no idea a report existed
+# on their disk.
+#
+# It links nothing from the engine (see tools/AverCrashReporter.cpp) and is built unconditionally, so
+# there is no module condition to attach and nothing for it to drag in.
+AverCrashReporter.exe
+
 # Engine modules. Same set as the engine payload minus the editor-only ones.
 Aver.UI.Abi.dll
 Aver.Render.PBR.dll   ?AVER_MODULE_PBR

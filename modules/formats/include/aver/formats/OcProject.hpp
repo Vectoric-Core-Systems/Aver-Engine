@@ -9,6 +9,11 @@
 namespace aver::fmt {
 
 // A parsed manifest: what the project is called, where its content lives, and its render intent.
+// The highest OCPROJECT version this build can read. A file claiming more is REFUSED rather than
+// read as version 1 -- see parseOcproject. Bump this in the same change that teaches the parser
+// whatever the new version means, never ahead of it.
+inline constexpr int kOcProjectVersion = 1;
+
 struct ProjectDesc {
     int version = 1;                    // OCPROJECT <n>
     std::string name;                   // NAME

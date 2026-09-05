@@ -130,6 +130,15 @@ bool parseOcgraph(std::string_view text, OcGraphData& out, std::string* err) {
         if (equalsCI(key, "OCGRAPH")) {
             out.version = t.size() > 1 ? parseI32(t[1], 1) : 1;
             sawHeader = true;
+            // Refused rather than read as version 1 -- see the identical note in OcProject.cpp. A
+            // graph is the worse case of the two: an unknown record silently dropped by a save here
+            // is somebody's gameplay logic, and the editor rewrites the whole file on every save.
+            if (out.version > kOcGraphVersion) {
+                if (err) *err = "this graph is OCGRAPH version " + std::to_string(out.version) +
+                                ", and this engine understands up to " +
+                                std::to_string(kOcGraphVersion) + " -- it was written by a newer build";
+                return false;
+            }
         } else if (equalsCI(key, "DOMAIN")) {
             // DOMAIN <name> -- which language this graph's nodes are written in. Stored verbatim,
             // not mapped to the enum here, so a name this build does not know survives a save (see
