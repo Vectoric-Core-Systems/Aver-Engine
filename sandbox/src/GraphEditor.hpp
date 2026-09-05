@@ -170,6 +170,33 @@ public:
     // for the Variables panel and the component tree -- thin ImGui glue, model in the class.
     std::string addNodeFromCatalog(const std::string& typeId, Vec2 canvasPos);
 
+    // ---- drag-a-wire-into-empty-space -------------------------------------------------------
+    //
+    // Releasing a link drag on empty canvas opens the palette filtered to node types that could
+    // accept the wire, and connects whichever one is picked. It is the gesture a Blueprint author
+    // uses to create most nodes, and it did nothing here at all until now -- the wire just vanished.
+    //
+    // Modelled as three public methods with no ImGui in them so a headless test can drive the whole
+    // gesture: arm it, ask what the palette would show, pick one, check the link exists.
+
+    // Arms the gesture. `fromPin` is the pin the drag STARTED at; `fromIsOutput` says which end of
+    // the wire that is, which decides whether candidates are searched for a matching INPUT or a
+    // matching OUTPUT.
+    void beginLinkDrop(const std::string& fromNode, const std::string& fromPin, bool fromIsOutput);
+    void cancelLinkDrop() { linkDropPending_ = false; }
+    bool linkDropPending() const { return linkDropPending_; }
+
+    // Would this node type accept the pending wire? False for every type when nothing is pending,
+    // so a caller can use it unconditionally. Uses the SAME compatibility predicate commitLink
+    // uses (exact match for gameplay, material widening for material graphs), so the palette can
+    // never offer a node whose link would then be refused.
+    bool linkDropAccepts(const struct GraphNodeDesc& desc) const;   // GraphNodeDefs.hpp
+
+    // Spawns `typeId` at `canvasPos` and wires the pending drop to its first accepting pin.
+    // Returns the new node's id, or empty if the type is unknown. Disarms the gesture either way.
+    // With nothing pending this is exactly addNodeFromCatalog.
+    std::string spawnAndConnectLinkDrop(const std::string& typeId, Vec2 canvasPos);
+
     // Which node vocabulary the open graph belongs to, read from its own DOMAIN record -- so it is
     // the same answer the COMPILER gives for the same file. There is deliberately no second notion
     // of domain anywhere in the editor: one that disagreed with the compiler would offer a palette
@@ -614,6 +641,15 @@ private:
     // from it. Empty / -1 means empty canvas, which opens Add Node exactly as before.
     std::string rightClickNode_;
     int         rightClickLink_ = -1;
+
+    // Armed by beginLinkDrop, cleared by cancelLinkDrop / spawnAndConnectLinkDrop. The from-pin is
+    // kept here rather than read back from linkDragFromNode_ at use time because the drag state is
+    // reset the instant the button comes up, and the palette is submitted later in the same frame.
+    bool        linkDropPending_ = false;
+    std::string linkDropFromNode_;
+    std::string linkDropFromPin_;
+    bool        linkDropFromIsOutput_ = false;
+    std::string linkDropFromType_;
     std::string activeComment_;            // the box being moved or resized right now
     Vec2 commentDragStartPos_{}, commentDragStartSize_{};
     // Nodes captured when a MOVE began, and where each of them started. A comment box drags what it

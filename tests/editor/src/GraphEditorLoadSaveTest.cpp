@@ -1740,6 +1740,78 @@ LINK d1.value other.a
     check(ed.graph().links.size() == 3, "a single undo restores BOTH removed links");
 }
 
+// ================================================================================ link drop =
+// DRAGGING A WIRE INTO EMPTY SPACE opens the palette filtered to types that accept it, and connects
+// the one picked. The whole gesture is modelled with no ImGui in it precisely so this can drive it:
+// arm it, ask what the palette would show, pick one, check the link.
+//
+// The filter is the half worth testing. Its two ways to be wrong are both silent -- offering a node
+// whose link the editor will then refuse, and searching the wrong END of the candidate (looking for
+// an output when the wire needs an input), which offers exactly the wrong half of the palette.
+static void testLinkDropFiltersAndConnects() {
+    AVER_INFO("=== dropping a wire on empty canvas offers only nodes that accept it, then wires up ===");
+
+    const std::string text = R"(OCGRAPH 1
+NODE c1 ConstFloat 0 0
+PIN c1 value out float 1
+NODE flag ConstBool 0 100
+PIN flag value out bool false
+)";
+    const std::string tmp = (std::filesystem::path(scratchDir()) / "link_drop.ocgraph").string();
+    writeFile(tmp, text);
+
+    GraphEditor ed(tmp);
+    const GraphNodeDesc* add = findGraphNodeDesc("Add");        // two float inputs, one float output
+    const GraphNodeDesc* cfloat = findGraphNodeDesc("ConstFloat"); // one float OUTPUT, no inputs
+    check(add != nullptr && cfloat != nullptr, "the catalog has Add and ConstFloat to test against");
+    if (!add || !cfloat) return;
+
+    check(!ed.linkDropPending(), "nothing is pending before the gesture starts");
+    check(!ed.linkDropAccepts(*add), "and with nothing pending nothing is offered");
+
+    // Dragging FROM c1's float OUTPUT: candidates need a float INPUT.
+    ed.beginLinkDrop("c1", "value", /*fromIsOutput=*/true);
+    check(ed.linkDropPending(), "the gesture arms from a real pin");
+    check(ed.linkDropAccepts(*add), "Add is offered -- it has a float input to land on");
+    check(!ed.linkDropAccepts(*cfloat),
+          "ConstFloat is NOT offered -- its only float pin is an OUTPUT, and two outputs cannot wire");
+
+    const std::string made = ed.spawnAndConnectLinkDrop("Add", Vec2{300.0f, 0.0f});
+    check(!made.empty(), "picking Add spawns it");
+    check(!ed.linkDropPending(), "and disarms the gesture");
+    const bool wired = ed.graph().links.size() == 1 &&
+                       ed.graph().links[0].sourceNode == "c1" &&
+                       ed.graph().links[0].sourcePin == "value" &&
+                       ed.graph().links[0].destNode == made &&
+                       ed.graph().links[0].destPin == "a";
+    check(wired, "the wire is committed to the new node's FIRST accepting input, 'a'");
+
+    // A BOOL output must not be offered a float input. Same node type, opposite answer -- which is
+    // what tells a real type check from one that just returns true for anything with an input pin.
+    ed.beginLinkDrop("flag", "value", /*fromIsOutput=*/true);
+    check(!ed.linkDropAccepts(*add), "a bool output is not offered Add, whose inputs are floats");
+    ed.cancelLinkDrop();
+    check(!ed.linkDropPending(), "cancelling disarms it");
+
+    // Dragging from an INPUT is the other direction: candidates now need a matching OUTPUT, and
+    // ConstFloat -- refused above -- becomes the obvious answer.
+    const usize before = ed.graph().links.size();
+    ed.beginLinkDrop(made, "b", /*fromIsOutput=*/false);
+    check(ed.linkDropAccepts(*cfloat), "dragging from a float INPUT now offers ConstFloat");
+    const std::string k = ed.spawnAndConnectLinkDrop("ConstFloat", Vec2{0.0f, 300.0f});
+    check(!k.empty(), "and picking it spawns one");
+    const bool wired2 = ed.graph().links.size() == before + 1 &&
+                        ed.graph().links.back().sourceNode == k &&
+                        ed.graph().links.back().destNode == made &&
+                        ed.graph().links.back().destPin == "b";
+    check(wired2, "wired the NEW node's output into the pin the drag started from");
+
+    // A pin that does not exist must not arm the gesture -- otherwise the next palette pick would
+    // try to wire to nothing.
+    ed.beginLinkDrop("c1", "noSuchPin", true);
+    check(!ed.linkDropPending(), "a drag from a pin that is not there does not arm anything");
+}
+
 int main() {
     AVER_INFO("======== GraphEditorLoadSaveTest ========");
     std::error_code ec;
@@ -1778,6 +1850,7 @@ int main() {
     testCopyPasteRemapsIdsAndLinks();
     testControlRigNodeCarriesItsWeightDefault();
     testBreakLinksKeepsTheNodes();
+    testLinkDropFiltersAndConnects();
 
     AVER_INFO("======== {} failure(s) ========", g_failures);
     return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);

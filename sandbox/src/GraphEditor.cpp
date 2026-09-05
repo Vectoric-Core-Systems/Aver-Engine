@@ -426,6 +426,83 @@ GraphNodeDomain GraphEditor::openGraphDomain() const {
                                                                         : kDomainGameplay;
 }
 
+// The pin a link drag started from, looked up in the graph rather than in the layout cache: the
+// layout carries geometry, and what the filter needs is the pin's TYPE.
+static const fmt::OcGraphPin* findGraphPin(const fmt::OcGraphData& g, const std::string& nodeId,
+                                           const std::string& pinName) {
+    for (const auto& n : g.nodes) {
+        if (n.id != nodeId) continue;
+        for (const auto& p : n.pins) if (p.name == pinName) return &p;
+        return nullptr;
+    }
+    return nullptr;
+}
+
+void GraphEditor::beginLinkDrop(const std::string& fromNode, const std::string& fromPin, bool fromIsOutput) {
+    const fmt::OcGraphPin* p = findGraphPin(graph_, fromNode, fromPin);
+    if (!p) { linkDropPending_ = false; return; }   // a pin that is not there cannot be wired to
+    linkDropPending_      = true;
+    linkDropFromNode_     = fromNode;
+    linkDropFromPin_      = fromPin;
+    linkDropFromIsOutput_ = fromIsOutput;
+    linkDropFromType_     = p->type;
+}
+
+bool GraphEditor::linkDropAccepts(const GraphNodeDesc& desc) const {
+    if (!linkDropPending_) return false;
+    if ((desc.domain & openGraphDomain()) == 0u) return false;
+
+    // THE SAME PREDICATE commitLink USES, not a second rule that happens to agree today. A palette
+    // that offers a node whose link is then refused is worse than one that offers nothing: the
+    // author has already committed to the gesture by the time they find out.
+    const PinTypeCompat compat = openGraphDomain() == kDomainMaterial ? &materialPinTypeMatch
+                                                                     : &exactPinTypeMatch;
+    for (const auto& ps : desc.pins) {
+        // Dragging FROM an output looks for an INPUT to land on, and vice versa. The direction is
+        // half the filter, and getting it backwards would offer exactly the wrong half of the palette.
+        if (ps.isOutput == linkDropFromIsOutput_) continue;
+        const bool ok = linkDropFromIsOutput_ ? compat(linkDropFromType_, ps.type)
+                                              : compat(ps.type, linkDropFromType_);
+        if (ok) return true;
+    }
+    return false;
+}
+
+std::string GraphEditor::spawnAndConnectLinkDrop(const std::string& typeId, Vec2 canvasPos) {
+    if (!linkDropPending_) return addNodeFromCatalog(typeId, canvasPos);
+
+    const GraphNodeDesc* desc = findGraphNodeDescIn(typeId, openGraphDomain());
+    if (!desc) { linkDropPending_ = false; return {}; }
+
+    // Resolve the target pin BEFORE spawning, so a type with no compatible pin costs no node and no
+    // undo step. Reached when a caller spawns something the filter would not have offered.
+    const PinTypeCompat compat = openGraphDomain() == kDomainMaterial ? &materialPinTypeMatch
+                                                                     : &exactPinTypeMatch;
+    std::string targetPin;
+    for (const auto& ps : desc->pins) {
+        if (ps.isOutput == linkDropFromIsOutput_) continue;
+        const bool ok = linkDropFromIsOutput_ ? compat(linkDropFromType_, ps.type)
+                                              : compat(ps.type, linkDropFromType_);
+        // FIRST accepting pin in declaration order, which is the catalog's own reading order -- so
+        // a wire dropped near an Add lands on `a`, not on whichever pin a set happened to iterate
+        // first. Not the nearest pin geometrically: the node does not exist yet to measure against.
+        if (ok) { targetPin = ps.name; break; }
+    }
+    if (targetPin.empty()) { linkDropPending_ = false; return {}; }
+
+    const std::string newId = addNodeFromCatalog(typeId, canvasPos);
+    if (newId.empty()) { linkDropPending_ = false; return {}; }
+
+    // commitLink pushes its own undo, so this gesture costs two steps -- one for the node, one for
+    // the wire. Deliberate: undoing once leaves the node you asked for, disconnected, which is a
+    // more useful place to land than back at nothing.
+    if (linkDropFromIsOutput_) commitLink(linkDropFromNode_, linkDropFromPin_, newId, targetPin);
+    else                       commitLink(newId, targetPin, linkDropFromNode_, linkDropFromPin_);
+
+    linkDropPending_ = false;
+    return newId;
+}
+
 std::string GraphEditor::addNodeFromCatalog(const std::string& typeId, Vec2 canvasPos) {
     // DOMAIN-AWARE, because sixteen type names exist in both vocabularies with DIFFERENT PINS -- a
     // gameplay Add takes two scalars, a material Add takes two float3s. Resolving by name alone
@@ -1900,6 +1977,24 @@ void GraphEditor::drawEventGraph(float dpi) {
             if (hit.kind == GraphHitKind::Pin && !(hit.nodeId == linkDragFromNode_ && hit.pinName == linkDragFromPin_)) {
                 if (linkDragFromIsOutput_) commitLink(linkDragFromNode_, linkDragFromPin_, hit.nodeId, hit.pinName);
                 else                       commitLink(hit.nodeId, hit.pinName, linkDragFromNode_, linkDragFromPin_);
+            } else if (hit.kind == GraphHitKind::None) {
+                // DRAGGING A WIRE INTO EMPTY SPACE OPENS THE PALETTE, filtered to node types that
+                // could actually accept this wire, and connects the one you pick. Releasing here
+                // used to do nothing at all -- the wire simply vanished.
+                //
+                // This is the gesture a Blueprint author reaches for to create most nodes, and its
+                // absence is a large part of why every graph in this repo was typed by hand rather
+                // than drawn: without it, building a chain means opening the palette, finding the
+                // node, placing it somewhere, then dragging a wire to it, for every single node.
+                //
+                // Only on EMPTY canvas (hit.kind == None). Dropping on a node's body but missing its
+                // pin still does nothing, deliberately -- the author was aiming at that node, and
+                // spawning a second one on top of it would be a worse guess than doing nothing.
+                beginLinkDrop(linkDragFromNode_, linkDragFromPin_, linkDragFromIsOutput_);
+                if (linkDropPending_) {
+                    pendingSpawnCanvasPos_ = mouseCanvas;
+                    ImGui::OpenPopup("##graphAddNode");
+                }
             }
             dragMode_ = DragMode::None;
         }
@@ -2270,6 +2365,15 @@ void GraphEditor::drawEventGraph(float dpi) {
     }
 
     if (ImGui::BeginPopup("##graphAddNode")) {
+        // WHEN THE PALETTE WAS OPENED BY DROPPING A WIRE, say so and say what is being hidden. A
+        // silently shortened list reads as a missing node rather than as a filter, which is the
+        // same failure the search box's "...and N more" line exists to avoid.
+        if (linkDropPending_) {
+            ImGui::TextDisabled("connecting %s.%s (%s) -- showing types that accept it",
+                                linkDropFromNode_.c_str(), linkDropFromPin_.c_str(),
+                                linkDropFromType_.c_str());
+            ImGui::Separator();
+        }
         // Above the categories, not inside one: a comment box is not a node, has no pins, and
         // filing it under a node family would be the first place an author looked and the last
         // place they found it.
@@ -2309,11 +2413,12 @@ void GraphEditor::drawEventGraph(float dpi) {
                 ImGui::TextDisabled("no node matches");
             } else {
                 for (const GraphNodeDesc* d : hits) {
+                    if (linkDropPending_ && !linkDropAccepts(*d)) continue;
                     // The category rides on the row rather than being a header: a ranked list is not
                     // grouped, and a reader still needs to know that Add is Math and VecAdd is Vector.
                     const std::string row = d->displayName + "##s" + d->typeId;
                     if (ImGui::MenuItem(row.c_str())) {
-                        addNodeFromCatalog(d->typeId, pendingSpawnCanvasPos_);
+                        spawnAndConnectLinkDrop(d->typeId, pendingSpawnCanvasPos_);
                         ImGui::CloseCurrentPopup();
                     }
                     ImGui::SameLine();
@@ -2340,6 +2445,10 @@ void GraphEditor::drawEventGraph(float dpi) {
         std::vector<std::string> categories;
         for (const auto& d : graphNodeCatalog()) {
             if ((d.domain & domain) == 0u) continue;
+            // A category whose every member refuses the pending wire is not shown at all, for the
+            // reason the domain filter above gives: an empty submenu is a dead end that looks like
+            // a place the node might be.
+            if (linkDropPending_ && !linkDropAccepts(d)) continue;
             if (std::find(categories.begin(), categories.end(), d.category) == categories.end())
                 categories.push_back(d.category);
         }
@@ -2351,16 +2460,23 @@ void GraphEditor::drawEventGraph(float dpi) {
             if (ImGui::BeginMenu(cat.c_str())) {
                 for (const auto& d : graphNodeCatalog()) {
                     if (d.category != cat || (d.domain & domain) == 0u) continue;
-                    // Thin glue: everything the drop actually DOES is addNodeFromCatalog, so it can
-                    // be driven by a test with no ImGui context.
+                    if (linkDropPending_ && !linkDropAccepts(d)) continue;
+                    // Thin glue: everything the drop actually DOES is spawnAndConnectLinkDrop (which
+                    // is addNodeFromCatalog when no wire is pending), so it can be driven by a test
+                    // with no ImGui context.
                     if (ImGui::MenuItem(d.displayName.c_str()))
-                        addNodeFromCatalog(d.typeId, pendingSpawnCanvasPos_);
+                        spawnAndConnectLinkDrop(d.typeId, pendingSpawnCanvasPos_);
                 }
                 ImGui::EndMenu();
             }
         }
         }   // else: the category menus
         ImGui::EndPopup();
+    } else if (linkDropPending_ && !ImGui::IsPopupOpen("##graphAddNode")) {
+        // DISARMED WHEN THE POPUP GOES AWAY WITHOUT A PICK (Escape, or a click outside). Without
+        // this the gesture stays armed, and the NEXT ordinary right-click Add Node would silently
+        // wire the node it spawns to a pin the author dragged from minutes ago.
+        cancelLinkDrop();
     }
 
     ImGui::EndChild();
