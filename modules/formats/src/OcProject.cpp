@@ -111,6 +111,8 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
             if (t.size() > 1) out.occlusionCull = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.DEPTHPREPASS")) {
             if (t.size() > 1) out.depthPrepass = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.FRAMEBUDGETMS")) {
+            if (t.size() > 1) out.frameBudgetMs = static_cast<f32>(parseF64(t[1]));
         } else if (equalsCI(key, "RENDER.BACKEND")) {
             // Stored verbatim and lowercased; validated where it is USED, not here. A manifest naming
             // a backend this build has no support for is not a broken manifest -- the same file is
@@ -330,6 +332,7 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     appendKey(owned, "RENDER.OCCLUSIONCULL", d.occlusionCull);
     appendKey(owned, "RENDER.DEPTHPREPASS", d.depthPrepass);
     if (!d.backend.empty()) appendKey(owned, "RENDER.BACKEND", d.backend);
+    appendKey(owned, "RENDER.FRAMEBUDGETMS", d.frameBudgetMs);
     appendKey(owned, "RENDER.MSAA", d.msaa);
     appendKey(owned, "RENDER.MESHSHADERS", d.meshShaders);
     appendKey(owned, "RENDER.GIUPDATEINTERVAL", d.giUpdateInterval);

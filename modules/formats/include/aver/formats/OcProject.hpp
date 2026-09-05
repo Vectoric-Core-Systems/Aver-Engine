@@ -96,6 +96,11 @@ struct ProjectDesc {
     // after load -- would be far too late to choose a device. See peekBackend().
     std::string backend;        // RENDER.BACKEND  "d3d12" | "vulkan" | "d3d11"; empty = engine default
 
+    // A FRAME TIME TO AIM AT, in milliseconds. <= 0 (the default) leaves quality exactly as
+    // authored, which is what every existing project gets and what every MEASUREMENT needs -- a
+    // renderer that quietly retunes itself cannot be A/B'd against anything.
+    f32 frameBudgetMs = -1.0f;  // RENDER.FRAMEBUDGETMS  e.g. 16.7 for 60 Hz; <= 0 = off
+
     // ---- FOUR THINGS THE UI COULD SET AND THE FILE COULD NOT HOLD ------------------------------
     //
     // Each of these was a live control in Project Settings that applied immediately and then
@@ -135,7 +140,7 @@ struct ProjectDesc {
                refractionEdgeFade >= 0.0f || lodSelect >= 0 || lodThresholdPx >= 0.0f ||
                occlusionCull >= 0 || depthPrepass >= 0 ||
                msaa >= 0 || meshShaders >= 0 || giUpdateInterval >= 0 || hasGiVolume ||
-               !backend.empty();
+               !backend.empty() || frameBudgetMs > 0.0f;
     }
 
     // ---- WINDOW.* -- how a shipped game presents itself -----------------------------------------

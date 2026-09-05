@@ -1234,6 +1234,8 @@ public:
     }
     void setUseWarp(bool w) { useWarp_ = w; }
     void setBackend(std::string b) { backendName_ = std::move(b); }   // --backend <name>
+    // --frame-budget <ms>: target frame time, and run the controller even in a bounded capture.
+    void setFrameBudget(f32 ms) { frameBudgetMs_ = ms; frameBudgetForced_ = ms > 0.0f; }
     void setDebugLayer(bool d) { debugLayer_ = d; }
 
 #if AVER_WITH_IMGUI
@@ -3488,7 +3490,11 @@ public:
             e.device()->setSampleCount(static_cast<u32>(voxi::Renderer::get().settings().msaa));
 
         if (voxiAttached_) {
-            const voxi::Settings& vs = voxi::Renderer::get().settings();
+            // A COPY, and that is load-bearing: the controller must never write back into the
+            // singleton, or one throttled frame would become the new authored baseline and the
+            // quality could only ever ratchet down. Project Settings still shows what was authored.
+            voxi::Settings vs = voxi::Renderer::get().settings();
+            frameBudgetTick(t.dt, vs);
             const f32 c[3] = {giCenter_.x, giCenter_.y, giCenter_.z};
             voxiRenderer_.setSettings(vs);
             voxiRenderer_.setVolume(c, giExtent_);
@@ -8328,6 +8334,10 @@ private:
         if (project_.occlusionCull >= 0) occlusionCullEnabled_ = project_.occlusionCull != 0;
         // Applied to the UI only -- main() has already used this to pick the device.
         projectBackend_ = project_.backend;
+        // NOT WHEN --frame-budget SAID SO. This runs on every project apply, and the manifest's
+        // default is -1, so an unconditional assignment silently switched the flag back off one
+        // frame after it was set -- the controller was wired, reachable and never once ran.
+        if (!frameBudgetForced_) frameBudgetMs_ = project_.frameBudgetMs;
         if (project_.depthPrepass  >= 0) depthPrepassOverride_ = project_.depthPrepass != 0;
 
         // ---- PHYSICS AND AUDIO, which no manifest could state until now -------------------------
@@ -8472,6 +8482,7 @@ private:
         const bool tierOnlyChange = requested.globalIllumination != live.globalIllumination
                                   && requested.voxelResolution == live.voxelResolution;
         project_.backend = projectBackend_;
+        project_.frameBudgetMs = frameBudgetMs_;
         project_.voxelResolution = tierOnlyChange ? -1 : static_cast<int>(requested.voxelResolution);
         project_.giIntensity     = requested.giIntensity;
         project_.giMaxDistance   = requested.giMaxDistance;
@@ -8568,6 +8579,100 @@ private:
     // save re-serialises the document). A drag settles before it is written.
     static constexpr f32 kProjectAutosaveSec = 0.5f;
     f32 projectAutosaveAccum_ = 0.0f;
+
+
+    // ---- FRAME BUDGET -------------------------------------------------------------------------
+    //
+    // Scales GI work to hit a target frame time. Off unless RENDER.FRAMEBUDGETMS is set, because a
+    // renderer that silently changes its own quality is a renderer whose measurements cannot be
+    // compared, and this repo takes a lot of measurements.
+    //
+    // WHY A BUDGET AND NOT A "CAMERA IS MOVING" TEST. Motion is the trigger people notice, but it is
+    // not the thing that hurts: a still camera in a heavier scene misses the frame just as badly,
+    // and a moving camera in a trivial one does not need help. Budgeting the frame covers both with
+    // one rule, and the rule is stated in the unit anyone actually cares about.
+    //
+    // WHAT IT SCALES, AND WHAT IT DELIBERATELY DOES NOT. GI update interval first, then cone count.
+    // Both were MEASURED on Sponza under --cam-wobble: raising the interval to 4 alone took GPU
+    // total 51.1 ms -> 29.3 ms, which is nearly the whole regression, and cone count 13 -> 5 was
+    // worth ~8% of the primary pass. RENDER SCALE IS NOT ON THIS LADDER even though it is the
+    // single biggest lever, because rebuilding the render targets from inside a frame has taken the
+    // device down before (see the renderScale recovery path); AverSR is the supported way to trade
+    // resolution and it is chosen deliberately, not by a controller.
+    //
+    // ONE STEP AT A TIME, WITH HYSTERESIS. Dropping quality is allowed to react quickly, raising it
+    // is not: an unstable controller that oscillates between two rungs is more distracting than the
+    // frame it was trying to save, because the eye tracks CHANGE in indirect light far better than
+    // its absolute level.
+    static constexpr i32 kFrameBudgetRungs = 5;
+    f32  frameBudgetMs_ = 0.0f;       // RENDER.FRAMEBUDGETMS; <= 0 disables the whole controller
+    bool frameBudgetForced_ = false;  // --frame-budget: run the controller even in a capture
+    i32  frameBudgetRung_ = 0;        // 0 = full quality
+    f32  frameBudgetAvgMs_ = 0.0f;    // EMA, so one long frame cannot move the rung
+    u32  frameBudgetFrames_ = 0;      // frames seen; the first few are loading, not rendering
+    i32  frameBudgetUnder_ = 0;       // consecutive comfortable frames, for the climb back
+    u32  frameBudgetAppliedInterval_ = 0;
+    u32  frameBudgetAppliedCones_ = 0;
+
+    void frameBudgetTick(f32 dt, voxi::Settings& vs) {
+        // OFF IN CAPTURE RUNS unless asked for by name. A controller that retunes quality mid-run
+        // makes every bounded measurement incomparable, which is most of how this engine is
+        // checked. --frame-budget is the way to exercise it in one anyway, including in a gate.
+        if (frameBudgetMs_ <= 0.0f) { frameBudgetRung_ = 0; return; }
+        if (maxFrames_ != 0 && !frameBudgetForced_) { frameBudgetRung_ = 0; return; }
+        const f32 ms = dt * 1000.0f;
+
+        // WARM-UP, AND IT IS NOT OPTIONAL. Opening a level costs seconds in one frame -- mesh
+        // uploads, shader work, the first voxelisation. Folding that into the average made the
+        // controller read "1597.6ms" on a scene running at 40, and an EMA this smooth needs about a
+        // hundred frames to forget a sample that size: it ratcheted straight to the bottom rung off
+        // a number that described loading, then sat there. Ignore the opening frames outright.
+        if (++frameBudgetFrames_ < 30) return;
+
+        // AND REJECT HITCHES AFTERWARDS, for the same reason in miniature. A single 500ms frame is a
+        // compile, a stream-in or an alt-tab; none of them is a signal about steady-state quality,
+        // and reacting to one drops quality for the second or so it takes the average to recover.
+        // Dropped rather than clamped, because a clamped hitch is still a vote for "too slow".
+        constexpr f32 kHitchMs = 250.0f;
+        if (ms > kHitchMs) return;
+
+        // Seeded on the first frame that survives both filters rather than climbing from zero, which
+        // would otherwise read as "comfortably under budget" for the first dozen frames of every launch.
+        frameBudgetAvgMs_ = frameBudgetAvgMs_ <= 0.0f ? ms : (frameBudgetAvgMs_ * 0.9f + ms * 0.1f);
+
+        // The band, not the line. Dropping at exactly the budget and climbing at exactly the budget
+        // guarantees oscillation; 15% of headroom is the gap between the two decisions.
+        const f32 over  = frameBudgetMs_;
+        const f32 under = frameBudgetMs_ * 0.85f;
+        if (frameBudgetAvgMs_ > over && frameBudgetRung_ < kFrameBudgetRungs - 1) {
+            ++frameBudgetRung_;
+            frameBudgetUnder_ = 0;
+        } else if (frameBudgetAvgMs_ < under && frameBudgetRung_ > 0) {
+            // Sixty comfortable frames -- about a second -- before giving quality back. Deliberately
+            // far slower than the drop.
+            if (++frameBudgetUnder_ >= 60) { --frameBudgetRung_; frameBudgetUnder_ = 0; }
+        } else {
+            frameBudgetUnder_ = 0;
+        }
+
+        // The ladder. Rung 0 leaves the authored settings completely alone, so a project inside its
+        // budget renders exactly what it asked for.
+        if (frameBudgetRung_ == 0) return;
+        static const u32 kInterval[kFrameBudgetRungs] = {1, 2, 4, 4, 8};
+        static const u32 kConeCap[kFrameBudgetRungs]  = {0, 0, 0, 8, 5};   // 0 = leave as authored
+        const u32 wantInterval = kInterval[frameBudgetRung_];
+        if (wantInterval > vs.giUpdateInterval) vs.giUpdateInterval = wantInterval;
+        if (kConeCap[frameBudgetRung_] && vs.giCones > kConeCap[frameBudgetRung_])
+            vs.giCones = kConeCap[frameBudgetRung_];
+
+        if (vs.giUpdateInterval != frameBudgetAppliedInterval_ || vs.giCones != frameBudgetAppliedCones_) {
+            frameBudgetAppliedInterval_ = vs.giUpdateInterval;
+            frameBudgetAppliedCones_ = vs.giCones;
+            AVER_INFO("[Sandbox] frame budget {:.1f}ms: {:.1f}ms average -> rung {} "
+                      "(GI every {} frame(s), {} cone(s))",
+                      frameBudgetMs_, frameBudgetAvgMs_, frameBudgetRung_, vs.giUpdateInterval, vs.giCones);
+        }
+    }
 
     void maybeAutosaveProject(f32 dt) {
         // NOT DURING A CAPTURE RUN, the same rule maybeAutosavePrefs follows and for a sharper
@@ -22712,6 +22817,7 @@ Application* createApplication(int argc, char** argv) {
     const char* cbMoveArg = nullptr;
     int saveDirtyArg = 0;
     int prefsWriteArg = 0;
+    f32 frameBudgetArg = 0.0f;
     int recaptureArg = 0;
     int viewmodelArg = 0;
     // --gpu-timing takes no value, so it's matched in the i+1<argc loop below only incidentally --
@@ -22729,6 +22835,7 @@ Application* createApplication(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--cbmove-test"))          cbMoveArg = argv[i + 1];
         if (!std::strcmp(argv[i], "--savedirty-test"))       saveDirtyArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--prefs-write-test"))     prefsWriteArg = std::atoi(argv[i + 1]);
+        if (!std::strcmp(argv[i], "--frame-budget"))         frameBudgetArg = (f32)std::atof(argv[i + 1]);
         if (!std::strcmp(argv[i], "--recapture-test"))       recaptureArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--viewmodel-test"))       viewmodelArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--refraction"))           refraction = std::atoi(argv[i + 1]);
@@ -23668,6 +23775,7 @@ Application* createApplication(int argc, char** argv) {
     if (cbMoveArg) app->setCbMoveTest(cbMoveArg);
     if (saveDirtyArg > 0) app->setSaveDirtyTest(saveDirtyArg);
     if (prefsWriteArg > 0) app->setPrefsWriteTest(prefsWriteArg);
+    if (frameBudgetArg > 0.0f) app->setFrameBudget(frameBudgetArg);
     if (recaptureArg > 0) app->setRecaptureTest(recaptureArg);
     if (viewmodelArg > 0) app->setViewmodelTest(viewmodelArg);
 #endif
