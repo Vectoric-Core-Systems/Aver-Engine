@@ -1061,42 +1061,90 @@ Everything below is what the audit found unenforced, unchecked, untested or unst
 - **`aver_fw_scene_abi_matches()` must keep genuinely calling into Aver.Scene** or the check becomes a tautology (`framework_abi.h:70-77`). It does today (`FrameworkAbi.cpp:376`), but nothing in the build enforces its presence — and the header's supporting argument, that the framework would otherwise import nothing from the scene, no longer holds: `FrameworkAbi.cpp:13-15` includes the scene's C++ headers and `:36` calls `World::instance()`.
 - **Read-only fields are enforced in code but stated in no header.** Six setters reject them (`SceneAbi.cpp:146, 169, 193, 215, 243, 268`); the flags are registered at `Builtins.cpp:44, 52, 63, 76, 93`; the only prose is `modules/scene/README.md:15-16`. `scene_abi.h` never uses the words, so a binding author reading only the header cannot know that a 0 from a setter may mean "this field is not yours to write". See §3 — and note that on `CHierarchy` the flag is what stands between a script and an unbounded loop in `composeChain()`/`worldMatrix()` (`SceneAbi.cpp:240-242`).
 
-### Hand-mirrored constants — most are checked now; two are not
+### Hand-mirrored constants — twenty-one checked, three that a text comparison cannot reach
 When this audit was written the headers claimed these were "pinned" and nothing executable pinned
 them. **`tests/abi/src/AbiEnumTest.cpp` closed most of the gap since**: it reads the C headers and the
 `.cs` files as text and compares each group by normalised name, so adding a member to both sides needs
 no edit in the test and adding it to one side fails. It also compares the physics and audio *function
 signatures* — return type, parameter types, parameter names, in order.
 
-The "Checked by" column below is current. **One row is left**, and the table says so rather than being
-deleted: an unchecked pair fails silently and at run time, in whatever feature happens to use the
-wrong number.
+**This table was wrong twice, in the same direction both times.** It first said nothing checked any
+of these, long after `AbiEnumTest` had started checking eight. Corrected, it then listed *one*
+remaining gap — because it only ever listed the pairs somebody had happened to notice. A sweep of
+every ABI header against every C# mirror found **fourteen** unchecked pairs, not one. All fourteen are
+now checked, and the three genuinely uncheckable cases are named below rather than left off.
+
+The lesson is the table's own: a list of known gaps is not a list of gaps. What follows is derived
+from `kGroups` in `tests/abi/src/AbiEnumTest.cpp`, which is the thing that actually runs.
 
 | # | Native | C# mirror | Checked by |
 |---|---|---|---|
 | 1 | `AVER_SCRIPTING_CONTRACT_VERSION` (`scripting_abi.h:35`) | `HostBridge.cs:27` | **run-time check** — boundary 1, §14 |
 | 2 | `AVER_FW_DISPATCH_VERSION` (`framework_hooks.h:128`) | `ManagedDispatch.cs:27` | **run-time check** — boundary 3 |
 | 3 | `AvManagedDispatch` field order (`framework_hooks.h:144-157`) | `ManagedDispatch.cs:35-46` | only indirectly, by the `structBytes` check |
-| 4 | `AVER_FW_KEY_*` (`framework_abi.h:205-218`) | `Input.cs` (`Key`), consumed by `EnhancedInput.cs` | **nothing** — a key that never fires |
-| 5 | `AVER_SCENE_COMP_*` (`scene_abi.h:85-92`) | `SceneIds.cs` `SceneIds` | `AbiEnumTest` (via `csStrip`, since C# spells them `CLocal` where C says `AVER_SCENE_COMP_LOCAL`) |
-| 6 | `AVER_SCENE_KIND_*` (`scene_abi.h:70-83`) | no C# mirror; C++ side pinned at `SceneAbi.cpp:25-42` | `static_assert`, C++ only |
-| 7 | `AVER_FW_CLASS_*` (`framework_abi.h:99-106`) | `Enums.cs` `ClassFlags` | `AbiEnumTest` |
-| 8 | `AVER_FW_TICK_*` (`framework_abi.h:109-112`) | `Enums.cs` `TickGroup` | `AbiEnumTest` |
-| 9 | `AVER_FW_PLAY_*` (`framework_abi.h:174-176`) | `Enums.cs` `PlayState` | `AbiEnumTest` |
-| 10 | `AVER_FW_BEGIN_*` / `AVER_FW_END_*` (`framework_hooks.h:58-65`) | `Enums.cs` `BeginReason` / `EndReason` | `AbiEnumTest` |
-| 11 | `AVER_PBR_FEATURE_*` / `_STATUS_*` (`pbr_abi.h`) | `Pbr.cs` `PbrFeature` / `PbrStatus` | `AbiEnumTest` |
-| 12 | `AVER_VOXI_FEATURE_*` / `_STATUS_*` / `_QUALITY_*` (`voxi_abi.h`) | `Voxi.cs` | `AbiEnumTest` |
-| 13 | `AVER_UI_LAYER_*` (`ui_abi.h`) | `Aver.UI/Hud.cs` `Layer` | `AbiEnumTest` |
-| 14 | `AVER_SCRIPT_LOG_*` (`scripting_abi.h`) and `aver::LogLevel` (`Log.hpp`, by POSITION) | `Aver.Scripting/Log.cs` `Level` | `AbiEnumTest` |
-| 15 | `aver::AbiError` (`core/ErrorCodes.hpp`) | `Aver.Physics` `PhysicsError`, `Aver.Scene` `SceneError` | `AbiEnumTest` — all three compared |
+| 4 | `AVER_FW_CLASS_*` (`framework_abi.h`) | `Enums.cs` `ClassFlags` | `AbiEnumTest` |
+| 5 | `AVER_FW_TICK_*` (`framework_abi.h`) | `Enums.cs` `TickGroup` | `AbiEnumTest` |
+| 6 | `AVER_FW_PLAY_*` (`framework_abi.h`) | `Enums.cs` `PlayState` | `AbiEnumTest` |
+| 7 | `AVER_FW_BEGIN_*` / `AVER_FW_END_*` (`framework_hooks.h`) | `Enums.cs` `BeginReason` / `EndReason` | `AbiEnumTest` |
+| 8 | `AVER_FW_KEY_*` (`framework_abi.h`) | `Input.cs` `Key` | `AbiEnumTest` — all 50, by position |
+| 9 | `AVER_FW_GAMEPAD_*` (`framework_abi.h`) | `Input.cs` `GamepadButton` | `AbiEnumTest` |
+| 10 | `AVER_FW_GAMEPAD_AXIS_*` (`framework_abi.h`) | `Input.cs` `GamepadAxis` | `AbiEnumTest` |
+| 11 | `AVER_FW_VIEW_*` (`framework_abi.h`) | `Character.cs` `CameraView` | `AbiEnumTest` |
+| 12 | `AVER_FW_ACTION_*` (`framework_abi.h`) | `EnhancedInput.cs` `InputValueType` | `AbiEnumTest` |
+| 13 | `AVER_FW_ACTION_SRC_*` (`framework_abi.h`) | `EnhancedInput.cs` `InputSource` | `AbiEnumTest` |
+| 14 | `AVER_SCENE_COMP_*` (`scene_abi.h`) | `SceneIds.cs` `SceneIds` **and** `Component.cs` `Component` | `AbiEnumTest` — **two** mirrors, both compared |
+| 15 | `AVER_SCENE_KIND_*` (`scene_abi.h`) | no named C# type — see below | `static_assert`, C++ only |
+| 16 | `AVER_PHYS_MOTION_*` / `_MOTOR_*` / `_DOF_*` / `_GROUND_*` | `Aver.Physics/Enums.cs` `MotionType`, `MotorState`, `SixDofAxis`, `GroundState` | `AbiEnumTest` |
+| 17 | `AVER_PBR_FEATURE_*` / `_STATUS_*` / `_TEX_*` / `_ALPHA_*` / `_UV_*` (`pbr_abi.h`) | `Pbr.cs` — five enums | `AbiEnumTest` |
+| 18 | `AVER_VOXI_FEATURE_*` / `_STATUS_*` / `_QUALITY_*` (`voxi_abi.h`) | `Voxi.cs` | `AbiEnumTest` |
+| 19 | `AVER_UI_LAYER_*` (`ui_abi.h`) | `Aver.UI/Hud.cs` `Layer` | `AbiEnumTest` |
+| 20 | `AVER_SCRIPT_LOG_*` (`scripting_abi.h`) and `aver::LogLevel` (`Log.hpp`, by POSITION) | `Aver.Scripting/Log.cs` `Level` | `AbiEnumTest` |
+| 21 | `aver::AbiError` (`core/ErrorCodes.hpp`) | `Aver.Physics` `PhysicsError`, `Aver.Scene` `SceneError` | `AbiEnumTest` — all three compared |
+| 22 | `AVER_AUDIO_BUS_*` (`audio_abi.h`) | **no C# mirror exists** | n/a — see below |
+| 23 | `AVER_SCRIPT_OK` / `_ERR_CONTRACT` / `_ERR_MANAGED_FAULT` (`scripting_abi.h`) | three private fields of `HostBridge` | **nothing** — see below |
 
-Row 4 is the one still unchecked, and the obstacle is a parse shape rather than a decision. Both sides
-are **implicit-value enums** — `AVER_FW_KEY_A = 0, AVER_FW_KEY_B, AVER_FW_KEY_C, …` in C and
-`A = 0, B, C, …` in `Input.cs` — where the value of all but a handful of members comes from POSITION.
-`AbiEnumTest`'s two readers cannot see them: `cDefines` parses `#define`s and this is a C `enum`, and
-`csMembers` takes only members that carry an `=`, which here is 3 of 47. Closing it means an
-implicit-value enum reader on each side. Until that exists the row stays in this table saying
-"nothing", which is the point of keeping it.
+### The three that a text comparison cannot reach
+
+These are not oversights, and none of them is one `kGroups` row away. Each is here so the list above
+can be read as complete.
+
+- **`AVER_AUDIO_BUS_*` has no C# mirror at all.** `Aver.Framework/Audio.cs`'s `Play`/`PlayAt` take a
+  bare `int bus = 0` with no named constants, so there is nothing to drift *from*. That is a missing
+  API, not a mirror gap: a script naming a bus has to write the integer.
+- **`AVER_SCENE_KIND_*`'s C# side is not a type.** `GraphCompiler.cs` declares two of the nine as
+  private `const int` fields on the compiler class, and `HostBridge.cs`'s `SceneKindOf` is a `switch`
+  *expression* mapping three `PinType`s to bare literals with the constant named only in a trailing
+  comment. `csMembers` looks for a named `enum` or `class` body; there is no name to give it. Both are
+  deliberate partial mirrors (3 of 9, 2 of 9), so even the count check would be wrong.
+- **The scripting bootstrap codes sit in a 1000-line static class.** `HostBridge.cs:29-31` declares
+  `Ok`, `ErrContract` and `ErrManagedFault` as private fields directly inside `HostBridge`, whose body
+  also contains every other member of that class — so pointing `csMembers` at the type name would
+  compare three constants against the whole file. `AVER_SCRIPT_` is also a prefix of every
+  `AVER_SCRIPT_LOG_*` name in the same header, which `cExclude` could handle but the C# shape cannot.
+  Extracting the three into their own small type would make this checkable.
+
+### How the readers grew to cover the rest
+
+`cDefines` and `csMembers` between them could not see an **implicit-value enum**, where a member's
+value comes from its POSITION rather than an `=`. That is the shape of the whole framework input
+seam — of `Key`'s 50 members exactly 3 carry an `=` on the C# side — so six pairs were invisible for
+a mechanical reason rather than a decided one. Three additions closed them:
+
+- **`cEnumValues`** reads an anonymous C `enum { … }` block, selected by an **anchor member** rather
+  than by prefix. Both halves matter: an anonymous enum has no type name to find it by, and
+  `AVER_FW_GAMEPAD_` is a prefix of every `AVER_FW_GAMEPAD_AXIS_*` name, so a prefix scan would read
+  the six axes into the fourteen buttons.
+- **`csMembers` gained a running counter**, used only inside an `enum` — in a `static class` of
+  `const int`s a chunk without an `=` is not a member that omitted its value, it is not a member.
+- **Comments come off before the split, on both sides.** `framework_abi.h`'s key block carries
+  `/* A..Z = 0..25 */` *between commas*, and every C# member carries a `///` summary containing
+  commas and `<see cref="…"/>`. Splitting the raw body glues a comment onto the next member's chunk
+  and finds an `=` inside it.
+
+Plus two table fields for divergences that are real rather than drift: `csStrip` for a whole-group
+prefix (`SceneIds` spells them `CLocal`), and `kMemberWaivers` for thirteen individual members of the
+key group — ten of which are **forced by C# itself**, because an identifier cannot begin with a digit,
+so `AVER_FW_KEY_0..9` are mirrored as `Key.D0..D9`. A waived member's *value* is still compared.
 
 ### Two stale comments in the C# tree
 - **`scripting/csharp/Aver.Framework/Native.cs:16-18`** asserts that "The in-progress `Aver.Scene/Native.cs` currently uses ANSI `LPStr`; that is the defect". No longer true — `Aver.Scene/Native.cs` uses `LPUTF8Str` throughout and decodes with `PtrToStringUTF8` (`:36, 53, 67, 71, 76`). The file that still uses ANSI is `Aver.Scripting/Pbr.cs`.

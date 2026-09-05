@@ -81,6 +81,42 @@ static std::string trimmed(const std::string& s) {
     return s.substr(b, s.find_last_not_of(" \t\r\n") - b + 1);
 }
 
+// Every `<apiMacro> <ret> <prefix>name(params);` in a C header. Comments come out first: these
+// declarations carry doc comments that would otherwise land inside a parameter list.
+// Removes both kinds of comment IN ONE PASS, which is the only way to get it right.
+//
+// THIS USED TO BE TWO SEQUENTIAL SEARCH-AND-ERASE LOOPS, block comments first and then line comments,
+// and that ordering is wrong in a way that silently ate whole headers. A line comment is allowed to
+// contain the two characters that open a block comment -- physics_joints_abi.h's own opening
+// paragraph names a build-artefact path with a wildcard in it -- and the block pass, running first
+// and knowing nothing about line comments, treated that as the start of a block, found no terminator
+// anywhere after it, and erased THE REST OF THE FILE. Both the joints and shapes headers parsed to
+// zero exports because of one path in one sentence, and it presented as 29 believable "C# imports a
+// function the header does not export" failures rather than as a parse error.
+//
+// Swapping the two passes only moves the bug: a block comment containing a line comment would then
+// lose its own terminator to the line pass. A single left-to-right walk that knows which comment it
+// is inside has neither problem, and is shorter than the two loops it replaces.
+static std::string stripComments(const std::string& in) {
+    std::string out;
+    out.reserve(in.size());
+    for (size_t i = 0; i < in.size(); ++i) {
+        if (in[i] == '/' && i + 1 < in.size() && in[i + 1] == '/') {
+            while (i < in.size() && in[i] != 0x0A) ++i;
+            if (i < in.size()) out.push_back(static_cast<char>(0x0A));
+            continue;
+        }
+        if (in[i] == '/' && i + 1 < in.size() && in[i + 1] == '*') {
+            const size_t e = in.find("*/", i + 2);
+            if (e == std::string::npos) break;   // unterminated: the rest genuinely is a comment
+            i = e + 1;
+            continue;
+        }
+        out.push_back(in[i]);
+    }
+    return out;
+}
+
 // Parses `#define <PREFIX><NAME> <int>` -- decimal or 0x hex, which the flag groups use. Returns
 // normalised name -> value. Anything that is not a plain integer literal (a macro referring to
 // another macro, a cast, an expression) is skipped rather than guessed at.
@@ -181,16 +217,80 @@ static std::map<std::string, long long> cppEnumValues(const std::string& text, c
     return out;
 }
 
+// One ANONYMOUS C `enum { ... }` block whose values come from POSITION: normalised name (prefix
+// stripped) -> value. The third and last reader in this file, and the gap it closes is the input
+// codes, where 47 of Key's 50 members carry no `=` at all.
+//
+// SELECTED BY AN ANCHOR MEMBER, NOT BY PREFIX, and both halves of that matter. These enums are
+// anonymous, so unlike a C# `enum X` there is no type name to find them by. And selecting by prefix
+// is not merely inelegant here, it is wrong: `AVER_FW_GAMEPAD_` is a prefix of every
+// `AVER_FW_GAMEPAD_AXIS_*` name in the block below it, so a prefix scan over the header would read
+// the six axes into the fourteen buttons and compare twenty constants against fourteen members. The
+// anchor names one member; the braces around it are the group; the two gamepad enums stay separate
+// because they are separate blocks.
+//
+// COMMENTS COME OFF FIRST, and that is not hygiene either. framework_abi.h's key block carries
+// `/* A..Z = 0..25 */` and `/* 0..9 = 26..35 */` BETWEEN commas. Splitting the raw body would glue
+// each comment onto the following member's chunk, find the `=` inside the comment, and emit a
+// phantom member named `a..z` -- so the strip has to happen before the split, not after.
+static std::map<std::string, long long> cEnumValues(const std::string& text,
+                                                    const std::string& anchor,
+                                                    const std::string& prefix) {
+    std::map<std::string, long long> out;
+    const std::string clean = stripComments(text);
+    const auto at = clean.find(anchor);
+    if (at == std::string::npos) return out;
+    const auto open = clean.rfind('{', at);
+    const auto close = clean.find('}', at);
+    if (open == std::string::npos || close == std::string::npos) return out;
+
+    // `next` is the value an unadorned member takes. An `= N` anywhere resets it, which is what the
+    // key block needs three times over: A = 0, then the digits at 26, then Space at 36.
+    long long next = 0;
+    std::istringstream in(clean.substr(open + 1, close - open - 1));
+    std::string chunk;
+    while (std::getline(in, chunk, ',')) {
+        const auto eq = chunk.find('=');
+        std::istringstream ns(eq == std::string::npos ? chunk : chunk.substr(0, eq));
+        std::string tok, name;
+        while (ns >> tok) name = tok;
+        if (name.empty()) continue;            // the empty tail after a trailing comma
+        if (name.rfind(prefix, 0) != 0) continue;
+        if (eq != std::string::npos) {
+            std::istringstream vs(chunk.substr(eq + 1));
+            std::string value;
+            if (vs >> value) {
+                try { next = std::stoll(value, nullptr, 0); }
+                catch (...) { continue; }      // not an integer literal; not ours to interpret
+            }
+        }
+        out[normalise(name.substr(prefix.size()))] = next++;
+    }
+    return out;
+}
+
 // Parses the members of one C# `enum X { ... }` or `static class X { ... }` block. Handles both
 // forms because the C side's flag groups are mirrored as a class of consts (ClassFlags) while the
 // rest are real enums -- `Name = 0,` and `internal const int Name = 0x0001;` alike.
-static std::map<std::string, long long> csMembers(const std::string& text, const std::string& typeName) {
+static std::map<std::string, long long> csMembers(const std::string& rawText, const std::string& typeName) {
     std::map<std::string, long long> out;
+    // COMMENTS OFF FIRST. Every member in these files carries a /// <summary>, and those summaries
+    // contain commas ("Camera at the character's eyes, looking where it faces") and `=` signs (a
+    // <see cref="X"/>). Splitting the raw body on ',' therefore produced chunks whose last token
+    // was a word out of a sentence -- harmless while every real member carried an `=`, because the
+    // value then failed to parse as an integer and the chunk was dropped; a phantom member the
+    // moment the implicit branch below started accepting a chunk without one.
+    const std::string text = stripComments(rawText);
+
     // Find "enum <typeName>" or "class <typeName>", then take the braced block that follows.
     size_t at = std::string::npos;
+    bool isEnum = false;
     for (const char* kw : {"enum ", "class "}) {
         const size_t p = text.find(std::string(kw) + typeName);
-        if (p != std::string::npos && (at == std::string::npos || p < at)) at = p;
+        if (p != std::string::npos && (at == std::string::npos || p < at)) {
+            at = p;
+            isEnum = kw[0] == 'e';
+        }
     }
     if (at == std::string::npos) return out;
     const size_t open = text.find('{', at);
@@ -207,11 +307,29 @@ static std::map<std::string, long long> csMembers(const std::string& text, const
     // constants against 1 C# member.
     std::string flat = body;
     std::replace(flat.begin(), flat.end(), ';', ',');
+    long long next = 0;                          // see the implicit branch below
     std::istringstream in(flat);
     std::string chunk;
     while (std::getline(in, chunk, ',')) {
         const size_t eq = chunk.find('=');
-        if (eq == std::string::npos) continue;
+        // A MEMBER WITH NO `=`, INSIDE AN ENUM, STILL HAS A VALUE -- its position. Dropping those
+        // is why Aver.Framework's Key, GamepadButton, GamepadAxis, CameraView, InputValueType and
+        // InputSource could not be checked at all: of Key's 50 members exactly 3 carry an `=`, so
+        // this function used to report 3 where the header declares 50.
+        //
+        // ENUM ONLY, and that distinction is real rather than defensive: inside a `static class`
+        // of `const int`s a chunk without an `=` is not a member that omitted its value, it is not
+        // a member. Handing it the running counter would invent constants out of stray tokens.
+        if (eq == std::string::npos) {
+            if (!isEnum) continue;
+            std::istringstream ns(chunk);
+            std::string tok, last;
+            while (ns >> tok) last = tok;
+            if (last.empty()) continue;
+            if (!std::isalpha(static_cast<unsigned char>(last[0])) && last[0] != '_') continue;
+            out[normalise(last)] = next++;
+            continue;
+        }
         std::istringstream ns(chunk.substr(0, eq));
         std::string tok, last;
         while (ns >> tok) last = tok;            // the identifier is the token before '='
@@ -220,8 +338,9 @@ static std::map<std::string, long long> csMembers(const std::string& text, const
         if (!(vs >> value) || last.empty()) continue;
         while (!value.empty() && (value.back() == ';' || value.back() == '}')) value.pop_back();
         try {
-            out[normalise(last)] = std::stoll(value, nullptr, 0);
-        } catch (...) { /* not an integer literal */ }
+            next = std::stoll(value, nullptr, 0);
+        } catch (...) { continue; }   // not an integer literal
+        out[normalise(last)] = next++;
     }
     return out;
 }
@@ -359,43 +478,10 @@ static std::string flatten(const std::string& s) {
     return out;
 }
 
-// Every `<apiMacro> <ret> <prefix>name(params);` in a C header. Comments come out first: these
-// declarations carry doc comments that would otherwise land inside a parameter list.
-// Removes both kinds of comment IN ONE PASS, which is the only way to get it right.
-//
-// THIS USED TO BE TWO SEQUENTIAL SEARCH-AND-ERASE LOOPS, block comments first and then line comments,
-// and that ordering is wrong in a way that silently ate whole headers. A line comment is allowed to
-// contain the two characters that open a block comment -- physics_joints_abi.h's own opening
-// paragraph names a build-artefact path with a wildcard in it -- and the block pass, running first
-// and knowing nothing about line comments, treated that as the start of a block, found no terminator
-// anywhere after it, and erased THE REST OF THE FILE. Both the joints and shapes headers parsed to
-// zero exports because of one path in one sentence, and it presented as 29 believable "C# imports a
-// function the header does not export" failures rather than as a parse error.
-//
-// Swapping the two passes only moves the bug: a block comment containing a line comment would then
-// lose its own terminator to the line pass. A single left-to-right walk that knows which comment it
-// is inside has neither problem, and is shorter than the two loops it replaces.
-static std::string stripComments(const std::string& in) {
-    std::string out;
-    out.reserve(in.size());
-    for (size_t i = 0; i < in.size(); ++i) {
-        if (in[i] == '/' && i + 1 < in.size() && in[i + 1] == '/') {
-            while (i < in.size() && in[i] != 0x0A) ++i;
-            if (i < in.size()) out.push_back(static_cast<char>(0x0A));
-            continue;
-        }
-        if (in[i] == '/' && i + 1 < in.size() && in[i + 1] == '*') {
-            const size_t e = in.find("*/", i + 2);
-            if (e == std::string::npos) break;   // unterminated: the rest genuinely is a comment
-            i = e + 1;
-            continue;
-        }
-        out.push_back(in[i]);
-    }
-    return out;
-}
 
 
+// stripComments lives up with the other text helpers now: cEnumValues and csMembers need it too,
+// because an enum body's comments contain the very commas and '=' signs those two split on.
 static std::map<std::string, Signature> cSignatures(std::string text, const std::string& apiMacro,
                                                     const std::string& prefix) {
     text = stripComments(text);
@@ -516,6 +602,41 @@ struct Group {
     // say so the only alternatives are to leave the pair unchecked -- which is what happened -- or to
     // rename a public C# surface to suit a test.
     const char* csStrip = "";
+
+    // A member of an ANONYMOUS C `enum { ... }` block. Non-empty means "the C side is an enum,
+    // not #define, and this names one member of the block to read" -- see cEnumValues for why the
+    // block is found by a member rather than by the prefix every other row selects on.
+    const char* cAnchor = "";
+
+    // A normalised sub-prefix to DROP from the C side after the group prefix is stripped, or "".
+    // One group needs it and the need is structural rather than cosmetic: AVER_FW_ACTION_ is a
+    // prefix of AVER_FW_ACTION_SRC_*, four constants in the same header that are a DIFFERENT set
+    // with its own C# enum, so a plain prefix scan returns seven constants for a three-member
+    // group. The two rows exclude each other by naming the other's remainder ("src", and nothing
+    // for the SRC row because no AVER_FW_ACTION_SRC_* name is a prefix of another).
+    const char* cExclude = "";
+};
+
+// A MEMBER SPELLED DIFFERENTLY ON PURPOSE, waived by name -- the same shape kNameWaivers uses for
+// parameters below, and for the same reason: waiving the handful that genuinely differ keeps the
+// name check strict on the other several hundred, which is worth far more than dropping it.
+//
+// ALL THIRTEEN ARE ON ONE GROUP, the key codes, and ten of them are FORCED BY C# ITSELF: a C#
+// identifier cannot begin with a digit, so AVER_FW_KEY_0..9 cannot be mirrored as Key.0..9 and the
+// C# side spells them D0..D9. That is a language rule, not drift, and it is the reason this table
+// exists at all rather than the pair simply being renamed to agree. The other three are a
+// readability choice on the managed side (LeftShift over LSHIFT), left alone because Key is a
+// public surface that scripts already name.
+struct MemberWaiver { const char* group; const char* cName; const char* csName; };
+static const MemberWaiver kMemberWaivers[] = {
+    {"framework key codes", "0", "d0"}, {"framework key codes", "1", "d1"},
+    {"framework key codes", "2", "d2"}, {"framework key codes", "3", "d3"},
+    {"framework key codes", "4", "d4"}, {"framework key codes", "5", "d5"},
+    {"framework key codes", "6", "d6"}, {"framework key codes", "7", "d7"},
+    {"framework key codes", "8", "d8"}, {"framework key codes", "9", "d9"},
+    {"framework key codes", "lshift", "leftshift"},
+    {"framework key codes", "lctrl",  "leftctrl"},
+    {"framework key codes", "lalt",   "leftalt"},
 };
 
 // SENTINELS ARE SKIPPED BY NAME, one per group at most. AVER_FW_TICK_COUNT and the two _COUNT
@@ -557,6 +678,53 @@ static const Group kGroups[] = {
     // that is silently never attached, which is exactly the failure mode that table describes.
     {"scene component ids",   "modules/scene/include/aver/scene/scene_abi.h",               "AVER_SCENE_COMP_",
      "scripting/csharp/Aver.Scene/SceneIds.cs",  "SceneIds",    "", "C"},
+    // THE SAME C GROUP, A SECOND HAND-MIRROR. Aver.Framework/Component.cs restates all twelve ids as
+    // its own enum ("Values match the scene's fixed AVER_SCENE_COMP_* ids"), and a row that checked
+    // only SceneIds would leave this copy free to drift -- which is the failure this whole file is
+    // about. A group may be named more than once; the C side is simply read twice.
+    {"scene component ids (2)", "modules/scene/include/aver/scene/scene_abi.h",             "AVER_SCENE_COMP_",
+     "scripting/csharp/Aver.Framework/Component.cs", "Component", ""},
+
+    // ---- the implicit-value enums ---------------------------------------------------------------
+    //
+    // Everything below was unreachable until cEnumValues and csMembers' implicit branch existed. The
+    // input codes are the headline -- 47 of Key's 50 members take their value from position on both
+    // sides -- and the two gamepad blocks are why the C side is found by an anchor: AVER_FW_GAMEPAD_
+    // is a prefix of AVER_FW_GAMEPAD_AXIS_.
+    {"framework key codes",   "modules/framework/include/aver/framework/framework_abi.h",   "AVER_FW_KEY_",
+     "scripting/csharp/Aver.Framework/Input.cs", "Key",         "count", "", "AVER_FW_KEY_A"},
+    {"framework gamepad buttons", "modules/framework/include/aver/framework/framework_abi.h", "AVER_FW_GAMEPAD_",
+     "scripting/csharp/Aver.Framework/Input.cs", "GamepadButton", "buttoncount", "", "AVER_FW_GAMEPAD_DPAD_UP",
+     // The axis block sits directly below and shares this prefix in full. The anchor keeps them in
+     // separate braces; this keeps a stray AXIS_ name out even if the two are ever merged.
+     "axis"},
+    {"framework gamepad axes", "modules/framework/include/aver/framework/framework_abi.h",  "AVER_FW_GAMEPAD_AXIS_",
+     "scripting/csharp/Aver.Framework/Input.cs", "GamepadAxis", "count", "", "AVER_FW_GAMEPAD_AXIS_LEFT_X"},
+
+    // ---- #define on the C side, implicit enum on the C# side ------------------------------------
+    {"framework view mode",   "modules/framework/include/aver/framework/framework_abi.h",   "AVER_FW_VIEW_",
+     "scripting/csharp/Aver.Framework/Character.cs", "CameraView", ""},
+    // AVER_FW_ACTION_ and AVER_FW_ACTION_SRC_ are two sets in one header, one a prefix of the other.
+    {"input action value types", "modules/framework/include/aver/framework/framework_abi.h", "AVER_FW_ACTION_",
+     "scripting/csharp/Aver.Framework/EnhancedInput.cs", "InputValueType", "", "", "", "src"},
+    {"input action sources",  "modules/framework/include/aver/framework/framework_abi.h",   "AVER_FW_ACTION_SRC_",
+     "scripting/csharp/Aver.Framework/EnhancedInput.cs", "InputSource", ""},
+
+    // ---- both sides already readable; these were simply never named -----------------------------
+    {"physics motion types",  "modules/physics/include/aver/physics/physics_abi.h",         "AVER_PHYS_MOTION_",
+     "scripting/csharp/Aver.Physics/Enums.cs",   "MotionType",  ""},
+    {"physics motor states",  "modules/physics/include/aver/physics/physics_joints_abi.h",  "AVER_PHYS_MOTOR_",
+     "scripting/csharp/Aver.Physics/Enums.cs",   "MotorState",  ""},
+    {"physics six-DOF axes",  "modules/physics/include/aver/physics/physics_joints_abi.h",  "AVER_PHYS_DOF_",
+     "scripting/csharp/Aver.Physics/Enums.cs",   "SixDofAxis",  "count"},
+    {"physics ground state",  "modules/physics/include/aver/physics/physics_character_abi.h", "AVER_PHYS_GROUND_",
+     "scripting/csharp/Aver.Physics/Enums.cs",   "GroundState", ""},
+    {"PBR texture slots",     "modules/render.pbr/include/aver/pbr/pbr_abi.h",              "AVER_PBR_TEX_",
+     "scripting/csharp/Aver.Scripting/Pbr.cs",   "PbrTextureSlot", "count"},
+    {"PBR alpha modes",       "modules/render.pbr/include/aver/pbr/pbr_abi.h",              "AVER_PBR_ALPHA_",
+     "scripting/csharp/Aver.Scripting/Pbr.cs",   "PbrAlphaMode", ""},
+    {"PBR UV modes",          "modules/render.pbr/include/aver/pbr/pbr_abi.h",              "AVER_PBR_UV_",
+     "scripting/csharp/Aver.Scripting/Pbr.cs",   "PbrUvMode",   ""},
 };
 
 int main() {
@@ -573,7 +741,13 @@ int main() {
         if (!readText(root + g.header, hdr)) { check(false, std::string(g.label) + ": cannot read " + g.header); continue; }
         if (!readText(root + g.csFile, cs))  { check(false, std::string(g.label) + ": cannot read " + g.csFile); continue; }
 
-        std::map<std::string, long long> c = cDefines(hdr, g.prefix);
+        std::map<std::string, long long> c =
+            *g.cAnchor ? cEnumValues(hdr, g.cAnchor, g.prefix) : cDefines(hdr, g.prefix);
+        if (*g.cExclude) {
+            const std::string ex = normalise(g.cExclude);
+            for (auto it = c.begin(); it != c.end();)
+                it = it->first.rfind(ex, 0) == 0 ? c.erase(it) : std::next(it);
+        }
         std::map<std::string, long long> m = csMembers(cs, g.csType);
         if (*g.csStrip) {
             const std::string strip = normalise(g.csStrip);
@@ -582,12 +756,23 @@ int main() {
                 stripped[name.rfind(strip, 0) == 0 ? name.substr(strip.size()) : name] = v;
             m.swap(stripped);
         }
+        // The C# spellings that differ on purpose are renamed to their C counterpart HERE, so the
+        // comparisons below stay a plain name join and a waived member's VALUE is still checked.
+        for (const MemberWaiver& w : kMemberWaivers) {
+            if (std::string(w.group) != g.label) continue;
+            const auto it = m.find(w.csName);
+            if (it == m.end()) continue;
+            const long long v = it->second;
+            m.erase(it);
+            m[w.cName] = v;
+        }
         if (*g.skip) c.erase(g.skip);
 
         // A GROUP THAT MATCHES NOTHING IS A FAILURE, not a silent pass. If a header is reorganised or
         // an enum renamed, the parse quietly returns nothing and every value check below vacuously
         // succeeds -- a check that cannot fail is the exact thing this suite exists to avoid.
-        check(!c.empty(), std::string(g.label) + ": found C constants with prefix " + g.prefix);
+        check(!c.empty(), std::string(g.label) + ": found C constants with prefix " + g.prefix +
+                          (*g.cAnchor ? std::string(" in the enum holding ") + g.cAnchor : std::string()));
         check(!m.empty(), std::string(g.label) + ": found C# members of " + g.csType);
         if (c.empty() || m.empty()) continue;
 
