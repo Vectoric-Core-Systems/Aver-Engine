@@ -26,6 +26,10 @@ public class OcGraphParser
         graph = new Graph();
         err = null;
         bool sawHeader = false;
+        // Set when a NODE line names the Self type, which is rewritten to `Param entity` on the spot
+        // (see the NODE case). It only tells the post-parse pass whether the `entity` PARAM has to be
+        // declared -- by then no Self node is left to count.
+        bool selfSeen = false;
         var nodes = new Dictionary<string, Node>();
 
         var lines = text.Split(new[] { "\n" }, StringSplitOptions.None);
@@ -415,7 +419,28 @@ public class OcGraphParser
 
                 string nodeId = tokens[1];  // Store as string to support both int and string IDs
                 string nodeType = tokens[2];
+
+                // SELF IS SUGAR FOR `Param entity`, AND IT IS RESOLVED HERE, AT CONSTRUCTION.
+                // Not afterwards: Node.Type is init-only, so a later pass would have to rebuild the
+                // node and copy every field across -- which silently drops whichever field is added
+                // to Node next. Rewriting the type token before the object exists costs two lines
+                // and cannot go stale that way.
+                //
+                // The PARAM record it needs is declared after the whole file is read (see
+                // Graph.ResolveSelfNodes, called below), because a hand-written file may declare
+                // `PARAM entity int` itself, ABOVE or BELOW its nodes, and Self must reuse that one
+                // rather than adding a second -- two parameters would change the compiled method's
+                // arity and break every caller. selfSeen is what tells that pass a Self was here at
+                // all; the marker on the node is its param= naming "entity".
+                //
+                // Why the node is needed at all: nearly every Scene/Character/Physics/Animation/
+                // Audio node takes an `entity` pin, and PARAM is a top-level record the EDITOR
+                // cannot write -- aver::fmt::OcGraphData models no parameters. So a graph authored
+                // entirely on the canvas could not reach the entity it runs on.
+                bool isSelf = nodeType.Equals("self", StringComparison.OrdinalIgnoreCase);
+                if (isSelf) { nodeType = "Param"; selfSeen = true; }
                 var node = new Node { Id = nodeId, Type = nodeType };
+                if (isSelf) node.ParamName = "entity";
 
                 // Parse optional key=value pairs for node configuration (e.g., value=42.5 for constants).
                 for (int i = 3; i < tokens.Count; i++)
@@ -849,6 +874,16 @@ public class OcGraphParser
             string t = node.Type.ToLowerInvariant();
             if (t == "funcentry" && owner.EntryNodeId == null) owner.EntryNodeId = node.Id;
             else if (t == "funcreturn" && owner.ReturnNodeId == null) owner.ReturnNodeId = node.Id;
+        }
+
+        // Self is shorthand for the graph's own entity handle -- rewritten into the `Param entity`
+        // it stands for HERE, between func= ownership (which the refusal below needs) and
+        // AddDefaultPins (which gives the rewritten node its output pin from the parameter's type,
+        // exactly as it would for a hand-written Param node). See Graph.ResolveSelfNodes.
+        if (selfSeen && !graph.ResolveSelfNodes(out var selfErr))
+        {
+            err = selfErr;
+            return false;
         }
 
         // Default pins for built-in node types if not explicitly declared.

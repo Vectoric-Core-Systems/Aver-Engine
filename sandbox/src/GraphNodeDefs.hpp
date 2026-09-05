@@ -599,6 +599,25 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     //    always prefers the node's own recorded pins over this table (see the header comment).
     //    param= names which declared PARAM this node reads. --
     t.push_back({"Param", "Param", "Param", {pin("value", "float", true)}, {attr("param", "Param Name")}});
+    // -- SELF: THE NODE WITHOUT WHICH A CANVAS-AUTHORED GRAPH COULD NOT DRIVE ANYTHING.
+    //    Nearly every Scene, Character, Physics, Animation and Audio node takes an `entity` pin, and
+    //    the only way to reach the graph's own handle was `PARAM entity int` plus a Param node --
+    //    a top-level record the editor cannot write, because OcGraphData does not model parameters
+    //    at all (modules/formats/include/aver/formats/OcGraph.hpp). So the Param row above was
+    //    unusable from the canvas: it can name a parameter but nothing here can declare one. That is
+    //    the reason every gameplay graph in this repository is hand-written text, alongside the
+    //    Const rows' missing `value` attribute.
+    //
+    //    NO ATTRIBUTES, deliberately: there is nothing to configure. Graph.ResolveSelfNodes rewrites
+    //    it into `Param entity` at parse time and declares the PARAM if the file did not, so by the
+    //    time the compiler, GraphHost or the C++ writer sees the graph there is no Self node left --
+    //    which is why this row needs no counterpart anywhere in GraphCompiler.cs.
+    //    THE OUTPUT PIN IS CALLED `value`, NOT `entity`, and that is not cosmetic. The desugar
+    //    turns this node into a Param node and nothing else -- EmitParam stores the loaded argument
+    //    into the local for the pin named "value" and no other, so a pin called "entity" would have
+    //    left the value on the stack and stored nothing. Matching Param's pin name is what keeps
+    //    the rewrite a pure type change, with no pin renaming and no LINK rewriting to go wrong.
+    t.push_back({"Self", "Self", "Param", {pin("value", "int", true)}});
 
     // -- flow / exec: control flow, not data flow. "exec" is a PIN TYPE, exactly like "float"/"int"/
     //    "bool" above -- see modules/formats/include/aver/formats/OcGraph.hpp's comment on

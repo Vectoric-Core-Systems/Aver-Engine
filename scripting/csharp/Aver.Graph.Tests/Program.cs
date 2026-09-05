@@ -256,6 +256,11 @@ static int Main()
         // See AudioNodeTests.cs's own header for what these can and cannot prove.
         failures += AudioNodeTests.RunAll();
 
+        // Self: the node that makes a canvas-authored graph able to name its own entity at all.
+        // See SelfNodeTests.cs's header for why its absence, not polish, is what kept every
+        // gameplay graph in this repo hand-written.
+        failures += SelfNodeTests.RunAll();
+
         if (failures == 0)
             Console.WriteLine("\nAll tests passed.");
         else

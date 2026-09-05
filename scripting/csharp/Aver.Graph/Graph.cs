@@ -507,6 +507,69 @@ public class Graph
     // subclass of APlayerController is.
     public string? ClassController { get; set; }
 
+    /// Declares the `entity` parameter that `Self` nodes read, if the graph did not declare one
+    /// itself. Called by OcGraphParser only when a Self node was seen -- by then each has already
+    /// been built as a `Param` node naming "entity" (Node.Type is init-only, so the rewrite happens
+    /// at construction; see the NODE case in OcGraphParser). Runs BEFORE AddDefaultPins, so the
+    /// rewritten node gets its output pin typed from this parameter like any other Param node.
+    ///
+    /// WHY SELF EXISTS. Nearly every Scene, Character, Physics, Animation and Audio node takes an
+    /// `entity` pin, and `PARAM entity int` plus a Param node was the ONLY route to the graph's own
+    /// handle. That is fine in hand-written text and impossible in the editor, which has no way to
+    /// write a PARAM record: aver::fmt::OcGraphData (modules/formats/include/aver/formats/OcGraph.hpp)
+    /// models nodes, links, variables, components, functions and outputs, and no parameters at all.
+    /// So a graph authored entirely on the canvas could not name the entity it was running on, and
+    /// therefore could not drive anything. That, not polish, is why every gameplay graph in this
+    /// repository is hand-written text.
+    ///
+    /// SUGAR, NOT A NODE THE COMPILER KNOWS, so it costs nothing anywhere else: not in the IL
+    /// emitter, not in CompileFunction's argument rebasing, not in GraphHost's entity/time/deltaTime
+    /// slot mapping, not in FireForEntity's by-name binding, and not in the C++ writer. All of those
+    /// already handle `PARAM entity int`, and none of them ever sees a Self node.
+    ///
+    /// THE ONE VISIBLE CONSEQUENCE is that a graph using Self gains a parameter it did not write.
+    /// Every caller in the engine binds arguments BY NAME (GraphHost.LoadEventGraph maps the
+    /// {entity, time, deltaTime} vocabulary; FireForEntity does the same), so this is invisible to
+    /// them. Only Fire()'s raw positional overload counts arguments, and it refuses a mismatch with
+    /// a message naming the expected count rather than binding the wrong value.
+    public bool ResolveSelfNodes(out string? err)
+    {
+        err = null;
+
+        // Reuse a declaration the author already made rather than adding a second one -- a
+        // hand-written graph that mixes `PARAM entity int` with a canvas-placed Self node is an
+        // ordinary thing to end up with once the editor can save these files, and two parameters
+        // would change the compiled method's arity and break every caller.
+        var declared = Parameters.FirstOrDefault(
+            p => p.Name.Equals("entity", System.StringComparison.OrdinalIgnoreCase));
+        if (declared == null)
+        {
+            Parameters.Add(new GraphParameter { Name = "entity", Type = PinType.Int });
+            return true;
+        }
+
+        if (declared.Type != PinType.Int)
+        {
+            // A FLOAT CANNOT HOLD AN ENTITY HANDLE. Handles start above 2^24, where a float's
+            // mantissa has already run out of integers, so the value would round to a NEIGHBOURING
+            // handle -- a real entity, just not this one. Refused rather than silently accepted,
+            // because the resulting bug looks like a framework fault rather than a typed-it-wrong
+            // fault: every call downstream succeeds, on somebody else's entity.
+            err = $"Self resolves to the graph's 'entity' parameter, which this graph declares as " +
+                  $"{declared.Type}. An entity handle does not fit in a {declared.Type} -- declare " +
+                  "'PARAM entity int', or delete the declaration and let Self add it.";
+            return false;
+        }
+
+        // The declared spelling may differ in case from the "entity" the parser wrote onto each Self
+        // node, and Validate's parameter lookup is case-SENSITIVE. Re-point them at what was declared.
+        if (declared.Name != "entity")
+            foreach (var n in Nodes.Values)
+                if (n.ParamName == "entity") n.ParamName = declared.Name;
+
+        return true;
+    }
+
     /// Validates the graph for consistency. Returns false if invalid; sets err to a message.
     /// Note: Comparison is case-sensitive for node IDs. If nodes are added as "1" and referenced as "1",
     /// they must match exactly. The C# parser uses string representations of integer IDs, and the C++ writer
@@ -755,6 +818,33 @@ public class Graph
                       "Remove the `pure` flag on its FUNC record, or move the side effect out of it.";
                 return false;
             }
+        }
+
+        // A PARAM NODE CANNOT LIVE INSIDE A FUNCTION, and until this check existed nothing said so.
+        // EmitParam emits `Ldarg <index into Graph.Parameters>`. Inside a function body the argument
+        // slots are the FUNCTION's own inputs (see CompileFunction, which rebases _varStoreArgIndex
+        // onto fn.Inputs.Count for exactly this reason), so a Param node there reads whichever
+        // function input happens to sit at the graph parameter's index -- a different value, silently,
+        // or a CLR verification failure if the types differ. It compiled, ran, and produced a wrong
+        // number, which is the worst of the three outcomes.
+        //
+        // Refused rather than rebased, because there is nothing to rebase ONTO: a function is called
+        // from anywhere and does not receive the event graph's arguments at all. Passing the value in
+        // as a function input is the only thing that can work, and the message says so.
+        foreach (var node in Nodes.Values)
+        {
+            // "self" is listed for a graph built in code rather than parsed from text: the parser
+            // rewrites Self into Param before Validate ever runs, so through that path this arm is
+            // unreachable and the offender arrives spelled "Param".
+            bool isParamNodeInFunc = node.Type.Equals("param", System.StringComparison.OrdinalIgnoreCase) ||
+                                     node.Type.Equals("getparam", System.StringComparison.OrdinalIgnoreCase) ||
+                                     node.Type.Equals("self", System.StringComparison.OrdinalIgnoreCase);
+            if (!isParamNodeInFunc || node.FuncOwner == null) continue;
+            err = $"Node '{node.Id}' is a {node.Type} node inside function '{node.FuncOwner}'. " +
+                  "A function does not receive the event graph's parameters -- its arguments are its " +
+                  "own declared inputs -- so this would have read whichever input sits at that index. " +
+                  $"Add an input to '{node.FuncOwner}' and pass the value in at the call site instead.";
+            return false;
         }
 
         // Check every Param node names a parameter that was actually declared, and that if it
