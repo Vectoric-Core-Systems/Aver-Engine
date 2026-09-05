@@ -523,6 +523,63 @@ public static class HostBridge
         }
     }
 
+    /// <summary>Parses and validates .ocgraph TEXT and reports the first thing wrong with it.
+    /// Returns 0 when the graph is valid, 1 when it is not (with <paramref name="buffer"/> filled),
+    /// and -1 on a bad argument. Nothing is loaded, compiled, spawned or ticked -- this reads text.
+    ///
+    /// WHY THIS EXPORT EXISTS. Graph.Validate() and OcGraphParser between them carry about thirty
+    /// carefully-worded errors that name the offending node and say what to do -- "Node 'x' is a
+    /// Param node but has no param= attribute naming which parameter it reads", and so on -- and
+    /// THE EDITOR NEVER CALLED ANY OF THEM. It could not: the checks are C# and the editor is C++,
+    /// with no channel between them for this. An author's first sight of any of these messages was
+    /// the engine log at project open, long after the mistake, if they thought to look.
+    ///
+    /// TEXT IN, NOT A PATH. The editor validates the graph currently ON THE CANVAS, including
+    /// unsaved edits; a path would validate the last saved version and quietly disagree with what
+    /// the author is looking at.
+    ///
+    /// OPTIONAL ON THE HOST SIDE (ScriptHost binds it with the same graceful-degradation rule as
+    /// GraphFire), so a bridge built before this existed still boots and the editor simply reports
+    /// that validation is unavailable.</summary>
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static unsafe int GraphValidate(IntPtr utf8Text, byte* buffer, int capacity)
+    {
+        try
+        {
+            if (buffer is null || capacity <= 1) return -1;
+            buffer[0] = 0;
+            string? text = Marshal.PtrToStringUTF8(utf8Text);
+            if (text is null) return -1;
+
+            // Parse() runs Validate() itself at the end, so one call covers both vocabularies of
+            // error -- a malformed record and a well-formed graph that does not hang together.
+            string? err;
+            if (OcGraphParser.Parse(text, out _, out err)) return 0;
+
+            byte[] utf8 = System.Text.Encoding.UTF8.GetBytes(err ?? "the graph is not valid");
+            int n = Math.Min(utf8.Length, capacity - 1);
+            for (int i = 0; i < n; ++i) buffer[i] = utf8[i];
+            buffer[n] = 0;
+            return 1;
+        }
+        catch (Exception ex)
+        {
+            // NEVER THROWS ACROSS THE ABI, for GraphFire's reason: an exception escaping an
+            // UnmanagedCallersOnly frame tears the process down with no usable diagnostic. Reported
+            // as "not valid" with the exception described, which is true and actionable -- a graph
+            // whose validation crashed is not one to trust.
+            try
+            {
+                byte[] utf8 = System.Text.Encoding.UTF8.GetBytes($"validation threw: {Describe(ex)}");
+                int n = Math.Min(utf8.Length, capacity - 1);
+                for (int i = 0; i < n; ++i) buffer[i] = utf8[i];
+                buffer[n] = 0;
+            }
+            catch { }
+            return 1;
+        }
+    }
+
     // ------------------------------------------------------------------ graph classes
     //
     // GRAPH-AS-CLASS: a .ocgraph carrying a CLASS record becomes a real registered actor class,

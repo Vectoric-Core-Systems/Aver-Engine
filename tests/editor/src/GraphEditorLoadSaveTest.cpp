@@ -1812,6 +1812,80 @@ PIN flag value out bool false
     check(!ed.linkDropPending(), "a drag from a pin that is not there does not arm anything");
 }
 
+// ================================================================================= validation =
+// The editor can finally ask the managed validator whether a graph is valid. The VALIDATOR itself is
+// C# and needs a .NET runtime, so what is tested here is everything on this side of that boundary,
+// with a stub validator standing in for the bridge:
+//
+//   - the "no validator" answer, which must NOT read as "valid" (an absence of evidence is not
+//     evidence of correctness -- the failure mode this repo has been bitten by repeatedly);
+//   - what gets sent: exactly the bytes save() would write, not the live graph with its synthesized
+//     pins, or the validator would be answering about pins the author never wrote;
+//   - errorNodeId, a heuristic over prose and therefore the piece most worth pinning down.
+static void testValidationPlumbing() {
+    AVER_INFO("=== validation: unavailable is not 'valid', and the message's node is resolved ===");
+
+    const std::string text = R"(OCGRAPH 1
+NODE c1 ConstFloat 0 0
+PIN c1 value out float 1
+NODE add Add 200 0
+PIN add a in float
+PIN add b in float
+PIN add result out float
+LINK c1.value add.a
+)";
+    const std::string tmp = (std::filesystem::path(scratchDir()) / "validate.ocgraph").string();
+    writeFile(tmp, text);
+
+    GraphEditor ed(tmp);
+    check(!ed.validatorInstalled(), "an editor built with no validator says so");
+
+    std::string err, node;
+    check(!ed.validateNow(err, node),
+          "AND validateNow REFUSES rather than returning 'valid' -- nothing checked the graph");
+    check(err.find("no validator") != std::string::npos,
+          "with a message that says why, not a bare false: '" + err + "'");
+
+    // What actually crosses the boundary. save() strips the pins synthesizeMissingPins invented, and
+    // validation has to send the same bytes or it is answering about a different document.
+    std::string sent;
+    ed.setValidator([&](const std::string& t, std::string&) { sent = t; return true; });
+    check(ed.validatorInstalled(), "installing one is visible");
+    check(ed.validateNow(err, node), "a validator that approves gives a clean pass");
+    check(err.empty() && node.empty(), "with nothing reported");
+    check(sent == ed.serializeForSave(),
+          "and it was handed EXACTLY what save() would write, synthesized pins stripped");
+
+    // A refusal naming a real node resolves to that node, so the canvas can ring it.
+    ed.setValidator([](const std::string&, std::string& e) {
+        e = "Node 'add' is a Param node but has no param= attribute naming which parameter it reads";
+        return false;
+    });
+    check(!ed.validateNow(err, node), "a refusal is reported as one");
+    check(node == "add", "and the node the message names is resolved for the badge");
+
+    // THE TIMID HALF, which is what makes the heuristic safe. A quoted token that is not a node id
+    // in this graph resolves to nothing, so a message about a pin, an event or a parameter cannot
+    // ring an unrelated node.
+    ed.setValidator([](const std::string&, std::string& e) {
+        e = "Node references undeclared parameter 'entity' -- add 'PARAM entity int'";
+        return false;
+    });
+    check(!ed.validateNow(err, node), "still a refusal");
+    check(node.empty(), "but 'entity' is not a node id here, so NOTHING is badged rather than the wrong thing");
+
+    ed.setValidator([](const std::string&, std::string& e) { e = "something went wrong"; return false; });
+    check(!ed.validateNow(err, node) && node.empty(), "a message with no quotes badges nothing");
+
+    // Directly, on the static, including the shapes validateNow cannot easily reach.
+    const fmt::OcGraphData& g = ed.graph();
+    check(GraphEditor::errorNodeId("Node 'c1' is wrong", g) == "c1", "errorNodeId reads the first quoted token");
+    check(GraphEditor::errorNodeId("'c1' then 'add'", g) == "c1", "and only the FIRST one");
+    check(GraphEditor::errorNodeId("no quotes at all", g).empty(), "no quotes, no answer");
+    check(GraphEditor::errorNodeId("an empty '' pair", g).empty(), "an empty pair is not a node id");
+    check(GraphEditor::errorNodeId("one 'unterminated", g).empty(), "an unterminated quote is not either");
+}
+
 int main() {
     AVER_INFO("======== GraphEditorLoadSaveTest ========");
     std::error_code ec;
@@ -1851,6 +1925,7 @@ int main() {
     testControlRigNodeCarriesItsWeightDefault();
     testBreakLinksKeepsTheNodes();
     testLinkDropFiltersAndConnects();
+    testValidationPlumbing();
 
     AVER_INFO("======== {} failure(s) ========", g_failures);
     return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);

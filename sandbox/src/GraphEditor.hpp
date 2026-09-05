@@ -38,6 +38,7 @@
 #include "aver/formats/OcGraph.hpp"
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -191,6 +192,36 @@ public:
     // uses (exact match for gameplay, material widening for material graphs), so the palette can
     // never offer a node whose link would then be refused.
     bool linkDropAccepts(const struct GraphNodeDesc& desc) const;   // GraphNodeDefs.hpp
+
+    // ---- validation, through the managed validator ------------------------------------------
+    //
+    // Graph.Validate() and OcGraphParser carry about thirty carefully-worded errors that name the
+    // offending node and say what to do, and THE EDITOR NEVER CALLED ANY OF THEM: the checks are C#
+    // and this is C++, with no channel between them for it. An author's first sight of one was the
+    // engine log at project open, if they thought to look.
+    //
+    // Supplied as a hook rather than a direct ScriptHost call so this file keeps its existing
+    // dependencies (Core + Formats + ImGui) and stays drivable from a test with no .NET runtime.
+    // Unset means "no validator": validateNow() then reports unavailable rather than claiming valid.
+    using ValidateFn = std::function<bool(const std::string& ocgraphText, std::string& err)>;
+    void setValidator(ValidateFn fn) { validate_ = std::move(fn); }
+    bool validatorInstalled() const { return static_cast<bool>(validate_); }
+
+    // Validates what is ON THE CANVAS, unsaved edits and all -- it serialises the live graph rather
+    // than reading the file back, so the answer describes what the author is looking at. True when
+    // valid. On false, `err` is the validator's own message and `offendingNode` is the node it names
+    // if that can be resolved (empty otherwise).
+    bool validateNow(std::string& err, std::string& offendingNode);
+
+    // The node id a validator message names, or empty. Public and static because it is a HEURISTIC
+    // over prose and therefore the part most worth testing on its own: it reads the first
+    // single-quoted token in the message and returns it ONLY if it is a real node id in `g`. A
+    // message quoting a pin name, an event name or a parameter yields nothing, which is why a wrong
+    // guess cannot highlight an innocent node.
+    static std::string errorNodeId(const std::string& message, const fmt::OcGraphData& g);
+
+    // Exactly what save() would write. Public so a test can compare the two.
+    std::string serializeForSave() const;
 
     // Spawns `typeId` at `canvasPos` and wires the pending drop to its first accepting pin.
     // Returns the new node's id, or empty if the type is unknown. Disarms the gesture either way.
@@ -645,6 +676,11 @@ private:
     // Armed by beginLinkDrop, cleared by cancelLinkDrop / spawnAndConnectLinkDrop. The from-pin is
     // kept here rather than read back from linkDragFromNode_ at use time because the drag state is
     // reset the instant the button comes up, and the palette is submitted later in the same frame.
+    ValidateFn  validate_;
+    // The last validation result, shown as a badge on the named node until the graph changes.
+    std::string validateErr_;
+    std::string validateNode_;
+
     bool        linkDropPending_ = false;
     std::string linkDropFromNode_;
     std::string linkDropFromPin_;
@@ -708,6 +744,14 @@ private:
 //
 // Declared here so a test can parse it, the same reason SoundEditor.hpp declares snStarterGraph.
 std::string graphStarterText(const std::string& stem);
+
+// Installs the validator every GraphEditor opened from here on will use. Process-wide, the same
+// shape as setActorEditorContentRoot and for the same reason: the editors are created by a free
+// factory function (makeGraphEditor, below) that takes only a path, so there is nowhere to thread a
+// dependency through per instance. SandboxApp calls this once with a lambda over ScriptHost.
+//
+// An editor already open keeps whatever it was constructed with; call this before opening files.
+void setGraphValidator(GraphEditor::ValidateFn fn);
 
 std::unique_ptr<AssetEditor> makeGraphEditor(const std::string& path);
 

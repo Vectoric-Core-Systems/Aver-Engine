@@ -313,7 +313,7 @@ bool GraphEditor::save(std::string* why) {
     // preserves unrecognised records and keeps a no-op round trip byte-identical.
     const std::string text = fmt::writeOcgraph(toWrite, originalText_);
 
-    std::error_code ec;
+    std::error_code ec;   // (validateNow() below serialises through serializeForSave(), the same path)
     const std::filesystem::path p(path_);
     if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
 
@@ -332,6 +332,59 @@ bool GraphEditor::save(std::string* why) {
     return true;
 }
 
+// EXACTLY WHAT save() WOULD WRITE, factored out so validateNow() cannot check a different document
+// from the one that lands on disk. The synthesized-pin strip matters here as much as it does there:
+// validating with forty invented PIN records would ask the managed validator about pins the author
+// never wrote, and its answers would name them.
+std::string GraphEditor::serializeForSave() const {
+    fmt::OcGraphData toWrite = graph_;
+    if (!synthesizedPins_.empty()) {
+        for (auto& n : toWrite.nodes) {
+            n.pins.erase(std::remove_if(n.pins.begin(), n.pins.end(),
+                                        [&](const fmt::OcGraphPin& p) {
+                                            return synthesizedPins_.count(pinKey(n.id, p.name, p.isOutput)) != 0;
+                                        }),
+                         n.pins.end());
+        }
+    }
+    return fmt::writeOcgraph(toWrite, originalText_);
+}
+
+std::string GraphEditor::errorNodeId(const std::string& message, const fmt::OcGraphData& g) {
+    // A HEURISTIC OVER PROSE, and deliberately a timid one. The validator's messages are sentences
+    // written by hand -- "Node 'muzzle' is a Param node but has no param= attribute..." -- so there
+    // is no structured field to read; the node id is simply the first single-quoted token. What
+    // makes guessing safe is the second half: the token is returned ONLY if it is a real node id in
+    // this graph. A message quoting a pin name, an event name, a parameter or a function yields
+    // nothing at all, so a wrong guess cannot badge an innocent node -- it just badges none.
+    // The quote character named through a constant rather than a character literal, because writing
+    // it inline is what this file's history keeps getting mangled on -- see the escape-eating note.
+    const char kQuote = 0x27;   // '
+    const usize a = message.find(kQuote);
+    if (a == std::string::npos) return {};
+    const usize b = message.find(kQuote, a + 1);
+    if (b == std::string::npos || b <= a + 1) return {};
+    const std::string token = message.substr(a + 1, b - a - 1);
+    for (const auto& n : g.nodes) if (n.id == token) return token;
+    return {};
+}
+
+bool GraphEditor::validateNow(std::string& err, std::string& offendingNode) {
+    err.clear();
+    offendingNode.clear();
+    if (!validate_) {
+        // NOT "valid". An absent validator is an absence of evidence, and saying "valid" here would
+        // be the exact unbacked claim this codebase has been bitten by before.
+        err = "no validator is available (the .NET bridge exports no GraphValidate)";
+        return false;
+    }
+    std::string message;
+    if (validate_(serializeForSave(), message)) return true;
+    err = message.empty() ? std::string("the graph is not valid") : message;
+    offendingNode = errorNodeId(err, graph_);
+    return false;
+}
+
 void GraphEditor::onFileChanged() {
     if (dirty_) return; // never clobber unsaved edits behind the user's back
     loadFromDisk();
@@ -343,6 +396,12 @@ void GraphEditor::onFileChanged() {
 }
 
 void GraphEditor::pushUndo() {
+    // A STANDING VALIDATION RESULT DESCRIBES THE GRAPH IT WAS RUN ON, and every caller of pushUndo is
+    // about to change that graph. Left up, the message would go on naming a node the author has just
+    // fixed (or deleted), which is worse than showing nothing: it reads as "still broken".
+    validateErr_.clear();
+    validateNode_.clear();
+
     UndoState s;
     s.graph = graph_;
     s.displayPos = displayPos_;
@@ -1632,8 +1691,36 @@ void GraphEditor::draw(Engine& e) {
                                    ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false))) {
         std::string why;
         if (!save(&why)) AVER_ERROR("[GraphEditor] save failed for '{}': {}", path_, why);
+        // CHECKED ON SAVE, BUT THE SAVE STILL HAPPENS. A half-built graph is the normal state of one
+        // being built, and an editor that refuses to write it would be unusable. The result is
+        // reported, not enforced.
+        else if (validate_) { validateNow(validateErr_, validateNode_); }
     }
     ImGui::SameLine();
+    // VALIDATE, as its own button as well as on save, because the question "is this finished" is one
+    // an author asks mid-build, not only when writing to disk.
+    ImGui::BeginDisabled(!validate_);
+    if (ImGui::Button("Validate")) {
+        if (validateNow(validateErr_, validateNode_)) {
+            validateErr_.clear();
+            validateNode_.clear();
+            showRejectionBanner("graph is valid");
+        } else {
+            showRejectionBanner(validateErr_);
+        }
+    }
+    ImGui::EndDisabled();
+    if (!validate_ && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("The .NET bridge exports no GraphValidate, so nothing can check this graph.");
+    ImGui::SameLine();
+    // The standing result, so an author is not made to re-press Validate to remember what was wrong.
+    // Cleared by the next Validate, and by any edit that could have fixed it (see pushUndo).
+    if (!validateErr_.empty()) {
+        ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.35f, 1.0f), "%s%s",
+                           validateNode_.empty() ? "" : (validateNode_ + ": ").c_str(),
+                           validateErr_.c_str());
+        ImGui::SameLine();
+    }
     ImGui::BeginDisabled(undoStack_.empty());
     if (ImGui::Button("Undo")) undo();
     ImGui::EndDisabled();
@@ -2208,6 +2295,15 @@ void GraphEditor::drawEventGraph(float dpi) {
         dl->AddLine(ImVec2(pMin.x, pMin.y + headerH), ImVec2(pMax.x, pMin.y + headerH),
                     IM_COL32(0, 0, 0, 90), 1.0f * dpi);
         dl->AddRect(pMin, pMax, selected ? kSelectionCol : IM_COL32(12, 14, 18, 255), 5.0f * dpi, 0, selected ? 2.5f * dpi : 1.0f * dpi);
+        // THE NODE THE VALIDATOR NAMED, ringed in amber. Drawn OVER the selection ring rather than
+        // instead of it, so a node that is both selected and broken still reads as both -- and
+        // outside the node's own rect, so it cannot be mistaken for the node's border colour.
+        // Only ever one node: the validator reports the first problem it finds, not a list.
+        if (!validateNode_.empty() && nl.nodeId == validateNode_) {
+            const f32 pad = 3.0f * dpi;
+            dl->AddRect(ImVec2(pMin.x - pad, pMin.y - pad), ImVec2(pMax.x + pad, pMax.y + pad),
+                        IM_COL32(240, 150, 60, 255), 7.0f * dpi, 0, 2.5f * dpi);
+        }
         if (showTitles) {
             const std::string label = srcNode ? nodeTitle(*srcNode, desc, graph_.variables) : nl.nodeId;
             dl->PushClipRect(pMin, ImVec2(pMax.x, pMin.y + headerH), true);
@@ -3567,11 +3663,22 @@ CLASS AN_)" + stem + R"( Actor
 )";
 }
 
+namespace {
+// The validator handed to every GraphEditor built after setGraphValidator runs. Empty by default,
+// which is the honest state in a build with no .NET runtime: validateNow() then reports that nothing
+// could check the graph rather than claiming it is fine.
+GraphEditor::ValidateFn g_graphValidator;
+} // namespace
+
+void setGraphValidator(GraphEditor::ValidateFn fn) { g_graphValidator = std::move(fn); }
+
 std::unique_ptr<AssetEditor> makeGraphEditor(const std::string& path) {
     std::string ext = std::filesystem::path(path).extension().string();
     for (char& c : ext) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
     if (ext != ".ocgraph") return nullptr;
-    return std::make_unique<GraphEditor>(path);
+    auto ed = std::make_unique<GraphEditor>(path);
+    if (g_graphValidator) ed->setValidator(g_graphValidator);
+    return ed;
 }
 
 } // namespace aver::editor

@@ -76,6 +76,24 @@ public:
     // built before this existed hosts graphs perfectly well and simply cannot be fired at.
     bool graphFireAvailable() const;
 
+    // VALIDATES .ocgraph TEXT, loading and running nothing. Returns true when the graph is valid;
+    // false with `err` set to the first thing wrong with it, in the words the managed validator
+    // already uses (they name the offending node and say what to do).
+    //
+    // TEXT, NOT A PATH, on purpose: the editor validates what is on the CANVAS, unsaved edits and
+    // all. Handing over a path would validate the last saved version and quietly disagree with what
+    // the author is looking at.
+    //
+    // Returns true with `err` cleared when validation is unavailable -- refusing to save a graph
+    // because the bridge is missing would be worse than not checking it. Ask
+    // graphValidateAvailable() when the distinction matters to the caller.
+    bool graphValidate(const std::string& text, std::string& err) const;
+
+    // Whether the staged bridge exports GraphValidate. Optional and separate from every group above,
+    // for GraphFire's reason: a bridge that predates it hosts, ticks and fires graphs correctly and
+    // is only unable to check one.
+    bool graphValidateAvailable() const;
+
     // GRAPH-AS-CLASS: bound OPTIONALLY, exactly like the graph three just above -- a bridge built
     // before these existed still boots; graphClassesAvailable() is false and both calls below are
     // documented no-ops.

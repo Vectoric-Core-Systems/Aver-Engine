@@ -1547,6 +1547,21 @@ public:
         // APPENDED, not inserted: AssetEditorHost::open() tries factories in registration order, so
         // moving this ahead of the others would change which editor claims a file they both accept.
         assetEditors_.registerFactory(&editor::makeGraphEditor);
+        // THE GRAPH EDITOR CAN FINALLY ASK WHETHER A GRAPH IS VALID. Graph.Validate() and
+        // OcGraphParser carry about thirty errors that name the offending node and say what to do,
+        // and nothing here had ever called one: the checks are C# and the editor is C++. Installed
+        // before any file opens, because makeGraphEditor takes only a path and hands the validator
+        // to each editor it builds.
+        //
+        // A LAMBDA OVER scripts_, not a direct dependency, so GraphEditor keeps its Core + Formats +
+        // ImGui dependency set and stays drivable from a headless test with no .NET runtime at all.
+        // ScriptHost::graphValidate is itself a no-op returning "available? no" when the staged
+        // bridge predates the GraphValidate export, so an old bridge greys the button out rather
+        // than claiming every graph is fine.
+        editor::setGraphValidator([this](const std::string& text, std::string& err) {
+            if (!scripts_.graphValidateAvailable()) { err = "the .NET bridge exports no GraphValidate"; return false; }
+            return scripts_.graphValidate(text, err);
+        });
         // Appended for the same reason, and it claims only .ocbt, which nothing above accepts.
         assetEditors_.registerFactory(&editor::makeBtEditor);
         // And again for .ocsnd, which likewise nothing above claims. See SoundEditor.hpp.
@@ -3320,6 +3335,7 @@ public:
         if (saveDirtyTestFrames_ > 0 && --saveDirtyTestFrames_ == 0) runSaveDirtyTest();
         if (findRefsFrames_ > 0 && --findRefsFrames_ == 0) runFindRefs();
         if (projectSwitchFrames_ > 0 && --projectSwitchFrames_ == 0) runProjectSwitchTest();
+        if (validateGraphFrames_ > 0 && --validateGraphFrames_ == 0) runValidateGraph();
         if (prefsWriteTestFrames_ > 0 && --prefsWriteTestFrames_ == 0) runPrefsWriteTest();
         if (keybindTestAutoFrames_ > 0 && --keybindTestAutoFrames_ == 0) runKeybindPersistTest(keybindTestMode_);
 #endif
@@ -6513,6 +6529,7 @@ public:
     // shared asset can be tested rather than eyeballed once.
     void setFindRefs(const std::string& p) { findRefsPath_ = p; findRefsFrames_ = 8; }
     void setProjectSwitchTest(int frames) { projectSwitchFrames_ = frames > 0 ? frames : 8; }
+    void setValidateGraph(const std::string& p) { validateGraphPath_ = p; validateGraphFrames_ = 8; }
     void setRecaptureTest(int n)   { recapFrames_ = n; }                          // --recapture-test
     void setViewmodelTest(int n)   { vmFrames_ = n; }                             // --viewmodel-test
     void setSkinSceneDir(std::string d) { skinSceneDir_ = std::move(d); }          // --skin-scene-test <dir>
@@ -12788,6 +12805,34 @@ private:
         applyProjectRenderSettings();
 
         AVER_INFO("[project-switch-test] RESULT: {}", failures == 0 ? "PASS" : "FAIL");
+    }
+
+    // --validate-graph <path>: run the managed graph validator over one .ocgraph and print the
+    // answer. END-TO-END ON PURPOSE -- it goes C++ -> ScriptHost -> hostfxr -> HostBridge.GraphValidate
+    // -> OcGraphParser/Graph.Validate and back with a real message. The editor-side plumbing has its
+    // own headless test with a stub validator (GraphEditorLoadSaveTest), and a stub cannot prove the
+    // export is reachable, that the buffer contract holds, or that the .NET runtime is even hosted.
+    // Absence of the "exports no GraphValidate" warning at startup proves a symbol bound; this proves
+    // it RUNS.
+    std::string validateGraphPath_;
+    int validateGraphFrames_ = 0;
+    void runValidateGraph() {
+        if (!scripts_.graphValidateAvailable()) {
+            AVER_ERROR("[validate-graph] the staged bridge exports no GraphValidate");
+            return;
+        }
+        const std::string abs = project_.valid() && validateGraphPath_.find(':') == std::string::npos
+            ? (project_.contentDir() + "\\" + validateGraphPath_) : validateGraphPath_;
+        std::string text;
+        if (!readFileText(abs, text)) {
+            AVER_ERROR("[validate-graph] could not read '{}'", abs);
+            return;
+        }
+        std::string err;
+        if (scripts_.graphValidate(text, err))
+            AVER_INFO("[validate-graph] '{}' is VALID", validateGraphPath_);
+        else
+            AVER_INFO("[validate-graph] '{}' is INVALID: {}", validateGraphPath_, err);
     }
 
     std::string findRefsPath_;
@@ -23502,6 +23547,7 @@ Application* createApplication(int argc, char** argv) {
     f32 frameBudgetArg = 0.0f;
     const char* findRefsArg = nullptr;
     int projectSwitchArg = 0;
+    const char* validateGraphArg = nullptr;
     int recaptureArg = 0;
     int viewmodelArg = 0;
     // --gpu-timing takes no value, so it's matched in the i+1<argc loop below only incidentally --
@@ -23522,6 +23568,7 @@ Application* createApplication(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--frame-budget"))         frameBudgetArg = (f32)std::atof(argv[i + 1]);
         if (!std::strcmp(argv[i], "--find-refs"))            findRefsArg = argv[i + 1];
         if (!std::strcmp(argv[i], "--project-switch-test")) projectSwitchArg = std::atoi(argv[i + 1]);
+        if (!std::strcmp(argv[i], "--validate-graph"))      validateGraphArg = argv[i + 1];
         if (!std::strcmp(argv[i], "--recapture-test"))       recaptureArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--viewmodel-test"))       viewmodelArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--refraction"))           refraction = std::atoi(argv[i + 1]);
@@ -24464,6 +24511,7 @@ Application* createApplication(int argc, char** argv) {
     if (frameBudgetArg > 0.0f) app->setFrameBudget(frameBudgetArg);
     if (findRefsArg) app->setFindRefs(findRefsArg);
     if (projectSwitchArg) app->setProjectSwitchTest(projectSwitchArg);
+    if (validateGraphArg) app->setValidateGraph(validateGraphArg);
     if (recaptureArg > 0) app->setRecaptureTest(recaptureArg);
     if (viewmodelArg > 0) app->setViewmodelTest(viewmodelArg);
 #endif
