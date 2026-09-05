@@ -21,6 +21,7 @@
 #include "aver/core/Types.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/rhi/RHI.hpp"
+#include "aver/rhi/GpuTimingFormat.hpp"
 #include "aver/runtime/Engine.hpp"
 #if AVER_MODULE_VOXI
 #include "aver/voxi/Voxi.hpp"
@@ -480,55 +481,14 @@ inline bool handleHelp(SandboxApp&, Engine&, const std::vector<std::string>&, co
 // measurement -- see GpuTimingReport's own comment for why the two axes exist.
 inline bool handleFrameTime(SandboxApp&, Engine& e, const std::vector<std::string>&, const ConsolePrint& print) {
     if (!e.device()) { print(LogLevel::Error, "No render device is attached."); return false; }
+    // ONE FORMATTER, shared with the packaged game (aver/rhi/GpuTimingFormat.hpp). It used to live
+    // here, in a header the game cannot include -- which is the whole reason a shipped AverGame.exe
+    // could not show timings it was already paying to collect. Moving it beside the report it
+    // formats means the two hosts cannot drift into printing different things from the same data.
     const rhi::GpuTimingReport r = e.device()->gpuTiming();
-
-    if (!r.supported) {
-        print(LogLevel::Info, "This backend cannot report per-pass GPU timings (unsupported here, not just empty).");
-        return true;
-    }
-    if (r.nodes.empty() || r.framesAccumulated == 0) {
-        print(LogLevel::Info, "GPU timing is supported but no data has been collected yet -- ask again in a moment.");
-        return true;
-    }
-
-    std::vector<std::vector<u32>> children(r.nodes.size());
-    std::vector<u32> topLevel;
-    for (u32 i = 0; i < r.nodes.size(); ++i) {
-        if (r.nodes[i].parent == rhi::GpuTimingNode::kNoParent) topLevel.push_back(i);
-        else                                                    children[r.nodes[i].parent].push_back(i);
-    }
-    f64 gpuTotalMs = 0.0;
-    for (u32 i : topLevel) gpuTotalMs += r.nodes[i].ms;
-
-    char hdr[192];
-    std::snprintf(hdr, sizeof hdr,
-                  "GPU per-pass breakdown, averaged over %u frames and a couple of frames old (see "
-                  "IDevice::gpuTiming's own comment) -- not a live number:",
-                  static_cast<unsigned>(r.framesAccumulated));
-    print(LogLevel::Info, hdr);
-
-    // Recursive local functor, same shape as D3D12Device.cpp's own Appender in collectGpuTiming --
-    // a hand-rolled struct with operator() calling itself is the smallest thing that prints an
-    // indented tree without adding a dependency for one call site.
-    struct Appender {
-        const ConsolePrint& print;
-        const std::vector<std::vector<u32>>& children;
-        const std::vector<rhi::GpuTimingNode>& nodes;
-        f64 total;
-        void operator()(u32 idx, u32 depth) const {
-            const rhi::GpuTimingNode& n = nodes[idx];
-            f64 childMs = 0.0;
-            for (u32 c : children[idx]) childMs += nodes[c].ms;
-            const f64 pct = total > 0.0 ? (n.ms / total * 100.0) : 0.0;
-            char buf[192];
-            std::snprintf(buf, sizeof buf, "%*s%s  %.2fms incl / %.2fms excl  (%.1f%% of GPU total)",
-                          static_cast<int>(depth) * 2 + 2, "", n.label.c_str(), n.ms, n.ms - childMs, pct);
-            print(LogLevel::Info, buf);
-            for (u32 c : children[idx]) (*this)(c, depth + 1);
-        }
-    };
-    const Appender append{print, children, r.nodes, gpuTotalMs};
-    for (u32 i : topLevel) append(i, 0);
+    const f64 gpuTotalMs = rhi::formatGpuTiming(
+        r, [&](const std::string& line) { print(LogLevel::Info, line); });
+    if (!r.supported || r.nodes.empty() || r.framesAccumulated == 0) return true;
 
     // GPU total here is the sum of TOP-LEVEL marked spans only (mirrors collectGpuTiming's own
     // topLevelMs, which excludes anything unmarked); CPU frame is THIS INSTANT's e.time().dt, not an

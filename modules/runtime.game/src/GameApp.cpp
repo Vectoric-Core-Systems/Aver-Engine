@@ -6,6 +6,9 @@
 #include "aver/platform/Window.hpp"
 #include "aver/platform/FileSystem.hpp"
 #include "aver/core/Log.hpp"
+// The shared GPU-timing tree formatter -- see --stats in GameConfig, and the header's own note on
+// why it moved out of the editor console.
+#include "aver/rhi/GpuTimingFormat.hpp"
 
 // --screenshot (captureScreenshotIfDue). A SECOND STB_IMAGE_WRITE_IMPLEMENTATION relative to
 // sandbox/src/SandboxApp.cpp's own is fine -- tests/formats/CMakeLists.txt's MakeFoliage target
@@ -339,6 +342,15 @@ GameConfig parseArgs(int argc, char** argv) {
         // and compares -- the divergence check whose absence is why this executable was
         // deleted. Sandbox.exe accepts the identical flag and prints the identical format.
         else if (std::strcmp(a, "--scene-census") == 0) { c.sceneCensus = true; }
+        // --stats [seconds]: the interval is OPTIONAL, so a bare --stats works. valueAfter is only
+        // consumed when it parses as a number, or "--stats --headless" would silently eat the next
+        // flag and run with no window for a reason nobody could see.
+        else if (std::strcmp(a, "--stats") == 0) {
+            const char* v = valueAfter(argc, argv, i, nullptr);
+            const f32 secs = v ? static_cast<f32>(std::atof(v)) : 0.0f;
+            if (secs > 0.0f) { c.statsIntervalSec = secs; ++i; }
+            else             { c.statsIntervalSec = 5.0f; }
+        }
         else if (std::strcmp(a, "--pcg-volume-test") == 0) { c.pcgVolumeTest = true; }
         else if (std::strcmp(a, "--no-particle-gi") == 0)  { c.noParticleGi = true; }
         else if (std::strcmp(a, "--particle-test") == 0)   { c.particleTest = true; }
@@ -1539,6 +1551,28 @@ void GameApp::onInit(Engine& e) {
 void GameApp::onUpdate(Engine& e, const Timestep& t) {
     ++frames_;
     cloudTime_ += t.dt;
+
+    // THE PROFILER A SHIPPED GAME NEVER HAD. See GameConfig::statsIntervalSec for why this is a log
+    // dump and not an overlay, and why the numbers were already being collected.
+    //
+    // FIRST DUMP AT THE FULL INTERVAL, not immediately: gpuTiming() reports an average over frames
+    // since boot, so asking in the first second gets either "nothing collected yet" or a number
+    // dominated by the first frames, which are the least representative ones a game ever renders.
+    if (cfg_.statsIntervalSec > 0.0f && e.device()) {
+        statsTimer_ += t.dt;
+        if (statsTimer_ >= cfg_.statsIntervalSec) {
+            statsTimer_ = 0.0f;
+            const f64 gpuMs = rhi::formatGpuTiming(e.device()->gpuTiming(),
+                                                   [](const std::string& line) { AVER_INFO("[Stats] {}", line); });
+            // The same rough GPU-bound/CPU-bound signal the editor console prints, and the same
+            // caveat: different sources, different moments, deliberately not a matched pair. A GPU
+            // total well under the CPU frame says CPU-bound; close to or above it says GPU-bound.
+            if (gpuMs > 0.0)
+                AVER_INFO("[Stats] GPU total (marked passes): {:.2f}ms  |  CPU frame (this instant): "
+                          "{:.2f}ms -- a rough bound signal, not a matched pair.",
+                          gpuMs, static_cast<f64>(t.dt) * 1000.0);
+        }
+    }
     // Input is READ here, never rolled here. See onRender for why.
 #if AVER_MODULE_FRAMEWORK
     // BEFORE the gameplay tick, so a PrePhysics actor reads THIS frame's input rather than last

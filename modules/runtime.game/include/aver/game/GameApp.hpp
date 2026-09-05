@@ -59,6 +59,21 @@ struct GameConfig {
     // identical project, and scripts/verify-game.ps1 compares the two. See SceneCensus.hpp for why
     // this is a census and not a pixel diff.
     bool sceneCensus = false;
+    // --stats [seconds]: periodically log the per-pass GPU breakdown a shipped game has ALWAYS been
+    // paying to collect and never had any way to look at. D3D12Device::initGpuTiming runs
+    // unconditionally, not behind a build flag or a CLI switch, so every AverGame.exe ever shipped
+    // has been timestamping every pass and throwing the numbers away -- the editor was the only host
+    // with a reader (its console's `frametime`), and a packaged game cannot include the editor.
+    //
+    // A LOG DUMP RATHER THAN AN OVERLAY, at least first: a profiler for a shipped build is something
+    // you capture from a session and read afterwards, often from a machine you do not have. An
+    // overlay would also need the game UI's text path and would change what a --screenshot capture
+    // contains, which would break verify-game's census comparison for a diagnostic feature.
+    //
+    // 0 means off. The interval is in SECONDS because the report is an average over frames since
+    // boot and only moves slowly (see GpuTimingReport::framesAccumulated); logging it per frame
+    // would be a flood of nearly identical trees.
+    f32 statsIntervalSec = 0.0f;
     // Fills a density volume on the GPU and compares every voxel against the CPU mirror, then
     // exits. The only way to check the HLSL against its reference: HLSL compiles at RUNTIME, so a
     // green build says nothing about whether the shader agrees with anything.
@@ -370,6 +385,8 @@ private:
     GameContent content_;
     GameLevel level_;
     u64 frames_ = 0;
+    // Seconds since the last --stats dump. See GameConfig::statsIntervalSec.
+    f32 statsTimer_ = 0.0f;
 };
 
 } // namespace aver::game
