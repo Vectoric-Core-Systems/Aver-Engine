@@ -25,6 +25,13 @@ aver_add_module(Aver.Formats
     # nothing beyond Core/Platform/Assets -- it is the AVR1 container and arithmetic, no process, no
     # device, no .NET. That is what lets the landscape tests run on a machine with none of those.
     src/OcLand.cpp
+    # .oclightmap and its unwrapper. In the BASE target for GiCache.cpp's reason: both are the AVR1
+    # container plus arithmetic -- no device, no renderer, no .NET -- which is what lets their tests
+    # run on a machine with none of those. The unwrapper is here rather than in a tool because the
+    # runtime will need to VALIDATE an unwrap (vertex counts, UVs in range) even if only an offline
+    # baker ever produces one.
+    src/OcLightmap.cpp
+    src/LightmapUnwrap.cpp
     # The C# actor-script scanner. MOVED HERE FROM Aver.Formats.Material, where it never belonged:
     # it parses a generated region out of a C# file and contains not one reference to pbr:: or
     # MaterialDesc, but sat behind AVER_MODULE_PBR anyway. Four things outside the material system

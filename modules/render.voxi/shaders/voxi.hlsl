@@ -290,6 +290,35 @@ float4 averRtSampleSlot(RtMaterial mat, uint slot, float2 uv, float2 gx, float2 
 #endif
 }
 
+// ---- the material-graph adapter for this pass ---------------------------------------------------
+//
+// A generated material graph emits `averSampleSlot(slot, uv)`, which reads the eight BOUND texture
+// registers through the material cbuffer's sampler. A ray hit has neither: its maps live in the
+// bindless gRtTextures array, indexed through the hit's own RtMaterial. So the generated body cannot
+// be used here verbatim -- and that, not any missing feature, is why "no material GRAPH runs on any
+// ray path" was true for the renderer that is the DEFAULT path.
+//
+// MaterialGraphHlsl.cpp emits a second copy of every graph body with `averSampleSlot(` rewritten to
+// `averRtSampleSlotGraph(`, so the two copies differ in exactly one token and cannot drift.
+//
+// THE MATERIAL TRAVELS IN A STATIC, NOT A PARAMETER, and that is the part worth explaining. The
+// generated body is written by a module that cannot see RtMaterial -- Aver.Render.PBR.Materials has
+// no idea this backend exists, and teaching it would invert the dependency. Threading `mat` through
+// would mean the emitter naming a type it must not know. A per-thread static costs nothing (HLSL
+// statics are per-invocation, not shared) and keeps the emitter ignorant, which is the seam that
+// matters. Set these immediately before calling the graph; nothing else reads them.
+static RtMaterial gAverGraphMat;
+static float2     gAverGraphGx;
+static float2     gAverGraphGy;
+
+// WHITE, NOT BLACK, for an unbound slot -- matching averSampleSlot's own #else branch in
+// material_prelude.hlsl. A graph that multiplies by an unbound map must get the identity, or every
+// material without (say) an occlusion map would shade to nothing the moment a graph sampled one.
+float4 averRtSampleSlotGraph(uint slot, float2 uv) {
+    return averRtSampleSlot(gAverGraphMat, slot, uv, gAverGraphGx, gAverGraphGy,
+                            float4(1.0, 1.0, 1.0, 1.0));
+}
+
 // The UV-space footprint of one pixel's primary ray, for SampleGrad.
 //
 // WHY THIS IS NOT ddx(uv)/ddy(uv). A pixel shader's implicit derivatives describe the SCREEN

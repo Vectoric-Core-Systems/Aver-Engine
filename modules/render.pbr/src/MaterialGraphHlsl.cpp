@@ -794,12 +794,16 @@ MaterialGraphBody compileMaterialGraph(const fmt::OcGraphData& g) {
     return r;
 }
 
-std::string materialGraphHlsl(const std::vector<MaterialGraphEntry>& entries) {
-    std::string s;
-    s += "// ---- generated from .ocgraph material graphs; do not edit ----\n";
-    s += "AverSurface averEvalMaterial(AverVertex v, AverLight l) {\n";
-    s += "    float2 uv = averSurfaceUV(v);\n";
-    s += "    AverAuthored a = averStockAuthored(uv, v.N);\n";
+// The switch itself, emitted once and shared. Split out of averEvalMaterial so a caller that cannot
+// use averStockAuthored can still run a graph.
+//
+// WHY THAT MATTERS: the ray-driven path has no material cbuffer and no bound texture slots -- it
+// reads gRtMaterials[materialIndex] and samples through averRtSampleSlot -- so it hand-builds its
+// surface and could never call averEvalMaterial. That is the entire reason "no material GRAPH runs
+// on any ray path" was true, on the renderer that is the DEFAULT path. Handing the switch its
+// AverAuthored as a parameter, rather than fetching one itself, is what lets both callers share it.
+static void emitSwitch(std::string& s, const std::vector<MaterialGraphEntry>& entries,
+                       const char* sampleFn) {
     // A UNIFORM SWITCH, not a chain of ifs: gMaterialGraphId is a constant across the whole draw,
     // so every lane takes the same arm and the cost is the arm's own, not the sum of all of them.
     s += "    switch (gMaterialGraphId) {\n";
@@ -810,13 +814,57 @@ std::string materialGraphHlsl(const std::vector<MaterialGraphEntry>& entries) {
         s += "\n    case ";
         s += std::to_string(e.id);
         s += ": {\n";
-        s += e.hlsl;
+        // The body verbatim, except for which sampler its SampleTexture nodes reach. Substituted
+        // textually rather than emitted twice from the graph, so the two copies cannot drift: there
+        // is one compile of each graph and one body string, differing only in this token.
+        if (std::string(sampleFn) == "averSampleSlot") {
+            s += e.hlsl;
+        } else {
+            std::string body = e.hlsl;
+            const std::string from = "averSampleSlot(";
+            const std::string to   = std::string(sampleFn) + "(";
+            for (usize p = body.find(from); p != std::string::npos; p = body.find(from, p + to.size()))
+                body.replace(p, from.size(), to);
+            s += body;
+        }
         s += "        break;\n    }\n";
     }
     s += "    default: break;   // no graph: exactly the stock material\n";
     s += "    }\n";
+}
+
+std::string materialGraphHlsl(const std::vector<MaterialGraphEntry>& entries) {
+    std::string s;
+    s += "// ---- generated from .ocgraph material graphs; do not edit ----\n";
+
+    // ---- the raster entry point, unchanged in behaviour ----
+    s += "AverSurface averEvalMaterial(AverVertex v, AverLight l) {\n";
+    s += "    float2 uv = averSurfaceUV(v);\n";
+    s += "    AverAuthored a = averStockAuthored(uv, v.N);\n";
+    emitSwitch(s, entries, "averSampleSlot");
     s += "    return averBuildSurface(v, l, a, uv);\n";
     s += "}\n";
+
+    // ---- the ray-driven twin ----
+    //
+    // TAKES AN AverAuthored RATHER THAN BUILDING ONE, because its caller has already assembled the
+    // stock values from the hit's own RtMaterial and bindless samples -- there is no cbuffer for
+    // averStockAuthored to read. It returns the mutated struct and does NOT build a surface: the ray
+    // path has its own hand-written surface assembly, matched line by line against averBuildSurface,
+    // and replacing that is a separate argument from making graphs run at all.
+    //
+    // averRtSampleSlotGraph is voxi.hlsl's own adapter -- see its definition there for why the
+    // material travels in a static rather than a parameter (the generated body cannot be given extra
+    // arguments without teaching the emitter about a type this module cannot see).
+    //
+    // GUARDED, because AVER_RT_BINDLESS is what declares that adapter. Without it this function
+    // would not compile, and every raster-only consumer of this text includes it.
+    s += "#ifdef AVER_RT_BINDLESS\n";
+    s += "AverAuthored averApplyMaterialGraphRt(AverAuthored a, AverVertex v, float2 uv) {\n";
+    emitSwitch(s, entries, "averRtSampleSlotGraph");
+    s += "    return a;\n";
+    s += "}\n";
+    s += "#endif\n";
     return s;
 }
 

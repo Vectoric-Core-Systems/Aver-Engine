@@ -14,6 +14,26 @@ target_link_libraries(LevelInspect PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(LevelInspect PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# OcLightmapTest -- the .oclightmap container and its RGB9E5 texel encoding. See the test's own
+# banner for why the HDR round trip is the assertion that matters.
+#
+# NO add_test HERE, for either of the two below: aver_register_ctest_in (root CMakeLists) walks every
+# target whose name ends in Test and registers it with the TIMEOUT, WORKING_DIRECTORY and -- the part
+# that matters -- the FAIL_REGULAR_EXPRESSION "FAIL  |FAILED ===" every suite here is written
+# against. A hand-written add_test compiles and runs but silently opts out of that regex, so a suite
+# printing failures while returning 0 would pass.
+add_executable(OcLightmapTest src/OcLightmapTest.cpp)
+target_link_libraries(OcLightmapTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(OcLightmapTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# LightmapUnwrapTest -- the dependency-free chart-by-normal unwrapper. Its central assertion is the
+# occupancy grid proving two charts never overlap in the atlas; see the test's banner.
+add_executable(LightmapUnwrapTest src/LightmapUnwrapTest.cpp)
+target_link_libraries(LightmapUnwrapTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(LightmapUnwrapTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # OcGraphTest — the .ocgraph visual scripting format. Text parsing, round-tripping, unknown record
 # preservation, and deterministic output. See modules/formats/include/aver/formats/OcGraph.hpp.
 add_executable(OcGraphTest src/OcGraphTest.cpp)
