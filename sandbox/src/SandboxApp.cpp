@@ -4104,6 +4104,10 @@ public:
                 meshParts_.erase(pit);
             }
             sceneMeshes_.erase(id); meshTris_.erase(id); meshSlot0Material_.erase(id);
+            if (const auto oit = selOutlineLines_.find(id); oit != selOutlineLines_.end()) {
+                if (oit->second) e.device()->destroyLineMesh(oit->second);
+                selOutlineLines_.erase(oit);
+            }
 #if AVER_MODULE_TRIFACTOR
             meshLods_.erase(id);
             meshClusterData_.erase(id);
@@ -4269,7 +4273,10 @@ public:
             // new overlay above this loop) would silently break.
             e.device()->setDrawBlended(false);
             e.device()->drawMesh(o.mesh, &w.m[0][0], col, o.metallic, o.roughness);
-            if (i == sel_) selectionOutline_ = w, selectionMesh_ = o.mesh, hasSelection_ = true;
+            // The placeholder Floor/Cube have no .ocmesh behind them, so they get no outline --
+            // selectionMeshId_ stays 0 and selectionOutlineLines returns 0 for it.
+            if (i == sel_) selectionOutline_ = w, selectionMesh_ = o.mesh, selectionMeshId_ = 0,
+                           hasSelection_ = true;
         }
 
         // ---- the simulated fluid, drawn like every other surface in the level ----
@@ -5483,7 +5490,8 @@ public:
                         e.device()->drawMesh(mesh, &wm.m[0][0], col, metallic, roughness);
                 }
                 if (sel_ == kSelScene && ent == selEntity_)
-                    selectionOutline_ = wm, selectionMesh_ = mesh, hasSelection_ = true;
+                    selectionOutline_ = wm, selectionMesh_ = mesh, selectionMeshId_ = mr->mesh,
+                    hasSelection_ = true;
                 ++drawn;
             }
             // Closes "raster scene draws" HERE, at the end of the draw walk, rather than letting it
@@ -5588,43 +5596,37 @@ public:
 #endif
         }
 #endif
-        // Selection outline: an enlarged wireframe shell over both passes, interactive runs only.
-        // NOT ISSUED AT ALL WHILE A FEATURE HAS TAKEN THE SCENE OVER -- not wasted, but CAPTURED:
-        // IDevice::drawMesh hands every draw to every feature BEFORE honouring suppressesScene, and
-        // PtSceneView filters only on whether vertices are compute-written, with no concept of
-        // wireframe or editor chrome. So this draw was folded into the path tracer's accumulated scene
-        // as a second, solid, oversized copy of the selection -- not filterable inside drawMesh, since
-        // by then "chrome vs geometry" is already lost.
-        // The outline being invisible under path tracing is separate and INTENDED (the Quality
-        // combo's tooltip says the view "SUPPRESSES the raster view entirely") -- this just stops the
-        // suppressed draw contaminating what replaced it.
-        // AND NOT WHILE ANYTHING IS PLAYING: anyPlayActive() rather than playSessionActive(), since two
-        // of three ways to be playing never start a session, and chrome must disappear for all three
-        // -- the Player Start icon shares the same call so the two cannot disagree.
-        if (hasSelection_ && maxFrames_ == 0 && !anyPlayActive() && !e.device()->sceneSuppressed()) {
-            static constexpr f32 kSelect[4] = {1.0f, 0.62f, 0.12f, 1.0f};   // selection orange
-            const Vec3 sp{selectionOutline_.m[3][0], selectionOutline_.m[3][1], selectionOutline_.m[3][2]};
-            const f32 camDist = (sp - camPos_).size();
-            const f32 grow = 1.0f + std::fmin(0.12f, std::fmax(0.02f, camDist * 0.000009f));
-            Mat4 o = selectionOutline_;
-            for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) o.m[r][c] *= grow;
-            e.device()->setWireframe(true);
-            // setDrawBlended is STICKY, and this draw runs AFTER the project scene loop, whose last
-            // entity may well have been glass -- left true, the fixed contract would CAPTURE this
-            // wireframe draw and replay it later, filled and out of order, wherever a blended replay
-            // finds a matching scenePipeline (unlikely, so the backend just DROPS it). This is chrome,
-            // never geometry: always opaque.
-            e.device()->setDrawBlended(false);
-            // UNLIT, BECAUSE A SELECTION OUTLINE IS CHROME AND CHROME HAS NO SURFACE NORMAL WORTH
-            // LIGHTING. Until this call, setWireframe(true) fell through to PSMainPlain, a real
-            // Cook-Torrance shader with fog -- so the outline came out sun-lit, sky-tinted and varying
-            // with each face's direction, when selection orange is supposed to mean one thing.
-            // setUnlit reaches a bypass plainShadeSurface always had. Bracketed like setWireframe, or
-            // it would quietly flatten the next mesh anything else drew.
-            e.device()->setUnlit(true);
-            e.device()->drawMesh(selectionMesh_, &o.m[0][0], kSelect, 0.0f, 1.0f);
-            e.device()->setUnlit(false);
-            e.device()->setWireframe(wireframe_);
+        // Selection outline: the selected mesh's boundary and crease edges, as LINES.
+        //
+        // IT USED TO BE A drawMesh AND THAT IS WHY THERE WAS NO OUTLINE. drawMesh is gated on
+        // sceneSuppressed(), and VoxiRenderer::suppressesScene() is true whenever ray-driven primary
+        // visibility is on -- this engine's STANDING DEFAULT. So the outline was issued into nothing
+        // for the mode everyone actually uses. Measured, rather than reasoned: a bounded capture with
+        // the interactive gate lifted and an entity selected produced exactly ONE orange-ish pixel
+        // anywhere in the viewport, and it was a leaf vein. The device log states the same thing --
+        // "2 render features claim the whole scene ... The rasteriser draws NOTHING while this holds."
+        //
+        // drawLines is gated on suppressesWholeFrame(), which VoxiRenderer deliberately keeps FALSE
+        // for ray-driven so that chrome survives, and which D3D12Device::drawLines explains: "Gizmos
+        // and wireframes belong in a ray-driven viewport as much as in a rastered one, and they
+        // depth-test against the real depth the ray pass writes." The grid, gizmo, nav mesh and
+        // collider overlay were already on that path; the outline was the one piece of chrome that
+        // was not.
+        //
+        // STILL INTERACTIVE-ONLY (maxFrames_ == 0), and now for a different reason than before. The
+        // old reason -- that drawMesh hands every draw to every feature's submitDraw before honouring
+        // suppressesScene, so the path tracer accumulated an oversized solid copy of the selection --
+        // does not apply to drawLines, which no feature captures. The reason it stays is the render
+        // gates: they run bounded, they do NOT pass --no-editor-chrome, and the editor starts with
+        // sel_ = 1, the placeholder Cube. Dropping this gate would put an orange outline in every gate
+        // image and move all twenty of them.
+        //
+        // NOT SCALED. The old shell was inflated 1.02-1.12x to escape z-fighting with the surface it
+        // copied; lines depth-test against the ray pass's own depth and sit exactly on the geometry,
+        // so growing them would only lift the outline off the object it is meant to trace.
+        if (hasSelection_ && maxFrames_ == 0 && !anyPlayActive() && !noEditorChrome_) {
+            if (const rhi::LineHandle lh = selectionOutlineLines(e, selectionMeshId_))
+                e.device()->drawLines(lh, &selectionOutline_.m[0][0]);
         }
         hasSelection_ = false;
 
@@ -7150,6 +7152,147 @@ private:
             e.device()->setDrawBlended(blended);
             e.device()->drawMesh(p.mesh, world, col, metallic, roughness);
         }
+    }
+
+
+    // ---- the selection outline, as LINES ----------------------------------------------------------
+    //
+    // WHY LINES AND NOT A MESH, which is the whole bug this replaces. The outline used to be the mesh
+    // redrawn through drawMesh with setWireframe(true) -- and drawMesh is gated on sceneSuppressed(),
+    // which VoxiRenderer returns TRUE for whenever ray-driven primary visibility is on. Ray-driven is
+    // this engine's STANDING DEFAULT, so the outline was drawn into nothing: measured on a bounded
+    // capture with the interactive gate lifted, ONE orange pixel appeared anywhere in the viewport,
+    // and it was a leaf vein. The device log says it outright -- "The rasteriser draws NOTHING while
+    // this holds".
+    //
+    // drawLines is gated on the much narrower suppressesWholeFrame(), which VoxiRenderer deliberately
+    // keeps FALSE for ray-driven, and D3D12Device::drawLines says why in as many words: "Gizmos and
+    // wireframes belong in a ray-driven viewport as much as in a rastered one, and they depth-test
+    // against the real depth the ray pass writes." The grid, the gizmo, the nav mesh and the collider
+    // overlay all already ride that path. The outline simply was not on it.
+    //
+    // BOUNDARY AND CREASE EDGES, NOT EVERY EDGE. A wireframe of a 31k-triangle plant is an orange
+    // thicket, not an outline. An edge is drawn when it belongs to exactly ONE triangle (a true
+    // boundary -- for a leaf, its rim) or when its two triangles disagree in direction by more than
+    // kCreaseCos. On flat foliage cards that is precisely the silhouette; on a hard-surface prop it is
+    // the shape's own edges. Camera-independent, so it is built ONCE per mesh and cached rather than
+    // recomputed as the view moves.
+    //
+    // WHY IT READS THE .ocmesh AGAIN: loadProjectMeshes uploads to the GPU and lets the CPU-side
+    // OcMeshData go, so the triangles are not in memory to walk. A selection change is a click, not a
+    // frame, and the result is cached by mesh id -- so this costs one file read the first time an
+    // asset is ever selected and nothing on any later selection of it.
+    rhi::LineHandle selectionOutlineLines(Engine& e, u64 meshId) {
+        if (const auto it = selOutlineLines_.find(meshId); it != selOutlineLines_.end()) return it->second;
+
+        const auto pit = meshPathById_.find(meshId);
+        const std::string content = project_.contentDir();
+        if (pit == meshPathById_.end() || content.empty()) return 0;
+
+        fmt::OcMeshData md;
+        std::string why;
+        if (!fmt::loadOcMesh(content + "/" + pit->second, md, &why)) {
+            AVER_WARN("[Editor] selection outline: {}", why);
+            selOutlineLines_[meshId] = 0;   // cached as "no outline", so this is not retried per frame
+            return 0;
+        }
+
+        // ADJACENCY BY POSITION, NOT BY INDEX, and this is the whole difference between an outline
+        // and an orange thicket.
+        //
+        // Game meshes split a vertex wherever a UV or a normal seam runs, so the two triangles either
+        // side of a smooth edge routinely carry DIFFERENT indices for the same corner. Keyed by index,
+        // almost no edge finds its neighbour, every edge looks like a boundary, and the "outline"
+        // becomes a full wireframe: this Anthurium reported 31,113 edges from 15,544 triangles --
+        // more than the ~23k a closed mesh of that size even has -- which is what that measurement
+        // means. Welding by position finds the neighbours the indices hide.
+        //
+        // QUANTISED TO 1/100 cm before hashing, because two authored copies of one corner are equal
+        // in intent and rarely equal in float. The engine's unit is the centimetre, so this welds
+        // anything within 10 microns and nothing a person would call two places.
+        const auto weld = [&md](u32 v) {
+            const auto q = [](f32 x) { return static_cast<i64>(std::llround(static_cast<f64>(x) * 100.0)); };
+            const i64 x = q(md.positions[usize(v)*3+0]);
+            const i64 y = q(md.positions[usize(v)*3+1]);
+            const i64 z = q(md.positions[usize(v)*3+2]);
+            // fnv1a over the three quantised coordinates: a 64-bit id for a POSITION.
+            u64 h = 0xcbf29ce484222325ull;
+            for (const i64 c : {x, y, z}) {
+                const u64 u = static_cast<u64>(c);
+                for (int b = 0; b < 8; ++b) { h ^= (u >> (b * 8)) & 0xFF; h *= 0x100000001b3ull; }
+            }
+            return h;
+        };
+
+        struct EdgeFaces { u32 a = 0xFFFFFFFFu, b = 0xFFFFFFFFu; };
+        // Keyed by the PAIR of welded position ids, order-independent, so an edge walked from either
+        // of its two triangles lands in the same bucket.
+        std::unordered_map<u64, EdgeFaces> edges;
+        std::unordered_map<u64, std::pair<u32, u32>> edgeVerts;   // key -> one representative index pair
+        const usize triCount = md.indices.size() / 3;
+        edges.reserve(triCount * 3);
+        edgeVerts.reserve(triCount * 3);
+
+        std::vector<u64> welded(md.vertexCount());
+        for (u32 v = 0; v < md.vertexCount(); ++v) welded[v] = weld(v);
+
+        const auto faceNormal = [&md](usize t, Vec3& n) {
+            const u32 i0 = md.indices[t*3+0], i1 = md.indices[t*3+1], i2 = md.indices[t*3+2];
+            const Vec3 p0{md.positions[usize(i0)*3+0], md.positions[usize(i0)*3+1], md.positions[usize(i0)*3+2]};
+            const Vec3 p1{md.positions[usize(i1)*3+0], md.positions[usize(i1)*3+1], md.positions[usize(i1)*3+2]};
+            const Vec3 p2{md.positions[usize(i2)*3+0], md.positions[usize(i2)*3+1], md.positions[usize(i2)*3+2]};
+            n = cross(p1 - p0, p2 - p0).getSafeNormal();
+        };
+
+        for (usize t = 0; t < triCount; ++t) {
+            const u32 idx[3] = {md.indices[t*3+0], md.indices[t*3+1], md.indices[t*3+2]};
+            for (int k = 0; k < 3; ++k) {
+                const u32 vi = idx[k], vj = idx[(k+1)%3];
+                u64 wa = welded[vi], wb = welded[vj];
+                if (wa == wb) continue;              // a degenerate edge: both ends weld to one place
+                if (wa > wb) { const u64 t2 = wa; wa = wb; wb = t2; }
+                // 64 bits mixed from two 64-bit ids. A collision would merge two unrelated edges into
+                // one bucket and at worst drop one line from a highlight -- not worth a wider key.
+                const u64 key = wa ^ (wb * 0x9E3779B97F4A7C15ull);
+                edgeVerts.emplace(key, std::pair<u32, u32>{vi, vj});
+                EdgeFaces& ef = edges[key];
+                if (ef.a == 0xFFFFFFFFu)      ef.a = static_cast<u32>(t);
+                else if (ef.b == 0xFFFFFFFFu) ef.b = static_cast<u32>(t);
+                // A third face on one edge is non-manifold geometry; it is drawn as a crease rather
+                // than dropped, which is the conservative answer for a selection highlight.
+            }
+        }
+
+        // cos(40 degrees). Chosen so a smooth cylinder's facets do not each become an edge while a
+        // box's corners still do.
+        constexpr f32 kCreaseCos = 0.766f;
+        static constexpr f32 kSelR = 1.0f, kSelG = 0.62f, kSelB = 0.12f;   // the selection orange
+        std::vector<rhi::LineVertex> lines;
+        lines.reserve(edges.size() / 2);
+        for (const auto& [key, ef] : edges) {
+            bool draw = ef.b == 0xFFFFFFFFu;   // a boundary edge: exactly one face
+            if (!draw) {
+                Vec3 na, nb;
+                faceNormal(ef.a, na);
+                faceNormal(ef.b, nb);
+                draw = dot(na, nb) < kCreaseCos;
+            }
+            if (!draw) continue;
+            const auto vit = edgeVerts.find(key);
+            if (vit == edgeVerts.end()) continue;
+            const u32 x = vit->second.first, y = vit->second.second;
+            lines.push_back({md.positions[usize(x)*3+0], md.positions[usize(x)*3+1], md.positions[usize(x)*3+2],
+                             kSelR, kSelG, kSelB});
+            lines.push_back({md.positions[usize(y)*3+0], md.positions[usize(y)*3+1], md.positions[usize(y)*3+2],
+                             kSelR, kSelG, kSelB});
+        }
+
+        const rhi::LineHandle h = lines.empty() ? 0
+                                : e.device()->createLineMesh(lines.data(), static_cast<u32>(lines.size()));
+        AVER_INFO("[Editor] selection outline for '{}': {} edge(s) of {} triangle(s)",
+                  pit->second, lines.size() / 2, triCount);
+        selOutlineLines_[meshId] = h;
+        return h;
     }
 
     // ---- autosave, and the recovery it exists for -----------------------------------------------
@@ -18992,6 +19135,12 @@ private:
     std::unordered_map<i32, pbr::MaterialHandle> surfaceMaterials_;
     // mesh id -> the material token its materialSlots[0] names. See meshDefaultMaterial.
     std::unordered_map<u64, i32> meshSlot0Material_;
+    // mesh id -> its cached outline line mesh (0 = this mesh yields no outline). See
+    // selectionOutlineLines; dropped with the project's meshes.
+    std::unordered_map<u64, rhi::LineHandle> selOutlineLines_;
+    // The ASSET id of the selected mesh (what meshPathById_ and the outline cache key on), as
+    // distinct from selectionMesh_, which is a GPU upload handle nothing can turn back into a file.
+    u64 selectionMeshId_ = 0;
 #endif
 
     // ---------------- landscape (opt-in; --landscape <path>, or <levelname>.ocland beside the level) ----------------
