@@ -1,7 +1,8 @@
 # Aver Materials — node-graph shading
 
 A surface can now be shaded two ways. The older one is a `.ocmat` file: a fixed `PARAM` block
-(`baseColorFactor`, `metallicFactor`, …) plus up to five texture maps, authored either by hand or
+(`baseColorFactor`, `metallicFactor`, …) plus up to eight texture maps (five base slots, plus three
+for the slope-blended second layer), authored either by hand or
 generated from a `[AverMaterial]` C# class (`docs/EDITOR.md` Phase 9). The newer one is a **material
 graph**: a `.ocgraph` carrying `DOMAIN material`, wired in the same node editor Aver Node uses for
 gameplay, that computes some or all of a surface's inputs per pixel instead of taking them as
@@ -24,7 +25,7 @@ their wording, only what they mean for a material.
 | --- | --- | --- |
 | The `DOMAIN material` record | `modules/formats/{include,src}/aver/formats/OcGraph.cpp` | round-trip + domain tests, both readers |
 | `GRAPHREF` on a `.ocmat` | `modules/formats/{include,src}/aver/formats/OcMat.*` | `MaterialTest` |
-| The graph → HLSL compiler | `modules/render.pbr/src/MaterialGraphHlsl.cpp` | `MaterialGraphTest` — 59 `check()` calls (grep-counted; the file previously claimed 105, which is wrong by any reading — 56 node types exist in total, so "one graph per node type" cannot itself reach 105 checks), including 24 node types each compiled through real DXC individually via `kNewNodeCases` and the remaining node types exercised together in one combined `M_Everything` graph, not one-per-type |
+| The graph → HLSL compiler | `modules/render.pbr/src/MaterialGraphHlsl.cpp` | `MaterialGraphTest` — 82 `check()` calls (grep-counted; the file previously claimed 105, then 59 — the count moved again as coat pins and the imported-material-graph case were added after the 59 count was taken), including 24 node types each compiled through real DXC individually via `kNewNodeCases` and the remaining node types exercised together in one combined `M_Everything` graph, not one-per-type |
 | The process-wide registry | `modules/render.pbr/src/MaterialGraphRegistry.cpp` | `MaterialGraphRegistryTest` |
 | The `AverAuthored`/`averBuildSurface` split | `modules/render.pbr/src/PbrShaders.cpp` | the stock path's own oracle gates (unchanged by construction — see §6) |
 | `GRAPHREF` → `graphId` resolution | `sandbox/src/SandboxApp.cpp` (`resolveMaterialGraph`, `materialForSurface`) | end-to-end fixture, `test-content/MaterialGraph` |
@@ -38,17 +39,21 @@ process (§5), and a sphere in the graph editor that shows exactly what that sha
 
 ## 2. A material graph versus a `.ocmat` PARAM block
 
-A `.ocmat`'s `PARAM` block is eight scalars/vectors and five texture slots, authored once and read
-as constants at draw time — the same shape every material in this engine has had since before this
-feature existed. It cannot compute anything: a `roughnessFactor` is a number, not an expression, and
-there is no way to say "roughness gets rougher near the ground" without either baking that into a
-texture or writing C++.
+A `.ocmat`'s `PARAM` block is a growing set of scalars/vectors (`pbr::MaterialDesc` — well past the
+original eight now that subsurface, dielectric/transmission, volume attenuation and the coat have
+each added their own) and eight texture slots, authored once and read as constants at draw time —
+the same shape every material in this engine has had since before this feature existed. It cannot
+compute anything: a `roughnessFactor` is a number, not an expression, and there is no way to say
+"roughness gets rougher near the ground" without either baking that into a texture or writing C++.
 
 A material graph computes. It reads what the renderer already knows about the pixel being shaded —
 its UV, its world position and normal, the view direction, the camera and object positions — and
 whatever textures the material's own `.ocmat` already declares, and produces some or all of the same
-eight fields a `PARAM` block would have set directly: `BaseColor`, `Metallic`, `Roughness`, `Normal`,
-`Emissive`, `Occlusion`, `Opacity`, `AlphaCutoff`.
+fields a `PARAM` block would have set directly: `BaseColor`, `Metallic`, `Roughness`, `Normal`,
+`Emissive`, `Occlusion`, `Opacity`, `AlphaCutoff`, `SubsurfaceWeight`, `SubsurfaceRadius`, `Ior`,
+`Transmission`, `AttenuationColor`, `AttenuationDistance`, `CoatWeight`, `CoatRoughness`, `CoatF0` —
+seventeen today (`kOutputFields`, `modules/render.pbr/src/MaterialGraphHlsl.cpp`), up from the eight
+this page originally described.
 
 **The relationship is additive, not a replacement.** `GRAPHREF` names a graph on a `.ocmat` that
 still has its own complete `PARAM` block and its own maps. Only the `MaterialOutput` inputs the
@@ -167,8 +172,11 @@ the `PARAM` factors, then derive the BRDF terms (`F0`, `F`, `kdAlbedo`, `ndv`, t
 the result. Node-graph materials split that in two:
 
 - **`AverAuthored`** — exactly what a material authors, and nothing else: `baseColor`, `opacity`,
-  `metallic`, `roughness`, `normalTS`, `emissive`, `occlusion`, `alphaCutoff`. Eight fields, matching
-  `MaterialOutput`'s eight input pins one for one.
+  `metallic`, `roughness`, `normalTS`, `emissive`, `occlusion`, `alphaCutoff`, `subsurfaceWeight`,
+  `subsurfaceRadius`, `ior`, `transmission`, `attenuationColor`, `attenuationDistance`, `coatWeight`,
+  `coatRoughness`, `coatF0` (`modules/render.pbr/shaders/material_prelude.hlsl`). Seventeen fields
+  today — eight originally, before subsurface, the dielectric pair, volume attenuation and the coat
+  triple each added their own — matching `MaterialOutput`'s seventeen input pins one for one.
 - **`averStockAuthored(uv, geoN)`** — fills an `AverAuthored` the way every material always has: the
   five maps, blended by slope, times the `PARAM` factors.
 - **`averBuildSurface(v, l, a, uv)`** — derives everything else a surface needs from an
@@ -177,14 +185,14 @@ the result. Node-graph materials split that in two:
   any one material's, and a graph never gets to restate it.
 
 A generated `averEvalMaterial` starts from `a = averStockAuthored(uv, v.N)` — so a graph inherits
-this material's own maps and factors as the baseline — then, for each of the eight
+this material's own maps and factors as the baseline — then, for each of the seventeen
 `MaterialOutput` inputs, overwrites `a.<field>` **only if that input is driven**, and finally hands
 `a` to `averBuildSurface` exactly as the stock path does. A graph that sets nothing but `BaseColor`
 still gets the right `F0`, the right energy split and the right alpha clip, because it never
 restates a line of the BRDF — it only ever changes what it explicitly touches.
 
 **"Driven" means linked, or a literal typed onto the pin — not merely present.**
-`MaterialOutput`'s eight pins carry **no default value** in the palette, on purpose: a `PARAM` block
+`MaterialOutput`'s seventeen pins carry **no default value** in the palette, on purpose: a `PARAM` block
 already has a value for every one of these fields, so a graph's `MaterialOutput` needs a way to say
 "leave this one alone" that is not "zero." A pin left both unlinked and untyped is exactly that; a
 non-empty literal (or a wire) is unambiguously something an author wrote. A graph whose
@@ -354,9 +362,9 @@ this material's own values for all five. **Falsified, not just observed:** comme
 differs.
 
 This pair is what `MaterialGraphTest` and `MaterialGraphRegistryTest` check mechanically — the
-former by compiling node types through real DXC (59 `check()` calls total in the file — see §1's
-correction; not 105), the latter by asserting ids are never recycled across a `clear()`, since an id
-may still be sitting in an uploaded constant block.
+former by compiling node types through real DXC (82 `check()` calls total in the file — see §1's
+correction; not 105, nor the 59 once counted there either), the latter by asserting ids are never
+recycled across a `clear()`, since an id may still be sitting in an uploaded constant block.
 
 ---
 
@@ -366,8 +374,8 @@ Stated plainly, the way an honest limitation should be, rather than left for a r
 
 - **No vertex or displacement graphs.** Every value a material graph reads about geometry —
   `WorldPosition`, `WorldNormal`, `ViewDirection` — is already-computed *per-pixel* vertex output;
-  nothing a graph produces feeds back into the vertex stage. `MaterialOutput`'s eight inputs are all
-  pixel-stage surface properties (§6); there is no ninth pin for a vertex offset, and nothing in the
+  nothing a graph produces feeds back into the vertex stage. `MaterialOutput`'s seventeen inputs are
+  all pixel-stage surface properties (§6); none of them is a vertex offset, and nothing in the
   compiler touches a vertex shader at all.
 - **No per-graph dynamic constant buffer, and no exposed instance parameters.** `gMaterialGraphId`
   is four bytes that used to be padding inside the material's existing `AverMaterial` block (§5) —
@@ -383,12 +391,21 @@ Stated plainly, the way an honest limitation should be, rather than left for a r
   graph through the Vulkan backend. Nothing about the emitted HLSL text is Vulkan-*specific*, but
   "should probably work" is not the same claim as "verified," and this page makes only the second
   kind.
-- **No `Time` node, and no `VertexColor` node.** Both were in the original plan and both were cut for
-  the same reason: this engine genuinely cannot supply them yet. There is no time uniform anywhere
-  in the shared shader prelude, and `VSOut` carries no vertex colour — either would have been a
-  palette entry whose only possible outcome is a compile error naming a symbol that does not exist.
-  `Panner`, which needs a time input to be worth having, was cut alongside `Time` for the same
-  reason.
+- **`Time` exists now; this page used to say it did not.** Commit `1aa21ab` ("A material graph can
+  move...") gave `PerFrameCB` (`b0`) a clock (`Time` wrapped hourly, `Time.raw` monotonic, `Time.delta`
+  since the last frame) specifically so a graph could stop being a pure function of position. It is
+  emitted (`ciEquals(ty, "Time")` in `MaterialGraphHlsl.cpp`) and load-bearing enough to have re-render
+  a fixture at maxdiff 1 — but it is **not** in §7's node vocabulary table, has no palette entry in the
+  graph editor, and `MaterialGraphTest` never names it: today the only way to use it is to hand-author
+  the `.ocgraph` text, the way `WaveNormal` (added the same day, for the water surface's own ripple set
+  — `position`/`height`/`focus`) also must be. Both exist in the compiler and neither is reachable from
+  the editor's Add Node menu.
+- **No `VertexColor` node.** `VSOut` still carries no vertex colour, so it remains what it always
+  was: a palette entry whose only possible outcome would be a compile error naming a symbol that does
+  not exist.
+- **`Panner` still does not exist**, even though the reason this page used to give — "it needs a time
+  input, and there is no time input" — no longer holds now that `Time` does. It was simply never added
+  once `Time` landed; nothing in the tree suggests it is coming.
 - **Every graph in the process shares one compiled shader** (§5) — there is no per-graph shader
   variant, no per-graph optimisation pass, and no way for one graph's compile to diverge from what
   every other registered graph's `case` arm looks like. This is a deliberate trade (§5), not an

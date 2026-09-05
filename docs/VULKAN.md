@@ -24,7 +24,7 @@ Two modules, both new since the 2026-08-02 draft:
 
 | Module | Files | Purpose |
 |---|---|---|
-| `Aver.RHI.Vulkan` (`modules/rhi.vulkan`) | `VulkanDevice.cpp` (3798 lines), `VulkanResourceFactory.cpp` (2964), `VulkanCommon.hpp` (2136), `VulkanRenderContext.cpp` (1463), `VulkanPipeline.cpp` (686, **not built** — see below), `VulkanShaderCompiler.cpp` (286), `VulkanRegisterMap.hpp` (75) | The `IDevice` implementation: instance/device bring-up, swapchain, the fixed scene/sky/line/mesh pipelines, resources, binding, barriers, acceleration structures, capture. |
+| `Aver.RHI.Vulkan` (`modules/rhi.vulkan`) | `VulkanDevice.cpp` (3758 lines, was 3798), `VulkanResourceFactory.cpp` (3000, was 2964), `VulkanCommon.hpp` (2123, was 2136), `VulkanRenderContext.cpp` (1478, was 1463), `VulkanPipeline.cpp` (686, unchanged, **not built** — see below), `VulkanShaderCompiler.cpp` (293, was 286), `VulkanRegisterMap.hpp` (75, unchanged) | The `IDevice` implementation: instance/device bring-up, swapchain, the fixed scene/sky/line/mesh pipelines, resources, binding, barriers, acceleration structures, capture. |
 | `Aver.RHI.Vulkan.ImGui` (`modules/rhi.vulkan.imgui`) | `ImGuiVulkanUiBackend.cpp` | The concrete Dear ImGui backend, structural twin of `modules/rhi.d3d12.imgui`, plugged into `Aver.RHI.Vulkan`'s `vkb::IUiBackend` seam. Only `Sandbox` links it. |
 
 `modules/rhi.vulkan/src/VulkanCommon.hpp` declares `class VulkanDevice final : public IDevice` with
@@ -75,7 +75,7 @@ so a binding bug on that driver crashes the process with no diagnostic at all ra
 validation message. Every bug fixed in this backend so far was found through the layer; none of them
 were found by the driver telling you what was wrong.
 
-One comment elsewhere in the tree has not caught up to this: `modules/rhi/CMakeLists.txt:13` still
+One comment elsewhere in the tree has not caught up to this: `modules/rhi/CMakeLists.txt:32` still
 says *"Vulkan stays off until the SDK is installed"*, which was true when written and is not the
 reason it is off today (see "Why it is still off by default" below). That file is shared RHI, not
 this module, and is out of scope for this document to fix.
@@ -84,10 +84,12 @@ this module, and is out of scope for this document to fix.
 
 ## What actually renders
 
-Confirmed by reading `VulkanDevice::init` (`VulkanDevice.cpp:658`) and the commits that built it:
+Confirmed by reading `VulkanDevice::init` (`VulkanDevice.cpp:521`, drifted from `658`) and the commits
+that built it:
 
 - A real `vkCreateInstance` → `vkEnumeratePhysicalDevices` → `vkCreateDevice` chain
-  (`VulkanDevice.cpp:737`, `:759-762`, `:859`), not a stub returning a null device.
+  (`VulkanDevice.cpp:595`, `:617-618`, `:740` — all drifted down from `737`/`759-762`/`859` as the
+  file's earlier sections grew), not a stub returning a null device.
 - A live swapchain, presenting. `modules/rhi.vulkan/README.md` states it plainly: *"It presents a
   frame — grid, cube, shadow, sky and world axes — which it did not until `7504a80`."*
 - **Instanced draws**, added in `c97f092` (2026-08-23): `drawMeshInstanced` issues one
@@ -97,16 +99,18 @@ Confirmed by reading `VulkanDevice::init` (`VulkanDevice.cpp:658`) and the commi
 - **The whole editor UI**, added in `43a04c8` (2026-08-23, "Vulkan: the editor runs on it"):
   `modules/rhi.vulkan.imgui`'s `ImGuiVulkanUiBackend` is installed from `sandbox/src/SandboxApp.cpp`
   (`rhi::vkb::imgui_backend::create()` then `rhi::vkb::installUiBackend(e.device(), ...)`, around
-  `SandboxApp.cpp:1057-1058`) whenever the live device reports itself as the Vulkan backend. See "The
+  `SandboxApp.cpp:1411`, drifted again from `1436`, itself drifted from `1057-1058`) whenever the live device reports itself as the Vulkan backend. See "The
   two contradictions" below for how this reconciles with an older note claiming the opposite.
 - **Ray tracing and mesh-shader capability queries are real, not deferred.** `VulkanDevice.cpp`
   queries `VK_EXT_mesh_shader` and the acceleration-structure extension set and reports
   `caps_.meshShaderTier = 1` / `caps_.rayTracingTier = 11` when the hardware and DXC both support
-  them (`:1136-1158`); `buildBlas`/`buildTlas` are implemented in `VulkanRenderContext.cpp` (`:926`,
-  `:985`), including the same `instanceCustomIndex` handling the D3D12 backend uses for RT
-  reflection, and `requestCapture`/`getCapture`/`getFrameImage` exist and are wired to a real
-  readback path (`VulkanDevice.cpp:3691-3696`+). None of this matches the 2026-08-02 draft's plan to
-  defer ray tracing and mesh shaders to a much later slice — they were built alongside everything
+  them (`:1022-1052`, drifted from `:1136-1158`); `buildBlas`/`buildTlas` are implemented in
+  `VulkanRenderContext.cpp` (`:926`, `:985` — these two have not moved), including the same
+  `instanceCustomIndex` handling the D3D12 backend uses for RT reflection, and
+  `requestCapture`/`getCapture`/`getFrameImage` exist and are wired to a real readback path
+  (`requestCapture` inline in `VulkanCommon.hpp:1402`; `getCapture`/`getFrameImage` at
+  `VulkanDevice.cpp:3607`/`:3612`, drifted from `:3691-3696`). None of this matches the 2026-08-02
+  draft's plan to defer ray tracing and mesh shaders to a much later slice — they were built alongside everything
   else, not held back.
 - **Teardown leaks nothing.** `972dac7` (2026-08-23) took `vkDestroyDevice`'s leaked-object count
   from 40 to 0 across four fixes: `~VulkanDevice` now calls `uiShutdown()` (it never did, so the UI
@@ -147,9 +151,11 @@ directly:
 - It is wired into the build: `CMakeLists.txt:264-272` adds it as a nested subdirectory of the
   `AVER_RHI_VULKAN` block, additionally gated on `AVER_ENABLE_UI` — the same two-level gating
   `modules/rhi.d3d12.imgui` uses.
-- `sandbox/src/SandboxApp.cpp` installs it: the block around line 1042 picks one of two
-  `installUiBackend` calls "by what the device actually is" — `rhi::d3d12::installUiBackend` for a
-  D3D12 device, `rhi::vkb::installUiBackend` (`SandboxApp.cpp:1057-1058`) for a Vulkan one.
+- `sandbox/src/SandboxApp.cpp` installs it: the block, now around line 1398 (drifted again from the
+  1420 previously recorded here, itself drifted from 1042 as the file grew), picks one of two
+  `installUiBackend` calls "by what the device actually is" — `rhi::d3d12::installUiBackend`
+  (`SandboxApp.cpp:1404`) for a D3D12 device, `rhi::vkb::installUiBackend`
+  (`SandboxApp.cpp:1411`) for a Vulkan one.
 - `43a04c8`'s own commit message claims the result was seen on screen ("menus, toolbar, World
   Outliner, Details, dockspace and the 3D viewport with the scene in it -- now draws on the Vulkan
   backend at 60 FPS"). That claim is not independently reproducible from this pass — this document
@@ -226,7 +232,9 @@ D3D12   darkest floor pixel (13, 15, 19)  -- a shadow
 Vulkan  darkest floor pixel (66, 66, 66)  -- unshadowed floor, no shadow
 ```
 
-**The cause is `pushRenderScope`** (`VulkanDevice.cpp:2578-2583`):
+**The cause is `pushRenderScope`** (`VulkanDevice.cpp:2524-2528` — moved down from the `2578-2583`
+recorded here originally by a "KNOWN DEFECT, MEASURED, NOT YET FIXED" comment block added above it;
+the function body itself is unchanged):
 
 ```cpp
 bool VulkanDevice::pushRenderScope(VkCommandBuffer cmd, const VkRenderingInfo& ri) {
@@ -257,7 +265,7 @@ three more mismatches at once: the bound pipeline's `rasterizationSamples` and
 `VkPipelineRenderingCreateInfo` formats are still the scene's, and the shadow image is never
 transitioned to `DEPTH_ATTACHMENT_OPTIMAL`. That attempt took validation errors from 10 to 40 and
 broke the floor draw entirely, and was reverted. The real fix, per the comment left at
-`VulkanDevice.cpp:2572-2577` for the next person to find, is architectural: the scope needs to
+`VulkanDevice.cpp:2490-2521` for the next person to find, is architectural: the scope needs to
 **follow the currently-bound render targets** (close on retarget, reopen lazily at the next draw,
 persist across draws instead of opening and closing around each one), and pipelines need to be built
 against the sample count and formats of the targets they are actually used with — a change to how
@@ -272,7 +280,7 @@ parenthetical is also now inaccurate, per "Why no SDK is needed" above). Turning
 
 - Adds `modules/rhi.vulkan` and, if `AVER_ENABLE_UI` is also on, `modules/rhi.vulkan.imgui`
   (`CMakeLists.txt:264-272`).
-- Defines `AVER_HAS_VULKAN=1` publicly on `Aver.RHI` (`modules/rhi/CMakeLists.txt:21`) and links
+- Defines `AVER_HAS_VULKAN=1` publicly on `Aver.RHI` (`modules/rhi/CMakeLists.txt:40`) and links
   `Aver.RHI.Vulkan` into `Aver.Runtime` (`modules/runtime/CMakeLists.txt:19`).
 - Does **not** change what a default `Sandbox.exe` run does. `modules/runtime/src/Engine.cpp`'s
   request-a-backend path still has the bug the 2026-08-02 draft found: when `--backend vulkan` is
@@ -284,8 +292,10 @@ parenthetical is also now inaccurate, per "Why no SDK is needed" above). Turning
   request that somehow failed would still silently fall through to D3D12 with only a warning, exactly
   as the draft described.
 - `scripts/gates.ps1` still has no `-Backend`/`--backend` handling anywhere in it (confirmed:
-  `grep -n backend scripts/gates.ps1` returns nothing), so the 18-gate pixel-probe oracle cannot run
-  against this backend at all yet, let alone assert that a gate run actually used it. This is the
+  `grep -n backend scripts/gates.ps1` returns nothing), so the pixel-probe oracle cannot run
+  against this backend at all yet, let alone assert that a gate run actually used it — 18 gates in
+  `$Gates` when this line was written, 20 now, the count having grown since is itself evidence the
+  oracle keeps changing under a backend that has never once run through it. This is the
   same hole the 2026-08-02 draft flagged, unchanged. Recording `gates.baseline.vulkan.txt` before
   this backend is turned on by default would be recording nothing, silently.
 
@@ -361,7 +371,7 @@ In rough order of leverage:
 
 1. **Fix `pushRenderScope`** so it follows the currently-bound render targets instead of joining
    whatever scope happens to be open. This is the one confirmed rendering defect, it is precisely
-   diagnosed, and the comment at `VulkanDevice.cpp:2572-2577` already describes the shape of the fix.
+   diagnosed, and the comment at `VulkanDevice.cpp:2490-2521` already describes the shape of the fix.
 2. **Give `scripts/gates.ps1` a `-Backend` switch** that selects the executable and baseline file
    together, the way `-Release` already does. Without it, this backend cannot be regression-tested at
    all, and cannot ever be turned on by default responsibly.

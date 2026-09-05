@@ -19,6 +19,28 @@ public readonly partial struct Entity
         return SetInt64("CSkeletalMesh.skeleton", Assets.ObjectIdOf(skeletonAsset));
     }
 
+    /// <summary>Binds a control rig to this entity, so its sampled pose is modified procedurally
+    /// before it is skinned — IK, aim constraints, anything the .ocrig names.
+    ///
+    /// <para>The odd one out in this file: CControlRig is registered at RUNTIME rather than being a
+    /// built-in, so it is attached by NAME (see <see cref="Entity.AddComponent(string)"/>) and has
+    /// no <see cref="Component"/> value to check against. That also means it is only attachable at
+    /// all in a host that registered it; in one that did not, this returns false rather than
+    /// half-configuring an entity.</para>
+    ///
+    /// <para><b>weight is written every call, and that is not defensive.</b> A component's storage
+    /// arrives zero-filled with no constructor run over it, so CControlRig's own `weight = 1.0f`
+    /// in-class default never executes on this path. Leaving weight unwritten would attach a rig
+    /// that loads, validates, resolves its bones and then scales every op by zero — the exact
+    /// silent-no-op ControlRig.hpp warns about, and indistinguishable from a rig that simply does
+    /// not fit the skeleton.</para></summary>
+    public bool SetControlRig(string rigAsset, float weight = 1.0f)
+    {
+        if (!HasComponent("CControlRig") && !AddComponent("CControlRig")) return false;
+        SetFloat("CControlRig.weight", weight);
+        return SetInt64("CControlRig.rig", Assets.ObjectIdOf(rigAsset));
+    }
+
     /// <summary>Plays a clip from the start, adding an animator if there is not one.</summary>
     public bool PlayAnimation(string clipAsset, bool loop = true)
     {

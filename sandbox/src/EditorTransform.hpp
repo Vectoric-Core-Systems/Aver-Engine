@@ -53,4 +53,27 @@ inline void multiplyEditorTransform(const f32 a[16], const f32 b[16], f32 out[16
                                   a[row * 4 + 2] * b[2 * 4 + col] + a[row * 4 + 3] * b[3 * 4 + col];
 }
 
+
+// How far to lift a dropped object so it RESTS ON what was under the cursor rather than intersecting
+// it -- what Unreal does when an asset is dragged onto something in the viewport.
+//
+// WHY IT IS NEEDED: the drop returns the point the mouse ray met a surface, and the placement puts
+// the new entity's ORIGIN there. For a mesh authored around its own centre that buries the lower half
+// in whatever it landed on, and dropping onto another object -- whose pick box surrounds it -- put
+// the new object inside the old one's silhouette, which from the camera reads as having REPLACED it
+// rather than added to it.
+//
+// ALONG WORLD +Z, not along the surface normal, and deliberately: Unreal does not rotate the actor to
+// the face it hit either, and lifting along a side-face normal would shove the object sideways out of
+// the pile instead of stacking it. A dropped object stands up.
+//
+// ZERO FOR A MESH ALREADY AUTHORED ON ITS BASE (boundsMin.z == 0), which most foliage is -- so this
+// changes nothing for the assets it would only have moved for no visible reason. Never negative: a
+// mesh authored entirely ABOVE its origin is already clear of the surface, and pulling it down into
+// the thing it was dropped on is the bug this exists to fix, in the other direction.
+inline f32 dropRestLift(f32 boundsMinZ, f32 scaleZ) {
+    const f32 lift = -boundsMinZ * (scaleZ != 0.0f ? scaleZ : 1.0f);
+    return lift > 0.0f ? lift : 0.0f;
+}
+
 } // namespace aver::editor

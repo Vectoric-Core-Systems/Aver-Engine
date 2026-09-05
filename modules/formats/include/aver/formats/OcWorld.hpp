@@ -50,6 +50,27 @@ struct OcWorldPlacement {
     // decide how it looks, not this record.
     std::string className;
 
+    // WHICH PLACEMENT THIS ONE HANGS FROM: an index into OcWorldData::placements, or -1 for a root.
+    //
+    // NESTING IS A FILE-LEVEL SHAPE ONLY. In memory the placements stay a flat vector with this
+    // index, so LevelInstance, GameLevel, frameCameraOn, LevelInspect and ScatterBudgetTool need no
+    // change at all; parseOcworld and writeOcworld are the only two functions that know about the
+    // tree. That is deliberate: a std::vector of children would have rewritten every consumer to buy
+    // nothing, since all of them walk placements linearly.
+    //
+    // THE INDEX IS NOT STABLE ACROSS A SAVE, and cannot be. writeOcworld emits depth-first from the
+    // roots, so a flat array whose children do not already follow their parents comes back
+    // renumbered. Nothing may store one of these across a round trip -- parents are re-derived from
+    // the file's BEGIN/END nesting, never from a number written down. This tree has a scar from
+    // exactly that mistake (LevelClassSave.hpp: "Pairing by position would write one placement's
+    // transform onto another's line"), which is the reason the file format nests instead of carrying
+    // a parent index of its own.
+    //
+    // x/y/z, yaw/pitch/roll and the scale are PARENT-RELATIVE when parent >= 0, and world when it is
+    // -1. That is the same convention scene::CLocal already uses, which is what lets the editor's
+    // save write CLocal straight out.
+    i32 parent = -1;
+
     bool uniform() const { return sx == sy && sy == sz; }
 };
 
@@ -273,24 +294,121 @@ struct OcWaterPlacement {
     i32 iterations = -1;
     f64 pressure   = -1.0;
 
-    // THE MATERIAL LAYER, alongside the four raw knobs above -- see fluids::FluidMaterial's own
+    // THE MATERIAL LAYER, alongside the four raw knobs above -- see fluids::FluidPhysicsMaterial's own
     // comment (FluidVolume.hpp) for what density/viscosity mean physically (density real,
     // viscosity a CALIBRATED FIT onto `damping` above, not a fifth thing that reaches Jolt
     // directly -- correcting what this struct's own comment used to say, back when there was no
-    // such fit yet). `preset` names one of FluidMaterial's own presets (water/lightoil/honey/lava,
+    // such fit yet). `preset` names one of FluidPhysicsMaterial's own presets (water/lightoil/honey/lava,
     // case-insensitive) and wins over density/viscosity when non-empty; density/viscosity alone
     // build a hand-typed material. EMPTY PRESET AND BOTH density/viscosity <= 0 MEANS NO MATERIAL
     // -- the consumer, not this struct, decides what that becomes, the identical division of
     // responsibility the four -1 knobs above already have. A record naming BOTH a material (any of
     // the three fields below) and a non-default `damping` above is carried through exactly as
-    // written; the consumer is what refuses the conflict (fluids::fluidResolveMaterial, called from
+    // written; the consumer is what refuses the conflict (fluids::fluidResolvePhysicsMaterial, called from
     // fluids::FluidScene::spawn), not this struct and not the parser.
     std::string preset;
     f64 density   = -1.0;
     f64 viscosity = -1.0;
+
+    // THE SURFACE MATERIAL -- a THIRD thing this record calls "material", and the only one that
+    // decides how the water LOOKS. Names an .ocmat under Content/Materials, exactly as a PLACEG
+    // line's trailing material token does, and resolves through the same
+    // aver_scene_material -> surfaceMaterials_ path every other surface in a level uses.
+    //
+    // DO NOT CONFUSE IT WITH `preset` ABOVE, and the collision is why this comment is long.
+    // `preset`/`density`/`viscosity` are the SOLVER's material: two floats that become particle mass
+    // and Jolt damping (fluids::FluidPhysicsMaterial, renamed from FluidPhysicsMaterial precisely so these
+    // two ideas stop sharing a word). They carry no colour, no roughness, no IOR, no texture, and
+    // naming the preset "honey" has never made anything look like honey -- the appearance was a pair
+    // of compile-time C++ literals in the fluid shader that no level could reach.
+    //
+    // EMPTY MEANS NO AUTHORED MATERIAL, and the consumer decides what that becomes -- the identical
+    // division of responsibility every other optional field here already has. A water surface with
+    // no material draws with the engine's fallback look rather than refusing to draw.
+    std::string material;
 };
 
-struct OcWorldData {
+// A LEVEL'S WEATHER, split out of OcWorldData so it can be COPIED WHOLE.
+//
+// It is a base class rather than a member for one reason: every existing reader says `w.sunLux`,
+// and a member would have made this a rename across 81 sites for no gain. Inheriting keeps all of
+// them working while letting `env = w` slice off exactly these fields -- which is what runtime.game
+// does, and what removes a whole class of bug. GameLevel used to mirror twelve of these into its
+// own members one assignment at a time, so a field added to the format and not there was
+// authorable in the editor and silently ignored by the game. There is nothing to forget now.
+//
+// Values are plain numbers rather than an rhi::SkyAtmosphere because this module depends on Core
+// alone; the defaults below MIRROR that struct's, so a level that omits a token behaves exactly as
+// one written before the token existed.
+//
+// TWO CONVENTIONS LIVE HERE, on purpose:
+//
+//   * A NEGATIVE SENTINEL, for the six air parameters and the two that already used it. Every one
+//     is a strictly positive physical quantity, so -1 cannot collide with an authored value, and
+//     the writer omits an unset one entirely.
+//   * TOKEN PRESENCE, for everything else. parseOcworld assigns only the tokens it actually reads,
+//     so a token that is absent leaves the default standing -- which means no sentinel is needed
+//     and none is safe: fogHeight and the cloud layer bounds are world Z, fogStart is a distance,
+//     cloudWind is a direction and cloudsEnabled is a bool. Zero is an ordinary authored value for
+//     all of them, and a `>= 0` rule would have made each of them unsettable.
+struct OcWorldEnv {
+    bool hasSun = false;
+    // Points TOWARD the light, matching rhi::SkyAtmosphere::sunDirection.
+    f64 sunDir[3] = {-0.5481, 0.3838, 0.7431};
+    f64 sunColor[3] = {1.0, 0.98, 0.92};
+    f64 sunLux = 100000.0;
+    // Kelvin, and 0 means "use sunColor as authored" -- rhi::SkyAtmosphere spells it the same way,
+    // so this is that field's convention rather than a sentinel of this format's invention.
+    f64 sunTemperatureK = 0.0;
+    f64 sunAngularDeg = 0.545;             // the disk's angular diameter, and how fast a shadow softens
+
+    bool hasFog = false;
+    f64 fogDensity = 4e-6;                 // per cm
+    f64 fogColor[3] = {1.0, 1.0, 1.0};     // a tint on the in-scattered sky; white is clear air
+    f64 fogFalloff = 0.0;                  // how fast it thins going up; 0 is uniform distance fog
+    f64 fogHeight = 0.0;                   // world Z at which density is exactly fogDensity
+    f64 fogStart = 0.0;                    // distance in front of the camera before fog accumulates
+    f64 fogMaxOpacity = 1.0;               // so distance never fully erases the world
+
+    // SKY: which sky model, the authored dome, the ground it stands on, and the air above it.
+    bool hasSky = false;
+    bool skyPhysical = true;               // false selects the authored two-colour dome
+    // The authored dome. Read only when the model is Authored, but written either way: a level that
+    // switches back to Authored must find the colours it left there.
+    f64 skyZenith[3] = {0.24, 0.45, 0.85};
+    f64 skyHorizon[3] = {0.72, 0.83, 0.95};
+    f64 skyDomeExponent = 0.65;            // exponent on the horizon-to-zenith blend
+    // What the world below the horizon reflects back, and how much of it replaces the sky there.
+    f64 skyGroundAlbedo[3] = {0.24, 0.23, 0.21};
+    f64 skyGroundBlend = 1.0;
+    f64 skyLight = 1.0;                    // multiplier on the sky-hemisphere irradiance
+    // The air. Negative means "leave the engine's default alone" -- see the note above.
+    f64 skyMieScatter = -1.0;              // per km; raise for haze, dust or a coastal day
+    f64 skyMieExtinction = -1.0;
+    f64 skyMiePhaseG = -1.0;               // forward-scattering anisotropy
+    f64 skyRayleighKm = -1.0;              // Rayleigh scale height
+    f64 skyMieKm = -1.0;                   // Mie scale height
+    f64 skyPlanetKm = -1.0;
+    f64 skyAirDepthKm = -1.0;
+    f64 skyMultiScatter = -1.0;            // isotropic multiple-scattering gain
+    i32 skyViewSteps = 0;                  // samples along a sky ray
+    i32 skyAerialSteps = 0;                // samples along the air between camera and surface
+
+    // CLOUDS: its own record, so a level with none writes no line and reads exactly as it did
+    // before the record existed. hasClouds says the level SPOKE about clouds; cloudsEnabled says
+    // what it said. Collapsing the two would make "clouds off" indistinguishable from "no opinion",
+    // and an authored overcast level would come back clear the first time anyone saved it.
+    bool hasClouds = false;
+    bool cloudsEnabled = false;
+    f64 cloudCoverage = 0.45;              // 0 clear, 1 overcast
+    f64 cloudDensity = 1.0;
+    f64 cloudBottom = 150000.0;            // world Z of the layer's base and top
+    f64 cloudTop = 280000.0;
+    f64 cloudFeatureSize = 50000.0;        // the width of one noise feature, in world units
+    f64 cloudWind[2] = {900.0, 260.0};     // world units per second
+};
+
+struct OcWorldData : OcWorldEnv {
     int version = 1;
     u64 contentId = 0;                     // ID = FNV-1a-64(NAME)
     std::string name;
@@ -311,25 +429,6 @@ struct OcWorldData {
     u32 build = 0;
     u32 algo = 3;
 
-    bool hasSun = false;
-    // Points TOWARD the light, matching rhi::SkyAtmosphere::sunDirection.
-    f64 sunDir[3] = {-0.5481, 0.3838, 0.7431};
-    f64 sunColor[3] = {1.0, 0.98, 0.92};
-    f64 sunLux = 100000.0;
-
-    bool hasFog = false;
-    f64 fogDensity = 4e-6;                 // per cm
-    f64 fogColor[3] = {1.0, 1.0, 1.0};     // a tint on the in-scattered sky; white is clear air
-
-    // SKY: which sky model, and the few air parameters worth authoring per level. Kept as plain
-    // numbers rather than an rhi::AtmosphereProfile because this module depends on Core alone.
-    // A negative or zero override means "leave the engine's default alone".
-    bool hasSky = false;
-    bool skyPhysical = true;               // false selects the authored two-colour dome
-    f64 skyMieScatter = -1.0;              // per km; raise for haze, dust or a coastal day
-    f64 skyMultiScatter = -1.0;            // isotropic multiple-scattering gain
-    i32 skyViewSteps = 0;                  // samples along a sky ray
-    i32 skyAerialSteps = 0;                // samples along the air between camera and surface
 
     bool hasSpawn = false;
     f64 spawnX = 0, spawnY = 0, spawnZ = 0, spawnYaw = 0;

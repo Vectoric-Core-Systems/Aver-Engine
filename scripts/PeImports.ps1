@@ -79,8 +79,15 @@ function Get-PeImports {
 # pattern rather than listed. NOTE mfplat and mfreadwrite (Media Foundation) are present on desktop
 # SKUs but NOT on 'N' editions without the Media Feature Pack -- they are not ours to redistribute,
 # so they stay on this list, but that is a support note rather than a staging obligation.
+#
+# THE SCAN THIS WAS GROUNDED IN HAS SINCE GONE STALE ONCE, which is worth recording because the
+# failure is a hard one: staging ABORTS on an unlisted import rather than warning, so the payload
+# could not be produced at all. comctl32 and dbghelp are both Windows' own and both arrived with the
+# crash reporter -- comctl32 for its dialog, dbghelp for the minidump and stack walk that are the
+# whole point of it. Neither is ours to redistribute and neither was in the original scan.
 $AverOsProvidedDlls = @(
-    'advapi32.dll', 'avrt.dll', 'd3d11.dll', 'd3d12.dll', 'd3dcompiler_47.dll', 'dxgi.dll',
+    'advapi32.dll', 'avrt.dll', 'comctl32.dll', 'd3d11.dll', 'd3d12.dll', 'd3dcompiler_47.dll',
+    'dbghelp.dll', 'dxgi.dll',
     'gdi32.dll', 'imm32.dll', 'kernel32.dll', 'mfplat.dll', 'mfreadwrite.dll', 'mscoree.dll',
     'ole32.dll', 'oleaut32.dll', 'shell32.dll', 'shlwapi.dll', 'user32.dll', 'version.dll',
     'ws2_32.dll', 'ucrtbase.dll'

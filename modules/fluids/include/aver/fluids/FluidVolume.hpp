@@ -133,14 +133,22 @@ constexpr f32 kFluidDensityUnset = -1.0f;
 //   simulation than a pressurised soft-body shell can ever be, and a knob that pretended otherwise
 //   would be a worse answer than no knob at all.
 //
-// PRESETS RETURN THE SAME STRUCT AN AUTHOR FILLS BY HAND -- FluidMaterial::Water(), ::Honey(), and
+// PRESETS RETURN THE SAME STRUCT AN AUTHOR FILLS BY HAND -- FluidPhysicsMaterial::Water(), ::Honey(), and
 // so on are plain factory functions, not a second enum-keyed path through the spawn code. By the
-// time anything downstream of these (fluidResolveMaterial, FluidScene::spawn) sees a FluidMaterial,
+// time anything downstream of these (fluidResolvePhysicsMaterial, FluidScene::spawn) sees a FluidPhysicsMaterial,
 // it cannot tell whether the numbers came from a preset or were typed by hand, and nothing needs to.
-struct FluidMaterial {
+// RENAMED FROM FluidMaterial, and the rename is the point rather than tidying. A water surface can
+// now carry a SURFACE material as well -- an .ocmat naming its colour, roughness, textures and
+// volume absorption (OcWaterPlacement::material) -- and for a while this subsystem had three
+// different things called "material": this one, that one, and the `preset` token that selects this
+// one. THIS STRUCT IS THE SOLVER'S: two floats that become particle mass and Jolt damping. It
+// carries no appearance and never has. Naming the preset "honey" has never made anything look like
+// honey, because until the surface material existed the look was a pair of compile-time literals in
+// the fluid shader that no level could reach.
+struct FluidPhysicsMaterial {
     // Water's own real figure (design brief 5). Left as the struct default rather than
-    // kFluidDensityUnset's own -1 sentinel: FluidMaterial has no "not set" state of its own --
-    // unlike FluidVolumeDesc, which must stay silent about density until asked, a FluidMaterial only
+    // kFluidDensityUnset's own -1 sentinel: FluidPhysicsMaterial has no "not set" state of its own --
+    // unlike FluidVolumeDesc, which must stay silent about density until asked, a FluidPhysicsMaterial only
     // ever exists once an author (or a preset) has actually asked for one, via
     // FluidVolumeDesc::material below.
     f32 densityKgM3  = 998.0f;
@@ -153,16 +161,16 @@ struct FluidMaterial {
     // Real order-of-magnitude figures (design brief 5), each a single representative point rather
     // than a re-exposed range -- an author who wants a different point in a cited range still has
     // density=/viscosity= to type it directly; a preset is a starting point, not the only water.
-    static FluidMaterial Water()  { return FluidMaterial{998.0f, 1.0e-3f}; }
+    static FluidPhysicsMaterial Water()  { return FluidPhysicsMaterial{998.0f, 1.0e-3f}; }
     // ~900 kg/m^3, ~0.1 Pa*s (SAE-10 machine oil) -- the geometric midpoint of the water/honey
     // viscosity anchors below (sqrt(1e-3 * 10) ~= 0.1), so LightOil is also roughly the midpoint of
     // fluidDampingForViscosity's own calibrated range, not just of the two named liquids either side.
-    static FluidMaterial LightOil() { return FluidMaterial{900.0f, 0.1f}; }
+    static FluidPhysicsMaterial LightOil() { return FluidPhysicsMaterial{900.0f, 0.1f}; }
     // ~1420 kg/m^3; viscosity 10.0 Pa*s -- the TOP of the cited 2-10 Pa*s range, chosen deliberately
     // to equal fluidDampingForViscosity's own HIGH anchor (kViscosityAnchorHighPaS) rather than some
     // other point inside that range, so Honey() maps to exactly the calibrated ceiling
     // (damping=3.0), a measured point, instead of landing at an interpolated one.
-    static FluidMaterial Honey() { return FluidMaterial{1420.0f, 10.0f}; }
+    static FluidPhysicsMaterial Honey() { return FluidPhysicsMaterial{1420.0f, 10.0f}; }
     // ~2700-3100 kg/m^3 (basaltic lava), density figure taken near the middle of that range;
     // viscosity ~10^2-10^4 Pa*s, of which this picks 1000.0 as a representative point -- BUT SEE
     // fluidDampingForViscosity's OWN COMMENT: the calibration's reliable range tops out at the
@@ -170,7 +178,7 @@ struct FluidMaterial {
     // same damping. Lava is real density (heavier sag, genuinely) with a damping response that is
     // presently indistinguishable from Honey's -- a real, acknowledged gap, not something to paper
     // over with an extrapolated formula past where anything was ever measured.
-    static FluidMaterial Lava() { return FluidMaterial{2900.0f, 1000.0f}; }
+    static FluidPhysicsMaterial Lava() { return FluidPhysicsMaterial{2900.0f, 1000.0f}; }
 };
 
 // One fluid volume's authored placement, size, subdivision and solver tuning -- everything a level
@@ -219,18 +227,18 @@ struct FluidVolumeDesc {
 
     // THE MATERIAL LAYER: a SECOND, OPTIONAL input on top of densityKgM3 and damping above, not a
     // replacement for either. std::nullopt (the default) means exactly what an author who has never
-    // heard of FluidMaterial already gets: the raw knobs above, alone, untouched -- the identical
+    // heard of FluidPhysicsMaterial already gets: the raw knobs above, alone, untouched -- the identical
     // "unset changes nothing" contract kFluidDensityUnset and kFluidPressureAuto already hold for
-    // their own fields, just expressed as an optional rather than a sentinel because FluidMaterial is
+    // their own fields, just expressed as an optional rather than a sentinel because FluidPhysicsMaterial is
     // a struct, not a single number a magic value can hide inside.
     //
-    // RESOLVED EXACTLY ONCE, BY fluidResolveMaterial, CALLED FROM FluidScene::spawn AND NOWHERE ELSE
+    // RESOLVED EXACTLY ONCE, BY fluidResolvePhysicsMaterial, CALLED FROM FluidScene::spawn AND NOWHERE ELSE
     // -- see that function's own comment for why THAT call site, not this field, is where the
     // design brief's precedence rule (a material and a hand-set raw damping on the same desc is a
     // refusal, not a silent pick) is actually enforced. This field only carries what was asked for;
     // it does not adjudicate anything, the same division of labour OcWaterPlacement's own comment
     // already draws between a format struct and its consumer.
-    std::optional<FluidMaterial> material;
+    std::optional<FluidPhysicsMaterial> material;
 };
 
 // Particle count of the shell generateFluidSeedShell would build for `desc` -- the SAME
@@ -322,11 +330,11 @@ f32 fluidParticleMassKg(const FluidVolumeDesc& desc);
 f32 fluidPressureFor(const FluidVolumeDesc& desc, f32 gravityCmPerS2 = 980.0f);
 
 // ---------------------------------------------------------------------------------------------
-// THE MATERIAL LAYER -- see FluidMaterial's own comment above for the honest split this section
+// THE MATERIAL LAYER -- see FluidPhysicsMaterial's own comment above for the honest split this section
 // holds to (density real, viscosity a calibrated fit, some things refused outright).
 
 // The two anchor points fluidDampingForViscosity's log-log mapping is pinned to -- see that
-// function's own comment for the measured table these are read off, and FluidMaterial::Water()/
+// function's own comment for the measured table these are read off, and FluidPhysicsMaterial::Water()/
 // ::Honey() for why those two presets' own viscosityPaS equal these exact numbers rather than some
 // other point in a cited range: a preset that anchors the curve should MEASURE the calibrated
 // point, not approximate it.
@@ -381,7 +389,7 @@ constexpr f32 kDampingAnchorHigh = 3.0f;           // measured: the sweep's own 
 // it clamps, is this function's own choice, made from the table above.
 //
 // CLAMPS RATHER THAN EXTRAPOLATES past either anchor: a viscosity above kViscosityAnchorHighPaS
-// (lava's 10^2-10^4 Pa*s -- see FluidMaterial::Lava()'s own comment) returns the SAME damping as
+// (lava's 10^2-10^4 Pa*s -- see FluidPhysicsMaterial::Lava()'s own comment) returns the SAME damping as
 // the high anchor, not a larger number nothing measured. That undershoot is a real, acknowledged
 // gap this comment records rather than paper over with an invented formula reaching past kDampingAnchorHigh.
 //
@@ -392,11 +400,11 @@ constexpr f32 kDampingAnchorHigh = 3.0f;           // measured: the sweep's own 
 f32 fluidDampingForViscosity(f32 viscosityPaS);
 
 // Resolves a named preset (case-insensitive: "water", "lightoil"/"light oil"/"oil", "honey",
-// "lava") to the FluidMaterial it stands for -- see that struct's own static factories for the
+// "lava") to the FluidPhysicsMaterial it stands for -- see that struct's own static factories for the
 // actual numbers. Returns std::nullopt for anything else; the caller's job to warn by name, the
 // same tolerance GraphComponentTree.ApplyKind already gives an unrecognised component Kind rather
 // than silently falling back to some default material.
-std::optional<FluidMaterial> fluidMaterialPreset(std::string_view name);
+std::optional<FluidPhysicsMaterial> fluidPhysicsMaterialPreset(std::string_view name);
 
 // Applies desc.material onto desc itself: densityKgM3 becomes desc.densityKgM3 (feeding
 // fluidParticleMassKg/fluidPressureFor exactly as if an author had typed it by hand), and
@@ -418,7 +426,7 @@ std::optional<FluidMaterial> fluidMaterialPreset(std::string_view name);
 // probably meant. Checked against kDefaultFluidDamping rather than a separate "was this authored"
 // flag because FluidVolumeDesc carries none, the same sentinel-by-default-value convention
 // kFluidPressureAuto and kFluidDensityUnset both already use for their own fields.
-bool fluidResolveMaterial(FluidVolumeDesc& desc, std::string* outConflict = nullptr);
+bool fluidResolvePhysicsMaterial(FluidVolumeDesc& desc, std::string* outConflict = nullptr);
 
 // Builds a closed, subdivided-box triangle shell from `desc`, in LOCAL (object) space -- vertices run
 // from -halfExtentCm to +halfExtentCm about local (0,0,0), NOT about desc.centreCm. That split mirrors

@@ -13,6 +13,7 @@
 #include "aver/game/GameInput.hpp"
 #include "aver/platform/InputState.hpp"
 #include "aver/framework/framework_abi.h"
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 
 #include <string>
@@ -109,5 +110,5 @@ int main() {
 
     if (g_failures == 0) { AVER_INFO("InputBridgeTest: ALL PASS"); return 0; }
     AVER_ERROR("InputBridgeTest: {} failure(s)", g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

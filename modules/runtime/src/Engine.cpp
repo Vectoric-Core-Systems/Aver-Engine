@@ -169,6 +169,9 @@ void Engine::frameStep() {
     time_.dt = static_cast<f32>(dt);
     time_.total += time_.dt;
     time_.frame += 1;
+    // Handed to the RHI here, at the one place the clock advances, so every shader sees the same
+    // instant this frame shades. An animated material reads it from the engine's per-frame block.
+    device_->setFrameTime(time_.total, time_.dt);
 
     // A LOST DEVICE STOPS THE FRAME, and stops it HERE rather than three layers down.
     //

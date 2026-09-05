@@ -856,11 +856,17 @@ void AnimEditor::drawSockets() {
             }
 
             ImGui::SetNextItemWidth(w);
-            if (ImGui::SmallButton("Move to selected bone") && haveBone &&
-                k.bone != static_cast<u32>(selectedBone_)) {
+            // Gated like its sibling "Add on selected bone" above, which has always been
+            // BeginDisabled(!haveBone) with a reason. This one was enabled with no bone selected and
+            // silently did nothing when clicked.
+            ImGui::BeginDisabled(!haveBone);
+            if (ImGui::SmallButton("Move to selected bone") && k.bone != static_cast<u32>(selectedBone_)) {
                 k.bone = static_cast<u32>(selectedBone_);
                 dirty_ = true;
             }
+            ImGui::EndDisabled();
+            if (!haveBone && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("Select a bone in the skeleton list first.");
 
             // CENTIMETRES, and dragged rather than typed: placing a grip is done by watching the
             // marker in the preview, not by knowing the number. The number is still editable for the

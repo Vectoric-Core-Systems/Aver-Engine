@@ -514,6 +514,16 @@ public:
     // caller culling with it can produce a false "might be visible", never a false "definitely is
     // not". False when the backend has no bounds to give, which is the signal to skip culling for
     // that mesh rather than treat an all-zero sphere as a real, radius-zero point.
+    // The mesh's LOCAL-space axis-aligned extents, or false where the backend never measured them.
+    //
+    // The sphere below is the right shape for a frustum cull -- one centre, one radius, one dot
+    // product -- and the wrong one for containment. A sphere around a wide shallow pool bulges above
+    // its own surface, so "is the camera in the water" answered yes from the poolside. Callers that
+    // need to know whether a POINT is inside a volume, or where that volume's top actually is, want
+    // this instead.
+    virtual bool meshBoundsAabb(MeshHandle mesh, f32 outMin[3], f32 outMax[3]) const {
+        (void)mesh; (void)outMin; (void)outMax; return false;
+    }
     virtual bool meshBounds(MeshHandle mesh, f32 outCentre[3], f32* outRadius) const {
         (void)mesh; (void)outCentre; (void)outRadius; return false;
     }
@@ -535,6 +545,23 @@ public:
     // Sets the directional light and the ambient term.
     virtual void setLight(const f32 dirToLight[3], const f32 color[3], f32 ambient) { (void)dirToLight; (void)color; (void)ambient; }
     // Sets the sky, the sun and the air. Supersedes setLight for the sun.
+    // The engine's clock, forwarded into PerFrameCB::time so that ANY shader can animate.
+    //
+    // Separate from SkyAtmosphere::cloudTime, which is the cloud layer's own drift and is authored
+    // weather rather than a wall clock -- a level that pauses its sky must not thereby freeze every
+    // animated material in it. `seconds` is raw and monotonic; the backend does the wrapping the
+    // shader needs (see PerFrameCB::time for why it wraps at all).
+    // The water wave set both the surface shader and the caustics read -- see PerFrameCB::wave for
+    // why one array rather than a copy each. `waves` is up to 3 entries of
+    // {dirX, dirY, k (rad/cm), speed (rad/s)}; `count` 0 disables the surface entirely.
+    //
+    // A CALLER MAY GENERATE THESE HOWEVER IT LIKES -- authored WAVE records, a PCG pass, a gameplay
+    // system reacting to weather. The renderer neither knows nor cares where they came from, which
+    // is the point of putting the seam here.
+    virtual void setWaterWaves(const f32 (*waves)[4], u32 count, f32 amplitude) {
+        (void)waves; (void)count; (void)amplitude;
+    }
+    virtual void setFrameTime(f32 seconds, f32 deltaSeconds) { (void)seconds; (void)deltaSeconds; }
     virtual void setSkyAtmosphere(const SkyAtmosphere& s) { (void)s; }
     virtual SkyAtmosphere skyAtmosphere() const { return {}; }
     // Sets the camera post-processing chain.
@@ -652,9 +679,49 @@ public:
 
     // Renders subsequent meshes as wireframe until toggled off.
     virtual void setWireframe(bool on) { (void)on; }
+    // Draws the next mesh with NO LIGHTING -- flat gBaseColor, no sun, no ambient, no fog.
+    //
+    // IT TURNS ON A PATH THAT ALREADY EXISTED AND COULD NOT BE REACHED. plainShadeSurface has carried
+    // `if (gMaterial.z > 0.5) return float4(gBaseColor.rgb, gBaseColor.a);` since it was written
+    // (shared_prelude.hlsl, and its constant block documents the slot as "z=unlit(0/1)"), and every
+    // single call site that fills that constant hardcoded it to 0 -- so the branch was dead in the
+    // shader with nothing on either backend able to select it.
+    //
+    // A SETTER, NOT A WIDER drawMesh, matching setWireframe/setDrawBlended/setLineDepth beside it.
+    // Widening the call would drag IRenderFeature::submitDraw's signature and every feature with it,
+    // for a flag no feature ever sees: the editor's one caller draws in WIREFRAME, and wireframe is
+    // exactly the case where VoxiRenderer declines the pipeline, so the draw has already fallen
+    // through to the backend's own before this matters.
+    //
+    // STICKY, like setWireframe: nothing resets it per frame, so a caller brackets its own draw.
+    virtual void setUnlit(bool on) { (void)on; }
 
     // Line depth testing. Default true; false draws subsequent lines as an always-on-top overlay.
     virtual void setLineDepth(bool testDepth) { (void)testDepth; }
+
+    // How much scene radiance a line writes, as a multiple of the colour it was authored with.
+    // 1.0 is exactly the old behaviour: the line lands at the display colour the vertex named.
+    // Above 1.0 the line is BRIGHTER THAN WHITE in the pre-tonemap target, which is what makes the
+    // camera's own bloom pick it up -- lines already draw into the HDR scene target and bloom runs
+    // before the tonemap, so this needs no glow shader of its own, only headroom.
+    //
+    // WHY A MULTIPLIER AND NOT A BRIGHTER AUTHORED COLOUR. PSLine writes
+    // averInverseTonemap(srgbToLin(col)), and that curve is near-vertical at the top: it clamps at
+    // 1.0329, because its `2.43y - 2.51` denominator reaches zero there. Two of the six baked gizmo
+    // hues already sit at exactly 1.0 on a channel, where averInverseTonemap(srgbToLin(1.0)) is
+    // about 7.24 -- and at 1.4 it clamps and evaluates to about 1931. A 270x jump, with the other
+    // channels washing toward white on the way. Scaling AFTER the inverse tonemap has no ceiling
+    // and no hue shift: every channel moves by the same factor, so red stays red.
+    //
+    // STICKY, like setLineDepth above it, and drawLines writes the constant on EVERY call rather
+    // than only when it is non-default -- the value shares dword 16 of the per-object block with
+    // gBaseColor.x, so a line drawn after any mesh would otherwise inherit that mesh's red channel
+    // as its glow. Callers still bracket, so the sticky value is 1.0 outside a bracket.
+    //
+    // NOT EXPOSURE-STABLE, stated rather than fixed: PSLine never divides by gPostTone.x, so under
+    // auto-exposure the apparent strength drifts with scene brightness. That is pre-existing --
+    // the authored line colour has always had it -- and acceptable for a cosmetic effect.
+    virtual void setLineGlow(f32 gain) { (void)gain; }
 
     // Captures the backbuffer pixel at (x,y) during the next presented frame; poll getCapture().
     virtual void requestCapture(u32 x, u32 y) { (void)x; (void)y; }
@@ -692,6 +759,31 @@ public:
     // no depth buffer to give at all. 0 before the first swapchain resize has run, exactly like every
     // other size-dependent target this interface exposes.
     virtual TextureHandle sceneDepthTexture() { return 0; }
+
+    // THE OPAQUE SCENE, COPIED, SO A TRANSLUCENT SURFACE CAN READ WHAT IS BEHIND IT.
+    //
+    // WHY THIS HAS TO EXIST. Hardware alpha blending attenuates the destination by ONE scalar
+    // (1 - src.a), which cannot differ per channel. Volume absorption is Beer-Lambert and is
+    // per-channel by definition -- glass is green because iron passes green and eats red, and the
+    // effect grows with path length. So a blended surface can be made to go DARKER with depth by
+    // raising its alpha, but it can never TINT what is behind it. That is the whole reason glass in
+    // this engine could not show the green edge that real glass shows.
+    //
+    // The way out is to hand the shader the background as a texture, so it does the composite itself
+    // instead of leaving it to one blend factor. This returns a copy of the scene colour taken just
+    // BEFORE the blended draws replay -- the same trick the AverSR path already uses to give the
+    // upscaler a TextureHandle for a raw render target.
+    //
+    // ONE COPY, TAKEN ONCE. A second translucent layer therefore samples a background that does not
+    // include the first: glass over water reads the water's own backdrop, not the water. That is the
+    // standard trade (UE's distortion pass makes it too) and it is the price of this approach over
+    // per-channel destination blending, which D3D12 cannot offer here because the blended pass binds
+    // four render targets when the G-buffer is on and dual-source blending requires exactly one.
+    //
+    // 0 when unavailable, and the shader must fall back to the scalar composite when it is: before
+    // the first resize, on a backend that has not implemented it, and under MSAA, where the scene
+    // target is multisampled and a plain CopyResource into a single-sample texture is invalid.
+    virtual TextureHandle sceneColorBackdropTexture() { return 0; }
 
     // ---------------------------------------------------------------------------------------
     // G-buffer: velocity, view-space depth, and world normal+roughness, written ALONGSIDE the

@@ -26,6 +26,16 @@ target_compile_definitions(OcGraphTest PRIVATE
 set_target_properties(OcGraphTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# OcInputTest -- the .ocinput input-binding-scheme format, and the OcProject INPUT.SCHEME key that
+# names one (see modules/formats/include/aver/formats/OcInput.hpp for the grammar and
+# modules/formats/include/aver/formats/OcProject.hpp for the new key). The OcProject assertions live
+# in this same executable rather than a separate one: the point of INPUT.SCHEME is the pairing of the
+# two formats, and neither Aver.Formats target dependency changes by testing them together.
+add_executable(OcInputTest src/OcInputTest.cpp)
+target_link_libraries(OcInputTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(OcInputTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # OcParticleTest -- the .ocparticle format (particles DECIDED 3). Round-tripping, unknown-record and
 # comment preservation, strict malformed-input rejection, and a real on-disk malformed file. Guarded
 # on the TARGET rather than on AVER_MODULE_PARTICLES for MaterialTest's exact reason below: an
@@ -160,6 +170,14 @@ set_target_properties(ConvertTool PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BI
 if(TARGET Aver.Trifactor)
   target_link_libraries(ConvertTool PRIVATE Aver.Trifactor)
 endif()
+# Cooking the imported glTF's materials is optional for the same reason clustering is, and guarded
+# the same way: `if(TARGET ...)`, not `if(AVER_MODULE_PBR)`, so ConvertTool still builds and still
+# imports geometry in a tree where PBR is off. With the target absent, the tool says materials were
+# skipped rather than leaving the user to wonder where they went.
+if(TARGET Aver.Formats.Material)
+  target_link_libraries(ConvertTool PRIVATE Aver.Formats.Material)
+  target_compile_definitions(ConvertTool PRIVATE AVER_HAVE_MATERIAL_COOK=1)
+endif()
 
 # MakeRig -- writes content/dev/Rig.gltf, the tree's ONLY skinned asset source. Registered here for
 # ConvertTool's reason rather than because it is a test: this is where Aver.Formats is already linked.
@@ -270,6 +288,18 @@ if(TARGET Aver.Formats.Material)
   # stb_image_write, for the packed metalRough PNG. A SECOND STB_IMAGE_WRITE_IMPLEMENTATION relative
   # to MakeFoliage is fine: they are separate executables, so there is no duplicate symbol to collide.
   target_include_directories(AverAssetC PRIVATE ${CMAKE_SOURCE_DIR}/third_party/stb)
+  # Emitting the material's own .ocgraph needs the graph->HLSL compiler on top, so that the tool can
+  # PROVE the graph it just wrote shades before pointing the .ocmat at it. Nested inside the material
+  # guard because a graph is only ever written beside a .ocmat.
+  #
+  # LINKING THE COMPILER COSTS NO DEVICE AND NO BACKEND -- MaterialGraphTest above links this exact
+  # set and creates neither (see its own comment); compileMaterialGraph is a pure function from an
+  # OcGraphData to HLSL text. Aver.RHI comes along because Aver.Render.PBR.Materials declares it
+  # PUBLIC, not because anything here calls it.
+  if(TARGET Aver.Render.PBR.Materials)
+    target_link_libraries(AverAssetC PRIVATE Aver.Render.PBR.Materials)
+    target_compile_definitions(AverAssetC PRIVATE AVER_HAVE_MATERIAL_GRAPH=1)
+  endif()
 endif()
 
 # AverAssetCTest -- the JSON contract Aver Exchange in the LAUNCHER parses.
@@ -287,3 +317,11 @@ target_compile_definitions(AverAssetCTest PRIVATE
   AVER_ASSETC_EXE="$<TARGET_FILE:AverAssetC>"
   AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
 set_target_properties(AverAssetCTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# OcRigTest -- the .ocrig control-rig format. Text like .ocgraph and for the same reason (a rig is
+# four lines a person writes), so the checks are the ones text formats need: parse, round-trip
+# through both memory and disk, byte-stable rewrite, and a refusal with a reason for each malformed
+# shape.
+add_executable(OcRigTest src/OcRigTest.cpp)
+target_link_libraries(OcRigTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(OcRigTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

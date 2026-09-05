@@ -59,6 +59,26 @@ dxcompiler.dll
 dxil.dll
 nethost.dll
 
+# THE HLSL ITSELF, which shipped nowhere until this line existed.
+#
+# This is the other half of dxcompiler.dll above, and the payload had one without the other. The
+# engine's shaders are not compiled into the executable: rhi::shaderFile() reads them from
+# <executableDir>\shaders at pipeline-build time (modules/rhi/src/ShaderFiles.cpp), and
+# shared_prelude.hlsl, material_prelude.hlsl, voxi.hlsl, post.hlsl and color.hlsli have all lived
+# there as real files for some time. A staged payload therefore shipped the HLSL COMPILER and no
+# HLSL.
+#
+# WHY NOBODY NOTICED: a missing shader file is deliberately non-fatal. shaderFile() logs, caches an
+# empty string and returns it, so the failure surfaces later as DXC complaining about missing
+# declarations -- a compile error for a file-not-found cause, which reads like a shader bug rather
+# than a packaging one.
+#
+# Recursive, and deliberately not a list of names: every module that calls aver_deploy_shaders
+# copies into this one flat directory, so naming files individually would silently drop the next
+# module's shader the day it is added. A pattern matching nothing is an error here (see the header),
+# which is exactly the assertion this entry wants.
+shaders/**
+
 # Fonts the editor loads by name from executableDir(). Roboto, Apache-2.0 -- the notice is required.
 Roboto-Regular.ttf
 Roboto-Medium.ttf

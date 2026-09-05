@@ -111,6 +111,12 @@ public:
     bool layeredBsdfActive() const { return layeredBsdf_; }
 
     // Turns on the frame-period report. See rtShadowRays_ for what it is for and what it is not.
+    // MEASUREMENT ONLY -- see AVER_RD_ABLATE's own block in voxi.hlsl for what each value removes and
+    // why a timestamp cannot answer this question. Must be set BEFORE init(), because it becomes a
+    // shader define and the pipelines are compiled once there. Any non-zero value renders a
+    // deliberately WRONG frame; it exists to be timed, never to be shipped or wired to a quality tier.
+    void setRayDrivenAblation(u32 mode) { rdAblate_ = mode; }
+
     void setFrameTimeReport(bool on) { frameTimeReport_ = on; }
 
     // The largest ray count accepted. Not a hardware limit: there is a recorded TDR history on this
@@ -131,9 +137,12 @@ public:
     // submit, the cluster path, the packaged game -- keeps its exact behaviour without being touched.
     // Only submitDraw's blended branch passes true. See Draw::translucent for what the flag costs a
     // draw and what it buys it.
+    // `hiddenFromOwner` DEFAULTS FALSE for the same reason `translucent` does: every existing
+    // caller keeps its exact behaviour untouched. Only the editor's owner-hide branch passes true.
     void submit(rhi::MeshHandle mesh, const f32 world[16], const f32 baseColor[4],
                 f32 metallic, f32 roughness, rhi::BindingSetHandle drawBinding,
-                const void* drawConstants, u32 drawConstantBytes, bool translucent = false);
+                const void* drawConstants, u32 drawConstantBytes, bool translucent = false,
+                bool hiddenFromOwner = false);
     // `blended` is the one thing this override has to look at that submit() itself never sees, and
     // it has to look at it BEFORE anything reaches draws_/drawsPrev_, not after -- everything
     // downstream of that list treats membership in it as "this is opaque scene geometry": voxelizePass
@@ -185,6 +194,7 @@ public:
     rhi::PipelineHandle depthPrepassPipeline() const override;
 
     // True while the debug view replaces the scene, including the backend's line draws.
+    rhi::BindlessTableHandle sceneBindlessTable() const override;
     bool suppressesScene() const override;
     // ONLY the debug raymarch owns the whole frame. Ray-driven mode replaces how the first
     // surface is found and nothing else -- the sky, the gizmos and the particles in that frame are
@@ -419,6 +429,12 @@ private:
     // is a project-level decision; changing it takes a project reload. See voxi::Settings.
     bool layeredBsdf_ = false;
     bool layeredBsdfLatched_ = false;
+    // ONCE PER PROCESS, not once per frame. The mismatch this reports is a STANDING condition -- the
+    // setting really does disagree with the compiled shaders for the rest of the session -- so the
+    // warning it drives fired on EVERY applySettings call. Measured in an ordinary bounded run: ~30
+    // copies of the same line, which is not a louder warning, it is a log nobody can read. Same
+    // idiom as drawCapReported_ a few members down, for the same reason.
+    bool layeredBsdfWarned_ = false;
     // Settings::ptBounces. Spent only while pathTracingWanted() -- see where cb_.ptBounceParams
     // is filled, which is the one place that decision is made.
     u32 ptBounces_ = 1;
@@ -444,6 +460,9 @@ private:
     // It exists because "the cost is linear in the ray count" was an assertion with no instrument
     // behind it. Changing exactly one thing and re-reading the same number is a measurement; a
     // profiler capture that cannot be checked into the repository is not.
+    // The backdrop handle currently bound at t10, so a re-bind only happens when it moves.
+    rhi::TextureHandle boundBackdrop_ = 0;
+    u32  rdAblate_ = 0;            // --rd-ablate: AVER_RD_ABLATE for PSRayDriven, 0 = normal
     bool frameTimeReport_ = false;
     u64  frameTimeLastNs_ = 0;          // steady_clock, nanoseconds; 0 = no previous frame
     u32  frameTimeSeen_ = 0;            // frames sampled, including the discarded warm-up
@@ -584,6 +603,10 @@ private:
     // The TEXTURED ray-driven pipeline. Separate from rayDrivenPso_ because the bindless range is
     // part of the root signature: preferred when it exists, and rayDrivenPso_ is the fallback.
     rhi::PipelineHandle rayDrivenTexPso_ = 0;
+    // The TEXTURED blended (glass) variant: PSMainVoxi compiled with the bindless table declared,
+    // so a reflection seen IN a windowpane samples the reflected surface's texture. Preferred over
+    // sceneRtBlendedPso_ whenever it built and the G-buffer is off.
+    rhi::PipelineHandle sceneRtBlendedTexPso_ = 0;
 
     rhi::BindlessTableHandle rtTexTable_ = 0;
     std::unordered_map<rhi::TextureHandle, u32> rtTexIndex_;
@@ -696,6 +719,24 @@ private:
     // comment. This tracker is the ready-to-connect other half; wiring it is the next build's job,
     // gated on that coordinated ABI change landing in VoxiShaders.hpp.
     //
+    // OFF UNTIL SOMETHING READS IT, and this is the switch the comment above means by "wiring it is
+    // the next build's job". Every map operation below runs once per draw per frame to produce
+    // rtInstancePrevWorld_, which -- as that comment states plainly -- is never bound to a
+    // descriptor. A repo-wide grep agrees: the only read of the vector is `.size()` in the one-time
+    // memory log. So the whole tracker is, today, work whose sole output is discarded.
+    //
+    // A CONSTANT RATHER THAN A DELETION, deliberately. This is not dead code that nobody meant; it is
+    // a carefully reasoned half of a feature whose other half needs a coordinated RtInstance ABI
+    // change that another agent owns. Deleting it would throw away the population gate, the ordinal
+    // scheme and the two-map swap, all of which are correct and all of which would have to be
+    // rediscovered. Flipping this to true is step one of finishing the job; until then the compiler
+    // removes the cost entirely.
+    //
+    // MEASURE BEFORE BELIEVING IT MATTERS: on PTTest (20 entities) the frame is GPU-bound with the
+    // CPU scene walk at 0.0 ms, so this buys nothing there. It is a per-draw cost, so what it is
+    // worth scales with the draw count, not with this scene.
+    static constexpr bool kTrackPrevTransforms = false;
+
     // Groups by (mesh, drawBinding). FNV-1a, matching giDrawsKey()/buildGeometryTable's own mixing
     // constants so a reader who already knows those two recognises the recipe rather than learning a
     // third one.
@@ -764,6 +805,19 @@ private:
         // drawsPrev_ and a parallel list would mean four walk sites each needing to remember to visit
         // it. One flag tested in one place per pass cannot be forgotten by a fifth pass added later.
         bool translucent = false;
+
+        // HIDDEN FROM ITS OWNER: in everything, out of the ray-driven primary ray alone.
+        //
+        // The peer of `translucent` above and the exact complement of it: that flag keeps a draw in
+        // the TLAS and out of the depth-only passes; this one keeps a draw in every pass it already
+        // reached -- shadow cascade, GI voxelisation, reflections, bounce rays -- and removes it
+        // from ONE traversal, the primary visibility ray, because that ray begins inside this
+        // mesh. See AVER_RT_MASK_OWNER_HIDDEN in voxi.hlsl for why the fix belongs in the instance
+        // mask rather than in whether the instance exists.
+        //
+        // A FLAG ON THE DRAW, for the reason `translucent` gives directly above: the alternative is
+        // a parallel list every pass has to remember to visit.
+        bool hiddenFromOwner = false;
     };
     std::vector<Draw> draws_, drawsPrev_;
 
@@ -850,6 +904,30 @@ private:
         // The reprojected NDC lands in THIS rect, not at [0,1] of the whole history texture: the
         // editor docks the 3D view in a sub-rect of the backbuffer, same as prevViewProj above.
         f32 sceneViewport[4] = {};
+        // THIS frame's scene viewport rect, in the same (x, y, w, h) target pixels.
+        //
+        // A SECOND COPY IS NOT REDUNDANT: sceneViewport above is the PREVIOUS frame's, because every
+        // reader of it pairs it with prevViewProj to reproject into last frame's history. A reader
+        // that projects with THIS frame's gViewProj -- refraction does -- needs this frame's rect,
+        // and reusing the previous one silently mismatches for a frame after any viewport change.
+        f32 sceneViewportCur[4] = {};
+        // THE MEDIUM THE CAMERA IS CURRENTLY INSIDE. x = 1 when the eye is within a blended,
+        // single-sided volume; y = that material's ior; z, w spare.
+        //
+        // Needed because a closed volume seen FROM WITHIN has no front faces at all -- every face
+        // points away from the eye -- so the back-face discard that keeps a water box from
+        // compositing four coats of alpha also deletes the surface entirely once you swim under it.
+        // The shader inverts that discard rather than switching it off; see PSMainVoxi.
+        f32 cameraMedium[4] = {};
+        // THE WATER VOLUME THAT CASTS CAUSTICS, in world centimetres: min.xyz and max.xyz of its
+        // axis-aligned box, with min.w = 1 when there is one at all and max.w its strength.
+        //
+        // The volume's TOP (max.z) is the surface light refracts through, and everything inside the
+        // footprint and below that height is lit through it. Published from the renderer rather than
+        // read from the fluids module because Voxi renders and plugins do not: what arrives here is
+        // a box, and nothing about this says "water".
+        f32 causticMin[4] = {};
+        f32 causticMax[4] = {};
         // The GI-only shadow map's light view-projection, fitted to the GI volume rather than the
         // camera -- see fitGiShadow(). Read only by PSVoxel through giShadowFactor(); PSMainVoxi
         // keeps using cascadeViewProj/shadowFactor above for the camera cascades.
@@ -875,12 +953,19 @@ private:
     } cb_;
 
     // THE MIRROR THIS FILE HAS ALWAYS HAD AND NEVER GUARDED. `cbuffer VoxiFrame : register(b4)` in
-    // VoxiShaders.hpp repeats every field above by hand, and nothing checked that the two agreed --
-    // the same unguarded-mirror bug already fixed for PathTracer's FrameCB and PcgVolume's VolumeCB.
-    // VoxiFrame was simply the one that never got the assert. Appending here without appending there
-    // reads garbage off the end of the block in every Voxi shader at once.
-    static_assert(sizeof(FrameConstants) == 624,
-                  "cbuffer VoxiFrame in VoxiShaders.hpp mirrors this byte for byte");
+    // modules/render.voxi/shaders/voxi.hlsl repeats every field above by hand, and nothing checked
+    // that the two agreed -- the same unguarded-mirror bug already fixed for PathTracer's FrameCB
+    // and PcgVolume's VolumeCB. VoxiFrame was simply the one that never got the assert. Appending
+    // here without appending there reads garbage off the end of the block in every Voxi shader at
+    // once, and INSERTING in the middle -- which is what adding sceneViewportCur beside its
+    // previous-frame twin does -- shifts every field after it instead, which is worse: it is silent
+    // and it is wrong everywhere rather than at the end.
+    //
+    // The file this used to name, VoxiShaders.hpp, no longer exists: the HLSL moved out of C++
+    // string literals into shaders/ and the message was never updated. It sent me to a deleted file
+    // when this assert did its job. Naming the real one now.
+    static_assert(sizeof(FrameConstants) == 688,
+                  "cbuffer VoxiFrame in modules/render.voxi/shaders/voxi.hlsl mirrors this byte for byte");
     static_assert(sizeof(FrameConstants) % 16 == 0, "must be a legal constant-buffer size");
 
     // ---- the GI rebuild gate: skip a revoxelisation whose result would be bit-identical ----
@@ -960,6 +1045,42 @@ private:
     u64  giCacheBufBytes_ = 0;
     u32  giCacheDumpCountdown_ = 0;   // 0 = nothing pending
     fmt::GiCacheKey giCachePendingKey_{};
+
+    // ---- the write-behind buffer -------------------------------------------------------------
+    //
+    // BAKES LAND IN RAM AND GO TO DISK IN BATCHES. Every completed bake used to be an ~18 MiB file
+    // write on the frame it finished, and an author nudging the sun produces a bake per nudge --
+    // so a minute of lighting work was tens of writes and a directory that had to be swept after
+    // each one. The volumes now accumulate here and reach the filesystem when the budget is
+    // exceeded or the editor shuts down.
+    //
+    // SAFE BECAUSE OF WHAT THIS CACHE IS, not because the window is small. GiCache.hpp states the
+    // contract plainly: "nothing here is authored and nothing here is precious: the whole directory
+    // can be deleted at any time and the only cost is one rebuild." Losing the buffer to a crash
+    // costs exactly one revoxelisation, which is the same thing a cold cache costs.
+    std::vector<fmt::GiCacheEntry> giCachePendingEntries_;
+    u64 giCachePendingBytes_ = 0;
+    // Default 256 MiB: about fourteen entries at the ~18 MiB a 128^3 volume takes, comfortably more
+    // than a lighting session produces, and small enough to be unremarkable next to the volume
+    // textures themselves. Editor Preferences > Derived Data Cache moves it.
+    u64 giCacheRamBudget_ = 256ull * 1024ull * 1024ull;
+    // Latched so the "this volume is bigger than the whole budget" warning is said once rather than
+    // once per bake. Never cleared: raising the budget mid-session does not make the earlier
+    // explanation wrong, and a second copy of it would only be noise.
+    bool giCacheOversizeWarned_ = false;
+
+public:
+    // The write-behind budget, in bytes. Lowering it below what is already buffered flushes
+    // immediately rather than leaving the buffer over its own limit until the next bake.
+    void setGiCacheRamBudget(u64 bytes);
+    u64  giCacheRamBudget() const { return giCacheRamBudget_; }
+    // What is buffered but not yet written -- for the preferences page to show.
+    u64  giCachePendingBytes() const { return giCachePendingBytes_; }
+    u32  giCachePendingCount() const { return static_cast<u32>(giCachePendingEntries_.size()); }
+    // Writes every buffered entry, sweeps the directory once, and empties the buffer. Returns how
+    // many files were written. Safe to call with nothing pending.
+    u32  giCacheFlush();
+private:
     // Per-mip byte offsets inside the readback buffer, in the BACKEND's footprint layout.
     std::vector<u64> giCacheMipOffsets_;
     bool giCacheUnsupported_ = false;   // textureCopyFootprint said no; stop asking

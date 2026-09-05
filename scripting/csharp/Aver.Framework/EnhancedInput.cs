@@ -1,15 +1,35 @@
 // Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems. All rights reserved.
 // Proprietary. See LICENSE.md at the repository root.
-// Action-mapped input: named actions, stacked mapping contexts, and the per-frame router.
+// Action-mapped input: named actions, stacked mapping contexts, and the layer that binds them onto
+// the native action ABI.
+//
+// WHY THE IMPLEMENTATION MOVED DOWN A LAYER. Until now, everything in this file -- InputAction's
+// accumulated value, InputMappingContext's priority-stacked consumption, the 0.15 dead zone -- was
+// pure C#, computed by an internal Update() this class alone drove. It was complete, documented,
+// and had ZERO CONSUMERS: a graph node has no way to call a C# static method, and neither does a C++
+// system, so nothing outside a hand-written script could ever ask "is Jump held" without itself
+// being C#. A well-designed layer nobody but its own author can reach is a liability (someone
+// maintains it) without being an asset (nothing uses it) -- the exact framing the ABI's own header
+// comment uses for this section (framework_abi.h's NAMED ACTIONS section, minor 5).
+//
+// The fix ported the ALGORITHM verbatim onto aver_fw_action_* (FrameworkAbi.cpp) -- same dead zone,
+// same scale/component accumulation, same strictly-higher-priority key consumption -- and this file
+// is now a THIN WRAPPER over that: every field this file used to own (Raw, Prev, the consumed-key
+// set, the per-frame Update() that recomputed them) is gone, not moved, because the native side
+// recomputes held/pressed/released/value2 ON DEMAND straight from InputState's cur/prev, the same
+// bytes aver_fw_input_key already reads. There is nothing left in C# to roll once a frame -- see
+// HostBridge.cs's DispTickAll for where that call used to sit and why it was deleted outright rather
+// than kept as a no-op.
 
-using System;
 using System.Collections.Generic;
 using Aver.Scene;
 
 namespace Aver.Framework;
 
-/// <summary>What shape of value an <see cref="InputAction"/> carries.</summary>
+/// <summary>What shape of value an <see cref="InputAction"/> carries. Values are pinned to the
+/// framework's AVER_FW_ACTION_* enum (framework_abi.h) -- cast directly to int when calling
+/// aver_fw_action_register, never through a lookup table.</summary>
 public enum InputValueType
 {
     /// <summary>On or off — a button.</summary>
@@ -20,7 +40,8 @@ public enum InputValueType
     Axis2D,
 }
 
-/// <summary>Where one binding reads from.</summary>
+/// <summary>Where one binding reads from. Values are pinned to the framework's AVER_FW_ACTION_SRC_*
+/// enum (framework_abi.h) for the identical reason <see cref="InputValueType"/>'s are.</summary>
 public enum InputSource
 {
     /// <summary>A key or mouse button, held = 1.</summary>
@@ -33,52 +54,105 @@ public enum InputSource
     MouseWheel,
 }
 
-/// <summary>A named thing the player can do — "Jump", "Fire", "Move" — independent of any key.</summary>
+/// <summary>A named thing the player can do — "Jump", "Fire", "Move" — independent of any key. A THIN
+/// WRAPPER over a native aver_fw_action_* handle; see this file's own top-of-file comment for why the
+/// value it reads is no longer stored here at all.</summary>
 public sealed class InputAction
 {
-    /// <summary>Display name, used in logs and by the mapping context.</summary>
+    /// <summary>Display name, used in logs and as the native registry key.</summary>
     public string Name { get; }
 
     /// <summary>The shape of this action's value.</summary>
     public InputValueType ValueType { get; }
 
-    // This frame's value and the previous frame's, refreshed by EnhancedInput.Update.
-    internal Vec3 Raw, Prev;
+    /// <summary>The native handle from aver_fw_action_register. Internal: EnhancedInput.Rebind() is
+    /// the only other reader, when it re-issues every binding after a context stack change.</summary>
+    internal readonly int Handle;
 
-    private InputAction(string name, InputValueType type) { Name = name; ValueType = type; }
+    // aver_fw_action_register is IDEMPOTENT BY NAME (framework_abi.h:412) -- the same reason
+    // aver_fw_class_declare is idempotent: an actor's OnBeginPlay runs every time it (re)spawns, and
+    // re-declaring "Jump" on every possession must hand back the ORIGINAL action, never multiply it.
+    // Caching HERE, by handle, extends that guarantee to the MANAGED wrapper too: two call sites that
+    // each write InputAction.Digital("Jump") now get the SAME InputAction object, not two independent
+    // ones that happen to share a display string. That is a real behaviour change from the old
+    // pure-C# version, where only a SHARED STATIC FIELD made two call sites the same action -- but it
+    // is the correct behaviour change, not an accidental one: it is exactly the property that makes
+    // idempotent registration useful for the OnBeginPlay case in the first place, and the doc's own
+    // "declare each once, usually as a static readonly field" guidance still works unchanged for a
+    // script that follows it.
+    private static readonly Dictionary<int, InputAction> s_byHandle = new();
+
+    private InputAction(string name, InputValueType type, int handle)
+    { Name = name; ValueType = type; Handle = handle; }
 
     /// <summary>Declares a button action.</summary>
-    public static InputAction Digital(string name) => Register(new InputAction(name, InputValueType.Digital));
+    public static InputAction Digital(string name) => Of(name, InputValueType.Digital);
     /// <summary>Declares a single-axis action.</summary>
-    public static InputAction Axis1D(string name) => Register(new InputAction(name, InputValueType.Axis1D));
+    public static InputAction Axis1D(string name) => Of(name, InputValueType.Axis1D);
     /// <summary>Declares a two-axis action, read through <see cref="Value2D"/>.</summary>
-    public static InputAction Axis2D(string name) => Register(new InputAction(name, InputValueType.Axis2D));
+    public static InputAction Axis2D(string name) => Of(name, InputValueType.Axis2D);
 
-    /// <summary>Registers an action with the router and returns it.</summary>
-    private static InputAction Register(InputAction a) { EnhancedInput.Track(a); return a; }
+    private static InputAction Of(string name, InputValueType type)
+    {
+        int handle = Fw.aver_fw_action_register(name, (int)type);
+        // handle == 0 means a null/empty name or an invalid valueType (framework_abi.h's own
+        // comment) -- do not cache under 0, or every failed registration would collapse into one
+        // shared "invalid" object that silently answers for all of them.
+        if (handle != 0 && s_byHandle.TryGetValue(handle, out InputAction? existing)) return existing;
+        var a = new InputAction(name, type, handle);
+        if (handle != 0) s_byHandle[handle] = a;
+        return a;
+    }
 
-    /// <summary>The raw value: X for a 1D axis, X and Y for 2D, X = 0 or 1 for a button.</summary>
-    public Vec3 Value2D => Raw;
+    /// <summary>Looks up a previously registered action by name, or null if none exists. Only ever
+    /// returns an action THIS C# runtime itself created via Digital/Axis1D/Axis2D: the ABI has no
+    /// getter for a handle's declared valueType (aver_fw_action_find returns the handle alone), so a
+    /// handle registered from elsewhere -- a graph node, a future C++ caller -- has no way to become a
+    /// strongly-typed InputAction here without this runtime already knowing what shape to build.</summary>
+    public static InputAction? Find(string name)
+    {
+        int handle = Fw.aver_fw_action_find(name);
+        return handle != 0 && s_byHandle.TryGetValue(handle, out InputAction? existing) ? existing : null;
+    }
+
+    [ThreadStatic] private static float[]? s_value2Buf;
+    private static float[] Value2Buf => s_value2Buf ??= new float[2];
+
+    /// <summary>The current accumulated value: X for a 1D axis, X and Y for 2D, X = 0 or 1 for a
+    /// button. Z is always 0 now -- aver_fw_action_value2 only carries two channels across the ABI
+    /// (framework_abi.h's own comment: "without the Z channel this ABI has no consumer for"), and
+    /// none of this file's own binding methods below ever targeted component 2 either, so nothing
+    /// that used to read a nonzero Z through this property existed to begin with.</summary>
+    public Vec3 Value2D
+    {
+        get
+        {
+            float[] v = Value2Buf;
+            Fw.aver_fw_action_value2(Handle, v);
+            return new Vec3(v[0], v[1], 0f);
+        }
+    }
 
     /// <summary>The single-axis value.</summary>
-    public float Value1D => Raw.X;
+    public float Value1D => Value2D.X;
 
-    /// <summary>True while the action is active.</summary>
-    public bool IsHeld => Active(Raw);
+    /// <summary>True while the action is active (any channel's magnitude exceeds the 0.15 dead zone,
+    /// pinned on the native side -- not a parameter here either, for the same reason it is not one
+    /// there: a caller who needs a different threshold wants a different feature).</summary>
+    public bool IsHeld => Fw.aver_fw_action_held(Handle) != 0;
 
     /// <summary>True on the frame the action became active.</summary>
-    public bool WasPressed => Active(Raw) && !Active(Prev);
+    public bool WasPressed => Fw.aver_fw_action_pressed(Handle) != 0;
 
     /// <summary>True on the frame the action stopped being active.</summary>
-    public bool WasReleased => !Active(Raw) && Active(Prev);
-
-    /// <summary>True when any component is outside the dead zone.</summary>
-    private static bool Active(Vec3 v) => MathF.Abs(v.X) > 0.15f || MathF.Abs(v.Y) > 0.15f || MathF.Abs(v.Z) > 0.15f;
+    public bool WasReleased => Fw.aver_fw_action_released(Handle) != 0;
 
     public override string ToString() => $"{Name} ({ValueType})";
 }
 
-/// <summary>One key-to-action mapping inside a context.</summary>
+/// <summary>One key-to-action mapping inside a context. Pure bookkeeping -- this struct never crosses
+/// the ABI itself; EnhancedInput.Rebind() unpacks it into aver_fw_action_bind calls, adding the
+/// owning context's priority at that point.</summary>
 internal readonly struct InputBinding
 {
     public readonly InputAction Action;
@@ -92,7 +166,10 @@ internal readonly struct InputBinding
     { Action = action; Source = source; Key = key; Scale = scale; Component = component; }
 }
 
-/// <summary>A set of key-to-action mappings pushed and popped as a whole. Derive it and bind in the constructor.</summary>
+/// <summary>A set of key-to-action mappings pushed and popped as a whole. Derive it and bind in the
+/// constructor. Unchanged by the move to a native action ABI: this class never touched Raw/Prev
+/// itself, it only ever recorded intent, and EnhancedInput now replays that intent onto
+/// aver_fw_action_bind instead of onto its own in-process evaluator.</summary>
 public abstract class InputMappingContext
 {
     internal readonly List<InputBinding> Bindings = new();
@@ -118,7 +195,10 @@ public abstract class InputMappingContext
         BindAxis1D(action, right, left, component: 1);
     }
 
-    /// <summary>Binds mouse movement to a 2D action: X gets horizontal, Y gets vertical.</summary>
+    /// <summary>Binds mouse movement to a 2D action: X gets horizontal, Y gets vertical. `Key.A` on
+    /// both bindings is an unused placeholder -- the native ABI's own aver_fw_action_bind comment
+    /// notes it ignores `key` whenever `source` is not AVER_FW_ACTION_SRC_KEY, ported as-is rather
+    /// than inventing a second binding shape just to avoid one ignored field.</summary>
     protected void BindMouseLook(InputAction action, float sensitivity = 1f)
     {
         Bindings.Add(new InputBinding(action, InputSource.MouseX, Key.A, sensitivity, 0));
@@ -130,7 +210,9 @@ public abstract class InputMappingContext
         Bindings.Add(new InputBinding(action, InputSource.MouseWheel, Key.A, scale, 0));
 }
 
-/// <summary>The input router: mapping contexts go in, action values come out, once per frame.</summary>
+/// <summary>The input router: mapping contexts go in, action values come out. No per-frame step of
+/// its own any more -- see this file's own top-of-file comment for why Update() is gone rather than
+/// merely empty.</summary>
 public static class EnhancedInput
 {
     /// <summary>One context at one priority.</summary>
@@ -140,78 +222,61 @@ public static class EnhancedInput
         public int Priority;
     }
 
-    private static readonly List<Layer>       s_layers  = new();
-    private static readonly List<InputAction> s_actions = new();
+    private static readonly List<Layer> s_layers = new();
 
-    /// <summary>Adds an action to the set updated each frame.</summary>
-    internal static void Track(InputAction a) { if (!s_actions.Contains(a)) s_actions.Add(a); }
-
-    /// <summary>Pushes a context. Higher <paramref name="priority"/> runs first and consumes the keys it binds.</summary>
+    /// <summary>Pushes a context. Higher <paramref name="priority"/> consumes the keys it binds,
+    /// blocking a lower-priority context from ever seeing them -- see <see cref="Rebind"/> for how
+    /// that maps onto the native ABI, which has no context object of its own to carry it.</summary>
     public static void AddContext(InputMappingContext context, int priority = 0)
     {
         if (context is null) return;
-        RemoveContext(context);
+        s_layers.RemoveAll(l => ReferenceEquals(l.Context, context));
         s_layers.Add(new Layer { Context = context, Priority = priority });
+        // Sorting is no longer load-bearing for consumption -- the native side compares priority
+        // VALUES directly (FrameworkAbi.cpp's actionKeyConsumedByHigherPriority), not list position --
+        // but it keeps Rebind()'s re-issue order matching what a debugger dump of s_layers would show,
+        // which cost nothing to keep.
         s_layers.Sort((a, b) => b.Priority.CompareTo(a.Priority));
+        Rebind();
     }
 
     /// <summary>Pops a context. Safe for one that was never added.</summary>
-    public static void RemoveContext(InputMappingContext context) =>
-        s_layers.RemoveAll(l => ReferenceEquals(l.Context, context));
+    public static void RemoveContext(InputMappingContext context)
+    {
+        if (context is null) return;
+        if (s_layers.RemoveAll(l => ReferenceEquals(l.Context, context)) > 0) Rebind();
+    }
 
     /// <summary>Drops every context.</summary>
-    public static void ClearContexts() => s_layers.Clear();
+    public static void ClearContexts()
+    {
+        if (s_layers.Count == 0) return;
+        s_layers.Clear();
+        Fw.aver_fw_action_clear_bindings();
+    }
 
     /// <summary>How many contexts are active.</summary>
     public static int ContextCount => s_layers.Count;
 
-    /// <summary>Recomputes every action from the current device state. Host calls this once per frame.</summary>
-    internal static void Update()
+    // THE ABI HAS NO CONTEXT HANDLE (framework_abi.h's own NAMED ACTIONS section says so explicitly)
+    // and consequently no partial "remove just this context" call either -- aver_fw_action_clear_
+    // bindings drops every binding at once. So every AddContext/RemoveContext here clears the WHOLE
+    // native binding table and re-issues it from s_layers, which is now the ONLY thing this class
+    // still keeps in C# -- not because the framework needs a copy, but because the native side is
+    // stateless about "what was pushed" by design, and somebody has to remember that in order to
+    // rebuild it after a change. That somebody is whichever caller mutates the layer stack, i.e. us.
+    private static void Rebind()
     {
-        for (int i = 0; i < s_actions.Count; i++)
-        {
-            InputAction a = s_actions[i];
-            a.Prev = a.Raw;
-            a.Raw  = Vec3.Zero;
-        }
-        if (s_layers.Count == 0) return;
-
-        var consumed = new HashSet<Key>();
-
+        Fw.aver_fw_action_clear_bindings();
         for (int li = 0; li < s_layers.Count; li++)
         {
-            List<InputBinding> bindings = s_layers[li].Context.Bindings;
+            Layer layer = s_layers[li];
+            List<InputBinding> bindings = layer.Context.Bindings;
             for (int bi = 0; bi < bindings.Count; bi++)
             {
                 InputBinding b = bindings[bi];
-                if (b.Source == InputSource.Key && consumed.Contains(b.Key)) continue;
-
-                float v = b.Source switch
-                {
-                    InputSource.Key        => Input.GetKey(b.Key) ? 1f : 0f,
-                    InputSource.MouseX     => Input.MouseDeltaX,
-                    InputSource.MouseY     => Input.MouseDeltaY,
-                    InputSource.MouseWheel => Input.MouseWheel,
-                    _                      => 0f,
-                };
-                if (v == 0f) continue;
-
-                Accumulate(b.Action, b.Component, v * b.Scale);
+                Fw.aver_fw_action_bind(b.Action.Handle, (int)b.Source, (int)b.Key, b.Scale, b.Component, layer.Priority);
             }
-            // Consumption is per layer, so two bindings in one context can share a key.
-            for (int bi = 0; bi < bindings.Count; bi++)
-                if (bindings[bi].Source == InputSource.Key) consumed.Add(bindings[bi].Key);
-        }
-    }
-
-    /// <summary>Adds a value into one component of an action.</summary>
-    private static void Accumulate(InputAction a, int component, float value)
-    {
-        switch (component)
-        {
-            case 0:  a.Raw.X += value; break;
-            case 1:  a.Raw.Y += value; break;
-            default: a.Raw.Z += value; break;
         }
     }
 }

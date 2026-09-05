@@ -1,0 +1,50 @@
+OCPROJECT 1
+# Engine test content for the CONTROL RIG. Not a demo game -- it exists so a real .ocrig, authored
+# against a real humanoid skeleton, sits somewhere the editor can open and a person can read.
+#
+# WHAT IS HERE, AND WHAT IS HONESTLY NOT.
+#
+# Here: Content/Rigs/ArmReach.ocrig, a two-op rig (a two-bone IK on the left arm and a weighted head
+# aim) written against Content/Skeletons/Character.ocskel's actual bone names. Open the Content
+# Browser on this project and it is there, with an icon; open the file and it reads as what it does.
+# Every layer beneath it is built and tested -- anim::twoBoneIk and anim::aimAt (IkTest), the format
+# (OcRigTest), and CControlRig applied through AnimSystem's pose-modifier seam (ControlRigTest,
+# which drives exactly this chain end to end from a file on disk).
+#
+# WHAT CHANGED SINCE THIS FILE WAS FIRST WRITTEN. It used to say a rig could not be attached from
+# anywhere but C++, and named two ways to fix that: a `rig=` attribute on a level placement, or a
+# SetControlRig node. The NODE was the right one and it now exists -- an .ocworld PLACE record still
+# has no skeleton field, so a placed mesh is a static mesh with no pose to modify, and skinned
+# characters reach a level through a graph CLASS the way templates/FirstPerson does. Attaching a rig
+# is therefore a thing a CLASS does, not a thing a placement says.
+#
+# SetControlRig sits beside SetSkeleton and PlayAnimation in the palette's Scene group, takes a
+# `rig=` attribute and a weight pin, and required one new scene ABI call to exist at all
+# (aver_scene_component, ABI 1.4): CControlRig is registered at RUNTIME, so unlike every other
+# component in that family it has no fixed id a binding could name, and until now such a component
+# was addable from C++ and from nowhere else.
+#
+# STILL NOT HERE, AND THIS IS THE REMAINING GAP -- a map placing a rigged character. It is now a
+# smaller and more specific problem than the one above, in two parts:
+#
+#   1. NO ANIMATOR MEANS NO POSE. AnimSystem::tick walks the CAnimator pool, so an entity is posed
+#      only if it has BOTH CSkeletalMesh and CAnimator on the SAME entity. The clip itself is
+#      optional -- with none, the entity holds its rest pose and the rig still modifies it, which is
+#      exactly what this demo wants -- but the animator must be there.
+#   2. COMP RECORDS CANNOT PUT THEM TOGETHER. A graph class declares scene content with
+#      `COMP <id> <Kind>`, and GraphComponentTree.Build creates ONE ENTITY PER RECORD. So
+#      `COMP body SkeletalMesh` and `COMP body Animator` are two sibling entities, not one entity
+#      with two components, and the animator lands somewhere the skeleton is not. Nothing in this
+#      tree uses `COMP ... Animator` today, and templates/FirstPerson's own skinned character has no
+#      animator at all -- it holds a rest pose forever, which is why nobody has hit this.
+#
+# Closing it is a choice between giving the SkeletalMesh kind an optional `clip=`/animator attribute,
+# letting COMP records stack on one id, or adding a ControlRig COMP kind that does both. That is a
+# format decision with three defensible answers, so it is written down here rather than guessed at.
+#
+# There is also no .ocanim anywhere in this repository -- the format is an AVR1 binary container, not
+# text, so a clip cannot be hand-authored beside this file the way the rig and the skeleton were.
+NAME ControlRigDemo
+ENGINE Aver 0.5.0
+CREATEDWITH 0.5.0
+CONTENT Content

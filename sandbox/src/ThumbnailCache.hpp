@@ -69,9 +69,6 @@ public:
     // per frame by the host, BEFORE the render features run.
     void update();
 
-    u32 residentCount() const { return static_cast<u32>(entries_.size()); }
-    u32 pendingCount() const { return static_cast<u32>(pending_.size()); }
-
     // The feature that performs the copy. Registered by init(); exposed so the host can unregister
     // it at shutdown, matching how every other feature in the editor is torn down.
     rhi::IRenderFeature* copyFeature();
@@ -81,7 +78,23 @@ private:
         rhi::TextureHandle tex = 0;
         u64  uiId = 0;
         bool ready = false;   // false until the copy has actually run for it
+        // HOW MANY TIMES THE COPY HAS BEEN ATTEMPTED AND NOT FINISHED.
+        //
+        // An entry used to be created by update() BEFORE the copy ran, and request() refuses any
+        // asset already in entries_ -- so a single failed attempt left an entry that was never ready
+        // and could never be asked for again. The copy can fail for reasons that are transient by
+        // nature: the preview's colour target is momentarily 0 while createTargets rebuilds it after
+        // a resize (ActorPreview.cpp sets color_ = 0 before recreating), and uiTextureId can return 0
+        // for a texture the backend has not yet given a descriptor. Both pass. The old code turned
+        // either into a permanently blank tile, for whichever assets happened to be in the queue at
+        // the time -- alphabetically first, in a browser that queues in listing order.
+        u32  attempts = 0;
     };
+
+    // ATTEMPTS BEFORE GIVING UP ON ONE ASSET. Bounded rather than unbounded so a genuinely broken
+    // asset costs a handful of frames and one log line instead of re-queueing forever; generous
+    // enough that a device rebuild in the middle of a browse recovers on its own.
+    static constexpr u32 kMaxThumbnailAttempts = 8;
 
     // The feature half, separate from the cache so the cache itself is not an IRenderFeature -- it
     // is called from UI code every frame and a render feature is called from the backend, and

@@ -46,6 +46,15 @@ void sanitise(MaterialDesc& d) {
     d.alphaCutoff       = std::clamp(d.alphaCutoff, 0.0f, 1.0f);
     d.subsurfaceWeight  = std::clamp(d.subsurfaceWeight, 0.0f, 1.0f);
     d.subsurfaceRadius  = std::clamp(d.subsurfaceRadius, 0.0f, 1.0f);
+    // Volume absorption. attenuationColor is a TRANSMITTANCE, so [0,1] per channel -- and the low end
+    // is floored just above zero rather than at it, because the shader takes -log(colour) and a
+    // channel of exactly 0 is an infinite extinction, i.e. an inf that propagates into the whole
+    // pixel. 1e-4 is about nine attenuation lengths, far past visually opaque, so the floor costs
+    // nothing anyone can see and removes the only way this pair can produce a non-finite result.
+    for (f32& ch : d.attenuationColor) ch = std::clamp(ch, 1e-4f, 1.0f);
+    // Negative is meaningless and would flip the sign of the extinction; clamping to 0 lands it on
+    // the documented "no volume" state rather than on something inside-out.
+    d.attenuationDistance = d.attenuationDistance < 0.0f ? 0.0f : d.attenuationDistance;
     if (static_cast<u32>(d.alphaMode) > static_cast<u32>(AlphaMode::Blend)) d.alphaMode = AlphaMode::Opaque;
 }
 

@@ -12,6 +12,18 @@ namespace aver::editor {
 // True when `name` is usable as both a directory name and a manifest name.
 bool validateProjectName(const std::string& name, std::string* err);
 
+// A project's name turned into a legal C# namespace.
+//
+// A PROJECT NAME IS NOT AN IDENTIFIER, and every generator that pastes one after `namespace ` was
+// assuming it was. validateProjectName deliberately allows spaces, hyphens, dots and anything else
+// Windows permits in a folder name -- it is naming a FOLDER -- so a project called "My Game"
+// produced `namespace My Game;` in every generated .cs and the whole Scripts assembly failed to
+// compile, at the first Compile C#, with an error pointing at a file nobody had written by hand.
+//
+// Non-identifier characters become '_', a leading digit is prefixed, and an empty or fully-illegal
+// name falls back to "Game" rather than emitting `namespace ;`.
+std::string csharpNamespaceFor(const std::string& projectName);
+
 // True when `name` is a legal type name: leading letter or '_', then letters/digits/'_', no keyword.
 bool validateTypeName(const std::string& name, std::string* err);
 

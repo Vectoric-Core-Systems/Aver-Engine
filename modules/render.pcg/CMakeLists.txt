@@ -10,3 +10,7 @@ aver_add_module(Aver.Render.Pcg
     Aver.RHI
     Aver.Core
 )
+
+# HLSL beside the executable, redeployed when a shader changes -- the same stamp mechanism
+# modules/rhi, render.pbr and render.voxi already use. See cmake/AvModule.cmake.
+aver_deploy_shaders(Aver.Render.Pcg "${CMAKE_CURRENT_SOURCE_DIR}/shaders")

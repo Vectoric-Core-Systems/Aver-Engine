@@ -140,7 +140,7 @@ Three things fell out of it that are worth knowing:
   shader names a sampler *statically uses* set 3, and Vulkan requires every such set to be bound
   before the draw. `VulkanRenderContext` binds it once per `setPipeline`.
 
-`tests/rhi/RegisterBindMapTest.cpp` pins the mapping with no device and no SDK, against the exact
+`tests/rhi/src/RegisterBindMapTest.cpp` pins the mapping with no device and no SDK, against the exact
 layout that was failing (Voxi's GI: `srvCount` 9, `srvCount1` 8, `uavCount` 4, 3 samplers).
 
 ## Constant buffers: done, and how
@@ -159,9 +159,10 @@ source and `moduleForLayout()` re-patches at *pipeline* creation rather than at 
 The part worth not breaking is the **padding**. `pushConstantLayout()` places the object block at
 bytes 0–128 whether or not a shader declares it, so a shader declaring only b3 needs its fields to
 begin at byte 128 — where the engine actually pushes them. Get it wrong and nothing crashes; every
-vertex is simply skinned by the top row of `gWorld`. `tests/rhi/CbufferLayoutPatchTest.cpp` pins
-this with no device and no Vulkan headers, and was checked by deliberately removing the padding
-(exactly one of its 33 checks fails).
+vertex is simply skinned by the top row of `gWorld`. `tests/rhi/src/CbufferLayoutPatchTest.cpp` pins
+this with no device and no Vulkan headers (41 `check()` calls today, up from 33), and was checked by
+deliberately removing the padding (exactly one check failed at the time this was written; not
+re-verified against the current, larger test).
 
 ## Also worth knowing
 

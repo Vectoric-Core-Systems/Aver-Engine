@@ -242,6 +242,12 @@ static int Main()
         // shapes and the wiring both compilers reach. See SynapseNodeTests.cs's own header comment.
         failures += SynapseNodeTests.RunAll();
 
+        // SetControlRig: the node that makes a control rig placeable from a level at all. The rig
+        // arithmetic is tested at the C++ level (IkTest, OcRigTest, ControlRigTest); this covers the
+        // pin shape, the rig= attribute, the unwired-weight default and the by-NAME component attach
+        // both compilers reach. See ControlRigNodeTests.cs's own header.
+        failures += ControlRigNodeTests.RunAll();
+
         // The parity-backlog four: CreateEntity/FindEntity (SetName's own name= family) and the two
         // Physics status reads. See NameAndPhysicsStatusNodeTests.cs's own header.
         failures += NameAndPhysicsStatusNodeTests.RunAll();

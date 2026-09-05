@@ -1,4 +1,12 @@
-# Aver.Fluids  (`modules/water`)
+# Aver.Fluids  (`modules/fluids`)
+
+**Corrected:** this header named `modules/water` — the module's name before `b887a78` ("Water and
+render.fluid become one module called Fluids") merged it with `render.fluid` and renamed the
+directory. This file describes only the water half (`GerstnerWave`/`WaterRenderer`/`Underwater`) that
+`modules/water` used to be; `FluidVolume.hpp`/`.cpp` and `FluidScene.hpp`/`.cpp` — the solver-driven
+half that motivated the rename, per that commit's own message ("FluidVolume builds a closed shell of
+arbitrary compliance and pressure and hands it to a solver. That is a fluid, not specifically water") —
+also live in this directory now and are not documented below.
 
 - **Language:** C++
 - **Depends on:** Core, RHI
@@ -15,7 +23,7 @@ Water in three parts, of which this module is two.
 ## The wave math is separable, on purpose
 
 `GerstnerWave.hpp` takes no `rhi::` and no device: a world position and a time go in, a displaced
-position and a normal come out. That is what lets `tests/water/src/GerstnerWaveTest.cpp` check the
+position and a normal come out. That is what lets `tests/fluids/src/GerstnerWaveTest.cpp` check the
 surface against numbers it computes for itself, on a machine with no GPU — the same argument
 `Aver.Sound` and `Aver.Synapse` make for being pure.
 
@@ -38,16 +46,29 @@ both copies by hand and keeping them in step; nothing in the build checks that t
 
 Recorded here rather than left to be discovered:
 
-- **No `.ocworld` water record.** The water level and wave set are supplied by the host at
-  registration, not authored per level. Making them level data is a separate slice and follows the
-  `LANDSCAPE` record precedent exactly.
+- **No longer true — a level can author its own water.** This used to say the water level and wave
+  set were supplied only by the host at registration. `9afd98b` closed it: `WATER` (name, level height,
+  `bounds`/`infinite`, an optional `simulate` flag) and `WAVE` (cross-referenced to a `WATER` by name,
+  empty name meaning the first declared one) are real `.ocworld` records now
+  (`modules/formats/src/OcWorld.cpp`'s `WATER` parse, `OcWorld.hpp`'s `OcWaterPlacement`/`OcGerstnerWave`),
+  modelled on `OcPcgVolume` rather than the `LANDSCAPE` precedent this bullet originally pointed at —
+  a `WATER` record has no external asset, so nothing about it needs positioning the way a landscape
+  tile does.
 - **No soft shoreline.** The surface is depth-*tested* but does not sample scene depth, so it meets
-  sloped terrain in a hard line rather than a fade. Scene depth is D3D12-only today
-  (`IDevice::sceneDepthTexture()` returns 0 on every other backend), so the blend is deferred rather
-  than half-built against a backend gap.
-- **Vulkan is untested, not broken.** The code is written against the generic `rhi::` vocabulary and
-  should compile, but the post chain it would composite through is refused on Vulkan today, so no
-  claim is made about the final image there.
+  sloped terrain in a hard line rather than a fade. **Corrected:** scene depth is no longer D3D12-only
+  — `VulkanDevice::sceneDepthTexture()` (`VulkanDevice.cpp:848`, drifted from `906`) now mirrors the D3D12 implementation
+  structurally, so both backends can supply it. D3D11 still returns `IDevice`'s own default of 0
+  (no override in `modules/rhi.d3d11`). The blend is still deferred, but the reason has narrowed to
+  "not built yet" rather than "blocked on a D3D12-only capability".
+- **Vulkan claim corrected.** This used to say the post chain the surface would composite through was
+  refused on Vulkan, so no claim was made about the final image there. `VulkanDevice::runPostChain`
+  is called unconditionally every frame (`VulkanDevice.cpp`, present since the backend's first
+  checkpoint commit `895ba68`), and `modules/rhi.vulkan/README.md`'s own "What is left" section lists
+  the post chain's bindings as verified, not among its remaining gaps — so nothing refuses it. This
+  module's own code still has no Vulkan-specific path or gate (`WaterRenderer.cpp` declines only when
+  the backend exposes no resource factory at all, a generic check), so the water surface should
+  composite through the same way on both backends; that has simply not been independently checked
+  here.
 - **The fog defaults are placeholders.** They are unvalidated guesses at centimetre scale, and the
   existing fog was measured only at kilometre scale — a genuinely different regime.
 - **Invisible to every other render feature.** `WaterRenderer::transparentPass` issues its own

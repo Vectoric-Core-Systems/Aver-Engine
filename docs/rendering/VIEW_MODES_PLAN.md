@@ -10,6 +10,24 @@ workflow concurrently, so every line number is "as read at the time of this pass
 file will still read that way tomorrow; and per this task's own rules, nothing here has been built or
 run — every behavioural claim is a trace through source, not a screenshot.
 
+> **The caveat above was not hypothetical — corrected 2026-09-02.** Commit `063e84e` ("Compress
+> comments in the eight heaviest source files") landed the same day as this plan and shrank comment
+> blocks, unevenly, in `SandboxApp.cpp`, `D3D12Device.cpp`, `VoxiRenderer.cpp`, `VulkanCommon.hpp` and
+> `VulkanDevice.cpp` — five of the files this plan cites by line number. Spot-checked against the tree
+> as it reads today: `scenePipeline()`'s wireframe decline, quoted below as `VoxiRenderer.cpp:2068-
+> 2071`, is now at `:2640`; `suppressesScene()`/`suppressesWholeFrame()`, quoted as `:1860`/`:1867`,
+> are now at `:2329`/`:2336`. Every other line number below has almost certainly moved by a similar,
+> uneven amount and should be re-derived from the quoted symbol or code snippet, not trusted as a
+> coordinate. The code and mechanisms shown at each citation were re-checked for this correction pass
+> and still read exactly as described; only the numbers are stale. Separately, as of this same pass,
+> none of this plan's changes have shipped: no `ViewMode` enum exists in `SandboxApp.cpp`, no
+> `ShadingOverride`/`setFeatureCostView` exists anywhere in the RHI or Voxi headers, and no
+> `IDevice::frameSuppressed()` accessor exists — the private `frameSuppressed_` member §1b describes
+> does exist on both backends now and is already used to gate sky/particle drawing under ray-driven
+> mode, but it is still not exposed, and the selection outline (now `SandboxApp.cpp:5966`, moved from
+> the `:5450` cited below) still guards on `sceneSuppressed()`, exactly the bug §1b describes. This
+> remains a plan, not a report.
+
 ---
 
 ## 1. The two bugs

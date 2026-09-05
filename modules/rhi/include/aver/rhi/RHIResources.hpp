@@ -570,6 +570,20 @@ public:
     // Populates a binding set. Slots left unset are null-filled.
     virtual void setSrv(BindingSetHandle set, u32 slot, TextureHandle t, u32 mip = kAllMips) = 0;
     virtual void setUav(BindingSetHandle set, u32 slot, TextureHandle t, u32 mip) = 0;
+    // Returns an SRV slot to the null-filled state it had when the set was created.
+    //
+    // EXISTS BECAUSE A BOUND DESCRIPTOR OUTLIVES ITS TEXTURE, AND THAT IS A GPU CRASH RATHER THAN A
+    // WRONG PIXEL. Once a slot has been pointed at a texture, destroying that texture does not
+    // unbind it: the descriptor keeps naming memory the factory has retired and will free. A shader
+    // that then samples the slot faults, and a fault in a shader removes the device -- the window
+    // dies with no message beyond "the GPU stopped responding".
+    //
+    // The case this was written for is a target that comes and goes across a resize. D3D12Device's
+    // resize() releases the post-process targets and does NOT recreate them in the same call, so
+    // anything holding one of their handles sees it go to 0 for a frame or more. `if (h) setSrv(...)`
+    // is the natural-looking guard and it is exactly wrong: it skips the update and leaves the dead
+    // descriptor in place. Call this instead when the handle a slot tracks becomes 0.
+    virtual void clearSrv(BindingSetHandle set, u32 slot) = 0;
     // Puts a TLAS in an SRV slot.
     virtual void setSrvTlas(BindingSetHandle set, u32 slot, TlasHandle tlas) = 0;
     // Puts a buffer in a SlotKind::StructuredBuffer slot. `stride` is the element size in bytes,
@@ -877,6 +891,17 @@ public:
                                          bool blended = false) const {
         (void)meshShaders; (void)wireframe; (void)depthPrepassed; (void)blended; return 0;
     }
+
+    // The bindless texture table the pipelines returned above expect to have bound, or 0 for a
+    // feature whose pipelines declare none.
+    //
+    // WHY THE BACKEND HAS TO ASK. A blended draw is CAPTURED and replayed by the device, after the
+    // deferred sky -- see scenePipeline's own comment. The feature is not on the stack at that
+    // moment, so it cannot bind anything itself, and the device does not own the table. It asks,
+    // exactly as it already asks for the pipeline. Returning 0 is answered by setBindlessTable
+    // being a no-op on a pipeline that declared no range, so a feature that has no table and a
+    // pipeline that wants none cost one virtual call between them.
+    virtual BindlessTableHandle sceneBindlessTable() const { return 0; }
     // The DEPTH-ONLY pipeline for a same-frame depth prepass. A caller pairs this with
     // scenePipeline(..., depthPrepassed=true) for the SAME instance later in the frame: this one
     // writes depth (test=Less, write=true, matching scenePipeline()'s own default depth state

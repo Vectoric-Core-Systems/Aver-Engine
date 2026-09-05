@@ -5,6 +5,7 @@
 // cases a hand-authored file will actually contain: a bare `infinite`, explicit bounds, missing
 // optional keys, and values that would divide by zero.
 #include "aver/formats/OcWorld.hpp"
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 
 #include <string>
@@ -34,7 +35,7 @@ int main() {
     std::string err;
     check(fmt::parseOcworld(src, a, &err), "the file parses: " + err);
     check(a.pcgVolumes.size() == 4, "four volumes read (got " + std::to_string(a.pcgVolumes.size()) + ")");
-    if (a.pcgVolumes.size() != 4) { AVER_ERROR("PcgVolumeFormatTest: {} failure(s)", ++g_failures); return g_failures; }
+    if (a.pcgVolumes.size() != 4) { AVER_ERROR("PcgVolumeFormatTest: {} failure(s)", ++g_failures); return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok); }
 
     check(a.pcgVolumes[0].name == "Sky" && a.pcgVolumes[0].seed == 20260802, "seed is read as authored");
     check(a.pcgVolumes[0].infinite, "a bare `infinite` token marks the field unbounded");
@@ -76,5 +77,5 @@ int main() {
 
     if (g_failures == 0) { AVER_INFO("PcgVolumeFormatTest: ALL PASS"); return 0; }
     AVER_ERROR("PcgVolumeFormatTest: {} failure(s)", g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

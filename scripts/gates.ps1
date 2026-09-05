@@ -11,7 +11,17 @@
 #   ./scripts/gates.ps1 -Config baseline,warp # several
 #   ./scripts/gates.ps1 -Record               # re-record the baseline (ONLY with a reason, see below)
 #
-# Exit code 0 = every gate matched. Non-zero = the number of gates that did not.
+# EXIT CODES, from the engine's own table in modules/core/include/aver/core/ErrorCodes.hpp:
+#
+#     0  ok           every gate matched
+#     1  failed       at least one gate did not -- the COUNT is on the last line, not in the code
+#     2  usage        an unknown -Config name
+#     3  environment  no Sandbox.exe to run: the tree was never built
+#
+# This used to `exit $failures`, and that was wrong in two ways that only show up from a script. Two
+# moved gates exited 2, which the table above spells 'you invoked me wrong' -- so a caller could not
+# tell a renderer regression from a typo in a -Config name. And a shell truncates an exit code to a
+# byte, so 256 failing gates would have exited 0. A count is a thing to PRINT; it is not a code.
 #
 # RE-RECORDING is a decision, not a chore. A moved number means either the change was announced as
 # oracle-moving and is understood, or something broke. Say which in the commit message, and say it in
@@ -363,14 +373,16 @@ function Invoke-Gate($exe, [string[]] $gateArgs, [string[]] $extra, [int] $frame
 # ---------------------------------------------------------------- run
 
 $buildHint = if ($Release) { './scripts/build.ps1 -Release' } else { './scripts/build.ps1' }
-if (-not (Test-Path $Exe)) { Write-Error "Sandbox.exe not found at $Exe - run $buildHint first"; exit 1 }
+# Environment, not Failed: nothing was measured and nothing is wrong with the renderer -- there is no
+# build tree to point at. CI wants to report this differently from a gate that moved.
+if (-not (Test-Path $Exe)) { Write-Error "Sandbox.exe not found at $Exe - run $buildHint first"; exit 3 }
 $Exe = (Resolve-Path $Exe).Path
 
 $selected = if ($Config.Count -gt 0) { $Config } else { @($Configs.Keys) }
 foreach ($c in $selected) {
     if (-not $Configs.Contains($c)) {
         Write-Error "unknown configuration '$c'; known: $($Configs.Keys -join ', ')"
-        exit 1
+        exit 2   # usage: the caller named something that does not exist
     }
 }
 
@@ -541,7 +553,7 @@ if ($Record) {
         if ($flaky -gt 0) {
             Write-Host "A FLAKY gate has no value to freeze -- compare its two viewport rects first." -ForegroundColor Red
         }
-        exit $(if ($failures -gt 0) { $failures } else { $flaky })
+        exit 1   # the counts are printed above; the CODE just says it did not work
     }
     # Only the configurations that were actually run are rewritten; the rest of the file survives, so
     # recording one configuration cannot quietly erase the baseline of another.
@@ -562,4 +574,4 @@ if ($flaky -gt 0) {
     Write-Host "$flaky GATE(S) FLAKY -- passed on retry. Compare the two viewport rects on each line."
 }
 Write-Host $(if ($failures -eq 0) { "ALL GATES PASS" } else { "$failures GATE(S) FAILED" })
-exit $failures
+exit $(if ($failures -eq 0) { 0 } else { 1 })

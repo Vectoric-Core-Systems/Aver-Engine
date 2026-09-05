@@ -5,6 +5,7 @@
 #include "aver/core/Log.hpp"
 
 #include <cstring>
+#include "aver/rhi/ShaderFiles.hpp"   // this pass's HLSL is a deployed file, not a literal
 
 namespace aver::render::ui {
 namespace {
@@ -64,7 +65,7 @@ bool UiRenderer::init(rhi::IDevice& device) {
     // ---- shaders ----
     {
         rhi::ShaderDesc sd;
-        sd.source = kUiHLSL;
+        sd.source = rhi::shaderFile("ui.hlsl").c_str();
         sd.entry  = "UiVS";
         sd.stage  = rhi::ShaderStage::Vertex;
         vs_ = res_->createShader(sd);

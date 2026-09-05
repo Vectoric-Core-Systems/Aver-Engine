@@ -13,6 +13,7 @@
 //     intrusive, so a child without its parent is a dangling handle rather than a hole.
 //   * AN ENTITY FAR FROM THE ORIGIN, where an absolute f32 has already lost the precision the
 //     chunk-local split keeps.
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/scene/Components.hpp"
 #include "aver/scene/World.hpp"
@@ -309,5 +310,5 @@ int main() {
 
     if (g_failures == 0) AVER_INFO("=== {} assertions, 0 failed ===", g_checks);
     else AVER_ERROR("=== {} assertions, {} failed ===", g_checks, g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

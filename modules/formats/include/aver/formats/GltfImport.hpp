@@ -2,6 +2,7 @@
 // glTF 2.0 / GLB import into the engine's own formats. glTF is right-handed, +Y up, -Z forward, in
 // metres; this engine is left-handed, +Z up, +X forward, in centimetres, so positions, normals and
 // rotations are rebased, lengths scaled, and triangle winding reversed (the basis change has det -1).
+#include "aver/formats/ImportedMaterial.hpp"
 #include "aver/formats/OcAnim.hpp"
 #include "aver/formats/OcMesh.hpp"
 
@@ -9,6 +10,14 @@
 #include <vector>
 
 namespace aver::fmt {
+
+// The material and image shapes are SHARED, not glTF's own -- see ImportedMaterial.hpp. They were
+// written here first, then three importers turned out to need the same thing and a fourth copy of
+// the reserved-look-name list was the price of not sharing them. The aliases are kept so existing
+// code naming GltfMaterial/GltfImage (including GltfMaterial::TexRef) still compiles.
+using GltfMaterial = ImportedMaterial;
+using GltfImage    = ImportedImage;
+
 
 // What an import produced, and what it had to drop.
 struct GltfImportResult {
@@ -41,6 +50,16 @@ struct GltfImportResult {
     // Clips, in the file's own order. Bone indices address `skeletons[0]`.
     std::vector<OcAnimation> animations;
     std::vector<std::string> animationNames;
+
+    // Index-parallel to the file's own materials[] and images[] arrays, so a TexRef's imageIndex is
+    // a direct subscript into `images`. Empty when the file declared none.
+    //
+    // DELIBERATELY POD AND PBR-FREE. Turning these into a pbr::MaterialDesc happens in
+    // GltfMaterialCook, which lives in the PBR-gated Aver.Formats.Material target -- see that
+    // header. Doing it here would put the render family behind every headless tool that links
+    // Aver.Formats for nothing but meshes.
+    std::vector<GltfMaterial> materials;
+    std::vector<GltfImage>    images;
 
     std::vector<std::string> unsupported;    // features the file used and this importer cannot carry
 };

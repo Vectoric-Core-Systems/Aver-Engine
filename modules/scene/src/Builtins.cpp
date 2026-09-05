@@ -1,4 +1,4 @@
-// Registers the twelve built-in components and their field tables, through the same public API a
+// Registers the fifteen built-in components and their field tables, through the same public API a
 // script-declared component uses.
 #include "aver/scene/Components.hpp"
 
@@ -135,6 +135,42 @@ void registerBuiltinComponents(World& world) {
             .field("body", FieldKind::I32, static_cast<u16>(offsetof(CSoftBody, body)), 0, /*readOnly*/ true)
             .field("flags", FieldKind::I32, static_cast<u16>(offsetof(CSoftBody, flags)));
         expect(b.verify(sizeof(CSoftBody)), b.typeId(), kComponentSoftBody, "CSoftBody");
+    }
+    {
+        auto b = world.registerComponent<CRigidBody>("CRigidBody");
+        b.field("shapeKind", FieldKind::I32, static_cast<u16>(offsetof(CRigidBody, shapeKind)))
+            .field("dims", FieldKind::Vec3, static_cast<u16>(offsetof(CRigidBody, dims)))
+            .field("motionType", FieldKind::I32, static_cast<u16>(offsetof(CRigidBody, motionType)))
+            .field("massKg", FieldKind::F32, static_cast<u16>(offsetof(CRigidBody, massKg)))
+            .field("friction", FieldKind::F32, static_cast<u16>(offsetof(CRigidBody, friction)))
+            .field("restitution", FieldKind::F32, static_cast<u16>(offsetof(CRigidBody, restitution)))
+            .field("gravityFactor", FieldKind::F32, static_cast<u16>(offsetof(CRigidBody, gravityFactor)))
+            .field("linearDamping", FieldKind::F32, static_cast<u16>(offsetof(CRigidBody, linearDamping)))
+            .field("angularDamping", FieldKind::F32, static_cast<u16>(offsetof(CRigidBody, angularDamping)))
+            .field("collisionLayer", FieldKind::I32, static_cast<u16>(offsetof(CRigidBody, collisionLayer)))
+            .field("isSensor", FieldKind::Bool, static_cast<u16>(offsetof(CRigidBody, isSensor)))
+            // READ-ONLY, and that is docs/CHUNKS.md 5.1 rather than a preference: `body` is a
+            // process-local physics handle and means nothing in another run, so it must never reach
+            // a serialised chunk. A read-only field cannot be written by the ABI or an editor, which
+            // is what keeps it out.
+            .field("body", FieldKind::I32, static_cast<u16>(offsetof(CRigidBody, body)), 0, /*readOnly*/ true);
+        expect(b.verify(sizeof(CRigidBody)), b.typeId(), kComponentRigidBody, "CRigidBody");
+    }
+    {
+        auto b = world.registerComponent<CJoint>("CJoint");
+        b.field("jointType", FieldKind::I32, static_cast<u16>(offsetof(CJoint, jointType)))
+            .field("otherEntity", FieldKind::Entity, static_cast<u16>(offsetof(CJoint, otherEntity)))
+            .field("anchorLocal", FieldKind::Vec3, static_cast<u16>(offsetof(CJoint, anchorLocal)))
+            .field("primaryAxis", FieldKind::Vec3, static_cast<u16>(offsetof(CJoint, primaryAxis)))
+            .field("normalAxis", FieldKind::Vec3, static_cast<u16>(offsetof(CJoint, normalAxis)))
+            .field("limitMin", FieldKind::F32, static_cast<u16>(offsetof(CJoint, limitMin)))
+            .field("limitMax", FieldKind::F32, static_cast<u16>(offsetof(CJoint, limitMax)))
+            .field("motorState", FieldKind::I32, static_cast<u16>(offsetof(CJoint, motorState)))
+            .field("motorTarget", FieldKind::F32, static_cast<u16>(offsetof(CJoint, motorTarget)))
+            // READ-ONLY for the identical reason as CRigidBody::body and CSoftBody::body: a
+            // process-local physics handle must never reach a serialised chunk.
+            .field("joint", FieldKind::I32, static_cast<u16>(offsetof(CJoint, joint)), 0, /*readOnly*/ true);
+        expect(b.verify(sizeof(CJoint)), b.typeId(), kComponentJoint, "CJoint");
     }
 }
 

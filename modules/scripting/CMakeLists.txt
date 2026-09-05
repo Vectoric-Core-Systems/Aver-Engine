@@ -30,6 +30,44 @@ if(NOT AVER_DOTNET_EXE)
   return()
 endif()
 
+# The flags EVERY `dotnet build` below shares, in one place because there are eight of them and a
+# flag added to seven is a flag that does nothing.
+#
+# -p:UseSharedCompilation=false IS THE ONE THAT NEEDS EXPLAINING. By default MSBuild hands compilation
+# to VBCSCompiler.exe, a server process that outlives the build by minutes so the next one starts
+# warm. It keeps the assemblies it referenced open, memory-mapped, and one of those is
+# bin/Scripting/Aver.Framework.dll -- which the very next build has to overwrite. A gate run failed
+# outright on exactly that, twice, and `dotnet build-server shutdown` cleared it both times.
+#
+# THE SPEED IT COSTS IS SPEED THIS BUILD DOES NOT USE. A warm compiler server pays off when the same
+# project is rebuilt over and over; here each project is compiled at most once per build, and the
+# OUTPUT/DEPENDS rules below skip it entirely when nothing changed. So the server was buying almost
+# nothing and charging a file lock for it.
+#
+# -nodeReuse:false IS THE SECOND HALF, AND IT WAS ADDED ON EVIDENCE. This block first shipped saying
+# MSBuild's worker nodes "could in principle hold the same files, but that has not been observed here",
+# and that a flag added on suspicion is one nobody can later tell was needed. Twenty minutes later a
+# Release build failed with
+#
+#   CSC : error CS2012: Cannot open '...\Aver.Framework\obj\x64\Release\net10.0\Aver.Framework.dll'
+#         for writing -- the process cannot access the file because it is being used by another process
+#
+# and the machine held NINE dotnet.exe processes, every one of them
+# `MSBuild.dll /nodemode:1 /nodeReuse:true`, all created during the PREVIOUS build. No VBCSCompiler:
+# that half of the fix was working. The worker nodes are a separate pool with its own lifetime, they
+# survive the build that spawned them, and a reused node brings the previous build's open handles with
+# it.
+#
+# The two flags are therefore not alternatives. UseSharedCompilation=false stops the COMPILER server
+# holding bin/Scripting/*.dll; nodeReuse:false stops the BUILD nodes holding obj/**/*.dll. Removing
+# either one leaves a process alive that the next build has to write past.
+#
+# Note the shape of the evidence: a single-project `dotnet build` spawns no worker nodes at all, so an
+# A/B on one project shows zero either way. Only the full CMake build, which fires eight of these,
+# reproduces it -- which is why the first pass through here saw nothing to fix.
+set(AVER_DOTNET_BUILD_FLAGS -c Release --nologo -v quiet
+                            -p:UseSharedCompilation=false -nodeReuse:false)
+
 set(AVER_CSHARP_DIR ${CMAKE_SOURCE_DIR}/scripting/csharp)
 set(AVER_BRIDGE_PROJ ${AVER_CSHARP_DIR}/Aver.Scripting.Bridge/Aver.Scripting.Bridge.csproj)
 
@@ -64,10 +102,23 @@ file(GLOB AVER_BRIDGE_SOURCES CONFIGURE_DEPENDS
   ${AVER_CSHARP_DIR}/Aver.Framework/*.csproj
   ${AVER_CSHARP_DIR}/Aver.Scene/*.cs
   ${AVER_CSHARP_DIR}/Aver.Scene/*.csproj
+  # Aver.Physics, the C# binding for modules/physics' 125-function ABI. LISTED HERE FOR THE REASON
+  # THE NOTE AT THE TOP OF THIS BLOCK RECORDS: Aver.Framework references it, so it compiles INTO the
+  # bridge, and a referenced project whose sources are not a dependency means editing it re-stages
+  # nothing and the running editor keeps the previous build with no sign anything was skipped.
+  ${AVER_CSHARP_DIR}/Aver.Physics/*.cs
+  ${AVER_CSHARP_DIR}/Aver.Physics/*.csproj
   # Aver.Graph (GraphHost, the graph compiler, the .ocgraph parser): referenced by the bridge so
   # HostBridge's GraphLoad/GraphTick/GraphUnload can host a compiled graph per entity.
   ${AVER_CSHARP_DIR}/Aver.Graph/*.cs
-  ${AVER_CSHARP_DIR}/Aver.Graph/*.csproj)
+  ${AVER_CSHARP_DIR}/Aver.Graph/*.csproj
+  # Aver.UI, which the bridge references (Aver.Scripting.Bridge.csproj) so [AverHud] resolves out of
+  # the BRIDGE's context -- and which was MISSING from this glob. That is the same defect the note at
+  # the top of this block records for Physics.cs and EnhancedInput.cs: a referenced project whose
+  # sources are not a dependency means editing Hud.cs restages nothing, and the running editor keeps
+  # the previous build with no sign anything was skipped.
+  ${AVER_CSHARP_DIR}/Aver.UI/*.cs
+  ${AVER_CSHARP_DIR}/Aver.UI/*.csproj)
 
 set(AVER_BRIDGE_OUTPUTS
   ${AVER_BRIDGE_DIR}/Aver.Scripting.Bridge.dll
@@ -79,7 +130,7 @@ set(AVER_BRIDGE_OUTPUTS
 
 add_custom_command(
   OUTPUT ${AVER_BRIDGE_OUTPUTS}
-  COMMAND ${AVER_DOTNET_EXE} build ${AVER_BRIDGE_PROJ} -c Release --nologo -v quiet
+  COMMAND ${AVER_DOTNET_EXE} build ${AVER_BRIDGE_PROJ} ${AVER_DOTNET_BUILD_FLAGS}
           -o ${AVER_BRIDGE_DIR}
   DEPENDS ${AVER_BRIDGE_SOURCES}
   COMMENT "Building the managed scripting bridge (staged to bin/Scripting)"
@@ -96,7 +147,7 @@ set(AVER_SAMPLE_PROJ ${AVER_CSHARP_DIR}/Aver.Scripting.SampleBehaviour/Aver.Scri
 set(AVER_SAMPLE_OUT ${CMAKE_BINARY_DIR}/bin/SampleScripts/Aver.Scripting.SampleBehaviour.dll)
 add_custom_command(
   OUTPUT ${AVER_SAMPLE_OUT}
-  COMMAND ${AVER_DOTNET_EXE} build ${AVER_SAMPLE_PROJ} -c Release --nologo -v quiet
+  COMMAND ${AVER_DOTNET_EXE} build ${AVER_SAMPLE_PROJ} ${AVER_DOTNET_BUILD_FLAGS}
           -o ${CMAKE_BINARY_DIR}/bin/SampleScripts
   DEPENDS ${AVER_SAMPLE_PROJ}
           ${AVER_CSHARP_DIR}/Aver.Scripting.SampleBehaviour/HelloBehaviour.cs
@@ -117,7 +168,7 @@ set(AVER_ACTOR_PROJ ${AVER_CSHARP_DIR}/Aver.Framework.SampleActor/Aver.Framework
 set(AVER_ACTOR_OUT ${CMAKE_BINARY_DIR}/bin/ActorScripts/Aver.Framework.SampleActor.dll)
 add_custom_command(
   OUTPUT ${AVER_ACTOR_OUT}
-  COMMAND ${AVER_DOTNET_EXE} build ${AVER_ACTOR_PROJ} -c Release --nologo -v quiet
+  COMMAND ${AVER_DOTNET_EXE} build ${AVER_ACTOR_PROJ} ${AVER_DOTNET_BUILD_FLAGS}
           -o ${CMAKE_BINARY_DIR}/bin/ActorScripts
   DEPENDS ${AVER_ACTOR_PROJ}
           ${AVER_CSHARP_DIR}/Aver.Framework.SampleActor/TestActor.cs
@@ -180,7 +231,7 @@ set(AVER_MATC_OUTPUTS
 
 add_custom_command(
   OUTPUT ${AVER_MATC_OUTPUTS}
-  COMMAND ${AVER_DOTNET_EXE} build ${AVER_MATC_PROJ} -c Release --nologo -v quiet
+  COMMAND ${AVER_DOTNET_EXE} build ${AVER_MATC_PROJ} ${AVER_DOTNET_BUILD_FLAGS}
           -o ${AVER_MATC_DIR}
   DEPENDS ${AVER_MATC_SOURCES}
   COMMENT "Building the material compiler (staged to bin/Tools)"
@@ -195,10 +246,14 @@ add_dependencies(Aver.Scripting.Host Aver.MaterialCompiler)
 # Same reasoning as avermatc and the same shape: a TOOL the editor shells out to, not an assembly the
 # scripting host loads, so it goes in bin/Tools where the bridge's probing path cannot reach it.
 #
-# THE ONLY NUGET CONSUMER IN THE TREE. Microsoft.CodeAnalysis is MIT and ships inside the .NET SDK, so
-# the restore resolves from the machine's package cache with no network. A machine without it fails
-# THIS custom command and nothing else: averDesignAvailable() then reports the tool missing and the
-# editor runs with the built-in scanner as its only backend, which is a supported configuration.
+# THE ONLY NUGET CONSUMER IN THE TREE. Microsoft.CodeAnalysis is MIT, and the package is CHECKED IN at
+# third_party/nuget with the repository's NuGet.config naming that folder as the only source, so the
+# restore needs no network. It used to say the restore was offline because Roslyn "ships inside the
+# .NET SDK": the SDK carries Roslyn as the compiler's own DLLs under Roslyn/bincore and its only
+# restorable .nupkg is FSharp.Core, so that was never true and a clean machine went to nuget.org.
+# A machine that cannot restore fails THIS custom command and nothing else: averDesignAvailable() then
+# reports the tool missing and the editor runs with the built-in scanner as its only backend, which is
+# a supported configuration.
 set(AVER_DESIGN_PROJ ${AVER_CSHARP_DIR}/Aver.Design/Aver.Design.csproj)
 set(AVER_DESIGN_DIR ${CMAKE_BINARY_DIR}/bin/Tools)
 
@@ -212,7 +267,7 @@ set(AVER_DESIGN_OUTPUTS
 
 add_custom_command(
   OUTPUT ${AVER_DESIGN_OUTPUTS}
-  COMMAND ${AVER_DOTNET_EXE} build ${AVER_DESIGN_PROJ} -c Release --nologo -v quiet
+  COMMAND ${AVER_DOTNET_EXE} build ${AVER_DESIGN_PROJ} ${AVER_DOTNET_BUILD_FLAGS}
           -o ${AVER_DESIGN_DIR}
   DEPENDS ${AVER_DESIGN_SOURCES}
   COMMENT "Building the Roslyn actor-script reader (staged to bin/Tools)"
@@ -257,7 +312,7 @@ set(AVER_FSHARP_OUTPUTS
 
 add_custom_command(
   OUTPUT ${AVER_FSHARP_OUTPUTS}
-  COMMAND ${AVER_DOTNET_EXE} build ${AVER_FSHARP_PROJ} -c Release --nologo -v quiet
+  COMMAND ${AVER_DOTNET_EXE} build ${AVER_FSHARP_PROJ} ${AVER_DOTNET_BUILD_FLAGS}
           -o ${AVER_FSHARP_OUT_DIR}
   DEPENDS ${AVER_FSHARP_SOURCES}
           ${AVER_BRIDGE_OUTPUTS}
@@ -302,7 +357,7 @@ set(AVER_PCG_OUTPUTS
 
 add_custom_command(
   OUTPUT ${AVER_PCG_OUTPUTS}
-  COMMAND ${AVER_DOTNET_EXE} build ${AVER_PCG_PROJ} -c Release --nologo -v quiet
+  COMMAND ${AVER_DOTNET_EXE} build ${AVER_PCG_PROJ} ${AVER_DOTNET_BUILD_FLAGS}
           -o ${AVER_BRIDGE_DIR}
   DEPENDS ${AVER_PCG_SOURCES}
           ${AVER_BRIDGE_OUTPUTS}
@@ -343,7 +398,7 @@ set(AVER_PCGSAMPLE_OUTPUTS
 
 add_custom_command(
   OUTPUT ${AVER_PCGSAMPLE_OUTPUTS}
-  COMMAND ${AVER_DOTNET_EXE} build ${AVER_PCGSAMPLE_PROJ} -c Release --nologo -v quiet
+  COMMAND ${AVER_DOTNET_EXE} build ${AVER_PCGSAMPLE_PROJ} ${AVER_DOTNET_BUILD_FLAGS}
           -o ${AVER_PCGSAMPLE_OUT_DIR}
   DEPENDS ${AVER_PCGSAMPLE_SOURCES}
           ${AVER_BRIDGE_OUTPUTS}

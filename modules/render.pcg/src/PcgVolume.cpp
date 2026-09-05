@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 #include <vector>
+#include "aver/rhi/ShaderFiles.hpp"   // this pass's HLSL is a deployed file, not a literal
 
 namespace aver::pcg {
 namespace {
@@ -160,7 +161,7 @@ bool VolumeBuilder::init(rhi::IDevice& dev) {
     if (!res_) return false;   // a GPU-less backend declines here, as designed
 
     rhi::ShaderDesc sd;
-    sd.source = kPcgVolumeHLSL;
+    sd.source = rhi::shaderFile("pcg_volume.hlsl").c_str();
     sd.entry  = "CSVolume";
     sd.stage  = rhi::ShaderStage::Compute;
     sd.minShaderModel = 60;

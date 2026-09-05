@@ -22,3 +22,6 @@ aver_add_module(Aver.Render.Sr
   PUBLIC_DEFS
     AVER_MODULE_SR=1
 )
+
+# HLSL beside the executable -- see cmake/AvModule.cmake.
+aver_deploy_shaders(Aver.Render.Sr "${CMAKE_CURRENT_SOURCE_DIR}/shaders")

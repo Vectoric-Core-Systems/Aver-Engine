@@ -25,7 +25,7 @@ holds; where this page and that one disagree, this page is the newer one and say
 | The seed-shell geometry (closed, wound, sized) | `modules/fluids/{include,src}/aver/fluids/FluidVolume.{hpp,cpp}` — `generateFluidSeedShell` | `FluidVolumeTest.cpp`: `testClosedAndConsistentlyWound`, `testNoDuplicatedSeamVertices`, `testExtentMatchesRequest`, `testEveryTriangleFacesOutward`, `testSubdivisionScaling` |
 | Density → mass, mass → pressure | same file — `fluidParticleMassKg`, `fluidPressureFor` | `testDerivedPressure`, `testShellParticleCountMatchesGenerator`, `testDensityScalesMassAndPressure` |
 | Viscosity → damping (the calibrated fit) | same file — `fluidDampingForViscosity` | `testViscosityDampingFit`, `testMaterialPresets`; the calibration itself is `tests/physics/src/FluidDampingCalibrationTest.cpp` |
-| The material precedence rule | same file — `fluidResolveMaterial`, called only from `FluidScene::spawn` | `testResolveMaterialPrecedence` |
+| The material precedence rule | same file — `fluidResolvePhysicsMaterial`, called only from `FluidScene::spawn` | `testResolveMaterialPrecedence` |
 | The solver join (GPU mesh, staging ring, Jolt body) | `modules/fluids/{include,src}/aver/fluids/FluidScene.{hpp,cpp}` | no dedicated test — see §7 |
 | Winding/pressure correctness inside Jolt itself | `modules/physics/src/PhysicsWorld.cpp` — `buildSoftShared`, `addSoftBody` | `tests/physics/src/SoftBodyTest.cpp::testPressureHoldsAShellUp` |
 | `COMP <id> Fluid` (graph authoring) | `scripting/csharp/Aver.Graph/GraphComponentTree.cs` — `ApplyFluid` | — |
@@ -42,7 +42,7 @@ and never both apply to the same body of water (§6).
 
 ## 2. The unit story — and it is not symmetric
 
-An author no longer has to type Jolt's own solver knobs to describe a fluid. `FluidMaterial`
+An author no longer has to type Jolt's own solver knobs to describe a fluid. `FluidPhysicsMaterial`
 (`FluidVolume.hpp`) adds a second, optional layer on top of the four raw ones
 (`compliance`/`damping`/`iterations`/`pressure`): **density, in kg/m³, and dynamic viscosity, in
 Pa·s.** The two are not the same kind of number, and the header is explicit about it rather than
@@ -72,12 +72,12 @@ letting a reader assume symmetry:
   *same* damping as honey — a real, acknowledged gap the header records rather than hides behind an
   invented formula reaching past where anything was ever measured.
 
-Four presets exist as plain factory functions, not a second enum-keyed path — `FluidMaterial::Water()`
+Four presets exist as plain factory functions, not a second enum-keyed path — `FluidPhysicsMaterial::Water()`
 (998 kg/m³, 1.0e-3 Pa·s), `LightOil()` (~900, 0.1 — the geometric midpoint of the water/honey anchors),
 `Honey()` (1420, 10 — chosen to equal the calibration's own high anchor exactly), `Lava()` (2900, 1000
 — real density, but a damping response presently indistinguishable from honey's, for the reason
-above). `fluidMaterialPreset("water"|"lightoil"/"light oil"/"oil"|"honey"|"lava")` resolves a name to
-one, case-insensitively.
+above). `fluidPhysicsMaterialPreset("water"|"lightoil"/"light oil"/"oil"|"honey"|"lava")` resolves a
+name to one, case-insensitively.
 
 **Surface tension, pour, split, merge and puddle are refused, deliberately.** `aver_phys_softbody_create`'s
 own `indices` never change after a body is built, so a shell's vertex count and the edges between them
@@ -92,7 +92,7 @@ so none is offered.
 (`compliance`, `damping`, `iterations`, `pressure`) alongside the new, optional `material` field. Both
 can be set on the same request — a `COMP ... Fluid` line, or a `WATER` record, can in principle name
 `preset=honey` *and* a hand-typed `damping=`. Rather than decide which one an author meant,
-`fluidResolveMaterial` — called from exactly one place, `FluidScene::spawn`, regardless of which
+`fluidResolvePhysicsMaterial` — called from exactly one place, `FluidScene::spawn`, regardless of which
 authoring path produced the request — **refuses the whole spawn** when `desc.material` is set and
 `desc.damping` has already been changed from `kDefaultFluidDamping` (0.1), and writes a message naming
 both the material's own implied damping and the conflicting raw value. `testResolveMaterialPrecedence`

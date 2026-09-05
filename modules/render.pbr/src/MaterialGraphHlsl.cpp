@@ -614,6 +614,47 @@ struct Emitter {
         }
 
         // -- utility --
+        // THE CLOCK, and the node that makes a material graph able to MOVE. Without it a graph is a
+        // pure function of position and can only ever describe a still surface; with it, ripples,
+        // scrolling, flicker and pulsing are all just arithmetic on one more input.
+        //
+        // It reads gTime from the ENGINE's per-frame block (b0), not from any feature's or the
+        // material's, because a graph is emitted into every shader that shades a surface and b0 is
+        // the only block all of them agree about. See PerFrameCB::time.
+        //
+        //   Time         -- seconds, WRAPPED at an hour. This is the default and almost always the
+        //                   one wanted: sin() of an unwrapped clock degrades as the day wears on,
+        //                   because consecutive float32 values eventually skip whole periods.
+        //   Time.raw     -- unwrapped monotonic seconds, for anything that genuinely needs it and
+        //                   accepts that precision decays.
+        //   Time.delta   -- seconds since the previous frame.
+        //
+        // NO `scale` INPUT ON PURPOSE, though one is the obvious convenience. input() falls back to
+        // a pin's authored default and, for a pin nobody declared, to zero -- so an unconnected
+        // scale would multiply the clock by 0 and freeze every animation with no error anywhere.
+        // A Multiply beside this node costs one node and cannot fail that way.
+        // THE WATER SURFACE, so a graph shapes it from the SAME numbers the caustics project through.
+        //
+        //   WaveNormal.value  -- tangent-space normal of the wave set at `position` (world XY, cm)
+        //   WaveNormal.height -- its height in cm, for anything wanting the scalar
+        //   WaveNormal.focus  -- how strongly it converges light there, which is what caustics use
+        //
+        // A graph that wants a different ripple should change the wave set, not re-derive one out of
+        // Sin nodes: a hand-built one looks identical and silently stops agreeing with the caustics.
+        if (ciEquals(ty, "WaveNormal")) {
+            const Value p2 = input(n, "position", MatType::Float2);
+            if (ciEquals(pin, "height"))
+                return bind(n.id, pin, MatType::Float, "averWaveHeight(" + p2.expr + ")");
+            if (ciEquals(pin, "focus"))
+                return bind(n.id, pin, MatType::Float, "averWaveFocus(" + p2.expr + ")");
+            return bind(n.id, pin, MatType::Float3, "averWaveNormal(" + p2.expr + ")");
+        }
+        if (ciEquals(ty, "Time")) {
+            const char* src = ciEquals(pin, "raw")   ? "gTime.y"
+                            : ciEquals(pin, "delta") ? "gTime.z"
+                                                     : "gTime.x";
+            return bind(n.id, pin, MatType::Float, src);
+        }
         // Grazing-angle falloff, from the geometric normal and the view vector the renderer handed
         // in. Deliberately NOT from the normal-mapped one: this runs before a graph has decided what
         // the normal is, and reading a normal the same graph is still computing is a dependency the
@@ -667,6 +708,13 @@ constexpr OutputField kOutputFields[] = {
     {"SubsurfaceRadius", "subsurfaceRadius", MatType::Float},
     {"Ior",          "ior",          MatType::Float},
     {"Transmission", "transmission", MatType::Float},
+    // THE VOLUME. Together with Ior and Transmission above, these are what let a graph author glass
+    // rather than merely select it: attenuationColor is the transmittance after AttenuationDistance
+    // centimetres, so driving the pair per pixel is how one material becomes a thin clear pane at
+    // its face and a deep green edge down its length. A distance of 0 or less means "no volume",
+    // which is what every material that never mentions them keeps getting.
+    {"AttenuationColor",    "attenuationColor",    MatType::Float3},
+    {"AttenuationDistance", "attenuationDistance", MatType::Float},
     // THE COAT, drivable per pixel. This is where a coat earns a graph rather than three numbers on
     // the material: a weight mask is the difference between a uniformly lacquered object and one
     // that is polished where it is handled and bare where it is worn, and a roughness mask is how a

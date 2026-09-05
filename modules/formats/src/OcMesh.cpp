@@ -20,13 +20,10 @@ constexpr u32 kChunkIDXS = avrFourCC("IDXS");
 constexpr u32 kChunkMADR = avrFourCC("MADR");
 constexpr u32 kChunkMLET = avrFourCC("MLET");
 
-// MLET limits (FORMAT_SPECS.md 5.7). Duplicated from Aver.Trifactor's ClusterBuilder.hpp
-// (kMaxClusterVertices/kMaxClusterTriangles) ON PURPOSE, not an oversight: Aver.Formats sits BELOW
-// Aver.Trifactor in the module DAG (cmake/AvModule.cmake) and must load/save .ocmesh with
-// AVER_MODULE_TRIFACTOR=OFF, so this file cannot include Trifactor's header. These two numbers are
-// the on-disk MLET contract's own, not a borrowed constant.
-constexpr u32 kMaxMeshletVertices  = 64;
-constexpr u32 kMaxMeshletTriangles = 124;
+// MLET limits (FORMAT_SPECS.md 5.7) now live in OcMesh.hpp, so Trifactor can ALIAS them rather
+// than declare a second pair. The reasoning that put them here was half right: Formats sits below
+// Trifactor and cannot include its header -- but that argues against the wrong direction only, and
+// the DAG running one way is exactly what lets Formats own the number. See OcMesh.hpp.
 
 // MLET chunk versions (FORMAT_SPECS.md 5.7). Version is a property of the whole MLET chunk (every
 // LOD's sub-arrays inside it share one AvrChunk::version), not per meshlet -- there is exactly one

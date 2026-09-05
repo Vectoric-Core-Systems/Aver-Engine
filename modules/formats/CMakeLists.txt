@@ -9,6 +9,11 @@ aver_add_module(Aver.Formats
     src/OcAnim.cpp
     src/OcBeam.cpp
     src/OcGraph.cpp
+    # .ocinput -- named input actions and default key/mouse bindings (see OcInput.hpp for the format
+    # and why it needs no engine dependency). Beside the other AVR1-adjacent text readers for the same
+    # reason .ocparticle states for itself minus the module split: this one has no type from outside
+    # Aver.Formats to parse into at all (Aver.Framework is C#-only), so it never needed a third target.
+    src/OcInput.cpp
     src/OcMap.cpp
     src/OcMesh.cpp
     src/OcWorld.cpp
@@ -39,6 +44,9 @@ aver_add_module(Aver.Formats
     # .ocsnd -- a procedural sound as a node graph. Beside the other AVR1 readers for the same
     # reason: a node array, a link array and a header, nothing that needs a mixer.
     src/OcSound.cpp
+    # .ocrig -- a control rig. TEXT rather than an AVR1 container, unlike its neighbours here:
+    # a rig is four lines a person writes and reads, not a baked array. See OcRig.hpp.
+    src/OcRig.cpp
     src/Texture.cpp
   DEPS
     Aver.Core
@@ -61,6 +69,10 @@ if(AVER_MODULE_PBR)
     SOURCES
       src/OcMat.cpp
       src/MaterialScript.cpp
+      # Turning imported materials into .ocmat. Here rather than beside the importers for
+      # exactly the reason this target exists: it is the step that needs pbr::MaterialDesc, and the
+      # importers must stay in the PBR-free base target. Format-neutral: glTF, OBJ and USD feed it.
+      src/MaterialCook.cpp
     DEPS
       Aver.Formats
       Aver.Render.PBR

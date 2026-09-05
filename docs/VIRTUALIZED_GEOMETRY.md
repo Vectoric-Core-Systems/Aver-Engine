@@ -1,6 +1,26 @@
 # Virtualized geometry: clustering, LOD hierarchies, and GPU-driven rendering
 
-> **STATUS: PLAN ONLY. No code has been written.**
+> **STATUS AS WRITTEN (2026-08-08): PLAN ONLY. No code has been written.** That is no longer true and
+> has not been since a later commit built Slice 0 of §7 almost exactly as designed here, under a name
+> this plan did not anticipate. **Re-verified 2026-09-02:** `modules/trifactor/` (module name
+> "Aver.Trifactor") contains `buildClusters()`, `buildLodHierarchy()`, and `validateLodDag()`
+> (`include/aver/trifactor/ClusterBuilder.hpp`, `src/ClusterBuilder.cpp`), `third_party/meshoptimizer`
+> is vendored, `tests/formats/src/ConvertTool.cpp` calls both functions behind `#if
+> AVER_MODULE_TRIFACTOR` before `saveOcMesh()`, `.ocmesh` persists the resulting LOD DAG
+> (`OcMeshData::coarserLods`, `modules/formats/include/aver/formats/OcMesh.hpp`), and running
+> `build/bin/TrifactorTest.exe` here printed `=== all 201 Trifactor checks passed ===` — checked by
+> actually running it, not by trusting a README's claim of it (this file's own repository has a
+> documented habit of claiming test runs that never happened). §2 and the B13/B15 blockers below are
+> corrected in place with what this re-check found; §3-§6 and the GPU-side blockers (B10-B12, B14)
+> are NOT re-verified past what §2 covers, except where a correction below says otherwise, and should
+> not be trusted as still-accurate just because they sit in the same file as a corrected section. A
+> substantial GPU-side per-cluster mesh-shader rendering path also now exists in
+> `sandbox/src/SandboxApp.cpp` (search the file for `"[LOD-MESH-SHADER]"` — an amplification/mesh/pixel
+> shader pipeline behind a `--lod-mesh-shader` flag, with a CPU per-cluster fallback for devices with
+> `meshShaderTier == 0`) that this plan, written before any of it existed, does not describe and this
+> pass did not attempt to map onto specific slice numbers below — treat every "NOT IMPLEMENTED" and
+> "done when" claim in §3, §6 and §7 for anything past Slice 0 as unverified against that code, not as
+> confirmed still true.
 >
 > This plan is dated 2026-08-08. It surveys five subsystems (in-tree format infrastructure, offline
 > cluster-building pipeline, runtime rendering stack, chunk-vs-cluster streaming model, and
@@ -16,7 +36,8 @@
 ## 1. Licensing and patent stance — can we build this?
 
 The Aver Engine's public commitment is explicit: **no GPL, no patent-bearing tech**
-(`docs/formats/FORMAT_SPECS.md:13`; `docs/rendering/RENDERING.md:22-24`). Virtualized
+(`docs/formats/FORMAT_SPECS.md:13`; `docs/rendering/RENDERING.md:3`, corrected — "22-24" pointed at
+the design-principles list, not the licensing commitment). Virtualized
 micropolygon geometry—clustering, LOD hierarchies, GPU-driven rendering—is built on the
 **Nanite** architecture, a trademarked technology from Epic Games. This section answers the
 critical question: can we implement it safely?
@@ -66,17 +87,25 @@ The recommended tech stack:
 | Dynamic GI: **use Brixelizer, not DDGI** | **FidelityFX Brixelizer GI** (AMD) | MIT | **SAFE** |
 | DDGI (if desired later) | NVIDIA—probe-based irradiance fields | Patent US20210012562A1 | **UNSAFE without legal review** |
 
-**Critical decision:** RENDERING.md (§67-68) already flags DDGI as requiring "patent diligence" and
-recommends Brixelizer as the "lowest-risk" alternative. **Do not ship DDGI without explicit legal
-clearance.** The engine's public stance is zero patent exposure; violating that at ship time is a
-brand-level event.
+**Critical decision:** RENDERING.md already flags DDGI as requiring "patent diligence" and
+recommends Brixelizer as the "lowest-risk" alternative — its "Patent diligence note" (currently
+line 78, inside §1's licensing table) and its GI recommendation (§4.4, and the module-structure note
+near line 501) say so, not "§67-68", which is not a section this document has (its numbered sections
+run 0 through 9; a `§67`/`§68` reads like a stale line-number reference mislabelled as a section).
+Separately, RENDERING.md's own **§8, "Nanite-like virtualized geometry (the hard one, done
+honestly)"**, independently sketches almost this entire plan in eight bullet points — meshoptimizer
+clustering, a cluster LOD DAG via `meshopt_simplify`, GPU-driven mesh-shader rendering with an
+indirect-VS fallback, Hi-Z occlusion, screen-space-error LOD selection, and page-based streaming —
+predating or alongside this document without either one citing the other. **Do not ship DDGI without
+explicit legal clearance.** The engine's public stance is zero patent exposure; violating that at
+ship time is a brand-level event.
 
 ### Bottom line
 
 This plan is **technically safe to build** if:
 1. Implementation is derived from published papers and permissively-licensed libraries — in
-   practice meshoptimizer (MIT), which `docs/rendering/RENDERING.md:42` and
-   `docs/formats/FORMAT_SPECS.md:242` had already chosen for exactly this before this document
+   practice meshoptimizer (MIT), which `docs/rendering/RENDERING.md` (§8, and its tech-stack table
+   in §1) and `docs/formats/FORMAT_SPECS.md:255` had already chosen for exactly this before this document
    existed.
 2. Legal counsel confirms no patent exposure before shipping (one-time gate).
 3. The design is **not** an attempt to replicate Nanite's internal implementation details; it is
@@ -95,26 +124,46 @@ source.
 
 ### Format and offline infrastructure
 
-- **Meshlet format:** `.ocmesh` (OcMesh) has a `kOcMeshMeshlets` flag in the `MeshFlags` enum
-  (`modules/formats/include/aver/formats/OcMesh.hpp:15`) and full LOD hierarchy fields including
-  `LodDesc[LODCount]` per LOD (`docs/formats/FORMAT_SPECS.md:217-228`). **The infrastructure is
-  designed but inert.**
+**Every bullet in this subsection described a gap that Slice 0 (§7) has since closed. Corrected
+2026-09-02 — see the status banner at the top of this document for how that was checked; the
+struck-through claims are kept, not deleted, because they were the honest state of the tree on
+2026-08-08 and the point of this page is to show what changed, not to erase that it was once true.**
 
-- **Meshlet data is never written:** ConvertTool writes `LODCount=1` and `MeshletOffset=0`,
-  `MeshletCount=0` for every mesh (`modules/formats/src/OcMesh.cpp:224, :259-261`). The `kOcMeshMeshlets`
-  flag is masked to 0 before writing (`OcMesh.cpp:220`). **No actual meshlet data reaches disk.**
+- ~~**Meshlet format:** designed but inert.~~ Still true that `.ocmesh` (OcMesh) has a
+  `kOcMeshMeshlets` flag in the `MeshFlags` enum (`modules/formats/include/aver/formats/OcMesh.hpp:16`)
+  and full LOD hierarchy fields including `LodDesc[LODCount]` per LOD
+  (`docs/formats/FORMAT_SPECS.md:217-228`) — but it is no longer inert; see the next three bullets.
 
-- **No cluster-building bake step exists:** The import pipeline flows directly from `fmt::importGltf()`
-  (raw glTF → OcMeshData, LOD0 flat) to `fmt::saveOcMesh()` with no intermediate clustering stage
-  (`tests/formats/src/ConvertTool.cpp:44-62`). Clustering and LOD hierarchy building do not happen.
+- ~~**Meshlet data is never written:** ConvertTool writes `LODCount=1` and `MeshletOffset=0`,
+  `MeshletCount=0` for every mesh.~~ **FALSE as of the module `Aver.Trifactor` landing.** When
+  `AVER_MODULE_TRIFACTOR` is enabled (the `standard`/`full` edition default; off in `slim`),
+  `OcMesh.cpp`'s writer (around `modules/formats/src/OcMesh.cpp:589-595`) writes a per-LOD
+  `MeshletOffset`/`MeshletCount`/`ScreenErrorThreshold` triple sourced from the actual cluster/LOD
+  build, and the `kOcMeshMeshlets` flag is set whenever any LOD has meshlets
+  (`OcMesh.cpp` around line 544, `if (anyMeshlets) flags |= kOcMeshMeshlets;`). The claim still holds
+  verbatim for a mesh built with Trifactor disabled, or for one where clustering produced nothing (a
+  single-LOD mesh smaller than one cluster) — that path still writes the old all-zero bytes, by
+  design, for exact backward compatibility (§8.7 below is still accurate on this point).
 
-- **meshoptimizer is cited but not integrated:** `docs/formats/FORMAT_SPECS.md:242` mentions
-  `meshopt_buildMeshlets` as the reference tool for meshlet generation at cook time, but the codebase
-  has zero references to it (`grep meshopt_buildMeshlets` returns nothing).
+- ~~**No cluster-building bake step exists.**~~ **FALSE.** `tests/formats/src/ConvertTool.cpp` calls
+  `aver::trifactor::buildClusters()` for LOD 0 and `aver::trifactor::buildLodHierarchy()` for every
+  coarser level, behind `#if AVER_MODULE_TRIFACTOR`, before `fmt::saveOcMesh()` — see that file's own
+  `AVER_MODULE_TRIFACTOR`-gated block (currently starting around line 30). The import pipeline this
+  bullet described (`importGltf()` straight to `saveOcMesh()`, no clustering) is exactly what runs
+  when the module is compiled out; it is no longer what runs when it is compiled in, which is the
+  default for two of the three shipped editions.
 
-- **Screen-space error metric is not populated:** The `.ocmesh` `LodDesc` carries a
-  `ScreenErrorThreshold` field (`FORMAT_SPECS.md:227`), but it is hardcoded to 0.0f
-  (`OcMesh.cpp:261`). Runtime LOD selection cannot use it.
+- ~~**meshoptimizer is cited but not integrated.**~~ **FALSE.** `third_party/meshoptimizer` is
+  vendored (has been since the commit that added `Aver.Trifactor`), and
+  `modules/trifactor/src/ClusterBuilder.cpp` calls `meshopt_buildMeshlets`,
+  `meshopt_computeMeshletBounds`, and `meshopt_simplify` directly. `grep meshopt_buildMeshlets` no
+  longer returns nothing.
+
+- ~~**Screen-space error metric is not populated.**~~ **FALSE**, under the same
+  `AVER_MODULE_TRIFACTOR` condition as the meshlet-data bullet above: `OcMesh.cpp` writes
+  `lods[L].screenError` (a value `buildLodHierarchy` actually computed) into `ScreenErrorThreshold`,
+  not a hardcoded `0.0f`. Whether anything on the RUNTIME side reads it back to drive LOD selection —
+  the concern §3.3 below raises — was not re-checked in this pass; §3.3's "NOT VERIFIED" stands.
 
 ### GPU rendering capabilities
 
@@ -137,10 +186,15 @@ source.
   `dispatch`, `drawIndexed`). **Indirect draws are required for GPU-driven rendering; this is a
   gap.**
 
-- **Bindless descriptors NOT implemented:** `RHIResources.hpp:3` states the binding model is
-  "explicit descriptor tables, NOT bindless". RENDERING.md §2.5 lists bindless as a "Tier A"
-  desired future with "Tier B bound fallback for DX11". **Dynamic descriptor indexing is not
-  available.**
+- **Bindless descriptors NOT implemented for the raster path — one narrow exception exists.**
+  `RHIResources.hpp:3` still states the general binding model is "explicit descriptor tables, NOT
+  bindless", and RENDERING.md §2.5 still lists general bindless as a "Tier A" desired future with
+  "Tier B bound fallback for DX11". **Checked this pass:** `createBindlessTextureTable` (same file,
+  `IResourceFactory`) now exists — a fixed-size, shader-indexable texture array, gated behind
+  `DeviceCaps::rtBindlessTextures`, but its own comment is explicit that this is "the one exception"
+  and deliberately not a `BindingSetDesc` extension the raster path could also use. **Dynamic
+  descriptor indexing for cluster/meshlet rendering (a raster or mesh-shader consumer) is still not
+  available**; only the ray-hit shading path has it.
 
 ### Current rendering architecture
 
@@ -164,7 +218,7 @@ source.
 
 ### Chunk streaming already exists; cluster streaming does not
 
-Chunk streaming (`modules/world/ChunkStreamer.hpp`) is independent of cluster paging:
+Chunk streaming (`modules/world/include/aver/world/ChunkStreamer.hpp`) is independent of cluster paging:
 
 - Chunks answer "which entities?" and are distance-based (`ChunkStreamer.hpp:36-44`). Load radius
   is 3 chunks; evict radius is 5. Default budget is 2 load/4 evict per frame.
@@ -271,9 +325,16 @@ error and a per-frame error budget.
 feedback or frustum culling), looks up each cluster's screen-space error, and selects the LOD
 level. Output: per-cluster LOD decision.
 
-**NOT VERIFIED:** The current engine does not populate `ScreenErrorThreshold` (hardcoded to 0.0f,
-`OcMesh.cpp:261`), and it is unclear whether the existing visibility-buffer code or any runtime
-LOD-selection code references it at all.
+**Corrected 2026-09-02 — this used to say the engine never populates `ScreenErrorThreshold` at all,
+which contradicted §2's own correction of the same claim two sections up.** With
+`AVER_MODULE_TRIFACTOR` on, `OcMesh.cpp`'s writer (`:595`, not the previous citation's `:261`, which
+names an unrelated root-meshlet validation check) writes `lods[L].screenError` — a real value
+`buildLodHierarchy()` computed — into `ScreenErrorThreshold`; only a Trifactor-disabled build, or a
+mesh clustering produced nothing for, still gets the all-zero bytes. **What is still NOT VERIFIED,
+and is the part of this concern that survives the correction:** nothing outside `modules/formats`
+and `modules/trifactor` reads `ScreenErrorThreshold` back (checked this pass — no match in
+`sandbox/src/*.cpp` or any `render*` module), so a value now exists on disk with no runtime GPU
+LOD-selection code consuming it yet.
 
 ---
 
@@ -511,51 +572,46 @@ recommended.
 
 ---
 
-### B13 — No screen-space error metric populated for LOD selection
+### B13 — No screen-space error metric populated for LOD selection — RESOLVED
 
-`docs/formats/FORMAT_SPECS.md:227` defines `ScreenErrorThreshold` per LOD, but
-`modules/formats/src/OcMesh.cpp:261` hardcodes it to 0.0f.
+`docs/formats/FORMAT_SPECS.md:227` defines `ScreenErrorThreshold` per LOD. As of the
+`Aver.Trifactor` module landing, `modules/formats/src/OcMesh.cpp` writes the real per-LOD value
+`buildLodHierarchy` computed, not a hardcoded `0.0f` — see the corrected §2 bullet above. **What is
+NOT re-verified:** whether any GPU LOD-selection pass actually reads this value back at runtime; §3.3
+below still carries its own "NOT VERIFIED" for that half of the question, unchanged by this
+correction.
 
-**What is blocked:** GPU LOD-selection compute pass cannot decide which LOD level to render without
-a populated error metric.
-
-**What would unblock it:** Slice 1 of this plan computes `ScreenErrorThreshold` during LOD hierarchy
-building (ClusterBuilder.cpp) and writes it to the `.ocmesh` file.
-
-**Cost:** Already included in slice 1 (cluster-building offline pipeline).
+**Cost:** Was already included in what became Slice 0 (cluster-building offline pipeline) — done.
 
 ---
 
-### B14 — Mesh-shader tier is not queried; fallback to older hardware is not designed
+### B14 — Mesh-shader tier is not queried; fallback to older hardware is not designed — LIKELY STALE, NOT FULLY RE-VERIFIED
 
-`modules/rhi/include/aver/rhi/RHI.hpp:87` tracks `meshShaderTier` capability, but the renderer does
-not query it or provide a fallback path for older hardware.
-
-**What is blocked:** Shipping virtualized geometry on hardware without mesh shaders (DX11, older
-DX12 devices). The Modern path requires mesh shaders; the Fallback path (discrete LOD levels,
-software rasterization) does not, but it is not designed yet.
-
-**What would unblock it:** Slice 3 designs a Fallback path using discrete LOD levels and frustum
-culling on the CPU. Does not require mesh shaders or GPU-driven rendering.
-
-**Cost:** Already included in slice 3 (render at discrete LOD levels on fallback devices).
+`modules/rhi/include/aver/rhi/RHI.hpp` tracks `meshShaderTier` capability. As of this pass,
+`sandbox/src/SandboxApp.cpp` (search `"[LOD-MESH-SHADER]"`) DOES query it — `caps.meshShaderTier == 0
+|| caps.shaderModel < 65 || !caps.dxcAvailable` gates whether the mesh-shader pipeline is built at
+all — and DOES fall back, logging `"falling back to --lod-per-cluster/--lod-select"` and using what
+its own comments call a CPU per-cluster path. This directly contradicts "the renderer does not query
+it or provide a fallback path". **Not independently re-verified for this pass:** whether that CPU
+fallback matches the discrete-LOD, CPU-frustum-culled design Slice 3 below actually proposes, or is
+something else entirely built under the same `--lod-per-cluster` flag name. Treat this blocker as
+probably resolved and Slice 3's design section below as unconfirmed against what actually ships,
+not as still-accurate.
 
 ---
 
-### B15 — The cluster-building offline pipeline does not exist
+### B15 — The cluster-building offline pipeline does not exist — RESOLVED
 
-`tests/formats/src/ConvertTool.cpp` flows directly from `importGltf()` to `saveOcMesh()` with no
-clustering stage.
+`tests/formats/src/ConvertTool.cpp` used to flow directly from `importGltf()` to `saveOcMesh()` with
+no clustering stage. It no longer does: behind `#if AVER_MODULE_TRIFACTOR`, it now calls
+`aver::trifactor::buildClusters()` and `aver::trifactor::buildLodHierarchy()` before saving. The
+functions live in `modules/trifactor/src/ClusterBuilder.cpp` (module `Aver.Trifactor`), not
+`modules/formats/src/ClusterBuilder.cpp` as this blocker's "what would unblock it" originally
+proposed — a separate module below `Aver.Formats` in the module DAG, per
+`modules/trifactor/README.md`, rather than a new file inside Aver.Formats itself. `tests/formats/src/
+TrifactorTest.cpp` exercises it; running it here printed `=== all 201 Trifactor checks passed ===`.
 
-**What is blocked:** Every downstream step (LOD hierarchy, meshlet packing, GPU rendering).
-
-**What would unblock it:** Implement `buildClusters()` and `buildLodHierarchy()` in
-`modules/formats/src/ClusterBuilder.cpp` and call them from ConvertTool before saving.
-
-**Cost:** Roughly 2 weeks (graph partitioning via METIS or hand-rolled bisection, LOD hierarchy
-building with locked boundaries, error metric computation, validation).
-
-**This blocker is the first slice (0).**
+**This blocker was Slice 0 — done, under a different module name than this plan guessed.**
 
 ---
 
@@ -565,7 +621,15 @@ Ordering is by dependency. Each slice is independently testable without a GPU (o
 headless test harness). The first slice is pure CPU-side data-model work, following the precedent in
 CHUNKS.md and LANDSCAPE_EDITOR.md.
 
-### Slice 0 — Offline cluster building and LOD hierarchy
+### Slice 0 — Offline cluster building and LOD hierarchy — DONE (module `Aver.Trifactor`)
+
+**Corrected 2026-09-02: this slice shipped.** It landed as a new module, `modules/trifactor/`
+(`Aver.Trifactor`), rather than as new files inside `modules/formats/` the way the "Work" list below
+proposes — see the corrected §2 and B15 above for what was checked. The rest of this slice's
+description (goal, work breakdown, done-when criteria) is kept below as the design record of what was
+asked for; it is not a live task list any more; `docs/formats/FORMAT_SPECS.md` (5.5-5.7) also now
+documents the shipped `LodDesc`/meshlet/error-monotonicity format, including a per-cluster
+`OwnError`/`ParentError` pair this plan's original design did not have.
 
 **Goal:** Implement the complete offline cluster-building bake pipeline and prove it via headless
 tests, with NO GPU rendering yet.
@@ -956,6 +1020,13 @@ This plan proposes a staged implementation of Nanite-class virtualized geometry 
 starting with offline cluster building (slice 0, ~2 weeks) and culminating in fully GPU-driven
 rendering with reactive cluster paging (slice 4, ~6 weeks total). Slices are independently testable
 and can be parallelized if resources permit.
+
+**Corrected 2026-09-02: Slice 0 has shipped** (as `Aver.Trifactor`, see §7 and B15 above), and a
+GPU-driven per-cluster mesh-shader rendering path with a hardware-tier fallback also exists in
+`sandbox/src/SandboxApp.cpp` (`"[LOD-MESH-SHADER]"`, see the status banner at the top of this
+document) that was not built by following slices 1-3 as numbered here. This section's slice-by-slice
+timeline and "critical path" below describe the plan as proposed on 2026-08-08, not the order or
+shape of what was actually built; do not read "slice 1 → 2 → 4" as a status report.
 
 **Total estimated effort:** 8–10 weeks for slices 0–5 (core pipeline). Slices 6–9 (multi-material,
 transparency, raytracing integration, content workflow) add another 4–6 weeks.

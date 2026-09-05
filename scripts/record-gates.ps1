@@ -190,7 +190,11 @@ function Invoke-Tree([string] $flavour) {
     # mismatch on the very next run is not a regression -- it is non-determinism, and it means the
     # gate that moved does not have a stable probe. Do not re-record it away.
     Say ""
-    Say "$flavour RECORDED BUT DID NOT VERIFY -- $verifyExit gate(s) differ from what was just written." 'Red'
+    # NOT "$verifyExit gate(s)". gates.ps1 now exits 1 for "something failed" and prints the count on
+    # its own last line, per the shared table in modules/core/include/aver/core/ErrorCodes.hpp.
+    # Reading the code as a count was true while it WAS the count, and would have quietly become a
+    # lie the moment that changed -- so this says only what it actually knows.
+    Say "$flavour RECORDED BUT DID NOT VERIFY -- gates.ps1 exited $verifyExit; its last line has the count." 'Red'
     Say "These values came from this binary minutes ago, so this is NON-DETERMINISM, not a regression." 'Red'
     Say "Re-pick the offending probe onto a flat neighbourhood; do not record again to make it stop." 'Red'
     return $false

@@ -60,7 +60,13 @@ public static class Voxi
     [DllImport(Lib)] private static extern int aver_voxi_set_mesh_shaders(int on);
 
     /// <summary>Marshals a native string pointer, or "?" when it is null.</summary>
-    private static string Str(IntPtr p) => Marshal.PtrToStringAnsi(p) ?? "?";
+    // UTF-8, NOT ANSI. The ABI is explicit -- scripting_abi.h: "Strings are UTF-8 const char*
+    // both ways" -- and every other binding in this tree already decodes that way
+    // (Aver.Framework/Native.cs, Aver.Scene/Native.cs). PtrToStringAnsi decodes through the
+    // OS ANSI codepage instead, so anything non-ASCII came back mangled. Most of what these
+    // return is an ASCII name table where the two agree by luck; aver_pbr_get_texture_path is
+    // not -- it carries a path the user typed into a free-text field.
+    private static string Str(IntPtr p) => Marshal.PtrToStringUTF8(p) ?? "?";
 
     /// <summary>---- feature introspection ----</summary>
     public static int FeatureCount => aver_voxi_feature_count();

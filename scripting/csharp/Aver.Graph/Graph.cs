@@ -193,6 +193,13 @@ public class Node
     // GraphNodeDefs.hpp's own "PlayAnimation gets a THIRD input pin" comment for why. Null for every
     // other node type.
     public string? ClipPath { get; set; }
+
+    // Which control rig a "setcontrolrig" node binds, e.g. "Content/Rigs/ArmReach.ocrig". Set from
+    // the NODE line's "rig=<path>" attribute -- same mechanism as SkeletonPath and ClipPath above.
+    // The weight is NOT here, for exactly ClipPath's reason: which rig is worn is edit-time naming,
+    // how strongly it is worn is runtime data a graph may compute, so weight rides a float PIN.
+    // Null for every other node type.
+    public string? RigPath { get; set; }
 }
 
 /// One parameter the compiled method accepts -- e.g. the entity a graph drives, or the current

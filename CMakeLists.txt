@@ -34,6 +34,19 @@ option(AVER_BUILD_SANDBOX "Build the sandbox sample app" ON)
 # runtime lives on as a library because tests/game drives it directly.
 option(AVER_BUILD_GAME "Build the game runtime library (Aver.Runtime.Game)" ON)
 option(AVER_BUILD_TESTS "Build test executables" ON)
+# CTest, so the suites are runnable by ONE command from a terminal or a build server.
+#
+# They were not, until now. The only two things that ran them were tools/mcp/aver_mcp.py's
+# `aver_tests` -- reachable from an AI agent session and nowhere else -- and running each .exe by
+# hand, which README.md documents by listing 14 of the 100+ by name. A check nobody can run in one
+# step is a check that quietly stops being run, and this repo already has the commit to prove it
+# ("Two skin tests that exited 0 however they went").
+#
+# Registration is a single recursive walk at the bottom of this file rather than an add_test() in
+# each of the 33 tests/*/CMakeLists.txt: those files are long, heavily reasoned, and full of
+# `if(TARGET ...)` guards, so 100+ hand-written registrations would be 100+ chances to add a suite
+# and forget its line -- exactly the failure the walk cannot have.
+enable_testing()
 option(AVER_ENABLE_UI "In-window editor UI (Dear ImGui)" ON)
 
 # --- Editions: a named module set the launcher can offer and install ---
@@ -410,12 +423,22 @@ if(AVER_BUILD_SANDBOX)
   add_subdirectory(sandbox)
 endif()
 
-# THERE IS NO STANDALONE GAME EXECUTABLE. `game/` (AverGame.exe) and the packaged-game staging path
-# (scripts/stage-game.ps1, verify-game.ps1, game.allowlist, and the editor's Package Project item)
-# were removed deliberately: the editor is how a project is run, and a second host that rendered a
-# different subset of the scene was a standing source of confusion about what "the game" actually
-# shows. Aver.Runtime.Game survives as a LIBRARY -- tests/game drives it directly -- which is what
-# AVER_BUILD_GAME now switches.
+# THE STANDALONE GAME EXECUTABLE, restored -- with the check whose absence is why it was removed.
+#
+# `game/` (AverGame.exe) and the packaged-game staging path went in b262c73 for a stated reason, and
+# it was a real one: a second host "rendered a different subset of the scene than the editor", and
+# nothing in the tree could notice. The runtime itself never left -- Aver.Runtime.Game kept being
+# built and kept growing, and GameApp::onInit is a SUPERSET of the editor's applyProject -- so what
+# was deleted was ~30 lines of glue plus three scripts, and roughly 3,500 lines of game host sat
+# compiled and unlinked for nineteen days.
+#
+# WHAT IS DIFFERENT THIS TIME: scripts/verify-game.ps1 now runs a DIVERGENCE gate. It opens the same
+# project and level in both hosts under --frames and compares their probe codes, so "the game draws
+# what the editor draws" is a check that fails rather than a claim nobody can test. Restoring the
+# executable without that would be restoring the problem.
+if(AVER_BUILD_GAME)
+  add_subdirectory(game)
+endif()
 
 # THE MODULE DAG CHECK, here rather than inside aver_add_module.
 #
@@ -503,6 +526,12 @@ if(AVER_BUILD_TESTS)
   # property of the SOURCE TREE rather than of any module: that no game content sits in the engine and
   # that one file knows where projects live. docs/PROJECTS.md asserts both in prose; this decides them.
   add_subdirectory(tests/repo)
+  # The C ABI's integer constants against the C# enums that restate them. Unconditional and
+  # Aver.Core-only for the same reason tests/repo is: it reads the headers and the .cs files as
+  # SOURCE rather than exercising either side, so it needs no device and no .NET SDK. It lives here
+  # rather than as a managed test because a native *Test.exe is the only thing this repo actually
+  # runs -- Aver.Graph.Tests is wired into nothing and must be invoked by hand.
+  add_subdirectory(tests/abi)
   # The Roslyn backend, checked against the scanner it falls back from. Unconditional like its module;
   # the test itself skips when averdesign is not staged.
   add_subdirectory(tests/formats.roslyn)
@@ -560,4 +589,50 @@ if(AVER_BUILD_TESTS)
   if(AVER_MODULE_RENDER_SOFTBODY)
     add_subdirectory(tests/render.softbody)
   endif()
+endif()
+
+# ---- CTest registration -------------------------------------------------------------------------
+#
+# Walks every directory added above and registers each EXECUTABLE whose name ends in `Test`. That
+# suffix is the existing convention -- aver_mcp.py's `aver_tests` already globs `bin/*Test.exe` --
+# so this registers exactly the set that was already being run, and keeps doing so when a suite is
+# added or a module option removes one. Tools that live beside the suites (ConvertTool, ActorSweep,
+# AudioProbe, DumpClusterPs) do not match and are not registered.
+#
+# PASS IS NOT JUST EXIT 0. Several suites have historically exited 0 however they went -- there is a
+# commit named for it, and docs/STALE_CODE.md records another instance where an `ok_` flag was set
+# and never read. FAIL_REGULAR_EXPRESSION is the second, independent signal.
+#
+# THE PATTERN IS EXACT ON PURPOSE, and matching the bare word does not work. Suites describe the
+# negative cases they cover in prose -- "an OBJ with no faces FAILS rather than returning an empty
+# mesh", "AND IT STAYS FAILED", "a bad input FAILS detectably" -- so a naive /FAIL/ marks six
+# perfectly green suites red, which is what the first attempt at this line did. What only ever
+# appears on a real failure is the shared check() helper's own formatting, `FAIL` followed by two
+# spaces, and the summary line's `FAILED ===`. Verified against the passing output of all six of
+# those suites: zero matches.
+function(aver_register_ctest_in dir)
+  get_property(_targets DIRECTORY "${dir}" PROPERTY BUILDSYSTEM_TARGETS)
+  foreach(_t IN LISTS _targets)
+    if(_t MATCHES "Test$")
+      get_target_property(_type ${_t} TYPE)
+      if(_type STREQUAL "EXECUTABLE")
+        add_test(NAME ${_t} COMMAND ${_t})
+        set_tests_properties(${_t} PROPERTIES
+          # Matches aver_tests' own per-suite budget, so a hang fails rather than wedging a build.
+          TIMEOUT 600
+          # bin/, because several suites resolve fixtures relative to the executable the same way a
+          # shipped editor resolves shaders and splash.png.
+          WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+          FAIL_REGULAR_EXPRESSION "FAIL  |FAILED ===")
+      endif()
+    endif()
+  endforeach()
+  get_property(_subs DIRECTORY "${dir}" PROPERTY SUBDIRECTORIES)
+  foreach(_s IN LISTS _subs)
+    aver_register_ctest_in("${_s}")
+  endforeach()
+endfunction()
+
+if(AVER_BUILD_TESTS)
+  aver_register_ctest_in("${CMAKE_CURRENT_SOURCE_DIR}")
 endif()

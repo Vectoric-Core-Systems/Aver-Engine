@@ -102,32 +102,32 @@ public:
     // cannot happen without an IRenderContext is the barriered copyBuffer, so that alone is what
     // prePass is left to do.
     //
-    // elapsedSeconds IS THE COMPOSITION ROOT'S Timestep::total (seconds since engine start), handed
-    // in rather than measured internally with its own clock, for a reason found by inspection, not
-    // assumption: fluids::WaterRenderer already has an identical-shaped elapsedSeconds_ clock, fed by
-    // its own WaterRenderer::tick(dtSeconds) -- and grep over sandbox/src/SandboxApp.cpp shows that
-    // method is NEVER CALLED from anywhere, so the ocean's own wave clock has stood frozen at 0 since
-    // that feature shipped (see the memory note this session left on it). This class does not repeat
-    // that mistake: rather than add a second tick() a future refactor can just as easily forget to
-    // wire up, it takes the one clock this composition root already advances and already threads
-    // through every other system's tick this same frame (anim::animSystem, particles::particleSystem,
-    // aver_fw_tick all read t.dt/t.total at their own call sites, a few lines from this one) --
-    // stored for transparentPass to read afterward, since transparentPass has no Timestep of its own
-    // to reach for (see FluidScene.cpp's own comment on elapsedSeconds_ for what it is used for).
-    void update(f32 elapsedSeconds);
+    // TAKES NO CLOCK. It used to take the composition root's Timestep::total, purely so
+    // transparentPass could fill gFluidTime for a decorative ripple in a shader this class no longer
+    // owns. Surface detail on a fluid is a normal map on its .ocmat now, like every other surface.
+    void update();
 
     // What the composition root should draw for this handle, or ZERO for an unknown or despawned
     // one -- draw the entity's authored placeholder instead of nothing, the same convention
     // SoftBodyScene::drawHandle documents.
     //
-    // DRAW WITH AN IDENTITY WORLD MATRIX. Once update() has run for a handle at least once, the
-    // vertex buffer this returns holds fluids::FluidVolume::positionsCm() verbatim -- WORLD-space,
-    // because that is what the physics ABI returns and what FluidVolume's own contract promises a
-    // renderer ("what a renderer draws", in FluidVolume.hpp's own words). A soft body's buffer needs
-    // an entity's world matrix on top because softBodyPackVertices deliberately converts back to
-    // mesh-local first; this buffer was never converted, so applying any further translation or
-    // rotation at draw time would move it a second time.
+    // DRAW WITH A TRANSLATION OF volumeOrigin(), NOT IDENTITY -- corrected, and the correction was
+    // a real bug rather than tidying. This buffer holds mesh-LOCAL positions about the volume's
+    // centre, exactly as softBodyPackVertices produces for a soft body and for the same reason: the
+    // blended draw flush sorts back-to-front by the world matrix's TRANSLATION, so a mesh handed an
+    // identity matrix claims to sit at the world origin and composites against other translucent
+    // surfaces in the wrong order.
     rhi::MeshHandle drawHandle(FluidHandle h) const;
+
+    // WHERE drawHandle()'s BUFFER IS ANCHORED: the volume's authored centre in world centimetres,
+    // which is exactly the translation a caller must put in the world matrix it draws with. False
+    // for an unknown or despawned handle, leaving `out` untouched.
+    //
+    // THE BUFFER IS MESH-LOCAL, NOT WORLD. It used to be absolute world space, drawn with an
+    // identity matrix -- which places the mesh correctly and sorts it WRONG, because the blended
+    // flush orders draws by the world matrix's translation and identity says "the origin". See
+    // packFluidVerts for the full account.
+    bool volumeOrigin(FluidHandle h, f32 out[3]) const;
 
     // The aver_phys_softbody_* handle behind this volume, or ZERO for an unknown/despawned handle or
     // one whose body creation failed (see spawn()'s own comment on that outcome). Exists for a
@@ -142,34 +142,18 @@ public:
     // buffer it writes -- update() has no IRenderContext to issue a barrier or a copy with.
     void prePass(rhi::IRenderContext& ctx) override;
 
-    // Draws every live volume's CURRENT drawMesh as a depth-tested, alpha-blended water surface --
-    // the seam rhi::IRenderFeature::transparentPass exists for (RHIResources.hpp's own comment calls
-    // it "A SEAM, not a special case: any feature may implement it"), and the exact seam
-    // particles::ParticleRenderer already proves out. THIS REPLACES THE COMPOSITION ROOT'S OWN
-    // drawMesh CALL for this feature: sandbox/src/SandboxApp.cpp used to hand fluidScene_.drawHandle()
-    // to the ordinary OPAQUE draw path with a flat colour, which is what this override exists to fix,
-    // and it is also less coupling in the composition root either way -- SandboxApp no longer needs
-    // to know this feature draws itself at all, the same way it already does not know ParticleRenderer
-    // or WaterRenderer draw themselves. See FluidShaders.hpp for the pixel shader and FluidScene.cpp's
-    // own comment at this method for what it does and does not read from each resident.
-    void transparentPass(rhi::IRenderContext& ctx) override;
+    // NO transparentPass OVERRIDE, AND THAT IS DELIBERATE. This class used to draw its own volumes
+    // through that seam with its own pipeline and shaders, which is what kept water out of the
+    // ray-tracing structure, out of the sun's shadow term, out of fog and out of back-to-front
+    // sorting against the glass. The composition root now draws drawHandle() through
+    // setDrawBlended() + drawMesh() with an authored .ocmat instead, so a fluid volume is an
+    // ordinary translucent mesh. What is left here is what the header always claimed this class was
+    // modelled on -- SoftBodyScene: produce the geometry, let the renderer shade it.
 
-    // Rebuilds pso_ to bake the scene target's current sample count and formats -- the same
-    // DECIDED-1 rule ParticleRenderer::onRenderTargetsChanged and WaterRenderer::onRenderTargetsChanged
-    // both follow: MSAA and render-target formats are baked into a PSO at creation, not read per draw.
-    void onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rhi::Format depth,
-                                u32 width, u32 height) override;
 
     u32 residentCount() const { return static_cast<u32>(live_.size()); }
 
 private:
-    // Builds (or rebuilds) pso_ against the given target shape. Called from init() with the device's
-    // best-effort-at-startup values, and again from onRenderTargetsChanged whenever they actually
-    // change -- ParticleRenderer::buildPipelines' and WaterRenderer::buildPipeline's identical
-    // two-caller shape. A build failure here is NOT a reason to refuse init() as a whole (see init()'s
-    // own comment): transparentPass simply no-ops while pso_ is zero, exactly as
-    // ParticleRenderer::transparentPass does when its own pipelines failed to build.
-    bool buildPipeline(u32 sampleCount, rhi::Format color, rhi::Format depth);
     // One fluid volume's simulation and GPU residency. Owns the FluidVolume itself -- there is no
     // asset cache to keep it in, the way SoftBodyScene's decoded_ keeps an OcMeshData -- because a
     // fluid volume's shape is authored once, per instance, by its own desc, and shared by nothing
@@ -213,24 +197,12 @@ private:
     std::unordered_map<FluidHandle, Resident> live_;
     FluidHandle nextHandle_ = 1;
 
-    // The transparentPass pipeline -- see buildPipeline()'s own comment. Compiled once in init();
-    // ready_ does NOT depend on these being non-zero, because a shader/pipeline failure here should
-    // still leave spawn()/update()/prePass() fully working (the physics side of this feature), the
-    // same separation ParticleRenderer::init keeps between "this device has no resource factory"
-    // (a hard failure) and "the pipeline build failed" (a soft one, logged, checked at draw time).
-    rhi::ShaderHandle   vs_ = 0, ps_ = 0;
-    rhi::PipelineHandle pso_ = 0;
-    u32         bakedSampleCount_ = 1;
-    rhi::Format bakedColorFmt_ = rhi::Format::Unknown;
-    rhi::Format bakedDepthFmt_ = rhi::Format::Unknown;
 
-    // update()'s own copy of the composition root's Timestep::total, held here purely so
-    // transparentPass -- called later the same frame, with no Timestep of its own -- has a real,
-    // moving clock to fill FluidFrame's b4 CBV with for PSFluid's animated ripple perturbation (see
-    // FluidShaders.hpp's own comment on gFluidTime). Zero-initialised, not that it matters: the very
-    // first frame's ripple offset from t=0 is indistinguishable from any other phase, since the ripple
-    // pattern has no "start" a player could notice.
-    f32 elapsedSeconds_ = 0.0f;
+
+    // How many times update() has read a body back, purely so the shell-bounds check below can log
+    // on a power-of-two cadence (1, 2, 4, 8 ...) rather than every frame -- the same
+    // (n & (n + 1)) == 0 shape VoxiRenderer's own translucent-draw census uses.
+    u64 updates_ = 0;
 };
 
 } // namespace aver::fluids

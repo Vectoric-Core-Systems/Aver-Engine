@@ -46,3 +46,6 @@ aver_add_module(Aver.Render.ActorPreview
 if(TARGET Aver.Render.PBR.Materials)
   target_link_libraries(Aver.Render.ActorPreview PUBLIC Aver.Render.PBR.Materials)
 endif()
+
+# HLSL beside the executable -- see cmake/AvModule.cmake.
+aver_deploy_shaders(Aver.Render.ActorPreview "${CMAKE_CURRENT_SOURCE_DIR}/shaders")

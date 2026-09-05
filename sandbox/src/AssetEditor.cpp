@@ -5,6 +5,14 @@
 
 #include "aver/core/Log.hpp"
 #include "aver/formats/OcMesh.hpp"
+#if AVER_WITH_IMGUI
+#include "ActorEditor.hpp"                                  // sharedPreview
+#include "aver/render/preview/ActorPreview.hpp"
+#include "aver/rhi/RHI.hpp"
+#include "aver/runtime/Engine.hpp"
+#include <algorithm>
+#include <vector>
+#endif
 
 #include <cctype>
 #include <filesystem>
@@ -125,16 +133,87 @@ bool AssetEditorHost::draw(Engine& e, unsigned dockInto, float dpi) {
     }
 
     // Erase after the loop: an editor freed mid-iteration is still on this frame's ImGui draw list.
+    //
+    // A DIRTY TAB IS NOT CLOSED, IT IS ASKED ABOUT. Closing one used to destroy the editor and log
+    // a warning into a drawer the user is probably not looking at -- an hour of graph or sound
+    // editing gone to a click on the wrong X, with the only record in the Output Log. The whole
+    // application already refuses to exit with unsaved editors and raises a proper prompt naming
+    // them; this is the same question for one tab.
     for (usize k = closing_.size(); k-- > 0;) {
         AssetEditor& ed = *editors_[closing_[k]];
-        if (ed.dirty())
-            AVER_WARN("[Editor] closed '{}' with unsaved changes", std::filesystem::path(ed.path()).filename().string());
+        if (ed.dirty()) {
+            closeAskPath_ = ed.path();     // held open until the prompt is answered
+            closeAskError_.clear();
+            continue;
+        }
         editors_.erase(editors_.begin() + static_cast<isize>(closing_[k]));
     }
+
+    drawClosePrompt(dpi);
     return !editors_.empty();
 #else
     (void)e; (void)dockInto; (void)dpi;
     return false;
+#endif
+}
+
+// Asks before throwing away one tab's unsaved edits. Modelled on SandboxApp's own exit prompt: same
+// centred auto-resizing modal, same Save / Discard / Cancel order, same rule that a FAILED save
+// keeps the dialog up and says why rather than closing and losing the work anyway.
+void AssetEditorHost::drawClosePrompt(float dpi) {
+#if AVER_WITH_IMGUI
+    if (closeAskPath_.empty()) return;
+
+    AssetEditor* ed = find(closeAskPath_);
+    if (!ed) { closeAskPath_.clear(); return; }   // saved or closed some other way meanwhile
+
+    constexpr const char* kTitle = "Unsaved changes";
+    if (!ImGui::IsPopupOpen(kTitle)) ImGui::OpenPopup(kTitle);
+    const ImVec2 centre = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(centre, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(460.0f * dpi, 0.0f), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+
+    ImGui::TextWrapped("'%s' has unsaved changes.", ed->title().c_str());
+    ImGui::TextDisabled("%s", closeAskPath_.c_str());
+    if (!closeAskError_.empty()) {
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4(0.93f, 0.42f, 0.38f, 1.0f), "%s", closeAskError_.c_str());
+    }
+    ImGui::Spacing();
+    ImGui::Separator();
+
+    const auto drop = [this]() {
+        for (usize i = 0; i < editors_.size(); ++i) {
+            if (editors_[i]->path() != closeAskPath_) continue;
+            editors_.erase(editors_.begin() + static_cast<isize>(i));
+            break;
+        }
+        closeAskPath_.clear();
+        closeAskError_.clear();
+        ImGui::CloseCurrentPopup();
+    };
+
+    if (ImGui::Button("Save and close", ImVec2(150.0f * dpi, 0.0f))) {
+        std::string why;
+        if (ed->save(&why)) drop();
+        else closeAskError_ = why.empty() ? std::string("Could not save.") : why;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Discard", ImVec2(110.0f * dpi, 0.0f))) {
+        AVER_WARN("[Editor] discarded unsaved changes in '{}'",
+                  std::filesystem::path(closeAskPath_).filename().string());
+        drop();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", ImVec2(110.0f * dpi, 0.0f))) {
+        closeAskPath_.clear();       // the tab simply stays open
+        closeAskError_.clear();
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+#else
+    (void)dpi;
 #endif
 }
 
@@ -159,7 +238,7 @@ public:
     }
 
     // Draws the mesh summary, or the load error.
-    void draw(Engine&) override {
+    void draw(Engine& e) override {
 #if AVER_WITH_IMGUI
         if (!loaded_) {
             ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.45f, 1.0f), "This file could not be read.");
@@ -208,12 +287,103 @@ public:
         }
 
         ImGui::Separator();
-        ImGui::TextDisabled("Read-only. A 3D preview needs an offscreen render target and a preview");
-        ImGui::TextDisabled("camera, neither of which exists yet.");
+        drawPreview(e);
 #endif
     }
 
 private:
+#if AVER_WITH_IMGUI
+    // A 3D preview of the mesh.
+    //
+    // THE COMMENT THAT USED TO BE HERE SAID THIS "needs an offscreen render target and a preview
+    // camera, neither of which exists yet". Both existed: ActorPreview provides the target, the
+    // orbit camera, frameAll() and uiTextureId(), and ThumbnailCache already renders .ocmesh files
+    // through it for the Content Browser's tiles. The mesh viewer was the only place that still
+    // said it could not be done -- the third stale "cannot" comment found in this tree.
+    //
+    // UPLOADED FROM THE ALREADY-PARSED MESH, not through PreviewMeshCache::resolve. resolve joins
+    // its path against the project content root, and this tab opens whatever file it was given,
+    // which may be outside any project entirely. The bytes are already in mesh_; the only thing
+    // missing was a GPU copy of them.
+    void drawPreview(Engine& e) {
+        rhi::IDevice* dev = e.device();
+        render::preview::ActorPreview* preview = editor::sharedPreview(e);
+        if (!dev || !preview || !preview->uiTextureId()) {
+            ImGui::TextDisabled("No preview on this backend.");
+            return;
+        }
+        if (!uploadTried_) {
+            uploadTried_ = true;
+            gpuMesh_ = uploadMesh(*dev);
+            if (!gpuMesh_) AVER_WARN("[Editor] mesh preview: could not upload '{}'", path_);
+        }
+        if (!gpuMesh_) { ImGui::TextDisabled("This mesh could not be uploaded for preview."); return; }
+
+        // ONLY WHEN FOCUSED. ActorPreview is shared by every tab that draws into it, and the draw
+        // list is whatever the last writer set this frame -- so an actor editor and a mesh viewer
+        // both open would otherwise take turns showing each other's contents. Claiming it only on
+        // focus keeps a background tab from stealing the image out of the one being looked at.
+        const bool mine = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+        if (mine) {
+            std::vector<render::preview::PreviewDraw> draws(1);
+            draws[0].mesh = gpuMesh_;
+            // Recentre on the mesh's own middle and give frameAll a real extent: at boundsRadius 0
+            // it computes a zero span and falls back to a fixed distance, framing every mesh
+            // identically regardless of size. Same reasoning ThumbnailCache writes out at length.
+            f32 centre[3] = {};
+            f32 radius = 0.0f;
+            if (dev->meshBounds(gpuMesh_, centre, &radius)) {
+                draws[0].world[12] = -centre[0];
+                draws[0].world[13] = -centre[1];
+                draws[0].world[14] = -centre[2];
+                draws[0].boundsRadius = radius;
+            }
+            preview->setDrawList(std::move(draws));
+            if (!framed_) { preview->frameAll(); framed_ = true; }
+        }
+
+        const ImVec2 avail = ImGui::GetContentRegionAvail();
+        const f32 h = std::max(160.0f, avail.y);
+        ImGui::Image(static_cast<ImTextureID>(preview->uiTextureId()), ImVec2(avail.x, h));
+        if (ImGui::IsItemHovered()) {
+            const ImGuiIO& io = ImGui::GetIO();
+            if (ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+                preview->camera().addOrbit(io.MouseDelta.x * 0.4f, io.MouseDelta.y * 0.4f);
+            if (io.MouseWheel != 0.0f)
+                preview->camera().addZoom(io.MouseWheel > 0.0f ? 0.9f : 1.1f);
+        }
+        if (!mine) ImGui::TextDisabled("Click this tab to take the preview.");
+    }
+
+    // The file's stream layout into the engine's interleaved vertex, then one createMesh.
+    rhi::MeshHandle uploadMesh(rhi::IDevice& dev) const {
+        const u32 n = mesh_.vertexCount();
+        if (n == 0 || mesh_.indices.empty()) return 0;
+        std::vector<rhi::MeshVertex> verts(n);
+        for (u32 i = 0; i < n; ++i) {
+            rhi::MeshVertex& v = verts[i];
+            v.px = mesh_.positions[usize(i)*3+0];
+            v.py = mesh_.positions[usize(i)*3+1];
+            v.pz = mesh_.positions[usize(i)*3+2];
+            if (mesh_.normals.size() >= usize(n)*3) {
+                v.nx = mesh_.normals[usize(i)*3+0];
+                v.ny = mesh_.normals[usize(i)*3+1];
+                v.nz = mesh_.normals[usize(i)*3+2];
+            } else { v.nx = 0.0f; v.ny = 0.0f; v.nz = 1.0f; }
+            if (mesh_.uvs.size() >= usize(n)*2) {
+                v.u = mesh_.uvs[usize(i)*2+0];
+                v.v = mesh_.uvs[usize(i)*2+1];
+            } else { v.u = 0.0f; v.v = 0.0f; }
+        }
+        return dev.createMesh(verts.data(), n, mesh_.indices.data(),
+                              static_cast<u32>(mesh_.indices.size()));
+    }
+
+    rhi::MeshHandle gpuMesh_ = 0;
+    bool uploadTried_ = false;
+    bool framed_ = false;
+#endif
+
     std::string path_;
     fmt::OcMeshData mesh_;
     std::string error_;

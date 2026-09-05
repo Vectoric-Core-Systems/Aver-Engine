@@ -31,6 +31,49 @@ set_target_properties(SoftBodyTest PROPERTIES
 # THIS TARGET WAS MISSING when the buoyancy code was first written, and the consequence is worth
 # recording: the test file existed, compiled by hand, and reported a real failure that nothing in
 # the build would ever have run. A test that is not in a CMakeLists is not a test.
+# BodyDynamicsTest -- forces, impulses, spin, motion type, material properties, mass, sleeping.
+#
+# Links Aver.Physics and Aver.Core only, like BuoyancyTest below and for the same reason: every claim
+# it makes is about OBSERVED MOTION through the public ABI, so it is checked the way a caller sees it
+# rather than by reaching into the module. It needs no Jolt header at all.
+# CharacterTest -- and its first test is the one that matters: the stair-stepping distances are
+# arguments to Jolt's ExtendedUpdate rather than state on the character, so the setter can only record
+# them and something must read them back. Walking a character at a kerb is the only way to tell a
+# working feature from a setter that stores a number nothing looks at.
+add_executable(CharacterTest src/CharacterTest.cpp)
+target_link_libraries(CharacterTest PRIVATE Aver.Physics Aver.Core)
+set_target_properties(CharacterTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# LayerTest -- collision layers. Its FIRST job is a negative claim: that a project which never
+# mentions a layer behaves exactly as it did before layers existed, since every body's object layer
+# is now an encoding rather than a constant.
+add_executable(LayerTest src/LayerTest.cpp)
+target_link_libraries(LayerTest PRIVATE Aver.Physics Aver.Core)
+set_target_properties(LayerTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# ShapeTest -- the rigid shapes, checked by DROPPING them and measuring where their centres rest.
+# That number is a shape's half-height, measured rather than declared, which is the only check that
+# tells a capsule built to the right size from one built to twice or half of it.
+add_executable(ShapeTest src/ShapeTest.cpp)
+target_link_libraries(ShapeTest PRIVATE Aver.Physics Aver.Core)
+set_target_properties(ShapeTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# JointTest -- written against physics_joints_abi.h ALONE, by a different author from the
+# implementation, deliberately: a test written by reading the implementation agrees with that
+# implementation's bugs.
+add_executable(JointTest src/JointTest.cpp)
+target_link_libraries(JointTest PRIVATE Aver.Physics Aver.Core)
+set_target_properties(JointTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+add_executable(BodyDynamicsTest src/BodyDynamicsTest.cpp)
+target_link_libraries(BodyDynamicsTest PRIVATE Aver.Physics Aver.Core)
+set_target_properties(BodyDynamicsTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 add_executable(BuoyancyTest src/BuoyancyTest.cpp)
 target_link_libraries(BuoyancyTest PRIVATE Aver.Physics Aver.Core)
 set_target_properties(BuoyancyTest PROPERTIES

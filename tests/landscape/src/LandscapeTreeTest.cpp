@@ -1,5 +1,6 @@
 // The landscape CPU model: the quadtree, the LOD metric, frustum culling and chunk geometry.
 // Exit code = failure count. No device, no GPU, no .NET.
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/Math.hpp"
 #include "aver/landscape/ChunkMesh.hpp"
@@ -483,5 +484,5 @@ int main() {
     }
 
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

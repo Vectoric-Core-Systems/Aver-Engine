@@ -27,6 +27,25 @@ target_include_directories(EditorEulerTest PRIVATE
 target_link_libraries(EditorEulerTest PRIVATE Aver.Core Aver.Platform)
 set_target_properties(EditorEulerTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# DropPlacementTest -- the lift that makes a dragged-in asset REST ON what it was dropped onto rather
+# than intersect it. Header-only and Core-only for EditorEulerTest's reason, and the same reason it
+# was worth extracting at all: the rest of the drop path needs a device, a window and a physical
+# drag, so this arithmetic is the only part of it a headless suite can reach -- and a sign error in
+# it drops objects through the floor without logging anything.
+add_executable(DropPlacementTest src/DropPlacementTest.cpp)
+target_include_directories(DropPlacementTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(DropPlacementTest PRIVATE Aver.Core)
+set_target_properties(DropPlacementTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# LevelListTest -- the level enumeration behind File > Open Level and the Content Browser's level
+# activation. Header-only and Core-only, exactly like EditorEulerTest above, for the same reason: the
+# PICKER needs ImGui and a window, the LIST does not, and the list is where a missed extension or a
+# walk into a project's streamed-chunk directory would actually go wrong.
+add_executable(LevelListTest src/LevelListTest.cpp)
+target_include_directories(LevelListTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(LevelListTest PRIVATE Aver.Core Aver.Platform)
+set_target_properties(LevelListTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # GraphEditorGeometryTest -- the .ocgraph node editor's headless core: the node descriptor table
 # (sandbox/src/GraphNodeDefs.hpp), and layout/hit-testing/link-rules/cycle-detection/canvas-transform
 # (sandbox/src/GraphEditorGeometry.hpp/.cpp). No ImGui, no Engine, no scene:: -- an editor that only
@@ -80,7 +99,11 @@ target_compile_definitions(GraphEditorLoadSaveTest PRIVATE
   # source fixture lives," matching AVER_OCGRAPH_FIXTURE's own precedent just above.
   AVER_OCGRAPH_ATTR_FIXTURE="${CMAKE_SOURCE_DIR}/scripting/csharp/Aver.Graph.Tests/attribute_edit_test.ocgraph"
   AVER_OCGRAPH_ATTR_FIXTURE_OUTPUT="${CMAKE_SOURCE_DIR}/scripting/csharp/Aver.Graph.Tests/attribute_edit_test.output.ocgraph")
-target_link_libraries(GraphEditorLoadSaveTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+# Aver.World is here for its HEADERS ONLY: LevelClassSave.hpp (the class-placement save path this
+# suite covers) includes aver/world/LevelTransform.hpp for eulerDegFromQuat, so that the level save
+# and every other level path agree on what "yaw 90" means rather than each rolling its own. The
+# functions there are `inline`, so this adds an include directory and no object code.
+target_link_libraries(GraphEditorLoadSaveTest PRIVATE Aver.Formats Aver.World Aver.Core Aver.Platform)
 set_target_properties(GraphEditorLoadSaveTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # BtEditorTest -- the .ocbt behaviour-tree editor tab's headless core: the four structural edits
@@ -212,3 +235,44 @@ if(TARGET Aver.Render.PBR)
   endif()
   set_target_properties(DumpClusterPs PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# InputOwnershipTest -- the editor's input arbitration table.
+#
+# Same EditorPrefsTest precedent as above (Sandbox is add_executable-only, so this compiles the sandbox
+# translation units directly rather than linking a library half that does not exist). It needs
+# It links NOTHING from the keybind system: editor::Scope moved into InputOwnership.hpp precisely so
+# this target would not have to drag in EditorKeybinds.hpp, which is whole-file `#if AVER_WITH_IMGUI`.
+#
+# NO ImGui, deliberately and by construction: resolveInputOwnership takes a struct of plain bools and
+# returns one, precisely so the decision that used to be spread across ~11 ImGui-reading call sites in
+# SandboxApp.cpp could be tested without a window, a device or an ImGui context. If this target ever
+# needs AVER_WITH_IMGUI, the function has stopped being pure and the extraction has been undone.
+add_executable(InputOwnershipTest
+  src/InputOwnershipTest.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/InputOwnership.cpp)
+target_include_directories(InputOwnershipTest PRIVATE
+  ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(InputOwnershipTest PRIVATE Aver.Core)
+set_target_properties(InputOwnershipTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# RecentProjectsTest -- the start screen's list model: recent order, cards, and the selection.
+#
+# Same EditorPrefsTest precedent as the targets above (Sandbox is add_executable-only, so this
+# compiles the sandbox translation unit directly rather than linking a library half that does not
+# exist), and the same reason ProjectCopyTest gives for the extraction itself: a private member of
+# an ImGui screen cannot be reached from a test, and the browser's two parallel containers were
+# where its worst bug lived -- a selection that indexed one of them while the Open button indexed
+# the other.
+#
+# NO ImGui and NO filesystem, by construction. RecentProjects::parse() takes its own keep-predicate
+# and rebuild() takes the results of the caller's directory walk, so the ordering, identity and
+# selection logic is reachable without a window or a disk. If this target ever needs
+# AVER_WITH_IMGUI or Aver.Platform, the model has stopped being pure and the extraction has been
+# undone -- the same tripwire InputOwnershipTest sets for itself.
+add_executable(RecentProjectsTest
+  src/RecentProjectsTest.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/RecentProjects.cpp)
+target_include_directories(RecentProjectsTest PRIVATE
+  ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(RecentProjectsTest PRIVATE Aver.Core)
+set_target_properties(RecentProjectsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

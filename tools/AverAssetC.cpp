@@ -22,10 +22,17 @@
 #include "aver/formats/UsdImport.hpp"
 #include "aver/formats/OcMesh.hpp"
 #include "aver/formats/OcAnim.hpp"
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 
 #if AVER_HAVE_AUDIO_IMPORT
 #include "aver/formats/OcAudio.hpp"
+#endif
+#if AVER_HAVE_MATERIAL_COMPILE
+// Under the SAME guard as the `material` subcommand, and reusing its macro rather than adding a
+// second one: both need exactly Aver.Formats.Material to be linked, and two names for one condition
+// is a worse thing to keep in step than one name doing two jobs.
+#include "aver/formats/MaterialCook.hpp"
 #endif
 
 // Material generation (texture set -> .ocmat) is OPTIONAL for the same reason audio import above is:
@@ -35,9 +42,23 @@
 // these are separate executables with no duplicate symbol to collide.
 #if AVER_HAVE_MATERIAL_COMPILE
 #include "aver/formats/OcMat.hpp"
+// Texture.hpp for generateMipChain, which --max-texture downscales THROUGH rather than beside: it is
+// the filter the renderer's own mip chain is built with, so a texture imported at 2048 comes out
+// bit-identical to mip 1 of the same texture imported at 4096.
+#include "aver/formats/Texture.hpp"
 #include "aver/platform/Image.hpp"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
+#endif
+
+// Emitting the material's own .ocgraph is optional ON TOP of material generation, and separately
+// guarded, because it needs one library more: Aver.Render.PBR.Materials, for the compiler that
+// proves the generated graph shades. Writing the file needs only Aver.Formats, which is always
+// linked -- but a graph this tool could not COMPILE is a graph it must not point a .ocmat at, so
+// there is no useful half of this feature to ship without the compiler and the guard covers both.
+#if AVER_HAVE_MATERIAL_GRAPH
+#include "aver/formats/OcGraph.hpp"
+#include "aver/pbr/MaterialGraphHlsl.hpp"
 #endif
 
 // Clustering is entirely OPTIONAL, exactly as in ConvertTool.cpp: this tool must still import and
@@ -148,6 +169,22 @@ void emitSummary(const std::string& input, const RunStats& stats, int exitCode) 
 
 #if AVER_HAVE_MATERIAL_COMPILE
 
+// WHERE --out-dir SITS INSIDE THE PROJECT, stated once because two different records depend on it.
+//
+// This tool is handed an ABSOLUTE --out-dir and has no idea where the content root is, yet both the
+// .ocmat's texture paths and its GRAPHREF have to be CONTENT-RELATIVE -- the editor resolves each as
+// `contentDir + "\\" + ref` (SandboxApp::resolveAssetPath and ::resolveMaterialGraph). The tool has
+// always closed that gap by assuming the caller places it: it writes every texture reference as
+// "Textures/<file>" while copying the file to --out-dir, which is only correct if --out-dir IS
+// <content>/Textures.
+//
+// THE GRAPH MUST MAKE THE SAME ASSUMPTION OR IT SILENTLY DOES NOTHING. A GRAPHREF that resolves to a
+// path with no file there is not an error a user sees: resolveMaterialGraph logs it and returns 0,
+// and the material shades through the stock path looking almost right. Sharing one constant means the
+// textures and the graph cannot disagree about the layout, and that a future change to it is one edit
+// rather than two that must be found.
+const std::string kContentRelPrefix = "Textures/";
+
 // The filename with its extension, unlike stemOf/extOf: a texture's destination name in the project
 // is the SAME name it downloaded with (Aver Exchange never renames a texture, only meshes get a
 // synthesised name from --base).
@@ -174,6 +211,17 @@ MapRole classifyMap(const std::string& fileName) {
     if (n.find("_ao_") != std::string::npos || n.find("_occlusion_") != std::string::npos) return MapRole::Occlusion;
     if (n.find("_rough_") != std::string::npos) return MapRole::RoughnessOnly;
     if (n.find("_metal_") != std::string::npos) return MapRole::MetalOnly;
+
+    // ambientCG's own naming convention -- verified against two real downloaded asset ZIPs, not
+    // guessed. A genuinely different shape from Poly Haven's underscore-PADDED style above: the
+    // suffix sits PascalCase right before the extension ("Ground110_1K-JPG_Color.jpg"), not between
+    // two underscores with a resolution token after it.
+    if (n.find("_color.") != std::string::npos) return MapRole::BaseColor;
+    if (n.find("_normalgl.") != std::string::npos) return MapRole::Normal;
+    if (n.find("_roughness.") != std::string::npos) return MapRole::RoughnessOnly;
+    if (n.find("_metalness.") != std::string::npos) return MapRole::MetalOnly;
+    if (n.find("_ambientocclusion.") != std::string::npos) return MapRole::Occlusion;
+
     return MapRole::Unrecognised;
 }
 
@@ -210,19 +258,254 @@ bool packMetalRough(const std::string& roughPath, const std::string& metalPath,
     return true;
 }
 
+#if AVER_HAVE_MATERIAL_GRAPH
+
+// ---- the material .ocgraph ------------------------------------------------------------------------
+//
+// WHY A GENERATED GRAPH IS WORTH ANYTHING WHEN IT CHANGES NOTHING ON SCREEN. `.ocmat` has carried a
+// GRAPHREF record naming a `DOMAIN material` .ocgraph since materials gained a node compiler, and
+// until now NOTHING IN THE REPOSITORY WROTE ONE -- the reader, the HLSL compiler, the registry and
+// the editor all existed for a file no tool produced. An imported material was therefore a dead end:
+// you could shade with it, and you could not open it and change how it shades without hand-authoring
+// a graph from nothing. This emits the graph that says what the material ALREADY does, which is the
+// only useful place to start editing from.
+//
+// EXACT EQUIVALENCE IS THE WHOLE CONTRACT, and it is enforced rather than hoped for. The graph
+// replaces averEvalMaterial wholesale: every pin it drives overwrites what averStockAuthored() put
+// there, so a pin driven even slightly differently is a visible regression on every material this
+// tool imports. Each pin below therefore reproduces material_prelude.hlsl's own arithmetic exactly --
+//
+//   BaseColor   gBaseColorFactor.rgb * map.baseColor      (averStockAuthored:525,528)
+//   Roughness   gRoughnessFactor * map.metalRough.x, and metalRough is float2(mr.g, mr.b)
+//               (averSampleMaps:302) -- so roughness is the GREEN channel, metallic the BLUE
+//   Metallic    gMetallicFactor  * map.metalRough.y
+//   Normal      map.normalTS = float3((tex.xyz*2-1).xy * gNormalScale, (tex.xyz*2-1).z)
+//               (averSampleMaps:303-304) -- the *2-1 unpack is NOT optional
+//   Occlusion   map.occlusion = tex.r  (averSampleMaps:305) -- the RED channel, a scalar
+//
+// -- and a pin whose per-material FACTOR is not 1 is LEFT UNDRIVEN rather than approximated. There is
+// no graph node for gBaseColorFactor/gRoughnessFactor/gNormalScale, so a graph cannot reproduce a
+// non-unit factor at all; skipping the pin leaves averStockAuthored's own value in place, which is
+// exactly right, and `skipped` reports why so the omission is visible in the artifact record instead
+// of being a silent difference. In practice this tool never sets those three, so the guard fires only
+// if that changes -- which is the point of writing it as a check rather than a comment.
+//
+// EMISSIVE AND THE layer1* SLOTS ARE NEVER EMITTED because classifyMap never binds them; a graph
+// node for a slot with no texture behind it would sample a default and write it over the stock value.
+
+constexpr f64 kColSample = 0.0, kColConvert = 320.0, kColConvert2 = 520.0, kColOut = 760.0;
+constexpr f64 kRowStep = 150.0;
+
+// Appends a node. Takes its extras and pins BY VALUE rather than handing back a reference for the
+// caller to fill in: `g.nodes.back()` is invalidated by the next push_back, and a builder that
+// returned one would work until the day a node was added after it.
+void addNode(fmt::OcGraphData& g, std::string id, std::string type, f64 x, f64 y,
+             std::vector<std::string> extras = {}, std::vector<fmt::OcGraphPin> pins = {}) {
+    fmt::OcGraphNode n;
+    n.id = std::move(id);
+    n.type = std::move(type);
+    n.x = x;
+    n.y = y;
+    n.extraTokens = std::move(extras);
+    n.pins = std::move(pins);
+    g.nodes.push_back(std::move(n));
+}
+
+void addLink(fmt::OcGraphData& g, std::string sn, std::string sp, std::string dn, std::string dp) {
+    g.links.push_back(fmt::OcGraphLink{std::move(sn), std::move(sp), std::move(dn), std::move(dp)});
+}
+
+bool isUnitFactor(f32 v) { return v >= 1.0f - 1e-6f && v <= 1.0f + 1e-6f; }
+
+// AN OUTPUT PIN'S DECLARED TYPE IS LOAD-BEARING, and omitting it is not a cosmetic slip -- it
+// silently changes what the graph computes. Emitter::outType reads the node's DECLARED output pin
+// (`findPin(n, pin, true)`) and falls back to MatType::Float for a node that declares none; every
+// generic operator then sizes itself with widestInput() off that answer. Two things follow, and this
+// generator hit both before the pins below existed:
+//
+//   * Swizzle refused mask=z with "reads a component a float does not have" -- a LOUD failure, and
+//     the only reason it was loud is that the mask is validated against the arity.
+//   * The normal chain's Multiply sized itself to float, and widen() NARROWS silently by appending
+//     .x (MaterialGraphHlsl.cpp:241-244) -- so `tex*2-1` would have quietly become
+//     `float3(tex.x*2-1)`, a wrong normal on every imported material with no error anywhere.
+//
+// So every node this generator emits declares the output pin a downstream node reads, with its real
+// width. The declaration is also what the node editor draws the pin from, so it is not duplicated
+// bookkeeping -- it is the one place the width is stated.
+fmt::OcGraphPin outPin(const char* name, const char* type) {
+    return fmt::OcGraphPin{name, type, true, {}};
+}
+fmt::OcGraphPin inPinDefault(const char* name, const char* type, const char* value) {
+    return fmt::OcGraphPin{name, type, false, value};
+}
+
+// The graph that reproduces `desc`'s stock shading. `skipped` collects a human-readable reason for
+// every pin deliberately left undriven, so the caller can report them rather than lose them.
+fmt::OcGraphData buildMaterialGraph(const pbr::MaterialDesc& desc, const std::string& name,
+                                    std::vector<std::string>& skipped) {
+    fmt::OcGraphData g;
+    g.name = name;
+    g.domain = "material";
+
+    const auto bound = [&](pbr::TextureSlot s) {
+        return !desc.textures[static_cast<u32>(s)].empty();
+    };
+    f64 row = 0.0;
+    const auto nextRow = [&]() { const f64 y = row; row += kRowStep; return y; };
+
+    // The one sink. Its INPUT PIN NAMES are the AverAuthored fields (MaterialGraphHlsl's
+    // kOutputFields), which is why there is no "BaseColor node" -- there is a BaseColor PIN.
+    addNode(g, "surface", "MaterialOutput", kColOut, 0.0);
+
+    if (bound(pbr::TextureSlot::BaseColor)) {
+        if (isUnitFactor(desc.baseColorFactor[0]) && isUnitFactor(desc.baseColorFactor[1])
+            && isUnitFactor(desc.baseColorFactor[2])) {
+            const f64 y = nextRow();
+            addNode(g, "texBaseColor", "SampleTexture", kColSample, y, {"slot=basecolor"},
+                    {outPin("rgb", "float3")});
+            addLink(g, "texBaseColor", "rgb", "surface", "BaseColor");
+        } else {
+            skipped.push_back("BaseColor: baseColorFactor is not white and no node can express it");
+        }
+    }
+
+    if (bound(pbr::TextureSlot::MetalRough)) {
+        const f64 y = nextRow();
+        addNode(g, "texMetalRough", "SampleTexture", kColSample, y, {"slot=metalrough"},
+                {outPin("rgb", "float3")});
+        // Roughness is .g and metallic is .b -- see averSampleMaps' own float2(mr.g, mr.b).
+        if (isUnitFactor(desc.roughnessFactor)) {
+            addNode(g, "roughness", "Swizzle", kColConvert, y, {"mask=y"},
+                    {outPin("result", "float")});
+            addLink(g, "texMetalRough", "rgb", "roughness", "x");
+            addLink(g, "roughness", "result", "surface", "Roughness");
+        } else {
+            skipped.push_back("Roughness: roughnessFactor is not 1 and no node can express it");
+        }
+        if (isUnitFactor(desc.metallicFactor)) {
+            addNode(g, "metallic", "Swizzle", kColConvert, y + kRowStep * 0.5, {"mask=z"},
+                    {outPin("result", "float")});
+            addLink(g, "texMetalRough", "rgb", "metallic", "x");
+            addLink(g, "metallic", "result", "surface", "Metallic");
+        } else {
+            // Reached whenever runMaterial forced metallicFactor to 0 for a set with no metal map --
+            // in which case there is no MetalRough texture either and this branch cannot run. Kept
+            // because the guard belongs to the factor, not to that one caller's habits.
+            skipped.push_back("Metallic: metallicFactor is not 1 and no node can express it");
+        }
+        row += kRowStep * 0.5;
+    }
+
+    if (bound(pbr::TextureSlot::Normal)) {
+        if (isUnitFactor(desc.normalScale)) {
+            const f64 y = nextRow();
+            addNode(g, "texNormal", "SampleTexture", kColSample, y, {"slot=normal"},
+                    {outPin("rgb", "float3")});
+            // THE *2-1 UNPACK, in two nodes because there is no unpack node. Both scalars ride on an
+            // input pin's default, which parseComponents BROADCASTS to the width of the other input
+            // (float3 here) -- a single component with more wanted is replicated, not zero-padded.
+            addNode(g, "normalScaled", "Multiply", kColConvert, y, {},
+                    {inPinDefault("b", "float", "2"), outPin("result", "float3")});
+            addNode(g, "normalUnpacked", "Subtract", kColConvert2, y, {},
+                    {inPinDefault("b", "float", "1"), outPin("result", "float3")});
+            addLink(g, "texNormal", "rgb", "normalScaled", "a");
+            addLink(g, "normalScaled", "result", "normalUnpacked", "a");
+            addLink(g, "normalUnpacked", "result", "surface", "Normal");
+        } else {
+            skipped.push_back("Normal: normalScale is not 1 and no node can express it");
+        }
+    }
+
+    if (bound(pbr::TextureSlot::Occlusion)) {
+        // NO FACTOR GUARD, and that is not an oversight: occlusionStrength is applied by
+        // averBuildSurface AFTER the authored struct, not inside averStockAuthored, so it is not a
+        // term this pin is responsible for reproducing.
+        const f64 y = nextRow();
+        addNode(g, "texOcclusion", "SampleTexture", kColSample, y, {"slot=occlusion"},
+                {outPin("rgb", "float3")});
+        addNode(g, "occlusionR", "Swizzle", kColConvert, y, {"mask=x"},
+                {outPin("result", "float")});
+        addLink(g, "texOcclusion", "rgb", "occlusionR", "x");
+        addLink(g, "occlusionR", "result", "surface", "Occlusion");
+    }
+
+    return g;
+}
+
+// Writes the graph, reloads it, and COMPILES it -- the same write-then-reload discipline the .ocmat
+// and .ocmesh writers use, with one step more.
+//
+// PARSING IS NOT ENOUGH HERE. A graph that round-trips is a graph that is well-formed TEXT; the thing
+// that can actually go wrong is a node type, slot name, swizzle mask or pin arity this build's
+// emitter rejects, and none of those are syntax. compileMaterialGraph is the check that matches the
+// claim being made, and it needs no device (MaterialGraphTest links exactly these libraries and
+// creates none), so there is no reason to make the weaker check instead.
+//
+// Returns the path to record as GRAPHREF, or an empty string when the graph could not be written or
+// would not compile -- in which case the caller writes NO GraphRef and the material shades through
+// the stock path exactly as it did before this tool emitted graphs at all.
+std::string writeAndVerifyMaterialGraph(const std::string& input, const std::string& path,
+                                        const pbr::MaterialDesc& desc, const std::string& name,
+                                        RunStats& stats) {
+    std::vector<std::string> skipped;
+    const fmt::OcGraphData g = buildMaterialGraph(desc, name, skipped);
+
+    // A graph with no driven pin describes nothing; writing one would mean a GRAPHREF whose graph
+    // overrides no field, which is a file to maintain for no effect.
+    if (g.links.empty()) {
+        AVER_WARN("no material pin could be driven exactly; no .ocgraph written");
+        return {};
+    }
+
+    std::string why;
+    if (!fmt::saveOcgraph(path, g, &why)) {
+        emitArtifact(input, path, "materialgraph", false, false, why, stats);
+        return {};
+    }
+    fmt::OcGraphData back;
+    if (!fmt::loadOcgraph(path, back, &why)) {
+        emitArtifact(input, path, "materialgraph", true, false, "reload failed: " + why, stats);
+        return {};
+    }
+    const pbr::MaterialGraphBody body = pbr::compileMaterialGraph(back);
+    if (!body.ok) {
+        emitArtifact(input, path, "materialgraph", true, false,
+                     "the generated graph does not compile: " + body.error, stats);
+        return {};
+    }
+
+    std::string extra = "\"drivenPins\":" + std::to_string(g.links.size());
+    if (!skipped.empty()) {
+        extra += ",\"skippedPins\":" + std::to_string(skipped.size());
+        for (const std::string& s : skipped) AVER_WARN("material graph: {}", s);
+    }
+    emitArtifact(input, path, "materialgraph", true, true, {}, stats, extra);
+    return path;
+}
+
+#endif // AVER_HAVE_MATERIAL_GRAPH
+
 // Writes one .ocmat, reloads it, and confirms every texture slot the caller bound survived the round
 // trip -- the same write-then-reload discipline writeAndVerifyMesh uses for .ocmesh.
+//
+// `graphRef` is the GRAPHREF record: the .ocgraph that shades this material, or empty for none. It is
+// a PARAMETER rather than something this function derives because the graph has to be written and
+// PROVEN TO COMPILE before the .ocmat may point at it -- a GRAPHREF naming a graph that does not
+// compile is a material that fails to shade at all, so the ordering is load-bearing, not incidental.
 bool writeAndVerifyMaterial(const std::string& input, const std::string& path,
-                            const pbr::MaterialDesc& desc, RunStats& stats) {
+                            const pbr::MaterialDesc& desc, const std::string& graphRef,
+                            RunStats& stats) {
     fmt::OcMatExtras extras;   // default-constructed: standard/opaque/back -- a bare texture-set
                                // material gets no shader/blend/cull override.
+    extras.graphRef = graphRef;
     std::string why;
     if (!fmt::saveOcmat(path, desc, &extras, &why)) {
         emitArtifact(input, path, "material", false, false, why, stats);
         return false;
     }
     pbr::MaterialDesc back;
-    if (!fmt::loadOcmat(path, back, nullptr, &why)) {
+    fmt::OcMatExtras backExtras;
+    if (!fmt::loadOcmat(path, back, &backExtras, &why)) {
         emitArtifact(input, path, "material", true, false, "reload failed: " + why, stats);
         return false;
     }
@@ -236,8 +519,17 @@ bool writeAndVerifyMaterial(const std::string& input, const std::string& path,
             return false;
         }
     }
-    emitArtifact(input, path, "material", true, true, {}, stats,
-                 "\"boundSlots\":" + std::to_string(boundSlots));
+    // VERIFIED LIKE ANY OTHER FIELD, because a GRAPHREF that silently failed to write is the one
+    // failure mode that looks exactly like success: the .ocmat loads, the material renders, and it
+    // renders through the stock path rather than the graph the caller was told it got.
+    if (backExtras.graphRef != graphRef) {
+        emitArtifact(input, path, "material", true, false,
+                     "the graph reference did not survive the round trip", stats);
+        return false;
+    }
+    std::string extra = "\"boundSlots\":" + std::to_string(boundSlots);
+    if (!graphRef.empty()) extra += ",\"graphRef\":\"" + jsonEscape(graphRef) + "\"";
+    emitArtifact(input, path, "material", true, true, {}, stats, extra);
     return true;
 }
 
@@ -254,7 +546,7 @@ int runMaterial(int argc, char** argv) {
     }
     if (inputs.empty() || outDir.empty()) {
         AVER_ERROR("usage: AverAssetC material <texture-file>... --out-dir <dir> --base <name>");
-        return 2;
+        return exitCode(ExitCode::Usage);
     }
     while (!outDir.empty() && (outDir.back() == '\\' || outDir.back() == '/')) outDir.pop_back();
     const std::string base = !baseOverride.empty() ? baseOverride : stemOf(inputs[0]);
@@ -279,7 +571,7 @@ int runMaterial(int argc, char** argv) {
         }
 
         const MapRole role = classifyMap(fname);
-        const std::string texRef = "Textures/" + fname;
+        const std::string texRef = kContentRelPrefix + fname;
         auto bind = [&](pbr::TextureSlot slot, const char* slotName) {
             desc.textures[static_cast<u32>(slot)] = pbr::TextureRef{texRef, 0};
             emitArtifact(in, dest, "material", true, true, {}, stats,
@@ -319,7 +611,7 @@ int runMaterial(int argc, char** argv) {
                 anyFailed = true;
             } else {
                 desc.textures[static_cast<u32>(pbr::TextureSlot::MetalRough)] =
-                    pbr::TextureRef{"Textures/" + base + "_metalRough.png", 0};
+                    pbr::TextureRef{kContentRelPrefix + base + "_metalRough.png", 0};
                 emitArtifact(packInput, packedPath, "material", true, true, {}, stats,
                              "\"slot\":\"metalRough\",\"packedFrom\":\"roughness+metal\"");
             }
@@ -329,8 +621,32 @@ int runMaterial(int argc, char** argv) {
     bool anyBound = false;
     for (const pbr::TextureRef& t : desc.textures) if (!t.empty()) { anyBound = true; break; }
     if (anyBound) {
+        // pbr::MaterialDesc::metallicFactor defaults to 1.0 (glTF's own spec default) -- correct
+        // when a metalRough texture IS bound (the factor multiplies the sampled value), wrong when
+        // one is not: a texture set with only a Roughness map and no Metal/arm map at all (a real,
+        // common case -- ambientCG's own Ground110 set has no metal content and ships no Metalness
+        // map for it) would otherwise render fully metallic with nothing overriding that default.
+        if (desc.textures[static_cast<u32>(pbr::TextureSlot::MetalRough)].empty()) {
+            desc.metallicFactor = 0.0f;
+        }
+        // THE GRAPH IS WRITTEN FIRST, AND THE .ocmat POINTS AT IT ONLY IF IT COMPILED. A GRAPHREF
+        // naming a graph that does not compile is worse than no graph at all -- the material stops
+        // shading rather than falling back -- so the ordering here is the safety property, not a
+        // convenience. An empty graphRef is the exact behaviour this tool had before graphs existed.
+        std::string graphRef;
+#if AVER_HAVE_MATERIAL_GRAPH
+        const std::string graphPath = outDir + "/" + base + ".ocgraph";
+        if (!writeAndVerifyMaterialGraph(allInputs, graphPath, desc, base, stats).empty()) {
+            // CONTENT-RELATIVE, through the SAME prefix the texture references use -- OcMat.hpp's
+            // GRAPHREF comment is explicit that the path never carries the content directory on the
+            // front, and the graph is written beside the .ocmat in --out-dir, so it is exactly as
+            // deep in the project as the textures are. See kContentRelPrefix for why that is an
+            // assumption rather than something this tool can look up.
+            graphRef = kContentRelPrefix + base + ".ocgraph";
+        }
+#endif
         const std::string matPath = outDir + "/" + base + ".ocmat";
-        if (!writeAndVerifyMaterial(allInputs, matPath, desc, stats)) anyFailed = true;
+        if (!writeAndVerifyMaterial(allInputs, matPath, desc, graphRef, stats)) anyFailed = true;
     } else {
         AVER_WARN("no texture in this set matched a recognised material slot; nothing to bind, no .ocmat written");
     }
@@ -510,6 +826,310 @@ bool writeMeshItems(const std::string& input, const std::string& outDir, const s
     return anyFailed;
 }
 
+
+#if AVER_HAVE_MATERIAL_COMPILE
+// How a texture is going to be READ, which is what decides how it may be filtered. Colour has to be
+// averaged in linear space, a normal map as vectors and then renormalised, and data (roughness,
+// metal, occlusion) straight -- getting this wrong does not fail, it just shades subtly wrong, which
+// is the worst kind of wrong to ship.
+enum class TexRole { Colour, Data, Normal };
+
+// Derives each image's role from the SLOTS that reference it. An image nothing references keeps the
+// conservative default (Data, filtered straight): it is about to be dropped by the cook anyway, and
+// guessing sRGB on an unreferenced file would only matter if that guess were wrong.
+std::vector<TexRole> imageRoles(const std::vector<fmt::ImportedMaterial>& materials, usize imageCount) {
+    std::vector<TexRole> roles(imageCount, TexRole::Data);
+    const auto mark = [&](const fmt::ImportedTexture& t, TexRole r) {
+        if (t.imageIndex >= 0 && usize(t.imageIndex) < roles.size()) roles[usize(t.imageIndex)] = r;
+    };
+    for (const fmt::ImportedMaterial& m : materials) {
+        mark(m.metalRoughTex, TexRole::Data);
+        mark(m.occlusionTex,  TexRole::Data);
+        mark(m.normalTex,     TexRole::Normal);
+        // Colour LAST so that an image serving as both -- an ORM map also wired to base colour, which
+        // an exporter can produce -- ends up filtered as colour, the reading that is visible.
+        mark(m.baseColorTex,  TexRole::Colour);
+        mark(m.emissiveTex,   TexRole::Colour);
+    }
+    return roles;
+}
+
+// Folds a material's SEPARATE opacity map into its base colour's alpha channel, which is the only
+// place .ocmat can express cutout.
+//
+// WHY THIS IS NEEDED AT ALL. glTF puts alpha in the base colour and the engine followed it, but USD
+// and .mtl both name opacity as its own file, and Intel's Jungle Ruins trees are authored that way:
+// a JPEG albedo -- which cannot carry an alpha channel at all -- plus a greyscale *_opacity.jpg
+// beside it. Dropping that map does not fail; it renders every leaf as a solid quad, and the tree
+// looks like a bush made of cardboard.
+//
+// WHY IN THE TOOL. Same reason as the size cap: the cook writes the bytes it is handed and has no
+// decoder. This one does, and needs one, because folding two encoded images together means decoding
+// both.
+//
+// THE RESULT IS ALWAYS A NEW IMAGE, never a write into the shared base colour: two materials may
+// share one albedo and have different opacity maps -- which is exactly how a tree's leaves and its
+// dead leaves are authored -- and mutating the shared one would give the second material the first
+// one's cutout.
+bool foldOpacityInto(std::vector<fmt::ImportedImage>& images, fmt::ImportedMaterial& m,
+                     std::string* note) {
+    if (m.opacityTex.empty()) return false;
+    const usize oi = usize(m.opacityTex.imageIndex);
+    if (oi >= images.size() || !images[oi].ok || images[oi].bytes.empty()) return false;
+    if (m.baseColorTex.empty()) {
+        // Nothing to fold INTO. Leaving the slot alone is right: an opacity map with no base colour
+        // has no channel to live in, and inventing a white base colour to carry it would put a
+        // texture on a material the source never gave one.
+        if (note) *note = "'" + m.name + "' has an opacity map but no base colour to fold it into; "
+                          "the cutout is lost";
+        m.opacityTex = {};
+        return false;
+    }
+    const usize bi = usize(m.baseColorTex.imageIndex);
+    if (bi >= images.size() || !images[bi].ok || images[bi].bytes.empty()) return false;
+
+    ImageData base, mask;
+    std::string derr;
+    if (!decodeImage(images[bi].bytes.data(), images[bi].bytes.size(), base, &derr) ||
+        !decodeImage(images[oi].bytes.data(), images[oi].bytes.size(), mask, &derr)) {
+        if (note) *note = "'" + m.name + "' could not fold its opacity map: " + derr;
+        return false;
+    }
+    if (mask.width != base.width || mask.height != base.height) {
+        // A resample would be easy and is deliberately not done: differing sizes mean the two maps
+        // were not authored against the same UV layout, and stretching one to fit is a guess that
+        // would show up as a cutout that does not follow the leaf.
+        if (note) {
+            char buf[256];
+            std::snprintf(buf, sizeof buf,
+                          "'%s' opacity map is %ux%u but its base colour is %ux%u; not folded",
+                          m.name.c_str(), mask.width, mask.height, base.width, base.height);
+            *note = buf;
+        }
+        return false;
+    }
+
+    // THE CHANNEL THE SOURCE NAMED, not a fixed one.
+    //
+    // This used to be hardcoded to RED, on the reasoning that `inputs:opacity.connect` names
+    // `.outputs:r` and .mtl's map_d is greyscale. That holds for a genuinely separate greyscale
+    // mask and is wrong the moment a file names a different channel -- and USD files routinely
+    // name `.outputs:a`. Reading red out of an image whose mask lives in alpha produces a cutout
+    // shaped like the picture's brightness, which on foliage is close to the worst possible answer.
+    //
+    // Averaging RGB is still not offered: it would differ on a map that is not actually grey, and
+    // would differ from what the authoring tool showed.
+    const usize lane = (m.opacityTex.channel == 'g')   ? 1
+                     : (m.opacityTex.channel == 'b')   ? 2
+                     : (m.opacityTex.channel == 'a')   ? 3
+                                                       : 0;   // 'r' and unstated
+    const usize n = usize(base.width) * base.height;
+    for (usize i = 0; i < n; ++i) base.pixels[i * 4 + 3] = mask.pixels[i * 4 + lane];
+
+    std::vector<u8> encoded;
+    const auto sink = [](void* ctx, void* data, int len) {
+        auto* v = static_cast<std::vector<u8>*>(ctx);
+        const u8* p = static_cast<const u8*>(data);
+        v->insert(v->end(), p, p + len);
+    };
+    if (!stbi_write_png_to_func(sink, &encoded, static_cast<int>(base.width),
+                                static_cast<int>(base.height), 4, base.pixels.data(),
+                                static_cast<int>(base.width * 4)) || encoded.empty()) {
+        if (note) *note = "'" + m.name + "' opacity fold failed to re-encode";
+        return false;
+    }
+
+    fmt::ImportedImage merged;
+    merged.bytes = std::move(encoded);
+    merged.ext = ".png";                        // PNG because it has to carry alpha; a JPEG cannot
+    merged.suggestedName = images[bi].suggestedName + "_cut";
+    // NOT the base colour's own path: that is the file this one replaced, and reusing it makes every
+    // later diagnostic -- the size cap's line, most visibly -- name a file that is no longer what is
+    // being written.
+    merged.sourcePath = images[bi].suggestedName + " + " + images[oi].suggestedName + " (merged)";
+    merged.ok = true;
+    if (note) *note = "'" + m.name + "' folded " +
+                      (images[oi].sourcePath.empty() ? images[oi].suggestedName : images[oi].sourcePath) +
+                      " into the alpha of " + merged.suggestedName;
+
+    images.push_back(std::move(merged));
+    m.baseColorTex.imageIndex = i32(images.size() - 1);
+    m.opacityTex = {};                          // consumed; the cook must not see it as unhandled
+    if (m.alphaMode == "OPAQUE") m.alphaMode = "MASK";
+    return true;
+}
+
+// Applies the fold across a whole import. Runs BEFORE the size cap so the cap sees, and shrinks, the
+// merged image rather than the original the merge replaced.
+void mergeOpacityMaps(std::vector<fmt::ImportedImage>& images,
+                      std::vector<fmt::ImportedMaterial>& materials) {
+    u32 folded = 0, lost = 0;
+    for (fmt::ImportedMaterial& m : materials) {
+        if (m.opacityTex.empty()) continue;
+        std::string note;
+        const bool ok = foldOpacityInto(images, m, &note);
+        if (!note.empty()) {
+            if (ok) AVER_INFO("opacity {}", note);
+            else    AVER_WARN("opacity {}", note);
+        }
+        if (ok) ++folded; else ++lost;
+        m.opacityTex = {};   // whatever happened, it is not the cook's business
+    }
+    if (folded) AVER_INFO("folded {} separate opacity map(s) into base-colour alpha", folded);
+    if (lost)   AVER_WARN("{} material(s) had an opacity map that could NOT be folded; their cutout "
+                          "is lost and they will render solid", lost);
+}
+
+// One image, halved until neither side exceeds `cap`, and re-encoded as PNG. Returns false and
+// leaves `img` untouched when it is already small enough, cannot be decoded, or would not re-encode.
+//
+// WHY IN THE TOOL AND NOT THE COOK. cookMaterials' contract is that it writes the bytes it is given;
+// it has no decoder and should not grow one, because every caller that wants verbatim bytes would
+// then be paying for a decode it does not want. A size cap is a POLICY about a particular import,
+// which is the tool's business -- and this is where the decoder and the PNG writer already are.
+//
+// THE FILTER IS THE ENGINE'S OWN. generateMipChain is the function that builds the mip chain the
+// renderer samples, so capping through it means a texture imported at 2048 is bit-identical to mip 1
+// of the same texture imported at 4096. A second box filter here would drift from that.
+bool capImageSize(fmt::ImportedImage& img, u32 cap, TexRole role, std::string* note) {
+    if (!img.ok || img.bytes.empty() || cap == 0) return false;
+
+    ImageData src;
+    std::string derr;
+    if (!decodeImage(img.bytes.data(), img.bytes.size(), src, &derr)) {
+        // NOT an error: the undecodable-container check in the cook reports these by name, and a
+        // format this build cannot read is not one the cap can do anything about either way.
+        return false;
+    }
+    if (src.width <= cap && src.height <= cap) return false;
+
+    fmt::TextureData t;
+    t.width  = src.width;
+    t.height = src.height;
+    t.srgb   = (role == TexRole::Colour);
+    t.levels.push_back(std::move(src));
+    fmt::generateMipChain(t, role == TexRole::Normal);
+
+    usize level = 0;
+    while (level + 1 < t.levels.size() &&
+           (t.levels[level].width > cap || t.levels[level].height > cap))
+        ++level;
+    const ImageData& out = t.levels[level];
+    if (!out.valid()) return false;
+
+    // stbi_write_png_to_func rather than the file form: the cook still owns where this lands, and a
+    // temporary file here would be a second place for an import to fail.
+    std::vector<u8> encoded;
+    const auto sink = [](void* ctx, void* data, int len) {
+        auto* v = static_cast<std::vector<u8>*>(ctx);
+        const u8* p = static_cast<const u8*>(data);
+        v->insert(v->end(), p, p + len);
+    };
+    if (!stbi_write_png_to_func(sink, &encoded, static_cast<int>(out.width),
+                                static_cast<int>(out.height), 4, out.pixels.data(),
+                                static_cast<int>(out.width * 4)) || encoded.empty())
+        return false;
+
+    if (note) {
+        char buf[256];
+        std::snprintf(buf, sizeof buf, "%s: %ux%u -> %ux%u (%.1f MB -> %.1f MB)",
+                      (img.sourcePath.empty() ? img.suggestedName : img.sourcePath).c_str(),
+                      t.levels[0].width, t.levels[0].height, out.width, out.height,
+                      double(img.bytes.size()) / 1e6, double(encoded.size()) / 1e6);
+        *note = buf;
+    }
+    img.bytes = std::move(encoded);
+    // PNG NO MATTER WHAT WENT IN. A JPEG re-encoded as a JPEG would compound its own artefacts, and
+    // the extension has to follow the bytes or the engine's decoder is handed a lie.
+    img.ext = ".png";
+    return true;
+}
+
+// Applies the cap across a whole import, in place, and says what it did.
+void capImageSizes(std::vector<fmt::ImportedImage>& images,
+                   const std::vector<fmt::ImportedMaterial>& materials, u32 cap) {
+    if (cap == 0 || images.empty()) return;
+    const std::vector<TexRole> roles = imageRoles(materials, images.size());
+    u32 changed = 0;
+    for (usize i = 0; i < images.size(); ++i) {
+        std::string note;
+        if (capImageSize(images[i], cap, roles[i], &note)) {
+            AVER_INFO("texture cap {}", note);
+            ++changed;
+        }
+    }
+    if (changed) AVER_INFO("capped {} texture(s) at {}px", changed, cap);
+}
+#endif // AVER_HAVE_MATERIAL_COMPILE
+
+// Cooks `materials` and `images` into the project's Content/Materials and Content/Textures, then
+// rewrites every mesh's material slots to the stems that were actually written. Shared by all three
+// mesh formats, which is the point: cooking lives in ONE place so the reserved-name policy, the
+// collision suffixes and the slot rewrite cannot drift apart between importers.
+//
+// THE ORDER IS LOAD-BEARING and is why this takes `meshes` by reference rather than returning the
+// names. Cooking renames each material to a prefixed, collision-free stem, and materialSlots has to
+// be rewritten to match BEFORE the meshes are copied into MeshItems -- writeMeshItems serialises
+// those copies, so a rewrite afterwards would leave the .ocmesh naming a material that is not on
+// disk under that name.
+//
+// A no-op when `contentDir` is empty, which is the launcher-less case: geometry still imports, and
+// the caller is told what it is leaving behind rather than losing it silently.
+void cookAndRewriteSlots(std::vector<fmt::ImportedMaterial>& materials,
+                         std::vector<fmt::ImportedImage>& images,
+                         const std::string& contentDir, const std::string& base,
+                         std::vector<fmt::OcMeshData>& meshes, u32 maxTexture) {
+    if (materials.empty() && images.empty()) return;
+    // Only the READABLE images are worth counting at the user: an entry whose bytes could not be
+    // loaded is carried so a second material naming the same missing file is not retried, and
+    // reporting it here would name a texture the cook is never going to write either way.
+    usize readable = 0;
+    for (const fmt::ImportedImage& img : images) if (img.ok) ++readable;
+#if AVER_HAVE_MATERIAL_COMPILE
+    if (contentDir.empty()) {
+        AVER_WARN("this file has {} material(s) and {} image(s); pass --content-dir <dir> to "
+                  "write them, otherwise only geometry is imported",
+                  materials.size(), readable);
+        return;
+    }
+    // BEFORE the cook, because the cook writes the bytes it is given. Capping afterwards would
+    // mean writing the 4K file and then a second one beside it. The opacity fold goes first so the
+    // cap shrinks the MERGED image rather than the original it replaced.
+    mergeOpacityMaps(images, materials);
+    capImageSizes(images, materials, maxTexture);
+
+    fmt::MaterialCookOptions copt;
+    copt.contentDir = contentDir;
+    copt.assetBase  = base;
+    // A stated output directory is a directive: this tool is invoked per asset by the launcher, and
+    // a re-import that silently kept the old material would be a worse surprise than one that
+    // replaced it.
+    copt.overwriteExisting = true;
+    fmt::MaterialCookResult cres;
+    std::vector<std::string> cwarn;
+    std::string cerr;
+    if (!fmt::cookMaterials(materials, images, copt, cres, &cwarn, &cerr)) {
+        AVER_WARN("materials: {}", cerr);
+        return;
+    }
+    for (const std::string& w : cwarn) AVER_WARN("materials: {}", w);
+    for (usize i = 0; i < materials.size() && i < cres.materialSlotNames.size(); ++i) {
+        if (cres.materialSlotNames[i].empty()) continue;   // did not cook; keep the old name
+        const std::string& from = materials[i].name;
+        const std::string& to   = cres.materialSlotNames[i];
+        for (fmt::OcMeshData& m : meshes)
+            for (std::string& slot : m.materialSlots)
+                if (slot == from) slot = to;
+    }
+    AVER_INFO("wrote {} material(s) and {} texture(s) under {}",
+              cres.materialsWritten, cres.texturesWritten, contentDir);
+#else
+    (void)contentDir; (void)base; (void)meshes; (void)maxTexture;
+    AVER_WARN("this build has no PBR module, so the file's {} material(s) and {} image(s) were not "
+              "imported; geometry only", materials.size(), readable);
+#endif
+}
+
 } // namespace
 
 // `convert` converts argv[2] (a glTF/GLB, OBJ, USDA, or -- when this build has audio import -- a
@@ -523,13 +1143,17 @@ int main(int argc, char** argv) {
     static const char* kUsage =
         "usage: AverAssetC convert <input-file> --out-dir <dir> [--base <name>] [--merge] [--lod <ratio>]"
 #if AVER_HAVE_MATERIAL_COMPILE
+        "\n                          [--content-dir <dir>]   write materials and textures too"
+        "\n                          [--max-texture <n>]     downscale imported textures to n px"
+#endif
+#if AVER_HAVE_MATERIAL_COMPILE
         "\n       AverAssetC material <texture-file>... --out-dir <dir> --base <name>"
 #endif
         ;
 
     if (argc < 2) {
         AVER_ERROR("{}", kUsage);
-        return 2;
+        return exitCode(ExitCode::Usage);
     }
     const std::string subcommand = argv[1];
 
@@ -539,10 +1163,11 @@ int main(int argc, char** argv) {
 
     if (subcommand != "convert") {
         AVER_ERROR("{}", kUsage);
-        return 2;
+        return exitCode(ExitCode::Usage);
     }
 
-    std::string input, outDir, baseOverride;
+    std::string input, outDir, baseOverride, contentDir;
+    u32 maxTexture = 0;             // 0 = every texture through at its source resolution
     bool merge = false;
     bool haveInput = false;
     f32 lodRatio = 0.0f;
@@ -552,11 +1177,20 @@ int main(int argc, char** argv) {
         else if (a == "--base" && i + 1 < argc)    baseOverride = argv[++i];
         else if (a == "--merge")                   merge = true;
         else if (a == "--lod" && i + 1 < argc)      lodRatio = static_cast<f32>(std::atof(argv[++i]));
+        // A SEPARATE FLAG FROM --out-dir, deliberately. The out-directory is where meshes go and is
+        // routinely a scratch path; the content root is where the engine looks for Materials/ and
+        // Textures/. Inferring one from the other would be a second fragile convention beside the
+        // one kContentRelPrefix already admits is an assumption.
+        else if (a == "--content-dir" && i + 1 < argc) contentDir = argv[++i];
+        // --max-texture <n>: no imported texture wider or taller than n pixels. A 4K set costs 87 MB
+        // of mips PER TEXTURE once the engine builds the chain, so three maps on each of a dozen
+        // plants is a gigabyte of VRAM before anything else is in the scene.
+        else if (a == "--max-texture" && i + 1 < argc) maxTexture = u32(std::atoi(argv[++i]));
         else if (!haveInput) { input = a; haveInput = true; }
     }
     if (!haveInput || outDir.empty()) {
         AVER_ERROR("{}", kUsage);
-        return 2;
+        return exitCode(ExitCode::Usage);
     }
     while (!outDir.empty() && (outDir.back() == '\\' || outDir.back() == '/')) outDir.pop_back();
     const std::string base = !baseOverride.empty() ? baseOverride : stemOf(input);
@@ -570,14 +1204,22 @@ int main(int argc, char** argv) {
         if (!fmt::importGltf(input, res, {}, &why)) {
             emitArtifact(input, {}, "mesh", false, false, why, stats);
             emitSummary(input, stats, 1);
-            return 1;
+            return exitCode(ExitCode::Failed);
         }
         for (const std::string& u : res.unsupported) AVER_WARN("unsupported: {}", u);
         if (res.meshes.empty()) {
             emitArtifact(input, {}, "mesh", false, false, "no meshes", stats);
             emitSummary(input, stats, 1);
-            return 1;
+            return exitCode(ExitCode::Failed);
         }
+
+        // ---- materials and their textures, BEFORE the meshes are copied into `items` ----
+        //
+        // THIS TOOL, NOT JUST THE HARNESS. The cook shipped first in tests/formats ConvertTool,
+        // which is the dev harness; this is the compiler the launcher actually invokes, so until
+        // now a glTF imported by the product arrived with its materials thrown away while the same
+        // file imported by the harness did not.
+        cookAndRewriteSlots(res.materials, res.images, contentDir, base, res.meshes, maxTexture);
 
         std::vector<MeshItem> items;
         items.reserve(res.meshes.size());
@@ -635,14 +1277,31 @@ int main(int argc, char** argv) {
         if (!fmt::importObj(input, res, {}, &why)) {
             emitArtifact(input, {}, "mesh", false, false, why, stats);
             emitSummary(input, stats, 1);
-            return 1;
+            return exitCode(ExitCode::Failed);
         }
         for (const std::string& u : res.unsupported) AVER_WARN("unsupported: {}", u);
         if (res.meshes.empty()) {
             emitArtifact(input, {}, "mesh", false, false, "no meshes", stats);
             emitSummary(input, stats, 1);
-            return 1;
+            return exitCode(ExitCode::Failed);
         }
+
+        // ---- the .mtl's materials, which until now were parsed and then dropped ----
+        //
+        // The map_* paths a .mtl writes are relative to the .obj's OWN directory, not to the
+        // project content root, so that is what the converter resolves against. Warnings from it
+        // name any texture the file points at and does not have.
+        {
+            std::vector<fmt::ImportedMaterial> mats;
+            std::vector<fmt::ImportedImage> imgs;
+            std::vector<std::string> mwarn;
+            const usize slash = input.find_last_of("/\\");
+            const std::string baseDir = slash == std::string::npos ? std::string() : input.substr(0, slash);
+            fmt::objMaterialsToImported(res.materials, baseDir, mats, imgs, &mwarn);
+            for (const std::string& w : mwarn) AVER_WARN("materials: {}", w);
+            cookAndRewriteSlots(mats, imgs, contentDir, base, res.meshes, maxTexture);
+        }
+
         std::vector<MeshItem> items;
         items.reserve(res.meshes.size());
         for (usize i = 0; i < res.meshes.size(); ++i) {
@@ -660,19 +1319,34 @@ int main(int argc, char** argv) {
         if (!fmt::importUsd(input, res, {}, &why)) {
             emitArtifact(input, {}, "mesh", false, false, why, stats);
             emitSummary(input, stats, 1);
-            return 1;
+            return exitCode(ExitCode::Failed);
         }
         for (const std::string& u : res.unsupported) AVER_WARN("unsupported: {}", u);
         if (res.meshes.empty()) {
             emitArtifact(input, {}, "mesh", false, false, "no meshes", stats);
             emitSummary(input, stats, 1);
-            return 1;
+            return exitCode(ExitCode::Failed);
         }
+
+        // The importer has already resolved each mesh's `rel material:binding` to the material's own
+        // name, so this rewrites those names to the cooked stems exactly as the glTF path does. A
+        // mesh whose slot stayed empty -- no binding, or one behind a reference this importer does
+        // not compose -- is untouched, and the import said so under `unsupported`.
+        cookAndRewriteSlots(res.materials, res.images, contentDir, base, res.meshes, maxTexture);
+
         std::vector<MeshItem> items;
         items.reserve(res.meshes.size());
         for (usize i = 0; i < res.meshes.size(); ++i) {
-            items.push_back(MeshItem{i < res.meshNames.size() ? res.meshNames[i] : std::string{},
-                                     res.meshes[i], -1});
+            // THE LEAF OF THE PRIM PATH, not the whole path. UsdImportResult::meshNames holds
+            // "/root/Grass_B_02/Grass_B_02" because that is what identifies a prim; safe() then
+            // strips the slashes for a filename and produces rootGrass_B_02Grass_B_02.ocmesh, which
+            // is unreadable and gets worse the deeper a scene nests. writeMeshItems already
+            // de-duplicates a stem it has used before, so two prims sharing a leaf name are still
+            // told apart -- by a numeric suffix rather than by a path nobody can read.
+            std::string name = i < res.meshNames.size() ? res.meshNames[i] : std::string{};
+            const usize leaf = name.find_last_of('/');
+            if (leaf != std::string::npos) name = name.substr(leaf + 1);
+            items.push_back(MeshItem{std::move(name), res.meshes[i], -1});
         }
         const bool anyFailed = writeMeshItems(input, outDir, base, items, merge, lodRatio, stats);
         emitSummary(input, stats, anyFailed ? 1 : 0);
@@ -686,14 +1360,14 @@ int main(int argc, char** argv) {
         if (!imp.ok) {
             emitArtifact(input, {}, "audio", false, false, imp.error, stats);
             emitSummary(input, stats, 1);
-            return 1;
+            return exitCode(ExitCode::Failed);
         }
         const std::string path = outDir + "/" + base + ".ocaudio";
         std::string why;
         if (!fmt::saveOcAudio(path, sound, stemOf(input), &why)) {
             emitArtifact(input, path, "audio", false, false, why, stats);
             emitSummary(input, stats, 1);
-            return 1;
+            return exitCode(ExitCode::Failed);
         }
         audio::SoundData back;
         const bool reloaded = fmt::loadOcAudio(path, back, &why);
@@ -702,19 +1376,19 @@ int main(int argc, char** argv) {
                          !reloaded && !why.empty() ? why : "reloaded audio does not match the source",
                          stats);
             emitSummary(input, stats, 1);
-            return 1;
+            return exitCode(ExitCode::Failed);
         }
         emitArtifact(input, path, "audio", true, true, {}, stats,
                      "\"frames\":" + std::to_string(back.frames())
                      + ",\"channels\":" + std::to_string(back.channels)
                      + ",\"sampleRate\":" + std::to_string(back.sampleRate));
         emitSummary(input, stats, 0);
-        return 0;
+        return exitCode(ExitCode::Ok);
     }
 #endif
 
     AVER_ERROR("unsupported input format: {}", input);
     emitArtifact(input, {}, "unknown", false, false, "unsupported input format", stats);
     emitSummary(input, stats, 1);
-    return 1;
+    return exitCode(ExitCode::Failed);
 }

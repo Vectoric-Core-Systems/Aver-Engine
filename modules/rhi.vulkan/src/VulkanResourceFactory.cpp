@@ -2868,6 +2868,42 @@ void VulkanResourceFactory::setUav(BindingSetHandle set, u32 slot, TextureHandle
     writeBindingSlot(*s, /*isUav=*/true, slot, st);
 }
 
+// Returns one SRV slot to the state nullFill gave it. See IResourceFactory::clearSrv for why this
+// exists at all: a descriptor left naming a destroyed resource is a device loss, not a wrong pixel.
+//
+// "Null" HERE MEANS THE DUMMY, NOT VK_NULL_HANDLE. Vulkan has no null descriptor without
+// robustness2, so nullFill writes gNull's 1x1 image / empty buffer / dummy TLAS into unset slots and
+// this writes exactly the same thing -- the whole point being that a cleared slot is
+// indistinguishable from one that was never bound. It goes through writeBindingSlot for the ring
+// reason that setSrv does: the write has to reach every frame's copy of the set, not just today's.
+void VulkanResourceFactory::clearSrv(BindingSetHandle set, u32 slot) {
+    RhiBindingSet* s = bindingSet(set);
+    if (!s) { AVER_ERROR("[RHI.Vulkan] clearSrv with an invalid set"); return; }
+    if (slot >= s->srvCount) { AVER_ERROR("[RHI.Vulkan] clearSrv slot {} past the {} declared", slot, s->srvCount); return; }
+    if (!ensureNullResources(*dev_)) {
+        AVER_ERROR("[RHI.Vulkan] clearSrv: the dummy null resources are unavailable, so slot {} keeps "
+                   "whatever it held -- which is the descriptor the caller is trying to stop using", slot);
+        return;
+    }
+    const bool rtSupported = dev_->cachedCaps().rayTracingTier != 0;
+    const SlotKind kind = s->srvKinds[slot];
+    BindingSlotState st;
+    st.type = toVkSrvDescriptorType(kind, rtSupported);
+    if (kind == SlotKind::StructuredBuffer) {
+        st.buffer = VkDescriptorBufferInfo{gNull.buffer, 0, VK_WHOLE_SIZE};
+    } else if (kind == SlotKind::AccelerationStructure && rtSupported) {
+        st.accel = gNull.dummyTlas;
+    } else {
+        const bool tex3D = (kind == SlotKind::Texture3D);
+        st.image = VkDescriptorImageInfo{VK_NULL_HANDLE, tex3D ? gNull.view3D : gNull.view2D,
+                                         VK_IMAGE_LAYOUT_GENERAL};
+    }
+    // NOT owned: gNull's views are global and outlive every binding set, so the slot must not retire
+    // one. writeBindingSlot still retires whatever view the slot owned BEFORE this call.
+    st.ownedView = VK_NULL_HANDLE;
+    writeBindingSlot(*s, /*isUav=*/false, slot, st);
+}
+
 void VulkanResourceFactory::setSrvTlas(BindingSetHandle set, u32 slot, TlasHandle h) {
     RhiBindingSet* s = bindingSet(set);
     RhiTlas* t = tlas(h);

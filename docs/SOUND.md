@@ -13,7 +13,7 @@ beside it is the audio *plan*; this one is not a plan.
 | Piece | Where | Checked by |
 | --- | --- | --- |
 | The `.ocsnd` format | `modules/formats/{include,src}/aver/formats/OcSound.*` | `tests/sound` (round-trip, validation) |
-| The evaluator | `modules/sound/src/Synth.cpp` — `renderSound()` | `SynthTest`, 37 checks |
+| The evaluator | `modules/sound/src/Synth.cpp` — `renderSound()` | `SynthTest`, 36 checks |
 | The C seam | `aver_audio_load_pcm` in `modules/audio.abi` | `AudioTest` |
 | The C# surface | `Audio.LoadPcm` in `scripting/csharp/Aver.Framework/Audio.cs` | — |
 | The editor tab | `sandbox/src/SoundEditor.*` | `SoundEditorTest`, 137 checks |

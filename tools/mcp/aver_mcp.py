@@ -532,10 +532,16 @@ def tool_package(args):
     if not out:
         return {"ok": False, "error": "'out' is required (the directory to stage the payload into)"}
     if args.get("project"):
+        # THE GAME PATH EXISTS AGAIN as of 2026-09-05, so this refusal no longer says "there is no
+        # such thing" -- it says "not through this tool". Staging a game runs a project's content
+        # through stage-game.ps1 and then verify-game.ps1's divergence gate, which launches BOTH
+        # hosts; that is a long, interactive-shaped operation with a real pass/fail of its own, and
+        # wrapping it behind an argument to the payload tool would hide which of the two was run.
         return {"ok": False,
-                "error": "packaging is per-ENGINE now, not per-project: there is no packaged-game "
-                         "path any more (AverGame.exe and stage-game.ps1 were removed). Drop "
-                         "'project' and pass only 'out'."}
+                "error": "this tool stages the ENGINE payload, not a game. To package a project run "
+                         "./scripts/stage-game.ps1 -Project <x.ocproject> -Out <dir>, then "
+                         "./scripts/verify-game.ps1 -Package <dir>, which also runs the divergence "
+                         "gate against the editor. Drop 'project' and pass only 'out'."}
     if '"' in out or "`" in out or ";" in out:
         return {"ok": False, "error": "suspicious character in 'out'"}
 

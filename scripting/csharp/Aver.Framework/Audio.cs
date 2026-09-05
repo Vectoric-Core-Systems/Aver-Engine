@@ -55,6 +55,37 @@ internal static class Ax
     [DllImport(Lib)] internal static extern int aver_audio_stolen_voices();
 }
 
+/// <summary>The four mixer buses, mirroring <c>AVER_AUDIO_BUS_*</c> in
+/// <c>modules/audio.abi/include/aver/audio/audio_abi.h</c> and <c>aver::audio::Bus</c> in
+/// <c>Sound.hpp</c>.</summary>
+///
+/// <remarks>WHY THIS EXISTS AT ALL, since every call below used to take a bare <c>int</c>. The two
+/// native halves have been pinned to each other by <c>static_assert</c> since they were written
+/// (<c>AudioAbi.cpp</c> is the one translation unit that includes both), and that file's own comment
+/// names the failure the third, managed copy could still produce: "every managed
+/// <c>SetBusVolume(1, ...)</c> meant for Music keeps compiling and starts moving whatever landed in
+/// that slot, with no error anywhere". There was no managed copy to pin — scripts wrote the integer —
+/// so the one mirror that could drift was the one nothing could check. This is that copy, and
+/// <c>tests/abi/src/AbiEnumTest.cpp</c> now compares it against the header.
+///
+/// AN UNKNOWN VALUE IS NOT REJECTED HERE. <c>busOf</c> on the native side folds anything it does not
+/// recognise into <c>Sfx</c>, deliberately, because an ABI must not trust its caller. Throwing on
+/// this side would make the same call behave differently depending on which language made it, so a
+/// cast-from-int that lands outside these four still reaches native and still becomes Sfx — see
+/// <c>GraphInterop</c>, which is where an out-of-range value can actually arrive, and which logs
+/// rather than silently swallowing it.</remarks>
+public enum Bus
+{
+    /// <summary>Gameplay sound effects. The default for every Play call.</summary>
+    Sfx = 0,
+    /// <summary>Music, so a settings menu can fade it separately from the effects.</summary>
+    Music = 1,
+    /// <summary>Dialogue and narration.</summary>
+    Voice = 2,
+    /// <summary>Interface clicks and notifications, which usually keep playing while paused.</summary>
+    Ui = 3,
+}
+
 /// <summary>A decoded sound, ready to play. 0 is "nothing", which every call below tolerates.</summary>
 /// <remarks>A HANDLE, NOT A FILE. <see cref="Audio.Load"/> decodes once and hands back the same
 /// handle for the same path forever after, so loading in a hot loop is wasteful but not wrong.</remarks>
@@ -195,10 +226,11 @@ public static class Audio
 
     /// <summary>Plays a sound the same in both ears — UI clicks, music, narration.</summary>
     /// <param name="bus">Which bus to mix through, for group volume control. 0 is the default bus.</param>
-    public static Voice Play(Sound sound, float volume = 1f, float pitch = 1f, bool looping = false, int bus = 0)
+    public static Voice Play(Sound sound, float volume = 1f, float pitch = 1f, bool looping = false,
+                             Bus bus = Bus.Sfx)
     {
         if (!sound.IsValid) return Voice.None;
-        try { return new Voice(Ax.aver_audio_play(sound.Handle, volume, pitch, looping ? 1 : 0, bus)); }
+        try { return new Voice(Ax.aver_audio_play(sound.Handle, volume, pitch, looping ? 1 : 0, (int)bus)); }
         catch (DllNotFoundException) { return Voice.None; }
     }
 
@@ -206,20 +238,21 @@ public static class Audio
     /// <param name="innerCm">Full volume at or inside this radius.</param>
     /// <param name="outerCm">Exactly silent at or beyond it.</param>
     public static Voice PlayAt(Sound sound, Vec3 position, float volume = 1f, float pitch = 1f,
-                               bool looping = false, int bus = 0,
+                               bool looping = false, Bus bus = Bus.Sfx,
                                float innerCm = 100f, float outerCm = 2000f)
     {
         if (!sound.IsValid) return Voice.None;
         try
         {
             return new Voice(Ax.aver_audio_play_at(sound.Handle, position.X, position.Y, position.Z,
-                                                   volume, pitch, looping ? 1 : 0, bus, innerCm, outerCm));
+                                                   volume, pitch, looping ? 1 : 0, (int)bus, innerCm, outerCm));
         }
         catch (DllNotFoundException) { return Voice.None; }
     }
 
     /// <summary>Loads and plays in one call, for the common "just make this noise" case.</summary>
-    public static Voice PlayFile(string path, float volume = 1f, float pitch = 1f, bool looping = false, int bus = 0) =>
+    public static Voice PlayFile(string path, float volume = 1f, float pitch = 1f, bool looping = false,
+                                 Bus bus = Bus.Sfx) =>
         Play(Load(path), volume, pitch, looping, bus);
 
     /// <summary>Stops every voice at once.</summary>
@@ -246,14 +279,14 @@ public static class Audio
     }
 
     /// <summary>Reads one bus's volume, 0..1.</summary>
-    public static float GetBusVolume(int bus)
+    public static float GetBusVolume(Bus bus)
     {
-        try { return Ax.aver_audio_bus_volume(bus); } catch (DllNotFoundException) { return 0f; }
+        try { return Ax.aver_audio_bus_volume((int)bus); } catch (DllNotFoundException) { return 0f; }
     }
 
     /// <summary>Sets one bus's volume, 0..1 — how a game gives the player separate SFX and music sliders.</summary>
-    public static void SetBusVolume(int bus, float volume)
+    public static void SetBusVolume(Bus bus, float volume)
     {
-        try { Ax.aver_audio_set_bus_volume(bus, volume); } catch (DllNotFoundException) { }
+        try { Ax.aver_audio_set_bus_volume((int)bus, volume); } catch (DllNotFoundException) { }
     }
 }

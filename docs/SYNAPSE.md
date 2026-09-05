@@ -241,7 +241,7 @@ Only a composition root links both sides. Everything else stays testable in isol
 | `modules/synapse.scene/…/SynapseBt.hpp` | `CSynapseBehavior` + `BtSystem` + the built-ins |
 | `sandbox/src/NavBakeCommand.*` | the editor bake command and its overlay |
 | `sandbox/src/BtEditor.*` | the `.ocbt` editor tab |
-| `tests/synapse/`, `tests/editor/src/BtEditorTest.cpp` | six suites, five of which need no world |
+| `tests/synapse/`, `tests/editor/src/BtEditorTest.cpp` | seven suites (was six), four of which need no world: `NavTest`, `BtTest`, `NavBakeTest` (pure `Aver.Synapse`, no `Aver.Scene`) and `BtEditorTest` (links `Aver.Formats`/`Aver.Core`/`Aver.Platform` only). `AgentTest`, `PerceptionTest` and `BtSystemTest` link `Aver.Scene` and need one. |
 
 Components are registered dynamically at each composition root
 (`AgentSystem::registerComponents` and friends), so none of this required an edit to

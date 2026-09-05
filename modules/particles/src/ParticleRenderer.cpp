@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include "aver/rhi/ShaderFiles.hpp"   // this pass's HLSL is a deployed file, not a literal
 
 namespace aver::particles {
 namespace {
@@ -74,7 +75,7 @@ bool ParticleRenderer::init(rhi::IDevice& device) {
     }
 
     rhi::ShaderDesc sd;
-    sd.source = kParticleHLSL;
+    sd.source = rhi::shaderFile("particles.hlsl").c_str();
     sd.prelude = rhi::sharedShaderPrelude();   // gViewProj, and nothing else from it, is used
     sd.entry = "ParticleVS";
     sd.stage = rhi::ShaderStage::Vertex;
@@ -223,7 +224,7 @@ bool ParticleRenderer::buildPipelines(u32 sampleCount, rhi::Format color, rhi::F
         if (giSeam_.prepare(kGiSrvBase, kGiSamplerBase, rhi::kFeatureFrameConstantRegister,
                             &giPrelude, &giDefines, giSeam_.user)) {
             rhi::ShaderDesc gsd;
-            gsd.source = kParticleHLSL;
+            gsd.source = rhi::shaderFile("particles.hlsl").c_str();
             const std::string prelude = std::string(rhi::sharedShaderPrelude()) + giPrelude;
             gsd.prelude = prelude.c_str();
             gsd.entry = "ParticlePS";

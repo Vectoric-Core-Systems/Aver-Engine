@@ -6,6 +6,38 @@
 > content-browser registration, ray-picking), and physics plus level-reference design — each
 > finding carrying a `file:line` an agent actually opened, distilled into the blockers, decisions
 > and slices below.
+>
+> **This is no longer true, starting the very next day.** Commit `5b88995` (2026-08-09, "Terrain: a
+> height seam the scatter follows, a landscape in the editor, and sculpt tools") linked
+> `Aver.Landscape.Renderer` into Sandbox, wired an editor camera to `select()`/`draw()` every frame
+> (behind a `--landscape <path>` flag or a `<levelname>.ocland` filename convention, not yet the
+> `.ocworld` `LANDSCAPE`-record path Slice 0 below specifies), added `.ocworld`'s `LANDSCAPE` record
+> itself (round-tripping byte-identically, the Slice-0 decision below), and shipped sculpt tools
+> (raise/lower/smooth/flatten, via new `modules/landscape/src/{Sculpt,HeightfieldRay}.cpp` reusing
+> the editor's existing `viewportRay` rather than the new pick-path this plan assumed). That commit's
+> own message is candid about what still wasn't done there, and two things it named have since closed
+> too: `LandscapeRenderer::forgetOverlapping(device, tree, x0,y0,x1,y1)` — region-scoped cache
+> eviction keyed to a brush stroke's touched rect, exactly Slice 3's ask — now exists alongside
+> `forgetAll`, and `EditCmd` (the *existing* undo stack this plan's §4 says cannot represent a height
+> edit) grew a `LandscapeStroke` payload (`landX0/Y0/X1/Y1` bounds + `landBefore`/`landAfter` sample
+> vectors, pushed once per stroke) rather than the new tab-local stack the Decision table calls for —
+> both landed in `31c06a4` (2026-08-29, "A crash reporter, an editor mode system, and two reported
+> numbers that were backwards"), which also put Landscape in the mode dropdown (`fe1ee9f`, the same
+> push). What that same commit message says is **still** open, confirmed still true by reading the
+> current source: **no terrain collision** (`PhysicsBridge::toPhysicsHeightfield` is tested end to end
+> and still called from nowhere — Blocker 6 / Slice 6), **the editor still does not read the level's
+> `LANDSCAPE` record** (loading is still flag/filename-convention only — the `world::instantiate`
+> wiring Slice 0 calls for is still open), and **the quantisation-drift bug is still open** (Blocker 2
+> / Slice 2 — `writeOcLand` still recomputes `lo`/`hi` from live heights on every save).
+>
+> **`docs/STATUS.md`'s own "Landscape — stages 1 to 4 of 5" section (outside this file's scope to
+> fix) does not mention any of this** — it still says "no pixel of landscape has ever been on a
+> screen," which `5b88995` made false. The corrections inlined below (Blockers 1, 3, 5, 8) are each
+> individually verified against the source as of 2026-09-02. **Everything else in this file —
+> Blockers 2, 4, 6, 7, 9, the rest of the decision table, and every slice's done-when criteria — was
+> not re-checked past what this note says**, against a tree that has since gained a mode system,
+> terrain texturing and tiling fixes the commit log hints at but this pass did not open. Re-verify
+> before relying on it; "not called out here as fixed" is not the same claim as "still broken."
 
 ---
 
@@ -15,18 +47,27 @@ Nine blockers stand between this module and an editor. The first four are not ju
 list — each one reshapes what the plan can look like, and together they are why slice 0 below is
 "get terrain on screen and referenced from a level", not a brush.
 
-### 1. Nothing in the engine calls the landscape module *(there is nothing to sculpt against until this closes)*
+### 1. Nothing in the engine calls the landscape module *(there is nothing to sculpt against until this closes — RESOLVED the day after this was written)*
 
-`Aver.Landscape` and `Aver.Landscape.Renderer` are linked from nowhere but their own
+**This closed in `5b88995` (2026-08-09), one day after this survey.** `Aver.Landscape.Renderer` is
+now linked into Sandbox (behind `if(TARGET ...)`), which loads an `.ocland` via `--landscape <path>`
+or the `<levelname>.ocland` convention, selects LOD against the editor camera every frame, and draws
+it — so there is now something to sculpt against, and Slice 0's render-and-see-it-working half is
+done. What follows describes the state that made Slice 0 necessary, kept for the record:
+
+`Aver.Landscape` and `Aver.Landscape.Renderer` were linked from nowhere but their own
 `CMakeLists.txt` and `tests/landscape/CMakeLists.txt:5,23-24,35` — a repo-wide grep for every
-`Aver\.Landscape` target confirms it. A second grep, for the symbols themselves (`LandscapeTree`,
-`LandscapeRenderer`, `loadOcLand`, `OcLandData`, `buildChunkMesh`), returns exactly 19 files, every
+`Aver\.Landscape` target confirmed it. A second grep, for the symbols themselves (`LandscapeTree`,
+`LandscapeRenderer`, `loadOcLand`, `OcLandData`, `buildChunkMesh`), returned exactly 19 files, every
 one of them inside `modules/landscape`, `modules/formats`, `tests/landscape`, `tests/formats`, one
-RHI comment, or `docs/`. No `.ocland` file exists anywhere in the repo or on disk. **An editor here
-is not a UI wrapped around a working module — it is new engineering layered on a headless CPU model
-that nothing in the running engine has ever exercised end to end.** Slice 0 therefore has to be
-"terrain on screen and referenced from a level", because there is nothing to sculpt against and no
-level format that can even point at a section until that path exists.
+RHI comment, or `docs/`. No `.ocland` file existed anywhere in the repo or on disk. **An editor here
+was not a UI wrapped around a working module — it was new engineering layered on a headless CPU model
+that nothing in the running engine had ever exercised end to end.** That is why Slice 0 below was
+scoped as "terrain on screen and referenced from a level" rather than a brush — there was nothing to
+sculpt against and no level format that could even point at a section until that path existed.
+**Still open:** the `world::instantiate` half of Slice 0 — the editor loads a section by flag or
+filename convention, not yet by reading the level's own `.ocworld` `LANDSCAPE` record (which now
+exists — see the top-of-file status note).
 
 ### 2. `.ocland` silently degrades work the artist never touched *(worse than no editor if left unaddressed)*
 
@@ -40,7 +81,13 @@ retained anywhere to recover from it. **A save silently re-quantises every sampl
 including ones the artist never touched, and the loss is permanent.** An editor that does this on
 every save is worse than no editor at all: it teaches the artist that saving is safe when it is not.
 
-### 3. The renderer will draw stale terrain forever *(the central finding for editing)*
+### 3. The renderer will draw stale terrain forever *(the central finding for editing — RESOLVED)*
+
+**Closed in `31c06a4` (2026-08-29).** `LandscapeRenderer` gained `forgetOverlapping(device, tree,
+x0, y0, x1, y1)`, which frees exactly the resident meshes whose node footprint overlaps a sample
+rectangle — the same rect `landscape::brushRect()`/`applyBrush()` already compute for a stroke — and
+leaves every other resident node alone. It is called from the sculpt path in `SandboxApp.cpp` after
+each stroke. What follows describes the gap that made this necessary, kept for the record:
 
 `LandscapeRenderer`'s mesh cache (`meshes_`, an `unordered_map<u32 nodeIndex, Resident>`,
 `LandscapeRenderer.hpp:75`) is keyed by a topological node index that `LandscapeTree::build()`
@@ -50,9 +97,10 @@ cached mesh unconditionally; it only builds a new one when the index is *absent*
 (`LandscapeRenderer.cpp:72-104`). **Nothing checks whether the samples under a cached mesh changed
 since it was cached.** After a height edit and a tree rebuild, every resident node whose footprint
 overlaps the edit — at every level that has a cached mesh there, not only the level currently
-selected — keeps drawing its pre-edit geometry indefinitely. The only lever that exists is
-`forgetAll()` (`LandscapeRenderer.hpp:54-58`), which destroys the *entire* resident set through the
-real `destroyMesh` added this session: a full-section stall for a one-sample edit, not a fix.
+selected — keeps drawing its pre-edit geometry indefinitely. At the time of this survey the only
+lever was `forgetAll()` (`LandscapeRenderer.hpp:54-58`), which destroys the *entire* resident set
+through the real `destroyMesh` added that session: a full-section stall for a one-sample edit, not a
+fix — which is exactly why `forgetOverlapping` was added, per the note above.
 
 ### 4. `LandscapeTree::build()` clears the tree before it validates *(destroys work speculatively)*
 
@@ -66,8 +114,13 @@ build into a scratch `LandscapeTree` and swap it in only on success.
 
 ### 5. `build()` has no incremental or region-scoped rebuild path
 
-The class's entire public surface is `build()`, `select()` and `resetHysteresis()`
-(`modules/landscape/include/aver/landscape/LandscapeTree.hpp:76-92`); `build()` always walks every
+At the time of this survey, the class's entire public surface was `build()`, `select()` and
+`resetHysteresis()`. **That is no longer the count**: `5b88995` added `widenRimSkirts(f32
+minSkirtCm)` and `levelErrorCm(u32 level)` (`modules/landscape/include/aver/landscape/LandscapeTree.hpp`,
+just after `resetHysteresis()`) for a *different* problem than the one below — masking the seam
+against an independently-selected neighbour tile at a section's outer rim, part of the same commit's
+"ring of synthesized tiles" work, not an incremental-rebuild entry point. The finding this blocker is
+actually about stands: `build()` still always walks every
 level and every node of the whole section, re-scanning every source sample for its bounding-sphere
 extent and, above level 0, its `errorCm` (`LandscapeTree.cpp:95-159`). There is no "rebuild this
 node" or "rebuild this rectangle of samples" entry point. It gets worse one level up: `skirtCm` at
@@ -106,16 +159,21 @@ treatment has to land in the same slice as the field itself, not later.
 
 ### 8. `sandbox/src` has no plumbing for this asset type at all
 
-No `AssetEditorFactory` claims `.ocland` — the concrete factories registered in `onInit`
-(`SandboxApp.cpp:498-501`) are for `.ocmesh`, actor and anim assets only, each checking its own
-extension in the style of `makeMeshEditor`'s `if (ext != ".ocmesh") return nullptr;`
-(`sandbox/src/AssetEditor.cpp:223`). The content browser's icon lookup (`assetIconTile`, a fixed
-three-way `if`-chain, `SandboxApp.cpp:3979-3984`) and its `kAssetIconTiles = 3` sprite sheet have no
-fourth entry. And the only ray/pick code in the editor, `pick()` (`SandboxApp.cpp:2903-2922`, with
-`rayAabb` defined at `:192`), tests ray-vs-AABB against placeholder objects and mesh-renderer bounds
-— never a heightfield. A double-clicked `.ocland` file falls through to the IDE-or-shell path today,
-and there is no way to resolve a screen point to a point on the terrain surface. None of this is
-wiring an existing but disconnected path; it is new surface from zero.
+Still no `AssetEditorFactory` claims `.ocland` — the terrain path `5b88995` shipped is a per-level
+singleton reached by `--landscape <path>` or the `<levelname>.ocland` filename convention (see the
+top-of-file status note), not a Content Browser double-click. `makeMeshEditor`'s
+`if (ext != ".ocmesh") return nullptr;` (`sandbox/src/AssetEditor.cpp:229`, moved one line since this
+was written) still has no landscape counterpart. The content browser's icon lookup (`assetIconTile`,
+`sandbox/src/SandboxApp.cpp:13390-13396`) is **no longer three-way**: it is now a four-way `if`-chain
+(`.ocanim`, `.ocskel`, `.ocmesh`, `.ocgraph`) and `kAssetIconTiles` is `4`, not `3` — the fourth slot
+this blocker predicted for landscape went to `.ocgraph` (Aver Node graph creation from the Content
+Browser) instead, so a landscape icon still needs adding, now as a **fifth** tile, not a fourth. The
+ray-picking half of this blocker is **resolved**: `5b88995` added `HeightfieldRay.cpp` to
+`modules/landscape`, and it reuses the editor's existing `viewportRay` rather than the new pick path
+this blocker assumed would be needed — so a screen point CAN resolve to a point on the terrain
+surface now, through the sculpt-tool path, just not yet through a generic asset-editor `pick()`. A
+double-clicked `.ocland` file still falls through to the IDE-or-shell path, since no factory claims
+the extension.
 
 ### 9. Two independent draw-budget ceilings that do not share a budget
 
@@ -156,9 +214,9 @@ needs to build from scratch.
 | Render via a direct call inside `SandboxApp::onRender()`, the same hand-rolled pattern as the existing `objects_` and scene-entity draw loops — not a new `IRenderFeature`, and not routed through `GameRender::drawWorld`/`CMeshRenderer`. | `LandscapeRenderer` has no scene-pipeline hooks and sections are not ECS entities, so forcing either pattern solves a problem this system doesn't have. |
 | The `.ocland` quantisation range becomes authored and pinned at section-creation time, not auto-refit from live data on every save. | A `modules/formats` schema change, coordinated with whoever owns its current in-flight work rather than raced against it. Until it lands, exposing "save" to an artist mid-sculpt is exposing the drift bug (blocker 2) live, so this gates any workflow that encourages repeated saves during one sculpt session. |
 | Full tree and physics-heightfield rebuilds are debounced to stroke-end (pointer-down..pointer-up), mirroring the existing `beginTransformEdit`/`endTransformEdit` gesture-bracket pattern (`SandboxApp.cpp:2417-2436`). | Mid-stroke feedback needs a separate, cheap preview path that patches already-uploaded geometry directly, bypassing the tree and mesh cache — and that preview must be proven, not assumed, never to silently diverge from the authoritative post-rebuild geometry. |
-| A new, landscape-tab-local undo stack, built from scratch rather than extended from `EditCmd`/`undoStack_`. | See §4 — the existing stack is entity-keyed and sized for one fixed transform, with no way to represent a height-sample edit without modelling every touched sample as a fake entity. |
-| An undo entry stores sparse before/after height-sample maps, never a whole-section snapshot. | Undo cost and memory are bounded by the stroke's actual footprint, matching the render/physics rebuild's own bounded-region assumption, and the correctness bar becomes directly testable. |
-| A new `.ocworld` `LANDSCAPE` record, plus `levelLandscapes_`-style pass-through tracking copying the exact `PCGVOLUME` pattern, lands in slice 0 — before any sculpt or import UI exists. | Closes off blocker 7's silent-revert failure mode from day one, rather than deferring the fix until "the editor can actually change it", which is precisely when the `PCGVOLUME` bug bit in the first place. |
+| ~~A new, landscape-tab-local undo stack, built from scratch rather than extended from `EditCmd`/`undoStack_`.~~ **Not what shipped** (`31c06a4`, 2026-08-29): `EditCmd` itself grew a `LandscapeStroke` payload (bounds + before/after sample vectors) on the *existing* `undoStack_`, not a separate stack. See §4's new note. | See §4 — the existing stack is entity-keyed and sized for one fixed transform, with no way to represent a height-sample edit without modelling every touched sample as a fake entity. |
+| ~~An undo entry stores sparse before/after height-sample maps, never a whole-section snapshot.~~ **Close, not exact**: the shipped entry stores a dense before/after array over the stroke's bounding rectangle (`landX0/Y0/X1/Y1` + `landBefore`/`landAfter`), not a sparse `{index -> height}` map — still bounded by the stroke's footprint, never a whole-section snapshot, just not sparse *within* that footprint. | Undo cost and memory are bounded by the stroke's actual footprint, matching the render/physics rebuild's own bounded-region assumption, and the correctness bar becomes directly testable. |
+| A new `.ocworld` `LANDSCAPE` record, plus `levelLandscapes_`-style pass-through tracking copying the exact `PCGVOLUME` pattern, lands in slice 0 — before any sculpt or import UI exists. **Half done**: the record exists and round-trips (`5b88995`), but the editor does not yet read it — see the top-of-file note. | Closes off blocker 7's silent-revert failure mode from day one, rather than deferring the fix until "the editor can actually change it", which is precisely when the `PCGVOLUME` bug bit in the first place. |
 | Landscape collision loads through the same shared `world::instantiate` path `Sandbox.exe` already uses (`modules/world/src/LevelInstance.cpp:14-73`), mirroring its existing static-box branch. | Landscape collision gets correct load *and* correct unload from the shared path; the two-copies-of-the-load-loop problem `docs/CHUNKS.md` already fixed once for placements must not be reintroduced here. |
 | Texture painting is explicitly deferred past sculpt+save+see-it-in-a-level. | `LandscapeRenderer::draw()`'s single `device.drawMesh(mesh, world, baseColor, metallic, roughness)` call (`LandscapeRenderer.cpp:116`) has no texture/material binding argument at all, so painting is a genuinely new draw path plus a new persisted `.ocland` chunk, not a UI wrapper around sculpting — scoped as its own slice (9) after the sculpt loop is proven. |
 | "New landscape" sample-count entry snaps to the exact geometric sequence `build()` accepts — at the default `nodeQuads = 64`, that is 65, 129, 257, 513, 1025, 2049, 4097, not every value of the form `64k+1` (`LandscapeTree.cpp:76-84`; capped at 4097 by `modules/formats/include/aver/formats/OcLand.hpp:18-19`). | A creation action can never produce a section that fails `build()` after the fact with no earlier warning — the constraint is enforced at the UI boundary, not discovered at runtime. |
@@ -166,6 +224,13 @@ needs to build from scratch.
 ---
 
 ## 4. Undo is a real design problem, not a checkbox
+
+**Shipped in `31c06a4` (2026-08-29), and not quite like this.** The recommendation below — a new,
+separate, tab-local stack, because the existing one "cannot" represent a height edit — turned out to
+be avoidable: a `LandscapeStroke` variant was added to the *existing* `EditCmd`/`undoStack_` instead
+(see the corrected decision-table rows above), and it works. The analysis of *why* a naive reuse
+would have failed (below) is still worth reading; the conclusion that the fix had to be a whole new
+stack was not borne out.
 
 One undo entry is one brush stroke, bracketed at pointer-down and pointer-up. It stores a **sparse
 map of `{sample index -> height}` for the state before the stroke, populated lazily the first time

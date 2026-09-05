@@ -48,7 +48,66 @@ cbuffer PerFrame : register(AVER_CB_JOIN(b, AVER_FRAME_CB)) {
     // the same reason: nothing about them varies per pixel. Only written while the PHYSICAL
     // atmosphere is on; averSkyIrradiance reads them only under averAtmoOn() for that reason.
     float4   gSkySh[9];
+    // x seconds wrapped to 3600, y seconds raw, z delta seconds. See PerFrameCB::time for why the
+    // clock lives in THIS block and not in the material or feature ones, and why x is wrapped.
+    float4   gTime;
+    // The water wave set: xy = unit direction, z = k (rad/cm), w = angular speed (rad/s).
+    // gWaveParams: x amplitude, y live count. See PerFrameCB::wave for why they live in THIS block.
+    float4   gWave[3];
+    float4   gWaveParams;
 };
+
+// ---- THE WATER SURFACE, EVALUATED IN ONE PLACE ------------------------------------------------
+//
+// THE SINGLE SOURCE OF TRUTH FOR THE WAVES, and it exists because there were briefly two. The ripple
+// was authored as a material graph with its constants as pin defaults; the caustics were HLSL in the
+// renderer with the same three wavelengths typed again. Nothing kept them in step, and they describe
+// the same surface: one makes the bumps, the other decides where those bumps focus sunlight. Retune
+// either alone and the bright lines slide off the ripples casting them.
+//
+// So neither owns the numbers now. Both call these.
+
+// One wave's phase at a world XY position, in radians.
+float averWavePhase(float4 w, float2 p) { return dot(w.xy, p) * w.z + gTime.x * w.w; }
+
+// Surface height in centimetres, relative to the flat surface.
+float averWaveHeight(float2 p) {
+    const uint n = (uint)(gWaveParams.y + 0.5);
+    float h = 0.0;
+    [unroll] for (uint i = 0; i < 3; ++i)
+        if (i < n) h += sin(averWavePhase(gWave[i], p));
+    return h * gWaveParams.x;
+}
+
+// The tangent-space normal of that height field. ANALYTIC, not a finite difference: the derivative
+// of a sum of sines is a sum of cosines, so this is exact and costs the same as the height itself.
+// z = 1 keeps it a tilt, so amplitude reads directly as steepness once normalised.
+float3 averWaveNormal(float2 p) {
+    const uint n = (uint)(gWaveParams.y + 0.5);
+    float2 d = float2(0.0, 0.0);
+    [unroll] for (uint i = 0; i < 3; ++i)
+        if (i < n) d += gWave[i].xy * (gWave[i].z * cos(averWavePhase(gWave[i], p)));
+    return normalize(float3(-d * gWaveParams.x, 1.0));
+}
+
+// How strongly the surface FOCUSES light at this position: 0 where it spreads, 1 at the tightest
+// convergence the wave set can produce.
+//
+// This is the Laplacian of the same height field, negated and normalised. A concave patch converges
+// the rays crossing it and a convex one spreads them, and for a sum of sines the second derivative
+// is analytic -- each term contributes -k^2 sin(phase). That is the whole of why caustics here need
+// no ray tracing, no photon map and no texture: they are this function, sharpened.
+float averWaveFocus(float2 p) {
+    const uint n = (uint)(gWaveParams.y + 0.5);
+    float lap = 0.0, norm = 0.0;
+    [unroll] for (uint i = 0; i < 3; ++i) {
+        if (i >= n) continue;
+        const float k2 = gWave[i].z * gWave[i].z;
+        lap  -= k2 * sin(averWavePhase(gWave[i], p));
+        norm += k2;
+    }
+    return saturate(lap / max(norm, 1e-6));
+}
 // The per-draw block: transform plus shading constants. 32 dwords, matching kObjectConstantDwords.
 cbuffer PerObject : register(AVER_CB_JOIN(b, AVER_OBJECT_CB)) {
     float4x4 gWorld;
@@ -738,7 +797,20 @@ float4 plainShadeSurface(VSOut i, float sunVis, float3 indirectRadiance, float a
     float rough = clamp(gMaterial.y, 0.045, 1.0);
 
     if (gMaterial.z > 0.5) {
-        return float4(gBaseColor.rgb, gBaseColor.a);
+        // UNLIT: hand the authored colour back with no shading at all. Used by editor chrome -- the
+        // selection outline -- where the colour is a signal ("this is selected") rather than a
+        // surface, so sun, sky ambient, specular and fog all have nothing to say about it.
+        //
+        // srgbToLin IS REQUIRED HERE, and its absence was a real bug the first live use of this
+        // bypass exposed. Every other exit of this function converts the authored colour with
+        // srgbToLin (see the `albedo` line just below) before doing anything with it, because what
+        // this shader writes is LINEAR radiance that the tonemap and sRGB encode downstream undo.
+        // Returning the sRGB triple raw skips only the first half of that round trip, so the value
+        // is tonemapped as though it were already linear: measured, selection orange (1.0, 0.62,
+        // 0.12) came out YELLOW, because ACES compresses the saturated red channel far harder than
+        // the middling green one and the ratio between them collapses. With the conversion the
+        // outline is the colour it was authored as, merely unshaded.
+        return float4(srgbToLin(gBaseColor.rgb), gBaseColor.a);
     }
 
     float3 albedo = srgbToLin(gBaseColor.rgb);

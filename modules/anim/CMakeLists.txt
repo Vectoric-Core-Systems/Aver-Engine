@@ -10,6 +10,7 @@ aver_add_module(Aver.Anim
   SOURCES
     src/Pose.cpp
     src/AnimSampler.cpp
+    src/Ik.cpp
   DEPS
     Aver.Core
     Aver.Formats

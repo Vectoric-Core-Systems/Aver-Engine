@@ -55,6 +55,15 @@ MaterialConstants packMaterial(const MaterialDesc& d) {
     c.coatRoughness     = d.coatRoughness;
     c.coatF0            = d.coatF0;
     c._coatPad          = 0.0f;   // assigned, not left to the {} above -- see the note below
+    // Volume absorption, forwarded verbatim. NOT clamped or normalised here: attenuationColor is a
+    // transmittance in [0,1] per channel and attenuationDistance is a length in centimetres, both
+    // already range-checked by pbr::sanitize (Material.cpp) the way every other authored float in
+    // this block is. A distance of 0 means "no volume" and the shader gates on it -- see
+    // MaterialConstants::attenuationDistance.
+    c.attenuationColor[0] = d.attenuationColor[0];
+    c.attenuationColor[1] = d.attenuationColor[1];
+    c.attenuationColor[2] = d.attenuationColor[2];
+    c.attenuationDistance = d.attenuationDistance;
     // The two floats above are what _pad0/_pad1 used to be. The struct carries no padding now, so
     // every one of its members is assigned here rather than some being left at the zero the
     // `MaterialConstants c{};` above gives them -- if a field is ever added back without a line in

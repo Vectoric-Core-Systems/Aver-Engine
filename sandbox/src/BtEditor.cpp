@@ -157,8 +157,27 @@ i32 btReparent(std::vector<fmt::OcBtNode>& nodes, i32 index, i32 newParent) {
     return it != remap.end() ? it->second : -1;
 }
 
+// Whether btMoveSibling below would do anything. Shares its reasoning by construction: the move
+// calls this first, so a disabled button and a refused move can never disagree about what is
+// possible. The two buttons used to be enabled at both ends and silently do nothing there.
+bool btCanMoveSibling(const std::vector<fmt::OcBtNode>& nodes, i32 index, i32 delta) {
+    if (!inRange(nodes, index) || index == 0 || delta == 0) return false;
+
+    const ChildOrder order = captureOrder(const_cast<std::vector<fmt::OcBtNode>&>(nodes));
+    const i32 parent = nodes[static_cast<usize>(index)].parent;
+    const auto it = order.find(parent);
+    if (it == order.end()) return false;
+    const std::vector<i32>& siblings = it->second;
+
+    const auto pos = std::find(siblings.begin(), siblings.end(), index);
+    if (pos == siblings.end()) return false;
+    const auto at = static_cast<i32>(pos - siblings.begin());
+    const i32 want = at + (delta < 0 ? -1 : 1);
+    return want >= 0 && want < static_cast<i32>(siblings.size());
+}
+
 i32 btMoveSibling(std::vector<fmt::OcBtNode>& nodes, i32 index, i32 delta) {
-    if (!inRange(nodes, index) || index == 0 || delta == 0) return -1;
+    if (!btCanMoveSibling(nodes, index, delta)) return -1;
 
     ChildOrder order = captureOrder(nodes);
     const i32 parent = nodes[static_cast<usize>(index)].parent;
@@ -170,7 +189,6 @@ i32 btMoveSibling(std::vector<fmt::OcBtNode>& nodes, i32 index, i32 delta) {
     if (pos == siblings.end()) return -1;
     const auto at = static_cast<i32>(pos - siblings.begin());
     const i32 want = at + (delta < 0 ? -1 : 1);
-    if (want < 0 || want >= static_cast<i32>(siblings.size())) return -1;   // already at that end
     std::swap(siblings[static_cast<usize>(at)], siblings[static_cast<usize>(want)]);
 
     const std::unordered_map<i32, i32> remap = rebuild(nodes, order);
@@ -187,6 +205,22 @@ void btSetKind(std::vector<fmt::OcBtNode>& nodes, i32 index, fmt::OcBtNodeKind k
         n.name = kind == fmt::OcBtNodeKind::Condition ? "HasTarget" : "Wait";
     else if (!needsName)
         n.name.clear();
+}
+
+fmt::OcBtData btStarterTree() {
+    fmt::OcBtData bt;
+
+    fmt::OcBtNode root;
+    root.kind = fmt::OcBtNodeKind::Selector;
+    root.parent = fmt::kOcBtNoParent;
+    bt.nodes.push_back(root);
+
+    // Built through btAddChild rather than hand-rolled, so the starter is produced by the same edit
+    // path every other node in this editor goes through -- including its choice of a registered name.
+    btAddChild(bt.nodes, 0, fmt::OcBtNodeKind::Action);
+    if (bt.nodes.size() > 1) bt.nodes[1].params[0] = 1.0f;   // Wait's duration, seconds
+
+    return bt;
 }
 
 // ================================================================================== the tab =======
@@ -445,9 +479,15 @@ void BtEditor::drawDetails() {
             }
             ImGui::EndCombo();
         }
+        // Disabled at the ends, like Undo/Redo/Delete beside them. These two were the only controls
+        // in this toolbar that stayed enabled when they could not act.
+        ImGui::BeginDisabled(!btCanMoveSibling(tree_.nodes, selected_, -1));
         if (ImGui::Button("Move up")) moveSelected(-1);
+        ImGui::EndDisabled();
         ImGui::SameLine();
+        ImGui::BeginDisabled(!btCanMoveSibling(tree_.nodes, selected_, 1));
         if (ImGui::Button("Move down")) moveSelected(1);
+        ImGui::EndDisabled();
         ImGui::SameLine();
         ImGui::TextDisabled("(order is execution order)");
     }

@@ -29,3 +29,6 @@ aver_add_module(Aver.Render.PathTracer
   SOURCES src/PathTracer.cpp src/PtFurnaceTest.cpp src/PtSceneView.cpp
   DEPS    Aver.RHI Aver.Core
 )
+
+# HLSL beside the executable -- see cmake/AvModule.cmake.
+aver_deploy_shaders(Aver.Render.PathTracer "${CMAKE_CURRENT_SOURCE_DIR}/shaders")

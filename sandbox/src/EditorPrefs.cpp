@@ -133,8 +133,7 @@ void setPrefString(std::string_view key, std::string_view value) {
 // Writes the file if anything changed since the last write.
 void flushEditorPrefs() {
     if (!g_dirty) return;
-    g_dirty = false;
-    if (g_path.empty()) return;
+    if (g_path.empty()) { g_dirty = false; return; }   // nowhere to write; stop asking
 
     const usize slash = g_path.find_last_of("/\\");
     if (slash != std::string::npos) createDirectories(g_path.substr(0, slash));
@@ -145,8 +144,18 @@ void flushEditorPrefs() {
         "# resets the editor's appearance. Nothing about a PROJECT is stored here.\n";
     for (const auto& [k, v] : g_values) { out += k; out += '='; out += v; out += '\n'; }
 
-    if (!writeFileText(g_path, out))
+    // TEMP-THEN-RENAME, not a truncate-and-write. This is now called on a timer rather than
+    // once at shutdown, so the window in which a crash or a kill can catch a half-written file
+    // is no longer vanishing -- and the failure mode of the plain writer is an editor.ini
+    // truncated to nothing, which loses every preference rather than the last one.
+    if (!writeFileTextAtomic(g_path, out)) {
         AVER_WARN("[Prefs] could not write {}", g_path);
+        return;                     // KEEP g_dirty SET, so the next flush retries
+    }
+    // CLEARED ONLY ON SUCCESS. It used to be cleared before the write was attempted, so a failed
+    // write dropped the dirty bit and the values stayed unsaved until something else changed --
+    // silently, and for the rest of the session on a directory that could not be written at all.
+    g_dirty = false;
 }
 
 // The settings file's path. Empty before the first access.

@@ -7,6 +7,7 @@
 #include "GraphEditorGeometry.hpp"
 #include "GraphNodeDefs.hpp"
 
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/formats/OcGraph.hpp"
 
@@ -1032,5 +1033,5 @@ int main() {
     testComputeAttributeRows();
     testNodeCatalogCoversTheCompiler();
     AVER_INFO("======== {} failure(s) ========", g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

@@ -184,6 +184,16 @@ private:
     u32 accumWidth_  = kAccumWidthLow;
     u32 accumHeight_ = kAccumHeightLow;
     bool     haveCam_ = false;
+    // The lighting this accumulator's samples were drawn under. accumulate() packs only the camera
+    // into its constants -- the sun and sky reach the integrator through the shared per-frame block
+    // inside the shader -- so without this a moving sun blends two times of day into one mean with
+    // no reset and no warning. Compared the way VoxiRenderer::giSnapshotUnchanged compares it, whose
+    // comment records the two traps (padding in a by-value return, and cloudTime being a clock).
+    rhi::SkyAtmosphere sky_{};
+    bool     haveSky_ = false;
+    // Said once per restart cause, so a permanently-restarting accumulator is distinguishable from a
+    // working one in a log. It was silent before, which is why nobody could tell.
+    bool     camResetLogged_ = false;
 
     u64  sceneKey_ = 0;
     bool sceneReady_ = false;

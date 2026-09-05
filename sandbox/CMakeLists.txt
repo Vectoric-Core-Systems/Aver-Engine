@@ -7,8 +7,11 @@ add_executable(Sandbox
   src/SkinSceneTest.cpp
   src/ReflTest.cpp
   src/ProjectBrowser.cpp
+  src/RecentProjects.cpp
   src/ProjectScaffold.cpp
   src/EditorPrefs.cpp
+  src/InputOwnership.cpp
+  src/ViewportIconRenderer.cpp
   src/EngineScaffold.cpp
   src/McpConf.cpp
   src/IdeIntegration.cpp
@@ -21,6 +24,7 @@ add_executable(Sandbox
   src/SoundEditor.cpp
   src/EditorKeybinds.cpp
   src/EditorEntitySnapshot.cpp
+  src/PhysicsSceneSync.cpp
   src/ThumbnailCache.cpp
   Sandbox.rc)
 target_link_libraries(Sandbox PRIVATE Aver.Runtime Aver.Formats)
@@ -251,6 +255,21 @@ add_custom_target(Sandbox.Logo DEPENDS ${CMAKE_BINARY_DIR}/bin/logo.png)
 add_dependencies(Sandbox Sandbox.Logo)
 set_target_properties(Sandbox.Logo PROPERTIES FOLDER "sandbox")
 
+# Ship the Player Start's viewport marker. Same OUTPUT/DEPENDS rule as the splash and logo above.
+# Unlike those two this one is drawn into the 3D SCENE rather than blitted into an ImGui panel --
+# see EditorIconRenderer -- but it is staged identically because it is loaded the identical way, by
+# path, next to the executable.
+add_custom_command(
+  OUTPUT ${CMAKE_BINARY_DIR}/bin/player-start-icon.png
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          ${CMAKE_SOURCE_DIR}/branding/player-start-icon.png ${CMAKE_BINARY_DIR}/bin/player-start-icon.png
+  DEPENDS ${CMAKE_SOURCE_DIR}/branding/player-start-icon.png
+  COMMENT "Staging player-start-icon.png"
+  VERBATIM)
+add_custom_target(Sandbox.PlayerStartIcon DEPENDS ${CMAKE_BINARY_DIR}/bin/player-start-icon.png)
+add_dependencies(Sandbox Sandbox.PlayerStartIcon)
+set_target_properties(Sandbox.PlayerStartIcon PROPERTIES FOLDER "sandbox")
+
 # Ship the Compile C# status sprite sheet (three tiles: built / failed / stale). Same OUTPUT/DEPENDS
 # rule as the splash and logo above, so editing the artwork alone re-stages it without a relink.
 add_custom_command(
@@ -413,3 +432,29 @@ endif()
 if(MSVC)
   set_source_files_properties(src/SandboxApp.cpp PROPERTIES COMPILE_OPTIONS "/bigobj")
 endif()
+
+# The editor's own two shaders (the cluster PS and the G-buffer debug view). The same stamp
+# mechanism the modules use -- aver_deploy_shaders takes any target, executables included.
+aver_deploy_shaders(Sandbox "${CMAKE_CURRENT_SOURCE_DIR}/shaders")
+
+# Ship the game UI's baked font next to the executable. Same OUTPUT/DEPENDS rule as the splash and
+# logo above, for the same reason: a POST_BUILD would leave a re-baked font unstaged after a build
+# that did not relink.
+#
+# TWO FILES, ONE TARGET: the .ocfont is the glyph table and the .png is the atlas it indexes, and a
+# half-staged pair is a font that parses and draws nothing. Baked by scripts/bake-font.py -- see its
+# header for why the game UI bakes offline rather than rasterising at runtime.
+add_custom_command(
+  OUTPUT ${CMAKE_BINARY_DIR}/bin/Roboto-Regular.ocfont ${CMAKE_BINARY_DIR}/bin/Roboto-Regular.png
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          ${CMAKE_SOURCE_DIR}/assets/fonts/Roboto-Regular.ocfont ${CMAKE_BINARY_DIR}/bin/Roboto-Regular.ocfont
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          ${CMAKE_SOURCE_DIR}/assets/fonts/Roboto-Regular.png ${CMAKE_BINARY_DIR}/bin/Roboto-Regular.png
+  DEPENDS ${CMAKE_SOURCE_DIR}/assets/fonts/Roboto-Regular.ocfont
+          ${CMAKE_SOURCE_DIR}/assets/fonts/Roboto-Regular.png
+  COMMENT "Staging the game-UI font"
+  VERBATIM)
+add_custom_target(Sandbox.UiFont DEPENDS
+  ${CMAKE_BINARY_DIR}/bin/Roboto-Regular.ocfont ${CMAKE_BINARY_DIR}/bin/Roboto-Regular.png)
+add_dependencies(Sandbox Sandbox.UiFont)
+set_target_properties(Sandbox.UiFont PROPERTIES FOLDER "sandbox")

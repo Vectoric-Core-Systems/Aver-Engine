@@ -1,10 +1,10 @@
 // See FluidScene.hpp for the whole design. What follows is spawn/despawn/update/prePass, the private
 // retire() they share, and the one small packing helper both spawn() and update() call.
 #include "aver/fluids/FluidScene.hpp"
-#include "FluidShaders.hpp"
 #include "aver/physics/physics_abi.h"
 #include "aver/core/Log.hpp"
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -24,14 +24,28 @@ constexpr u32 kMaxResident = 64;
 // because both of those are already done by the time either caller reaches this -- see spawn()'s and
 // update()'s own comments for why. `out` is resized to match; UVs are written as zero rather than
 // left uninitialised, since this shell has no source parameterisation to carry across.
+//
+// originCm, WHEN GIVEN, IS SUBTRACTED, and that is what keeps the buffer in the mesh-LOCAL frame the
+// rest of this engine assumes. The seed shell is already built about local (0,0,0)
+// (FluidVolume.cpp: "LOCAL + centre = WORLD"), but the SOLVER hands its particles back in absolute
+// world space, so update() has to put them back. This buffer used to be left in world space and
+// drawn with an identity matrix -- which renders correctly and sorts WRONG: the blended flush orders
+// draws by world[12..14] (D3D12Device.cpp:5006-5013), and an identity matrix's translation is the
+// world ORIGIN, so a pool authored anywhere else sorted as though it sat at (0,0,0) and could
+// composite on the wrong side of a glass pane it was plainly in front of.
+//
+// Normals are NOT offset: a translation does not rotate them.
 void packFluidVerts(const std::vector<f32>& positionsCm, const std::vector<f32>& normals,
-                    std::vector<rhi::MeshVertex>& out) {
+                    std::vector<rhi::MeshVertex>& out, const f32* originCm = nullptr) {
+    const f32 ox = originCm ? originCm[0] : 0.0f;
+    const f32 oy = originCm ? originCm[1] : 0.0f;
+    const f32 oz = originCm ? originCm[2] : 0.0f;
     const size_t n = positionsCm.size() / 3;
     out.resize(n);
     for (size_t i = 0; i < n; ++i) {
-        out[i].px = positionsCm[i * 3 + 0];
-        out[i].py = positionsCm[i * 3 + 1];
-        out[i].pz = positionsCm[i * 3 + 2];
+        out[i].px = positionsCm[i * 3 + 0] - ox;
+        out[i].py = positionsCm[i * 3 + 1] - oy;
+        out[i].pz = positionsCm[i * 3 + 2] - oz;
         out[i].nx = normals[i * 3 + 0];
         out[i].ny = normals[i * 3 + 1];
         out[i].nz = normals[i * 3 + 2];
@@ -55,45 +69,17 @@ bool FluidScene::init(rhi::IDevice& dev) {
         return ready_;
     }
 
-    // The transparentPass shaders and pipeline -- compiled here, best-effort, the identical
-    // two-step pattern ParticleRenderer::init and WaterRenderer::init both follow: this call uses
-    // whatever sample count/formats the device reports right now, and onRenderTargetsChanged rebuilds
-    // against the real scene target's shape the moment the device calls it (before the first real
-    // frame). A failure here is logged and left alone rather than propagated to `ready_` -- see this
-    // class's own header comment on vs_/ps_/pso_ for why the physics half of this feature must not go
-    // inert just because its draw half could not compile.
-    rhi::ShaderDesc sd;
-    sd.source = kFluidHLSL;
-    sd.prelude = rhi::sharedShaderPrelude();
-    sd.entry = "VSFluid";
-    sd.stage = rhi::ShaderStage::Vertex;
-    vs_ = res_->createShader(sd);
-    sd.entry = "PSFluid";
-    sd.stage = rhi::ShaderStage::Pixel;
-    ps_ = res_->createShader(sd);
-    if (!vs_ || !ps_) {
-        AVER_ERROR("[Fluid] the fluid surface shaders failed to compile; every volume this run will "
-                   "spawn and simulate but draw nothing");
-    } else {
-        buildPipeline(dev.sampleCount(), dev.backbufferFormat(), dev.depthFormat());
-    }
-
+    // NO SHADERS AND NO PIPELINE. This class used to compile VSFluid/PSFluid here and build its own
+    // PSO, because it drew its own volumes through IRenderFeature::transparentPass. It does not draw
+    // anything any more -- the composition root draws drawHandle() as an ordinary translucent mesh
+    // with an authored .ocmat -- so there is nothing here to compile and nothing to keep in step with
+    // the scene target's sample count and formats.
     return ready_;
 }
 
 void FluidScene::shutdown() {
     for (auto& kv : live_) retire(kv.second);
     live_.clear();
-    if (res_) {
-        res_->destroyPipeline(pso_);
-        res_->destroyShader(vs_);
-        res_->destroyShader(ps_);
-    }
-    pso_ = 0;
-    vs_ = ps_ = 0;
-    bakedSampleCount_ = 1;
-    bakedColorFmt_ = rhi::Format::Unknown;
-    bakedDepthFmt_ = rhi::Format::Unknown;
     dev_ = nullptr;
     res_ = nullptr;
     ready_ = false;
@@ -145,18 +131,18 @@ FluidHandle FluidScene::spawn(const fluids::FluidVolumeDesc& desc, rhi::IDevice&
         return 0;
     }
 
-    // THE MATERIAL LAYER RESOLVES HERE, AND ONLY HERE -- see fluids::fluidResolveMaterial's own
+    // THE MATERIAL LAYER RESOLVES HERE, AND ONLY HERE -- see fluids::fluidResolvePhysicsMaterial's own
     // doc comment (FluidVolume.hpp) for why this is the one call every fluid request converges on
     // regardless of how it was authored: a WATER record via SandboxApp::applyLevelWater's direct
     // construction, a graph's `COMP ... Fluid` line via either of the framework relay's two
     // providers, or any future direct caller of this function. A desc that never set `material` is
-    // untouched by this (fluidResolveMaterial's own early-out), so every caller from before this
+    // untouched by this (fluidResolvePhysicsMaterial's own early-out), so every caller from before this
     // layer existed spawns identically to before. A desc that DOES set `material` alongside a
     // hand-set raw `damping` REFUSES the whole spawn rather than picking a winner -- this is the
     // design brief's precedence rule, enforced at the one point it cannot be silently skipped.
     fluids::FluidVolumeDesc resolved = desc;
     std::string materialConflict;
-    if (!fluids::fluidResolveMaterial(resolved, &materialConflict)) {
+    if (!fluids::fluidResolvePhysicsMaterial(resolved, &materialConflict)) {
         AVER_ERROR("[Fluid] refusing to spawn: {}", materialConflict);
         return 0;
     }
@@ -270,14 +256,11 @@ void FluidScene::despawn(FluidHandle h) {
     live_.erase(it);
 }
 
-void FluidScene::update(f32 elapsedSeconds) {
-    // Stored unconditionally, even on the !ready_ early-out below (a device the caller never
-    // finished initialising), rather than left at whatever update() last saw: transparentPass
-    // separately no-ops without pso_, so there is no failure mode this ordering could paper over,
-    // and skipping the store on the early-out path would leave gFluidTime frozen from whichever
-    // frame LAST called update() with ready_ true, which is a strictly worse answer than "matches
-    // this frame's real clock" for a feature that draws nothing until it is ready anyway.
-    elapsedSeconds_ = elapsedSeconds;
+void FluidScene::update() {
+    // NO CLOCK PARAMETER ANY MORE. This took the composition root's Timestep::total purely to fill
+    // gFluidTime for PSFluid's decorative ripple -- a detail the fluid shader drew that the solver
+    // never computed. Both are gone: an authored .ocmat gets surface detail from a normal map, which
+    // is the same answer every other surface in the engine already uses.
     if (!ready_) return;
 
     // Reused across every resident this call rather than allocated per-volume: each buffer's
@@ -313,6 +296,40 @@ void FluidScene::update(f32 elapsedSeconds) {
         // simulating it.
         r.vol.updateFromSimulation(physicsXyz.data(), got);
 
+        // WHERE THE SHELL ACTUALLY IS, versus where it was authored to be.
+        //
+        // A soft body is free to go anywhere the solver takes it, and nothing downstream notices: the
+        // mesh is drawn from whatever positions come back, so a volume that has escaped its authored
+        // box renders happily over whatever it now covers. That is not hypothetical -- it is how the
+        // PTTest pool came to paint the pit's concrete walls white, which read for a whole session as
+        // a renderer bug (a "blown-out pit interior", plus scattered dark pixels that were really the
+        // wall showing through) and cost a full bisect of the texturing work to attribute correctly.
+        //
+        // The authored box is desc.centreCm +/- desc.halfExtentCm (FluidVolume.hpp:182-187). A little
+        // overshoot is normal and expected -- pressure inflates the shell and the surface oscillates --
+        // so this only says what the numbers are and lets the reader judge; it deliberately does not
+        // warn on a threshold nobody has calibrated.
+        {
+            const std::vector<f32>& p = r.vol.positionsCm();
+            if (p.size() >= 3 && (updates_ & (updates_ + 1)) == 0) {
+                f32 lo[3] = {p[0], p[1], p[2]}, hi[3] = {p[0], p[1], p[2]};
+                for (usize v = 3; v + 2 < p.size(); v += 3)
+                    for (int a = 0; a < 3; ++a) {
+                        lo[a] = std::min(lo[a], p[v + static_cast<usize>(a)]);
+                        hi[a] = std::max(hi[a], p[v + static_cast<usize>(a)]);
+                    }
+                const fluids::FluidVolumeDesc& d = r.vol.desc();
+                AVER_INFO("[Fluid] volume {} shell bounds after {} update(s): "
+                          "x [{:.1f} {:.1f}] y [{:.1f} {:.1f}] z [{:.1f} {:.1f}] cm; "
+                          "authored x [{:.1f} {:.1f}] y [{:.1f} {:.1f}] z [{:.1f} {:.1f}]",
+                          h, updates_,
+                          lo[0], hi[0], lo[1], hi[1], lo[2], hi[2],
+                          d.centreCm[0] - d.halfExtentCm[0], d.centreCm[0] + d.halfExtentCm[0],
+                          d.centreCm[1] - d.halfExtentCm[1], d.centreCm[1] + d.halfExtentCm[1],
+                          d.centreCm[2] - d.halfExtentCm[2], d.centreCm[2] + d.halfExtentCm[2]);
+            }
+        }
+
         // Packed straight from FluidVolume's own positions and normals, NOT through
         // render::softBodyPackVertices. That helper exists to solve two problems neither apply here:
         // it recomputes normals by re-walking the index buffer and accumulating face normals, which
@@ -322,7 +339,10 @@ void FluidScene::update(f32 elapsedSeconds) {
         // drawHandle()'s own comment for why the composition root draws this buffer with an identity
         // world matrix -- so vol.positionsCm() is used exactly as FluidVolume already produced it,
         // in WORLD space, with no conversion and no second normal computation.
-        packFluidVerts(r.vol.positionsCm(), r.vol.normals(), packed);
+        // The solver's positions are ABSOLUTE WORLD; the mesh's frame is local about the volume's
+        // centre, the same frame spawn() seeded it in. See packFluidVerts for why that difference
+        // matters to sorting rather than only to placement.
+        packFluidVerts(r.vol.positionsCm(), r.vol.normals(), packed, r.vol.desc().centreCm);
 
         r.ringSlot = (r.ringSlot + 1) % kFluidFramesInFlight;
         const rhi::BufferHandle stage = r.staging[r.ringSlot];
@@ -335,11 +355,23 @@ void FluidScene::update(f32 elapsedSeconds) {
         }
         r.stagedThisFrame = true;
     }
+
+    ++updates_;
 }
 
 rhi::MeshHandle FluidScene::drawHandle(FluidHandle h) const {
     const auto it = live_.find(h);
     return it == live_.end() ? 0 : it->second.drawMesh;
+}
+
+bool FluidScene::volumeOrigin(FluidHandle h, f32 out[3]) const {
+    const auto it = live_.find(h);
+    if (it == live_.end()) return false;
+    const fluids::FluidVolumeDesc& d = it->second.vol.desc();
+    out[0] = d.centreCm[0];
+    out[1] = d.centreCm[1];
+    out[2] = d.centreCm[2];
+    return true;
 }
 
 int32_t FluidScene::physicsBody(FluidHandle h) const {
@@ -370,173 +402,16 @@ void FluidScene::prePass(rhi::IRenderContext& ctx) {
     }
 }
 
-bool FluidScene::buildPipeline(u32 sampleCount, rhi::Format color, rhi::Format depth) {
-    if (!res_ || !vs_ || !ps_) return false;
 
-    res_->destroyPipeline(pso_);
-    pso_ = 0;
 
-    rhi::GraphicsPipelineDesc gd;
-    gd.vs = vs_;
-    gd.ps = ps_;
-
-    // A root CBV at b(kFeatureFrameConstantRegister) -- "zero means root CBV" per PipelineLayout's
-    // own comment -- carrying ONLY an elapsed-seconds clock for PSFluid's ripple perturbation
-    // (FluidShaders.hpp's cbuffer FluidFrame). This is new since this pipeline was first built: the
-    // original version of this method had no per-frame block at all, on the reasoning (still true
-    // for the colours and the Fresnel/specular constants) that nothing PSFluid read varied per frame
-    // or per volume. A moving ripple is the one exception -- animation is, by definition, a value
-    // that must change frame to frame -- so unlike WaterFrame at 192 bytes of wave/grid state, this
-    // is the smallest thing that could possibly go in that slot.
-    gd.layout.constantDwords[rhi::kFeatureFrameConstantRegister] = 0;
-
-    // gd.vertexLayout is left at its default (empty), which the backend reads as "the engine's own
-    // MeshVertex" (GraphicsPipelineDesc::vertexLayout's own doc comment, RHIResources.hpp) rather
-    // than a custom layout -- see FluidShaders.hpp's own comment on VSFluidIn for why that is not
-    // optional here: rhi::Format has no three-component float entry, so a custom VertexLayout could
-    // not describe this mesh's float3 POSITION0/NORMAL0 even if this pipeline wanted one to. This is
-    // exactly the buffer drawMesh's own opaque pipeline already reads (both are rhi::MeshVertex,
-    // stride 32), so binding it here needs no conversion, no second copy, and no new vertex format.
-
-    // DEPTH-TESTED, DEPTH-WRITE OFF -- the transparentPass contract (RHIResources.hpp) and the exact
-    // state ParticleRenderer::buildPipelines and WaterRenderer::buildPipeline both use. Write MUST
-    // stay off: a blended surface that also wrote depth would occlude anything a LATER transparent
-    // draw this same frame tried to put behind it, and would corrupt whatever runs after
-    // transparentPass and reads the scene depth buffer as it was left (D3D12Device.cpp's own comment
-    // at the transparentPass call site spells out the historical bug this guards against).
-    gd.depth.test = true;
-    gd.depth.write = false;
-
-    // BACK, and the difference from WaterRenderer matters more than it looks. That renderer draws a
-    // single-layer GRID: culling is irrelevant to it, and None is right there because the camera can
-    // sit on either side of one sheet of ocean. This mesh is not a sheet -- it is a CLOSED BOX, the
-    // soft-body shell FluidVolume generates, with six faces enclosing a volume.
-    //
-    // Drawn unculled, every pixel of the top surface also blends the far interior walls and the
-    // bottom face stacked behind it: three or four layers of 15-100% alpha compositing over each
-    // other. Measured on the FirstPerson pool, that is exactly what it looked like -- a saturated
-    // cyan slab with dark blotches where face count changed, reading as coloured glass rather than
-    // as water, and showing the box's own side planes as distinct facets through the surface. One
-    // layer is what a water surface IS; the rest is the inside of a bag nobody should be seeing.
-    //
-    // The enterable-pool case that argued for None is real but is not solved by disabling culling:
-    // a camera under the surface sees the shell's underside, which is back-facing, so None makes it
-    // visible at the cost of breaking the ordinary above-water view that every player has all the
-    // time. That trade is the wrong way round, and underwater rendering needs its own treatment
-    // (Underwater.hpp) rather than a culling mode that degrades the common case to half-serve the
-    // rare one.
-    gd.cull = rhi::CullMode::Back;
-
-    gd.renderTargetCount = 1;
-    gd.renderTargets[0] = color;
-    gd.depthFormat = depth;
-    // MSAA IS BAKED INTO THE PIPELINE AT CREATION, the same DECIDED-1 rule ParticleRenderer's and
-    // WaterRenderer's own buildPipeline(s) comments cite: the scene target's ACTUAL sample count, not
-    // a hardcoded 1, rebuilt here whenever onRenderTargetsChanged reports it changed.
-    gd.sampleCount = sampleCount;
-
-    // PREMULTIPLIED alpha -- REVERSED from this pipeline's own prior choice, matching
-    // WaterRenderer.cpp's identical reversal and for the identical reason: see that file's own
-    // blend-state comment for the full argument. PSFluid (FluidShaders.hpp) used to output straight
-    // alpha over a flat deep/shallow lerp, which AlphaBlend composited correctly because nothing in
-    // that rgb needed protecting from attenuation. PSFluid now outputs a real specular term --
-    // skyColor(R) mirror reflection plus GGX sun glitter, exactly PSWater's fix applied to the same
-    // substance -- that must reach the framebuffer at full strength however transparent this pool is
-    // authored to be. Straight AlphaBlend would multiply that reflection by alpha, reproducing the
-    // "flat cartoon" defect one level deeper. Premultiplied (rgb = specular + diffuse*alpha, a = alpha
-    // -- PSFluid's own final line) sends `specular` through unattenuated and lets only the transmitted
-    // body colour shrink with coverage.
-    gd.blend = rhi::BlendMode::PremultipliedAlpha;
-
-    pso_ = res_->createGraphicsPipeline(gd);
-
-    bakedSampleCount_ = sampleCount;
-    bakedColorFmt_ = color;
-    bakedDepthFmt_ = depth;
-
-    if (pso_) {
-        AVER_INFO("[Fluid] transparent-pass pipeline (re)built: {}x MSAA", sampleCount);
-    } else {
-        AVER_ERROR("[Fluid] transparent-pass pipeline build failed at {}x MSAA", sampleCount);
-    }
-    return pso_ != 0;
-}
-
-void FluidScene::onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rhi::Format depth,
-                                        u32 width, u32 height) {
-    (void)width; (void)height;
-    if (sampleCount == bakedSampleCount_ && color == bakedColorFmt_ && depth == bakedDepthFmt_) return;
-    buildPipeline(sampleCount, color, depth);
-}
-
-void FluidScene::transparentPass(rhi::IRenderContext& ctx) {
-    if (!ready_ || !pso_ || !dev_ || live_.empty()) return;
-
-    // Viewport, scissor and the scene colour+depth targets are ALL already set -- the
-    // transparentPass contract (RHIResources.hpp) -- so nothing here touches any of them; only the
-    // pipeline and each resident's own geometry are ours.
-    //
-    // A DELIBERATELY TINY PER-FRAME CONSTANT BUFFER, unlike WaterRenderer's 192-byte WaterFrame at
-    // the same register. VSFluid still displaces nothing and still reads worldPos/worldNrm straight
-    // off the staged mesh (see update()'s own comment) -- that reasoning has not changed. What
-    // changed is PSFluid: it now perturbs its shading normal with a small animated ripple to give the
-    // coarse 8x8 shell a surface detail no amount of Fresnel/colour tuning could add (see
-    // FluidShaders.hpp's own comment on gFluidTime for why a moving pattern needs a moving number
-    // from SOMEWHERE, and why that number is elapsedSeconds_ rather than a fresh clock of this
-    // method's own). Four floats, one upload, once per frame -- not per resident, since every live
-    // pool shares the same clock.
-    ctx.pushMarker("Aver.Fluid");
-    ctx.setPipeline(pso_);
-    for (auto& kv : live_) {
-        const Resident& r = kv.second;
-        if (!r.drawMesh) continue;   // this handle's spawn() never finished building a drawable mesh
-
-        // PER-RESIDENT NOW, not once for the whole pass, and the reason is the floor depth below:
-        // two pools of different depths shade differently, so a single upload before the loop would
-        // have given every pool the first one's column. The clock is still shared; only the geometry
-        // term varies. One extra 48-byte root-constant write per pool per frame.
-        //
-        // EXTINCTION, per centimetre, for clear water. The per-metre coefficients are roughly
-        // (0.45, 0.09, 0.035) -- red is absorbed more than an order of magnitude faster than blue,
-        // which is the entire reason water reads cyan and reads more cyan the deeper you look. These
-        // are the physical numbers divided by 100 for this engine's centimetre world units, not a
-        // look tuned by eye: at this pool's 120 cm depth they give a transmittance of about
-        // (0.58, 0.90, 0.96) straight down, i.e. the floor is clearly visible with a slight teal
-        // cast, which is what a clean swimming pool actually looks like.
-        //
-        // BODY COLOUR is the light scattered back OUT of the column rather than absorbed by it --
-        // what makes a pool read cyan even above a white floor. Distinct from extinction: one is what
-        // the water removes, the other is what it adds.
-        //
-        // Both are still constants HERE rather than authored, and that is a known gap, not a
-        // decision: the WATER record carries no colour token at all (OcWorld.hpp's OcWaterPlacement
-        // has no such field), so there is nothing to read them from yet. They are at least in one
-        // place now, and reaching the GPU through a buffer, instead of being compiled literals
-        // duplicated across two shaders.
-        const fluids::FluidVolumeDesc& d = r.vol.desc();
-        const float floorZ = d.centreCm[2] - d.halfExtentCm[2];
-        const float fluidFrame[12] = {
-            elapsedSeconds_, floorZ,  0.0f,    0.0f,
-            0.0045f,         0.0009f, 0.00035f, 0.0f,
-            0.03f,           0.32f,   0.38f,    0.0f,
-        };
-        ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, fluidFrame, sizeof(fluidFrame));
-
-        // meshGeometry(), not r.vertices/r.source directly: it is the one place this RHI already
-        // resolves a MeshHandle to the buffers and counts a raw draw call needs, and it is what every
-        // other feature drawing outside the ordinary drawMesh() path already goes through (PathTracer,
-        // VoxiRenderer -- see meshGeometry()'s own doc comment: "this is what a RAY needs and a raster
-        // draw never did", equally true of a raster draw issued from OUTSIDE drawMesh(), which is
-        // exactly this one).
-        rhi::BufferHandle vb = 0, ib = 0;
-        u32 vertexCount = 0, indexCount = 0;
-        if (!dev_->meshGeometry(r.drawMesh, &vb, &ib, &vertexCount, &indexCount) || !vb || !ib)
-            continue;
-        ctx.setVertexBuffer(vb, sizeof(rhi::MeshVertex));
-        ctx.setIndexBuffer(ib, rhi::Format::R32Uint);
-        ctx.drawIndexed(indexCount, 0, 0);
-    }
-    ctx.popMarker();
-}
+// transparentPass IS GONE, AND THE ABSENCE IS THE FEATURE. This class used to bind its own pipeline
+// and issue its own drawIndexed here, which is what kept water out of the TLAS, out of the shadow
+// term, out of fog and out of back-to-front sorting -- everything IDevice::drawMesh already arranges
+// for any other surface. sandbox/src/SandboxApp.cpp now draws drawHandle() through setDrawBlended()
+// + drawMesh() with a real .ocmat, so a fluid volume is an ordinary translucent mesh and this class
+// is what its own header always said it was modelled on: SoftBodyScene, a feature that produces
+// GEOMETRY and lets the composition root decide how it is shaded.
+//
+// Deleted rather than left as an empty override, so nothing can quietly start drawing here again.
 
 } // namespace aver::fluids

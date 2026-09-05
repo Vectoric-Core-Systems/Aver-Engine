@@ -414,6 +414,11 @@ void GameContent::loadProjectMeshes(rhi::IDevice& device) {
         const u64 id = fnv1a64(std::string_view(rel));
         sceneMeshes_[id] = h;
         meshBounds_[id] = {md.boundsMin, md.boundsMax};
+        // THE MESH'S OWN MATERIAL. .ocmesh has always carried a materialSlots table and nothing here
+        // read it, so an entity that named no material drew flat grey even though the mesh said what
+        // it was. See GameContent.hpp's meshDefaultMaterial for why 0 means "ask the mesh".
+        if (!md.materialSlots.empty() && !md.materialSlots[0].empty())
+            meshSlot0Material_[id] = aver_scene_material(0, md.materialSlots[0].c_str());
         projectMeshIds_.push_back(id);
 
         // THE COARSE STAND-IN THE SHADOW, GI-SHADOW AND VOXELISE PASSES DRAW INSTEAD OF THIS MESH.
@@ -470,7 +475,9 @@ void GameContent::loadProjectMeshes(rhi::IDevice& device) {
 }
 
 void GameContent::releaseProjectMeshes() {
-    for (const u64 id : projectMeshIds_) { sceneMeshes_.erase(id); meshBounds_.erase(id); }
+    for (const u64 id : projectMeshIds_) {
+        sceneMeshes_.erase(id); meshBounds_.erase(id); meshSlot0Material_.erase(id);
+    }
     projectMeshIds_.clear();
 }
 
@@ -619,6 +626,11 @@ void GameContent::releaseProjectMaterials() {
 #endif // AVER_MODULE_PBR
 
 #if AVER_MODULE_PBR && AVER_MODULE_SCENE
+i32 GameContent::meshDefaultMaterial(u64 meshId) const {
+    const auto it = meshSlot0Material_.find(meshId);
+    return it == meshSlot0Material_.end() ? 0 : it->second;
+}
+
 pbr::MaterialHandle GameContent::authoredFor(i32 token) const {
     const auto it = surfaceMaterials_.find(token);
     return it == surfaceMaterials_.end() ? 0 : it->second;

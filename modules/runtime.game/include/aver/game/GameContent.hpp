@@ -85,6 +85,15 @@ public:
     // Remembers that an interned surface token has an authored material behind it.
     void bindSurfaceMaterial(i32 token, pbr::MaterialHandle h) { surfaceMaterials_[token] = h; }
     pbr::MaterialHandle authoredFor(i32 token) const;
+
+    /// The material token this mesh's own materialSlots[0] names, or 0 when it names none.
+    ///
+    /// THE EDITOR'S RULE, HELD HERE TOO, and it has to be: a fallback the editor honours and the
+    /// packaged game does not is this repo's most-repeated defect shape, and the divergence gate in
+    /// scripts/verify-game.ps1 exists because of it. An entity whose CMeshRenderer.material is 0 is
+    /// not saying "draw me flat", it is saying nothing -- and the mesh it points at already declares
+    /// a material. A non-zero material stays an override, exactly as before.
+    i32 meshDefaultMaterial(u64 meshId) const;
 #endif
 
 #if AVER_MODULE_SCENE
@@ -144,6 +153,8 @@ private:
 #if AVER_MODULE_SCENE
     std::unordered_map<u64, rhi::MeshHandle>       sceneMeshes_;
     std::unordered_map<u64, std::pair<Vec3, Vec3>> meshBounds_;
+    // mesh id -> the material token its materialSlots[0] names. See meshDefaultMaterial.
+    std::unordered_map<u64, i32>                   meshSlot0Material_;
     std::vector<u64>                               projectMeshIds_;
     std::unordered_map<i32, SurfaceLook>           surfaceLooks_;
     // Depth proxy map: LOD meshes used instead of full detail in depth passes

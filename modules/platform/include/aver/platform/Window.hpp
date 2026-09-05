@@ -38,6 +38,22 @@ public:
     bool shouldClose() const { return shouldClose_; }
     void requestClose() { shouldClose_ = true; }
 
+    // MAY THE WINDOW CLOSE? Asked synchronously from inside WM_CLOSE, before shouldClose_ is set.
+    // Returning false vetoes the close and the app stays up.
+    //
+    // WHY A VETO AND NOT AN EVENT. WM_CLOSE already dispatches a WindowClose event, and an app could
+    // in principle react to it -- except that the same handler then sets shouldClose_, and
+    // Engine::run tests shouldClose() BEFORE calling frameStep(). So by the time an app could draw
+    // anything in response, the frame loop has already broken. Every unsaved-changes prompt the
+    // editor has was reachable only from its own File > Exit; the window's own X button and Alt+F4
+    // went straight past all of them and took the work with them.
+    //
+    // The guard runs on the message thread inside the window procedure, so it must only decide --
+    // set a flag, return. It must not block, and it must not itself try to close the window.
+    using CloseGuard = bool (*)(void* user);
+    void setCloseGuard(CloseGuard g, void* user) { closeGuard_ = g; closeGuardUser_ = user; }
+    bool mayClose() { return closeGuard_ ? closeGuard_(closeGuardUser_) : true; }
+
     u32 width() const { return width_; }
     u32 height() const { return height_; }
     // Display scale factor for this window's monitor (1.0 = 96 DPI). width()/height() are physical.
@@ -137,6 +153,8 @@ private:
     EventCallback callback_ = nullptr;
     void* callbackUser_ = nullptr;
     MessageHook messageHook_ = nullptr;
+    CloseGuard closeGuard_ = nullptr;
+    void* closeGuardUser_ = nullptr;
     OpenRequestHook openRequestHook_ = nullptr;
     void* openRequestHookUser_ = nullptr;
     bool hasPendingOpenRequest_ = false;

@@ -1,5 +1,7 @@
 // .ocproject reader and writer: parses a project manifest and rewrites it in place.
 #include "aver/formats/OcProject.hpp"
+
+#include <cstdio>
 #include "aver/formats/detail/TextScan.hpp"
 #include "aver/platform/FileSystem.hpp"
 #include "aver/core/Version.hpp"
@@ -62,6 +64,10 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
             if (t.size() > 1) out.contentRoot = std::string(t[1]);
         } else if (equalsCI(key, "STARTMAP")) {
             if (t.size() > 1) out.startMap = std::string(t[1]);
+        } else if (equalsCI(key, "DRONE.GRAPH")) {
+            if (t.size() > 1) out.droneGraph = std::string(t[1]);
+        } else if (equalsCI(key, "INPUT.SCHEME")) {
+            if (t.size() > 1) out.inputScheme = std::string(t[1]);
         } else if (equalsCI(key, "AUTHOR")) {
             out.author = std::string(restOfLine(line, key));
         } else if (equalsCI(key, "RENDER.GI")) {
@@ -88,6 +94,98 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
             if (t.size() > 1) out.rtRenderMode = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.PTBOUNCES")) {
             if (t.size() > 1) out.ptBounces = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.GICONES")) {
+            if (t.size() > 1) out.giCones = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.REFRACTIONMODE")) {
+            if (t.size() > 1) out.refractionMode = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.REFRACTIONSTRENGTH")) {
+            if (t.size() > 1) out.refractionStrength = static_cast<f32>(parseF64(t[1]));
+        } else if (equalsCI(key, "RENDER.REFRACTIONEDGEFADE")) {
+            if (t.size() > 1) out.refractionEdgeFade = static_cast<f32>(parseF64(t[1]));
+        } else if (equalsCI(key, "RENDER.LODSELECT")) {
+            if (t.size() > 1) out.lodSelect = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.LODTHRESHOLD")) {
+            if (t.size() > 1) out.lodThresholdPx = static_cast<f32>(parseF64(t[1]));
+        } else if (equalsCI(key, "RENDER.OCCLUSIONCULL")) {
+            if (t.size() > 1) out.occlusionCull = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.DEPTHPREPASS")) {
+            if (t.size() > 1) out.depthPrepass = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.MSAA")) {
+            if (t.size() > 1) out.msaa = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.MESHSHADERS")) {
+            if (t.size() > 1) out.meshShaders = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.GIUPDATEINTERVAL")) {
+            if (t.size() > 1) out.giUpdateInterval = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.GIVOLUME")) {
+            // ALL FOUR OR NONE, for PHYSICS.GRAVITY's reason immediately below: a half-stated volume
+            // would keep defaults the author believed they had replaced.
+            if (t.size() > 4) {
+                for (int i = 0; i < 3; ++i) out.giCenter[i] = static_cast<f32>(parseF64(t[1 + i]));
+                out.giExtent = static_cast<f32>(parseF64(t[4]));
+                out.hasGiVolume = true;
+            }
+        } else if (equalsCI(key, "WINDOW.TITLE")) {
+            out.windowTitle = std::string(restOfLine(line, key));
+        } else if (equalsCI(key, "WINDOW.SIZE")) {
+            // BOTH OR NEITHER: half a resolution is not a resolution.
+            if (t.size() > 2) {
+                out.windowWidth  = parseI32(t[1], -1);
+                out.windowHeight = parseI32(t[2], -1);
+            }
+        } else if (equalsCI(key, "WINDOW.RESIZABLE")) {
+            if (t.size() > 1) out.windowResizable = parseI32(t[1], -1);
+        } else if (equalsCI(key, "WINDOW.FULLSCREEN")) {
+            if (t.size() > 1) out.windowFullscreen = parseI32(t[1], -1);
+        } else if (equalsCI(key, "IMPORT.SCALE")) {
+            if (t.size() > 1) out.importScale = static_cast<f32>(parseF64(t[1], -1.0));
+        } else if (equalsCI(key, "IMPORT.CONVERTAXES")) {
+            if (t.size() > 1) out.importConvertAxes = parseI32(t[1], -1);
+        } else if (equalsCI(key, "IMPORT.GENNORMALS")) {
+            if (t.size() > 1) out.importGenNormals = parseI32(t[1], -1);
+        } else if (equalsCI(key, "IMPORT.GENMIPS")) {
+            if (t.size() > 1) out.importGenMips = parseI32(t[1], -1);
+        } else if (equalsCI(key, "IMPORT.MAXTEXTURE")) {
+            if (t.size() > 1) out.importMaxTexture = parseI32(t[1], -1);
+        } else if (equalsCI(key, "STREAM.LOADRADIUS")) {
+            if (t.size() > 1) out.streamLoadRadius = parseI32(t[1], -1);
+        } else if (equalsCI(key, "STREAM.EVICTRADIUS")) {
+            if (t.size() > 1) out.streamEvictRadius = parseI32(t[1], -1);
+        } else if (equalsCI(key, "STREAM.LOADBUDGET")) {
+            if (t.size() > 1) out.streamLoadBudget = parseI32(t[1], -1);
+        } else if (equalsCI(key, "STREAM.EVICTBUDGET")) {
+            if (t.size() > 1) out.streamEvictBudget = parseI32(t[1], -1);
+        } else if (equalsCI(key, "STREAM.VERTICALRADIUS")) {
+            if (t.size() > 1) out.streamVerticalRadius = parseI32(t[1], -1);
+        } else if (equalsCI(key, "STREAM.LEADSECONDS")) {
+            if (t.size() > 1) out.streamLeadSeconds = static_cast<f32>(parseF64(t[1], -1.0));
+        } else if (equalsCI(key, "PHYSICS.MAXBODIES")) {
+            if (t.size() > 1) out.physMaxBodies = parseI32(t[1], -1);
+        } else if (equalsCI(key, "PHYSICS.MAXBODYPAIRS")) {
+            if (t.size() > 1) out.physMaxBodyPairs = parseI32(t[1], -1);
+        } else if (equalsCI(key, "PHYSICS.MAXCONTACTS")) {
+            if (t.size() > 1) out.physMaxContacts = parseI32(t[1], -1);
+        } else if (equalsCI(key, "PHYSICS.TEMPALLOCMB")) {
+            if (t.size() > 1) out.physTempAllocatorMb = parseI32(t[1], -1);
+        } else if (equalsCI(key, "PHYSICS.GRAVITY")) {
+            // All three or none: a partial vector is worse than no vector, because two of the axes
+            // would silently keep a default the author thought they had replaced.
+            if (t.size() > 3) {
+                out.gravity[0] = static_cast<f32>(parseF64(t[1]));
+                out.gravity[1] = static_cast<f32>(parseF64(t[2]));
+                out.gravity[2] = static_cast<f32>(parseF64(t[3]));
+                out.hasGravity = true;
+            }
+        } else if (equalsCI(key, "PHYSICS.FIXEDSTEP")) {
+            if (t.size() > 1) out.fixedStep = static_cast<f32>(parseF64(t[1]));
+        } else if (equalsCI(key, "AUDIO.MASTER")) {
+            if (t.size() > 1) { out.masterVolume = static_cast<f32>(parseF64(t[1])); out.hasAudioMix = true; }
+        } else if (equalsCI(key, "AUDIO.BUS")) {
+            // Four on one line, in audio_abi.h's own bus order. One key rather than four keeps the
+            // mix readable as a mix, and makes a partial write impossible.
+            if (t.size() > 4) {
+                for (int i = 0; i < 4; ++i) out.busVolume[i] = static_cast<f32>(parseF64(t[static_cast<usize>(i) + 1]));
+                out.hasAudioMix = true;
+            }
         }
     }
 
@@ -152,11 +250,22 @@ bool isOwnedKey(std::string_view line) {
     const std::string_view l = trim(line);
     if (l.empty() || l[0] == '#') return false;
     static const char* kOwned[] = {
-        "NAME", "ENGINE", "CREATEDWITH", "CONTENT", "STARTMAP", "AUTHOR",
+        "NAME", "ENGINE", "CREATEDWITH", "CONTENT", "STARTMAP", "AUTHOR", "DRONE.GRAPH", "INPUT.SCHEME",
         "RENDER.GI", "RENDER.RAYTRACING", "RENDER.PATHTRACING",
         "RENDER.VOXELRES", "RENDER.GIINTENSITY", "RENDER.GIDISTANCE",
         "RENDER.RTSHADOWRAYS", "RENDER.RTPIXELSPERRAY", "RENDER.RTSHADOWDENOISE",
         "RENDER.RTRENDERMODE", "RENDER.PTBOUNCES", "RENDER.LAYEREDBSDF",
+        "RENDER.GICONES", "RENDER.REFRACTIONMODE", "RENDER.REFRACTIONSTRENGTH",
+        "RENDER.REFRACTIONEDGEFADE", "RENDER.LODSELECT", "RENDER.LODTHRESHOLD",
+        "RENDER.OCCLUSIONCULL", "RENDER.DEPTHPREPASS",
+        "RENDER.MSAA", "RENDER.MESHSHADERS", "RENDER.GIUPDATEINTERVAL", "RENDER.GIVOLUME",
+        "WINDOW.TITLE", "WINDOW.SIZE", "WINDOW.RESIZABLE", "WINDOW.FULLSCREEN",
+        "IMPORT.SCALE", "IMPORT.CONVERTAXES", "IMPORT.GENNORMALS", "IMPORT.GENMIPS",
+        "IMPORT.MAXTEXTURE",
+        "STREAM.LOADRADIUS", "STREAM.EVICTRADIUS", "STREAM.LOADBUDGET", "STREAM.EVICTBUDGET",
+        "STREAM.VERTICALRADIUS", "STREAM.LEADSECONDS",
+        "PHYSICS.MAXBODIES", "PHYSICS.MAXBODYPAIRS", "PHYSICS.MAXCONTACTS", "PHYSICS.TEMPALLOCMB",
+        "PHYSICS.GRAVITY", "PHYSICS.FIXEDSTEP", "AUDIO.MASTER", "AUDIO.BUS",
     };
     const std::vector<std::string_view> t = splitWhitespace(l);
     if (t.empty()) return false;
@@ -181,6 +290,15 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     if (!d.contentRoot.empty())      { owned += "CONTENT ";  owned += d.contentRoot; owned += '\n'; }
     if (!d.startMap.empty())         { owned += "STARTMAP "; owned += d.startMap;    owned += '\n'; }
     if (!d.author.empty())           { owned += "AUTHOR ";   owned += d.author;      owned += '\n'; }
+    // EMITTED BECAUSE IT IS AN OWNED KEY. isOwnedKey lists DRONE.GRAPH, so the writer strips whatever
+    // line the file had; without this it would strip and never replace, and saving a project would
+    // quietly delete its drone. Empty writes nothing -- a project with no drone graph has no line.
+    if (!d.droneGraph.empty())       { owned += "DRONE.GRAPH "; owned += d.droneGraph; owned += '\n'; }
+    // EMITTED BECAUSE IT IS AN OWNED KEY, for DRONE.GRAPH's exact reason immediately above: isOwnedKey
+    // lists INPUT.SCHEME, so leaving this out would strip whatever line the file had without ever
+    // replacing it -- silently deleting a project's input scheme reference on every save. Empty
+    // writes nothing -- a project with no default scheme has no line.
+    if (!d.inputScheme.empty())      { owned += "INPUT.SCHEME "; owned += d.inputScheme; owned += '\n'; }
     appendKey(owned, "RENDER.GI",          d.giQuality);
     appendKey(owned, "RENDER.RAYTRACING",  d.rayTracing);
     appendKey(owned, "RENDER.PATHTRACING", d.pathTracing);
@@ -193,6 +311,75 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     appendKey(owned, "RENDER.RTRENDERMODE", d.rtRenderMode);
     appendKey(owned, "RENDER.PTBOUNCES", d.ptBounces);
     appendKey(owned, "RENDER.LAYEREDBSDF", d.layeredBsdf);
+    appendKey(owned, "RENDER.GICONES", d.giCones);
+    appendKey(owned, "RENDER.REFRACTIONMODE", d.refractionMode);
+    appendKey(owned, "RENDER.REFRACTIONSTRENGTH", d.refractionStrength);
+    appendKey(owned, "RENDER.REFRACTIONEDGEFADE", d.refractionEdgeFade);
+    appendKey(owned, "RENDER.LODSELECT", d.lodSelect);
+    appendKey(owned, "RENDER.LODTHRESHOLD", d.lodThresholdPx);
+    appendKey(owned, "RENDER.OCCLUSIONCULL", d.occlusionCull);
+    appendKey(owned, "RENDER.DEPTHPREPASS", d.depthPrepass);
+    appendKey(owned, "RENDER.MSAA", d.msaa);
+    appendKey(owned, "RENDER.MESHSHADERS", d.meshShaders);
+    appendKey(owned, "RENDER.GIUPDATEINTERVAL", d.giUpdateInterval);
+    // Same presence-flag shape as PHYSICS.GRAVITY below, and written with snprintf for the same
+    // reason: %g gives the shortest round-tripping spelling, so a value the author typed comes back
+    // looking like what they typed.
+    if (d.hasGiVolume) {
+        char b[200];
+        std::snprintf(b, sizeof b, "RENDER.GIVOLUME %g %g %g %g\n",
+                      static_cast<double>(d.giCenter[0]), static_cast<double>(d.giCenter[1]),
+                      static_cast<double>(d.giCenter[2]), static_cast<double>(d.giExtent));
+        owned += b;
+    }
+
+    // WINDOW.* -- how a shipped game presents itself. TITLE is prose, so it is written directly
+    // rather than through appendKey, which is numeric.
+    if (!d.windowTitle.empty()) owned += "WINDOW.TITLE " + d.windowTitle + "\n";
+    if (d.windowWidth > 0 && d.windowHeight > 0) {
+        char b[96];
+        std::snprintf(b, sizeof b, "WINDOW.SIZE %d %d\n", d.windowWidth, d.windowHeight);
+        owned += b;
+    }
+    appendKey(owned, "WINDOW.RESIZABLE", d.windowResizable);
+    appendKey(owned, "WINDOW.FULLSCREEN", d.windowFullscreen);
+
+    appendKey(owned, "IMPORT.SCALE", d.importScale);
+    appendKey(owned, "IMPORT.CONVERTAXES", d.importConvertAxes);
+    appendKey(owned, "IMPORT.GENNORMALS", d.importGenNormals);
+    appendKey(owned, "IMPORT.GENMIPS", d.importGenMips);
+    appendKey(owned, "IMPORT.MAXTEXTURE", d.importMaxTexture);
+
+    appendKey(owned, "STREAM.LOADRADIUS", d.streamLoadRadius);
+    appendKey(owned, "STREAM.EVICTRADIUS", d.streamEvictRadius);
+    appendKey(owned, "STREAM.LOADBUDGET", d.streamLoadBudget);
+    appendKey(owned, "STREAM.EVICTBUDGET", d.streamEvictBudget);
+    appendKey(owned, "STREAM.VERTICALRADIUS", d.streamVerticalRadius);
+    appendKey(owned, "STREAM.LEADSECONDS", d.streamLeadSeconds);
+
+    appendKey(owned, "PHYSICS.MAXBODIES", d.physMaxBodies);
+    appendKey(owned, "PHYSICS.MAXBODYPAIRS", d.physMaxBodyPairs);
+    appendKey(owned, "PHYSICS.MAXCONTACTS", d.physMaxContacts);
+    appendKey(owned, "PHYSICS.TEMPALLOCMB", d.physTempAllocatorMb);
+
+    // WRITTEN ON THEIR PRESENCE FLAG, not on a sentinel -- appendKey's "negative means unstated"
+    // rule cannot express a downward gravity or a muted bus. See OcProjectDesc for both reasons.
+    if (d.hasGravity) {
+        char b[160];
+        std::snprintf(b, sizeof b, "PHYSICS.GRAVITY %g %g %g\n",
+                      static_cast<double>(d.gravity[0]), static_cast<double>(d.gravity[1]),
+                      static_cast<double>(d.gravity[2]));
+        owned += b;
+    }
+    appendKey(owned, "PHYSICS.FIXEDSTEP", d.fixedStep);
+    if (d.hasAudioMix) {
+        char b[200];
+        std::snprintf(b, sizeof b, "AUDIO.MASTER %g\nAUDIO.BUS %g %g %g %g\n",
+                      static_cast<double>(d.masterVolume),
+                      static_cast<double>(d.busVolume[0]), static_cast<double>(d.busVolume[1]),
+                      static_cast<double>(d.busVolume[2]), static_cast<double>(d.busVolume[3]));
+        owned += b;
+    }
 
     if (trim(existing).empty()) {
         std::string out = "OCPROJECT " + std::to_string(d.version > 0 ? d.version : 1) + "\n";
@@ -230,6 +417,22 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
         if (last) break;
     }
     if (!placed) out += owned;
+
+    // THE HEADER IS NOT OPTIONAL, and this branch used to omit it whenever `existing` carried no
+    // OCPROJECT line of its own. Only the empty-existing branch above wrote one, so any caller
+    // passing a non-empty preamble got back a manifest with every key and no header -- which
+    // loadOcproject then refuses with "not an .ocproject: no OCPROJECT header line".
+    //
+    // That is not hypothetical. It broke NEW PROJECT ENTIRELY: ProjectScaffold::manifestText passes
+    // three comment lines as `existing`, so every project the editor scaffolded was written with no
+    // header and failed to load a moment later, from the very function that had just written it.
+    // The guard then deleted the half-made folder, so the user saw a creation that simply refused.
+    //
+    // Prepended rather than fixed at the call site because the contract belongs here: this function
+    // returns a manifest, and a manifest has a header. Any other caller passing a preamble -- a
+    // template, an importer, a migration -- had the same bug waiting.
+    if (!sawHeader)
+        out.insert(0, "OCPROJECT " + std::to_string(d.version > 0 ? d.version : 1) + "\n");
     return out;
 }
 

@@ -16,5 +16,6 @@ give up all three to gain a single version number nobody was asking for.
 given the job you have, every entry point with its signature, the type and handle rules, the three
 version boundaries, and the checklist for adding an entry point.
 
-Nothing here is built. `../interop/` is empty for the same reason: the C# bindings under
+Nothing here is built. `../interop/` was deleted for the same reason (it promised generated
+P/Invoke and Rust bindgen bindings that were never written): the C# bindings under
 `../scripting/csharp/` are hand-written rather than generated, and there is no Rust in this tree.

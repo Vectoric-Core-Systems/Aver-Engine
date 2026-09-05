@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <cstring>
+#include "aver/rhi/ShaderFiles.hpp"   // this pass's HLSL is a deployed file
 
 namespace aver::pt {
 
@@ -51,73 +52,6 @@ bool tanAndAxis(const Vec3& dir, const Vec3& forward, f32& tanOut, Vec3& axisOut
 // borrows the prelude's VSky entry point (a plain SV_VertexID fullscreen triangle, the same one
 // VoxiRenderer's own debug view compiles against), compiled as a SEPARATE shader object, so nothing
 // here needs the prelude's own declarations.
-constexpr const char* kPtPresentHLSL = R"(
-struct PtPresentIn { float4 pos : SV_POSITION; float2 ndc : TEXCOORD0; };
-
-cbuffer PtPresentCB : register(b1) { float4 gPtPresentInfo; };   // x width, y height, z layout, w unused
-
-StructuredBuffer<float4> gPtAccumRead : register(t0);
-
-float4 PSPathTracePresent(PtPresentIn i) : SV_TARGET {
-    uint W = (uint)gPtPresentInfo.x;
-    uint H = (uint)gPtPresentInfo.y;
-    // i.ndc is [-1,1] with +Y toward the top of the viewport (D3D clip-space convention); the
-    // accumulator's row 0 is ALSO the top of the traced image (see PtShaders.hpp's CSPathTrace: pixel
-    // row 0 maps to ndc.y=-1 in ITS OWN convention, whose -ndc.y term then leans the ray toward +up --
-    // i.e. row 0 leans toward whatever "up" the camera was handed). Flipping v here is what keeps the
-    // two agreeing without needing a matching flip on the C++ side.
-    float2 uv = i.ndc * 0.5 + 0.5;
-
-    // BILINEAR, NOT NEAREST, AND THIS IS THE CHEAPEST REAL IMPROVEMENT ON THIS PATH.
-    //
-    // The accumulator is 480x270 (kAccumWidth/kAccumHeight) and the viewport it is shown in is
-    // whatever the window is -- 3532x1987 on the display this was measured on, a 7.4x blow-up. The
-    // old lookup truncated uv to an integer texel, so every accumulator texel became a solid ~7x7
-    // block of identical pixels. That does not add noise, but it MAGNIFIES it: per-texel variance
-    // that would read as fine film grain reads instead as coarse blocky mottling, which is far more
-    // objectionable at the same numerical error. It also stair-stepped every silhouette in the
-    // image, visible on the horizon line of any capture taken before this.
-    //
-    // Manual rather than a SamplerState because the accumulator is a StructuredBuffer, not a
-    // texture -- it has to be, since the compute pass writes it as a UAV of float4 PAIRS (radiance,
-    // and a sample count in .z). Four fetches instead of one, on a fullscreen pass that was already
-    // trivially cheap.
-    //
-    // THE SAMPLE COUNT IS INTERPOLATED TOO, not taken from one texel. Every texel of a still frame
-    // holds the same count so it makes no difference then -- but the frame after a camera move has
-    // texels mid-update, and dividing one texel's radiance by another's count is how a blend seam
-    // becomes a bright or dark band.
-    float fx = clamp(uv.x * float(W) - 0.5, 0.0, float(W) - 1.0);
-    float fy = clamp((1.0 - uv.y) * float(H) - 0.5, 0.0, float(H) - 1.0);
-    uint x0 = (uint)floor(fx), y0 = (uint)floor(fy);
-    uint x1 = min(x0 + 1u, W - 1u), y1 = min(y0 + 1u, H - 1u);
-    float tx = fx - float(x0), ty = fy - float(y0);
-
-    // TWO SOURCE LAYOUTS, chosen by gPtPresentInfo.z. The denoiser writes a one-element buffer of
-    // means, so there is nothing left to divide; without it this reads the raw two-element
-    // accumulator and divides, exactly as it did before the filter existed. Keeping the fallback
-    // is what lets a device that cannot compile the filter still show a path-traced image.
-    const bool denoised = gPtPresentInfo.z > 0.5;
-
-    float3 c00, c10, c01, c11;
-    if (denoised) {
-        c00 = gPtAccumRead[y0 * W + x0].rgb;
-        c10 = gPtAccumRead[y0 * W + x1].rgb;
-        c01 = gPtAccumRead[y1 * W + x0].rgb;
-        c11 = gPtAccumRead[y1 * W + x1].rgb;
-    } else {
-        // The sample count is interpolated with the radiance rather than taken from one texel:
-        // the frame after a camera move has texels mid-update, and dividing one texel's radiance
-        // by another's count is how a blend seam becomes a band.
-        c00 = gPtAccumRead[(y0 * W + x0) * 2 + 0].rgb / max(gPtAccumRead[(y0 * W + x0) * 2 + 1].z, 1.0);
-        c10 = gPtAccumRead[(y0 * W + x1) * 2 + 0].rgb / max(gPtAccumRead[(y0 * W + x1) * 2 + 1].z, 1.0);
-        c01 = gPtAccumRead[(y1 * W + x0) * 2 + 0].rgb / max(gPtAccumRead[(y1 * W + x0) * 2 + 1].z, 1.0);
-        c11 = gPtAccumRead[(y1 * W + x1) * 2 + 0].rgb / max(gPtAccumRead[(y1 * W + x1) * 2 + 1].z, 1.0);
-    }
-
-    return float4(lerp(lerp(c00, c10, tx), lerp(c01, c11, tx), ty), 1.0);
-}
-)";
 
 // The DENOISER: one a-trous (Dammertz et al.) wavelet iteration per dispatch, over the accumulator.
 // See PtSceneView.hpp's denoise block for why this exists and why its strength is driven by the
@@ -132,85 +66,6 @@ float4 PSPathTracePresent(PtPresentIn i) : SV_TARGET {
 // Carrying the sample count in .w rather than re-reading the accumulator is what lets every pass
 // after the first ignore the accumulator entirely, and what lets the LAST pass still know how much
 // to trust the pixel it is filtering.
-constexpr const char* kPtDenoiseHLSL = R"(
-cbuffer PtDenoiseCB : register(b1) {
-    uint4  gDnInfo;   // x width, y height, z mode (0 resolve / 1 filter), w step in source texels
-    float4 gDnTune;   // x colour sigma, y max samples, zw unused
-};
-
-StructuredBuffer<float4>   gDnSrc : register(t0);
-RWStructuredBuffer<float4> gDnDst : register(u0);
-
-float ptLum(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
-
-// One source texel as (mean radiance, sample count), whichever layout the source is in.
-float4 ptDnFetch(uint x, uint y, uint W, uint mode) {
-    const uint p = y * W + x;
-    if (mode == 0u) {
-        const float4 rad = gDnSrc[p * 2 + 0];
-        const float  n   = max(gDnSrc[p * 2 + 1].z, 1.0);
-        return float4(rad.rgb / n, n);
-    }
-    return gDnSrc[p];
-}
-
-[numthreads(8, 8, 1)]
-void CSPtDenoise(uint3 tid : SV_DispatchThreadID) {
-    const uint W = gDnInfo.x, H = gDnInfo.y;
-    if (tid.x >= W || tid.y >= H) return;
-    const uint mode = gDnInfo.z;
-    const uint step = max(gDnInfo.w, 1u);
-
-    const float4 c = ptDnFetch(tid.x, tid.y, W, mode);
-
-    // RESOLVE ONLY CONVERTS. Filtering on the same pass would make the first iteration a special
-    // case with a different support from the other two, for no gain -- the chain is short enough
-    // that one extra dispatch over 130k pixels costs nothing worth counting.
-    if (mode == 0u) { gDnDst[tid.y * W + tid.x] = c; return; }
-
-    // A CONVERGED PIXEL IS PASSED THROUGH UNTOUCHED. The sigma below already tends to zero as the
-    // sample count rises, so this changes no pixel that the filter would have altered meaningfully
-    // -- it is here because this view exists to be a REFERENCE, and "the reference is bit-exact once
-    // converged" is a property worth being able to state without qualification rather than one that
-    // merely holds to several decimal places.
-    if (c.a >= gDnTune.y) { gDnDst[tid.y * W + tid.x] = c; return; }
-
-    // THE EDGE STOP. Expected Monte Carlo error falls as 1/sqrt(n), so the luminance difference that
-    // counts as "still the same surface" is scaled by exactly that: wide on the frame after a camera
-    // move, vanishing once the image has settled.
-    //
-    // RELATIVE TO LOCAL BRIGHTNESS, which is the half that matters for the problem this was built
-    // for. A shadow sits near 0.1 luminance and the sunlit floor near 0.8; an absolute threshold
-    // tuned on the floor does nothing in the shadow, and one tuned in the shadow flattens the floor.
-    const float lc    = ptLum(c.rgb);
-    const float sigma = gDnTune.x * rsqrt(max(c.a, 1.0)) * max(lc, 0.02);
-
-    // B3 spline, the standard a-trous kernel: [1 4 6 4 1]/16 as an outer product.
-    const float k[5] = { 0.0625, 0.25, 0.375, 0.25, 0.0625 };
-
-    float3 sum = float3(0, 0, 0);
-    float  wsum = 0.0;
-    [unroll] for (int dy = -2; dy <= 2; ++dy) {
-        [unroll] for (int dx = -2; dx <= 2; ++dx) {
-            const int sx = int(tid.x) + dx * int(step);
-            const int sy = int(tid.y) + dy * int(step);
-            // CLAMPED, not skipped. Skipping would renormalise the kernel differently at the border
-            // and leave a one-texel frame of differently-filtered pixels around the image.
-            const uint qx = (uint)clamp(sx, 0, int(W) - 1);
-            const uint qy = (uint)clamp(sy, 0, int(H) - 1);
-            const float4 q = ptDnFetch(qx, qy, W, mode);
-            const float wc = exp(-abs(ptLum(q.rgb) - lc) / (sigma + 1e-6));
-            const float w  = k[dx + 2] * k[dy + 2] * wc;
-            sum  += q.rgb * w;
-            wsum += w;
-        }
-    }
-
-    // wsum can never be zero -- the centre tap weighs k[2]*k[2] with wc == 1 -- but the guard costs
-    // nothing and a NaN here would propagate through every later pass.
-    gDnDst[tid.y * W + tid.x] = float4(wsum > 1e-6 ? sum / wsum : c.rgb, c.a);
-}
-)";
 
 } // namespace
 
@@ -461,7 +316,7 @@ bool PtSceneView::ensureDenoiseResources() {
 
     if (!denoisePso_) {
         rhi::ShaderDesc sd;
-        sd.source = kPtDenoiseHLSL;
+        sd.source = rhi::shaderFile("pt_denoise.hlsl").c_str();
         sd.entry  = "CSPtDenoise";
         sd.stage  = rhi::ShaderStage::Compute;
         // NO PRELUDE, unlike the integrator: this shader touches no engine concept at all -- no sky,
@@ -711,6 +566,44 @@ void PtSceneView::prePass(rhi::IRenderContext& ctx) {
         haveCam_ = true;
         sampleCursor_ = 0;
         convergedLogged_ = false;
+        if (!camResetLogged_) { camResetLogged_ = true;
+            AVER_INFO("[PT] scene view: accumulation restarted (camera or scene changed)"); }
+    }
+
+    // ---- 2b. HAS THE LIGHTING CHANGED? Nothing asked this until now. ----
+    //
+    // accumulate() packs only the CAMERA into its constants; the lighting reaches the integrator
+    // through the shared per-frame block inside the shader (ptEnvironment -> skyColor, and
+    // gLightDir for the sun). So a sun that moves mid-accumulation silently blends old-lighting and
+    // new-lighting samples into one running mean -- no reset, no warning, and an image that is a
+    // time-average of two different times of day while claiming to be a reference.
+    //
+    // THE RECIPE IS VoxiRenderer::giSnapshotUnchanged'S, DELIBERATELY, including both traps it
+    // already paid for:
+    //   ZERO-INITIALISE THEN COPY-ASSIGN. skyAtmosphere() returns by value and SkyAtmosphere opens
+    //   with a bool followed by padding; memcmp on a raw returned copy compares that padding, which
+    //   is unspecified, and the comparison then fails every single time.
+    //   CLOUDTIME IS A CLOCK. It counts accumulated seconds, so it differs on every tick by
+    //   construction; left in, this would reset the accumulator every frame and convergence would
+    //   never be reached.
+    // Comparing the remaining BYTES rather than a chosen field list is what keeps this correct when
+    // a field is added to SkyAtmosphere later.
+    if (dev_) {
+        rhi::SkyAtmosphere nowSky{};
+        nowSky = dev_->skyAtmosphere();
+        rhi::SkyAtmosphere wasSky{};
+        wasSky = sky_;
+        nowSky.cloudTime = wasSky.cloudTime = 0.0f;
+        if (!haveSky_ || std::memcmp(&nowSky, &wasSky, sizeof(nowSky)) != 0) {
+            const bool first = !haveSky_;
+            sky_ = dev_->skyAtmosphere();
+            haveSky_ = true;
+            if (!first) {
+                sampleCursor_ = 0;
+                convergedLogged_ = false;
+                AVER_INFO("[PT] scene view: accumulation restarted (sun/sky changed)");
+            }
+        }
     }
 
     // ---- 3. accumulate one bounded step, unless this image has already converged ----
@@ -818,7 +711,7 @@ void PtSceneView::onRenderTargetsChanged(u32 sampleCount, rhi::Format color, rhi
     vsd.stage = rhi::ShaderStage::Vertex;
     vsd.minShaderModel = 51;
     rhi::ShaderDesc psd;
-    psd.source = kPtPresentHLSL;
+    psd.source = rhi::shaderFile("pt_present.hlsl").c_str();
     psd.entry = "PSPathTracePresent";
     psd.stage = rhi::ShaderStage::Pixel;
     psd.minShaderModel = 51;

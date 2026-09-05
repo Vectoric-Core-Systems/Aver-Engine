@@ -3,8 +3,12 @@
 #include "aver/physics/physics_abi.h"
 #include "Convert.hpp"   // src-local: it speaks Jolt, and Jolt is PRIVATE to this module
 #include "Buoyancy.hpp"  // src-local for the same reason: WaterVolume holds JPH:: types
+#include "PhysicsInternal.hpp"  // the world and its handle tables, shared with the sibling ABI files
 
 #include "aver/core/Log.hpp"
+// The shared error vocabulary. findBody records the reason a handle lookup failed; aver_phys_last_error
+// hands it back. See ErrorCodes.hpp for why it is a separate channel from the return value.
+#include "aver/core/ErrorCodes.hpp"
 
 #include <Jolt/Jolt.h>
 #include <Jolt/Core/Factory.h>
@@ -44,58 +48,13 @@
 
 using namespace aver;
 using namespace aver::physics;
+// The world, the handle tables and the lookups now live in PhysicsInternal.hpp so the joint,
+// shape and body-dynamics files can reach them too. Pulled in unqualified here so every call
+// site below is the same text it was before the extraction -- which is what lets the three
+// existing physics suites act as the check that nothing changed.
+using namespace aver::physics::detail;
 
 namespace {
-
-// ---- Layers ---------------------------------------------------------------------------------------
-// Two object layers: things that never move, and things that do.
-namespace Layers {
-static constexpr JPH::ObjectLayer NON_MOVING = 0;
-static constexpr JPH::ObjectLayer MOVING     = 1;
-static constexpr JPH::uint        NUM        = 2;
-}
-namespace BroadPhaseLayers {
-static constexpr JPH::BroadPhaseLayer NON_MOVING(0);
-static constexpr JPH::BroadPhaseLayer MOVING(1);
-static constexpr JPH::uint            NUM = 2;
-}
-
-// Maps each object layer onto its broad-phase layer.
-class BPLayerInterface final : public JPH::BroadPhaseLayerInterface {
-public:
-    // Builds the object-layer to broad-phase-layer table.
-    BPLayerInterface() {
-        m_[Layers::NON_MOVING] = BroadPhaseLayers::NON_MOVING;
-        m_[Layers::MOVING]     = BroadPhaseLayers::MOVING;
-    }
-    JPH::uint GetNumBroadPhaseLayers() const override { return BroadPhaseLayers::NUM; }
-    JPH::BroadPhaseLayer GetBroadPhaseLayer(JPH::ObjectLayer l) const override { return m_[l]; }
-#if defined(JPH_EXTERNAL_PROFILE) || defined(JPH_PROFILE_ENABLED)
-    const char* GetBroadPhaseLayerName(JPH::BroadPhaseLayer l) const override {
-        return static_cast<JPH::BroadPhaseLayer::Type>(l) == 0 ? "NON_MOVING" : "MOVING";
-    }
-#endif
-private:
-    JPH::BroadPhaseLayer m_[Layers::NUM];
-};
-
-// Decides which object layers are tested against which broad-phase layers.
-class ObjectVsBroadPhaseFilter final : public JPH::ObjectVsBroadPhaseLayerFilter {
-public:
-    // Static geometry only needs testing against things that move.
-    bool ShouldCollide(JPH::ObjectLayer a, JPH::BroadPhaseLayer b) const override {
-        return a != Layers::NON_MOVING || b == BroadPhaseLayers::MOVING;
-    }
-};
-
-// Decides which object layers collide with each other.
-class ObjectLayerPairFilter final : public JPH::ObjectLayerPairFilter {
-public:
-    // Static geometry is not tested against static geometry.
-    bool ShouldCollide(JPH::ObjectLayer a, JPH::ObjectLayer b) const override {
-        return a != Layers::NON_MOVING || b == Layers::MOVING;
-    }
-};
 
 // Routes Jolt's diagnostics into the engine log.
 void traceImpl(const char* fmt, ...) {
@@ -114,43 +73,6 @@ bool assertFailedImpl(const char* expr, const char* msg, const char* file, JPH::
     return true;   // break into the debugger
 }
 #endif
-
-// ---- Events ---------------------------------------------------------------------------------------
-
-// Two solid bodies that began touching, and where.
-struct ContactEvent { int32_t a = 0, b = 0; Vec3 point, normal; };
-// A body entering or leaving a sensor volume.
-struct OverlapEvent { int32_t sensor = 0, body = 0; int32_t entered = 0; };
-
-// ---- The world ------------------------------------------------------------------------------------
-
-// The whole simulation: Jolt's system, the handle tables, and the event queues.
-struct World {
-    JPH::PhysicsSystem                       system;
-    BPLayerInterface                         bpLayers;
-    ObjectVsBroadPhaseFilter                 objVsBp;
-    ObjectLayerPairFilter                    objPair;
-    std::unique_ptr<JPH::TempAllocatorImpl>  temp;
-    std::unique_ptr<JPH::JobSystemThreadPool> jobs;
-
-    // Handles are dense int32 starting at 1, because 0 must stay invalid.
-    std::unordered_map<int32_t, JPH::BodyID> bodies;
-    std::unordered_map<int32_t, JPH::Ref<JPH::CharacterVirtual>> characters;
-    int32_t nextHandle = 1;
-
-    std::unordered_map<JPH::BodyID, int32_t> byId;   // reverse of `bodies`
-    std::unordered_map<int32_t, bool> sensors;       // which handles are sensors
-
-    // Written from Jolt's worker threads under the mutex, drained by the caller between steps.
-    std::mutex                 eventMutex;
-    std::vector<ContactEvent>  contacts;
-    std::vector<OverlapEvent>  overlaps;
-
-    float fixedStep = 1.0f / 60.0f;
-    float accumulator = 0.0f;
-};
-
-std::unique_ptr<World> g_world;
 
 // Records contacts and sensor overlaps as Jolt finds them.
 // Every method here runs on a PHYSICS WORKER THREAD, possibly several at once.
@@ -203,17 +125,31 @@ EventListener g_listener;
 // Jolt's global registration is process-wide, not per-world, so it is done once and never undone.
 bool g_joltStarted = false;
 
-// Jolt's body interface for the live world.
+} // namespace
+
+// ---- what PhysicsInternal.hpp declares ------------------------------------------------------------
+// Defined HERE rather than in the header because this file owns the world's lifetime: aver_phys_init
+// creates it and aver_phys_shutdown destroys it, and a second definition anywhere else would be a
+// second world.
+namespace aver::physics::detail {
+
+std::unique_ptr<World> g_world;
+
 JPH::BodyInterface& bi() { return g_world->system.GetBodyInterface(); }
 
-// Creates a body from a shape, registers it in both handle tables, and returns its handle.
 int32_t addBody(const JPH::Shape* shape, const Vec3& centreCm, bool dynamic, float massKg,
-                bool sensor = false) {
+                bool sensor, u32 userLayer) {
     if (!g_world) return 0;
-    // A sensor sits in the MOVING layer even though it never moves, so it is told about the world.
+    if (userLayer >= Layers::kUserLayerCount) {
+        AVER_WARN("[Physics] collision layer {} is out of range; using 0", userLayer);
+        userLayer = 0;
+    }
+    // A sensor sits in the MOVING half even though it never moves, so it is told about the world.
+    // At userLayer 0 this encodes to exactly the NON_MOVING/MOVING values that were the only two
+    // object layers before user layers existed.
     JPH::BodyCreationSettings s(shape, toJolt(centreCm), JPH::Quat::sIdentity(),
                                 dynamic ? JPH::EMotionType::Dynamic : JPH::EMotionType::Static,
-                                (dynamic || sensor) ? Layers::MOVING : Layers::NON_MOVING);
+                                Layers::encode(userLayer, dynamic || sensor));
     if (dynamic && massKg > 0.0f) {
         s.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
         s.mMassPropertiesOverride.mMass = massKg;
@@ -229,24 +165,38 @@ int32_t addBody(const JPH::Shape* shape, const Vec3& centreCm, bool dynamic, flo
     return h;
 }
 
-// The Jolt body id behind a handle, or nullptr.
 const JPH::BodyID* findBody(int32_t h) {
-    if (!g_world) return nullptr;
+    // ---- WHERE THE ERROR CODE IS RECORDED, and why here rather than at 179 call sites ----------
+    //
+    // Every ABI entry point in this module returns a bare 1/0, so a caller learned THAT a call
+    // failed and never WHY: `aver_phys_body_aabb` returning 0 is a dead handle, a null pointer, or
+    // no world at all, and nothing told them apart.
+    //
+    // This function is the choke point nearly every one of those failures passes through, and it
+    // ALREADY distinguishes the two interesting cases -- no world versus no such body. Setting the
+    // code here covers the whole surface with one edit, where hand-wiring each `return 0` would be
+    // 179 chances to instrument a return that is not an error at all (aver_phys_body_count()
+    // legitimately returns 0 with no world).
+    //
+    // The code travels on aver_phys_last_error(), NEVER on these functions' return values -- see
+    // ErrorCodes.hpp for why returning a negative code from a function whose callers write
+    // `if (aver_phys_...)` would silently invert every existing call site.
+    if (!g_world) { aver::setAbiError(aver::AbiError::NotInitialised); return nullptr; }
     auto it = g_world->bodies.find(h);
-    return it == g_world->bodies.end() ? nullptr : &it->second;
+    if (it == g_world->bodies.end()) { aver::setAbiError(aver::AbiError::BadHandle); return nullptr; }
+    aver::setAbiError(aver::AbiError::Ok);
+    return &it->second;
 }
 
-// The character behind a handle, or nullptr.
 JPH::CharacterVirtual* findCharacter(int32_t h) {
     if (!g_world) return nullptr;
     auto it = g_world->characters.find(h);
     return it == g_world->characters.end() ? nullptr : it->second.GetPtr();
 }
 
-// Writes a vector into a caller-owned float[3].
 void writeVec(float* out, const Vec3& v) { out[0] = v.x; out[1] = v.y; out[2] = v.z; }
 
-} // namespace
+} // namespace aver::physics::detail
 
 // ---- ABI ------------------------------------------------------------------------------------------
 
@@ -285,6 +235,11 @@ int32_t aver_phys_init(void) {
 
 // Destroys every character and body, unhooks the listener, and drops the world.
 void aver_phys_shutdown(void) {
+    // JOINTS FIRST, and the order is the whole point: a joint holds a reference to a Constraint that
+    // points into the PhysicsSystem below and at the bodies in it. Destroying the world first would
+    // leave PhysicsJoints.cpp's table holding references into wreckage.
+    destroyAllJoints();
+    clearCharacterStairSettings();
     if (!g_world) return;
     // Characters hold refs into the system; drop them before the system goes.
     g_world->characters.clear();
@@ -357,7 +312,12 @@ int32_t aver_phys_step(float dt) {
             }
             ch->SetLinearVelocity(v);
 
+            // THE STAIR DISTANCES THE CALLER ASKED FOR, rather than Jolt's defaults. Both are
+            // arguments to ExtendedUpdate and not state on the character, so this is the only moment
+            // aver_phys_character_set_stair_stepping's numbers can be honoured -- see
+            // detail::applyCharacterStairSettings.
             JPH::CharacterVirtual::ExtendedUpdateSettings us;
+            applyCharacterStairSettings(h, us);
             ch->ExtendedUpdate(g_world->fixedStep,
                                g_world->system.GetGravity(),
                                us,
@@ -449,6 +409,47 @@ int32_t aver_phys_body_position(int32_t body, float* outXyz) {
     return 1;
 }
 
+// Writes a body's WORLD-SPACE bounding box into outMin/outMax.
+//
+// WHY AN AABB AND NOT THE SHAPE ITSELF. There is no way to see a collider in this editor at all --
+// no toggle, no wireframe, nothing -- so "does the collision match the art" has only ever been
+// answerable by dropping something on it and watching. A box's world AABB IS the box for the
+// axis-aligned case that most level collision actually is, and for a sphere, capsule or mesh it is
+// an honest bound rather than a wrong outline. Exposing Jolt's full shape tree would mean an ABI
+// that can describe every shape type and a debug renderer that can draw them; this answers the
+// question people actually have -- where is the collision, and how big -- for one entry point.
+//
+// THROUGH THE SHAPE, not Body::GetWorldSpaceBounds(): that accessor is on Body, which would need a
+// BodyLockRead to reach, while BodyInterface exposes the shape and the centre-of-mass transform
+// without locking. Same answer, computed the way this ABI's other accessors already reach a body.
+int32_t aver_phys_body_aabb(int32_t body, float* outMin, float* outMax) {
+    const JPH::BodyID* id = findBody(body);
+    if (!id || !outMin || !outMax) return 0;
+    const JPH::RefConst<JPH::Shape> shape = bi().GetShape(*id);
+    if (!shape) return 0;
+    const JPH::AABox box =
+        shape->GetWorldSpaceBounds(bi().GetCenterOfMassTransform(*id), JPH::Vec3::sOne());
+    writeVec(outMin, fromJolt(box.mMin));
+    writeVec(outMax, fromJolt(box.mMax));
+    return 1;
+}
+
+// The body handle at a dense index, or 0. Pairs with aver_phys_body_count, which has been
+// answerable since this ABI existed while "which bodies" was not -- so nothing could iterate them.
+//
+// INDICES SHIFT when a body is added or removed, exactly like scene::World::at: this is for a
+// walk that completes within one frame, not a handle to keep.
+int32_t aver_phys_body_at(int32_t index) {
+    if (!g_world || index < 0) return 0;
+    if (static_cast<usize>(index) >= g_world->bodies.size()) return 0;
+    // std::unordered_map has no positional access; the walk is O(n) per call and this is a debug
+    // path that runs only while the collider overlay is on. Said plainly rather than hidden behind
+    // a cached vector that would then need invalidating on every add and remove.
+    auto it = g_world->bodies.begin();
+    std::advance(it, index);
+    return it->first;
+}
+
 // Writes a body's rotation into outQuat as xyzw.
 int32_t aver_phys_body_rotation(int32_t body, float* outQuat) {
     const JPH::BodyID* id = findBody(body);
@@ -484,6 +485,10 @@ int32_t aver_phys_body_set_velocity(int32_t body, float x, float y, float z) {
 
 // How many bodies are live.
 int32_t aver_phys_body_count(void) { return g_world ? static_cast<int32_t>(g_world->bodies.size()) : 0; }
+
+// The calling thread's last recorded reason. See the header for why this is a separate channel and
+// not a changed return value.
+int32_t aver_phys_last_error(void) { return static_cast<int32_t>(aver::lastAbiError()); }
 
 // Creates a character capsule. `height` is the TOTAL height including both caps. 0 if too short.
 int32_t aver_phys_character_create(float radius, float height, float x, float y, float z) {

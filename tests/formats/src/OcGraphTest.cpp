@@ -1,6 +1,7 @@
 // .ocgraph format test. Covers round-tripping, unknown records, and deterministic output.
 // Also tests malformed input rejection.
 #include "aver/formats/OcGraph.hpp"
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/platform/FileSystem.hpp"
 
@@ -1237,5 +1238,5 @@ int main(int argc, char** argv) {
 
     AVER_INFO("==================================================");
     AVER_INFO("OcGraph tests done: {} failure(s)", g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

@@ -381,6 +381,26 @@ foreach ($c in $components) {
 [void]$notices.AppendLine('')
 [void]$notices.AppendLine('Redistributed from the Microsoft.NETCore.App host pack under the .NET Library')
 [void]$notices.AppendLine('licence terms.')
+# Roslyn, and CONDITIONALLY, because it only reaches the payload through Tools/** which is gated on
+# AVER_MODULE_PBR (payload.allowlist:105). A notice for a component that is not there would be as
+# wrong as the missing one this fixes: docs/PACKAGING.md recorded for months that
+# Microsoft.CodeAnalysis(.CSharp).dll ships in bin/Tools while THIRD-PARTY-NOTICES.txt never named
+# it, which is an MIT obligation unmet. Detected from the STAGED tree rather than from a build flag,
+# so the notice tracks what was actually copied.
+$stagedRoslyn = @(Get-ChildItem -LiteralPath $outFull -Recurse -File -Filter 'Microsoft.CodeAnalysis*.dll' |
+                  ForEach-Object { $_.Name } | Sort-Object -Unique)
+if ($stagedRoslyn.Count -gt 0) {
+    $roslynLic = Join-Path $root 'third_party\nuget\LICENSE.roslyn.txt'
+    if (-not (Test-Path -LiteralPath $roslynLic)) { Fail "third-party licence file missing: $roslynLic" }
+    else {
+        [void]$notices.AppendLine('')
+        [void]$notices.AppendLine('=' * 78)
+        [void]$notices.AppendLine('.NET Compiler Platform ("Roslyn") - ' + ($stagedRoslyn -join ', '))
+        [void]$notices.AppendLine('=' * 78)
+        [void]$notices.AppendLine('')
+        [void]$notices.AppendLine((Get-Content -LiteralPath $roslynLic -Raw).TrimEnd())
+    }
+}
 if ($stagedCrt.Count -gt 0) {
     [void]$notices.AppendLine('')
     [void]$notices.AppendLine('Microsoft Visual C++ Runtime - ' + ($stagedCrt -join ', '))

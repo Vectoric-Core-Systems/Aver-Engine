@@ -5,6 +5,11 @@
 // mesh with some unreachable extra streams. That was the state of this tool until skinning had a
 // consumer, and it is why nothing downstream could be tested against a real file.
 #include "aver/formats/GltfImport.hpp"
+#if AVER_HAVE_MATERIAL_COOK
+// Reached only through the link interface, the same way Aver.Trifactor is below: the header pulls
+// in pbr::MaterialDesc, which does not exist in a tree built with AVER_MODULE_PBR off.
+#include "aver/formats/MaterialCook.hpp"
+#endif
 #include "aver/formats/OcMesh.hpp"
 #include "aver/formats/OcAnim.hpp"
 #include "aver/core/Log.hpp"
@@ -89,14 +94,23 @@ int main(int argc, char** argv) {
     // argv before the positional arguments are read, so it can be written anywhere on the line and
     // [base-name] does not accidentally swallow it.
     f32 lodRatio = 0.0f;
+    std::string contentDir;   // --content-dir: where Materials/ and Textures/ live
     int positional = argc;
     for (int i = 1; i + 1 < argc; ++i) {
-        if (std::string(argv[i]) == "--lod") {
+        const std::string a = argv[i];
+        if (a == "--lod") {
             lodRatio = static_cast<f32>(std::atof(argv[i + 1]));
-            positional = (positional == argc) ? i : positional;
+            if (i < positional) positional = i;
+        } else if (a == "--content-dir") {
+            // A SEPARATE FLAG FROM THE OUTPUT DIRECTORY, deliberately. The out-directory is where
+            // meshes go and is routinely a scratch path; the content root is where the engine looks
+            // for Materials/ and Textures/. Inferring one from the other would be a second fragile
+            // convention. Absent, materials and textures are skipped and the tool says so.
+            contentDir = argv[i + 1];
+            if (i < positional) positional = i;
         }
     }
-    argc = positional;   // hide the flag from the positional reads below
+    argc = positional;   // hide the flags from the positional reads below
 
     fmt::GltfImportResult res;
     std::string why;
@@ -107,6 +121,47 @@ int main(int argc, char** argv) {
     std::string dir = argv[2];
     while (!dir.empty() && (dir.back() == '\\' || dir.back() == '/')) dir.pop_back();
     const std::string base = argc > 3 ? std::string(argv[3]) : stemOf(argv[1]);
+
+    // ---- the materials and their textures ----
+    // BEFORE THE MESH IS WRITTEN, and the order is load-bearing. Cooking renames each material to a
+    // prefixed, collision-free stem, and the mesh's materialSlots have to be rewritten to match --
+    // if the .ocmesh is serialised first it bakes in the OLD name and points at a material that is
+    // not on disk under that name.
+#if AVER_HAVE_MATERIAL_COOK
+    if (!contentDir.empty() && (!res.materials.empty() || !res.images.empty())) {
+        fmt::MaterialCookOptions copt;
+        copt.contentDir = contentDir;
+        copt.assetBase  = base;
+        copt.overwriteExisting = true;   // a cook tool writing to a stated directory replaces
+        fmt::MaterialCookResult cres;
+        std::vector<std::string> cwarn;
+        std::string cerr;
+        if (!fmt::cookMaterials(res.materials, res.images, copt, cres, &cwarn, &cerr)) {
+            AVER_ERROR("materials: {}", cerr);
+        } else {
+            for (const std::string& w : cwarn) AVER_WARN("materials: {}", w);
+            for (usize i = 0; i < res.materials.size() && i < cres.materialSlotNames.size(); ++i) {
+                if (cres.materialSlotNames[i].empty()) continue;   // did not cook; leave the old name
+                const std::string& from = res.materials[i].name;
+                const std::string& to   = cres.materialSlotNames[i];
+                for (fmt::OcMeshData& m : res.meshes)
+                    for (std::string& slot : m.materialSlots)
+                        if (slot == from) slot = to;
+            }
+            AVER_INFO("wrote {} material(s) and {} texture(s) under {}",
+                      cres.materialsWritten, cres.texturesWritten, contentDir);
+        }
+    } else if (contentDir.empty() && (!res.materials.empty() || !res.images.empty())) {
+        AVER_WARN("this file has {} material(s) and {} image(s); pass --content-dir <dir> to write "
+                  "them, otherwise only geometry is imported",
+                  res.materials.size(), res.images.size());
+    }
+#else
+    if (!res.materials.empty() || !res.images.empty())
+        AVER_WARN("this build has no PBR module, so the file's {} material(s) and {} image(s) were "
+                  "not imported; geometry only", res.materials.size(), res.images.size());
+    (void)contentDir;
+#endif
 
     // ---- the mesh ----
     // EVERY mesh in the file, merged into one, not just res.meshes[0].

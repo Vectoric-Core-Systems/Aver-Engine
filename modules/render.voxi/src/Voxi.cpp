@@ -102,6 +102,14 @@ void Renderer::setSettings(const Settings& s) {
     if (n.globalIllumination != settings_.globalIllumination && n.giCones == settings_.giCones)
         n.giCones = giConesForQuality(n.globalIllumination);
 
+    // REFRACTION FOLLOWS THE RAY-TRACING TIER, by the same by-value rule as every derived knob here:
+    // only when the tier MOVED and the caller did not set the mode itself in the same call. A caller
+    // asking for the value the field already holds is indistinguishable from one who never asked --
+    // that is the trap SandboxApp's two-call setSettings pattern exists to step around, and it
+    // applies to this exactly as it does to rtShadowRays.
+    if (n.rayTracing != settings_.rayTracing && n.refractionMode == settings_.refractionMode)
+        n.refractionMode = refractionForQuality(n.rayTracing);
+
     // The RT sun-shadow knobs follow their own tier the same way, and for a sharper reason: with RT
     // on by default there is no longer any configuration in which these are inert, so a tier change
     // that left them alone would advertise Medium while running whatever the last tier paid for.
@@ -267,6 +275,25 @@ const char* Renderer::featureName(Feature f) {
 // (aver-unbacked-verification.md): a described test result nobody re-ran against the code as it
 // stands today. If two cones is ever proposed as a rung below Low, it needs its own probe capture
 // against THIS derivation, not a number carried over from before the derivation existed.
+// Which refraction the tier asks for. RayTraced only at the top two rungs, because it spends a ray
+// per translucent pixel on the pass that is already the frame's bottleneck; ScreenSpace is nearly
+// free (it reuses the backdrop copy the absorption path already takes) and is therefore the sensible
+// middle. Off at Quality::Off keeps the "tier off means feature off" contract every other knob here
+// honours -- with no ray tracing there is no thickness to bend by anyway.
+//
+// MEDIUM IS THE DEFAULT TIER, so its rung must equal Settings::refractionMode's own default or the
+// change-gated derivation above can never fire on a default device. See that field's comment.
+u32 Renderer::refractionForQuality(Quality q) {
+    switch (q) {
+        case Quality::Off:    return 0;   // Off
+        case Quality::Low:    return 1;   // ScreenSpace
+        case Quality::Medium: return 1;   // ScreenSpace  <- Settings::refractionMode's default
+        case Quality::High:   return 2;   // RayTraced
+        case Quality::Epic:   return 2;   // RayTraced
+        default:              return 1;
+    }
+}
+
 u32 Renderer::giConesForQuality(Quality q) {
     switch (q) {
         case Quality::Off:    return 6;   // inert: nothing gathers with GI off

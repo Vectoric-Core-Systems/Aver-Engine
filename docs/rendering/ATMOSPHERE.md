@@ -13,7 +13,7 @@ This closes gaps 1, 2 and 4 of `docs/STATUS.md` §4x. Gap 3 (clouds) and gap 5 (
 
 `SkyAtmosphere::model` picks between two skies:
 
-| | `Authored` (default) | `Physical` |
+| | `Authored` | `Physical` (default — see below) |
 |---|---|---|
 | dome | two sRGB colours, lerped by `pow(dir.z*0.5+0.5, k)` | derived, per frame, from the sun's elevation |
 | `k` | authored `atmosphereHeight` | fitted so the dome carries the model's own irradiance |
@@ -21,13 +21,23 @@ This closes gaps 1, 2 and 4 of `docs/STATUS.md` §4x. Gap 3 (clouds) and gap 5 (
 | the visible sky | the same two-colour dome | the full scattering integral, per pixel, in the sky pass |
 | distance | a tint on the sky, over an authored density | the atmosphere's own in-scattering and extinction |
 
-**The default is `Authored`, and that is load-bearing.** `scripts/gates.baseline.txt` records 17 gates
-across 9 device configurations, and a new model that moved them would report as a regression in all
-of them at once. With the default the whole atmosphere block is unreachable and the engine renders
-exactly what it did before — verified, 51/51 gates bit-exact across `baseline`, `no-rt` and `all-off`.
+**The default landed as `Authored` and has since been flipped to `Physical`, on the project owner's
+instruction.** It landed `Authored` first specifically so the oracle could be shown untouched — 51/51
+gates bit-exact across `baseline`, `no-rt` and `all-off` — before the switch was thrown. With
+`Physical` now default, **all 17 gates in `scripts/gates.baseline.txt` move**, and none of the moves
+is a defect: measured read-only against `baseline`, every value is identical across repeated reads (0
+corruption / 0 error / 0 warning), and every gate moves the *same* way — a little darker, and much
+less blue — which is the signature of a saturated authored dome (blue/red ratio 15) being replaced by
+one a real sky actually has (2.9-4, the model gives 4.1). `shadow` shows it most plainly, `23,40,86`
+(strongly blue, fill-lit only) to `22,26,31` (near-neutral); both gates' stated invariants still hold.
+**The baseline file itself is deliberately left stale** rather than silently re-recorded — that is a
+project-owner call via `./scripts/record-gates.ps1`, kept as a separate, reviewable commit from the
+flip. The full before/after table is in `docs/STATUS.md` §4y.
 
-`--sky-physical [elevation]` turns it on for a capture run; the Details panel for the sun/sky has a
-`Sky Model` combo and an `Air` group behind it.
+`--sky-authored` restores the old two-colour dome, for the same reason `--no-gi` exists — a path only
+a human clicking a Details-panel combo could reach is a path no gate can measure. `--sky-physical
+[elevation]` sweeps the sun under the (now-default) physical model for a capture run; the Details
+panel for the sun/sky has a `Sky Model` combo and an `Air` group behind it.
 
 ## 2. The model
 

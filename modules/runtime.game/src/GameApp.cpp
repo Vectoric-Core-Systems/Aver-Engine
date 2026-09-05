@@ -35,6 +35,10 @@
 #  include "aver/scene/scene_abi.h"
 #  include "aver/core/Hash.hpp"
 #endif
+#include "aver/assets/LevelSky.hpp"
+// The divergence census both hosts print, so "the game draws what the editor draws" is a check
+// rather than a claim. Header-only; see SceneCensus.hpp for why a census and not a pixel diff.
+#include "aver/world/SceneCensus.hpp"
 #if AVER_MODULE_VOXI
 #  include "aver/voxi/Voxi.hpp"
 #endif
@@ -330,6 +334,11 @@ GameConfig parseArgs(int argc, char** argv) {
         else if (std::strcmp(a, "--project") == 0)     { c.projectPath = valueAfter(argc, argv, i, ""); ++i; }
         else if (std::strcmp(a, "--input-echo") == 0)  { c.inputEcho = true; }
         else if (std::strcmp(a, "--trace-opens") == 0) { c.traceOpens = true; }
+        // --scene-census: print one canonical line describing what the level actually put in
+        // the world, and exit-safe either way. scripts/verify-game.ps1 asks BOTH hosts for it
+        // and compares -- the divergence check whose absence is why this executable was
+        // deleted. Sandbox.exe accepts the identical flag and prints the identical format.
+        else if (std::strcmp(a, "--scene-census") == 0) { c.sceneCensus = true; }
         else if (std::strcmp(a, "--pcg-volume-test") == 0) { c.pcgVolumeTest = true; }
         else if (std::strcmp(a, "--no-particle-gi") == 0)  { c.noParticleGi = true; }
         else if (std::strcmp(a, "--particle-test") == 0)   { c.particleTest = true; }
@@ -355,6 +364,45 @@ BootConfig GameApp::config() const {
     b.useWarp          = cfg_.useWarp;
     b.enableDebugLayer = cfg_.debugLayer;
     b.backend          = cfg_.backend.empty() ? nullptr : cfg_.backend.c_str();
+
+    // ---- WINDOW.* FROM THE MANIFEST, read HERE and not in onInit ------------------------------
+    //
+    // This is the only moment the answer is usable: the window is created from this BootConfig,
+    // before onInit runs, so a title or resolution the project states has to be known now. That is
+    // why the manifest is read twice -- once here for four keys, once in openProject for everything
+    // -- and reading a small text file twice is a much smaller price than a window that has to be
+    // resized after it is already on screen.
+    //
+    // THE SAME TWO PLACES openProject looks, in the same order: an explicit path, else
+    // Game.ocproject beside the executable, which is what stage-game.ps1 writes for a packaged game
+    // launched with no arguments at all.
+    //
+    // THE COMMAND LINE STILL WINS, and that is the standing rule in this repo rather than a
+    // preference here: a flag exists so a human at the keyboard can override recorded state, so
+    // --width/--height/--title are applied over the manifest, not under it. Only a value the caller
+    // did NOT state falls through to the project.
+    {
+        std::string manifest = cfg_.projectPath;
+        if (manifest.empty()) {
+            const std::string beside = executableDir() + "\\Game.ocproject";
+            std::error_code ec;
+            if (std::filesystem::exists(beside, ec)) manifest = beside;
+        }
+        if (!manifest.empty()) {
+            fmt::ProjectDesc d;
+            std::string why;
+            if (fmt::loadOcproject(manifest, d, &why)) {
+                if (cfg_.title.empty() || cfg_.title == GameConfig::kDefaultTitle) {
+                    // The project's own WINDOW.TITLE, else its NAME -- a shipped game showing the
+                    // engine's default title is the sort of thing nobody notices until a player does.
+                    windowTitleOwned_ = !d.windowTitle.empty() ? d.windowTitle : d.name;
+                    if (!windowTitleOwned_.empty()) b.windowTitle = windowTitleOwned_.c_str();
+                }
+                if (cfg_.width  == GameConfig::kDefaultWidth  && d.windowWidth  > 0) b.windowWidth  = static_cast<u32>(d.windowWidth);
+                if (cfg_.height == GameConfig::kDefaultHeight && d.windowHeight > 0) b.windowHeight = static_cast<u32>(d.windowHeight);
+            }
+        }
+    }
     return b;
 }
 
@@ -1152,33 +1200,24 @@ void GameApp::particleGiBind(rhi::IResourceFactory& res, rhi::BindingSetHandle s
 
 void GameApp::applyLevelSky() {
 #if AVER_MODULE_SCENE
-    if (!level_.hasSun() && !level_.hasSky()) return;
+    const fmt::OcWorldEnv& w = level_.env();
+    if (!w.hasSun && !w.hasSky && !w.hasFog && !w.hasClouds) return;
 
-    if (level_.hasSun()) {
-        const f64* sunDir = level_.sunDir();
-        const f64* sunColor = level_.sunColor();
-        for (int i = 0; i < 3; ++i) {
-            sky_.sunDirection[i] = static_cast<f32>(sunDir[i]);
-            sunColor_[i] = static_cast<f32>(sunColor[i]);
-        }
-        // Apply sunLux as a multiplier on the default intensity
-        // OcWorldData defaults to 100000, rhi::SkyAtmosphere defaults to 3.0
-        sky_.sunIntensity = static_cast<f32>(level_.sunLux() / (100000.0 / 3.0));
-        AVER_INFO("[Level] applied sun settings: dir[{:.3f} {:.3f} {:.3f}], intensity {:.2f}",
-                  sunDir[0], sunDir[1], sunDir[2], sky_.sunIntensity);
-    }
+    // ONE SHARED MAPPING, so the game and the editor cannot drift. This function used to read five
+    // of the format's fields; aver::voxi::applyLevelEnv reads all of them, which is how a level's
+    // clouds, height fog, authored dome and sun temperature reach a running game at all -- until
+    // now they were authorable in the editor and dropped on the floor here.
+    assets::applyLevelEnv(w, sky_);
 
-    if (level_.hasSky()) {
-        sky_.model = level_.skyPhysical() ? rhi::SkyModel::Physical : rhi::SkyModel::Authored;
-        if (level_.skyMieScatter() >= 0.0) sky_.air.mieScatter = static_cast<f32>(level_.skyMieScatter());
-        if (level_.skyMultiScatter() >= 0.0) sky_.air.multiScatterGain = static_cast<f32>(level_.skyMultiScatter());
-        if (level_.skyViewSteps() > 0) sky_.air.viewSteps = level_.skyViewSteps();
-        if (level_.skyAerialSteps() > 0) sky_.air.aerialSteps = level_.skyAerialSteps();
-        AVER_INFO("[Level] applied sky settings: model={}, mie={:.2f}, multi={:.2f}, view={}, aerial={}",
-                  level_.skyPhysical() ? "physical" : "authored",
-                  level_.skyMieScatter(), level_.skyMultiScatter(),
-                  level_.skyViewSteps(), level_.skyAerialSteps());
-    }
+    // RESEEDED FROM THE ATMOSPHERE, not from the level, because the frame loop copies sunColor_
+    // back over sky_.sunColor every frame -- so applying the level and not doing this would show
+    // the level's sun for exactly zero frames. See LevelSky.hpp's note on host-owned mirrors.
+    for (int i = 0; i < 3; ++i) sunColor_[i] = sky_.sunColor[i];
+    if (w.hasFog) fogDensity_ = sky_.fogDensity;
+
+    AVER_INFO("[Level] applied environment: sun={} sky={} fog={} clouds={}, intensity {:.2f}, "
+              "model {}", w.hasSun, w.hasSky, w.hasFog, w.hasClouds, sky_.sunIntensity,
+              w.skyPhysical ? "physical" : "authored");
 #endif
 }
 
@@ -1274,10 +1313,9 @@ void GameApp::pushFrame(Engine& e) {
                   aspect, zNear, zFar);
     }
 
-    f32 fog = fogDensity_;
-#if AVER_MODULE_SCENE
-    if (level_.hasFog()) fog = level_.fogDensity();
-#endif
+    // ONE MEMBER FOR ONE VALUE, matching the editor's own fix: applyLevelSky seeds fogDensity_ from
+    // the level, so there is no second member for this to lose a race with.
+    const f32 fog = fogDensity_;
     // FROZEN: sunDirection stays unnormalised here -- the shaders normalise it.
     sky_.enabled = true;
     for (int i = 0; i < 3; ++i) {
@@ -1476,6 +1514,24 @@ void GameApp::onInit(Engine& e) {
     // just above (so a reader sees what loaded before seeing whether it started playing). See this
     // function's own comment for why "declares a GameMode" is the generic, content-driven switch this
     // is gated on, matching the shape haveGraphs/haveScriptAssembly already uses just above.
+    // BEFORE beginPlay, and that placement is the whole point.
+    //
+    // Taken after it instead, this host reported entities=24 meshRenderers=20 against the editor's
+    // 20/19 -- a difference that is REAL and entirely legitimate: the game had spawned and possessed
+    // a pawn, and the editor was still editing. Comparing a playing host against an editing one
+    // measures the lifecycle, not the content, and would have made this gate cry wolf on every
+    // project that declares a GameMode.
+    //
+    // What the census is for is the LEVEL's content -- the placements, the meshes and the materials
+    // each host resolved -- which is what b262c73 meant by "a different subset of the scene". So it
+    // is taken at the point both hosts have finished loading the level and spawning its class
+    // placements, and neither has started playing.
+#if AVER_MODULE_SCENE
+    if (cfg_.sceneCensus) {
+        AVER_INFO("[Census] {}",
+                  world::formatSceneCensus(world::takeSceneCensus(scene::World::instance())));
+    }
+#endif
     beginPlayIfGameModeDeclared();
     AVER_INFO("[Game] ready");
 }

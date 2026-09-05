@@ -12,6 +12,7 @@
 //     pointing somewhere arbitrary.
 //   * 64-bit offsets work -- a region archive can exceed 4 GiB, and truncating the offset to 32 bits
 //     writes over the start of the file rather than failing.
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/platform/FileSystem.hpp"
 
@@ -317,5 +318,5 @@ int main() {
     if (g_failures == 0 && g_skipped == 0) AVER_INFO("=== {} assertions, 0 failed ===", g_checks);
     else if (g_failures == 0) AVER_WARN("=== {} assertions, 0 failed, {} SKIPPED ===", g_checks, g_skipped);
     else AVER_ERROR("=== {} assertions, {} failed ===", g_checks, g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

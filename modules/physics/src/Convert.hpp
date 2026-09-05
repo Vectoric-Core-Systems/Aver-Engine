@@ -37,6 +37,46 @@ inline JPH::Vec3 toJoltUnit(const Vec3& v) { return JPH::Vec3(v.y, v.z, -v.x); }
 // Jolt unit vector to the engine's axes, UNSCALED.
 inline Vec3      fromJoltUnit(JPH::Vec3Arg v) { return Vec3(-v.GetZ(), v.GetX(), v.GetY()); }
 
+// --- Axial (pseudo)vectors: angular velocity, torque, angular impulse ------------------------------
+//
+// THESE FLIP SIGN, AND A LINEAR CONVERTER USED HERE IS WRONG IN A WAY NOTHING REPORTS. The basis map
+// above sends aver (x,y,z) to jolt (y,z,-x), i.e.
+//
+//     B = [ 0  1  0 ]
+//         [ 0  0  1 ]      det(B) = -1
+//         [-1  0  0 ]
+//
+// and det(B) = -1 is the whole of the left-handed to right-handed flip. A POLAR vector (a position, a
+// direction, a velocity, a force, a linear impulse) transforms by B. An AXIAL vector -- one defined by
+// a cross product, which is every rotational quantity: angular velocity, torque, angular momentum --
+// transforms by det(B) * B, so it picks up the extra minus sign.
+//
+// The evidence that this is not a derivation-on-paper: toJolt(Quat) above is (-q.y, -q.z, q.x, q.w),
+// whose vector part is exactly the NEGATIVE of toJoltUnit's (v.y, v.z, -v.x). A quaternion's vector
+// part is its rotation axis times sin(theta/2) -- an axial vector -- so the rotation converter this
+// module has shipped and tested all along already carries this sign. These helpers only give the same
+// rule a name, so a caller reaching for "the direction one" cannot silently get a body spinning
+// backwards.
+//
+// UNSCALED, like toJoltUnit: angular velocity is radians per second and radians are dimensionless, so
+// there is no centimetre in it to convert. Torque and angular impulse DO carry length (and length
+// squared at that) and get their own converters below.
+
+// Engine angular velocity (rad/s) to Jolt's. Axes only -- radians need no scaling.
+inline JPH::Vec3 toJoltAngular(const Vec3& v)   { return JPH::Vec3(-v.y, -v.z, v.x); }
+// Jolt angular velocity (rad/s) to the engine's.
+inline Vec3      fromJoltAngular(JPH::Vec3Arg v) { return Vec3(v.GetZ(), -v.GetX(), -v.GetY()); }
+
+// Engine torque (kg*cm^2/s^2) or angular impulse (kg*cm^2/s) to Jolt's SI equivalent.
+//
+// TWO FACTORS OF kCmPerMetre, not one, and that is the difference between a torque and a force. A
+// torque is a force times a LEVER ARM: both the force's own length dimension and the arm's have to be
+// converted, so the scale is cm^2 -> m^2. Getting this wrong by one factor makes every applied torque
+// a hundred times too weak, which reads as "torque does not work" rather than as a units bug.
+inline JPH::Vec3 toJoltTorque(const Vec3& v) {
+    return toJoltAngular(v) / (kCmPerMetre * kCmPerMetre);
+}
+
 // --- Rotations ------------------------------------------------------------------------------------
 
 // Engine rotation to Jolt's: vector part permuted and negated, w untouched.

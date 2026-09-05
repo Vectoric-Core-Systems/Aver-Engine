@@ -2,13 +2,19 @@
 // the mip filter, and the C# material-script rewriter. CPU only; no GPU is touched.
 #include <cstddef>
 #include "aver/formats/OcMat.hpp"
+#include "aver/formats/MaterialCook.hpp"
 #include "aver/formats/MaterialScript.hpp"
 #include "aver/formats/Texture.hpp"
 #include "aver/pbr/MaterialGpu.hpp"
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 
 #include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
+#include <vector>
 
 using namespace aver;
 
@@ -471,7 +477,7 @@ static void testPack() {
     // subtly wrong with nothing to grep for. Note this is a RUNTIME check rather than a
     // static_assert, which is why the 80 -> 96 growth compiled clean and would have failed the suite
     // instead -- keep it that way, since the point is to be told, not to be stopped.
-    check(sizeof(pbr::MaterialConstants) == 144, "MaterialConstants is 144 bytes");
+    check(sizeof(pbr::MaterialConstants) == 160, "MaterialConstants is 160 bytes");
     check(sizeof(pbr::MaterialConstants) % 16 == 0, "...and a legal constant-buffer size");
 
     // ---- THE FIELD LAYOUT, NOT JUST THE TOTAL ----
@@ -488,9 +494,27 @@ static void testPack() {
     //
     // Offsets are asserted rather than derived, so this fails when someone moves a field without
     // moving it in the shaders too. When it fails, fix all three; do not just update the number.
+    // EVERY FIELD, not the section boundaries. This list used to hold 14 of the struct's 26 offsets,
+    // which sounds thorough and left the single most dangerous stretch unguarded: emissiveFactor
+    // through alphaCutoff is SIX CONSECUTIVE SAME-TYPED FLOATS. Swap metallicFactor and
+    // roughnessFactor in one of the three mirrors and the size never moves, the build succeeds, every
+    // suite here passes, and every material in the engine shades with its metallic and roughness
+    // exchanged. That is exactly the failure this block's own comment describes; it just was not
+    // checking for it. A gap in a guard is worse than no guard, because it is read as coverage.
     check(offsetof(pbr::MaterialConstants, baseColorFactor)  ==  0, "baseColorFactor at 0");
+    check(offsetof(pbr::MaterialConstants, emissiveFactor)   == 16, "emissiveFactor at 16");
+    check(offsetof(pbr::MaterialConstants, metallicFactor)   == 28, "metallicFactor at 28");
+    check(offsetof(pbr::MaterialConstants, roughnessFactor)  == 32, "roughnessFactor at 32");
+    check(offsetof(pbr::MaterialConstants, normalScale)      == 36, "normalScale at 36");
+    check(offsetof(pbr::MaterialConstants, occlusionStrength) == 40, "occlusionStrength at 40");
+    check(offsetof(pbr::MaterialConstants, alphaCutoff)      == 44, "alphaCutoff at 44");
     check(offsetof(pbr::MaterialConstants, flags)            == 48, "flags at 48");
+    check(offsetof(pbr::MaterialConstants, reflectance)      == 52, "reflectance at 52");
+    check(offsetof(pbr::MaterialConstants, f90)              == 56, "f90 at 56");
+    check(offsetof(pbr::MaterialConstants, uvTilesPerCm)     == 60, "uvTilesPerCm at 60");
     check(offsetof(pbr::MaterialConstants, slopeBlendLo)     == 64, "slopeBlendLo at 64");
+    check(offsetof(pbr::MaterialConstants, slopeBlendHi)     == 68, "slopeBlendHi at 68");
+    check(offsetof(pbr::MaterialConstants, layer1UvScale)    == 72, "layer1UvScale at 72");
     check(offsetof(pbr::MaterialConstants, graphId)          == 76, "graphId at 76");
     check(offsetof(pbr::MaterialConstants, ior)              == 80, "ior at 80");
     check(offsetof(pbr::MaterialConstants, transmission)     == 84, "transmission at 84");
@@ -499,6 +523,10 @@ static void testPack() {
     check(offsetof(pbr::MaterialConstants, coatWeight)       == 96, "coatWeight at 96");
     check(offsetof(pbr::MaterialConstants, coatRoughness)    == 100, "coatRoughness at 100");
     check(offsetof(pbr::MaterialConstants, coatF0)           == 104, "coatF0 at 104");
+    // Checked even though nothing reads it: _coatPad is what keeps the coat row 16 bytes, and the
+    // HLSL mirrors have no such field -- they rely on uint4 TexIndex0 being pushed to the next row
+    // automatically. The two agree, for different reasons, so the C++ side's reason is worth pinning.
+    check(offsetof(pbr::MaterialConstants, _coatPad)         == 108, "_coatPad at 108");
 
     // The bindless texture-index block. Checked at its offset like every field above, and then
     // checked for CONTENT too, because this is the one field where a plausible-looking zero is the
@@ -506,6 +534,18 @@ static void testPack() {
     // never got resident textures must carry kUnboundTexture rather than a default-constructed 0,
     // or it samples whatever landed in slot 0 and looks like a content bug rather than a code one.
     check(offsetof(pbr::MaterialConstants, texIndex)         == 112, "texIndex at 112");
+    // The volume-absorption row, appended after texIndex when the block grew 144 -> 160. Offsets
+    // asserted for the same reason as every field above: three hand-maintained mirrors, and a field
+    // moved in one of them shades a material with its neighbour's bytes rather than failing to build.
+    check(offsetof(pbr::MaterialConstants, attenuationColor)    == 144, "attenuationColor at 144");
+    check(offsetof(pbr::MaterialConstants, attenuationDistance) == 156, "attenuationDistance at 156");
+    {
+        // ZERO IS THE OFF STATE, and the whole no-flag-bit design rests on it: a default material
+        // must carry a distance of 0 so averVolumeTransmittance returns exactly 1 and every material
+        // authored before this row existed shades bit-identically.
+        const pbr::MaterialConstants fresh = pbr::packMaterial(pbr::MaterialDesc{});
+        check(fresh.attenuationDistance == 0.0f, "...and a default material has NO volume");
+    }
     {
         const pbr::MaterialConstants fresh = pbr::packMaterial(pbr::MaterialDesc{});
         bool allUnbound = true;
@@ -679,6 +719,38 @@ static void testRoundTrip() {
 
     check(text.find("uv0 sRGB") != std::string::npos, "base colour is written sRGB");
     check(text.find("uv1 normal") != std::string::npos, "the normal slot is written 'normal'");
+
+    // ---- volume absorption round-trips, and is OPT-IN in the output ----
+    //
+    // kFull authors no volume, so the writer must emit neither PARAM -- the same byte-stability rule
+    // subsurface and the coat already follow. Writing "attenuationDistance 0" into every material
+    // would turn every fixture in this tree into a diff for a line meaning "not in use".
+    check(text.find("attenuationDistance") == std::string::npos,
+          "a material with no volume writes no attenuation PARAMs");
+    check(b.attenuationDistance == 0.0f, "...and re-parses with no volume");
+
+    // Now one that DOES author a volume. Checked by writing and re-parsing rather than by parsing a
+    // literal, because the failure this guards is a writer that emits a token the parser does not
+    // accept -- which a one-directional test cannot see.
+    {
+        pbr::MaterialDesc v = a;
+        v.attenuationColor[0] = 0.15f; v.attenuationColor[1] = 0.85f; v.attenuationColor[2] = 0.35f;
+        v.attenuationDistance = 12.5f;
+        const std::string vtext = fmt::writeOcmat(v, &exA);
+        check(vtext.find("PARAM attenuationDistance") != std::string::npos,
+              "an authored volume IS written");
+        pbr::MaterialDesc w;
+        std::string verr;
+        if (!fmt::parseOcmat(vtext, w, nullptr, &verr)) {
+            AVER_ERROR("   re-parse of an authored volume failed: {}", verr);
+            ++g_failures;
+        } else {
+            check(near(w.attenuationDistance, 12.5f), "attenuationDistance round-trips");
+            check(near(w.attenuationColor[0], 0.15f) && near(w.attenuationColor[1], 0.85f)
+               && near(w.attenuationColor[2], 0.35f),
+                  "attenuationColor round-trips all three channels, in order");
+        }
+    }
 }
 
 // Checks each BLEND mode through parse and write.
@@ -935,6 +1007,107 @@ static void testScriptRewrite() {
     }
 }
 
+// ---- the shared material cook: glTF, OBJ and USD all land here --------------------------------
+//
+// Writes into a scratch directory rather than the project, because that is the only way to exercise
+// the part with judgement in it: which files get written, under what names, and which texture slots
+// end up bound. The .ocmat CONTENT is already covered above by the parser tests -- this is about the
+// step between an importer and those files.
+static void testCook() {
+    AVER_INFO("=== the shared material cook ===");
+
+    const std::filesystem::path dir =
+        std::filesystem::temp_directory_path() / "aver_material_cook_test";
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+
+    // Two images the cook is asked to write. Only the magic bytes matter: the cook copies bytes and
+    // never decodes, so the sniff is the only thing reading them.
+    const u8 kPngMagic[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n'};
+    const u8 kTiffMagic[4] = {'I', 'I', '*', 0x00};
+
+    std::vector<fmt::ImportedImage> images(2);
+    images[0].bytes.assign(kPngMagic, kPngMagic + 8);
+    images[0].bytes.resize(64, 0);
+    images[0].ext = ".png";
+    images[0].suggestedName = "colour";
+    images[0].sourcePath = "colour.png";
+    images[0].ok = true;
+
+    images[1].bytes.assign(kTiffMagic, kTiffMagic + 4);
+    images[1].bytes.resize(64, 0);
+    images[1].ext = ".tif";
+    images[1].suggestedName = "basecolour";
+    images[1].sourcePath = "textures/basecolour.tif";
+    images[1].ok = true;
+
+    std::vector<fmt::ImportedMaterial> mats(3);
+    mats[0].name = "Good";
+    mats[0].baseColorTex.imageIndex = 0;
+    mats[1].name = "Tiffy";
+    mats[1].baseColorTex.imageIndex = 1;
+    // A generated material that happened to be called M_Crate would silently repaint every crate in
+    // the project, because an authored .ocmat WINS over the built-in look of the same name.
+    mats[2].name = "M_Crate";
+
+    fmt::MaterialCookOptions opt;
+    opt.contentDir = dir.string();
+    opt.assetBase  = "Fixture";
+    opt.overwriteExisting = true;
+
+    fmt::MaterialCookResult res;
+    std::vector<std::string> warn;
+    std::string err;
+    check(fmt::cookMaterials(mats, images, opt, res, &warn, &err), "the cook runs: " + err);
+    check(res.materialsWritten == 3, "all three materials were written");
+    check(res.texturesWritten == 1, "but only ONE texture -- the TIFF is not copied in");
+
+    check(std::filesystem::exists(dir / "Textures" / "Fixture" / "colour.png", ec),
+          "the PNG landed under Textures/<assetBase>/");
+    check(!std::filesystem::exists(dir / "Textures" / "Fixture" / "basecolour.tif", ec),
+          "and the TIFF did NOT, because nothing in the engine could decode it");
+
+    check(!res.texturePaths[0].empty() && res.texturePaths[1].empty(),
+          "so only the PNG has a content-relative path");
+
+    bool namedTiff = false;
+    for (const std::string& w : warn)
+        if (w.find("basecolour.tif") != std::string::npos && w.find("TIFF") != std::string::npos)
+            namedTiff = true;
+    check(namedTiff, "the refusal names the file AND the container, rather than failing silently");
+
+    // THE DISCRIMINATING PART for the sniff: the material must come out UNTEXTURED. Writing the file
+    // and emitting a TEX record for it would turn a stated import limit into a material that fails
+    // to load at run time, a long way from the import that caused it.
+    std::string text;
+    {
+        std::ifstream f(dir / "Materials" / "Fixture_Tiffy.ocmat");
+        text.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    }
+    check(!text.empty(), "the TIFF material was still written -- geometry keeps a material to bind");
+    check(text.find("TEX baseColor") == std::string::npos,
+          "with NO baseColor TEX record, so its slot is unbound rather than pointing at nothing");
+
+    std::string good;
+    {
+        std::ifstream f(dir / "Materials" / "Fixture_Good.ocmat");
+        good.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    }
+    check(good.find("TEX baseColor {path:Textures/Fixture/colour.png}") != std::string::npos,
+          "while the decodable one IS bound, by a content-relative path");
+
+    // THE PREFIX IS WHAT PROTECTS THE BUILT-IN LOOKS, not the reserved-name check underneath it: a
+    // source material called M_Crate is written as <assetBase>_M_Crate, which cannot collide. The
+    // check stays as a backstop for an assetBase policy that ever allowed an empty prefix, but it is
+    // unreachable today -- so this asserts the protection that is actually load-bearing.
+    check(!res.materialSlotNames[2].empty() && !fmt::isReservedLookName(res.materialSlotNames[2]),
+          "a source material named after a built-in look cannot be written under that name");
+    check(res.materialSlotNames[2] == "Fixture_M_Crate",
+          "because the assetBase prefix is what keeps it out of the built-ins' namespace");
+
+    std::filesystem::remove_all(dir, ec);
+}
+
 // Runs every material test. Returns the failure count.
 int main() {
     testFullParse();
@@ -949,8 +1122,9 @@ int main() {
     testMipChain();
     testGeneratedByCsharp();
     testScriptRewrite();
+    testCook();
 
     if (g_failures == 0) AVER_INFO("=== all material tests passed ===");
     else AVER_ERROR("=== {} material assertion(s) failed ===", g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

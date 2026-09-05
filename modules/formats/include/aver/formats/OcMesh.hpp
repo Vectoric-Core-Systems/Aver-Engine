@@ -42,6 +42,22 @@ inline constexpr u32 kOcMeshInfluences = 4;
 // aliases this exact symbol instead of naming a second one that could drift out of sync with it.
 inline constexpr u32 kInvalidClusterId = std::numeric_limits<u32>::max();
 
+// THE MLET SIZE LIMITS, now defined here rather than in OcMesh.cpp -- and this is the SAME move
+// kInvalidClusterId above already made, for the same reason. OcMesh.cpp argued its copy was
+// deliberate because "Aver.Formats sits BELOW Aver.Trifactor in the module DAG ... so this file
+// cannot include Trifactor's header", which is true and is an argument against the WRONG
+// direction. It never precluded the right one: Trifactor depends on Formats, so Formats can own the
+// number and Trifactor can alias it, exactly as it does one constant up.
+//
+// WHAT THAT WAS COSTING. These two are the on-disk MLET contract AND the mesh shader's output
+// array sizes, and there were THREE independent 64/124 pairs -- here, ClusterBuilder.hpp, and a
+// bare #define in a shared HLSL prelude -- with nothing tying any of them together. Raise the cap
+// in one place only and SetMeshOutputCounts overflows a fixed-size output array: GPU-side
+// out-of-bounds, driver-dependent corruption or a TDR, and nothing a CPU test or a screenshot
+// would catch.
+inline constexpr u32 kMaxMeshletVertices  = 64;
+inline constexpr u32 kMaxMeshletTriangles = 124;
+
 // One meshlet, matching the on-disk MLET shape byte for byte (FORMAT_SPECS.md 5.7): MeshletDesc's
 // VertexIndexOffset/TriangleOffset/Pad are a WRITE-TIME detail (computed from where this meshlet
 // lands among its siblings), not carried here -- this struct is the DECODED, offset-free form both

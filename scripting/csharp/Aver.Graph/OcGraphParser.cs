@@ -583,6 +583,12 @@ public class OcGraphParser
                     {
                         node.ClipPath = v;
                     }
+                    // rig= names the .ocrig a "setcontrolrig" node binds (see Node.RigPath) -- same
+                    // treatment as skeleton=/clip= above. weight is NOT parsed here; it is a pin.
+                    else if (k == "rig")
+                    {
+                        node.RigPath = v;
+                    }
                     // event= names which event a "fireevent" node fires on another entity's graph (see
                     // Node.EventName) -- the value itself (an event name, e.g. "OnHit"), not a lookup
                     // key, the same "carries data" treatment name=/mesh=/material= already get. Nothing
@@ -1295,6 +1301,19 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;
 
+            // Same pin shape as setlocalscale below, deliberately: entity + xyz in, then/success out.
+            // A node that moves a child and a node that resizes one should not need to be learned
+            // twice.
+            case "setlocalposition":
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "x", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "y", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "z", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
             case "setlocalscale":
                 node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
@@ -1503,6 +1522,246 @@ public class OcGraphParser
                 node.Pins.Add(new Pin { Name = "pointX", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "pointY", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "pointZ", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                break;
+
+            // Forces and impulses. Same shape as addbodyvelocity above: exec, body, three loose
+            // floats, then/success out. A force/torque lasts one step; an impulse is instantaneous.
+            case "addforce":
+            case "addimpulse":
+            case "addtorque":
+            case "addangularimpulse":
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "body", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "x", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "y", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "z", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            // Spin. GetBodyAngularVelocity is pure, same shape as getbodyvelocity; SetBodyAngularVelocity
+            // is a write, same shape as setbodyvelocity.
+            case "getbodyangularvelocity":
+                node.Pins.Add(new Pin { Name = "body", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "x", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "y", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "z", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "setbodyangularvelocity":
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "body", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "x", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "y", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "z", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            // Material and mass. One scalar write each; GetBodyMass is the one pure read.
+            case "setbodyfriction":
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "body", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "friction", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "setbodyrestitution":
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "body", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "restitution", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "setbodygravityfactor":
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "body", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "factor", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "setbodymass":
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "body", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "mass", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "getbodymass":
+                node.Pins.Add(new Pin { Name = "body", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "mass", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            // Motion type and sleeping.
+            case "setbodymotiontype":
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "body", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "motionType", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "getbodymotiontype":
+                node.Pins.Add(new Pin { Name = "body", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "motionType", Type = PinType.Int, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "activatebody":
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "body", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "isbodyactive":
+                node.Pins.Add(new Pin { Name = "body", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "active", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            // Layers. SetLayerCollision has no body pin -- it edits the world's shared matrix.
+            case "setbodylayer":
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "body", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "layer", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "getbodylayer":
+                node.Pins.Add(new Pin { Name = "body", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "layer", Type = PinType.Int, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "setlayercollision":
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "layerA", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "layerB", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "collide", Type = PinType.Bool, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            // Joints. Creators mirror addstaticbox/etc above: exec + params in, then + a handle out
+            // (here "joint" rather than "body"). See GraphNodeDefs.hpp's own JOINTS banner for why
+            // bodyB == 0 means the world, and why Hinge/Slider each carry a second (normal) axis.
+            case "jointfixed":
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "bodyA", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "bodyB", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "px", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "py", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "pz", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "axX", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "axY", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "axZ", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "ayX", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "ayY", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "ayZ", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "joint", Type = PinType.Int, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "jointpoint":
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "bodyA", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "bodyB", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "px", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "py", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "pz", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "joint", Type = PinType.Int, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "jointdistance":
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "bodyA", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "bodyB", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "paX", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "paY", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "paZ", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "pbX", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "pbY", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "pbZ", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "minDist", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "maxDist", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "joint", Type = PinType.Int, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "jointhinge":
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "bodyA", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "bodyB", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "px", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "py", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "pz", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "hx", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "hy", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "hz", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "nx", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "ny", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "nz", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "minAngleRad", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "maxAngleRad", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "joint", Type = PinType.Int, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "jointslider":
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "bodyA", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "bodyB", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "px", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "py", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "pz", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "sx", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "sy", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "sz", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "nx", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "ny", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "nz", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "minCm", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "maxCm", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "joint", Type = PinType.Int, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "jointsetmotor":
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "joint", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "state", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "target", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "jointsetenabled":
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "joint", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "enabled", Type = PinType.Bool, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "jointremove":
+                node.Pins.Add(new Pin { Name = "exec", Type = PinType.Exec, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "joint", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "then", Type = PinType.Exec, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            case "getjointvalue":
+                node.Pins.Add(new Pin { Name = "joint", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "value", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;
 
             // Reroute: one pin in, the same type out. Purely a place to bend a wire.
@@ -1854,6 +2113,11 @@ public class OcGraphParser
                 // side effect), so -- like GetField -- it is safe to pull as often as anything wants,
                 // through either compiler, with no _execLocals caching needed. See
                 // GraphCompiler.EmitInputKey.
+                //
+                // InputAction, below, is this node's newer NAMED sibling -- prefer it for anything a
+                // project wants to REBIND without touching the graph. This node stays for the literal
+                // key code case (and for content authored before InputAction existed) -- see
+                // "InputAction / InputActionPressed / InputActionReleased"'s own comment for the trade.
                 node.Pins.Add(new Pin { Name = "key", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "down", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;
@@ -1873,6 +2137,58 @@ public class OcGraphParser
             case "inputkeypressed":
             case "inputkeyreleased":
                 node.Pins.Add(new Pin { Name = "key", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "triggered", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            // ---- InputAction / InputActionPressed / InputActionReleased ---------------------------
+            // THE PREFERRED PATH over InputKey/MouseDelta/MoveAxis above, for anything a project wants
+            // REBINDABLE rather than baked to a literal key or a raw device axis: aver_fw_action_*
+            // (framework_abi.h's Named Actions section, minor 5 -- aver_fw_action_register/find/bind/
+            // value2/held/pressed/released) reads whatever mix of keys/mouse a project's own setup code
+            // bound to a name via aver_fw_action_bind, so a graph asks "did the player Jump" once and
+            // never again cares which physical key that project -- or a later rebinding -- happens to
+            // use.
+            //
+            // `action` IS AN INT HANDLE, NOT A NAME, and that is a real limitation worth spelling out
+            // rather than leaving implicit. PinType has no String member (Graph.cs's own PinType enum:
+            // Float/Int/Bool/Exec only), and the established "author-chosen string, resolved by NAME at
+            // invocation" mechanism this format already has for exactly this situation -- Spawn's
+            // class=, FireEvent's event=, GetAnimCurve's curve= -- lives on a dedicated Node property
+            // (Graph.cs's ClassName/EventName/CurveName, set from a NODE-line attribute), and adding one
+            // more of those means editing Graph.cs and this parser's key=value attribute loop both --
+            // Graph.cs is a file this slice does not own (see the file's own exclusive-ownership list).
+            // So, like InputKey's own `key` pin above, `action` is a plain Int the graph must already
+            // hold a HANDLE for: the value aver_fw_action_register/_find returned, NOT the string that
+            // was registered.
+            //
+            // UNLIKE a VK_/AVER_FW_KEY_* code, that handle is NOT a stable compile-time constant:
+            // aver_fw_action_register appends to a vector and hands back its 1-based index
+            // (FrameworkAbi.cpp:1245-1253's actionDefs()/aver_fw_action_register, idempotent by name --
+            // FrameworkAbi.cpp:1234-1240's aver_fw_action_find), so the number assigned to "Jump"
+            // depends on how many OTHER actions a project's own code had already registered earlier
+            // that same run. A literal Const int authored into a .ocgraph file today is therefore only
+            // as reliable as that registration order staying fixed -- see GraphCompiler.EmitInputAction's
+            // own comment for the full accounting and what a real name pin would need instead.
+            //
+            // Pure data, no exec pins -- like InputKey just above, NOT like MouseDelta/MoveAxis below:
+            // both native calls behind InputAction (aver_fw_action_value2, aver_fw_action_held) are
+            // array-scan reads over actionBindings() with no side effect, the same "cheap enough to
+            // redundantly pull" cost class GetForward's own comment already accepts for a six-output
+            // read -- not a per-call cost that would justify MouseDelta's _execLocals caching shape.
+            case "inputaction":
+                node.Pins.Add(new Pin { Name = "action", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "x", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "y", Type = PinType.Float, IsOutput = true, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "held", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            // InputActionPressed / InputActionReleased: the action-level twin of InputKeyPressed/
+            // InputKeyReleased above -- identical reasoning, identical "triggered" pin name (an EVENT,
+            // not a STATE -- see that case's own comment), one layer up over aver_fw_action_pressed/
+            // _released instead of aver_fw_input_key_pressed/_released.
+            case "inputactionpressed":
+            case "inputactionreleased":
+                node.Pins.Add(new Pin { Name = "action", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "triggered", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;
 
@@ -1917,6 +2233,14 @@ public class OcGraphParser
             // one frame's input costs exactly one native call regardless of how many output pins a
             // graph reads, and the PUSH compiler only has one mechanism that guarantees that:
             // _execLocals caching keyed to a single exec visit, exactly like Raycast's.
+            //
+            // THE LOW-LEVEL PATH, now that InputAction exists (see that case's own comment, below
+            // InputKeyPressed/InputKeyReleased): these two read the device DIRECTLY, with no name and
+            // no rebinding in between -- exactly right for a raw camera look or a debug probe, and
+            // exactly wrong for anything a project wants a player (or a future rebinding UI) to
+            // reconfigure, where InputAction is the one to reach for instead. Behaviour here is
+            // UNCHANGED by InputAction's addition; existing .ocgraph content wires MouseDelta/MoveAxis
+            // directly and must keep doing exactly what it always did.
 
             case "mousedelta":
                 // Zero data inputs -- nothing to read before the call. "then" (not "exec", for the
@@ -2315,6 +2639,16 @@ public class OcGraphParser
             case "playanimation":
                 node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "loop", Type = PinType.Bool, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
+                break;
+
+            // SetControlRig, the third of the family. Shaped like PlayAnimation rather than
+            // SetSkeleton -- a float weight pin beside the entity, for the same reason loop is a pin:
+            // rig= is edit-time naming, weight is runtime data. See GraphNodeDefs.hpp's own comment
+            // for why the component it attaches is reached by NAME and not by a Component enum value.
+            case "setcontrolrig":
+                node.Pins.Add(new Pin { Name = "entity", Type = PinType.Int, IsOutput = false, NodeId = node.Id });
+                node.Pins.Add(new Pin { Name = "weight", Type = PinType.Float, IsOutput = false, NodeId = node.Id });
                 node.Pins.Add(new Pin { Name = "success", Type = PinType.Bool, IsOutput = true, NodeId = node.Id });
                 break;
         }

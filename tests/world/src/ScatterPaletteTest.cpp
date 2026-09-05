@@ -7,6 +7,7 @@
 // VALIDATION: a level author gets no editor and no compiler, so a naming mistake, a weight of zero,
 // or a swapped min/max has to be caught here, named by species, or it is indistinguishable from the
 // feature simply not working -- exactly what this task's brief calls out.
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/formats/OcWorld.hpp"
 #include "aver/platform/FileSystem.hpp"
@@ -152,5 +153,5 @@ int main() {
 
     if (g_failures == 0) AVER_INFO("=== {} assertions, 0 failed ===", g_checks);
     else AVER_ERROR("=== {} assertions, {} failed ===", g_checks, g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

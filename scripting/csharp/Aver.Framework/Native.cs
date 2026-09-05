@@ -84,6 +84,44 @@ internal static class Fw
     [DllImport(Lib)] internal static extern int aver_fw_input_key_pressed(int key);
     [DllImport(Lib)] internal static extern int aver_fw_input_key_released(int key);
     [DllImport(Lib)] internal static extern void aver_fw_input_mouse(float[] out3);
+
+    // NAMED ACTIONS (minor 5, framework_abi.h) -- the port of this assembly's own EnhancedInput.cs
+    // onto the framework, so a graph node or a C++ system can finally reach it too. held/pressed/
+    // released/value2 read InputState's cur/prev ON DEMAND, with no per-frame roll of their own --
+    // see EnhancedInput.cs's own top-of-file comment for why that is a hard requirement, not a
+    // convenience, and why EnhancedInput.Update() (HostBridge.cs's old DispTickAll call site) is gone.
+    [DllImport(Lib)] internal static extern int  aver_fw_action_register([MarshalAs(UnmanagedType.LPUTF8Str)] string name, int valueType);
+    [DllImport(Lib)] internal static extern int  aver_fw_action_find([MarshalAs(UnmanagedType.LPUTF8Str)] string name);
+    [DllImport(Lib)] internal static extern void aver_fw_action_bind(int action, int source, int key, float scale, int component, int contextPriority);
+    [DllImport(Lib)] internal static extern void aver_fw_action_clear_bindings();
+    [DllImport(Lib)] internal static extern void aver_fw_action_value2(int action, float[] out2);
+    [DllImport(Lib)] internal static extern int  aver_fw_action_held(int action);
+    [DllImport(Lib)] internal static extern int  aver_fw_action_pressed(int action);
+    [DllImport(Lib)] internal static extern int  aver_fw_action_released(int action);
+
+    // RAW WIN32 VK -- an additive twin to aver_fw_input_key above, indexed by the literal Win32 VK
+    // code (0..255) instead of the AVER_FW_KEY_* enum, for the F-keys/numpad/OEM range that enum can
+    // never grow to cover (InputKeys.hpp's own comment: a saved .ocgraph's InputKey node stores the
+    // enum's current int, so inserting a new key anywhere but the tail would repoint every saved
+    // graph at the wrong key). set_vk has no caller in this assembly today, same as
+    // aver_fw_input_set_key above -- it exists so a test can round-trip it by reflection exactly as
+    // NewNodeTests.cs already does for aver_fw_input_set_key/aver_fw_input_key.
+    [DllImport(Lib)] internal static extern void aver_fw_input_set_vk(int vk, int down);
+    [DllImport(Lib)] internal static extern int  aver_fw_input_vk(int vk);
+    [DllImport(Lib)] internal static extern int  aver_fw_input_vk_pressed(int vk);
+    [DllImport(Lib)] internal static extern int  aver_fw_input_vk_released(int vk);
+
+    // GAMEPAD, SHAPE ONLY (framework_abi.h's own GAMEPAD section) -- no poller exists anywhere yet
+    // (ZERO CONSUMERS was the stated reason not to build one), so the getters below read back
+    // whatever a future provider sets, or the all-zero/false default nothing has ever written. `pad`
+    // is fixed at 0 by the ABI itself; Input.cs's GetGamepadButton/GetGamepadAxis still take it as a
+    // parameter rather than hardcoding it, so this signature does not change the day a second pad
+    // becomes real.
+    [DllImport(Lib)] internal static extern void  aver_fw_input_set_gamepad_button(int pad, int button, int down);
+    [DllImport(Lib)] internal static extern void  aver_fw_input_set_gamepad_axis(int pad, int axis, float value);
+    [DllImport(Lib)] internal static extern int   aver_fw_input_gamepad_button(int pad, int button);
+    [DllImport(Lib)] internal static extern float aver_fw_input_gamepad_axis(int pad, int axis);
+
     [DllImport(Lib)] internal static extern void aver_fw_set_view(int mode, float eyeHeight, float boomLength);
     [DllImport(Lib)] internal static extern void aver_fw_set_view_entity(int entity);
 
@@ -124,6 +162,10 @@ internal static class SceneNative
 
     [DllImport(Lib)] internal static extern int aver_scene_create();
     [DllImport(Lib)] internal static extern int aver_scene_destroy(int e);
+    // Resolves a DYNAMICALLY registered component type by name (scene ABI 1.4). The Component enum
+    // covers the built-ins, whose ids are fixed; a type registered at runtime has no enum value and
+    // no knowable id, so this is the only way the framework can attach one.
+    [DllImport(Lib)] internal static extern int aver_scene_component([MarshalAs(UnmanagedType.LPUTF8Str)] string name);
     [DllImport(Lib)] internal static extern int aver_scene_add_component(int e, int component);
     [DllImport(Lib)] internal static extern int aver_scene_has_component(int e, int component);
     [DllImport(Lib)] internal static extern int aver_scene_set_parent(int child, int parent);
@@ -161,4 +203,58 @@ internal static class SceneNative
 
     // material: name0 is the content-pack id (0 == the default/project pack).
     [DllImport(Lib)] internal static extern int aver_scene_material(int name0, [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
+}
+
+/// <summary>The Aver.Settings C ABI -- durable key/value a shipped game can read and write
+/// (settings_abi.h). A SEPARATE class from <see cref="Fw"/>, not a section bolted onto it: these are
+/// aver_settings_* exports out of a different native binary (Aver.Settings.dll) that settings_abi.h's
+/// own header says "depends on nothing above Core and Platform" -- filing them under Fw would misname
+/// every one of these as a framework call when it links no framework at all. SceneNative just above is
+/// the same move for the identical reason, one native surface per DLL, all living in this one file
+/// because that is where the CRITICAL CONSTRAINT this repo enforces says a new native call belongs.
+///
+/// UNLIKE Fw and SceneNative, this class needs NO entry in NativeResolver.cs. That resolver exists
+/// only because "Aver.Framework" and "Aver.Scene" each name BOTH a managed contract assembly and a
+/// native DLL sitting in the same output directory, so the default P/Invoke probe would find the
+/// managed one first and GetProcAddress every symbol into failure (NativeResolver.cs's own comment).
+/// There is no managed "Aver.Settings" assembly anywhere in scripting/csharp for "Aver.Settings" to
+/// collide with, and modules/settings/CMakeLists.txt:16-18 stages the native Aver.Settings.dll into
+/// the identical CMAKE_BINARY_DIR/bin the framework DLL already resolves into (framework/CMakeLists.txt
+/// :26's own "DLL next to the exe") -- so the CLR's ordinary default probing finds it unassisted.</summary>
+internal static class SettingsNative
+{
+    private const string Lib = "Aver.Settings";
+
+    // Reading a file that does not exist is not an error -- a first run has no settings. Calling
+    // this again with a different path closes the first WITHOUT flushing it (settings_abi.h's own
+    // aver_settings_open comment) -- Settings.cs's Open() documents that for the caller.
+    [DllImport(Lib)] internal static extern int aver_settings_open([MarshalAs(UnmanagedType.LPUTF8Str)] string utf8Path);
+    // Returned pointer must not be freed by the caller and is valid only until the next call --
+    // decoded immediately through Fw.Str, the same convention aver_fw_class_name's callers already
+    // follow for an identical lifetime.
+    [DllImport(Lib)] internal static extern IntPtr aver_settings_default_path();
+    [DllImport(Lib)] internal static extern int aver_settings_flush();
+
+    // Readers: each returns `fallback` for a missing key OR a value that fails to parse as the
+    // requested type (settings_abi.h's own comment -- a hand-edited `volume=loud` reads as the
+    // fallback, never a silent 0).
+    [DllImport(Lib)] internal static extern float aver_settings_get_f32([MarshalAs(UnmanagedType.LPUTF8Str)] string key, float fallback);
+    [DllImport(Lib)] internal static extern int aver_settings_get_i32([MarshalAs(UnmanagedType.LPUTF8Str)] string key, int fallback);
+    [DllImport(Lib)] internal static extern int aver_settings_get_bool([MarshalAs(UnmanagedType.LPUTF8Str)] string key, int fallback);
+    [DllImport(Lib)] internal static extern IntPtr aver_settings_get_str([MarshalAs(UnmanagedType.LPUTF8Str)] string key, [MarshalAs(UnmanagedType.LPUTF8Str)] string fallback);
+
+    // Writers: 1 on success, 0 for an empty key or a value that cannot be stored. Dirty until the
+    // next aver_settings_flush -- nothing here touches disk by itself.
+    [DllImport(Lib)] internal static extern int aver_settings_set_f32([MarshalAs(UnmanagedType.LPUTF8Str)] string key, float value);
+    [DllImport(Lib)] internal static extern int aver_settings_set_i32([MarshalAs(UnmanagedType.LPUTF8Str)] string key, int value);
+    [DllImport(Lib)] internal static extern int aver_settings_set_bool([MarshalAs(UnmanagedType.LPUTF8Str)] string key, int value);
+    // A value containing a newline is REFUSED, not escaped -- the file is one key=value line each,
+    // with no escaping at all, and a smuggled newline would silently become a second key.
+    [DllImport(Lib)] internal static extern int aver_settings_set_str([MarshalAs(UnmanagedType.LPUTF8Str)] string key, [MarshalAs(UnmanagedType.LPUTF8Str)] string value);
+
+    [DllImport(Lib)] internal static extern int aver_settings_has([MarshalAs(UnmanagedType.LPUTF8Str)] string key);
+    // 1 if the key is gone afterwards, INCLUDING when it never existed -- Remove() is not a "did I
+    // do anything" flag, it is a postcondition check.
+    [DllImport(Lib)] internal static extern int aver_settings_remove([MarshalAs(UnmanagedType.LPUTF8Str)] string key);
+    [DllImport(Lib)] internal static extern int aver_settings_count();
 }

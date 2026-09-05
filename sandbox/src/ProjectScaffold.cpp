@@ -142,32 +142,41 @@ std::string templatesRoot() {
     return cached;
 }
 
-// Builds the .ocproject manifest text.
+// Builds the .ocproject manifest text -- through fmt::writeOcproject, NOT by hand.
+//
+// THIS USED TO CONCATENATE THE KEYS ITSELF, and it was the last place in this file that did: the
+// two siblings below (createFromTemplate, migrateProject) already call the canonical writer. A
+// hand-rolled manifest is a second implementation of a grammar with exactly one reader, and the
+// only thing keeping the two in step was that one person wrote both.
+//
+// writeOcproject owns NAME/ENGINE/CREATEDWITH/CONTENT/STARTMAP/AUTHOR and every RENDER.* key, and
+// copies every line of `existing` it does NOT own through untouched -- which is exactly the
+// mechanism for keeping the explanatory comments, since those are the point of a scaffolded
+// manifest. Unset RENDER.* fields are -1 and omitted, so this still states RAYTRACING and nothing
+// else, as the hand-written version did.
 std::string manifestText(const std::string& name) {
-    std::string s;
-    s += "OCPROJECT 1\n";
-    s += "# Created by the Aver Engine editor. This project lives OUTSIDE the engine tree and\n";
-    s += "# references it; see the engine's docs/PROJECTS.md.\n";
-    s += "NAME " + name + "\n";
-    s += "ENGINE " + std::string(kEngineName) + " " + std::string(kEngineVersion) + "\n";
-    // What made it, as opposed to ENGINE's "what it needs at least". This is the value the upgrade
-    // chain reads to decide whether a later engine has to migrate the project, so a project stamped
-    // here today is one a 0.4 editor can carry forward without guessing at its age.
-    s += "CREATEDWITH " + std::string(kEngineVersion) + "\n";
-    s += "CONTENT Content\n";
-    s += "STARTMAP Maps/Default.ocmap\n";
+    fmt::ProjectDesc d;
+    d.name             = name;
+    d.engineName       = kEngineName;
+    d.engineMinVersion = kEngineVersion;
+    // What made it, as opposed to ENGINE's "what it needs at least" -- the value the upgrade chain
+    // reads to decide whether a later engine has to migrate the project.
+    d.createdWith      = kEngineVersion;
+    d.contentRoot      = "Content";
+    d.startMap         = "Maps/Default.ocmap";
     // WRITTEN EXPLICITLY, not left to the engine default it currently agrees with. A manifest that
-    // states nothing inherits whatever the engine's default happens to be on the day it is opened,
-    // which makes a project's own look a moving target across engine versions and gives its author no
-    // line to edit. Stating it costs one line and makes the setting discoverable in the place someone
-    // would look for it.
-    //
-    // 2 is Medium (0=Off 1=Low 2=Medium 3=High 4=Epic -- OcProject.hpp). It is not free: on
-    // ElectricDreams, Medium's rungs measured 18.36 ms against 11.73 ms with ray tracing off. Turn it
-    // down here if a project would rather have the frame back.
-    s += "RENDER.RAYTRACING 2\n";
-    s += "# AUTHOR <your name>\n";
-    return s;
+    // states nothing inherits whatever the default happens to be on the day it is opened, which
+    // makes a project's look a moving target across engine versions and gives its author no line to
+    // edit. 2 is Medium (0=Off 1=Low 2=Medium 3=High 4=Epic). Not free: on ElectricDreams, Medium
+    // measured 18.36 ms against 11.73 ms with ray tracing off.
+    d.rayTracing       = 2;
+
+    // The lines writeOcproject does not own, and therefore preserves verbatim.
+    const std::string comments =
+        "# Created by the Aver Engine editor. This project lives OUTSIDE the engine tree and\n"
+        "# references it; see the engine's docs/PROJECTS.md.\n"
+        "# AUTHOR <your name>\n";
+    return fmt::writeOcproject(d, comments);
 }
 
 // The starting level a new project opens.
@@ -377,7 +386,7 @@ std::string starterMaterialText(const std::string& projectName) {
     s += "// The Details panel's \"Save to C#\" writes back here, so tuning a surface by dragging a\n";
     s += "// slider and tuning it by editing this file are the same edit.\n";
     s += "using Aver.Materials;\n\n";
-    s += "namespace " + projectName + ".Materials;\n\n";
+    s += "namespace " + csharpNamespaceFor(projectName) + ".Materials;\n\n";
     s += "/// <summary>A plain mid-grey surface. Bind it by name from a mesh: \"M_Default\".</summary>\n";
     s += "[AverMaterial(\"M_Default\")]\n";
     s += "public sealed class Default : Material\n";
@@ -516,7 +525,7 @@ std::string actorScriptText(const std::string& projectName, const std::string& s
     s += "using Aver.Scene;\n";
     s += "using Aver.Scripting;   // Log\n";
     s += "\n";
-    s += "namespace " + projectName + ";\n";
+    s += "namespace " + csharpNamespaceFor(projectName) + ";\n";
     s += "\n";
     if (kind == CsKind::GameMode) {
         s += "[AverGameMode(\"" + scriptName + "\")]\n";
@@ -613,7 +622,7 @@ std::string scriptText(const std::string& projectName, const std::string& script
     }
     s += "\n";
     if (behaviour) s += "using Aver.Scripting;\n\n";
-    s += "namespace " + projectName + ";\n";
+    s += "namespace " + csharpNamespaceFor(projectName) + ";\n";
     s += "\n";
     s += "public sealed class " + scriptName + (behaviour ? " : AverBehaviour\n" : "\n");
     s += "{\n";
@@ -687,6 +696,24 @@ const char* csKindNoun(CsKind kind) {
 }
 
 // Checks a project name as a folder name. Returns false and fills `err` with the reason.
+// See the header for why this is needed at all. Kept next to validateProjectName, which is the
+// function whose permissiveness makes it necessary.
+std::string csharpNamespaceFor(const std::string& projectName) {
+    std::string ns;
+    ns.reserve(projectName.size());
+    for (const char c : projectName) {
+        const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                        (c >= '0' && c <= '9') || c == '_';
+        ns += ok ? c : '_';
+    }
+    // Trim the underscores a trailing space or dot would have produced, so "My Game " does not
+    // become "My_Game_". Leading ones are handled by the digit/empty rules below.
+    while (!ns.empty() && ns.back() == '_') ns.pop_back();
+    if (ns.empty()) return "Game";
+    if (ns.front() >= '0' && ns.front() <= '9') ns.insert(ns.begin(), '_');
+    return ns;
+}
+
 bool validateProjectName(const std::string& name, std::string* err) {
     auto fail = [&](const char* m) { if (err) *err = m; return false; };
     if (name.empty()) return fail("Enter a project name.");

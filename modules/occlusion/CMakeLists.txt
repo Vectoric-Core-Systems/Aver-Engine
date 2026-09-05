@@ -21,3 +21,6 @@ target_link_libraries(Aver.Occlusion PUBLIC Aver.Core Aver.RHI)
 target_compile_definitions(Aver.Occlusion PUBLIC AVER_MODULE_OCCLUSION=1)
 
 set_target_properties(Aver.Occlusion PROPERTIES FOLDER "modules")
+
+# HLSL beside the executable -- see cmake/AvModule.cmake.
+aver_deploy_shaders(Aver.Occlusion "${CMAKE_CURRENT_SOURCE_DIR}/shaders")

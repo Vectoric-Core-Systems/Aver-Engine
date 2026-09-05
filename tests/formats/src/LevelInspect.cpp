@@ -11,6 +11,7 @@
 //
 //     LevelInspect.exe "<project>\Content\Maps\Default.ocmap"
 #include "aver/formats/OcWorld.hpp"
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 
 #include <string>
@@ -20,7 +21,7 @@ using namespace aver;
 int main(int argc, char** argv) {
     if (argc < 2) {
         AVER_INFO("usage: LevelInspect <file.ocworld|file.ocmap> [more...]");
-        return 1;
+        return exitCode(ExitCode::Usage);
     }
     int failures = 0;
     for (int i = 1; i < argc; ++i) {
@@ -47,5 +48,5 @@ int main(int argc, char** argv) {
                       sp.densityMin, sp.densityMax, sp.collisionRadiusCm, sp.randomizeYaw);
         }
     }
-    return failures;
+    return exitCode(failures ? ExitCode::Failed : ExitCode::Ok);
 }

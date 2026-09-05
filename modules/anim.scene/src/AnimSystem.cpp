@@ -144,6 +144,15 @@ void AnimSystem::tick(scene::World& world, f32 dt) {
                 p.pose = blended;
             }
         }
+        // THE POSE MODIFIER SEAM. Everything above produced a local-space pose from a clip; this is
+        // the one point at which anything else may edit it, and it was empty until a control rig
+        // needed it -- sampleAnimation wrote p.pose and the next line consumed it.
+        //
+        // AFTER the sample and blend so a rig LAYERS on animation rather than fighting it, and
+        // BEFORE poseToSkinning so what the rig did is what gets skinned. Put it the other side of
+        // that call and the modifier would be editing a pose nothing reads again.
+        if (poseMod_) poseMod_(e, *skel, p.pose, poseModUser_);
+
         poseToSkinning(*skel, p.pose, p.skin);
     }
 

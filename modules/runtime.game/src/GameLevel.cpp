@@ -66,35 +66,12 @@ void GameLevel::load(const std::string& path, GameContent& content) {
         if (!p.className.empty()) classPlacements_.push_back(p);
 #endif
 
-    if (w.hasFog) {
-        levelFog_    = static_cast<f32>(w.fogDensity);
-        fogColor_[0] = static_cast<f32>(w.fogColor[0]);
-        fogColor_[1] = static_cast<f32>(w.fogColor[1]);
-        fogColor_[2] = static_cast<f32>(w.fogColor[2]);
-        hasLevelFog_ = true;
-    }
-
-    // Load sun settings from the level
-    if (w.hasSun) {
-        hasSun_ = true;
-        sunDir_[0] = w.sunDir[0];
-        sunDir_[1] = w.sunDir[1];
-        sunDir_[2] = w.sunDir[2];
-        sunColor_[0] = w.sunColor[0];
-        sunColor_[1] = w.sunColor[1];
-        sunColor_[2] = w.sunColor[2];
-        sunLux_ = w.sunLux;
-    }
-
-    // Load sky settings from the level
-    if (w.hasSky) {
-        hasSky_ = true;
-        skyPhysical_ = w.skyPhysical;
-        skyMieScatter_ = w.skyMieScatter;
-        skyMultiScatter_ = w.skyMultiScatter;
-        skyViewSteps_ = w.skyViewSteps;
-        skyAerialSteps_ = w.skyAerialSteps;
-    }
+    // THE WHOLE ENVIRONMENT IN ONE LINE. This was twenty assignments across three `if`s, and the
+    // hasSun/hasSky/hasFog flags rode INSIDE those conditions -- so the record's own flag and the
+    // decision to copy it were the same statement, which is the arrangement that made a newly added
+    // field easy to miss. Slicing the base copies every field including the flags, and a field
+    // added to the format reaches the runtime with nothing else edited. See GameLevel::env().
+    env_ = w;
 
     // ---- the level's declared density fields ----
     //
@@ -319,9 +296,7 @@ void GameLevel::unload() {
     for (const int32_t b : levelBodies_) aver_phys_remove_body(b);
     levelBodies_.clear();
 #endif
-    hasLevelFog_ = false;
-    hasSun_ = false;
-    hasSky_ = false;
+    env_ = fmt::OcWorldEnv{};
     hasBounds_ = false;
     pcgFields_.clear();
     levelPath_.clear();

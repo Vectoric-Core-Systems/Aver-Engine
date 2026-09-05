@@ -8,6 +8,7 @@
 // rule about Jolt staying private to the module still holds.
 #include "aver/physics/physics_abi.h"
 
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 
 #include <cmath>
@@ -1089,5 +1090,5 @@ int main() {
     testApplyImpulseMovesNearbyVertices();
     testDensityChangesSagUnderGravity();
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

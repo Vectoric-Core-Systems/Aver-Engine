@@ -9,12 +9,25 @@ work, and nothing in it may claim to be, or imply it is, FSR or DLSS.
 
 | Backend | Status | Notes |
 |---|---|---|
-| Aver temporal upscaler | the default, and genuinely ours | needs jitter + motion vectors |
-| Aver spatial upscaler | fallback when temporal data is unavailable | plain resample, no history |
-| AMD FSR 1 | vendored, MIT, attributed | `third_party/fidelityfx-fsr`, spatial only |
+| Aver spatial upscaler (`SpatialUpscaler`) | **implemented and wired** | dependency-free Catmull-Rom bicubic resample; `needs()` answers `None` — no jitter, motion vectors or history |
+| Aver edge-detecting AA (`AverSrFxaa`) | **implemented**, a second `IUpscaler` beside it | single-pass, luma-based, FXAA-style edge AA — anti-aliases an already-resolved (never-multisampled) target rather than changing resolution; written from the published technique, not a port |
+| Aver temporal upscaler | **does not exist yet** | needs render-scale, jitter, per-pixel motion vectors, depth, exposure and a camera-cut reset as whole-frame data, none of which exists outside Voxi's ray-shadow-only reprojection — see Prerequisites, below |
+| AMD FSR 1 | vendored (MIT), attributed, **not yet wrapped in an `IUpscaler`** | `third_party/fidelityfx-fsr`; the next implementation this module is meant to gain, alongside the two above, with no change to the seam itself |
 | AMD FSR 2 / 3 | possible later | MIT; needs jitter + motion vectors |
 | NVIDIA DLSS | **empty slot, on purpose** | see below |
 | Intel XeSS | possible later | same prerequisites as FSR 2 |
+
+> **This table used to list a temporal upscaler as "the default, and genuinely ours" and the spatial
+> one as its fallback.** Neither was true of the tree: no `AverSrTemporal.*` exists anywhere under
+> `modules/render.sr/`, and the actual shipped default is **`Off`** — no upscaler runs at all unless
+> `--aversr <level>` or the Editor Preferences combo asks for one, per `modules/render.sr/README.md`.
+> What *is* built is the spatial resample and, since, a second `IUpscaler` implementation doing
+> edge-detecting AA rather than resolution change — neither of those is a "fallback" for the other,
+> they are the only two backends that exist. `IDevice::setUpscaler`/`upscaler()` and the D3D12/Vulkan
+> composite-pass call site are real and wired (`modules/render.sr/README.md`, "Backend wiring"); a
+> non-`Off` level was measured (PTTest, 2750×1639) taking the ray-driven primary pass from 5.0ms at
+> `Off` to 2.3 / 1.7 / 1.3ms at Quality / Balanced / Performance. `SpatialUpscaler::execute()` has
+> still never been proven against a live swapchain by a GPU capture, per the same source.
 
 **Upscalers are not combined.** One runs per frame. Running two costs double and they fight over the
 same history — "merge FSR and DLSS into one better upscaler" is not a thing that exists.

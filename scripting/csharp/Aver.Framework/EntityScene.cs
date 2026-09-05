@@ -41,6 +41,29 @@ public readonly partial struct Entity
     /// <summary>Attaches <paramref name="component"/> (idempotent). False if the type or handle is bad.</summary>
     public bool AddComponent(Component component) => SceneNative.aver_scene_add_component(Handle, (int)component) != 0;
 
+    /// <summary>True if this entity carries the component registered under <paramref name="name"/>
+    /// (e.g. "CControlRig"). False for an unregistered name.</summary>
+    public bool HasComponent(string name) =>
+        SceneNative.aver_scene_has_component(Handle, SceneNative.aver_scene_component(name)) != 0;
+
+    /// <summary>Attaches the component registered under <paramref name="name"/> (idempotent). False
+    /// if nothing of that name is registered.
+    ///
+    /// <para>For the components that are NOT in <see cref="Component"/>: types registered at runtime
+    /// through World::registerComponent — CControlRig, CSynapseAgent — deliberately stay out of the
+    /// built-in id range, so their ids depend on registration order and cannot be an enum value. A
+    /// misspelt name resolves to 0 and attaches nothing rather than attaching the wrong pool.</para>
+    ///
+    /// <para><b>The bytes arrive ZEROED, and no constructor runs over them.</b> ComponentPool::add
+    /// resizes a raw byte buffer, so a struct's in-class initialisers are dead code on this path —
+    /// whatever the C++ side declares as a default is NOT what the caller gets. Write every field
+    /// this component needs after attaching; a field left alone is 0, not its default.</para></summary>
+    public bool AddComponent(string name)
+    {
+        int type = SceneNative.aver_scene_component(name);
+        return type != 0 && SceneNative.aver_scene_add_component(Handle, type) != 0;
+    }
+
     /// <summary>Reads a float field by qualified name, or 0 if absent.</summary>
     public float GetFloat(string field) => SceneNative.aver_scene_get_f32(Handle, SceneIds.Field(field));
     /// <summary>Writes a float field. False if the field is unknown or the component is absent.</summary>

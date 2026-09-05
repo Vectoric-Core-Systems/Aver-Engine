@@ -31,6 +31,23 @@ using AssetPathFn = std::string (*)(u64 objectId, void* user);
 // wants to keep it must copy it.
 using AnimNotifyFn = void (*)(scene::Entity e, const char* name, void* user);
 
+// A POSE MODIFIER: the seam a control rig lives in.
+//
+// Called once per animated entity per tick, AFTER the clip has been sampled and blended into `pose`
+// and BEFORE that pose becomes skinning matrices. Until this existed there was nothing between those
+// two statements -- sampleAnimation wrote the pose and poseToSkinning consumed it in the next line,
+// with no way for anything to sit in between. Foot placement, a head that tracks a target, a hand
+// held on a grip while the arm plays a canned clip: all of them are edits made in that gap.
+//
+// IT MUTATES `pose.local` IN PLACE, which is the whole reason this is cheap: anim::Pose is a flat
+// vector of local transforms with no accessor wall, so a modifier assigns to the bones it cares
+// about and leaves the rest of the sampled animation exactly as it was.
+//
+// EVERYTHING DOWNSTREAM ALREADY FOLLOWS. updateAttachments runs after every entity's pose exists, so
+// a socket on a bone this moves tracks it for free, and the skinning matrices are computed from the
+// modified pose rather than the sampled one.
+using PoseModifierFn = void (*)(scene::Entity e, const fmt::OcSkeleton& skel, Pose& pose, void* user);
+
 // Owns the loaded rigs and clips, and the pose of every animated entity.
 class AnimSystem {
 public:
@@ -38,11 +55,27 @@ public:
     // clocks, so a scrubbing editor works before any asset path is known.
     void setResolver(AssetPathFn fn, void* user) { resolve_ = fn; user_ = user; }
 
+    // The path an interned asset id resolves to, or empty when there is no resolver or it declines.
+    //
+    // Exposed because this class OWNS the resolver and other systems in this module need it: the
+    // control rig loads a .ocrig by the same asset id, through the same host-supplied mapping, so
+    // that a rig is found exactly the way a skeleton and a clip are. A second resolver installed
+    // beside this one would be a second answer to the same question.
+    std::string assetPath(u64 objectId) const {
+        return (resolve_ && objectId) ? resolve_(objectId, user_) : std::string{};
+    }
+
     // Installs the notify sink. Without one, crossings are still TRACKED (so installing a sink
     // mid-session does not deliver a backlog) but nothing is delivered -- an editor previewing a
     // clip has no graphs to fire at, and should not pay for pretending otherwise.
     void setNotifySink(AnimNotifyFn fn, void* user) { notify_ = fn; notifyUser_ = user; }
     bool hasNotifySink() const { return notify_ != nullptr; }
+
+    // Installs the pose modifier. Without one the tick is exactly what it was before the seam
+    // existed -- sample, blend, skin -- so the cost of having this hook and not using it is one null
+    // check per animated entity per frame.
+    void setPoseModifier(PoseModifierFn fn, void* user) { poseMod_ = fn; poseModUser_ = user; }
+    bool hasPoseModifier() const { return poseMod_ != nullptr; }
 
     // How many notifies this system has delivered since the last clear(). Exists so a test can
     // assert on the COUNT without installing a sink that records, and so a host can see at a glance
@@ -159,6 +192,9 @@ private:
     void* user_ = nullptr;
     AnimNotifyFn notify_ = nullptr;
     void* notifyUser_ = nullptr;
+
+    PoseModifierFn poseMod_ = nullptr;
+    void* poseModUser_ = nullptr;
     u64 fired_ = 0;
     u32 attachmentsPlaced_ = 0;
     // Reused across entities and ticks so a frame of notifies costs no allocation after the first.

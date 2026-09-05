@@ -30,7 +30,14 @@ internal static class NativeResolver
     /// <summary>Loads the two colliding library names by full path; zero for everything else.</summary>
     private static IntPtr Resolve(string libraryName, Assembly assembly, DllImportSearchPath? searchPath)
     {
-        if (libraryName is not ("Aver.Framework" or "Aver.Scene"))
+        // "Aver.Physics" JOINED THIS LIST THE DAY A MANAGED ASSEMBLY TOOK THAT NAME. Until then the
+        // only Aver.Physics.dll anywhere was the native one in bin/, so the loader found it with no
+        // help; now a managed Aver.Physics.dll sits in bin/Scripting/ beside THIS assembly, wins the
+        // probe, and every P/Invoke against it fails with EntryPointNotFoundException naming a
+        // function that plainly exists. Aver.Framework still calls into native physics directly (see
+        // Physics.cs's Phys block, kept for Character.cs), so it needs the redirect for its own
+        // P/Invokes -- a resolver is registered per ASSEMBLY, and Aver.Physics registers its own.
+        if (libraryName is not ("Aver.Framework" or "Aver.Scene" or "Aver.Physics"))
             return IntPtr.Zero;
 
         string? dir = ExecutableDirectory();

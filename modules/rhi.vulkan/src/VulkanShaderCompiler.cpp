@@ -57,6 +57,8 @@
 #include <dxcapi.h>
 #include <wrl/client.h>
 
+#include "aver/rhi/DxcShaderInclude.hpp"
+
 #include <cstring>
 #include <string>
 #include <vector>
@@ -217,8 +219,13 @@ bool VulkanShaderCompiler::compile(const char* src, const char* entry, ShaderSta
     for (const std::wstring& d : wDefines) { args.push_back(L"-D"); args.push_back(d.c_str()); }
 
     auto* compiler = static_cast<IDxcCompiler3*>(compiler_);
+    // The same include handler D3D12 uses, from the same header, so a shader that #includes compiles
+    // identically on both backends -- see DxcShaderInclude.hpp. utils_ is held as void* here (this
+    // class keeps DXC out of VulkanCommon.hpp's public surface), so it is cast back at the one point
+    // that needs the real type.
+    DxcShaderInclude includes(static_cast<IDxcUtils*>(utils_));
     ComPtr<IDxcResult> result;
-    HRESULT hr = compiler->Compile(&buf, args.data(), static_cast<UINT32>(args.size()), nullptr,
+    HRESULT hr = compiler->Compile(&buf, args.data(), static_cast<UINT32>(args.size()), &includes,
                                    IID_PPV_ARGS(&result));
     if (SUCCEEDED(hr) && result) result->GetStatus(&hr);
     if (FAILED(hr)) {

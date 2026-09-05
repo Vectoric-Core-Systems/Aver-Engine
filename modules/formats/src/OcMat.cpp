@@ -217,6 +217,25 @@ bool parseOcmat(std::string_view text, pbr::MaterialDesc& out, OcMatExtras* extr
                 const f32 v = tokF(t, 2, out.subsurfaceRadius);
                 out.subsurfaceRadius = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
             }
+            // ---- volume absorption: what the inside of a transmissive material does to light ----
+            // attenuationColor is a TRANSMITTANCE per channel at exactly attenuationDistance, so it
+            // belongs in [0,1] and is clamped like every other authored ratio in this parser. The low
+            // end stops just above zero rather than at it: the shader takes -log() of this, and a
+            // channel of exactly 0 is an infinite extinction that propagates an inf through the pixel.
+            else if (equalsCI(p, "attenuationColor")) {
+                for (int i = 0; i < 3; ++i) {
+                    const f32 v = tokF(t, 2 + static_cast<usize>(i), out.attenuationColor[i]);
+                    out.attenuationColor[i] = v < 1e-4f ? 1e-4f : (v > 1.0f ? 1.0f : v);
+                }
+            }
+            // Centimetres, this engine's world unit -- the distance over which attenuationColor is the
+            // transmittance. NOT clamped at the top: a shallow pond and an ocean trench are both legal
+            // and differ by orders of magnitude. Zero (or anything negative, floored here) is the
+            // documented OFF state and is what every material authored before this existed carries.
+            else if (equalsCI(p, "attenuationDistance")) {
+                const f32 v = tokF(t, 2, out.attenuationDistance);
+                out.attenuationDistance = v < 0.0f ? 0.0f : v;
+            }
             // ---- the coat: a clear film over the base material ----
             // Clamped into [0,1] like the two above, and for the same reason -- a weight outside that
             // range is an authoring slip, and letting it through gives a lobe that adds energy.
@@ -395,6 +414,16 @@ std::string writeOcmat(const pbr::MaterialDesc& d, const OcMatExtras* extras) {
     if (d.subsurfaceWeight > 0.0f)
         s += "PARAM subsurfaceWeight " + num(d.subsurfaceWeight) + "\n"
              "PARAM subsurfaceRadius " + num(d.subsurfaceRadius) + "\n";
+
+    // Gated on attenuationDistance for the same byte-stability reason as the block above: 0 is the
+    // off state, so writing this pair into every pre-existing .ocmat would turn every material in the
+    // tree's fixtures into a diff for a line meaning "not in use". The colour rides along with the
+    // distance because a transmittance with no distance to measure it over says nothing.
+    if (d.attenuationDistance > 0.0f)
+        s += "PARAM attenuationColor " + num(d.attenuationColor[0]) + " " +
+                                         num(d.attenuationColor[1]) + " " +
+                                         num(d.attenuationColor[2]) + "\n"
+             "PARAM attenuationDistance " + num(d.attenuationDistance) + "\n";
 
     // Gated on coatWeight for exactly the reason stated above, and the other two ride along with it:
     // a roughness or an F0 with no weight describes a coat that is not there.

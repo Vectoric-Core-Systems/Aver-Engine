@@ -21,9 +21,10 @@
 // translation unit -- see ensureLodMeshPipeline's register-map comment for what they mean and what
 // checks them; nothing at compile time ties this copy to that one, which is exactly why running
 // this tool after touching either side is the check.
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/rhi/RHIResources.hpp"
 #include "aver/pbr/PbrShaders.hpp"
-#include "ClusterMaterialShader.hpp"
+#include "aver/rhi/ShaderFiles.hpp"
 #if AVER_MODULE_VOXI
 #include "aver/voxi/VoxiGiShaders.hpp"
 #endif
@@ -63,7 +64,7 @@ int main(int argc, char** argv) {
             else cur += c;
         }
         if (!cur.empty()) std::printf("%s\n", cur.c_str());
-        return 0;
+        return aver::exitCode(aver::ExitCode::Ok);
     }
 
     std::string src = std::string(aver::rhi::sharedShaderPrelude()) +
@@ -71,7 +72,9 @@ int main(int argc, char** argv) {
 #if AVER_MODULE_VOXI
     src += aver::voxi::giShaderPrelude();
 #endif
-    src += std::string(aver::sandbox::kClusterMaterialPS);
+    // The cluster PS is a deployed file now, not a header constant -- read it the same way the
+    // editor does, so this tool keeps dumping exactly what the editor compiles.
+    src += aver::rhi::shaderFile("cluster_material.hlsl");
     std::fwrite(src.data(), 1, src.size(), stdout);
-    return 0;
+    return aver::exitCode(aver::ExitCode::Ok);
 }

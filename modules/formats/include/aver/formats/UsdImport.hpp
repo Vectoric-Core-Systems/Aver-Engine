@@ -11,6 +11,7 @@
 // and rejected with a message saying exactly that and how to convert. A silent empty import is the
 // failure mode this design is built to avoid: it looks identical to a model that legitimately has no
 // geometry, and it sends the user looking at the renderer.
+#include "aver/formats/ImportedMaterial.hpp"
 #include "aver/formats/OcMesh.hpp"
 
 #include <string>
@@ -38,6 +39,17 @@ struct UsdImportResult {
     std::vector<OcMeshData>  meshes;
     std::vector<std::string> meshNames;      // the prim path, e.g. "/root/body"
 
+    // The stage's UsdPreviewSurface materials, and the images they name. SHARED SHAPES, not USD's
+    // own -- see ImportedMaterial.hpp -- so the same cook serves glTF, OBJ and USD.
+    //
+    // A mesh's materialSlots[0] holds the `name` of the material its `rel material:binding` resolved
+    // to, and is EMPTY when it had no binding or the binding pointed at a prim this file does not
+    // contain. That is the join, and it is the one piece with no glTF equivalent: glTF's
+    // mesh-to-material edge is a JSON index the importer resolves as it reads, while USD's is a prim
+    // path that may name a Material declared later in the file, so it is resolved after the walk.
+    std::vector<ImportedMaterial> materials;
+    std::vector<ImportedImage>    images;
+
     UsdEncoding encoding = UsdEncoding::Unknown;
     f32 sourceMetersPerUnit = 1.0f;          // as the stage declared it
     std::string sourceUpAxis;                // "Y" or "Z", as the stage declared it
@@ -58,10 +70,18 @@ struct UsdImportOptions {
     bool generateMissingNormals = true;
 };
 
+// Imports a .usda from disk. A material's `inputs:file` paths resolve against the file's own
+// directory, which is what USD's asset resolution does for a relative `@path@` in the absence of a
+// resolver plugin.
 bool importUsd(const std::string& path, UsdImportResult& out,
                const UsdImportOptions& opt = {}, std::string* why = nullptr);
 
-bool importUsdFromMemory(const u8* bytes, usize size, UsdImportResult& out,
-                         const UsdImportOptions& opt = {}, std::string* why = nullptr);
+// The same from memory. `baseDir` resolves the `@path@` asset references a UsdUVTexture names; empty
+// refuses them, leaving the texture slot unbound and saying so in `unsupported` -- the same contract
+// the glTF and OBJ readers use, and for the same reason: a content pipeline that reads whatever
+// happens to be in the working directory is a reproducibility bug waiting to happen.
+bool importUsdFromMemory(const u8* bytes, usize size, const std::string& baseDir,
+                         UsdImportResult& out, const UsdImportOptions& opt = {},
+                         std::string* why = nullptr);
 
 } // namespace aver::fmt

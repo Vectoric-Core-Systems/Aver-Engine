@@ -7,8 +7,10 @@ This is the deliberate opposite of bundling a game's content inside the engine t
 ```
 C:\Users\User\Documents\
 ├── Aver Engine\                 ← THE ENGINE (this repo). No game content lives here.
-│   ├── modules\  abi\  tools\  editor\  shaders\
-│   ├── sandbox\                 ← an engine SAMPLE, not a game project
+│   ├── modules\  abi\  tools\   ← editor\ and shaders\ existed here once; both were deleted
+│   │                              (the editor is sandbox\ -> Sandbox.exe; HLSL lives in
+│   │                              modules/*/shaders/ and sandbox/shaders/ files instead)
+│   ├── sandbox\                 ← an engine SAMPLE, not a game project — and also THE EDITOR
 │   ├── templates\               ← starter templates the engine COPIES into a new project
 │   ├── test-content\            ← fixtures the suites open; miniature projects on purpose
 │   └── tests\                   ← format-conformance vectors only
@@ -39,7 +41,8 @@ A project is **additive, never required**: the editor runs exactly as well with 
 - **Never in automation.** The browser is suppressed when `--frames` is present, when a project
   was named on the command line, or when headless. The verification harness drives the editor
   with `--frames` and reads one probe pixel out of the viewport; a full-screen chooser in front
-  of it would take out all 13 oracle gates at once.
+  of it would take out all 20 oracle gates at once (`scripts/gates.ps1`'s `$Gates` array; 13 when
+  this line was first written, since grown).
 - **Older-series projects need `--open-legacy` in automation**, and the bullet above is exactly
   why this is easy to miss: the BROWSER is suppressed, but the *upgrade prompt* is a different
   modal and is not. A project whose `CREATEDWITH` predates the current series is offered an
@@ -58,7 +61,10 @@ A project is **additive, never required**: the editor runs exactly as well with 
 
 Once loaded, the project's name appears in the window title and the status bar, the Content
 Browser reports where the mount points, and Edit ▸ Project Settings ▸ Description shows the
-manifest. The editor **reads** `.ocproject`; it does not write one back yet.
+manifest. The editor reads `.ocproject` and, since Project Settings became editable, writes one back:
+Name, Author and Start map are fields, and Save rewrites the manifest through
+`fmt::writeOcproject`. Engine and Content stay read-only, with the reason on screen — changing
+`CONTENT` moves where every asset resolves and nothing re-mounts.
 
 ## Where code goes — C# is project-side, C++ is engine-side
 
@@ -77,7 +83,7 @@ the engine — the Tools items are labelled `(engine)` and their modals say it o
 C# is the reverse: `Content/Scripts/` is plain content, `Scripts.csproj` is generated beside it,
 and **Tools ▸ Compile Scripts** runs `dotnet build` on it without the engine being touched.
 Compiled scripts now *run*: `spawnActor` dispatches `OnBeginPlay`
-(`modules/framework/src/FrameworkAbi.cpp:530`) and the Play lifecycle spawns
+(`modules/framework/src/FrameworkAbi.cpp:535`) and the Play lifecycle spawns
 GameInstance/GameMode/Controller/Pawn. One deliberate exception — the Actor Editor's **Live**
 preview spawns the class, runs `BuildModels` and destroys it the same frame, so no `OnBeginPlay`
 and no ticking there; its tooltip says so.

@@ -28,9 +28,49 @@ std::string num(f64 v) {
 } // namespace
 
 // Parses an .ocworld or .ocmap from memory. Unknown records are skipped.
+//
+// NESTING, ADDED FOR THE WORLD OUTLINER'S HIERARCHY, and spelled with WORDS on purpose:
+//
+//     PLACE  Meshes/table.ocmesh  0 0 0  0 0 0  1  M_Wood
+//     BEGIN
+//       CHILD  Meshes/lamp.ocmesh  10 0 80  0 0 0  1  M_Brass
+//       BEGIN
+//         CHILD  Meshes/bulb.ocmesh  0 0 12  0 0 0  1  M_Glass
+//       END
+//       CHILD  Meshes/book.ocmesh  -5 0 80  0 0 0  1  M_Paper
+//     END
+//
+// BEGIN opens a scope on the most recent placement, END closes the innermost, and CHILD / CHILDG
+// are placements parented to the innermost open scope (CHILDG carries non-uniform scale, mirroring
+// PLACE / PLACEG). It is braces spelled as words -- and that IS the design, not decoration.
+//
+// WHY NOT BRACES, AND WHY NOT INDENTATION. Both fail CATASTROPHICALLY in a build that predates this,
+// and differently:
+//   * `PLACE ... {` hits the PLACE token loop's catch-all -- `else if (p.material.empty())
+//     p.material = t[i]` -- so an older reader sets that placement's material to "{". That name is
+//     then interned as a surface and WRITTEN BACK on the next save, destroying the placement's real
+//     material. Silent, and it corrupts the file.
+//   * Indentation is discarded by trim/splitWhitespace before any of this runs, so an older reader
+//     loads a child at its parent-relative offset AS A WORLD POSITION -- and both builds' writers
+//     then emit identical bytes for two different scenes, which is the worst property a format can
+//     have.
+// BEGIN / CHILD / END are unknown RECORDS instead, and this parser's record chain has no `else` --
+// the "unknown records are skipped, not failed" contract FormatTest pins at :387, :768 and :887. So
+// an older build loses the children rather than misplacing them: a hierarchical level opens as its
+// root placements only, visibly missing objects rather than silently wrong ones, and no material is
+// harmed. As with any unmodelled data, an old build that then saves drops them -- the same class as
+// the levelPcgVolumes_ carry-through the editor's saveLevel already has.
+//
+// THE COST, stated rather than discovered later: this was a stateless line loop whose only carried
+// variable was sawHeader, with exactly one failure mode. It now carries a scope stack and has a
+// second one.
 bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
     out = OcWorldData{};
     bool sawHeader = false;
+    // Indices into out.placements: the open BEGIN scopes, innermost last, and the most recent
+    // placement a BEGIN could attach to.
+    std::vector<i32> scope;
+    i32 lastPlacement = -1;
 
     usize pos = 0;
     while (pos <= text.size()) {
@@ -85,6 +125,10 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
                     out.sunColor[0] = parseF64(t[i+1]); out.sunColor[1] = parseF64(t[i+2]); out.sunColor[2] = parseF64(t[i+3]);
                 } else if (equalsCI(t[i], "lux") && i + 1 < t.size()) {
                     out.sunLux = parseF64(t[i+1]);
+                } else if (equalsCI(t[i], "kelvin") && i + 1 < t.size()) {
+                    out.sunTemperatureK = parseF64(t[i+1]);
+                } else if (equalsCI(t[i], "angular") && i + 1 < t.size()) {
+                    out.sunAngularDeg = parseF64(t[i+1]);
                 }
             }
             if (sawElev || sawAzim) {
@@ -107,6 +151,30 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
                     out.skyViewSteps = parseI32(t[i+1], 0);
                 } else if (equalsCI(t[i], "aerial") && i + 1 < t.size()) {
                     out.skyAerialSteps = parseI32(t[i+1], 0);
+                } else if (equalsCI(t[i], "zenith") && i + 3 < t.size()) {
+                    out.skyZenith[0] = parseF64(t[i+1]); out.skyZenith[1] = parseF64(t[i+2]); out.skyZenith[2] = parseF64(t[i+3]);
+                } else if (equalsCI(t[i], "horizon") && i + 3 < t.size()) {
+                    out.skyHorizon[0] = parseF64(t[i+1]); out.skyHorizon[1] = parseF64(t[i+2]); out.skyHorizon[2] = parseF64(t[i+3]);
+                } else if (equalsCI(t[i], "dome") && i + 1 < t.size()) {
+                    out.skyDomeExponent = parseF64(t[i+1]);
+                } else if (equalsCI(t[i], "ground") && i + 3 < t.size()) {
+                    out.skyGroundAlbedo[0] = parseF64(t[i+1]); out.skyGroundAlbedo[1] = parseF64(t[i+2]); out.skyGroundAlbedo[2] = parseF64(t[i+3]);
+                } else if (equalsCI(t[i], "groundblend") && i + 1 < t.size()) {
+                    out.skyGroundBlend = parseF64(t[i+1]);
+                } else if (equalsCI(t[i], "skylight") && i + 1 < t.size()) {
+                    out.skyLight = parseF64(t[i+1]);
+                } else if (equalsCI(t[i], "mieextinction") && i + 1 < t.size()) {
+                    out.skyMieExtinction = parseF64(t[i+1]);
+                } else if (equalsCI(t[i], "miephase") && i + 1 < t.size()) {
+                    out.skyMiePhaseG = parseF64(t[i+1]);
+                } else if (equalsCI(t[i], "rayleighkm") && i + 1 < t.size()) {
+                    out.skyRayleighKm = parseF64(t[i+1]);
+                } else if (equalsCI(t[i], "miekm") && i + 1 < t.size()) {
+                    out.skyMieKm = parseF64(t[i+1]);
+                } else if (equalsCI(t[i], "planetkm") && i + 1 < t.size()) {
+                    out.skyPlanetKm = parseF64(t[i+1]);
+                } else if (equalsCI(t[i], "airkm") && i + 1 < t.size()) {
+                    out.skyAirDepthKm = parseF64(t[i+1]);
                 }
             }
         } else if (equalsCI(key, "FOG")) {
@@ -115,6 +183,26 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
                 if (equalsCI(t[i], "density") && i + 1 < t.size()) out.fogDensity = parseF64(t[i+1]);
                 else if (equalsCI(t[i], "color") && i + 3 < t.size()) {
                     out.fogColor[0] = parseF64(t[i+1]); out.fogColor[1] = parseF64(t[i+2]); out.fogColor[2] = parseF64(t[i+3]);
+                }
+                else if (equalsCI(t[i], "falloff")    && i + 1 < t.size()) out.fogFalloff    = parseF64(t[i+1]);
+                else if (equalsCI(t[i], "height")     && i + 1 < t.size()) out.fogHeight     = parseF64(t[i+1]);
+                else if (equalsCI(t[i], "start")      && i + 1 < t.size()) out.fogStart      = parseF64(t[i+1]);
+                else if (equalsCI(t[i], "maxopacity") && i + 1 < t.size()) out.fogMaxOpacity = parseF64(t[i+1]);
+            }
+        } else if (equalsCI(key, "CLOUDS")) {
+            // The record's PRESENCE is "this level has an opinion about clouds"; the on|off word is
+            // the opinion. See OcWorldEnv::hasClouds for why those are two facts and not one.
+            out.hasClouds = true;
+            for (usize i = 1; i < t.size(); ++i) {
+                if      (equalsCI(t[i], "on"))  out.cloudsEnabled = true;
+                else if (equalsCI(t[i], "off")) out.cloudsEnabled = false;
+                else if (equalsCI(t[i], "coverage") && i + 1 < t.size()) out.cloudCoverage    = parseF64(t[i+1]);
+                else if (equalsCI(t[i], "density")  && i + 1 < t.size()) out.cloudDensity     = parseF64(t[i+1]);
+                else if (equalsCI(t[i], "bottom")   && i + 1 < t.size()) out.cloudBottom      = parseF64(t[i+1]);
+                else if (equalsCI(t[i], "top")      && i + 1 < t.size()) out.cloudTop         = parseF64(t[i+1]);
+                else if (equalsCI(t[i], "feature")  && i + 1 < t.size()) out.cloudFeatureSize = parseF64(t[i+1]);
+                else if (equalsCI(t[i], "wind")     && i + 2 < t.size()) {
+                    out.cloudWind[0] = parseF64(t[i+1]); out.cloudWind[1] = parseF64(t[i+2]);
                 }
             }
         } else if (equalsCI(key, "LANDSCAPE")) {
@@ -220,6 +308,10 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
                 else if (equalsCI(t[i], "preset")     && i + 1 < t.size()) wp.preset    = std::string(t[++i]);
                 else if (equalsCI(t[i], "density")    && i + 1 < t.size()) wp.density   = parseF64(t[++i]);
                 else if (equalsCI(t[i], "viscosity")  && i + 1 < t.size()) wp.viscosity = parseF64(t[++i]);
+                // THE SURFACE MATERIAL -- an .ocmat name, NOT a solver preset. `preset` two lines up
+                // is the physics one; see OcWaterPlacement::material's own comment for why the two
+                // are kept apart so deliberately.
+                else if (equalsCI(t[i], "material")   && i + 1 < t.size()) wp.material  = std::string(t[++i]);
             }
             out.waters.push_back(std::move(wp));
         } else if (equalsCI(key, "WAVE")) {
@@ -233,9 +325,29 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
                 else if (equalsCI(t[i], "steepness")    && i + 1 < t.size()) gw.steepness    = parseF64(t[++i]);
             }
             out.waves.push_back(std::move(gw));
-        } else if (equalsCI(key, "PLACE") || equalsCI(key, "PLACEG")) {
-            const bool g = equalsCI(key, "PLACEG");
+        } else if (equalsCI(key, "BEGIN")) {
+            // OPENS A SCOPE ON THE MOST RECENT PLACEMENT. See the grammar note above parseOcworld.
+            if (lastPlacement < 0) {
+                if (err) *err = "BEGIN with no placement before it to attach children to";
+                return false;
+            }
+            scope.push_back(lastPlacement);
+        } else if (equalsCI(key, "END")) {
+            if (scope.empty()) {
+                if (err) *err = "END with no matching BEGIN";
+                return false;
+            }
+            scope.pop_back();
+        } else if (equalsCI(key, "PLACE") || equalsCI(key, "PLACEG")
+                || equalsCI(key, "CHILD") || equalsCI(key, "CHILDG")) {
+            const bool g     = equalsCI(key, "PLACEG") || equalsCI(key, "CHILDG");
+            const bool child = equalsCI(key, "CHILD")  || equalsCI(key, "CHILDG");
+            if (child && scope.empty()) {
+                if (err) *err = "CHILD outside any BEGIN/END scope -- nothing to parent it to";
+                return false;
+            }
             OcWorldPlacement p;
+            p.parent = child ? scope.back() : -1;
             p.asset = t.size() > 1 ? std::string(t[1]) : std::string();
             p.x = tokF(t, 2); p.y = tokF(t, 3); p.z = tokF(t, 4);
             p.yaw = tokF(t, 5); p.pitch = tokF(t, 6); p.roll = tokF(t, 7);
@@ -261,8 +373,21 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
                 else if (p.material.empty()) p.material = std::string(t[i]);
             }
             p.objectId = fnv1a64(std::string_view(p.asset));
+            lastPlacement = static_cast<i32>(out.placements.size());
             out.placements.push_back(std::move(p));
         }
+    }
+
+    // THE PARSER'S SECOND FAILURE MODE, and its first new one since it was written. Everything else
+    // in this function either matches a record or silently skips it -- the "unknown records are
+    // skipped, not failed" contract FormatTest pins in three places -- and the only way to fail was
+    // a missing header. Nesting adds state that can be left dangling, and a file whose BEGIN is
+    // never closed has to say so: the alternative is silently adopting the rest of the level as
+    // children of one table leg.
+    if (!scope.empty()) {
+        if (err) *err = "unbalanced BEGIN/END: " + std::to_string(scope.size()) +
+                        " scope(s) still open at end of file";
+        return false;
     }
 
     if (!sawHeader) {
@@ -347,20 +472,54 @@ std::string writeOcworld(const OcWorldData& w) {
         s += "SUN dir " + num(w.sunDir[0]) + " " + num(w.sunDir[1]) + " " + num(w.sunDir[2]) +
              " color " + num(w.sunColor[0]) + " " + num(w.sunColor[1]) + " " + num(w.sunColor[2]) +
              " lux " + num(w.sunLux) +
+             " kelvin " + num(w.sunTemperatureK) +
+             " angular " + num(w.sunAngularDeg) +
              "   # elev " + num(elev) + " azim " + num(azim) + "\n";
     }
     if (w.hasSky) {
         s += "SKY model ";
         s += w.skyPhysical ? "physical" : "authored";
-        if (w.skyMieScatter   >= 0.0) s += " mie " + num(w.skyMieScatter);
-        if (w.skyMultiScatter >= 0.0) s += " multiscatter " + num(w.skyMultiScatter);
-        if (w.skyViewSteps    >  0)   s += " steps " + std::to_string(w.skyViewSteps);
-        if (w.skyAerialSteps  >  0)   s += " aerial " + std::to_string(w.skyAerialSteps);
+        // WRITTEN UNCONDITIONALLY, unlike the air overrides below, because zero is an authored value
+        // for every one of them: a black zenith, a ground that reflects nothing, a sky light turned
+        // off. A `>= 0` guard would make each of those unsettable, which is the trap the air's
+        // sentinel avoids only because those quantities are strictly positive.
+        s += " zenith " + num(w.skyZenith[0]) + " " + num(w.skyZenith[1]) + " " + num(w.skyZenith[2]);
+        s += " horizon " + num(w.skyHorizon[0]) + " " + num(w.skyHorizon[1]) + " " + num(w.skyHorizon[2]);
+        s += " dome " + num(w.skyDomeExponent);
+        s += " ground " + num(w.skyGroundAlbedo[0]) + " " + num(w.skyGroundAlbedo[1]) + " " + num(w.skyGroundAlbedo[2]);
+        s += " groundblend " + num(w.skyGroundBlend);
+        s += " skylight " + num(w.skyLight);
+        if (w.skyMieScatter    >= 0.0) s += " mie " + num(w.skyMieScatter);
+        if (w.skyMieExtinction >= 0.0) s += " mieextinction " + num(w.skyMieExtinction);
+        if (w.skyMiePhaseG     >= 0.0) s += " miephase " + num(w.skyMiePhaseG);
+        if (w.skyRayleighKm    >= 0.0) s += " rayleighkm " + num(w.skyRayleighKm);
+        if (w.skyMieKm         >= 0.0) s += " miekm " + num(w.skyMieKm);
+        if (w.skyPlanetKm      >= 0.0) s += " planetkm " + num(w.skyPlanetKm);
+        if (w.skyAirDepthKm    >= 0.0) s += " airkm " + num(w.skyAirDepthKm);
+        if (w.skyMultiScatter  >= 0.0) s += " multiscatter " + num(w.skyMultiScatter);
+        if (w.skyViewSteps     >  0)   s += " steps " + std::to_string(w.skyViewSteps);
+        if (w.skyAerialSteps   >  0)   s += " aerial " + std::to_string(w.skyAerialSteps);
         s += "\n";
     }
     if (w.hasFog) {
         s += "FOG exp density " + num(w.fogDensity) +
-             " color " + num(w.fogColor[0]) + " " + num(w.fogColor[1]) + " " + num(w.fogColor[2]) + "\n";
+             " color " + num(w.fogColor[0]) + " " + num(w.fogColor[1]) + " " + num(w.fogColor[2]) +
+             " falloff " + num(w.fogFalloff) +
+             " height " + num(w.fogHeight) +
+             " start " + num(w.fogStart) +
+             " maxopacity " + num(w.fogMaxOpacity) + "\n";
+    }
+    // OMITTED ENTIRELY when the level never spoke about clouds, so a file that predates this record
+    // does not grow one and every level in the tree stays byte-identical through a load and save.
+    if (w.hasClouds) {
+        s += "CLOUDS ";
+        s += w.cloudsEnabled ? "on" : "off";
+        s += " coverage " + num(w.cloudCoverage) +
+             " density " + num(w.cloudDensity) +
+             " bottom " + num(w.cloudBottom) +
+             " top " + num(w.cloudTop) +
+             " feature " + num(w.cloudFeatureSize) +
+             " wind " + num(w.cloudWind[0]) + " " + num(w.cloudWind[1]) + "\n";
     }
 
     if (!w.landscapes.empty()) {
@@ -468,6 +627,11 @@ std::string writeOcworld(const OcWorldData& w) {
             if (!wp.preset.empty())  s += " preset "    + wp.preset;
             if (wp.density   >= 0.0) s += " density "   + num(wp.density);
             if (wp.viscosity >= 0.0) s += " viscosity " + num(wp.viscosity);
+            // The SURFACE material, last, and gated on non-empty like `preset` for the same reason:
+            // a record that names none must round-trip without gaining a token. Written after
+            // `preset` deliberately, so a human reading the line meets the solver material and the
+            // render material in the same order the struct declares them.
+            if (!wp.material.empty()) s += " material " + wp.material;
             s += "\n";
         }
     }
@@ -488,13 +652,34 @@ std::string writeOcworld(const OcWorldData& w) {
     }
 
     s += "\n";
-    for (const OcWorldPlacement& p : w.placements) {
+    // DEPTH-FIRST FROM THE ROOTS, so the nesting in the file IS the parent relation and no index is
+    // ever written down. See OcWorldPlacement::parent for why that matters: a stored index has to be
+    // kept in step with every reorder, and this tree already has a scar from that mistake.
+    //
+    // The children lists are built once rather than rescanning the vector per parent, which would be
+    // quadratic on a level with thousands of placements -- the ordinary case, not a corner.
+    const usize n = w.placements.size();
+    std::vector<std::vector<i32>> kids(n);
+    std::vector<i32> roots;
+    for (usize i = 0; i < n; ++i) {
+        const i32 par = w.placements[i].parent;
+        // A PARENT OUT OF RANGE, OR ITSELF, IS TREATED AS A ROOT rather than dropped or trusted.
+        // parseOcworld cannot produce one, but writeOcworld also serves callers that built the
+        // vector by hand, and the alternatives are both worse: trusting it walks off the end, and
+        // dropping the placement loses geometry to a bookkeeping error nobody would see.
+        if (par >= 0 && par < static_cast<i32>(n) && par != static_cast<i32>(i))
+            kids[static_cast<usize>(par)].push_back(static_cast<i32>(i));
+        else
+            roots.push_back(static_cast<i32>(i));
+    }
+
+    const auto line = [&](const OcWorldPlacement& p, const char* keyword, const char* keywordG) {
         if (p.uniform()) {
-            s += "PLACE  " + p.asset + " " +
+            s += keyword; s += " " + p.asset + " " +
                  num(p.x) + " " + num(p.y) + " " + num(p.z) + " " +
                  num(p.yaw) + " " + num(p.pitch) + " " + num(p.roll) + " " + num(p.sx);
         } else {
-            s += "PLACEG " + p.asset + " " +
+            s += keywordG; s += " " + p.asset + " " +
                  num(p.x) + " " + num(p.y) + " " + num(p.z) + " " +
                  num(p.yaw) + " " + num(p.pitch) + " " + num(p.roll) + " " +
                  num(p.sx) + " " + num(p.sy) + " " + num(p.sz);
@@ -505,6 +690,45 @@ std::string writeOcworld(const OcWorldData& w) {
         // Omitted when empty, same "no override is the default" rule as GAMEMODE above.
         if (!p.className.empty()) { s += " class "; s += p.className; }
         s += "\n";
+    };
+
+    // ITERATIVE, not recursive: a hand-built vector can describe a cycle, and a cycle in a recursive
+    // emit is a stack overflow rather than a diagnosable error. `emitted` bounds the walk to each
+    // placement once, so the worst a malformed parent chain can do is leave a subtree unwritten.
+    std::vector<bool> emitted(n, false);
+    struct Frame { i32 index; usize next; bool opened; };
+    std::vector<Frame> stack;
+    for (const i32 root : roots) {
+        if (emitted[static_cast<usize>(root)]) continue;
+        emitted[static_cast<usize>(root)] = true;
+        line(w.placements[static_cast<usize>(root)], "PLACE ", "PLACEG");
+        stack.push_back(Frame{root, 0, false});
+        while (!stack.empty()) {
+            Frame& f = stack.back();
+            const std::vector<i32>& ch = kids[static_cast<usize>(f.index)];
+            if (f.next >= ch.size()) {
+                if (f.opened) {
+                    s.append(static_cast<usize>(stack.size() - 1) * 2, ' ');
+                    s += "END\n";
+                }
+                stack.pop_back();
+                continue;
+            }
+            if (!f.opened) {
+                f.opened = true;
+                s.append(static_cast<usize>(stack.size() - 1) * 2, ' ');
+                s += "BEGIN\n";
+            }
+            const i32 c = ch[f.next++];
+            if (emitted[static_cast<usize>(c)]) continue;
+            emitted[static_cast<usize>(c)] = true;
+            // Indentation is COSMETIC, exactly as it is everywhere else in this format -- trim and
+            // splitWhitespace discard it before any parse sees it. The nesting is carried by the
+            // records; the spaces are for whoever opens the file.
+            s.append(stack.size() * 2, ' ');
+            line(w.placements[static_cast<usize>(c)], "CHILD ", "CHILDG");
+            stack.push_back(Frame{c, 0, false});
+        }
     }
     return s;
 }

@@ -11,6 +11,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include "aver/rhi/ShaderFiles.hpp"   // the ocean HLSL is a deployed file
 
 namespace aver::fluids {
 namespace {
@@ -46,11 +47,11 @@ constexpr f32 kGridExtentCm = static_cast<f32>(kGridCellsPerSide) * kCellSizeCm;
 
 // A plain XZ grid vertex: local (x, z) in this file's own generic sense (see WaterShaders.hpp's
 // axis note -- this is engine X and engine Y once the vertex shader adds gGridOriginCount.xy).
-// POSITION0, RG32Float, matching kWaterHLSL's VSWaterIn::localXZ.
+// POSITION0, RG32Float, matching rhi::shaderFile("water.hlsl").c_str()'s VSWaterIn::localXZ.
 struct WaterVertex { f32 x, z; };
 static_assert(sizeof(WaterVertex) == 8, "the vertex layout in buildPipeline names this stride");
 
-// MIRRORS kWaterHLSL's cbuffer WaterFrame in WaterShaders.hpp FIELD FOR FIELD -- see that cbuffer's
+// MIRRORS rhi::shaderFile("water.hlsl").c_str()'s cbuffer WaterFrame in WaterShaders.hpp FIELD FOR FIELD -- see that cbuffer's
 // own comment for what each field means and why gGridOriginCount carries the actual wave count
 // rather than always looping the compile-time maximum.
 struct WaterFrameCB {
@@ -78,14 +79,14 @@ bool WaterRenderer::init(rhi::IDevice& dev) {
         return false;
     }
 
-    // AVER_WATER_MAX_WAVES is computed from kMaxGerstnerWaves here, once, rather than hardcoded as a
+    // AVER_MAX_WAVES is computed from kMaxGerstnerWaves here, once, rather than hardcoded as a
     // second "4" inside WaterShaders.hpp -- the same precedent materialShaderDefines (PbrShaders.cpp)
     // sets for computing a register/size define in C++ instead of duplicating a number that has to
     // agree across two languages by hand.
-    const std::string defines = "AVER_WATER_MAX_WAVES=" + std::to_string(kMaxGerstnerWaves);
+    const std::string defines = "AVER_MAX_WAVES=" + std::to_string(kMaxGerstnerWaves);
 
     rhi::ShaderDesc sd;
-    sd.source = kWaterHLSL;
+    sd.source = rhi::shaderFile("water.hlsl").c_str();
     sd.prelude = rhi::sharedShaderPrelude();
     sd.defines = defines.c_str();
     sd.entry = "VSWater";
@@ -216,7 +217,7 @@ void WaterRenderer::setWaves(const GerstnerWave* waves, size_t count) {
     // Unused slots are zeroed to an EXPLICITLY inert wave (amplitude 0), not left holding
     // GerstnerWave{}'s own non-zero defaults (amplitudeCm=25 among them) -- a stale non-zero
     // amplitude in a slot past waveCount_ would never actually be READ (both gerstnerHeightCm-style
-    // C++ callers and kWaterHLSL's averGerstnerDisplace loop only up to the real count), but leaving
+    // C++ callers and rhi::shaderFile("water.hlsl").c_str()'s averGerstnerDisplace loop only up to the real count), but leaving
     // it there anyway invites exactly the bug this comment is here to prevent: a future edit to
     // EITHER loop bound that starts reading past waveCount_ would silently pick up a hardcoded wave
     // instead of nothing.
