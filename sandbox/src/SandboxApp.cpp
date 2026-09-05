@@ -2627,6 +2627,11 @@ public:
 #if AVER_MODULE_SCENE
         framedByLevel = !levelEntities_.empty();
 #endif
+        // A RESTORED CAMERA COUNTS AS FRAMED, or the default view below would throw it away. The
+        // entity test alone is not enough: a level can carry a CAMERA record and no placements at
+        // all -- an empty level somebody has started laying out is exactly that -- and without this
+        // the restore would be silently overwritten by the 700,700,450 fallback one line later.
+        if (levelCameraRestored_) framedByLevel = true;
         if (!framedByLevel) {
             camPos_ = Vec3{700.0f, 700.0f, 450.0f};
             const Vec3 d = (Vec3{0,0,1} - camPos_).getSafeNormal();
@@ -2835,6 +2840,21 @@ public:
             ic.pointerInViewport = levelHovered_ && inViewport(oio.MousePos.x, oio.MousePos.y);
             ic.drawerOpen        = drawer_ != Drawer::None;
             ic.landscapeMode     = mode_ == EditorMode::Landscape;
+            // --wheel-speed-test STANDS IN FOR A POINTER IN THE VIEWPORT. Headlessly there is no
+            // real cursor, so ImGui reports WantCaptureKeyboard and WantCaptureMouse -- measured as
+            // wantKb=1 wantMouse=1 ptrInViewport=0 -- and resolveInputOwnership correctly denies the
+            // tools. That is the right answer for an unhovered window and the wrong precondition for
+            // this test, which is about what happens once the gate is OPEN.
+            //
+            // These three values ARE the state of a person right-dragging the viewport, so asserting
+            // them is standing in for the human, not weakening the test: everything downstream --
+            // resolveInputOwnership itself, the flying_ block, the wheel read -- runs exactly as it
+            // does in a real session. Confined to the test's own frames.
+            if (wheelTestForceFly_) {
+                ic.uiWantsKeyboard = false;
+                ic.uiWantsMouse = false;
+                ic.pointerInViewport = true;
+            }
             own_ = editor::resolveInputOwnership(ic);
         }
 #endif
@@ -2860,6 +2880,9 @@ public:
             // this gate -- see that clear's own comment for why a state whose only reset lives inside
             // a conditional block is the same defect as the input publisher that latched every key.
             if (ImGui::IsMouseClicked(1) && !overUI) flying_ = true;
+            // --wheel-speed-test drives this directly; see maybeWheelSpeedTest for why it forces
+            // the state rather than synthesising the right-drag that normally opens it.
+            if (wheelTestForceFly_) flying_ = true;
             if (flying_) ImGui::SetMouseCursor(ImGuiMouseCursor_None);
 
             if (flying_) {
@@ -2875,8 +2898,27 @@ public:
                 // would be imperceptible when flying fast and violent when creeping. 1.25 per notch
                 // is roughly three notches to double, which is coarse enough to be useful in one
                 // flick and fine enough to settle on a speed.
-                if (io.MouseWheel != 0.0f) {
-                    flySpeed_ *= std::pow(1.25f, -io.MouseWheel);
+                //
+                // input_.wheel() AND NOT io.MouseWheel, WHICH IS ALWAYS ZERO HERE. This is the bug
+                // that made the whole control dead, and it was dead long before the direction was
+                // ever changed -- the previous `flySpeed_ *= (1.0f + io.MouseWheel * 0.15f)` sat on
+                // this exact line and could not fire either.
+                //
+                // WHY: Engine::frameStep runs onUpdate BEFORE uiNewFrame (Engine.cpp:208-212), and
+                // ImGui::EndFrame zeroes io.MouseWheel at the tail of the PREVIOUS frame
+                // (imgui.cpp:6420). NewFrame is the only thing that merges queued wheel events back
+                // in, and it has not run yet. So every read of io.MouseWheel from onUpdate observes
+                // the previous frame's reset -- not intermittently, but on every frame by
+                // construction. GraphEditor's and AssetEditor's wheel zoom work because they are
+                // drawn from onRender, which is after NewFrame.
+                //
+                // InputState is fed by pumpEvents, which runs before frameStep, and is rolled at the
+                // END of onRender (see input_.newFrame()) -- so during onUpdate it holds exactly this
+                // frame's accumulated notches. It is the correctly-phased source for anything in
+                // this function, and io.MouseWheel is the wrong one no matter how it is spelled.
+                const f32 wheel = input_.wheel();
+                if (wheel != 0.0f) {
+                    flySpeed_ *= std::pow(1.25f, -wheel);
                     flySpeed_ = flySpeed_ < 20.0f ? 20.0f : (flySpeed_ > 40000.0f ? 40000.0f : flySpeed_);
                 }
             }
@@ -2931,7 +2973,13 @@ public:
 #endif
                 camPos_ += step;
             } else if (!overUI) {
-                if (io.MouseWheel != 0.0f) camPos_ += fwd * io.MouseWheel * (flySpeed_ * 0.15f);
+                // THE SAME DEFECT, in the scroll-to-dolly this branch exists for: it read
+                // io.MouseWheel from onUpdate, so it has never moved the camera either. Found by
+                // following the fly-speed bug rather than by anybody reporting it, which is what a
+                // control with no headless witness looks like when it breaks. See the long note on
+                // input_.wheel() in the flying_ block above for why the phase is wrong.
+                const f32 wheel = input_.wheel();
+                if (wheel != 0.0f) camPos_ += fwd * wheel * (flySpeed_ * 0.15f);
                 if (io.MouseDown[2]) { camPos_ -= right * io.MouseDelta.x * 0.02f; camPos_ += up * io.MouseDelta.y * 0.02f; }
             }
             // CTRL+S SAVES THE LEVEL, which the File menu has claimed it does for as long as that
@@ -3039,6 +3087,7 @@ public:
         maybePieCameraTest();
         maybeInputStuckTest();
         maybeInputSourceTest();
+        maybeWheelSpeedTest();
         maybeRecaptureTest();
         maybeViewmodelTest();
         // The tick groups bracket the physics step: PrePhysics -> Physics -> PostPhysics.
@@ -6296,6 +6345,7 @@ public:
     void setPieCameraTest(int n) { pieCamFrames_ = n; }                            // --pie-camera-test
     void setInputStuckTest(int n) { inputStuckFrames_ = n; }                       // --input-stuck-test
     void setInputSourceTest(int n) { inputSrcFrames_ = n; }                        // --input-source-test
+    void setWheelSpeedTest(int n) { wheelTestFrames_ = n; }                        // --wheel-speed-test
     void setRecaptureTest(int n)   { recapFrames_ = n; }                          // --recapture-test
     void setViewmodelTest(int n)   { vmFrames_ = n; }                             // --viewmodel-test
     void setSkinSceneDir(std::string d) { skinSceneDir_ = std::move(d); }          // --skin-scene-test <dir>
@@ -9005,6 +9055,84 @@ private:
 #endif
     }
     int  inputSrcFrames_ = 0, inputSrcFrame_ = 0, inputSrcDisagree_ = 0, inputSrcStuck_ = 0;
+
+    // --wheel-speed-test: does turning the wheel while flying actually change the fly speed?
+    //
+    // THIS EXISTS BECAUSE THE CONTROL WAS DEAD AND NOTHING NOTICED. The wheel read sat in onUpdate,
+    // which Engine::frameStep runs BEFORE ImGui's NewFrame, and ImGui::EndFrame zeroes io.MouseWheel
+    // at the tail of the previous frame -- so the read was 0.0f on every frame by construction, from
+    // the day it was written. It survived a rewrite of its own direction and a commit message
+    // describing how it behaved. A control with no headless witness is a control that can be dead
+    // for months while everyone reads the source and agrees it looks right.
+    //
+    // REAL WINDOW MESSAGES, for the same reason maybeInputSourceTest posts them: the whole defect
+    // lives in WHICH input path is read and WHEN, so a harness that injects straight into ImGui's
+    // queue (or straight into InputState) would pass while the editor stayed broken. Only a message
+    // through the real pump exercises the ordering that was wrong.
+    void maybeWheelSpeedTest() {
+        if (wheelTestFrames_ <= 0) return;
+#if defined(_WIN32) && AVER_WITH_IMGUI
+        ++wheelTestFrame_;
+        HWND hwnd = window_ ? static_cast<HWND>(window_->nativeHandle()) : nullptr;
+        if (!hwnd) {
+            if (wheelTestFrame_ > 4) { AVER_INFO("[wheel-test] RESULT: SKIPPED (no window)"); wheelTestFrames_ = 0; }
+            return;
+        }
+        // Both sources sampled EVERY frame, because the contrast is the evidence: the fix is not
+        // "the speed moved", it is "the value this function reads is the live one".
+        wheelTestSawImGui_ = wheelTestSawImGui_ || ImGui::GetIO().MouseWheel != 0.0f;
+        wheelTestSawInput_ = wheelTestSawInput_ || input_.wheel() != 0.0f;
+        // The gates between the wheel arriving and the speed changing, sampled too -- without these
+        // a FAIL cannot be told apart from "the harness never reached the code".
+        if (input_.wheel() != 0.0f) {
+            wheelTestOwnAtWheel_ = own_.keyboardToTool || own_.mouseToTool;
+            wheelTestFlyAtWheel_ = flying_;
+        }
+
+        if (wheelTestFrame_ == 5) {
+            wheelTestSpeedBefore_ = flySpeed_;
+            // Straight into fly mode rather than synthesising a right-drag: entering it needs the
+            // pointer inside the viewport rect and levelHovered_ set by the docked window, neither of
+            // which a posted WM_MOUSEMOVE reliably reproduces headlessly. What is under test is the
+            // wheel READ, not the gesture that opens it, so forcing the state keeps the harness
+            // measuring the thing that was broken instead of the thing that was not.
+            wheelTestForceFly_ = true;
+            return;
+        }
+        // One notch DOWN, which is the direction that speeds up. WHEEL_DELTA is negated for down.
+        if (wheelTestFrame_ == 6) {
+            ::PostMessageW(hwnd, WM_MOUSEWHEEL, MAKEWPARAM(0, -WHEEL_DELTA), 0);
+            return;
+        }
+        // Slack for the same reason maybeInputSourceTest leaves it: PostMessageW queues, pumpEvents
+        // delivers on the next turn of the loop. Sampling sooner reads the answer before it is written.
+        if (wheelTestFrame_ < 9) return;
+
+        wheelTestForceFly_ = false;
+        const f32 after = flySpeed_;
+        const f32 want = wheelTestSpeedBefore_ * 1.25f;
+        const bool moved = std::fabs(after - wheelTestSpeedBefore_) > 0.01f;
+        const bool right = std::fabs(after - want) < std::fmax(1.0f, want * 0.02f);
+        AVER_INFO("[wheel-test] speed {:.1f} -> {:.1f} cm/s (one notch down, want {:.1f})",
+                  wheelTestSpeedBefore_, after, want);
+        AVER_INFO("[wheel-test] sources during onUpdate: io.MouseWheel seen={} input_.wheel() seen={}",
+                  wheelTestSawImGui_ ? "yes" : "NO (always zero -- this is the bug)",
+                  wheelTestSawInput_ ? "yes" : "NO");
+        AVER_INFO("[wheel-test] gates on the wheel frame: inputOwnedByTool={} flying={}",
+                  wheelTestOwnAtWheel_ ? "yes" : "NO", wheelTestFlyAtWheel_ ? "yes" : "NO");
+        AVER_INFO("[wheel-test] RESULT: {}", (moved && right) ? "PASS"
+                                           : moved ? "FAIL (speed moved, but not by one notch)"
+                                                   : "FAIL (speed did not change at all)");
+        wheelTestFrames_ = 0;
+#else
+        AVER_INFO("[wheel-test] RESULT: SKIPPED (needs Win32 + ImGui)");
+        wheelTestFrames_ = 0;
+#endif
+    }
+    int  wheelTestFrames_ = 0, wheelTestFrame_ = 0;
+    f32  wheelTestSpeedBefore_ = 0.0f;
+    bool wheelTestForceFly_ = false, wheelTestSawImGui_ = false, wheelTestSawInput_ = false;
+    bool wheelTestOwnAtWheel_ = false, wheelTestFlyAtWheel_ = false;
     bool inputSrcStateSaw_ = false, inputSrcImguiSaw_ = false;
 
     // --viewmodel-test N: does the gun sit STILL in the frame, or does it swim against the camera?
@@ -18318,6 +18446,9 @@ private:
     rhi::IDevice* prefsDevice_ = nullptr;   // borrowed, latched in buildUI
     std::string prefIdeName_;               // stored IDE name, pending the async scan that resolves it
     bool prefsLoaded_ = false;
+    // Set by loadLevel when a level supplied its own CAMERA record; read by onAttach so the default
+    // framing does not overwrite it. See both sites.
+    bool levelCameraRestored_ = false;
     editor::AssetEditorHost assetEditors_;
     bool vsyncOffRequested_ = false;        // --no-vsync, pending a device to apply it to
     bool wantMeshReload_ = false;
@@ -19938,7 +20069,38 @@ private:
         sel_ = -1;
         selEntity_ = scene::kInvalidEntity;
 
-        if (!w.placements.empty()) frameCameraOn(w);
+        // A STORED VIEWPOINT OUTRANKS AUTO-FRAMING, because it is the more specific statement:
+        // frameCameraOn guesses a view from the level's bounds, and a CAMERA record is where the
+        // author actually was. Guessing is the fallback for a level that has never been saved with
+        // one, which is every level written before the record existed.
+        //
+        // --cam STILL WINS, and deliberately: it is applied after this in onAttach (see the
+        // camOverride_ block there), so a bounded capture or a gate run still points where it was
+        // told to rather than wherever somebody last left the editor. That ordering is the whole
+        // reason this does not simply assign in onAttach.
+        if (w.hasCamera) {
+            constexpr f32 kRad = 3.14159265358979323846f / 180.0f;
+            camPos_ = Vec3{static_cast<f32>(w.camX), static_cast<f32>(w.camY), static_cast<f32>(w.camZ)};
+            yaw_    = static_cast<f32>(w.camYaw) * kRad;
+            pitch_  = static_cast<f32>(w.camPitch) * kRad;
+            // Clamped to the same limits the mouse-look path enforces, so a hand-edited or
+            // corrupted file cannot put the camera somewhere the controls can never recover from.
+            pitch_ = pitch_ < -1.54f ? -1.54f : (pitch_ > 1.54f ? 1.54f : pitch_);
+            // 0 means UNSTATED -- a level that carried no speed leaves the user's preference alone
+            // rather than resetting the camera to a stored zero and appearing to freeze.
+            if (w.camSpeed > 0.0) {
+                flySpeed_ = static_cast<f32>(w.camSpeed);
+                flySpeed_ = flySpeed_ < 20.0f ? 20.0f : (flySpeed_ > 40000.0f ? 40000.0f : flySpeed_);
+            }
+            levelCameraRestored_ = true;
+            // LOGGED because this is otherwise invisible: a restored camera and an auto-framed one
+            // look the same from outside the process, and the difference is exactly what a person
+            // reporting "it didn't remember where I was" needs to be able to check.
+            AVER_INFO("[Level] camera restored to ({:.0f},{:.0f},{:.0f}) yaw {:.1f} pitch {:.1f} speed {:.0f}",
+                      camPos_.x, camPos_.y, camPos_.z, w.camYaw, w.camPitch, flySpeed_);
+        } else if (!w.placements.empty()) {
+            frameCameraOn(w);
+        }
 
         AVER_INFO("[Level] '{}' loaded from {} ({} placement(s))", w.name, path, w.placements.size());
 
@@ -20410,6 +20572,34 @@ private:
                 w.hasSpawn = true;
                 w.spawnX = sp.x; w.spawnY = sp.y; w.spawnZ = sp.z; w.spawnYaw = sy;
             }
+        }
+
+        // WHERE THE AUTHOR WAS STANDING, so reopening the level returns you to it instead of to the
+        // world origin. Written on every save, which is what makes "save the camera when you leave"
+        // true without needing a separate exit hook -- closing a level you have saved, and Ctrl+S,
+        // are the same act as far as this record is concerned.
+        //
+        // NOT WRITTEN WHEN --cam CHOSE THE VIEW. That flag means a machine picked the camera -- a
+        // gate, a capture, a bug repro -- and stamping its synthetic viewpoint into a file a person
+        // owns is the thing to avoid. An unflagged save writes the camera whoever ran it was looking
+        // through, which is the whole feature.
+        //
+        // GATED ON camOverride_ RATHER THAN maxFrames_, which is what I reached for first. The
+        // bounded-run test would have been redundant AND harmful: redundant because the level
+        // autosave -- the thing that actually wrote a corrupt file from a capture once -- already
+        // refuses outright when maxFrames_ != 0 (see maybeAutosave), and --save-level is a manual
+        // flag no script invokes; harmful because it made this feature impossible to verify outside
+        // an interactive session, and an unverifiable guard is how a silent regression gets in.
+        //
+        // DEGREES OUT, radians in: yaw_/pitch_ are radians everywhere in this file, and the file
+        // format is degrees for the same reason SPAWN is -- a number a person may end up reading.
+        if (!camOverride_) {
+            constexpr f64 kDeg = 180.0 / 3.14159265358979323846;
+            w.hasCamera = true;
+            w.camX = camPos_.x; w.camY = camPos_.y; w.camZ = camPos_.z;
+            w.camYaw = static_cast<f64>(yaw_) * kDeg;
+            w.camPitch = static_cast<f64>(pitch_) * kDeg;
+            w.camSpeed = flySpeed_;
         }
 
         // EACH RECORD GOES OUT WHENEVER THE LEVEL CARRIED IT **OR** THE AUTHOR HAS EDITED IT HERE
@@ -21443,6 +21633,7 @@ Application* createApplication(int argc, char** argv) {
     // build failure, not a warning.
     int inputStuckArg = 0;
     int inputSourceArg = 0;
+    int wheelSpeedArg = 0;
     int recaptureArg = 0;
     int viewmodelArg = 0;
     // --gpu-timing takes no value, so it's matched in the i+1<argc loop below only incidentally --
@@ -21455,6 +21646,7 @@ Application* createApplication(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--pie-camera-test"))      pieCamArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--input-stuck-test"))     inputStuckArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--input-source-test"))    inputSourceArg = std::atoi(argv[i + 1]);
+        if (!std::strcmp(argv[i], "--wheel-speed-test"))     wheelSpeedArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--recapture-test"))       recaptureArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--viewmodel-test"))       viewmodelArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--refraction"))           refraction = std::atoi(argv[i + 1]);
@@ -22361,6 +22553,7 @@ Application* createApplication(int argc, char** argv) {
     if (pieCamArg > 0) app->setPieCameraTest(pieCamArg);
     if (inputStuckArg > 0) app->setInputStuckTest(inputStuckArg);
     if (inputSourceArg > 0) app->setInputSourceTest(inputSourceArg);
+    if (wheelSpeedArg > 0) app->setWheelSpeedTest(wheelSpeedArg);
     if (recaptureArg > 0) app->setRecaptureTest(recaptureArg);
     if (viewmodelArg > 0) app->setViewmodelTest(viewmodelArg);
 #endif

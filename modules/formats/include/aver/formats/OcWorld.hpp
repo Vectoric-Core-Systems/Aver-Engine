@@ -433,6 +433,30 @@ struct OcWorldData : OcWorldEnv {
     bool hasSpawn = false;
     f64 spawnX = 0, spawnY = 0, spawnZ = 0, spawnYaw = 0;
 
+    // WHERE THE EDITOR CAMERA WAS WHEN THE LEVEL WAS LAST SAVED, so reopening a level puts you back
+    // where you were working instead of at the world origin looking down the X axis.
+    //
+    // THIS IS NOT THE SPAWN ABOVE, and the two must not be conflated. SPAWN is where the GAME puts
+    // the player; this is where the AUTHOR was standing. A level whose player start is at the top of
+    // a tower can perfectly well have been last edited in a basement, and overloading one record for
+    // both would move the player every time somebody saved from a different vantage point.
+    //
+    // hasCamera false is the ordinary case for every level written before this record existed, and
+    // means "no opinion" -- the editor then frames the level the way it always did rather than
+    // jumping to a stored origin, which is the one behaviour that would look like a bug.
+    //
+    // ANGLES IN DEGREES, positions in centimetres, matching SPAWN directly above. Degrees do not
+    // round-trip a direction exactly the way the SUN record's vector does, and here that is fine:
+    // this is a viewpoint a person will move again within seconds, not a lighting input whose drift
+    // would show up in a render.
+    bool hasCamera = false;
+    f64 camX = 0, camY = 0, camZ = 0;
+    f64 camYaw = 0, camPitch = 0;
+    // The fly speed that was in effect, in cm/s -- part of "where I was working" in the same sense
+    // as the position. 0 means unstated, so a level that never carried one leaves the preference
+    // alone rather than resetting it to a stored zero.
+    f64 camSpeed = 0;
+
     // The level's landscape sections. Order is the file's order, same reasoning as pcgVolumes below --
     // a level naming two the same keeps both rather than silently losing one.
     std::vector<OcLandscapePlacement> landscapes;

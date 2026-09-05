@@ -106,6 +106,17 @@ bool parseOcworld(std::string_view text, OcWorldData& out, std::string* err) {
             out.hasSpawn = true;
             out.spawnX = tokF(t, 1); out.spawnY = tokF(t, 2);
             out.spawnZ = tokF(t, 3); out.spawnYaw = tokF(t, 4);
+        } else if (equalsCI(key, "CAMERA")) {
+            // THE EDITOR'S VIEWPOINT, NOT THE PLAYER SPAWN above -- see OcWorldData::hasCamera for
+            // why those are deliberately two records rather than one.
+            //
+            // tokF yields 0 for a token that is not present, so a short CAMERA line degrades to
+            // zeros instead of failing the parse. The speed is optional in exactly that way, and 0
+            // there means "unstated" rather than "stand still".
+            out.hasCamera = true;
+            out.camX = tokF(t, 1); out.camY = tokF(t, 2); out.camZ = tokF(t, 3);
+            out.camYaw = tokF(t, 4); out.camPitch = tokF(t, 5);
+            out.camSpeed = tokF(t, 6);
         } else if (equalsCI(key, "SUN")) {
             out.hasSun = true;
             // `dir` and `elev`/`azim` are alternative spellings of the same field; the later token
@@ -460,6 +471,12 @@ std::string writeOcworld(const OcWorldData& w) {
     if (!w.gameMode.empty()) s += "GAMEMODE " + w.gameMode + "\n";
     if (w.hasSpawn) {
         s += "SPAWN " + num(w.spawnX) + " " + num(w.spawnY) + " " + num(w.spawnZ) + " " + num(w.spawnYaw) + "\n";
+    }
+    // WRITTEN ONLY WHEN THE LEVEL HAS ONE, so every level authored before this record existed keeps
+    // round-tripping byte-identically instead of gaining a line the moment it is opened and saved.
+    if (w.hasCamera) {
+        s += "CAMERA " + num(w.camX) + " " + num(w.camY) + " " + num(w.camZ) +
+             " " + num(w.camYaw) + " " + num(w.camPitch) + " " + num(w.camSpeed) + "\n";
     }
     if (w.hasSun) {
         // The VECTOR is written, because it round-trips exactly where degrees do not. The elevation
