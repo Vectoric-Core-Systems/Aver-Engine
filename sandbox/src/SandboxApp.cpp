@@ -2952,10 +2952,11 @@ public:
                 yaw_   += io.MouseDelta.x * lookSpeed_;
                 pitch_ -= io.MouseDelta.y * lookSpeed_;
                 pitch_ = pitch_ < -1.54f ? -1.54f : (pitch_ > 1.54f ? 1.54f : pitch_);
-                // WHEEL WHILE FLYING CHANGES SPEED, and SCROLL DOWN MAKES IT FASTER. That is the
-                // inverse of the previous behaviour and is what was asked for; note it is also the
-                // inverse of Unreal's own default, where wheel-up speeds up. Kept as asked rather
-                // than "corrected" -- which way a wheel means "more" is a preference, not a fact.
+                // WHEEL WHILE FLYING CHANGES SPEED, and SCROLL UP MAKES IT FASTER -- Unreal's own
+                // direction, and the one that survived contact with a hand. It shipped inverted
+                // first because that was asked for; using it settled the question the other way.
+                // Which way a wheel means "more" is a preference, not a fact, so it is written
+                // down here rather than argued about: up is faster.
                 //
                 // MULTIPLICATIVE, so a notch feels the same at 1 as it does at 20: an additive step
                 // would be imperceptible when flying fast and violent when creeping. 1.25 per notch
@@ -2981,7 +2982,7 @@ public:
                 // this function, and io.MouseWheel is the wrong one no matter how it is spelled.
                 const f32 wheel = input_.wheel();
                 if (wheel != 0.0f) {
-                    flySpeed_ *= std::pow(1.25f, -wheel);
+                    flySpeed_ *= std::pow(1.25f, wheel);
                     flySpeed_ = flySpeed_ < 20.0f ? 20.0f : (flySpeed_ > 40000.0f ? 40000.0f : flySpeed_);
                 }
             }
@@ -9166,9 +9167,11 @@ private:
             wheelTestForceFly_ = true;
             return;
         }
-        // One notch DOWN, which is the direction that speeds up. WHEEL_DELTA is negated for down.
+        // One notch UP, which is the direction that speeds up. Positive WHEEL_DELTA is up; the
+        // test posts the real message so it exercises the same path a hand does, sign included --
+        // which is exactly what would catch this flipping back by accident.
         if (wheelTestFrame_ == 6) {
-            ::PostMessageW(hwnd, WM_MOUSEWHEEL, MAKEWPARAM(0, -WHEEL_DELTA), 0);
+            ::PostMessageW(hwnd, WM_MOUSEWHEEL, MAKEWPARAM(0, WHEEL_DELTA), 0);
             return;
         }
         // Slack for the same reason maybeInputSourceTest leaves it: PostMessageW queues, pumpEvents
@@ -9180,7 +9183,7 @@ private:
         const f32 want = wheelTestSpeedBefore_ * 1.25f;
         const bool moved = std::fabs(after - wheelTestSpeedBefore_) > 0.01f;
         const bool right = std::fabs(after - want) < std::fmax(1.0f, want * 0.02f);
-        AVER_INFO("[wheel-test] speed {:.1f} -> {:.1f} cm/s (one notch down, want {:.1f})",
+        AVER_INFO("[wheel-test] speed {:.1f} -> {:.1f} cm/s (one notch up, want {:.1f})",
                   wheelTestSpeedBefore_, after, want);
         AVER_INFO("[wheel-test] sources during onUpdate: io.MouseWheel seen={} input_.wheel() seen={}",
                   wheelTestSawImGui_ ? "yes" : "NO (always zero -- this is the bug)",
@@ -18934,7 +18937,7 @@ private:
             // The rate is still what the camera actually moves at, and somebody measuring a fly-through
             // needs it -- so it is shown, just not as the number you steer by.
             ImGui::TextDisabled("%.0f cm/s", flySpeed_);
-            ImGui::TextDisabled("Right-drag the viewport and scroll DOWN to speed up.");
+            ImGui::TextDisabled("Right-drag the viewport and scroll UP to speed up.");
             ImGui::EndPopup();
         }
 
