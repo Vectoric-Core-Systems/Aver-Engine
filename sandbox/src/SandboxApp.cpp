@@ -112,6 +112,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "BtEditor.hpp"
 #include "SoundEditor.hpp"
 #include "EditorEuler.hpp"
+#include "EditorTransform.hpp"   // dropRestLift, so a dropped asset rests on what it landed on
 #include "EditorPrefs.hpp"
 #include "EditorIcons.hpp"
 #include "EditorKeybinds.hpp"
@@ -10674,7 +10675,16 @@ private:
     // Finds a finite world point to drop an asset at, from a screen-space mouse position. Order:
     // nearest scene-entity hit, else the ground plane, else a fixed distance along the ray from the
     // camera. Z is up in this engine (see averAtmoCamAlt()), so the ground plane is Z = 0, not Y = 0.
-    Vec3 dropWorldPoint(f32 screenX, f32 screenY) const {
+    // The world point under the cursor for a drop, and whether it is ON SOMETHING.
+    //
+    // `onSurface` is what tells the caller to rest the new object on what it hit rather than leave
+    // its origin buried in it -- see restOnSurface. The ground-plane and in-front-of-camera
+    // fallbacks report false: there is nothing there to sit on, and a mesh authored around its own
+    // middle should not float half its height above an empty floor just because it was dropped at
+    // one. Z = 0 IS a surface in the sense that matters, so the ground case reports true; only the
+    // "ray points at the sky" fallback does not.
+    Vec3 dropWorldPoint(f32 screenX, f32 screenY, bool* onSurface = nullptr) const {
+        if (onSurface) *onSurface = true;
         Vec3 ro, rd;
         viewportRay(screenX, screenY, ro, rd);
 
@@ -10711,9 +10721,12 @@ private:
         }
 
         // The ray is parallel to (or points away from) the ground: fall back to a fixed distance
-        // in front of the camera, matching spawnCube()'s placement.
+        // in front of the camera, matching spawnCube()'s placement. Nothing was hit, so nothing is
+        // underneath to rest on -- the object goes exactly where the camera is pointing.
+        if (onSurface) *onSurface = false;
         return camPos_ + camForward() * kAddDistance;
     }
+
 
     // Places a content-browser asset dropped on the viewport at a screen-space position, following
     // spawnCube()'s create -> CMeshRenderer -> levelEntities_ -> undo recipe exactly. Only .ocmesh
@@ -10822,7 +10835,8 @@ private:
             return;
         }
 
-        const Vec3 at = dropWorldPoint(screenX, screenY);
+        bool onSurface = false;
+        const Vec3 at = dropWorldPoint(screenX, screenY, &onSurface);
         if (!(std::isfinite(at.x) && std::isfinite(at.y) && std::isfinite(at.z))) {
             cbStatus_ = "Could not find a valid drop position";
             AVER_WARN("[Editor] drop: computed a non-finite world position for '{}'", rel);
@@ -10832,9 +10846,21 @@ private:
         scene::World& world = scene::World::instance();
         Transform xf;
         xf.position = at;
-        if (snapMove_) for (int k=0;k<3;++k) (&xf.position.x)[k] = snapf((&xf.position.x)[k], moveSnap_);
         xf.rotation = Quat{0,0,0,1};
         xf.scale = Vec3{1,1,1};
+
+        // ON TOP OF WHAT IT LANDED ON, not inside it. Applied BEFORE the snap so the snap still
+        // quantises the final position rather than a value the lift then knocks off the grid.
+        // A MESH WITH NO KNOWN BOUNDS IS LEFT WHERE IT LANDED. meshBounds_ is filled at load from
+        // the .ocmesh's own header, so a miss means nothing measured this mesh -- and inventing a
+        // lift for it would move the object for a reason nobody could see.
+        f32 lift = 0.0f;
+        if (onSurface) {
+            if (const auto bit = meshBounds_.find(meshId); bit != meshBounds_.end())
+                lift = editor::dropRestLift(bit->second.first.z, xf.scale.z);
+        }
+        xf.position.z += lift;
+        if (snapMove_) for (int k=0;k<3;++k) (&xf.position.x)[k] = snapf((&xf.position.x)[k], moveSnap_);
 
         const scene::Entity ent = world.create(rel, scene::kInvalidEntity, xf);
         if (ent == scene::kInvalidEntity) {
@@ -10858,8 +10884,10 @@ private:
             pushEdit(std::move(c));
         }
         cbStatus_ = "Placed " + fileName;
-        AVER_INFO("[Editor] placed entity #{} from '{}' at ({:.0f}, {:.0f}, {:.0f})",
-                  (u32)ent, rel, xf.position.x, xf.position.y, xf.position.z);
+        AVER_INFO("[Editor] placed entity #{} from '{}' at ({:.0f}, {:.0f}, {:.0f}){}",
+                  (u32)ent, rel, xf.position.x, xf.position.y, xf.position.z,
+                  lift > 0.0f ? " -- lifted " + std::to_string((int)lift) + "cm to rest on the surface"
+                              : std::string());
     }
 #endif  // AVER_WITH_IMGUI
 #endif  // AVER_MODULE_SCENE

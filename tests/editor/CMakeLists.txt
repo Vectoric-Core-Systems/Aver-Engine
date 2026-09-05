@@ -27,6 +27,16 @@ target_include_directories(EditorEulerTest PRIVATE
 target_link_libraries(EditorEulerTest PRIVATE Aver.Core Aver.Platform)
 set_target_properties(EditorEulerTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# DropPlacementTest -- the lift that makes a dragged-in asset REST ON what it was dropped onto rather
+# than intersect it. Header-only and Core-only for EditorEulerTest's reason, and the same reason it
+# was worth extracting at all: the rest of the drop path needs a device, a window and a physical
+# drag, so this arithmetic is the only part of it a headless suite can reach -- and a sign error in
+# it drops objects through the floor without logging anything.
+add_executable(DropPlacementTest src/DropPlacementTest.cpp)
+target_include_directories(DropPlacementTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(DropPlacementTest PRIVATE Aver.Core)
+set_target_properties(DropPlacementTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # LevelListTest -- the level enumeration behind File > Open Level and the Content Browser's level
 # activation. Header-only and Core-only, exactly like EditorEulerTest above, for the same reason: the
 # PICKER needs ImGui and a window, the LIST does not, and the list is where a missed extension or a
