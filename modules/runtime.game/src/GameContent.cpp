@@ -474,13 +474,6 @@ void GameContent::loadProjectMeshes(rhi::IDevice& device) {
                   failed ? (", " + std::to_string(failed) + " failed") : "");
 }
 
-void GameContent::releaseProjectMeshes() {
-    for (const u64 id : projectMeshIds_) {
-        sceneMeshes_.erase(id); meshBounds_.erase(id); meshSlot0Material_.erase(id);
-    }
-    projectMeshIds_.clear();
-}
-
 rhi::MeshHandle GameContent::meshFor(u64 id) const {
     const auto it = sceneMeshes_.find(id);
     return it == sceneMeshes_.end() ? 0 : it->second;

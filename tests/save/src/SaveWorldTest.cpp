@@ -14,6 +14,7 @@
 #include "aver/scene/World.hpp"
 
 #include <cmath>
+#include <cstring>
 #include <string>
 
 using namespace aver;
@@ -231,6 +232,50 @@ int main() {
               "a save naming a component this build does not have still LOADS: " + why);
         check(w.find("FromTheFuture") != scene::kInvalidEntity,
               "and the entity is there, just without that component");
+    }
+
+    AVER_INFO("a spawner that refuses part-way leaves the world EMPTY, as the header promises");
+    {
+        clearWorld(w);
+
+        // THE SCENARIO IS AN OUT-OF-DATE SAVE, NOT A CORRUPT ONE. A save records each actor's class
+        // by NAME, and the host's spawnClass returns kInvalidEntity for a name this build no longer
+        // has -- a class renamed or deleted since the save was written. That refusal reaches
+        // restore()'s create-loop, which fails the whole load. SaveWorld.hpp promises the world is
+        // left EMPTY when that happens, "because a half-restored world is worse than an empty one:
+        // it looks playable". It was not: every entity created before the refusal stayed.
+        //
+        // Three entities with the bad class SECOND, deliberately. First would have made the bug
+        // invisible (nothing had been created yet to leak) and last would have made it maximal; the
+        // middle is the case that distinguishes "cleans up" from "cleans up only sometimes".
+        fmt::OcSaveData snap;
+        for (const char* nm : {"Good1", "GoneClass", "Good2"}) {
+            fmt::OcSaveEntity en;
+            en.name = nm;
+            en.parent = -1;
+            en.className = nm;
+            snap.entities.push_back(en);
+        }
+
+        // Refuses exactly one name, spawns anything else as a plain entity. Stands in for
+        // saveSpawnClass's `if (aver_fw_class_find(className) == 0) return kInvalidEntity;`.
+        struct Ctx { scene::World* w; } ctx{&w};
+        save::RestoreOptions ro;
+        ro.host.user = &ctx;
+        ro.host.spawnClass = [](const char* cn, void* u) -> scene::Entity {
+            if (cn && std::strcmp(cn, "GoneClass") == 0) return scene::kInvalidEntity;
+            return static_cast<Ctx*>(u)->w->create(cn ? cn : "", scene::kInvalidEntity, Transform{});
+        };
+
+        std::string why;
+        check(!save::restore(snap, w, ro, &why),
+              "restore FAILS when the spawner refuses a class this build no longer has");
+        w.flush();
+        check(w.count() == 0,
+              "AND THE WORLD IS EMPTY -- the entity created before the refusal is torn down, not "
+              "left behind for the caller to trip over");
+        check(w.find("Good1") == scene::kInvalidEntity,
+              "specifically: the one that HAD been created is gone");
     }
 
     clearWorld(w);

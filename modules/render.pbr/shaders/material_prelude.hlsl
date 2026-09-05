@@ -44,20 +44,24 @@ cbuffer AverMaterial : register(b2) {
     // fields are not independent, and averBuildSurface below for the one thing gTransmission
     // currently feeds (the AVER_MAT_ALPHA_BLEND coverage term).
     //
-    // gIor IS READ BY NOTHING, and this comment used to claim otherwise -- it said gIor "is no
-    // longer unread: it sets the critical angle in averTotalInternalReflection". That was true
-    // while the total-internal-reflection override existed; the override was removed because it
-    // could not fire legitimately from a rasterised back face (see averBuildSurface's alpha branch
-    // for the Snell argument and the measured cost), and this line went back to being false with it.
-    // The honest state: ior is authored, packed, transported to the GPU and copied into
-    // AverAuthored, and no shading term consumes it. The physically correct consumer is F0 --
+    // gIor IS READ, BY REFRACTION -- and this comment has now been wrong in both directions.
+    // It first claimed gIor set the critical angle in averTotalInternalReflection; that override
+    // was removed because it could not fire legitimately from a rasterised back face (see
+    // averBuildSurface's alpha branch for the Snell argument and the measured cost), so the
+    // comment was corrected to "read by nothing" -- and then refraction landed and made THAT
+    // false too, without anyone editing this file. voxi.hlsl's averRefractedBackdropUV reads gIor
+    // directly (`const float ior = max(gIor, 1.0001);`) to bend the refracted backdrop UV, on both
+    // the screen-space and ray-traced paths, whenever Settings::refractionMode is not Off -- which
+    // is the DEFAULT. This prelude is prepended to voxi.hlsl before compilation, so that is the
+    // same global, not a same-named twin. The physically correct consumer is still F0 --
     // F0 = ((1-n)/(1+n))^2 -- which today is authored SEPARATELY as `reflectance`, so a material
     // can state an ior and a reflectance that contradict each other (M_Glass.ocmat's own comment
     // warns about exactly that and keeps them in sync by hand). Deriving one from the other would
     // change F0 for every material that does not already agree, so it is a decision, not a tidy-up.
     //
     // Both are copied into AverAuthored rather than read directly at their use sites, so a material
-    // graph can drive either per pixel; still nothing here does refraction.
+    // graph can drive either per pixel. The refraction that consumes gIor lives in voxi.hlsl, not
+    // here -- this file only transports it.
     float  gIor;
     float  gTransmission;
     // EXPLICIT PADDING, MIRRORING MaterialConstants::_pad0/_pad1. Not load-bearing for THIS cbuffer

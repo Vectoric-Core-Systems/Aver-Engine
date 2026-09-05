@@ -107,9 +107,18 @@ public:
     // how the SandboxApp god object started.
     void loadProjectMeshes(rhi::IDevice& device);
 
-    // Drops the project's meshes from the id table. The built-in primitives survive, which is why
-    // they are tracked separately.
-    void releaseProjectMeshes();
+    // THERE IS DELIBERATELY NO releaseProjectMeshes() TWIN of releaseProjectMaterials().
+    // There was one, it had zero callers, and it was wrong: it erased sceneMeshes_/meshBounds_/
+    // meshSlot0Material_ entries without ever calling IDevice::destroyMesh on the handles they held,
+    // so the first caller to wire it up would have leaked the GPU vertex/index buffers (and any BLAS
+    // built from them) instead of freeing them. It could not have done otherwise -- it took no
+    // device, and this class only gets one as an argument to loadProjectMeshes.
+    //
+    // Nothing needs it today: openProject runs exactly once per process in the packaged game, so the
+    // device's own teardown reclaims everything. Whoever adds a project-reload path should write the
+    // correct version then -- taking rhi::IDevice&, destroying each handle before erasing it, and
+    // mirroring the editor's SandboxApp::releaseProjectMeshes, which also has to destroy per-material
+    // split parts and outline line meshes this class does not have.
 
     rhi::MeshHandle meshFor(u64 id) const;
     usize meshCount() const { return sceneMeshes_.size(); }

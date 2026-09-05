@@ -88,10 +88,12 @@ struct MaterialConstants {
     u32 graphId;
 
     // ---- dielectric transmission, read only where AVER_MAT_ALPHA_BLEND is set ----
-    // Mirrors MaterialDesc::ior/transmission. ior travels with the block for completeness (and for
-    // whatever future refraction pass wants it) but nothing reads it yet -- the only consumer today
-    // is transmission, via averBuildSurface's alpha computation in PbrShaders.cpp. See
-    // MaterialDesc::ior's own comment for why the two are not independent.
+    // Mirrors MaterialDesc::ior/transmission. THE "future refraction pass" THIS COMMENT USED TO
+    // ANTICIPATE ARRIVED: ior is read by voxi.hlsl's averRefractedBackdropUV, through the shared
+    // gIor cbuffer field this struct is uploaded into, to compute the Snell bend whenever
+    // Settings::refractionMode is not Off. transmission's own consumer is unchanged --
+    // averBuildSurface's alpha computation in PbrShaders.cpp. See MaterialDesc::ior's own comment
+    // for why the two are not independent.
     f32 ior;
     f32 transmission;
 

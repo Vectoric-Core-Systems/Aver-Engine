@@ -947,8 +947,10 @@ private:
         // fine for a week and then costs an afternoon.
         f32 ptBounceParams[4] = {};
         // GI gather control -- mirrored as gGiParams. x = how many cones the diffuse gather
-        // traces, total, including the axial one; y/z/w unused. Its own float4 for the reason
-        // ptBounceParams above has one.
+        // traces, total, including the axial one. y/z/w are REFRACTION, not spare:
+        // y = Settings::refractionMode, z = refractionStrength, w = refractionEdgeFade, all
+        // three written every frame in VoxiRenderer.cpp and read by averRefractedBackdropUV.
+        // Its own float4 for the reason ptBounceParams above has one.
         f32 giParams[4] = {};
     } cb_;
 

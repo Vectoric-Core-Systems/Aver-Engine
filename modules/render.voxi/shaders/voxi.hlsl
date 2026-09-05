@@ -55,7 +55,12 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     // unrolled away at zero taps -- a compile-time 0 would measure nothing and call it free.
     float4   gRtDenoiseParams;
     float4   gPtBounceParams;
-    // x = total cones the diffuse gather traces, including the axial one. y/z/w unused.
+    // x = total cones the diffuse gather traces, including the axial one.
+    // y/z/w are REFRACTION, not spare: y = mode (Settings::refractionMode, 0 = off),
+    // z = strength, w = edge fade. averRefractedBackdropUV below reads all three. They said
+    // "unused" for as long as refraction has existed -- the feature landed in a row this
+    // comment still described as free, which is exactly how the next person adding a field
+    // near here would have overwritten it.
     float4   gGiParams;
 };
 

@@ -3319,6 +3319,7 @@ public:
         if (cbMoveTestFrames_ > 0 && --cbMoveTestFrames_ == 0) runCbMoveTest(cbMoveTestDir_);
         if (saveDirtyTestFrames_ > 0 && --saveDirtyTestFrames_ == 0) runSaveDirtyTest();
         if (findRefsFrames_ > 0 && --findRefsFrames_ == 0) runFindRefs();
+        if (projectSwitchFrames_ > 0 && --projectSwitchFrames_ == 0) runProjectSwitchTest();
         if (prefsWriteTestFrames_ > 0 && --prefsWriteTestFrames_ == 0) runPrefsWriteTest();
         if (keybindTestAutoFrames_ > 0 && --keybindTestAutoFrames_ == 0) runKeybindPersistTest(keybindTestMode_);
 #endif
@@ -6511,6 +6512,7 @@ public:
     // confirm's scan, reachable without a modal -- so the thing that stops someone destroying a
     // shared asset can be tested rather than eyeballed once.
     void setFindRefs(const std::string& p) { findRefsPath_ = p; findRefsFrames_ = 8; }
+    void setProjectSwitchTest(int frames) { projectSwitchFrames_ = frames > 0 ? frames : 8; }
     void setRecaptureTest(int n)   { recapFrames_ = n; }                          // --recapture-test
     void setViewmodelTest(int n)   { vmFrames_ = n; }                             // --viewmodel-test
     void setSkinSceneDir(std::string d) { skinSceneDir_ = std::move(d); }          // --skin-scene-test <dir>
@@ -8366,7 +8368,26 @@ private:
     }
 
     void applyProjectRenderSettings() {
-        if (!project_.valid() || !project_.hasRenderSettings()) return;
+        if (!project_.valid()) return;
+
+        // MIRRORS, NOT A DELTA -- which is why these two run BEFORE the hasRenderSettings() guard
+        // rather than beside the knobs they look like they belong with. Everything past that guard
+        // applies a manifest key only when the key is stated (the "-1 means unstated" rule), so a
+        // project that states nothing DELIBERATELY inherits the live value. These two are the
+        // opposite: projectBackend_ is the Project Settings "Renderer" dropdown's backing field and
+        // frameBudgetMs_ is a live controller target, and each is supposed to say what THIS project
+        // asked for. Behind the guard, opening a project with no RENDER.* keys at all left the
+        // PREVIOUS project's backend showing in the dropdown and its frame budget still throttling
+        // GI -- and because the Rendering page writes the whole block back (project_.backend =
+        // projectBackend_, below), the next edit to any control on that page baked the inherited
+        // backend into a manifest that had never asked for it.
+        projectBackend_ = project_.backend;
+        // NOT WHEN --frame-budget SAID SO. This runs on every project apply, and the manifest's
+        // default is -1, so an unconditional assignment silently switched the flag back off one
+        // frame after it was set -- the controller was wired, reachable and never once ran.
+        if (!frameBudgetForced_) frameBudgetMs_ = project_.frameBudgetMs;
+
+        if (!project_.hasRenderSettings()) return;
         if (!voxiAttached_) { projectRenderPending_ = true; return; }
         projectRenderPending_ = false;
 
@@ -8386,12 +8407,8 @@ private:
         else if (project_.lodThresholdPx >= 0.0f)
             setLodSelect(lodSelectEnabled_, project_.lodThresholdPx);
         if (project_.occlusionCull >= 0) occlusionCullEnabled_ = project_.occlusionCull != 0;
-        // Applied to the UI only -- main() has already used this to pick the device.
-        projectBackend_ = project_.backend;
-        // NOT WHEN --frame-budget SAID SO. This runs on every project apply, and the manifest's
-        // default is -1, so an unconditional assignment silently switched the flag back off one
-        // frame after it was set -- the controller was wired, reachable and never once ran.
-        if (!frameBudgetForced_) frameBudgetMs_ = project_.frameBudgetMs;
+        // projectBackend_ and frameBudgetMs_ were applied above the hasRenderSettings() guard --
+        // see the comment there for why they cannot live down here with the rest of the block.
         if (project_.depthPrepass  >= 0) depthPrepassOverride_ = project_.depthPrepass != 0;
 
         // ---- PHYSICS AND AUDIO, which no manifest could state until now -------------------------
@@ -12717,6 +12734,62 @@ private:
         AVER_INFO("[prefs-write-test] RESULT: {}", failures == 0 ? "PASS" : "FAIL");
     }
     int prefsWriteTestFrames_ = 0;
+
+    // --project-switch-test: opening a project that states NO render settings must not leave the
+    // previous project's settings in force. Synthetic on purpose -- it drives applyProjectRenderSettings
+    // with two hand-built ProjectDescs rather than two real .ocproject files on disk, because what is
+    // under test is that function's guard, not the parser or the project browser. valid() needs only
+    // a name and a dir, so no filesystem is touched and this runs headless on any machine.
+    //
+    // It falsifies a specific regression: projectBackend_ and frameBudgetMs_ used to be assigned
+    // BELOW the hasRenderSettings() early return, so a bare project inherited both from whatever was
+    // open before -- and the Rendering page then wrote the inherited backend into the bare project's
+    // own manifest on the next unrelated edit.
+    int projectSwitchFrames_ = 0;
+    void runProjectSwitchTest() {
+        int failures = 0;
+        auto check = [&](bool cond, const char* what) {
+            if (cond) AVER_INFO("[project-switch-test] PASS: {}", what);
+            else      { AVER_ERROR("[project-switch-test] FAIL: {}", what); ++failures; }
+        };
+
+        const fmt::ProjectDesc saved = project_;
+        const std::string savedBackend = projectBackend_;
+        const f32 savedBudget = frameBudgetMs_;
+        const bool savedForced = frameBudgetForced_;
+        frameBudgetForced_ = false;   // the manifest path, not the --frame-budget override path
+
+        fmt::ProjectDesc a;
+        a.name = "SwitchTestA";
+        a.dir = executableDir();
+        a.backend = "vulkan";
+        a.frameBudgetMs = 8.0f;
+        check(a.valid() && a.hasRenderSettings(), "project A is valid and states render settings");
+        project_ = a;
+        applyProjectRenderSettings();
+        check(projectBackend_ == "vulkan", "opening A puts its backend in the dropdown mirror");
+        check(frameBudgetMs_ == 8.0f, "opening A arms its frame budget");
+
+        fmt::ProjectDesc b;
+        b.name = "SwitchTestB";
+        b.dir = executableDir();
+        check(b.valid() && !b.hasRenderSettings(), "project B is valid and states NO render settings");
+        project_ = b;
+        applyProjectRenderSettings();
+        check(projectBackend_.empty(),
+              "opening B clears the backend mirror instead of inheriting A's vulkan");
+        check(frameBudgetMs_ == b.frameBudgetMs,
+              "opening B resets the frame budget instead of inheriting A's 8ms");
+
+        project_ = saved;
+        projectBackend_ = savedBackend;
+        frameBudgetMs_ = savedBudget;
+        frameBudgetForced_ = savedForced;
+        applyProjectRenderSettings();
+
+        AVER_INFO("[project-switch-test] RESULT: {}", failures == 0 ? "PASS" : "FAIL");
+    }
+
     std::string findRefsPath_;
     int findRefsFrames_ = 0;
     void runFindRefs() {
@@ -23428,6 +23501,7 @@ Application* createApplication(int argc, char** argv) {
     int prefsWriteArg = 0;
     f32 frameBudgetArg = 0.0f;
     const char* findRefsArg = nullptr;
+    int projectSwitchArg = 0;
     int recaptureArg = 0;
     int viewmodelArg = 0;
     // --gpu-timing takes no value, so it's matched in the i+1<argc loop below only incidentally --
@@ -23447,6 +23521,7 @@ Application* createApplication(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--prefs-write-test"))     prefsWriteArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--frame-budget"))         frameBudgetArg = (f32)std::atof(argv[i + 1]);
         if (!std::strcmp(argv[i], "--find-refs"))            findRefsArg = argv[i + 1];
+        if (!std::strcmp(argv[i], "--project-switch-test")) projectSwitchArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--recapture-test"))       recaptureArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--viewmodel-test"))       viewmodelArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--refraction"))           refraction = std::atoi(argv[i + 1]);
@@ -24388,6 +24463,7 @@ Application* createApplication(int argc, char** argv) {
     if (prefsWriteArg > 0) app->setPrefsWriteTest(prefsWriteArg);
     if (frameBudgetArg > 0.0f) app->setFrameBudget(frameBudgetArg);
     if (findRefsArg) app->setFindRefs(findRefsArg);
+    if (projectSwitchArg) app->setProjectSwitchTest(projectSwitchArg);
     if (recaptureArg > 0) app->setRecaptureTest(recaptureArg);
     if (viewmodelArg > 0) app->setViewmodelTest(viewmodelArg);
 #endif

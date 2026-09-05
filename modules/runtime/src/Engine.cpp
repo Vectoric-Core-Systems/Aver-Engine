@@ -52,8 +52,13 @@ int Engine::run(Application* app) {
         }
     }
 
-    // --- RHI device. Default order is D3D12 -> D3D11 -> Vulkan -> Null; D3D11 and Vulkan are
-    //     13-line stubs that return nullptr today, so the default order really means D3D12 or Null.
+    // --- RHI device. Default order is D3D12 -> D3D11 -> Vulkan -> Null. D3D11 is still a 13-line
+    //     stub that returns nullptr; VULKAN IS NOT, and this comment claimed it was long after that
+    //     stopped being true. It is a real backend, compiled by default (AVER_RHI_VULKAN is ON as of
+    //     94e0091) and reachable from this fallback chain, so a machine without D3D12 now genuinely
+    //     gets a working device here rather than Null. It is not at D3D12 parity -- the shadow
+    //     cascade map is not written (see the Vulkan pushRenderScope note) -- so "falls through to
+    //     Vulkan" means a picture, not the same picture.
     rhi::DeviceDesc dd;
     dd.enableDebug = cfg.enableDebugLayer;
     dd.useWarp = cfg.useWarp;
