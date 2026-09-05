@@ -149,9 +149,22 @@ inline GraphAttributeSpec attr(std::string key, std::string label) {
 inline std::vector<GraphNodeDesc> buildCatalog() {
     std::vector<GraphNodeDesc> t;
     // -- constants: a single output pin carrying the literal as its default value --
-    t.push_back({"ConstFloat", "Const Float", "Const", {pin("value", "float", true, "0")}});
-    t.push_back({"ConstInt",   "Const Int",   "Const", {pin("value", "int",   true, "0")}});
-    t.push_back({"ConstBool",  "Const Bool",  "Const", {pin("value", "bool",  true, "false")}});
+    //
+    // THE `value` ATTRIBUTE IS WHAT MAKES THESE USABLE AT ALL, and its absence was the single
+    // biggest hole in this editor. A Const spawned from the palette carried only its PIN default, and
+    // the details panel renders a row per DECLARED attribute (plus any key=value the node already
+    // has) -- so a fresh Const showed "This node type has no attributes." and there was no
+    // affordance anywhere to type a number into it. Every constant in an editor-built graph was 0,
+    // permanently. That is most of the reason every graph in this repo is hand-written text: you
+    // could not author a speed, a duration, a key code or a direction without leaving the editor.
+    //
+    // The parser has read `value=` on a Const all along, and reads it BY THE NODE'S DECLARED TYPE
+    // (OcGraphParser.cs) rather than by guessing from the literal's shape -- so `value=100` on a
+    // ConstFloat is refused by name rather than silently compiled to 0.0f. Declaring it here is all
+    // that was missing to reach it.
+    t.push_back({"ConstFloat", "Const Float", "Const", {pin("value", "float", true, "0")}, {attr("value", "Value")}});
+    t.push_back({"ConstInt",   "Const Int",   "Const", {pin("value", "int",   true, "0")}, {attr("value", "Value")}});
+    t.push_back({"ConstBool",  "Const Bool",  "Const", {pin("value", "bool",  true, "false")}, {attr("value", "Value")}});
     // -- arithmetic: a, b in; result out --
     t.push_back({"Add",      "Add",      "Math", {pin("a", "float", false), pin("b", "float", false), pin("result", "float", true)}});
     // -- Print: the node this vocabulary has never had, and the one a Blueprint author reaches for

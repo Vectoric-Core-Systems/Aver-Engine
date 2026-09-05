@@ -1325,6 +1325,22 @@ bool GraphEditor::setAttribute(const std::string& nodeId, const std::string& key
         // half. Renaming the attribute without the record leaves a graph that looks renamed and
         // has silently stopped firing.
         if (key == "name" && n.type == "CustomEvent") syncEventEntry(n.id, value);
+        // A CONSTANT IS WRITTEN TWICE INTO THE FILE, so both copies have to agree.
+        //
+        // A Const node carries its literal in two places: the NODE line's `value=` (which this row
+        // edits) and the output PIN's default, written at spawn. OcGraphParser.cs turns BOTH into a
+        // ConstantOutput for the same node id, and the compiler takes FirstOrDefault -- so today the
+        // attribute happens to win, purely because a NODE line precedes its own PIN lines in the
+        // file. That is a correct outcome resting on nothing but emission order, and a writer that
+        // ever grouped PIN records differently would silently flip every constant in every graph
+        // back to its spawn default.
+        //
+        // Writing both makes the file self-consistent, so the order stops mattering and a human
+        // reading the text is not shown two different numbers for one value.
+        if (key == "value") {
+            for (fmt::OcGraphPin& p : n.pins)
+                if (p.isOutput && p.name == "value") p.defaultValue = value;
+        }
         dirty_ = true;
         return true;
     }

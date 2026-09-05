@@ -821,11 +821,29 @@ static void testNodeAttributeCatalog() {
 
     // A type with no attributes at all declares an empty list, not a list with an empty entry --
     // computeAttributeRows below relies on this to draw nothing extra for a plain Add node.
-    const char* noAttrs[] = {"Add", "ConstFloat", "Branch", "OnTick", "MouseDelta", "MoveAxis"};
+    //
+    // ConstFloat WAS ON THIS LIST, and it was pinning the defect rather than the design. Declaring no
+    // attributes is exactly what made a spawned Const uneditable: the details panel renders a row per
+    // declared attribute, so it showed "This node type has no attributes" and there was nowhere to
+    // type a number. Every constant in an editor-built graph compiled to 0 forever. The Const types
+    // are asserted the other way now, immediately below.
+    const char* noAttrs[] = {"Add", "Branch", "OnTick", "MouseDelta", "MoveAxis"};
     for (const char* t : noAttrs) {
         const GraphNodeDesc* d = findGraphNodeDesc(t);
         if (d) check(d->attributes.empty(), std::string(t) + " declares no attributes");
         else check(false, std::string(t) + " present (attribute check skipped)");
+    }
+
+    // ...and every Const type MUST declare `value`, or its literal is unauthorable from the editor.
+    // Named `value` exactly, because that is the key OcGraphParser.cs reads and parses BY THE NODE'S
+    // DECLARED TYPE -- a different spelling would write an attribute nothing reads, which looks like
+    // it works right up until the graph runs.
+    for (const char* t : {"ConstFloat", "ConstInt", "ConstBool"}) {
+        const GraphNodeDesc* d = findGraphNodeDesc(t);
+        if (!d) { check(false, std::string(t) + " present"); continue; }
+        bool hasValue = false;
+        for (const GraphAttributeSpec& a : d->attributes) if (a.key == "value") hasValue = true;
+        check(hasValue, std::string(t) + " declares a 'value' attribute so its literal can be typed");
     }
 }
 

@@ -456,6 +456,58 @@ static std::string variablesFixtureText() {
         "OUT gv value\n";
 }
 
+// A Const node's literal is EDITABLE, and both copies of it agree on disk.
+//
+// THE BUG THIS PINS, and it is the reason every graph in this repo is hand-written text: a Const
+// spawned from the palette declared no `value` attribute, so the details panel drew "This node type
+// has no attributes" and offered nowhere to type a number. Every constant in an editor-built graph
+// compiled to its spawn default of 0, permanently -- no speed, no duration, no key code, no
+// direction could be authored without leaving the editor.
+//
+// AND THE SECOND HALF, which is what makes this more than a one-line catalog change: the literal is
+// written into the file TWICE -- the NODE line's `value=` and the output PIN's default. The C#
+// parser turns both into a ConstantOutput for the same node and the compiler takes FirstOrDefault,
+// so the attribute wins only because a NODE line precedes its own PIN lines. Correct, resting on
+// emission order alone. Asserting BOTH land is what stops a future writer change from silently
+// resetting every constant in every graph to its spawn default.
+static void testConstNodeValueIsEditable() {
+    AVER_INFO("=== a Const node's value can be authored, and both copies agree ===");
+    const std::string tmp = (std::filesystem::path(scratchDir()) / "const_value_test.ocgraph").string();
+    // A raw string literal, for the reason graphStarterText gives: tooling in this repo has eaten a
+    // backslash-n four times now, landing a real newline inside a narrow literal and producing a wall
+    // of C2001. Raw literals cannot be mangled that way.
+    writeFile(tmp, R"(OCGRAPH 1
+DOMAIN gameplay
+NAME ConstTest
+NODE cf ConstFloat 0 0
+PIN cf value out float 0
+)");
+
+    GraphEditor ed(tmp);
+    check(ed.setAttribute("cf", "value", "0.35"),
+          "setAttribute('cf', 'value', ...) succeeds -- the attribute is declared now");
+
+    const fmt::OcGraphNode* cf = nullptr;
+    for (const auto& n : ed.graph().nodes) if (n.id == "cf") { cf = &n; break; }
+    check(cf != nullptr, "the Const node is still there");
+    if (cf) {
+        const GraphNodeAttribute a = getNodeAttribute(*cf, "value");
+        check(a.found && a.value == "0.35", "the NODE line carries value=0.35");
+        bool pinMatches = false;
+        for (const fmt::OcGraphPin& p : cf->pins)
+            if (p.isOutput && p.name == "value") pinMatches = (p.defaultValue == "0.35");
+        check(pinMatches,
+              "and the output PIN's default was updated to match, so the file cannot contradict itself");
+    }
+
+    std::string why;
+    check(ed.save(&why), "it saves (why='" + why + "')");
+    const std::string onDisk = readFile(tmp);
+    check(onDisk.find("value=0.35") != std::string::npos, "value=0.35 reached the file");
+    check(onDisk.find("PIN cf value out float 0.35") != std::string::npos,
+          "and so did the pin default -- both copies, one number");
+}
+
 static void testVariablesParseAndByteIdenticalRoundTrip() {
     AVER_INFO("=== variables: parse into GraphEditor::variables() and round-trip byte-identically ===");
     const std::string text = variablesFixtureText();
@@ -1653,6 +1705,7 @@ int main() {
     testFunctionsInTheEditor();
     testLoadFailure();
     testWrongExtensionIsRejectedByFactory();
+    testConstNodeValueIsEditable();
     testContentBrowserStarterOpensAndKeepsItsClass();
     testClassPlacementsCarryTheEditorsMoves();
     testPaletteSearchRanksSensibly();
