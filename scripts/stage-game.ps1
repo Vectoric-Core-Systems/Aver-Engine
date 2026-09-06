@@ -126,9 +126,41 @@ Note "project '$gameName'  content=$contentRel  startmap=$startMap  tree=$BuildD
 
 # Compiled scripts must exist and must not be older than their sources: a package built from stale
 # script DLLs runs the PREVIOUS version of the game, silently.
+#
+# ONLY WHEN THE PROJECT ACTUALLY HAS C# TO COMPILE. This check used to be unconditional, which made
+# every GRAPH-DRIVEN game impossible to package -- and graph-driven is the headline authoring story
+# here. Measured: test-content/AN_Playable has ZERO .cs files, runs correctly (three Aver Node
+# classes declared from .ocgraph, "0 behaviour(s) live" reported as the normal state, not an error),
+# and could not be packaged by any means, because it was being asked for an artefact it does not use
+# and has no way to produce. Every project on this machine was in that state.
+#
+# .ocgraph classes are NOT compiled into Binaries\Scripts. They are read from Content at runtime by
+# HostBridge.DeclareGraphClasses and compiled to IL in-process, so they ride along in the ordinary
+# content copy below and need nothing from this gate.
+#
+# The staleness half is untouched and still applies to any project that DOES have sources: shipping
+# yesterday's assemblies silently is the failure this whole block exists to prevent.
 $scriptsBin = Join-Path $binariesSrc 'Scripts'
-if (-not (Test-Path -LiteralPath $scriptsBin)) {
-    Fail "no compiled scripts at $scriptsBin -- run Compile .NET in the editor before packaging."
+$scriptSrcDir = Join-Path $contentSrc 'Scripts'
+$authoredScripts = @()
+if (Test-Path -LiteralPath $scriptSrcDir) {
+    # obj/ and bin/ excluded for the reason the staleness check below spells out at length: they are
+    # build output living inside the source tree, and counting them here would demand a compile for a
+    # project whose only .cs files are MSBuild's own generated ones.
+    # -Include IS SILENTLY IGNORED WITH -LiteralPath. Get-ChildItem only applies -Include when the
+    # PATH itself carries a wildcard, so `-LiteralPath <dir> -Recurse -Include *.cs` returns EVERY
+    # file under <dir> and filters nothing at all. Measured on AN_Playable, whose Content/Scripts
+    # holds three .ocgraph files and no C# whatsoever: it reported "3 authored script source(s)".
+    # Extension filtering is therefore done in Where-Object, which has no such rule.
+    $authoredScripts = @(Get-ChildItem -LiteralPath $scriptSrcDir -Recurse -File -ErrorAction SilentlyContinue |
+                         Where-Object { $_.Extension -in '.cs', '.fs' } |
+                         Where-Object { $_.FullName -notmatch '[\\/](obj|bin)[\\/]' })
+}
+
+if ($authoredScripts.Count -eq 0) {
+    Note "no authored C#/F# under $scriptSrcDir -- skipping the compiled-scripts check (a graph-only game compiles its .ocgraph classes at runtime)"
+} elseif (-not (Test-Path -LiteralPath $scriptsBin)) {
+    Fail "$($authoredScripts.Count) authored script source(s) under $scriptSrcDir but no compiled scripts at $scriptsBin -- run Compile .NET in the editor before packaging."
 } else {
     $newestDll = (Get-ChildItem -LiteralPath $scriptsBin -Filter *.dll -ErrorAction SilentlyContinue |
                   Sort-Object LastWriteTimeUtc | Select-Object -Last 1)
@@ -147,7 +179,13 @@ if (-not (Test-Path -LiteralPath $scriptsBin)) {
             #
             # The content copy below already drops obj/bin for exactly the same reason: they are
             # build output living inside the source tree, not content.
-            $newestSrc = (Get-ChildItem -LiteralPath $srcDir -Recurse -Include *.cs, *.fs -ErrorAction SilentlyContinue |
+            # SAME -Include-IS-IGNORED BUG AS ABOVE, and it was here first. With -LiteralPath this
+            # scanned EVERY file under Content/Scripts rather than just .cs/.fs -- so on a project
+            # holding both C# and .ocgraph, touching a graph made the newest "source" a .ocgraph and
+            # reported "script sources are NEWER than the compiled assemblies", demanding a C#
+            # recompile that could not have changed anything. Filtered where it is honoured.
+            $newestSrc = (Get-ChildItem -LiteralPath $srcDir -Recurse -File -ErrorAction SilentlyContinue |
+                          Where-Object { $_.Extension -in '.cs', '.fs' } |
                           Where-Object { $_.FullName -notmatch '[\\/](obj|bin)[\\/]' } |
                           Sort-Object LastWriteTimeUtc | Select-Object -Last 1)
             if ($newestSrc -and $newestSrc.LastWriteTimeUtc -gt $newestDll.LastWriteTimeUtc) {
