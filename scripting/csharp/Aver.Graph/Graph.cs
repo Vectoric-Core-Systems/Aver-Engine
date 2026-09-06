@@ -831,6 +831,39 @@ public class Graph
             }
         }
 
+        // AN EXEC OUTPUT MAY DRIVE EXACTLY ONE LINK, and this check exists here so the EDITOR can say
+        // so. The rule itself was already enforced -- GraphCompiler.FindExecTarget throws a
+        // well-worded InvalidOperationException for it -- but only at COMPILE time, only for a node
+        // the exec walk actually reaches, and as an exception rather than a validation error. An
+        // author's first sight of it was the engine log at project open, on a graph they had finished
+        // and put away. Checked here, it reaches the canvas as a badge on the offending node the
+        // moment they press Validate.
+        //
+        // DATA OUTPUTS ARE UNAFFECTED and deliberately so: a value may fan out to as many readers as
+        // want it. It is control flow that cannot fork without saying which order it forks in, which
+        // is what a Sequence node is for.
+        //
+        // NAMED SO THE EDITOR CAN FIND THE NODE: the message leads with Node '<id>' because
+        // GraphEditor.errorNodeId reads the first single-quoted token and badges it only if it is a
+        // real node id. Leading with 'nodeId.pinName' -- which is what the compiler's own message
+        // does -- would badge nothing.
+        foreach (var node in Nodes.Values)
+        {
+            foreach (var pin in node.Pins)
+            {
+                if (!pin.IsOutput || pin.Type != PinType.Exec) continue;
+                int driven = 0;
+                foreach (var l in Links)
+                    if (l.SourceNodeId == node.Id && l.SourcePinName == pin.Name) ++driven;
+                if (driven <= 1) continue;
+                err = $"Node '{node.Id}' has exec output '{pin.Name}' wired to {driven} links -- an " +
+                      "exec output can only continue to ONE place, unlike a data output (which may " +
+                      "fan out to many readers). Wire a Sequence node here if more than one thing " +
+                      "should run from this point.";
+                return false;
+            }
+        }
+
         // A PARAM NODE CANNOT LIVE INSIDE A FUNCTION, and until this check existed nothing said so.
         // EmitParam emits `Ldarg <index into Graph.Parameters>`. Inside a function body the argument
         // slots are the FUNCTION's own inputs (see CompileFunction, which rebases _varStoreArgIndex
