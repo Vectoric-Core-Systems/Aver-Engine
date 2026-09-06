@@ -10,6 +10,20 @@ add_executable(EditorPrefsTest
 target_link_libraries(EditorPrefsTest PRIVATE Aver.Platform Aver.Core)
 set_target_properties(EditorPrefsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# EditorNotificationsTest -- the notification model, with no UI anywhere near it.
+#
+# Aver.Core ONLY: no Aver.Platform (it touches no filesystem) and, deliberately, NO imgui and no
+# AVER_WITH_IMGUI. Time enters the model as a parameter to tick(), which is the entire reason expiry,
+# dedup and the cap can be asserted without a graphics context. If this target ever needs ImGui, the
+# model has stopped being pure and the split described in EditorNotifications.hpp has been undone --
+# fix the header rather than this line.
+add_executable(EditorNotificationsTest
+  src/EditorNotificationsTest.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/EditorNotifications.cpp)
+target_include_directories(EditorNotificationsTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(EditorNotificationsTest PRIVATE Aver.Core)
+set_target_properties(EditorNotificationsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # EditorEulerTest -- the Euler <-> quaternion pair the editor reads and writes every transform
 # through. Header-only, so this needs no sandbox .cpp; it exists because those two functions used to
 # be static inside SandboxApp.cpp where nothing could reach them, and one of them was wrong in a way
