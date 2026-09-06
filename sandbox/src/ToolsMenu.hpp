@@ -140,6 +140,9 @@ private:
         std::string reloadStatus;
         bool reloadOk = false;
     };
+
+    // The "Compiling C#..." notification, updated in place and finished by reapCompile.
+    u64 compileNotify_ = 0;
     std::shared_ptr<Compile> compile_;
     std::thread compileThread_;
 

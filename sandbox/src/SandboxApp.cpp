@@ -6885,6 +6885,7 @@ public:
         synapse::BakeStats st;
         if (!editor::bakeNavigation(scene::World::instance(), s, nav_, &st, &reason)) {
             AVER_WARN("[Editor] navigation bake failed: {}", reason);
+            notifyOutcome(editor::NotifySeverity::Error, "Navigation bake failed", reason, true);
             if (why) *why = reason;
             nav_ = fmt::OcNavData{};
             rebuildNavOverlay(e);
@@ -6899,6 +6900,8 @@ public:
         if (levelPath_.empty()) {
             AVER_WARN("[Editor] navigation baked but NOT saved -- this level has no path yet; "
                       "save the level and bake again to write its .ocnav");
+            notifyOutcome(editor::NotifySeverity::Warning, "Navigation baked, but not saved",
+                         "This level has no path yet. Save it and bake again to write its .ocnav.");
             return true;
         }
         const std::string path = editor::navPathForLevel(levelPath_);
@@ -6906,9 +6909,12 @@ public:
         if (!fmt::saveOcNav(path, nav_, &wwhy)) {
             AVER_WARN("[Editor] navigation bake could not be written to {}: {}", path, wwhy);
             if (why) *why = wwhy;
+            notifyOutcome(editor::NotifySeverity::Error, "Could not write the navmesh", wwhy, true);
             return false;
         }
         AVER_INFO("[Editor] navigation written to {}", path);
+        notifyOutcome(editor::NotifySeverity::Success, "Navigation baked",
+                     std::filesystem::path(path).filename().string());
         return true;
     }
 
@@ -18223,11 +18229,15 @@ private:
     // Imports one asset into destDir: models and audio are converted, everything else is copied.
     // UI-side: calls cbIsEditable/cbInvalidate/importModel/importAudio, all the content browser's.
     // Its one non-browser caller (--import's deferred handshake in onInit) is guarded instead.
-    // Import outcomes go to a NOTIFICATION as well as to cbStatus_, and the difference matters:
-    // cbStatus_ is the Content Browser's footer, visible only while that drawer is open, and an
-    // import can be started by a drag from Explorer with the drawer shut. The messages themselves
-    // said "see the Output Log" -- naming a panel they gave the user no way to open.
-    void notifyImport(editor::NotifySeverity sev, std::string title, std::string body,
+    // One-line outcomes go to a NOTIFICATION as well as to whatever panel-local status line they
+    // already had, and the difference matters: cbStatus_ is the Content Browser's footer, visible
+    // only while that drawer is open, and an import can be started by a drag from Explorer with
+    // the drawer shut. Several of these messages said "see the Output Log" -- naming a panel they
+    // gave the user no way to open, which is what the offerLog action fixes.
+    //
+    // Named for the shape rather than the caller: it started as import-only and is now also the
+    // navmesh bake and the GI cache flush.
+    void notifyOutcome(editor::NotifySeverity sev, std::string title, std::string body,
                       bool offerLog = false) {
         editor::Notification n;
         n.severity = sev;
@@ -18254,7 +18264,7 @@ private:
         if (!cbIsEditable(destDir)) {
             AVER_WARN("[Import] '{}' is engine content and is read-only", destDir);
             cbStatus_ = "Engine content is read-only";
-            notifyImport(editor::NotifySeverity::Warning, "Import refused",
+            notifyOutcome(editor::NotifySeverity::Warning, "Import refused",
                          "Engine content is read-only.");
             return;
         }
@@ -18262,14 +18272,14 @@ private:
         // a file that had moved, or of one already imported, simply appeared to do nothing.
         if (!std::filesystem::exists(src, ec)) {
             AVER_WARN("[Import] source not found: {}", src);
-            notifyImport(editor::NotifySeverity::Warning, "Import failed", "Source not found: " + src);
+            notifyOutcome(editor::NotifySeverity::Warning, "Import failed", "Source not found: " + src);
             return;
         }
         const std::string name = std::filesystem::path(src).filename().string();
         const std::string dest = destDir + "\\" + name;
         if (std::filesystem::exists(dest, ec)) {
             AVER_WARN("[Import] '{}' already exists in {} - not overwritten; rename the source or remove it first", name, destDir);
-            notifyImport(editor::NotifySeverity::Warning, "Already imported",
+            notifyOutcome(editor::NotifySeverity::Warning, "Already imported",
                          name + " exists here already and was not overwritten.");
             return;
         }
@@ -18284,14 +18294,14 @@ private:
         std::filesystem::copy_file(src, dest, ec);
         if (ec) { AVER_WARN("[Import] failed to copy '{}' -> '{}': {}", src, dest, ec.message());
                   cbStatus_ = "Import failed - see the Output Log";
-                  notifyImport(editor::NotifySeverity::Error, "Import failed", ec.message(), true);
+                  notifyOutcome(editor::NotifySeverity::Error, "Import failed", ec.message(), true);
                   return; }
         AVER_INFO("[Import] imported '{}' into {}", name, destDir);
         cbStatus_ = "Imported " + name;
         // Content-relative, not absolute: the full path is unreadable at this width and the
         // reader already knows which project is open. cbRelativeToContent falls back to the
         // absolute path when there is no project, which is the only case where it helps.
-        notifyImport(editor::NotifySeverity::Success, "Imported " + name,
+        notifyOutcome(editor::NotifySeverity::Success, "Imported " + name,
                      "into " + importDestLabel(destDir));
         cbInvalidate(destDir);
     }
@@ -18305,7 +18315,7 @@ private:
             AVER_WARN("[Import] {} could not be decoded: {}",
                       std::filesystem::path(src).filename().string(), r.error);
             cbStatus_ = "Import failed - see the Output Log";
-            notifyImport(editor::NotifySeverity::Error,
+            notifyOutcome(editor::NotifySeverity::Error,
                          "Could not decode " + std::filesystem::path(src).filename().string(),
                          r.error, true);
             return;
@@ -18317,7 +18327,7 @@ private:
         if (std::filesystem::exists(out, ec)) {
             AVER_WARN("[Import] '{}' already exists in {} - not overwritten", outName, destDir);
             cbStatus_ = "Already imported";
-            notifyImport(editor::NotifySeverity::Warning, "Already imported",
+            notifyOutcome(editor::NotifySeverity::Warning, "Already imported",
                          outName + " exists here already and was not overwritten.");
             return;
         }
@@ -18326,7 +18336,7 @@ private:
         if (!fmt::saveOcAudio(out, data, std::filesystem::path(src).filename().string(), &why)) {
             AVER_WARN("[Import] could not write '{}': {}", out, why);
             cbStatus_ = "Import failed - see the Output Log";
-            notifyImport(editor::NotifySeverity::Error, "Could not write " + outName, why, true);
+            notifyOutcome(editor::NotifySeverity::Error, "Could not write " + outName, why, true);
             return;
         }
 
@@ -18338,7 +18348,7 @@ private:
                   std::filesystem::path(src).filename().string(), outName,
                   data.samples.size(), r.decoder, data.channels, data.sampleRate, seconds);
         cbStatus_ = "Imported " + outName;
-        notifyImport(editor::NotifySeverity::Success, "Imported " + outName,
+        notifyOutcome(editor::NotifySeverity::Success, "Imported " + outName,
                      std::to_string(data.channels) + " ch, " +
                          std::to_string(data.sampleRate) + " Hz");
         cbInvalidate(destDir);
@@ -18355,12 +18365,12 @@ private:
         if (!importGltfToDir(src, destDir, sum, &why)) {
             AVER_WARN("[Import] {}", why);
             cbStatus_ = "Import failed - see the Output Log";
-            notifyImport(editor::NotifySeverity::Error, "Could not import " + srcName, why, true);
+            notifyOutcome(editor::NotifySeverity::Error, "Could not import " + srcName, why, true);
             return;
         }
         if (sum.meshesWritten == 0 && sum.rigsWritten == 0 && sum.clipsWritten == 0) {
             cbStatus_ = "Import produced nothing - see the Output Log";
-            notifyImport(editor::NotifySeverity::Warning, "Nothing imported from " + srcName,
+            notifyOutcome(editor::NotifySeverity::Warning, "Nothing imported from " + srcName,
                          "The file parsed but contained no meshes, skeletons or clips.", true);
             return;
         }
@@ -18369,7 +18379,7 @@ private:
                                    std::to_string(sum.clipsWritten) + " clip(s)";
         cbStatus_ = "Imported " + counts + " from " + srcName;
         // The outcome of a slow operation, which is precisely what a notification is for.
-        notifyImport(editor::NotifySeverity::Success, "Imported " + srcName, counts);
+        notifyOutcome(editor::NotifySeverity::Success, "Imported " + srcName, counts);
         cbInvalidate(destDir);
         wantMeshReload_ = true;
     }
@@ -20441,7 +20451,15 @@ private:
                         static_cast<unsigned long long>(pend / (1024 * 1024)),
                         voxiRenderer_.giCachePendingCount());
             ImGui::BeginDisabled(pend == 0);
-            if (ImGui::Button("Write to disk now")) voxiRenderer_.giCacheFlush();
+            if (ImGui::Button("Write to disk now")) {
+                const u32 wrote = voxiRenderer_.giCacheFlush();
+                // A count, not "done": flushing nothing and flushing 400 volumes look identical
+                // from the button, and the difference is the whole reason to press it.
+                notifyOutcome(wrote ? editor::NotifySeverity::Success : editor::NotifySeverity::Info,
+                             wrote ? "GI cache written" : "Nothing to write",
+                             wrote ? std::to_string(wrote) + " volume(s) flushed to disk"
+                                   : "Every bake is already on disk.");
+            }
             ImGui::EndDisabled();
             uiReg_.track("prefs.ddc.flushNow");
             if (pend == 0 && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))

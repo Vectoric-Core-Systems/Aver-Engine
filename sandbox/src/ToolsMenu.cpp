@@ -2,6 +2,8 @@
 // bakes its materials, scaffolds new scripts/classes/modules, and reports build diagnostics.
 
 #include "ToolsMenu.hpp"
+
+#include "EditorNotifications.hpp"
 #include "EngineScaffold.hpp"
 
 #include "aver/platform/FileSystem.hpp"
@@ -701,6 +703,22 @@ void ToolsMenu::reapCompile() {
     if (compile_->exitCode == 0) AVER_INFO("[Editor] {}: {} built cleanly", what, compile_->csproj);
     else AVER_ERROR("[Editor] {}: dotnet build exited {}", what, compile_->exitCode);
 
+    // ON SUCCESS this finishes the progress toast. ON FAILURE it CLOSES it instead and says
+    // nothing, because the AVER_ERROR just above already reaches the notification queue through
+    // the log sink -- with a Show in Output Log action, which is precisely what a build failure
+    // wants. Finishing it here as well would put two rows on screen for one event.
+    if (compile_->exitCode == 0) {
+        editor::notifications().finish(compileNotify_, editor::NotifySeverity::Success,
+                                       compile_->reload ? "Scripts reloaded" : "C# compiled",
+                                       compile_->warnings > 0
+                                           ? std::to_string(compile_->warnings) + " warning(s)"
+                                           : std::string("Built cleanly."),
+                                       5.0);
+    } else {
+        editor::notifications().close(compileNotify_);
+    }
+    compileNotify_ = 0;
+
     lastBuildFailed_ = compile_->exitCode != 0;
     scanClock_ = -1.0;   // force the status light to re-read this frame
     if (openModalOnFail_) {
@@ -728,6 +746,18 @@ void ToolsMenu::startCompile(const std::string& csproj, const std::string& outDi
         std::filesystem::file_time_type stamp{};
         haveBuiltStamp_ = newestProjectCsTime(scriptsDir, stamp);
         builtStamp_ = stamp;
+    }
+
+    // INDETERMINATE, not a percentage: `dotnet build` reports no progress this code can read,
+    // and a bar that invents one is worse than a spinner that admits it does not know.
+    {
+        editor::Notification n;
+        n.severity = editor::NotifySeverity::Info;
+        n.title = reload ? "Reloading scripts" : "Compiling C#";
+        n.body = std::filesystem::path(csproj).filename().string();
+        n.hasProgress = true;   // implies no expiry, so it survives a slow build
+        n.progress = -1.0f;
+        compileNotify_ = editor::notifications().push(std::move(n));
     }
 
     auto job = std::make_shared<Compile>();
