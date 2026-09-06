@@ -63,6 +63,12 @@ struct KeybindDef {
     bool repeatAllowed;
 };
 
+// The bindable-key vocabulary, exposed so a test can sweep the WHOLE table rather than re-listing
+// it. A key absent from it cannot be displayed, parsed or captured, so this is the one place that
+// decides what a user is allowed to bind.
+usize       keyNameCount();
+const char* keyNameAt(usize i);
+
 // The compiled-in defaults, one row per CommandId, in declaration order.
 const std::array<KeybindDef, kCommandCount>& keybindDefs();
 // Looks up a command's def by id (keybindDefs()[(size_t)id] with the cast done once, in one place).

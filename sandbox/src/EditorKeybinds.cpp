@@ -32,7 +32,38 @@ constexpr KeyName kKeyNames[] = {
     {ImGuiKey_F9,"F9"},{ImGuiKey_F10,"F10"},{ImGuiKey_F11,"F11"},{ImGuiKey_F12,"F12"},
     {ImGuiKey_Delete,"Delete"},{ImGuiKey_Tab,"Tab"},{ImGuiKey_Space,"Space"},
     {ImGuiKey_Escape,"Escape"},{ImGuiKey_GraveAccent,"`"},
+    // NAVIGATION AND EDITING, added because their absence was a hard ceiling rather than a
+    // preference: a key missing from this table cannot be displayed, parsed OR captured, so no
+    // amount of UI work could bind one. GraphEditor's Home->frameAll could not be promoted into the
+    // registry at all until Home existed here.
+    {ImGuiKey_UpArrow,"Up"},{ImGuiKey_DownArrow,"Down"},
+    {ImGuiKey_LeftArrow,"Left"},{ImGuiKey_RightArrow,"Right"},
+    {ImGuiKey_Enter,"Enter"},{ImGuiKey_KeypadEnter,"KeypadEnter"},
+    {ImGuiKey_Backspace,"Backspace"},{ImGuiKey_Insert,"Insert"},
+    {ImGuiKey_Home,"Home"},{ImGuiKey_End,"End"},
+    {ImGuiKey_PageUp,"PageUp"},{ImGuiKey_PageDown,"PageDown"},
+    // The numpad, which is a genuinely separate set of keys: someone binding Keypad1 does not want
+    // the row-1 above the letters to fire as well.
+    {ImGuiKey_Keypad0,"Keypad0"},{ImGuiKey_Keypad1,"Keypad1"},{ImGuiKey_Keypad2,"Keypad2"},
+    {ImGuiKey_Keypad3,"Keypad3"},{ImGuiKey_Keypad4,"Keypad4"},{ImGuiKey_Keypad5,"Keypad5"},
+    {ImGuiKey_Keypad6,"Keypad6"},{ImGuiKey_Keypad7,"Keypad7"},{ImGuiKey_Keypad8,"Keypad8"},
+    {ImGuiKey_Keypad9,"Keypad9"},
+    {ImGuiKey_KeypadAdd,"KeypadAdd"},{ImGuiKey_KeypadSubtract,"KeypadSubtract"},
+    {ImGuiKey_KeypadMultiply,"KeypadMultiply"},{ImGuiKey_KeypadDivide,"KeypadDivide"},
+    {ImGuiKey_KeypadDecimal,"KeypadDecimal"},
+    // PUNCTUATION, and note what is NOT here: no name may contain '+', because parseChord splits on
+    // it and takes the last token, so a key called "+" would parse as an empty key name. Plus and
+    // Minus are therefore spelled as words on the keypad and as bracket-style names in the row.
+    {ImGuiKey_Minus,"Minus"},{ImGuiKey_Equal,"Equal"},
+    {ImGuiKey_LeftBracket,"LeftBracket"},{ImGuiKey_RightBracket,"RightBracket"},
+    {ImGuiKey_Backslash,"Backslash"},{ImGuiKey_Semicolon,"Semicolon"},
+    {ImGuiKey_Apostrophe,"Apostrophe"},{ImGuiKey_Comma,"Comma"},
+    {ImGuiKey_Period,"Period"},{ImGuiKey_Slash,"Slash"},
+    // DELIBERATELY ABSENT: CapsLock, NumLock, ScrollLock, PrintScreen and Pause, which are OS-level
+    // traps on Windows rather than shortcuts; and the bare modifiers, which Chord has no way to
+    // represent -- it holds one key plus three booleans, so "Ctrl" alone is not expressible.
 };
+
 
 const char* keyName(ImGuiKey k) {
     for (const KeyName& kn : kKeyNames) if (kn.key == k) return kn.name;
@@ -97,6 +128,12 @@ constexpr std::array<KeybindDef, kCommandCount> kDefs = {{
 static_assert(kDefs.size() == kCommandCount, "kDefs must have exactly one row per CommandId");
 
 } // namespace
+
+// Lets a test walk the whole vocabulary instead of duplicating it. Without this the codec sweep
+// would assert against a copy of the table, which is the one thing it must not do: a copy agrees
+// with itself by construction, including about a name it got wrong.
+usize keyNameCount() { return sizeof(kKeyNames) / sizeof(kKeyNames[0]); }
+const char* keyNameAt(usize i) { return i < keyNameCount() ? kKeyNames[i].name : nullptr; }
 
 const std::array<KeybindDef, kCommandCount>& keybindDefs() { return kDefs; }
 const KeybindDef& keybindDef(CommandId id) { return kDefs[static_cast<usize>(id)]; }

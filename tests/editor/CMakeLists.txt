@@ -17,6 +17,24 @@ set_target_properties(EditorPrefsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAK
 # dedup and the cap can be asserted without a graphics context. If this target ever needs ImGui, the
 # model has stopped being pure and the split described in EditorNotifications.hpp has been undone --
 # fix the header rather than this line.
+# EditorKeybindsTest -- the chord codec, conflict scoping and the persisted ids.
+#
+# THE FIRST TEST TARGET IN THE TREE TO LINK IMGUI, and only because EditorKeybinds.hpp is whole-file
+# `#if AVER_WITH_IMGUI`: a Chord names an ImGuiKey, so the enum values alone pull it in. The test
+# must never create a context or call an ImGui function -- the codec is pure, and needing a live
+# GImGui would be the signal that it stopped being. Guarded on the target existing for the same
+# reason SoundEditorTest guards on Aver.Sound: third_party/imgui is only added under AVER_ENABLE_UI.
+if(TARGET imgui)
+  add_executable(EditorKeybindsTest
+    src/EditorKeybindsTest.cpp
+    ${CMAKE_SOURCE_DIR}/sandbox/src/EditorKeybinds.cpp
+    ${CMAKE_SOURCE_DIR}/sandbox/src/EditorPrefs.cpp)
+  target_include_directories(EditorKeybindsTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+  target_compile_definitions(EditorKeybindsTest PRIVATE AVER_WITH_IMGUI=1)
+  target_link_libraries(EditorKeybindsTest PRIVATE imgui Aver.Core Aver.Platform)
+  set_target_properties(EditorKeybindsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
 add_executable(EditorNotificationsTest
   src/EditorNotificationsTest.cpp
   ${CMAKE_SOURCE_DIR}/sandbox/src/EditorNotifications.cpp)
