@@ -16737,7 +16737,16 @@ private:
             ImGui::SameLine();
             ImGui::SetNextItemWidth(std::fmax(80.0f*dpi_,
                 ImGui::GetWindowWidth() - ImGui::GetCursorPosX() - (controls + 14.0f)*dpi_));
-            ImGui::InputTextWithHint("##cbsearch", "Search this folder...", cbFilter_, sizeof(cbFilter_));
+            ImGui::InputTextWithHint("##cbsearch",
+                                     cbSearchDeep_ ? "Search this folder and below..."
+                                                   : "Search this folder...",
+                                     cbFilter_, sizeof(cbFilter_));
+            ImGui::SameLine();
+            // OFF BY DEFAULT, so the box keeps meaning what it has always meant until someone asks
+            // for more. The hint text changes with it, because a search that quietly covered more
+            // than the folder you are looking at would be the more confusing default.
+            ImGui::Checkbox("Subfolders", &cbSearchDeep_);
+            uiReg_.track("contentBrowser.searchDeep");
 
             ImGui::SameLine(std::fmax(ImGui::GetCursorPosX(), ImGui::GetWindowWidth() - controls*dpi_));
             if (viewTab("Tiles", cbGallery_)) cbGallery_ = true;
@@ -17759,6 +17768,29 @@ private:
         clipper.End();
     }
 
+    // Collects every FILE at or under `dir` whose name matches the search box.
+    //
+    // POINTERS INTO dirCache_ ARE SAFE HERE, and that is worth stating because it is the kind of
+    // thing that is fine until it silently is not. dirCache_ is a std::unordered_map, whose mapped
+    // values are node-allocated: inserting more folders during this walk rehashes the map but does
+    // NOT move the DirListing objects, so pointers into their entry vectors stay valid. And a folder
+    // already listed this frame is returned from cache untouched (dirListing's 20-frame stamp), so
+    // no vector this walk has already taken pointers into can be rebuilt underneath it.
+    //
+    // FILES ONLY. A matching FOLDER in the results would be a row that navigates rather than opens,
+    // mixed in with rows that open -- two different meanings for one gesture.
+    void cbGatherDeepMatches(const std::string& dir, std::vector<const DirEntry*>& out, int depth) {
+        // A depth cap rather than a visited set: the content tree is a tree, and the one thing that
+        // could make it not one is a directory symlink, which this bounds instead of chasing.
+        constexpr int kMaxDepth = 16;
+        if (depth > kMaxDepth) return;
+        const DirListing& l = dirListing(dir);
+        for (const DirEntry& e : l.entries) {
+            if (e.isDir) cbGatherDeepMatches(e.full, out, depth + 1);
+            else if (containsNoCase(e.name, cbFilter_)) out.push_back(&e);
+        }
+    }
+
     // Draws the breadcrumb and the folder's filtered entries, as tiles or as a list.
     void drawFolderFiles(std::string dir) {   // by value: a click below reassigns cbSelectedDir_
         drawBreadcrumb(dir);
@@ -17767,8 +17799,18 @@ private:
         const DirListing& listing = dirListing(dir);
         std::vector<const DirEntry*> shown;
         shown.reserve(listing.entries.size());
-        for (const DirEntry& e : listing.entries)
-            if (containsNoCase(e.name, cbFilter_)) shown.push_back(&e);
+        if (cbFilter_[0] != '\0' && cbSearchDeep_) {
+            // SEARCHING SUBFOLDERS TOO. The box only ever looked at the open folder, so finding an
+            // asset meant already knowing which folder it was in -- which is the thing you use a
+            // search box because you do not know.
+            //
+            // ONLY WHILE A FILTER IS TYPED: with an empty box this would flatten the whole tree into
+            // one folder view and lose the hierarchy the browser is for.
+            cbGatherDeepMatches(dir, shown, 0);
+        } else {
+            for (const DirEntry& e : listing.entries)
+                if (containsNoCase(e.name, cbFilter_)) shown.push_back(&e);
+        }
 
         if (shown.empty()) {
             ImGui::TextDisabled(listing.entries.empty() ? "(this folder is empty)"
@@ -24198,6 +24240,9 @@ private:
     f32                 cbTileSize_ = 88.0f;      // gallery tile edge, in dp
     std::string         cbSelectedFile_;          // the highlighted entry in the file view
     char                cbFilter_[128] = {};      // the search box: filters the open folder by name
+    // Whether the search box also looks under the open folder. See cbGatherDeepMatches; only ever
+    // consulted while a filter is actually typed, or it would flatten the tree the browser is for.
+    bool                cbSearchDeep_ = false;
     std::string         cbEngineRoot_;            // empty in a shipped build; the root is not offered
     std::vector<std::string> cbHistory_;
     int                 cbHistoryPos_ = -1;
