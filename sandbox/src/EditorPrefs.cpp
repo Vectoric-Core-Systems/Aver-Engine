@@ -16,8 +16,15 @@ std::map<std::string, std::string, std::less<>> g_values;
 std::string g_path;
 bool g_loaded = false;
 bool g_dirty  = false;
+// Latched when the file existed and could not be read. See prefsShouldRefuseWrite in the header.
+bool g_readOnly = false;
 
 // Reads editor.ini once. A failed read leaves an empty store and does not retry.
+//
+// THE ONE-SHOT IS CORRECT; THE INFERENCE FROM IT WAS NOT. Every pref accessor calls this, and
+// loadEditorPreferences plus keybinds_.loadFromPrefs() make dozens of those calls, so retrying a
+// failing read on each one would turn a single stat into a per-access one. What was wrong was
+// concluding that "we tried to load" also means "it is safe to overwrite".
 void ensureLoaded() {
     if (g_loaded) return;
     g_loaded = true;
@@ -30,7 +37,17 @@ void ensureLoaded() {
     g_path = dir + "/editor.ini";
 
     std::string text;
-    if (!readFileText(g_path, text)) return;
+    if (!readFileText(g_path, text)) {
+        // A MISSING FILE IS THE ORDINARY FIRST RUN. An UNREADABLE one is not, and the two arrive
+        // here as the same `false` -- so existence is asked separately, and a session that could
+        // not read an existing file never writes over it.
+        if (prefsShouldRefuseWrite(false, fileExists(g_path))) {
+            g_readOnly = true;
+            AVER_WARN("[Prefs] {} exists but could not be read; preferences are READ-ONLY for this "
+                      "session rather than being overwritten with defaults", g_path);
+        }
+        return;
+    }
 
     usize line = 0;
     while (line < text.size()) {
@@ -131,9 +148,23 @@ void setPrefString(std::string_view key, std::string_view value) {
 }
 
 // Writes the file if anything changed since the last write.
+// Pure, and deliberately so: the branch it encodes is otherwise unreachable from a test, because
+// ensureLoaded latches g_loaded once per process and there is no reset hook. Extracting the decision
+// is what lets EditorPrefsTest assert all three cases directly. See the header for the reasoning.
+bool prefsShouldRefuseWrite(bool readSucceeded, bool fileExists) {
+    return !readSucceeded && fileExists;
+}
+
+bool editorPrefsReadOnly() { return g_readOnly; }
+
 void flushEditorPrefs() {
     if (!g_dirty) return;
     if (g_path.empty()) { g_dirty = false; return; }   // nowhere to write; stop asking
+    // READ-ONLY BEATS DIRTY. The store is empty only because the read failed, so writing it would
+    // replace a good file with a header and nothing else -- and writeFileTextAtomic below makes
+    // that replacement complete and irreversible. Drop the dirty bit for the same reason the
+    // empty-path bail does: there is nothing this session can do about it, so stop asking.
+    if (g_readOnly) { g_dirty = false; return; }
 
     const usize slash = g_path.find_last_of("/\\");
     if (slash != std::string::npos) createDirectories(g_path.substr(0, slash));

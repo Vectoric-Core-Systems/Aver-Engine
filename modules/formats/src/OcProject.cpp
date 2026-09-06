@@ -286,6 +286,12 @@ bool isOwnedKey(std::string_view line) {
         "RENDER.GICONES", "RENDER.REFRACTIONMODE", "RENDER.REFRACTIONSTRENGTH",
         "RENDER.REFRACTIONEDGEFADE", "RENDER.LODSELECT", "RENDER.LODTHRESHOLD",
         "RENDER.OCCLUSIONCULL", "RENDER.DEPTHPREPASS",
+        // IN EMIT ORDER, and these two were missing. A key appended to `owned` above but absent
+        // here is copied through as the author's "unowned text" AND re-emitted, so the manifest
+        // grows a duplicate on every save -- and because the owned block splices in at the first
+        // owned key while the author's line stays below it, last-write-wins parsing makes the STALE
+        // line win. Changing the renderer appeared to work and reverted on reload.
+        "RENDER.BACKEND", "RENDER.FRAMEBUDGETMS",
         "RENDER.MSAA", "RENDER.MESHSHADERS", "RENDER.GIUPDATEINTERVAL", "RENDER.GIVOLUME",
         "WINDOW.TITLE", "WINDOW.SIZE", "WINDOW.RESIZABLE", "WINDOW.FULLSCREEN",
         "IMPORT.SCALE", "IMPORT.CONVERTAXES", "IMPORT.GENNORMALS", "IMPORT.GENMIPS",

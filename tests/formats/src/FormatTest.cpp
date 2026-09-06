@@ -339,6 +339,13 @@ static void checkOcproject() {
     rs.rtShadowDenoise = 0;
     rs.rtRenderMode = 0;
     rs.ptBounces = 1;
+    // THESE TWO ARE THE REASON THE LOOP BELOW MISSED A LIVE BUG. Both are skipped by appendKey
+    // unless set -- backend is guarded on !empty(), frameBudgetMs defaults to -1.0f and the f32
+    // overload returns early on a negative -- so a fixture that leaves them at their defaults
+    // never emits the keys, and a duplication check that never sees a key cannot catch it
+    // duplicating. They are exactly the two newest render settings.
+    rs.backend = "vulkan";
+    rs.frameBudgetMs = 16.7f;
     check(rs.hasRenderSettings(), "a desc stating render settings says so");
 
     const std::string once = writeOcproject(rs, "");
@@ -355,7 +362,8 @@ static void checkOcproject() {
     for (const char* key : {"RENDER.GI ", "RENDER.RAYTRACING", "RENDER.PATHTRACING",
                              "RENDER.VOXELRES", "RENDER.GIINTENSITY", "RENDER.GIDISTANCE",
                              "RENDER.RTSHADOWRAYS", "RENDER.RTPIXELSPERRAY",
-                             "RENDER.RTSHADOWDENOISE", "RENDER.RTRENDERMODE", "RENDER.PTBOUNCES"}) {
+                             "RENDER.RTSHADOWDENOISE", "RENDER.RTRENDERMODE", "RENDER.PTBOUNCES",
+                             "RENDER.BACKEND", "RENDER.FRAMEBUDGETMS"}) {
         check(countKey(thrice, key) == 1,
               std::string("after three saves, ") + key + " appears exactly once");
     }
@@ -366,6 +374,23 @@ static void checkOcproject() {
           "and the ray-driven keys read back the values they were written with");
     check(rb.rtShadowDenoise == 0 && rb.rtShadowRays == 1,
           "alongside the RT keys that predate them");
+    check(rb.backend == "vulkan", "and the backend the author chose survives three saves");
+
+    // THE SYMPTOM A USER ACTUALLY SEES, which counting alone does not describe: a CHANGED value
+    // reverting. An unowned duplicate is not merely untidy -- the writer splices its owned block in
+    // at the first owned key (near NAME) while the author's original line stays further down, and
+    // parseOcproject is last-write-wins, so the OLD line is the one that wins on reload. Switching
+    // the renderer would appear to work, save, and come back as the previous choice.
+    ProjectDesc changed = rs;
+    changed.backend = "d3d12";
+    changed.frameBudgetMs = 8.3f;
+    const std::string afterChange = writeOcproject(changed, once);
+    ProjectDesc reread;
+    check(parseOcproject(afterChange, reread, &err), "a manifest saved after a change parses");
+    check(reread.backend == "d3d12",
+          "and CHANGING the renderer sticks -- the previous value must not win on reload");
+    check(reread.frameBudgetMs > 8.0f && reread.frameBudgetMs < 8.6f,
+          "and so does changing the frame budget");
 
     // A ZERO IS A REAL ANSWER, NOT AN ABSENT KEY -- the same distinction the giQuality check at
     // the top of this function makes. rtRenderMode 0 means "the rasteriser finds the first

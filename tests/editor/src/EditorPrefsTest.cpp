@@ -157,6 +157,32 @@ int main() {
               "but a genuine change is still written");
     }
 
+    // ---- an UNREADABLE file must never be written over ----------------------------------------
+    //
+    // THE FAILURE THIS PREVENTS IS TOTAL, NOT PARTIAL. `readFileText` returns false both for a file
+    // that is absent and for one that exists and could not be opened -- a lock, a permissions
+    // change, a network share that blinked. Before this, both answers left the store empty AND
+    // considered loaded, so the very next flush replaced a good editor.ini with a three-line comment
+    // header via writeFileTextAtomic: every preference and every keybind gone, atomically, with no
+    // way back.
+    //
+    // Tested through the pure predicate rather than by staging a locked file, because ensureLoaded
+    // latches once per process and has no reset hook -- an in-process test can never reach the
+    // branch through the front door. The predicate IS the decision; the caller only obeys it.
+    {
+        check(!editor::prefsShouldRefuseWrite(true, true),
+              "a file that was read successfully is writable");
+        check(!editor::prefsShouldRefuseWrite(false, false),
+              "a MISSING file is the ordinary first run and must stay writable");
+        check(editor::prefsShouldRefuseWrite(false, true),
+              "but a file that EXISTS and could not be read is never written over");
+        check(!editor::prefsShouldRefuseWrite(true, false),
+              "and a successful read of a vanished file is not a refusal either");
+        // This process read its own file fine, so the latch must be clear -- a test asserting the
+        // refusal path must not leave the store poisoned for the checks above it.
+        check(!editor::editorPrefsReadOnly(), "this session read its file, so it is not read-only");
+    }
+
     // ---- restore the developer's own file -----------------------------------------------------
     if (hadFile) writeFileText(path, original);
     else         writeFileText(path, "");

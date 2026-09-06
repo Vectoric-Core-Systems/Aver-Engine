@@ -6204,6 +6204,26 @@ public:
         // safe unconditionally since setPref*/flushEditorPrefs() are no-ops on nothing dirty.
         saveEditorPreferences();
         editor::flushEditorPrefs();
+        // THE MANIFEST TOO, for the same reason and one the preferences do not have: the project
+        // autosave is a 0.5s DEBOUNCE (kProjectAutosaveSec), so an edit made and immediately
+        // followed by File > Exit or the window's X is still sitting in projectDirty_ when the
+        // process goes. Neither exit path checked it -- requestExitChecked and onCloseGuard both
+        // test only assetEditors_.anyDirty() || levelHasUnsavedEdits() -- so the edit was lost with
+        // no prompt and no log line.
+        //
+        // FLUSHED, NOT PROMPTED. A prompt would contradict the design stated at projectDirty_'s
+        // declaration: settings save on edit precisely so a page cannot be "edited and closed, and
+        // the edit gone". Writing here closes the window for EVERY exit path at once.
+        //
+        // THE maxFrames_ GUARD IS LOAD-BEARING, not tidiness -- maybeAutosaveProject documents why:
+        // --frames sets render settings from the command line and applyProjectRenderSettings marks
+        // the project dirty when it does, so flushing here unguarded would write a capture run's
+        // CLI flags into the user's manifest as if they had chosen them.
+        if (maxFrames_ == 0 && projectDirty_ && project_.valid()) {
+            std::string why;
+            if (!saveProjectManifest(&why))
+                AVER_WARN("[Project] could not flush unsaved settings on exit: {}", why);
+        }
         editor::shutdownActorEditors();
     editor::shutdownAnimEditors();
         setMouseCaptured(false);
@@ -7851,7 +7871,7 @@ private:
     // around an authored section, so a created section and its neighbours come out of one function
     // rather than two that have to agree.
     bool createLandscapeForLevel(rhi::IDevice* device, u32 samples, f32 spacingCm) {
-        if (!project_.valid()) { setUpgradeStatus("Open a project first."); return false; }
+        if (!project_.valid()) { setUpgradeStatus("Open a project first.", false); return false; }
         const std::string stem = levelName_.empty() ? std::string("untitled") : levelName_;
         const std::filesystem::path dir = std::filesystem::path(project_.contentDir()) / "Landscape";
         const std::filesystem::path dst = dir / (stem + ".ocland");
@@ -7862,17 +7882,17 @@ private:
         const f32 tileSizeCm = static_cast<f32>(samples - 1) * spacingCm;
         if (!landscape::synthesizeTerrainTile(landscape::TileCoord{0, 0}, 0.0f, 0.0f, tileSizeCm,
                                               samples, landscapeNoiseParams_, data)) {
-            setUpgradeStatus("Could not synthesise a landscape at that size.");
+            setUpgradeStatus("Could not synthesise a landscape at that size.", false);
             return false;
         }
         std::string why;
         if (!fmt::saveOcLand(dst.string(), data, &why)) {
             AVER_ERROR("[Landscape] could not write '{}': {}", dst.string(), why);
-            setUpgradeStatus("Could not write " + dst.filename().string());
+            setUpgradeStatus("Could not write " + dst.filename().string(), false);
             return false;
         }
         if (!loadLandscape(device, dst.string())) {
-            setUpgradeStatus("Wrote " + dst.filename().string() + " but could not load it back.");
+            setUpgradeStatus("Wrote " + dst.filename().string() + " but could not load it back.", false);
             return false;
         }
         recordLandscapeInLevel();
@@ -8977,7 +8997,7 @@ private:
         if (saveLevel(levelPath_)) {
             setUpgradeStatus("Saved " + name);
         } else {
-            setUpgradeStatus("Could not save " + name);
+            setUpgradeStatus("Could not save " + name, false);
             AVER_ERROR("[Level] save: could not write {}", levelPath_);
         }
 #endif
@@ -14410,9 +14430,17 @@ private:
     // Records the outcome of an upgrade decision and restarts its time on screen.
     // THROUGH A SETTER so the timer cannot be forgotten at one of the three call sites: the string
     // used to be assigned and never displayed, so whether the upgrade worked was reported only to the log.
-    void setUpgradeStatus(std::string msg) {
+    // SEVERITY IS PASSED, NEVER PARSED BACK OUT OF THE PROSE. The status bar used to decide the
+    // colour with `upgradeStatus_.rfind("Upgrade failed", 0) == 0`, and exactly one of this setter's
+    // twelve call sites begins with that literal -- so "Could not save <name>", "Could not write
+    // <file>", "Wrote <file> but could not load it back.", "Could not synthesise a landscape at that
+    // size." and "Open a project first." were all drawn in the green that means success. A message
+    // that reports a failure in the colour of a success is worse than no message: it is read, and
+    // believed.
+    void setUpgradeStatus(std::string msg, bool ok = true) {
         upgradeStatus_ = std::move(msg);
         upgradeStatusAge_ = 0.0f;
+        upgradeStatusOk_ = ok;
     }
 
     // May the window close? Called from inside WM_CLOSE, on the message thread -- so it decides and
@@ -14906,7 +14934,7 @@ private:
                 setUpgradeStatus("Project upgraded - Compile C# to rebuild.");
                 AVER_INFO("[Editor] '{}' upgraded", project_.name);
             } else {
-                setUpgradeStatus("Upgrade failed: " + err);
+                setUpgradeStatus("Upgrade failed: " + err, false);
                 AVER_ERROR("[Editor] upgrade of '{}' failed: {}", project_.name, err);
             }
             pendingUpgrade_ = {};
@@ -15651,7 +15679,7 @@ private:
                 ImGui::SameLine();
                 ImGui::TextUnformatted("  |  ");
                 ImGui::SameLine();
-                const bool bad = upgradeStatus_.rfind("Upgrade failed", 0) == 0;
+                const bool bad = !upgradeStatusOk_;
                 ImGui::TextColored(bad ? ImVec4(1.0f, 0.45f, 0.40f, 1.0f)
                                        : ImVec4(0.55f, 0.85f, 0.55f, 1.0f),
                                    "%s", upgradeStatus_.c_str());
@@ -22304,6 +22332,7 @@ private:
     std::unordered_map<u32, std::string> entityLegacyMaterial_;
     std::string upgradeStatus_;
     f32         upgradeStatusAge_ = 0.0f;   // seconds since it was set; see setUpgradeStatus
+    bool        upgradeStatusOk_ = true;    // false draws it as a failure; passed, never sniffed
     f32  uiDemoHealth_ = 0.72f, uiDemoStamina_ = 0.44f, uiDemoScroll_ = 0.0f, uiDemoClock_ = 0.0f;
     // The game UI's font. Invalid until loadGameUiFont finds one beside the exe; addText on an
     // invalid font draws nothing, which is what makes a missing font non-fatal.
