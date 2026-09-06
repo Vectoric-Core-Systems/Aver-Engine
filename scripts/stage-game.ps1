@@ -33,6 +33,21 @@
 .PARAMETER Out
     Output directory. Created if absent; must be empty or -Force'd.
 
+.PARAMETER Compile
+    Build the project's C#/F# before staging, instead of requiring it to have been built already.
+
+    This does NOT reimplement the build. It runs the editor's own -compile-scripts, which shells out to
+    `dotnet build` with flags that carry real reasoning (-c Release because every contract assembly is
+    Release; -p:UseSharedCompilation=false and -nodeReuse:false because both MSBuild process pools
+    outlive the build). A second copy of that command line in PowerShell would drift from the first one
+    silently, and the symptom would be a package built with different flags than the editor uses.
+
+    MEASURED, because the plan this came from claimed the opposite: -compile-scripts already needs no
+    human, and works on a WARP software device, so a machine with no GPU can do it. What it does need is
+    a device of SOME kind, since the trigger lives inside the editor's Tools menu machinery.
+
+    Off by default: staging should not silently rebuild a developer's assemblies underneath them.
+
 .EXAMPLE
     ./scripts/stage-game.ps1 -Project "C:\Projects\SkyForge\SkyForge.ocproject" -Out ..\stage\SkyForge
 #>
@@ -43,7 +58,8 @@ param(
     [string] $Config = 'Release',
     [string] $BuildDir,
     [switch] $Force,
-    [switch] $AllowDebugCrt
+    [switch] $AllowDebugCrt,
+    [switch] $Compile
 )
 
 $ErrorActionPreference = 'Stop'
@@ -155,6 +171,57 @@ if (Test-Path -LiteralPath $scriptSrcDir) {
     $authoredScripts = @(Get-ChildItem -LiteralPath $scriptSrcDir -Recurse -File -ErrorAction SilentlyContinue |
                          Where-Object { $_.Extension -in '.cs', '.fs' } |
                          Where-Object { $_.FullName -notmatch '[\\/](obj|bin)[\\/]' })
+}
+
+# -Compile: build the scripts here rather than demanding they were built already.
+#
+# THROUGH THE EDITOR'S OWN --compile-scripts, not a second `dotnet build` written in PowerShell. The
+# real invocation carries flags with reasoning behind them (-c Release because every contract assembly
+# is Release, so a project's own Scripts.dll would otherwise be the one Debug assembly among them;
+# -p:UseSharedCompilation=false and -nodeReuse:false because the compiler server and the MSBuild worker
+# nodes each hold assemblies open and both outlive the build). Copying that command line here would
+# give it two homes and one of them would go stale, and the symptom -- a package built with different
+# flags than the editor uses -- is exactly the kind that surfaces months later.
+#
+# MEASURED FIRST, because the plan that asked for this claimed --compile-scripts "only arms the GUI
+# button": it does not. It builds Scripts.dll AND Scripts.FSharp.dll with no human, and it does so on a
+# WARP software device, so a runner with no GPU can package a game. What it genuinely needs is a device
+# of SOME kind, because the trigger lives in the editor's Tools menu machinery.
+if ($Compile -and $authoredScripts.Count -gt 0) {
+    $sandbox = Join-Path $bin 'Sandbox.exe'
+    if (-not (Test-Path -LiteralPath $sandbox)) {
+        Fail "-Compile needs $sandbox, which this tree does not have (a game-only tree cannot compile scripts)."
+    } else {
+        Note "compiling $($authoredScripts.Count) script source(s) via $sandbox --compile-scripts"
+        # --frames 60 is generous on purpose. The build is armed a few frames in and runs on a
+        # background thread, and ~ToolsMenu joins that thread at shutdown, so the process cannot exit
+        # mid-build however few frames are asked for -- the margin is for the editor reaching the point
+        # where it fires at all, not for the compile itself.
+        # ErrorActionPreference IS RELAXED ACROSS THIS CALL, and it is not optional. This script runs
+        # with 'Stop', and in Windows PowerShell 5.1 a NATIVE executable writing anything to stderr is
+        # wrapped in an ErrorRecord (NativeCommandError) -- which under 'Stop' terminates the script
+        # even when the exe exits 0. The editor emits ordinary warnings on stderr as a matter of course
+        # ("[WARN] [ChunkWorld] cannot enable streaming..."), so staging died on a line that meant
+        # nothing. The EXIT CODE is the contract here, not the presence of stderr output.
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $compileLog = & $sandbox --project $Project --frames 60 --compile-scripts 2>&1
+        $compileCode = $LASTEXITCODE
+        $ErrorActionPreference = $prevEap
+
+        if ($compileCode -ne 0) {
+            # The tail only, and only on failure: the editor logs hundreds of lines about shaders and
+            # assets that have nothing to do with why a build broke.
+            $compileLog | Select-Object -Last 25 | ForEach-Object { Write-Host "[game]   $_" }
+            Fail "the editor exited $compileCode while compiling scripts"
+        } elseif (-not (Test-Path -LiteralPath $scriptsBin)) {
+            # A clean exit that produced nothing means the build failed, or the project has no
+            # Scripts.csproj. Either way the package would be wrong, and silence here would ship it.
+            Fail "the compile ran but produced no $scriptsBin -- the build failed, or there is no Scripts.csproj"
+        } else {
+            Note "compiled: $((Get-ChildItem -LiteralPath $scriptsBin -Filter *.dll).Count) assembly(ies) in $scriptsBin"
+        }
+    }
 }
 
 if ($authoredScripts.Count -eq 0) {

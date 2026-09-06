@@ -1246,12 +1246,23 @@ public:
         if (msg.rfind("[Graph] ", 0) == 0) {
             std::string text(msg.substr(8));
             // CONSECUTIVE DUPLICATES COLLAPSE, and this is not tidiness -- without it the feature is
-            // unusable. The editor ticks graph-class instances UNGATED on play state (see
-            // HostBridge.GraphTickBoundInstances), so a PrintString on an OnTick chain fires every
-            // frame just from having the level open: sixty identical lines a second, a ring buffer
-            // that churns faster than anyone can read, and an overlay that is a solid block of the
-            // same sentence. Collapsed, that same graph shows one line with a rising count, which is
-            // also strictly more information -- "still firing, 143 times now" rather than "firing".
+            // unusable. A PrintString on an OnTick chain fires EVERY FRAME: sixty identical lines a
+            // second, a ring buffer that churns faster than anyone can read, and an overlay that is
+            // a solid block of the same sentence. Collapsed, that same graph shows one line with a
+            // rising count, which is also strictly more information -- "still firing, 143 times now"
+            // rather than "firing".
+            //
+            // CORRECTING THIS COMMENT'S FIRST DRAFT, which said the flood happens "just from having
+            // the level open" because the editor ticks graphs ungated on play state. IT DOES NOT.
+            // HostBridge.GraphTickBoundInstances is ungated INTERNALLY, and that callee comment is
+            // what I read -- but its caller gates it (see the tickGraphClassInstances call in this
+            // file, guarded on aver_fw_play_state() == AVER_FW_PLAY_PLAYING, with a long comment
+            // recording the measurement that forced that gate: 4003 tick lines and a VAR climbing to
+            // 12.31s while nobody pressed Play). Reading a callee's comment instead of tracing its
+            // caller is the exact mistake this codebase keeps paying for.
+            //
+            // The flood is real regardless -- it happens the moment you press Play, and in the
+            // packaged game every frame -- which is precisely when someone is watching this feed.
             //
             // CONSECUTIVE only, deliberately, not deduplicated across the whole buffer: two prints
             // alternating (a Branch taking each arm in turn) is exactly the pattern an author is
