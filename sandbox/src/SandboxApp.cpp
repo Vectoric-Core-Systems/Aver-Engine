@@ -7280,7 +7280,6 @@ private:
         startContentWatch();
         pendingUpgrade_ = editor::inspectProject(project_);
         upgradeAsked_ = false;
-        upgradeStatus_.clear();
         if (!pendingUpgrade_.empty())
             AVER_INFO("[Editor] project '{}' predates {} of this editor's project files; offering to upgrade",
                       project_.name, pendingUpgrade_.fixes.size());
@@ -8010,7 +8009,7 @@ private:
             // autosave sidecar, so the file at levelPath_ does NOT contain it. Saying otherwise
             // would let the recovered work be closed without a prompt -- losing it twice.
             markLevelUnsaved();
-            setUpgradeStatus("Recovered - not yet saved");
+            setUpgradeStatus("Recovered - not yet saved", editor::NotifySeverity::Warning);
         }
         ImGui::SameLine();
         if (ImGui::Button("Discard", ImVec2(120.0f * dpi_, 0.0f))) {
@@ -8039,7 +8038,7 @@ private:
     // around an authored section, so a created section and its neighbours come out of one function
     // rather than two that have to agree.
     bool createLandscapeForLevel(rhi::IDevice* device, u32 samples, f32 spacingCm) {
-        if (!project_.valid()) { setUpgradeStatus("Open a project first.", false); return false; }
+        if (!project_.valid()) { setUpgradeStatus("Open a project first.", editor::NotifySeverity::Warning); return false; }
         const std::string stem = levelName_.empty() ? std::string("untitled") : levelName_;
         const std::filesystem::path dir = std::filesystem::path(project_.contentDir()) / "Landscape";
         const std::filesystem::path dst = dir / (stem + ".ocland");
@@ -8050,17 +8049,17 @@ private:
         const f32 tileSizeCm = static_cast<f32>(samples - 1) * spacingCm;
         if (!landscape::synthesizeTerrainTile(landscape::TileCoord{0, 0}, 0.0f, 0.0f, tileSizeCm,
                                               samples, landscapeNoiseParams_, data)) {
-            setUpgradeStatus("Could not synthesise a landscape at that size.", false);
+            setUpgradeStatus("Could not synthesise a landscape at that size.", editor::NotifySeverity::Error);
             return false;
         }
         std::string why;
         if (!fmt::saveOcLand(dst.string(), data, &why)) {
             AVER_ERROR("[Landscape] could not write '{}': {}", dst.string(), why);
-            setUpgradeStatus("Could not write " + dst.filename().string(), false);
+            setUpgradeStatus("Could not write " + dst.filename().string(), editor::NotifySeverity::Error);
             return false;
         }
         if (!loadLandscape(device, dst.string())) {
-            setUpgradeStatus("Wrote " + dst.filename().string() + " but could not load it back.", false);
+            setUpgradeStatus("Wrote " + dst.filename().string() + " but could not load it back.", editor::NotifySeverity::Error);
             return false;
         }
         recordLandscapeInLevel();
@@ -9104,8 +9103,16 @@ private:
         if (projectAutosaveAccum_ < kProjectAutosaveSec) return;
         projectAutosaveAccum_ = 0.0f;
         std::string why;
-        if (saveProjectManifest(&why)) projectSaveStatus_ = "Saved.";
-        else                           projectSaveStatus_ = "Save failed: " + why;
+        if (saveProjectManifest(&why)) {
+            projectSaveStatus_ = "Saved.";
+        } else {
+            projectSaveStatus_ = "Save failed: " + why;
+            // THE FAILURE ARM ONLY. A successful project autosave fires on a 0.5s debounce while a
+            // slider is being dragged -- a toast per success would be a toast twice a second. A
+            // FAILURE means the manifest could not be written at all, and today that is invisible
+            // the moment the Project Settings panel is closed.
+            notifyOutcome(editor::NotifySeverity::Error, "Could not save project settings", why, true);
+        }
     }
     bool projectRenderPending_ = false;   // manifest read before the device attached
     std::string projectSaveStatus_;
@@ -9165,7 +9172,7 @@ private:
         if (saveLevel(levelPath_)) {
             setUpgradeStatus("Saved " + name);
         } else {
-            setUpgradeStatus("Could not save " + name, false);
+            setUpgradeStatus("Could not save " + name, editor::NotifySeverity::Error);
             AVER_ERROR("[Level] save: could not write {}", levelPath_);
         }
 #endif
@@ -14667,17 +14674,22 @@ private:
     // Records the outcome of an upgrade decision and restarts its time on screen.
     // THROUGH A SETTER so the timer cannot be forgotten at one of the three call sites: the string
     // used to be assigned and never displayed, so whether the upgrade worked was reported only to the log.
-    // SEVERITY IS PASSED, NEVER PARSED BACK OUT OF THE PROSE. The status bar used to decide the
-    // colour with `upgradeStatus_.rfind("Upgrade failed", 0) == 0`, and exactly one of this setter's
-    // twelve call sites begins with that literal -- so "Could not save <name>", "Could not write
-    // <file>", "Wrote <file> but could not load it back.", "Could not synthesise a landscape at that
-    // size." and "Open a project first." were all drawn in the green that means success. A message
-    // that reports a failure in the colour of a success is worse than no message: it is read, and
-    // believed.
-    void setUpgradeStatus(std::string msg, bool ok = true) {
-        upgradeStatus_ = std::move(msg);
-        upgradeStatusAge_ = 0.0f;
-        upgradeStatusOk_ = ok;
+    // NOW A NOTIFICATION, and the name is kept only because fourteen call sites say it.
+    //
+    // This was the editor's one transient-status channel: a string in the status bar with a
+    // twelve-second timer, whose severity was recovered by matching the prose prefix
+    // `rfind("Upgrade failed", 0) == 0`. Exactly one of its call sites began with that literal, so
+    // "Could not save <name>", "Could not write <file>", "Wrote <file> but could not load it back.",
+    // "Could not synthesise a landscape at that size." and "Open a project first." all rendered in
+    // the green that means success. A failure reported in the colour of a success is worse than no
+    // message at all: it is read, and believed.
+    //
+    // It is also misnamed for what it does -- its sites include "Saved", "Added water" and
+    // "Created" -- which is why folding it into the notification queue rather than keeping a second
+    // parallel channel is the right end for it.
+    void setUpgradeStatus(std::string msg,
+                          editor::NotifySeverity sev = editor::NotifySeverity::Success) {
+        notifyOutcome(sev, std::move(msg), "", sev == editor::NotifySeverity::Error);
     }
 
     // May the window close? Called from inside WM_CLOSE, on the message thread -- so it decides and
@@ -15171,7 +15183,7 @@ private:
                 setUpgradeStatus("Project upgraded - Compile C# to rebuild.");
                 AVER_INFO("[Editor] '{}' upgraded", project_.name);
             } else {
-                setUpgradeStatus("Upgrade failed: " + err, false);
+                setUpgradeStatus("Upgrade failed: " + err, editor::NotifySeverity::Error);
                 AVER_ERROR("[Editor] upgrade of '{}' failed: {}", project_.name, err);
             }
             pendingUpgrade_ = {};
@@ -15181,7 +15193,7 @@ private:
         ImGui::SameLine();
         if (ImGui::Button("Not now", ImVec2(120.0f * dpi_, 0.0f))) {
             upgradeAsked_ = true;
-            setUpgradeStatus("Project left as it is.");
+            setUpgradeStatus("Project left as it is.", editor::NotifySeverity::Info);
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
@@ -15911,21 +15923,6 @@ private:
         // The upgrade outcome, for a while: twelve seconds is long enough to read after clicking a
         // button and short enough not to become permanent furniture. A FAILURE draws in the error
         // colour -- "Upgrade failed: ..." sliding past in frame-rate grey reads as it having worked.
-        if (!upgradeStatus_.empty()) {
-            upgradeStatusAge_ += dt;
-            if (upgradeStatusAge_ > 12.0f) {
-                upgradeStatus_.clear();
-            } else {
-                ImGui::SameLine();
-                ImGui::TextUnformatted("  |  ");
-                ImGui::SameLine();
-                const bool bad = !upgradeStatusOk_;
-                ImGui::TextColored(bad ? ImVec4(1.0f, 0.45f, 0.40f, 1.0f)
-                                       : ImVec4(0.55f, 0.85f, 0.55f, 1.0f),
-                                   "%s", upgradeStatus_.c_str());
-            }
-        }
-
         auto drawerButton = [&](const char* label, Drawer d, const char* tip) {
             const bool on = drawer_ == d;
             if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
@@ -20765,7 +20762,13 @@ private:
             ImGui::BeginDisabled(!projectDirty_);
             if (ImGui::Button("Save Project Settings", ImVec2(220.0f * dpi_, 0.0f))) {
                 std::string why;
-                projectSaveStatus_ = saveProjectManifest(&why) ? "Saved." : ("Save failed: " + why);
+                if (saveProjectManifest(&why)) {
+                    projectSaveStatus_ = "Saved.";
+                } else {
+                    projectSaveStatus_ = "Save failed: " + why;
+                    notifyOutcome(editor::NotifySeverity::Error, "Could not save project settings",
+                                  why, true);
+                }
             }
             ImGui::EndDisabled();
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
@@ -20787,6 +20790,8 @@ private:
                     projectSaveStatus_ = "Reverted to the file on disk.";
                 } else {
                     projectSaveStatus_ = "Revert failed: " + why;
+                    notifyOutcome(editor::NotifySeverity::Error, "Could not revert project settings",
+                                  why, true);
                 }
             }
             ImGui::EndDisabled();
@@ -22785,9 +22790,6 @@ private:
     std::unordered_map<u32, bool> entityLegacyDeform_;
     std::unordered_map<u32, i32> entityLegacySurface_;
     std::unordered_map<u32, std::string> entityLegacyMaterial_;
-    std::string upgradeStatus_;
-    f32         upgradeStatusAge_ = 0.0f;   // seconds since it was set; see setUpgradeStatus
-    bool        upgradeStatusOk_ = true;    // false draws it as a failure; passed, never sniffed
     f32  uiDemoHealth_ = 0.72f, uiDemoStamina_ = 0.44f, uiDemoScroll_ = 0.0f, uiDemoClock_ = 0.0f;
     // The game UI's font. Invalid until loadGameUiFont finds one beside the exe; addText on an
     // invalid font draws nothing, which is what makes a missing font non-fatal.
