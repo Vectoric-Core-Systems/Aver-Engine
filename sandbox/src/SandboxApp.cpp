@@ -18223,18 +18223,54 @@ private:
     // Imports one asset into destDir: models and audio are converted, everything else is copied.
     // UI-side: calls cbIsEditable/cbInvalidate/importModel/importAudio, all the content browser's.
     // Its one non-browser caller (--import's deferred handshake in onInit) is guarded instead.
+    // Import outcomes go to a NOTIFICATION as well as to cbStatus_, and the difference matters:
+    // cbStatus_ is the Content Browser's footer, visible only while that drawer is open, and an
+    // import can be started by a drag from Explorer with the drawer shut. The messages themselves
+    // said "see the Output Log" -- naming a panel they gave the user no way to open.
+    void notifyImport(editor::NotifySeverity sev, std::string title, std::string body,
+                      bool offerLog = false) {
+        editor::Notification n;
+        n.severity = sev;
+        n.title = std::move(title);
+        n.body  = std::move(body);
+        n.ttlSec = sev == editor::NotifySeverity::Error ? 10.0 : 6.0;
+        if (offerLog) {
+            n.actions[0] = editor::NotifyAction::ShowOutputLog;
+            n.actionLabels[0] = "Show in Output Log";
+        }
+        editor::notifications().push(std::move(n));
+    }
+
+    // "Content" rather than ".", which is what cbRelativeToContent returns for the Content root
+    // itself -- a body reading "into ." is worse than no body at all.
+    std::string importDestLabel(const std::string& absDir) const {
+        const std::string rel = cbRelativeToContent(absDir);
+        if (rel.empty() || rel == ".") return "Content";
+        return "Content/" + rel;
+    }
+
     void importAsset(const std::string& src, const std::string& destDir) {
         std::error_code ec;
         if (!cbIsEditable(destDir)) {
             AVER_WARN("[Import] '{}' is engine content and is read-only", destDir);
             cbStatus_ = "Engine content is read-only";
+            notifyImport(editor::NotifySeverity::Warning, "Import refused",
+                         "Engine content is read-only.");
             return;
         }
-        if (!std::filesystem::exists(src, ec)) { AVER_WARN("[Import] source not found: {}", src); return; }
+        // THESE TWO REPORTED NOTHING TO THE UI AT ALL -- not even into cbStatus_. A drag-and-drop of
+        // a file that had moved, or of one already imported, simply appeared to do nothing.
+        if (!std::filesystem::exists(src, ec)) {
+            AVER_WARN("[Import] source not found: {}", src);
+            notifyImport(editor::NotifySeverity::Warning, "Import failed", "Source not found: " + src);
+            return;
+        }
         const std::string name = std::filesystem::path(src).filename().string();
         const std::string dest = destDir + "\\" + name;
         if (std::filesystem::exists(dest, ec)) {
             AVER_WARN("[Import] '{}' already exists in {} - not overwritten; rename the source or remove it first", name, destDir);
+            notifyImport(editor::NotifySeverity::Warning, "Already imported",
+                         name + " exists here already and was not overwritten.");
             return;
         }
         const std::string ext = std::filesystem::path(src).extension().string();
@@ -18247,9 +18283,16 @@ private:
 
         std::filesystem::copy_file(src, dest, ec);
         if (ec) { AVER_WARN("[Import] failed to copy '{}' -> '{}': {}", src, dest, ec.message());
-                  cbStatus_ = "Import failed - see the Output Log"; return; }
+                  cbStatus_ = "Import failed - see the Output Log";
+                  notifyImport(editor::NotifySeverity::Error, "Import failed", ec.message(), true);
+                  return; }
         AVER_INFO("[Import] imported '{}' into {}", name, destDir);
         cbStatus_ = "Imported " + name;
+        // Content-relative, not absolute: the full path is unreadable at this width and the
+        // reader already knows which project is open. cbRelativeToContent falls back to the
+        // absolute path when there is no project, which is the only case where it helps.
+        notifyImport(editor::NotifySeverity::Success, "Imported " + name,
+                     "into " + importDestLabel(destDir));
         cbInvalidate(destDir);
     }
 
@@ -18262,6 +18305,9 @@ private:
             AVER_WARN("[Import] {} could not be decoded: {}",
                       std::filesystem::path(src).filename().string(), r.error);
             cbStatus_ = "Import failed - see the Output Log";
+            notifyImport(editor::NotifySeverity::Error,
+                         "Could not decode " + std::filesystem::path(src).filename().string(),
+                         r.error, true);
             return;
         }
 
@@ -18271,6 +18317,8 @@ private:
         if (std::filesystem::exists(out, ec)) {
             AVER_WARN("[Import] '{}' already exists in {} - not overwritten", outName, destDir);
             cbStatus_ = "Already imported";
+            notifyImport(editor::NotifySeverity::Warning, "Already imported",
+                         outName + " exists here already and was not overwritten.");
             return;
         }
 
@@ -18278,6 +18326,7 @@ private:
         if (!fmt::saveOcAudio(out, data, std::filesystem::path(src).filename().string(), &why)) {
             AVER_WARN("[Import] could not write '{}': {}", out, why);
             cbStatus_ = "Import failed - see the Output Log";
+            notifyImport(editor::NotifySeverity::Error, "Could not write " + outName, why, true);
             return;
         }
 
@@ -18289,6 +18338,9 @@ private:
                   std::filesystem::path(src).filename().string(), outName,
                   data.samples.size(), r.decoder, data.channels, data.sampleRate, seconds);
         cbStatus_ = "Imported " + outName;
+        notifyImport(editor::NotifySeverity::Success, "Imported " + outName,
+                     std::to_string(data.channels) + " ch, " +
+                         std::to_string(data.sampleRate) + " Hz");
         cbInvalidate(destDir);
     }
 #endif
@@ -18299,18 +18351,25 @@ private:
     void importModel(const std::string& src, const std::string& destDir) {
         GltfImportSummary sum;
         std::string why;
+        const std::string srcName = std::filesystem::path(src).filename().string();
         if (!importGltfToDir(src, destDir, sum, &why)) {
             AVER_WARN("[Import] {}", why);
             cbStatus_ = "Import failed - see the Output Log";
+            notifyImport(editor::NotifySeverity::Error, "Could not import " + srcName, why, true);
             return;
         }
         if (sum.meshesWritten == 0 && sum.rigsWritten == 0 && sum.clipsWritten == 0) {
             cbStatus_ = "Import produced nothing - see the Output Log";
+            notifyImport(editor::NotifySeverity::Warning, "Nothing imported from " + srcName,
+                         "The file parsed but contained no meshes, skeletons or clips.", true);
             return;
         }
-        cbStatus_ = "Imported " + std::to_string(sum.meshesWritten) + " mesh(es), " +
-                    std::to_string(sum.rigsWritten) + " skeleton(s) and " + std::to_string(sum.clipsWritten) +
-                    " clip(s) from " + std::filesystem::path(src).filename().string();
+        const std::string counts = std::to_string(sum.meshesWritten) + " mesh(es), " +
+                                   std::to_string(sum.rigsWritten) + " skeleton(s) and " +
+                                   std::to_string(sum.clipsWritten) + " clip(s)";
+        cbStatus_ = "Imported " + counts + " from " + srcName;
+        // The outcome of a slow operation, which is precisely what a notification is for.
+        notifyImport(editor::NotifySeverity::Success, "Imported " + srcName, counts);
         cbInvalidate(destDir);
         wantMeshReload_ = true;
     }
