@@ -62,6 +62,12 @@ ImGuiKey nameToKey(std::string_view s) {
 //   EditUndo                  -- `io.KeyCtrl && IsKeyPressed(ImGuiKey_Z,false) && !io.KeyShift`
 //   EditRedo                  -- `io.KeyCtrl && IsKeyPressed(ImGuiKey_Y,false)` (Shift unchecked)
 //   EditCopy/Paste/Duplicate  -- new commands; Ctrl+C/V/D, exact-modifier by design (see header)
+//   EditSelectAll             -- Ctrl+A over the OUTLINER's drawn order. It shipped as a menu item
+//                                whose "Ctrl+A" hint was a hardcoded string with no key behind it,
+//                                so the menu advertised a shortcut that did nothing. The Content
+//                                Browser's own Ctrl+A (cbShortcuts) stays hardcoded and out of this
+//                                table on purpose: it selects FILES, and is gated on that panel
+//                                holding focus -- two meanings on one key, exactly as Delete has.
 constexpr u32 kViewportScope = kScopeObjectMode | kScopeLandscapeMode;
 constexpr std::array<KeybindDef, kCommandCount> kDefs = {{
     {CommandId::ToolSelect,  "tool.select",  "Select Tool",           {ImGuiKey_1, false,false,false}, kScopeObjectMode,    false,false, true},
@@ -85,6 +91,7 @@ constexpr std::array<KeybindDef, kCommandCount> kDefs = {{
     {CommandId::EditCopy,      "edit.copy",      "Copy",      {ImGuiKey_C, true,false,false}, kViewportScope, true, true, false},
     {CommandId::EditPaste,     "edit.paste",     "Paste",     {ImGuiKey_V, true,false,false}, kViewportScope, true, true, false},
     {CommandId::EditDuplicate, "edit.duplicate", "Duplicate", {ImGuiKey_D, true,false,false}, kViewportScope, true, true, false},
+    {CommandId::EditSelectAll, "edit.selectAll", "Select All", {ImGuiKey_A, true,false,false}, kViewportScope, true, true, false},
 }};
 
 static_assert(kDefs.size() == kCommandCount, "kDefs must have exactly one row per CommandId");

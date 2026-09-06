@@ -491,7 +491,7 @@ internal static class GraphInterop
     internal static void RecordNodeHitForGraph(string graphName, string nodeId)
     {
         if (!s_recordHits) return;
-        lock (s_nodeHits) s_nodeHits[graphName + " " + nodeId] = s_hitClock.Elapsed.TotalSeconds;
+        lock (s_nodeHits) s_nodeHits[graphName + "\0" + nodeId] = s_hitClock.Elapsed.TotalSeconds;
     }
 
     /// <summary>Turns recording on or off. Called from the bridge when a graph editor tab opens or
@@ -507,7 +507,7 @@ internal static class GraphInterop
     internal static string CollectNodeHits(string graphName, double maxAgeSeconds)
     {
         var sb = new System.Text.StringBuilder();
-        string prefix = graphName + " ";
+        string prefix = graphName + "\0";
         lock (s_nodeHits)
         {
             double now = s_hitClock.Elapsed.TotalSeconds;

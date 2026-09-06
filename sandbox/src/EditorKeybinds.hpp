@@ -37,7 +37,7 @@ enum class CommandId : u8 {
     ModeToggleLandscape, ViewFrameSelected,
     PlayReleaseMouse, PlayStop,
     DrawerDismiss, DrawerToggleContent, DrawerToggleConsole,
-    EditDelete, EditUndo, EditRedo, EditCopy, EditPaste, EditDuplicate,
+    EditDelete, EditUndo, EditRedo, EditCopy, EditPaste, EditDuplicate, EditSelectAll,
     Count
 };
 inline constexpr usize kCommandCount = static_cast<usize>(CommandId::Count);

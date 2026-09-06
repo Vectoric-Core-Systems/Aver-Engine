@@ -210,23 +210,30 @@ bool readOcLightmap(const std::string& path, OcLightmap& out, std::string* err) 
         return false;
     }
 
-    // A SANITY CEILING. DEFENCE IN DEPTH, NOT A CRASH FIX -- and the difference is worth writing
-    // down, because a review claimed the stronger thing and MEASURING IT SAID OTHERWISE.
+    // A SANITY CEILING, AND IT IS LOAD-BEARING ON 64-BIT -- do not weaken it to "defence in depth".
     //
-    // The claim was that `usize(width) * usize(height) * 4`, built from u32s read straight out of the
-    // file, could wrap to a SMALL value, sail past the size checks below, and then throw out of a
-    // resize -- from a function whose documented contract is to return false with `err` set. The
-    // test written to prove it (see OcLightmapTest's hostile-header case) passes with this block
-    // DISABLED, which is what settles it: on a 64-bit build width*height cannot overflow at all
-    // (both are u32, the product fits u64), and the *4 wraps only for absurd dimensions -- to a
-    // still-enormous number that no real chunk size matches, so the existing check rejects it
-    // cleanly. The reachable-crash story does not hold here.
+    // THIS COMMENT PREVIOUSLY SAID THE OPPOSITE, on evidence that turned out to be an artefact of
+    // the test rather than a fact about the code, so the reasoning is written out here in full.
     //
-    // What this block DOES buy, and why it stays: a header claiming 40000x40000 is refused for six
-    // gigabytes' worth of arithmetic before anything is sized against it, the failure names the
-    // absurd number instead of a byte-count mismatch, and a 32-bit build -- where usize is 32 bits
-    // and the product genuinely can wrap small -- is covered by construction rather than by luck.
-    // 16384 on an edge is four times the largest atlas anything here produces.
+    // The wrap is real and the arithmetic is exact. `usize(width) * usize(height) * 4` at
+    // width = height = 2^31 gives 2^62 * 4, which is 2^64 -- zero in a 64-bit usize. Not "a
+    // still-enormous number no real chunk size matches", which is what this comment used to claim:
+    // exactly ZERO, which an empty texel chunk matches perfectly at the size check below. Control
+    // then reaches `texels.resize(2^62)`, well past any vector's max_size, which throws
+    // std::length_error out of a function whose header documents a false return. So without this
+    // block a hostile file crashes the reader on a 64-bit build, not merely a 32-bit one.
+    //
+    // WHY THE OLD CLAIM SURVIVED: the test cited as proof ("passes with this block DISABLED") forged
+    // its hostile file by patching bytes inside an already-written file, leaving the AVR1 chunk hash
+    // describing the original bytes. parseAvr1 rejected it at the container layer and this function's
+    // arithmetic never ran -- so disabling the ceiling could not have changed the outcome either way.
+    // The test now builds its file THROUGH the writer, so the hashes are valid, the container admits
+    // it, and the assertions name which refusal fired. See OcLightmapTest's hostile-header case.
+    //
+    // The rest of what it buys still stands: a header claiming 40000x40000 is refused before six
+    // gigabytes' worth of arithmetic is done against it, the failure names the absurd number instead
+    // of a byte-count mismatch, and a 32-bit build -- where the product itself can wrap small -- is
+    // covered by construction. 16384 on an edge is four times the largest atlas anything here makes.
     constexpr u32 kMaxLightmapEdge = 16384;
     constexpr u32 kMaxLightmapVerts = 1u << 28;   // 268M vertices, far past any real mesh
     if (lm.width > kMaxLightmapEdge || lm.height > kMaxLightmapEdge) {

@@ -12330,6 +12330,10 @@ private:
             if (keybinds_.pressed(editor::CommandId::EditCopy, io))      copySelection();
             if (keybinds_.pressed(editor::CommandId::EditPaste, io))     pasteClipboard();
             if (keybinds_.pressed(editor::CommandId::EditDuplicate, io)) duplicateSelection();
+            // Guarded on the SAME emptiness the menu item greys itself on, so the key and the menu
+            // agree about when Select All does nothing.
+            if (!outlinerOrder_.empty() && keybinds_.pressed(editor::CommandId::EditSelectAll, io))
+                selectAllInOutliner();
             if (keybinds_.pressed(editor::CommandId::EditUndo, io)) undo();
             // Ctrl+Shift+Z: an intentionally NOT-rebindable alternate spelling of Redo (same command,
             // not a second one) -- kept as a small hardcoded fallback next to the registry-driven
@@ -14240,6 +14244,19 @@ private:
             check(editor::chordToString(keybinds_.chordFor(CommandId::EditCopy)) == "Ctrl+C",
                   "Edit.Copy starts at its compiled-in default (Ctrl+C)");
 
+            // SELECT ALL EXISTS AS A COMMAND AT ALL -- that is the regression this guards, and it is
+            // not hypothetical. Select All shipped as a menu row whose "Ctrl+A" was a hardcoded hint
+            // STRING with no registry entry and no dispatch behind it, so the menu advertised a key
+            // that did nothing when pressed. Asserting the chord here is what keeps the menu label
+            // (which now reads chordFor, like every other Edit row) and handleManip's dispatch
+            // describing one binding instead of two independently-maintained ones.
+            check(editor::chordToString(keybinds_.chordFor(CommandId::EditSelectAll)) == "Ctrl+A",
+                  "Edit.SelectAll exists as a real command and defaults to Ctrl+A");
+            check(keybinds_.conflictWith(CommandId::EditSelectAll,
+                                          editor::keybindDef(CommandId::EditSelectAll).def,
+                                          editor::keybindDef(CommandId::EditSelectAll).scope) == CommandId::Count,
+                  "and Ctrl+A collides with nothing else in the viewport scope");
+
             const Chord ctrlZ{ImGuiKey_Z, true, false, false};   // Edit.Undo's own default chord
             const bool blocked = !keybinds_.rebind(CommandId::EditPaste, ctrlZ);
             check(blocked, "rebinding Edit.Paste to Ctrl+Z is REFUSED (Edit.Undo already holds it)");
@@ -15221,7 +15238,13 @@ private:
                 // which is what "all" means to someone looking at it. It is also exactly what
                 // multiRange walks, so shift-click and this agree by construction.
                 ImGui::BeginDisabled(outlinerOrder_.empty());
-                if (ImGui::MenuItem("Select All", "Ctrl+A")) selectAllInOutliner();
+                // The hint comes from the registry, like every Edit-menu row. It was a hardcoded
+                // "Ctrl+A" string with no command behind it, so the menu named a key that was never
+                // dispatched -- the precise drift the Edit menu's comment says this pattern prevents.
+                if (ImGui::MenuItem("Select All",
+                                    editor::chordToString(
+                                        keybinds_.chordFor(editor::CommandId::EditSelectAll)).c_str()))
+                    selectAllInOutliner();
                 ImGui::EndDisabled();
                 uiReg_.track("select.all");
                 if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && outlinerOrder_.empty())

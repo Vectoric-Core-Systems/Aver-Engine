@@ -12,6 +12,7 @@
 // reader that returns success on a truncated file hands the renderer garbage UVs.
 #include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
+#include "aver/formats/Avr1.hpp"
 #include "aver/formats/OcLightmap.hpp"
 #include "aver/platform/FileSystem.hpp"
 
@@ -196,50 +197,81 @@ int main() {
 
     // ---- a hostile header must be REFUSED, not allocated against ---------------------------------
     //
-    // WHAT THIS DOES AND DOES NOT PROVE, stated because the first version of this comment claimed
-    // more than the test earns. It asserts a clean `false` + message for an absurd header. It does
-    // NOT demonstrate an integer overflow: running it with OcLightmap.cpp's size ceiling disabled
-    // still PASSES, because on a 64-bit build width*height (both u32) cannot overflow a usize, and
-    // the *4 wraps only to another enormous value that no real chunk size matches -- so the ordinary
-    // size check already rejects it. The ceiling is defence in depth for a 32-bit build and for
-    // absurd-but-representable sizes; this case guards the refusal, not a crash.
+    // THE PREVIOUS VERSION OF THIS TEST NEVER REACHED THE CODE IT NAMED, and the comment above it
+    // drew a conclusion from that. It forged the file by patching width/height inside an ALREADY
+    // WRITTEN file, which leaves the AVR1 chunk hash describing the original bytes -- so parseAvr1
+    // refused it with `AVR1: chunk payload hash mismatch (file corrupt)` (measured: that string was
+    // what this very check printed) and readOcLightmap's arithmetic never ran at all. That is also
+    // why "it still passes with the ceiling disabled" was both true and worthless as evidence:
+    // nothing ever got as far as the ceiling to be affected by disabling it.
     //
-    // BUILT BY PATCHING A REAL FILE, not by hand-assembling a container: the AVR1 header carries a
-    // CRC and per-chunk hashes, so a from-scratch forgery would be rejected by the container layer
-    // and prove nothing about this reader's own arithmetic. Taking a valid file and rewriting four
-    // bytes of the payload is what puts the hostile numbers past the container and in front of the
-    // code under test.
+    // HAND-ASSEMBLED THROUGH THE WRITER, which is what makes a file hostile AND well-formed:
+    // writeAvr1 computes every chunk hash from whatever bytes it is handed (Avr1.cpp), so a forged
+    // container carries self-consistent hashes and a valid CRC. The old comment asserted the
+    // opposite -- that a from-scratch forgery "would be rejected by the container layer" -- and that
+    // false premise is precisely what pushed this test into the patching approach that defeated it.
+    //
+    // WHY 2^31 SQUARED IS THE INTERESTING SIZE and 0xFFFFFFFF is not: `usize(w) * usize(h) * 4` at
+    // w = h = 2^31 is 2^62 * 4 == 2^64 exactly, which wraps a 64-bit usize to ZERO -- not to
+    // "another enormous value no real chunk size matches", as the old comment claimed. A zero-byte
+    // texel chunk MATCHES that wrapped size, so control reaches `texels.resize(2^62)`, which throws
+    // std::length_error out of a function whose header documents a false return. The ceiling in
+    // OcLightmap.cpp is therefore load-bearing on 64-bit too, not merely cover for 32-bit builds.
+    //
+    // The assertions check WHICH refusal fired, not merely that one did. An assertion demanding only
+    // `false` is satisfied by the container hash error -- which is exactly how the previous version
+    // passed while testing nothing.
     {
-        std::vector<u8> bytes;
-        const std::string hostile = tempPath("hostile.oclightmap");
-        if (readFileBytes(path, bytes)) {
-            // The header chunk's first eight bytes are width then height, little-endian. Find them
-            // by their known values (4 and 3 from the fixture) rather than by a hard-coded offset,
-            // which would silently stop testing anything if the container layout ever shifted.
-            bool patched = false;
-            for (usize i = 0; i + 8 <= bytes.size(); ++i) {
-                const u32 w = u32(bytes[i]) | (u32(bytes[i+1])<<8) | (u32(bytes[i+2])<<16) | (u32(bytes[i+3])<<24);
-                const u32 h = u32(bytes[i+4]) | (u32(bytes[i+5])<<8) | (u32(bytes[i+6])<<16) | (u32(bytes[i+7])<<24);
-                if (w == 4u && h == 3u) {
-                    for (int k = 0; k < 8; ++k) bytes[i + usize(k)] = 0xFFu;   // 4294967295 x 4294967295
-                    patched = true;
-                    break;
-                }
-            }
-            check(patched, "the fixture's width/height could be located for patching");
-            if (FILE* f = std::fopen(hostile.c_str(), "wb")) {
-                std::fwrite(bytes.data(), 1, bytes.size(), f);
-                std::fclose(f);
-            }
-            fmt::OcLightmap r;
-            std::string why;
-            // No try/catch: if this throws, the test process dies and the suite reports it, which is
-            // the correct outcome for a regression here -- a swallowed exception would let the very
-            // failure this guards against pass quietly.
-            check(!fmt::readOcLightmap(hostile, r, &why),
-                  "a header claiming a 4294967295x4294967295 atlas is refused cleanly");
-            check(!why.empty(), "and it says why rather than throwing: " + why);
-        }
+        auto put32 = [](std::vector<u8>& v, u32 x) {
+            v.push_back(u8(x)); v.push_back(u8(x >> 8));
+            v.push_back(u8(x >> 16)); v.push_back(u8(x >> 24));
+        };
+        auto put64 = [](std::vector<u8>& v, u64 x) {
+            for (int i = 0; i < 8; ++i) v.push_back(u8(x >> (i * 8)));
+        };
+        // vertexCount 1 with a matching 8-byte uv chunk keeps everything except the atlas size
+        // honest, so a uv mismatch cannot be the thing doing the refusing.
+        auto buildHostile = [&](const std::string& out, u32 w, u32 h, usize texBytes) {
+            std::vector<u8> head;
+            put32(head, w);
+            put32(head, h);
+            put32(head, 1u);           // vertexCount
+            put64(head, 0u);           // sourceHash
+            put32(head, 1u);           // sourceMesh length
+            head.push_back(u8('m'));   // sourceMesh itself
+            std::vector<u8> uv(1u * 2u * sizeof(f32), 0u);
+            std::vector<u8> tex(texBytes, 0u);
+            fmt::Avr1File f;
+            f.subtype = fmt::avrFourCC("LMAP");
+            f.add(fmt::avrFourCC("LMHD"), std::move(head), fmt::kAvrChunkRequired);
+            f.add(fmt::avrFourCC("LMUV"), std::move(uv),   fmt::kAvrChunkRequired);
+            f.add(fmt::avrFourCC("LMTX"), std::move(tex),  fmt::kAvrChunkRequired);
+            return fmt::saveAvr1(out, f, nullptr);
+        };
+
+        // Proving the container ACCEPTS the forgery is what makes the refusals below attributable to
+        // the reader's own arithmetic rather than to a malformed file.
+        const std::string wrap = tempPath("hostile_wrap.oclightmap");
+        check(buildHostile(wrap, 0x80000000u, 0x80000000u, 0),
+              "a forged .oclightmap can be written carrying valid AVR1 hashes");
+
+        fmt::OcLightmap r;
+        std::string why;
+        // No try/catch: with the ceiling removed this throws std::length_error and takes the process
+        // with it, which is the correct and highly visible outcome for a regression here.
+        check(!fmt::readOcLightmap(wrap, r, &why),
+              "a 2147483648x2147483648 atlas, whose byte count wraps to exactly 0, is refused");
+        check(why.find("edge limit") != std::string::npos,
+              "and it is the EDGE CEILING that refuses it, not the container: " + why);
+
+        const std::string huge = tempPath("hostile_max.oclightmap");
+        fmt::OcLightmap r2;
+        std::string why2;
+        check(buildHostile(huge, 0xFFFFFFFFu, 0xFFFFFFFFu, 0), "and one at the u32 maximum");
+        check(!fmt::readOcLightmap(huge, r2, &why2),
+              "a 4294967295x4294967295 atlas is refused cleanly");
+        check(why2.find("edge limit") != std::string::npos,
+              "and it too names the edge ceiling: " + why2);
     }
 
     // ---- wrong magic ----------------------------------------------------------------------------
