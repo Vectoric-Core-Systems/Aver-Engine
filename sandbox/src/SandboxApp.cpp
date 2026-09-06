@@ -10080,11 +10080,11 @@ private:
     // Filled when the delete-confirm modal opens; see cbFindReferencesTo for what it can and
     // cannot see. Cleared on delete or cancel so a later modal never shows a previous answer.
     std::vector<std::string> cbDeleteRefs_;
-    std::vector<std::string> cbRenameRefs_;
+    std::vector<std::string> cbRenameRefs_;   // the same, for the rename dialog
     // Whether the rename dialog will repoint what it found. ON by default: repointing is what an
     // author wants nearly every time, and the checkbox exists so a tool that edits other people's
     // files can be told not to.
-    bool cbRenameRepoint_ = true;   // the same, for the rename dialog
+    bool cbRenameRepoint_ = true;
 
     // Selects every row the World Outliner currently lists. The anchor becomes the FIRST row rather
     // than the last, so a following shift-click ranges downward from the top the way a person expects
