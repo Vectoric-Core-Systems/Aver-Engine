@@ -101,6 +101,19 @@ ImGuiKey nameToKey(std::string_view s) {
 //   EditUndo                  -- `io.KeyCtrl && IsKeyPressed(ImGuiKey_Z,false) && !io.KeyShift`
 //   EditRedo                  -- `io.KeyCtrl && IsKeyPressed(ImGuiKey_Y,false)` (Shift unchecked)
 //   EditCopy/Paste/Duplicate  -- new commands; Ctrl+C/V/D, exact-modifier by design (see header)
+//   AssetSave                 -- the SAME Ctrl+S transcribed from four places at once:
+//                                AnimEditor (sockets and clips), BtEditor and GraphEditor all
+//                                wrote `IsWindowFocused(RootAndChildWindows) && io.KeyCtrl &&
+//                                IsKeyPressed(S,false)`. checkShift is FALSE because not one of
+//                                them gated on Shift -- Ctrl+Shift+S saves today, and this table
+//                                transcribes behaviour rather than tidying it. The focus test
+//                                stays at each call site: pressed() does not consult live scope.
+//   LevelSave                 -- Ctrl+S over the LEVEL, a different command from AssetSave and
+//                                deliberately a separate row: its scopes do not overlap (one is
+//                                the viewport, the other an asset tab), and its gating differs --
+//                                it tests WantTextInput rather than window focus, because saving
+//                                is not a viewport gesture but renaming an entity must not save
+//                                the level on the "s" of a name.
 //   EditSelectAll             -- Ctrl+A over the OUTLINER's drawn order. It shipped as a menu item
 //                                whose "Ctrl+A" hint was a hardcoded string with no key behind it,
 //                                so the menu advertised a shortcut that did nothing. The Content
@@ -108,29 +121,41 @@ ImGuiKey nameToKey(std::string_view s) {
 //                                table on purpose: it selects FILES, and is gated on that panel
 //                                holding focus -- two meanings on one key, exactly as Delete has.
 constexpr u32 kViewportScope = kScopeObjectMode | kScopeLandscapeMode;
+// THE SAME COMMAND, IN THE CANVAS TOO. Delete/Undo/Redo/Copy/Paste/Duplicate and Frame Selected
+// were hardcoded a second time inside GraphEditor, so rebinding Copy on the Preferences page
+// changed it everywhere EXCEPT the place a node author spends their day. Widening the scope is
+// right where adding parallel commands would be wrong: there is one "Copy", and the user
+// rebinds it once.
+constexpr u32 kEditScope = kViewportScope | kScopeGraphEditor;
+// The actor editor has its own viewport with the SAME four tools, hardcoded a second time.
+constexpr u32 kToolScope = kScopeObjectMode | kScopeActorEditor;
 constexpr std::array<KeybindDef, kCommandCount> kDefs = {{
-    {CommandId::ToolSelect,  "tool.select",  "Select Tool",           {ImGuiKey_1, false,false,false}, kScopeObjectMode,    false,false, true},
-    {CommandId::ToolMove,    "tool.move",    "Move Tool",             {ImGuiKey_2, false,false,false}, kScopeObjectMode,    false,false, true},
-    {CommandId::ToolRotate,  "tool.rotate",  "Rotate Tool",           {ImGuiKey_3, false,false,false}, kScopeObjectMode,    false,false, true},
-    {CommandId::ToolScale,   "tool.scale",   "Scale Tool",            {ImGuiKey_4, false,false,false}, kScopeObjectMode,    false,false, true},
+    {CommandId::ToolSelect,  "tool.select",  "Select Tool",           {ImGuiKey_1, false,false,false}, kToolScope,    false,false, true},
+    {CommandId::ToolMove,    "tool.move",    "Move Tool",             {ImGuiKey_2, false,false,false}, kToolScope,    false,false, true},
+    {CommandId::ToolRotate,  "tool.rotate",  "Rotate Tool",           {ImGuiKey_3, false,false,false}, kToolScope,    false,false, true},
+    {CommandId::ToolScale,   "tool.scale",   "Scale Tool",            {ImGuiKey_4, false,false,false}, kToolScope,    false,false, true},
     {CommandId::SculptRaise,   "sculpt.raise",   "Sculpt: Raise",     {ImGuiKey_1, false,false,false}, kScopeLandscapeMode, false,false, true},
     {CommandId::SculptLower,   "sculpt.lower",   "Sculpt: Lower",     {ImGuiKey_2, false,false,false}, kScopeLandscapeMode, false,false, true},
     {CommandId::SculptSmooth,  "sculpt.smooth",  "Sculpt: Smooth",    {ImGuiKey_3, false,false,false}, kScopeLandscapeMode, false,false, true},
     {CommandId::SculptFlatten, "sculpt.flatten", "Sculpt: Flatten",   {ImGuiKey_4, false,false,false}, kScopeLandscapeMode, false,false, true},
     {CommandId::ModeToggleLandscape, "mode.toggleLandscape", "Toggle Landscape Mode", {ImGuiKey_Tab, false,false,false}, kViewportScope, false,false, true},
-    {CommandId::ViewFrameSelected,   "view.frameSelected",   "Frame Selected",        {ImGuiKey_F,   false,false,false}, kViewportScope, false,false, true},
+    {CommandId::ViewFrameSelected,   "view.frameSelected",   "Frame Selected",        {ImGuiKey_F,   false,false,false}, kEditScope | kScopeActorEditor, false,false, true},
     {CommandId::PlayReleaseMouse, "play.releaseMouse", "Release Mouse (Play)", {ImGuiKey_F1,     false,true, false}, kScopePlaySession, false,true,  false},
     {CommandId::PlayStop,         "play.stop",         "Stop Play Session",    {ImGuiKey_Escape, false,false,false}, kScopePlaySession, false,false, false},
     {CommandId::DrawerDismiss,       "drawer.dismiss",       "Dismiss Drawer",          {ImGuiKey_Escape, false,false,false}, kScopeDrawerOpen, false,false, false},
     {CommandId::DrawerToggleContent, "drawer.toggleContent", "Toggle Content Browser",  {ImGuiKey_Space,  true, false,false}, kScopeGlobalUI,   true, false, false},
     {CommandId::DrawerToggleConsole, "drawer.toggleConsole", "Toggle Console",          {ImGuiKey_GraveAccent, false,false,false}, kScopeGlobalUI, false,false, false},
-    {CommandId::EditDelete, "edit.delete", "Delete",    {ImGuiKey_Delete, false,false,false}, kViewportScope, false,false, false},
-    {CommandId::EditUndo,   "edit.undo",   "Undo",      {ImGuiKey_Z,      true, false,false}, kViewportScope, true, true,  false},
-    {CommandId::EditRedo,   "edit.redo",   "Redo",      {ImGuiKey_Y,      true, false,false}, kViewportScope, true, false, false},
-    {CommandId::EditCopy,      "edit.copy",      "Copy",      {ImGuiKey_C, true,false,false}, kViewportScope, true, true, false},
-    {CommandId::EditPaste,     "edit.paste",     "Paste",     {ImGuiKey_V, true,false,false}, kViewportScope, true, true, false},
-    {CommandId::EditDuplicate, "edit.duplicate", "Duplicate", {ImGuiKey_D, true,false,false}, kViewportScope, true, true, false},
+    {CommandId::EditDelete, "edit.delete", "Delete",    {ImGuiKey_Delete, false,false,false}, kEditScope, false,false, false},
+    {CommandId::EditUndo,   "edit.undo",   "Undo",      {ImGuiKey_Z,      true, false,false}, kEditScope, true, true,  false},
+    {CommandId::EditRedo,   "edit.redo",   "Redo",      {ImGuiKey_Y,      true, false,false}, kEditScope, true, false, false},
+    {CommandId::EditCopy,      "edit.copy",      "Copy",      {ImGuiKey_C, true,false,false}, kEditScope, true, true, false},
+    {CommandId::EditPaste,     "edit.paste",     "Paste",     {ImGuiKey_V, true,false,false}, kEditScope, true, true, false},
+    {CommandId::EditDuplicate, "edit.duplicate", "Duplicate", {ImGuiKey_D, true,false,false}, kEditScope, true, true, false},
     {CommandId::EditSelectAll, "edit.selectAll", "Select All", {ImGuiKey_A, true,false,false}, kViewportScope, true, true, false},
+    {CommandId::AssetSave,     "asset.save",     "Save Asset", {ImGuiKey_S, true,false,false}, kScopeAssetEditor, true, false, false},
+    {CommandId::LevelSave,     "level.save",     "Save Level",            {ImGuiKey_S, true,false,false}, kViewportScope, true, false, false},
+    {CommandId::GraphCommentBox, "graph.commentBox", "Graph: Comment Box", {ImGuiKey_C, false,false,false}, kScopeGraphEditor, true, false, false},
+    {CommandId::GraphFrameAll,   "graph.frameAll",   "Graph: Frame All",             {ImGuiKey_Home, false,false,false}, kScopeGraphEditor, false,false, false},
 }};
 
 static_assert(kDefs.size() == kCommandCount, "kDefs must have exactly one row per CommandId");
@@ -142,6 +167,13 @@ static_assert(kDefs.size() == kCommandCount, "kDefs must have exactly one row pe
 // with itself by construction, including about a name it got wrong.
 usize keyNameCount() { return sizeof(kKeyNames) / sizeof(kKeyNames[0]); }
 const char* keyNameAt(usize i) { return i < keyNameCount() ? kKeyNames[i].name : nullptr; }
+
+// One instance, reached by everything. A function-local static rather than a namespace-scope object
+// so its construction order cannot race the preference store it reads from in loadFromPrefs().
+KeybindRegistry& keybinds() {
+    static KeybindRegistry r;
+    return r;
+}
 
 const std::array<KeybindDef, kCommandCount>& keybindDefs() { return kDefs; }
 const KeybindDef& keybindDef(CommandId id) { return kDefs[static_cast<usize>(id)]; }
@@ -260,7 +292,11 @@ bool KeybindRegistry::drawPreferencesSection(f32 dpi, bool visible, UiRegistry* 
     if (ImGui::BeginTable("keybindsTable", 4,
                           ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH)) {
         ImGui::TableSetupColumn("Command", ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn("Chord", ImGuiTableColumnFlags_WidthFixed, 150.0f * dpi);
+        // 120, not 150. Widening the button column below to fit Clear AND Reset took that space
+        // out of the stretching Command column, which started truncating labels ("Release Mous",
+        // "Toggle Consol"). The longest chord this can hold is "Ctrl+Shift+KeypadSubtract", which
+        // no default uses and which wraps rather than being lost.
+        ImGui::TableSetupColumn("Chord", ImGuiTableColumnFlags_WidthFixed, 120.0f * dpi);
         ImGui::TableSetupColumn("##rebind", ImGuiTableColumnFlags_WidthFixed, 84.0f * dpi);
         // WIDE ENOUGH FOR TWO BUTTONS, because this column holds Clear AND Reset side by side. It
         // was still sized for the one it held before Clear was added, so Reset rendered clipped to
@@ -274,6 +310,10 @@ bool KeybindRegistry::drawPreferencesSection(f32 dpi, bool visible, UiRegistry* 
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0);
             ImGui::TextUnformatted(def.label);
+            // The Command column stretches to whatever the Preferences window leaves it, so the two
+            // longest labels clip at the default size. A hover tooltip makes that harmless rather
+            // than chasing column widths that only hold at one window size and one DPI.
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", def.label);
             ImGui::TableSetColumnIndex(1);
             if (listening_ == static_cast<int>(i))
                 ImGui::TextColored(ImVec4(0.95f, 0.42f, 0.13f, 1.0f), "Press a chord...");

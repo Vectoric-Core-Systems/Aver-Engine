@@ -1,6 +1,7 @@
 // The actor editor tab: opens a C# actor file, previews it in 3D, and writes placements back.
 
 #include "ActorEditor.hpp"
+#include "EditorKeybinds.hpp"
 #include "EditorEuler.hpp"
 #include "EditorTransform.hpp"
 #include "ToolGlyphs.hpp"
@@ -1268,11 +1269,16 @@ void ActorEditor::draw(Engine& e) {
 
             // Tools 1-4 and F, only while the pointer is over the viewport.
             if (ImGui::IsItemHovered() && !ImGui::GetIO().WantTextInput) {
-                if (ImGui::IsKeyPressed(ImGuiKey_1)) tool_ = ToolSelect;
-                if (ImGui::IsKeyPressed(ImGuiKey_2)) tool_ = ToolMove;
-                if (ImGui::IsKeyPressed(ImGuiKey_3)) tool_ = ToolRotate;
-                if (ImGui::IsKeyPressed(ImGuiKey_4)) tool_ = ToolScale;
-                if (ImGui::IsKeyPressed(ImGuiKey_F) && g_preview) g_preview->frameAll();
+                // The SAME four tool commands the level viewport uses, not clones: this editor
+                // hardcoded 1-4 and F a second time, so rebinding them on the Preferences page
+                // changed the level viewport and quietly did nothing here.
+                auto& kb = editor::keybinds();
+                using editor::CommandId;
+                if (kb.pressed(CommandId::ToolSelect, io)) tool_ = ToolSelect;
+                if (kb.pressed(CommandId::ToolMove, io))   tool_ = ToolMove;
+                if (kb.pressed(CommandId::ToolRotate, io)) tool_ = ToolRotate;
+                if (kb.pressed(CommandId::ToolScale, io))  tool_ = ToolScale;
+                if (kb.pressed(CommandId::ViewFrameSelected, io) && g_preview) g_preview->frameAll();
             }
 
             const bool haveSel = !live_ && tool_ != ToolSelect && selected_ >= 0

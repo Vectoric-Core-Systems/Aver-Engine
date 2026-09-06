@@ -2,6 +2,7 @@
 // the structural edits are free functions, and for why this is a list rather than a canvas.
 
 #include "SoundEditor.hpp"
+#include "EditorKeybinds.hpp"
 
 #include "EditorIcons.hpp"
 #include "aver/core/Log.hpp"
@@ -693,7 +694,7 @@ void SoundEditor::draw(Engine& e) {
 
     if (ImGui::Button(ICON_SAVE " Save") ||
         (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
-         ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false))) {
+         editor::keybinds().pressed(editor::CommandId::AssetSave, ImGui::GetIO()))) {
         std::string why;
         if (!save(&why)) AVER_ERROR("[SoundEditor] save failed for '{}': {}", path_, why);
     }

@@ -3154,7 +3154,7 @@ public:
             // NOT GATED ON levelFocused_, unlike F below: saving is not a viewport gesture and
             // wanting it while the cursor sits over the Outliner is not a mistake. It IS gated on
             // WantTextInput, or renaming an entity would save the level on the "s" of a name.
-            if (!io.WantTextInput && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false))
+            if (!io.WantTextInput && keybinds_.pressed(editor::CommandId::LevelSave, io))
                 saveLevelInteractive();
 
             // F frames the selection at a distance derived from its radius.
@@ -21955,7 +21955,11 @@ private:
     // What chord means what command, defaults matching every hardcoded key this file used before
     // this registry existed. See EditorKeybinds.hpp for why it lives in its own file.
 #if AVER_WITH_IMGUI
-    editor::KeybindRegistry keybinds_;
+    // A REFERENCE TO THE ONE REGISTRY, not an instance of its own. The asset-editor tabs reach the
+    // same object through editor::keybinds(), and two registries would mean a rebind made on the
+    // Preferences page silently failed to apply inside a graph or actor tab -- the exact "rebindable
+    // unless you are in a tab" split this promotion exists to remove.
+    editor::KeybindRegistry& keybinds_ = editor::keybinds();
 #endif
 
     // Builds an outliner label from a surface name plus an ordinal: "M_Wall" -> "Wall 3". Falls back

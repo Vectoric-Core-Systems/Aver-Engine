@@ -42,6 +42,7 @@ enum class CommandId : u8 {
     PlayReleaseMouse, PlayStop,
     DrawerDismiss, DrawerToggleContent, DrawerToggleConsole,
     EditDelete, EditUndo, EditRedo, EditCopy, EditPaste, EditDuplicate, EditSelectAll,
+    AssetSave, LevelSave, GraphCommentBox, GraphFrameAll,
     Count
 };
 inline constexpr usize kCommandCount = static_cast<usize>(CommandId::Count);
@@ -66,6 +67,20 @@ struct KeybindDef {
     bool checkShift;      // false: ditto for Shift. (Alt is never checked anywhere in this codebase.)
     bool repeatAllowed;
 };
+
+// THE PROCESS-WIDE REGISTRY, and the reason it exists is the same one that gave the notification
+// queue an accessor: the asset editors (GraphEditor, ActorEditor, AnimEditor, BtEditor) live in
+// editor:: and cannot see SandboxApp, but their keys belong in the same table as everything else --
+// otherwise "rebindable" means "rebindable unless you are in a tab".
+//
+// The alternative was widening AssetEditor::draw's signature to carry a registry, which this
+// header's own note about not widening an interface for one subclass argues against. Two seams
+// solved two different ways would be the worst of the three options.
+//
+// SandboxApp still OWNS the lifetime question in practice: it loads from prefs at startup and saves
+// on change. This is a reference to the one instance, not a second one.
+class KeybindRegistry;
+KeybindRegistry& keybinds();
 
 // The bindable-key vocabulary, exposed so a test can sweep the WHOLE table rather than re-listing
 // it. A key absent from it cannot be displayed, parsed or captured, so this is the one place that

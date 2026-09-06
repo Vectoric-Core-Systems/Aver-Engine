@@ -130,6 +130,7 @@ int main() {
             "drawer.dismiss", "drawer.toggleContent", "drawer.toggleConsole",
             "edit.delete", "edit.undo", "edit.redo", "edit.copy", "edit.paste",
             "edit.duplicate", "edit.selectAll",
+            "asset.save", "level.save", "graph.commentBox", "graph.frameAll",
         };
         const auto& defs = editor::keybindDefs();
         check(defs.size() == golden.size(),

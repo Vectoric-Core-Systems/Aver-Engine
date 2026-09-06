@@ -16,6 +16,7 @@
 //      parser skipped (a comment, a future record type) rides through untouched, the same guarantee
 //      testUnknownRecords exercises (tests/formats/src/OcGraphTest.cpp:183).
 #include "EditorTransform.hpp"
+#include "EditorKeybinds.hpp"
 #include "GraphEditor.hpp"
 #include "GraphNodeDefs.hpp"
 #if AVER_MODULE_FLUIDS
@@ -1688,7 +1689,7 @@ void GraphEditor::draw(Engine& e) {
     }
 
     if (ImGui::Button("Save") || (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
-                                   ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false))) {
+                                   keybinds().pressed(CommandId::AssetSave, ImGui::GetIO()))) {
         std::string why;
         if (!save(&why)) AVER_ERROR("[GraphEditor] save failed for '{}': {}", path_, why);
         // CHECKED ON SAVE, BUT THE SAVE STILL HAPPENS. A half-built graph is the normal state of one
@@ -2178,26 +2179,44 @@ void GraphEditor::drawEventGraph(float dpi) {
     }
 
     if (canvasFocused) {
-        if (ImGui::IsKeyPressed(ImGuiKey_Delete, false)) deleteSelection();
+        // THROUGH THE REGISTRY, so a rebind made on the Preferences page applies in here too. These
+        // were nine hardcoded keys duplicating commands that already existed, which meant rebinding
+        // Copy changed it everywhere except the canvas a node author works in all day.
+        //
+        // Delete/Undo/Redo/Copy/Paste/Duplicate and Frame Selected are the SAME commands as the
+        // level viewport's, widened to this scope rather than cloned -- there is one "Copy" and the
+        // user rebinds it once. Comment Box and Frame Everything are genuinely graph-only and have
+        // their own rows.
+        auto& kb = editor::keybinds();
+        using editor::CommandId;
+
+        if (kb.pressed(CommandId::EditDelete, io)) deleteSelection();
         // C wraps the selection in a comment box -- the same key Blueprint binds it to, and
         // the reason the gesture is worth having at all: drawing a box by hand around six
         // nodes and then nudging its edges is enough work that nobody does it.
-        if (!io.KeyCtrl && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_C, false) && !selectedNodes_.empty())
+        if (kb.pressed(CommandId::GraphCommentBox, io) && !selectedNodes_.empty())
             addCommentAroundSelection(dpi);
-        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Z, false)) { if (io.KeyShift) redo(); else undo(); }
-        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Y, false)) redo();
-        // Ctrl+C / Ctrl+V / Ctrl+D. The bare-C gesture above already excludes Ctrl, so these don't
-        // fight it. PASTE LANDS UNDER THE CURSOR -- expected, and it's what makes pasting the same
-        // clipboard twice land the copies somewhere different; a fixed offset would stack them.
-        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C, false)) copySelection();
-        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V, false)) pasteClipboard(mouseCanvas);
-        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_D, false)) duplicateSelection();
+
+        // CTRL+SHIFT+Z STAYS HARDCODED, and dropping it here is the trap this promotion sets. It was
+        // an alternate spelling of Redo folded into the undo branch (`if (io.KeyShift) redo()`), and
+        // EditUndo checks Shift -- so routing undo through the registry makes Ctrl+Shift+Z match
+        // nothing at all, and it would have gone quietly dead. Kept exactly as SandboxApp keeps its
+        // own copy, and deliberately NOT a second rebindable command: one Redo that can drift into
+        // two spellings is worse than one spelling that cannot be rebound.
+        if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z, false)) redo();
+        if (kb.pressed(CommandId::EditUndo, io)) undo();
+        if (kb.pressed(CommandId::EditRedo, io)) redo();
+        // PASTE LANDS UNDER THE CURSOR -- expected, and it's what makes pasting the same clipboard
+        // twice land the copies somewhere different; a fixed offset would stack them.
+        if (kb.pressed(CommandId::EditCopy, io)) copySelection();
+        if (kb.pressed(CommandId::EditPaste, io)) pasteClipboard(mouseCanvas);
+        if (kb.pressed(CommandId::EditDuplicate, io)) duplicateSelection();
         // F frames the selection (falling back to everything), Home always frames everything --
         // the same two bindings Blueprint uses, and the reason for having both is that "show me
         // what I just clicked" and "show me where I am" are different questions.
-        if (!io.KeyCtrl && !io.KeyAlt && ImGui::IsKeyPressed(ImGuiKey_F, false))
+        if (kb.pressed(CommandId::ViewFrameSelected, io))
             frameSelection(Vec2{canvasSize.x, canvasSize.y}, dpi);
-        if (ImGui::IsKeyPressed(ImGuiKey_Home, false)) frameAll(Vec2{canvasSize.x, canvasSize.y}, dpi);
+        if (kb.pressed(CommandId::GraphFrameAll, io)) frameAll(Vec2{canvasSize.x, canvasSize.y}, dpi);
     }
 
     // Comment boxes draw at the back, then links, then nodes -- via ImDrawListSplitter, not

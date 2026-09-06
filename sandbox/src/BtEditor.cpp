@@ -2,6 +2,7 @@
 // why the structural edits are free functions rather than members.
 
 #include "BtEditor.hpp"
+#include "EditorKeybinds.hpp"
 
 #include "aver/core/Log.hpp"
 
@@ -501,7 +502,7 @@ void BtEditor::draw(Engine& e) {
     }
 
     if (ImGui::Button("Save") || (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
-                                  ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false))) {
+                                  keybinds().pressed(CommandId::AssetSave, ImGui::GetIO()))) {
         std::string why;
         if (!save(&why)) AVER_ERROR("[BtEditor] save failed for '{}': {}", path_, why);
     }

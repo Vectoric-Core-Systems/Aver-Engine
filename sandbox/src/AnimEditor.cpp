@@ -15,6 +15,7 @@
 // the mesh is the right view for everything else. Deleting them to celebrate the mesh would have
 // traded one incomplete answer for another.
 #include "AnimEditor.hpp"
+#include "EditorKeybinds.hpp"
 
 #include "ActorEditor.hpp"
 
@@ -785,7 +786,7 @@ void AnimEditor::drawSockets() {
     const bool saveClicked = ImGui::SmallButton("Save##sock");
     ImGui::EndDisabled();
     const bool saveKey = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
-                         ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false);
+                         keybinds().pressed(CommandId::AssetSave, ImGui::GetIO());
     if (dirty_ && (saveClicked || saveKey)) {
         std::string why;
         if (!save(&why)) AVER_ERROR("[AnimEditor] save failed for '{}': {}", path_, why);
@@ -916,7 +917,7 @@ void AnimEditor::drawNotifies() {
     const bool saveClicked = ImGui::SmallButton("Save");
     ImGui::EndDisabled();
     const bool saveKey = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
-                         ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false);
+                         keybinds().pressed(CommandId::AssetSave, ImGui::GetIO());
     if (dirty_ && (saveClicked || saveKey)) {
         std::string why;
         if (!save(&why)) AVER_ERROR("[AnimEditor] save failed for '{}': {}", path_, why);

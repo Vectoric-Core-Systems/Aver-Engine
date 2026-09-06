@@ -43,6 +43,17 @@ enum Scope : u32 {
     kScopePlaySession   = 1u << 2,
     kScopeDrawerOpen    = 1u << 3,
     kScopeGlobalUI      = 1u << 4,
+    // THE ASSET-EDITOR TABS, which each had their own hardcoded keys and no way to rebind them. They
+    // are separate scopes rather than one because a chord may legitimately mean different things in
+    // a node canvas and in a skeletal preview -- the graph editor's bare `C` is "comment box around
+    // the selection", which would be a bizarre binding to force on the actor editor.
+    //
+    // Their WHOLE POINT is that they do not overlap kScopeObjectMode: a tab is either the level
+    // viewport or one of these, never both, so Ctrl+C can mean copy-entity in one and copy-node in
+    // the other without conflictWith() calling that ambiguous.
+    kScopeGraphEditor   = 1u << 5,
+    kScopeActorEditor   = 1u << 6,
+    kScopeAssetEditor   = 1u << 7,   // any asset tab: the shared Ctrl+S lives here
 };
 
 // Everything the decision depends on, gathered once per frame at the call site.
