@@ -1300,6 +1300,7 @@ bool VoxiRenderer::giSnapshotUnchanged() const {
     // measuring, since the gate compares four independent things and the log said only "no", never
     // which one. The first version latched on the FIRST rejection of any kind, trivially "no snapshot
     // yet" on frame one, hiding every real cause behind it.
+    giRebuildCloudOnly_ = false;
     const auto reject = [this](u32 bit, const char* which) {
         if (!(giGateWhyMask_ & (1u << bit))) {
             giGateWhyMask_ |= (1u << bit);
@@ -1351,12 +1352,6 @@ bool VoxiRenderer::giSnapshotUnchanged() const {
         return reject(3, "sky/sun changed");
     }
 
-    // Excusing the clock is not the same as ignoring the clouds: a drifting layer really does change
-    // how much sky reaches the ground, so the bake is allowed to go stale by a bounded amount rather
-    // than indefinitely. Only when there are clouds to drift -- a clear sky holds its bake for as
-    // long as nothing else moves.
-    constexpr f32 kGiCloudStaleSeconds = 2.0f;
-    if (now.cloudsEnabled && cloudTimeDelta > kGiCloudStaleSeconds) return reject(5, "clouds drifted");
     if (giDrawsKey() != giDrawsKey_) {
         // WHICH AXIS, not just "the draw list". See giDrawsSubKeys.
         u64 c = 0, m = 0, w = 0, mt = 0;
@@ -1397,6 +1392,27 @@ bool VoxiRenderer::giSnapshotUnchanged() const {
             giDrawsNextReport_ *= 2;
         }
         return reject(4, "draw list changed");
+    }
+
+    // CLOUDS LAST, AND THAT ORDER IS THE POINT. Excusing the cloud clock is not the same as ignoring
+    // the clouds: a drifting layer really does change how much sky reaches the ground, so the bake is
+    // allowed to go stale by a bounded amount rather than indefinitely. Only when there are clouds to
+    // drift -- a clear sky holds its bake for as long as nothing else moves.
+    //
+    // This used to be tested FIRST, above the geometry checks, which made "clouds drifted" ambiguous:
+    // it fired whether or not the draw list had also changed, so it could not be used to identify a
+    // rebuild caused by nothing but the sky. Tested last, it means exactly that, which is what lets
+    // giCacheScheduleDump below decline to write one to disk.
+    //
+    // THIRTY SECONDS, NOT TWO. Two seconds forced a full ~18 MB revoxelisation every two seconds for
+    // as long as a scene had clouds in it, whether or not anything else in the world moved -- and
+    // MEASURED on ElectricDreams under camera motion, that was the dominant source of 439 MB of cache
+    // writes in a 900-frame run. Cloud shadow is low-frequency, indirect and diffuse; thirty seconds
+    // of staleness in the bounce term is not visible, and fifteen rebuilds a minute is.
+    constexpr f32 kGiCloudStaleSeconds = 30.0f;
+    if (now.cloudsEnabled && cloudTimeDelta > kGiCloudStaleSeconds) {
+        giRebuildCloudOnly_ = true;
+        return reject(5, "clouds drifted");
     }
     return true;
 }
@@ -1596,6 +1612,14 @@ void VoxiRenderer::giCacheScheduleDump(rhi::IRenderContext& ctx) {
     if (giCacheDir_.empty() || giCacheUnsupported_) return;
     if (giCacheDumpCountdown_) return;   // one in flight is enough
 
+    // A CLOUD-ONLY REBUILD IS NOT WORTH A FILE, and this is the sharpest instance of the cache
+    // writing something it can never retrieve. giCacheKey deliberately zeroes cloudTime -- a key on a
+    // running clock would miss on every load by construction -- so a bake whose ONLY input change was
+    // the cloud clock carries a key identical to the one already on disk while holding different
+    // voxels. Writing it spends ~18 MB to make the cache non-deterministic: the same key would name
+    // two different volumes depending on which run wrote last.
+    if (giRebuildCloudOnly_) return;
+
     giCachePendingKey_ = giCacheKey();
     if (giCachePendingKey_.resolution == 0) return;
 
@@ -1739,7 +1763,14 @@ u32 VoxiRenderer::giCacheFlush() {
 
     // Bounded, because nothing else bounds it: every distinct bake writes a new file and none is
     // ever overwritten.
-    const u32 swept = wrote ? fmt::giCacheSweep(giCacheDir_, 8) : 0;
+    // RAISED FROM 8, AND NOW BOUNDED BY BYTES TOO. Eight was below the working set: MEASURED on
+    // ElectricDreams under camera motion, one 900-frame run touched 17 distinct volumes, so the
+    // sweep was throwing away entries that would be asked for again shortly. The byte cap is what
+    // makes raising the count safe -- 64 entries is ~1.1 GB at 128^3 but would have been 16 GB at
+    // the largest entry the writer accepts, and a count alone cannot tell those apart.
+    constexpr u32 kGiCacheKeepFiles = 64;
+    constexpr u64 kGiCacheKeepBytes = 1536ull * 1024ull * 1024ull;   // 1.5 GB of derived data
+    const u32 swept = wrote ? fmt::giCacheSweep(giCacheDir_, kGiCacheKeepFiles, kGiCacheKeepBytes) : 0;
     if (wrote)
         AVER_INFO("[Voxi] GI cache FLUSHED {} entr(ies), {} KB{}", wrote, wroteBytes / 1024,
                   swept ? (", swept " + std::to_string(swept) + " older entr(ies)") : std::string());

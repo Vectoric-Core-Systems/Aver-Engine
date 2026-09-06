@@ -173,23 +173,38 @@ bool saveGiCache(const std::string& path, const GiCacheEntry& in, std::string* w
     return saveAvr1(path, file, why);
 }
 
-u32 giCacheSweep(const std::string& dir, u32 keep) {
+u32 giCacheSweep(const std::string& dir, u32 keep, u64 maxBytes) {
     std::error_code ec;
     if (!std::filesystem::is_directory(dir, ec)) return 0;
 
-    struct Entry { std::filesystem::path path; std::filesystem::file_time_type when; };
+    struct Entry { std::filesystem::path path; std::filesystem::file_time_type when; u64 bytes; };
     std::vector<Entry> entries;
     for (std::filesystem::directory_iterator it(dir, ec), end; it != end && !ec; it.increment(ec)) {
         if (!it->is_regular_file(ec)) continue;
         if (it->path().extension() != ".cache") continue;
-        entries.push_back({it->path(), it->last_write_time(ec)});
+        std::error_code sec;
+        const auto sz = std::filesystem::file_size(it->path(), sec);
+        entries.push_back({it->path(), it->last_write_time(ec), sec ? 0ull : static_cast<u64>(sz)});
     }
-    if (entries.size() <= keep) return 0;
 
     std::sort(entries.begin(), entries.end(),
               [](const Entry& a, const Entry& b) { return a.when > b.when; });   // newest first
+
+    // Walk newest-first and find the first entry that breaches EITHER limit; everything from there
+    // on is older and goes. Checked in this order so a single entry larger than the whole byte
+    // budget is still kept when it is the newest -- dropping the only fresh volume because it is
+    // big would make the cache useless exactly where it is most expensive to rebuild.
+    usize firstDropped = entries.size();
+    u64 running = 0;
+    for (usize i = 0; i < entries.size(); ++i) {
+        if (i >= keep) { firstDropped = i; break; }
+        running += entries[i].bytes;
+        if (maxBytes && running > maxBytes && i > 0) { firstDropped = i; break; }
+    }
+    if (firstDropped >= entries.size()) return 0;
+
     u32 removed = 0;
-    for (usize i = keep; i < entries.size(); ++i)
+    for (usize i = firstDropped; i < entries.size(); ++i)
         if (std::filesystem::remove(entries[i].path, ec)) ++removed;
     return removed;
 }

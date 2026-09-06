@@ -1080,6 +1080,14 @@ private:
     // than a lighting session produces, and small enough to be unremarkable next to the volume
     // textures themselves. Editor Preferences > Derived Data Cache moves it.
     u64 giCacheRamBudget_ = 256ull * 1024ull * 1024ull;
+    // True when the rebuild about to run was triggered by NOTHING but the cloud clock. The gate
+    // tests clouds last precisely so this can mean that, and giCacheScheduleDump uses it to
+    // decline writing a volume whose key cannot describe what changed. Cleared at the top of
+    // every gate evaluation.
+    // mutable because giSnapshotUnchanged is const and should stay that way: it ANSWERS a question
+    // about the world rather than changing it, and this records which answer it gave -- the same
+    // reason giGateWhyMask_ beside it is written from that const method.
+    mutable bool giRebuildCloudOnly_ = false;
     // Latched so the "this volume is bigger than the whole budget" warning is said once rather than
     // once per bake. Never cleared: raising the budget mid-session does not make the earlier
     // explanation wrong, and a second copy of it would only be noise.

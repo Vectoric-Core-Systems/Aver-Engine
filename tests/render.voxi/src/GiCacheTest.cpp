@@ -160,6 +160,45 @@ int main() {
         check(fmt::giCacheSweep(sweepDir.string(), 4) == 0, "sweeping again removes nothing");
     }
 
+    AVER_INFO("=== and bounded by BYTES, because a count is the wrong unit ===");
+    {
+        // A count alone means 144 MB in one project and 2 GB in another, since an entry is one
+        // volume and a volume ranges from 18 MB at 128^3 to the 256 MB ceiling the writer
+        // accepts. The byte cap is what makes raising the file count safe.
+        const std::filesystem::path byteDir = root / "sweepbytes";
+        std::filesystem::create_directories(byteDir, ec);
+        u64 one = 0;
+        for (u32 i = 0; i < 6; ++i) {
+            fmt::GiCacheEntry e;
+            e.key = sampleKey(4, 2);
+            e.key.drawsKey = 2000 + i;
+            e.voxels = fillVolume(e.key);
+            const std::string path = (byteDir / fmt::giCacheFileName(e.key)).string();
+            fmt::saveGiCache(path, e, nullptr);
+            std::error_code sec;
+            one = static_cast<u64>(std::filesystem::file_size(path, sec));
+        }
+        check(one > 0, "an entry has a measurable size on disk");
+
+        // A generous file count with a budget that only fits three: the BYTES must be what bites.
+        const u32 removed = fmt::giCacheSweep(byteDir.string(), 100, one * 3 + one / 2);
+        u32 after = 0;
+        for (auto& d : std::filesystem::directory_iterator(byteDir, ec)) { (void)d; ++after; }
+        check(removed == 3 && after == 3,
+              "a byte budget fitting three entries keeps three, even with the file count set to 100");
+
+        // The newest entry survives even when it alone exceeds the whole budget -- dropping the
+        // only fresh volume because it is big would make the cache useless exactly where a
+        // rebuild is most expensive.
+        const u32 removed2 = fmt::giCacheSweep(byteDir.string(), 100, 1);
+        u32 after2 = 0;
+        for (auto& d : std::filesystem::directory_iterator(byteDir, ec)) { (void)d; ++after2; }
+        check(removed2 == 2 && after2 == 1, "a budget smaller than one entry still keeps the newest");
+
+        check(fmt::giCacheSweep(byteDir.string(), 100, 0) == 0,
+              "maxBytes 0 means no byte limit, the behaviour before the argument existed");
+    }
+
     AVER_INFO("=== the cache directory is beside the project, not inside Content ===");
     {
         const std::string d = fmt::giCacheDir("C:\\Projects\\Demo");
