@@ -15195,9 +15195,15 @@ private:
             }
             uiReg_.track("menu.build");
             if (ImGui::BeginMenu("Select")){
-                // Select All needs a selection SET -- selection here is two scalars and roughly ten
-                // consumers assume exactly one -- so it is disabled and says so rather than being an
-                // empty {} body that swallows the click.
+                // Select All works. It is greyed only when the Outliner has no rows to select, which
+                // is the one case where it would genuinely do nothing.
+                //
+                // (The paragraph that used to lead this comment said Select All "is disabled and says
+                // so" because selection was two scalars with no set behind it. That was true before
+                // multi-selection shipped and contradicted the code below it afterwards -- the same
+                // failure as the tooltip it went on to describe, one paragraph away from describing
+                // it. Removed rather than left to catch the next reader.)
+                //
                 // WAS DISABLED WITH A TOOLTIP THAT OUTLIVED ITS OWN TRUTH: "The editor selects one
                 // object at a time. Multi-selection is not built yet." Multi-selection shipped, and
                 // this kept telling people it had not -- worse than a missing feature, because it
