@@ -1088,6 +1088,13 @@ private:
     // about the world rather than changing it, and this records which answer it gave -- the same
     // reason giGateWhyMask_ beside it is written from that const method.
     mutable bool giRebuildCloudOnly_ = false;
+
+    // THE ONE DEFINITION OF "voxelizePass will inject this draw". giDrawsKey, giDrawsSubKeys and
+    // voxelizePass all have to agree about this exactly -- both hash functions say so in as many
+    // words -- and they agreed on two of the three tests while the third, the volume-bounds cull,
+    // existed only in the pass. Three hand-copied predicates is how that happened; one is how it
+    // stops happening.
+    bool giVoxelisedDraw(const Draw& d) const;
     // Latched so the "this volume is bigger than the whole budget" warning is said once rather than
     // once per bake. Never cleared: raising the budget mid-session does not make the earlier
     // explanation wrong, and a second copy of it would only be noise.

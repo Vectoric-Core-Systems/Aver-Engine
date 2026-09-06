@@ -1193,17 +1193,34 @@ u64 VoxiRenderer::prevTransformGroupKey(rhi::MeshHandle mesh, rhi::BindingSetHan
 // the reviewed design marked mandatory rather than optional, and it is the reason a count exists here
 // at all: without it, a list that gains a draw and loses a different one summing to the same total
 // would read as unchanged.
+// True when voxelizePass would actually inject this draw into the volume.
+//
+// THE BOUNDS TEST IS THE ONE THAT WAS MISSING FROM THE HASHES, and its absence was the exact
+// failure both of them warn about: a draw beyond the volume changed giDrawsKey, the gate reported
+// "draw list changed" and forced a full rebuild -- and then voxelizePass culled that same draw and
+// produced a bit-identical volume. All of the gate's cost, none of its benefit, which is what
+// giDrawsKey's own comment says the skinned-mesh skip exists to prevent.
+//
+// It matters most exactly where it is worst: a streamed level moving props kilometres away, or a
+// scatter layer well outside a level-fitted GI volume, re-keyed the volume on every tick.
+bool VoxiRenderer::giVoxelisedDraw(const Draw& d) const {
+    if (d.translucent) return false;
+    if (dev_ && dev_->meshVertexBuffer(d.mesh)) return false;
+    if (d.boundsRadius < 0.0f) return true;   // no bounds stated: assume it counts, as the pass does
+    const Vec3 volCentre{center_[0], center_[1], center_[2]};
+    const f32 volRadius = (extent_ > 1.0f ? extent_ : 1.0f) * 1.7320508f;
+    return dist(Vec3{d.boundsCentre[0], d.boundsCentre[1], d.boundsCentre[2]}, volCentre)
+           <= volRadius + d.boundsRadius;
+}
+
 u64 VoxiRenderer::giDrawsKey() const {
     u64 key = 0;
     u64 counted = 0;
     for (const Draw& d : drawsPrev_) {
-        // Translucent draws are not voxelised (see voxelizePass); this skip must agree with that one
-        // exactly, same contract as the skinned-mesh skip below.
-        if (d.translucent) continue;
-        // SKINNED MESHES ARE NOT IN THIS KEY BECAUSE THEY ARE NOT IN THE VOLUME -- must agree exactly
-        // with voxelizePass's matching skip, or hashing a draw the pass doesn't inject would force
-        // rebuilds that recompute an identical volume: all of the gate's cost, none of its benefit.
-        if (dev_ && dev_->meshVertexBuffer(d.mesh)) continue;
+        // Translucent, skinned, and OUT OF THE VOLUME are all "the pass will not inject this", and
+        // all three now come from one predicate rather than three hand-copied tests -- see
+        // giVoxelisedDraw for what the third one was costing while it was missing here.
+        if (!giVoxelisedDraw(d)) continue;
         // PER DRAW, from the same offset basis the whole-list chain used to start from. Everything
         // mixed in here is identical to before; only where the running value lives has changed.
         u64 h = 1469598103934665603ull;
@@ -1266,8 +1283,7 @@ void VoxiRenderer::giDrawsSubKeys(u64& count, u64& mesh, u64& world, u64& mat) c
         h ^= h >> 33; return h;
     };
     for (const Draw& d : drawsPrev_) {
-        if (d.translucent) continue;
-        if (dev_ && dev_->meshVertexBuffer(d.mesh)) continue;
+        if (!giVoxelisedDraw(d)) continue;
         ++count;
         mesh += mix(1469598103934665603ull ^ static_cast<u64>(d.depthMesh));
         u64 w = 1469598103934665603ull;
@@ -1784,8 +1800,7 @@ void VoxiRenderer::takeGiSnapshot() {
     // (frustum culling, submission order, occlusion bucketing); naming the handles ends the guessing.
     giSnapMeshes_.clear();
     for (const Draw& d : drawsPrev_) {
-        if (d.translucent) continue;
-        if (dev_ && dev_->meshVertexBuffer(d.mesh)) continue;
+        if (!giVoxelisedDraw(d)) continue;
         giSnapMeshes_.push_back(d.depthMesh);
     }
     std::sort(giSnapMeshes_.begin(), giSnapMeshes_.end());
@@ -2503,8 +2518,9 @@ void VoxiRenderer::voxelizePass(rhi::IRenderContext& ctx) {
         // revoxelisation -- injecting one mesh's region without rebuilding the whole volume -- which
         // voxelizePass doesn't support today.
         if (dev_ && dev_->meshVertexBuffer(d.mesh)) { ++voxelSkinned; continue; }
-        if (d.boundsRadius >= 0.0f && dist(Vec3{d.boundsCentre[0], d.boundsCentre[1], d.boundsCentre[2]},
-                                            volCentre) > volRadius + d.boundsRadius) { ++voxelCulled; continue; }
+        // The bounds half of giVoxelisedDraw, kept inline ONLY to keep the two counters that feed the
+        // census line below. The predicate is the definition; this must not drift from it.
+        if (!giVoxelisedDraw(d)) { ++voxelCulled; continue; }
         ++voxelSubmitted;
         f32 consts[rhi::kObjectConstantDwords];
         std::memcpy(consts, d.world, 16 * sizeof(f32));
