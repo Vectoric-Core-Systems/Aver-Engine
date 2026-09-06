@@ -2268,6 +2268,39 @@ void VoxiRenderer::shadowPass(rhi::IRenderContext& ctx) {
 #endif
     if (cascades == 0) { cb_.shadowParams[1] = 0.0f; return; }
 
+    // THE ATLAS HAS NO READER WHILE RAY TRACING IS ON, so filling it is dead work -- in BOTH the
+    // raster and the ray-driven mode, which is broader than the "cascade map for nobody" note that
+    // stood elsewhere in this tree claimed.
+    //
+    // THE WHOLE CHAIN, because it is short and it is the entire justification: gShadowTex is sampled
+    // at exactly one place (voxi.hlsl:1585, inside shadowSampleCascade), reached from exactly one
+    // caller (shadowFactor, voxi.hlsl:1594), which the lit pass calls only on the
+    // `gShadowParams.z <= 0.5` arm (voxi.hlsl:1814-1817) or in the shader variant compiled without
+    // AVER_RT (:1819). And shadowParams[2] IS this same rtActive_ -- the two are written together,
+    // 0.0f/false at the top of buildAccelerationStructures and 1.0f/true once the TLAS exists, so
+    // they cannot disagree. PSRayDriven has no cascade arm at all (voxi.hlsl:2224 traces
+    // unconditionally). Whenever there is a TLAS, nothing samples this texture.
+    //
+    // MEASURED on PTTest Sponza at a fixed camera: the "Voxi shadow" GPU scope is 5.57 ms at four
+    // cascades and 2.07 ms at two, on a ~47 ms frame. It also explains an earlier experiment that
+    // dropped four cascades to two and found a large saving with NO visual change -- there was no
+    // visual change available, because there is no reader.
+    //
+    // fitCascades() STILL RUNS, above: it is cheap CPU work, and it is where curViewProj_ is
+    // captured, which endShadowHistory copies into prevViewProj_ every frame for temporal
+    // reprojection whether or not a cascade is ever drawn. Returning before it would break every
+    // temporally-reprojected effect while looking like a pure optimisation.
+    //
+    // shadowParams[1] = 0 is what makes this SAFE rather than merely unread: shadowFactor's own
+    // first line is `if (gShadowParams.y < 0.5) return 1.0`, so a pixel that somehow reaches the
+    // cascade arm is unshadowed instead of sampling an atlas holding the last non-RT frame. The two
+    // early-outs above set it for the same reason; this is the third case, not a new convention.
+    //
+    // Skipping the pass also skips BOTH halves of its barrier pair (ShaderResource -> DepthWrite
+    // here, and back at the end), so the texture stays in ShaderResource -- exactly the state its
+    // SRV binding expects. Skipping only one of the two would be the bug this note exists to avoid.
+    if (rtActive_) { cb_.shadowParams[1] = 0.0f; return; }
+
     cb_.shadowParams[0] = 1.0f / static_cast<f32>(kShadowSize);
     cb_.shadowParams[1] = 1.0f;
     cb_.shadowParams[3] = static_cast<f32>(cascades);
