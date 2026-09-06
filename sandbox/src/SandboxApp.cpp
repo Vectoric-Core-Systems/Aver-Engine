@@ -3394,6 +3394,7 @@ public:
         if (validateGraphFrames_ > 0 && --validateGraphFrames_ == 0) runValidateGraph();
         if (graphPrintTestFrames_ > 0 && --graphPrintTestFrames_ == 0) runGraphPrintTest();
         if (clearShaderCacheFrames_ > 0 && --clearShaderCacheFrames_ == 0) runClearShaderCache();
+        if (assetAssignTestFrames_ > 0 && --assetAssignTestFrames_ == 0) runAssetAssignTest();
         if (prefsWriteTestFrames_ > 0 && --prefsWriteTestFrames_ == 0) runPrefsWriteTest();
         if (keybindTestAutoFrames_ > 0 && --keybindTestAutoFrames_ == 0) runKeybindPersistTest(keybindTestMode_);
 #endif
@@ -6589,6 +6590,7 @@ public:
     void setProjectSwitchTest(int frames) { projectSwitchFrames_ = frames > 0 ? frames : 8; }
     void setValidateGraph(const std::string& p) { validateGraphPath_ = p; validateGraphFrames_ = 8; }
     void setGraphPrintTest(int frames) { graphPrintTestFrames_ = frames > 0 ? frames : 8; }
+    void setAssetAssignTest(int frames) { assetAssignTestFrames_ = frames > 0 ? frames : 8; }
     void setClearShaderCache(const std::string& dir = {}) {
         clearShaderCacheDir_ = dir; clearShaderCacheFrames_ = 4;
     }
@@ -13339,6 +13341,89 @@ private:
     }
     int multiSelTestFrames_ = 0;   // --multiselect-test: frames left before it fires
 
+    // --asset-assign-test: the asset picker's three assignment helpers, headlessly.
+    //
+    // The PICKER itself is an ImGui popup and cannot be driven from here -- but nothing interesting
+    // lives in it. What can go wrong lives in the assignment: which id space each field uses, whether
+    // the render path is told to re-upload, and whether the level is marked dirty. Those are plain
+    // C++ once extracted, which is why they were extracted.
+    //
+    // THE MATERIAL CASE IS THE POINT OF THIS TEST. A material is identified by an INTERNED NAME
+    // TOKEN, while mesh and effect are both fnv1a64 of a project-relative path. Writing a path hash
+    // into mr->material fails SILENTLY -- it resolves to no surface, or by coincidence to an
+    // unrelated one -- so nothing would crash and the entity would just render wrong.
+    int assetAssignTestFrames_ = 0;
+    void runAssetAssignTest() {
+        int failures = 0;
+        auto check = [&](bool cond, const char* what) {
+            if (cond) AVER_INFO("[asset-assign-test] PASS: {}", what);
+            else      { AVER_ERROR("[asset-assign-test] FAIL: {}", what); ++failures; }
+        };
+#if AVER_MODULE_SCENE
+        scene::World& w = scene::World::instance();
+        const scene::Entity e = w.create("assignTarget");
+        w.addComponent(e, scene::kComponentMeshRenderer);
+        auto* mr = w.component<scene::CMeshRenderer>(e, scene::kComponentMeshRenderer);
+        check(mr != nullptr, "the fixture entity has a mesh renderer");
+        if (mr) {
+            *mr = scene::CMeshRenderer{};
+
+            // A MESH ID IS A PATH HASH, and picking one must reach the field verbatim.
+            const u64 meshId = fnv1a64(std::string_view("Meshes/Pick.ocmesh"));
+            markLevelSaved();
+            check(!levelHasUnsavedEdits(), "the level starts clean");
+            // CLEARED FIRST, OR THE dirty ASSERTION BELOW IS VACUOUS. CMeshRenderer::dirty defaults
+            // to 1, so a fresh component already satisfies it -- the first draft of this test passed
+            // with the flag deliberately removed from assignMeshId, which is the exact shape of
+            // assertion this codebase has been burned by before. Zeroing it is what makes the check
+            // observe the assignment rather than the default.
+            mr->dirty = 0;
+            check(assignMeshId(e, meshId), "assignMeshId accepts an entity with a mesh renderer");
+            check(mr->mesh == meshId, "the picked mesh id reaches the field unchanged");
+            check(mr->dirty == 1,
+                  "AND THE RENDERER IS TOLD TO RE-UPLOAD -- without this the picture never changes");
+            check(levelHasUnsavedEdits(),
+                  "the level is dirty afterwards (these writes have no EditCmd, so this is the only "
+                  "thing standing between the edit and silent loss on close)");
+
+            // A MATERIAL IS A NAME TOKEN. Interning the same name twice must give the same token, and
+            // that token -- not a hash of anything -- is what belongs in the field.
+            const i32 token = aver_scene_material(0, "M_PickTest");
+            check(token != 0, "a surface name interns to a non-zero token");
+            check(aver_scene_material(0, "M_PickTest") == token, "and interning is stable");
+            check(fnv1a64(std::string_view("M_PickTest")) != static_cast<u64>(static_cast<u32>(token)),
+                  "the token is NOT the name's hash -- which is exactly why the two id spaces cannot "
+                  "be used interchangeably");
+            markLevelSaved();
+            check(assignMaterialToken(e, token), "assignMaterialToken accepts the entity");
+            check(mr->material == token, "the TOKEN reaches the field, not a path hash");
+            check(levelHasUnsavedEdits(), "and it marks the level dirty too");
+        }
+
+        // An entity with no mesh renderer must be refused rather than silently doing nothing to a
+        // component that is not there.
+        const scene::Entity bare = w.create("noRenderer");
+        check(!assignMeshId(bare, 1234), "assignMeshId refuses an entity with no mesh renderer");
+        check(!assignMaterialToken(bare, 1), "assignMaterialToken refuses it too");
+
+#if AVER_MODULE_PARTICLES
+        const scene::Entity pem = w.create("emitter");
+        w.addComponent(pem, scene::kComponentParticleEmitter);
+        if (auto* pe = w.component<scene::CParticleEmitter>(pem, scene::kComponentParticleEmitter)) {
+            *pe = scene::CParticleEmitter{};
+            // THE EXTENSION GATE, which the shared helper owns so the drop target and the picker
+            // cannot disagree about it.
+            check(!assignParticleEffect(pem, "C:/nope/Thing.ocmesh"),
+                  "assignParticleEffect refuses anything that is not a .ocparticle");
+            check(pe->effect == 0, "and leaves the field alone when it refuses");
+        }
+        w.destroy(pem);
+#endif
+        w.destroy(e); w.destroy(bare); w.flush();
+#endif
+        AVER_INFO("[asset-assign-test] RESULT: {}", failures == 0 ? "PASS" : "FAIL");
+    }
+
     void runUndoTest(Engine& eng) {
         int failures = 0;
         auto check = [&](bool cond, const char* what) {
@@ -17013,6 +17098,150 @@ private:
 
 
     // True when hay contains needle, ignoring case. An empty needle matches.
+    // ---- the asset picker ------------------------------------------------------------------
+    //
+    // WHY THERE WAS NONE. Assigning an asset to a component field meant dragging it out of the
+    // Content Browser, so closing that drawer made reassignment impossible -- and only ONE field
+    // (CParticleEmitter::effect) even had a drop target. CMeshRenderer::mesh printed a hex id and
+    // offered nothing at all; CMeshRenderer::material offered nothing either. Worse,
+    // isPlaceableAssetExt only lets .ocmesh and .ocparticle START a drag, so a material could not be
+    // dragged even in principle. A button beside the field bypasses all of that.
+    //
+    // ONE GENERIC WIDGET over (label, id) candidates rather than a picker per field: the three
+    // fields differ only in where their candidates come from and in what an id MEANS, and both of
+    // those belong to the caller. Shaped after the graph editor's node palette -- search box focused
+    // on open, case-insensitive filter, a capped list that SAYS it is capped -- so the two
+    // searchable popups in this editor behave the same way.
+    //
+    // CANDIDATES ARE BUILT PER FRAME BY THE CALLER AND CONSUMED IN IT. They come from maps a project
+    // reload clears (meshPathById_, surfaceMaterials_), so keeping them across frames would be
+    // keeping a list of things that may no longer exist.
+    struct AssetChoice { std::string label; u64 id = 0; };
+
+    // True, with *picked written, when something is chosen. `current` only drives the check mark.
+    bool assetPicker(const char* popupId, const std::vector<AssetChoice>& candidates,
+                     u64 current, u64* picked) {
+#if !AVER_WITH_IMGUI
+        (void)popupId; (void)candidates; (void)current; (void)picked;
+        return false;
+#else
+        bool chose = false;
+        if (ImGui::BeginPopup(popupId)) {
+            if (ImGui::IsWindowAppearing()) {
+                assetPickerFilter_[0] = 0;
+                ImGui::SetKeyboardFocusHere();
+            }
+            ImGui::SetNextItemWidth(260.0f * dpi_);
+            ImGui::InputTextWithHint("##assetPickerFilter", "Search assets...",
+                                     assetPickerFilter_, sizeof assetPickerFilter_);
+            ImGui::Separator();
+
+            // NEVER A SILENT TRUNCATION, the same rule the node palette follows: a capped list that
+            // simply stops reads as "there is no such asset", which is the wrong thing to learn from
+            // a full box.
+            constexpr usize kShown = 40;
+            usize matched = 0, drawn = 0;
+            for (const AssetChoice& c : candidates) {
+                if (!containsNoCase(c.label, assetPickerFilter_)) continue;
+                ++matched;
+                if (drawn >= kShown) continue;
+                ++drawn;
+                if (ImGui::Selectable(c.label.c_str(), c.id == current)) {
+                    *picked = c.id;
+                    chose = true;
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+            if (matched == 0)
+                ImGui::TextDisabled("%s", candidates.empty() ? "nothing loaded to pick from"
+                                                             : "no asset matches");
+            else if (matched > drawn)
+                ImGui::TextDisabled("...and %zu more; type to narrow", matched - drawn);
+            ImGui::EndPopup();
+        }
+        return chose;
+#endif
+    }
+    char assetPickerFilter_[64] = {};
+
+    // ---- the three assignments, each its own function because an "asset id" is three things -----
+    //
+    // NOT UNDOABLE, AND THAT IS A TESTED CONTRACT rather than an oversight: runSaveDirtyTest asserts
+    // that a Details-panel asset write marks the level dirty through markLevelUnsaved() with no
+    // EditCmd behind it. Giving these real undo would be a deliberate change to that contract, and
+    // it is not a picker's business to make it.
+#if AVER_MODULE_SCENE
+    // The particle path, EXTRACTED so the drag-drop target and the picker share one implementation.
+    // Writing the resolve/hash/assign/mark/log sequence a second time is exactly the "two
+    // implementations of one fact" shape this file keeps paying for elsewhere.
+    bool assignParticleEffect(scene::Entity ent, const std::string& absPath) {
+#if AVER_MODULE_PARTICLES
+        scene::World& w = scene::World::instance();
+        auto* pe = w.component<scene::CParticleEmitter>(ent, scene::kComponentParticleEmitter);
+        if (!pe) return false;
+        if (lowerExt(std::filesystem::path(absPath)) != ".ocparticle") {
+            cbStatus_ = "Only a .ocparticle asset can be assigned to an emitter";
+            return false;
+        }
+        const std::string content = project_.contentDir();
+        std::error_code ec;
+        std::string rel = content.empty() ? std::string()
+                                          : std::filesystem::relative(absPath, content, ec).string();
+        if (content.empty() || ec || rel.empty()) {
+            cbStatus_ = "Could not resolve the effect to a project-relative path";
+            return false;
+        }
+        for (char& ch : rel) if (ch == '\\') ch = '/';
+        pe->effect = fnv1a64(std::string_view(rel));
+        markLevelUnsaved();
+        cbStatus_ = "Assigned " + std::filesystem::path(absPath).filename().string();
+        AVER_INFO("[Particles] entity {} effect set to 0x{:016X} ('{}')", ent, pe->effect, rel);
+        return true;
+#else
+        (void)ent; (void)absPath;
+        return false;
+#endif
+    }
+
+    // A mesh id IS fnv1a64 of the project-relative path, which is exactly what meshPathById_ is keyed
+    // on -- so a picked id needs no conversion, unlike the material below.
+    bool assignMeshId(scene::Entity ent, u64 meshId) {
+        scene::World& w = scene::World::instance();
+        auto* mr = w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
+        if (!mr) return false;
+        mr->mesh = meshId;
+        // WITHOUT THIS THE PICTURE DOES NOT CHANGE. The GPU path only re-uploads when dirty is set --
+        // the same fix EditorEntitySnapshot records after restoring a mesh renderer, and the same one
+        // a reassignment needs.
+        mr->dirty = 1;
+        markLevelUnsaved();
+        const auto it = meshPathById_.find(meshId);
+        cbStatus_ = "Assigned " + (it == meshPathById_.end()
+                                       ? std::string("mesh")
+                                       : std::filesystem::path(it->second).filename().string());
+        AVER_INFO("[Editor] entity {} mesh set to 0x{:016X} ('{}')", ent, meshId,
+                  it == meshPathById_.end() ? std::string("?") : it->second);
+        return true;
+    }
+
+    // MATERIAL IDENTITY IS AN INTERNED NAME TOKEN, not a path hash, and getting that wrong is silent:
+    // an fnv1a64 written into mr->material resolves to nothing, or by coincidence to an unrelated
+    // surface. surfaceMaterials_ is keyed on the token aver_scene_material() interns, so the picker
+    // carries tokens and this writes one straight through.
+    bool assignMaterialToken(scene::Entity ent, i32 token) {
+        scene::World& w = scene::World::instance();
+        auto* mr = w.component<scene::CMeshRenderer>(ent, scene::kComponentMeshRenderer);
+        if (!mr) return false;
+        mr->material = token;
+        mr->dirty = 1;
+        markLevelUnsaved();
+        const char* nm = aver_scene_material_name(token);
+        cbStatus_ = std::string("Assigned surface ") + (nm && *nm ? nm : "(unnamed)");
+        AVER_INFO("[Editor] entity {} material set to token {} ('{}')", ent, token, nm ? nm : "");
+        return true;
+    }
+#endif
+
     static bool containsNoCase(const std::string& hay, const char* needle) {
         if (!needle || !*needle) return true;
         const usize n = std::strlen(needle);
@@ -18457,7 +18686,29 @@ private:
                         if (vis) mr->flags |=  scene::kMeshRendererVisible;
                         else     mr->flags &= ~scene::kMeshRendererVisible;
                     }
-                    ImGui::TextDisabled("mesh id 0x%llx", (unsigned long long)mr->mesh);
+                    // THE FIELD IS NOW REASSIGNABLE. It printed this hex id and offered nothing --
+                    // no picker, and not even a drop target: the only mesh drag-drop in the editor
+                    // lands on the 3D VIEWPORT and SPAWNS A NEW ENTITY, which is a different verb.
+                    // So there was no way, anywhere, to point an existing entity at another mesh.
+                    const auto meshIt = meshPathById_.find(mr->mesh);
+                    ImGui::TextDisabled("mesh  %s", meshIt == meshPathById_.end()
+                                                        ? "(unloaded)" : meshIt->second.c_str());
+                    if (ImGui::Button("Change Mesh...")) ImGui::OpenPopup("##pickMesh");
+                    uiReg_.track("details.mesh.pick");
+                    {
+                        // CANDIDATES ARE THE MESHES ACTUALLY LOADED, from the map populated for
+                        // exactly this ("the foliage palette, a future asset picker"). Listing every
+                        // .ocmesh in the content index instead would offer meshes the device has
+                        // refused or that were never loaded, and picking one would blank the entity.
+                        std::vector<AssetChoice> cands;
+                        cands.reserve(meshPathById_.size());
+                        for (const auto& kv : meshPathById_) cands.push_back({kv.second, kv.first});
+                        std::sort(cands.begin(), cands.end(),
+                                  [](const AssetChoice& a, const AssetChoice& b) { return a.label < b.label; });
+                        u64 picked = 0;
+                        if (assetPicker("##pickMesh", cands, mr->mesh, &picked))
+                            assignMeshId(selEntity_, picked);
+                    }
                 }
 
                 // THE MATERIAL, which a scene entity's Details has never offered. The scene stores a
@@ -18476,6 +18727,32 @@ private:
                     // drawing with the mesh's own material -- a panel disagreeing with the picture.
                     const i32 shown = mr->material ? mr->material : meshDefaultMaterial(mr->mesh);
                     const char* surfaceName = aver_scene_material_name(shown);
+
+                    // A MATERIAL COULD NOT BE ASSIGNED AT ALL BEFORE THIS -- not by picker, and not
+                    // by drag either, because isPlaceableAssetExt refuses to start a drag on a
+                    // .ocmat. The panel could edit the parameters of whatever material the mesh's own
+                    // slot already named, and nothing could change WHICH material that was.
+                    if (ImGui::Button("Change Material...")) ImGui::OpenPopup("##pickMaterial");
+                    uiReg_.track("details.material.pick");
+                    {
+                        // TOKENS, NOT PATH HASHES. surfaceMaterials_ is keyed on the interned name
+                        // token, which is what mr->material holds; an fnv1a64 here would resolve to
+                        // nothing or, worse, to an unrelated surface by coincidence.
+                        std::vector<AssetChoice> cands;
+                        cands.reserve(surfaceMaterials_.size());
+                        for (const auto& kv : surfaceMaterials_) {
+                            if (!kv.second) continue;   // interned but no .ocmat loaded behind it
+                            const char* nm = aver_scene_material_name(kv.first);
+                            cands.push_back({nm && *nm ? nm : "(unnamed)",
+                                             static_cast<u64>(static_cast<u32>(kv.first))});
+                        }
+                        std::sort(cands.begin(), cands.end(),
+                                  [](const AssetChoice& a, const AssetChoice& b) { return a.label < b.label; });
+                        u64 picked = 0;
+                        if (assetPicker("##pickMaterial", cands,
+                                        static_cast<u64>(static_cast<u32>(shown)), &picked))
+                            assignMaterialToken(selEntity_, static_cast<i32>(static_cast<u32>(picked)));
+                    }
                     const auto it = surfaceMaterials_.find(shown);
                     if (it == surfaceMaterials_.end() || !it->second) {
                         ImGui::TextDisabled("Surface '%s' has no .ocmat loaded.",
@@ -18504,34 +18781,48 @@ private:
                     // Drop a .ocparticle from the Content Browser directly onto this row to point this
                     // emitter at it -- the SAME id space loadProjectParticleEffects() populates, so a
                     // freshly authored effect resolves the moment it lands here.
+                    // THROUGH THE SHARED HELPER NOW. The resolve/validate/hash/assign/mark/log
+                    // sequence used to be written out here, and the picker below would have been a
+                    // second copy of it -- the "two implementations of one fact" shape this file
+                    // keeps paying for. assignParticleEffect owns it; both callers just hand it a path.
                     if (ImGui::BeginDragDropTarget()) {
                         if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kAssetDragDropType)) {
                             const std::string dropped(
                                 static_cast<const char*>(payload->Data),
                                 payload->DataSize > 0 ? static_cast<usize>(payload->DataSize - 1) : usize(0));
-                            if (lowerExt(std::filesystem::path(dropped)) == ".ocparticle") {
-                                const std::string content = project_.contentDir();
-                                std::error_code ec;
-                                std::string rel = content.empty() ? std::string()
-                                    : std::filesystem::relative(dropped, content, ec).string();
-                                if (!content.empty() && !ec && !rel.empty()) {
-                                    for (char& c : rel) if (c == '\\') c = '/';
-                                    pe->effect = fnv1a64(std::string_view(rel));
-                                    // Same reason as Add Component: this writes a component field
-                                    // with no EditCmd behind it, so the level has to be marked dirty
-                                    // here or the assignment is lost on close with no prompt.
-                                    markLevelUnsaved();
-                                    cbStatus_ = "Assigned " + std::filesystem::path(dropped).filename().string();
-                                    AVER_INFO("[Particles] entity {} effect set to 0x{:016X} ('{}')",
-                                              selEntity_, pe->effect, rel);
-                                } else {
-                                    cbStatus_ = "Could not resolve the dropped effect to a project-relative path";
-                                }
-                            } else {
-                                cbStatus_ = "Only a .ocparticle asset can be assigned to an emitter";
-                            }
+                            assignParticleEffect(selEntity_, dropped);
                         }
                         ImGui::EndDragDropTarget();
+                    }
+                    // And the same assignment without needing the Content Browser open at all.
+                    if (ImGui::Button("Change Effect...")) ImGui::OpenPopup("##pickEffect");
+                    uiReg_.track("details.effect.pick");
+                    {
+                        // CANDIDATES COME FROM THE CONTENT INDEX, not from a loaded-effects map:
+                        // unlike a mesh, an effect is resolved when it is ASSIGNED (so a freshly
+                        // authored one works the moment it lands), so listing only already-loaded
+                        // effects would hide exactly the file the author just made.
+                        // contentIndex_ is already id -> project-relative path, and its key is
+                        // fnv1a64(rel) -- the SAME id space pe->effect holds. So the listed id is the
+                        // effect id, and no separate hashing is needed here.
+                        std::vector<AssetChoice> cands;
+                        for (const auto& kv : contentIndex_) {
+                            if (lowerExt(std::filesystem::path(kv.second)) != ".ocparticle") continue;
+                            cands.push_back({kv.second, kv.first});
+                        }
+                        std::sort(cands.begin(), cands.end(),
+                                  [](const AssetChoice& a, const AssetChoice& b) { return a.label < b.label; });
+                        u64 picked = 0;
+                        if (assetPicker("##pickEffect", cands, pe->effect, &picked)) {
+                            // ASSIGNED BY PATH, not by writing the id straight in, so it goes through
+                            // the identical resolve/validate the drop does -- including the extension
+                            // check and the project-relative normalisation. Writing pe->effect here
+                            // would be the second implementation this extraction exists to avoid.
+                            const auto pit = contentIndex_.find(picked);
+                            if (pit != contentIndex_.end())
+                                assignParticleEffect(selEntity_,
+                                                     (std::filesystem::path(project_.contentDir()) / pit->second).string());
+                        }
                     }
                     ImGui::TextDisabled("age %.2fs   seed 0x%08x", pe->age, pe->seed);
                 }
@@ -23908,6 +24199,7 @@ Application* createApplication(int argc, char** argv) {
     int projectSwitchArg = 0;
     const char* validateGraphArg = nullptr;
     int graphPrintArg = 0;
+    int assetAssignArg = 0;
     int recaptureArg = 0;
     int viewmodelArg = 0;
     // --gpu-timing takes no value, so it's matched in the i+1<argc loop below only incidentally --
@@ -23930,6 +24222,7 @@ Application* createApplication(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--project-switch-test")) projectSwitchArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--validate-graph"))      validateGraphArg = argv[i + 1];
         if (!std::strcmp(argv[i], "--graph-print-test"))   graphPrintArg = std::atoi(argv[i + 1]);
+        if (!std::strcmp(argv[i], "--asset-assign-test")) assetAssignArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--recapture-test"))       recaptureArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--viewmodel-test"))       viewmodelArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--refraction"))           refraction = std::atoi(argv[i + 1]);
@@ -24887,6 +25180,7 @@ Application* createApplication(int argc, char** argv) {
     if (projectSwitchArg) app->setProjectSwitchTest(projectSwitchArg);
     if (validateGraphArg) app->setValidateGraph(validateGraphArg);
     if (graphPrintArg) app->setGraphPrintTest(graphPrintArg);
+    if (assetAssignArg) app->setAssetAssignTest(assetAssignArg);
     if (clearShaderCacheArg) app->setClearShaderCache(clearShaderCacheDirArg);
     if (recaptureArg > 0) app->setRecaptureTest(recaptureArg);
     if (viewmodelArg > 0) app->setViewmodelTest(viewmodelArg);
