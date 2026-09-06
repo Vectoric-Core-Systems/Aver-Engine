@@ -12507,15 +12507,48 @@ private:
     // other, mirroring the existing loose pairing of sel_/selEntity_.
     void copySelection() {
 #if AVER_MODULE_SCENE
+        // THE WHOLE SELECTION, NOT JUST THE ANCHOR -- the same fix Ctrl+D got, in the same shape.
+        //
+        // ANCESTORS SKIPPED, and it must be DUPLICATE's version of that test, not the mover's. The
+        // mover's forEachMultiMoved also excludes `ent == selEntity_`, because a drag moves the
+        // anchor through the gizmo and the others relative to it. A copy has no anchor to exclude:
+        // dropping it would silently omit the very entity the author clicked first. Skipping a
+        // descendant of another selected entity IS still required, though -- captureSubtree already
+        // takes it along inside its parent, so keeping it would paste it twice, once orphaned.
+        if (sel_ == kSelScene && !multiStale() && multiSel_.size() > 1) {
+            scene::World& w = scene::World::instance();
+            clipboard_.entities.clear();
+            for (const scene::Entity ent : multiSel_) {
+                if (!w.valid(ent)) continue;
+                bool ancestorSelected = false;
+                for (scene::Entity p = w.parent(ent); p != scene::kInvalidEntity; p = w.parent(p))
+                    if (multiIsSelected(p)) { ancestorSelected = true; break; }
+                if (ancestorSelected) continue;
+
+                EditCmd c = describeEntity(ent);
+                captureSubtree(c, ent);
+                ClipboardEntity ce;
+                ce.snap = c.snap;
+                ce.subtree = std::move(c.subtree);
+                ce.xform = c.after;
+                ce.hadBody = c.hadBody;
+                ce.bodyHalf = c.bodyHalf;
+                clipboard_.entities.push_back(std::move(ce));
+            }
+            clipboard_.hasObject = false;
+            AVER_INFO("[Editor] copied {} entities", clipboard_.entities.size());
+            return;
+        }
         if (sel_ == kSelScene && selEntity_ != scene::kInvalidEntity && scene::World::instance().valid(selEntity_)) {
             EditCmd c = describeEntity(selEntity_);
             captureSubtree(c, selEntity_);
-            clipboard_.hasScene   = true;
-            clipboard_.sceneSnap  = c.snap;
-            clipboard_.sceneSubtree = std::move(c.subtree);
-            clipboard_.sceneXform = c.after;
-            clipboard_.hadBody    = c.hadBody;
-            clipboard_.bodyHalf   = c.bodyHalf;
+            ClipboardEntity ce;
+            ce.snap = c.snap;
+            ce.subtree = std::move(c.subtree);
+            ce.xform = c.after;
+            ce.hadBody = c.hadBody;
+            ce.bodyHalf = c.bodyHalf;
+            clipboard_.entities.assign(1, std::move(ce));
             clipboard_.hasObject  = false;
             return;
         }
@@ -12523,9 +12556,7 @@ private:
         if (movableSelected()) {
             clipboard_.hasObject = true;
             clipboard_.object = objects_[sel_];
-#if AVER_MODULE_SCENE
-            clipboard_.hasScene = false;
-#endif
+            clipboard_.entities.clear();   // exclusive with the scene path, as hasScene/hasObject were
         }
     }
 
@@ -12537,23 +12568,50 @@ private:
         Vec3 at = camPos_ + camForward() * kAddDistance;
         if (snapMove_) for (int k = 0; k < 3; ++k) (&at.x)[k] = snapf((&at.x)[k], moveSnap_);
 #if AVER_MODULE_SCENE
-        if (clipboard_.hasScene) {
-            EditXform x = clipboard_.sceneXform;
-            x.pos = at;
-            const std::string label = makeEntityLabel(std::string(), clipboard_.sceneSnap.asset);
-            const scene::Entity e = spawnEntityFrom(clipboard_.sceneSnap, x, label, clipboard_.hadBody, clipboard_.bodyHalf, /*restoreObjectId=*/false);
-            if (e == scene::kInvalidEntity) return;
-            spawnSubtreeUnder(e, clipboard_.sceneSubtree, /*restoreIds=*/false);
-            sel_ = kSelScene; selEntity_ = e;   // spawnSubtreeUnder selects whatever it made last
-            EditCmd c = describeEntity(e);
-            c.kind = EditCmd::Kind::Create;
-            // CAPTURED FROM THE COPY, so REDO puts the children back too. Undo of a Create destroys
-            // the whole subtree (World::destroy retires it), so without this a paste-undo-redo cycle
-            // returned the root alone -- the children were destroyed by the undo and never rebuilt.
-            captureSubtree(c, e);
-            pushEdit(std::move(c));
-            AVER_INFO("[Editor] pasted entity #{} and {} descendant(s)", (u32)e,
-                      clipboard_.sceneSubtree.size());
+        if (!clipboard_.entities.empty()) {
+            // RELATIVE LAYOUT IS PRESERVED, and that is the whole reason this is not just a loop
+            // pasting each item at `at`. Doing that would stack every copied entity on the same point
+            // in front of the camera -- five props arranged in a row would arrive as one heap, and the
+            // author would have to rebuild an arrangement they had already made. Duplicate gets this
+            // for free by offsetting each copy from its own original; paste has to compute the same
+            // thing, because it is moving the whole set to a NEW anchor.
+            //
+            // The FIRST clipboard entry lands exactly at `at` (the one-item case is then bit-identical
+            // to what this did before), and every other entry keeps its offset from that first one.
+            const Vec3 origin = clipboard_.entities.front().xform.pos;
+            std::vector<scene::Entity> made;
+            for (const ClipboardEntity& ce : clipboard_.entities) {
+                EditXform x = ce.xform;
+                x.pos = at + (ce.xform.pos - origin);
+                const std::string label = makeEntityLabel(std::string(), ce.snap.asset);
+                const scene::Entity e = spawnEntityFrom(ce.snap, x, label, ce.hadBody, ce.bodyHalf, /*restoreObjectId=*/false);
+                if (e == scene::kInvalidEntity) continue;
+                spawnSubtreeUnder(e, ce.subtree, /*restoreIds=*/false);
+                sel_ = kSelScene; selEntity_ = e;   // spawnSubtreeUnder selects whatever it made last
+                EditCmd c = describeEntity(e);
+                c.kind = EditCmd::Kind::Create;
+                // CAPTURED FROM THE COPY, so REDO puts the children back too. Undo of a Create destroys
+                // the whole subtree (World::destroy retires it), so without this a paste-undo-redo cycle
+                // returned the root alone -- the children were destroyed by the undo and never rebuilt.
+                captureSubtree(c, e);
+                // ONE RECORD PER PASTED ENTITY, which is Duplicate's and Delete's precedent: N undos
+                // for N items. This file states outright why there is no compound kind (a compound
+                // Create that recreates a whole set is a bigger change than this is worth), and
+                // inventing one here would make paste the only verb that disagreed.
+                pushEdit(std::move(c));
+                made.push_back(e);
+            }
+            if (made.empty()) return;
+            // The pastes become the selection, matching Duplicate: a drag straight after Ctrl+V moves
+            // what was just made, which is what makes paste-then-place one motion.
+            multiSetSingle(made.front());
+            for (usize i = 1; i < made.size(); ++i) multiToggle(made[i]);
+            sel_ = kSelScene; selEntity_ = made.front();
+            if (made.size() == 1)
+                AVER_INFO("[Editor] pasted entity #{} and {} descendant(s)", (u32)made.front(),
+                          clipboard_.entities.front().subtree.size());
+            else
+                AVER_INFO("[Editor] pasted {} entities", made.size());
             return;
         }
 #endif
@@ -13221,6 +13279,56 @@ private:
             sel_ = -1; selEntity_ = scene::kInvalidEntity;
             undoStack_.clear(); redoStack_.clear();
             outlinerOrder_.clear();
+        }
+
+        // ---- Ctrl+C / Ctrl+V take the whole set too, and do not double-copy a subtree -----------
+        //
+        // Duplicate was fixed for the set; Copy was not, and the two are separate verbs with
+        // separate code. Copy read the anchor alone and the clipboard could physically hold one
+        // entity, so Ctrl+C on five props and Ctrl+V produced ONE -- silently, because the paste
+        // looked like it worked.
+        {
+            scene::Entity c0 = w.create("cpA"), c1 = w.create("cpB"), c2 = w.create("cpC");
+            multiClear();
+            sel_ = -1; selEntity_ = scene::kInvalidEntity;
+            multiSetSingle(c0); multiToggle(c1); multiToggle(c2);
+            sel_ = kSelScene; selEntity_ = c0;
+
+            // COUNTING THE WORLD is what catches an anchor-only copy: asserting the clipboard is
+            // non-empty would pass on the broken version too.
+            const usize beforeCopy = w.count();
+            copySelection();
+            pasteClipboard();
+            check(w.count() == beforeCopy + 3,
+                  "Ctrl+C then Ctrl+V on a set of three creates THREE copies, not one");
+            check(selectedEntities().size() == 3, "and the pastes become the selection");
+            check(w.valid(c0) && w.valid(c1) && w.valid(c2), "with every original left alone");
+
+            multiClear();
+            sel_ = -1; selEntity_ = scene::kInvalidEntity;
+            undoStack_.clear(); redoStack_.clear();
+
+            // THE ANCESTOR-SKIP CASE, which is the one a naive loop gets wrong. A parent and its own
+            // child both selected must paste TWO entities, not three: captureSubtree already carries
+            // the child along inside the parent, so keeping the child as its own clipboard entry
+            // would paste it twice -- once correctly parented, once orphaned beside it.
+            scene::Entity par = w.create("cpParent");
+            scene::Entity kid = w.create("cpChild", par, Transform{});
+            w.flush();
+            multiClear();
+            multiSetSingle(par); multiToggle(kid);
+            sel_ = kSelScene; selEntity_ = par;
+
+            const usize beforeNest = w.count();
+            copySelection();
+            pasteClipboard();
+            check(w.count() == beforeNest + 2,
+                  "a selected parent AND its selected child paste as two entities, not three -- "
+                  "the child is not copied a second time as an orphan");
+
+            multiClear();
+            sel_ = -1; selEntity_ = scene::kInvalidEntity;
+            undoStack_.clear(); redoStack_.clear();
         }
 
         multiClear();
@@ -14639,7 +14747,7 @@ private:
                 // disagreeing about what a chord does.
                 if (ImGui::MenuItem("Copy", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditCopy)).c_str(), false, anySelected())) copySelection();
                 uiReg_.track("edit.copy");
-                if (ImGui::MenuItem("Paste", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditPaste)).c_str(), false, clipboard_.hasScene || clipboard_.hasObject)) pasteClipboard();
+                if (ImGui::MenuItem("Paste", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditPaste)).c_str(), false, !clipboard_.entities.empty() || clipboard_.hasObject)) pasteClipboard();
                 uiReg_.track("edit.paste");
                 if (ImGui::MenuItem("Duplicate", editor::chordToString(keybinds_.chordFor(editor::CommandId::EditDuplicate)).c_str(), false, anySelected())) duplicateSelection();
                 uiReg_.track("edit.duplicate");
@@ -20586,18 +20694,30 @@ private:
     // Copy/Duplicate's source, and what Paste rebuilds from. hasScene/hasObject are set exclusively
     // of each other by copySelection() -- mirrors the existing loose pairing of sel_/selEntity_
     // rather than a variant type for two cases already mutually exclusive by construction.
-    struct EditorClipboard {
-        bool hasScene = false;
+    // ONE COPIED ENTITY. Split out of EditorClipboard so the clipboard can hold a LIST: Ctrl+C read
+    // the anchor alone, so copying five selected props and pasting produced one -- the same
+    // "applies to the set, acts on the anchor" shape that made multi-move unundoable and that Ctrl+D
+    // was fixed for earlier this session.
+    struct ClipboardEntity {
 #if AVER_MODULE_SCENE
-        editor::EntitySnapshot sceneSnap;
+        editor::EntitySnapshot snap;
         // EVERYTHING UNDER IT, TOO. Copying only the entity the selection names meant pasting a
         // parent produced a childless copy -- silently, since the paste looked like it worked.
-        std::vector<EditCmd::DestroyedNode> sceneSubtree;
+        std::vector<EditCmd::DestroyedNode> subtree;
 #endif
-        EditXform sceneXform{};
+        EditXform xform{};
         bool hadBody = false;
         Vec3 bodyHalf{0, 0, 0};
+    };
 
+    struct EditorClipboard {
+        // Empty means nothing was copied -- this replaces the old hasScene bool outright.
+        std::vector<ClipboardEntity> entities;
+
+        // THE PLACEHOLDER PATH STAYS SINGLE-ITEM, deliberately. objects_/MeshObj is the no-project
+        // path and has no multi-selection concept at all: multiSel_ is scene::Entity-typed and lives
+        // behind AVER_MODULE_SCENE, so there is no set for it to copy. Turning this into a list too
+        // would be inventing a feature nothing can reach.
         bool hasObject = false;
         MeshObj object{};
     };
