@@ -2,7 +2,13 @@
 // Developed by Vectoric-Core-Systems. All rights reserved.
 // Proprietary. See LICENSE.md at the repository root.
 //
-// Finding one asset path inside another file's text, at a PATH-SEGMENT BOUNDARY.
+// Finding, and rewriting, one asset path inside another file's text -- at a PATH-SEGMENT BOUNDARY.
+//
+// TWO HALVES, and the order matters: the matcher came first and alone, because it is the precondition
+// for the rewriter and shipping them together would have meant shipping a rewriter built on a matcher
+// nothing had yet checked. referencesAsset / findAnchoredAssetRefs answer "does this file name that
+// asset"; rewriteAssetRefs repoints it. Both are pure functions over strings so tests/editor can drive
+// them with no device, no ImGui and no sandbox translation unit.
 //
 // WHY THIS EXISTS. The Content Browser's "who references this asset" scan matched with a bare
 // `hay.find(want)` and no boundary test at all. Every reference here is a content-relative path, so

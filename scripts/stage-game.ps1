@@ -154,8 +154,10 @@ Note "project '$gameName'  content=$contentRel  startmap=$startMap  tree=$BuildD
 # HostBridge.DeclareGraphClasses and compiled to IL in-process, so they ride along in the ordinary
 # content copy below and need nothing from this gate.
 #
-# The staleness half is untouched and still applies to any project that DOES have sources: shipping
-# yesterday's assemblies silently is the failure this whole block exists to prevent.
+# The staleness half still applies to any project that DOES have sources -- shipping yesterday's
+# assemblies silently is the failure this whole block exists to prevent -- but it is NOT untouched, as
+# an earlier draft of this comment claimed: it carried the same silently-ignored -Include bug fixed
+# below, so it had been comparing every file under Content/Scripts against the DLLs, not just .cs/.fs.
 $scriptsBin = Join-Path $binariesSrc 'Scripts'
 $scriptSrcDir = Join-Path $contentSrc 'Scripts'
 $authoredScripts = @()

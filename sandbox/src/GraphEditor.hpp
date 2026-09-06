@@ -213,9 +213,10 @@ public:
     // reason the validator is: it keeps this file's dependencies at Core + Formats + ImGui and leaves
     // it drivable from a test with no .NET runtime.
     //
-    // Called at most once a frame, and only while a graph tab is open -- the recording it reads from
-    // is armed on open and disarmed on close, because it sits on the hot path of every exec node of
-    // every live graph instance.
+    // Called at most once a frame, by a graph tab that is actually drawing. The recording it reads
+    // from is armed ONCE when the editor starts (SandboxApp), not per tab: the managed table is keyed
+    // by graph NAME and the record call costs a static bool test when off, which is cheaper than
+    // tracking tab lifetimes to switch it. A packaged game has no editor and never arms it.
     using NodeHitsFn = std::function<void(const std::string& graphName, f32 maxAgeSeconds,
                                           std::vector<std::pair<std::string, f32>>& out)>;
     void setNodeHitSource(NodeHitsFn fn) { nodeHits_ = std::move(fn); }

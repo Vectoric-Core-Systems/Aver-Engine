@@ -1801,7 +1801,12 @@ void GraphEditor::draw(Engine& e) {
 void GraphEditor::drawEventGraph(float dpi) {
     // WHICH NODES ARE RUNNING, refreshed once a frame. Cheap by construction: the managed side keys
     // its table by graph NAME, so this asks only about the graph on this canvas, and the recording
-    // that fills it is armed only while a tab is open.
+    // that fills it costs a static bool test when nothing is recording.
+    //
+    // (An earlier draft said "armed only while a tab is open". It is not: SandboxApp arms it ONCE
+    // when the editor starts, deliberately, because the managed table is keyed by graph NAME and
+    // costs a static bool test when off -- which is cheaper than tracking tab lifetimes. A packaged
+    // game, having no editor, never arms it at all.)
     //
     // CLEARED WHEN THERE IS NO SOURCE, so a set captured during Play cannot go on glowing after Play
     // stops -- a highlight that outlives the execution it describes is a lie with a half-life.

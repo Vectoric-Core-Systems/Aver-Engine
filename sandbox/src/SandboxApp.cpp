@@ -16417,11 +16417,10 @@ private:
         if (oldRel.empty() || newRel.empty() || oldRel == oldAbs || newRel == newAbs) return rep;
         if (oldRel == newRel) return rep;
 
-        // The SAME set of files the warning listed, so what was promised is what is edited. Resolved
-        // against the NEW path because the rename has already happened by the time this runs -- the
-        // referrers still name the old one, which is the whole point.
-        // Scanned for the OLD path, deliberately: the rename has already happened on disk, and the
-        // referrers are exactly the files that still name where it used to be.
+        // SCANNED FOR THE OLD PATH, which is also the same set of files the warning listed -- so what
+        // the dialog promised is exactly what gets edited. The rename has already happened on disk by
+        // the time this runs, and the referrers are precisely the files that still name where the
+        // asset used to be.
         for (const std::string& refRel : cbFindReferencesTo(oldAbs)) {
             const std::string abs = project_.contentDir() + "\\" + refRel;
             std::string text;
