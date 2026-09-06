@@ -6678,6 +6678,64 @@ public:
     // EXCLUSIVE TIME IS DERIVED HERE, not reported: the nodes carry INCLUSIVE ms and a parent
     // index, and "how much of this pass is not its children" is the number that actually points at
     // what to optimise. Deriving it in the view keeps the ABI carrying one number per node.
+    // The References panel: which files name the asset you asked about.
+    //
+    // WHY IT IS A PANEL AND NOT ONLY A MODAL LINE. The scan has existed for a while, and could be
+    // reached from exactly two places: the delete confirm and the rename confirm. So the one moment
+    // an author could ask "what uses this?" was the moment they had already decided to remove or
+    // rename it -- which is the wrong end of the question. This asks it on demand.
+    //
+    // A SCAN, NOT AN INDEX, and it says so. The result is a snapshot taken when you pressed the menu
+    // item, over the text formats only, and it can be wrong in one direction: a reference built at
+    // runtime in C#, or held only as a hashed ObjectId with the path nowhere on disk, cannot be seen
+    // from here. Reporting "found N" rather than "there are exactly N" is the honest framing and the
+    // panel repeats it, because a reader who takes this for a complete answer will delete something.
+    void buildReferencesPanel() {
+#if AVER_WITH_IMGUI
+        if (!showReferences_) return;
+        ImGui::SetNextWindowSize(ImVec2(520.0f * dpi_, 320.0f * dpi_), ImGuiCond_FirstUseEver);
+        if (!ImGui::Begin("References", &showReferences_)) { ImGui::End(); return; }
+
+        if (!refPanelScanned_) {
+            ImGui::TextWrapped("Right-click an asset in the Content Browser and choose "
+                               "\"Find References\" to see what names it.");
+            ImGui::End();
+            return;
+        }
+
+        ImGui::TextDisabled("%s", cbRelativeToContent(refPanelAsset_).c_str());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Rescan")) refPanelResults_ = cbFindReferencesTo(refPanelAsset_);
+        uiReg_.track("references.rescan");
+        ImGui::Separator();
+
+        if (refPanelResults_.empty()) {
+            ImGui::TextColored(ImVec4(0.6f, 0.85f, 0.6f, 1.0f), "Nothing found that names this asset.");
+        } else {
+            ImGui::Text("%zu file(s) name it:", refPanelResults_.size());
+            ImGui::Separator();
+            for (const std::string& rel : refPanelResults_) {
+                // DOUBLE-CLICK OPENS IT, which is what makes this a navigation surface rather than a
+                // list of strings you then have to go and find by hand.
+                if (ImGui::Selectable(rel.c_str(), false, ImGuiSelectableFlags_AllowDoubleClick) &&
+                    ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                    const std::string abs = project_.contentDir() + "\\" + rel;
+                    cbSelectedFile_ = abs;
+                    assetEditors_.open(abs);
+                }
+            }
+        }
+
+        ImGui::Separator();
+        // THE LIMIT, said every time rather than once in a comment nobody reads. See
+        // cbFindReferencesTo for what it can and cannot see.
+        ImGui::TextDisabled("Scanned .ocworld/.ocmap/.ocmat/.ocgraph/.ocproject for this path.");
+        ImGui::TextDisabled("Cannot see: a path built in C# at runtime, or a reference stored only as");
+        ImGui::TextDisabled("a hashed id. This is \"found N\", not \"there are exactly N\".");
+        ImGui::End();
+#endif
+    }
+
     void buildProfilerPanel(Engine& e) {
 #if AVER_WITH_IMGUI
         if (!showProfiler_) return;
@@ -15053,6 +15111,10 @@ private:
                     // as scrolling console text from the `frametime` command.
                     ImGui::MenuItem("GPU Profiler", nullptr, &showProfiler_);
                     uiReg_.track("window.gpuProfiler");
+                    // Which files name an asset. Reachable from here as well as from the Content
+                    // Browser's own context menu, so it can be left open while working.
+                    ImGui::MenuItem("References", nullptr, &showReferences_);
+                    uiReg_.track("window.references");
                     if (!project_.valid() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                         ImGui::SetTooltip("Open or create a project first - a streamed world belongs to one.");
                     else if (ImGui::IsItemHovered())
@@ -15413,6 +15475,7 @@ private:
         buildProjectSettings();
         buildWorldSettings();
         buildProfilerPanel(e);
+        buildReferencesPanel();
 #if AVER_MODULE_SCENE
 #if AVER_WITH_IMGUI
         buildChunkStreamingPanel();
@@ -16541,6 +16604,16 @@ private:
         }
         if (ImGui::MenuItem("Show in Explorer")) editor::revealInFileManager(full);
         if (ImGui::MenuItem("Copy Path")) { ImGui::SetClipboardText(full.c_str()); cbStatus_ = "Path copied"; }
+        // FIND REFERENCES, on demand rather than only when you are about to destroy something.
+        // The scan existed already but could only be reached from the delete and rename confirms --
+        // so the one moment you could ask "what uses this?" was the moment you had already decided to
+        // remove it. Asking beforehand is the ordinary question.
+        if (!isDir && ImGui::MenuItem("Find References")) {
+            refPanelAsset_ = full;
+            refPanelResults_ = cbFindReferencesTo(full);
+            refPanelScanned_ = true;
+            showReferences_ = true;
+        }
         ImGui::Separator();
         ImGui::BeginDisabled(!editable);
         if (ImGui::MenuItem("Rename", "F2")) {
@@ -21527,6 +21600,12 @@ private:
     // The GPU profiler panel. A view over GpuTimingReport, which the device has always
     // produced and only the console ever read.
     bool showProfiler_=false;
+    // The References panel. refPanelScanned_ distinguishes "opened but never asked" from "asked and
+    // found nothing" -- two states an empty list cannot tell apart, and the second is the useful one.
+    bool showReferences_ = false;
+    bool refPanelScanned_ = false;
+    std::string refPanelAsset_;
+    std::vector<std::string> refPanelResults_;
     rhi::LineHandle colliderMesh_=0;
     bool navRegionColours_=true;
     // --bake-nav: bake once at startup, then carry on. Deferred to a frame rather than done at
