@@ -59,6 +59,8 @@ using graph_tick_fn    = void(__cdecl*)(int32_t entity, float timeSeconds);
 using graph_unload_fn  = void(__cdecl*)(int32_t entity);
 using graph_fire_fn    = int32_t(__cdecl*)(int32_t entity, const char* utf8EventName);
 using graph_validate_fn = int32_t(__cdecl*)(const char* utf8Text, char* outErr, int32_t cap);
+using graph_set_hits_fn = int32_t(__cdecl*)(int32_t on);
+using graph_get_hits_fn = int32_t(__cdecl*)(const char* utf8GraphName, char* out, int32_t cap, float maxAgeSeconds);
 using declare_graph_classes_fn = int32_t(__cdecl*)(const char* utf8ContentDir);
 using tick_graph_class_instances_fn = void(__cdecl*)(float dt);
 
@@ -116,6 +118,8 @@ struct ScriptHost::Impl {
     graph_unload_fn graphUnload = nullptr;
     graph_fire_fn   graphFire   = nullptr;
     graph_validate_fn graphValidate = nullptr;
+    graph_set_hits_fn graphSetHits = nullptr;
+    graph_get_hits_fn graphGetHits = nullptr;
     declare_graph_classes_fn      declareGraphClasses    = nullptr;
     tick_graph_class_instances_fn tickGraphClassInstances = nullptr;
 };
@@ -247,6 +251,17 @@ bool ScriptHost::init(const HostDesc& desc) {
         impl_->graphValidate = nullptr;
         AVER_WARN("[Scripting] the bridge exports no GraphValidate; the graph editor cannot check a "
                   "graph before saving it");
+    }
+
+    // The node-hit pair, optional together and separate from GraphValidate -- same graceful-degradation
+    // rule every group above follows. A bridge predating them hosts and validates graphs perfectly
+    // well and is only unable to say which nodes are running.
+    if (!bind(L"GraphSetHitRecording", reinterpret_cast<void**>(&impl_->graphSetHits)) ||
+        !bind(L"GraphGetHits", reinterpret_cast<void**>(&impl_->graphGetHits))) {
+        impl_->graphSetHits = nullptr;
+        impl_->graphGetHits = nullptr;
+        AVER_WARN("[Scripting] the bridge exports no node-hit entry points; the graph editor cannot "
+                  "highlight which nodes are executing");
     }
 
     // GRAPH-AS-CLASS is optional too, same reasoning: a bridge built before DeclareGraphClasses/
@@ -384,6 +399,46 @@ bool ScriptHost::graphValidate(const std::string& text, std::string& err) const 
     return false;
 }
 
+bool ScriptHost::graphHitsAvailable() const {
+    return ready_ && impl_ && impl_->graphSetHits && impl_->graphGetHits;
+}
+
+void ScriptHost::graphSetHitRecording(bool on) const {
+    if (!graphHitsAvailable()) return;
+    impl_->graphSetHits(on ? 1 : 0);
+}
+
+void ScriptHost::graphNodeHits(const std::string& graphName, f32 maxAgeSeconds,
+                               std::vector<std::pair<std::string, f32>>& out) const {
+    out.clear();
+    if (!graphHitsAvailable() || graphName.empty()) return;
+    // A FIXED BUFFER, and the managed side truncates at a separator rather than mid-entry, so a graph
+    // with more recent hits than fit loses whole entries instead of producing a node id nothing on the
+    // canvas matches. 8 KB is a few hundred nodes, well past any graph a person is reading.
+    char buf[8192] = {};
+    const int32_t n = impl_->graphGetHits(graphName.c_str(), buf, static_cast<int32_t>(sizeof buf), maxAgeSeconds);
+    if (n <= 0) return;
+
+    // "nodeId:age;nodeId:age". Parsed here rather than handed over as a string so every caller does
+    // not re-derive the format.
+    std::string_view all(buf, static_cast<usize>(n));
+    usize pos = 0;
+    while (pos < all.size()) {
+        const usize semi = all.find(';', pos);
+        const std::string_view entry = all.substr(pos, semi == std::string_view::npos ? all.size() - pos : semi - pos);
+        const usize colon = entry.rfind(':');
+        if (colon != std::string_view::npos && colon > 0) {
+            f32 age = 0.0f;
+            // A node id can itself contain a colon in principle, so the LAST one separates the age.
+            const std::string ageText(entry.substr(colon + 1));
+            try { age = std::stof(ageText); } catch (...) { age = 0.0f; }
+            out.emplace_back(std::string(entry.substr(0, colon)), age);
+        }
+        if (semi == std::string_view::npos) break;
+        pos = semi + 1;
+    }
+}
+
 // Whether the staged bridge exports the graph-class entry points -- see the optional-bind block in init().
 bool ScriptHost::graphClassesAvailable() const {
     return ready_ && impl_ && impl_->declareGraphClasses && impl_->tickGraphClassInstances;
@@ -444,6 +499,9 @@ bool ScriptHost::graphFireAvailable() const { return false; }
 bool ScriptHost::graphFire(i32, const std::string&) { return false; }
 bool ScriptHost::graphValidateAvailable() const { return false; }
 bool ScriptHost::graphValidate(const std::string&, std::string& err) const { err.clear(); return true; }
+bool ScriptHost::graphHitsAvailable() const { return false; }
+void ScriptHost::graphSetHitRecording(bool) const {}
+void ScriptHost::graphNodeHits(const std::string&, f32, std::vector<std::pair<std::string, f32>>& out) const { out.clear(); }
 bool ScriptHost::graphClassesAvailable() const { return false; }
 i32  ScriptHost::declareGraphClasses(const std::string&) { return 0; }
 void ScriptHost::tickGraphClassInstances(f32) {}

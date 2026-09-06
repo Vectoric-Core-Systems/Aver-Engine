@@ -2606,6 +2606,24 @@ public class GraphCompiler
                 "through a while/forEach node (its 'loop' exec-output pin is what repeats); a direct " +
                 "exec link back to an earlier node is not supported and would compile-recurse forever.");
 
+        // EVERY EXEC NODE REPORTS THAT IT RAN, from this one site. Emitting it here rather than in
+        // each emitter covers branch/switchInt/doOnce/gate/flipFlop/while/forEach AND the whole
+        // default bucket in a single edit, and cannot be forgotten when a new exec node type is added
+        // later -- every one of them comes through here first.
+        //
+        // TWO COMPILE-TIME CONSTANTS AND A CALL, deliberately the cheapest thing that is still true.
+        // The receiving side is a static bool test when the editor is not looking (see
+        // GraphInterop.RecordNodeHitForGraph), so an uninstrumented-feeling graph really is
+        // uninstrumented at runtime.
+        //
+        // KEYED BY GRAPH NAME, NOT ENTITY. The compiled method's arguments come from the graph's own
+        // PARAM list, so there is no "entity is always argument 0" available here, and a graph
+        // declaring no entity PARAM has no entity to name. The editor's canvas shows a class anyway,
+        // so "some instance of this graph ran this node" is exactly the question it is asking.
+        _il.Emit(OpCodes.Ldstr, _graph.Name);
+        _il.Emit(OpCodes.Ldstr, node.Id);
+        _il.Emit(OpCodes.Call, RecordNodeHitMethod);
+
         try
         {
             switch (node.Type.ToLowerInvariant())
@@ -4900,6 +4918,12 @@ public class GraphCompiler
     private static readonly MethodInfo PrintIntMethod =
         typeof(GraphInterop).GetMethod("PrintIntForGraph", BindingFlags.NonPublic | BindingFlags.Static)
         ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.PrintIntForGraph was not found by reflection");
+    // RecordNodeHit: called by EVERY exec node as it runs, so the editor can highlight live control
+    // flow. Resolved by reflection here like every other GraphInterop entry point, which also means a
+    // renamed or removed method fails at type-init rather than silently never recording.
+    private static readonly MethodInfo RecordNodeHitMethod =
+        typeof(GraphInterop).GetMethod("RecordNodeHitForGraph", BindingFlags.NonPublic | BindingFlags.Static)
+        ?? throw new InvalidOperationException("Aver.Framework.GraphInterop.RecordNodeHitForGraph was not found by reflection");
     // PrintString: an authored message rather than a value, for a node that needs nothing wired.
     private static readonly MethodInfo PrintStringMethod =
         typeof(GraphInterop).GetMethod("PrintStringForGraph", BindingFlags.NonPublic | BindingFlags.Static)

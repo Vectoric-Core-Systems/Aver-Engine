@@ -1618,6 +1618,15 @@ public:
             if (!scripts_.graphValidateAvailable()) { err = "the .NET bridge exports no GraphValidate"; return false; }
             return scripts_.graphValidate(text, err);
         });
+        // AND WHICH NODES ARE RUNNING. Recording is armed here rather than per tab because the
+        // managed table is keyed by graph NAME and costs a static bool test when off -- arming it once
+        // while the editor is up is simpler than tracking tab lifetimes, and a packaged game (which
+        // has no editor) never arms it at all.
+        editor::setGraphNodeHitSource([this](const std::string& graphName, f32 maxAge,
+                                             std::vector<std::pair<std::string, f32>>& out) {
+            scripts_.graphNodeHits(graphName, maxAge, out);
+        });
+        scripts_.graphSetHitRecording(true);
         // Appended for the same reason, and it claims only .ocbt, which nothing above accepts.
         assetEditors_.registerFactory(&editor::makeBtEditor);
         // And again for .ocsnd, which likewise nothing above claims. See SoundEditor.hpp.
@@ -3395,6 +3404,7 @@ public:
         if (graphPrintTestFrames_ > 0 && --graphPrintTestFrames_ == 0) runGraphPrintTest();
         if (clearShaderCacheFrames_ > 0 && --clearShaderCacheFrames_ == 0) runClearShaderCache();
         if (assetAssignTestFrames_ > 0 && --assetAssignTestFrames_ == 0) runAssetAssignTest();
+        if (graphHitsTestFrames_ > 0 && --graphHitsTestFrames_ == 0) runGraphHitsTest();
         if (prefsWriteTestFrames_ > 0 && --prefsWriteTestFrames_ == 0) runPrefsWriteTest();
         if (keybindTestAutoFrames_ > 0 && --keybindTestAutoFrames_ == 0) runKeybindPersistTest(keybindTestMode_);
 #endif
@@ -6591,6 +6601,7 @@ public:
     void setValidateGraph(const std::string& p) { validateGraphPath_ = p; validateGraphFrames_ = 8; }
     void setGraphPrintTest(int frames) { graphPrintTestFrames_ = frames > 0 ? frames : 8; }
     void setAssetAssignTest(int frames) { assetAssignTestFrames_ = frames > 0 ? frames : 8; }
+    void setGraphHitsTest(const std::string& p) { graphHitsTestPath_ = p; graphHitsTestFrames_ = 8; }
     void setClearShaderCache(const std::string& dir = {}) {
         clearShaderCacheDir_ = dir; clearShaderCacheFrames_ = 4;
     }
@@ -13352,6 +13363,88 @@ private:
     // TOKEN, while mesh and effect are both fnv1a64 of a project-relative path. Writing a path hash
     // into mr->material fails SILENTLY -- it resolves to no surface, or by coincidence to an
     // unrelated one -- so nothing would crash and the entity would just render wrong.
+    // --graph-hits-test <graph.ocgraph>: the node-hit chain end to end, through the REAL bridge.
+    //
+    // The managed half has its own tests (NodeHitTests.cs: branch arms, diamonds, graph bleed). What
+    // those cannot prove is anything on this side of the ABI -- that the two new exports actually
+    // bind, that a graph name marshals across, that the "nodeId:age;..." payload survives the round
+    // trip and parses back into pairs, and that disarming really stops it. A stub cannot fail those.
+    //
+    // Driven through graphLoad/graphTick, which host ONE graph on ONE entity with no class registry
+    // and no Play state involved -- the smallest thing that makes real compiled IL execute.
+    std::string graphHitsTestPath_;
+    int graphHitsTestFrames_ = 0;
+    void runGraphHitsTest() {
+        int failures = 0;
+        auto check = [&](bool cond, const char* what) {
+            if (cond) AVER_INFO("[graph-hits-test] PASS: {}", what);
+            else      { AVER_ERROR("[graph-hits-test] FAIL: {}", what); ++failures; }
+        };
+
+        if (!scripts_.graphHitsAvailable()) {
+            AVER_ERROR("[graph-hits-test] FAIL: the staged bridge exports no node-hit entry points");
+            AVER_INFO("[graph-hits-test] RESULT: FAIL");
+            return;
+        }
+        check(true, "the bridge exports GraphSetHitRecording and GraphGetHits");
+
+        std::string name;
+        {   // The NAME is the key the managed table uses, so read it from the file rather than guess.
+            std::string text;
+            if (!readFileText(graphHitsTestPath_, text)) {
+                AVER_ERROR("[graph-hits-test] FAIL: could not read '{}'", graphHitsTestPath_);
+                AVER_INFO("[graph-hits-test] RESULT: FAIL");
+                return;
+            }
+            fmt::OcGraphData g;
+            std::string why;
+            if (fmt::parseOcgraph(text, g, &why)) name = g.name;
+        }
+        check(!name.empty(), "the test graph declares a NAME for the hit table to key on");
+
+        constexpr i32 kEnt = 424242;   // an id no scene entity here uses; graphLoad only keys a map by it
+        std::vector<std::pair<std::string, f32>> hits;
+
+        // DISARMED FIRST, and this is the assertion that would catch "it records unconditionally":
+        // the instrumentation call is in the IL whether or not anyone is looking, so what must be
+        // true is that it stores nothing.
+        scripts_.graphSetHitRecording(false);
+        check(scripts_.graphLoad(kEnt, graphHitsTestPath_), "the graph loads onto an entity");
+        scripts_.graphTick(kEnt, 0.016f);
+        scripts_.graphNodeHits(name, 5.0f, hits);
+        check(hits.empty(), "with recording OFF a full tick records nothing");
+
+        scripts_.graphSetHitRecording(true);
+        scripts_.graphTick(kEnt, 0.032f);
+        scripts_.graphNodeHits(name, 5.0f, hits);
+        check(!hits.empty(), "with recording ON the same tick reports nodes that ran");
+        bool aged = true;
+        for (const auto& h : hits) if (h.second < 0.0f || h.second > 5.0f) aged = false;
+        check(aged, "and every reported age is a plausible number of seconds, so the payload parsed");
+
+        // THE LAST ENTRY MUST SURVIVE THE ROUND TRIP, and this assertion exists because it did not.
+        // GraphGetHits truncates the payload at a separator so a node id is never cut in half -- and
+        // the first version did that UNCONDITIONALLY, so a payload that fitted perfectly still lost
+        // its final entry. The managed unit tests cannot see it (they call CollectNodeHits directly
+        // and never cross the ABI), and the symptom was a node that provably ran -- it printed -- and
+        // never lit up. Any probe graph reaching here has at least three exec nodes on its chain.
+        check(hits.size() >= 3,
+              "every node on the chain survives marshalling, including the LAST one");
+        bool named = !hits.empty();
+        for (const auto& h : hits) if (h.first.empty()) named = false;
+        check(named, "and no entry came back with an empty node id, so nothing was cut mid-entry");
+        for (const auto& h : hits) AVER_INFO("[graph-hits-test]   ran: {} ({:.3f}s ago)", h.first, h.second);
+
+        // A DIFFERENT NAME MUST REPORT NOTHING -- the filter is what stops one canvas lighting another
+        // graph's nodes, and it lives on the managed side, so it has to be checked from here too.
+        scripts_.graphNodeHits(name + "_NotThisOne", 5.0f, hits);
+        check(hits.empty(), "asking for a different graph name reports nothing");
+
+        scripts_.graphSetHitRecording(false);
+        scripts_.graphUnload(kEnt);
+        AVER_INFO("[graph-hits-test] RESULT: {}", failures == 0 ? "PASS" : "FAIL");
+    }
+
     int assetAssignTestFrames_ = 0;
     void runAssetAssignTest() {
         int failures = 0;
@@ -13413,7 +13506,10 @@ private:
             *pe = scene::CParticleEmitter{};
             // THE EXTENSION GATE, which the shared helper owns so the drop target and the picker
             // cannot disagree about it.
-            check(!assignParticleEffect(pem, "C:/nope/Thing.ocmesh"),
+            // A RELATIVE PATH, because SeparationTest forbids an absolute one anywhere in engine
+            // source and was right to fail this test's first draft. The extension gate runs before
+            // any path resolution, so nothing here needs a real location to exercise it.
+            check(!assignParticleEffect(pem, "Meshes/Thing.ocmesh"),
                   "assignParticleEffect refuses anything that is not a .ocparticle");
             check(pe->effect == 0, "and leaves the field alone when it refuses");
         }
@@ -24200,6 +24296,7 @@ Application* createApplication(int argc, char** argv) {
     const char* validateGraphArg = nullptr;
     int graphPrintArg = 0;
     int assetAssignArg = 0;
+    const char* graphHitsArg = nullptr;
     int recaptureArg = 0;
     int viewmodelArg = 0;
     // --gpu-timing takes no value, so it's matched in the i+1<argc loop below only incidentally --
@@ -24223,6 +24320,7 @@ Application* createApplication(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--validate-graph"))      validateGraphArg = argv[i + 1];
         if (!std::strcmp(argv[i], "--graph-print-test"))   graphPrintArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--asset-assign-test")) assetAssignArg = std::atoi(argv[i + 1]);
+        if (!std::strcmp(argv[i], "--graph-hits-test"))   graphHitsArg = argv[i + 1];
         if (!std::strcmp(argv[i], "--recapture-test"))       recaptureArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--viewmodel-test"))       viewmodelArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--refraction"))           refraction = std::atoi(argv[i + 1]);
@@ -25181,6 +25279,7 @@ Application* createApplication(int argc, char** argv) {
     if (validateGraphArg) app->setValidateGraph(validateGraphArg);
     if (graphPrintArg) app->setGraphPrintTest(graphPrintArg);
     if (assetAssignArg) app->setAssetAssignTest(assetAssignArg);
+    if (graphHitsArg) app->setGraphHitsTest(graphHitsArg);
     if (clearShaderCacheArg) app->setClearShaderCache(clearShaderCacheDirArg);
     if (recaptureArg > 0) app->setRecaptureTest(recaptureArg);
     if (viewmodelArg > 0) app->setViewmodelTest(viewmodelArg);

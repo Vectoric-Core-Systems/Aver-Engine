@@ -207,6 +207,24 @@ public:
     void setValidator(ValidateFn fn) { validate_ = std::move(fn); }
     bool validatorInstalled() const { return static_cast<bool>(validate_); }
 
+    // ---- execution highlighting --------------------------------------------------------------
+    //
+    // Which nodes of THIS graph ran recently, and how long ago. Supplied as a hook for the same
+    // reason the validator is: it keeps this file's dependencies at Core + Formats + ImGui and leaves
+    // it drivable from a test with no .NET runtime.
+    //
+    // Called at most once a frame, and only while a graph tab is open -- the recording it reads from
+    // is armed on open and disarmed on close, because it sits on the hot path of every exec node of
+    // every live graph instance.
+    using NodeHitsFn = std::function<void(const std::string& graphName, f32 maxAgeSeconds,
+                                          std::vector<std::pair<std::string, f32>>& out)>;
+    void setNodeHitSource(NodeHitsFn fn) { nodeHits_ = std::move(fn); }
+    bool nodeHitSourceInstalled() const { return static_cast<bool>(nodeHits_); }
+
+    // How long a hit keeps a node lit. Long enough to see a once-per-second event, short enough that
+    // a node which stopped running goes dark while you are still looking at it.
+    static constexpr f32 kNodeHitFadeSec = 1.5f;
+
     // Validates what is ON THE CANVAS, unsaved edits and all -- it serialises the live graph rather
     // than reading the file back, so the answer describes what the author is looking at. True when
     // valid. On false, `err` is the validator's own message and `offendingNode` is the node it names
@@ -677,6 +695,10 @@ private:
     // kept here rather than read back from linkDragFromNode_ at use time because the drag state is
     // reset the instant the button comes up, and the palette is submitted later in the same frame.
     ValidateFn  validate_;
+    NodeHitsFn  nodeHits_;
+    // nodeId -> seconds since it last ran, refreshed once a frame. Cleared when the source is absent
+    // so a stale set cannot keep glowing after Play stops.
+    std::unordered_map<std::string, f32> nodeHitAges_;
     // The last validation result, shown as a badge on the named node until the graph changes.
     std::string validateErr_;
     std::string validateNode_;
@@ -752,6 +774,10 @@ std::string graphStarterText(const std::string& stem);
 //
 // An editor already open keeps whatever it was constructed with; call this before opening files.
 void setGraphValidator(GraphEditor::ValidateFn fn);
+
+// The node-hit source every GraphEditor opened from here on will poll. Same process-wide shape and
+// same reason as setGraphValidator above: the editors come from a free factory taking only a path.
+void setGraphNodeHitSource(GraphEditor::NodeHitsFn fn);
 
 std::unique_ptr<AssetEditor> makeGraphEditor(const std::string& path);
 

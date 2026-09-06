@@ -1799,6 +1799,21 @@ void GraphEditor::draw(Engine& e) {
 // the Viewport tab arrived -- draw() is now the tab bar and nothing else, which is the only way
 // either tab's body stays readable.
 void GraphEditor::drawEventGraph(float dpi) {
+    // WHICH NODES ARE RUNNING, refreshed once a frame. Cheap by construction: the managed side keys
+    // its table by graph NAME, so this asks only about the graph on this canvas, and the recording
+    // that fills it is armed only while a tab is open.
+    //
+    // CLEARED WHEN THERE IS NO SOURCE, so a set captured during Play cannot go on glowing after Play
+    // stops -- a highlight that outlives the execution it describes is a lie with a half-life.
+    if (nodeHits_) {
+        std::vector<std::pair<std::string, f32>> hits;
+        nodeHits_(graph_.name, kNodeHitFadeSec, hits);
+        nodeHitAges_.clear();
+        for (auto& h : hits) nodeHitAges_.emplace(std::move(h.first), h.second);
+    } else if (!nodeHitAges_.empty()) {
+        nodeHitAges_.clear();
+    }
+
 #if AVER_WITH_IMGUI
     recomputeLayouts(dpi);
 
@@ -2303,6 +2318,19 @@ void GraphEditor::drawEventGraph(float dpi) {
             const f32 pad = 3.0f * dpi;
             dl->AddRect(ImVec2(pMin.x - pad, pMin.y - pad), ImVec2(pMax.x + pad, pMax.y + pad),
                         IM_COL32(240, 150, 60, 255), 7.0f * dpi, 0, 2.5f * dpi);
+        }
+        // AND A GREEN RING FOR A NODE THAT JUST RAN, fading with age. Drawn OUTSIDE the validator's
+        // so a node that is both broken and executing shows both, and drawn from real recorded hits
+        // rather than an animation -- a plausible-looking glow that did not correspond to execution
+        // would be worse than nothing, because it would be trusted.
+        if (const auto hit = nodeHitAges_.find(nl.nodeId); hit != nodeHitAges_.end()) {
+            const f32 t = 1.0f - (hit->second / kNodeHitFadeSec);
+            if (t > 0.0f) {
+                const f32 pad = 6.0f * dpi;
+                dl->AddRect(ImVec2(pMin.x - pad, pMin.y - pad), ImVec2(pMax.x + pad, pMax.y + pad),
+                            IM_COL32(90, 230, 130, static_cast<int>(255.0f * (t < 1.0f ? t : 1.0f))),
+                            9.0f * dpi, 0, 2.0f * dpi);
+            }
         }
         if (showTitles) {
             const std::string label = srcNode ? nodeTitle(*srcNode, desc, graph_.variables) : nl.nodeId;
@@ -3668,9 +3696,11 @@ namespace {
 // which is the honest state in a build with no .NET runtime: validateNow() then reports that nothing
 // could check the graph rather than claiming it is fine.
 GraphEditor::ValidateFn g_graphValidator;
+GraphEditor::NodeHitsFn g_graphNodeHits;
 } // namespace
 
 void setGraphValidator(GraphEditor::ValidateFn fn) { g_graphValidator = std::move(fn); }
+void setGraphNodeHitSource(GraphEditor::NodeHitsFn fn) { g_graphNodeHits = std::move(fn); }
 
 std::unique_ptr<AssetEditor> makeGraphEditor(const std::string& path) {
     std::string ext = std::filesystem::path(path).extension().string();
@@ -3678,6 +3708,7 @@ std::unique_ptr<AssetEditor> makeGraphEditor(const std::string& path) {
     if (ext != ".ocgraph") return nullptr;
     auto ed = std::make_unique<GraphEditor>(path);
     if (g_graphValidator) ed->setValidator(g_graphValidator);
+    if (g_graphNodeHits)  ed->setNodeHitSource(g_graphNodeHits);
     return ed;
 }
 

@@ -459,6 +459,70 @@ internal static class GraphInterop
         Log.Info($"[Graph] {label}: {text}");
     }
 
+    // ---- node-hit recording, for the editor's execution highlighting -----------------------------
+    //
+    // Every exec node calls this as it runs, so the graph editor can show which nodes are actually
+    // executing rather than leaving an author to infer it from prints. Visual scripting had no way at
+    // all to see control flow: you could print a value, and nothing showed you WHICH branch ran.
+    //
+    // OFF UNLESS THE EDITOR ASKS. This sits on the hot path of every exec node of every live graph
+    // instance, so with recording off it must cost a static bool test and nothing else -- no
+    // allocation, no dictionary probe, no time read. A packaged game never turns it on.
+    //
+    // NOT THE LOG CHANNEL, though that already reaches the editor. PrintStringForGraph is a string
+    // interpolation plus a Log.Info under the core log mutex, then a cross-thread substring filter on
+    // the other side; paying that per exec node per frame per instance would make the profiler part
+    // of what it profiles.
+    //
+    // KEYED BY (GRAPH NAME, NODE ID), BOTH COMPILE-TIME CONSTANTS. Not by entity: the compiled
+    // method's arguments come from the graph's declared PARAM list, so there is no "entity is always
+    // argument 0" to lean on, and a graph that declares no entity PARAM has none to report. Keying by
+    // graph name is also what the editor actually wants -- its canvas shows a CLASS, and any instance
+    // running a node should light that node.
+    //
+    // LAST-HIT TIME, NEVER A COUNTER. A diamond in the exec graph (two branch arms rejoining) makes
+    // the shared node's IL be emitted TWICE at compile time, so a counter would over-report by
+    // construction. "When did this last run" is both the honest measure and the one a fading
+    // highlight needs.
+    private static bool s_recordHits;
+    private static readonly Dictionary<string, double> s_nodeHits = new();
+    private static readonly System.Diagnostics.Stopwatch s_hitClock = System.Diagnostics.Stopwatch.StartNew();
+
+    internal static void RecordNodeHitForGraph(string graphName, string nodeId)
+    {
+        if (!s_recordHits) return;
+        lock (s_nodeHits) s_nodeHits[graphName + " " + nodeId] = s_hitClock.Elapsed.TotalSeconds;
+    }
+
+    /// <summary>Turns recording on or off. Called from the bridge when a graph editor tab opens or
+    /// closes, so the cost exists only while somebody is looking.</summary>
+    internal static void SetNodeHitRecording(bool on)
+    {
+        s_recordHits = on;
+        if (!on) lock (s_nodeHits) s_nodeHits.Clear();
+    }
+
+    /// <summary>Node ids of `graphName` hit within `maxAgeSeconds`, with their ages, as
+    /// "id:age;id:age". Ages rather than timestamps because the two sides do not share a clock.</summary>
+    internal static string CollectNodeHits(string graphName, double maxAgeSeconds)
+    {
+        var sb = new System.Text.StringBuilder();
+        string prefix = graphName + " ";
+        lock (s_nodeHits)
+        {
+            double now = s_hitClock.Elapsed.TotalSeconds;
+            foreach (var kv in s_nodeHits)
+            {
+                if (!kv.Key.StartsWith(prefix, StringComparison.Ordinal)) continue;
+                double age = now - kv.Value;
+                if (age > maxAgeSeconds) continue;
+                if (sb.Length > 0) sb.Append(';');
+                sb.Append(kv.Key.AsSpan(prefix.Length)).Append(':').Append(age.ToString("0.000"));
+            }
+        }
+        return sb.ToString();
+    }
+
     /// <summary>The character this entity is, or null with one warning line. Every character node
     /// below funnels through here so they all fail the same way and say the same thing -- the shape
     /// JumpForGraph and GetViewEntity already established.</summary>

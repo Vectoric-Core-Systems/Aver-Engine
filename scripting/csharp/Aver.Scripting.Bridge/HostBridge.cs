@@ -580,6 +580,76 @@ public static class HostBridge
         }
     }
 
+    /// <summary>Turns per-node execution recording on or off. The editor calls this when a graph tab
+    /// opens or closes, so the cost -- a call on the hot path of every exec node of every live graph
+    /// instance -- exists only while somebody is looking at a canvas. A packaged game never calls it.
+    ///
+    /// Returns 1 when the request was applied, 0 if the framework could not be reached.</summary>
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static int GraphSetHitRecording(int on)
+    {
+        try
+        {
+            Aver.Framework.GraphInterop.SetNodeHitRecording(on != 0);
+            return 1;
+        }
+        catch (Exception ex)
+        {
+            // NEVER THROWS ACROSS THE ABI, for GraphFire's reason.
+            Emit((int)Log.Level.Error, $"[Graph] hit recording could not be {(on != 0 ? "enabled" : "disabled")}: {Describe(ex)}");
+            return 0;
+        }
+    }
+
+    /// <summary>Writes the nodes of `utf8GraphName` that ran within `maxAgeSeconds` into
+    /// <paramref name="buffer"/> as "nodeId:age;nodeId:age", UTF-8 and NUL-terminated. Returns the
+    /// byte count written, or 0.
+    ///
+    /// AGES, NOT TIMESTAMPS, because the two sides do not share a clock -- the managed side counts
+    /// from its own Stopwatch and the editor from ImGui's frame time, and handing over a raw
+    /// timestamp would make the editor subtract two unrelated origins.
+    ///
+    /// BY GRAPH NAME, not by entity: the canvas shows a CLASS, and any instance running a node should
+    /// light that node. It is also the only key available -- a compiled graph's arguments come from
+    /// its own PARAM list, so there is no entity to name at the instrumentation point.</summary>
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static unsafe int GraphGetHits(IntPtr utf8GraphName, byte* buffer, int capacity, float maxAgeSeconds)
+    {
+        try
+        {
+            if (buffer is null || capacity <= 1) return 0;
+            buffer[0] = 0;
+            string? name = Marshal.PtrToStringUTF8(utf8GraphName);
+            if (string.IsNullOrEmpty(name)) return 0;
+
+            string joined = Aver.Framework.GraphInterop.CollectNodeHits(name, maxAgeSeconds);
+            if (joined.Length == 0) return 0;
+            byte[] utf8 = System.Text.Encoding.UTF8.GetBytes(joined);
+            int n = Math.Min(utf8.Length, capacity - 1);
+            // TRUNCATED AT A SEPARATOR, never mid-entry: a half-written "nodeId:0.1" would parse as a
+            // node id nothing on the canvas matches -- silent, rather than visibly wrong.
+            //
+            // ONLY WHEN IT ACTUALLY DID NOT FIT, and getting that wrong cost a debugging round: the
+            // first version walked back to the last ';' unconditionally, so a payload that fitted
+            // perfectly still lost its final entry. The managed unit tests could not catch it -- they
+            // call CollectNodeHits directly and never cross this boundary -- and the symptom was a
+            // node that provably executed (it printed) never lighting up.
+            if (n < utf8.Length)
+            {
+                while (n > 0 && utf8[n - 1] != (byte)';') --n;
+                if (n > 0) --n;   // drop the trailing separator itself
+            }
+            for (int i = 0; i < n; ++i) buffer[i] = utf8[i];
+            buffer[n] = 0;
+            return n;
+        }
+        catch (Exception ex)
+        {
+            Emit((int)Log.Level.Error, $"[Graph] collecting node hits threw: {Describe(ex)}");
+            return 0;
+        }
+    }
+
     // ------------------------------------------------------------------ graph classes
     //
     // GRAPH-AS-CLASS: a .ocgraph carrying a CLASS record becomes a real registered actor class,

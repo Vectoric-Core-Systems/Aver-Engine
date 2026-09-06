@@ -265,6 +265,10 @@ static int Main()
         // exec. See PrintStringTests.cs for why invoking it, not just compiling it, is the test.
         failures += PrintStringTests.RunAll();
 
+        // Node-hit recording: every exec node reporting that it ran, so the editor can highlight live
+        // control flow. See NodeHitTests.cs for why the branch and diamond cases are the real tests.
+        failures += NodeHitTests.RunAll();
+
         if (failures == 0)
             Console.WriteLine("\nAll tests passed.");
         else
