@@ -276,3 +276,16 @@ target_include_directories(RecentProjectsTest PRIVATE
   ${CMAKE_SOURCE_DIR}/sandbox/src)
 target_link_libraries(RecentProjectsTest PRIVATE Aver.Core)
 set_target_properties(RecentProjectsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# AssetRefScanTest -- the path-segment boundary rule behind "who references this asset".
+#
+# Header-only and Core-only, for EditorEulerTest's reason. It exists because the Content Browser's
+# scan matched with a bare find(), and `Meshes/Cube.ocmesh` is a substring of `PropMeshes/Cube.ocmesh`
+# and of `Sub/Meshes/Cube.ocmesh` -- different files it was reporting as referrers. That is noise in a
+# warning and corruption in anything that REWRITES what the scan finds, so the rule is pinned before a
+# rewriter exists. The false-positive cases are the point: a matcher returning true for everything
+# passes every other assertion in that file.
+add_executable(AssetRefScanTest src/AssetRefScanTest.cpp)
+target_include_directories(AssetRefScanTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(AssetRefScanTest PRIVATE Aver.Core)
+set_target_properties(AssetRefScanTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

@@ -113,6 +113,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "BtEditor.hpp"
 #include "SoundEditor.hpp"
 #include "EditorEuler.hpp"
+#include "AssetRefScan.hpp"
 #include "EditorTransform.hpp"   // dropRestLift, so a dropped asset rests on what it landed on
 #include "EditorPrefs.hpp"
 #include "EditorIcons.hpp"
@@ -16215,8 +16216,7 @@ private:
         // Compared case-insensitively, and with both separators, because these paths are authored by
         // hand as often as by a tool: a .ocgraph written by a person may say Meshes\Cube.ocmesh where
         // the browser reports Meshes/Cube.ocmesh, and a miss there reads as "nothing references it".
-        std::string want = lowerCopy(needle);
-        for (char& c : want) if (c == '\\') c = '/';
+        const std::string want = editor::normaliseForRefScan(needle);
 
         std::error_code ec;
         const std::string content = project_.contentDir();
@@ -16230,9 +16230,13 @@ private:
                 ext != ".ocgraph" && ext != ".ocproject") continue;
             std::string text;
             if (!readFileText(p, text)) continue;
-            std::string hay = lowerCopy(text);
-            for (char& c : hay) if (c == '\\') c = '/';
-            if (hay.find(want) != std::string::npos) out.push_back(cbRelativeToContent(p));
+            // ANCHORED, not a bare find(). `Meshes/Cube.ocmesh` is a SUBSTRING of
+            // `PropMeshes/Cube.ocmesh` and of `Sub/Meshes/Cube.ocmesh`, both of which name a
+            // DIFFERENT file -- so a plain substring test reported referrers of an unrelated asset.
+            // Merely noisy for a warning; actively destructive for anything that REWRITES what this
+            // finds, which is why the boundary rule now lives in a tested header. See AssetRefScan.hpp.
+            const std::string hay = editor::normaliseForRefScan(text);
+            if (editor::referencesAsset(hay, want)) out.push_back(cbRelativeToContent(p));
         }
         std::sort(out.begin(), out.end());
         out.erase(std::unique(out.begin(), out.end()), out.end());
@@ -16279,6 +16283,22 @@ private:
         if (cbSelectedFile_ == from) { cbSelectedFile_ = dst.string(); }
         for (std::string& sp : cbSelection_) if (sp == from) sp = dst.string();
         cbRewriteHistory(from, dst.string());
+
+        // THE SAME ID INVALIDATION A MOVE CAUSES, and rename was the one path that did not say so.
+        // cbAfterMoveOrCopy sets this for move and copy with the reason spelled out: sceneMeshes_ is
+        // keyed by fnv1a64 of the content-relative PATH, so changing the path retires the old id and
+        // creates one nothing has registered. A rename does exactly that -- it IS a move within a
+        // folder -- yet reloaded nothing, so the renamed mesh kept drawing under its old id until the
+        // next project open, and a fresh drag of it found no mesh at all.
+        //
+        // Directories included, for cbAfterMoveOrCopy's reason: renaming a folder changes the
+        // relative path of every asset beneath it.
+        {
+            const std::string ext = lowerExt(dst);
+            std::error_code dec;
+            if (ext == ".ocmesh" || ext == ".ocparticle" || std::filesystem::is_directory(dst, dec))
+                wantMeshReload_ = true;
+        }
         cbStatus_ = "Renamed to " + newName;
     }
 
