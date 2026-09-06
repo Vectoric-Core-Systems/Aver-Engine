@@ -3419,6 +3419,9 @@ public:
         if (renameRepointFrames_ > 0 && --renameRepointFrames_ == 0) runRenameRepointTest();
         if (prefsWriteTestFrames_ > 0 && --prefsWriteTestFrames_ == 0) runPrefsWriteTest();
         if (notifyTestFrames_ > 0 && --notifyTestFrames_ == 0) runNotifyTest();
+        // Armed once, not every frame: markLevelUnsaved is what gives the autosave timer something
+        // to do, and re-marking after each save would loop forever instead of showing one cycle.
+        if (autosaveTestArm_) { autosaveTestArm_ = false; markLevelUnsaved(); }
         if (keybindTestAutoFrames_ > 0 && --keybindTestAutoFrames_ == 0) runKeybindPersistTest(keybindTestMode_);
 #endif
 #if AVER_MODULE_SCRIPTING
@@ -6630,6 +6633,15 @@ public:
     // run so a capture never has a toast in shot, and this is the one run where the toast IS the
     // thing being captured.
     void setNotifyTest(int n) { notifyTestFrames_ = n; notifyTestLift_ = true; }
+    // --autosave-test <sec>: shorten the interval, mark the level dirty so the timer has a reason to
+    // run, and lift the capture suppression. The countdown is otherwise unreachable from a bounded
+    // run -- it needs thirty seconds of unsaved edits, which no capture has.
+    void setAutosaveTest(f32 sec) {
+        autosaveIntervalSec_ = sec;
+        notifyTestLift_ = true;
+        autosaveTestArm_ = true;
+        autosaveTestLift_ = true;
+    }
     // --find-refs <content-relative-path>: print what references an asset and exit. The delete
     // confirm's scan, reachable without a modal -- so the thing that stops someone destroying a
     // shared asset can be tested rather than eyeballed once.
@@ -7746,7 +7758,30 @@ private:
         // SUN record and no placements at all. That sidecar is newer than the level, so the next
         // interactive open offers to "recover unsaved changes" from it -- and accepting would have
         // replaced a working level with an empty one. A capture must not be able to do that.
-        if (maxFrames_ != 0) { autosaveAccum_ = 0.0f; return; }
+        // --autosave-test LIFTS THIS DELIBERATELY, and the guard is otherwise absolute. The reason
+        // for the guard is written above and it is a real incident, not a precaution: a bounded run
+        // once wrote a sidecar holding a SUN record and no placements, which the next interactive
+        // open then offered to "recover" over a working level. The diagnostic flag exists because
+        // the countdown is unreachable from a bounded run without it -- it needs thirty seconds of
+        // unsaved edits, which no capture has -- and it announces itself so a sidecar appearing
+        // beside somebody's level is never a surprise.
+        if (maxFrames_ != 0 && !autosaveTestLift_) { autosaveAccum_ = 0.0f; return; }
+        if (maxFrames_ != 0 && autosaveTestLift_ && !autosaveTestWarned_) {
+            autosaveTestWarned_ = true;
+            AVER_WARN("[Autosave] --autosave-test is lifting the capture guard: this bounded run "
+                      "WILL write a recovery sidecar. Point it at a throwaway project.");
+        }
+
+        // A Retry pressed on the failure notification. Handled before the disabled-check below,
+        // because that check is exactly what Retry exists to undo.
+        if (autosaveRetryRequested_) {
+            autosaveRetryRequested_ = false;
+            autosaveIntervalSec_ = kAutosaveDefaultSec;
+            autosaveFailedWarned_ = false;
+            autosaveAccum_ = 0.0f;
+            autosaveCancelNotice();
+        }
+
         if (autosaveIntervalSec_ <= 0.0f) return;
         // NOTHING TO SAVE is the common case and must cost nothing: no level, never saved (so there
         // is nowhere to put the sidecar), or nothing edited since it was opened.
@@ -7754,14 +7789,111 @@ private:
         // was opened, or nowhere at all to write (no level AND no project, i.e. the placeholder
         // scene, which is not the user's work). An UNTITLED level with a project open is now saved
         // -- see autosavePathFor.
-        if (!levelHasUnsavedEdits()) { autosaveAccum_ = 0.0f; return; }
-        if (levelPath_.empty() && project_.dir.empty()) { autosaveAccum_ = 0.0f; return; }
-        autosaveAccum_ += dt;
-        if (autosaveAccum_ < autosaveIntervalSec_) return;
-        autosaveAccum_ = 0.0f;
+        // A COUNTDOWN IN FLIGHT IS CANCELLED, NOT LEFT RUNNING, when the reason for it goes away --
+        // the commonest case being that the user saved manually while the warning was on screen.
+        // Counting down to a save that is no longer needed is worse than not warning at all.
+        if (!levelHasUnsavedEdits()) { autosaveAccum_ = 0.0f; autosaveCancelNotice(); return; }
+        if (levelPath_.empty() && project_.dir.empty()) { autosaveAccum_ = 0.0f; autosaveCancelNotice(); return; }
 
+        // PENDING: the countdown reached zero LAST frame and the toast said "Saving..." then. Only
+        // now, one presented frame later, is the blocking write actually done -- see the state's
+        // comment at autosaveState_.
+        if (autosaveState_ == AutosaveState::Pending) {
+            autosaveState_ = AutosaveState::Idle;
+            autosaveAccum_ = 0.0f;
+            autosaveRunSave();
+            return;
+        }
+
+        if (autosavePostponeRequested_) {
+            autosavePostponeRequested_ = false;
+            if (autosavePostpones_ < kAutosaveMaxPostpones) ++autosavePostpones_;
+            autosaveAccum_ = 0.0f;
+            autosaveCancelNotice();
+            editor::Notification p;
+            p.severity = editor::NotifySeverity::Info;
+            p.title = "Autosave postponed";
+            p.body  = "Next attempt in " + std::to_string(static_cast<int>(autosaveIntervalSec_)) + "s.";
+            p.ttlSec = 3.0;
+            editor::notifications().push(std::move(p));
+            return;
+        }
+
+        autosaveAccum_ += dt;
+
+        // THE WARNING WINDOW. Announced before it happens rather than after, because the save is a
+        // synchronous world walk on the main thread -- the user feels it, and a hitch you were
+        // warned about is a different experience from one you were not.
+        const f32 remaining = autosaveIntervalSec_ - autosaveAccum_;
+        if (remaining <= kAutosaveWarnSec) {
+            const int secs = remaining > 0.0f ? static_cast<int>(remaining) + 1 : 0;
+            if (autosaveState_ != AutosaveState::Counting) {
+                autosaveState_ = AutosaveState::Counting;
+                autosaveShownSec_ = -1;
+                editor::Notification n;
+                n.severity = editor::NotifySeverity::Info;
+                n.title = "Autosaving soon";
+                n.hasProgress = true;   // implies no expiry, so the countdown cannot fade mid-count
+                autosaveNotify_ = editor::notifications().push(std::move(n));
+            }
+            // ONE UPDATE PER WHOLE SECOND, not per frame: the text only changes once a second, and
+            // pushing 144 identical updates a second through a mutex to redraw the same string is
+            // work nobody sees.
+            if (secs != autosaveShownSec_) {
+                autosaveShownSec_ = secs;
+                const bool exhausted = autosavePostpones_ >= kAutosaveMaxPostpones;
+                editor::Notification u;
+                u.severity = editor::NotifySeverity::Info;
+                u.title = "Autosaving in " + std::to_string(secs) + "s";
+                u.body  = exhausted ? "Postponed " + std::to_string(kAutosaveMaxPostpones) +
+                                          " times already - saving this time."
+                                    : "The editor will pause briefly to write a recovery file.";
+                editor::notifications().update(autosaveNotify_, u.severity, u.title, u.body);
+                editor::notifications().setProgress(
+                    autosaveNotify_, 1.0f - (remaining / kAutosaveWarnSec), "");
+                if (!exhausted)
+                    editor::notifications().setActions(autosaveNotify_,
+                                                       editor::NotifyAction::PostponeAutosave, "Postpone",
+                                                       editor::NotifyAction::None, "");
+                else
+                    editor::notifications().setActions(autosaveNotify_, editor::NotifyAction::None, "",
+                                                       editor::NotifyAction::None, "");
+            }
+        }
+
+        if (autosaveAccum_ < autosaveIntervalSec_) return;
+
+        // ZERO. Say "Saving..." and STOP -- the write happens next frame, after this one has been
+        // presented. Doing both here would set the state to "Saved" before buildUI ever ran, so the
+        // one message describing the stall the user is about to feel would never be drawn.
+        autosaveState_ = AutosaveState::Pending;
+        editor::notifications().update(autosaveNotify_, editor::NotifySeverity::Info,
+                                       "Autosaving...", "Writing a recovery file.");
+        editor::notifications().setProgress(autosaveNotify_, -1.0f, "");
+        // The buttons go NOW, not when the save finishes: activations are drained in onRender, which
+        // runs after onUpdate, so a Postpone clicked on this frame would arrive after the save had
+        // already happened and would silently do nothing.
+        editor::notifications().setActions(autosaveNotify_, editor::NotifyAction::None, "",
+                                           editor::NotifyAction::None, "");
+#else
+        (void)dt;
+#endif
+    }
+
+    // Clears any countdown notification and returns to Idle. Safe to call when there is none.
+    void autosaveCancelNotice() {
+        if (autosaveNotify_) editor::notifications().close(autosaveNotify_);
+        autosaveNotify_ = 0;
+        autosaveState_ = AutosaveState::Idle;
+        autosaveShownSec_ = -1;
+    }
+
+    // The write itself, unchanged in substance from what maybeAutosave used to do inline. Guarded on
+    // the same module as its caller's body was: saveLevel and autosavePathFor are scene-side.
+    void autosaveRunSave() {
+#if AVER_MODULE_SCENE
         const std::string dst = autosavePathFor(levelPath_);
-        if (dst.empty()) { autosaveAccum_ = 0.0f; return; }
+        if (dst.empty()) { autosaveAccum_ = 0.0f; autosaveCancelNotice(); return; }
         // The untitled path lives under <project>/Saved, which need not exist yet. Harmless for the
         // beside-the-level case, where the parent is the level's own folder.
         {
@@ -7769,9 +7901,13 @@ private:
             const std::filesystem::path parent = std::filesystem::path(dst).parent_path();
             if (!parent.empty()) std::filesystem::create_directories(parent, mkec);
         }
+        const std::string name = std::filesystem::path(dst).filename().string();
         if (saveLevel(dst)) {
             autosaveWritten_ = true;
+            autosavePostpones_ = 0;   // a successful save earns the postpones back
             AVER_INFO("[Autosave] wrote {}", dst);
+            editor::notifications().finish(autosaveNotify_, editor::NotifySeverity::Success,
+                                           "Autosaved", name, 4.0);
         } else {
             // ONCE, not every interval: a directory that cannot be written will not start working,
             // and a log line every thirty seconds would bury everything else.
@@ -7780,9 +7916,20 @@ private:
                 AVER_WARN("[Autosave] could not write {} -- autosave is off for this session", dst);
             }
             autosaveIntervalSec_ = 0.0f;
+            // STICKY, WITH A WAY BACK. This used to be a single log line and then silence: the
+            // user's safety net was gone for the rest of the session and nothing on screen ever said
+            // so. Every real cause of it -- a locked file, a full disk, a share that blinked -- is
+            // transient, so latching it off for the session with no way to undo was always the wrong
+            // answer to a temporary problem.
+            editor::notifications().finish(autosaveNotify_, editor::NotifySeverity::Error,
+                                           "Autosave failed - it is now OFF for this session",
+                                           "Could not write " + dst, 0.0);
+            editor::notifications().setSticky(autosaveNotify_, true);
+            editor::notifications().setActions(autosaveNotify_,
+                                               editor::NotifyAction::RetryAutosave, "Turn back on",
+                                               editor::NotifyAction::ShowOutputLog, "Show in Output Log");
         }
-#else
-        (void)dt;
+        autosaveNotify_ = 0;
 #endif
     }
 
@@ -11593,8 +11740,27 @@ private:
     // generator so a created section and the tiles around it come from one set of numbers.
     // Autosave. Thirty seconds is short enough that a crash costs a gesture or two and long
     // enough that saveLevel's cost never shows: it walks the world once per write.
-    f32 autosaveIntervalSec_ = 30.0f;
+    static constexpr f32 kAutosaveDefaultSec = 30.0f;
+    f32 autosaveIntervalSec_ = kAutosaveDefaultSec;
     f32 autosaveAccum_ = 0.0f;
+
+    // THE COUNTDOWN, AND WHY IT NEEDS THREE STATES RATHER THAN A BOOL.
+    //
+    // The save is synchronous: saveLevel walks the whole world and writes it from inside onUpdate.
+    // Engine::frameStep runs onUpdate BEFORE onRender, so a "Saving..." notification raised and then
+    // saved in the same tick has already been replaced by "Saved" before buildUI ever draws -- the
+    // one message describing the stall the user is about to feel would never appear. Pending exists
+    // to spend a whole presented frame saying it, and to do the write on the tick after.
+    enum class AutosaveState : u8 { Idle, Counting, Pending };
+    AutosaveState autosaveState_ = AutosaveState::Idle;
+    u64 autosaveNotify_ = 0;      // the countdown's notification, updated in place
+    int autosaveShownSec_ = -1;   // last whole second rendered, so updates are 1/s not 1/frame
+    u8  autosavePostpones_ = 0;
+    // Ten seconds is long enough to finish a drag and press Postpone, short enough that the warning
+    // is about the save that is coming rather than a background fact.
+    static constexpr f32 kAutosaveWarnSec = 10.0f;
+    // A Postpone that works forever is a way to switch the safety net off without ever deciding to.
+    static constexpr u8  kAutosaveMaxPostpones = 3;
     // Preferences are cheap to check and tiny to write, so this can be far tighter than the level
     // autosave above: two seconds is short enough that nothing a person adjusts is worth losing,
     // and a tick that changed nothing does no I/O at all.
@@ -13035,6 +13201,9 @@ private:
     int prefsWriteTestFrames_ = 0;
     int  notifyTestFrames_ = 0;      // --notify-test: frames left before the samples are raised
     bool notifyTestLift_ = false;    // ...and the one thing that lets them draw in a bounded run
+    bool autosaveTestArm_ = false;   // --autosave-test: mark the level dirty once, then let it run
+    bool autosaveTestLift_ = false;  // ...and lift the capture guard, loudly (see maybeAutosave)
+    bool autosaveTestWarned_ = false;
 
     // --project-switch-test: opening a project that states NO render settings must not leave the
     // previous project's settings in force. Synthetic on purpose -- it drives applyProjectRenderSettings
@@ -19809,8 +19978,10 @@ private:
                     // A negative progress is the indeterminate sentinel; ImGui draws an animated bar
                     // for it when the fraction is negative, which is exactly the "working, no idea
                     // how long" case a bake's first step is in.
-                    ImGui::ProgressBar(n.progress, ImVec2(-FLT_MIN, 6.0f * dpi_),
-                                       n.progress < 0.0f ? "" : nullptr);
+                    // EMPTY OVERLAY IN BOTH CASES. ImGui's default draws "60%" centred in the bar,
+                    // which at this height is taller than the bar and renders clipped through it --
+                    // and the percentage is redundant anyway, since the title already says "in 4s".
+                    ImGui::ProgressBar(n.progress, ImVec2(-FLT_MIN, 6.0f * dpi_), "");
                     if (!n.progressNote.empty()) ImGui::TextDisabled("%s", n.progressNote.c_str());
                 }
                 for (int a = 0; a < 2; ++a) {
@@ -24875,6 +25046,7 @@ Application* createApplication(int argc, char** argv) {
     // suppression so the stack is actually drawn in a bounded run. Without the lift there would be
     // no way to screenshot the one piece of this feature a headless test cannot judge.
     int notifyTestArg = 0;
+    f32 autosaveTestArg = 0.0f;
     f32 frameBudgetArg = 0.0f;
     const char* findRefsArg = nullptr;
     int projectSwitchArg = 0;
@@ -24901,6 +25073,7 @@ Application* createApplication(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--savedirty-test"))       saveDirtyArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--prefs-write-test"))     prefsWriteArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--notify-test"))          notifyTestArg = std::atoi(argv[i + 1]);
+        if (!std::strcmp(argv[i], "--autosave-test"))        autosaveTestArg = (f32)std::atof(argv[i + 1]);
         if (!std::strcmp(argv[i], "--frame-budget"))         frameBudgetArg = (f32)std::atof(argv[i + 1]);
         if (!std::strcmp(argv[i], "--find-refs"))            findRefsArg = argv[i + 1];
         if (!std::strcmp(argv[i], "--project-switch-test")) projectSwitchArg = std::atoi(argv[i + 1]);
@@ -25862,6 +26035,7 @@ Application* createApplication(int argc, char** argv) {
     if (saveDirtyArg > 0) app->setSaveDirtyTest(saveDirtyArg);
     if (prefsWriteArg > 0) app->setPrefsWriteTest(prefsWriteArg);
     if (notifyTestArg > 0) app->setNotifyTest(notifyTestArg);
+    if (autosaveTestArg > 0.0f) app->setAutosaveTest(autosaveTestArg);
     if (frameBudgetArg > 0.0f) app->setFrameBudget(frameBudgetArg);
     if (findRefsArg) app->setFindRefs(findRefsArg);
     if (projectSwitchArg) app->setProjectSwitchTest(projectSwitchArg);

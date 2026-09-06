@@ -87,6 +87,25 @@ void NotificationQueue::update(u64 id, NotifySeverity sev, std::string title, st
     n.body  = std::move(body);
 }
 
+void NotificationQueue::setActions(u64 id, NotifyAction a0, std::string label0,
+                                   NotifyAction a1, std::string label1) {
+    if (!id) return;
+    std::lock_guard<std::mutex> lk(mutex_);
+    Notification& n = reviveOrFind(live_, id, find(id));
+    n.actions[0] = a0; n.actionLabels[0] = std::move(label0);
+    n.actions[1] = a1; n.actionLabels[1] = std::move(label1);
+}
+
+void NotificationQueue::setSticky(u64 id, bool sticky) {
+    if (!id) return;
+    std::lock_guard<std::mutex> lk(mutex_);
+    Notification& n = reviveOrFind(live_, id, find(id));
+    n.sticky = sticky;
+    // A notification that becomes sticky restarts its life, so it is not immediately reaped by a ttl
+    // that elapsed while it was still an ordinary one.
+    if (sticky) n.createdAt = -1.0;
+}
+
 void NotificationQueue::finish(u64 id, NotifySeverity sev, std::string title, std::string body,
                                f64 ttlSec) {
     if (!id) return;

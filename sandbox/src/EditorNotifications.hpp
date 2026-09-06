@@ -106,6 +106,11 @@ public:
     // somebody else's notification.
     void setProgress(u64 id, f32 progress, std::string note);
     void update(u64 id, NotifySeverity sev, std::string title, std::string body);
+    // Replaces both action slots at once. Pass None to clear one. Setting them is how a countdown
+    // withdraws its own Postpone button the moment postponing stops being possible.
+    void setActions(u64 id, NotifyAction a0, std::string label0,
+                    NotifyAction a1, std::string label1);
+    void setSticky(u64 id, bool sticky);
     // Ends a progress notification: clears hasProgress and re-arms the stamp, so the "Done" state
     // gets a fresh full ttl starting from the frame that draws it.
     void finish(u64 id, NotifySeverity sev, std::string title, std::string body, f64 ttlSec);
