@@ -11751,9 +11751,22 @@ private:
     // The Outliner row currently being renamed in place, and its edit buffer.
     // Create-a-landscape controls; the shape knobs are landscapeNoiseParams_, shared with the ring
     // generator so a created section and the tiles around it come from one set of numbers.
-    // Autosave. Thirty seconds is short enough that a crash costs a gesture or two and long
-    // enough that saveLevel's cost never shows: it walks the world once per write.
-    static constexpr f32 kAutosaveDefaultSec = 30.0f;
+    // Autosave. TEN MINUTES, and it was thirty seconds until the countdown made that cadence
+    // visible for the first time.
+    //
+    // The old value was chosen when autosave was silent, on the reasoning that "a crash costs a
+    // gesture or two" and the write itself never shows. Both halves are still true. What changed is
+    // that autosaveRunSave does NOT call markLevelSaved -- correctly, since a sidecar is not a real
+    // save -- so the level stays dirty afterwards and the timer immediately restarts. With a
+    // ten-second warning on a thirty-second period, that put a countdown on screen for a third of
+    // every minute, forever, until the level was saved for real. A safety net nobody can ignore is
+    // one they turn off.
+    //
+    // Ten minutes is the interval Unreal ships and for the same reason: it is long enough that the
+    // warning is a rare event worth reading, and a crash still costs one stretch of work rather than
+    // an afternoon. The warning window stays at ten seconds, which is now 1.7% of the period instead
+    // of 33%.
+    static constexpr f32 kAutosaveDefaultSec = 600.0f;
     f32 autosaveIntervalSec_ = kAutosaveDefaultSec;
     f32 autosaveAccum_ = 0.0f;
 
