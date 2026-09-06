@@ -580,9 +580,13 @@ public static class HostBridge
         }
     }
 
-    /// <summary>Turns per-node execution recording on or off. The editor calls this when a graph tab
-    /// opens or closes, so the cost -- a call on the hot path of every exec node of every live graph
-    /// instance -- exists only while somebody is looking at a canvas. A packaged game never calls it.
+    /// <summary>Turns per-node execution recording on or off. The editor arms it ONCE at startup and
+    /// leaves it armed: the record call is a static bool test when off, which is cheaper than tracking
+    /// graph-tab lifetimes to switch it. A packaged game has no editor and never calls this at all, so
+    /// the cost on the hot path of every exec node of every live instance stays at that one test.
+    ///
+    /// (An earlier version said the editor calls this "when a graph tab opens or closes". It does not,
+    /// and the arming site in SandboxApp says so -- this was the third copy of that same wrong claim.)
     ///
     /// Returns 1 when the request was applied, 0 if the framework could not be reached.</summary>
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]

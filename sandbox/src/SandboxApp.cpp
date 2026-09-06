@@ -12581,7 +12581,7 @@ private:
     }
 
     // Copies the selection into the editor's own clipboard. A pure read: nothing changes in the
-    // world, so nothing is pushed onto the undo stack. hasScene/hasObject are set exclusively of each
+    // world, so nothing is pushed onto the undo stack. A non-empty `entities` and `hasObject` are
     // other, mirroring the existing loose pairing of sel_/selEntity_.
     void copySelection() {
 #if AVER_MODULE_SCENE
@@ -12634,7 +12634,7 @@ private:
         if (movableSelected()) {
             clipboard_.hasObject = true;
             clipboard_.object = objects_[sel_];
-            clipboard_.entities.clear();   // exclusive with the scene path, as hasScene/hasObject were
+            clipboard_.entities.clear();   // exclusive with the scene path, as the two halves always were
         }
     }
 
@@ -13036,8 +13036,15 @@ private:
         };
         auto clear = [this] { std::lock_guard<std::mutex> lk(logMutex_); graphPrints_.clear(); };
 
-        // The case that decides whether this feature is usable at all: the editor ticks graph
-        // instances ungated on play state, so a PrintString on an OnTick chain fires every frame.
+        // The case that decides whether this feature is usable at all: a PrintString on an OnTick
+        // chain fires EVERY FRAME once Play starts (tickGraphClassInstances is gated on
+        // aver_fw_play_state() == AVER_FW_PLAY_PLAYING), and every frame in a packaged game -- which
+        // is exactly when someone is watching this feed.
+        //
+        // (This said "the editor ticks graph instances ungated on play state". That was wrong, and it
+        // is the SECOND copy of the same wrong sentence: the first, beside logSink, was corrected in
+        // 1f9507e and this one was missed because the correction fixed the site it was reading rather
+        // than grepping for the claim.)
         clear();
         for (int i = 0; i < 200; ++i) AVER_INFO("[Graph] hello: reached_the_tick");
         usize rows = 0; u32 count = 0; std::string text;
@@ -19200,13 +19207,20 @@ private:
                         // unlike a mesh, an effect is resolved when it is ASSIGNED (so a freshly
                         // authored one works the moment it lands), so listing only already-loaded
                         // effects would hide exactly the file the author just made.
-                        // contentIndex_ is already id -> project-relative path, and its key is
-                        // fnv1a64(rel) -- the SAME id space pe->effect holds. So the listed id is the
-                        // effect id, and no separate hashing is needed here.
+                        // contentIndex_ MAPS id -> ABSOLUTE path, not relative, and an earlier draft of
+                        // this comment said relative. Its KEY is fnv1a64 of the project-relative
+                        // spelling -- the same id space pe->effect holds, so the listed id is the
+                        // effect id and needs no hashing here -- but its VALUE is
+                        // `it->path().string()` straight off the directory iterator
+                        // (rebuildContentIndex). The two halves genuinely disagree, which is why the
+                        // label has to be derived rather than used as-is.
+                        //
+                        // LABELLED RELATIVE, so this popup reads like the Mesh and Material ones a few
+                        // rows above instead of showing the developer's whole local directory tree.
                         std::vector<AssetChoice> cands;
                         for (const auto& kv : contentIndex_) {
                             if (lowerExt(std::filesystem::path(kv.second)) != ".ocparticle") continue;
-                            cands.push_back({kv.second, kv.first});
+                            cands.push_back({cbRelativeToContent(kv.second), kv.first});
                         }
                         std::sort(cands.begin(), cands.end(),
                                   [](const AssetChoice& a, const AssetChoice& b) { return a.label < b.label; });
@@ -19216,10 +19230,15 @@ private:
                             // the identical resolve/validate the drop does -- including the extension
                             // check and the project-relative normalisation. Writing pe->effect here
                             // would be the second implementation this extraction exists to avoid.
+                            // PASSED STRAIGHT THROUGH, because contentIndex_'s value is ALREADY
+                            // absolute. The previous line joined it onto contentDir() first, which
+                            // happened to produce the right answer only because std::filesystem's
+                            // operator/ DISCARDS the left side when the right is absolute -- correct
+                            // by accident, and silently wrong the day that map starts storing
+                            // relative paths, which its own key spelling suggests it should.
                             const auto pit = contentIndex_.find(picked);
                             if (pit != contentIndex_.end())
-                                assignParticleEffect(selEntity_,
-                                                     (std::filesystem::path(project_.contentDir()) / pit->second).string());
+                                assignParticleEffect(selEntity_, pit->second);
                         }
                     }
                     ImGui::TextDisabled("age %.2fs   seed 0x%08x", pe->age, pe->seed);
@@ -21380,7 +21399,7 @@ private:
     // non-empty between beginTransformEdit and endTransformEdit; see EditCmd::alsoMoved.
     std::vector<std::pair<EditId, Transform>> multiMoveBefore_;
 
-    // Copy/Duplicate's source, and what Paste rebuilds from. hasScene/hasObject are set exclusively
+    // Copy/Duplicate's source, and what Paste rebuilds from. `entities` and `hasObject` are set exclusively
     // of each other by copySelection() -- mirrors the existing loose pairing of sel_/selEntity_
     // rather than a variant type for two cases already mutually exclusive by construction.
     // ONE COPIED ENTITY. Split out of EditorClipboard so the clipboard can hold a LIST: Ctrl+C read

@@ -850,8 +850,10 @@ void GameApp::openProject(Engine& e) {
     // OPTIONAL, and silently so: most levels have no baked navigation, loadOcNav's own failure path
     // leaves gameNav_ default-constructed (empty, OcNavData::valid() == false), and
     // AgentSystem::tick already treats that identically to "no grid yet" -- an agent with a goal
-    // simply waits rather than failing. Only worth a WARN, never an ERROR: this is not the game
-    // failing to start.
+    // simply waits rather than failing. Logged at INFO, not WARN: a project with no navigation at all
+    // -- which every graph-driven game without agents is -- would otherwise open with a warning about
+    // a feature it never asked for. (An earlier version of this comment said "only worth a WARN",
+    // which no branch below has ever done.)
     {
         std::string navErr;
         const std::string navPath = navPathForLevel(level_.path());
@@ -972,15 +974,6 @@ void GameApp::initScripting() {
 #endif
 }
 
-    // THE ANIMATION-NOTIFY WIRE. A clip crossed a marker; that marker names a graph event; the
-    // entity playing the clip is the one to raise it on. Every part of that sentence belongs to a
-    // different module, and this function is the only place they meet -- which is exactly why the
-    // anim module takes a function pointer instead of knowing what a graph is.
-    //
-    // A MISSING HANDLER IS NOT AN ERROR HERE. graphFire returns false for an entity with no graph,
-    // a graph with no such event, and a bridge too old to be fired at, and none of those is worth a
-    // line per frame from an animation tick -- the managed router already logs each once per
-    // (entity, event) pair with a message that says which it was.
 // The animation system's answer to the framework's relayed curve query. See framework_abi.h for
 // why this is a function pointer rather than a link edge.
 i32 GameApp::animCurve(i32 entity, i64 nameHash, f32* outValue, void*) {
@@ -1021,6 +1014,19 @@ i32 GameApp::synapsePerception(i32 entity, i32* outCanSee, i32* outLastTarget, f
 }
 #endif
 
+// THE ANIMATION-NOTIFY WIRE. A clip crossed a marker; that marker names a graph event; the entity
+// playing the clip is the one to raise it on. Every part of that sentence belongs to a different
+// module, and this function is the only place they meet -- which is exactly why the anim module takes
+// a function pointer instead of knowing what a graph is. Perception and the BT "FireEvent" action
+// reach a graph through this same sink; their NotifyFn signatures are byte-for-byte identical.
+//
+// A MISSING HANDLER IS NOT AN ERROR HERE. graphFire returns false for an entity with no graph, a
+// graph with no such event, and a bridge too old to be fired at, and none of those is worth a line
+// per frame from an animation tick -- the managed router already logs each once per (entity, event)
+// pair with a message saying which it was.
+//
+// (This comment had drifted ~50 lines up the file, where it sat after a closing brace and above
+// animCurve, which has a doc comment of its own. Re-homed.)
 void GameApp::animNotify(scene::Entity e, const char* name, void* user) {
 #if AVER_MODULE_SCRIPTING
     auto* self = static_cast<GameApp*>(user);

@@ -692,9 +692,8 @@ private:
     std::string rightClickNode_;
     int         rightClickLink_ = -1;
 
-    // Armed by beginLinkDrop, cleared by cancelLinkDrop / spawnAndConnectLinkDrop. The from-pin is
-    // kept here rather than read back from linkDragFromNode_ at use time because the drag state is
-    // reset the instant the button comes up, and the palette is submitted later in the same frame.
+    // The two hooks the editor is given from outside: what can check a graph, and what can say which
+    // of its nodes just ran. Both may be unset -- a build with no .NET runtime installs neither.
     ValidateFn  validate_;
     NodeHitsFn  nodeHits_;
     // nodeId -> seconds since it last ran, refreshed once a frame. Cleared when the source is absent
@@ -704,6 +703,12 @@ private:
     std::string validateErr_;
     std::string validateNode_;
 
+    // Armed by beginLinkDrop, cleared by cancelLinkDrop / spawnAndConnectLinkDrop. The from-pin is
+    // kept here rather than read back from linkDragFromNode_ at use time because the drag state is
+    // reset the instant the button comes up, and the palette is submitted later in the same frame.
+    //
+    // (This comment used to sit five members higher, above validate_/nodeHits_, which it has nothing
+    // to do with -- inserting those two between the comment and its subject orphaned it.)
     bool        linkDropPending_ = false;
     std::string linkDropFromNode_;
     std::string linkDropFromPin_;

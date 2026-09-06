@@ -30,8 +30,6 @@ static_assert(AVER_SCENE_KIND_MAT4   == static_cast<u32>(FieldKind::Mat4),   "Oc
 
 bool fail(std::string* why, std::string m) { if (why) *why = std::move(m); return false; }
 
-// Components a snapshot deliberately never writes, each for a stated reason. A SMALL NAMED LIST
-// rather than an opt-in flag on the component, because the default must be "a component nobody
 // GRAPH-LOCAL VARIABLES, as a SYNTHETIC component riding the same OcSaveComponent/OcSaveField
 // shape every real component already uses -- not a new chunk, not a new list on OcSaveEntity, so
 // every reader this format already has (including one built before this existed) round-trips a
