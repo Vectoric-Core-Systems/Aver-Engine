@@ -20419,7 +20419,6 @@ private:
         // --scroll-prefs-to-keybinds: a one-shot verification aid: Preferences has grown to six
         // DefaultOpen sections, more than fit one screen, and there is no human here to scroll. Fires
         // once (consumes its own flag) so it never fights a person who scrolls the window themselves.
-        if (scrollPrefsToKeybinds_) { ImGui::SetScrollHereY(0.0f); scrollPrefsToKeybinds_ = false; }
         if (ImGui::CollapsingHeader("Derived Data Cache", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::TextDisabled("Baked global illumination, cached beside the project under");
             ImGui::TextDisabled("DerivedDataCache\\GI. Derived data: deleting it costs one rebuild.");
@@ -20452,9 +20451,18 @@ private:
 #endif
         }
 
-        if (ImGui::CollapsingHeader("Keybinds", ImGuiTreeNodeFlags_DefaultOpen)) {
-            keybinds_.drawPreferencesSection(dpi_);
-        }
+        // The scroll lands HERE, on the section it names. It used to fire immediately above the
+        // Derived Data Cache header, so --scroll-prefs-to-keybinds put the DDC section at the top of
+        // the window and left Keybinds below the fold -- which is exactly what the flag exists to
+        // avoid, and it went unnoticed because a screenshot of the wrong section still looks like a
+        // screenshot of a section.
+        if (scrollPrefsToKeybinds_) { ImGui::SetScrollHereY(0.0f); scrollPrefsToKeybinds_ = false; }
+        // CALLED WHETHER OR NOT IT IS OPEN, passing which. Collapsing the header mid-capture used to
+        // strand `listening_`: the section stopped being drawn, so the capture loop that clears it
+        // never ran again, and the row still said "Press a chord..." when the header was reopened.
+        // The state belongs to the registry, so the registry is what clears it.
+        const bool keybindsOpen = ImGui::CollapsingHeader("Keybinds", ImGuiTreeNodeFlags_DefaultOpen);
+        keybinds_.drawPreferencesSection(dpi_, keybindsOpen, &uiReg_);
         ImGui::Separator();
         ImGui::TextDisabled("Preferences apply immediately and are saved for next time.");
         ImGui::TextDisabled("%s", editor::editorPrefsPath().c_str());

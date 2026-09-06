@@ -100,6 +100,13 @@ int main() {
         check(editor::chordToString(Chord{}) == "none", "an unbound chord renders as the token 'none'");
         check(!editor::parseChord("none").isBound(), "and 'none' parses back as unbound");
         check(!editor::parseChord("").isBound(), "an empty string is unbound");
+        // ACCEPTED IN, NEVER WRITTEN OUT. The header claimed for a long time that chordToString
+        // rendered "(unbound)"; it never did. Reading it is charity toward anyone who hand-edited
+        // editor.ini after believing the comment. Emitting it would change a file-format token and
+        // silently unbind every command a user had cleared, so the codec stays asymmetric on purpose.
+        check(!editor::parseChord("(unbound)").isBound(), "'(unbound)' is accepted on the way IN");
+        check(editor::chordToString(Chord{}) != "(unbound)",
+              "but is never what gets written -- the on-disk token stays 'none'");
         // Garbage must be FULLY unbound, not a chord that kept its modifiers -- a half-parsed
         // Ctrl+<nothing> would silently fire on Ctrl alone.
         const Chord junk = editor::parseChord("Ctrl+Nonsense");

@@ -6,7 +6,9 @@
 #include "EditorKeybinds.hpp"
 #if AVER_WITH_IMGUI
 #include "EditorPrefs.hpp"
+#include "UiRegistry.hpp"
 
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -69,6 +71,12 @@ const char* keyName(ImGuiKey k) {
     for (const KeyName& kn : kKeyNames) if (kn.key == k) return kn.name;
     return nullptr;
 }
+// "prefs.keybind.<strId>.<action>", so automation can address ONE row rather than hunting for a
+// rect. Returned by value; UiRegistry copies the name into a std::string, so a temporary is safe.
+std::string trackName(const char* strId, const char* action) {
+    return std::string("prefs.keybind.") + strId + action;
+}
+
 ImGuiKey nameToKey(std::string_view s) {
     for (const KeyName& kn : kKeyNames) if (s == kn.name) return kn.key;
     return ImGuiKey_None;
@@ -151,7 +159,10 @@ std::string chordToString(const Chord& c) {
 }
 
 Chord parseChord(const std::string& text) {
-    if (text.empty() || text == "none") return Chord{};
+    // "(unbound)" is accepted but never WRITTEN: the header comment claimed for a long time that
+    // this was the rendering, so a file hand-edited by someone following it must still load rather
+    // than silently reverting that command to its default.
+    if (text.empty() || text == "none" || text == "(unbound)") return Chord{};
     std::vector<std::string_view> tokens;
     std::string_view sv(text);
     usize pos = 0;
@@ -219,9 +230,16 @@ void KeybindRegistry::saveToPrefs() const {
         setPrefString(std::string("keybind.") + kDefs[i].strId, chordToString(current_[i]));
 }
 
-bool KeybindRegistry::drawPreferencesSection(f32 dpi) {
+bool KeybindRegistry::drawPreferencesSection(f32 dpi, bool visible, UiRegistry* reg) {
+    // CANCEL A CAPTURE THAT CAN NO LONGER BE COMPLETED. When the caller's header is collapsed
+    // this function stops being called at all, so the capture loop at the bottom -- the only thing
+    // that ever clears listening_ -- never runs again. The row was then stuck reading
+    // "Press a chord..." on reopen, with no way out but restarting the editor.
+    if (!visible) { listening_ = -1; conflictLabel_.clear(); return false; }
+
     bool changed = false;
-    ImGui::TextDisabled("Click Rebind, then press the new chord. Esc cancels the capture.");
+    ImGui::TextDisabled("Click Rebind, then press the new chord. Esc cancels the capture; "
+                        "Clear unbinds it.");
 
     // Reset All. Per-row Reset has always been here; putting every binding back was fifteen
     // clicks. Disabled when nothing differs from the defaults, so it never claims to undo
@@ -234,6 +252,7 @@ bool KeybindRegistry::drawPreferencesSection(f32 dpi) {
         for (usize i = 0; i < kCommandCount; ++i) resetToDefault(kDefs[i].id);
         changed = true;
     }
+    if (reg) reg->track("prefs.keybind.resetAll");
     ImGui::EndDisabled();
     if (!anyChanged && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
         ImGui::SetTooltip("Every binding is already at its default.");
@@ -243,7 +262,11 @@ bool KeybindRegistry::drawPreferencesSection(f32 dpi) {
         ImGui::TableSetupColumn("Command", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableSetupColumn("Chord", ImGuiTableColumnFlags_WidthFixed, 150.0f * dpi);
         ImGui::TableSetupColumn("##rebind", ImGuiTableColumnFlags_WidthFixed, 84.0f * dpi);
-        ImGui::TableSetupColumn("##reset", ImGuiTableColumnFlags_WidthFixed, 84.0f * dpi);
+        // WIDE ENOUGH FOR TWO BUTTONS, because this column holds Clear AND Reset side by side. It
+        // was still sized for the one it held before Clear was added, so Reset rendered clipped to
+        // "Res" -- visible in any screenshot of this page, and easy to miss precisely because a
+        // clipped button still looks like a button.
+        ImGui::TableSetupColumn("##reset", ImGuiTableColumnFlags_WidthFixed, 176.0f * dpi);
         ImGui::TableHeadersRow();
         for (usize i = 0; i < kCommandCount; ++i) {
             const KeybindDef& def = kDefs[i];
@@ -259,8 +282,10 @@ bool KeybindRegistry::drawPreferencesSection(f32 dpi) {
             ImGui::TableSetColumnIndex(2);
             if (listening_ == static_cast<int>(i)) {
                 if (ImGui::SmallButton("Cancel")) listening_ = -1;
+                if (reg) reg->track(trackName(def.strId, ".cancel").c_str());
             } else {
                 if (ImGui::SmallButton("Rebind")) { listening_ = static_cast<int>(i); conflictLabel_.clear(); }
+                if (reg) reg->track(trackName(def.strId, ".rebind").c_str());
             }
             ImGui::TableSetColumnIndex(3);
             // CLEAR, which rebind() has always supported and nothing could reach. The header says
@@ -270,12 +295,14 @@ bool KeybindRegistry::drawPreferencesSection(f32 dpi) {
             // instruction the UI gives for resolving a conflict named a control that did not exist.
             ImGui::BeginDisabled(!current_[i].isBound());
             if (ImGui::SmallButton("Clear")) { rebind(def.id, Chord{}); changed = true; }
+            if (reg) reg->track(trackName(def.strId, ".clear").c_str());
             ImGui::EndDisabled();
             if (!current_[i].isBound() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                 ImGui::SetTooltip("Already unbound.");
             ImGui::SameLine();
             ImGui::BeginDisabled(current_[i] == def.def);
             if (ImGui::SmallButton("Reset")) { resetToDefault(def.id); changed = true; }
+            if (reg) reg->track(trackName(def.strId, ".reset").c_str());
             ImGui::EndDisabled();
             ImGui::PopID();
         }
