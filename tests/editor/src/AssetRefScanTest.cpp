@@ -113,6 +113,78 @@ int main() {
     check(!isAnchoredAssetRef("abc", 9, 1), "an offset past the end is not a match");
     check(!isAnchoredAssetRef("abc", 0, 0), "a zero-length match is not a match");
 
+    // ---- the rewriter -------------------------------------------------------------------------
+    //
+    // This is the half that can destroy someone's project, so it is a pure string function and the
+    // cases below are the ways it could do that.
+    {
+        const std::string oldRel = "Meshes/Cube.ocmesh";
+        const std::string newRel = "Meshes/Box.ocmesh";
+
+        // The ordinary case, and the near-miss beside it that must survive untouched.
+        {
+            const std::string in = "MESH Meshes/Cube.ocmesh\nMESH PropMeshes/Cube.ocmesh\n";
+            const auto r = rewriteAssetRefs(in, oldRel, newRel);
+            check(r.count == 1, "one reference rewritten");
+            check(r.text == "MESH Meshes/Box.ocmesh\nMESH PropMeshes/Cube.ocmesh\n",
+                  "AND THE UNRELATED ASSET IS UNTOUCHED -- the whole reason for anchoring");
+        }
+
+        // SEVERAL OCCURRENCES, which is where a front-to-back splice corrupts the tail: each
+        // replacement shifts every later offset. A different-length new name makes that visible.
+        {
+            const std::string in = "a Meshes/Cube.ocmesh b Meshes/Cube.ocmesh c Meshes/Cube.ocmesh d";
+            const auto r = rewriteAssetRefs(in, oldRel, "Meshes/AMuchLongerName.ocmesh");
+            check(r.count == 3, "three references rewritten");
+            check(r.text == "a Meshes/AMuchLongerName.ocmesh b Meshes/AMuchLongerName.ocmesh "
+                            "c Meshes/AMuchLongerName.ocmesh d",
+                  "all three land correctly even though the new name is longer");
+        }
+        {
+            // And shorter, the other direction of the same bug.
+            const std::string in = "a Meshes/Cube.ocmesh b Meshes/Cube.ocmesh";
+            const auto r = rewriteAssetRefs(in, oldRel, "M/C.ocmesh");
+            check(r.text == "a M/C.ocmesh b M/C.ocmesh", "and a shorter new name too");
+        }
+
+        // SEPARATOR STYLE IS PRESERVED PER OCCURRENCE. A hand-written .ocgraph uses backslashes; a
+        // tool-written .ocworld uses forward slashes; one file can hold both, and rewriting either
+        // into the other style is an edit nobody asked for in a file somebody maintains by hand.
+        {
+            const std::string in = "one Meshes\\Cube.ocmesh two Meshes/Cube.ocmesh";
+            const auto r = rewriteAssetRefs(in, oldRel, newRel);
+            check(r.count == 2, "both separator styles are found");
+            check(r.text == "one Meshes\\Box.ocmesh two Meshes/Box.ocmesh",
+                  "and EACH keeps the style it was written with");
+        }
+
+        // Case in the FILE differs from case in the browser; the replacement is the new name as
+        // given, because that is the name the asset now actually has on disk.
+        {
+            const std::string in = "MESH MESHES/CUBE.OCMESH";
+            const auto r = rewriteAssetRefs(in, oldRel, newRel);
+            check(r.count == 1, "a differently-cased reference is found");
+            check(r.text == "MESH Meshes/Box.ocmesh", "and replaced with the real new name");
+        }
+
+        // Nothing to do must change nothing at all -- a caller writes the result back to disk, so a
+        // spurious edit here is a modified file and a dirtied timestamp for no reason.
+        {
+            const std::string in = "MESH Props/Other.ocmesh\n# a comment\n";
+            const auto r = rewriteAssetRefs(in, oldRel, newRel);
+            check(r.count == 0 && r.text == in, "a file with no references is returned byte-identical");
+        }
+        {
+            const auto r = rewriteAssetRefs("MESH Meshes/Cube.ocmesh", oldRel, "");
+            check(r.count == 0 && r.text == "MESH Meshes/Cube.ocmesh",
+                  "an empty new name rewrites nothing rather than deleting the reference");
+        }
+        {
+            const auto r = rewriteAssetRefs("MESH Meshes/Cube.ocmesh", "", newRel);
+            check(r.count == 0, "an empty old name rewrites nothing");
+        }
+    }
+
     AVER_INFO(g_failures ? "AssetRefScanTest: {} FAILURES" : "AssetRefScanTest: all checks passed ({})",
               g_failures);
     return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);

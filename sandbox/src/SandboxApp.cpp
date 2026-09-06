@@ -3406,6 +3406,7 @@ public:
         if (clearShaderCacheFrames_ > 0 && --clearShaderCacheFrames_ == 0) runClearShaderCache();
         if (assetAssignTestFrames_ > 0 && --assetAssignTestFrames_ == 0) runAssetAssignTest();
         if (graphHitsTestFrames_ > 0 && --graphHitsTestFrames_ == 0) runGraphHitsTest();
+        if (renameRepointFrames_ > 0 && --renameRepointFrames_ == 0) runRenameRepointTest();
         if (prefsWriteTestFrames_ > 0 && --prefsWriteTestFrames_ == 0) runPrefsWriteTest();
         if (keybindTestAutoFrames_ > 0 && --keybindTestAutoFrames_ == 0) runKeybindPersistTest(keybindTestMode_);
 #endif
@@ -6598,6 +6599,7 @@ public:
     // confirm's scan, reachable without a modal -- so the thing that stops someone destroying a
     // shared asset can be tested rather than eyeballed once.
     void setFindRefs(const std::string& p) { findRefsPath_ = p; findRefsFrames_ = 8; }
+    void setRenameRepointTest(int frames) { renameRepointFrames_ = frames > 0 ? frames : 8; }
     void setProjectSwitchTest(int frames) { projectSwitchFrames_ = frames > 0 ? frames : 8; }
     void setValidateGraph(const std::string& p) { validateGraphPath_ = p; validateGraphFrames_ = 8; }
     void setGraphPrintTest(int frames) { graphPrintTestFrames_ = frames > 0 ? frames : 8; }
@@ -10078,7 +10080,11 @@ private:
     // Filled when the delete-confirm modal opens; see cbFindReferencesTo for what it can and
     // cannot see. Cleared on delete or cancel so a later modal never shows a previous answer.
     std::vector<std::string> cbDeleteRefs_;
-    std::vector<std::string> cbRenameRefs_;   // the same, for the rename dialog
+    std::vector<std::string> cbRenameRefs_;
+    // Whether the rename dialog will repoint what it found. ON by default: repointing is what an
+    // author wants nearly every time, and the checkbox exists so a tool that edits other people's
+    // files can be told not to.
+    bool cbRenameRepoint_ = true;   // the same, for the rename dialog
 
     // Selects every row the World Outliner currently lists. The anchor becomes the FIRST row rather
     // than the last, so a following shift-click ranges downward from the top the way a person expects
@@ -13079,6 +13085,74 @@ private:
             AVER_INFO("[validate-graph] '{}' is VALID", validateGraphPath_);
         else
             AVER_INFO("[validate-graph] '{}' is INVALID: {}", validateGraphPath_, err);
+    }
+
+    // --rename-repoint-test: the rename-repoint chain over REAL files in the real project.
+    //
+    // AssetRefScanTest covers the string surgery exhaustively and cannot cover any of this: which
+    // files get opened, that the scan and the rewrite agree on the same set, that the write actually
+    // lands on disk, and that a near-miss file sitting beside a real referrer is left byte-identical.
+    // Those are the parts that edit somebody's project.
+    //
+    // Writes into a scratch folder UNDER the open project's content root, because that is the only
+    // place cbFindReferencesTo will look, and removes it afterwards.
+    int renameRepointFrames_ = 0;
+    void runRenameRepointTest() {
+        int failures = 0;
+        auto check = [&](bool cond, const char* what) {
+            if (cond) AVER_INFO("[rename-repoint-test] PASS: {}", what);
+            else      { AVER_ERROR("[rename-repoint-test] FAIL: {}", what); ++failures; }
+        };
+        if (!project_.valid()) {
+            AVER_ERROR("[rename-repoint-test] FAIL: needs an open project (pass --project)");
+            AVER_INFO("[rename-repoint-test] RESULT: FAIL");
+            return;
+        }
+
+        std::error_code ec;
+        const std::filesystem::path root = std::filesystem::path(project_.contentDir()) / "RepointTmp";
+        std::filesystem::remove_all(root, ec);
+        std::filesystem::create_directories(root, ec);
+
+        const std::filesystem::path asset   = root / "Cube.ocmesh";
+        const std::filesystem::path referrer= root / "Uses.ocworld";
+        const std::filesystem::path nearMiss= root / "NearMiss.ocworld";
+        const std::filesystem::path unrelated = root / "Other.ocmesh";
+
+        writeFileTextAtomic(asset.string(), "not a real mesh, only its name matters here");
+        writeFileTextAtomic(unrelated.string(), "also not a real mesh");
+        // A real reference, twice, in both separator styles.
+        writeFileTextAtomic(referrer.string(),
+                            "MESH RepointTmp/Cube.ocmesh\nMESH RepointTmp\\Cube.ocmesh\n");
+        // THE NEAR MISS: a longer folder ending in the same segment. Anchoring must leave this alone,
+        // and it is the file whose survival proves the whole exercise is safe.
+        const std::string nearMissText = "MESH XRepointTmp/Cube.ocmesh\nMESH RepointTmp/Cube.ocmesh2\n";
+        writeFileTextAtomic(nearMiss.string(), nearMissText);
+
+        const std::vector<std::string> found = cbFindReferencesTo(asset.string());
+        check(found.size() == 1, "the scan finds exactly the one real referrer, not the near-miss file");
+
+        cbRenameEntry(asset.string(), "Box.ocmesh", /*repointRefs=*/true);
+        check(std::filesystem::exists(root / "Box.ocmesh", ec), "the asset is renamed on disk");
+
+        std::string after;
+        check(readFileText(referrer.string(), after), "the referrer is readable after the rewrite");
+        check(after.find("RepointTmp/Box.ocmesh") != std::string::npos,
+              "the forward-slash reference was repointed");
+        check(after.find("RepointTmp\\Box.ocmesh") != std::string::npos,
+              "AND the backslash one, keeping its own separator style");
+        check(after.find("Cube.ocmesh") == std::string::npos, "with no stale reference left behind");
+
+        std::string nm;
+        check(readFileText(nearMiss.string(), nm), "the near-miss file is readable");
+        check(nm == nearMissText,
+              "AND IS BYTE-IDENTICAL -- a longer folder and a longer filename were both left alone");
+
+        std::string un;
+        check(readFileText(unrelated.string(), un), "the unrelated asset still exists untouched");
+
+        std::filesystem::remove_all(root, ec);
+        AVER_INFO("[rename-repoint-test] RESULT: {}", failures == 0 ? "PASS" : "FAIL");
     }
 
     std::string findRefsPath_;
@@ -16243,6 +16317,57 @@ private:
         return out;
     }
 
+    // ---- REPOINTING WHAT REFERENCED AN ASSET, after it has been renamed -----------------------
+    //
+    // Rewrites `oldRel` to `newRel` in every text asset that anchored-matches it, in place. Returns
+    // {files changed, references rewritten, files it could not write}.
+    //
+    // WHAT THIS DELIBERATELY CANNOT DO, because a feature that claims to have fixed everything is
+    // worse than one that says what it missed:
+    //
+    //  - A reference stored as a HASH with no path text. A .ocmat TEX record may be written
+    //    `{guid:0x...}`, and a save game bakes fnv1a64 ids into component fields with no path
+    //    anywhere in the file. Nothing textual can find those, so nothing textual can fix them.
+    //  - Anything outside the five text formats the scan reads. A .ocmesh's interned material slots,
+    //    a .ocbt's string table and a C# file that builds a path in code are all real references and
+    //    all invisible here.
+    //  - A material named by FILENAME STEM rather than by path (materialForSurface probes three
+    //    directories), which is a different identity model again.
+    //
+    // NOT TRANSACTIONAL, and it cannot cheaply be: this is N separate file writes. Every write goes
+    // through writeFileTextAtomic so no INDIVIDUAL file is ever left torn, but a failure partway
+    // leaves some files updated and some not. The count of failures is returned rather than
+    // swallowed so the caller can say so out loud.
+    struct RefRewriteReport { usize filesChanged = 0; usize refsRewritten = 0; usize filesFailed = 0; };
+
+    RefRewriteReport cbRewriteReferences(const std::string& oldAbs, const std::string& newAbs) {
+        RefRewriteReport rep;
+        if (!project_.valid()) return rep;
+        const std::string oldRel = cbRelativeToContent(oldAbs);
+        const std::string newRel = cbRelativeToContent(newAbs);
+        if (oldRel.empty() || newRel.empty() || oldRel == oldAbs || newRel == newAbs) return rep;
+        if (oldRel == newRel) return rep;
+
+        // The SAME set of files the warning listed, so what was promised is what is edited. Resolved
+        // against the NEW path because the rename has already happened by the time this runs -- the
+        // referrers still name the old one, which is the whole point.
+        // Scanned for the OLD path, deliberately: the rename has already happened on disk, and the
+        // referrers are exactly the files that still name where it used to be.
+        for (const std::string& refRel : cbFindReferencesTo(oldAbs)) {
+            const std::string abs = project_.contentDir() + "\\" + refRel;
+            std::string text;
+            if (!readFileText(abs, text)) { ++rep.filesFailed; continue; }
+            const editor::RefRewrite r = editor::rewriteAssetRefs(text, oldRel, newRel);
+            if (r.count == 0) continue;                    // matched the scan, changed nothing: leave it alone
+            if (!writeFileTextAtomic(abs, r.text)) { ++rep.filesFailed; continue; }
+            ++rep.filesChanged;
+            rep.refsRewritten += r.count;
+            AVER_INFO("[Editor] repointed {} reference(s) in '{}' from '{}' to '{}'",
+                      r.count, refRel, oldRel, newRel);
+        }
+        return rep;
+    }
+
     std::string cbRelativeToContent(const std::string& abs) const {
         if (!project_.valid()) return abs;
         std::error_code ec;
@@ -16270,7 +16395,7 @@ private:
         cbMoveDest_.clear();
     }
 
-    void cbRenameEntry(const std::string& from, const std::string& newName) {
+    void cbRenameEntry(const std::string& from, const std::string& newName, bool repointRefs = false) {
         if (newName.empty()) return;
         std::error_code ec;
         const std::filesystem::path src(from);
@@ -16278,6 +16403,11 @@ private:
         if (std::filesystem::exists(dst, ec)) { cbStatus_ = "'" + newName + "' already exists"; return; }
         std::filesystem::rename(src, dst, ec);
         if (ec) { cbStatus_ = "Rename failed: " + ec.message(); return; }
+
+        // AFTER the filesystem rename, never before: if the rename fails there is nothing to repoint,
+        // and repointing first would leave every referrer naming a file that does not exist yet.
+        RefRewriteReport rep;
+        if (repointRefs) rep = cbRewriteReferences(from, dst.string());
         cbInvalidate(src.parent_path().string());
         if (cbSelectedDir_ == from)  { cbSelectedDir_ = dst.string(); }
         if (cbSelectedFile_ == from) { cbSelectedFile_ = dst.string(); }
@@ -16299,7 +16429,25 @@ private:
             if (ext == ".ocmesh" || ext == ".ocparticle" || std::filesystem::is_directory(dst, dec))
                 wantMeshReload_ = true;
         }
-        cbStatus_ = "Renamed to " + newName;
+
+        // SAYS WHAT IT DID AND WHAT IT COULD NOT, which is the difference between this being useful
+        // and being a claim. A partial failure is reported rather than folded into the success line:
+        // this is N separate writes and is not transactional, so "3 of 4" is a state the author has
+        // to be able to see.
+        if (!repointRefs) {
+            cbStatus_ = "Renamed to " + newName;
+        } else if (rep.filesFailed) {
+            cbStatus_ = "Renamed to " + newName + " -- repointed " + std::to_string(rep.refsRewritten) +
+                        " reference(s) in " + std::to_string(rep.filesChanged) + " file(s), but " +
+                        std::to_string(rep.filesFailed) + " file(s) could NOT be updated";
+            AVER_ERROR("[Editor] {} file(s) referencing '{}' could not be rewritten -- they still name "
+                       "the old path", rep.filesFailed, from);
+        } else if (rep.filesChanged) {
+            cbStatus_ = "Renamed to " + newName + " -- repointed " + std::to_string(rep.refsRewritten) +
+                        " reference(s) in " + std::to_string(rep.filesChanged) + " file(s)";
+        } else {
+            cbStatus_ = "Renamed to " + newName;
+        }
     }
 
     // Rewrites history entries under `from` to `to`, dropping them when `to` is empty.
@@ -16736,17 +16884,31 @@ private:
                     for (usize i = 0; i < shown; ++i) ImGui::BulletText("%s", cbRenameRefs_[i].c_str());
                     if (cbRenameRefs_.size() > shown)
                         ImGui::TextDisabled("   ...and %zu more", cbRenameRefs_.size() - shown);
-                    ImGui::TextDisabled("Renaming will not update them -- they will stop resolving.");
+                    // THE OPT-IN, replacing "renaming will not update them". Default ON because
+                    // repointing is what an author wants nearly every time; a checkbox rather than
+                    // unconditional because this EDITS OTHER PEOPLE'S FILES, and a tool that does
+                    // that with no way to decline is one people stop trusting.
+                    ImGui::Checkbox("Update them to the new name", &cbRenameRepoint_);
+                    if (cbRenameRepoint_) {
+                        // WHAT IT STILL CANNOT FIX, said here rather than discovered later. These are
+                        // real reference kinds no text rewrite can reach, and staying quiet about
+                        // them would turn an honest tool into a false promise.
+                        ImGui::TextDisabled("Rewrites path references in .ocworld/.ocmap/.ocmat/.ocgraph/.ocproject.");
+                        ImGui::TextDisabled("Cannot fix: ids stored as a hash with no path (.ocmat {guid:...},");
+                        ImGui::TextDisabled("save games), C# that builds a path in code, or binary asset tables.");
+                    } else {
+                        ImGui::TextDisabled("They will stop resolving.");
+                    }
                     ImGui::Separator();
                 }
             }
 
             ImGui::BeginDisabled(!valid);
             if (ImGui::Button("Rename") || (submit && valid)) {
-                if (!cbRenameRefs_.empty())
+                if (!cbRenameRefs_.empty() && !cbRenameRepoint_)
                     AVER_WARN("[Editor] renamed '{}' while {} file(s) still reference its old path",
                               cbContextPath_, cbRenameRefs_.size());
-                cbRenameEntry(cbContextPath_, cbRenameBuf_);
+                cbRenameEntry(cbContextPath_, cbRenameBuf_, cbRenameRepoint_ && !cbRenameRefs_.empty());
                 cbRenameRefs_.clear();
                 ImGui::CloseCurrentPopup();
             }
@@ -24317,6 +24479,7 @@ Application* createApplication(int argc, char** argv) {
     int graphPrintArg = 0;
     int assetAssignArg = 0;
     const char* graphHitsArg = nullptr;
+    int renameRepointArg = 0;
     int recaptureArg = 0;
     int viewmodelArg = 0;
     // --gpu-timing takes no value, so it's matched in the i+1<argc loop below only incidentally --
@@ -24341,6 +24504,7 @@ Application* createApplication(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--graph-print-test"))   graphPrintArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--asset-assign-test")) assetAssignArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--graph-hits-test"))   graphHitsArg = argv[i + 1];
+        if (!std::strcmp(argv[i], "--rename-repoint-test")) renameRepointArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--recapture-test"))       recaptureArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--viewmodel-test"))       viewmodelArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--refraction"))           refraction = std::atoi(argv[i + 1]);
@@ -25300,6 +25464,7 @@ Application* createApplication(int argc, char** argv) {
     if (graphPrintArg) app->setGraphPrintTest(graphPrintArg);
     if (assetAssignArg) app->setAssetAssignTest(assetAssignArg);
     if (graphHitsArg) app->setGraphHitsTest(graphHitsArg);
+    if (renameRepointArg) app->setRenameRepointTest(renameRepointArg);
     if (clearShaderCacheArg) app->setClearShaderCache(clearShaderCacheDirArg);
     if (recaptureArg > 0) app->setRecaptureTest(recaptureArg);
     if (viewmodelArg > 0) app->setViewmodelTest(viewmodelArg);

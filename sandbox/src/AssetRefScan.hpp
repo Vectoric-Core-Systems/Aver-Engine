@@ -92,4 +92,59 @@ inline std::string normaliseForRefScan(std::string s) {
     return s;
 }
 
+struct RefRewrite {
+    std::string text;      // the rewritten document
+    std::size_t count = 0; // how many references were replaced
+};
+
+// Replaces every ANCHORED occurrence of `oldRel` with `newRel` in `text`, and reports how many.
+//
+// A PURE STRING FUNCTION on purpose. This is the part of "rename fixes your references" that can
+// destroy someone's project, so it is separated from all file I/O and tested on its own. The caller
+// does nothing but read a file, call this, and write it back.
+//
+// AN IN-PLACE SPLICE, NOT A LOAD-AND-RE-SAVE, and that is forced rather than preferred. Round-tripping
+// through a format's own parser and writer looks tidier and destroys data here: OcWorld.cpp has no
+// unknown-record passthrough (OcGraph and OcProject both do), so re-saving a level silently drops
+// every record its if/else chain does not model; and writeOcmat drops the GRAPH{} block outright,
+// which would delete a hand-authored shading graph. Splicing bytes touches nothing it was not asked
+// to touch, which is the only property that makes this safe to run over somebody's files.
+//
+// BACK TO FRONT, because replacing at an early offset shifts every later one. Trivial, and the kind
+// of trivial that silently corrupts the tail of a file when it is got wrong.
+//
+// THE ORIGINAL SEPARATOR STYLE IS PRESERVED PER OCCURRENCE. A .ocgraph written by hand may say
+// `Meshes\Cube.ocmesh` where the browser says `Meshes/Cube.ocmesh`; the matcher is separator-blind so
+// it finds both, and rewriting one into the other style would be an edit nobody asked for in a file
+// somebody hand-maintains. Decided from the bytes actually being replaced, not globally, because one
+// file can legitimately contain both.
+inline RefRewrite rewriteAssetRefs(const std::string& text, const std::string& oldRel,
+                                   const std::string& newRel) {
+    RefRewrite out;
+    out.text = text;
+    if (oldRel.empty() || newRel.empty()) return out;
+
+    const std::string normHay = normaliseForRefScan(text);
+    const std::string normOld = normaliseForRefScan(oldRel);
+    const std::vector<std::size_t> hits = findAnchoredAssetRefs(normHay, normOld);
+    if (hits.empty()) return out;
+
+    for (std::size_t i = hits.size(); i-- > 0;) {
+        const std::size_t at = hits[i];
+        // Which separator this particular occurrence was written with.
+        bool usedBackslash = false;
+        for (std::size_t k = at; k < at + normOld.size(); ++k)
+            if (text[k] == '\\') { usedBackslash = true; break; }
+
+        std::string replacement = newRel;
+        for (char& c : replacement) {
+            if (usedBackslash && c == '/') c = '\\';
+            else if (!usedBackslash && c == '\\') c = '/';
+        }
+        out.text.replace(at, normOld.size(), replacement);
+        ++out.count;
+    }
+    return out;
+}
+
 } // namespace aver::editor
