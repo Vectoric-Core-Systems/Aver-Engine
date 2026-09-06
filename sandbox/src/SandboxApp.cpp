@@ -115,6 +115,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "EditorEuler.hpp"
 #include "AssetRefScan.hpp"
 #include "EditorTransform.hpp"   // dropRestLift, so a dropped asset rests on what it landed on
+#include "EditorNotifications.hpp"
 #include "EditorPrefs.hpp"
 #include "EditorIcons.hpp"
 #include "EditorKeybinds.hpp"
@@ -1279,6 +1280,15 @@ public:
                 if (self->graphPrints_.size() > kMaxGraphPrints) self->graphPrints_.pop_front();
             }
         }
+
+        // ERRORS AND CRITICALS BECOME NOTIFICATIONS, from inside THIS sink rather than a second one:
+        // setLogSink holds a single global slot (Log.cpp), and this application already owns it.
+        //
+        // Everything this call is allowed to do is written on pushFromLog itself, because the cost
+        // of getting it wrong is a deadlock rather than a failing test -- we are three locks deep
+        // here (the core log mutex, then logMutex_ above, then the queue's own), and a single
+        // AVER_* call from inside it would hang the editor against a non-recursive mutex.
+        editor::notifications().pushFromLog(level, msg);
     }
 
     // Returns the boot configuration for the editor window.
@@ -3408,6 +3418,7 @@ public:
         if (graphHitsTestFrames_ > 0 && --graphHitsTestFrames_ == 0) runGraphHitsTest();
         if (renameRepointFrames_ > 0 && --renameRepointFrames_ == 0) runRenameRepointTest();
         if (prefsWriteTestFrames_ > 0 && --prefsWriteTestFrames_ == 0) runPrefsWriteTest();
+        if (notifyTestFrames_ > 0 && --notifyTestFrames_ == 0) runNotifyTest();
         if (keybindTestAutoFrames_ > 0 && --keybindTestAutoFrames_ == 0) runKeybindPersistTest(keybindTestMode_);
 #endif
 #if AVER_MODULE_SCRIPTING
@@ -6615,6 +6626,10 @@ public:
     void setCbMoveTest(const std::string& dir) { cbMoveTestDir_ = dir; cbMoveTestFrames_ = 10; }
     void setSaveDirtyTest(int n) { saveDirtyTestFrames_ = n; }                     // --savedirty-test
     void setPrefsWriteTest(int n) { prefsWriteTestFrames_ = n; }                   // --prefs-write-test
+    // --notify-test N. The lift is the point: drawNotifications refuses to draw during a bounded
+    // run so a capture never has a toast in shot, and this is the one run where the toast IS the
+    // thing being captured.
+    void setNotifyTest(int n) { notifyTestFrames_ = n; notifyTestLift_ = true; }
     // --find-refs <content-relative-path>: print what references an asset and exit. The delete
     // confirm's scan, reachable without a modal -- so the thing that stops someone destroying a
     // shared asset can be tested rather than eyeballed once.
@@ -11597,6 +11612,11 @@ private:
     f32 prefsAutosaveAccum_ = 0.0f;
     bool autosaveWritten_ = false;
     bool autosaveFailedWarned_ = false;
+    // Set by a notification button and consumed by maybeAutosave on the next tick. Deferred rather
+    // than acted on inline because the buttons are drawn from onRender, which runs AFTER onUpdate --
+    // acting immediately would apply a postpone to a save that had already happened this frame.
+    bool autosavePostponeRequested_ = false;
+    bool autosaveRetryRequested_ = false;
     std::string recoveryPath_;      // a sidecar newer than its level, waiting to be offered
 
     int landCreateSamples_ = 513;
@@ -12928,6 +12948,46 @@ private:
     // writes through writeFileTextAtomic and only clears the dirty bit on success, the atomic write
     // is write-temp-then-MoveFileEx). Reading further was not going to settle it, so this reports
     // each step against the real file instead.
+    // Raises one notification of each severity, plus a progress one, so the stack's appearance can
+    // be screenshotted. This is the half of the feature a headless test genuinely cannot judge:
+    // EditorNotificationsTest owns every rule about WHEN a notification lives and dies, and nothing
+    // but a picture can say whether the result is legible.
+    void runNotifyTest() {
+        editor::NotificationQueue& q = editor::notifications();
+        editor::Notification n;
+
+        n = {}; n.severity = editor::NotifySeverity::Info;
+        n.title = "Info"; n.body = "A routine outcome worth mentioning once.";
+        n.ttlSec = 1.0e6; q.push(n);
+
+        n = {}; n.severity = editor::NotifySeverity::Success;
+        n.title = "Imported Rock_01.fbx"; n.body = "3 meshes, 1 skeleton, 2 clips.";
+        n.ttlSec = 1.0e6; q.push(n);
+
+        n = {}; n.severity = editor::NotifySeverity::Warning;
+        n.title = "Already imported"; n.body = "Content/Props/Rock_01.ocmesh exists.";
+        n.ttlSec = 1.0e6; q.push(n);
+
+        // THROUGH THE LOG, not pushed directly, and that is the point of this one: it is the only
+        // sample that exercises the production path -- logSink -> pushFromLog -> the queue -- so the
+        // capture proves the wiring rather than just the drawing. Safe to log here because
+        // runNotifyTest is called from the frame tick, not from inside the sink.
+        //
+        // Error and not Critical: AVER_CRITICAL wakes the crash reporter, and a diagnostic flag has
+        // no business launching a second process. The Critical sample below is pushed directly for
+        // exactly that reason.
+        AVER_ERROR("[Import] could not read Textures/missing.png");
+
+        n = {}; n.severity = editor::NotifySeverity::Critical;
+        n.title = "Critical - RHI.D3D12"; n.body = "THE GPU DEVICE HAS BEEN LOST";
+        n.sticky = true;
+        n.actions[0] = editor::NotifyAction::ShowOutputLog; n.actionLabels[0] = "Show in Output Log";
+        n.actions[1] = editor::NotifyAction::Dismiss;       n.actionLabels[1] = "Dismiss";
+        q.push(n);
+
+        AVER_INFO("[notify-test] raised {} sample notification(s)", q.size());
+    }
+
     void runPrefsWriteTest() {
         int failures = 0;
         auto check = [&](bool cond, const char* what) {
@@ -12973,6 +13033,8 @@ private:
         AVER_INFO("[prefs-write-test] RESULT: {}", failures == 0 ? "PASS" : "FAIL");
     }
     int prefsWriteTestFrames_ = 0;
+    int  notifyTestFrames_ = 0;      // --notify-test: frames left before the samples are raised
+    bool notifyTestLift_ = false;    // ...and the one thing that lets them draw in a bounded run
 
     // --project-switch-test: opening a project that states NO render settings must not leave the
     // previous project's settings in force. Synthetic on purpose -- it drives applyProjectRenderSettings
@@ -15535,6 +15597,9 @@ private:
         }
         if (levelVisible_) buildViewportOverlay();
         drawDrawer(e);
+        // AFTER drawDrawer, deliberately: it publishes drawerPixelH_, so the stack dodges the
+        // drawer using this frame's height rather than last frame's.
+        drawNotifications();
         buildEditorPrefs();
         buildProjectSettings();
         buildWorldSettings();
@@ -19658,6 +19723,140 @@ private:
         // flag rather than ImGui::IsWindowAppearing(), since the ##drawer window doesn't newly "appear"
         // switching FROM Content/Log TO Console -- the flag targets "just chose Console specifically".
         if (drawer_ == Drawer::Console) consoleFocusPending_ = true;
+    }
+
+    // Maps a notification's severity onto the palette the Output Log and Console already share.
+    // REUSED RATHER THAN RE-CHOSEN: logLineStyle argues that two copies of these colours drifting
+    // apart is itself the bug, and an error that is one red in the log and another in a toast is
+    // exactly that drift.
+    static ImVec4 notifyColour(editor::NotifySeverity s) {
+        switch (s) {
+            case editor::NotifySeverity::Success:  return ImVec4(0.55f, 0.85f, 0.55f, 1.0f);
+            case editor::NotifySeverity::Warning:  return ImVec4(1.00f, 0.62f, 0.15f, 1.0f);
+            case editor::NotifySeverity::Error:    return ImVec4(0.95f, 0.30f, 0.28f, 1.0f);
+            case editor::NotifySeverity::Critical: return ImVec4(0.86f, 0.20f, 0.17f, 1.0f);
+            default:                               return ImVec4(0.82f, 0.84f, 0.88f, 1.0f);
+        }
+    }
+
+    // Draws the notification stack, bottom-right, newest nearest the corner and growing upward.
+    void drawNotifications() {
+        // NOTHING DURING A CAPTURE RUN. --frames drives the render gates and the screenshot tooling,
+        // which compare exact pixel values; a toast in shot changes what was measured. Every
+        // autosave sibling guards on the same condition for the same class of reason.
+        if (maxFrames_ != 0 && !notifyTestLift_) return;
+
+        editor::NotificationQueue& q = editor::notifications();
+        static std::vector<editor::Notification> shown;
+        usize hidden = 0;
+        q.tick(ImGui::GetTime(), shown, hidden);
+        if (shown.empty() && hidden == 0) return;
+
+        // OWN WINDOWS, NOT THE LEVEL'S DRAW LIST. drawGraphPrintOverlay writes into the Level
+        // window's list before ImGui::Image appends the viewport texture to that same list, so it is
+        // painted and then covered. A separate Begin() cannot be reached by another window's
+        // submission order. GetForegroundDrawList() would also sit on top but has no hit-testing,
+        // and these carry real buttons.
+        const ImGuiViewport* mv = ImGui::GetMainViewport();
+        const f32 pad     = 8.0f * dpi_;
+        const f32 statusH = 26.0f * dpi_;
+        const f32 width   = 340.0f * dpi_;
+        const f32 anchorX = mv->WorkPos.x + mv->WorkSize.x - pad;
+        // Above the status bar AND above the drawer. drawerPixelH_ is this frame's value because
+        // this runs after drawDrawer -- ##vphint reads the same member one call earlier and is
+        // therefore a frame stale while the drawer slides.
+        f32 y = mv->WorkPos.y + mv->WorkSize.y - statusH - drawerPixelH_ - pad;
+
+        const ImGuiWindowFlags base =
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+            ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_AlwaysAutoResize |
+            ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings |
+            ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNavFocus;
+
+        // NEWEST FIRST, so the toast being read is placed exactly: with a bottom-right pivot its
+        // position needs no knowledge of its own height. Only the older ones above it need the
+        // newer heights, which are remembered from last frame.
+        static std::unordered_map<u64, f32> heights;
+        for (usize i = shown.size(); i-- > 0;) {
+            const editor::Notification& n = shown[i];
+            const bool interactive = n.actions[0] != editor::NotifyAction::None;
+
+            ImGui::SetNextWindowPos(ImVec2(anchorX, y), ImGuiCond_Always, ImVec2(1.0f, 1.0f));
+            ImGui::SetNextWindowSize(ImVec2(width, 0.0f), ImGuiCond_Always);
+            // OPAQUE, not merely mostly-opaque. The viewport bars sit at 0.62 over a scene, where
+            // translucency reads as depth; these land on the Details panel, and 0.92 was measured to
+            // let its labels bleed through the plate -- "Transform", "Rotation" and "Base Color"
+            // legible straight through an error message. A notification competing with the text
+            // underneath it is one you misread.
+            ImGui::SetNextWindowBgAlpha(1.0f);
+
+            char id[32];
+            std::snprintf(id, sizeof id, "##notify_%llu", static_cast<unsigned long long>(n.id));
+            if (ImGui::Begin(id, nullptr, interactive ? base : (base | ImGuiWindowFlags_NoInputs))) {
+                if (fontMedium_) ImGui::PushFont(fontMedium_, 0.0f);
+                ImGui::TextColored(notifyColour(n.severity), "%s", n.title.c_str());
+                if (fontMedium_) ImGui::PopFont();
+                if (n.count > 1) {
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("x%u", n.count);
+                }
+                if (!n.body.empty()) {
+                    ImGui::PushTextWrapPos(0.0f);
+                    ImGui::TextUnformatted(n.body.c_str());
+                    ImGui::PopTextWrapPos();
+                }
+                if (n.hasProgress) {
+                    // A negative progress is the indeterminate sentinel; ImGui draws an animated bar
+                    // for it when the fraction is negative, which is exactly the "working, no idea
+                    // how long" case a bake's first step is in.
+                    ImGui::ProgressBar(n.progress, ImVec2(-FLT_MIN, 6.0f * dpi_),
+                                       n.progress < 0.0f ? "" : nullptr);
+                    if (!n.progressNote.empty()) ImGui::TextDisabled("%s", n.progressNote.c_str());
+                }
+                for (int a = 0; a < 2; ++a) {
+                    if (n.actions[a] == editor::NotifyAction::None) continue;
+                    if (a) ImGui::SameLine();
+                    ImGui::PushID(a);
+                    if (ImGui::SmallButton(n.actionLabels[a].c_str())) q.activate(n.id, n.actions[a]);
+                    ImGui::PopID();
+                }
+                heights[n.id] = ImGui::GetWindowSize().y;
+            }
+            ImGui::End();
+
+            const auto it = heights.find(n.id);
+            y -= (it == heights.end() ? 48.0f * dpi_ : it->second) + pad * 0.5f;
+        }
+
+        if (hidden > 0) {
+            ImGui::SetNextWindowPos(ImVec2(anchorX, y), ImGuiCond_Always, ImVec2(1.0f, 1.0f));
+            ImGui::SetNextWindowBgAlpha(0.75f);
+            if (ImGui::Begin("##notify_more", nullptr, base | ImGuiWindowFlags_NoInputs))
+                ImGui::TextDisabled("+%zu more", hidden);
+            ImGui::End();
+        }
+
+        // ACTED ON HERE, not inside the button, so an action that closes or re-orders the stack
+        // cannot do it while the stack is mid-iteration.
+        u64 actId = 0;
+        editor::NotifyAction act = editor::NotifyAction::None;
+        while (q.drainActivation(actId, act)) {
+            switch (act) {
+                case editor::NotifyAction::ShowOutputLog:
+                    // OPENED, not toggled: the user asked to see the log, and toggleDrawer would
+                    // close it if the Output Log already happened to be the open drawer.
+                    drawer_ = Drawer::Log;
+                    drawerRaise_ = true;
+                    break;
+                case editor::NotifyAction::Dismiss:          q.dismiss(actId); break;
+                case editor::NotifyAction::PostponeAutosave: autosavePostponeRequested_ = true; break;
+                case editor::NotifyAction::RetryAutosave:    autosaveRetryRequested_ = true; break;
+                default: break;
+            }
+        }
+        // Forget heights for notifications that are gone, so the map cannot grow for the life of the
+        // session on an editor that raises thousands of them.
+        if (heights.size() > editor::NotificationQueue::kMaxLive * 4) heights.clear();
     }
 
     // Reads every editor preference into the members that back the widgets.
@@ -24672,6 +24871,10 @@ Application* createApplication(int argc, char** argv) {
     const char* cbMoveArg = nullptr;
     int saveDirtyArg = 0;
     int prefsWriteArg = 0;
+    // --notify-test N: raise one notification of each severity N frames in, AND lift the capture
+    // suppression so the stack is actually drawn in a bounded run. Without the lift there would be
+    // no way to screenshot the one piece of this feature a headless test cannot judge.
+    int notifyTestArg = 0;
     f32 frameBudgetArg = 0.0f;
     const char* findRefsArg = nullptr;
     int projectSwitchArg = 0;
@@ -24697,6 +24900,7 @@ Application* createApplication(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--cbmove-test"))          cbMoveArg = argv[i + 1];
         if (!std::strcmp(argv[i], "--savedirty-test"))       saveDirtyArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--prefs-write-test"))     prefsWriteArg = std::atoi(argv[i + 1]);
+        if (!std::strcmp(argv[i], "--notify-test"))          notifyTestArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--frame-budget"))         frameBudgetArg = (f32)std::atof(argv[i + 1]);
         if (!std::strcmp(argv[i], "--find-refs"))            findRefsArg = argv[i + 1];
         if (!std::strcmp(argv[i], "--project-switch-test")) projectSwitchArg = std::atoi(argv[i + 1]);
@@ -25657,6 +25861,7 @@ Application* createApplication(int argc, char** argv) {
     if (cbMoveArg) app->setCbMoveTest(cbMoveArg);
     if (saveDirtyArg > 0) app->setSaveDirtyTest(saveDirtyArg);
     if (prefsWriteArg > 0) app->setPrefsWriteTest(prefsWriteArg);
+    if (notifyTestArg > 0) app->setNotifyTest(notifyTestArg);
     if (frameBudgetArg > 0.0f) app->setFrameBudget(frameBudgetArg);
     if (findRefsArg) app->setFindRefs(findRefsArg);
     if (projectSwitchArg) app->setProjectSwitchTest(projectSwitchArg);

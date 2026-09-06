@@ -10,6 +10,7 @@ add_executable(Sandbox
   src/RecentProjects.cpp
   src/ProjectScaffold.cpp
   src/EditorPrefs.cpp
+  src/EditorNotifications.cpp
   src/InputOwnership.cpp
   src/ViewportIconRenderer.cpp
   src/EngineScaffold.cpp
