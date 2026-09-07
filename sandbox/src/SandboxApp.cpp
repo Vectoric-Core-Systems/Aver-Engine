@@ -3143,7 +3143,18 @@ public:
         // ONE ARBITRATION, handed to every consumer: computed once here instead of eleven slightly
         // different spellings (InputOwnership.hpp).
 #if AVER_WITH_IMGUI
-        {
+        // THE #if IS COMPILE-TIME AND THIS QUESTION IS NOT -- the same distinction the capture block
+        // below spells out. A headless run never calls uiInit() (no hwnd, so it early-returns), which
+        // means CreateContext() never ran and GImGui is null: GetIO() then returns a reference off a
+        // null pointer and the first member read faults. It did, at 0x00000000000000fa, which is
+        // offsetof(ImGuiContext, IO) + offsetof(ImGuiIO, WantTextInput) exactly.
+        //
+        // ASKING uiActive() AS THE GATE rather than adding a new flag, because the answer was already
+        // being computed one line down into ic.uiActive, whose own declaration in InputOwnership.hpp
+        // describes the false case as "a headless/no-UI build". Leaving own_ at its default costs
+        // nothing: resolveInputOwnership returns all-false for uiActive = false, which is the honest
+        // answer when there is no UI and nothing can own the devices.
+        if (e.device()->uiActive()) {
             const ImGuiIO& oio = ImGui::GetIO();
             editor::InputConditions ic;
             ic.uiActive          = e.device()->uiActive();
@@ -3181,7 +3192,10 @@ public:
         // off-viewport left the camera stuck in fly mode with the cursor hidden. Releasing the button
         // always means stop flying, whoever owns input.
 #if AVER_WITH_IMGUI
-        if (!ImGui::GetIO().MouseDown[1]) flying_ = false;
+        // uiActive() first, for the reason given above: headless has no ImGui context to ask. Nothing
+        // is lost by skipping it there -- flying_ starts false and its only writer is the own_-gated
+        // block below, which cannot run without a UI.
+        if (e.device()->uiActive() && !ImGui::GetIO().MouseDown[1]) flying_ = false;
 #endif
         if (own_.keyboardToTool || own_.mouseToTool) {
             const ImGuiIO& io = ImGui::GetIO();
@@ -10392,6 +10406,13 @@ private:
         // `suppressed` survives only because the mouse branch below still needs "publish a zero" apart
         // from "publish the captured delta".
         const bool suppressed = !uiActive || (releasedByUser_ && playSessionActive());
+        // NOT THE EARLY RETURN THE COMMENT ABOVE FORBIDS, and the difference is which condition.
+        // The one that was rightly deleted was the mid-session RELEASE, where cur[] holds live values
+        // that must still be published down or every held key latches forever. uiActive is a
+        // process-lifetime property -- set once in uiInit, cleared in uiShutdown -- so when it is
+        // false nothing here has ever published a 1 and there is nothing to release. Without this,
+        // GetIO() below dereferences a null GImGui in any headless run.
+        if (!uiActive) return;
         ImGuiIO& io = ImGui::GetIO();
         const bool kb = own_.keyboardToGame;
         const bool chordSpace = !suppressed && keybinds_.pressed(editor::CommandId::DrawerToggleContent, io);
