@@ -353,9 +353,18 @@ struct RtMaterial {
 // call site, and it is the one an ENCLOSED scene actually takes.
 #define AVER_RD_ABL_ROUGHSKY 10
 // averApplyFog: a 4-step aerial march plus a possible second 32-step atmosphere march, run
-// unconditionally per pixel and never previously attributable. This function is recorded elsewhere in
-// the tree as having once been 41% of a frame.
+// unconditionally per pixel. This function is recorded elsewhere in the tree as having once been
+// 41% of a frame. MEASURED on Sponza it is now 0.22 ms of a 16.83 ms pass -- 1.3% -- so that
+// history is a reason to keep it attributable, not a reason to assume it is still expensive.
 #define AVER_RD_ABL_FOG      11
+// The AERIAL HALF of averApplyFog alone -- the 4-step atmosphere march between camera and
+// surface -- with height fog left running, since mode 11 removes both and cannot separate them.
+// EXISTS BECAUSE A GATE WAS PROPOSED FOR THAT MARCH and there was no way to price it: it is the
+// only term in averApplyFog with no magnitude threshold, which makes it look like the eager-lerp
+// bug this codebase has fixed twice. It measured 0.19 ms, 1.1% of the pass, while changing 28.6%
+// of the frame by up to 37 codes -- used, not discarded -- so no gate was added. Kept so the next
+// person to notice the missing threshold can re-run the number instead of re-deriving it.
+#define AVER_RD_ABL_AERIAL   12
 
 // READ THIS BEFORE SUBTRACTING TWO ABLATION NUMBERS. Several modes REROUTE work rather than removing
 // it, so the deltas are not additive and a term can measure NEGATIVE:
@@ -3223,6 +3232,10 @@ RayDrivenOut PSRayDriven(SkyOut i) {
 
 #if AVER_RD_ABLATE == AVER_RD_ABL_FOG
     // ablated: no aerial perspective and no fog inscatter march.
+#elif AVER_RD_ABLATE == AVER_RD_ABL_AERIAL
+    // ablated: the aerial march only. Height fog still runs, so the delta against mode 0 is
+    // this one term and not the pair.
+    radiance = averApplyFogEx(radiance, wpos, false);
 #else
     radiance = averApplyFog(radiance, wpos);
 #endif

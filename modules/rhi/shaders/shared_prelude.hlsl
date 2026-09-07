@@ -664,9 +664,35 @@ float3 averFogInscatter(float3 wpos, float3 t) {
 }
 
 // Applies the air between the camera and a surface: physical atmosphere, then height fog.
-float3 averApplyFog(float3 color, float3 wpos) {
+//
+// `aerial` EXISTS TO BE MEASURED. The height-fog term below is already branched, and its comment
+// records why; the aerial march above it never was, and no ablation could isolate it -- the existing
+// fog mode removes both at once. Splitting it here lets the aerial term's own cost be read off a
+// flag instead of argued about, which is the standard this file's other two gates were held to.
+// averApplyFog keeps its signature and its behaviour, so no caller changes.
+float3 averApplyFogEx(float3 color, float3 wpos, bool aerial) {
     float3 T = 1.0;
-    if (averAtmoOn()) {
+    // NO MAGNITUDE GATE ON THIS ONE, UNLIKE THE TWO BELOW IT, AND THAT IS NOW A MEASUREMENT
+    // RATHER THAN AN OVERSIGHT. It looks like the bug this file has already fixed twice -- an
+    // unconditional march whose result is near-zero for most pixels -- and the obvious fix is a
+    // distance threshold mirroring `fogF > 0.001` and `w > 0.01`. It was measured before being
+    // written, using the ablation the measurement needed (AVER_RD_ABL_AERIAL, voxi.hlsl), and
+    // the numbers say leave it alone. Sponza at 2750x1639, ray-driven primary:
+    //     baseline                       16.83 ms
+    //     aerial march ablated (mode 12) 16.64 ms   -> this term costs 0.19 ms, 1.1% of the pass
+    //     all of averApplyFog  (mode 11) 16.61 ms   -> height fog adds 0.03 ms on top
+    //
+    // AND IT IS NOT A NO-OP WHERE IT RUNS: ablating it changes 28.6% of the frame by up to 37
+    // codes. That is the whole difference from the 41%-of-a-frame case this file records. There,
+    // the march was multiplied by a weight that was zero exactly where fog was visible, so the
+    // work was provably discarded. Here the work is used, and a threshold trades a visible,
+    // physically-calibrated haze on mid-range geometry for at most a fifth of a millisecond.
+    //
+    // WHY IT IS SO CHEAP DESPITE BEING A LOOP: the pass around it is bound by ray traversal, not
+    // by arithmetic. A fixed four-step march with an analytic inner transmittance is ALU that
+    // largely hides behind memory latency the rays are already paying. Cost here is rays, and a
+    // gate on this term buys a rounding error against a real quality risk.
+    if (aerial && averAtmoOn()) {
         float3 inscatter = averAtmoAerial(wpos, T);
         color = color * T + inscatter;
     }
@@ -682,6 +708,8 @@ float3 averApplyFog(float3 color, float3 wpos) {
     if (fogF > 0.001) color = lerp(color, averFogInscatter(wpos, T), fogF);
     return color;
 }
+
+float3 averApplyFog(float3 color, float3 wpos) { return averApplyFogEx(color, wpos, true); }
 
 
 // The sky as light: the cosine-weighted average radiance over the hemisphere about N.
