@@ -635,6 +635,11 @@ void averRtProceedSolid(inout RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q) {
 // texture in one frame. x = visibility [0,1], y = linear depth in cm, for rtReprojectHistory.
 Texture2D<float2>   gRtShadowHist    : register(t6);
 RWTexture2D<float2> gRtShadowHistOut : register(u2);
+// The SKY-OCCLUSION history pair. Same RG32Float shape as the shadow pair above (x = openness,
+// y = linear depth) and bound in lockstep with it, so gRtHistParams.x/.y speak for all three
+// pairs at once and no fourth constant is needed.
+Texture2D<float2>   gAoHist    : register(t11);
+RWTexture2D<float2> gAoHistOut : register(u4);
 
 // Ray-traced reflection history: same ping-pong as the shadow history above, its own pair of
 // textures. rgb = shaded colour, a = linear hit depth, OR NEGATIVE meaning the ray missed.
@@ -1127,6 +1132,78 @@ bool rtReprojectHistory(float3 wpos, float2 pixel, out float hist, out float2 ve
     hist = stored.x;
     velocityPx = px - pixel;
     return true;
+}
+
+// The AMBIENT twin of rtReprojectHistory, against gAoHist. A near-copy on purpose: HLSL below
+// SM 6.6 cannot take a Texture2D parameter, and the alternative -- folding both into one function
+// behind a flag -- would put a branch in the hot path of every pixel to save nine lines. The
+// arithmetic is deliberately IDENTICAL, including floor() over round() and the 3% depth tolerance;
+// see the original for why each of those is what it is. Change one, change both.
+bool rtReprojectAo(float3 wpos, float2 pixel, out float hist, out float2 velocityPx) {
+    hist = 0.0;
+    velocityPx = 0.0;
+    float4 clip = mul(float4(wpos, 1.0), gPrevViewProj);
+    if (clip.w <= 1e-4) return false;
+    float3 ndc = clip.xyz / clip.w;
+    if (ndc.z < 0.0 || ndc.z > 1.0) return false;
+    float texW, texH;
+    gAoHist.GetDimensions(texW, texH);
+    float2 px = gSceneViewport.xy +
+                float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) * gSceneViewport.zw;
+    int2 texel = int2(floor(px));
+    if (any(texel < 0) || texel.x >= (int)texW || texel.y >= (int)texH) return false;
+    const float2 stored = gAoHist.Load(int3(texel, 0));   // x = openness, y = linear depth
+    const float tol = max(clip.w, stored.y) * 0.03 + 1.0;
+    if (abs(clip.w - stored.y) > tol) return false;
+    hist = stored.x;
+    velocityPx = px - pixel;
+    return true;
+}
+
+// AMBIENT OCCLUSION, ACCUMULATED OVER TIME instead of over rays.
+//
+// At one ray per pixel this estimator is `open = hit ? 0 : 1` -- a binary mask, the noisiest thing
+// a Monte Carlo estimate can be, and its MEAN is already correct (a probe read the same value at 1
+// ray and at 4, which is exactly why no probe could see the problem: a probe cannot measure
+// variance). The previous answer was four rays sharing one azimuth across a 4x4 tile, which buys
+// five quantisation levels instead of two and correlates them into visible BLOCKS -- the tile
+// comment above says as much, and names this function's approach as the real fix.
+//
+// Accumulating gets the sample count from FRAMES rather than from rays: at weight 0.9 the history
+// is an exponential average over ~10 of them, so one ray behaves like ten and the tile can go back
+// to 1 (independent noise per pixel, then averaged away). That is strictly cheaper than what it
+// replaces -- one coherent-free ray instead of four -- which is what lets sky occlusion come down
+// off the Epic-only rung it was priced onto.
+//
+// THE VELOCITY TERM AND THE 32-PIXEL BUDGET ARE THE SHADOW PATH'S, DELIBERATELY. This history is
+// also exactly one frame old and also guarded by a depth test, so the thing velocity still has to
+// pay for is sub-texel alignment -- bounded at half a texel at any speed by the nearest-neighbour
+// lookup. Ambient occlusion tolerates a stale sample better than a shadow edge does, not worse.
+float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays) {
+    const float fresh = rtSkyOcclusion(wpos, N, pixel, rays);
+    // The slots are null when this frame did not bind them (VoxiRenderer::beginShadowHistory);
+    // touching a null UAV is not merely wasteful, it is undefined. Same gate the shadow path uses.
+    if (gRtHistParams.x < 0.5) return fresh;
+
+    const float curDepth = mul(float4(wpos, 1.0), gViewProj).w;
+    float vis = fresh;
+    float histV = 0.0;
+    float2 velocityPx = 0.0;
+    if (gRtHistParams.y > 0.5 && rtReprojectAo(wpos, pixel, histV, velocityPx)) {
+        const float t      = saturate(length(velocityPx) / 32.0);
+        // THE SHADOW PATH'S OWN WEIGHTS, and 0.95 was tried rather than assumed. Doubling the
+        // effective sample count to ~20 moved dark-region local roughness from 0.4509 to 0.4486 --
+        // nothing, because what is left in a still frame is Sponza's stone TEXTURE, not sampling
+        // noise, and that floor is the same in every configuration measured (the old four-ray tile
+        // scored 0.3929 on it). Deeper history is not free -- it is lag on a disocclusion the depth
+        // test does not catch -- so the value that buys nothing is not the one to ship.
+        const float weight = lerp(0.9, 0.5, t);
+        vis = lerp(fresh, histV, weight);
+    }
+    // The ACCUMULATED value, not the fresh one -- writing `fresh` here would restart the average
+    // every frame and buy nothing, the same trap the shadow path documents.
+    gAoHistOut[uint2(pixel)] = float2(vis, curDepth);
+    return vis;
 }
 
 // The SPATIAL denoiser: average this pixel's shadow with its neighbours' from the history texture,
@@ -2301,7 +2378,7 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     // happened, and cost a build that reported OK because HLSL compiles at RUNTIME here.
 #if AVER_RT
     ind4.occlusion    = gAmbientParams.x > 0.5
-                      ? rtSkyOcclusion(i.wpos, N, i.pos.xy, (uint)gAmbientParams.x)
+                      ? rtSkyOcclusionTemporal(i.wpos, N, i.pos.xy, (uint)gAmbientParams.x)
                       : ao;
 #else
     ind4.occlusion    = ao;
@@ -3068,7 +3145,7 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     }
 #elif AVER_RT && AVER_RD_ABLATE != AVER_RD_ABL_SKYOCC
     ind.occlusion    = gAmbientParams.x > 0.5
-                     ? rtSkyOcclusion(wpos, N, i.pos.xy, (uint)gAmbientParams.x)
+                     ? rtSkyOcclusionTemporal(wpos, N, i.pos.xy, (uint)gAmbientParams.x)
                      : rdAo;
 #else
     // ablated (or no ray tracing): the cone gather's own occlusion, which is what every tier below

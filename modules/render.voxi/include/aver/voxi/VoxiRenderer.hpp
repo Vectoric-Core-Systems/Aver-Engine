@@ -1213,6 +1213,14 @@ private:
     // on an already-populated texel.
     rhi::TextureHandle rtShadowHist_[2] = {0, 0};
     rhi::TextureHandle rtReflHist_[2] = {0, 0};
+    // THE THIRD PAIR, and the one the sky-occlusion ray needs for the same reason the shadow
+    // ray needed the first: at one ray per pixel that estimator is `open = hit ? 0 : 1`, a
+    // BINARY mask -- the noisiest thing a Monte Carlo estimate can be. It was made bearable by
+    // firing four rays and correlating them across a 4x4 tile, which trades salt-and-pepper for
+    // visible BLOCKS and costs four incoherent rays to do it. Accumulating against a reprojected
+    // history buys the sample count over time instead: one ray, no tile, no blocks.
+    // RG32Float like the shadow pair, x = openness, y = linear depth for the disocclusion test.
+    rhi::TextureHandle rtAoHist_[2] = {0, 0};
     u32  rtShadowHistW_ = 0, rtShadowHistH_ = 0;
     u32  rtHistWriteIdx_ = 0;
     // False right after creation or a resize: the textures hold no real previous frame yet, and
@@ -1282,9 +1290,10 @@ private:
     // transitioned.
     bool shadowHistoryActive() const {
         return rtActive_ && rtShadowHist_[0] && rtShadowHist_[1] &&
-               rtReflHist_[0] && rtReflHist_[1] && !debugViewActive();
+               rtReflHist_[0] && rtReflHist_[1] &&
+               rtAoHist_[0] && rtAoHist_[1] && !debugViewActive();
     }
-    // Swaps the read/write roles, transitions all four textures, rebinds them and sets
+    // Swaps the read/write roles, transitions all six textures, rebinds them and sets
     // cb_.prevViewProj / rtHistParams for this frame. Called before shadowPass() so the UAVs are
     // writable and the constants are ready by the time the scene loop runs PSMainVoxi.
     void beginShadowHistory(rhi::IRenderContext& ctx);

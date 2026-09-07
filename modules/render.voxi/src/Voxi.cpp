@@ -384,24 +384,32 @@ u32 Renderer::giSkyOcclusionRaysForQuality(Quality q) {
         case Quality::Off:    return 0;
         case Quality::Low:    return 0;
         case Quality::Medium: return 0;
-        case Quality::High:   return 0;
-        // FOUR, NOT ONE, AND THE REASON IS NOISE RATHER THAN ACCURACY. At one ray this estimator is
-        // `open = hits ? 0 : 1` divided by one -- a BINARY per-pixel mask, the noisiest thing a Monte
-        // Carlo estimate can be. Its MEAN was already right at one sample (a probe read the same
-        // value at 1 and at 4), which is exactly why one probe pixel could not see the problem: a
-        // probe cannot measure variance. On screen it is salt and pepper.
+        // ONE RAY AT THE TOP TWO TIERS, NOT FOUR AT ONE -- and the change is the accumulation, not
+        // a re-tuning. This used to say FOUR, NOT ONE, because at one ray the estimator is
+        // `open = hit ? 0 : 1`, a binary per-pixel mask whose MEAN was already right (a probe read
+        // the same value at 1 and at 4 -- which is why a probe could not see the problem: a probe
+        // cannot measure variance). Four samples bought five quantisation levels instead of two,
+        // and the coherence tile paid for them by sharing one azimuth across a 4x4 block. That
+        // comment ended by naming its own successor: "the real fix is temporal accumulation against
+        // a reprojected history ... it needs a third history pair, and therefore a wider SRV/UAV
+        // table, which is why it is not in this change". That pair now exists (rtAoHist_,
+        // kVoxiSrvCount/kVoxiUavCount) and rtSkyOcclusionTemporal blends against it.
         //
-        // Four samples gives five levels instead of two, and the coherence tile below is what makes
-        // it affordable: MEASURED on Sponza, 4 rays at tile 4 costs +1.98 ms against 1 ray at tile 1,
-        // where 4 rays at tile 1 would cost +3.56 ms.
+        // So the sample count comes from FRAMES: ~10 effective samples at weight 0.9, more than
+        // four rays ever gave, with independent per-pixel noise that averages away instead of
+        // correlated noise that stacks into a visible block. One ray also costs less than four, so
+        // High can afford the term that used to be Epic-only.
         //
-        // STILL NOT A DENOISER, and this comment should not be read as claiming otherwise. Five
-        // quantisation levels correlated across a 4x4 block is a large improvement on a binary mask
-        // and is not a smooth ambient term. The real fix is temporal accumulation against a
-        // reprojected history, which this engine already does for shadows and reflections -- it needs
-        // a third history pair, and therefore a wider SRV/UAV table (kVoxiSrvCount / kGiUavCount,
-        // shared with the GI compute shaders), which is why it is not in this change.
-        case Quality::Epic:   return 4;
+        // WHY THIS MATTERS BEYOND NOISE: every tier that returns 0 here falls back to the voxel cone
+        // gather's own occlusion, and MEASURED on Sponza that fallback is far too open -- turning
+        // the rays off brightens the darkest 81% of the frame by 2.6x (mean luminance 20.71 -> 31.92).
+        // That is why shadows only ever looked properly dark on Epic.
+        //
+        // LOW AND MEDIUM STAY ON THE CONE GATHER. The ray is cosine-distributed over the hemisphere,
+        // so neighbouring lanes walk unrelated parts of the BVH and it is genuinely expensive --
+        // accumulation fixes its VARIANCE, not its traversal cost. A budget tier should not pay it.
+        case Quality::High:   return 1;
+        case Quality::Epic:   return 1;
         default:              return 0;   // an unknown tier must not silently cost more
     }
 }
@@ -415,11 +423,14 @@ u32 Renderer::giSkyOcclusionTileForQuality(Quality q) {
         case Quality::Low:    return 1;
         case Quality::Medium: return 1;
         case Quality::High:   return 1;
-        // 4 rather than 2: both were measured and 4 is the cheaper of the two per sample (+2.21 ms
-        // against +2.85 ms for the same four rays), and ambient occlusion is the one term whose
-        // spatial correlation is acceptable -- see Settings::giSkyOcclusionTile for that argument and
-        // for why this dial must not be reused on a sharp signal.
-        case Quality::Epic:   return 4;
+        // 1 EVERYWHERE NOW, EPIC INCLUDED. The tile existed to make four incoherent hemisphere
+        // rays affordable by pointing neighbouring lanes the same way, and its price was
+        // correlated noise -- which is exactly what a 4x4 block of identical ambient occlusion
+        // looks like on screen. With one accumulated ray there is nothing left to make coherent.
+        // KEPT AS A DIAL rather than deleted: the measurements behind it still stand (+1.98 ms
+        // for four rays at tile 4 against one at tile 1) and a future term tracing many
+        // incoherent rays could want it. 1 is the identity, floor(p/1) == p.
+        case Quality::Epic:   return 1;
         default:              return 1;   // an unknown tier gets the un-correlated, un-amortised path
     }
 }

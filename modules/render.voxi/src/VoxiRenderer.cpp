@@ -108,7 +108,15 @@ void giSamplers(rhi::PipelineLayout& l) {
 // t9 (material table) and t10 (blended-pass backdrop: the opaque scene copied before translucency
 // replays, so glass can tint per channel instead of through one blend alpha) are Voxi-only under the
 // same reasoning.
-constexpr u32 kVoxiSrvCount = kGiSrvCount + 2;
+constexpr u32 kVoxiSrvCount = kGiSrvCount + 3;
+
+// THE SAME ARGUMENT ON THE UAV SIDE, and it needs its own constant for a reason the SRV side
+// already documents. SandboxApp.cpp's cluster path sets `bsd.uavCount = voxi::kGiUavCount` and
+// then fills uavKinds[0..3] BY HAND; widening kGiUavCount itself would grow that count without
+// growing the kinds it declares, and Vulkan refuses a set whose slot types do not match the
+// pipeline layout -- an undeclared fifth slot there would be a validation failure in a file this
+// change never touches. Voxi sizes its OWN table against this instead, so u4 is invisible to it.
+constexpr u32 kVoxiUavCount = kGiUavCount + 1;
 
 // What KIND of resource each of table 0's slots holds, read by both giLayout() (every pipeline) and
 // createVoxelVolume()'s BindingSetDesc (the set those pipelines bind) -- Vulkan refuses a set whose
@@ -135,15 +143,21 @@ void giTableKinds(rhi::SlotKind* srv, rhi::SlotKind* uav) {
     // Null until the device has one -- before the first resize, under MSAA, or on a backend that does
     // not implement it -- and the shader tests for that rather than assuming.
     srv[10] = rhi::SlotKind::Texture2D;             // t10 blended backdrop
+    // t11/u4: the AMBIENT OCCLUSION history pair, the third of three and the reason
+    // kVoxiSrvCount/kVoxiUavCount exist. Same shape and same lockstep as the shadow and
+    // reflection pairs above -- see ensureShadowHistory, which creates all six together.
+    srv[11] = rhi::SlotKind::Texture2D;             // t11 sky-occlusion history (read)
     uav[0] = rhi::SlotKind::Texture3D;              // u0 volume mip 0
     uav[1] = rhi::SlotKind::Texture3D;              // u1 injection accumulator
     uav[2] = rhi::SlotKind::Texture2D;              // u2 ray-traced shadow history (write)
     uav[3] = rhi::SlotKind::Texture2D;              // u3 ray-traced reflection history (write)
-    static_assert(kVoxiSrvCount == 11 && kGiSrvCount == 9 && kGiUavCount == 4,
-                  "giTableKinds fills exactly kVoxiSrvCount (== kGiSrvCount + 2) SRVs and "
-                  "kGiUavCount UAVs; widen the right constant if this changes again -- kGiSrvCount "
-                  "itself only if SandboxApp.cpp's cluster-path reservation is being widened too, "
-                  "in the same change");
+    uav[4] = rhi::SlotKind::Texture2D;              // u4 sky-occlusion history (write)
+    static_assert(kVoxiSrvCount == 12 && kVoxiUavCount == 5 && kGiSrvCount == 9 && kGiUavCount == 4,
+                  "giTableKinds fills exactly kVoxiSrvCount SRVs and kVoxiUavCount UAVs; widen "
+                  "those, never kGiSrvCount/kGiUavCount -- those two are the union SandboxApp.cpp's "
+                  "cluster path reserves at its own base and fills kinds for by hand, so growing "
+                  "them without widening that file in the same change is a Vulkan set/layout "
+                  "type mismatch rather than a compile error");
 }
 
 // Returns the pipeline layout every Voxi raster pipeline declares. `bindlessTextures` non-zero
@@ -160,7 +174,7 @@ rhi::PipelineLayout giLayout(u32 bindlessTextures = 0) {
     // nothing tying them together at compile time (a mismatch was a descriptor-table error at draw
     // time, not a build failure). kGiSrvCount/kGiUavCount type the shared part once now.
     l.srvCount = kVoxiSrvCount;
-    l.uavCount = kGiUavCount;   // u0 volume mip 0, u1 injection accumulator, u2 shadow history, u3 reflection history (this frame's)
+    l.uavCount = kVoxiUavCount;   // u0 volume mip 0, u1 injection accumulator, u2 shadow, u3 reflection, u4 sky-occlusion (this frame's)
     // Table 1: the material's textures, based at t(kVoxiSrvCount) -- the root-signature builder
     // accumulates srvBase across tables, so a register number derived from a comment instead of this
     // value goes wrong the moment kVoxiSrvCount grows past kGiSrvCount.
@@ -2759,9 +2773,10 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
     // 3532x1987, held for a feature that never runs. Teardown rather than a bare early-out, so
     // switching ray tracing OFF at runtime gives the memory back instead of stranding it.
     if (!rayTracingWanted()) {
-        const bool had = rtShadowHist_[0] || rtReflHist_[0];
+        const bool had = rtShadowHist_[0] || rtReflHist_[0] || rtAoHist_[0];
         for (rhi::TextureHandle& t : rtShadowHist_) { if (t) res_->destroyTexture(t); t = 0; }
         for (rhi::TextureHandle& t : rtReflHist_)   { if (t) res_->destroyTexture(t); t = 0; }
+        for (rhi::TextureHandle& t : rtAoHist_)     { if (t) res_->destroyTexture(t); t = 0; }
         rtShadowHistW_ = rtShadowHistH_ = 0;
         rtHistWriteIdx_ = 0;
         rtHistValid_ = false;
@@ -2773,11 +2788,13 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
     }
 
     if (rtShadowHist_[0] && rtShadowHist_[1] && rtReflHist_[0] && rtReflHist_[1] &&
+        rtAoHist_[0] && rtAoHist_[1] &&
         rtShadowHistW_ == width && rtShadowHistH_ == height)
         return true;
 
     for (rhi::TextureHandle& t : rtShadowHist_) { if (t) res_->destroyTexture(t); t = 0; }
     for (rhi::TextureHandle& t : rtReflHist_)   { if (t) res_->destroyTexture(t); t = 0; }
+    for (rhi::TextureHandle& t : rtAoHist_)     { if (t) res_->destroyTexture(t); t = 0; }
     rtHistValid_ = false;   // the old contents, if any, belonged to a resolution that no longer exists
 
     rhi::TextureDesc d;
@@ -2810,6 +2827,17 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
     rtReflHist_[1] = res_->createTexture(d);
     if (!rtReflHist_[0] || !rtReflHist_[1]) return false;
 
+    // BACK TO RG32Float FOR THE AMBIENT PAIR -- the reflection block above left d.format on
+    // RGBA16F, and inheriting it here would give the depth channel 8cm precision at the exact
+    // distances the disocclusion test reads it (clip-space w in centimetres, tens of thousands
+    // on terrain). Same reasoning the reflection comment gives for NOT using it for depth.
+    d.format = rhi::Format::RG32Float;
+    d.debugName = "Voxi RT sky-occlusion history A";
+    rtAoHist_[0] = res_->createTexture(d);
+    d.debugName = "Voxi RT sky-occlusion history B";
+    rtAoHist_[1] = res_->createTexture(d);
+    if (!rtAoHist_[0] || !rtAoHist_[1]) return false;
+
     rtShadowHistW_ = width;
     rtShadowHistH_ = height;
     rtHistWriteIdx_ = 0;
@@ -2819,6 +2847,8 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
     res_->setSrv(bindings_, 6, rtShadowHist_[1]);
     res_->setUav(bindings_, 3, rtReflHist_[0], 0);
     res_->setSrv(bindings_, 7, rtReflHist_[1]);
+    res_->setUav(bindings_, 4, rtAoHist_[0], 0);
+    res_->setSrv(bindings_, 11, rtAoHist_[1]);
     return true;
 }
 
@@ -2839,15 +2869,19 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     // always swap together (see the member comment in VoxiRenderer.hpp).
     ctx.textureBarrier(rtShadowHist_[writeIdx], rhi::ResourceState::ShaderResource, rhi::ResourceState::UnorderedAccess);
     ctx.textureBarrier(rtReflHist_[writeIdx],   rhi::ResourceState::ShaderResource, rhi::ResourceState::UnorderedAccess);
+    ctx.textureBarrier(rtAoHist_[writeIdx],     rhi::ResourceState::ShaderResource, rhi::ResourceState::UnorderedAccess);
     if (rtHistValid_) {
         ctx.textureBarrier(rtShadowHist_[readIdx], rhi::ResourceState::UnorderedAccess, rhi::ResourceState::ShaderResource);
         ctx.textureBarrier(rtReflHist_[readIdx],   rhi::ResourceState::UnorderedAccess, rhi::ResourceState::ShaderResource);
+        ctx.textureBarrier(rtAoHist_[readIdx],     rhi::ResourceState::UnorderedAccess, rhi::ResourceState::ShaderResource);
     }
 
     res_->setUav(bindings_, 2, rtShadowHist_[writeIdx], 0);
     res_->setSrv(bindings_, 6, rtShadowHist_[readIdx]);
     res_->setUav(bindings_, 3, rtReflHist_[writeIdx], 0);
     res_->setSrv(bindings_, 7, rtReflHist_[readIdx]);
+    res_->setUav(bindings_, 4, rtAoHist_[writeIdx], 0);
+    res_->setSrv(bindings_, 11, rtAoHist_[readIdx]);
 
     // Read fresh every frame rather than cached: unlike the texture resolution, the scene viewport
     // can change (an editor panel resize) without a full onRenderTargetsChanged notification. A
@@ -3116,7 +3150,7 @@ bool VoxiRenderer::createVoxelVolume(u32 resolution) {
     // foreign caller's layout reserves against) -- reading the identical constants here keeps this
     // set and the pipelines that bind it from independently drifting.
     bd.srvCount = kVoxiSrvCount;
-    bd.uavCount = kGiUavCount;
+    bd.uavCount = kVoxiUavCount;
     // The SAME kinds giLayout() declares -- one function, so the set and the pipelines that bind it
     // cannot drift apart. They were two hand-kept copies until giTableKinds() existed.
     giTableKinds(bd.srvKinds, bd.uavKinds);
