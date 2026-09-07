@@ -966,7 +966,21 @@ AverAmbientTraced rtAmbientTraced(float3 wpos, float3 N, float2 pixel, uint rays
     // so there is no "off" case to test for.
     const float aoTileEdge = max(gAmbientParams.y, AVER_AO_COHERENCE_TILE);
     const float2 aoTile = floor(pixel / aoTileEdge);
-    const float ang0 = rtHash(aoTile) * 6.2831853;
+    // A DIFFERENT DIRECTION EVERY FRAME, and without this the history pair below buys nothing.
+    //
+    // rtHash(aoTile) is a function of the PIXEL and nothing else, so before this term every pixel
+    // traced the same hemisphere direction on every frame it ever rendered. That makes the estimator
+    // deterministic rather than noisy -- and a deterministic wrong answer is exactly what temporal
+    // accumulation cannot fix, because averaging ten identical samples returns the sample. A pixel
+    // whose one ray happened to escape read fully open forever, next to neighbours whose ray happened
+    // to hit, which is the white salt-and-pepper on shadowed surfaces: not noise that settles, a
+    // fixed per-pixel pattern that no weight could touch. It is also why raising the accumulation
+    // weight from 0.9 to 0.95 measured no change at all -- there was nothing different to average.
+    //
+    // THE GOLDEN ANGLE, the same 2.39996323 the tiled shadow path already spends for the same reason:
+    // successive frames land far apart on the disc rather than drifting, so ~10 frames of history is
+    // ~10 well-spread samples instead of one sample counted ten times.
+    const float ang0 = rtHash(aoTile) * 6.2831853 + gRtHistParams.z * 2.39996323;
     float3 T, B;
     // Matches ptBasis/averBasis convention: any orthonormal pair about N will do, since the disc
     // sample is rotated by ang0 anyway.
