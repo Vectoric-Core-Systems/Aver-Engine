@@ -12,6 +12,14 @@ struct WindowDesc {
     u32 width = 1280;
     u32 height = 720;
     bool resizable = true;
+    // Created but NOT SHOWN. For a startup that puts a loading screen in front: the window is fully
+    // real -- WM_SIZE has fired from the SetWindowPos calls in create(), so width/height/dpiScale are
+    // established and the swapchain that reads them afterwards is correct -- it simply has no pixels
+    // on screen yet. Without this the editor sat behind the splash as a frozen grey rectangle for the
+    // whole load, which reads as a hang rather than as progress.
+    //
+    // The window is revealed with show(), NOT by a second create. Whoever sets this owns calling it.
+    bool startHidden = false;
     // False shows the window without taking focus. An automated capture run has no business
     // stealing the keyboard from whatever the machine's owner is doing.
     bool activate = true;
@@ -46,6 +54,9 @@ public:
 
     // Retitles a live window.
     void setTitle(const std::string& title);
+    // Reveals a window created with WindowDesc::startHidden. Idempotent and harmless on a window
+    // that is already visible, so a caller does not have to track which case it is in.
+    void show(bool activate = true);
 
     bool shouldClose() const { return shouldClose_; }
     void requestClose() { shouldClose_ = true; }

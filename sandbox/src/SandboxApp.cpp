@@ -1239,14 +1239,24 @@ public:
             if (close != std::string::npos) t.erase(0, close + 1);
         }
         while (!t.empty() && t.front() == ' ') t.erase(0, 1);
-        // Keep the last path segment of anything that looks like a path. DT_END_ELLIPSIS clips from
-        // the RIGHT, so a full path would show the drive letter and hide the filename -- the only
-        // part worth reading. Both separators, because these lines carry either.
-        const usize at = t.find_last_of("\\/");
-        if (at != std::string::npos && at + 1 < t.size()) {
-            const usize wordStart = t.find_last_of(" \t", at);
+        // Keep the last THREE path segments of anything that looks like a path -- enough to read as
+        // "JungleRuins/Sponza/arch_stones_01.ocmesh" rather than a bare filename, which is what makes
+        // it obvious WHICH thing is loading rather than merely that something is. Not the whole path:
+        // DT_END_ELLIPSIS clips from the RIGHT, so a full absolute path spends the line on a drive
+        // letter and directories and hides the only part worth reading. Both separators, since these
+        // lines carry either.
+        constexpr int kKeepSegments = 3;
+        usize cut = std::string::npos;
+        usize probe = t.find_last_of("\\/");
+        for (int i = 0; i < kKeepSegments && probe != std::string::npos; ++i) {
+            cut = probe;
+            probe = probe ? t.find_last_of("\\/", probe - 1) : std::string::npos;
+        }
+        if (cut != std::string::npos && probe != std::string::npos && probe + 1 < t.size()) {
+            // Only trim when there was MORE path than we keep; a short relative path is left alone.
+            const usize wordStart = t.find_last_of(" \t'\"", probe);
             t = (wordStart == std::string::npos ? std::string() : t.substr(0, wordStart + 1)) +
-                t.substr(at + 1);
+                t.substr(probe + 1);
         }
         if (t.size() > 110) t.resize(110);
         return t;
@@ -1372,10 +1382,28 @@ public:
     // walk assigns it on the first frame that runs, whatever the count, so >= 0 means "a frame has
     // been walked" and > 0 means "a frame has drawn something". One member answers both halves and
     // there is no second counter to keep in step with it.
+    // AND IT HAS TO STOP CHANGING, which is the half that was missing. "A frame drew something" is
+    // true of the FIRST mesh, not the last: a project streams its meshes in over many frames, so the
+    // splash lifted partway through with the rest of the level still arriving behind it. Waiting for
+    // the draw count to hold steady for a few consecutive frames waits for the tail instead of the
+    // head, and costs nothing on a project that is already settled -- the count is equal to itself
+    // from the first frame and the run clears in kSettleFrames.
+    //
+    // A COUNT, NOT A TIMER. Frames are the unit the thing being waited on actually advances in, and a
+    // wall-clock wait would be a different length on every machine for no reason. The engine's own
+    // warm-up cap (600 frames / 20s) still bounds this, so a project that never settles -- streaming
+    // that genuinely never ends -- costs seconds rather than the session.
     bool startupComplete() const override {
         if (lastSceneDrawn_ < 0) return false;             // no frame has walked the scene yet
         if (projectPath_.empty()) return true;             // nothing was asked to load
-        return lastSceneDrawn_ > 0;                        // the project reached the screen
+        if (lastSceneDrawn_ == 0) return false;            // walked, but nothing has drawn yet
+        constexpr int kSettleFrames = 8;
+        // Mutable because this is asked once per warm-up frame and there is nowhere else to tick
+        // from: Engine's loop calls exactly this, and a second per-frame hook to update a counter
+        // read only here would be two things to keep in step instead of one.
+        if (lastSceneDrawn_ == startupSettleCount_) ++startupSettleFrames_;
+        else { startupSettleCount_ = lastSceneDrawn_; startupSettleFrames_ = 0; }
+        return startupSettleFrames_ >= kSettleFrames;
     }
 
     void setUseWarp(bool w) { useWarp_ = w; }
@@ -25074,6 +25102,9 @@ private:
     // parsed the file by the time it knows this, otherwise reachable only by opening every mesh.
     std::unordered_set<u64> skinnedMeshIds_;
     int lastSceneDrawn_=-1;           // last scene-entity draw count, so the log line fires only on change
+    // startupComplete's settle detector; see it for why these are mutable and why a frame count.
+    mutable int startupSettleCount_ = -2;   // -2 so it cannot match lastSceneDrawn_'s -1 start
+    mutable int startupSettleFrames_ = 0;
     int lastSceneCulled_=-1;          // and the cull count, so a frustum bug shows as a number rather than a gap
     int lastSceneOwnerHidden_=-1;     // and the owner-hide count, so a stuck `hidden=owner` mesh shows as a number too
 #endif

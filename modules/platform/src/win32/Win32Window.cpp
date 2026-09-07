@@ -430,7 +430,10 @@ bool Window::create(const WindowDesc& desc) {
         }
     }
 
-    ShowWindow(hwnd, desc.activate ? SW_SHOW : SW_SHOWNOACTIVATE);
+    // startHidden skips the reveal ENTIRELY rather than showing and hiding, which would flash.
+    // Everything above this line has already run, so the window is sized, DPI-aware and ready to
+    // present -- see WindowDesc::startHidden.
+    if (!desc.startHidden) ShowWindow(hwnd, desc.activate ? SW_SHOW : SW_SHOWNOACTIVATE);
     // Push a capture window to the BOTTOM of the stack. SWP_NOMOVE|SWP_NOSIZE is load-bearing: the
     // centring SetWindowPos above already placed it, and a gate probe is a pixel at a fixed rect in
     // a client area of a fixed size, so this call may change the Z order and nothing else.
@@ -442,6 +445,13 @@ bool Window::create(const WindowDesc& desc) {
 }
 
 // Retitles a live window.
+// See the header. SW_SHOWNA rather than SW_SHOW when not activating, for the same reason create()
+// distinguishes them: a capture run must not take the keyboard from whoever owns the machine.
+void Window::show(bool activate) {
+    if (!nativeHandle_) return;
+    ShowWindow(static_cast<HWND>(nativeHandle_), activate ? SW_SHOW : SW_SHOWNA);
+}
+
 void Window::setTitle(const std::string& title) {
     if (nativeHandle_) SetWindowTextW(static_cast<HWND>(nativeHandle_), utf8ToWide(title).c_str());
 }

@@ -48,6 +48,12 @@ int Engine::run(Application* app) {
         // through rather than short-circuiting here keeps the rule in ONE place (the platform layer),
         // so a second caller cannot get it wrong.
         wd.fullscreen = cfg.fullscreen;
+        // HIDDEN WHILE THE SPLASH IS UP. The window is fully created -- sized, DPI-resolved, ready
+        // for the swapchain that reads those numbers below -- it just has no pixels on screen. It sat
+        // behind the loading screen as a frozen grey rectangle otherwise, which reads as a hang.
+        // Only when a splash is actually being shown: a capture run has no splash and must keep
+        // behaving exactly as before, and a headless run has no window at all.
+        wd.startHidden = !cfg.headless && interactive;
         if (!window_->create(wd)) {
             AVER_WARN("[Engine] window creation failed — continuing headless");
             delete window_;
@@ -160,6 +166,10 @@ int Engine::run(Application* app) {
     // 0, NOT 1100: the minimum-visible delay existed so a fast start did not flash the splash for a
     // few frames. The wait above has already kept it up for as long as the loading actually took, so
     // adding a second delay on top would only make a loaded editor sit behind a picture of itself.
+    // REVEALED BEFORE THE SPLASH GOES, not after: showing the window first means the loading screen
+    // lifts to a drawn editor rather than to the desktop for a frame. The warm-up loop above has
+    // already rendered real frames into it, so there is something to reveal.
+    if (window_ && !cfg.headless && interactive) window_->show(true);
     splashForApp_ = nullptr;
     if (!cfg.headless) splash.close(interactive ? 0 : 1100);
 
