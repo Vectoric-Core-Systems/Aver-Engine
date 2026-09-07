@@ -460,6 +460,10 @@ void VoxiRenderer::setSettings(const Settings& s) {
     // onRenderTargetsChanged sees a resize, not a settings change, so waiting for one would leave a
     // quarter of a gigabyte allocated (or missing) until the window happened to change size.
     const bool wasWanted = rayTracingWanted();
+    // The ambient pair has its OWN edge: a tier moving Medium -> High starts tracing the ray without
+    // changing whether ray tracing is on at all, and the pair would otherwise not appear until the
+    // next resize.
+    const bool wasAoWanted = aoHistoryWanted();
     settings_ = s;
     // Applied here rather than only through the direct setters, so the editor's Rendering page and
     // the project manifest can drive them the same way every other setting already does; the direct
@@ -487,7 +491,8 @@ void VoxiRenderer::setSettings(const Settings& s) {
 
     // Guarded on a real size: before the first onRenderTargetsChanged there is nothing to create at,
     // and that call will apply the current setting itself when it arrives.
-    if (rayTracingWanted() != wasWanted && rtHistWantW_ && rtHistWantH_)
+    if ((rayTracingWanted() != wasWanted || aoHistoryWanted() != wasAoWanted) &&
+        rtHistWantW_ && rtHistWantH_)
         if (!ensureShadowHistory(rtHistWantW_, rtHistWantH_))
             AVER_ERROR("[Voxi] ray-traced history could not follow a ray-tracing setting change at {}x{}",
                        rtHistWantW_, rtHistWantH_);
@@ -2803,7 +2808,7 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
     }
 
     if (rtShadowHist_[0] && rtShadowHist_[1] && rtReflHist_[0] && rtReflHist_[1] &&
-        rtAoHist_[0] && rtAoHist_[1] &&
+        (rtAoHist_[0] && rtAoHist_[1]) == aoHistoryWanted() &&
         rtShadowHistW_ == width && rtShadowHistH_ == height)
         return true;
 
@@ -2846,12 +2851,16 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
     // RGBA16F, and inheriting it here would give the depth channel 8cm precision at the exact
     // distances the disocclusion test reads it (clip-space w in centimetres, tens of thousands
     // on terrain). Same reasoning the reflection comment gives for NOT using it for depth.
-    d.format = rhi::Format::RG32Float;
-    d.debugName = "Voxi RT sky-occlusion history A";
-    rtAoHist_[0] = res_->createTexture(d);
-    d.debugName = "Voxi RT sky-occlusion history B";
-    rtAoHist_[1] = res_->createTexture(d);
-    if (!rtAoHist_[0] || !rtAoHist_[1]) return false;
+    // ONLY WHERE THE RAY RUNS -- see aoHistoryWanted(). Low and Medium never write this pair, so
+    // allocating it there is 112 MB held for nothing.
+    if (aoHistoryWanted()) {
+        d.format = rhi::Format::RG32Float;
+        d.debugName = "Voxi RT sky-occlusion history A";
+        rtAoHist_[0] = res_->createTexture(d);
+        d.debugName = "Voxi RT sky-occlusion history B";
+        rtAoHist_[1] = res_->createTexture(d);
+        if (!rtAoHist_[0] || !rtAoHist_[1]) return false;
+    }
 
     rtShadowHistW_ = width;
     rtShadowHistH_ = height;
@@ -2862,8 +2871,10 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
     res_->setSrv(bindings_, 6, rtShadowHist_[1]);
     res_->setUav(bindings_, 3, rtReflHist_[0], 0);
     res_->setSrv(bindings_, 7, rtReflHist_[1]);
-    res_->setUav(bindings_, 4, rtAoHist_[0], 0);
-    res_->setSrv(bindings_, 11, rtAoHist_[1]);
+    if (rtAoHist_[0]) {
+        res_->setUav(bindings_, 4, rtAoHist_[0], 0);
+        res_->setSrv(bindings_, 11, rtAoHist_[1]);
+    }
     return true;
 }
 
@@ -2873,6 +2884,10 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     // either slot unless THIS frame actually bound them to real textures below.
     cb_.rtHistParams[0] = 0.0f;
     cb_.rtHistParams[1] = 0.0f;
+    // BEFORE THE EARLY RETURN, for the same reason the two above it are: a frame that binds nothing
+    // must say so, and leaving this at last frame's value would point the ambient path at a slot
+    // this frame never bound.
+    cb_.rtDenoiseParams[3] = 0.0f;
     if (!shadowHistoryActive()) return;
 
     const u32 writeIdx = rtHistWriteIdx_;
@@ -2884,19 +2899,25 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     // always swap together (see the member comment in VoxiRenderer.hpp).
     ctx.textureBarrier(rtShadowHist_[writeIdx], rhi::ResourceState::ShaderResource, rhi::ResourceState::UnorderedAccess);
     ctx.textureBarrier(rtReflHist_[writeIdx],   rhi::ResourceState::ShaderResource, rhi::ResourceState::UnorderedAccess);
-    ctx.textureBarrier(rtAoHist_[writeIdx],     rhi::ResourceState::ShaderResource, rhi::ResourceState::UnorderedAccess);
+    if (rtAoHist_[writeIdx]) ctx.textureBarrier(rtAoHist_[writeIdx], rhi::ResourceState::ShaderResource, rhi::ResourceState::UnorderedAccess);
     if (rtHistValid_) {
         ctx.textureBarrier(rtShadowHist_[readIdx], rhi::ResourceState::UnorderedAccess, rhi::ResourceState::ShaderResource);
         ctx.textureBarrier(rtReflHist_[readIdx],   rhi::ResourceState::UnorderedAccess, rhi::ResourceState::ShaderResource);
-        ctx.textureBarrier(rtAoHist_[readIdx],     rhi::ResourceState::UnorderedAccess, rhi::ResourceState::ShaderResource);
+        if (rtAoHist_[readIdx]) ctx.textureBarrier(rtAoHist_[readIdx], rhi::ResourceState::UnorderedAccess, rhi::ResourceState::ShaderResource);
     }
 
     res_->setUav(bindings_, 2, rtShadowHist_[writeIdx], 0);
     res_->setSrv(bindings_, 6, rtShadowHist_[readIdx]);
     res_->setUav(bindings_, 3, rtReflHist_[writeIdx], 0);
     res_->setSrv(bindings_, 7, rtReflHist_[readIdx]);
-    res_->setUav(bindings_, 4, rtAoHist_[writeIdx], 0);
-    res_->setSrv(bindings_, 11, rtAoHist_[readIdx]);
+    // gRtDenoiseParams.w: 1 only while the ambient pair is genuinely bound this frame. The shader
+    // must not touch a null UAV, and unlike the other two pairs this one is absent at Low and Medium
+    // by design -- so it cannot ride gRtHistParams.x with the others.
+    if (rtAoHist_[writeIdx] && rtAoHist_[readIdx]) {
+        res_->setUav(bindings_, 4, rtAoHist_[writeIdx], 0);
+        res_->setSrv(bindings_, 11, rtAoHist_[readIdx]);
+        cb_.rtDenoiseParams[3] = 1.0f;
+    }
 
     // Read fresh every frame rather than cached: unlike the texture resolution, the scene viewport
     // can change (an editor panel resize) without a full onRenderTargetsChanged notification. A

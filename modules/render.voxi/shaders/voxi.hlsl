@@ -1190,9 +1190,12 @@ bool rtReprojectAo(float3 wpos, float2 pixel, out float hist, out float2 velocit
 // lookup. Ambient occlusion tolerates a stale sample better than a shadow edge does, not worse.
 float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays) {
     const float fresh = rtSkyOcclusion(wpos, N, pixel, rays);
-    // The slots are null when this frame did not bind them (VoxiRenderer::beginShadowHistory);
-    // touching a null UAV is not merely wasteful, it is undefined. Same gate the shadow path uses.
-    if (gRtHistParams.x < 0.5) return fresh;
+    // gRtDenoiseParams.w, NOT gRtHistParams.x, and the difference matters: the shadow and
+    // reflection pairs exist at every ray-tracing tier, but this one is allocated only where the
+    // ray is actually traced -- High and Epic. At Low and Medium the slots are genuinely absent,
+    // and touching a null UAV is undefined rather than merely wasteful. Returning the fresh trace
+    // is also the correct answer there: with no history there is nothing to accumulate against.
+    if (gRtDenoiseParams.w < 0.5) return fresh;
 
     const float curDepth = mul(float4(wpos, 1.0), gViewProj).w;
     float vis = fresh;

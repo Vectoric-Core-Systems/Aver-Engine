@@ -970,7 +970,11 @@ private:
         // pixels (0 = off), y = how much of the filtered value to take (0 discards it while
         // still paying for the taps, which is how the cost is measured before the filter is
         // trusted), z = how fast to taper the filter off as the gather centre's reprojection
-        // velocity rises (0 = no taper, the behaviour before the knob existed), w unused.
+        // velocity rises (0 = no taper, the behaviour before the knob existed);
+        // w = 1 while the AMBIENT history pair is bound this frame. It needs its own bit rather
+        // than riding gRtHistParams.x with the shadow and reflection pairs, because unlike those
+        // two it is allocated only at the tiers that trace the sky-occlusion ray -- High and
+        // Epic; see aoHistoryWanted().
         f32 rtDenoiseParams[4] = {};
         // Ray-driven bounce control -- mirrored as gRtBounceParams. x = how many bounces a ray
         // takes AFTER the first hit (1 is one bounce, which is what reflections already do);
@@ -1272,6 +1276,13 @@ private:
     // off -- and VRAM pressure severe enough to force eviction looks exactly like an unexplained
     // frame-rate drop, which is the complaint that led here.
     bool rayTracingWanted() const { return rtSupported_ && settings_.rayTracing != Quality::Off; }
+    // The AMBIENT history pair is wanted only where the ray that fills it is traced -- High and Epic.
+    // Low and Medium keep the cone gather's own occlusion (giSkyOcclusionRaysForQuality returns 0),
+    // and allocating a pair they never write is 112 MB of full-screen target at 3532x1987 held for a
+    // feature that does not run. That is the same argument ensureShadowHistory already makes for
+    // releasing all of them when ray tracing is off, and the tiers it applies to are precisely the
+    // ones most likely to be memory-bound.
+    bool aoHistoryWanted() const { return rayTracingWanted() && settings_.giSkyOcclusionRays > 0; }
     // PATH TRACING WANTED, which is a different question from ray tracing wanted and deliberately
     // asks the other setting. Both need the hardware -- a path tracer is built out of rays -- but
     // a project may want ray-traced shadows and no path tracing at all, which is the default.
@@ -1297,10 +1308,13 @@ private:
     // rtShadowTemporal exactly as PSMainVoxi does, so it needs the history prepared and bound --
     // asking suppressesScene() here would leave it sampling and writing resources this frame never
     // transitioned.
+    // DELIBERATELY DOES NOT REQUIRE THE AMBIENT PAIR. It gates the shadow and reflection histories,
+    // which exist at every ray-tracing tier; the ambient pair exists only at High and Epic, so
+    // requiring it here would switch SHADOW accumulation off at Low and Medium as a side effect.
+    // The ambient path has its own flag, gRtDenoiseParams.w -- see beginShadowHistory.
     bool shadowHistoryActive() const {
         return rtActive_ && rtShadowHist_[0] && rtShadowHist_[1] &&
-               rtReflHist_[0] && rtReflHist_[1] &&
-               rtAoHist_[0] && rtAoHist_[1] && !debugViewActive();
+               rtReflHist_[0] && rtReflHist_[1] && !debugViewActive();
     }
     // Swaps the read/write roles, transitions all six textures, rebinds them and sets
     // cb_.prevViewProj / rtHistParams for this frame. Called before shadowPass() so the UAVs are
