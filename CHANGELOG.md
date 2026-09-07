@@ -21,9 +21,10 @@ usually how long something had been quietly not working.
 
 - **The default renderer samples real textures.** Ray-driven primary visibility shaded every hit
   with a per-material average colour; a brick wall and a painted wall were the same wall. Against a
-  raster reference on ElectricDreams, mean absolute difference fell from **16.76 to 6.06** out of 255,
-  and pixels differing by more than 24 codes from **30.82% to 3.65%**. Reflections and glass panes
-  sample textures too, through the same table.
+  raster reference on ElectricDreams, mean absolute difference fell from **16.76 to 7.48** out of 255
+  — that is the settled figure after the world-aligned-UV fix landed the same day and brought the
+  remaining seven texture slots into the comparison. Reflections and glass panes sample textures too,
+  through the same table.
 - **And it got faster.** Mip selection moved to ray differentials, which is both the correct answer
   and a cheaper one: whole-frame median **11.96 ms → 8.14 ms** on ElectricDreams (−32%), 15.47 ms →
   14.21 ms on PTTest. Texturing's own cost went from 4.1 ms to **0.3 ms** over the untextured path.
@@ -51,7 +52,7 @@ usually how long something had been quietly not working.
   Hill ACES fit gives **+13% mean saturation** at essentially equal brightness.
 - **Water and glass tint what is behind them.** Absorption is per-channel over a ray-measured path
   length instead of a flat surface colour or a colourless darkness scalar. Glass edge-on greenness
-  **+0.138** against +0.002 for a low-iron control; the pool floor's shadow went (19,33,42) →
+  **+0.118** against +0.002 for a low-iron control; the pool floor's shadow went (19,33,42) →
   (33,40,49); magenta pixels across three test cameras went from tens of thousands to **0**.
 - **Water is a material, not a renderer.** It drew through a bespoke pass bolted on beside the
   pipeline, which is why it never cast a ray-traced shadow, never reached GI, and was invisible to
