@@ -2465,6 +2465,15 @@ public:
                           "This is a stopwatch for attributing PSRayDriven's cost, not a quality "
                           "setting -- see AVER_RD_ABLATE in voxi.hlsl.", rdAblate_);
             }
+            // Unlike --rd-ablate this is NOT a shader define, so it does not have to precede
+            // init() -- but it is set here anyway, beside its sibling, so both measurement
+            // dials are handed over in one place rather than one here and one somewhere else.
+            if (rtDenoiseMotionTaper_ > 0.0f) {
+                voxiRenderer_.setRtDenoiseMotionTaper(rtDenoiseMotionTaper_);
+                AVER_INFO("[Sandbox] --rt-denoise-motion {}: the shadow denoiser will fade out "
+                          "as the gather centre reprojects. 0 (the default) is no taper.",
+                          rtDenoiseMotionTaper_);
+            }
             if (voxiRenderer_.init(*e.device())) {
                 e.device()->addRenderFeature(&voxiRenderer_);
                 voxiAttached_ = true;
@@ -7290,6 +7299,9 @@ public:
     // --rd-ablate: forwarded to voxiRenderer_ BEFORE init(), because it becomes a shader define and
     // the pipelines are compiled once there. Setting it later would be silently inert.
     void setRayDrivenAblation(int m) { rdAblate_ = m; }
+    // --rt-denoise-motion: forwarded to Voxi where --rd-ablate is, and for the same reason --
+    // both are measurement dials that have to be set before the renderer composes a frame.
+    void setRtDenoiseMotionTaper(f32 v) { rtDenoiseMotionTaper_ = v; }
     // --refraction / --refraction-strength / --refraction-fade. -1 in any of them means "not given".
     void setRefractionOverrides(int mode, f32 strength, f32 fade) {
         refractionOverride_ = mode; refractionStrengthOverride_ = strength; refractionFadeOverride_ = fade;
@@ -22499,6 +22511,7 @@ private:
     std::unique_ptr<aver::sr::FxaaResolve> edgeAaUpscaler_;
 #endif
     int  rdAblate_=0;                // --rd-ablate: AVER_RD_ABLATE for PSRayDriven, 0 = normal
+    f32  rtDenoiseMotionTaper_=0.0f; // --rt-denoise-motion: 0 = no taper, the shipped default
     bool ptSceneViewYieldLogged_=false;   // say once, per mode change, that the PT view yielded
     int  refractionOverride_=-1;     // --refraction: -1 not given, else the mode
     f32  refractionStrengthOverride_=-1.0f;
@@ -25301,8 +25314,13 @@ Application* createApplication(int argc, char** argv) {
     // checked in its own full-length loop too, or a trailing --gpu-timing would be silently ignored --
     // the exact shape of the --no-rt/--no-gi bug this file already paid for once.
     bool gpuTimingArg = false;
+    f32 rtDenoiseMotionArg = 0.0f;   // --rt-denoise-motion, 0 = the shipped default (no taper)
     for (int i = 1; i + 1 < argc; ++i) {
         if (!std::strcmp(argv[i], "--rd-ablate"))            rdAblate = std::atoi(argv[i + 1]);
+        // --rt-denoise-motion F: see VoxiRenderer::setRtDenoiseMotionTaper. In THIS loop rather than
+        // the chain below for the reason stated at the top of it -- that chain is at MSVC's nesting
+        // limit and one more else-if there is a hard compile error.
+        if (!std::strcmp(argv[i], "--rt-denoise-motion"))     rtDenoiseMotionArg = (f32)std::atof(argv[i + 1]);
         if (!std::strcmp(argv[i], "--resize-cycle"))         resizeCycleArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--pie-camera-test"))      pieCamArg = std::atoi(argv[i + 1]);
         if (!std::strcmp(argv[i], "--input-stuck-test"))     inputStuckArg = std::atoi(argv[i + 1]);
@@ -26240,6 +26258,7 @@ Application* createApplication(int argc, char** argv) {
     app->setGiUpdateInterval(giUpdateInterval);
     app->setRtForceOff(noRt);
     app->setRayDrivenAblation(rdAblate);
+    app->setRtDenoiseMotionTaper(rtDenoiseMotionArg);
     app->setRefractionOverrides(refraction, refractionStrength, refractionFade);
     app->setCamWobble(camWobbleDeg, camWobblePeriod);
     app->setRenderScale(renderScale);

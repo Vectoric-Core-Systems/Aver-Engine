@@ -414,6 +414,21 @@ void VoxiRenderer::shutdown() {
     if (shadowTex_) res_->destroyTexture(shadowTex_);
     if (giShadowTex_) res_->destroyTexture(giShadowTex_);
     voxelAccumTex_ = voxelTex_ = shadowTex_ = giShadowTex_ = 0;
+    // THE THREE HISTORY PAIRS, WHICH THIS FUNCTION HAS NEVER FREED. Six full-screen textures --
+    // ensureShadowHistory's own comment prices four of them at ~225 MB at 3532x1987, and there are
+    // six now -- released only when ray tracing was switched OFF at runtime, never on the way out.
+    // Exactly the bug the pipeline list above records closing three times in this same function
+    // ("zeroing a handle LOOKS like releasing it"), and the reason it hid here is the same: the
+    // handles are cleared by the destructor's own member init, so nothing looked wrong.
+    //
+    // MATTERS BEYOND PROCESS EXIT: the editor can shut a render feature down and re-init it while
+    // running, so this was a per-cycle leak of a third of a gigabyte, not a one-off at teardown.
+    for (rhi::TextureHandle& t : rtShadowHist_) { if (t) res_->destroyTexture(t); t = 0; }
+    for (rhi::TextureHandle& t : rtReflHist_)   { if (t) res_->destroyTexture(t); t = 0; }
+    for (rhi::TextureHandle& t : rtAoHist_)     { if (t) res_->destroyTexture(t); t = 0; }
+    rtShadowHistW_ = rtShadowHistH_ = 0;
+    rtHistWriteIdx_ = 0;
+    rtHistValid_ = false;
 
     // Acceleration structures are released with the factory itself: only the handles are dropped.
     blas_.clear();
@@ -3161,9 +3176,11 @@ bool VoxiRenderer::createVoxelVolume(u32 resolution) {
     if (giShadowTex_) res_->setSrv(bindings_, 8, giShadowTex_);   // t8, the GI-only shadow map
     res_->setUav(bindings_, 0, voxelTex_, 0);
     res_->setUav(bindings_, 1, voxelAccumTex_, 0);
-    // t6/u2 (rtShadowHist_) and t7/u3 (rtReflHist_) are populated once onRenderTargetsChanged
-    // creates them -- the resolution is not known this early, and the slots are declared above so
-    // Tier 1 null-fills them correctly until then.
+    // t6/u2 (rtShadowHist_), t7/u3 (rtReflHist_) and t11/u4 (rtAoHist_) are populated once
+    // onRenderTargetsChanged creates them -- the resolution is not known this early, and the
+    // slots are declared above so Tier 1 null-fills them correctly until then. THREE pairs, not
+    // two: the ambient one arrived with temporal sky occlusion and this list is the kind that
+    // quietly goes one short.
 
     // The clear and the resolve get UAV-only sets: while they run every mip of the volume is in
     // UnorderedAccess, so no SRV descriptor over it may be live.

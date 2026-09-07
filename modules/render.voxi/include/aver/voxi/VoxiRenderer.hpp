@@ -120,6 +120,13 @@ public:
     // shader define and the pipelines are compiled once there. Any non-zero value renders a
     // deliberately WRONG frame; it exists to be timed, never to be shipped or wired to a quality tier.
     void setRayDrivenAblation(u32 mode) { rdAblate_ = mode; }
+    // --rt-denoise-motion: how fast the spatial shadow filter tapers off with the gather centre's
+    // reprojection velocity. 0 = no taper, which is the shipped default. A MEASUREMENT DIAL, and it
+    // needed this setter to actually be one: the field's own comment claimed it existed so the
+    // filter's motion contribution could be isolated "at runtime instead of by rebuilding with a
+    // line commented out", while nothing outside this class could set it. That is the same
+    // knob-with-no-plumbing shape giSkyOcclusionRays and giSkyOcclusionTile were both caught in.
+    void setRtDenoiseMotionTaper(f32 v) { rtDenoiseMotionTaper_ = v; }
 
     void setFrameTimeReport(bool on) { frameTimeReport_ = on; }
 
@@ -980,8 +987,10 @@ private:
         // Ambient control -- mirrored as gAmbientParams. x = how many sky-visibility rays the
         // ambient term traces per pixel, 0 meaning "use the cone gather's own occlusion", which is
         // what every tier below the top does and what this renderer did before the rays existed.
-        // y/z/w spare, and genuinely so TODAY -- see the giParams note above for what happens when
-        // that sentence stops being true and nobody edits it.
+        // y IS THE COHERENCE TILE EDGE the sky-occlusion rays share a direction across (1 = a fresh
+        // direction per pixel, the identity). It was claimed spare here while already being read by
+        // the shader -- which is precisely what the giParams note above warns happens to a row
+        // described as free. z/w are what is left, and that warning still applies to them.
         //
         // Its own float4, not a spare component of gRtDenoiseParams or gGiShadowParams, for the
         // reason ptBounceParams states: a field whose name says "denoise" carrying a ray count
