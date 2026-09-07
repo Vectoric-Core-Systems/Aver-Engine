@@ -1401,7 +1401,17 @@ public:
     // that genuinely never ends -- costs seconds rather than the session.
     bool startupComplete() const override {
         if (lastSceneDrawn_ < 0) return false;             // no frame has walked the scene yet
-        if (projectPath_.empty()) return true;             // nothing was asked to load
+        // THE LIVE PROJECT, NOT THE COMMAND LINE. projectPath_ is set once from argv and is empty
+        // for every project opened through the browser -- so asking it here answered "nothing was
+        // asked to load" for the most common way a project is actually opened, and the loading
+        // screen lifted on the first walked frame with the whole load still ahead of it. That is
+        // the midway disappearance, moved rather than fixed: the startup path was cured and the
+        // browser path still had it. project_ is assigned at the top of applyProject and tracks
+        // opens and switches, which is the same reason handleOpenRequest reads it instead.
+        // A FAILED OPEN leaves it empty and falls out here after one frame, which is right: there
+        // is nothing arriving to wait for, and the alternative is holding a splash over an error
+        // until the engine's 600-frame warm-up cap expires.
+        if (project_.manifestPath.empty()) return true;    // no project is loading
         if (lastSceneDrawn_ == 0) return false;            // walked, but nothing has drawn yet
         constexpr int kSettleFrames = 8;
         // Mutable because this is asked once per warm-up frame and there is nowhere else to tick
@@ -4624,7 +4634,27 @@ public:
         // startupComplete: hold until the draw count has stopped changing, so it covers the tail of
         // the load rather than the head. startupComplete() also ticks the settle counters, and asking
         // it here is deliberate -- one implementation of "has this finished", not two that drift.
-        if (projectLoading_ && startupComplete()) projectLoading_.reset();
+        //
+        // A BORROWED SCREEN IS NOT OURS TO TIME, and the short-circuit is the point: during a
+        // command-line load Engine::run's warm-up loop is already calling startupComplete() once a
+        // frame, so a second call from here would tick the settle counter TWICE per frame and halve
+        // the tail it is supposed to wait through. Follow the engine's own splash instead, and drop
+        // the wrapper when that closes so the log sink stops routing into a window that is gone.
+        //
+        // AND IT IS CAPPED, because the settle rule alone can never fire on a project that draws
+        // nothing: an empty start map, or one whose meshes all failed to load, leaves the draw count
+        // at zero forever, and a top-most splash that never comes down is worse than one that comes
+        // down early -- the editor is running behind it and unreachable. The startup path has this
+        // cap already (Engine's 600-frame warm-up bound); the browser path had nothing, so it gets
+        // the same number for the same reason.
+        constexpr int kLoadingScreenFrameCap = 600;
+        if (projectLoading_) {
+            if (projectLoading_->borrowed) {
+                if (!projectLoading_->borrowed->loadingScreenActive()) projectLoading_.reset();
+            } else if (++projectLoadingFrames_ >= kLoadingScreenFrameCap || startupComplete()) {
+                projectLoading_.reset();
+            }
+        }
 
         applyStartMode();
         e.device()->setWireframe(wireframe_);
@@ -7496,6 +7526,7 @@ private:
         // at must not count as this one already being finished.
         startupSettleCount_ = -2;
         startupSettleFrames_ = 0;
+        projectLoadingFrames_ = 0;
         LoadingScreen& loading = *projectLoading_;
         loading.stage("Opening project");
 
@@ -25131,6 +25162,8 @@ private:
     // The project-open loading screen, alive from applyProject until the scene settles. Null the
     // rest of the time; see applyProject for why it is not a local any more.
     std::unique_ptr<struct LoadingScreen> projectLoading_;
+    // Frames the OWNED project loading screen has been up; see onRender for why it is capped.
+    int projectLoadingFrames_ = 0;
     int lastSceneCulled_=-1;          // and the cull count, so a frustum bug shows as a number rather than a gap
     int lastSceneOwnerHidden_=-1;     // and the owner-hide count, so a stuck `hidden=owner` mesh shows as a number too
 #endif
