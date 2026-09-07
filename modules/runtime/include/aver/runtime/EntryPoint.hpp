@@ -4,6 +4,7 @@
 #include "Application.hpp"
 #include "aver/core/CrashReport.hpp"
 #include "aver/core/Version.hpp"
+#include "aver/platform/Console.hpp"
 
 #include <string>
 
@@ -33,6 +34,16 @@ int main(int argc, char** argv) {
         }
         aver::crash::install(cfg);
     }
+
+    // A CONSOLE NOBODY ASKED FOR IS NOISE. Launched from Explorer or a shortcut, a console-subsystem
+    // program gets a black window of its own beside the editor for the whole session. This hides it
+    // only when this process is the sole owner -- a run from a terminal, or one a script is piping,
+    // keeps its console because that window belongs to the parent. See hideOwnConsoleWindow.
+    //
+    // AFTER crash::install and BEFORE createApplication: the crash handler must be armed first (its
+    // own comment says why), and createApplication is the first thing that logs, so doing it here
+    // means the window is gone before anything would have appeared in it.
+    aver::platform::hideOwnConsoleWindow();
 
     aver::Application* app = aver::createApplication(argc, argv);
     if (!app) return 1;

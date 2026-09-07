@@ -1282,10 +1282,16 @@ public:
         // single AVER_* call from inside here deadlocks against itself -- a trap this file has
         // already been caught by once. Nothing below logs: setLoadingStatus sets a string and pumps
         // a message queue, and the splash has no custom WndProc to log from.
-        if (self->engineForSplash_ && level >= LogLevel::Info &&
-            std::this_thread::get_id() == self->mainThreadId_ &&
-            self->engineForSplash_->loadingScreenActive()) {
-            self->engineForSplash_->setLoadingStatus(splashTextFor(msg));
+        // EITHER LOADING SCREEN, whichever is up. There are two: the engine's startup splash, which
+        // applyProject BORROWS when a project is named on the command line, and the one applyProject
+        // owns when a project is opened from the browser frames later. Only forwarding to the first
+        // meant a browser-opened project showed its six stage names and none of the assets, which is
+        // the case a user actually watches most often.
+        if (level >= LogLevel::Info && std::this_thread::get_id() == self->mainThreadId_) {
+            const std::string text = splashTextFor(msg);
+            if (self->projectLoading_) self->projectLoading_->stage(text.c_str());
+            else if (self->engineForSplash_ && self->engineForSplash_->loadingScreenActive())
+                self->engineForSplash_->setLoadingStatus(text);
         }
 
         // GRAPH PRINTS ALSO GO ON SCREEN. Visual scripting had no debugging surface at all: a Print
@@ -4614,6 +4620,12 @@ public:
         // first point after those run that has a device -- see applyLandscapeRect's own comment.
         flushLandscapeInvalidate(e);
 #endif
+        // THE PROJECT LOADING SCREEN COMES DOWN HERE, not when applyProject returned. Same rule as
+        // startupComplete: hold until the draw count has stopped changing, so it covers the tail of
+        // the load rather than the head. startupComplete() also ticks the settle counters, and asking
+        // it here is deliberate -- one implementation of "has this finished", not two that drift.
+        if (projectLoading_ && startupComplete()) projectLoading_.reset();
+
         applyStartMode();
         e.device()->setWireframe(wireframe_);
         // UNLIT for the whole scene pass, alongside wireframe. setUnlit has been implemented on
@@ -7472,8 +7484,19 @@ private:
         // backslash (C4129) and asked for "...binsplash.png", which never existed. The loading screen
         // has drawn with no image since it was written; the identical mistake was in GameApp.cpp's
         // script-directory test, both reported by the compiler on every build and never read.
-        LoadingScreen loading(e, e.window() != nullptr && maxFrames_ == 0,
-                              executableDir() + "\\splash.png");
+        // A MEMBER, NOT A LOCAL, and that is the fix for it vanishing midway. Scoped to this
+        // function it closed when the STAGED work ended -- and the staged work is the head of the
+        // load, not the tail: meshes, materials and the first voxelisation keep arriving over the
+        // frames after applyProject returns, which is exactly what was still appearing behind a
+        // screen that had already gone. It is closed from the frame loop instead, on the same "the
+        // draw count stopped changing" rule startupComplete uses for the startup splash.
+        projectLoading_ = std::make_unique<LoadingScreen>(
+            e, e.window() != nullptr && maxFrames_ == 0, executableDir() + "\\splash.png");
+        // Restart the settle detector: this is a NEW load, and whatever the previous scene settled
+        // at must not count as this one already being finished.
+        startupSettleCount_ = -2;
+        startupSettleFrames_ = 0;
+        LoadingScreen& loading = *projectLoading_;
         loading.stage("Opening project");
 
         project_ = browser_.project();
@@ -25105,6 +25128,9 @@ private:
     // startupComplete's settle detector; see it for why these are mutable and why a frame count.
     mutable int startupSettleCount_ = -2;   // -2 so it cannot match lastSceneDrawn_'s -1 start
     mutable int startupSettleFrames_ = 0;
+    // The project-open loading screen, alive from applyProject until the scene settles. Null the
+    // rest of the time; see applyProject for why it is not a local any more.
+    std::unique_ptr<struct LoadingScreen> projectLoading_;
     int lastSceneCulled_=-1;          // and the cull count, so a frustum bug shows as a number rather than a gap
     int lastSceneOwnerHidden_=-1;     // and the owner-hide count, so a stuck `hidden=owner` mesh shows as a number too
 #endif
