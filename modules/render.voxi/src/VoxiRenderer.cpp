@@ -1860,8 +1860,18 @@ u32 VoxiRenderer::giCacheFlush() {
 void VoxiRenderer::takeGiSnapshot() {
     giDrawsSubKeys(giDrawsCount_, giDrawsMeshKey_, giDrawsWorldKey_, giDrawsMatKey_);
     // The mesh multiset itself, so giSnapshotUnchanged can say WHICH draws came and went rather
-    // than only that the count moved. Three hypotheses have now been refuted by measurement here
-    // (frustum culling, submission order, occlusion bucketing); naming the handles ends the guessing.
+    // than only that the count moved. FIVE hypotheses have now been refuted by measurement here --
+    // frustum culling, submission order, occlusion bucketing, and most recently the GPU per-cluster
+    // path (which does skip drawMesh(), the only route to submitDraw, so it LOOKED decisive:
+    // --no-lod-mesh-shader under a six-degree wobble reproduces the axis census digit for digit,
+    // 269 vs 267 and 269 vs 274, so it is not that either).
+    //
+    // WHAT THE CENSUS ACTUALLY SAYS, and it is worth writing down because every guess so far has
+    // ignored it: all four axes move on EVERY rejection and the count moves with them. Transforms
+    // and materials are not drifting -- the SET is changing, by a handful of meshes out of ~269, in
+    // consecutive runs of handles that look like one source mesh's split parts. The next step is not
+    // a sixth hypothesis: it is to report WHY a handle left, from the site that decided it, since
+    // this end of the pipe can only ever say that it did.
     giSnapMeshes_.clear();
     for (const Draw& d : drawsPrev_) {
         if (!giVoxelisedDraw(d)) continue;
