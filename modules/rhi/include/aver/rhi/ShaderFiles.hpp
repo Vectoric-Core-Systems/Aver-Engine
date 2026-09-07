@@ -42,6 +42,26 @@ namespace aver::rhi {
 // two errors describing one cause is better than an abort that describes none.
 const std::string& shaderFile(std::string_view name);
 
+// A hash of EVERY shader file that could take part in a compile, for a cache key to fold in.
+//
+// WHY A BLOB CACHE NEEDS THIS. The DXIL cache keys on the source text handed to DXC plus the defines
+// -- which was the whole input back when shader composition was C++ string concatenation and that
+// text really did contain every prelude. It is not any more: a shader pulls in what it needs, and an
+// edit to an included or concatenated PRELUDE leaves the top-level text byte-identical. The key does
+// not move, the cache hits, and DXC is never asked -- so the edit is silently ignored, for every
+// shader, until something else happens to change a key.
+//
+// That is not a stale-cache annoyance, it is a correctness hole: shared_prelude.hlsl holds the sky,
+// the fog, the tonemap and the frame constant buffer, so editing any of them appeared to do nothing.
+// It cost a real debugging session before it was found.
+//
+// COARSE ON PURPOSE. Any shader edit invalidates every entry rather than just the dependents, which
+// costs one full recompile after a change to any shader. Tracking real dependencies would mean
+// knowing a file's includes BEFORE compiling it to look it up -- the chicken-and-egg the include
+// handler cannot answer -- and a shader edit is a developer action measured in seconds either way.
+// Computed once and memoised; reloadShaderFiles() drops it along with the texts.
+u64 shaderCorpusHash();
+
 // Points shaderFile() at a directory to read from BEFORE `<executableDir>/shaders/`.
 //
 // For iterating on shaders without rebuilding: aim it at the source tree and the next reload picks

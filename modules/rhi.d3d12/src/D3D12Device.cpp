@@ -126,8 +126,16 @@ public:
     // SM6 target and requires DXC. `define` is a semicolon-separated -D list.
     //
     // Blob cache: MEASURED BEFORE IT WAS BUILT -- 64 compiles, 5,601ms on a PTTest launch, no cache
-    // of any kind. Key is the WHOLE input (composed source, -D list, entry, target profile, a
-    // hand-bumped format version) so nothing needs invalidating -- a changed input just misses.
+    // of any kind. Key is the whole input: source, -D list, entry, target profile, a hand-bumped
+    // format version, and a hash of every shader FILE (see below).
+    //
+    // "COMPOSED SOURCE" STOPPED BEING THE WHOLE INPUT and this comment said it was. When shaders were
+    // C++ string literals, `src` really did contain every prelude, so a changed prelude changed the
+    // key. Once shaders became files that pull in what they need, `src` is the top-level text alone
+    // -- and an edit to shared_prelude.hlsl (the sky, the fog, the tonemap, the frame constant
+    // buffer) left every key identical. The cache hit, DXC was never asked, and the edit did nothing,
+    // silently, for every shader. That is a correctness hole rather than a stale-cache annoyance, and
+    // it cost a debugging session before it was found: a sky change measured as a no-op three times.
     //
     // kCacheVersion is the dxcompiler.dll escape hatch: a newer DXC can emit different DXIL for
     // identical input, invisible to the cache. Bump it when the shipped compiler changes.
@@ -141,6 +149,10 @@ public:
         };
         const u32 v = kCacheVersion;
         mix(reinterpret_cast<const char*>(&v), sizeof v);
+        // Every shader file, not just this one's own text -- see the note above. Memoised, so this is
+        // one directory walk per process however many pipelines are built.
+        const u64 corpus = shaderCorpusHash();
+        mix(reinterpret_cast<const char*>(&corpus), sizeof corpus);
         mix(src, std::strlen(src));
         mix(entry, std::strlen(entry));
         mix(target, std::strlen(target));

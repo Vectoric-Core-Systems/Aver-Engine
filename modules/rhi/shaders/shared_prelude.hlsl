@@ -374,6 +374,27 @@ float3 averGroundRadiance() {
     return albedo * E / PI;
 }
 
+// The ground as the PHYSICAL model should see it: the same albedo, lit by a sun that has actually
+// travelled through the atmosphere to reach it.
+//
+// THE ONE LINE THAT SEPARATES THIS FROM averGroundRadiance IS sunT, AND IT IS THE WHOLE BUG. That
+// function multiplies the albedo by averSunRadiance() at full strength -- the sun as if no air stood
+// between it and the ground. A neutral 0.24 albedo under a 1.0/0.98/0.92 sun at 100k lux lands on
+// warm cream at EVERY sun elevation, including a sunset where the real ground is deep red-brown and
+// a fraction as bright. That is why an earlier attempt to blend the lower hemisphere toward it was
+// reported back as "brown" and abandoned: the blend was not the mistake, the sun feeding it was.
+//
+// Passing the same transmittance the sky march already computes makes the ground track the sun it is
+// actually lit by -- dim and red at sunset, bright and neutral at noon -- which is what lets it be
+// composited without dragging cream across the bottom of the frame.
+float3 averGroundRadianceLit(float3 sunT) {
+    if (averFurnaceOn()) return averFurnaceL();
+    float3 albedo = srgbToLin(gGroundColor.rgb);
+    float  ndl    = saturate(normalize(gLightDir.xyz).z);
+    float3 E = averSunRadiance() * sunT * ndl + PI * averSkyAbove(float3(0, 0, 0.5)) * gAmbient.r;
+    return albedo * E / PI;
+}
+
 // The whole authored dome: sky above the horizon, fading to the lit ground below it.
 float3 skyColorFull(float3 dir)
 {
@@ -394,15 +415,23 @@ float3 skyColorFull(float3 dir)
 // the bright band across the horizon and the warm brown below it -- two separate wrongs filling half
 // the view.
 //
-// Marched as authored now. A ray that meets the planet STOPS at the planet, so the air in front of
-// the ground is the air actually there: metres of it looking steeply down, tens of kilometres just
-// under the horizon. The ground is then composited the way every other surface in this file is --
-// background * transmittance + inscatter, exactly what averApplyFog does -- instead of replacing the
-// sky outright. Distant ground veils to the horizon's own colour, near ground does not, so the
-// effect follows the view instead of being stamped on at a constant angle. It also means the haze
-// only takes over the horizon once there is real distance to look through, which is the scale
-// argument: at room and arena size there is nothing between you and the ground to scatter, and the
-// band that used to sit there was never earned.
+// THAT PARAGRAPH USED TO SAY THE RAY IS MARCHED TO THE PLANET AND THE GROUND COMPOSITED IN FRONT
+// OF IT. It is not, and has not been since the horizon-seam fix below replaced it -- cosV is pinned
+// to 0 for the whole lower hemisphere, and until now nothing was composited over the result. The
+// comment survived the change and described the code as doing the opposite of what it does, which is
+// the class of mistake this file treats as a defect rather than untidiness.
+//
+// What the pinned march actually produces is the horizon-grazing colour, everywhere below the
+// horizon, flat. That closes the seam -- both sides evaluate the identical integral at dir.z = 0 --
+// but the horizon is the BRIGHTEST direction the model can return, because it is the longest path
+// through air toward the sun. Painting the entire lower hemisphere with it makes the bottom of the
+// frame the brightest thing on screen, which is backwards for any real view and was reported as the
+// void being far too bright: looking straight down at a sunset read 220,157,118.
+//
+// So the march stays pinned and a GROUND TERM is composited over it, weighted by how far below the
+// horizon the ray points -- zero AT the horizon, so the seam the pinning exists to close stays
+// closed, and full looking straight down. See averGroundRadianceLit for why this does not bring back
+// the cream that sank the earlier attempt.
 //
 // ABOVE THE HORIZON THIS IS BIT-IDENTICAL TO WHAT IT REPLACED. For dir.z >= 0 the planet's near root
 // is behind the camera, so tMax is still the far root of the atmosphere shell and cosV still equals
@@ -515,12 +544,23 @@ float3 averSkyPhysical(float3 dir) {
     // geometry, and the dome's ground only means anything zoomed out far enough for the planet to be
     // a planet.
     //
-    // So there is no ground term here at all. `sky` already IS the right answer, on its own: cosV is
-    // pinned to 0 for the entire lower hemisphere (the fix above), so every downward direction
-    // integrates the identical horizon-grazing path and returns the identical, correctly-coloured
-    // haze -- flat, yes, but flat and RIGHT is a better answer than graded and brown, and it is the
-    // same haze colour the sky immediately above the horizon is already drawing, so there is no seam
-    // to paper over with a second blend.
+    // THE GROUND, COMPOSITED OVER THE PINNED MARCH RATHER THAN REPLACING IT. The paragraph above
+    // argued there should be no ground term because the only one available went cream -- true of
+    // averGroundRadiance, and fixed by averGroundRadianceLit, which lights the same albedo with a sun
+    // that has been through the air. What is left of that argument still holds and is why this is a
+    // BLEND and not a substitution: the haze in front of distant ground is real, and just under the
+    // horizon there are tens of kilometres of it.
+    //
+    // WEIGHTED BY DEPTH BELOW THE HORIZON, AND ZERO AT IT. smoothstep(0, 0.45, -dir.z) is 0 for every
+    // ray at or above the horizon, so this cannot reopen the seam the cosV pinning exists to close --
+    // above the horizon this function is bit-identical to what it was. It reaches full weight around
+    // 27 degrees down, by which point there is little air left to look through and what you are
+    // looking at is the ground, not the sky beyond it.
+    //
+    // gGroundColor.a is the authored "how much of the ground replaces the sky" and is respected, so a
+    // project that wants the old flat haze sets it to 0 and gets exactly that.
+    const float below = smoothstep(0.0, 0.45, saturate(-dir.z)) * gGroundColor.a;
+    if (below > 0.0) sky = lerp(sky, averGroundRadianceLit(groundSunT), below);
     return sky;
 }
 

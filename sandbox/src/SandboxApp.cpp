@@ -1295,12 +1295,17 @@ public:
     BootConfig config() const override {
         BootConfig c; c.windowTitle="Aver Engine \xE2\x80\x94 Editor"; c.windowWidth=1600; c.windowHeight=900;
         c.maxFrames=maxFrames_; c.headless=headless_; c.useWarp=useWarp_;
-        // FULLSCREEN FOR A PERSON, WINDOWED FOR A MEASUREMENT. maxFrames_ != 0 is a bounded capture
-        // run (--frames), which is also the run every recorded gate baseline was measured through --
-        // its probes are pixels at a fixed rect in a fixed client area. WindowDesc::fullscreen
-        // enforces the same rule again from `activate`, so this is belt and braces rather than the
-        // only guard. --windowed opts an interactive run out.
-        c.fullscreen = !windowedOverride_ && maxFrames_ == 0;
+        // WINDOWED, and borderless fullscreen only when it is ASKED FOR. This was the other way
+        // round -- an interactive run started borderless-fullscreen and --windowed opted out --
+        // which is the wrong default for an editor: it covers the taskbar and whatever the user
+        // was reading beside it, and an editor is a tool you sit next to other windows, not a
+        // game you launch into. --fullscreen asks for it explicitly now.
+        //
+        // maxFrames_ == 0 IS STILL PART OF THE TEST, and stays here rather than being dropped as
+        // redundant: a bounded capture run (--frames) is how every recorded gate baseline was
+        // measured, and its probes are pixels at a fixed rect in a fixed client area. Even an
+        // explicit --fullscreen must not reshape the window under a measurement.
+        c.fullscreen = fullscreenOverride_ && maxFrames_ == 0;
         c.enableDebugLayer=debugLayer_;
         c.backend = backendName_.empty() ? nullptr : backendName_.c_str();
         return c;
@@ -1329,7 +1334,8 @@ public:
     }
 
     void setUseWarp(bool w) { useWarp_ = w; }
-    void setWindowed(bool w) { windowedOverride_ = w; }                          // --windowed
+    void setWindowed(bool w) { windowedOverride_ = w; }                          // --windowed (now the default)
+    void setFullscreen(bool f) { fullscreenOverride_ = f; }                      // --fullscreen
     void setBackend(std::string b) { backendName_ = std::move(b); }   // --backend <name>
     // --frame-budget <ms>: target frame time, and run the controller even in a bounded capture.
     void setFrameBudget(f32 ms) { frameBudgetMs_ = ms; frameBudgetForced_ = ms > 0.0f; }
@@ -22528,7 +22534,8 @@ private:
     Vec3 camPosOverride_{};
     f32  pitchOverride_=0.0f, yawOverride_=0.0f;   // radians, converted in setCamera
     bool useWarp_=false;             // --warp: run on the D3D12 software rasteriser
-    bool windowedOverride_=false;    // --windowed: opt an interactive run out of borderless fullscreen
+    bool windowedOverride_=false;    // --windowed: kept so the flag still parses; windowed is the default now
+    bool fullscreenOverride_=false;  // --fullscreen: opt an interactive run INTO borderless fullscreen
     std::string backendName_;   // --backend: which RHI backend to ask for first
     // RENDER.BACKEND as the OPEN PROJECT states it. Separate from backendName_, which is what
     // this RUN was actually launched with: editing the project's choice must not retarget the
@@ -25394,6 +25401,7 @@ Application* createApplication(int argc, char** argv) {
     // max-radiance 0 means "no clamp at all".
     int tonemapArg = -1; f32 maxRadianceArg = -1.0f;
     bool windowedArg = false;
+    bool fullscreenArg = false;
     for (int i=1;i<argc;++i){
         // HANDLED BEFORE THE else-if CHAIN BELOW, AND NOT BY PREFERENCE: one more `else if` there
         // hits MSVC's nesting limit (C1061). Anything added from here on wants this shape instead:
@@ -25427,9 +25435,14 @@ Application* createApplication(int argc, char** argv) {
         // baseline was measured through), 1 the matrixed fit that keeps saturation. See
         // PostSettings::tonemap.
         if (!std::strcmp(argv[i],"--tonemap") && i+1<argc) { tonemapArg = std::atoi(argv[++i]); continue; }
-        // --windowed: keep the old titled 1600x900 window on an interactive run. The editor is
-        // borderless-fullscreen by default now; a capture run is windowed regardless.
+        // --windowed: the DEFAULT now, kept so scripts and habits that pass it still work rather
+        // than erroring on an unknown flag. --fullscreen is the one that changes anything.
         if (!std::strcmp(argv[i],"--windowed")) { windowedArg = true; continue; }
+        // --fullscreen: borderless fullscreen on an interactive run, sized to the monitor. Off by
+        // default because an editor sits BESIDE other windows -- covering the taskbar and whatever is
+        // behind it is a game's behaviour, not a tool's. A capture run stays windowed regardless, so
+        // this cannot reshape the client area a recorded gate probe was measured in.
+        if (!std::strcmp(argv[i],"--fullscreen")) { fullscreenArg = true; continue; }
         // --max-radiance F: ceiling on scene radiance just before the tonemap; 0 disables it. The sun
         // disc is the thing this exists for -- see PostSettings::maxRadiance.
         if (!std::strcmp(argv[i],"--max-radiance") && i+1<argc) {
@@ -26247,6 +26260,7 @@ Application* createApplication(int argc, char** argv) {
     app->setGiSkyOcclusionRays(giSkyOccRays);
     app->setGiSkyOcclusionTile(giSkyOccTile);
     app->setWindowed(windowedArg);
+    app->setFullscreen(fullscreenArg);
     app->setTonemap(tonemapArg);
     app->setMaxRadiance(maxRadianceArg);
     app->setRtPixelsPerRay(rtPixelsPerRay);
