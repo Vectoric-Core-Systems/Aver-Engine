@@ -1,4 +1,11 @@
-add_executable(Sandbox
+# WIN32 -- /SUBSYSTEM:WINDOWS, so the editor never opens a console window of its own. It was a
+# console-subsystem program until 0.5.0, which meant every launch from Explorer, a shortcut or the
+# Aver Launcher put a black rectangle on screen beside the editor for the whole session.
+#
+# THE OUTPUT IS NOT LOST: EntryPoint.hpp calls attachParentConsole(), which adopts the launching
+# terminal's console when there is one and leaves redirection untouched -- see Console.hpp. gates.ps1,
+# test.ps1 and the MCP runner all capture stdout through pipes and are unaffected either way.
+add_executable(Sandbox WIN32
   src/SandboxApp.cpp
   src/AssetEditor.cpp
   src/ActorEditor.cpp
@@ -432,6 +439,10 @@ endif()
 # happens to be the one that tips it over.
 if(MSVC)
   set_source_files_properties(src/SandboxApp.cpp PROPERTIES COMPILE_OPTIONS "/bigobj")
+  # WIN32 above sets /SUBSYSTEM:WINDOWS, which makes the linker look for WinMain. The entry point
+  # this engine generates is main(), so point the CRT's startup at the one that calls it. Identical
+  # to game/CMakeLists.txt, whose comment claimed Sandbox already did this long before it did.
+  target_link_options(Sandbox PRIVATE /ENTRY:mainCRTStartup)
 endif()
 
 # The editor's own two shaders (the cluster PS and the G-buffer debug view). The same stamp

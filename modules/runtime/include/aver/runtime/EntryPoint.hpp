@@ -35,15 +35,15 @@ int main(int argc, char** argv) {
         aver::crash::install(cfg);
     }
 
-    // A CONSOLE NOBODY ASKED FOR IS NOISE. Launched from Explorer or a shortcut, a console-subsystem
-    // program gets a black window of its own beside the editor for the whole session. This hides it
-    // only when this process is the sole owner -- a run from a terminal, or one a script is piping,
-    // keeps its console because that window belongs to the parent. See hideOwnConsoleWindow.
+    // A CONSOLE NOBODY ASKED FOR IS NOISE, so both hosts are linked /SUBSYSTEM:WINDOWS and Windows
+    // never makes one. This puts the output back for the runs that want it -- a terminal, or a
+    // script reading stdout -- and does nothing when launched from Explorer or the launcher.
+    // See Console.hpp for why redirection is left strictly alone.
     //
     // AFTER crash::install and BEFORE createApplication: the crash handler must be armed first (its
-    // own comment says why), and createApplication is the first thing that logs, so doing it here
-    // means the window is gone before anything would have appeared in it.
-    aver::platform::hideOwnConsoleWindow();
+    // own comment says why), and createApplication is the first thing that logs, so attaching here
+    // means nothing has been printed yet that the console would have missed.
+    aver::platform::attachParentConsole();
 
     aver::Application* app = aver::createApplication(argc, argv);
     if (!app) return 1;
