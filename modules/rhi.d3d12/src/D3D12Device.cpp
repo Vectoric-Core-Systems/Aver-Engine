@@ -315,9 +315,15 @@ D3D12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE type) {
 // descriptor-pool sharing now go through d3d12::IUiBackend; see uiBackendWndProcThunk and
 // D3D12ResourceFactory::uiDescriptor for where each half landed.
 
-// Writes the default shading model and its parameters into the tail of a per-draw b1 block.
-void writeShadingConstants(f32* block) {
-    const u32 model = 0;   // AVER_MODEL_STANDARD in the material prelude
+// Writes the shading model and its parameters into the tail of a per-draw b1 block.
+//
+// `unlit` REACHES THE MATERIAL SHADER, which gMaterial.z alone does not. Two different shaders read
+// two different fields for the same idea: the backend's own fallback tests gMaterial.z (block[22]),
+// while anything built on the material prelude branches on gShadingModel. Writing only the first
+// left an overriding feature's shader -- Voxi's, i.e. the one that actually draws scenes -- with no
+// way to see the mode at all, which is why unlit had to be diverted away from it entirely.
+void writeShadingConstants(f32* block, bool unlit = false) {
+    const u32 model = unlit ? 1u : 0u;   // AVER_MODEL_UNLIT / AVER_MODEL_STANDARD in the prelude
     std::memcpy(block + 24, &model, sizeof(model));   // a uint in the block, not a converted float
     block[25] = 0.04f;
     block[26] = 1.0f;
@@ -3522,18 +3528,24 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
 
     for (IRenderFeature* f : features_) {
         if (!f->overridesScenePipeline() || !rhiContext_) continue;
-        // UNLIT FALLS THROUGH TO THIS BACKEND'S OWN PSO, exactly as wireframe does, and for the same
-        // structural reason rather than as a shortcut: the unlit bypass lives in the shared prelude
-        // (`gMaterial.z > 0.5`), which the backend's own shader runs and an overriding feature's does
-        // not -- Voxi's scene shader reads gMaterialFlags and gMaterial.xy and never gMaterial.z. So
-        // asking the feature for a pipeline here would hand the draw to a shader with no unlit branch
-        // in it and the mode would silently do nothing.
+        // UNLIT STAYS ON THE FEATURE'S PIPELINE. It used to break out to this backend's own PSO,
+        // on the reasoning that the unlit bypass lived only in the shared prelude's
+        // `gMaterial.z > 0.5` and Voxi's scene shader had no unlit branch to take. The premise was
+        // true and the consequence was PURE WHITE: the backend's fallback shader is compiled before
+        // the material prelude exists, so it cannot sample a base-colour texture, and the draw loops
+        // deliberately hand it gBaseColor = 1,1,1 for every authored material precisely because the
+        // real colour is supposed to arrive through a texture binding it never reads. Unlit on any
+        // textured mesh was therefore a white silhouette rather than its flat albedo.
         //
-        // Wireframe expresses the same decision one level down, inside VoxiRenderer::scenePipeline,
-        // which returns 0 when wireframe is requested. Unlit is decided here instead only because
-        // scenePipeline has no unlit parameter to decline on, and adding one would change the
-        // IRenderFeature interface for a fallthrough both sides already agree about.
-        if (unlit_) break;
+        // The material prelude has had the right mechanism the whole time -- s.display and
+        // s.displayColor, gated on gShadingModel == AVER_MODEL_UNLIT, which PSMainVoxi already
+        // checks through averDisplayColour. Nothing ever WROTE that model; writeShadingConstants
+        // hardcoded STANDARD on both backends. It is written now, so the feature's own shader
+        // resolves unlit against the sampled material and this diversion is no longer needed.
+        //
+        // Wireframe is NOT the same case and keeps its own route: it needs a different rasteriser
+        // state, not a different shading branch, and VoxiRenderer::scenePipeline declines it one
+        // level down by returning 0.
         // `blended` explicit and false: the OPAQUE scene walk. A translucent mesh never reaches here
         // -- setDrawBlended(true) diverts it into the capture-and-replay path above -- so writing
         // false out loud says so, rather than leaning on the parameter's default.
@@ -3564,7 +3576,7 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
         std::memcpy(fc, world, 16 * sizeof(f32));
         std::memcpy(fc + 16, color, 4 * sizeof(f32));
         fc[20] = metallic; fc[21] = roughness; fc[22] = unlit_ ? 1.0f : 0.0f; fc[23] = 0.0f;
-        writeShadingConstants(fc);
+        writeShadingConstants(fc, unlit_);
         rhiContext_->setConstants(kObjectConstantRegister, fc, kObjectConstantDwords);
         if (msActive_ && msPso_ && !wireframe_) rhiContext_->dispatchMeshFor(mesh);
         else                                    rhiContext_->drawMesh(mesh);
@@ -3592,7 +3604,7 @@ void D3D12Device::drawMesh(MeshHandle mesh, const f32 world[16], const f32 color
     std::memcpy(consts, world, 16 * sizeof(f32));
     std::memcpy(consts + 16, color, 4 * sizeof(f32));
     consts[20] = metallic; consts[21] = roughness; consts[22] = unlit_ ? 1.0f : 0.0f; consts[23] = 0.0f;
-    writeShadingConstants(consts);
+    writeShadingConstants(consts, unlit_);
     cmdList_->SetGraphicsRoot32BitConstants(kSceneObjectParam, kObjectConstantDwords, consts, 0);
     if (useMs) { dispatchMesh(m); return; }
     cmdList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);

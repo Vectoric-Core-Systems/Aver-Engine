@@ -746,6 +746,14 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
     cb_.voxelParams[0] = static_cast<f32>(voxelResBuilt_);
     cb_.voxelParams[1] = settings_.giIntensity;
     cb_.giParams[0]    = static_cast<f32>(settings_.giCones);
+    // THE EDITOR VIEW MODE, COMPOSED HERE AND NOT IN beginShadowHistory, where it was first
+    // written and never arrived: that function returns early unless shadow history is active,
+    // so the field kept whatever it held at init and PSRayDriven read unlit as permanently off.
+    // MEASURED, which is the only reason it was caught: with --unlit the image differed from lit
+    // by 2.79% of pixels at an unchanged mean luminance -- the raster chrome moving, not the
+    // scene. A view mode that "does something" is not evidence it did the RIGHT something.
+    // prePass runs every frame before the constants are uploaded, which is what this needs.
+    cb_.viewParams[0] = unlit_ ? 1.0f : 0.0f;
     // GATED ON rtActive_, NOT ON THE SETTING ALONE. The shader traces these against the same
     // acceleration structure the shadow ray uses, and there is not one on a frame that built no
     // TLAS -- publishing a non-zero count then would have every pixel trace into nothing and read

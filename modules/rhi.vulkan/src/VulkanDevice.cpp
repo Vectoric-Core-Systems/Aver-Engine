@@ -287,8 +287,8 @@ VkDescriptorSetLayout makeEmptySetLayout(const VulkanApi& api, VkDevice device) 
 // Writes the default shading model + params into the tail of a per-draw b1 block. Byte-for-byte
 // mirror of D3D12Device.cpp's writeShadingConstants: the PerObject cbuffer's tail fields
 // (gShadingModel, gReflectance, gF90, _objPad, gEmissive) are the same 8 dwords on both backends.
-void writeShadingConstants(f32* block) {
-    const u32 model = 0;   // AVER_MODEL_STANDARD
+void writeShadingConstants(f32* block, bool unlit = false) {
+    const u32 model = unlit ? 1u : 0u;   // AVER_MODEL_UNLIT / AVER_MODEL_STANDARD
     std::memcpy(block + 24, &model, sizeof(model));
     block[25] = 0.04f;
     block[26] = 1.0f;
@@ -2164,7 +2164,9 @@ void VulkanDevice::drawMesh(MeshHandle mesh, const f32 world[16], const f32 colo
         std::memcpy(fc, world, 16 * sizeof(f32));
         std::memcpy(fc + 16, color, 4 * sizeof(f32));
         fc[20] = metallic; fc[21] = roughness; fc[22] = unlit_ ? 1.0f : 0.0f; fc[23] = 0.0f;
-        writeShadingConstants(fc);
+        // UNLIT REACHES THE MATERIAL SHADER TOO, not just gMaterial.z. The twin of
+        // D3D12Device.cpp's call; see writeShadingConstants there for why both fields are written.
+        writeShadingConstants(fc, unlit_);
         rhiContext_->setConstants(kObjectConstantRegister, fc, kObjectConstantDwords);
         if (msActive_ && meshPso_ && !wireframe_) rhiContext_->dispatchMeshFor(mesh);
         else                                      rhiContext_->drawMesh(mesh);
@@ -2191,7 +2193,7 @@ void VulkanDevice::drawMesh(MeshHandle mesh, const f32 world[16], const f32 colo
     std::memcpy(consts, world, 16 * sizeof(f32));
     std::memcpy(consts + 16, color, 4 * sizeof(f32));
     consts[20] = metallic; consts[21] = roughness; consts[22] = unlit_ ? 1.0f : 0.0f; consts[23] = 0.0f;
-    writeShadingConstants(consts);
+    writeShadingConstants(consts, unlit_);
     api_.CmdPushConstants(cmd, layout, VK_SHADER_STAGE_ALL, PushConstantLayout::kObjectOffset, sizeof(consts), consts);
 
     if (useMs) { dispatchMesh(m); return; }

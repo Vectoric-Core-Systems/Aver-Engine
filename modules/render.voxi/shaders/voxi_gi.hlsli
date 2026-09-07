@@ -45,6 +45,26 @@ cbuffer VoxiFrame : register(AVER_GI_JOIN(b, AVER_GI_FRAME_REG)) {
     float4   gRtHistParams;
     float4x4 gPrevViewProj;
     float4   gSceneViewport;
+    // FOUR FIELDS THAT WERE MISSING HERE, and their absence was not cosmetic. This block is
+    // bound from giFrameConstants(), which hands over &cb_ -- the WHOLE FrameConstants struct
+    // -- so a declaration that skips a field does not skip the bytes: it shifts every field
+    // after it. These four (added to voxi.hlsl and the C++ struct with the viewport-relative
+    // NDC fix, the camera medium and caustics) were never mirrored here, leaving everything
+    // below reading 64 bytes early. The live consequence was the cone gather at the bottom of
+    // this file: gGiParams.x, its ring count, landed inside gGiShadowViewProj and read a
+    // matrix element as a cone count.
+    //
+    // NOTHING HERE READS THEM. They are declared for their SIZE, exactly as gAmbientParams
+    // below is, and the header comment already says this block is deliberately the full
+    // struct rather than a trimmed one for precisely this reason.
+    //
+    // The static_assert in VoxiRenderer.hpp guards the C++ struct against voxi.hlsl and says
+    // so by name. It cannot see THIS file, which is how the two drifted apart while the guard
+    // stayed green -- so when you append there, append here too.
+    float4   gSceneViewportCur;
+    float4   gCameraMedium;
+    float4   gCausticMin;
+    float4   gCausticMax;
     float4x4 gGiShadowViewProj;
     float4   gGiShadowParams;
     // THE TAIL THIS MIRROR WAS MISSING. The comment above calls this block byte for byte
@@ -59,6 +79,10 @@ cbuffer VoxiFrame : register(AVER_GI_JOIN(b, AVER_GI_FRAME_REG)) {
     // header note above), and a shorter declaration would quietly stop being that. Appended, never
     // inserted: every field above keeps its offset.
     float4   gAmbientParams;
+    // Editor view modes the ray-driven path honours itself. x = unlit; y/z/w spare.
+    // Mirrors FrameConstants::viewParams -- appended at the END, so every offset above is
+    // untouched. See VoxiRenderer.hpp's static_assert for the guard that makes that a rule.
+    float4   gViewParams;
 };
 
 // t(AVER_GI_SRV) the GI volume, t(AVER_GI_SRV_1) the shadow map -- the only two of Voxi's table-0

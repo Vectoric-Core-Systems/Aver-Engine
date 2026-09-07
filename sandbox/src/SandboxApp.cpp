@@ -2842,6 +2842,17 @@ public:
         // FIRST in the frame, so everything downstream (view matrix, gPrevViewProj reprojection,
         // shadow history) sees one consistent camera. Latched base yaw rather than accumulating onto
         // yaw_: accumulating would drift with floating-point error and never return exactly to the start.
+#if AVER_MODULE_VOXI
+        // THE VIEW MODE REACHES VOXI FROM onUpdate, NOT FROM THE SCENE PASS, and the difference
+        // is the whole reason unlit did nothing under ray-driven. Its twin, device()->setUnlit,
+        // is set and cleared around the scene draw because that flag rides per-draw state and
+        // would otherwise leak into editor chrome. Voxi does not read it per draw: it composes
+        // its frame constants in prePass, which the engine runs inside beginFrame -- BEFORE
+        // onRender. Setting it there meant prePass always read the value the previous frame had
+        // just cleared, so gViewParams.x was permanently 0 and PSRayDriven never took the branch.
+        // No clear is needed here for the same reason: nothing else draws through this pass.
+        voxiRenderer_.setUnlit(unlit_);
+#endif
         if (camWobbleDeg_ != 0.0f && camWobblePeriod_ > 0) {
             if (!camWobbleBased_) { camWobbleBaseYaw_ = yaw_; camWobbleBased_ = true; }
             const f32 phase = 6.2831853f * (f32)(t.frame - 1) / (f32)camWobblePeriod_;
@@ -21587,17 +21598,17 @@ private:
         if (dropButton(wireframe_ ? "Wireframe" : (unlit_ ? "Unlit" : "Lit"))) ImGui::OpenPopup("viewMode");
         if (ImGui::BeginPopup("viewMode")) {
             if (ImGui::Selectable("Lit", !wireframe_ && !unlit_)) { wireframe_=false; unlit_=false; }
-            // WIREFRAME AND UNLIT BOTH NEED THE RASTERISER, and neither can be honoured while
-            // ray-driven primary visibility is running -- Voxi traces the image itself and the
-            // scene pipeline these modes ride is never consulted. Verified by probe, not
-            // assumed: the same pixel comes back byte-identical with and without --unlit under
-            // the default settings, and differs under --no-rt --no-gi.
+            // WIREFRAME NEEDS THE RASTERISER; UNLIT NO LONGER DOES, and the split is the point.
+            // Both used to be gated here, on a probe showing the same pixel byte-identical with
+            // and without --unlit under the default settings. That measurement was right and
+            // the conclusion drawn from it -- that the mode was impossible here -- was not: it
+            // showed only that the mode was a per-draw flag on a draw call ray-driven never
+            // makes. Given a pass-level one (gViewParams.x) PSRayDriven answers it directly.
             //
-            // Shown DISABLED WITH A REASON rather than enabled-and-inert, which is the whole
-            // point of this pass. docs/rendering/VIEW_MODES_PLAN.md reaches the same verdict
-            // for wireframe and calls it "structurally impossible in ray-driven primary
-            // visibility as currently built, which is why it now reads as broken by default";
-            // it simply had nothing in the UI saying so.
+            // Wireframe is genuinely different and stays disabled with its reason shown, which
+            // is still better than enabled-and-inert. docs/rendering/VIEW_MODES_PLAN.md calls
+            // it "structurally impossible in ray-driven primary visibility as currently built";
+            // that verdict now applies to wireframe alone.
             bool rasterModes = true;
 #if AVER_MODULE_VOXI
             // suppressesScene() rather than rayDrivenActive(): it is the public predicate for
@@ -21605,13 +21616,19 @@ private:
             // covers the GI debug raymarch too, which replaces the image for the same reason.
             rasterModes = !voxiRenderer_.suppressesScene();
 #endif
+            // UNLIT IS NO LONGER GATED ON THE RASTERISER. It was, correctly, while the mode
+            // existed only as a per-draw flag that ray-driven never sees. PSRayDriven honours
+            // gViewParams.x itself now, so the mode works in the DEFAULT renderer.
+            if (ImGui::Selectable("Unlit", unlit_ && !wireframe_)) { unlit_ = true; wireframe_ = false; }
+            // WIREFRAME STILL IS, for a reason unlit no longer shares: it needs a different
+            // RASTERISER STATE rather than a different shading branch, and in ray-driven mode
+            // there is no rasteriser in the loop to put into that state.
             ImGui::BeginDisabled(!rasterModes);
             if (ImGui::Selectable("Wireframe", wireframe_)) { wireframe_=true; unlit_=false; }
-            if (ImGui::Selectable("Unlit", unlit_ && !wireframe_)) { unlit_ = true; wireframe_ = false; }
             ImGui::EndDisabled();
             uiReg_.track("viewMode.unlit");
             if (!rasterModes && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-                ImGui::SetTooltip("Ray-driven primary visibility draws the image without the rasteriser,\nso these modes cannot apply. Turn it off in Settings > Rendering, or run with --no-rt.");
+                ImGui::SetTooltip("Ray-driven primary visibility draws the image without the rasteriser,\nso wireframe cannot apply. Turn it off in Settings > Rendering, or run with --no-rt.");
             ImGui::Selectable("Detail Lighting", false, ImGuiSelectableFlags_Disabled);
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                 ImGui::SetTooltip("Needs a flat-albedo shading override the shader does not have yet.");

@@ -53,6 +53,10 @@ public:
 
     // Replaces the scene with a raymarch of the volume.
     void setDebugView(bool on);
+    // The editor's Unlit view mode. Mirrors RhiDevice::setUnlit, which only ever reaches the
+    // RASTER path -- ray-driven primary visibility bypasses drawMesh entirely, so it has to be
+    // told separately or the mode silently does nothing in the default renderer.
+    void setUnlit(bool on) { unlit_ = on; }
 
     // A/B MEASUREMENT TOGGLE, not a quality setting: OFF forces cb_.voxelParams.w to 0, the same
     // "gates the cone trace" flag prePass already computes from giEnabled(), so PSMainVoxi's
@@ -983,6 +987,14 @@ private:
         // reason ptBounceParams states: a field whose name says "denoise" carrying a ray count
         // reads fine for a week and then costs an afternoon.
         f32 ambientParams[4] = {};
+        // EDITOR VIEW MODES that the ray-driven path has to honour itself. x = unlit (flat
+        // authored albedo, no lighting); y/z/w spare.
+        //
+        // A PASS-LEVEL FIELD, not a per-draw one, because a ray hit has no per-draw cbuffer
+        // to read: gShadingModel rides in the b1 block that the raster path sets per mesh,
+        // and PSRayDriven never binds it. That asymmetry is the whole reason unlit reached
+        // the rasteriser and not the renderer that actually draws the scene by default.
+        f32 viewParams[4] = {};
     } cb_;
 
     // THE MIRROR THIS FILE HAS ALWAYS HAD AND NEVER GUARDED. `cbuffer VoxiFrame : register(b4)` in
@@ -997,7 +1009,7 @@ private:
     // The file this used to name, VoxiShaders.hpp, no longer exists: the HLSL moved out of C++
     // string literals into shaders/ and the message was never updated. It sent me to a deleted file
     // when this assert did its job. Naming the real one now.
-    static_assert(sizeof(FrameConstants) == 704,
+    static_assert(sizeof(FrameConstants) == 720,
                   "cbuffer VoxiFrame in modules/render.voxi/shaders/voxi.hlsl mirrors this byte for byte");
     static_assert(sizeof(FrameConstants) % 16 == 0, "must be a legal constant-buffer size");
 
@@ -1290,6 +1302,7 @@ private:
 
     u32  voxelMips_ = 0, voxelResBuilt_ = 0;
     bool giReady_ = false, rtSupported_ = false, rtActive_ = false, debugView_ = false;
+    bool unlit_ = false;   // --unlit / the viewport view-mode dropdown; see setUnlit
     // See setConeTraceEnabled's own comment. Defaults to true, i.e. bit-identical to every build
     // before this toggle existed -- nobody who never calls the setter sees any difference at all.
     bool coneTraceEnabled_ = true;

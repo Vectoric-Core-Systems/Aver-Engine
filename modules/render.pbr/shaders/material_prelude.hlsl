@@ -569,8 +569,16 @@ AverSurface averBuildSurface(AverVertex v, AverLight l, AverAuthored a, float2 u
     s.f90 = gMatF90;
     s.reflectance = gMatReflectance;
     s.display = gShadingModel == AVER_MODEL_UNLIT;
-    s.displayColor = float4(gBaseColor.rgb, gBaseColor.a);
     s.albedo = srgbToLin(gBaseColor.rgb) * a.baseColor;
+    // THE SAMPLED TEXTURE AND THE LINEARISED FACTOR, i.e. exactly s.albedo, because this is what an
+    // unlit surface hands to the backbuffer. Reading gBaseColor alone was two bugs at once, and both
+    // of them render as WHITE rather than as anything that looks like a colour mistake: the draw
+    // loops deliberately neutralise gBaseColor to 1,1,1 for any material that carries its colour in
+    // a texture (see SandboxApp's authored branch and GameRender.cpp), so dropping a.baseColor drops
+    // the entire colour; and skipping srgbToLin hands an sRGB triple to a tonemap that assumes
+    // linear, which is the same round-trip fault the selection outline hit in plainShadeSurface.
+    // s.alpha rather than gBaseColor.a so an unlit surface fades with opacity like every other one.
+    s.displayColor = float4(s.albedo, s.alpha);
     if (gMaterialFlags & AVER_MAT_ALPHA_MASK) clip(s.alpha - a.alphaCutoff);
     s.ndv = saturate(dot(s.N, v.V));
     s.F0 = lerp(gMatReflectance.xxx, s.albedo, s.metallic);

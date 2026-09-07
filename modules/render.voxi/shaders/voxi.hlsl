@@ -69,6 +69,10 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     // days of this row being written down as spare, which is what gGiParams directly above warns
     // happens; z/w are what is left, and the warning still applies to them.
     float4   gAmbientParams;
+    // Editor view modes the ray-driven path honours itself. x = unlit; y/z/w spare.
+    // Mirrors FrameConstants::viewParams -- appended at the END, so every offset above is
+    // untouched. See VoxiRenderer.hpp's static_assert for the guard that makes that a rule.
+    float4   gViewParams;
 };
 
 // ---- Voxi: voxel cone traced GI ----
@@ -3151,7 +3155,17 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // buffer, which puts smoke in front of walls.
     float4 clip = mul(float4(wpos, 1.0), gViewProj);
     o.depth = clip.w > 1e-6 ? saturate(clip.z / clip.w) : 1.0;
-    o.col   = float4(radiance, 1.0);
+    // UNLIT SUBSTITUTES THE COLOUR AND NOTHING ELSE. Handled here rather than through
+    // gShadingModel because a ray hit has no per-draw cbuffer -- the raster path carries the mode in
+    // the b1 block PSMainVoxi reads, and this pass never binds it; that asymmetry is why the mode
+    // reached the rasteriser and not the renderer that draws the scene by default.
+    //
+    // AN OVERRIDE RATHER THAN AN EARLY RETURN, deliberately: every AVER_GBUFFER channel below still
+    // has to be written, and returning above them would leave velocity, viewZ, normal-roughness and
+    // SV_DEPTH unwritten -- the exact "fills only some outputs" fault the struct's own comment warns
+    // both return sites about. s.albedo is the SAMPLED base colour; shading a base-colour CONSTANT
+    // is what made this mode pure white on every textured mesh.
+    o.col   = float4(gViewParams.x > 0.5 ? s.albedo : radiance, 1.0);
 #if AVER_GBUFFER
     // clip.w IS the view-space linear depth viewZ wants, reused from o.depth's divide above rather
     // than a second mul. Velocity uses the SAME static-geometry function as PSMainVoxi (see
