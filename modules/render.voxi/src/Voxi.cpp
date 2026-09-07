@@ -122,6 +122,13 @@ void Renderer::setSettings(const Settings& s) {
         n.rtShadowDenoise = rtShadowDenoiseForQuality(n.rayTracing);
     if (n.rayTracing != settings_.rayTracing && n.rtRenderMode == settings_.rtRenderMode)
         n.rtRenderMode = rtRenderModeForQuality(n.rayTracing);
+    // KEYED ON rayTracing, not globalIllumination, even though it is the AMBIENT term it corrects:
+    // what it costs is a ray, and what makes it possible at all is the acceleration structure. A
+    // project raising GI quality on hardware with ray tracing off must not start paying for rays.
+    if (n.rayTracing != settings_.rayTracing && n.giSkyOcclusionRays == settings_.giSkyOcclusionRays)
+        n.giSkyOcclusionRays = giSkyOcclusionRaysForQuality(n.rayTracing);
+    if (n.rayTracing != settings_.rayTracing && n.giSkyOcclusionTile == settings_.giSkyOcclusionTile)
+        n.giSkyOcclusionTile = giSkyOcclusionTileForQuality(n.rayTracing);
     // KEYED ON pathTracing, not rayTracing. A bounce budget is a path-tracing quantity; deriving
     // it from the ray-tracing tier is what let the two run out of step.
     if (n.pathTracing != settings_.pathTracing && n.ptBounces == settings_.ptBounces)
@@ -131,6 +138,11 @@ void Renderer::setSettings(const Settings& s) {
     // At least the axial cone, or the gather returns nothing and GI silently switches itself off.
     // 16 is a ceiling on a per-pixel loop, for the same reason the bounce count has one.
     n.giCones         = std::clamp(n.giCones, 1u, 16u);
+    // 1 is "a fresh direction per pixel" and is the no-op; 16 is well past where a tile stops being a
+    // local neighbourhood and starts being a visible block. Clamped rather than rejected for the same
+    // reason every other dial here is: a project asking for something silly gets the nearest sane
+    // renderer, not a refusal to start.
+    n.giSkyOcclusionTile = std::clamp(n.giSkyOcclusionTile, 1u, 16u);
     n.giIntensity     = std::clamp(n.giIntensity, 0.0f, 8.0f);
     n.giMaxDistance   = std::clamp(n.giMaxDistance, 1.0f, 100000.0f);
     // Mirrors VoxiRenderer::kMaxShadowRays / kMaxPixelsPerRayTile, restated rather than shared: this
@@ -360,6 +372,58 @@ u32 Renderer::giUpdateIntervalForQuality(Quality q) {
 // can. Tile 4 over tile 2 saves only 0.29 ms, so Low differs from Medium mostly in noise rather than
 // cost -- which is why Low takes the wider tile and the same single ray, rather than pretending a
 // meaningful gap exists.
+// EPIC ONLY, and the zero below Epic is the whole point rather than caution. These rays are an
+// ADDITION to a frame that already traces shadow rays and cone-marches a volume; the cone estimate
+// they replace is wrong in enclosed geometry but costs nothing extra, so every rung that cannot
+// afford another ray per pixel keeps it. A tier that silently started tracing four more rays would
+// be the opposite of what a quality ladder is for.
+u32 Renderer::giSkyOcclusionRaysForQuality(Quality q) {
+    switch (q) {
+        // OFF MUST BE 0, and not merely "inert": with no acceleration structure there is nothing to
+        // trace against, and the shader falls back to the cone gather's occlusion on this value.
+        case Quality::Off:    return 0;
+        case Quality::Low:    return 0;
+        case Quality::Medium: return 0;
+        case Quality::High:   return 0;
+        // FOUR, NOT ONE, AND THE REASON IS NOISE RATHER THAN ACCURACY. At one ray this estimator is
+        // `open = hits ? 0 : 1` divided by one -- a BINARY per-pixel mask, the noisiest thing a Monte
+        // Carlo estimate can be. Its MEAN was already right at one sample (a probe read the same
+        // value at 1 and at 4), which is exactly why one probe pixel could not see the problem: a
+        // probe cannot measure variance. On screen it is salt and pepper.
+        //
+        // Four samples gives five levels instead of two, and the coherence tile below is what makes
+        // it affordable: MEASURED on Sponza, 4 rays at tile 4 costs +1.98 ms against 1 ray at tile 1,
+        // where 4 rays at tile 1 would cost +3.56 ms.
+        //
+        // STILL NOT A DENOISER, and this comment should not be read as claiming otherwise. Five
+        // quantisation levels correlated across a 4x4 block is a large improvement on a binary mask
+        // and is not a smooth ambient term. The real fix is temporal accumulation against a
+        // reprojected history, which this engine already does for shadows and reflections -- it needs
+        // a third history pair, and therefore a wider SRV/UAV table (kVoxiSrvCount / kGiUavCount,
+        // shared with the GI compute shaders), which is why it is not in this change.
+        case Quality::Epic:   return 4;
+        default:              return 0;   // an unknown tier must not silently cost more
+    }
+}
+
+// SHARED ACROSS A TILE ONLY WHERE THE RAYS EXIST: every rung that traces no sky-occlusion ray keeps 1,
+// so the value is inert rather than merely unused, and a tier that later starts tracing does not
+// inherit a coherence setting nobody chose for it.
+u32 Renderer::giSkyOcclusionTileForQuality(Quality q) {
+    switch (q) {
+        case Quality::Off:    return 1;
+        case Quality::Low:    return 1;
+        case Quality::Medium: return 1;
+        case Quality::High:   return 1;
+        // 4 rather than 2: both were measured and 4 is the cheaper of the two per sample (+2.21 ms
+        // against +2.85 ms for the same four rays), and ambient occlusion is the one term whose
+        // spatial correlation is acceptable -- see Settings::giSkyOcclusionTile for that argument and
+        // for why this dial must not be reused on a sharp signal.
+        case Quality::Epic:   return 4;
+        default:              return 1;   // an unknown tier gets the un-correlated, un-amortised path
+    }
+}
+
 u32 Renderer::rtShadowRaysForQuality(Quality q) {
     switch (q) {
         case Quality::Off:    return 1;   // RT is not running; the value is inert either way
@@ -517,6 +581,24 @@ u32 Renderer::rtShadowDenoiseForQuality(Quality q) {
 u32 Renderer::rtPixelsPerRayTileForQuality(Quality q) {
     switch (q) {
         case Quality::Off:    return 1;
+        // ONE AT EVERY RUNG, INCLUDING LOW, and the long argument for that lives with the field in
+        // Voxi.hpp -- see Settings::rtPixelsPerRayTile's "ALL FOUR TIERS ARE 1" and "LOW WAS 4".
+        // Short version: amortisation measured 0.14 ms moving / 0.09 ms static against tile 1, which
+        // is inside the noise, while the motion trail it buys is already visible on 0.80% of pixels
+        // at tile 2. It traded a fault anyone moving the camera can see for milliseconds nobody
+        // could measure.
+        //
+        // THIS FUNCTION SAID 4 FOR LOW WHILE THAT HEADER SAID 1, which is a torn pair of exactly the
+        // kind gates.baseline.txt's own header warns about -- the conclusion was written down and the
+        // code was left behind. The gate suite caught it: `tier1-no-typed-uav` clamps ray tracing far
+        // enough to land on the Low rung, and `rt`, `ms-rt` and `ms-rt-gi` each read 65,44,36 against
+        // a recorded 65,45,37. That is the SAME three gates and the SAME one-code move this rung's
+        // earlier Medium=2 experiment produced, for the same reason, which is what makes it a
+        // recognisable signature rather than a mystery.
+        //
+        // A project that wants the amortisation at any tier can still ask: RENDER.RTPIXELSPERRAY and
+        // --rt-pixels-per-ray are both honoured, and both outrank the manifest properly. Opting in is
+        // a decision; a preset doing it silently is not.
         case Quality::Low:    return 1;
         case Quality::Medium: return 1;
         case Quality::High:   return 1;

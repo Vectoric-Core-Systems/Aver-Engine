@@ -3291,7 +3291,11 @@ void VulkanDevice::runPostChain(VkImage bbImage, VkImageView bbView, VkFormat /*
         cb.adapt[2] = 1.0f - std::exp(-post_.exposureSpeed * frameSeconds_); cb.adapt[3] = 0.0f;
         cb.limit[0] = post_.exposureMin; cb.limit[1] = post_.exposureMax;
         cb.limit[2] = post_.histogramLowPercent; cb.limit[3] = post_.histogramHighPercent;
-        cb.misc[0] = post_.exposureKey; cb.misc[1] = autoExp ? 1.0f : 0.0f; cb.misc[2] = 1.0f; cb.misc[3] = 0.0f;
+        cb.misc[0] = post_.exposureKey; cb.misc[1] = autoExp ? 1.0f : 0.0f; cb.misc[2] = 1.0f;
+        // The twin of D3D12Device.cpp's fill; see there for why both move together.
+        cb.misc[3] = static_cast<f32>(post_.tonemap);
+        cb.clampRadiance[0] = post_.maxRadiance;
+        cb.clampRadiance[1] = cb.clampRadiance[2] = cb.clampRadiance[3] = 0.0f;
     };
     auto bindSetFor = [&](VkPipelineBindPoint bp, u32 slot) {
         const ConstantAllocation ca = postConstants(&cb, sizeof cb);

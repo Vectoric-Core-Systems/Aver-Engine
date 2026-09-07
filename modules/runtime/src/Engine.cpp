@@ -44,6 +44,10 @@ int Engine::run(Application* app) {
         wd.width = cfg.windowWidth;
         wd.height = cfg.windowHeight;
         wd.activate = interactive;
+        // `interactive` is the same signal WindowDesc::fullscreen keys off internally; passing it
+        // through rather than short-circuiting here keeps the rule in ONE place (the platform layer),
+        // so a second caller cannot get it wrong.
+        wd.fullscreen = cfg.fullscreen;
         if (!window_->create(wd)) {
             AVER_WARN("[Engine] window creation failed — continuing headless");
             delete window_;
@@ -110,7 +114,47 @@ int Engine::run(Application* app) {
     splashForApp_ = nullptr;
     // Render one frame per modal-loop timer tick.
     if (window_) window_->setRenderTick(&Engine::renderTickThunk, this);
-    if (!cfg.headless) splash.close(1100);
+
+    // --- Hold the splash over the frames that finish the loading ------------------------------
+    //
+    // These frames are REAL frames, rendered into the window while the splash still covers it, so
+    // when it goes the editor is already drawing the loaded project rather than starting to. That is
+    // the whole point: see Application::startupComplete for why onInit() returning was never the
+    // right moment.
+    //
+    // BOUNDED THREE WAYS, because a loading screen that can outlive the loading is worse than one
+    // that goes early: a frame cap, a wall-clock cap, and the window closing. A subclass whose
+    // readiness never arrives costs a few seconds, not the session.
+    if (!cfg.headless && interactive) {
+        constexpr u32 kMaxWarmupFrames = 600;
+        constexpr f64 kMaxWarmupSeconds = 20.0;
+        // ACCUMULATED, because Clock::restart() is the only reader it has and it resets as it reads --
+        // there is no "how long since you were made" call to ask.
+        Clock warmupClock;
+        f64 warmupSeconds = 0.0;
+        u32 warmed = 0;
+        frameClock_ = Clock{};
+        while (!exit_ && warmed < kMaxWarmupFrames &&
+               warmupSeconds < kMaxWarmupSeconds && !app->startupComplete()) {
+            if (window_) {
+                window_->pumpEvents();
+                if (window_->shouldClose()) break;
+            }
+            frameStep();
+            warmupSeconds += warmupClock.restart();
+            ++warmed;
+        }
+        if (warmed >= kMaxWarmupFrames || warmupSeconds >= kMaxWarmupSeconds)
+            AVER_WARN("[Engine] startup did not report complete within {} frames / {:.0f}s -- showing "
+                      "the window anyway", kMaxWarmupFrames, kMaxWarmupSeconds);
+        else
+            AVER_INFO("[Engine] startup complete after {} warm-up frame(s)", warmed);
+    }
+
+    // 0, NOT 1100: the minimum-visible delay existed so a fast start did not flash the splash for a
+    // few frames. The wait above has already kept it up for as long as the loading actually took, so
+    // adding a second delay on top would only make a loaded editor sit behind a picture of itself.
+    if (!cfg.headless) splash.close(interactive ? 0 : 1100);
 
     // --- Frame loop ---
     frameClock_ = Clock{};

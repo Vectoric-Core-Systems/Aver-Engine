@@ -71,7 +71,8 @@ cbuffer PtFrame : register(b4) {
     float4 gPtRight;     // xyz
     float4 gPtUp;        // xyz
     uint4  gPtImage;     // x width, y height, z max bounces, w defect mode
-    uint4  gPtSample;    // x first sample index, y samples this dispatch, z reset the accumulator
+    uint4  gPtSample;    // x first sample index, y samples this dispatch, z reset the accumulator,
+                         // w first bounce eligible for Russian roulette (0 = never)
     float4 gPtTrace;     // x ray bias in cm, y tMax in cm
 };
 
@@ -618,6 +619,8 @@ void CSPathTrace(uint3 tid : SV_DispatchThreadID) {
     const uint bounce = gPtImage.z;
     const uint defect = gPtImage.w;
     const float bias  = gPtTrace.x;
+    // 0 disables it entirely; see PtDispatch::rouletteDepth for why that is the default.
+    const uint rrFrom = gPtSample.w;
 
     float3 sum = float3(0, 0, 0);
     float  escaped = 0.0, bounceEvents = 0.0;
@@ -734,6 +737,45 @@ void CSPathTrace(uint3 tid : SV_DispatchThreadID) {
             }
 
             throughput *= weight;
+
+            // ---- RUSSIAN ROULETTE ---------------------------------------------------------------
+            //
+            // Kill a path with probability (1 - p) and divide the survivors by p. The estimator is
+            // UNBIASED for any p in (0, 1]: a path that survives carries exactly the expected
+            // contribution of the ones that did not, so the mean over enough samples is unchanged and
+            // only the variance moves. That is why this is a legitimate optimisation and not an
+            // approximation with an error budget.
+            //
+            // p IS THE THROUGHPUT ITSELF, its largest channel. A path still carrying most of its
+            // energy is almost certain to survive; one that has scattered off three dark surfaces and
+            // holds a few percent almost certainly stops -- which is the point, because that path was
+            // going to pay a closest-hit traversal AND a next-event shadow ray per remaining bounce
+            // to contribute a few percent of one sample.
+            //
+            // NOT BEFORE `rrFrom`. Rouletting the first bounces would kill primary paths, which are
+            // the ones carrying nearly all the image's energy: maximum added variance for almost no
+            // saved traversal, since a path killed at b=0 saves at most `bounce` iterations that the
+            // early exits above often skip anyway. Starting later spends the technique where the
+            // paths are long, dim and numerous.
+            //
+            // THE DRAW COMES FROM THE SAME `rng` STREAM as every other decision in this path, and
+            // that is a hard requirement rather than tidiness: the whole integrator is a pure
+            // function of (pixel, sampleIndex), which is what makes a run bit-identically replayable
+            // and what PtFurnaceTest's comparison depends on. A separate stream, or anything keyed on
+            // a frame counter, would break that quietly.
+            //
+            // CLAMPED AT 1: a specular weight can exceed one channel-wise, and a p above 1 would
+            // otherwise DIVIDE the survivor's throughput down -- silently darkening exactly the
+            // bright paths this must not touch.
+            if (rrFrom != 0u && b >= rrFrom) {
+                const float p = saturate(max(throughput.x, max(throughput.y, throughput.z)));
+                // A path with no energy left contributes nothing whether it continues or not, so it
+                // stops unconditionally -- and this also keeps the division below away from zero.
+                if (!(p > 0.0)) break;
+                if (ptRand(rng) >= p) break;
+                throughput /= p;
+            }
+
             // THE BIAS OFFSET FOLLOWS THE NEW RAY, NOT UNCONDITIONALLY THE FACING NORMAL. A diffuse
             // bounce and a specular REFLECTION both continue on the nWS side of the surface (dot(d,
             // nWS) > 0 by construction) -- exactly where the old `nWS * bias` always put them, so this

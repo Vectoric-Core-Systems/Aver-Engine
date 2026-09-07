@@ -1295,11 +1295,41 @@ public:
     BootConfig config() const override {
         BootConfig c; c.windowTitle="Aver Engine \xE2\x80\x94 Editor"; c.windowWidth=1600; c.windowHeight=900;
         c.maxFrames=maxFrames_; c.headless=headless_; c.useWarp=useWarp_;
+        // FULLSCREEN FOR A PERSON, WINDOWED FOR A MEASUREMENT. maxFrames_ != 0 is a bounded capture
+        // run (--frames), which is also the run every recorded gate baseline was measured through --
+        // its probes are pixels at a fixed rect in a fixed client area. WindowDesc::fullscreen
+        // enforces the same rule again from `activate`, so this is belt and braces rather than the
+        // only guard. --windowed opts an interactive run out.
+        c.fullscreen = !windowedOverride_ && maxFrames_ == 0;
         c.enableDebugLayer=debugLayer_;
         c.backend = backendName_.empty() ? nullptr : backendName_.c_str();
         return c;
     }
+    // Has the project actually reached the screen? See Application::startupComplete.
+    //
+    // TWO CASES, and the empty one matters as much as the other. With NO project requested there is
+    // nothing to wait for beyond the editor's own first frame, so one rendered frame is the whole
+    // condition -- otherwise an empty editor would sit behind the splash for the full warm-up cap.
+    //
+    // With a project, the honest signal is that the scene has DRAWN something: lastSceneDrawn_ is
+    // set from the per-frame walk and stays -1 until a frame has actually submitted meshes, which is
+    // downstream of the mesh uploads, the material/texture residency and the first voxelisation --
+    // exactly the work that used to happen after the splash had gone. A project that legitimately
+    // draws nothing (an empty level) falls through to the engine's warm-up cap and costs a few
+    // seconds; that is the right way round, because the alternative is calling a project loaded
+    // before it is.
+    // lastSceneDrawn_ IS THE FRAME COUNTER AS WELL AS THE DRAW COUNT: it starts at -1 and the scene
+    // walk assigns it on the first frame that runs, whatever the count, so >= 0 means "a frame has
+    // been walked" and > 0 means "a frame has drawn something". One member answers both halves and
+    // there is no second counter to keep in step with it.
+    bool startupComplete() const override {
+        if (lastSceneDrawn_ < 0) return false;             // no frame has walked the scene yet
+        if (projectPath_.empty()) return true;             // nothing was asked to load
+        return lastSceneDrawn_ > 0;                        // the project reached the screen
+    }
+
     void setUseWarp(bool w) { useWarp_ = w; }
+    void setWindowed(bool w) { windowedOverride_ = w; }                          // --windowed
     void setBackend(std::string b) { backendName_ = std::move(b); }   // --backend <name>
     // --frame-budget <ms>: target frame time, and run the controller even in a bounded capture.
     void setFrameBudget(f32 ms) { frameBudgetMs_ = ms; frameBudgetForced_ = ms > 0.0f; }
@@ -2398,6 +2428,13 @@ public:
             if (rtRenderModeOverride_    >= 0) k.rtRenderMode    = static_cast<u32>(rtRenderModeOverride_);
             if (ptBouncesOverride_       >= 0) k.ptBounces       = static_cast<u32>(ptBouncesOverride_);
             if (layeredBsdfOverride_     >= 0) k.layeredBsdf     = static_cast<voxi::Quality>(layeredBsdfOverride_);
+            // IN THE SECOND CALL, and that is load-bearing rather than tidy: giSkyOcclusionRays is
+            // derived from the rayTracing tier on a tier CHANGE, and the block at the top of this
+            // function explains why a knob set during the FIRST call cannot be distinguished from one
+            // never set at all. >= 0 rather than > 0 because 0 means "use the cone gather's
+            // occlusion", not "flag absent".
+            if (giSkyOccRaysOverride_ >= 0) k.giSkyOcclusionRays = static_cast<u32>(giSkyOccRaysOverride_);
+            if (giSkyOccTileOverride_ >= 0) k.giSkyOcclusionTile = static_cast<u32>(giSkyOccTileOverride_);
             if (rtPixelsPerRayOverride_ > 0) k.rtPixelsPerRayTile = static_cast<u32>(rtPixelsPerRayOverride_);
             else if (rtPixelsPerRayOverride_ < 0)
                 AVER_WARN("[Sandbox] --rt-pixels-per-ray {} is not a tile edge; the default of {} stands",
@@ -3693,11 +3730,24 @@ public:
 
         // The slot decides the colour space, never the filename.
         assets::TextureUsage usage = assets::TextureUsage::Data;
+        // THE LAYER-1 SLOTS BELONG HERE TOO, and their absence was a decode bug rather than an omission
+        // of principle. MaterialSystem::colourClass classifies Layer1BaseColor as 'c' (sRGB) and
+        // Layer1Normal as 'n', and its own comment says "KEEP THIS IN STEP WITH THOSE TWO SWITCHES" --
+        // this being one of them. It drifted: everything not named fell through to Data, so a
+        // slope-blended material's SECOND base-colour layer was uploaded LINEAR when its pixels are sRGB.
+        //
+        // WHAT THAT LOOKS LIKE is why it went unnoticed: decoding sRGB texels as linear does not corrupt
+        // them, it LIFTS the midtones and flattens the contrast -- the layer reads pale and washed out
+        // beside the layer 0 it blends against, which reads as a lighting or blending problem rather than
+        // as a colour-space one. Layer1Normal had the matching fault the other way: routed to Data it lost
+        // the normal-map-aware mip generation that NormalMap selects.
         switch (slot) {
             case pbr::TextureSlot::BaseColor:
-            case pbr::TextureSlot::Emissive:  usage = assets::TextureUsage::Colour;    break;
-            case pbr::TextureSlot::Normal:    usage = assets::TextureUsage::NormalMap; break;
-            default:                          usage = assets::TextureUsage::Data;      break;
+            case pbr::TextureSlot::Layer1BaseColor:
+            case pbr::TextureSlot::Emissive:      usage = assets::TextureUsage::Colour;    break;
+            case pbr::TextureSlot::Normal:
+            case pbr::TextureSlot::Layer1Normal:  usage = assets::TextureUsage::NormalMap; break;
+            default:                              usage = assets::TextureUsage::Data;      break;
         }
 
         std::string err;
@@ -6547,6 +6597,11 @@ public:
         postAutoExpFromCli_  = autoExposure;
     }
 
+    // --tonemap N / --max-radiance F. Both are POST settings rather than renderer ones, so they land
+    // straight in post_ and need no tier derivation; -1 / negative leaves the shipped default alone.
+    void setTonemap(int mode)      { if (mode >= 0) post_.tonemap = static_cast<u32>(mode); }
+    void setMaxRadiance(f32 ceil)  { if (ceil >= 0.0f) post_.maxRadiance = ceil; }
+
     // Disables auto-exposure for a capture run unless the run asked for it.
     void applyCaptureExposureRule(bool explicitlyRequested) {
         if (maxFrames_ != 0 && !explicitlyRequested) post_.autoExposure = false;
@@ -6954,6 +7009,8 @@ public:
     void setPtOverride(int q) { ptOverride_ = q; }                              // --pt
     void setRtForceOff(bool off) { rtForceOff_ = off; }                         // --no-rt
     void setRtRays(int n) { rtRaysOverride_ = n; }                              // --rt-rays N
+    void setGiSkyOcclusionRays(int n) { giSkyOccRaysOverride_ = n; }             // --gi-sky-occlusion-rays N
+    void setGiSkyOcclusionTile(int n) { giSkyOccTileOverride_ = n; }             // --gi-sky-occlusion-tile N
     void setRtPixelsPerRay(int n) { rtPixelsPerRayOverride_ = n; }              // --rt-pixels-per-ray N
     void setRtShadowDenoise(int n) { rtShadowDenoiseOverride_ = n; }            // --rt-shadow-denoise N
     void setRtRenderMode(int n) { rtRenderModeOverride_ = n; }                  // --rt-render-mode 0|1
@@ -8852,7 +8909,22 @@ private:
             take(rtShadowDenoiseOverride_, k.rtShadowDenoise,    "--rt-shadow-denoise");
             take(ptBouncesOverride_,       k.ptBounces,          "--pt-bounces");
             take(layeredBsdfOverride_,     reinterpret_cast<u32&>(k.layeredBsdf), "--layered-bsdf");
+            // --msaa WAS THE NINTH CASE, and it was still missing. The block above says outright
+            // that "a rule with five of nine cases is not a rule" -- this is the one that was left.
+            // It is applied at startup (msaaOverride_ is read where settings are first built) and
+            // then SILENTLY OVERWRITTEN by RENDER.MSAA when the project opens, so `--msaa 1` against
+            // a manifest saying 2 measured the manifest and said nothing. Found while trying to
+            // price MSAA in ray-driven mode, where the pass is one fullscreen triangle and gains
+            // nothing from multisampling -- a measurement that would have been quietly meaningless.
+            if (msaaOverride_ > 0)           take(msaaOverride_, reinterpret_cast<u32&>(k.msaa), "--msaa");
             if (rtRaysOverride_ > 0)         take(rtRaysOverride_,        k.rtShadowRays,      "--rt-rays");
+            // WIRED IN WITH THE FLAG, not after it bites -- the block above records four separate
+            // occasions where a knob was added and this list was not updated, each one silently
+            // letting a manifest outrank the command line and each one corrupting a measurement
+            // before anyone noticed. No `if` guard: take() already treats a negative as absent, and
+            // this override's sentinel IS -1 precisely so that 0 stays expressible.
+            take(giSkyOccRaysOverride_,      k.giSkyOcclusionRays, "--gi-sky-occlusion-rays");
+            take(giSkyOccTileOverride_,      k.giSkyOcclusionTile, "--gi-sky-occlusion-tile");
             if (rtPixelsPerRayOverride_ > 0) take(rtPixelsPerRayOverride_, k.rtPixelsPerRayTile, "--rt-pixels-per-ray");
             // THE FOURTH INSTANCE OF THE SAME BUG CLASS, closed. --gi-update-interval had no
             // manifest key AND no entry here, while giUpdateInterval IS tier-derived inside
@@ -22372,6 +22444,10 @@ private:
     int  ptOverride_=-1;             // --pt [tier]: PATH tracing quality at startup
     bool rtForceOff_=false;          // --no-rt: force it off, whatever the default is
     int  rtRaysOverride_=0;          // --rt-rays N: sun occlusion rays per pixel (0 = flag not given)
+    // --gi-sky-occlusion-rays N: AMBIENT sky-visibility rays per pixel. -1 = flag not given, because
+    // 0 is a real value here (fall back to the cone gather's own occlusion).
+    int  giSkyOccRaysOverride_=-1;
+    int  giSkyOccTileOverride_=-1;   // --gi-sky-occlusion-tile N
     int  rtPixelsPerRayOverride_=0;  // --rt-pixels-per-ray N: shadow tile edge (0 = flag not given)
     int  rtShadowDenoiseOverride_=-1; // --rt-shadow-denoise N: spatial radius (-1 = flag not given)
     int  rtRenderModeOverride_=-1;    // --rt-render-mode 0|1 (-1 = flag not given)
@@ -22416,6 +22492,7 @@ private:
     Vec3 camPosOverride_{};
     f32  pitchOverride_=0.0f, yawOverride_=0.0f;   // radians, converted in setCamera
     bool useWarp_=false;             // --warp: run on the D3D12 software rasteriser
+    bool windowedOverride_=false;    // --windowed: opt an interactive run out of borderless fullscreen
     std::string backendName_;   // --backend: which RHI backend to ask for first
     // RENDER.BACKEND as the OPEN PROJECT states it. Separate from backendName_, which is what
     // this RUN was actually launched with: editing the project's choice must not retarget the
@@ -25265,6 +25342,17 @@ Application* createApplication(int argc, char** argv) {
 
     u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; std::string shaderSourceDir; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool furnaceGrid=false; f32 furnaceTilt=0.0f; bool ptFurnace=false; bool ptScene=false; int deviceLostAt=0; int ptQualityRamp=0; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int aversrCycle=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=-1; int rt=-1; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int rtRenderMode=-1; int pt=-1; int ptBounces=-1; int layeredBsdf=-1; f32 coatWeight=0.0f; f32 coatRough=0.1f; f32 coatF0=0.04f; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool bloomSet=false, exposureSet=false; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string selectEntity; bool openLegacy=false; bool waterOn=false; f32 waterHeight=0.0f; std::string graphSelectNode; std::string graphTab; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false; bool bakeNav=false; f32 bakeNavCell=50.0f; std::string openMap; bool gbuffer=false; std::string gbufferDebug; std::string crashTest; std::string startMode;
     bool openLevelPickerArg=false; std::string openLevelArg; bool noEditorChrome=false; bool sceneCensus=false;
+    // -1 IS ABSENT, NOT 0. Zero is a MEANING for this knob -- "estimate ambient occlusion from the
+    // cone gather", which is what every tier below Epic does -- so the usual 0-means-absent sentinel
+    // could not express turning the rays off. Same reasoning --rt-shadow-denoise already documents.
+    int giSkyOccRays = -1;
+    // Same -1 sentinel and the same reason: 1 is a real value here (a fresh direction per pixel), so
+    // 0-means-absent could not express it.
+    int giSkyOccTile = -1;
+    // -1 = flag absent. 0 is a real value for BOTH: tonemap 0 is the legacy per-channel curve, and
+    // max-radiance 0 means "no clamp at all".
+    int tonemapArg = -1; f32 maxRadianceArg = -1.0f;
+    bool windowedArg = false;
     for (int i=1;i<argc;++i){
         // HANDLED BEFORE THE else-if CHAIN BELOW, AND NOT BY PREFERENCE: one more `else if` there
         // hits MSVC's nesting limit (C1061). Anything added from here on wants this shape instead:
@@ -25272,6 +25360,40 @@ Application* createApplication(int argc, char** argv) {
         // --open-level-picker: open File > Open Level's modal on the first frame, so a --frames run
         // can screenshot it. In THIS loop for the C1061 reason above, like every flag added since.
         if (!std::strcmp(argv[i],"--open-level-picker")) { openLevelPickerArg=true; continue; }
+        // --gi-sky-occlusion-rays N: how many sky-visibility rays the AMBIENT term traces per pixel.
+        //
+        // IT EXISTED AS A SETTING WITH NO WAY TO SET IT. Settings::giSkyOcclusionRays shipped
+        // tier-derived and nothing else -- no flag, no manifest key -- so nobody could sweep the one
+        // dial the shader itself says is the lever for this ray. rtSkyOcclusion's own comment
+        // (voxi.hlsl) spells out why it matters and why it is NOT the same question as --rt-rays:
+        // the sun rays are coherent, all pointing one way and walking the same BVH nodes, so three
+        // more cost 0.05 ms; these are cosine-distributed over the hemisphere, so every lane in a
+        // wave descends a different part of the tree and ONE of them costs 5.37 ms. "Ray count is
+        // nearly free" is a measured property of the coherent ray and does not transfer here -- and
+        // the only way to find out where it does land was a knob that did not exist.
+        //
+        // In THIS loop for the C1061 reason above, like every flag added since.
+        if (!std::strcmp(argv[i],"--gi-sky-occlusion-rays") && i+1<argc) {
+            giSkyOccRays = std::atoi(argv[++i]); continue;
+        }
+        // --gi-sky-occlusion-tile N: pixels per shared sky-occlusion ray direction. The lever the ray
+        // itself names for its own cost, and it was a compile-time #define set nowhere until now --
+        // so the trade it governs (cheaper rays against correlated noise) had never been measured.
+        if (!std::strcmp(argv[i],"--gi-sky-occlusion-tile") && i+1<argc) {
+            giSkyOccTile = std::atoi(argv[++i]); continue;
+        }
+        // --tonemap 0|1: 0 the original per-channel ACES approximation (what every recorded gate
+        // baseline was measured through), 1 the matrixed fit that keeps saturation. See
+        // PostSettings::tonemap.
+        if (!std::strcmp(argv[i],"--tonemap") && i+1<argc) { tonemapArg = std::atoi(argv[++i]); continue; }
+        // --windowed: keep the old titled 1600x900 window on an interactive run. The editor is
+        // borderless-fullscreen by default now; a capture run is windowed regardless.
+        if (!std::strcmp(argv[i],"--windowed")) { windowedArg = true; continue; }
+        // --max-radiance F: ceiling on scene radiance just before the tonemap; 0 disables it. The sun
+        // disc is the thing this exists for -- see PostSettings::maxRadiance.
+        if (!std::strcmp(argv[i],"--max-radiance") && i+1<argc) {
+            maxRadianceArg = static_cast<f32>(std::atof(argv[++i])); continue;
+        }
         // --no-editor-chrome: draw the SCENE and nothing the editor adds on top of it -- no grid, no
         // navmesh overlay, no gizmo, no sculpt cursor, no viewport icons.
         //
@@ -26081,6 +26203,11 @@ Application* createApplication(int argc, char** argv) {
     app->setGiOverride(gi, giDbg);
     app->setRtOverride(rt);
     app->setRtRays(rtRays);
+    app->setGiSkyOcclusionRays(giSkyOccRays);
+    app->setGiSkyOcclusionTile(giSkyOccTile);
+    app->setWindowed(windowedArg);
+    app->setTonemap(tonemapArg);
+    app->setMaxRadiance(maxRadianceArg);
     app->setRtPixelsPerRay(rtPixelsPerRay);
     app->setRtShadowDenoise(rtShadowDenoise);
     app->setRtRenderMode(rtRenderMode);

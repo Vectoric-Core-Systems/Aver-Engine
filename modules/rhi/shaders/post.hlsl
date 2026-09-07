@@ -8,7 +8,8 @@ cbuffer AverPost : register(b0) {
     float4 gPostSrc;     // xy source size in texels,      zw its reciprocal
     float4 gPostAdapt;   // x min log2 luminance, y 1/log2 range, z adaption alpha, w pixels sampled
     float4 gPostLimit;   // x exposure min, y exposure max, z histogram low cut, w high cut
-    float4 gPostMisc;    // x middle grey, y auto-exposure on, z bloom filter radius, w unused
+    float4 gPostMisc;    // x middle grey, y auto-exposure on, z bloom filter radius, w tonemap mode
+    float4 gPostClamp;   // x pre-tonemap radiance ceiling (0 = no clamp), yzw spare
 };
 
 Texture2D<float4>     gPostSceneTex : register(t0);
@@ -54,12 +55,28 @@ AverPostVSOut PostVS(uint id : SV_VertexID) {
 }
 
 // Halves the scene into the pyramid's first level, Karis-averaged and soft-knee thresholded.
+// THE CEILING, APPLIED WHERE THE SCENE IS READ -- before exposure, and before the bloom threshold.
+//
+// PLACEMENT IS THE WHOLE FIX AND THE FIRST ATTEMPT GOT IT WRONG. Clamping in PSComposite after bloom
+// had been added does nothing useful: past about 8 the tonemap already returns pure white, so the sun
+// disc looks identical clamped or not. What the unclamped value actually does is drive the BLOOM --
+// the prefilter reads the same scene texture, thresholds at 1.0, and a disc sitting at ~42 (the sky
+// dome draws sunColour * sunIntensity * 14, and sunIntensity defaults to 3) bleeds a halo
+// proportional to all 42 of it. That halo is what reads as the void being overwhelmingly bright.
+//
+// 0 DISABLES IT rather than meaning "clamp to nothing".
+float3 averPostClampRadiance(float3 c) {
+    return gPostClamp.x > 0.0 ? min(c, gPostClamp.x) : c;
+}
+
 float4 PSBloomPrefilter(AverPostVSOut i) : SV_TARGET {
     float2 o = gPostSrc.zw;
     float3 a = gPostSceneTex.SampleLevel(gPostSamp, i.uv + float2(-o.x, -o.y), 0).rgb;
     float3 b = gPostSceneTex.SampleLevel(gPostSamp, i.uv + float2( o.x, -o.y), 0).rgb;
     float3 c = gPostSceneTex.SampleLevel(gPostSamp, i.uv + float2(-o.x,  o.y), 0).rgb;
     float3 d = gPostSceneTex.SampleLevel(gPostSamp, i.uv + float2( o.x,  o.y), 0).rgb;
+    a = averPostClampRadiance(a); b = averPostClampRadiance(b);
+    c = averPostClampRadiance(c); d = averPostClampRadiance(d);
     float3 sum = averBloomKaris(a) + averBloomKaris(b) + averBloomKaris(c) + averBloomKaris(d);
     return float4(averBloomPrefilter(sum * 0.25 * averPostExposure()), 1.0);
 }
@@ -178,7 +195,7 @@ void CSExposure() {
 // ---- composite -----------------------------------------------------------------------------
 // Exposure, bloom, tonemap and gamma in one pass; the frame becomes a display image here.
 float4 PSComposite(AverPostVSOut i) : SV_TARGET {
-    float3 c = gPostSceneTex.SampleLevel(gPostSamp, i.uv, 0).rgb;
+    float3 c = averPostClampRadiance(gPostSceneTex.SampleLevel(gPostSamp, i.uv, 0).rgb);
 #ifdef AVER_POST_AUTOEXPOSURE
     c *= asfloat(gPostExpRead.Load(0));
 #else
@@ -187,5 +204,5 @@ float4 PSComposite(AverPostVSOut i) : SV_TARGET {
 #ifdef AVER_POST_BLOOM
     c += gPostBloomTex.SampleLevel(gPostSamp, i.uv, 0).rgb * gPostTone.y;
 #endif
-    return float4(toGamma(acesTonemap(c)), 1.0);
+    return float4(toGamma(averTonemap(c, gPostMisc.w)), 1.0);
 }

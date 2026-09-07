@@ -15,6 +15,9 @@ struct BootConfig {
     u64 maxFrames = 0;     // 0 = run until the window is closed
     bool headless = false; // skip window creation entirely
     bool useWarp = false;  // ask the RHI for the software rasteriser
+    // Borderless fullscreen for an INTERACTIVE run; see WindowDesc::fullscreen for why a capture run
+    // ignores it.
+    bool fullscreen = false;
     bool enableDebugLayer = false;   // opt-in in every build type; `--debug-layer`
     // Which RHI backend to ASK FOR first: "d3d12", "d3d11", "vulkan", "null", or empty for the
     // compiled-in default order. The engine still falls back if it is unavailable, and says loudly
@@ -37,6 +40,19 @@ public:
     virtual void onDeviceCreated(Engine&) {}
 
     virtual void onInit(Engine&) {}
+
+    // Has everything the first frame needs finished arriving?
+    //
+    // WHY onInit() RETURNING IS NOT THAT. The splash used to close the moment onInit() returned, and
+    // onInit() is only the SYNCHRONOUS half of loading: the meshes are uploaded, the shader
+    // permutations compiled and the GI volume first voxelised on the first RENDERED frames, which is
+    // seconds of work that happened after the splash was already gone. So the window appeared, empty
+    // or half-lit, and the person watching saw the editor "start" and then hang.
+    //
+    // DEFAULT TRUE so every other Application is unaffected -- the engine closes the splash exactly
+    // where it used to unless something opts in by overriding this. The engine also caps how long it
+    // will wait, so a subclass that never returns true delays startup rather than hanging it.
+    virtual bool startupComplete() const { return true; }
     virtual void onUpdate(Engine&, const Timestep&) {}
     virtual void onRender(Engine&) {}
     virtual void onShutdown(Engine&) {}

@@ -530,11 +530,24 @@ pbr::MaterialSystem::ResolvedTexture GameContent::resolveMaterialTexture(const p
     // THE SLOT DECIDES THE COLOUR SPACE, NEVER THE FILENAME. A normal map read as sRGB is a subtly
     // wrong lighting response that looks like a shading bug rather than a decode bug.
     assets::TextureUsage usage = assets::TextureUsage::Data;
+    // THE LAYER-1 SLOTS BELONG HERE TOO, and their absence was a decode bug rather than an omission
+    // of principle. MaterialSystem::colourClass classifies Layer1BaseColor as 'c' (sRGB) and
+    // Layer1Normal as 'n', and its own comment says "KEEP THIS IN STEP WITH THOSE TWO SWITCHES" --
+    // this being one of them. It drifted: everything not named fell through to Data, so a
+    // slope-blended material's SECOND base-colour layer was uploaded LINEAR when its pixels are sRGB.
+    //
+    // WHAT THAT LOOKS LIKE is why it went unnoticed: decoding sRGB texels as linear does not corrupt
+    // them, it LIFTS the midtones and flattens the contrast -- the layer reads pale and washed out
+    // beside the layer 0 it blends against, which reads as a lighting or blending problem rather than
+    // as a colour-space one. Layer1Normal had the matching fault the other way: routed to Data it lost
+    // the normal-map-aware mip generation that NormalMap selects.
     switch (slot) {
         case pbr::TextureSlot::BaseColor:
-        case pbr::TextureSlot::Emissive:  usage = assets::TextureUsage::Colour;    break;
-        case pbr::TextureSlot::Normal:    usage = assets::TextureUsage::NormalMap; break;
-        default:                          usage = assets::TextureUsage::Data;      break;
+        case pbr::TextureSlot::Layer1BaseColor:
+        case pbr::TextureSlot::Emissive:      usage = assets::TextureUsage::Colour;    break;
+        case pbr::TextureSlot::Normal:
+        case pbr::TextureSlot::Layer1Normal:  usage = assets::TextureUsage::NormalMap; break;
+        default:                              usage = assets::TextureUsage::Data;      break;
     }
 
     std::string err;

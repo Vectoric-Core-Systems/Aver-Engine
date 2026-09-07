@@ -373,6 +373,14 @@ void VoxiRenderer::shutdown() {
                                         sceneBlendedGbufPso_, sceneMsBlendedGbufPso_,
                                         sceneRtBlendedGbufPso_, sceneMsRtBlendedGbufPso_,
                                         scenePsoPrepassedGbuf_, sceneRtPsoPrepassedGbuf_,
+                                        // TWO PRE-EXISTING LEAKS CLOSED ALONGSIDE THE NEW HANDLE.
+                                        // rayDrivenTexPso_ and sceneRtBlendedTexPso_ were both set
+                                        // to 0 below without ever being destroyed -- the exact bug
+                                        // the comment above says was fixed for rayDrivenPso_,
+                                        // repeated twice in the same file and missed both times
+                                        // because zeroing a handle LOOKS like releasing it.
+                                        rayDrivenTexPso_, sceneRtBlendedTexPso_,
+                                        rayDrivenTexGbufPso_,
                                         rayDrivenGbufPso_};
     for (rhi::PipelineHandle p : psos) if (p) res_->destroyPipeline(p);
     shadowPso_ = shadowInstancedPso_ = giShadowPso_ = giShadowInstancedPso_ = 0;
@@ -385,7 +393,7 @@ void VoxiRenderer::shutdown() {
     sceneGbufPso_ = sceneMsGbufPso_ = sceneRtGbufPso_ = sceneMsRtGbufPso_ = 0;
     sceneBlendedGbufPso_ = sceneMsBlendedGbufPso_ = sceneRtBlendedGbufPso_ = sceneMsRtBlendedGbufPso_ = 0;
     scenePsoPrepassedGbuf_ = sceneRtPsoPrepassedGbuf_ = 0;
-    rayDrivenGbufPso_ = 0;
+    rayDrivenGbufPso_ = rayDrivenTexGbufPso_ = 0;
 
     if (voxelAccumTex_) res_->destroyTexture(voxelAccumTex_);
     if (voxelTex_)  res_->destroyTexture(voxelTex_);
@@ -738,6 +746,20 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
     cb_.voxelParams[0] = static_cast<f32>(voxelResBuilt_);
     cb_.voxelParams[1] = settings_.giIntensity;
     cb_.giParams[0]    = static_cast<f32>(settings_.giCones);
+    // GATED ON rtActive_, NOT ON THE SETTING ALONE. The shader traces these against the same
+    // acceleration structure the shadow ray uses, and there is not one on a frame that built no
+    // TLAS -- publishing a non-zero count then would have every pixel trace into nothing and read
+    // back "sky visible everywhere", which is BRIGHTER than the cone estimate it replaced and would
+    // look like this feature making the bug worse. Zero here means the shader keeps the cone
+    // gather's own occlusion, which is the correct fallback and the pre-existing behaviour.
+    cb_.ambientParams[0] = rtActive_ ? static_cast<f32>(std::min(settings_.giSkyOcclusionRays,
+                                                                 kMaxShadowRays))
+                                     : 0.0f;
+    // y IS THE COHERENCE TILE EDGE, and it is sent whether or not the rays are on: the shader divides
+    // the pixel coordinate by it unconditionally, so a 0 arriving here would be a division by zero in
+    // every pixel rather than a disabled feature. max(1) is the identity, not a guard against a
+    // caller mistake -- Settings clamps the authored value already.
+    cb_.ambientParams[1] = static_cast<f32>(std::max(settings_.giSkyOcclusionTile, 1u));
     // Refraction rides giParams' spare .yzw -- only .x was used, so these ride a row the HLSL mirror
     // already declares at no layout cost (mirrored by hand in more than one place; see
     // MaterialConstants' note on what a silent offset mistake costs). A fourth refraction knob needs
@@ -2656,12 +2678,30 @@ void VoxiRenderer::scenePass(rhi::IRenderContext& ctx) {
         rhi::ScopedGpuStat rayStat(ctx, "Voxi ray-driven primary");
         // See pickGbuf()'s own comment: ray-driven mode never goes through scenePipeline(), so this
         // is the one call site that has to ask for its G-buffer twin directly.
-        // THE TEXTURED PIPELINE WHEN THERE IS ONE. Only for the non-G-buffer path: the G-buffer twin
-        // writes velocity/view-Z/normals, none of which a base-colour texture changes, so it is not
-        // worth a second variant until a later stage needs one -- and pickGbuf() must keep returning
-        // a pair that agree about their root signature.
-        const bool textured = rayDrivenTexPso_ != 0 && !dev_->gBufferEnabled();
-        ctx.setPipeline(textured ? rayDrivenTexPso_ : pickGbuf(rayDrivenPso_, rayDrivenGbufPso_));
+        // TEXTURING AND THE G-BUFFER ARE INDEPENDENT AXES NOW, four pipelines rather than three.
+        // This used to read:
+        //     const bool textured = rayDrivenTexPso_ != 0 && !dev_->gBufferEnabled();
+        // which was true to the pipelines that existed -- there was no textured G-buffer variant --
+        // but it meant --gbuffer did not merely add three targets, it turned TEXTURING OFF. An A/B
+        // across that flag compared a textured image with a flat-albedo one, and the whole difference
+        // was there to be attributed to the G-buffer. See the header's comment on
+        // rayDrivenTexGbufPso_ for why that had to be closed before, not after, the deferred-lighting
+        // work leans on this flag.
+        //
+        // pickGbuf() STAYS THE SINGLE AUTHORITY on whether four targets will really be bound this
+        // frame -- it declines when the twin never compiled, before init(), and at MSAA > 1, where the
+        // G-buffer targets are single-sample and OMSetRenderTargets refuses to bind them beside a
+        // multisampled colour target. Asking dev_->gBufferEnabled() again here would duplicate that
+        // MSAA rule in a second place and the two would drift.
+        const bool gbufBound = pickGbuf(rayDrivenPso_, rayDrivenGbufPso_) == rayDrivenGbufPso_;
+        // FALLING BACK WITHIN THE SAME TARGET COUNT, never across it: if the textured G-buffer
+        // pipeline did not compile, the fallback is the FLAT G-buffer one, not the textured
+        // single-target one. Binding a pipeline that declares one target while the backend has bound
+        // four would leave the G-buffer unwritten while every caller believed it was on.
+        const rhi::PipelineHandle rdPso =
+            gbufBound ? (rayDrivenTexGbufPso_ ? rayDrivenTexGbufPso_ : rayDrivenGbufPso_)
+                      : (rayDrivenTexPso_     ? rayDrivenTexPso_     : rayDrivenPso_);
+        ctx.setPipeline(rdPso);
         ctx.setBindingSet(bindings_);
         ctx.setBindingSet(materials_.fallbackBindingSet(), 1);
         // A no-op on the untextured pipeline, which declares no bindless table -- so this does not
@@ -3333,6 +3373,13 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
                                          sceneBlendedGbufPso_, sceneMsBlendedGbufPso_,
                                          sceneRtBlendedGbufPso_, sceneMsRtBlendedGbufPso_,
                                          scenePsoPrepassedGbuf_, sceneRtPsoPrepassedGbuf_,
+                                         // Same two leaks as shutdown()'s list, and the same reason
+                                         // they survived: this function OVERWRITES every member a
+                                         // few lines down, so a handle missing from here leaks on
+                                         // every pipeline rebuild -- once per resize, not once
+                                         // per run.
+                                         rayDrivenTexPso_, sceneRtBlendedTexPso_,
+                                         rayDrivenTexGbufPso_,
                                          rayDrivenGbufPso_};
     for (rhi::PipelineHandle p : stale) if (p) res_->destroyPipeline(p);
     debugPso_ = scenePso_ = sceneMsPso_ = sceneRtPso_ = sceneMsRtPso_ = 0;
@@ -3343,7 +3390,7 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
     sceneGbufPso_ = sceneMsGbufPso_ = sceneRtGbufPso_ = sceneMsRtGbufPso_ = 0;
     sceneBlendedGbufPso_ = sceneMsBlendedGbufPso_ = sceneRtBlendedGbufPso_ = sceneMsRtBlendedGbufPso_ = 0;
     scenePsoPrepassedGbuf_ = sceneRtPsoPrepassedGbuf_ = 0;
-    rayDrivenGbufPso_ = 0;
+    rayDrivenGbufPso_ = rayDrivenTexGbufPso_ = 0;
 
     ShaderScope compile(*res_);
     const rhi::PipelineLayout gi = giLayout();
@@ -3521,6 +3568,38 @@ bool VoxiRenderer::createScenePipelines(u32 sampleCount, rhi::Format color, rhi:
                       "factors alone");
         else
             AVER_INFO("[Voxi] textured ray-driven pass ready ({} texture slots)", kRtTextureCapacity);
+
+        // THE TEXTURED G-BUFFER TWIN. Same shader, same bindless layout, plus AVER_GBUFFER=1 so
+        // PSRayDriven returns RayDrivenGBufferOut's four targets instead of one. Built here rather
+        // than beside rayDrivenGbufPso_ below because `giTex`, `bindlessDefs` and `vskyTex` are
+        // scoped to this block -- the bindless range is a root-signature fact, so a G-buffer PSO that
+        // wants texturing has to be created where the textured layout exists.
+        //
+        // WITHOUT THIS, --gbuffer SILENTLY UNTEXTURED THE RENDERER: see the header's comment on this
+        // member for why that made every A/B across the flag meaningless.
+        const rhi::ShaderHandle psTexGbuf =
+            compile("PSRayDriven", rhi::ShaderStage::Pixel, 65,
+                    rasterDefs((bindlessDefs + ";AVER_GBUFFER=1" + rdAblateDefs()).c_str()).c_str());
+        if (vskyTex && psTexGbuf) {
+            rhi::GraphicsPipelineDesc p;
+            p.vs = vskyTex; p.ps = psTexGbuf;
+            p.layout = giTex;
+            p.cull = rhi::CullMode::None;
+            // Always/write-on for the same reason rayDrivenPso_ gives: a fullscreen pass has no prior
+            // depth to test against, and Less would reject every pixel against a cleared far plane.
+            p.depth = {true, true, rhi::CompareOp::Always};
+            p.renderTargetCount = 4;
+            p.renderTargets[0] = color;
+            p.renderTargets[1] = rhi::Format::RG16F;
+            p.renderTargets[2] = rhi::Format::R32Float;
+            p.renderTargets[3] = rhi::Format::RGB10A2Unorm;
+            p.depthFormat = depth;
+            p.sampleCount = sampleCount;
+            rayDrivenTexGbufPso_ = res_->createGraphicsPipeline(p);
+        }
+        if (!rayDrivenTexGbufPso_)
+            AVER_WARN("[Voxi] textured G-buffer ray-driven pass unavailable; --gbuffer will fall back "
+                      "to the flat-albedo G-buffer pipeline");
 
         // AND THE BLENDED VARIANT, which is the one that reaches GLASS. A blended draw never goes
         // through PSRayDriven -- the device captures it and replays it after the deferred sky through

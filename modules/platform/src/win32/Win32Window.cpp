@@ -348,8 +348,15 @@ bool Window::create(const WindowDesc& desc) {
     wc.hIconSm = wc.hIcon;
     RegisterClassExW(&wc);
 
-    DWORD style = desc.resizable ? WS_OVERLAPPEDWINDOW
-                                 : (WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX);
+    // AND ONLY WHEN THE WINDOW IS INTERACTIVE. See WindowDesc::fullscreen: a capture run's window is
+    // the instrument every gate baseline was recorded through, so it keeps its fixed size no matter
+    // what this asks for.
+    const bool wantFullscreen = desc.fullscreen && desc.activate;
+
+    DWORD style = wantFullscreen
+                    ? (WS_POPUP | WS_VISIBLE)
+                    : (desc.resizable ? WS_OVERLAPPEDWINDOW
+                                      : (WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX));
 
     RECT rc = {0, 0, static_cast<LONG>(desc.width), static_cast<LONG>(desc.height)};
     AdjustWindowRect(&rc, style, FALSE);
@@ -386,8 +393,26 @@ bool Window::create(const WindowDesc& desc) {
     height_ = desc.height;
     dpiScale_ = queryDpiScale(hwnd);
 
+    // FULLSCREEN TAKES rcMonitor, NOT rcWork: the work area excludes the taskbar, which is exactly
+    // what a borderless-fullscreen window must cover. Sized in PHYSICAL pixels straight from the
+    // monitor, so the DPI scaling the windowed path applies below would be wrong here twice over --
+    // the monitor rect is already in the units the swapchain wants.
+    if (wantFullscreen) {
+        MONITORINFO mi{}; mi.cbSize = sizeof(mi);
+        if (GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi)) {
+            const int mw = mi.rcMonitor.right - mi.rcMonitor.left;
+            const int mh = mi.rcMonitor.bottom - mi.rcMonitor.top;
+            SetWindowPos(hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top, mw, mh,
+                         SWP_NOACTIVATE);   // WM_SIZE updates width_/height_
+            AVER_INFO("[Platform] borderless fullscreen {}x{}", mw, mh);
+        } else {
+            AVER_WARN("[Platform] fullscreen asked for but the monitor could not be queried; "
+                      "staying windowed");
+        }
+    }
+
     // desc.width/height are logical 96-DPI sizes: scale, clamp to the work area, centre.
-    {
+    if (!wantFullscreen) {
         int cw = static_cast<int>(desc.width * dpiScale_ + 0.5f);
         int ch = static_cast<int>(desc.height * dpiScale_ + 0.5f);
         MONITORINFO mi{}; mi.cbSize = sizeof(mi);

@@ -62,6 +62,13 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     // comment still described as free, which is exactly how the next person adding a field
     // near here would have overwritten it.
     float4   gGiParams;
+    // x = sky-visibility rays the ambient term traces per pixel; 0 means "use the cone gather's own
+    // occlusion instead", which is every tier below the top and is what this shader did before the
+    // rays existed.
+    // y = the COHERENCE TILE EDGE those rays share a direction across (1 = per-pixel). Claimed within
+    // days of this row being written down as spare, which is what gGiParams directly above warns
+    // happens; z/w are what is left, and the warning still applies to them.
+    float4   gAmbientParams;
 };
 
 // ---- Voxi: voxel cone traced GI ----
@@ -76,6 +83,57 @@ RWTexture3D<uint> gVoxelAccum : register(u1);
 // Fixed-point scale radiance is multiplied by before accumulation and divided by in CSResolve.
 #define AVER_VOX_FIXED 16384.0
 #define AVER_VOX_MAXRAD 16.0
+
+// Edge, in pixels, of the tile that shares one sky-occlusion ray direction. See rtSkyOcclusion for
+// why coherence rather than ray count is the lever here. 1 = a fresh rotation per pixel, which is
+// what this shader did before the dial existed and is bit-identical to it.
+#ifndef AVER_AO_COHERENCE_TILE
+#define AVER_AO_COHERENCE_TILE 1.0
+#endif
+
+// AVER_AO_UNIFIED: let the ambient ray answer more than one question.
+//
+// THE OBSERVATION. rtSkyOcclusion fires a full hemisphere BVH traversal per sample and keeps ONE BIT
+// of what it learns -- `open += 1.0` on a miss. On a miss it has just seen the sky, in a direction it
+// knows, and throws that away while skyColor() marches the atmosphere 32 steps elsewhere in this same
+// shader for the same information. On a hit it carries ACCEPT_FIRST_HIT_AND_END_SEARCH, so it does
+// not even learn WHICH surface stopped it -- while thirteen cones march the voxel volume estimating
+// the bounced light off exactly those surfaces.
+//
+// So one ray is paying for three answers and returning a third of one. At 1 this file behaves exactly
+// as it always has; at 1 the ray keeps all three:
+//
+//   MISS   -> averSkyRadianceCheap(dir), the SH sky evaluated along the ray. This is strictly better
+//             than what it replaces, and not only cheaper: the current term is an unoccluded
+//             hemispherical mean scaled by a scalar, so a room with one window is lit by an average
+//             of the whole sky dimmed to taste. Per-direction sampling knows WHICH sky got in.
+//   HIT    -> the voxel volume sampled AT THE HIT POINT, mip 0. The cone gather's answer to the same
+//             question is a widening cone that starts leaking through thin walls as it climbs mips;
+//             a ray that actually traversed the geometry cannot leak, because it stopped.
+//
+// WHAT IT COSTS, AND WHY THIS IS A HYPOTHESIS RATHER THAN AN IMPROVEMENT. Dropping
+// ACCEPT_FIRST_HIT_AND_END_SEARCH turns an any-hit query into a closest-hit one, which is typically
+// 1.5-2x per ray -- the query can no longer stop at the first thing it touches. The bet is that this
+// buys the removal of the GI cone gather (4.05 ms), the specular cone (2.63 ms) and both atmosphere
+// marches (2.69 + 2.21 ms). If the closest-hit ray costs more than the ~11.6 ms of marching it
+// replaces, the idea is simply wrong and this define should be deleted rather than defaulted on.
+// MEASURE IT ON A MOVING CAMERA: every share quoted above is a still-camera share.
+//
+// AT 1 THE TWO PRIMARY-VISIBILITY PATHS DELIBERATELY DISAGREE, and that is the one thing about this
+// switch that must not surprise anyone. Only PSRayDriven is wired to the unified gather; PSMainVoxi
+// still takes the cone gather plus a scalar occlusion. Elsewhere this file insists the two must
+// match ("they currently agree to 2.23 MAD and that is worth keeping") and that is still the rule --
+// it is simply suspended inside a measurement mode that is off in every shipped configuration.
+// Wiring PSMainVoxi follows once the trade is measured, NOT before: doing both at once would mean
+// the first number came from a build with no unchanged path left to compare against.
+//
+// AND IT IS NOT ON A QUALITY TIER, for the same reason AVER_RD_ABLATE is not: this changes what the
+// image MEANS, not how much of it there is. A tier that silently swapped the estimator would make
+// two tiers of the same scene incomparable.
+#ifndef AVER_AO_UNIFIED
+#define AVER_AO_UNIFIED 0
+#endif
+
 
 // The roughness below which a reflective surface is treated as a MIRROR: no cone, no temporal
 // history, no spatial filter. See rtReflectionTemporal's own comment for why all three must be
@@ -279,6 +337,32 @@ struct RtMaterial {
 // so glass could attenuate rather than stop a shadow), measuring that decision's cost. Knowingly
 // breaks tinted shadows through glass; never wire it to a quality tier either.
 #define AVER_RD_ABL_SHADOW_FIRSTHIT 7
+// 8..11 CLOSE THIS HARNESS'S OWN BLIND SPOTS. Modes 1-6 above between them leave four of the pass's
+// larger terms unmeasurable, which matters more than it sounds: a sweep that reports 1-6 looks
+// complete and silently attributes none of the cost below, so the residual gets blamed on whatever
+// mode happened to be biggest.
+#define AVER_RD_ABL_SKYOCC   8  // the sky-visibility ray (rtSkyOcclusion) -- ambient occlusion
+// The SPECULAR cone, traced in the rough-surface branch. NOT covered by AVER_RD_ABL_GI, which only
+// skips coneTracedIndirect -- so mode 2 has always left a 14th cone running and called it "GI off".
+#define AVER_RD_ABL_SPECCONE 9
+// skyColor in the ROUGH branch. Mode 4 ablates only the reflection branch's march; this is the other
+// call site, and it is the one an ENCLOSED scene actually takes.
+#define AVER_RD_ABL_ROUGHSKY 10
+// averApplyFog: a 4-step aerial march plus a possible second 32-step atmosphere march, run
+// unconditionally per pixel and never previously attributable. This function is recorded elsewhere in
+// the tree as having once been 41% of a frame.
+#define AVER_RD_ABL_FOG      11
+
+// READ THIS BEFORE SUBTRACTING TWO ABLATION NUMBERS. Several modes REROUTE work rather than removing
+// it, so the deltas are not additive and a term can measure NEGATIVE:
+//   - Mode 3 (REFL) leaves specHit false, which makes `!specHit || skyW > 0.0` always true and forces
+//     a full 32-step skyColor(R) march that a committed hit would have skipped. Mode 3's delta is
+//     therefore (reflection cost) MINUS (added sky march).
+//   - Mode 5 (TEX) is the documented one, above -- and additionally makes every alpha-masked cutout
+//     candidate commit, terminating traversal EARLIER than reality, so it can read faster than truth.
+//   - Mode 1 (SHADOW) replaces only the primary rtShadowTemporal call. The reflection's inner shadow
+//     ray and the bounce loop's shadow ray both keep running, so it measures the primary shadow
+//     estimator, NOT all shadow rays in the pass.
 
 float4 averRtSampleSlot(RtMaterial mat, uint slot, float2 uv, float2 gx, float2 gy, float4 fallback) {
     const uint idx = mat.texIndex[slot];
@@ -582,6 +666,7 @@ float rtHash(float2 p) {
     return frac((q.x + q.y) * q.z);
 }
 
+
 // Radical inverse of `i` in base 2 (bits reflected about the binary point) in [0,1). Makes the
 // sample sequence NESTED, unlike the sqrt((k+0.5)/n) it replaced: that put sample k at a radius
 // depending on the TOTAL ray count, so n=2 and n=4 were unrelated estimators with no shared samples.
@@ -785,6 +870,215 @@ float3 rtShadow(float3 wpos, float3 N, float3 L, float2 pixel, float3 dpx, float
         vis += through;
     }
     return vis / (float)n;
+}
+
+// The fraction of the hemisphere above `N` from which the SKY is actually reachable: 1 fully open,
+// 0 fully enclosed. This is the scalar `diffAmbient` multiplies the sky irradiance by, traced
+// instead of estimated.
+//
+// WHY IT EXISTS. coneTracedIndirect's `ao` is six 60-degree cones marching the voxel volume, and a
+// cone that widens into a coarse mip averages a thin wall with the empty space beside it and passes
+// through. In an OPEN scene that estimate is approximately right and this function is a waste of
+// four rays -- which is exactly why it is Epic-only. In an enclosed one it is optimistic, MEASURED
+// on Sponza against a converged path-traced reference as shadowed pixels reading [25,26,30] where
+// the reference says [7,7,7], blue-biased because what leaks in is sky.
+//
+// COSINE-WEIGHTED BY CONSTRUCTION, via Malley's method: a uniform point on the unit disc lifted onto
+// the hemisphere IS a cosine-weighted direction, so the average of a binary visibility test over
+// these directions is already the cosine-weighted integral `diffAmbient` wants. No per-sample weight
+// and no normalisation beyond the count. rtDiscSample supplies the disc point, so this shares the
+// shadow ray's NESTED sequence -- raising the ray count refines the estimate rather than replacing it.
+//
+// NO FRAME TERM, DELIBERATELY, and this is a hard constraint rather than an oversight: every RT
+// sampler in this file is a pure function of pixel position because the gate oracle compares exact
+// pixels across runs. A frame-varying sample set would decorrelate beautifully, denoise well, and
+// make 181 gates non-reproducible. The cost is that the noise here is FIXED per pixel -- stable and
+// non-flickering, but structured, and it does not average away over time the way a jittered one
+// would. If this ever needs to be smoother, the answer is more rays or a spatial filter, not a
+// frame counter.
+//
+// A MISS IS SKY. The ray is a plain occlusion query against the opaque lane with
+// ACCEPT_FIRST_HIT_AND_END_SEARCH: unlike the sun ray directly above, which walks past glass
+// accumulating transmittance, this one only asks whether anything is in the way at all.
+// FORWARD-DECLARED because the voxel helpers are defined with the cone tracer, roughly nine hundred
+// lines below this ray, and HLSL needs a declaration before the call. Moving their definitions up
+// instead would drag the whole clipmap block above the RT section for one caller's benefit.
+float3 voxelUVW(float3 wp);
+bool   insideVolume(float3 uvw);
+
+// What one hemisphere gather learned. `sky` and `bounce` are written only under AVER_AO_UNIFIED and
+// are zero otherwise, so a caller that ignores them gets exactly the old behaviour and exactly the
+// old cost -- the branches that fill them are compiled out, not merely unread.
+struct AverAmbientTraced {
+    float  open;    // fraction of samples that reached the sky. THE ONLY FIELD the legacy path uses.
+    float3 sky;     // mean radiance of the sky actually visible, per direction rather than averaged
+    float3 bounce;  // mean radiance of whatever stopped the rays that did not escape
+};
+
+AverAmbientTraced rtAmbientTraced(float3 wpos, float3 N, float2 pixel, uint rays) {
+    const uint n = clamp(rays, 1u, 32u);
+    const float bias = max(gRtParams.z, 1e-4) * (1.0 + length(wpos - gCamPos.xyz) * 5e-4);
+    // ROTATION SHARED ACROSS A TILE, NOT PER PIXEL -- a coherence dial, and the only lever the
+    // measurements actually support for this ray.
+    //
+    // WHY NOT "USE SIMD": this already runs under SIMT, 32-64 lanes in lockstep, and the cost is not
+    // arithmetic. Adding three more SUN rays costs 0.05 ms while removing the shadow ray entirely
+    // saves 11.95 ms -- rays 2-4 are nearly free because they all point at the sun and walk the same
+    // BVH nodes, so ray one pays the traversal and the rest ride its cache. This ray is the opposite:
+    // cosine-distributed over the hemisphere, so every lane in a wave descends a different part of
+    // the tree and the wave runs at the speed of its unluckiest lane. That is why it costs 5.37 ms
+    // for one ray where the sun gets four for less.
+    //
+    // Sharing the azimuth across an NxN tile makes neighbouring lanes trace near-PARALLEL rays, which
+    // touch the same nodes and the same cache lines. The price is correlated noise inside a tile
+    // rather than independent noise per pixel -- acceptable for a low-frequency term like ambient
+    // occlusion, and exactly the wrong trade for anything with sharp detail.
+    //
+    // HARDWARE AGNOSTIC BY CONSTRUCTION: plain HLSL, no wave intrinsics, no vendor extension, no
+    // capability gate. Shader Execution Reordering would attack the same problem more directly and is
+    // deliberately NOT used -- ReorderThread is vendor-specific and DXR 1.2's MaybeReorderThread needs
+    // a tier this engine does not require, so either would make this path exist on some GPUs only.
+    //
+    // 1 REPRODUCES THE PREVIOUS BEHAVIOUR EXACTLY (floor(pixel/1) == pixel), so this is a dial with a
+    // no-op setting rather than a rewrite, and the tile size can be measured rather than argued.
+    // RUNTIME, from gAmbientParams.y, with the compile-time define as the floor. It was a #define
+    // alone, set nowhere, which made the one lever this ray's own comment names unmeasurable -- the
+    // same shape of gap as the ray count beside it.
+    // max() rather than a branch: 1 reproduces the per-pixel rotation exactly (floor(p/1) == floor(p)),
+    // so there is no "off" case to test for.
+    const float aoTileEdge = max(gAmbientParams.y, AVER_AO_COHERENCE_TILE);
+    const float2 aoTile = floor(pixel / aoTileEdge);
+    const float ang0 = rtHash(aoTile) * 6.2831853;
+    float3 T, B;
+    // Matches ptBasis/averBasis convention: any orthonormal pair about N will do, since the disc
+    // sample is rotated by ang0 anyway.
+    const float3 up = abs(N.z) < 0.9 ? float3(0, 0, 1) : float3(1, 0, 0);
+    T = normalize(cross(up, N));
+    B = cross(N, T);
+
+    AverAmbientTraced res;
+    res.open = 0.0; res.sky = float3(0, 0, 0); res.bounce = float3(0, 0, 0);
+    [loop] for (uint k = 0; k < n; ++k) {
+        const float2 d = rtDiscSample(k, ang0);
+        // Malley: lift the disc point onto the hemisphere. r^2 + z^2 == 1 by construction, so the
+        // result is unit length without a normalize() that would perturb the very cosine
+        // distribution being relied on.
+        const float3 dir = T * d.x + B * d.y + N * sqrt(saturate(1.0 - dot(d, d)));
+
+        RayDesc r;
+        // Offset along BOTH the normal and the ray, as the shadow ray does: the normal alone leaves
+        // acne at grazing angles, and a cosine-weighted set contains plenty of grazing directions.
+        r.Origin    = wpos + N * bias + dir * bias;
+        r.Direction = dir;
+        r.TMin      = bias;
+        // BOUNDED, NOT 1 km -- AND MEASURED TO CHANGE NOTHING HERE, which is written down because
+        // the obvious assumption is that it should. The sun ray above runs to 100000 because a
+        // shadow caster can be any distance away and missing one is a visibly wrong hard edge.
+        // Ambient is a smooth local quantity, so bounding it LOOKS like the optimisation. On Sponza
+        // it is worth exactly nothing: 65.716 ms bounded against 65.715 ms unbounded, and a
+        // byte-identical viewport mean. Every ray in an enclosed scene hits something long before
+        // 40 m, so there was no traversal to save.
+        //
+        // THE COST IS RAY INCOHERENCE, NOT RAY LENGTH. These directions are cosine-distributed over
+        // the hemisphere, so neighbouring lanes walk unrelated parts of the BVH -- unlike the sun
+        // rays, which all point one way and traverse together. That is why four of these cost far
+        // more than the four sun rays already in the frame, and why the lever is ray COUNT or
+        // amortisation, not distance.
+        //
+        // Kept anyway, because an unbounded ambient ray is wrong in principle and this scene simply
+        // cannot show it: gVoxelParams.z is Settings::giMaxDistance, already the authored answer to
+        // "how far does indirect light travel here" and already where traceCone stops, so the traced
+        // estimate and the cone estimate it replaces measure the same extent of world.
+        r.TMax      = max(gVoxelParams.z, 1.0);
+
+        // THE TEMPLATE ARGUMENT LOST ACCEPT_FIRST_HIT_AND_END_SEARCH, and the flag moved to the
+        // TraceRayInline call where the mode needs it. Two reasons, and the first applies even at
+        // AVER_AO_UNIFIED 0:
+        //
+        //   averRtProceedSolid is written against exactly one RayQuery template argument, and says so
+        //   ("A second flag set would need its own copy -- HLSL has no way to be generic over the
+        //   flags"). This ray was the ONE ray in this file still calling a bare Proceed() with no
+        //   candidate test, and the bug that left is the OPPOSITE of the obvious guess -- it is not
+        //   that a leaf occluded with its bounding rectangle instead of its cutout. Alpha-masked
+        //   instances stay in the OPAQUE lane but carry FORCE_NON_OPAQUE (VoxiRenderer.cpp, "NOT THE
+        //   MASK, only the flags"), and this file's own mask comment states the consequence: "a
+        //   RayQuery meeting one does not commit it, so a single Proceed()+CommittedStatus traversal
+        //   would stop AT the pane and miss whatever is behind it." CommittedStatus then reads
+        //   COMMITTED_NOTHING and the sample was counted as HAVING REACHED THE SKY.
+        //
+        //   So a leaf did not over-occlude, it made ambient light LEAK: any direction whose traversal
+        //   surfaced a cutout candidate first was scored fully open no matter what solid wall stood
+        //   behind it, brightening exactly the enclosed, foliage-heavy interiors this ray was added
+        //   to darken. Running the shared loop resolves each candidate against its alpha and keeps
+        //   traversing, which is what every other ray in this file already did.
+        //
+        //   And under AVER_AO_UNIFIED the flag has to go anyway: "any hit will do" cannot tell you
+        //   WHICH surface you hit, and the hit is half the point.
+        //
+        // Runtime flags OR with template flags, so the non-unified path below is the same query it
+        // has always been, just spelled at the call rather than in the type.
+        RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
+#if AVER_AO_UNIFIED
+        q.TraceRayInline(gScene, RAY_FLAG_NONE, AVER_RT_MASK_OPAQUE_ALL, r);
+#else
+        q.TraceRayInline(gScene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, AVER_RT_MASK_OPAQUE_ALL, r);
+#endif
+        averRtProceedSolid(q);
+
+        if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {
+            res.open += 1.0;
+#if AVER_AO_UNIFIED
+            // The sky this sample actually saw. averSkyRadianceCheap is the SH reconstruction, ~20
+            // ALU, against skyColor's 32-step march -- affordable once per hemisphere sample in a way
+            // the march never could be. It cannot represent the sun disc, which is correct here: the
+            // sun is a separate direct term and must not be gathered twice.
+            res.sky += averSkyRadianceCheap(dir);
+#endif
+        }
+#if AVER_AO_UNIFIED
+        else {
+            // FIRST-BOUNCE RADIANCE AT AN EXACT HIT, which is the same quantity traceCone estimates
+            // and a strictly better estimate of it. A cone widens with distance and climbs mips, and
+            // a coarse mip averages across a thin wall -- that is the leak that makes enclosed
+            // shadows read too bright. This ray stopped ON the geometry, so there is nothing to
+            // average across; mip 0 at the hit point is what the cone was approximating all along.
+            //
+            // Clamped exactly as every other consumer of this volume clamps it: the volume can hold
+            // a physically large value and gVoxelParams.y scales it further, so AVER_VOX_MAXRAD is
+            // the same firefly bound traceCone's callers already apply.
+            const float3 hp  = r.Origin + dir * q.CommittedRayT();
+            const float3 uvw = voxelUVW(hp);
+            // OUTSIDE THE VOLUME CONTRIBUTES NOTHING, deliberately, and this is the one place the
+            // unified path is DARKER than the cone gather rather than brighter: traceCone treats
+            // leaving the volume as "unoccluded" and hands back the sky, which is why shrinking the
+            // GI volume once made shadows brighter instead of darker. A ray that hit real geometry
+            // outside the voxelised region is genuinely occluded; crediting it with sky would
+            // reintroduce the leak this whole change exists to remove.
+            if (insideVolume(uvw))
+                res.bounce += min(gVoxelTex.SampleLevel(gVoxelSamp, uvw, 0).rgb * gVoxelParams.y,
+                                  AVER_VOX_MAXRAD);
+        }
+#endif
+    }
+
+    // ALL THREE DIVIDE BY n, NOT BY THEIR OWN HIT COUNTS. These are Monte Carlo estimates of
+    // hemisphere integrals, so a sample that missed contributes zero to `bounce` and a sample that
+    // hit contributes zero to `sky` -- that is the estimate, not a gap in it. Dividing `sky` by the
+    // miss count instead would return the mean brightness of the visible sky and silently drop the
+    // occlusion, which is the very thing being measured.
+    const float inv = 1.0 / (float)n;
+    res.open   *= inv;
+    res.sky    *= inv;
+    res.bounce *= inv;
+    return res;
+}
+
+// The scalar-only form every existing caller wants, kept so that turning AVER_AO_UNIFIED on does not
+// require every call site to change at once. Under the define the extra fields are computed and
+// discarded here, which is exactly the waste this whole idea is about -- so a call site that means to
+// use them must call rtAmbientTraced directly.
+float rtSkyOcclusion(float3 wpos, float3 N, float2 pixel, uint rays) {
+    return rtAmbientTraced(wpos, N, pixel, rays).open;
 }
 
 // Reprojects wpos through LAST frame's camera to sample the ray-traced shadow history. False when
@@ -1789,7 +2083,7 @@ float2 averGBufferVelocity(float3 wpos) {
 #define AVER_GBUF_RETURN(colorExpr) return (colorExpr)
 #endif
 
-// The Voxi lit pixel shader. Voxi supplies light transport only — sun visibility, sky, bounce —
+// The Voxi lit pixel shader. Voxi supplies light transport only â€” sun visibility, sky, bounce â€”
 // and the material shades it. Returns linear radiance; the post chain tonemaps.
 #if AVER_GBUFFER
 GBufferOut PSMainVoxi(VSOut i) {
@@ -1891,7 +2185,20 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     ind4.ambient      = averSkyIrradiance(averShadingNormal(s));
     ind4.ambientScale = gAmbient.r;
     ind4.diffuse      = ind;
+    // TRACED SKY VISIBILITY WHEN THE TIER PAYS FOR IT, the cone gather's own estimate otherwise.
+    // gAmbientParams.x is already 0 on any frame without an acceleration structure (VoxiRenderer
+    // gates it on rtActive_), so this needs no second RUNTIME test -- but it does need a
+    // COMPILE-TIME one: rtSkyOcclusion lives inside this file's `#if AVER_RT` region because it
+    // names gScene, and this line does not. Without the guard every non-RT entry point in the file
+    // (VSShadow, PSVoxel, CSResolve, ...) fails on an undeclared identifier -- which is exactly what
+    // happened, and cost a build that reported OK because HLSL compiles at RUNTIME here.
+#if AVER_RT
+    ind4.occlusion    = gAmbientParams.x > 0.5
+                      ? rtSkyOcclusion(i.wpos, N, i.pos.xy, (uint)gAmbientParams.x)
+                      : ao;
+#else
     ind4.occlusion    = ao;
+#endif
 #if AVER_RT
     // Ray traced when the acceleration structure and geometry table both exist; preferred over the
     // cone trace unconditionally since the cone is bounded by the voxel volume and this is not.
@@ -2275,10 +2582,23 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // (PTTest's floor, walls, crates, targets) as fallback white while the rasteriser drew them
     // correctly -- reported as "everything is white".
 #ifdef AVER_RT_BINDLESS
-    // THE FULL STOCK MATERIAL AT A RAY HIT: all eight maps, slope-blended second layer, normal-mapped
-    // shading normal. Composed like the raster path -- every factor MULTIPLIES its texel rather than
-    // replacing it, so a textureless material reduces to the untextured branch and the paths agree.
-    // Fallbacks are averSampleMaps' own identity values, so an unbound slot costs one compare.
+    // THE STOCK MATERIAL AT A RAY HIT: six of eight maps, slope-blended second layer. Composed like
+    // the raster path -- every factor MULTIPLIES its texel rather than replacing it, so a textureless
+    // material reduces to the untextured branch and the paths agree. Fallbacks are averSampleMaps'
+    // own identity values, so an unbound slot costs one compare.
+    //
+    // "ALL EIGHT MAPS" AND "NORMAL-MAPPED SHADING NORMAL" IS WHAT THIS COMMENT USED TO SAY, and both
+    // halves were wrong. Slots 2 and 7 (normal, layer-1 normal) are sampled below and then DISCARDED:
+    // the only reader is averRtPerturbNormal, behind `#define AVER_RT_NORMAL_MAPPING 0` further down.
+    // So this path has no normal mapping at all, and a reader trusting the sentence above would look
+    // for a bug in the tangent frame that never runs.
+    //
+    // The samples themselves are almost certainly free -- averRtSampleSlot is pure, so DXC dead-code
+    // eliminates a result nothing reads -- which is why this is corrected rather than deleted. The
+    // define is 0 because turning it on made ElectricDreams terrain WORSE by a measurement recorded
+    // at that define; settling that needs a flat surface with a known-good normal map judged against
+    // the path tracer (which gained working normal mapping with a derived tangent frame), not a
+    // deletion here.
     // THE EFFECTIVE UV, nothing like the mesh's own UV for a world-aligned material.
     const float2 uvS = averRtSurfaceUV(mat, inst, wpos, N, hitUV);
     // ...and the footprint one pixel covers in that same UV space, from the ray differentials this
@@ -2476,14 +2796,40 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // Four fewer cones bought ~0.4ms of 6.5ms. The gather is real but not dominant, and **the 3x gap
     // against the rasteriser remains unexplained**. Already tested; don't shave cones on this theory.
     //
-    // WHAT TO DO INSTEAD, a measurement problem first: there is NO GPU-timed marker for the raster
-    // path's own pixel shading, so the 0.1ms figure the 3x is computed against may not be a
-    // like-for-like GPU span. Put a symmetric ScopedGpuStat on the raster colour draw and re-take
-    // both numbers before trusting any ratio between them.
+    // WHAT TO DO INSTEAD -- AND THE MARKER THIS ASKED FOR ALREADY EXISTS. This used to say "there is
+    // NO GPU-timed marker for the raster path's own pixel shading" and call for one to be added. It
+    // is there and always was: D3D12Device::beginGpuSpan("scene draw") opens at the tail of
+    // beginFrame and closes at the top of endFrame, bracketing every drawMesh the raster path issues
+    // -- and "Voxi ray-driven primary" is a CHILD of that same span, so the two are already
+    // like-for-like. Nothing needed adding.
+    //
+    // THE 0.1ms WAS NOT A MISSING MARKER, IT WAS AN EMPTY SPAN. "scene draw" measured 0.1ms because
+    // no drawMesh ran at all: the path-traced scene view was suppressing the scene and painting the
+    // frame itself, so the "rasteriser" being timed had drawn nothing. D3D12Device.cpp's own
+    // suppression warning documents exactly that run. The fix was never instrumentation, it was
+    // pinning `--pt 0` so the rasteriser is the thing on screen.
+    //
+    // SO THE COMPARISON IS: --gpu-timing twice on ONE scene at ONE resolution with a MOVING camera,
+    // `--rt-render-mode 1 --pt 0` against `--rt-render-mode 0 --pt 0`, reading "scene draw" from
+    // each. Both runs must be checked against the "is painting the scene" log line before either
+    // number is believed -- that line, not the timing, is what says which renderer ran.
+    //
+    // AND THE GAP IS SMALLER THAN THE 3x ABOVE SUGGESTS. This file's own AVER_RD_ABLATE header
+    // records ray-driven primary at ~6.7ms of 14.55ms against raster's 7.82ms on PTTest with RT on
+    // in both -- so what rasterising primary visibility can recover is that GAP, not the whole
+    // "Voxi ray-driven primary" span. That span contains the entire deferred shade (shadow, cones,
+    // reflection, sky-occlusion, both sky marches, fog), and the shadow ray in particular is THE SAME
+    // CALL the raster path makes, as the comment beside it says.
     float rdAo  = 1.0;
     ind.diffuse = 0.0;
 #if AVER_RD_ABLATE == AVER_RD_ABL_GI || AVER_RD_ABLATE == AVER_RD_ABL_ALL
     // ablated: no cone gather
+#elif AVER_AO_UNIFIED
+    // NOT TRACED HERE AT ALL under the unified ambient ray -- the hemisphere gather below supplies
+    // this term from its own hits, and running both would double every interior's bounce light. The
+    // cones and the ray answer the SAME question (how much light arrives from the surfaces around
+    // this point); the difference is that the ray stopped on geometry while the cone averaged across
+    // it. See the ambient block further down, which assigns ind.diffuse.
 #else
     if (gVoxelParams.w > 0.5) ind.diffuse = coneTracedIndirect(wpos, N, rdAo);
 #endif
@@ -2549,20 +2895,79 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         // (rough > 0.75, or RT unavailable): past that roughness a one-ray estimate can't resolve a
         // near-hemispherical lobe regardless of which pass is asking.
         float  specAperture = clamp(s.rough * 0.5 + 0.02, 0.02, 0.4);
+#if AVER_RD_ABLATE == AVER_RD_ABL_SPECCONE
+        // ablated: no specular cone. FULLY OPAQUE (alpha 1) rather than empty, so skyWeight below
+        // goes to 0 and this mode measures the CONE ALONE -- an alpha of 0 would instead hand the
+        // whole branch to skyColor and measure a march this mode is not trying to price.
+        float4 sceneSpec    = float4(0.0, 0.0, 0.0, 1.0);
+#else
         float4 sceneSpec    = traceCone(wpos, R, specAperture);
+#endif
         // Same fix as PSMainVoxi's identical branch above: HLSL doesn't short-circuit the multiply,
         // so skyColor(R)*(1-sceneSpec.a) wastes a 32-step march when occluded. 0.004 threshold, same
         // reasoning as averFogInscatter's (measured there: "8.9ms -> 1.3ms, 85% of the scene pass").
         const float skyWeight = 1.0 - sceneSpec.a;
         ind.specular        = min(sceneSpec.rgb * gVoxelParams.y, AVER_VOX_MAXRAD);
+#if AVER_RD_ABLATE == AVER_RD_ABL_ROUGHSKY
+        // ablated: the rough branch's atmosphere march. Mode 4 covers only the REFLECTION branch's;
+        // this is the call an enclosed scene actually reaches.
+#else
         if (skyWeight > 0.004) ind.specular += skyColor(R) * skyWeight;
+#endif
     } else {
         ind.specular        = skyColor(R);
     }
     // REAL AMBIENT OCCLUSION NOW, from the same cone march as the diffuse term. Used to be a
     // hardcoded 1.0 ("a traced bounce is its own occlusion" -- true for a converged path tracer, not
     // for one fixed sample per pixel). Cone trace supplies both now, matching the raster path.
+    //
+    // AT EPIC `rdAo` IS COMPUTED AND THEN DISCARDED, and that is deliberate rather than an oversight
+    // left lying around. The line below prefers the traced sky visibility, so the cone gather's own
+    // occlusion goes unused on exactly the tier that pays most for it. It is NOT worth restructuring
+    // coneTracedIndirect to skip: the cones still have to be traced for `ind.diffuse`, so the only
+    // saving available is the per-cone `occ += c.a * w` accumulation -- roughly two FMAs times
+    // thirteen cones, against thirteen cone MARCHES of up to 24 volume samples each. Measured
+    // context: the whole cone gather is 4.05 ms of a 50.16 ms frame, and this is a rounding error
+    // inside that. Threading a `wantAo` flag through a function mirrored in two files (voxi.hlsl and
+    // voxi_gi.hlsli, byte-for-byte) to save it would cost more than it returns.
+    // Same substitution as PSMainVoxi's, and it has to be the same or the two primary-visibility
+    // paths would disagree about how much sky reaches a surface -- they currently agree to 2.23 MAD
+    // and that is worth keeping. Guarded for the same compile-time reason, and kept even though this
+    // pass only exists under ray tracing: a reader should not have to prove that to know this builds.
+#if AVER_RT && AVER_AO_UNIFIED && AVER_RD_ABLATE != AVER_RD_ABL_SKYOCC
+    // ONE GATHER, THREE ANSWERS. See AVER_AO_UNIFIED at the top of this file for the argument.
+    if (gAmbientParams.x > 0.5) {
+        const AverAmbientTraced amb = rtAmbientTraced(wpos, N, i.pos.xy, (uint)gAmbientParams.x);
+        ind.occlusion = amb.open;
+        // THE BOUNCE REPLACES THE CONE GATHER, and carries its own occlusion already: averIndirectTerms
+        // computes diffBounce as kD * ind.diffuse with NO occlusion factor, which is exactly right for
+        // a quantity gathered by rays that were themselves occluded.
+        ind.diffuse   = amb.bounce;
+        // DIVIDED BY `open` ON PURPOSE, and getting this wrong would darken every shadowed pixel by
+        // squaring the occlusion. amb.sky is ALREADY the occluded sky -- the mean over all n samples,
+        // where a blocked sample contributed zero -- but averIndirectTerms then multiplies ind.ambient
+        // by diffOcc = ind.occlusion * s.occlusion. Pre-dividing here means that multiply puts the
+        // occlusion back exactly once: (sky/open) * open == sky.
+        //
+        // WHY NOT SET ind.occlusion = 1 INSTEAD, which would look simpler: ind.occlusion is also read
+        // by averSpecularOcclusion for the specular lobe, and by the material's own s.occlusion map.
+        // Flattening it would silently unocclude both.
+        //
+        // The guard is for the fully-enclosed pixel: open == 0 means sky == 0 too, so the quotient is
+        // 0/0 and any finite stand-in gives the correct 0 after the multiply back.
+        ind.ambient   = amb.sky / max(amb.open, 1e-4);
+    } else {
+        ind.occlusion = rdAo;
+    }
+#elif AVER_RT && AVER_RD_ABLATE != AVER_RD_ABL_SKYOCC
+    ind.occlusion    = gAmbientParams.x > 0.5
+                     ? rtSkyOcclusion(wpos, N, i.pos.xy, (uint)gAmbientParams.x)
+                     : rdAo;
+#else
+    // ablated (or no ray tracing): the cone gather's own occlusion, which is what every tier below
+    // Epic uses anyway -- so this mode measures the RAY, not the presence of ambient occlusion.
     ind.occlusion    = rdAo;
+#endif
     radiance = averShadeIndirect(radiance, s, ind);
 
     // THE BOUNCE CARRIES THE DIFFUSE RESPONSE, not raw albedo: a metal reflects almost nothing
@@ -2632,7 +3037,11 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         radiance += throughput * bdirect;
     }
 
+#if AVER_RD_ABLATE == AVER_RD_ABL_FOG
+    // ablated: no aerial perspective and no fog inscatter march.
+#else
     radiance = averApplyFog(radiance, wpos);
+#endif
 
     // Depth for everything that draws AFTER the scene -- the deferred sky, transparentPass, the
     // particle pass. Without it they have nothing to test against and sort against a cleared

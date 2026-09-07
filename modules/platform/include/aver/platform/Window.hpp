@@ -15,6 +15,18 @@ struct WindowDesc {
     // False shows the window without taking focus. An automated capture run has no business
     // stealing the keyboard from whatever the machine's owner is doing.
     bool activate = true;
+    // BORDERLESS fullscreen -- a WS_POPUP sized to the monitor's full bounds, never DXGI's exclusive
+    // mode. Exclusive fullscreen takes ownership of the display mode, breaks alt-tab, and interacts
+    // badly with the editor's other windows; borderless costs nothing here because the swapchain is
+    // already sized from the client area either way.
+    //
+    // IGNORED WHEN activate IS FALSE, and that is load-bearing rather than a convenience: a capture
+    // run's window is a MEASURING INSTRUMENT. Every recorded gate probe is a pixel at a fixed rect
+    // inside a client area of a fixed size (the baselines carry `rect=0,270 2750x1639`), so a capture
+    // window that sized itself to whatever monitor it happened to run on would move all 223 baseline
+    // rows and mean nothing was comparable across machines. Interactive runs get fullscreen; capture
+    // runs keep the exact window the oracle was recorded through.
+    bool fullscreen = false;
 };
 
 // Minimal OS window (Win32 backend). create() returns false rather than aborting.

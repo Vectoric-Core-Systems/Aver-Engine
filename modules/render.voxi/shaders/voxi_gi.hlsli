@@ -54,6 +54,11 @@ cbuffer VoxiFrame : register(AVER_GI_JOIN(b, AVER_GI_FRAME_REG)) {
     float4   gRtDenoiseParams;
     float4   gPtBounceParams;
     float4   gGiParams;
+    // Mirrors gAmbientParams. NOTHING IN THIS PRELUDE READS IT -- it is here because this block is
+    // declared as the FULL FrameConstants so a caller can bind giFrameConstants() verbatim (see the
+    // header note above), and a shorter declaration would quietly stop being that. Appended, never
+    // inserted: every field above keeps its offset.
+    float4   gAmbientParams;
 };
 
 // t(AVER_GI_SRV) the GI volume, t(AVER_GI_SRV_1) the shadow map -- the only two of Voxi's table-0

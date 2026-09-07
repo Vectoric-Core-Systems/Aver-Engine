@@ -761,9 +761,22 @@ void PathTracer::accumulate(rhi::IRenderContext& ctx, const PtTarget& t, const P
     cb.sample[0] = d.firstSample;
     cb.sample[1] = d.samples;
     cb.sample[2] = d.reset ? 1u : 0u;
+    // gPtSample.w was the one unused slot in the block, so this needs no new row and the
+    // sizeof(FrameCB) assert below is untouched. 0 means "never roulette", which is what every
+    // caller that does not set it gets.
+    cb.sample[3] = d.rouletteDepth;
     cb.trace[0] = d.rayBias;
     cb.trace[1] = d.tMax;
 
+    // THE ONLY TIMED SPAN THIS MODULE HAS EVER HAD, and its absence was not cosmetic. Until this
+    // line the sole ScopedGpuStat anywhere in render.pt was on PtSceneView's present BLIT, so
+    // --gpu-timing could report what it cost to SHOW the image and nothing at all about tracing it.
+    // Every "the path tracer is Nx faster than raster" figure in this repository was therefore a
+    // whole-frame CPU number from --frame-time (which SandboxApp's own comment at :4854 describes as
+    // "WHOLE frames from the CPU"), set beside a GPU pass span from the renderer it was said to beat.
+    // That is a category error, and it survived precisely because nothing here was measurable enough
+    // to contradict it: a dispatch with no marker is a dispatch nobody can price.
+    rhi::ScopedGpuStat gpuStat(ctx, "PT accumulate");
     ctx.pushMarker("Aver.PathTracer");
     ctx.bufferBarrier(t.accum, rhi::ResourceState::Common, rhi::ResourceState::UnorderedAccess);
     // THE TEXTURED TWIN ONLY ONCE SOMETHING IS ACTUALLY RESIDENT. texturing() is false for every

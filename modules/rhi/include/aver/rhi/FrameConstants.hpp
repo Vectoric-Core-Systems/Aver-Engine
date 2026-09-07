@@ -113,8 +113,17 @@ struct PostCB {
     f32 src[4];     // source width, height, 1/width, 1/height
     f32 adapt[4];   // min log2 luminance, 1/log2 range, adaption alpha, unused
     f32 limit[4];   // exposure min, exposure max, histogram low cut, high cut
-    f32 misc[4];    // middle grey, auto-exposure on, bloom filter radius, unused
+    f32 misc[4];    // middle grey, auto-exposure on, bloom filter radius, TONEMAP MODE
+    // x = the ceiling scene radiance is clamped to just before the tonemap (0 disables it entirely).
+    // y/z/w spare -- and every row in this struct that has ever been described as spare was claimed
+    // within a session or two, so do not read that word as a promise.
+    //
+    // A NEW ROW RATHER THAN misc.w OR adapt.w. adapt.w looked free (this struct called it "unused")
+    // but post.hlsl documents the same component as "pixels sampled", and a slot whose two sides
+    // disagree about its meaning is exactly the kind of thing that gets read by one of them later.
+    // misc.w takes the tonemap mode because both sides already agreed it was unused.
+    f32 clampRadiance[4];
 };
-static_assert(sizeof(PostCB) == 96, "the HLSL cbuffer mirrors this byte for byte");
+static_assert(sizeof(PostCB) == 112, "the HLSL cbuffer mirrors this byte for byte");
 
 } // namespace aver::rhi

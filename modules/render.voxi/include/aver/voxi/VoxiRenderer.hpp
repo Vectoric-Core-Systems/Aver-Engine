@@ -603,6 +603,21 @@ private:
     // The TEXTURED ray-driven pipeline. Separate from rayDrivenPso_ because the bindless range is
     // part of the root signature: preferred when it exists, and rayDrivenPso_ is the fallback.
     rhi::PipelineHandle rayDrivenTexPso_ = 0;
+    // ITS G-BUFFER TWIN, and the reason it exists is a measurement trap rather than a feature.
+    //
+    // scenePass() used to pick the textured pipeline only when the G-buffer was OFF:
+    //     const bool textured = rayDrivenTexPso_ != 0 && !dev_->gBufferEnabled();
+    // because there was no textured pipeline that also wrote the four targets, and pickGbuf() must
+    // return a pair that agree about their root signature. The consequence was silent and severe:
+    // passing --gbuffer did not merely add three render targets, it UNTEXTURED the renderer. Any A/B
+    // taken across that flag was comparing a textured image against a flat-albedo one and attributing
+    // the difference to the G-buffer. That flag sits directly on the path of every measurement the
+    // deferred-lighting work needs, which is why this is being closed before that work starts rather
+    // than after it produces a number somebody believes.
+    //
+    // Optional exactly like every other twin here: 0 when it did not compile, and the picker falls
+    // back to the flat G-buffer pipeline rather than to an untextured non-G-buffer one.
+    rhi::PipelineHandle rayDrivenTexGbufPso_ = 0;
     // The TEXTURED blended (glass) variant: PSMainVoxi compiled with the bindless table declared,
     // so a reflection seen IN a windowpane samples the reflected surface's texture. Preferred over
     // sceneRtBlendedPso_ whenever it built and the G-buffer is off.
@@ -952,6 +967,16 @@ private:
         // three written every frame in VoxiRenderer.cpp and read by averRefractedBackdropUV.
         // Its own float4 for the reason ptBounceParams above has one.
         f32 giParams[4] = {};
+        // Ambient control -- mirrored as gAmbientParams. x = how many sky-visibility rays the
+        // ambient term traces per pixel, 0 meaning "use the cone gather's own occlusion", which is
+        // what every tier below the top does and what this renderer did before the rays existed.
+        // y/z/w spare, and genuinely so TODAY -- see the giParams note above for what happens when
+        // that sentence stops being true and nobody edits it.
+        //
+        // Its own float4, not a spare component of gRtDenoiseParams or gGiShadowParams, for the
+        // reason ptBounceParams states: a field whose name says "denoise" carrying a ray count
+        // reads fine for a week and then costs an afternoon.
+        f32 ambientParams[4] = {};
     } cb_;
 
     // THE MIRROR THIS FILE HAS ALWAYS HAD AND NEVER GUARDED. `cbuffer VoxiFrame : register(b4)` in
@@ -966,7 +991,7 @@ private:
     // The file this used to name, VoxiShaders.hpp, no longer exists: the HLSL moved out of C++
     // string literals into shaders/ and the message was never updated. It sent me to a deleted file
     // when this assert did its job. Naming the real one now.
-    static_assert(sizeof(FrameConstants) == 688,
+    static_assert(sizeof(FrameConstants) == 704,
                   "cbuffer VoxiFrame in modules/render.voxi/shaders/voxi.hlsl mirrors this byte for byte");
     static_assert(sizeof(FrameConstants) % 16 == 0, "must be a legal constant-buffer size");
 

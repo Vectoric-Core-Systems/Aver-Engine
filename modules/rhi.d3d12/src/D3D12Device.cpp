@@ -4284,7 +4284,12 @@ void D3D12Device::runPostChain(ID3D12Resource* bb) {
         cb.misc[0] = post_.exposureKey;
         cb.misc[1] = autoExp ? 1.0f : 0.0f;
         cb.misc[2] = 1.0f;
-        cb.misc[3] = 0.0f;
+        // FILLED ON BOTH BACKENDS IN THE SAME CHANGE. VulkanDevice.cpp has the twin of this lambda and
+        // its own comment says it uses "the same formulas, same PostCB fields as D3D12Device.cpp's" --
+        // a field added here and not there is a silently different image on the other backend.
+        cb.misc[3] = static_cast<f32>(post_.tonemap);
+        cb.clampRadiance[0] = post_.maxRadiance;
+        cb.clampRadiance[1] = cb.clampRadiance[2] = cb.clampRadiance[3] = 0.0f;
     };
 
     auto fullscreen = [&](ID3D12PipelineState* pso, u32 triple, u32 w, u32 h,

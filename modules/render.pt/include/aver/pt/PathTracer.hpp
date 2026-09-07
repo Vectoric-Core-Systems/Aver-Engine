@@ -120,6 +120,24 @@ struct PtDispatch {
     bool     reset       = false;// overwrite rather than add; the first dispatch must set it
     f32      rayBias     = 0.05f;// cm, along the normal and as TMin
     f32      tMax        = 1.0e7f;
+    // RUSSIAN ROULETTE: the bounce index at which paths start being terminated in proportion to how
+    // little energy they still carry. 0 is OFF and is the DEFAULT ON PURPOSE -- see the shader for
+    // the technique, and below for why the default is off rather than on.
+    //
+    // The integrator ran without it entirely until now: the bounce loop is `for (b = 0; b <= bounce)`
+    // with no early exit, so a path that has scattered off three dark surfaces carries a few percent
+    // of its original throughput, contributes almost nothing to the pixel, and still pays a full
+    // closest-hit traversal plus a next-event shadow ray for every bounce it has left.
+    //
+    // WHY OFF BY DEFAULT, when the technique is unbiased and standard. PtFurnaceTest is an ORACLE,
+    // and its identity is not simply "the mean is right": it reads back the ESCAPED FRACTION and
+    // predicts L times that fraction (see CSPathTrace's own comment at the bounce-budget break). A
+    // rouletted path neither escapes nor hits -- it stops -- so the escaped count falls while the
+    // radiance estimate stays correct, and the oracle's prediction breaks for a reason that has
+    // nothing to do with the BRDF it exists to check. Rather than teach the furnace about roulette,
+    // the furnace simply does not ask for it: this defaults to 0, PtFurnaceTest never sets it, and
+    // its arithmetic is bit-identical to before. PtSceneView opts in.
+    u32      rouletteDepth = 0;
 };
 
 // Where one camera's accumulation lands: the buffer, and the descriptors naming its scene.

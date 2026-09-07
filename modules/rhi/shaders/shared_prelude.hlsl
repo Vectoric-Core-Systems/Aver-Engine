@@ -732,6 +732,55 @@ float3 averShIrradiance(float3 n) {
     return max(e, 0.0);
 }
 
+// The sky as RADIANCE ALONG ONE DIRECTION, from the same nine coefficients averShIrradiance reads.
+//
+// THE DIFFERENCE FROM averShIrradiance IS THE COSINE CONVOLUTION, and it is the whole distinction.
+// That function answers "how much light arrives at a surface facing n", so it folds in the
+// cosine-lobe factors A0=PI, A1=2PI/3, A2=PI/4 (and divides the PI back out). This one answers "how
+// bright is the sky if I look along d", which is the raw basis with no convolution -- so every
+// constant below is that function's constant with its A-factor divided out:
+//     0.282095 = 0.282095 / 1        (A0/PI = 1)
+//     0.488603 = 0.325735 / (2/3)    (A1/PI = 2/3)
+//     1.092548 = 0.273137 / (1/4)    (A2/PI = 1/4)
+//     0.315392 = 0.078848 / (1/4)
+//     0.546274 = 0.136569 / (1/4)
+// Using the wrong one of the two is not a small error: the convolved version is a hemispherical
+// average and is nearly flat across directions, so a caller wanting per-direction sky would get a
+// blurred constant and never see it was wrong.
+//
+// WHAT NINE COEFFICIENTS CANNOT DO: represent the sun disc, a cloud edge, or anything else small and
+// bright. This is a smooth, low-frequency reconstruction, correct for an AMBIENT gather over many
+// directions and wrong for a mirror reflection, which must keep marching the atmosphere. The sun is
+// handled as its own direct term everywhere in this engine, so it is not missing here, only absent.
+//
+// SELF-CHECK, matching averShIrradiance's: a UNIFORM sky of radiance L projects to
+// c[0] = L * 0.282095 * 4PI and nothing else, and this returns exactly L in every direction.
+float3 averShRadiance(float3 d) {
+    float3 e = gSkySh[0].rgb * 0.282095;
+    e += (gSkySh[1].rgb * d.y + gSkySh[2].rgb * d.z + gSkySh[3].rgb * d.x) * 0.488603;
+    e += (gSkySh[4].rgb * (d.x * d.y) + gSkySh[5].rgb * (d.y * d.z) +
+          gSkySh[7].rgb * (d.x * d.z)) * 1.092548;
+    e += gSkySh[6].rgb * ((3.0 * d.z * d.z - 1.0) * 0.315392);
+    e += gSkySh[8].rgb * ((d.x * d.x - d.y * d.y) * 0.546274);
+    // Same clamp and same reason as averShIrradiance: L2 undershoots on a sky with a strong, small
+    // bright region, and negative radiance is not a dim colour -- acesTonemap(-1) reads 1.0, so it
+    // would come out BRIGHT. That failure is recorded in this tree already.
+    return max(e, 0.0);
+}
+
+// The per-direction sky a ray should use when it misses: averShRadiance under the physical
+// atmosphere, and the authored dome's own evaluation otherwise. Mirrors averSkyIrradiance's split so
+// a project on the authored sky is not silently handed a reconstruction of a sky it is not using.
+//
+// NOT skyColor(): that marches the atmosphere in 32 steps and is far too expensive to run once per
+// hemisphere sample. This is the cheap sibling, and the trade is high-frequency detail an ambient
+// term cannot see anyway.
+float3 averSkyRadianceCheap(float3 d) {
+    if (averFurnaceOn()) return averFurnaceL();
+    if (averAtmoOn()) return averShRadiance(d);
+    return skyColorFull(d);
+}
+
 float3 averSkyIrradiance(float3 N) {
     if (averFurnaceOn()) return averFurnaceL();
     // THE AZIMUTH IS THE POINT. Everything below this line reads only N.z, because the authored

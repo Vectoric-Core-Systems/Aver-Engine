@@ -163,6 +163,36 @@ struct PostSettings {
     // Fraction of the histogram discarded at each end before averaging.
     f32  histogramLowPercent  = 0.30f;
     f32  histogramHighPercent = 0.85f;
+
+    // WHICH TONE CURVE. 0 is the original per-channel Narkowicz/Hill approximation; 1 is the same
+    // curve applied between the ACES input/output matrices (colour.hlsli's acesFittedTonemap).
+    //
+    // 1 IS THE DEFAULT because 0 desaturates by construction -- it runs a scalar S-curve on R, G and
+    // B independently, so a saturated colour's channels compress at different rates and everything
+    // bright slides toward white. The matrixed form rotates into a space where the curve behaves and
+    // rotates back, which is the entire reason ACES has those matrices.
+    //
+    // 0 IS KEPT, and not only for taste: every recorded gate baseline in scripts/ was measured
+    // through it, so it is the setting that reproduces them.
+    u32  tonemap = 1;
+
+    // Ceiling applied to scene radiance immediately before the tonemap; 0 disables it.
+    //
+    // WHY IT EXISTS: nothing else in this renderer bounds radiance. The sun disc alone is drawn at
+    // sunColour * sunIntensity * 14 (scene.hlsl PSky) and reaches ~42x at the default intensity of
+    // 3, with no clamp anywhere between there and here. The tonemap flattens it to white regardless,
+    // so the disc looks the same either way -- but the auto-exposure histogram reads the unclamped
+    // value and lets a few enormous pixels pull the whole frame darker.
+    //
+    // 8 IS DERIVED, NOT TASTE: it is the input past which the tone curve has nothing left to say.
+    // acesTonemap(8) = 1.003, which saturates to pure white, so every value above 8 produces the
+    // IDENTICAL pixel -- clamping there cannot change how anything looks. What it does change is the
+    // bloom, which thresholds the same unclamped radiance and so bleeds a halo in proportion to a sun
+    // disc sitting at ~42. The disc stays blazing white; its halo stops being unbounded.
+    //
+    // Raise it if a project genuinely wants larger bloom from very bright sources; 0 turns the clamp
+    // off entirely and restores the previous behaviour exactly.
+    f32  maxRadiance = 8.0f;
 };
 
 // Which sky the engine draws. Authored is a two-colour dome; Physical derives the dome, the direct

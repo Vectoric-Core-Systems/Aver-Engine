@@ -475,6 +475,11 @@ void PtSceneView::runDenoise(rhi::IRenderContext& ctx) {
     const u32 gx = (target_.width  + 7) / 8;
     const u32 gy = (target_.height + 7) / 8;
 
+    // TIMED SEPARATELY FROM THE TRACE, not folded into it: this is four more dispatches over the
+    // same pixels (one resolve plus kDenoisePasses filters), and a single combined number could not
+    // say whether a slow frame was the integrator or the filter. See PathTracer::accumulate's own
+    // marker for why neither had one until now.
+    rhi::ScopedGpuStat gpuStat(ctx, "PT denoise");
     ctx.pushMarker("Aver.PtDenoise");
 
     // RESOLVE: accumulator -> A. The accumulator is read as an SRV here and written as a UAV by
@@ -656,10 +661,13 @@ void PtSceneView::prePass(rhi::IRenderContext& ctx) {
     // BOUNDED, PER THIS MODULE'S OWN GPU-HYGIENE RULE -- and the bound MOVES WITH THE RUNG, which
     // this comment used to ignore because there was no rung when it was written.
     //
-    // One accumulate() call issues (bounces+1)*samples = 5*8 = 40 RayQuery traces per pixel. That
-    // per-pixel figure is fixed; kAccumLadder's pixel count is not, so the traces per dispatch are:
+    // TWO TRACES PER BOUNCE, NOT ONE. This block used to read "(bounces+1)*samples = 5*8 = 40
+    // RayQuery traces per pixel" and tabulate from that. It counted only the bounce ray and silently
+    // omitted ptDirectSun's next-event shadow ray, which fires at every non-dielectric hit and whose
+    // own comment (pt_pathtrace.hlsl:306) says so in capitals. The real budget is (bounces+1)*2 = 10
+    // traces per sample, 80 per pixel per dispatch, so every figure below DOUBLES:
     //
-    //     Low 480x270   5.2M | Medium 640x360   9.2M | High 960x540  20.7M | Epic 1280x720  36.9M
+    //     Low 480x270  10.4M | Medium 640x360  18.4M | High 960x540  41.5M | Epic 1280x720  73.7M
     //
     // VoxiRenderer's own ray-traced sun shadow -- the only OTHER ray-traced pass in this engine, and
     // one already characterised against a recorded TDR history on this machine -- defaults to 4 rays
@@ -667,9 +675,14 @@ void PtSceneView::prePass(rhi::IRenderContext& ctx) {
     // "because there is a recorded TDR history on this machine"): at a modest 1280x720 scene that is
     // 4 * 921,600 = ~3.7M traces/frame.
     //
-    // SO THE TOP RUNG IS 10x THAT REFERENCE, not "the same order of magnitude" as this comment
-    // claimed while the accumulator was hardcoded at 480x270. That reading was correct for the one
-    // resolution it was written about and became stale the moment setQuality() started moving it.
+    // SO THE TOP RUNG IS 20x THAT REFERENCE -- not the 10x this comment said after the ladder landed,
+    // and not the "same order of magnitude" it said before that while the accumulator was hardcoded
+    // at 480x270. Each reading was correct for the one thing it was written about and went stale
+    // without anything failing.
+    //
+    // AND IT INVERTS A COMPARISON THAT WAS DRAWN FROM THE OLD NUMBER: 73.7M here against ray-driven
+    // primary visibility's ~29.7M at 2600x1430 means this view fires roughly 2.5x MORE rays than the
+    // pass it was claimed to be several times cheaper than. See kAccumLadder's withdrawn cost table.
     //
     // MEASURED, THOUGH, AND NOT A PROBLEM ON THIS HARDWARE: an Epic dispatch over a real streamed
     // scene (889 surfaces, ~3.3M vertices) times at 3.5-9.2 ms, two to three orders of magnitude
@@ -687,6 +700,12 @@ void PtSceneView::prePass(rhi::IRenderContext& ctx) {
     d.samples = kSamplesPerStep;
     d.firstSample = sampleCursor_;
     d.reset = (sampleCursor_ == 0);
+    // OPTED IN HERE AND NOWHERE ELSE. This is the view a person looks at, so the traversal a dim
+    // fourth-bounce path saves is worth the variance it adds -- and this view accumulates to
+    // kMaxSamples, which averages that variance away. PtFurnaceTest deliberately leaves the field at
+    // its 0 default: it is an oracle whose escaped-fraction identity counts paths that MISS, and a
+    // rouletted path neither misses nor hits.
+    d.rouletteDepth = kRouletteDepth;
     pt_.accumulate(ctx, target_, curCam_, d);
     // Immediately after, in the same pass: the filter reads what accumulate() just wrote, and a
     // frame that accumulated without re-filtering would present the PREVIOUS sample count's
