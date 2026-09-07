@@ -10,16 +10,33 @@ RaytracingAccelerationStructure gPtScene : register(t0);
 
 // MIRRORS rhi::MeshVertex byte for byte; the stride is handed to setSrvBuffer and nothing checks it.
 struct PtVertex   { float3 pos; float3 nrm; float2 uv; };
-// MIRRORS pt::PtInstance: 64 + 4 + 4 + 12 + 4 = 88 bytes, packed tightly with natural alignment.
-// The last field used to be a spare `pad`; it is now `ior`, read as 0.0 for an ordinary Lambertian
-// surface and as a real index of refraction (>0) for a smooth dielectric -- see PtSurface::ior
-// (PathTracer.hpp) for why that single float carries both the kind and the value with no separate
-// flag and no bit-packing.
-struct PtInstance { float4x4 objectToWorld; uint firstIndex; uint firstVertex; float3 albedo; float ior; };
+// MIRRORS pt::PtInstance: 64 + 4 + 4 + 12 + 4 + 4 = 92 bytes, packed tightly with natural alignment.
+// `ior` used to be the last field and used to be a spare `pad`; it is read as 0.0 for an ordinary
+// Lambertian surface and as a real index of refraction (>0) for a smooth dielectric -- see
+// PtSurface::ior (PathTracer.hpp) for why that single float carries both the kind and the value with
+// no separate flag and no bit-packing.
+//
+// `baseColorTex` is declared in BOTH shader variants even though only the textured one samples it:
+// the instance BUFFER is the same bytes either way, so a struct that omitted the field in the
+// untextured build would read every following instance at the wrong offset. Only the SAMPLING is
+// conditional, never the layout.
+struct PtInstance { float4x4 objectToWorld; uint firstIndex; uint firstVertex; float3 albedo; float ior; uint baseColorTex; };
 
 StructuredBuffer<PtVertex>   gPtVerts     : register(t1);
 StructuredBuffer<uint>       gPtIndices   : register(t2);
 StructuredBuffer<PtInstance> gPtInstances : register(t3);
+
+#ifdef AVER_PT_BINDLESS
+// The base-colour table, in space1 so it cannot collide with space0's explicit descriptor table.
+// AVER_PT_TEX_CAPACITY must equal PipelineLayout::bindlessTextureCount exactly -- declaring more
+// here reads past the root signature's range. Both come from kBindlessTexCapacity in PathTracer.cpp.
+#ifndef AVER_PT_TEX_CAPACITY
+#error "AVER_PT_TEX_CAPACITY must be defined by the pipeline that declares the bindless table"
+#endif
+Texture2D    gPtTextures[AVER_PT_TEX_CAPACITY] : register(t0, space1);
+SamplerState gPtSamp                           : register(s0);
+#define AVER_PT_TEX_UNBOUND 0xFFFFFFFFu
+#endif
 
 // The progressive accumulator: TWO float4 elements per pixel, and the second one is not decoration.
 //
@@ -257,6 +274,21 @@ bool ptTrace(float3 org, float3 dir, out float3 hitPos, out float3 nWS, out floa
     hitPos = org + dir * q.CommittedRayT();
     albedo = inst.albedo;
     ior    = inst.ior;
+#ifdef AVER_PT_BINDLESS
+    // THE FACTOR TIMES THE TEXEL, which is why PtSurface::albedo must carry baseColorFactor and not
+    // the texture's mean when a texture is bound -- mean x texel applies the texture twice.
+    if (inst.baseColorTex != AVER_PT_TEX_UNBOUND) {
+        const float2 uv = gPtVerts[i0].uv * w.x + gPtVerts[i1].uv * w.y + gPtVerts[i2].uv * w.z;
+        // SampleLevel AT MIP 0, not SampleGrad. A compute kernel has no pixel quad and therefore no
+        // implicit derivatives, and after the first cosine-weighted bounce there is no ray footprint
+        // to derive one from either -- the differential a primary hit could carry says nothing about
+        // where a diffusely scattered ray lands. Mip 0 aliases, but this integrator averages 1600
+        // jittered samples per pixel, which integrates that aliasing away rather than freezing it;
+        // a wrong mip would instead bias every one of those samples the same way.
+        albedo *= gPtTextures[NonUniformResourceIndex(inst.baseColorTex)]
+                      .SampleLevel(gPtSamp, uv, 0).rgb;
+    }
+#endif
     return true;
 }
 

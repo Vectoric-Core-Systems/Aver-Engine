@@ -164,10 +164,15 @@ void PtSceneView::submitDraw(rhi::MeshHandle mesh, const f32 world[16], const f3
     // It answers from the binding's IDENTITY rather than from the bytes' shape. Absent a resolver --
     // PtFurnaceTest, or any host with no material system -- every draw keeps its base colour.
     f32 resolved[3];
-    if (resolveAlbedo_ && resolveAlbedo_(drawBinding, drawConstants, drawConstantBytes, resolved)) {
+    rhi::TextureHandle resolvedTex = 0;
+    if (resolveAlbedo_ && resolveAlbedo_(drawBinding, drawConstants, drawConstantBytes, resolved,
+                                         &resolvedTex)) {
         d.albedo[0] = resolved[0];
         d.albedo[1] = resolved[1];
         d.albedo[2] = resolved[2];
+        // 0 means the resolver had no texture and `resolved` is already the finished colour. A real
+        // handle means `resolved` is the factor and this is what multiplies it -- see AlbedoResolver.
+        d.baseColorTex = resolvedTex;
     } else {
         d.albedo[0] = baseColor[0];
         d.albedo[1] = baseColor[1];
@@ -215,6 +220,15 @@ u64 PtSceneView::drawsKey() const {
             u32 bits = 0;
             std::memcpy(&bits, &d.ior, sizeof(bits));
             key ^= static_cast<u64>(bits);
+            key *= 1099511628211ull;
+        }
+        // AND SO DOES THE TEXTURE, for exactly the argument the ior note just made. The material
+        // system resolves its textures asynchronously, so a draw's base colour legitimately goes
+        // 0 -> handle a few frames into a scene; a key blind to that would keep tracing the
+        // untextured version until something unrelated forced a re-arm. It also covers the reverse
+        // case a texture swap in the editor produces.
+        {
+            key ^= static_cast<u64>(d.baseColorTex);
             key *= 1099511628211ull;
         }
     }
@@ -280,6 +294,11 @@ bool PtSceneView::rebuildScene(rhi::IRenderContext& ctx) {
         std::memcpy(s.world, d.world, sizeof(s.world));
         std::memcpy(s.albedo, d.albedo, sizeof(s.albedo));
         s.ior = d.ior;
+        // RESIDENCY IS RESOLVED HERE, not in submitDraw: this runs once per re-arm rather than once
+        // per draw per frame, and residentTexture() is the call that may build the table and compile
+        // the textured pipeline on first use. A handle the tracer cannot make resident comes back
+        // kUnboundTexture and the surface keeps its flat albedo, which is the documented fallback.
+        s.baseColorTex = d.baseColorTex ? pt_.residentTexture(d.baseColorTex) : kUnboundTexture;
         ids.push_back(pt_.addSurface(s));
     }
     if (dropped && !dropCapLogged_) {

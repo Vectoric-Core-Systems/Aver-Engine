@@ -7129,7 +7129,8 @@ public:
             // fall through to the per-draw baseColor instead.
             ptSceneView_->setAlbedoResolver(
                 [this](aver::rhi::BindingSetHandle set, const void* constants, aver::u32 bytes,
-                       aver::f32 outAlbedo[3]) -> bool {
+                       aver::f32 outAlbedo[3], aver::rhi::TextureHandle* outBaseColorTex) -> bool {
+                    if (outBaseColorTex) *outBaseColorTex = 0;
                     if (!set || !constants || bytes != sizeof(pbr::MaterialConstants)) return false;
                     pbr::MaterialSystem& ms = voxiRenderer_.materials();
                     // THIS EARLY RETURN IS WHY THE VIEW RE-ARMS TWICE ON A STATIC SCENE -- looks like
@@ -7144,13 +7145,39 @@ public:
                     if (!ms.ready()) return false;
                     if (set == ms.fallbackBindingSet()) return false;   // un-authored: keep the look's colour
                     if (!ms.ownsBindingSet(set)) return false;          // not one of ours at all
-                    // THE TEXTURE'S MEAN, NOT baseColorFactor ALONE: a modern material puts its look
-                    // in a TEXTURE and leaves the factor a plain white multiplier -- every one of the
-                    // forty materials in the demo project declares `baseColorFactor 1 1 1 1`. The
-                    // tracer has no texture units, so reading the factor alone painted every surface
-                    // pure white, roughly three times too bright and completely flat.
-                    if (ms.averageBaseColor(set, outAlbedo)) return true;
                     const auto* mc = static_cast<const pbr::MaterialConstants*>(constants);
+                    // THE TRACER SAMPLES TEXTURES NOW, so the answer depends on whether this
+                    // material has one, and the two branches mean DIFFERENT THINGS by outAlbedo.
+                    //
+                    // WITH a texture: hand back the FACTOR and the handle. baseColorFactor is already
+                    // linear (packMaterial decoded it), and the tracer multiplies factor x texel --
+                    // the same composition voxi.hlsl's textured ray hit makes. Returning
+                    // averageBaseColor here instead would be the bug this whole seam is shaped to
+                    // prevent: that value is factor x texture MEAN, so the texture would be applied
+                    // twice, and the only symptom is a uniformly too-dark scene with nothing logged.
+                    //
+                    // WITHOUT one: the previous behaviour, unchanged and still necessary. A modern
+                    // material puts its look in a TEXTURE and leaves the factor a plain white
+                    // multiplier -- every one of the forty materials in the demo project declares
+                    // `baseColorFactor 1 1 1 1` -- so a tracer that could not sample and read the
+                    // factor alone painted every surface pure white, roughly three times too bright
+                    // and completely flat. The mean is what that fallback is for, and it is still
+                    // what a device with no bindless support gets.
+                    if (const auto* tex = ms.textures(set)) {
+                        const aver::rhi::TextureHandle base =
+                            (*tex)[static_cast<aver::usize>(pbr::TextureSlot::BaseColor)];
+                        // textures() reports EFFECTIVE handles, so an unmapped slot is the 1x1 white
+                        // fallback rather than 0 -- sampling it is a multiply by one, which is
+                        // correct, and costs one texture fetch on a material with no base colour map.
+                        if (base && outBaseColorTex) {
+                            *outBaseColorTex = base;
+                            outAlbedo[0] = mc->baseColorFactor[0];
+                            outAlbedo[1] = mc->baseColorFactor[1];
+                            outAlbedo[2] = mc->baseColorFactor[2];
+                            return true;
+                        }
+                    }
+                    if (ms.averageBaseColor(set, outAlbedo)) return true;
                     outAlbedo[0] = mc->baseColorFactor[0];
                     outAlbedo[1] = mc->baseColorFactor[1];
                     outAlbedo[2] = mc->baseColorFactor[2];

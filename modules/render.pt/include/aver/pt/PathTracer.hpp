@@ -38,11 +38,28 @@ constexpr u32 kPtAccumStride = 16;
 enum class PtDefect : u32 { None = 0, TimesPi = 1, NoCosine = 2, DielectricNoPdfCancel = 3 };
 
 // One surface the tracer can hit: a mesh, where it is, and what it reflects.
+// "This slot holds no texture." NOT ZERO -- zero is a real, reachable bindless index, so a
+// zero-initialised field would silently mean "sample slot 0" (whatever material happened to land
+// there first) instead of "sample nothing". Same value and same reasoning as pbr::kUnboundTexture,
+// restated rather than included: this module links Aver.RHI and Aver.Core only, deliberately, and
+// naming a pbr:: symbol here is precisely the dependency the resolver callback exists to avoid.
+inline constexpr u32 kUnboundTexture = 0xFFFFFFFFu;
+
 struct PtSurface {
     rhi::MeshHandle mesh = 0;
     // ENGINE convention: row-major / row-vector, cm, +Z up. Handed to TlasInstance untouched.
     f32 world[16] = {1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  0, 0, 0, 1};
+    // THE FACTOR, NOT THE FINISHED COLOUR, whenever baseColorTex is bound -- the sampled texel
+    // multiplies this. A caller that supplies a texture must pass baseColorFactor here and NOT the
+    // texture's mean: mean x texel applies the texture twice, which reads as a too-dark scene with
+    // no assert and no log. (Every caller that binds no texture is unaffected and keeps meaning
+    // "the surface colour", which is what PtFurnaceTest and every pre-texture caller rely on.)
     f32 albedo[3] = {1, 1, 1};
+    // Index into the tracer's bindless base-colour table, or kUnboundTexture. Obtain it from
+    // PathTracer::residentTexture() -- NEVER by counting draws, because an index that moves when the
+    // visible set changes moves PtSceneView::drawsKey() with it and the accumulator then re-arms
+    // every frame, never reaching sample 1.
+    u32 baseColorTex = kUnboundTexture;
     // 0.0 (the default) means OPAQUE LAMBERTIAN -- every existing addSurface() caller that never
     // touches this field keeps the exact diffuse-only behaviour it always had. Any value > 0 means a
     // SMOOTH DIELECTRIC with that index of refraction (ordinary glass ~1.5, water ~1.33, diamond
@@ -104,6 +121,30 @@ public:
     bool init(rhi::IDevice& dev);
     void shutdown();
     bool available() const { return pipeline_ != 0; }
+
+    // Makes `h` resident in the tracer's own bindless base-colour table and returns its index, or
+    // kUnboundTexture if this device has no bindless support, the table could not be created, or it
+    // is full. Idempotent: the same handle always returns the same index for the life of the
+    // tracer.
+    //
+    // APPEND-ONLY AND NEVER FREED, and that is a correctness property rather than laziness. The
+    // index travels into PtSurface and therefore into PtSceneView::drawsKey(); if an index could be
+    // reused or renumbered, a scene whose visible set merely changed would hash differently, re-arm
+    // the accumulator, and a progressive tracer that re-arms every frame never accumulates anything.
+    // 4096 slots against a scene's distinct materials is not a budget anyone reaches.
+    //
+    // WHY THE TRACER OWNS THIS TABLE rather than borrowing the rasteriser's: Voxi's table is 0 under
+    // --no-gi, 0 when Voxi is detached mid-session, and 0 on any device without ray tracing, none of
+    // which has anything to do with whether the PATH TRACER can sample a texture. Binding a stale or
+    // zero handle leaves a declared root range unbound, which is a fault on the next dispatch, not a
+    // warning. This class already owns res_, its pipeline and its dispatch; the table belongs with them.
+    u32 residentTexture(rhi::TextureHandle h);
+
+    // The tracer samples textures only once something has actually been made resident. Until then it
+    // dispatches the ORIGINAL, texture-free pipeline -- which is what keeps PtFurnaceTest (which never
+    // calls residentTexture) running the identical compiled arithmetic it always has, and its
+    // bit-identical replay check meaningful.
+    bool texturing() const { return texPipeline_ != 0 && texCount_ != 0; }
 
     // Registers a surface and returns the id a hit reads back as CommittedInstanceID().
     // Surfaces are declared BEFORE any scene, because the flat geometry table is built over all of
@@ -187,8 +228,12 @@ private:
         u32 firstVertex = 0;
         f32 albedo[3] = {1, 1, 1};
         f32 ior = 0.0f;
+        // APPENDED, never inserted: any earlier position shifts albedo/ior and every existing
+        // instance silently reads the wrong fields. 88 -> 92, still naturally aligned (a u32 at
+        // offset 88), so the structured-buffer stride stays sizeof(Instance) with no padding.
+        u32 baseColorTex = kUnboundTexture;
     };
-    static_assert(sizeof(Instance) == 88, "PtInstance is the HLSL PtInstance ABI");
+    static_assert(sizeof(Instance) == 92, "PtInstance is the HLSL PtInstance ABI");
 
     struct Scene {
         rhi::TlasHandle  tlas = 0;
@@ -200,6 +245,24 @@ private:
 
     rhi::ShaderHandle   cs_ = 0;
     rhi::PipelineHandle pipeline_ = 0;
+
+    // THE TEXTURED TWIN, a second PSO rather than a runtime branch inside the first. The bindless
+    // range is part of the ROOT SIGNATURE, not a uniform, so it cannot be toggled per dispatch --
+    // the same reason VoxiRenderer builds rayDrivenTexPso_ separately. Built lazily, on the first
+    // successful residentTexture(), so a device with no bindless support and every caller that never
+    // asks for a texture (PtFurnaceTest) pay neither the compile nor the descriptor range.
+    // Builds texTable_/texCs_/texPipeline_ on first demand. Returns whether texturing is usable;
+    // one attempt per session, latched by texTried_.
+    bool ensureTexturing();
+
+    rhi::ShaderHandle   texCs_ = 0;
+    rhi::PipelineHandle texPipeline_ = 0;
+    rhi::BindlessTableHandle texTable_ = 0;
+    // Handle -> slot, append-only. See residentTexture() for why it is never cleared.
+    std::unordered_map<rhi::TextureHandle, u32> texIndex_;
+    u32  texCount_ = 0;
+    bool texTried_ = false;   // one attempt per session; a failure is remembered, not retried
+    bool texWarned_ = false;
 
     std::vector<PtSurface> surfaces_;
     std::vector<Instance>  instances_;

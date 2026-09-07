@@ -7,6 +7,7 @@
 #include "PtShaders.hpp"
 
 #include <cstring>
+#include <string>
 #include "aver/rhi/ShaderFiles.hpp"   // this pass's HLSL is a deployed file
 
 namespace aver::pt {
@@ -25,8 +26,8 @@ constexpr u32 kGroup = 8;
 constexpr u32 kShaderModel = 65;
 constexpr u32 kRayTracingTier = 11;
 
-// RESOURCE BINDING TIER IS DELIBERATELY NOT CHECKED HERE, and this note exists so that stays a
-// decision rather than becoming an oversight someone "fixes" prematurely.
+// RESOURCE BINDING TIER IS NOT CHECKED FOR THE INTEGRATOR ITSELF, AND NOW IS FOR ITS TEXTURES.
+// This note used to end "until then"; that moment arrived, so here is what actually happened.
 //
 // The engine as a whole is explicitly not bindless -- RHIResources.hpp:3, a Resource Binding Tier 1
 // commitment that protects the MINIMUM tier (D3D12 FL 11_0: Kepler, GCN 1.0, Haswell). This tracer
@@ -34,21 +35,59 @@ constexpr u32 kRayTracingTier = 11;
 // So the tracer COULD use descriptor indexing without raising the engine's floor, because it is
 // already gated to hardware that has it.
 //
-// It does not need it yet. The integrator binds a fixed four SRVs and one UAV (kSrvCount/kUavCount
-// above) -- TLAS, vertices, indices, instances -- which Tier 1 satisfies comfortably. Adding a
-// resourceBindingTier >= 3 requirement TODAY would refuse the path tracer on hardware where it
-// currently runs correctly, buying nothing.
+// THE UNTEXTURED INTEGRATOR STILL DOES NOT NEED IT, and still does not ask. It binds a fixed four
+// SRVs and one UAV (kSrvCount/kUavCount above) -- TLAS, vertices, indices, instances -- which Tier 1
+// satisfies comfortably. Requiring tier 3 of THAT would refuse the path tracer on hardware where it
+// runs correctly, buying nothing. So the check lives on the textured twin only, which is why there
+// are two pipelines here rather than one with a branch: the capability difference is a ROOT
+// SIGNATURE difference, and a root signature is not something a dispatch can opt out of.
 //
-// IT BECOMES REQUIRED THE MOMENT MATERIALS DO. Sampling an arbitrary material's textures at a ray
-// hit is precisely what needs an unbounded, dynamically-indexed table; that work is what should add
-// the check, next to the feature that depends on it, so the refusal names a real reason. The
-// capability is already queried (DeviceCaps::resourceBindingTier) and already clampable for testing
-// (CapsOverride::maxResourceBindingTier, the `tier1` token in --force-caps), so nothing has to be
-// built first -- only used.
+// The predicate is DeviceCaps::rtBindlessTextures (rayTracingTier >= 11 && resourceBindingTier >= 3),
+// the same one VoxiRenderer's ray path uses -- not a bare resourceBindingTier read, so the two
+// features cannot drift on what "can this device index a texture from a ray hit" means. It stays
+// clampable for testing through CapsOverride (`tier1` in --force-caps), which is how the fallback
+// path gets exercised on hardware that would otherwise never take it.
 //
-// Until then the honest statement is: this tracer requires DXR 1.1 and SM 6.5, and happens to run
-// only on hardware that would also support bindless. That is a coincidence of GPU generations, not
-// an invariant this file enforces.
+// The honest statement is now: this tracer requires DXR 1.1 and SM 6.5; it samples material textures
+// additionally on hardware reporting binding tier 3, and falls back to flat per-surface albedo --
+// exactly what it did before this existed -- everywhere else, including all of Vulkan, whose
+// createBindlessTextureTable returns 0 by construction.
+
+// The bindless base-colour table's fixed size. FIXED because this backend serialises root signature
+// 1.0, so the HLSL array length and PipelineLayout::bindlessTextureCount must be one compile-time
+// number and must agree exactly -- declaring more in the shader reads past the root signature's
+// range. 4096 is Voxi's figure for the same job; a scene's DISTINCT materials, not its draws, is
+// what fills it, and nothing in this tree approaches four thousand of those.
+constexpr u32 kBindlessTexCapacity = 4096;
+
+// The integrator's pipeline layout. `bindlessTextures` non-zero appends the base-colour table in its
+// own register space AND the sampler that reads it; zero reproduces, field for field, the layout the
+// untextured integrator has always declared -- which is what keeps PtFurnaceTest's replay comparing
+// the same compiled arithmetic against itself.
+//
+// THE SAMPLER IS PART OF THE TEXTURED HALF, not unconditional. The untextured pass declares no
+// sampler at all today, and adding one to it would change its root signature for a resource it never
+// reads.
+rhi::PipelineLayout ptLayout(u32 bindlessTextures) {
+    rhi::PipelineLayout l{};
+    l.srvCount = kSrvCount;
+    l.uavCount = kUavCount;
+    // b4 stays a ROOT CBV (zero dwords): the block is 112 bytes, which is more than root constants
+    // should carry, and setConstantBuffer suballocates it from the frame's upload ring.
+    l.constantDwords[rhi::kFeatureFrameConstantRegister] = 0;
+    if (bindlessTextures) {
+        // WRAP, because UV tiling is a material's own business and a clamped sampler would smear the
+        // edge texel across every repeat. LINEAR rather than the material path's ANISOTROPIC: this
+        // shader samples with SampleLevel at an explicit mip, and anisotropy is a function of the
+        // screen-space derivatives a compute path-tracing kernel does not have -- asking for it would
+        // cost the sampler slot's extra state to change nothing.
+        l.samplers[0].filter  = rhi::Filter::Linear;
+        l.samplers[0].address = rhi::AddressMode::Wrap;
+        l.samplerCount = 1;
+        l.bindlessTextureCount = bindlessTextures;
+    }
+    return l;
+}
 
 // MIRRORS cbuffer PtFrame in rhi::shaderFile("pt_pathtrace.hlsl").c_str(), field for field. A shifted field here reads a camera
 // basis as a sample count -- silently, and only in the rendered image.
@@ -109,17 +148,87 @@ bool PathTracer::init(rhi::IDevice& dev) {
 
     rhi::ComputePipelineDesc pd;
     pd.cs = cs_;
-    pd.layout.srvCount = kSrvCount;
-    pd.layout.uavCount = kUavCount;
-    // b4 stays a ROOT CBV (zero dwords): the block is 112 bytes, which is more than root constants
-    // should carry, and setConstantBuffer suballocates it from the frame's upload ring.
-    pd.layout.constantDwords[rhi::kFeatureFrameConstantRegister] = 0;
+    pd.layout = ptLayout(0);   // 0 == the layout this pass has always declared; see ptLayout
     pipeline_ = res_->createComputePipeline(pd);
     if (!pipeline_) { AVER_ERROR("[PT] integrator pipeline unavailable"); shutdown(); return false; }
 
     AVER_INFO("[PT] path tracer ready (RayQuery, SM {}, {}x{} threads per group)",
               kShaderModel, kGroup, kGroup);
     return true;
+}
+
+// Builds the textured twin -- table, shader, pipeline -- on first demand. ONE ATTEMPT PER SESSION:
+// texTried_ latches whether it succeeded or not, so a device that cannot do this is asked once and
+// then left alone, rather than re-entering DXC on every material a scene streams in.
+bool PathTracer::ensureTexturing() {
+    if (texTried_) return texPipeline_ != 0;
+    texTried_ = true;
+    if (!res_ || !dev_ || !pipeline_) return false;
+
+    // The capability the long note at the top of this file promised to check HERE, next to the
+    // feature that needs it -- so a refusal names a real reason rather than being a blanket tier
+    // requirement on a tracer that mostly does not need one.
+    if (!dev_->caps().rtBindlessTextures) {
+        AVER_INFO("[PT] no bindless texture support on this device; surfaces shade from their flat "
+                  "albedo, exactly as before textures existed (said once)");
+        return false;
+    }
+
+    texTable_ = res_->createBindlessTextureTable(kBindlessTexCapacity);
+    if (!texTable_) {
+        AVER_WARN("[PT] the bindless texture table could not be created; surfaces keep their flat "
+                  "albedo (said once)");
+        return false;
+    }
+
+    rhi::ShaderDesc sd;
+    sd.source  = rhi::shaderFile("pt_pathtrace.hlsl").c_str();
+    sd.prelude = rhi::sharedShaderPrelude();
+    sd.entry   = "CSPathTrace";
+    sd.stage   = rhi::ShaderStage::Compute;
+    sd.minShaderModel = kShaderModel;
+    // AVER_PT_TEX_CAPACITY must equal the layout's bindlessTextureCount exactly -- both come from
+    // kBindlessTexCapacity here so they cannot be edited apart.
+    const std::string defs = "AVER_PT_BINDLESS=1;AVER_PT_TEX_CAPACITY=" +
+                             std::to_string(kBindlessTexCapacity);
+    sd.defines = defs.c_str();
+    texCs_ = res_->createShader(sd);
+    if (!texCs_) {
+        AVER_WARN("[PT] the textured integrator would not compile; flat albedo stands in");
+        return false;
+    }
+
+    rhi::ComputePipelineDesc pd;
+    pd.cs = texCs_;
+    pd.layout = ptLayout(kBindlessTexCapacity);
+    texPipeline_ = res_->createComputePipeline(pd);
+    if (!texPipeline_) {
+        AVER_WARN("[PT] the textured integrator pipeline could not be created; flat albedo stands in");
+        return false;
+    }
+    AVER_INFO("[PT] textured integrator ready ({} texture slots)", kBindlessTexCapacity);
+    return true;
+}
+
+u32 PathTracer::residentTexture(rhi::TextureHandle h) {
+    if (!h) return kUnboundTexture;
+    if (!ensureTexturing()) return kUnboundTexture;
+    if (const auto it = texIndex_.find(h); it != texIndex_.end()) return it->second;
+    if (texCount_ >= kBindlessTexCapacity) {
+        // REFUSED, NOT WRAPPED. Reusing slot 0 would silently paint one material with another's
+        // texture; an unbound index falls back to the flat albedo, which is merely flat.
+        if (!texWarned_) {
+            texWarned_ = true;
+            AVER_WARN("[PT] the {} bindless texture slots are full; further materials shade from "
+                      "their flat albedo (said once)", kBindlessTexCapacity);
+        }
+        return kUnboundTexture;
+    }
+    const u32 index = texCount_;
+    if (!res_->setBindlessTexture(texTable_, index, h)) return kUnboundTexture;
+    ++texCount_;
+    texIndex_.emplace(h, index);
+    return index;
 }
 
 void PathTracer::shutdown() {
@@ -147,7 +256,21 @@ void PathTracer::shutdown() {
         tlasPoolCap_.clear();
         if (pipeline_)    res_->destroyPipeline(pipeline_);
         if (cs_)          res_->destroyShader(cs_);
+        if (texPipeline_) res_->destroyPipeline(texPipeline_);
+        if (texCs_)       res_->destroyShader(texCs_);
+        // THE TABLE IS NOT DESTROYED, and the omission is the RHI's shape rather than a leak this
+        // function is ignoring: destroyBindlessTextureTable exists, but the descriptors it hands back
+        // are only safe to recycle once no in-flight frame can still reference them, and this class
+        // has no fence to prove that. Voxi's table has the same lifetime for the same reason. What
+        // matters here is that the INDEX MAP is cleared alongside the handle below, so a re-init
+        // cannot hand out an index into a table it no longer owns.
     }
+    texTable_ = 0;
+    texIndex_.clear();
+    texCount_ = 0;
+    texTried_ = texWarned_ = false;
+    texPipeline_ = 0;
+    texCs_ = 0;
     blasCache_.clear();
     // CLEARED WITH THE BUFFERS IT DESCRIBES. Leaving it populated would let the next prepare() after
     // a re-init match its mesh set against a table whose verts_/indices_ were just destroyed, and
@@ -248,8 +371,9 @@ bool PathTracer::prepare() {
         std::memcpy(inst.objectToWorld, surfaces_[i].world, sizeof(inst.objectToWorld));
         std::memcpy(inst.albedo, surfaces_[i].albedo, sizeof(inst.albedo));
         inst.ior = surfaces_[i].ior;
+        inst.baseColorTex = surfaces_[i].baseColorTex;
         // The SHARED rows: every surface on this mesh reads the same geometry. What stays per
-        // surface is objectToWorld, albedo and ior, right here.
+        // surface is objectToWorld, albedo, ior and the base-colour index, right here.
         inst.firstVertex = row.firstVertex;
         inst.firstIndex  = row.firstIndex;
     }
@@ -524,8 +648,16 @@ void PathTracer::accumulate(rhi::IRenderContext& ctx, const PtTarget& t, const P
 
     ctx.pushMarker("Aver.PathTracer");
     ctx.bufferBarrier(t.accum, rhi::ResourceState::Common, rhi::ResourceState::UnorderedAccess);
-    ctx.setPipeline(pipeline_);
+    // THE TEXTURED TWIN ONLY ONCE SOMETHING IS ACTUALLY RESIDENT. texturing() is false for every
+    // caller that never asked for a texture -- PtFurnaceTest above all -- so those dispatches run the
+    // original pipeline, the original root signature and the original compiled arithmetic, which is
+    // what its bit-identical replay check is entitled to assume.
+    const bool textured = texturing();
+    ctx.setPipeline(textured ? texPipeline_ : pipeline_);
     ctx.setBindingSet(t.set);
+    // AFTER setPipeline and setBindingSet: the table is a root parameter of the pipeline just bound,
+    // and binding it against the previous pipeline's root signature is a silent mismatch.
+    if (textured) ctx.setBindlessTable(texTable_);
     ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb, sizeof(cb));
     ctx.dispatch((t.width + kGroup - 1) / kGroup, (t.height + kGroup - 1) / kGroup, 1);
     // Back to Common before the frame ends: a buffer's state does not survive the command list.
