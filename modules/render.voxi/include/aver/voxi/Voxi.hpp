@@ -132,7 +132,7 @@ struct Settings {
     // re-measured against it.
     u32 giCones         = 6;
     // Sky-visibility rays the AMBIENT term traces per pixel. 0 means "estimate it from the cone
-    // gather", which is what this renderer has always done and what every tier below Epic still does.
+    // gather", which is what this renderer has always done and what Low and Medium still do.
     //
     // WHY THE RAYS EXIST. `diffAmbient` (material_prelude.hlsl) multiplies the FULL sky irradiance by
     // the cone gather's occlusion, and that estimate is optimistic in enclosed geometry: six 60-degree
@@ -142,8 +142,11 @@ struct Settings {
     // the same estimate is approximately right, which is why this never showed up on the flat test map
     // and why it cannot be found by looking at one.
     //
-    // DERIVED FROM rayTracing on a tier change, like rtShadowRays: 0 below Epic, ONE at Epic. THE
-    // DEFAULT IS 0 BECAUSE THE DEFAULT TIER IS Medium -- the derivation only fires when the tier
+    // DERIVED FROM rayTracing on a tier change, like rtShadowRays: 0 at Low and Medium, ONE at High
+    // and Epic. It was Epic-only, and four rays, until the term accumulated against a reprojected
+    // history (rtSkyOcclusionTemporal, rtAoHist_): one accumulated ray is both quieter than four
+    // correlated ones and cheaper, which is what let it come down a rung. THE DEFAULT IS 0 BECAUSE
+    // THE DEFAULT TIER IS Medium -- the derivation only fires when the tier
     // CHANGES, so a struct whose default contradicts its own tier never reaches the rung it claims.
     // rtShadowRays documents the same trap; it is written down twice because it has bitten once.
     //

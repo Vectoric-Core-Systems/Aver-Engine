@@ -1367,8 +1367,11 @@ float rtShadowSpatial(float centre, float3 wpos, float3 N, float2 pixel, float c
 // footprint, frameJitter=0, and never touches history: blending in a reflected surface's shadow
 // would overwrite this pixel's history with a value unrelated to the primary ray's estimate.
 // gRtHistParams.w is the pixels-per-ray TILE EDGE as a bit count (0 = off, every pixel traces every
-// frame). At 0 this is BIT-FOR-BIT rtShadow() alone, just a plain write so the buffer stays live for
-// when tiling turns on -- tiling cuts ray count; blending alone only smooths flicker.
+// frame). At 0 it now ACCUMULATES: the fresh trace is blended against reprojected history and the
+// blended value is what gets stored. It used to be bit-for-bit rtShadow() alone with a plain write to
+// keep the buffer live for when tiling turned on -- which meant that at every shipped tier (the tile
+// edge is 1 everywhere) every previous measurement was discarded and the one-ray estimate stood
+// alone. Tiling still cuts ray COUNT; blending is what makes one ray behave like ten.
 // Splits a tinted visibility into the scalar the denoiser filters and the colour it does not.
 //
 // WHY THE HISTORY DIDN'T GROW: occlusion is binary/noisy (what the filters smooth); a medium's tint

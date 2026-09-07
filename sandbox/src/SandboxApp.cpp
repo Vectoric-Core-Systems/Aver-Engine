@@ -5498,7 +5498,13 @@ public:
                             std::memcpy(consts, &wm.m[0][0], 16 * sizeof(f32));
                             std::memcpy(consts + 16, col, 4 * sizeof(f32));
                             consts[20] = metallic; consts[21] = roughness; consts[22] = 0.0f; consts[23] = 0.0f;
-                            const u32 shadingModel = 0;   // AVER_MODEL_STANDARD
+                            // THE THIRD WRITER OF gShadingModel, and the one a search for
+                            // writeShadingConstants does not find: this path builds the PerObject
+                            // block by hand rather than calling it. It hardcoded STANDARD, so a
+                            // mesh drawn through the GPU cluster path ignored Unlit while every
+                            // other path honoured it -- the same mode giving two answers depending
+                            // on which pipeline happened to draw the geometry.
+                            const u32 shadingModel = unlit_ ? 1u : 0u;   // AVER_MODEL_UNLIT / STANDARD
                             std::memcpy(consts + 24, &shadingModel, sizeof(shadingModel));
                             consts[25] = 0.04f; consts[26] = 1.0f; consts[27] = 0.0f;
                             consts[28] = consts[29] = consts[30] = consts[31] = 0.0f;

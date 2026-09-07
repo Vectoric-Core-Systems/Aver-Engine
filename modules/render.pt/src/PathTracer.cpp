@@ -346,14 +346,17 @@ void PathTracer::shutdown() {
         if (verts_)       res_->destroyBuffer(verts_);
         if (indices_)     res_->destroyBuffer(indices_);
         if (instanceBuf_) res_->destroyBuffer(instanceBuf_);
-        // BLAS handles ARE released, and THIS is now the only place that does it: they are owned by
-        // blasCache_, which deliberately survives resetScene() (see its own comment). Iterating the
-        // CACHE rather than blas_ is what makes that correct -- blas_ holds only the meshes in the
-        // last snapshot, so freeing that instead would leak every mesh that had left the view.
+        // BLAS HANDLES ARE NOT RELEASED HERE, and the history of this comment is the reason to say so
+        // loudly. It once freed nothing (a per-toggle leak once a live editor could re-init this
+        // object), then freed everything in blasCache_. Neither is right now: prepare() ADOPTS
+        // structures other features built, via IResourceFactory::blasForMesh, so this map no longer
+        // holds only things this object made. Freeing one another feature is still tracing is a
+        // dangling handle inside a live TLAS build -- a device fault, not a quiet image bug.
         //
-        // This function used not to free them at all, which was inert while the only caller was
-        // process exit and became a per-toggle leak once a live editor could shut down and re-init a
-        // PathTracer repeatedly.
+        // A BLAS belongs to its MESH. destroyMesh calls destroyBlasForMesh, which frees every
+        // structure for that mesh, so nothing outlives the geometry it describes and VoxiRenderer has
+        // always relied on exactly this. What is given up is releasing early when this view is
+        // toggled off while its meshes stay loaded -- memory the scene is very likely still using.
         // NOTHING IS FREED HERE ANY MORE, and that is the price of sharing rather than an
         // oversight. Since prepare() may adopt a structure VoxiRenderer built, this map no longer
         // holds only things this object made -- and freeing a structure another feature is still

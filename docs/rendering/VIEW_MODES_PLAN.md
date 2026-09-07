@@ -476,9 +476,19 @@ The switch already exists and is already dispatched per draw, not baked into any
 s.model = gShadingModel;
 ```
 
+> **STATUS, 2026-09-08: the Unlit half of this plan has LANDED (31fe41f1), and the analysis below
+> describes the tree BEFORE it. What changed: `writeShadingConstants` takes an `unlit` argument on
+> both backends and writes `AVER_MODEL_UNLIT`; D3D12's `if (unlit_) break;` diversion is gone;
+> `s.displayColor` carries the sampled albedo rather than the raw factor; the GPU cluster path's
+> hand-built PerObject block honours the mode too; and PSRayDriven answers it directly from a
+> pass-level `gViewParams`, so Unlit now works under ray-driven primary visibility and the editor
+> no longer disables it. WIREFRAME is still unavailable in ray-driven, and this document's verdict
+> on that -- structurally impossible as currently built -- still stands, for the reason given: it
+> needs a different rasteriser state rather than a different shading branch.
+
 `gShadingModel` is a `uint` inside `PerObject` (`RHIShaders.cpp:151-155`), a 32-dword root-constant
-block rewritten by every `drawMesh()` call via `writeShadingConstants()`. Today, every writer of that
-slot hardcodes `AVER_MODEL_STANDARD`, with no exception anywhere in the tree:
+block rewritten by every `drawMesh()` call via `writeShadingConstants()`. At the time of writing,
+every writer of that slot hardcoded `AVER_MODEL_STANDARD`, with no exception anywhere in the tree:
 
 ```cpp
 // D3D12Device.cpp:211-213 and byte-identically VulkanDevice.cpp:377-379
@@ -491,8 +501,9 @@ const u32 shadingModel = 0;   // AVER_MODEL_STANDARD
 ```
 
 So the switch arm is real and correctly implemented downstream (`averShadeDirect`/`averShadeIndirect`
-at `PbrShaders.cpp:580-591` and `:660-679` both have working `AVER_MODEL_UNLIT` cases) but 100% dead
-today, because nothing ever writes anything else into the slot. Making Unlit real is, for the ordinary
+at `PbrShaders.cpp:580-591` and `:660-679` both have working `AVER_MODEL_UNLIT` cases) but was 100%
+dead, because nothing ever wrote anything else into the slot. Three writers do now -- see the
+status note at the top. Making Unlit real is, for the ordinary
 raster and cluster paths, a matter of adding exactly one more writer — a per-frame override, checked
 right before the existing assignment:
 
