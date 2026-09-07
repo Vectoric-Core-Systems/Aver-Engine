@@ -221,9 +221,10 @@ Pressing Play was broken in basic ways, and each of these was a separate defect.
 
 ### Physics, animation and UI
 
-- **The physics ABI went from 49 functions to 125, all of them bound in C#** — forces, impulses,
-  torque, live mass/friction/restitution/damping, sleeping control, per-body gravity. None of that
-  existed before.
+- **The physics ABI went from 49 functions to 128** — forces, impulses, torque, live
+  mass/friction/restitution/damping, sleeping control, per-body gravity. None of that existed before.
+  Counted at both ends of this release by the declarations in `modules/physics/include/aver/physics/`,
+  which is now five headers rather than one; `AbiEnumTest` holds the C# mirror to the C constants.
 - **All twelve Jolt constraint classes are usable** — fixed, point, distance, hinge, slider, cone,
   swing-twist, six-DOF, gear, rack-and-pinion, pulley and path — with motors and runtime limits.
 - **Collision layers do something, and filtered raycasts exist.** The character controller can climb
@@ -339,5 +340,15 @@ Pressing Play was broken in basic ways, and each of these was a separate defect.
 - **Rotate and Scale gizmos still act on the anchor object alone**, not the whole multi-selection —
   choosing the pivot for a group rotate or scale was left open rather than decided silently. Sibling
   reorder and multi-select drag in the Outliner are not built.
+- **A packaged game is silent.** The editor opens the audio device now — `aver_audio_init` used to be
+  reachable only from a button in the Sound Editor — collects voices each frame, and applies the
+  project's master and bus volumes, so sound works in the editor and in Play. `AverGame.exe` calls
+  none of that: grep the tree and the only callers of `aver_audio_init` are `SandboxApp.cpp` and
+  `SoundEditor.cpp`. A managed binding exists (`Aver.Framework/Audio.cs`), so a script's `Audio.Load`
+  and `Play` are real calls that simply have no device behind them in a shipped build.
+- **A C# HUD still cannot draw text.** `modules/ui` rasterises glyphs and hit-tests clicks now, but
+  `ui_abi.h` exposes `aver_ui_rect` and `aver_ui_textured_rect` and no text entry point, so there is
+  no `Hud.Text` for a script to call. The capability exists one layer below the seam that would reach
+  it.
 - **Persistence and Synapse received no functional change this release** beyond one `restore()`
   teardown fix. The `.ocsave` format and its I/O layer are otherwise untouched.

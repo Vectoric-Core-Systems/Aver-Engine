@@ -177,14 +177,42 @@ if ($script:badProbes -ge $a.Count) {
 
 $diffs = 0
 $missing = 0
+$noisy = 0
 foreach ($key in $a.Keys) {
     if (-not $b.Contains($key)) {
         Write-Host ("  {0,-28} MISSING from the staged run" -f $key) -ForegroundColor Red
         $missing++; continue
     }
     if ($a[$key] -ne $b[$key]) {
-        Write-Host ("  {0,-28} DIFFERS  tree={1}  staged={2}" -f $key, $a[$key], $b[$key]) -ForegroundColor Red
-        $diffs++
+        # A TOLERANCE, BECAUSE EXACT EQUALITY STOPPED BEING MEASURABLE. Temporal accumulation landed
+        # this release and the ray-traced configurations no longer reproduce bit-for-bit: running
+        # gates.ps1 TWICE AGAINST THE SAME BINARY moves rt 46,33,28 -> 43,31,27, shadow-ms-rt
+        # 28,42,59 -> 27,41,57, and ms-rt disagrees with its own retry inside a single run. Measured,
+        # not assumed. An exact test therefore reports "the staged payload is not the tree it came
+        # from" for two runs of one file, which is not a claim it can support.
+        #
+        # THREE CODES is the observed wobble band, and a real staging fault is not subtle: a missing
+        # shader, a stale binary or an unstaged DLL changes the picture wholesale or stops it
+        # rendering at all. Anything past the band still fails, and the binaries are separately
+        # required to be byte-identical below -- which is the strictly stronger test for the half of
+        # the question a probe was always a proxy for.
+        $pa = @($a[$key] -split ',')
+        $pb = @($b[$key] -split ',')
+        $delta = -1
+        if ($pa.Count -eq 3 -and $pb.Count -eq 3 -and $a[$key] -match '^\d' -and $b[$key] -match '^\d') {
+            $delta = 0
+            for ($i = 0; $i -lt 3; $i++) {
+                $d = [math]::Abs([int]$pa[$i] - [int]$pb[$i])
+                if ($d -gt $delta) { $delta = $d }
+            }
+        }
+        if ($delta -ge 0 -and $delta -le 3) {
+            Write-Host ("  {0,-28} within noise  tree={1}  staged={2}  (max delta {3})" -f $key, $a[$key], $b[$key], $delta) -ForegroundColor DarkYellow
+            $noisy++
+        } else {
+            Write-Host ("  {0,-28} DIFFERS  tree={1}  staged={2}" -f $key, $a[$key], $b[$key]) -ForegroundColor Red
+            $diffs++
+        }
     }
 }
 foreach ($key in $b.Keys) {
@@ -199,6 +227,40 @@ foreach ($key in $b.Keys) {
 $live = @($b.Values | Where-Object { $_ -ne 'NO-PROBE' }).Count
 Write-Host ''
 Write-Host ("[verify] {0} probes compared, {1} produced a pixel" -f $a.Count, $live)
+if ($noisy -gt 0) {
+    Write-Host ("[verify] {0} probe(s) differed within the 3-code noise band - see the comment at the comparison" -f $noisy) -ForegroundColor DarkYellow
+}
+
+# THE BINARIES MUST BE THE SAME FILE, and this is where that is actually established. The probe
+# comparison above was always a proxy for it, and temporal accumulation took away its precision; a
+# hash cannot drift. It also catches what a probe cannot: a binary that renders identically because
+# the payload quietly fell back to something staged beside it.
+#
+# EXTRAS ARE EXPECTED AND NOT COMPARED. The Visual C++ runtime is staged from the redist directory,
+# not built, so msvcp140.dll and the two vcruntime DLLs exist in the payload and not in the tree.
+# Only files present on BOTH sides can disagree, which is the only comparison that means anything.
+$treeBin   = Split-Path -Parent $treeExe
+$stagedBin = Split-Path -Parent $stagedExe
+$hashDiff = 0; $hashSame = 0; $hashOnlyStaged = 0
+foreach ($f in Get-ChildItem -LiteralPath $stagedBin -File | Where-Object { $_.Extension -in '.exe', '.dll' }) {
+    $t = Join-Path $treeBin $f.Name
+    if (-not (Test-Path -LiteralPath $t)) { $hashOnlyStaged++; continue }
+    if ((Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash -eq
+        (Get-FileHash -LiteralPath $t -Algorithm SHA256).Hash) { $hashSame++ }
+    else {
+        Write-Host ("  {0,-28} BYTES DIFFER from the tree" -f $f.Name) -ForegroundColor Red
+        $hashDiff++
+    }
+}
+Write-Host ("[verify] {0} staged binaries byte-identical to the tree, {1} differ, {2} staged from elsewhere (VC runtime)" -f $hashSame, $hashDiff, $hashOnlyStaged)
+if ($hashSame -eq 0) {
+    Write-Host '[verify] FAIL no staged binary could be compared against the tree' -ForegroundColor Red
+    exit 1
+}
+if ($hashDiff -gt 0) {
+    Write-Host ("[verify] {0} STAGED BINARIES ARE NOT THE TREE'S - the payload is not what was tested" -f $hashDiff) -ForegroundColor Red
+    exit 2
+}
 if ($live -eq 0) {
     Write-Host '[verify] FAIL every staged probe was NO-PROBE - the payload did not render anything' -ForegroundColor Red
     exit 1

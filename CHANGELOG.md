@@ -227,9 +227,10 @@ Pressing Play was broken in basic ways, and each of these was a separate defect.
 
 ### Physics, animation and UI
 
-- **The physics ABI went from 49 functions to 125, all of them bound in C#** — forces, impulses,
-  torque, live mass/friction/restitution/damping, sleeping control, per-body gravity. None of that
-  existed before.
+- **The physics ABI went from 49 functions to 128** — forces, impulses, torque, live
+  mass/friction/restitution/damping, sleeping control, per-body gravity. None of that existed before.
+  Counted at both ends of this release by the declarations in `modules/physics/include/aver/physics/`,
+  which is now five headers rather than one; `AbiEnumTest` holds the C# mirror to the C constants.
 - **All twelve Jolt constraint classes are usable** — fixed, point, distance, hinge, slider, cone,
   swing-twist, six-DOF, gear, rack-and-pinion, pulley and path — with motors and runtime limits.
 - **Collision layers do something, and filtered raycasts exist.** The character controller can climb
