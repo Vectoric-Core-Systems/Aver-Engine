@@ -65,6 +65,17 @@ usually how long something had been quietly not working.
   not the renderer that actually draws the scene. Sponza's centre probe went **(10,10,12) →
   (173,171,167)**, matching raster. Where a view mode structurally cannot work it now disables itself
   with a stated reason instead of silently doing nothing.
+- **A material graph can animate, and can author a volume.** A `Time` node — wrapped hourly so float
+  precision holds — reaches a material shader for the first time, so ripple, scroll and flicker are
+  possible at all; `AttenuationColor` and `AttenuationDistance` make the absorption above authorable
+  from the graph rather than only from a `.ocmat`.
+- **Caustics are projected from the water volume**, computed analytically from the ripple's own
+  curvature and applied into the sun term, so they correctly vanish inside a shadow. Clipped to a
+  true per-mesh AABB — `createMesh` had been measuring one and throwing it away.
+- **A project asking for `VOXELRES 512` gets 512.** The GI volume is sized once in
+  `VoxiRenderer::init()`, and the manifest's value was applied one step too late — after the volume
+  had been built — so a project requesting 512³ silently ran at 128³, 64× smaller, and was told it
+  had been applied.
 - **The path tracer became a reference worth measuring against.** It was a Lambertian approximation
   with one flat colour per mesh instance; it is a full energy-conserving PBR integrator now. Furnace
   test, white conductor at roughness 1: **0.307 L → 0.9976 L** after multi-scatter compensation. It
@@ -177,6 +188,41 @@ Every figure here is from the commit that made the change, on this machine, with
 - **Twelve editor controls that looked like they worked, didn't** — seven silently doing nothing,
   five working internally but unreachable from the UI. Found by sweeping the interface rather than
   reading the code.
+
+### Play in Editor
+
+Pressing Play was broken in basic ways, and each of these was a separate defect.
+
+- **Play starts at the Player Start, facing the way it points.** You could place one, drag it, and
+  save it into a level as a spawn record; Play ignored it — for the default pawn *and* for a
+  project's own GameMode pawn. Before that landed, Play spawned at world (0,0,0), which in an empty
+  test level is open air and in a real level is underground: on ElectricDreams it put the camera
+  inside the ground.
+- **Play with no GameMode gives you a camera**, not a stationary drone you are stuck inside. The
+  drone only moved if the project had separately named a flight graph through a CLI-only flag, so
+  for anyone using the editor normally, Play snapped the view into a parked quadcopter.
+- **Mouse look works.** It was not glitchy, it was dead: the fix for the pawn's movement had put the
+  look block inside a `!gameHasInput()` guard, and the default pawn counts as live input, so the
+  block excluded itself. `--pie-camera-test` is what caught it.
+- **Stop puts the level back where Play found it.** Play was a one-way door — every body physics had
+  shoved, every actor a graph had moved, stayed moved, and the only route back to the authored level
+  was reloading and losing unsaved edits.
+- **Releasing the mouse mid-session no longer leaves every key held down forever.**
+  `aver_fw_input_new_frame()` rolls `cur` into `prev` but does not clear `cur[]`, so an early return
+  in `pushInput()` meant "republish last frame forever" rather than "publish nothing". Hold fire, hit
+  the release-mouse chord to click something in the Outliner, and the weapon kept firing.
+- **Clicking back into the viewport hands control to the game, and does not fire the weapon doing
+  it.** The gesture never worked at all: ImGui always reports `WantCaptureMouse` over its own dock
+  window, so the guard could never be satisfied.
+- **File > Open Level opens a level.** The menu item was not a picker — it called `loadStartMap()`,
+  which only ever reopens the project's single start map, so a project with more than one level had
+  no menu path to any of the others.
+- **The selection outline exists in the default renderer.** It was gated on `!sceneSuppressed()`, and
+  ray-driven rendering — the standing default — suppresses the rasteriser entirely, so the outline
+  was drawn into nothing for the render mode everyone actually uses.
+- **The gizmo draws where the mesh is.** Selecting a child under a parent at, say, (5000,0,0) put the
+  move/rotate gizmo 50 m away from the mesh, and dragging it moved the child against the wrong
+  origin.
 
 ### Physics, animation and UI
 
