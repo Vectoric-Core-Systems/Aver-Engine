@@ -163,16 +163,19 @@ void PtSceneView::submitDraw(rhi::MeshHandle mesh, const f32 world[16], const f3
     // setAlbedoResolver, and LandscapeRenderer::setSurfaceBinding for the same division of labour).
     // It answers from the binding's IDENTITY rather than from the bytes' shape. Absent a resolver --
     // PtFurnaceTest, or any host with no material system -- every draw keeps its base colour.
-    f32 resolved[3];
-    rhi::TextureHandle resolvedTex = 0;
-    if (resolveAlbedo_ && resolveAlbedo_(drawBinding, drawConstants, drawConstantBytes, resolved,
-                                         &resolvedTex)) {
-        d.albedo[0] = resolved[0];
-        d.albedo[1] = resolved[1];
-        d.albedo[2] = resolved[2];
-        // 0 means the resolver had no texture and `resolved` is already the finished colour. A real
-        // handle means `resolved` is the factor and this is what multiplies it -- see AlbedoResolver.
-        d.baseColorTex = resolvedTex;
+    ResolvedMaterial rm;
+    if (resolveAlbedo_ && resolveAlbedo_(drawBinding, drawConstants, drawConstantBytes, rm)) {
+        d.albedo[0] = rm.albedo[0];
+        d.albedo[1] = rm.albedo[1];
+        d.albedo[2] = rm.albedo[2];
+        // A zero handle means the resolver had no texture for that slot and the scalar beside it is
+        // already the finished value; a real handle means the scalar is a factor multiplying it.
+        d.baseColorTex  = rm.baseColorTex;
+        d.metalRoughTex = rm.metalRoughTex;
+        d.normalTex     = rm.normalTex;
+        d.roughness     = rm.roughness;
+        d.metallic      = rm.metallic;
+        d.normalScale   = rm.normalScale;
     } else {
         d.albedo[0] = baseColor[0];
         d.albedo[1] = baseColor[1];
@@ -222,14 +225,23 @@ u64 PtSceneView::drawsKey() const {
             key ^= static_cast<u64>(bits);
             key *= 1099511628211ull;
         }
-        // AND SO DOES THE TEXTURE, for exactly the argument the ior note just made. The material
-        // system resolves its textures asynchronously, so a draw's base colour legitimately goes
+        // AND SO DOES EVERY MATERIAL FIELD, for exactly the argument the ior note just made. The
+        // material system resolves its textures asynchronously, so a draw's maps legitimately go
         // 0 -> handle a few frames into a scene; a key blind to that would keep tracing the
         // untextured version until something unrelated forced a re-arm. It also covers the reverse
-        // case a texture swap in the editor produces.
+        // case a texture swap in the editor produces, and a gloss/metalness edit that changes no
+        // texture at all.
         {
-            key ^= static_cast<u64>(d.baseColorTex);
-            key *= 1099511628211ull;
+            key ^= static_cast<u64>(d.baseColorTex);  key *= 1099511628211ull;
+            key ^= static_cast<u64>(d.metalRoughTex); key *= 1099511628211ull;
+            key ^= static_cast<u64>(d.normalTex);     key *= 1099511628211ull;
+            const f32 scalars[3] = {d.roughness, d.metallic, d.normalScale};
+            for (u32 i = 0; i < 3; ++i) {
+                u32 bits = 0;
+                std::memcpy(&bits, &scalars[i], sizeof(bits));
+                key ^= static_cast<u64>(bits);
+                key *= 1099511628211ull;
+            }
         }
     }
     return key;
@@ -297,8 +309,14 @@ bool PtSceneView::rebuildScene(rhi::IRenderContext& ctx) {
         // RESIDENCY IS RESOLVED HERE, not in submitDraw: this runs once per re-arm rather than once
         // per draw per frame, and residentTexture() is the call that may build the table and compile
         // the textured pipeline on first use. A handle the tracer cannot make resident comes back
-        // kUnboundTexture and the surface keeps its flat albedo, which is the documented fallback.
-        s.baseColorTex = d.baseColorTex ? pt_.residentTexture(d.baseColorTex) : kUnboundTexture;
+        // kUnboundTexture and the surface falls back to its factors, which is the documented
+        // behaviour on a device with no bindless support.
+        s.baseColorTex  = d.baseColorTex  ? pt_.residentTexture(d.baseColorTex)  : kUnboundTexture;
+        s.metalRoughTex = d.metalRoughTex ? pt_.residentTexture(d.metalRoughTex) : kUnboundTexture;
+        s.normalTex     = d.normalTex     ? pt_.residentTexture(d.normalTex)     : kUnboundTexture;
+        s.roughness     = d.roughness;
+        s.metallic      = d.metallic;
+        s.normalScale   = d.normalScale;
         ids.push_back(pt_.addSurface(s));
     }
     if (dropped && !dropCapLogged_) {

@@ -87,17 +87,29 @@ public:
     // Left unset, every draw uses its base colour, which is exactly right for a caller that has no
     // material system at all (PtFurnaceTest brings its own geometry and never sets one).
     //
-    // `outBaseColorTex` IS AN OUT PARAMETER WITH TWO MEANINGS, and the distinction is the whole
-    // reason this signature grew rather than gaining a second callback. A resolver that leaves it 0
-    // is saying "I have no texture for this; outAlbedo is the FINISHED colour" -- which is what the
-    // pre-texture behaviour was, and what a host with no bindless support still wants. A resolver
-    // that writes a real handle is saying "outAlbedo is the FACTOR; multiply it by this texture".
-    // Getting that backwards -- handing back the texture's mean AND its handle -- multiplies the
-    // texture in twice and reads as a uniformly too-dark scene with no assert and no log, so the two
-    // are deliberately answered by one call that cannot disagree with itself.
+    // ONE STRUCT RATHER THAN A GROWING OUT-PARAMETER LIST. This started as a single float3 and has
+    // since needed a base-colour texture, a metal-rough texture, a normal map and three scalars;
+    // threading each as its own pointer makes every future field a signature change at both ends,
+    // and makes it easy to fill six of seven and leave the last reading whatever was on the stack.
+    struct ResolvedMaterial {
+        // THE FACTOR when baseColorTex is set, THE FINISHED COLOUR when it is not. That ambiguity is
+        // deliberate and is why one call answers both: a resolver that hands back the texture's mean
+        // AND its handle applies the texture twice, which reads as a uniformly too-dark scene with
+        // no assert and nothing logged.
+        f32 albedo[3] = {1, 1, 1};
+        // NEGATIVE MEANS LAMBERTIAN, matching PtSurface::roughness -- a resolver that knows nothing
+        // about gloss leaves this alone and the surface keeps the diffuse-only BSDF the tracer had
+        // before specular existed. When metalRoughTex is set these two are FACTORS multiplying it,
+        // exactly as the .ocmat authoring means them.
+        f32 roughness = -1.0f;
+        f32 metallic = 0.0f;
+        f32 normalScale = 1.0f;
+        rhi::TextureHandle baseColorTex = 0;
+        rhi::TextureHandle metalRoughTex = 0;
+        rhi::TextureHandle normalTex = 0;
+    };
     using AlbedoResolver = std::function<bool(rhi::BindingSetHandle set, const void* constants,
-                                              u32 bytes, f32 outAlbedo[3],
-                                              rhi::TextureHandle* outBaseColorTex)>;
+                                              u32 bytes, ResolvedMaterial& out)>;
     void setAlbedoResolver(AlbedoResolver r) { resolveAlbedo_ = std::move(r); }
 
     const char* name() const override { return "Aver.PathTracer.SceneView"; }
@@ -144,12 +156,17 @@ private:
         rhi::MeshHandle mesh = 0;
         f32 world[16];
         f32 albedo[3];
-        // The base-colour texture this draw's material bound, or 0. Kept as the RHI HANDLE rather
-        // than a resolved bindless index because submitDraw runs during the frame's draw walk while
-        // residency is a PathTracer question answered at rebuildScene time; storing the handle keeps
+        // The material this draw's binding resolved to. Textures are kept as RHI HANDLES rather than
+        // resolved bindless indices because submitDraw runs during the frame's draw walk while
+        // residency is a PathTracer question answered at rebuildScene time; storing handles keeps
         // the two apart and keeps drawsKey() hashing something stable (a handle is never recycled,
         // an index could in principle be renumbered).
+        f32 roughness = -1.0f;
+        f32 metallic = 0.0f;
+        f32 normalScale = 1.0f;
         rhi::TextureHandle baseColorTex = 0;
+        rhi::TextureHandle metalRoughTex = 0;
+        rhi::TextureHandle normalTex = 0;
         // 0.0 = opaque Lambertian (every draw the backend never marked `blended`); kDefaultGlassIor
         // for a blended one. See PtSurface::ior for why one field carries both the kind and the
         // value, and this class's own MATERIALS comment for why the value is a fixed constant.

@@ -7129,8 +7129,8 @@ public:
             // fall through to the per-draw baseColor instead.
             ptSceneView_->setAlbedoResolver(
                 [this](aver::rhi::BindingSetHandle set, const void* constants, aver::u32 bytes,
-                       aver::f32 outAlbedo[3], aver::rhi::TextureHandle* outBaseColorTex) -> bool {
-                    if (outBaseColorTex) *outBaseColorTex = 0;
+                       pt::PtSceneView::ResolvedMaterial& out) -> bool {
+                    aver::f32* outAlbedo = out.albedo;
                     if (!set || !constants || bytes != sizeof(pbr::MaterialConstants)) return false;
                     pbr::MaterialSystem& ms = voxiRenderer_.materials();
                     // THIS EARLY RETURN IS WHY THE VIEW RE-ARMS TWICE ON A STATIC SCENE -- looks like
@@ -7164,16 +7164,25 @@ public:
                     // and completely flat. The mean is what that fallback is for, and it is still
                     // what a device with no bindless support gets.
                     if (const auto* tex = ms.textures(set)) {
+                        // textures() reports EFFECTIVE handles, so an unmapped slot is the 1x1
+                        // identity fallback (white / flat normal / (0,255,255,255) metal-rough)
+                        // rather than 0 -- sampling it is a multiply by one, which is correct, and
+                        // costs one fetch on a material that authored no such map.
                         const aver::rhi::TextureHandle base =
                             (*tex)[static_cast<aver::usize>(pbr::TextureSlot::BaseColor)];
-                        // textures() reports EFFECTIVE handles, so an unmapped slot is the 1x1 white
-                        // fallback rather than 0 -- sampling it is a multiply by one, which is
-                        // correct, and costs one texture fetch on a material with no base colour map.
-                        if (base && outBaseColorTex) {
-                            *outBaseColorTex = base;
+                        if (base) {
+                            out.baseColorTex  = base;
+                            out.metalRoughTex = (*tex)[static_cast<aver::usize>(pbr::TextureSlot::MetalRough)];
+                            out.normalTex     = (*tex)[static_cast<aver::usize>(pbr::TextureSlot::Normal)];
+                            // FACTORS, not finished values -- the tracer multiplies each by its map.
+                            // baseColorFactor is already linear (packMaterial decoded it); roughness
+                            // and metallic are linear scalars and need no decode.
                             outAlbedo[0] = mc->baseColorFactor[0];
                             outAlbedo[1] = mc->baseColorFactor[1];
                             outAlbedo[2] = mc->baseColorFactor[2];
+                            out.roughness   = mc->roughnessFactor;
+                            out.metallic    = mc->metallicFactor;
+                            out.normalScale = mc->normalScale;
                             return true;
                         }
                     }

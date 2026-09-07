@@ -60,6 +60,30 @@ struct PtSurface {
     // visible set changes moves PtSceneView::drawsKey() with it and the accumulator then re-arms
     // every frame, never reaching sample 1.
     u32 baseColorTex = kUnboundTexture;
+
+    // NEGATIVE MEANS "NO SPECULAR LOBE AT ALL" -- the pure Lambertian surface this tracer shipped
+    // with, and the default, so every caller written before specular existed keeps byte-identical
+    // behaviour. That matters more here than anywhere else in this file: PtFurnaceTest's oracle is
+    // an ABSOLUTE claim about an albedo-1 surface reading exactly L, and a dielectric specular lobe
+    // -- even a 0.04 one -- is extra energy leaving that surface. Making metallic/roughness merely
+    // default to 0/1 would have silently changed what every existing furnace configuration measures.
+    //
+    // Same idiom as `ior` directly below: a value no real surface can hold doubles as the kind, so
+    // there is no separate flag and nothing to keep in step. Roughness is a [0,1] quantity; -1 is
+    // not a rough surface, it is the absence of the question.
+    f32 roughness = -1.0f;
+    // Only read when roughness >= 0. 0 = dielectric (F0 0.04), 1 = conductor (F0 = albedo).
+    f32 metallic = 0.0f;
+
+    // glTF packing: occlusion in R, roughness in G, metallic in B. When bound, `roughness` and
+    // `metallic` above are FACTORS multiplying the sampled channels, which is what .ocmat authoring
+    // means by roughnessFactor/metallicFactor -- so a material with `metallicFactor 1` and a metal
+    // map is not a mirror, it is whatever the map says.
+    u32 metalRoughTex = kUnboundTexture;
+    // Tangent-space normal map. The tangent frame is derived per triangle from the UV gradient (the
+    // mesh carries no tangent stream), so this needs no extra vertex data.
+    u32 normalTex = kUnboundTexture;
+    f32 normalScale = 1.0f;
     // 0.0 (the default) means OPAQUE LAMBERTIAN -- every existing addSurface() caller that never
     // touches this field keeps the exact diffuse-only behaviour it always had. Any value > 0 means a
     // SMOOTH DIELECTRIC with that index of refraction (ordinary glass ~1.5, water ~1.33, diamond
@@ -229,11 +253,20 @@ private:
         f32 albedo[3] = {1, 1, 1};
         f32 ior = 0.0f;
         // APPENDED, never inserted: any earlier position shifts albedo/ior and every existing
-        // instance silently reads the wrong fields. 88 -> 92, still naturally aligned (a u32 at
-        // offset 88), so the structured-buffer stride stays sizeof(Instance) with no padding.
+        // instance silently reads the wrong fields. 88 -> 112, every field naturally aligned on a
+        // 4-byte boundary, so the structured-buffer stride stays sizeof(Instance) with no padding
+        // and no straddle for DXC to disagree with us about. Deliberately grown ONCE for the whole
+        // material rather than a field at a time: this ABI is hand-mirrored into HLSL with nothing
+        // but a static_assert on its size watching, so each edit is a chance to shift a field on one
+        // side only, and three edits are three chances.
         u32 baseColorTex = kUnboundTexture;
+        f32 roughness = -1.0f;   // negative = pure Lambertian; see PtSurface::roughness
+        f32 metallic = 0.0f;
+        u32 metalRoughTex = kUnboundTexture;
+        u32 normalTex = kUnboundTexture;
+        f32 normalScale = 1.0f;
     };
-    static_assert(sizeof(Instance) == 92, "PtInstance is the HLSL PtInstance ABI");
+    static_assert(sizeof(Instance) == 112, "PtInstance is the HLSL PtInstance ABI");
 
     struct Scene {
         rhi::TlasHandle  tlas = 0;
@@ -242,6 +275,20 @@ private:
 
     rhi::IDevice*          dev_ = nullptr;
     rhi::IResourceFactory* res_ = nullptr;
+
+    // THE SINGLE-SCATTER DIRECTIONAL ALBEDO TABLE, E(cos(theta), roughness), built once on the CPU
+    // at init and never touched again. It is what the multiple-scattering compensation divides by:
+    // a microfacet lobe with Smith shadowing returns only E of the light it receives, the rest being
+    // inter-facet scattering the single-scatter model has no term for, and the compensation puts
+    // exactly that missing (1 - E) back.
+    //
+    // INTEGRATED WITH THE SHADER'S OWN ESTIMATOR rather than taken from a published analytic fit.
+    // The fits in circulation are for a height-correlated Smith with a particular k and no
+    // below-horizon rejection; this sampler uses k = a/2 and DOES discard samples whose reflected
+    // direction falls under the surface. A fit would therefore compensate for a slightly different
+    // lobe than the one being corrected, and the furnace's 5e-3 tolerance is tight enough to see the
+    // difference. Computing E from the identical maths makes the compensation exact by construction.
+    rhi::BufferHandle energyLut_ = 0;
 
     rhi::ShaderHandle   cs_ = 0;
     rhi::PipelineHandle pipeline_ = 0;

@@ -10,7 +10,9 @@ RaytracingAccelerationStructure gPtScene : register(t0);
 
 // MIRRORS rhi::MeshVertex byte for byte; the stride is handed to setSrvBuffer and nothing checks it.
 struct PtVertex   { float3 pos; float3 nrm; float2 uv; };
-// MIRRORS pt::PtInstance: 64 + 4 + 4 + 12 + 4 + 4 = 92 bytes, packed tightly with natural alignment.
+// MIRRORS pt::PtInstance: 64 + 4 + 4 + 12 + 4 + 4 + 4 + 4 + 4 + 4 + 4 = 112 bytes, packed tightly
+// with natural alignment (every field lands on a 4-byte boundary, so there is no padding to
+// disagree about).
 // `ior` used to be the last field and used to be a spare `pad`; it is read as 0.0 for an ordinary
 // Lambertian surface and as a real index of refraction (>0) for a smooth dielectric -- see
 // PtSurface::ior (PathTracer.hpp) for why that single float carries both the kind and the value with
@@ -20,11 +22,20 @@ struct PtVertex   { float3 pos; float3 nrm; float2 uv; };
 // the instance BUFFER is the same bytes either way, so a struct that omitted the field in the
 // untextured build would read every following instance at the wrong offset. Only the SAMPLING is
 // conditional, never the layout.
-struct PtInstance { float4x4 objectToWorld; uint firstIndex; uint firstVertex; float3 albedo; float ior; uint baseColorTex; };
+struct PtInstance { float4x4 objectToWorld; uint firstIndex; uint firstVertex; float3 albedo; float ior; uint baseColorTex; float roughness; float metallic; uint metalRoughTex; uint normalTex; float normalScale; };
 
 StructuredBuffer<PtVertex>   gPtVerts     : register(t1);
 StructuredBuffer<uint>       gPtIndices   : register(t2);
 StructuredBuffer<PtInstance> gPtInstances : register(t3);
+
+// E(cos(theta), roughness): how much of the light a SINGLE-SCATTER GGX lobe with F = 1 actually
+// returns. Row-major, roughness outer. Built on the CPU by buildEnergyLut() with this file's own
+// estimator -- see its comment for why a published analytic fit would compensate the wrong lobe.
+// AVER_PT_ENERGY_DIM must equal kEnergyLutDim; both pipelines are compiled with it defined.
+#ifndef AVER_PT_ENERGY_DIM
+#error "AVER_PT_ENERGY_DIM must be defined by the pipeline that binds the energy table"
+#endif
+StructuredBuffer<float>      gPtEnergy    : register(t4);
 
 #ifdef AVER_PT_BINDLESS
 // The base-colour table, in space1 so it cannot collide with space0's explicit descriptor table.
@@ -155,6 +166,116 @@ float3 ptCosineHemisphere(float3 n, float u1, float u2) {
 // not overlap.
 float3 ptEnvironment(float3 dir) { return skyColor(dir); }
 
+// ---- the metal/rough lobe -----------------------------------------------------------------------
+//
+// GATED ON roughness >= 0 AT EVERY CALL SITE. A surface that never set it is the pure Lambertian
+// this tracer shipped with and takes none of the code below -- which is what keeps PtFurnaceTest's
+// existing configurations measuring exactly what they always measured. See PtSurface::roughness.
+
+// Is this hit a PBR surface at all, or the plain Lambertian default?
+bool ptHasSpecular(float rough) { return rough >= 0.0; }
+
+// Normal incidence reflectance. A dielectric reflects ~4% and keeps its colour in the diffuse lobe;
+// a conductor has no diffuse lobe at all and takes its colour from F0 instead.
+float3 ptF0(float3 albedo, float metal) { return lerp(float3(0.04, 0.04, 0.04), albedo, metal); }
+
+// The diffuse albedo left after the specular lobe has taken its share. Metals keep none.
+float3 ptDiffuseAlbedo(float3 albedo, float metal) { return albedo * (1.0 - metal); }
+
+// Bilinear fetch from the single-scatter energy table. ENDPOINT-INCLUSIVE, matching how
+// buildEnergyLut() placed its samples: cell 0 is exactly 0 and cell D-1 is exactly 1, so a query at
+// roughness 1 reads a row integrated at roughness 1. A half-texel disagreement between these two
+// mappings is not cosmetic -- it under-compensated a fully rough conductor by 5.4%, which is ten
+// times the furnace's tolerance, while every interior point still looked correct.
+float ptEnergyE(float ndv, float rough) {
+    const float D = float(AVER_PT_ENERGY_DIM);
+    const float fx = clamp(saturate(ndv)   * (D - 1.0), 0.0, D - 1.0);
+    const float fy = clamp(saturate(rough) * (D - 1.0), 0.0, D - 1.0);
+    const uint x0 = (uint)fx, y0 = (uint)fy;
+    const uint x1 = min(x0 + 1u, (uint)D - 1u), y1 = min(y0 + 1u, (uint)D - 1u);
+    const float tx = fx - float(x0), ty = fy - float(y0);
+    const float e00 = gPtEnergy[y0 * (uint)D + x0], e10 = gPtEnergy[y0 * (uint)D + x1];
+    const float e01 = gPtEnergy[y1 * (uint)D + x0], e11 = gPtEnergy[y1 * (uint)D + x1];
+    return max(lerp(lerp(e00, e10, tx), lerp(e01, e11, tx), ty), 1e-2);
+}
+
+// MULTIPLE-SCATTERING COMPENSATION, the term that makes a rough conductor stop reading dark.
+//
+// A single-scattering microfacet model lets a facet shadow light and then forgets about it. Real
+// microsurfaces scatter that light again off neighbouring facets until it escapes, so a lobe that
+// only ever bounces ONCE returns E of what arrived and silently drops (1 - E). At roughness 1 with
+// F0 = 1 this tracer measured E ~= 0.31, i.e. it was losing 69% of the light off a white metal --
+// the same defect, and worse, than the 45% white metal the RASTER furnace caught.
+//
+// The correction scales the lobe by 1 + F0*(1/E - 1). At F0 = 1 that is exactly 1/E, so the lobe
+// returns E * (1/E) = 1: every photon, which is what a white conductor must do. At F0 = 0.04 it is a
+// slight lift, because a dielectric only sent 4% down this lobe in the first place. It is the
+// Kulla-Conty form, with F0 standing in for the directional Fresnel average -- exact at both ends of
+// the metallic range, and within the furnace's tolerance between them.
+float3 ptSpecCompensation(float3 F0, float E) { return 1.0 + F0 * (1.0 / E - 1.0); }
+
+// What the COMPENSATED specular lobe returns over the hemisphere: F0*E scaled by the compensation
+// above, which simplifies to F0*E + F0^2*(1 - E). This is the quantity the diffuse lobe must give
+// way to, and using it rather than a bare (1 - F0) is what lets a rough DIELECTRIC also read exactly
+// L: the specular lobe takes F0*E, not F0, so scaling diffuse by (1 - F0) left the difference
+// unaccounted for and the furnace read 0.973 instead of 1.
+float3 ptSpecAlbedo(float3 F0, float E) { return F0 * E + F0 * F0 * (1.0 - E); }
+
+// Samples a GGX half-vector about `n` and returns the REFLECTED direction for view vector `v`.
+// Reuses ptBasis above rather than building a second tangent frame: the cosine-weighted sampler and
+// this one must agree on what "around the normal" means, or two lobes on the same surface would be
+// oriented differently and only their SUM would look wrong.
+// The half-vector is drawn from D(h)*cos(h), the standard distribution-of-normals sample, so the
+// weight below cancels D and the cosine analytically rather than evaluating them and dividing.
+float3 ptSampleGGX(float3 n, float3 v, float rough, float u1, float u2) {
+    const float a = max(rough * rough, 1e-3);   // a=0 is a delta lobe; clamp keeps the maths finite
+    const float phi = 2.0 * PI * u1;
+    const float ct = sqrt(saturate((1.0 - u2) / (1.0 + (a * a - 1.0) * u2)));
+    const float st = sqrt(saturate(1.0 - ct * ct));
+    float3 t, b;
+    ptBasis(n, t, b);
+    const float3 h = normalize(t * (st * cos(phi)) + b * (st * sin(phi)) + n * ct);
+    return reflect(-v, h);
+}
+
+// The throughput multiplier for a GGX-sampled direction, with D and the sampling density cancelled:
+//
+//   weight = BRDF * cos(l) / pdf(l)
+//          = [D*G*F / (4*ndv*ndl)] * ndl / [D*ndh / (4*vdh)]
+//          = F * G * vdh / (ndv * ndh)
+//
+// D NEVER APPEARS, which is the whole reason to importance-sample the distribution: at low roughness
+// D is enormous and the pdf is equally enormous, and evaluating both and dividing loses the precision
+// that cancelling them keeps. G is Smith, one Schlick term per direction, sharing the shared
+// prelude's plainGeomSchlick so this file and the rasteriser cannot drift on the geometry term.
+float3 ptScatterSpecular(float3 F0, float rough, float3 n, float3 v, float3 l) {
+    const float ndv = dot(n, v), ndl = dot(n, l);
+    if (!(ndv > 0.0) || !(ndl > 0.0)) return float3(0, 0, 0);   // below the horizon: no energy
+    const float3 h = normalize(v + l);
+    const float ndh = saturate(dot(n, h)), vdh = saturate(dot(v, h));
+    if (!(ndh > 0.0) || !(vdh > 0.0)) return float3(0, 0, 0);
+    // k = a/2, the Smith-Schlick pairing this engine's IBL form already uses. The furnace is what
+    // decides whether that choice conserves energy, and it is the reason this is one named constant
+    // rather than an inline literal.
+    const float a = max(rough * rough, 1e-3);
+    const float k = a * 0.5;
+    const float G = plainGeomSchlick(ndv, k) * plainGeomSchlick(ndl, k);
+    const float3 F = plainFresnelSchlick(vdh, F0);
+    // ptEnergyE is keyed on n.v, the direction the table was integrated over -- not n.l, and not the
+    // half-vector. E answers "how much does this lobe return to an observer at this elevation".
+    return F * G * vdh / max(ndv * ndh, 1e-6) * ptSpecCompensation(F0, ptEnergyE(ndv, rough));
+}
+
+// How often to send a bounce down the specular lobe rather than the diffuse one. ANY value in (0,1)
+// is unbiased -- the weight divides by whichever probability was used -- so this only decides
+// VARIANCE, never the answer. Tracking F0 puts the samples where the energy is: a conductor is
+// almost all specular, a dielectric almost all diffuse. The clamp keeps both lobes reachable, so
+// neither is estimated from zero samples on a surface where it still contributes.
+float ptSpecularProbability(float3 F0, float metal) {
+    const float lum = dot(F0, float3(0.2126, 0.7152, 0.0722));
+    return clamp(max(lum, metal), 0.1, 0.9);
+}
+
 // Direct light from the sun, by NEXT-EVENT ESTIMATION rather than by hoping a bounce finds it.
 //
 // THE PROBLEM THIS EXISTS TO FIX. averSunRadiance() (RHIShaders.cpp) is a single direction with no
@@ -193,7 +314,12 @@ float3 ptEnvironment(float3 dir) { return skyColor(dir); }
 // a delta BSDF has exactly zero probability of a BRDF-sampled bounce landing on the sun regardless
 // (same reasoning as the "why this does not double-count" note above) -- so there is no compensating
 // term missing, only a term that would not apply.
-float3 ptDirectSun(float3 hitPos, float3 nWS, float3 albedo, float bias, float tMax) {
+// `V` / `rough` / `metal` DESCRIBE THE SURFACE, and are only read when rough >= 0. A surface that
+// never set a roughness takes the identical Lambertian line this function has always ended with --
+// not an equivalent one, the same one -- which is what keeps every pre-specular caller, PtFurnaceTest
+// above all, measuring exactly what it measured before.
+float3 ptDirectSun(float3 hitPos, float3 nWS, float3 albedo, float bias, float tMax,
+                   float3 V, float rough, float metal) {
     float3 L = normalize(gLightDir.xyz);   // "direction TO light" -- see PerFrame in the prelude
     float ndl = dot(nWS, L);
     if (!(ndl > 0.0)) return float3(0, 0, 0);   // the light is behind this surface; no ray to fire
@@ -216,7 +342,29 @@ float3 ptDirectSun(float3 hitPos, float3 nWS, float3 albedo, float bias, float t
     // radiance. NO PDF DIVISION -- unlike ptScatter, which divides by the density of a DRAWN
     // direction, this direction was not drawn, it was CHOSEN (the one direction that reaches the
     // sun), so there is no density over directions here to divide out.
-    return albedo * (1.0 / PI) * ndl * averSunRadiance();
+    if (!ptHasSpecular(rough)) return albedo * (1.0 / PI) * ndl * averSunRadiance();
+
+    // THE PBR SURFACE, evaluated rather than sampled. D APPEARS IN FULL HERE, unlike
+    // ptScatterSpecular where importance sampling cancels it: this direction was chosen, not drawn,
+    // so there is no matching density to cancel against and the distribution has to be evaluated.
+    const float3 F0  = ptF0(albedo, metal);
+    const float  ndv = dot(nWS, V);
+    // The SAME energy bookkeeping the bounce path uses, so a surface lit directly and the same
+    // surface lit by a bounce do not disagree about how much light it reflects.
+    const float  E   = ptEnergyE(max(ndv, 1e-3), rough);
+    const float3 kd  = ptDiffuseAlbedo(albedo, metal) * (1.0 - ptSpecAlbedo(F0, E));
+    float3 brdf = kd * (1.0 / PI);
+    if (ndv > 0.0) {
+        const float3 H = normalize(V + L);
+        const float ndh = saturate(dot(nWS, H)), vdh = saturate(dot(V, H));
+        const float a = max(rough * rough, 1e-3);
+        const float k = a * 0.5;   // the same pairing ptScatterSpecular uses; they must not drift
+        const float  D = plainDistGGX(ndh, a);
+        const float  G = plainGeomSchlick(ndv, k) * plainGeomSchlick(ndl, k);
+        const float3 F = plainFresnelSchlick(vdh, F0);
+        brdf += D * G * F / max(4.0 * ndv * ndl, 1e-6) * ptSpecCompensation(F0, E);
+    }
+    return brdf * ndl * averSunRadiance();
 }
 
 // Traces one ray and resolves the surface it hit. False means the ray left the scene.
@@ -228,12 +376,16 @@ float3 ptDirectSun(float3 hitPos, float3 nWS, float3 albedo, float bias, float t
 // distinction. Recovered here, from the SAME comparison the flip already made, so a diffuse caller
 // that never reads it gets the identical nWS it always did.
 bool ptTrace(float3 org, float3 dir, out float3 hitPos, out float3 nWS, out float3 albedo,
-            out float ior, out bool entering) {
+            out float ior, out bool entering, out float rough, out float metal) {
     hitPos   = org;
     nWS      = float3(0, 0, 1);
     albedo   = float3(0, 0, 0);
     ior      = 0.0;
     entering = true;
+    // NEGATIVE IS THE DEFAULT ON A MISS TOO, so a caller that ignores the return value still sees
+    // "no specular lobe" rather than a mirror. See PtSurface::roughness.
+    rough    = -1.0;
+    metal    = 0.0;
 
     RayDesc r;
     r.Origin    = org;
@@ -274,11 +426,15 @@ bool ptTrace(float3 org, float3 dir, out float3 hitPos, out float3 nWS, out floa
     hitPos = org + dir * q.CommittedRayT();
     albedo = inst.albedo;
     ior    = inst.ior;
+    rough  = inst.roughness;
+    metal  = inst.metallic;
 #ifdef AVER_PT_BINDLESS
+    // ONE UV FOR THE WHOLE MATERIAL, computed once whether one map is bound or three.
+    const float2 uv = gPtVerts[i0].uv * w.x + gPtVerts[i1].uv * w.y + gPtVerts[i2].uv * w.z;
+
     // THE FACTOR TIMES THE TEXEL, which is why PtSurface::albedo must carry baseColorFactor and not
     // the texture's mean when a texture is bound -- mean x texel applies the texture twice.
     if (inst.baseColorTex != AVER_PT_TEX_UNBOUND) {
-        const float2 uv = gPtVerts[i0].uv * w.x + gPtVerts[i1].uv * w.y + gPtVerts[i2].uv * w.z;
         // SampleLevel AT MIP 0, not SampleGrad. A compute kernel has no pixel quad and therefore no
         // implicit derivatives, and after the first cosine-weighted bounce there is no ray footprint
         // to derive one from either -- the differential a primary hit could carry says nothing about
@@ -287,6 +443,55 @@ bool ptTrace(float3 org, float3 dir, out float3 hitPos, out float3 nWS, out floa
         // a wrong mip would instead bias every one of those samples the same way.
         albedo *= gPtTextures[NonUniformResourceIndex(inst.baseColorTex)]
                       .SampleLevel(gPtSamp, uv, 0).rgb;
+    }
+
+    // glTF packs occlusion in R, ROUGHNESS IN G AND METALLIC IN B. The factors multiply the sampled
+    // channels rather than replacing them -- which is what stops a material authoring
+    // `metallicFactor 1` beside a metal map (every Sponza material does) from rendering as a mirror.
+    if (rough >= 0.0 && inst.metalRoughTex != AVER_PT_TEX_UNBOUND) {
+        const float4 mr = gPtTextures[NonUniformResourceIndex(inst.metalRoughTex)]
+                              .SampleLevel(gPtSamp, uv, 0);
+        rough = saturate(rough * mr.g);
+        metal = saturate(metal * mr.b);
+    }
+
+    // TANGENT-SPACE NORMAL MAPPING, with the frame derived from the triangle rather than a vertex
+    // stream: PtVertex carries no tangent, and inverting the position-to-UV map of the three
+    // vertices recovers dP/du and dP/dv exactly, which IS the frame a tangent-space map is authored
+    // against. No extra geometry, no extra upload.
+    if (inst.normalTex != AVER_PT_TEX_UNBOUND) {
+        const float3 p0 = gPtVerts[i0].pos, p1 = gPtVerts[i1].pos, p2 = gPtVerts[i2].pos;
+        const float2 t0 = gPtVerts[i0].uv,  t1 = gPtVerts[i1].uv,  t2 = gPtVerts[i2].uv;
+        const float3 e1 = p1 - p0, e2 = p2 - p0;
+        const float2 d1 = t1 - t0, d2 = t2 - t0;
+        const float  det = d1.x * d2.y - d2.x * d1.y;
+        // DEGENERATE UVs ARE LEFT ALONE, not approximated. A triangle whose UVs are collinear has no
+        // tangent frame at all, and inventing one puts a normal map on it in an arbitrary rotation --
+        // worse than the geometric normal it already had.
+        if (abs(det) > 1e-12) {
+            const float3 T = mul(float4((e1 * d2.y - e2 * d1.y) / det, 0.0), inst.objectToWorld).xyz;
+            float3 nrm = gPtTextures[NonUniformResourceIndex(inst.normalTex)]
+                             .SampleLevel(gPtSamp, uv, 0).xyz * 2.0 - 1.0;
+            nrm.xy *= inst.normalScale;
+            // Gram-Schmidt against the SHADING normal, so the frame is orthonormal about the normal
+            // this hit actually uses. B from a cross product rather than the second UV derivative:
+            // that keeps the frame right-handed even on a mesh with mirrored UVs, where dP/dv points
+            // the opposite way and a raw B would flip the map's green channel.
+            // LENGTH TESTED BEFORE normalize(), NOT AFTER. A tangent parallel to the normal leaves
+            // nothing after the projection, and normalize() of that is NaN -- but checking the
+            // normalised result relies on NaN comparisons being false, which DXC is entitled to
+            // assume away under its default fast-math. Testing the vector that is about to be
+            // normalised needs no such assumption.
+            const float3 Tperp = T - nWS * dot(nWS, T);
+            if (dot(Tperp, Tperp) > 1e-12) {
+                const float3 Tn = normalize(Tperp);
+                const float3 Bn = cross(nWS, Tn);
+                const float3 pert = normalize(Tn * nrm.x + Bn * nrm.y + nWS * nrm.z);
+                // A normal map can tip a grazing normal past the horizon, which would shade the
+                // surface from behind and read as a false shadow. Keep it facing the ray.
+                if (dot(pert, dir) < 0.0) nWS = pert;
+            }
+        }
     }
 #endif
     return true;
@@ -437,8 +642,8 @@ void CSPathTrace(uint3 tid : SV_DispatchThreadID) {
         // tracer collect nothing at all and read 0 rather than L.
         [loop] for (uint b = 0; b <= bounce; ++b) {
             float3 hitPos, nWS, albedo;
-            float ior; bool entering;
-            if (!ptTrace(org, dir, hitPos, nWS, albedo, ior, entering)) {
+            float ior; bool entering; float rough, metal;
+            if (!ptTrace(org, dir, hitPos, nWS, albedo, ior, entering, rough, metal)) {
                 radiance += throughput * ptEnvironment(dir);
                 escaped += 1.0;
                 break;
@@ -470,7 +675,10 @@ void CSPathTrace(uint3 tid : SV_DispatchThreadID) {
             // which is a real, separable piece of follow-up work, not a consequence of anything this
             // change gets to skip quietly.
             if (!dielectric) {
-                radiance += throughput * ptDirectSun(hitPos, nWS, albedo, bias, gPtTrace.y);
+                // -dir is the direction back toward where this ray came from, which is the view
+                // vector this hit's BRDF is evaluated against.
+                radiance += throughput * ptDirectSun(hitPos, nWS, albedo, bias, gPtTrace.y,
+                                                     -dir, rough, metal);
             }
 
             // Out of bounces. The path is TRUNCATED and contributes no further INDIRECT light,
@@ -488,6 +696,36 @@ void CSPathTrace(uint3 tid : SV_DispatchThreadID) {
                 // reflection folded into the reflection branch -- so there is no failure case here
                 // to break out of the loop for, unlike the Lambertian branch's cosTheta guard below.
                 ptScatterDielectric(dir, nWS, entering, ior, defect, rng, d, weight);
+            } else if (ptHasSpecular(rough)) {
+                // TWO LOBES, ONE SAMPLE. Drawing from both and adding would double the ray count for
+                // an estimator that is already unbiased with one, so a single uniform picks which
+                // lobe this bounce follows and the weight divides by that probability. The choice is
+                // a draw from the SAME (pixel, sampleIndex) stream as everything else, so the path
+                // stays a pure function of its seed and the bit-identical replay still holds.
+                const float3 V = -dir;
+                const float3 F0 = ptF0(albedo, metal);
+                const float pSpec = ptSpecularProbability(F0, metal);
+                if (ptRand(rng) < pSpec) {
+                    d = ptSampleGGX(nWS, V, rough, ptRand(rng), ptRand(rng));
+                    if (!(dot(d, nWS) > 0.0)) break;   // sampled below the horizon; this path ends
+                    weight = ptScatterSpecular(F0, rough, nWS, V, d) / pSpec;
+                } else {
+                    d = ptCosineHemisphere(nWS, ptRand(rng), ptRand(rng));
+                    const float cosTheta = dot(d, nWS);
+                    if (!(cosTheta > 0.0)) break;
+                    // The cosine-weighted weight is the diffuse albedo (see ptScatter), scaled by
+                    // (1 - F) so the two lobes together cannot return more energy than arrived.
+                    // Fresnel at normal incidence rather than per-direction: the diffuse lobe has no
+                    // single direction to evaluate F against, and this is the standard pairing with
+                    // ptScatterSpecular's own F.
+                    // (1 - what the specular lobe actually returns), NOT (1 - F0). The compensated
+                    // lobe hands back F0*E + F0^2*(1-E), which is less than F0 at any real roughness,
+                    // so scaling by (1 - F0) would leave the difference unaccounted for -- measured as
+                    // a rough dielectric reading 0.973 L instead of 1.
+                    const float3 kd = ptDiffuseAlbedo(albedo, metal)
+                                    * (1.0 - ptSpecAlbedo(F0, ptEnergyE(max(dot(nWS, V), 1e-3), rough)));
+                    weight = ptScatter(kd, cosTheta, defect) / (1.0 - pSpec);
+                }
             } else {
                 d = ptCosineHemisphere(nWS, ptRand(rng), ptRand(rng));
                 float cosTheta = dot(d, nWS);

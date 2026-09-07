@@ -6,16 +6,28 @@
 #include "aver/core/Log.hpp"
 #include "PtShaders.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <string>
+#include <vector>
 #include "aver/rhi/ShaderFiles.hpp"   // this pass's HLSL is a deployed file
 
 namespace aver::pt {
 
 namespace {
 
-// t0 acceleration structure, t1 vertices, t2 indices, t3 instances.
-constexpr u32 kSrvCount = 4;
+// t0 acceleration structure, t1 vertices, t2 indices, t3 instances, t4 the energy-compensation table.
+constexpr u32 kSrvCount = 5;
+
+// The E(cos(theta), roughness) table's dimensions. Small on purpose: E is a smooth, monotone-ish
+// function of both arguments with no features to resolve, so 32x32 bilinear is well under the
+// furnace's 5e-3 tolerance while the whole table is 4 KB.
+constexpr u32 kEnergyLutDim = 32;
+// Samples per cell when integrating it. Hammersley, not random: the table must be identical on every
+// run, or two runs of a progressive tracer would disagree and PtFurnaceTest's determinism pair would
+// be comparing a moving target.
+constexpr u32 kEnergyLutSamples = 4096;
 // u0 the accumulator.
 constexpr u32 kUavCount = 1;
 // The shader's [numthreads(8,8,1)].
@@ -35,9 +47,9 @@ constexpr u32 kRayTracingTier = 11;
 // So the tracer COULD use descriptor indexing without raising the engine's floor, because it is
 // already gated to hardware that has it.
 //
-// THE UNTEXTURED INTEGRATOR STILL DOES NOT NEED IT, and still does not ask. It binds a fixed four
-// SRVs and one UAV (kSrvCount/kUavCount above) -- TLAS, vertices, indices, instances -- which Tier 1
-// satisfies comfortably. Requiring tier 3 of THAT would refuse the path tracer on hardware where it
+// THE UNTEXTURED INTEGRATOR STILL DOES NOT NEED IT, and still does not ask. It binds a fixed five
+// SRVs and one UAV (kSrvCount/kUavCount above) -- TLAS, vertices, indices, instances and the energy
+// table -- every one of them an explicitly bound slot, which Tier 1 satisfies comfortably. Requiring tier 3 of THAT would refuse the path tracer on hardware where it
 // runs correctly, buying nothing. So the check lives on the textured twin only, which is why there
 // are two pipelines here rather than one with a branch: the capability difference is a ROOT
 // SIGNATURE difference, and a root signature is not something a dispatch can opt out of.
@@ -59,6 +71,78 @@ constexpr u32 kRayTracingTier = 11;
 // range. 4096 is Voxi's figure for the same job; a scene's DISTINCT materials, not its draws, is
 // what fills it, and nothing in this tree approaches four thousand of those.
 constexpr u32 kBindlessTexCapacity = 4096;
+
+// Builds E(cos(theta), roughness): the fraction of incident light a SINGLE-SCATTER GGX lobe with
+// F = 1 actually returns. Row-major, roughness outer, cos(theta) inner.
+//
+// THIS IS THE SHADER'S ptScatterSpecular WITH F = 1, DELIBERATELY DUPLICATED. Every line below has a
+// twin in pt_pathtrace.hlsl -- the same GGX half-vector sample, the same k = a/2 Smith pairing, the
+// same below-horizon rejection -- because the compensation is only exact if it divides by the energy
+// THIS estimator loses rather than the energy some published fit's estimator loses. If either copy
+// changes, the other must change with it; the furnace's white-conductor check is what notices if
+// they drift, since compensating for the wrong lobe cannot read exactly L.
+std::vector<f32> buildEnergyLut() {
+    std::vector<f32> lut(static_cast<usize>(kEnergyLutDim) * kEnergyLutDim, 1.0f);
+    for (u32 ri = 0; ri < kEnergyLutDim; ++ri) {
+        // ENDPOINT-INCLUSIVE: cell 0 is exactly 0 and cell D-1 is exactly 1, NOT texel centres.
+        //
+        // MEASURED, not a matter of taste. With centres the top row sat at roughness 0.984, so a
+        // query at exactly 1.0 -- which is where a fully rough material lands, and where the furnace
+        // asks -- read an E integrated for a smoother surface. E falls with roughness, so the table
+        // overstated it, the compensation was correspondingly too small, and the white-conductor
+        // check came back 5.4% short (0.9465 against a required 1.000) while both interior points
+        // passed. The corners of this table are real query points and have to be sampled exactly.
+        const f32 rough = static_cast<f32>(ri) / static_cast<f32>(kEnergyLutDim - 1);
+        const f32 a  = std::max(rough * rough, 1e-3f);
+        const f32 k  = a * 0.5f;
+        for (u32 mi = 0; mi < kEnergyLutDim; ++mi) {
+            // Endpoint-inclusive as above; clamped off zero because a view exactly in the surface
+            // plane has no reflection to integrate and would divide by zero below.
+            const f32 ndv = std::max(static_cast<f32>(mi) / static_cast<f32>(kEnergyLutDim - 1),
+                                     1e-3f);
+            // The view vector in a tangent frame where the normal is +Z. Only its elevation matters:
+            // GGX is isotropic here, so azimuth is a free choice and 0 is as good as any.
+            const f32 vx = std::sqrt(std::max(0.0f, 1.0f - ndv * ndv));
+            f64 sum = 0.0;
+            for (u32 s = 0; s < kEnergyLutSamples; ++s) {
+                // Hammersley: van der Corput radical inverse in base 2 for the second dimension.
+                const f32 u1 = (static_cast<f32>(s) + 0.5f) / static_cast<f32>(kEnergyLutSamples);
+                u32 bits = s;
+                bits = (bits << 16) | (bits >> 16);
+                bits = ((bits & 0x55555555u) << 1) | ((bits & 0xAAAAAAAAu) >> 1);
+                bits = ((bits & 0x33333333u) << 2) | ((bits & 0xCCCCCCCCu) >> 2);
+                bits = ((bits & 0x0F0F0F0Fu) << 4) | ((bits & 0xF0F0F0F0u) >> 4);
+                bits = ((bits & 0x00FF00FFu) << 8) | ((bits & 0xFF00FF00u) >> 8);
+                const f32 u2 = static_cast<f32>(static_cast<f64>(bits) * 2.3283064365386963e-10);
+
+                const f32 phi = 6.2831853071795864f * u1;
+                const f32 ct  = std::sqrt(std::max(0.0f, (1.0f - u2) / (1.0f + (a * a - 1.0f) * u2)));
+                const f32 st  = std::sqrt(std::max(0.0f, 1.0f - ct * ct));
+                const f32 hx = st * std::cos(phi), hy = st * std::sin(phi), hz = ct;
+
+                // l = reflect(-v, h) = 2(v.h)h - v
+                // Only the elevation of the reflected direction and (v.h) enter the weight; the
+                // azimuth cancels, so lx/ly are never formed.
+                const f32 vdh = vx * hx + ndv * hz;
+                const f32 lz  = 2.0f * vdh * hz - ndv;
+                if (!(lz > 0.0f) || !(vdh > 0.0f) || !(hz > 0.0f)) continue;   // below the horizon
+                (void)hy;
+
+                const f32 g1v = ndv / (ndv * (1.0f - k) + k);
+                const f32 g1l = lz  / (lz  * (1.0f - k) + k);
+                // F = 1, so the weight is exactly G * (v.h) / (n.v * n.h) -- ptScatterSpecular's
+                // expression with the Fresnel factor left out.
+                sum += static_cast<f64>(g1v * g1l * vdh / std::max(ndv * hz, 1e-6f));
+            }
+            const f32 e = static_cast<f32>(sum / static_cast<f64>(kEnergyLutSamples));
+            // CLAMPED AWAY FROM ZERO because the shader divides by this. E genuinely approaches 0 at
+            // grazing incidence on a rough surface, and 1/E there would be an infinity multiplying
+            // a term that should be small.
+            lut[static_cast<usize>(ri) * kEnergyLutDim + mi] = std::clamp(e, 1e-2f, 1.0f);
+        }
+    }
+    return lut;
+}
 
 // The integrator's pipeline layout. `bindlessTextures` non-zero appends the base-colour table in its
 // own register space AND the sampler that reads it; zero reproduces, field for field, the layout the
@@ -138,6 +222,10 @@ bool PathTracer::init(rhi::IDevice& dev) {
     sd.entry   = "CSPathTrace";
     sd.stage   = rhi::ShaderStage::Compute;
     sd.minShaderModel = kShaderModel;
+    // The energy table's dimension travels as a define rather than a literal in the HLSL, so the
+    // shader's index arithmetic and buildEnergyLut()'s layout cannot be edited apart.
+    const std::string baseDefs = "AVER_PT_ENERGY_DIM=" + std::to_string(kEnergyLutDim);
+    sd.defines = baseDefs.c_str();
     cs_ = res_->createShader(sd);
     if (!cs_) {
         // HLSL is compiled at RUNTIME by DXC, so this is the only place a shader error can surface.
@@ -151,6 +239,26 @@ bool PathTracer::init(rhi::IDevice& dev) {
     pd.layout = ptLayout(0);   // 0 == the layout this pass has always declared; see ptLayout
     pipeline_ = res_->createComputePipeline(pd);
     if (!pipeline_) { AVER_ERROR("[PT] integrator pipeline unavailable"); shutdown(); return false; }
+
+    // BUILT BEFORE ANY TARGET, because createTarget binds it into every target's descriptor table
+    // and a table slot left empty is a fault on the dispatch, not a warning.
+    {
+        const std::vector<f32> lut = buildEnergyLut();
+        rhi::BufferDesc ed;
+        ed.bytes = lut.size() * sizeof(f32);
+        // UPLOAD, not Default, and written once here rather than copied on a command list: this is
+        // 4 KB of read-only constants that never change after init, so a staging copy would buy
+        // nothing and would drag a command context into a function that needs none. Same shape as
+        // instanceBuf_ below.
+        ed.kind = rhi::BufferKind::Upload;
+        ed.debugName = "pt energy compensation";
+        energyLut_ = res_->createBuffer(ed);
+        if (!energyLut_ || !res_->writeBuffer(energyLut_, lut.data(), ed.bytes)) {
+            AVER_ERROR("[PT] the energy-compensation table could not be uploaded");
+            shutdown();
+            return false;
+        }
+    }
 
     AVER_INFO("[PT] path tracer ready (RayQuery, SM {}, {}x{} threads per group)",
               kShaderModel, kGroup, kGroup);
@@ -190,7 +298,8 @@ bool PathTracer::ensureTexturing() {
     // AVER_PT_TEX_CAPACITY must equal the layout's bindlessTextureCount exactly -- both come from
     // kBindlessTexCapacity here so they cannot be edited apart.
     const std::string defs = "AVER_PT_BINDLESS=1;AVER_PT_TEX_CAPACITY=" +
-                             std::to_string(kBindlessTexCapacity);
+                             std::to_string(kBindlessTexCapacity) +
+                             ";AVER_PT_ENERGY_DIM=" + std::to_string(kEnergyLutDim);
     sd.defines = defs.c_str();
     texCs_ = res_->createShader(sd);
     if (!texCs_) {
@@ -233,6 +342,7 @@ u32 PathTracer::residentTexture(rhi::TextureHandle h) {
 
 void PathTracer::shutdown() {
     if (res_) {
+        if (energyLut_)   res_->destroyBuffer(energyLut_);
         if (verts_)       res_->destroyBuffer(verts_);
         if (indices_)     res_->destroyBuffer(indices_);
         if (instanceBuf_) res_->destroyBuffer(instanceBuf_);
@@ -280,6 +390,7 @@ void PathTracer::shutdown() {
     geoVerts_ = geoIndices_ = 0;
     geometryReused_ = false;
     verts_ = indices_ = instanceBuf_ = 0;
+    energyLut_ = 0;
     pipeline_ = 0;
     cs_ = 0;
     surfaces_.clear();
@@ -371,7 +482,12 @@ bool PathTracer::prepare() {
         std::memcpy(inst.objectToWorld, surfaces_[i].world, sizeof(inst.objectToWorld));
         std::memcpy(inst.albedo, surfaces_[i].albedo, sizeof(inst.albedo));
         inst.ior = surfaces_[i].ior;
-        inst.baseColorTex = surfaces_[i].baseColorTex;
+        inst.baseColorTex  = surfaces_[i].baseColorTex;
+        inst.roughness     = surfaces_[i].roughness;
+        inst.metallic      = surfaces_[i].metallic;
+        inst.metalRoughTex = surfaces_[i].metalRoughTex;
+        inst.normalTex     = surfaces_[i].normalTex;
+        inst.normalScale   = surfaces_[i].normalScale;
         // The SHARED rows: every surface on this mesh reads the same geometry. What stays per
         // surface is objectToWorld, albedo, ior and the base-colour index, right here.
         inst.firstVertex = row.firstVertex;
@@ -561,6 +677,7 @@ bool PathTracer::createTarget(u32 scene, u32 width, u32 height, PtTarget& out) {
     bd.uavCount = kUavCount;
     bd.srvKinds[0] = rhi::SlotKind::AccelerationStructure;
     bd.srvKinds[1] = bd.srvKinds[2] = bd.srvKinds[3] = rhi::SlotKind::StructuredBuffer;
+    bd.srvKinds[4] = rhi::SlotKind::StructuredBuffer;
     bd.uavKinds[0] = rhi::SlotKind::StructuredBuffer;
     out.set = res_->createBindingSet(bd);
 
@@ -578,6 +695,7 @@ bool PathTracer::createTarget(u32 scene, u32 width, u32 height, PtTarget& out) {
     res_->setSrvBuffer(out.set, 2, indices_, sizeof(u32), totalIndices_, 0);
     res_->setSrvBuffer(out.set, 3, instanceBuf_, sizeof(Instance),
                        static_cast<u32>(instances_.size()), 0);
+    res_->setSrvBuffer(out.set, 4, energyLut_, sizeof(f32), kEnergyLutDim * kEnergyLutDim, 0);
     res_->setUavBuffer(out.set, 0, out.accum, kPtAccumStride,
                        width * height * kPtAccumElementsPerPixel, 0);
 

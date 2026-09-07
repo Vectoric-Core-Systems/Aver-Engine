@@ -90,6 +90,9 @@ bool PtFurnaceTest::init(rhi::IDevice& dev) {
     configs_[kOpenDielectricDiamond] = {"open/dielectric-2.42/correct",        4, 0, 4, PtDefect::None, 0};
     configs_[kOpenDielectricDefect]  = {"open/dielectric-1.5/no-pdf-cancel",   3, 0, 4,
                                         PtDefect::DielectricNoPdfCancel,       0};
+    configs_[kOpenSpecDielectric]  = {"open/spec-r1.0-m0/correct",   5, 0, 4, PtDefect::None, 0};
+    configs_[kOpenSpecMetalRough]  = {"open/spec-r1.0-m1/correct",   6, 0, 4, PtDefect::None, 0};
+    configs_[kOpenSpecMetalSmooth] = {"open/spec-r0.3-m1/correct",   7, 0, 4, PtDefect::None, 0};
     configs_[kCaveShallow]    = {"cave/4-bounce/correct",   2, 1,  4, PtDefect::None,     0};
     configs_[kCaveDeep]       = {"cave/32-bounce/correct",  2, 1, 32, PtDefect::None,     0};
     // THE DETERMINISM PAIR RUNS IN THE CAVE, NOT ON THE QUAD, AND THAT IS THE SECOND ATTEMPT.
@@ -190,6 +193,20 @@ bool PtFurnaceTest::buildGeometry() {
     s.ior = kDiamondIor;
     const u32 diamond = pt_.addSurface(s);
 
+    // THE METAL/ROUGH SURFACES, again on the same quad. `ior` goes back to 0 -- these are not
+    // dielectric-interface surfaces, they are opaque PBR ones, and leaving it set would send them
+    // down ptScatterDielectric instead. Setting `roughness` at all is what opts a surface into the
+    // specular lobe (PtSurface::roughness); everything above this line leaves it negative and is
+    // therefore still the pure Lambertian these checks have always measured.
+    s.ior = 0.0f;
+    s.roughness = 1.0f; s.metallic = 0.0f;
+    const u32 specDielectric = pt_.addSurface(s);
+    s.roughness = 1.0f; s.metallic = 1.0f;
+    const u32 specMetalRough = pt_.addSurface(s);
+    s.roughness = 0.3f; s.metallic = 1.0f;
+    const u32 specMetalSmooth = pt_.addSurface(s);
+    s.roughness = -1.0f; s.metallic = 0.0f;   // leave the shared PtSurface as it was found
+
     // FIVE ACCELERATION STRUCTURES, not one scene with everything spread out. "The quad is far
     // enough from the cave that a bounce off it never reaches" is a probability argument, and the
     // single-bounce claim below must not rest on one: in scenes 0, 3 and 4 there is literally
@@ -199,6 +216,9 @@ bool PtFurnaceTest::buildGeometry() {
     pt_.addScene(cave, 5);       // scene 2
     pt_.addScene(&glass, 1);     // scene 3
     pt_.addScene(&diamond, 1);   // scene 4
+    pt_.addScene(&specDielectric, 1);    // scene 5
+    pt_.addScene(&specMetalRough, 1);    // scene 6
+    pt_.addScene(&specMetalSmooth, 1);   // scene 7
     return pt_.prepare();
 }
 
@@ -461,6 +481,36 @@ void PtFurnaceTest::evaluate() {
           "letting it cancel against the branch probability it already was -- the discrete-choice "
           "counterpart of PT_DEFECT_NO_COSINE forgetting the pdf it must divide back out. A reading "
           "at L means the oracle cannot see a double-counted Fresnel weight either.");
+
+    // ---- 6b. the metal/rough lobe: a third BSDF, the same absolute energy claim ----
+    //
+    // WHY THE SAME NUMBER FOR ALL THREE. The furnace's claim does not care which BSDF a surface
+    // wears: an albedo-1 surface in a uniform environment of radiance L reflects all of it and must
+    // read exactly L. A diffuse-plus-GGX split has to conserve energy BETWEEN its two lobes -- take
+    // too much for specular and the diffuse lobe is short, take too little and they sum past one --
+    // and a lobe-selection probability has to cancel exactly against the weight it divides. Both are
+    // invisible to any relational test, which is why they are checked against an absolute here.
+    //
+    // THE ROUGH CONDUCTOR IS THE ONE THAT MATTERS. F0 is 1 for an albedo-1 metal, so Fresnel takes
+    // the whole path and the reading is a direct measurement of the geometry term: whatever Smith
+    // shadowing removes at roughness 1 is energy a real surface would have scattered again between
+    // facets, and a single-scattering model has no mechanism to return it. That is exactly the shape
+    // of the loss the RASTER furnace already caught once (a white metal reading 45%), so this file
+    // asserts it rather than trusting that the tracer happens not to have it.
+    check("open/spec-r1.0-m0/correct", results_[kOpenSpecDielectric].mean(0), L, 5e-3,
+          "An albedo-1 dielectric with a specular lobe must still reflect all of L. Reading high "
+          "means the specular lobe was added on top of a full-strength diffuse one instead of "
+          "sharing the energy with it; reading low means the (1 - F) the diffuse lobe is scaled by "
+          "does not match the F the specular lobe actually returns.");
+    check("open/spec-r1.0-m1/correct", results_[kOpenSpecMetalRough].mean(0), L, 5e-3,
+          "An albedo-1 conductor has F0 = 1, so a correct lobe returns every photon regardless of "
+          "roughness. Reading low here is single-scattering energy loss -- the Smith term removing "
+          "inter-facet scattering the model never puts back -- and is the same defect a white metal "
+          "at 45% was in the rasteriser.");
+    check("open/spec-r0.3-m1/correct", results_[kOpenSpecMetalSmooth].mean(0), L, 5e-3,
+          "The same conductor near-smooth, where microfacet shadowing is slight. This one passing "
+          "while the roughness-1 case fails is the signature of missing multiple-scattering "
+          "compensation rather than an error in the lobe itself -- which is why both are here.");
 
     // ---- 7. more than one bounce, where the answer is L times what escaped ----
     // The identity is exact and needs NO baseline: both sides come out of the same paths. A path
