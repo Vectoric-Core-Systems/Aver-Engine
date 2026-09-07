@@ -75,7 +75,17 @@ function Invoke-Capture([string] $name, [string[]] $extra) {
     $args = @('--frames', $Frames, $Project, $Level, '--screenshot', $shot) + $extra
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    & $Exe @args 2>&1 | Out-File -Encoding utf8 $log
+    # Start-Process, for the reason spelled out in gates.ps1's Invoke-Gate: Sandbox.exe is
+    # /SUBSYSTEM:WINDOWS since 0.5.0, and Windows PowerShell neither waits for nor captures a
+    # GUI-subsystem process -- `& $Exe ... 2>&1` writes an EMPTY log and this script then compares
+    # nothing against nothing.
+    $errLog = "$log.err"
+    Start-Process -FilePath $Exe -ArgumentList $args -NoNewWindow -Wait `
+                  -RedirectStandardOutput $log -RedirectStandardError $errLog | Out-Null
+    if (Test-Path -LiteralPath $errLog) {
+        Get-Content -LiteralPath $errLog | Add-Content -LiteralPath $log -Encoding utf8
+        Remove-Item -LiteralPath $errLog -Force -ErrorAction SilentlyContinue
+    }
     $code = $LASTEXITCODE
     $ErrorActionPreference = $prev
     if ($code -ne 0) { Write-Host "  note: $name exited $code" }

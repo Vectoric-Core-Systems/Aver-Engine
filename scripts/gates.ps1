@@ -342,8 +342,29 @@ function Invoke-Gate($exe, [string[]] $gateArgs, [string[]] $extra, [int] $frame
     # below come out of it, and a gate that reported no corruption because nothing was watching
     # would be worse than no gate at all.
     $all = @('--frames', "$frames", '--debug-layer') + $gateArgs + $extra
-    $out = & $exe @all 2>&1 | Out-String
-    $exit = $LASTEXITCODE
+
+    # START-PROCESS, NOT `& $exe`, AND THAT IS NOT A STYLE CHOICE. Sandbox.exe is linked
+    # /SUBSYSTEM:WINDOWS as of 0.5.0 so the editor never opens a console window, and Windows
+    # PowerShell does not wait for a GUI-subsystem process nor capture its output: `& $exe ... 2>&1`
+    # returns ZERO lines and a BLANK $LASTEXITCODE, measured. Every gate would then read NO-PROBE and
+    # the oracle would be silently blind -- the exact shape of failure this repo has a documented
+    # history of. Start-Process -Wait waits whatever the subsystem is, and the redirect files give
+    # the same text the pipe used to.
+    #
+    # FILES RATHER THAN A PIPE because -RedirectStandardOutput takes a path, and separate files for
+    # out and err because Start-Process refuses to point both at one. They are read back and joined,
+    # so callers downstream see exactly what `2>&1` used to hand them.
+    $tmpOut = [System.IO.Path]::GetTempFileName()
+    $tmpErr = [System.IO.Path]::GetTempFileName()
+    try {
+        $p = Start-Process -FilePath $exe -ArgumentList $all -NoNewWindow -Wait -PassThru `
+                           -RedirectStandardOutput $tmpOut -RedirectStandardError $tmpErr
+        $exit = $p.ExitCode
+        $out = ((Get-Content -LiteralPath $tmpOut -Raw -ErrorAction SilentlyContinue) + "`n" +
+                (Get-Content -LiteralPath $tmpErr -Raw -ErrorAction SilentlyContinue))
+    } finally {
+        Remove-Item -LiteralPath $tmpOut, $tmpErr -Force -ErrorAction SilentlyContinue
+    }
     $r = [pscustomobject]@{ raw = 'NO-PROBE'; place = '?'; debug = 'NO-TOTALS'; exit = $exit; rect = '?'
                             rectW = 0; rectH = 0 }
     $probe = $out -split "`r?`n" | Select-String 'probe \(' | Select-Object -First 1
