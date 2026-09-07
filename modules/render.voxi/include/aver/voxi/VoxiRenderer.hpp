@@ -417,6 +417,11 @@ private:
     u32 rtPixelsPerRayTile_ = 1;
     // The SPATIAL filter radius, mirrored from Settings::rtShadowDenoise by applySettings.
     u32 rtShadowDenoise_ = 0;
+    // How fast the spatial filter tapers off with the gather centre's reprojection velocity.
+    // 0 = no taper. A MEASUREMENT KNOB, not a tier setting: temporal accumulation is what actually
+    // fixes the motion flicker, and this exists so the spatial filter's own share of it can be
+    // isolated at runtime instead of by rebuilding with a line commented out.
+    f32 rtDenoiseMotionTaper_ = 0.0f;
     // Settings::rtRenderMode, cached at setSettings like the knobs above it. 1 asks for
     // ray-driven primary visibility; whether it is HONOURED is rayDrivenActive(), which also
     // requires the device and the pipeline to have cooperated.
@@ -953,7 +958,8 @@ private:
         // The SPATIAL shadow denoiser -- mirrored as gRtDenoiseParams. x = filter radius in
         // pixels (0 = off), y = how much of the filtered value to take (0 discards it while
         // still paying for the taps, which is how the cost is measured before the filter is
-        // trusted), z/w unused.
+        // trusted), z = how fast to taper the filter off as the gather centre's reprojection
+        // velocity rises (0 = no taper, the behaviour before the knob existed), w unused.
         f32 rtDenoiseParams[4] = {};
         // Ray-driven bounce control -- mirrored as gRtBounceParams. x = how many bounces a ray
         // takes AFTER the first hit (1 is one bounce, which is what reflections already do);

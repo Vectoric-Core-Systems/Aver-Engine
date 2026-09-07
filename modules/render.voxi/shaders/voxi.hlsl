@@ -1145,14 +1145,25 @@ float rtShadowSpatial(float centre, float3 wpos, float3 N, float2 pixel, float c
     // six-degree wobble drifted 12-32 codes darker, worsening with radius -- a kernel walking off
     // its own surface. Same arithmetic as rtReprojectHistory (last frame's VIEWPORT RECT, FLOOR not
     // round) -- inherited landmines, not re-derived ones.
+    // WHERE THIS PIXEL WAS LAST FRAME, AND AT WHAT DEPTH. Hoisted out of the branch and evaluated
+    // unconditionally because the plane gradients below are ddx/ddy of pdepth: a derivative taken in
+    // divergent flow differences against a lane that never ran the branch, which is undefined and
+    // reads as noise along exactly the silhouettes this filter is trying to respect.
+    const float4 pclip  = mul(float4(wpos, 1.0), gPrevViewProj);
+    const float  pdepth = pclip.w;
+    const float  dpdx   = ddx(pdepth);
+    const float  dpdy   = ddy(pdepth);
+    const float  cdx    = ddx(curDepth);
+    const float  cdy    = ddy(curDepth);
+
     float2 centrePx = pixel;
-    if (gRtHistParams.y > 0.5) {
-        const float4 pclip = mul(float4(wpos, 1.0), gPrevViewProj);
-        if (pclip.w > 1e-4) {
-            const float3 pndc = pclip.xyz / pclip.w;
-            if (pndc.z >= 0.0 && pndc.z <= 1.0)
-                centrePx = gSceneViewport.xy +
-                           float2(pndc.x * 0.5 + 0.5, 0.5 - pndc.y * 0.5) * gSceneViewport.zw;
+    bool   reproj   = false;
+    if (gRtHistParams.y > 0.5 && pdepth > 1e-4) {
+        const float3 pndc = pclip.xyz / pdepth;
+        if (pndc.z >= 0.0 && pndc.z <= 1.0) {
+            centrePx = gSceneViewport.xy +
+                       float2(pndc.x * 0.5 + 0.5, 0.5 - pndc.y * 0.5) * gSceneViewport.zw;
+            reproj = true;
         }
     }
     const int2 base = int2(floor(centrePx));
@@ -1160,8 +1171,18 @@ float rtShadowSpatial(float centre, float3 wpos, float3 N, float2 pixel, float c
     // Plane-distance rejection, not a raw depth delta: centre depth + its screen-space gradient
     // defines the receiver's plane, so a neighbour on it is kept regardless of depth while one at
     // the same depth on a different surface is dropped. A plain |dz| test fails on a grazing floor.
-    const float dzdx = ddx(curDepth);
-    const float dzdy = ddy(curDepth);
+    //
+    // EXPRESSED IN LAST FRAME'S DEPTH WHENEVER THE GATHER REPROJECTED, and that is the motion fix.
+    // Every tap below loads gRtShadowHist, whose .y is LAST frame's depth, but this predictor was
+    // built from curDepth -- THIS frame's. Standing still the two are the same number and the
+    // mismatch cannot be seen; under camera motion they diverge with the yaw rate, so the 2%
+    // tolerance is spent asymmetrically across the kernel, accepting taps on the receding side and
+    // rejecting them on the approaching one. A one-sided accept set is a biased average, which is
+    // why the artefact is a region shifting brightness rather than noise, and why it worsened with
+    // radius: the further the tap, the larger the frame-to-frame depth disagreement.
+    const float planeDepth = reproj ? pdepth : curDepth;
+    const float dzdx       = reproj ? dpdx   : cdx;
+    const float dzdy       = reproj ? dpdy   : cdy;
 
     // A GAUSSIAN falloff (used to give every accepted neighbour weight 1.0 -- a flat kernel rings in
     // frequency response, a visible square halo around a bright feature). sigma = radius/2, matched
@@ -1193,8 +1214,9 @@ float rtShadowSpatial(float centre, float3 wpos, float3 N, float2 pixel, float c
             const int2 t = base + int2(ox, oy);
             if (any(t < 0) || t.x >= (int)texW || t.y >= (int)texH) continue;
             const float2 st = gRtShadowHist.Load(int3(t, 0));
-            // What this neighbour's depth WOULD be if it sat on the centre's plane.
-            const float predicted = curDepth + dzdx * (float)ox + dzdy * (float)oy;
+            // What this neighbour's depth WOULD be if it sat on the centre's plane -- in the same
+            // frame st.y was recorded in, see planeDepth.
+            const float predicted = planeDepth + dzdx * (float)ox + dzdy * (float)oy;
             const float tol = max(abs(predicted), 1.0) * 0.02 + 1.0;
             if (abs(st.y - predicted) > tol) continue;
 #if AVER_GBUFFER_HISTORY
@@ -1217,7 +1239,38 @@ float rtShadowSpatial(float centre, float3 wpos, float3 N, float2 pixel, float c
     // gRtDenoiseParams.y: blend weight of the filtered value. At 0 taps still run (radius is a
     // runtime constant, not optimised away) but this returns `centre` exactly -- the
     // cost-measurement configuration.
-    return lerp(centre, acc / wsum, saturate(gRtDenoiseParams.y));
+    //
+    // TAPERED BY THIS FILTER'S OWN REPROJECTION VELOCITY, which is what stops the shadows flickering
+    // while the camera moves. MEASURED on Sponza, comparing a still camera against a six-degree
+    // wobble AT A MATCHED POSE (both at sin(phase)=0, so the only difference is motion history),
+    // reading the population of differing pixels rather than a mean -- a mean is 0.01 of a code here
+    // because the affected pixels are a few percent of the frame changing a lot:
+    //
+    //   radius 0 (filter off)   9-32 codes: 0.000%   33+: 0.000%   max delta   4
+    //   radius 1                9-32 codes: 0.187%   33+: 0.002%   max delta  60
+    //   radius 2 (the default)  9-32 codes: 2.445%   33+: 0.177%   max delta  95
+    //   radius 2, 8 rays/pixel  9-32 codes: 0.205%   33+: 0.003%   max delta  64
+    //
+    // Read those together and the mechanism is not staleness and not the plane test -- it is THE
+    // KERNEL'S SAMPLE SET SLIDING. rtShadow jitters by rtHash(pixel), anchored to the pixel index,
+    // so the raw one-ray estimate at a given pose is the SAME every frame: with the filter off, a
+    // moving camera and a still one agree to 4 codes. Switch the filter on and the gather centre
+    // reprojects, so each frame averages a DIFFERENT 25 taps out of one static noise field, and a
+    // spatially noisy but temporally stable estimate becomes a temporally unstable one. That is why
+    // it scales with radius (more reach, more resampling) and why eight rays largely fix it (a
+    // quieter field to resample). Eight rays are not affordable; this is.
+    //
+    // NOT A DISOCCLUSION TEST: rtReprojectHistory already rejects taps whose depth disagrees. This
+    // is about the taps that are all individually VALID and still average to a different number.
+    // Full strength below half a pixel of drift, so a stationary camera is bit-for-bit unchanged and
+    // the recorded gates do not move; gone by three, where a fresh unfiltered trace is the more
+    // stable answer anyway.
+    // gRtDenoiseParams.z is the taper's falloff rate, and 0 means NO TAPER (the pre-existing
+    // behaviour) rather than "taper instantly to nothing" -- a knob whose off position silently
+    // disables the whole filter is the kind of default that gets measured by accident.
+    const float velPx = reproj ? length(centrePx - pixel) : 0.0;
+    const float trust = gRtDenoiseParams.z > 0.0 ? saturate((3.0 - velPx) * gRtDenoiseParams.z) : 1.0;
+    return lerp(centre, acc / wsum, saturate(gRtDenoiseParams.y) * trust);
 }
 
 // The PRIMARY sun-shadow call only -- rtReflection's inner rtShadow() call stays one ray with no
@@ -1257,12 +1310,62 @@ float3 rtShadowTemporal(float3 wpos, float3 N, float3 L, float2 pixel, float3 dp
         const float3 fresh3 = rtShadow(wpos, N, L, pixel, dpx, dpy, rays, 0.0);
         const float  fresh   = averShadowLum(fresh3);
         const float3 tint    = averShadowTint(fresh3, fresh);
-        gRtShadowHistOut[uint2(pixel)] = float2(fresh, curDepth);
+
+        // TEMPORAL ACCUMULATION, and the reason it belongs on THIS branch specifically.
+        //
+        // The early-return above conflates two separate things under one flag. Tiling is RAY
+        // AMORTISATION -- trace one pixel in N and reuse the rest -- and switching it off correctly
+        // means "trace every pixel every frame". It does not mean "throw away every previous
+        // measurement", but that is what this branch did: it wrote the raw one-ray trace to history
+        // and never read history back, so at rtPixelsPerRayTile 1 (every shipped tier) the entire
+        // reprojection path below was dead code and each frame's estimate stood alone.
+        //
+        // One ray per pixel is a very noisy estimate, and MEASURED, that noise is what the shadows
+        // were flickering with: the spatial filter gathers 25 taps around a centre that REPROJECTS,
+        // so a moving camera averages a different subset of one static, pixel-anchored noise field
+        // every frame. Sponza, still camera against a six-degree wobble at a matched pose, counting
+        // pixels rather than averaging them -- filter off, the moving and still images agree to 4
+        // codes; radius 1, 60; radius 2 (the default), 95, with 2.4% of the frame past 9 codes. The
+        // raw trace is temporally STABLE and spatially noisy; the filter converts the one into the
+        // other. Eight rays per pixel cut it ~12x, which names the cause as variance and prices the
+        // obvious fix out of reach.
+        //
+        // Accumulating instead buys the same variance reduction for one texture read: at rest the
+        // 0.9 weight is an exponential average over ~10 frames, so the estimate converges toward the
+        // many-ray answer rather than resampling noise. rtReprojectHistory's depth test is what
+        // keeps it honest across a disocclusion, and the velocity term discounts history as the
+        // reprojection gets less trustworthy -- both already written and, until now, unreachable.
+        //
+        // THE ACCUMULATED VALUE IS WHAT GETS STORED, not the fresh trace. That is what makes it
+        // compound; writing `fresh` here would restart the average every frame and buy nothing.
+        float vis = fresh;
+        float histV = 0.0;
+        float2 velocityPx = 0.0;
+        // A FAR LOOSER VELOCITY BUDGET THAN THE TILED PATH BELOW, and the difference is not a tuning
+        // preference. There, history can be 2^(2*tileBits) frames old, so its own staleness compounds
+        // with motion and 6 pixels is a fair place to stop trusting it. Here it is always EXACTLY one
+        // frame old, and the thing that can go wrong -- landing on a different surface -- is caught by
+        // rtReprojectHistory's depth test, not by the velocity. What velocity still costs is
+        // sub-texel alignment, and that error is bounded by half a texel at ANY speed because the
+        // lookup is nearest-neighbour. Reusing 6 here throttled the weight to 0.1 at the six-degree
+        // wobble's 24.7 px/frame, i.e. switched accumulation off in exactly the case it was added for.
+        if (gRtHistParams.y > 0.5 && rtReprojectHistory(wpos, pixel, histV, velocityPx)) {
+            // 0.9 is an exponential average over ~1/(1-w) = 10 frames, the effective sample count
+            // that makes a one-ray trace behave roughly like a ten-ray one, falling to 0.5 (two
+            // samples) as the reprojection stretches. BOTH ENDS MEASURED rather than reasoned:
+            // 0.8 at the far end holds MORE history and came out worse, not better (9-32 codes
+            // 0.951% against 0.902%, worst delta 108 against 92), because past a point the extra
+            // depth buys less than the sub-texel misalignment it drags in.
+            const float t      = saturate(length(velocityPx) / 32.0);
+            const float weight = lerp(0.9, 0.5, t);
+            vis = lerp(fresh, histV, weight);
+        }
+        gRtShadowHistOut[uint2(pixel)] = float2(vis, curDepth);
         // FILTERED HERE TOO -- this branch is what Medium (the DEFAULT tier) runs, and used to
         // return `fresh` unfiltered, leaving the default's hard 0/1 shadow untouched: the penumbra
         // probe read an unchanged 61,59,59 at every radius, which is what caught it. Two returns,
         // two call sites -- easy for a later edit to drop one again.
-        return rtShadowSpatial(fresh, wpos, N, pixel, curDepth) * tint;
+        return rtShadowSpatial(vis, wpos, N, pixel, curDepth) * tint;
     }
 
     // Which pixel in its tileBits x tileBits tile traces THIS frame -- a bitmask, not a modulo, since

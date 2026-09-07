@@ -2945,6 +2945,11 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     // (An earlier attempt used --render-scale to force a GPU bound and proved nothing: that flag
     // clamps to 1.00, so the 'measured' run rendered at the baseline's own resolution.)
     cb_.rtDenoiseParams[1] = rtShadowDenoise_ > 0 ? 1.0f : 0.0f;
+    // 0 = no motion taper. Left off by default: temporal accumulation (voxi.hlsl's tileBits==0
+    // branch) already removes the variance the taper was compensating for, and the two together
+    // just cost denoising quality while the camera moves. Kept as a knob because it is the only
+    // lever that isolates the spatial filter's motion contribution without a rebuild.
+    cb_.rtDenoiseParams[2] = rtDenoiseMotionTaper_;
 }
 
 void VoxiRenderer::endShadowHistory() {
