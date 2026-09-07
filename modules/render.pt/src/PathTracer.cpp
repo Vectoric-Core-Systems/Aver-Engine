@@ -357,19 +357,6 @@ void PathTracer::shutdown() {
         // structure for that mesh, so nothing outlives the geometry it describes and VoxiRenderer has
         // always relied on exactly this. What is given up is releasing early when this view is
         // toggled off while its meshes stay loaded -- memory the scene is very likely still using.
-        // NOTHING IS FREED HERE ANY MORE, and that is the price of sharing rather than an
-        // oversight. Since prepare() may adopt a structure VoxiRenderer built, this map no longer
-        // holds only things this object made -- and freeing a structure another feature is still
-        // tracing is a dangling handle inside a live TLAS build, which faults the device rather than
-        // corrupting an image quietly. There is no cheap way to tell the two apart that does not
-        // reintroduce a second source of truth about who owns what.
-        //
-        // A BLAS BELONGS TO ITS MESH, which is the ownership model the RHI already documents and
-        // VoxiRenderer already relies on: it never destroys one either. destroyMesh calls
-        // destroyBlasForMesh, which frees EVERY structure for that mesh, so nothing outlives the
-        // geometry it describes. What this gives up is releasing structures early when the
-        // path-traced view is toggled off while its meshes stay loaded -- memory the scene is very
-        // likely still using for Voxi's own rays.
         // THE TLASES STILL CANNOT BE RELEASED: the RHI has no destroyTlas at all (see
         // IResourceFactory -- BLAS has one, TLAS does not), so what this object allocated outlives
         // it, for the life of the DEVICE. What changed is the COUNT: addScene reuses a handle PER

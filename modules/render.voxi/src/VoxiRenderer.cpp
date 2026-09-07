@@ -1243,7 +1243,7 @@ u64 VoxiRenderer::prevTransformGroupKey(rhi::MeshHandle mesh, rhi::BindingSetHan
 // a different volume in any sense a viewer can see. What it DID do was reject on pure reordering.
 //
 // MEASURED: PTTest sets RENDER.OCCLUSIONCULL 1, so the per-entity walk visits occlusionOrder_
-// (SandboxApp.cpp:4965), which is rebuilt every frame by partitioning entities on last frame's
+// (SandboxApp's cluster draw loop), which is rebuilt every frame by partitioning entities on last frame's
 // hierarchical-Z result against the CURRENT viewProj. Rotating the camera reshuffles that partition,
 // so a completely static world submitted a differently-ORDERED draw list every tick, and this hash
 // rejected the gate on 92 of 128 ticks -- forcing a full revoxelisation of a volume whose contents

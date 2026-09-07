@@ -38,7 +38,8 @@ public:
     // IT DOES NOT TAKE A COLOUR OR AN AMBIENT, and that is the correction rather than an omission.
     // It used to take both, store them, and never read them -- the shaders get `gSunColor` and
     // `gAmbient` from the DEVICE's frame constant buffer, which `IDevice::setSkyAtmosphere` fills
-    // (D3D12Device.cpp:2181, :2191). Accepting them here made this look like a second place the sun
+    // (see D3D12Device::setSkyAtmosphere, which fills both). Accepting them here made this look like
+    // a second place the sun
     // could be configured, so anyone changing them expected a visual result and got nothing.
     // One source of truth for what the sun looks like; this one owns only where it points.
     void setSunDirection(const f32 dirToLight[3]);

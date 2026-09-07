@@ -443,7 +443,8 @@ void GameApp::tickGameplay(f32 dt) {
     // in a game.
     if (aver_fw_play_state() != AVER_FW_PLAY_PLAYING) return;
 
-    // ORDER COPIED FROM THE CODE, NOT FROM THE COMMENT ABOVE IT. SandboxApp.cpp:1049 says the tick
+    // ORDER COPIED FROM THE CODE, NOT FROM THE COMMENT ABOVE IT. SandboxApp's tick-group comment
+    // (search: "bracket the physics step") says the tick
     // groups "bracket the physics step: PrePhysics -> Physics -> PostPhysics", which describes the
     // GROUPS and not where the step lands. The step actually sits between PRE_PHYSICS and PHYSICS,
     // so PHYSICS-group ticks observe the results of this frame's simulation. Reordering to match
@@ -1663,7 +1664,7 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     //     onUpdate -> beginFrame -> onRender -> endFrame
     //
     // and beginFrame takes the ONE snapshot of PerFrameCB into the GPU-visible buffer
-    // (D3D12Device.cpp:2022 is the sole write to frameCBPtr_). setCamera, setLight and
+    // (D3D12Device::beginFrame is the sole write to frameCBPtr_). setCamera, setLight and
     // setSkyAtmosphere only touch the CPU-side shadow copy.
     //
     // This used to be the first line of onRender, which is AFTER beginFrame -- so every pixel of
