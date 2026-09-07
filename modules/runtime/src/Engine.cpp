@@ -109,9 +109,15 @@ int Engine::run(Application* app) {
     // materials and textures are loaded, scripts are hosted. The application reports its own stages
     // through this, which is why the splash is handed to it rather than kept private here.
     splash.setStatus("Compiling shaders");
+    // LIVE FOR AS LONG AS THE SPLASH IS ON SCREEN, which is NOT until onInit returns. This was
+    // cleared here, one line after onInit -- before the warm-up loop below, which renders the frames
+    // that finish the loading with the splash still covering the window. setLoadingStatus() is a
+    // no-op while this is null, so the text froze on whatever the last onInit stage happened to be
+    // and then sat there for the entire visible tail of the load. Cleared beside splash.close()
+    // instead, so the two facts -- "the splash exists" and "the app can write to it" -- stop and
+    // start together.
     splashForApp_ = &splash;
     app->onInit(*this);
-    splashForApp_ = nullptr;
     // Render one frame per modal-loop timer tick.
     if (window_) window_->setRenderTick(&Engine::renderTickThunk, this);
 
@@ -154,6 +160,7 @@ int Engine::run(Application* app) {
     // 0, NOT 1100: the minimum-visible delay existed so a fast start did not flash the splash for a
     // few frames. The wait above has already kept it up for as long as the loading actually took, so
     // adding a second delay on top would only make a loaded editor sit behind a picture of itself.
+    splashForApp_ = nullptr;
     if (!cfg.headless) splash.close(interactive ? 0 : 1100);
 
     // --- Frame loop ---
@@ -196,7 +203,13 @@ int Engine::run(Application* app) {
 // Names the startup stage on the splash's status line. See the header for why this exists.
 void Engine::setLoadingStatus(const std::string& stage) {
     if (!splashForApp_) return;
+    // PUMPED, NOT JUST SET. onInit is one long blocking call and nothing else services the splash's
+    // message queue while it runs, so a status written without a pump reached the window's state and
+    // never its pixels -- the text changed only when something else happened to pump later. That is
+    // what made a loading screen with stages still look frozen. LoadingScreen::stage already paired
+    // the two for its own splash; this is the same pairing for the borrowed one.
     static_cast<Splash*>(splashForApp_)->setStatus(stage);
+    static_cast<Splash*>(splashForApp_)->pump();
 }
 
 // One frame: sync swapchain to the window size, update, render, present.

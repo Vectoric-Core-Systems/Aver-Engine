@@ -264,6 +264,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include <iterator>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <new>          // ::operator new, for --crash-test oom
 #include <optional>
 #include <stdexcept>    // std::runtime_error, for --crash-test throw
@@ -1227,11 +1228,55 @@ public:
     }
 
     // Appends one engine log line to the Output Log buffer. Must not itself log: the core log mutex is held.
+    // One log line, trimmed to something a single-line splash can show. The subsystem tag is kept
+    // -- "[Material] foo.ocmat" says more than "foo.ocmat" -- but the level prefix and any absolute
+    // path are not: DT_END_ELLIPSIS clips from the RIGHT, so a full path would show the drive letter
+    // and hide the filename, which is the only part worth reading.
+    static std::string splashTextFor(std::string_view msg) {
+        std::string t(msg);
+        if (!t.empty() && t[0] == '[') {                       // drop the level prefix, keep the tag
+            const usize close = t.find(']');
+            if (close != std::string::npos) t.erase(0, close + 1);
+        }
+        while (!t.empty() && t.front() == ' ') t.erase(0, 1);
+        // Keep the last path segment of anything that looks like a path. DT_END_ELLIPSIS clips from
+        // the RIGHT, so a full path would show the drive letter and hide the filename -- the only
+        // part worth reading. Both separators, because these lines carry either.
+        const usize at = t.find_last_of("\\/");
+        if (at != std::string::npos && at + 1 < t.size()) {
+            const usize wordStart = t.find_last_of(" \t", at);
+            t = (wordStart == std::string::npos ? std::string() : t.substr(0, wordStart + 1)) +
+                t.substr(at + 1);
+        }
+        if (t.size() > 110) t.resize(110);
+        return t;
+    }
+
     static void logSink(void* ctx, LogLevel level, std::string_view msg) {
         auto* self = static_cast<SandboxApp*>(ctx);
         std::lock_guard<std::mutex> lock(self->logMutex_);
         self->logLines_.push_back({level, std::string(msg)});
         if (self->logLines_.size() > kMaxLogLines) self->logLines_.pop_front();
+
+        // THE LOADING SCREEN SAYS WHAT IS ACTUALLY LOADING, and this is where it learns it. The
+        // splash used to show only the half-dozen stage names Engine::run and applyProject hand it,
+        // so it read "Loading level" for the entire tail of a large project -- the log knew which
+        // mesh, material and texture were arriving, and the screen in front of the user did not.
+        //
+        // MAIN THREAD ONLY, and that is not caution, it is required: the splash's GDI objects belong
+        // to the thread that called show(), and Jolt wires JPH::Trace straight into AVER_INFO from
+        // its job pool, so a worker's log line arriving here would touch them from the wrong thread.
+        // A dropped line costs nothing -- the next main-thread line replaces it a moment later.
+        //
+        // AND IT MUST NOT LOG. This runs under the core log mutex, which is not recursive, so a
+        // single AVER_* call from inside here deadlocks against itself -- a trap this file has
+        // already been caught by once. Nothing below logs: setLoadingStatus sets a string and pumps
+        // a message queue, and the splash has no custom WndProc to log from.
+        if (self->engineForSplash_ && level >= LogLevel::Info &&
+            std::this_thread::get_id() == self->mainThreadId_ &&
+            self->engineForSplash_->loadingScreenActive()) {
+            self->engineForSplash_->setLoadingStatus(splashTextFor(msg));
+        }
 
         // GRAPH PRINTS ALSO GO ON SCREEN. Visual scripting had no debugging surface at all: a Print
         // node wrote one line into a firehose of engine logging, so watching a graph run meant
@@ -1598,6 +1643,10 @@ public:
 
     // Builds the editor: asset editors, MCP, physics, the placeholder scene, gizmos, and the render features.
     void onInit(Engine& e) override {
+        // FIRST, and before anything that logs: from here on every main-thread log line also
+        // names itself on the startup splash. See logSink for why the thread is checked there.
+        engineForSplash_ = &e;
+        mainThreadId_ = std::this_thread::get_id();
         AVER_INFO("[Sandbox] backend={} adapter='{}'", rhi::backendName(e.device()->backend()), e.device()->adapterName());
         // Latched once, because the Project Settings page shows it next to the backend the
         // project ASKS for and has no Engine& in scope to ask again.
@@ -22534,6 +22583,11 @@ private:
     Vec3 camPosOverride_{};
     f32  pitchOverride_=0.0f, yawOverride_=0.0f;   // radians, converted in setCamera
     bool useWarp_=false;             // --warp: run on the D3D12 software rasteriser
+    // The engine, for the log sink to write the startup splash through. Set at the top of onInit and
+    // left set: loadingScreenActive() is what actually gates the write, and Engine clears that itself
+    // when the splash closes, so there is one owner of "is it still up" rather than two guesses.
+    Engine* engineForSplash_ = nullptr;
+    std::thread::id mainThreadId_{};
     bool windowedOverride_=false;    // --windowed: kept so the flag still parses; windowed is the default now
     bool fullscreenOverride_=false;  // --fullscreen: opt an interactive run INTO borderless fullscreen
     std::string backendName_;   // --backend: which RHI backend to ask for first
