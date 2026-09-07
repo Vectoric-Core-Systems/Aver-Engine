@@ -1463,6 +1463,47 @@ bool VoxiRenderer::giSnapshotUnchanged() const {
             for (rhi::MeshHandle h : removed) { r += std::to_string(h); r += ' '; }
             AVER_INFO("[Voxi] GI draw-list delta: +{} mesh(es) [{}] -{} mesh(es) [{}]",
                       added.size(), a.empty() ? "-" : a.c_str(), removed.size(), r.empty() ? "-" : r.c_str());
+
+            // WHY A HANDLE LEFT, WHICH IS THE ONE THING THIS REPORT NEVER SAID. Five hypotheses have
+            // been refuted by measurement here, every one of them a guess about a mechanism upstream,
+            // because naming the handles only ever established THAT the set moved. There are exactly
+            // two ways a handle can leave, and they point at completely different code:
+            //
+            //   it is still in drawsPrev_  -> it was submitted and giVoxelisedDraw rejected it, so the
+            //                                 cause is one of that predicate's three tests and is
+            //                                 Voxi's own; the reason is named below.
+            //   it is gone from drawsPrev_ -> it never reached submitDraw at all, so the cause is
+            //                                 upstream in whoever decided not to submit, and no
+            //                                 amount of looking at this file will find it.
+            //
+            // Every previous hypothesis was about the second case. If the log says the first, they
+            // were all looking in the wrong file.
+            std::string why;
+            for (rhi::MeshHandle h : removed) {
+                const Draw* found = nullptr;
+                for (const Draw& d : drawsPrev_) if (d.depthMesh == h) { found = &d; break; }
+                why += std::to_string(h);
+                if (!found) { why += "=not-submitted "; continue; }
+                if (found->translucent) { why += "=translucent "; continue; }
+                if (dev_ && dev_->meshVertexBuffer(found->mesh)) { why += "=skinned "; continue; }
+                if (found->boundsRadius >= 0.0f) {
+                    const Vec3 volCentre{center_[0], center_[1], center_[2]};
+                    const f32 volRadius = (extent_ > 1.0f ? extent_ : 1.0f) * 1.7320508f;
+                    const f32 dd = dist(Vec3{found->boundsCentre[0], found->boundsCentre[1],
+                                             found->boundsCentre[2]}, volCentre);
+                    // The numbers, not just the verdict: a draw sitting a hair outside says the
+                    // volume is too tight, one sitting far outside says something moved it.
+                    char buf[96];
+                    std::snprintf(buf, sizeof buf, "=outside(d %.0f > r %.0f+%.0f) ",
+                                  static_cast<f64>(dd), static_cast<f64>(volRadius),
+                                  static_cast<f64>(found->boundsRadius));
+                    why += buf;
+                    continue;
+                }
+                why += "=submitted-but-unclassified ";
+            }
+            if (!removed.empty())
+                AVER_INFO("[Voxi] GI draw-list departures: {}", why);
         }
         if (giDrawsRejects_ >= giDrawsNextReport_) {
             AVER_INFO("[Voxi] GI draw-list axes over {} rejection(s): count moved {}x, mesh set {}x, "
