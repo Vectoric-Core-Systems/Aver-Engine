@@ -2840,6 +2840,16 @@ MeshHandle VulkanResourceFactory::blasMesh(BlasHandle h) const {
     return blases_[h - 1].mesh;
 }
 
+// The twin of D3D12ResourceFactory::blasForMesh; see IResourceFactory for the contract and why only
+// BUILT structures may be handed over. Kept identical on both backends deliberately -- a dedup that
+// fires on one and not the other is two different frames from the same scene.
+BlasHandle VulkanResourceFactory::blasForMesh(MeshHandle mesh) const {
+    if (mesh == 0) return 0;
+    for (usize i = 0; i < blases_.size(); ++i)
+        if (blases_[i].mesh == mesh && blases_[i].built) return static_cast<BlasHandle>(i + 1);
+    return 0;
+}
+
 void VulkanResourceFactory::destroyBlasForMesh(MeshHandle mesh) {
     if (mesh == 0) return;
     for (usize i = 0; i < blases_.size(); ++i)

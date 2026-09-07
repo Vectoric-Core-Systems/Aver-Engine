@@ -1832,6 +1832,7 @@ public:
     void destroyBuffer(BufferHandle h) override;
     void destroyBlas(BlasHandle h) override;
     MeshHandle blasMesh(BlasHandle h) const override;
+    BlasHandle blasForMesh(MeshHandle mesh) const override;
     // Destroys every acceleration structure built from `mesh`. Concrete, not part of
     // IResourceFactory -- an implementation detail of VulkanDevice::destroyMesh, mirroring
     // D3D12ResourceFactory::destroyBlasForMesh exactly, including WHY: a BLAS left behind would

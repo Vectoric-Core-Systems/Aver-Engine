@@ -354,7 +354,19 @@ void PathTracer::shutdown() {
         // This function used not to free them at all, which was inert while the only caller was
         // process exit and became a per-toggle leak once a live editor could shut down and re-init a
         // PathTracer repeatedly.
-        for (const auto& [mesh, b] : blasCache_) if (b) res_->destroyBlas(b);
+        // NOTHING IS FREED HERE ANY MORE, and that is the price of sharing rather than an
+        // oversight. Since prepare() may adopt a structure VoxiRenderer built, this map no longer
+        // holds only things this object made -- and freeing a structure another feature is still
+        // tracing is a dangling handle inside a live TLAS build, which faults the device rather than
+        // corrupting an image quietly. There is no cheap way to tell the two apart that does not
+        // reintroduce a second source of truth about who owns what.
+        //
+        // A BLAS BELONGS TO ITS MESH, which is the ownership model the RHI already documents and
+        // VoxiRenderer already relies on: it never destroys one either. destroyMesh calls
+        // destroyBlasForMesh, which frees EVERY structure for that mesh, so nothing outlives the
+        // geometry it describes. What this gives up is releasing structures early when the
+        // path-traced view is toggled off while its meshes stay loaded -- memory the scene is very
+        // likely still using for Voxi's own rays.
         // THE TLASES STILL CANNOT BE RELEASED: the RHI has no destroyTlas at all (see
         // IResourceFactory -- BLAS has one, TLAS does not), so what this object allocated outlives
         // it, for the life of the DEVICE. What changed is the COUNT: addScene reuses a handle PER
@@ -565,6 +577,26 @@ bool PathTracer::prepare() {
             // test the whole cache rests on -- see blasCache_ for why that is sufficient.
             blas_[i] = hit->second;
             ++reused;
+            continue;
+        }
+        // ANOTHER FEATURE MAY ALREADY HAVE ONE, and before this asked, the answer being yes cost a
+        // whole second structure. VoxiRenderer keeps its own MeshHandle -> BlasHandle map and builds
+        // over the same static meshes this snapshot names, so in the standing configuration -- where
+        // Voxi paints the scene and this view is the reference -- every mesh here was already built.
+        // MEASURED on Sponza: 220 meshes, 154.3 ms of createBlas at load, all of it duplicating
+        // structures over byte-identical geometry, plus double the resident BLAS memory.
+        //
+        // NOT MARKED FRESH, deliberately: blasForMesh only returns a structure that has been BUILT,
+        // so there is nothing left to do for it. Marking it fresh would have this feature record a
+        // second build over another feature's scratch buffer in the same frame, which is a race
+        // rather than a redundancy.
+        //
+        // AND NOT OWNED: a shared structure belongs to the mesh, and destroyMesh frees it through
+        // destroyBlasForMesh. See shutdown(), which no longer frees these.
+        if (const rhi::BlasHandle shared = res_->blasForMesh(mesh)) {
+            blas_[i] = shared;
+            ++reused;
+            blasCache_.emplace(mesh, shared);
             continue;
         }
         blas_[i] = res_->createBlas(mesh);

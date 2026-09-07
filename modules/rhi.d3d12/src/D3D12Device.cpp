@@ -1712,6 +1712,7 @@ public:
     void destroyBuffer(BufferHandle h) override;
     void destroyBlas(BlasHandle h) override;
     MeshHandle blasMesh(BlasHandle h) const override;
+    BlasHandle blasForMesh(MeshHandle mesh) const override;
     // Destroys every acceleration structure built from `mesh`. Concrete rather than part of
     // IResourceFactory: it is an implementation detail of D3D12Device::destroyMesh, and no caller
     // outside this file has any business asking for it.
@@ -6284,6 +6285,17 @@ void D3D12ResourceFactory::destroyBlas(BlasHandle h) {
 MeshHandle D3D12ResourceFactory::blasMesh(BlasHandle h) const {
     if (h == 0 || h > blases_.size()) return 0;
     return blases_[h - 1].mesh;
+}
+
+// The same linear scan destroyBlasForMesh already does, and proportionate for the same reason: one
+// entry per distinct mesh ever ray-traced, walked when a feature first meets a mesh rather than per
+// frame. `built` is what makes the result safe to hand over -- see IResourceFactory::blasForMesh.
+// A destroyed structure clears both `mesh` and `built`, so a dead slot excludes itself here.
+BlasHandle D3D12ResourceFactory::blasForMesh(MeshHandle mesh) const {
+    if (mesh == 0) return 0;
+    for (usize i = 0; i < blases_.size(); ++i)
+        if (blases_[i].mesh == mesh && blases_[i].built) return static_cast<BlasHandle>(i + 1);
+    return 0;
 }
 
 // Destroys every structure built from `mesh`. A linear scan, and that is proportionate: blases_ has
