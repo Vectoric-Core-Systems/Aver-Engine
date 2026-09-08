@@ -30,6 +30,23 @@ public:
 
     // Sets the quality settings this feature renders with.
     void setSettings(const Settings& s);
+
+    // Applies a voxel grid resolution that setSettings could only record, rebuilding the volume.
+    // Returns true only when a rebuild actually happened. Cheap and safe to call unconditionally
+    // every frame: with nothing outstanding it is one integer test.
+    //
+    // A HOST MUST CALL THIS, AND ONLY FROM OUTSIDE A FRAME. Rebuilding destroys the volume and its
+    // accumulator and rewrites every descriptor over them, so it cannot run between the backend's
+    // beginFrame and endFrame -- doing that kind of thing there has removed this device before with
+    // no diagnostic. Engine::frameStep calls Application::onUpdate BEFORE device_->beginFrame(), so
+    // onUpdate is the place; both hosts call it there.
+    //
+    // WHY IT IS NOT DONE INSIDE setSettings, WHICH WOULD NEED NO HOST AT ALL: setSettings is reached
+    // from a project load, and a project's render settings are applied during a prefs load that runs
+    // inside a frame. There is no way for this class to know from setSettings alone whether it is
+    // being called at a safe moment, and guessing wrong is a lost device rather than a wrong pixel.
+    bool applyPendingVoxelResolution();
+
     // Places the GI volume: centre in world units, half-edge extent.
     void setVolume(const f32 center[3], f32 extent);
     // Sets the sun DIRECTION, which is all this renderer needs: it fits the shadow cascades to the
@@ -249,6 +266,17 @@ private:
     bool createShadowResources();
     // Creates the radiance volume, the injection accumulator and every binding set over them.
     bool createVoxelVolume(u32 resolution);
+    // Creates the volume/accumulator pair at `resolution` into the caller's handles. Out-parameters
+    // so a rebuild can allocate the new pair before releasing the old one -- see the definition.
+    bool createVolumeTextures(u32 resolution, rhi::TextureHandle& outTex,
+                              rhi::TextureHandle& outAccum, u32& outMips);
+    // Points every volume descriptor at the current voxelTex_/voxelAccumTex_ and rebuilds the
+    // per-mip sets. Deliberately does NOT create bindings_ -- see the definition for what that set
+    // carries that this function could not refill.
+    bool pointVolumeBindings();
+    // Rebuilds the volume at a new edge, keeping the binding sets. NOT SAFE INSIDE A FRAME; the
+    // only caller is applyPendingVoxelResolution(), which documents where a host may call it.
+    bool rebuildVoxelVolume(u32 resolution);
     // Creates every pipeline the feature runs.
     bool createPipelines();
     // Creates the subset that bakes sample count and render-target formats -- now TWO pipelines per
@@ -1351,6 +1379,9 @@ private:
     // No sunColor_ and no ambient_ here on purpose. See setSunDirection.
 
     u32  voxelMips_ = 0, voxelResBuilt_ = 0;
+    // A grid edge setSettings was given and could not act on, or 0 when nothing is outstanding.
+    // Consumed by applyPendingVoxelResolution().
+    u32  voxelResPending_ = 0;
     bool giReady_ = false, rtSupported_ = false, rtActive_ = false, debugView_ = false;
     bool unlit_ = false;   // --unlit / the viewport view-mode dropdown; see setUnlit
     // See setConeTraceEnabled's own comment. Defaults to true, i.e. bit-identical to every build

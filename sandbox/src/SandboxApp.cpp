@@ -2534,6 +2534,11 @@ public:
             // occlusion", not "flag absent".
             if (giSkyOccRaysOverride_ >= 0) k.giSkyOcclusionRays = static_cast<u32>(giSkyOccRaysOverride_);
             if (giSkyOccTileOverride_ >= 0) k.giSkyOcclusionTile = static_cast<u32>(giSkyOccTileOverride_);
+            // IN THE SECOND CALL for exactly the reason above: voxelResolution is derived from the
+            // globalIllumination tier on a tier CHANGE, so a value set in the first call cannot be
+            // told apart from one never set and the tier's rung wins. > 0 rather than >= 0 -- a grid
+            // of zero voxels is not a request, so 0 keeps its "flag absent" meaning here.
+            if (voxelResOverride_ > 0) k.voxelResolution = static_cast<u32>(voxelResOverride_);
             if (rtPixelsPerRayOverride_ > 0) k.rtPixelsPerRayTile = static_cast<u32>(rtPixelsPerRayOverride_);
             else if (rtPixelsPerRayOverride_ < 0)
                 AVER_WARN("[Sandbox] --rt-pixels-per-ray {} is not a tile edge; the default of {} stands",
@@ -2960,6 +2965,13 @@ public:
         // just cleared, so gViewParams.x was permanently 0 and PSRayDriven never took the branch.
         // No clear is needed here for the same reason: nothing else draws through this pass.
         voxiRenderer_.setUnlit(unlit_);
+        // A VOXEL GRID RESOLUTION CAN ONLY BE APPLIED FROM HERE. setSettings records one and
+        // refuses to act on it, because it is reachable from a prefs load that runs between
+        // beginFrame and endFrame; this is onUpdate, which Engine::frameStep runs before
+        // beginFrame, so it is the one moment in the frame where destroying the volume and
+        // rewriting its descriptors is legal. Unconditional because it costs one integer test
+        // when nothing is outstanding, which is every frame but the one after a project loads.
+        voxiRenderer_.applyPendingVoxelResolution();
 #endif
         if (camWobbleDeg_ != 0.0f && camWobblePeriod_ > 0) {
             if (!camWobbleBased_) { camWobbleBaseYaw_ = yaw_; camWobbleBased_ = true; }
@@ -7194,6 +7206,7 @@ public:
     void setRtRays(int n) { rtRaysOverride_ = n; }                              // --rt-rays N
     void setGiSkyOcclusionRays(int n) { giSkyOccRaysOverride_ = n; }             // --gi-sky-occlusion-rays N
     void setGiSkyOcclusionTile(int n) { giSkyOccTileOverride_ = n; }             // --gi-sky-occlusion-tile N
+    void setVoxelResolution(int n) { voxelResOverride_ = n; }                   // --voxel-res N
     void setRtPixelsPerRay(int n) { rtPixelsPerRayOverride_ = n; }              // --rt-pixels-per-ray N
     void setRtShadowDenoise(int n) { rtShadowDenoiseOverride_ = n; }            // --rt-shadow-denoise N
     void setRtRenderMode(int n) { rtRenderModeOverride_ = n; }                  // --rt-render-mode 0|1
@@ -9123,6 +9136,12 @@ private:
             // this override's sentinel IS -1 precisely so that 0 stays expressible.
             take(giSkyOccRaysOverride_,      k.giSkyOcclusionRays, "--gi-sky-occlusion-rays");
             take(giSkyOccTileOverride_,      k.giSkyOcclusionTile, "--gi-sky-occlusion-tile");
+            // THE FIFTH INSTANCE OF THE SAME CLASS, and the one that had a manifest key and no flag
+            // at all: RENDER.VOXELRES could be written into a project and never overridden from the
+            // command line, so the grid a measurement ran at was whatever the project said. It is
+            // also the knob that was silently discarded entirely until VoxiRenderer learned to
+            // rebuild the volume -- see VoxiRenderer::applyPendingVoxelResolution.
+            if (voxelResOverride_ > 0)       take(voxelResOverride_, k.voxelResolution, "--voxel-res");
             if (rtPixelsPerRayOverride_ > 0) take(rtPixelsPerRayOverride_, k.rtPixelsPerRayTile, "--rt-pixels-per-ray");
             // THE FOURTH INSTANCE OF THE SAME BUG CLASS, closed. --gi-update-interval had no
             // manifest key AND no entry here, while giUpdateInterval IS tier-derived inside
@@ -22664,6 +22683,7 @@ private:
     // 0 is a real value here (fall back to the cone gather's own occlusion).
     int  giSkyOccRaysOverride_=-1;
     int  giSkyOccTileOverride_=-1;   // --gi-sky-occlusion-tile N
+    int  voxelResOverride_=-1;       // --voxel-res N (the GI grid edge; 0 is not a request)
     int  rtPixelsPerRayOverride_=0;  // --rt-pixels-per-ray N: shadow tile edge (0 = flag not given)
     int  rtShadowDenoiseOverride_=-1; // --rt-shadow-denoise N: spatial radius (-1 = flag not given)
     int  rtRenderModeOverride_=-1;    // --rt-render-mode 0|1 (-1 = flag not given)
@@ -25646,6 +25666,7 @@ Application* createApplication(int argc, char** argv) {
     // Same -1 sentinel and the same reason: 1 is a real value here (a fresh direction per pixel), so
     // 0-means-absent could not express it.
     int giSkyOccTile = -1;
+    int voxelResArg = -1;   // --voxel-res N; -1 = flag absent
     // -1 = flag absent. 0 is a real value for BOTH: tonemap 0 is the legacy per-channel curve, and
     // max-radiance 0 means "no clamp at all".
     int tonemapArg = -1; f32 maxRadianceArg = -1.0f;
@@ -25679,6 +25700,18 @@ Application* createApplication(int argc, char** argv) {
         // so the trade it governs (cheaper rays against correlated noise) had never been measured.
         if (!std::strcmp(argv[i],"--gi-sky-occlusion-tile") && i+1<argc) {
             giSkyOccTile = std::atoi(argv[++i]); continue;
+        }
+        // --voxel-res N: the GI volume's grid edge, clamped to [32, 512] by voxi::Renderer.
+        //
+        // THE MANIFEST KEY HAD NO COMMAND-LINE TWIN, so the only way to run a scene at a different
+        // grid was to edit the project -- which changes what everyone else measures too. It matters
+        // more than most: the volume is resolution CUBED, so this is simultaneously the sharpest
+        // quality dial for indirect light and the steepest memory cost in the renderer (64: ~6 MB,
+        // 128: ~50 MB, 256: ~400 MB, 512: ~3.2 GB).
+        //
+        // In THIS loop for the C1061 reason above, like every flag added since.
+        if (!std::strcmp(argv[i],"--voxel-res") && i+1<argc) {
+            voxelResArg = std::atoi(argv[++i]); continue;
         }
         // --tonemap 0|1: 0 the original per-channel ACES approximation (what every recorded gate
         // baseline was measured through), 1 the matrixed fit that keeps saturation. See
@@ -26508,6 +26541,7 @@ Application* createApplication(int argc, char** argv) {
     app->setRtRays(rtRays);
     app->setGiSkyOcclusionRays(giSkyOccRays);
     app->setGiSkyOcclusionTile(giSkyOccTile);
+    app->setVoxelResolution(voxelResArg);
     app->setWindowed(windowedArg);
     app->setFullscreen(fullscreenArg);
     app->setTonemap(tonemapArg);

@@ -1559,6 +1559,17 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     ++frames_;
     cloudTime_ += t.dt;
 
+#if AVER_MODULE_VOXI
+    // THE SAME CALL THE EDITOR MAKES, in the same place, and it has to be here for the same reason:
+    // Engine::frameStep runs onUpdate before device_->beginFrame(), and rebuilding the GI volume is
+    // only legal outside a frame. See VoxiRenderer::applyPendingVoxelResolution.
+    //
+    // MIRRORED RATHER THAN LEFT TO THE EDITOR, because a shipped game reads the same manifest: a
+    // project asking for RENDER.VOXELRES 256 that got it in the editor and 128 in the packaged build
+    // is exactly the host-divergence shape verify-game.ps1 exists to catch.
+    voxiRenderer_.applyPendingVoxelResolution();
+#endif
+
     // THE PROFILER A SHIPPED GAME NEVER HAD. See GameConfig::statsIntervalSec for why this is a log
     // dump and not an overlay, and why the numbers were already being collected.
     //
