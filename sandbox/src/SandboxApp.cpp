@@ -23918,6 +23918,22 @@ private:
             frameCameraOn(w);
         }
 
+#if AVER_MODULE_VOXI
+        // OUTSIDE THE CAMERA CHAIN ABOVE, because fitting the GI volume used to happen at the bottom
+        // of frameCameraOn -- which is only the fallback branch. A level with a saved CAMERA record,
+        // or a run passing --cam, never fitted its volume at all: where the camera ends up and how
+        // big the level is are different questions and only one of them is about the camera.
+        //
+        // BUT AN AUTHORED VOLUME STILL WINS, and that guard is not optional. RENDER.GIVOLUME is a
+        // number a person chose; a fit computed from placement bounds is a guess, and a guess must
+        // not silently replace authorship. I got this wrong first time round and measured the cost
+        // on PTTest, which authors a 5659cm half-extent: fitting unconditionally REPLACED it with
+        // 2356cm and shrank the volume for a level it already covered. project_.giExtent is 0 when
+        // the manifest states nothing, which is exactly the "no author has an opinion" case the fit
+        // is for.
+        if (!w.placements.empty() && project_.giExtent <= 0.0f) fitGiVolumeTo(w);
+#endif
+
         // JUST LOADED MEANS JUST SAVED, as far as the exit prompt is concerned. openLevelDirect
         // does NOT unload first, so without this a level opened after editing another would
         // inherit that one's history and be reported dirty the instant it appeared.
@@ -24015,7 +24031,12 @@ private:
         sel_ = -1;
         selEntity_ = scene::kInvalidEntity;
 
+        // The legacy .ocmap path fitted the GI volume through frameCameraOn's old side effect too,
+        // so it gets the explicit call for the same reason the .ocworld path above does.
         if (!synth.placements.empty()) frameCameraOn(synth);
+#if AVER_MODULE_VOXI
+        if (!synth.placements.empty() && project_.giExtent <= 0.0f) fitGiVolumeTo(synth);
+#endif
 
         AVER_INFO("[Level] '{}' loaded from {} ({} placement(s), legacy .ocmap)", m.name, path,
                   m.placements.size());
@@ -24112,7 +24133,21 @@ private:
 
     // Puts the editor camera where the whole level is visible, and fits the fly speed and the GI
     // volume to its bounds.
-    void frameCameraOn(const fmt::OcWorldData& w) {
+    // The level's world-space bounds as a centre and a radius. Split out of frameCameraOn because
+    // TWO UNRELATED THINGS were reading it and only one of them is about the camera.
+    //
+    // WHAT THAT COUPLING COST. Fitting the GI volume lived at the bottom of frameCameraOn, and
+    // frameCameraOn only runs for a level with NO saved CAMERA record -- it is the fallback for
+    // "we do not know where to look". So saving a level's camera silently stopped its GI volume
+    // being fitted, and the volume stayed at its authored default (centre 0,0,300, half-extent
+    // 1200cm) no matter how big the level was. Measured on Intel Sponza, which spans X -1386..747,
+    // Y -1595..1949, Z -43..1688: a third of the level sat outside its own GI volume, and nothing
+    // said so. Adding --cam made it worse for the same reason -- skipping the camera framing also
+    // skipped the fit.
+    //
+    // A radius, not a box, because that is what both consumers want: the camera wants a distance to
+    // stand back by, and setVolume takes a half-edge extent.
+    void levelBounds(const fmt::OcWorldData& w, Vec3& centre, f32& radius) const {
         // THE MESH BOX, SCALED AND ROTATED -- not p.sx/sy/sz used as a size. This loop read
         // fabs(p.sx/sy/sz) as a half-extent, but sx/sy/sz is a dimensionless SCALE MULTIPLIER
         // (Transform::scale, nothing converts it), so an ordinary PLACE (scale 1.0) contributed a 1cm
@@ -24149,10 +24184,28 @@ private:
         // Every placement missing and the sentinels never moved: a level with no placements at all.
         // Guarded because the radius below would otherwise be computed from 1e9-(-1e9).
         if (w.placements.empty() || lo.x > hi.x) { lo = Vec3{0,0,0}; hi = Vec3{0,0,0}; }
-        const Vec3 centre{(lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f, (lo.z + hi.z) * 0.5f};
-        const f32 radius = std::fmax(1.0f, 0.5f * std::sqrt((hi.x-lo.x)*(hi.x-lo.x) +
-                                                            (hi.y-lo.y)*(hi.y-lo.y) +
-                                                            (hi.z-lo.z)*(hi.z-lo.z)));
+        centre = Vec3{(lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f, (lo.z + hi.z) * 0.5f};
+        radius = std::fmax(1.0f, 0.5f * std::sqrt((hi.x-lo.x)*(hi.x-lo.x) +
+                                                  (hi.y-lo.y)*(hi.y-lo.y) +
+                                                  (hi.z-lo.z)*(hi.z-lo.z)));
+    }
+
+#if AVER_MODULE_VOXI
+    // Fits the GI volume to a level. Called on EVERY level load, whatever the camera does -- see
+    // levelBounds for what happened while this was reachable only through the camera fallback.
+    void fitGiVolumeTo(const fmt::OcWorldData& w) {
+        Vec3 centre; f32 radius = 1.0f;
+        levelBounds(w, centre, radius);
+        giCenter_ = centre;
+        giExtent_ = radius;
+        AVER_INFO("[Voxi] GI volume fitted to the level: centre ({:.0f},{:.0f},{:.0f}) half-extent {:.0f}cm",
+                  centre.x, centre.y, centre.z, radius);
+    }
+#endif
+
+    void frameCameraOn(const fmt::OcWorldData& w) {
+        Vec3 centre; f32 radius = 1.0f;
+        levelBounds(w, centre, radius);
         const f32 dist = radius * 1.6f;
         camPos_ = Vec3{centre.x - dist * 0.65f, centre.y - dist * 0.65f, centre.z + dist * 0.55f};
         const Vec3 look = (centre - camPos_).getSafeNormal();
@@ -24162,11 +24215,6 @@ private:
         // This is a teleport, not a move: the next chunk-streaming update must not see this as a
         // (huge, one-frame) velocity computed against wherever the camera used to be.
         chunkStreamHaveLastPos_ = false;
-
-#if AVER_MODULE_VOXI
-        giCenter_ = centre;
-        giExtent_ = radius;
-#endif
     }
 
     // Loads the project's start map, resolved against its content directory. Missing is not an error.
