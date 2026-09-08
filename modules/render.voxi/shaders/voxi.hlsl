@@ -1235,7 +1235,14 @@ float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays) {
         // noise, and that floor is the same in every configuration measured (the old four-ray tile
         // scored 0.3929 on it). Deeper history is not free -- it is lag on a disocclusion the depth
         // test does not catch -- so the value that buys nothing is not the one to ship.
-        const float weight = lerp(0.9, 0.5, t);
+        // 0.97, NOT 0.9, AND THE PARAGRAPH ABOVE IS OUT OF DATE RATHER THAN WRONG. It records that
+        // 0.95 "measured no change", and that was true when it was measured: what remained in a
+        // still frame was Sponza's stone TEXTURE, not sampling noise, so a deeper history had
+        // nothing left to average. The sky irradiance calibration removed that premise -- the
+        // ambient this occlusion multiplies is now eight times larger, so the same relative variance
+        // is eight times more visible, and this term rather than the texture is the floor.
+        // ~33 frames of history against ~10.
+        const float weight = lerp(0.97, 0.5, t);
         vis = lerp(fresh, histV, weight);
     }
     // The ACCUMULATED value, not the fresh one -- writing `fresh` here would restart the average
