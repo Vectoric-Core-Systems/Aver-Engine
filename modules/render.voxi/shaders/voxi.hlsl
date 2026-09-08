@@ -2228,7 +2228,25 @@ float4 traceCone(float3 originWS, float3 dir, float aperture) {
 float3 coneTracedIndirect(float3 wpos, float3 N, out float ao) {
     float3 up = abs(N.z) < 0.9 ? float3(0,0,1) : float3(1,0,0);
     float3 T = normalize(cross(up, N)), B = cross(N, T);
-    const float aperture = 0.577;              // ~60 degree cone
+
+    // APERTURE FROM THE CONE COUNT, not a constant -- and this is what made a higher GI tier look
+    // BLURRIER rather than sharper.
+    //
+    // It was a fixed 0.577 (a 60-degree cone) at every tier. Six of those roughly tile a hemisphere,
+    // which is the classic VXGI configuration and where the number came from. Thirteen of them --
+    // Epic's rung, and what this project runs -- cover it more than twice over, so raising GI
+    // quality bought overlap instead of detail. Worse, a 60-degree cone's diameter grows about 2.15x
+    // per march step, so it is sampling mip 7-8 within a couple of metres: texels tens of metres
+    // across, i.e. a scene-wide average. That is precisely an ambient term, and it is why bright
+    // sunlit floor never showed up on the column standing next to it.
+    //
+    // Tiling the hemisphere ONCE with N cones gives each a solid angle of 2pi/N, so
+    // 2pi(1 - cos(theta)) = 2pi/N and cos(theta) = 1 - 1/N. Narrower cones climb the mip chain more
+    // slowly and therefore keep near-field detail, which is the whole of what bounced light looks
+    // like. N=6 lands at 33.6 degrees, N=13 at 22.6.
+    const float cones    = max(gGiParams.x, 1.0);
+    const float cosHalf  = saturate(1.0 - 1.0 / cones);
+    const float aperture = sqrt(max(1.0 - cosHalf * cosHalf, 1e-6)) / max(cosHalf, 1e-6);   // tan
 
     float4 sum = traceCone(wpos, N, aperture);
     float occ = sum.a;
@@ -2239,11 +2257,24 @@ float3 coneTracedIndirect(float3 wpos, float3 N, out float ao) {
     // skipped, so every tier would still pay for six cones and the ladder would be a lie.
     // Angle is 2*pi/ring computed, not the 1.2566 literal (a rounded 2*pi/5) that stood here -- the
     // six-cone case shifts ~3e-5 radians, no longer bit-identical, in the more correct direction.
-    const uint  ring = (uint)max(gGiParams.x, 1.0) - 1u;
-    const float dphi = ring > 0u ? 6.2831853 / (float)ring : 0.0;
+    // A COSINE-DISTRIBUTED SPIRAL, NOT ONE RING. Every extra cone used to land at the SAME
+    // elevation -- `N * 0.5 + tangent * 0.866` is a fixed 60-degree tilt -- so Epic's thirteen cones
+    // were one axial plus twelve crammed into a single band. More cones bought more samples of one
+    // elevation rather than coverage of the hemisphere, which is the other half of why the gather
+    // behaved like an ambient term no matter how high the tier went.
+    //
+    // t is stratified over [0,1) and cos(theta) = sqrt(1-t) gives the cosine-weighted hemisphere
+    // distribution a diffuse gather actually wants; the golden angle in azimuth keeps successive
+    // directions from clumping the way a constant step does. The `w = dot(N,d)` cosine weight below
+    // is kept -- it is what makes this a weighted average rather than a plain mean, and the axial
+    // cone still carries weight 1.
+    const uint ring = (uint)cones - 1u;
     [loop] for (uint k = 0; k < ring; ++k) {
-        float ang = dphi * (float)k;
-        float3 d = normalize(N * 0.5 + (T * cos(ang) + B * sin(ang)) * 0.866);
+        float t    = ((float)k + 0.5) / (float)ring;
+        float cosT = sqrt(saturate(1.0 - t));
+        float sinT = sqrt(saturate(t));
+        float ang  = 2.39996323 * (float)k;
+        float3 d = normalize(N * cosT + (T * cos(ang) + B * sin(ang)) * sinT);
         float w = saturate(dot(N, d));
         float4 c = traceCone(wpos, d, aperture);
         sum += c * w; occ += c.a * w; wsum += w;
