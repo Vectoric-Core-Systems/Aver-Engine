@@ -12899,7 +12899,26 @@ private:
         // NOT a blanket "any window": a text field is excluded by WantTextInput below, and the Content
         // Browser deliberately keeps its own Delete (which deletes a FILE) -- widening this to its
         // panel would put two different destructive meanings on one key.
-        if ((levelFocused_ || outlinerFocused_ || detailsFocused_) && !io.WantTextInput) {
+        // NOT WHILE A GIZMO DRAG IS IN FLIGHT, and this is a correctness gate rather than a nicety.
+        //
+        // beginTransformEdit captures editBefore_ from whatever is selected AT GRAB TIME, but
+        // nothing pins the gesture to that entity: the drag block below reads and writes whatever
+        // selectedXform() resolves to THIS frame. So pressing Ctrl+A -- or Delete, or Ctrl+V --
+        // with the mouse button still held changes the selection under the gesture, and the drag
+        // silently continues on a different object. The undo record endTransformEdit then pushes
+        // describes an entity that was never dragged, which is corruption that an assertion about
+        // the anchor would pass straight through.
+        //
+        // Repro before this line: two objects, select the one that is NOT first in the Outliner,
+        // start dragging its gizmo, press Ctrl+A while still holding. The gizmo jumps to the other
+        // object and drags that instead.
+        //
+        // Gating the verbs rather than pinning a dragEntity_ through the drag update and
+        // endTransformEdit: a mouse button is already held on the gizmo, so a click cannot change
+        // the selection either, which leaves the keyboard verbs as the whole of the hole. The
+        // narrower fix is the one that cannot itself introduce a second source of truth for "what
+        // is being dragged".
+        if (!dragging_ && (levelFocused_ || outlinerFocused_ || detailsFocused_) && !io.WantTextInput) {
             if (keybinds_.pressed(editor::CommandId::EditDelete, io))    deleteSelection();
             if (keybinds_.pressed(editor::CommandId::EditCopy, io))      copySelection();
             if (keybinds_.pressed(editor::CommandId::EditPaste, io))     pasteClipboard();

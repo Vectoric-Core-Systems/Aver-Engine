@@ -144,6 +144,11 @@ if(TARGET Aver.Formats.Material)
   # and it is precisely the kind of hand-maintained cross-module layout that needs a test.
   target_link_libraries(MaterialTest PRIVATE
     Aver.Formats.Material Aver.Formats Aver.Render.PBR.Materials Aver.Core Aver.Platform)
+  # AVER_REPO_ROOT so the MaterialConstants block can READ the two HLSL files it claims to guard.
+  # It asserted C++ offsets only and called itself a three-way mirror check; the two shader copies
+  # it names were never opened. Same precedent as CoatEnergyTest and VoxiRtSeqTest, which each read
+  # the shader they mirror rather than describing it.
+  target_compile_definitions(MaterialTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
   set_target_properties(MaterialTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()

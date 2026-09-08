@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -32,6 +33,125 @@ static void check(bool cond, const std::string& what) {
 
 // True when two floats are within eps.
 static bool near(f32 a, f32 b, f32 eps = 1e-5f) { return std::fabs(a - b) <= eps; }
+
+// ---- the three-way MaterialConstants mirror, read rather than described -------------------------
+//
+// THE OFFSET BLOCK IN main() CALLED ITSELF A THREE-WAY CHECK AND OPENED NEITHER SHADER. It asserts
+// C++ offsets, which pins one of the three copies to itself -- a tautology. The failure it says it
+// exists to catch is a field REORDERED in one of the HLSL mirrors, where the total size never moves,
+// the build succeeds, every suite passes, and materials shade with a neighbour's bytes. That could
+// not have been caught, because the files were never read. voxi.hlsl's own RtMaterial comment says
+// the order is "checked only by tests/formats/src/MaterialTest.cpp", which made the gap worse: the
+// shader author was told a guard existed.
+//
+// WHAT IS CHECKED: the field ORDER in each shader block, against the order of the C++ struct. Not
+// packing arithmetic -- HLSL's own rules differ between a cbuffer and a StructuredBuffer, and
+// reimplementing them here would be a fourth thing to get wrong. Order plus the existing size and
+// offset assertions is what actually catches the dangerous case, because every reorder of two
+// same-typed floats moves a name past another name.
+//
+// The table IS the assertion. It is a fourth copy of the field list, deliberately: a test that
+// derived the expected order from one of the files it checks would agree with itself.
+struct MirrorField {
+    const char* cpp;       // for the failure message
+    const char* prelude;   // name in material_prelude.hlsl's `cbuffer AverMaterial`, or null
+    const char* rt;        // name in voxi.hlsl's `struct RtMaterial`, or null
+};
+static const MirrorField kMirror[] = {
+    {"baseColorFactor",     "gBaseColorFactor",    "baseColorFactor"},
+    {"emissiveFactor",      "gEmissiveFactor",     "emissiveFactor"},
+    {"metallicFactor",      "gMetallicFactor",     "metallicFactor"},
+    {"roughnessFactor",     "gRoughnessFactor",    "roughnessFactor"},
+    {"normalScale",         "gNormalScale",        "normalScale"},
+    {"occlusionStrength",   "gOcclusionStrength",  "occlusionStrength"},
+    {"alphaCutoff",         "gAlphaCutoff",        "alphaCutoff"},
+    {"flags",               "gMaterialFlags",      "flags"},
+    {"reflectance",         "gMatReflectance",     "reflectance"},
+    {"f90",                 "gMatF90",             "f90"},
+    {"uvTilesPerCm",        "gUvTilesPerCm",       "uvTilesPerCm"},
+    {"slopeBlendLo",        "gSlopeBlendLo",       "slopeBlendLo"},
+    {"slopeBlendHi",        "gSlopeBlendHi",       "slopeBlendHi"},
+    {"layer1UvScale",       "gL1UvScale",          "layer1UvScale"},
+    {"graphId",             "gMaterialGraphId",    "graphId"},
+    {"ior",                 "gIor",                "ior"},
+    {"transmission",        "gTransmission",       "transmission"},
+    {"subsurfaceWeight",    "gSubsurfaceWeight",   "subsurfaceWeight"},
+    {"subsurfaceRadius",    "gSubsurfaceRadius",   "subsurfaceRadius"},
+    {"coatWeight",          "gCoatWeight",         "coatWeight"},
+    {"coatRoughness",       "gCoatRoughness",      "coatRoughness"},
+    {"coatF0",              "gCoatF0",             "coatF0"},
+    {"_coatPad",            "_gCoatPad",           "_coatPad"},
+    // The cbuffer splits the eight indices into two uint4 rows; the structured buffer declares one
+    // uint[8]. Two rows here so the SECOND half's position is pinned too -- gTexIndex1 drifting
+    // above gTexIndex0 would swap four texture slots with four others.
+    {"texIndex",            "gTexIndex0",          "texIndex"},
+    {"texIndex[4..7]",      "gTexIndex1",          nullptr},
+    {"attenuationColor",    "gAttenuationColor",   "attenuationColor"},
+    {"attenuationDistance", "gAttenuationDistance", "attenuationDistance"},
+};
+
+// Reads a repo-relative file whole. Empty on failure, which the caller MUST treat as a failure:
+// every `find` below would otherwise return npos and the ordering check would pass vacuously.
+static std::string readRepoFile(const char* rel) {
+    const std::string path = std::string(AVER_REPO_ROOT) + "/" + rel;
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return {};
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    return ss.str();
+}
+
+// Replaces every comment with spaces, keeping every other byte at its own offset so positions in
+// the result are still positions in the original.
+//
+// NOT COSMETIC. Both of these blocks carry long prose comments that NAME the fields around them --
+// material_prelude.hlsl has a paragraph about `gIor` sitting eighteen lines above `float gIor;` --
+// so a search that did not strip comments would find the mention rather than the declaration and
+// pin the wrong position. That is the shape of a check that looks strict and tests nothing.
+static std::string stripComments(std::string s) {
+    for (usize i = 0; i + 1 < s.size(); ++i) {
+        if (s[i] == '/' && s[i + 1] == '/') {
+            while (i < s.size() && s[i] != '\n') s[i++] = ' ';
+        } else if (s[i] == '/' && s[i + 1] == '*') {
+            const usize end = s.find("*/", i + 2);
+            const usize stop = (end == std::string::npos) ? s.size() : end + 2;
+            while (i < stop) s[i++] = ' ';
+        }
+    }
+    return s;
+}
+
+// The text between `opener` and the first `};` after it -- one shader declaration block, comments
+// blanked out.
+// STRIPPED BEFORE THE BLOCK IS CUT OUT, not after: a `};` inside one of these files' prose would
+// otherwise end the block early and the fields past it would read as missing.
+static std::string blockAfter(const std::string& text, const char* opener) {
+    const std::string clean = stripComments(text);
+    const usize a = clean.find(opener);
+    if (a == std::string::npos) return {};
+    const usize b = clean.find("};", a);
+    if (b == std::string::npos) return {};
+    return clean.substr(a, b - a);
+}
+
+// Finds `name` as a whole declared identifier: preceded by whitespace and followed by one of
+// ` ;[:` -- so `gIor` does not match inside `gIorSomething`, and a mention in a COMMENT that
+// happens to sit above its own declaration cannot stand in for the declaration itself.
+static usize declPos(const std::string& block, const char* name) {
+    const std::string n = name;
+    usize from = 0;
+    for (;;) {
+        const usize p = block.find(n, from);
+        if (p == std::string::npos) return std::string::npos;
+        const bool leftOk  = p > 0 && (block[p - 1] == ' ' || block[p - 1] == '\t' || block[p - 1] == '\n');
+        const usize after  = p + n.size();
+        const bool rightOk = after < block.size() &&
+                             (block[after] == ';' || block[after] == '[' || block[after] == ' ' ||
+                              block[after] == '\t' || block[after] == ':');
+        if (leftOk && rightOk) return p;
+        from = p + 1;
+    }
+}
 
 // A .ocmat using every implemented record, plus two the reader must skip.
 static const char* kFull = R"(OCMAT 1
@@ -494,6 +614,11 @@ static void testPack() {
     //
     // Offsets are asserted rather than derived, so this fails when someone moves a field without
     // moving it in the shaders too. When it fails, fix all three; do not just update the number.
+    //
+    // THAT SENTENCE WAS A CLAIM THIS BLOCK COULD NOT BACK until the mirror check at the end of it
+    // existed. offsetof only ever asked the C++ struct about the C++ struct; a field moved in
+    // material_prelude.hlsl or voxi.hlsl and nowhere else passed every line below. The two shaders
+    // are now actually read -- see kMirror.
     // EVERY FIELD, not the section boundaries. This list used to hold 14 of the struct's 26 offsets,
     // which sounds thorough and left the single most dangerous stretch unguarded: emissiveFactor
     // through alphaCutoff is SIX CONSECUTIVE SAME-TYPED FLOATS. Swap metallicFactor and
@@ -539,6 +664,78 @@ static void testPack() {
     // moved in one of them shades a material with its neighbour's bytes rather than failing to build.
     check(offsetof(pbr::MaterialConstants, attenuationColor)    == 144, "attenuationColor at 144");
     check(offsetof(pbr::MaterialConstants, attenuationDistance) == 156, "attenuationDistance at 156");
+
+    // ---- AND NOW THE OTHER TWO MIRRORS, WHICH THIS BLOCK NEVER USED TO OPEN ----
+    //
+    // Everything above pins the C++ struct to itself. See kMirror's own comment for why that is a
+    // tautology and what these two files can silently do that no offsetof can see.
+    {
+        const std::string prelude = readRepoFile("modules/render.pbr/shaders/material_prelude.hlsl");
+        const std::string voxi    = readRepoFile("modules/render.voxi/shaders/voxi.hlsl");
+        // A MISSING FILE IS A FAILURE, NOT A SKIP. Every declPos below would return npos against an
+        // empty string and the ordering loop would pass without comparing anything -- the exact
+        // shape of guard this whole block exists because of.
+        check(!prelude.empty(), "material_prelude.hlsl is readable");
+        check(!voxi.empty(),    "voxi.hlsl is readable");
+
+        const std::string cb = blockAfter(prelude, "cbuffer AverMaterial");
+        const std::string rt = blockAfter(voxi,    "struct RtMaterial");
+        check(!cb.empty(), "...and declares `cbuffer AverMaterial`");
+        check(!rt.empty(), "...and declares `struct RtMaterial`");
+
+        // Every field of the table must be DECLARED in each mirror that claims to carry it. A field
+        // added to the C++ struct and forgotten in a shader shifts everything after it.
+        bool allPresent = true;
+        for (const MirrorField& f : kMirror) {
+            if (f.prelude && declPos(cb, f.prelude) == std::string::npos) {
+                AVER_ERROR("   ...`{}` (C++ {}) is not declared in cbuffer AverMaterial", f.prelude, f.cpp);
+                allPresent = false;
+            }
+            if (f.rt && declPos(rt, f.rt) == std::string::npos) {
+                AVER_ERROR("   ...`{}` (C++ {}) is not declared in struct RtMaterial", f.rt, f.cpp);
+                allPresent = false;
+            }
+        }
+        check(allPresent, "every MaterialConstants field is declared in both HLSL mirrors");
+
+        // THE ORDER, which is the whole point: positions must be strictly increasing. Swapping two
+        // same-typed floats in either shader moves one name past the other and lands here, where
+        // before it landed in a rendered image weeks later.
+        bool ordered = true;
+        usize lastCb = 0, lastRt = 0;
+        const char* lastCbName = "<start>"; const char* lastRtName = "<start>";
+        for (const MirrorField& f : kMirror) {
+            if (f.prelude) {
+                const usize p = declPos(cb, f.prelude);
+                if (p != std::string::npos) {
+                    if (p < lastCb) {
+                        AVER_ERROR("   ...cbuffer AverMaterial declares `{}` BEFORE `{}`; the C++ "
+                                   "struct has them the other way round", f.prelude, lastCbName);
+                        ordered = false;
+                    }
+                    lastCb = p; lastCbName = f.prelude;
+                }
+            }
+            if (f.rt) {
+                const usize p = declPos(rt, f.rt);
+                if (p != std::string::npos) {
+                    if (p < lastRt) {
+                        AVER_ERROR("   ...struct RtMaterial declares `{}` BEFORE `{}`; the C++ "
+                                   "struct has them the other way round", f.rt, lastRtName);
+                        ordered = false;
+                    }
+                    lastRt = p; lastRtName = f.rt;
+                }
+            }
+        }
+        check(ordered, "...and in the SAME ORDER as the C++ struct, in both");
+
+        // The table must not itself fall behind the struct. sizeof is the only handle the test has
+        // on "a field was added": if someone appends a row to MaterialConstants and does not extend
+        // kMirror, the loops above would still pass while checking a prefix.
+        check(sizeof(pbr::MaterialConstants) == 160,
+              "...and kMirror covers the whole struct (extend it if this size ever changes)");
+    }
     {
         // ZERO IS THE OFF STATE, and the whole no-flag-bit design rests on it: a default material
         // must carry a distance of 0 so averVolumeTransmittance returns exactly 1 and every material
