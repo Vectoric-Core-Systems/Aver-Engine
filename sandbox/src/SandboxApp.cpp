@@ -3846,6 +3846,18 @@ public:
             sky_.horizon[i]  = skyHorizon_[i];
             sky_.fogColor[i] = fogColor_[i];
         }
+        // --sky-light N OUTRANKS THE LEVEL, and is applied HERE rather than once at startup because
+        // sunAmbient_ is overwritten by applyLevelSky every time a level opens -- a value set before
+        // that would be silently discarded, which is the precedence bug this file has already
+        // recorded four times over (see the --gi-update-interval note in the flag-override block).
+        //
+        // WHY THE KNOB EXISTS AT ALL: skyLightIntensity scales the ONLY term in the frame that is
+        // added without being occluded by anything but a six-cone AO -- diffAmbient in
+        // material_prelude.hlsl -- and it had a slider in the Rendering panel and no command-line
+        // twin, so its share of the image could never be swept or measured. That share is the open
+        // question behind "the colours look washed out": the sky is Rayleigh-blue and the bounce off
+        // stone is warm, so a large unoccluded ambient dilutes chroma toward grey.
+        if (skyLightOverride_ >= 0.0f) sunAmbient_ = skyLightOverride_;
         sky_.skyLightIntensity = sunAmbient_;
         sky_.fogDensity = fog;
         sky_.cloudTime = cloudTime_;
@@ -7194,6 +7206,7 @@ public:
     void setRtRays(int n) { rtRaysOverride_ = n; }                              // --rt-rays N
     void setGiSkyOcclusionRays(int n) { giSkyOccRaysOverride_ = n; }             // --gi-sky-occlusion-rays N
     void setGiSkyOcclusionTile(int n) { giSkyOccTileOverride_ = n; }             // --gi-sky-occlusion-tile N
+    void setSkyLight(f32 v) { skyLightOverride_ = v; }                          // --sky-light N
     void setRtPixelsPerRay(int n) { rtPixelsPerRayOverride_ = n; }              // --rt-pixels-per-ray N
     void setRtShadowDenoise(int n) { rtShadowDenoiseOverride_ = n; }            // --rt-shadow-denoise N
     void setRtRenderMode(int n) { rtRenderModeOverride_ = n; }                  // --rt-render-mode 0|1
@@ -22688,6 +22701,9 @@ private:
     // 0 is a real value here (fall back to the cone gather's own occlusion).
     int  giSkyOccRaysOverride_=-1;
     int  giSkyOccTileOverride_=-1;   // --gi-sky-occlusion-tile N
+    // --sky-light N. NEGATIVE means absent: 0 is a real, meaningful request (no sky ambient at all),
+    // which is exactly the measurement this flag was added to make possible.
+    f32  skyLightOverride_=-1.0f;
     int  rtPixelsPerRayOverride_=0;  // --rt-pixels-per-ray N: shadow tile edge (0 = flag not given)
     int  rtShadowDenoiseOverride_=-1; // --rt-shadow-denoise N: spatial radius (-1 = flag not given)
     int  rtRenderModeOverride_=-1;    // --rt-render-mode 0|1 (-1 = flag not given)
@@ -25670,6 +25686,7 @@ Application* createApplication(int argc, char** argv) {
     // Same -1 sentinel and the same reason: 1 is a real value here (a fresh direction per pixel), so
     // 0-means-absent could not express it.
     int giSkyOccTile = -1;
+    f32 skyLightArg = -1.0f;   // --sky-light N; negative = flag absent
     // -1 = flag absent. 0 is a real value for BOTH: tonemap 0 is the legacy per-channel curve, and
     // max-radiance 0 means "no clamp at all".
     int tonemapArg = -1; f32 maxRadianceArg = -1.0f;
@@ -25703,6 +25720,18 @@ Application* createApplication(int argc, char** argv) {
         // so the trade it governs (cheaper rays against correlated noise) had never been measured.
         if (!std::strcmp(argv[i],"--gi-sky-occlusion-tile") && i+1<argc) {
             giSkyOccTile = std::atoi(argv[++i]); continue;
+        }
+        // --sky-light N: scales the sky ambient (SkyAtmosphere::skyLightIntensity, which is the
+        // editor's "Sky Light" slider). 1 is the default; 0 removes the term entirely.
+        //
+        // IT HAD A SLIDER AND NO FLAG, so the one term added to every surface without real occlusion
+        // -- diffAmbient, attenuated by a six-cone AO and nothing else -- could not be swept from a
+        // script, and its share of the image had therefore never been measured. That share is the
+        // open question behind a washed-out picture: the sky is Rayleigh-blue, a bounce off stone is
+        // warm, and a large unoccluded ambient pulls the result toward grey.
+        // In THIS loop for the C1061 reason above, like every flag added since.
+        if (!std::strcmp(argv[i],"--sky-light") && i+1<argc) {
+            skyLightArg = (f32)std::atof(argv[++i]); continue;
         }
         // --tonemap 0|1: 0 the original per-channel ACES approximation (what every recorded gate
         // baseline was measured through), 1 the matrixed fit that keeps saturation. See
@@ -26532,6 +26561,7 @@ Application* createApplication(int argc, char** argv) {
     app->setRtRays(rtRays);
     app->setGiSkyOcclusionRays(giSkyOccRays);
     app->setGiSkyOcclusionTile(giSkyOccTile);
+    app->setSkyLight(skyLightArg);
     app->setWindowed(windowedArg);
     app->setFullscreen(fullscreenArg);
     app->setTonemap(tonemapArg);
