@@ -1606,16 +1606,6 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     ++frames_;
     cloudTime_ += t.dt;
 
-#if AVER_MODULE_VOXI
-    // THE SAME CALL THE EDITOR MAKES, in the same place, and it has to be here for the same reason:
-    // Engine::frameStep runs onUpdate before device_->beginFrame(), and rebuilding the GI volume is
-    // only legal outside a frame. See VoxiRenderer::applyPendingVoxelResolution.
-    //
-    // MIRRORED RATHER THAN LEFT TO THE EDITOR, because a shipped game reads the same manifest: a
-    // project asking for RENDER.VOXELRES 256 that got it in the editor and 128 in the packaged build
-    // is exactly the host-divergence shape verify-game.ps1 exists to catch.
-    voxiRenderer_.applyPendingVoxelResolution();
-#endif
 #if AVER_WITH_AUDIO_ABI
     // The other half of opening the device: a finished voice's slot is reclaimed here or not at all.
     // aver_audio_collect had exactly one caller in the tree, the editor's, so a graph-started voice

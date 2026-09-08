@@ -489,22 +489,6 @@ void VoxiRenderer::setSettings(const Settings& s) {
     }
     setGiUpdateInterval(s.giUpdateInterval);
 
-    // THE VOXEL GRID EDGE IS RECORDED HERE AND APPLIED SOMEWHERE ELSE, and until this line existed
-    // it was simply discarded: createVoxelVolume ran once, in init(), and nothing ever looked at
-    // Settings::voxelResolution again. Every later change -- a project manifest's RENDER.VOXELRES,
-    // the editor's Voxel grid combo, a quality tier deriving a new rung -- updated this struct,
-    // reported success and changed nothing. PTTest asks for 512 and has been running at 128, a
-    // sixty-fourth of the voxels, for as long as the setting has existed.
-    //
-    // RECORDED RATHER THAN ACTED ON because rebuilding the volume destroys two textures and
-    // rewrites every descriptor over them, and setSettings is reachable from inside a recorded
-    // frame -- a project's render settings are applied during a prefs load, which runs between
-    // beginFrame and endFrame, and rebuilding GPU resources there has already removed this
-    // device once with no diagnostic at all. applyPendingVoxelResolution() does the work, called
-    // by a host that knows it is between frames.
-    if (giReady_ && settings_.voxelResolution != voxelResBuilt_)
-        voxelResPending_ = settings_.voxelResolution;
-
     // Guarded on a real size: before the first onRenderTargetsChanged there is nothing to create at,
     // and that call will apply the current setting itself when it arrives.
     if ((rayTracingWanted() != wasWanted || aoHistoryWanted() != wasAoWanted) &&
@@ -512,24 +496,6 @@ void VoxiRenderer::setSettings(const Settings& s) {
         if (!ensureShadowHistory(rtHistWantW_, rtHistWantH_))
             AVER_ERROR("[Voxi] ray-traced history could not follow a ray-tracing setting change at {}x{}",
                        rtHistWantW_, rtHistWantH_);
-}
-
-// Applies a voxel resolution that setSettings could only record. Safe to call every frame; it does
-// nothing at all unless a change is actually outstanding.
-//
-// THE CALLER'S HALF OF THE CONTRACT IS THE WHOLE POINT: this must run OUTSIDE beginFrame/endFrame.
-// Engine::frameStep calls the application's onUpdate before device_->beginFrame(), so onUpdate is
-// where a host belongs when it calls this. Called from inside a frame it would destroy textures a
-// recorded command list still names.
-bool VoxiRenderer::applyPendingVoxelResolution() {
-    if (voxelResPending_ == 0) return false;
-    // CONSUMED WHETHER OR NOT THE REBUILD HAPPENS. A request that cannot be honoured -- the
-    // renderer is not ready, or it already built exactly this -- must not sit here being retried
-    // every frame for the rest of the run.
-    const u32 want = voxelResPending_;
-    voxelResPending_ = 0;
-    if (!giReady_ || want == voxelResBuilt_) return false;
-    return rebuildVoxelVolume(want);
 }
 
 // Places the GI volume: centre in world units, half-edge extent.
@@ -3258,18 +3224,8 @@ bool VoxiRenderer::createShadowResources() {
     return shadowTex_ != 0;
 }
 
-// Creates the radiance volume and its injection accumulator at `resolution`, into the caller's
-// handles rather than into the members.
-//
-// OUT-PARAMETERS RATHER THAN MEMBERS, which is what lets rebuildVoxelVolume() allocate the new pair
-// while the old one is still live and still bound. A 512^3 volume is 3.2 GB and createTexture can
-// genuinely fail; writing straight into voxelTex_ would mean a failed rebuild leaves the renderer
-// with no volume at all -- a black frame -- rather than with the volume it already had.
-bool VoxiRenderer::createVolumeTextures(u32 resolution, rhi::TextureHandle& outTex,
-                                        rhi::TextureHandle& outAccum, u32& outMips) {
-    outTex = outAccum = 0;
-    outMips = 0;
-
+// Creates the radiance volume, the injection accumulator and every binding set over them.
+bool VoxiRenderer::createVoxelVolume(u32 resolution) {
     rhi::TextureDesc d;
     d.dim    = rhi::TextureDim::Tex3D;
     d.width  = resolution;
@@ -3280,8 +3236,8 @@ bool VoxiRenderer::createVolumeTextures(u32 resolution, rhi::TextureHandle& outT
     d.bind   = rhi::ResourceBind::ShaderResource | rhi::ResourceBind::UnorderedAccess;
     d.initialState = rhi::ResourceState::ShaderResource;   // where the chain rests between frames
     d.debugName    = "Voxi radiance volume";
-    outTex = res_->createTexture(d);
-    if (!outTex) { AVER_ERROR("[Voxi] radiance volume {}^3 could not be created", resolution); return false; }
+    voxelTex_ = res_->createTexture(d);
+    if (!voxelTex_) { AVER_ERROR("[Voxi] radiance volume {}^3 could not be created", resolution); return false; }
 
     // Four uints per voxel (r, g, b, fragment count) interleaved along x: R32_UINT is the only typed
     // format D3D12 guarantees UAV atomics on.
@@ -3295,116 +3251,13 @@ bool VoxiRenderer::createVolumeTextures(u32 resolution, rhi::TextureHandle& outT
     ad.bind   = rhi::ResourceBind::UnorderedAccess;
     ad.initialState = rhi::ResourceState::UnorderedAccess;   // where it stays: nothing reads it as an SRV
     ad.debugName    = "Voxi injection accumulator";
-    outAccum = res_->createTexture(ad);
-    if (!outAccum) { AVER_ERROR("[Voxi] injection accumulator {}^3 could not be created", resolution); return false; }
+    voxelAccumTex_ = res_->createTexture(ad);
+    if (!voxelAccumTex_) { AVER_ERROR("[Voxi] injection accumulator {}^3 could not be created", resolution); return false; }
 
     // The resolved mip count, never a recomputed log2.
     rhi::TextureDesc got{};
-    if (!res_->textureInfo(outTex, got)) { AVER_ERROR("[Voxi] textureInfo failed for the radiance volume"); return false; }
-    outMips = got.mips;
-    return true;
-}
-
-// Points every descriptor that names the volume or the accumulator at whatever voxelTex_ and
-// voxelAccumTex_ currently are, and rebuilds the per-mip sets (their COUNT follows the resolution).
-//
-// SEPARATE FROM THE SETS' CREATION, because a rebuild must not recreate bindings_. That set carries
-// slots this function does not own and could not refill: the TLAS at t2, the ray-tracing vertex,
-// index, instance and material buffers at t3/t4/t5/t9, the blue noise at t10, and the three history
-// pairs at t6/t7/t11 with their UAVs. Each is written by a different function on its own schedule,
-// and none of them would be rewritten just because the grid changed size -- so recreating the set
-// here would silently unbind all of them and the frame would shade against a null table.
-bool VoxiRenderer::pointVolumeBindings() {
-    res_->setSrv(bindings_, 0, voxelTex_, rhi::kAllMips);
-    if (shadowTex_) res_->setSrv(bindings_, 1, shadowTex_);
-    if (giShadowTex_) res_->setSrv(bindings_, 8, giShadowTex_);   // t8, the GI-only shadow map
-    res_->setUav(bindings_, 0, voxelTex_, 0);
-    res_->setUav(bindings_, 1, voxelAccumTex_, 0);
-
-    res_->setUav(clearBindings_, 0, voxelTex_, 0);
-    res_->setUav(clearBindings_, 1, voxelAccumTex_, 0);
-    res_->setUav(resolveBindings_, 0, voxelTex_, 0);
-    res_->setUav(resolveBindings_, 1, voxelAccumTex_, 0);
-
-    // One set per filter step. A single-mip source view is what makes reading level m-1 while
-    // writing level m legal.
-    for (rhi::BindingSetHandle s : mipBindings_) if (s) res_->destroyBindingSet(s);
-    mipBindings_.clear();
-    mipBindings_.reserve(voxelMips_ ? voxelMips_ - 1 : 0);
-    for (u32 m = 1; m < voxelMips_; ++m) {
-        rhi::BindingSetDesc md;
-        md.srvCount = 1;
-        md.uavCount = 1;
-        md.srvKinds[0] = rhi::SlotKind::Texture3D;
-        md.uavKinds[0] = rhi::SlotKind::Texture3D;
-        const rhi::BindingSetHandle s = res_->createBindingSet(md);
-        if (!s) { AVER_ERROR("[Voxi] mip binding set {} could not be created", m); return false; }
-        res_->setSrv(s, 0, voxelTex_, m - 1);
-        res_->setUav(s, 0, voxelTex_, m);
-        mipBindings_.push_back(s);
-    }
-    return true;
-}
-
-// Rebuilds the volume at a new edge, keeping every binding set. Returns false with the OLD volume
-// still intact and still bound whenever the new one cannot be made.
-//
-// MUST NOT BE CALLED BETWEEN beginFrame AND endFrame. It rewrites descriptors in heaps the GPU may
-// still be reading, which is why it waits for idle first -- the same thing D3D12Device does around
-// its own target rebuilds. See applyPendingVoxelResolution for who is allowed to call it and when.
-bool VoxiRenderer::rebuildVoxelVolume(u32 resolution) {
-    if (!res_ || resolution == 0 || resolution == voxelResBuilt_) return false;
-    if (!bindings_ || !clearBindings_ || !resolveBindings_) return false;
-
-    rhi::TextureHandle newTex = 0, newAccum = 0;
-    u32 newMips = 0;
-    if (!createVolumeTextures(resolution, newTex, newAccum, newMips)) {
-        // Whichever half succeeded is given straight back: a half-allocated pair is not a volume,
-        // and at these sizes leaking one is a gigabyte.
-        if (newAccum) res_->destroyTexture(newAccum);
-        if (newTex)   res_->destroyTexture(newTex);
-        AVER_ERROR("[Voxi] the GI volume could not be rebuilt at {}^3; staying at {}^3",
-                   resolution, voxelResBuilt_);
-        return false;
-    }
-
-    // Every descriptor rewritten below lives in a heap a frame already submitted may still be
-    // reading from, and both textures below are about to be retired. The backend's own resize path
-    // calls waitForGpu() before doing exactly this; this is that wait, through the RHI.
-    res_->waitIdle();
-
-    if (voxelAccumTex_) res_->destroyTexture(voxelAccumTex_);
-    if (voxelTex_)      res_->destroyTexture(voxelTex_);
-    voxelTex_      = newTex;
-    voxelAccumTex_ = newAccum;
-    voxelMips_     = newMips;
-    const u32 was  = voxelResBuilt_;
-    voxelResBuilt_ = resolution;
-
-    if (!pointVolumeBindings()) {
-        // The textures exist and the main table points at them; only the mip chain is short. That
-        // is not something to limp on -- filterMips would read a set that is not there.
-        AVER_ERROR("[Voxi] the GI volume was rebuilt at {}^3 but its mip binding sets could not be "
-                   "made; indirect light is off until the renderer is reinitialised", resolution);
-        giReady_ = false;
-        return false;
-    }
-
-    // THE NEW VOLUME HOLDS NOTHING, so both gates that can skip a revoxelisation have to be told.
-    // The in-run snapshot is the one that matters: without this, a still camera means
-    // giSnapshotUnchanged() reports "nothing moved" and the empty volume is never filled, which
-    // reads as GI having switched itself off. The on-disk cache needs no help -- giCacheKey()
-    // already carries voxelResBuilt_, so it names a different file on its own.
-    giSnapValid_  = false;
-    giSnapExtent_ = -1.0f;
-
-    AVER_INFO("[Voxi] GI volume rebuilt: {}^3 -> {}^3, {} mips", was, voxelResBuilt_, voxelMips_);
-    return true;
-}
-
-// Creates the radiance volume, the injection accumulator and every binding set over them.
-bool VoxiRenderer::createVoxelVolume(u32 resolution) {
-    if (!createVolumeTextures(resolution, voxelTex_, voxelAccumTex_, voxelMips_)) return false;
+    if (!res_->textureInfo(voxelTex_, got)) { AVER_ERROR("[Voxi] textureInfo failed for the radiance volume"); return false; }
+    voxelMips_     = got.mips;
     voxelResBuilt_ = resolution;
 
     // Main table. Each slot declares its kind because Tier 1 hardware null-fills by dimension.
@@ -3420,8 +3273,11 @@ bool VoxiRenderer::createVoxelVolume(u32 resolution) {
     giTableKinds(bd.srvKinds, bd.uavKinds);
     bindings_ = res_->createBindingSet(bd);
     if (!bindings_) { AVER_ERROR("[Voxi] main binding set could not be created"); return false; }
-    // t0/t1/t8 and u0/u1 are written by pointVolumeBindings() at the end of this function, which is
-    // also what a later resolution change re-runs -- one list of volume descriptors, not two.
+    res_->setSrv(bindings_, 0, voxelTex_, rhi::kAllMips);
+    if (shadowTex_) res_->setSrv(bindings_, 1, shadowTex_);
+    if (giShadowTex_) res_->setSrv(bindings_, 8, giShadowTex_);   // t8, the GI-only shadow map
+    res_->setUav(bindings_, 0, voxelTex_, 0);
+    res_->setUav(bindings_, 1, voxelAccumTex_, 0);
     // t6/u2 (rtShadowHist_), t7/u3 (rtReflHist_) and t11/u4 (rtAoHist_) are populated once
     // onRenderTargetsChanged creates them -- the resolution is not known this early, and the
     // slots are declared above so Tier 1 null-fills them correctly until then. THREE pairs, not
@@ -3436,11 +3292,30 @@ bool VoxiRenderer::createVoxelVolume(u32 resolution) {
     cd.uavKinds[1] = rhi::SlotKind::Texture3D;
     clearBindings_ = res_->createBindingSet(cd);
     if (!clearBindings_) { AVER_ERROR("[Voxi] clear binding set could not be created"); return false; }
+    res_->setUav(clearBindings_, 0, voxelTex_, 0);
+    res_->setUav(clearBindings_, 1, voxelAccumTex_, 0);
 
     resolveBindings_ = res_->createBindingSet(cd);
     if (!resolveBindings_) { AVER_ERROR("[Voxi] resolve binding set could not be created"); return false; }
+    res_->setUav(resolveBindings_, 0, voxelTex_, 0);
+    res_->setUav(resolveBindings_, 1, voxelAccumTex_, 0);
 
-    return pointVolumeBindings();
+    // One set per filter step. A single-mip source view is what makes reading level m-1 while
+    // writing level m legal.
+    mipBindings_.reserve(voxelMips_ ? voxelMips_ - 1 : 0);
+    for (u32 m = 1; m < voxelMips_; ++m) {
+        rhi::BindingSetDesc md;
+        md.srvCount = 1;
+        md.uavCount = 1;
+        md.srvKinds[0] = rhi::SlotKind::Texture3D;
+        md.uavKinds[0] = rhi::SlotKind::Texture3D;
+        const rhi::BindingSetHandle s = res_->createBindingSet(md);
+        if (!s) { AVER_ERROR("[Voxi] mip binding set {} could not be created", m); return false; }
+        res_->setSrv(s, 0, voxelTex_, m - 1);
+        res_->setUav(s, 0, voxelTex_, m);
+        mipBindings_.push_back(s);
+    }
+    return true;
 }
 
 // THE MODULAR SEAM (Stage 3, GPU per-cluster shading parity): a caller that has merged Voxi's
