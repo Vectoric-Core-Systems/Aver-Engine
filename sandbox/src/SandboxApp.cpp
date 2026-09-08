@@ -20211,7 +20211,24 @@ private:
             }
             ImGui::ColorEdit3("Ground", sky_.groundAlbedo);
             ImGui::SliderFloat("Ground Blend", &sky_.groundBlend, 0.0f, 1.0f, "%.2f");
-            ImGui::SliderFloat("Sky Light", &sunAmbient_, 0.0f, 2.0f, "%.2f");
+            // RANGE 0..32, LOGARITHMIC, AND IT USED TO STOP AT 2.
+            //
+            // This is the multiplier on the only term that fills an enclosed space -- sky light
+            // through the openings -- and an arcade needs far more of it than a slider that stops at
+            // 2 can express. MEASURED on PTTest Sponza at exposure 1, luminance percentiles of the
+            // 3D viewport, sunlit surfaces reaching 237 in every row:
+            //
+            //   Sky Light  1    p50   8   p90 48    <- the median pixel is essentially black
+            //   Sky Light  4    p50  15   p90 48
+            //   Sky Light 16    p50  34   p90 75    <- shadows readable, sun unchanged
+            //
+            // The sun is correctly scaled: a directly lit surface reaches 237/255 with no exposure
+            // at all. What was missing was the fill, and the control for it could not reach the
+            // value the scene wanted -- so "everything is too dark" was, in part, unauthorable.
+            // Logarithmic because the useful range spans two orders of magnitude and the interesting
+            // end is the bottom.
+            ImGui::SliderFloat("Sky Light", &sunAmbient_, 0.0f, 32.0f, "%.2f",
+                               ImGuiSliderFlags_Logarithmic);
 
             ImGui::Separator();
             ImGui::TextUnformatted("Height Fog");

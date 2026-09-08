@@ -119,9 +119,22 @@ float3 acesLumaTonemap(float3 x) {
     // The ratio, not a re-normalisation: multiplying by Lo/Lin moves the pixel along its own
     // chromaticity line to the new luminance and does nothing else.
     float3 c = x * (Lo / Lin);
-    // Gamut-safe highlight rolloff, described above. saturate() below is then a no-op except on the
-    // last sliver, rather than the thing doing the work.
-    c = lerp(c, Lo.xxx, saturate(Lo * Lo));
+    // DESATURATE ONLY AS MUCH AS THE GAMUT DEMANDS, AND NOT A DROP MORE.
+    //
+    // This was `lerp(c, Lo, saturate(Lo*Lo))`, which is wrong in a way that only shows at high
+    // exposure: Lo*Lo is already 0.64 at Lo = 0.8, so it blended nearly two thirds of the way to
+    // grey in the MIDTONES, not in the highlights. MEASURED on Sponza -- chroma (mean R-B) at
+    // exposure 8/16/32 was 2.37 / 0.82 / -0.98, i.e. the curve turned the picture grey and then
+    // BLUE exactly as the old per-channel shoulder did. It reintroduced the defect this mode was
+    // written to remove.
+    //
+    // The only real constraint is that no channel may leave [0,1]. Blending toward the neutral Lo
+    // by t gives max channel m + t(Lo - m), so setting that to 1 gives the exact t that brings the
+    // brightest channel to white and leaves everything dimmer than that completely untouched. A
+    // pixel whose channels already fit keeps its full saturation at any exposure, which is the
+    // entire point of tonemapping luminance in the first place.
+    const float m = max(max(c.r, c.g), c.b);
+    if (m > 1.0) c = lerp(c, Lo.xxx, saturate((m - 1.0) / max(m - Lo, 1e-4)));
     return saturate(c);
 }
 
