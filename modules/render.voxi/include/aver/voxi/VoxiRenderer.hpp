@@ -1240,6 +1240,23 @@ private:
     // False right after creation or a resize: the textures hold no real previous frame yet, and
     // cb_.rtParams.w must say so rather than let the shader blend against garbage.
     bool rtHistValid_ = false;
+    // THE SUN THE HISTORY WAS ACCUMULATED UNDER. The temporal denoiser blends up to 90% of the
+    // previous frame's visibility, and its only validity test is GEOMETRIC -- a screen-space
+    // reprojection plus a depth match. Nothing in it knows the light can move. So with a still
+    // camera and a moving sun the reprojection passes every frame and the displayed shadow keeps
+    // ~90% of a value traced against the OLD sun direction: the ray is correct and the picture is
+    // ten frames behind it. That is "the shadows don't update properly when the light has moved".
+    //
+    // THE SUN FIELDS ONLY, NOT THE WHOLE SkyAtmosphere, and that restriction is the difference
+    // between a fix and a regression: the struct carries a cloud clock that advances every frame,
+    // so comparing all of it would invalidate the history on every frame and turn the denoiser back
+    // into the raw one-ray noise it exists to remove. giSnapshotUnchanged excludes cloudTime for the
+    // same reason; this is the narrower question of what the SHADOW ray actually depends on.
+    f32  rtHistSunDir_[3]   = {0, 0, 0};
+    f32  rtHistSunColor_[3] = {0, 0, 0};
+    f32  rtHistSunIntensity_ = -1.0f;   // negative so the first frame always counts as a change
+    // True when this frame's sun differs from the one above; see beginShadowHistory.
+    bool rtHistSunMoved() const;
     // This frame's camera view-projection, captured where fitCascades() already reads the camera,
     // and copied into prevViewProj_ at the end of prePass for NEXT frame's cb_.prevViewProj.
     f32  curViewProj_[16] = {};

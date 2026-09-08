@@ -3218,8 +3218,22 @@ public:
             if (flying_) ImGui::SetMouseCursor(ImGuiMouseCursor_None);
 
             if (flying_) {
-                yaw_   += io.MouseDelta.x * lookSpeed_;
-                pitch_ -= io.MouseDelta.y * lookSpeed_;
+                // input_.mouseDX/DY AND NOT io.MouseDelta, FOR THE REASON THE WHEEL BLOCK BELOW
+                // ALREADY SPELLS OUT AT LENGTH -- this is the same phase bug, and only the wheel
+                // half of it was ever fixed.
+                //
+                // ImGui computes io.MouseDelta inside NewFrame (UpdateMouseInputs), and
+                // Engine::frameStep runs onUpdate BEFORE uiNewFrame. So every read of io.MouseDelta
+                // from this function sees the delta computed by the PREVIOUS frame's NewFrame: the
+                // camera turns by where the mouse was a frame ago, on every frame, by construction.
+                // That is not a stutter and not a GPU cost -- it is a fixed one-frame lag between
+                // the hand and the picture, which is what "it lags behind my inputs" describes.
+                //
+                // InputState is fed by pumpEvents (before frameStep) and rolled at the END of
+                // onRender, so during onUpdate it holds THIS frame's accumulated motion. It is the
+                // correctly-phased source for anything in this function.
+                yaw_   += static_cast<f32>(input_.mouseDX()) * lookSpeed_;
+                pitch_ -= static_cast<f32>(input_.mouseDY()) * lookSpeed_;
                 pitch_ = pitch_ < -1.54f ? -1.54f : (pitch_ > 1.54f ? 1.54f : pitch_);
                 // WHEEL WHILE FLYING CHANGES SPEED, and SCROLL UP MAKES IT FASTER -- Unreal's own
                 // direction, and the one that survived contact with a hand. It shipped inverted
@@ -3313,7 +3327,11 @@ public:
                 // input_.wheel() in the flying_ block above for why the phase is wrong.
                 const f32 wheel = input_.wheel();
                 if (wheel != 0.0f) camPos_ += fwd * wheel * (flySpeed_ * 0.15f);
-                if (io.MouseDown[2]) { camPos_ -= right * io.MouseDelta.x * 0.02f; camPos_ += up * io.MouseDelta.y * 0.02f; }
+                // Same phase argument as the look block above: MMB pan read a frame-old delta too.
+                if (io.MouseDown[2]) {
+                    camPos_ -= right * static_cast<f32>(input_.mouseDX()) * 0.02f;
+                    camPos_ += up    * static_cast<f32>(input_.mouseDY()) * 0.02f;
+                }
             }
             // CTRL+S SAVES THE LEVEL, which the File menu has claimed it does for as long as that
             // menu has existed -- the "Ctrl+S" beside Save Level is the shortcut-LABEL parameter of
@@ -10454,7 +10472,12 @@ private:
         // sentence long -- every slot is written, every frame, whatever the gate decided.
         if (suppressed) aver_fw_input_set_mouse(0.0f, 0.0f, 0.0f);
         else if (mouseCaptured_) aver_fw_input_set_mouse(captureDx_, captureDy_, io.MouseWheel);
-        else aver_fw_input_set_mouse(m ? io.MouseDelta.x : 0.0f, m ? io.MouseDelta.y : 0.0f, m ? io.MouseWheel : 0.0f);
+        // THE UNCAPTURED BRANCH IS THE EDITOR'S NORMAL ONE (mouseCaptured_ is false outside Play),
+        // so gameplay saw the same frame-late mouse the camera did. input_.mouseDX/DY and
+        // input_.wheel() are the correctly-phased sources during onUpdate -- see the look block.
+        else aver_fw_input_set_mouse(m ? static_cast<f32>(input_.mouseDX()) : 0.0f,
+                                     m ? static_cast<f32>(input_.mouseDY()) : 0.0f,
+                                     m ? input_.wheel() : 0.0f);
 #endif
     }
 

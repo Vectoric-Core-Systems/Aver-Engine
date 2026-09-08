@@ -3046,8 +3046,15 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
             }
         }
     }
+    // A MOVED SUN INVALIDATES THE HISTORY, because nothing else does. rtReprojectHistory's validity
+    // test is purely geometric, so a still camera under a moving light reprojects perfectly and the
+    // blend keeps feeding back visibility traced against the sun's OLD direction -- the shadow ray
+    // is right every frame and the image is ~10 frames behind it. Dropping the history for the one
+    // frame the sun changes costs a single noisy frame and lets the next accumulate from scratch,
+    // which is exactly what a disocclusion already does.
+    const bool sunMoved = rtHistSunMoved();
     cb_.rtHistParams[0] = 1.0f;                                        // t6/u2 are bound to real textures
-    cb_.rtHistParams[1] = (rtHistValid_ && haveViewport) ? 1.0f : 0.0f; // ...and t6 + gSceneViewport are usable
+    cb_.rtHistParams[1] = (rtHistValid_ && haveViewport && !sunMoved) ? 1.0f : 0.0f; // ...and t6 + gSceneViewport are usable
     cb_.rtHistParams[2] = static_cast<f32>(rtFrameIndex_);
     // The TILE EDGE (rtPixelsPerRayTile_) as its bit count, not the edge itself: the shader masks
     // and shifts by this rather than multiplying or taking a modulo. rtPixelsPerRayTile_ is always
@@ -3081,8 +3088,31 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     cb_.rtDenoiseParams[2] = rtDenoiseMotionTaper_;
 }
 
+// Has the sun moved since the frame the history was last written under? Compares the three fields
+// the shadow and sky-occlusion rays actually depend on -- direction, colour, intensity -- and
+// deliberately nothing else; see the members' comment for why the whole sky struct is the wrong
+// question. Exact float compare on purpose: the sun either was edited or it was not, and a
+// tolerance here would be a second, invisible threshold to tune.
+bool VoxiRenderer::rtHistSunMoved() const {
+    if (!dev_) return false;
+    const rhi::SkyAtmosphere sky = dev_->skyAtmosphere();
+    for (int i = 0; i < 3; ++i) {
+        if (sky.sunDirection[i] != rtHistSunDir_[i]) return true;
+        if (sky.sunColor[i]     != rtHistSunColor_[i]) return true;
+    }
+    return sky.sunIntensity != rtHistSunIntensity_;
+}
+
 void VoxiRenderer::endShadowHistory() {
     if (!shadowHistoryActive()) return;
+    // Remember the sun this frame's history was accumulated under, so the next frame can tell
+    // whether it moved. Written here rather than in beginShadowHistory so it always describes what
+    // the history textures actually hold.
+    if (dev_) {
+        const rhi::SkyAtmosphere sky = dev_->skyAtmosphere();
+        for (int i = 0; i < 3; ++i) { rtHistSunDir_[i] = sky.sunDirection[i]; rtHistSunColor_[i] = sky.sunColor[i]; }
+        rtHistSunIntensity_ = sky.sunIntensity;
+    }
     std::memcpy(prevViewProj_, curViewProj_, sizeof(curViewProj_));
     std::memcpy(prevSceneViewport_, curSceneViewport_, sizeof(curSceneViewport_));
     rtHistWriteIdx_ = 1 - rtHistWriteIdx_;
