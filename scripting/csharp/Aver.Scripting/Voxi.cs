@@ -50,6 +50,8 @@ public static class Voxi
     [DllImport(Lib)] private static extern int aver_voxi_set_voxel_resolution(int res);
     [DllImport(Lib)] private static extern float aver_voxi_get_gi_intensity();
     [DllImport(Lib)] private static extern int aver_voxi_set_gi_intensity(float v);
+    [DllImport(Lib)] private static extern int aver_voxi_get_gi_update_interval();
+    [DllImport(Lib)] private static extern int aver_voxi_set_gi_update_interval(int frames);
     [DllImport(Lib)] private static extern float aver_voxi_get_gi_max_distance();
     [DllImport(Lib)] private static extern int aver_voxi_set_gi_max_distance(float cm);
     [DllImport(Lib)] private static extern int aver_voxi_ray_tracing_tier();
@@ -143,6 +145,23 @@ public static class Voxi
     {
         get => aver_voxi_get_gi_max_distance();
         set => aver_voxi_set_gi_max_distance(value);
+    }
+    /// <summary>
+    /// How many frames apart the GI volume is re-voxelised. 1 rebuilds every frame and is
+    /// bit-identical to having no amortisation at all; clamped to [1, 8].
+    /// </summary>
+    /// <remarks>
+    /// The one native knob for the cost that dominates under camera motion -- a moving camera takes
+    /// the GI update from about 7 ms to about 36 ms -- and it was exported and left unbound, so no
+    /// script could reach it. The trade is TEMPORAL, not spatial: indirect light lags scene changes
+    /// by up to N-1 frames and a still scene converges to exactly the same image, which is what
+    /// makes raising this during a chase and dropping it back a reasonable thing for gameplay to do.
+    /// The cone trace itself is unaffected -- it is a per-pixel lookup and still runs every frame.
+    /// </remarks>
+    public static int GiUpdateInterval
+    {
+        get => aver_voxi_get_gi_update_interval();
+        set => aver_voxi_set_gi_update_interval(value);
     }
 
     // ---- device capabilities ----

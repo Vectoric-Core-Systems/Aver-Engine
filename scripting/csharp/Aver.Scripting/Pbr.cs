@@ -81,6 +81,10 @@ public static class Pbr
     [DllImport(Lib)] private static extern int aver_pbr_set_normal_scale(int m, float v);
     [DllImport(Lib)] private static extern float aver_pbr_get_occlusion_strength(int m);
     [DllImport(Lib)] private static extern int aver_pbr_set_occlusion_strength(int m, float v);
+    [DllImport(Lib)] private static extern float aver_pbr_get_reflectance(int m);
+    [DllImport(Lib)] private static extern int aver_pbr_set_reflectance(int m, float v);
+    [DllImport(Lib)] private static extern float aver_pbr_get_f90(int m);
+    [DllImport(Lib)] private static extern int aver_pbr_set_f90(int m, float v);
     [DllImport(Lib)] private static extern float aver_pbr_get_ior(int m);
     [DllImport(Lib)] private static extern int aver_pbr_set_ior(int m, float v);
     [DllImport(Lib)] private static extern float aver_pbr_get_transmission(int m);
@@ -217,6 +221,34 @@ public static class Pbr
         {
             get => aver_pbr_get_occlusion_strength(Handle);
             set => aver_pbr_set_occlusion_strength(Handle, value);
+        }
+
+        /// <summary>
+        /// Normal-incidence reflectance of the DIELECTRIC substrate, in [0,1]. 0.04 is the default
+        /// and is what almost every non-metal actually measures; raising it is how a surface reads
+        /// as gemstone or wet rather than as plastic.
+        /// </summary>
+        /// <remarks>
+        /// This is the F0 the multiple-scattering compensation uses for the diffuse lobe, so it
+        /// changes how much energy reaches diffuse as well as how bright the highlight is -- see
+        /// averIndirectTerms in material_prelude.hlsl. It has nothing to do with Metallic: a metal
+        /// takes its F0 from the base colour instead.
+        /// </remarks>
+        public float Reflectance
+        {
+            get => aver_pbr_get_reflectance(Handle);
+            set => aver_pbr_set_reflectance(Handle, value);
+        }
+
+        /// <summary>
+        /// Reflectance at grazing incidence, in [0,1]. 1.0 is the physical answer for a clean
+        /// surface and is the default; lowering it is a stylistic choice that softens the rim
+        /// every Fresnel term produces.
+        /// </summary>
+        public float F90
+        {
+            get => aver_pbr_get_f90(Handle);
+            set => aver_pbr_set_f90(Handle, value);
         }
 
         /// <summary>
