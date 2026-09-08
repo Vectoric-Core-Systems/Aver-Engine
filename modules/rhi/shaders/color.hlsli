@@ -77,9 +77,59 @@ float3 acesFittedTonemap(float3 x) {
     return saturate(x);
 }
 
+// LUMINANCE-ONLY TONEMAPPING, which is the only one of the three that survives a large exposure.
+//
+// WHAT THE OTHER TWO CANNOT DO. Both curves above map each channel through an S-curve whose shoulder
+// flattens toward 1. Multiply the scene by enough and every channel lands on that flat part, so a
+// warm stone at (0.9, 0.7, 0.5) and a cold one at (0.5, 0.7, 0.9) both come out near white: the
+// curve has compressed away the very differences that made them different colours. It is not a bug
+// in either fit -- it is what a shoulder IS -- and it is why an under-lit scene that needs a big
+// exposure to be readable arrives on screen grey. MEASURED on PTTest Sponza, chroma (mean R-B) by
+// exposure through acesFittedTonemap: 1x -> 3.32, 2x -> 4.47, 5x -> 3.28, 8x -> 1.40.
+//
+// WHAT THIS DOES INSTEAD: tonemap the LUMINANCE, then put the original chromaticity back by scaling
+// the colour by the ratio the luminance moved. Hue and saturation are preserved exactly, by
+// construction, at any exposure -- the curve is asked only to decide how BRIGHT a pixel is, which is
+// the question it can actually answer, and never what colour it is.
+//
+// THE DESATURATION TERM IS NOT OPTIONAL AND IS NOT TASTE. Preserving chromaticity perfectly means a
+// pixel whose luminance maps to near 1 keeps its full saturation, and a fully saturated colour at
+// luminance 1 has channels outside [0,1] -- so it clips, and clipping is where hue shifts and
+// banding come from. Real film desaturates as it approaches the highlight for exactly this reason.
+// So the chromaticity is blended toward white as tonemapped luminance approaches 1, which keeps the
+// result in gamut while leaving everything below the highlight untouched. The blend is on Lo^2 so it
+// stays out of the way through the whole midtone range and only arrives at the very top.
+//
+// NOT THE DEFAULT, and deliberately: every recorded gate baseline in scripts/ was measured through
+// mode 0 or 1, and this changes colour everywhere the shoulder was doing work. It is offered as
+// mode 2 (--tonemap 2) so it can be judged against the other two on the same frame.
+float3 acesLumaTonemap(float3 x) {
+    x = max(x, 0.0);
+    // The same 2.0 gain acesFittedTonemap applies, and for the same derived reason: without it this
+    // curve puts middle grey about a stop below where the other two put it, so a comparison between
+    // modes would be measuring brightness rather than colour. See that function's own table.
+    x *= 2.0;
+    // The Rec.709 coefficients averLuminance uses, written out because that helper is DECLARED
+    // BELOW this function and HLSL has no forward declarations. Kept identical to it on purpose;
+    // if one ever changes, change both.
+    const float Lin = max(dot(x, float3(0.2126, 0.7152, 0.0722)), 1e-6);
+    // The scalar form of the same RRT/ODT fit the matrixed curve uses, so the three modes agree
+    // about brightness and differ only in what they do to colour.
+    const float Lo  = saturate(averRrtOdtFit(Lin.xxx).x);
+    // The ratio, not a re-normalisation: multiplying by Lo/Lin moves the pixel along its own
+    // chromaticity line to the new luminance and does nothing else.
+    float3 c = x * (Lo / Lin);
+    // Gamut-safe highlight rolloff, described above. saturate() below is then a no-op except on the
+    // last sliver, rather than the thing doing the work.
+    c = lerp(c, Lo.xxx, saturate(Lo * Lo));
+    return saturate(c);
+}
+
 // Picks the curve. `mode` rides PostCB::misc.w; 0 is the original per-channel fit, kept because it is
-// what every recorded gate baseline was measured against, and 1 is the matrixed fit above.
+// what every recorded gate baseline was measured against, 1 is the matrixed fit above, and 2 is the
+// luminance-only form that holds its colour under a large exposure.
 float3 averTonemap(float3 x, float mode) {
+    if (mode > 1.5) return acesLumaTonemap(x);
     return mode > 0.5 ? acesFittedTonemap(x) : acesTonemap(x);
 }
 

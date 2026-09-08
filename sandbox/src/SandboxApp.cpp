@@ -7207,6 +7207,7 @@ public:
     void setGiSkyOcclusionRays(int n) { giSkyOccRaysOverride_ = n; }             // --gi-sky-occlusion-rays N
     void setGiSkyOcclusionTile(int n) { giSkyOccTileOverride_ = n; }             // --gi-sky-occlusion-tile N
     void setSkyLight(f32 v) { skyLightOverride_ = v; }                          // --sky-light N
+    void setGiIntensity(f32 v) { giIntensityOverride_ = v; }                    // --gi-intensity F
     void setRtPixelsPerRay(int n) { rtPixelsPerRayOverride_ = n; }              // --rt-pixels-per-ray N
     void setRtShadowDenoise(int n) { rtShadowDenoiseOverride_ = n; }            // --rt-shadow-denoise N
     void setRtRenderMode(int n) { rtRenderModeOverride_ = n; }                  // --rt-render-mode 0|1
@@ -9141,6 +9142,28 @@ private:
             // this override's sentinel IS -1 precisely so that 0 stays expressible.
             take(giSkyOccRaysOverride_,      k.giSkyOcclusionRays, "--gi-sky-occlusion-rays");
             take(giSkyOccTileOverride_,      k.giSkyOcclusionTile, "--gi-sky-occlusion-tile");
+            // --gi-intensity F, the multiplier on the cone-traced bounce (gVoxelParams.y). Another
+            // slider with no command-line twin, so "is the bounce strong enough" could not be swept
+            // -- and that is the question behind "the bounce lighting isn't working". Applied here,
+            // last, so it outranks RENDER.GIINTENSITY from the manifest like every other flag.
+            if (giIntensityOverride_ >= 0.0f) {
+                if (k.giIntensity != giIntensityOverride_)
+                    AVER_INFO("[Project] --gi-intensity {} outranks the recorded {}",
+                              giIntensityOverride_, k.giIntensity);
+                k.giIntensity = giIntensityOverride_;
+                // `overridden` GATES THE PUSH AT THE BOTTOM OF THIS BLOCK -- `if (overridden)
+                // vx.setSettings(k)` -- and take() sets it for you. Writing k directly without this
+                // line makes the whole override a no-op whenever no OTHER flag happens to be
+                // present, and it fails exactly the way this block's own comments describe: the log
+                // says the flag outranked the manifest, and nothing changes.
+                //
+                // THE FIFTH INSTANCE OF THE BUG THIS BLOCK DOCUMENTS, and it was written here, in
+                // this commit, directly underneath four paragraphs warning about it. It survived
+                // review and was caught only by a measurement: --gi-intensity 0, 2 and 4 produced
+                // three byte-identical images. The log line above is what makes that debuggable --
+                // a flag that claims to have won and then loses is the shape being guarded against.
+                overridden = true;
+            }
             if (rtPixelsPerRayOverride_ > 0) take(rtPixelsPerRayOverride_, k.rtPixelsPerRayTile, "--rt-pixels-per-ray");
             // THE FOURTH INSTANCE OF THE SAME BUG CLASS, closed. --gi-update-interval had no
             // manifest key AND no entry here, while giUpdateInterval IS tier-derived inside
@@ -22704,6 +22727,8 @@ private:
     // --sky-light N. NEGATIVE means absent: 0 is a real, meaningful request (no sky ambient at all),
     // which is exactly the measurement this flag was added to make possible.
     f32  skyLightOverride_=-1.0f;
+    // --gi-intensity F. Negative means absent; 0 is a real request (bounce off, direct only).
+    f32  giIntensityOverride_=-1.0f;
     int  rtPixelsPerRayOverride_=0;  // --rt-pixels-per-ray N: shadow tile edge (0 = flag not given)
     int  rtShadowDenoiseOverride_=-1; // --rt-shadow-denoise N: spatial radius (-1 = flag not given)
     int  rtRenderModeOverride_=-1;    // --rt-render-mode 0|1 (-1 = flag not given)
@@ -25687,6 +25712,7 @@ Application* createApplication(int argc, char** argv) {
     // 0-means-absent could not express it.
     int giSkyOccTile = -1;
     f32 skyLightArg = -1.0f;   // --sky-light N; negative = flag absent
+    f32 giIntensityArg = -1.0f;   // --gi-intensity F; negative = flag absent
     // -1 = flag absent. 0 is a real value for BOTH: tonemap 0 is the legacy per-channel curve, and
     // max-radiance 0 means "no clamp at all".
     int tonemapArg = -1; f32 maxRadianceArg = -1.0f;
@@ -25732,6 +25758,13 @@ Application* createApplication(int argc, char** argv) {
         // In THIS loop for the C1061 reason above, like every flag added since.
         if (!std::strcmp(argv[i],"--sky-light") && i+1<argc) {
             skyLightArg = (f32)std::atof(argv[++i]); continue;
+        }
+        // --gi-intensity F: multiplier on the cone-traced bounce. 1 is the default; 0 is direct
+        // light only. The editor has a slider and the manifest has RENDER.GIINTENSITY; this is the
+        // missing third way, and the one a measurement script can use.
+        // In THIS loop for the C1061 reason above, like every flag added since.
+        if (!std::strcmp(argv[i],"--gi-intensity") && i+1<argc) {
+            giIntensityArg = (f32)std::atof(argv[++i]); continue;
         }
         // --tonemap 0|1: 0 the original per-channel ACES approximation (what every recorded gate
         // baseline was measured through), 1 the matrixed fit that keeps saturation. See
@@ -26562,6 +26595,7 @@ Application* createApplication(int argc, char** argv) {
     app->setGiSkyOcclusionRays(giSkyOccRays);
     app->setGiSkyOcclusionTile(giSkyOccTile);
     app->setSkyLight(skyLightArg);
+    app->setGiIntensity(giIntensityArg);
     app->setWindowed(windowedArg);
     app->setFullscreen(fullscreenArg);
     app->setTonemap(tonemapArg);

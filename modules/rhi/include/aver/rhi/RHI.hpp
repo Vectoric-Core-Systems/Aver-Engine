@@ -179,9 +179,14 @@ struct PostSettings {
     // reproduces the auto-exposed image to within 0.02 per channel, which is how the clamp was
     // identified as the thing being hit rather than the metering being wrong.
     //
-    // 3 keeps the useful range (still 2x brighter than unexposed) and stops short of the shoulder.
-    // A scene that wants more than 3x is under-lit, and the fix for that is light, not gain.
-    f32  exposureMax    = 3.0f;
+    // THE CEILING WENT BACK TO 8, because capping it was treating the symptom. It was briefly 3,
+    // which did remove the washout and was immediately reported as "too dark" -- correctly: the
+    // scene needs the gain, it just could not survive it. The cause was the CURVE, not the ceiling,
+    // and tonemap mode 2 (acesLumaTonemap) fixes it at the source by tonemapping luminance and
+    // keeping chromaticity. Measured at exposure 8, same frame: mode 1 gives chroma 1.41, mode 2
+    // gives 3.09, at the same brightness. With a curve that holds its colour there is no reason to
+    // forbid the exposure that makes an enclosed scene readable.
+    f32  exposureMax    = 8.0f;
     f32  exposureSpeed  = 3.0f;    // adaptation rate, in e-folds per second
     f32  exposureKey    = 0.18f;   // middle grey the average luminance is driven towards
     // Fraction of the histogram discarded at each end before averaging.
@@ -191,14 +196,25 @@ struct PostSettings {
     // WHICH TONE CURVE. 0 is the original per-channel Narkowicz/Hill approximation; 1 is the same
     // curve applied between the ACES input/output matrices (colour.hlsli's acesFittedTonemap).
     //
-    // 1 IS THE DEFAULT because 0 desaturates by construction -- it runs a scalar S-curve on R, G and
-    // B independently, so a saturated colour's channels compress at different rates and everything
-    // bright slides toward white. The matrixed form rotates into a space where the curve behaves and
-    // rotates back, which is the entire reason ACES has those matrices.
+    // 2 IS THE DEFAULT NOW: acesLumaTonemap, which tonemaps LUMINANCE and puts the original
+    // chromaticity back, so hue and saturation survive any exposure by construction.
+    //
+    // WHY THE CHANGE. 1 desaturates less than 0 but it still runs a shoulder per channel after the
+    // matrices, so a big exposure -- which an enclosed scene needs, and which the eye adaptation
+    // will reach for -- lands every channel on the flat part and the frame arrives grey. That was
+    // the whole of a "colours are washed out" report. MEASURED on PTTest Sponza, chroma (mean R-B)
+    // against exposure, mode 1: 1x -> 3.32, 2x -> 4.47, 5x -> 3.28, 8x -> 1.40. Mode 2 at that same
+    // 8x holds 3.09 at identical brightness, and above 5x mode 1 also lets BLUE overtake GREEN --
+    // a warm stone interior rendering cold.
+    //
+    // 1 IS KEPT and is still the right answer for anything that must match a recorded baseline: it
+    // desaturates less than 0 because the matrixed form rotates into a space where the curve behaves
+    // and rotates back, which is the entire reason ACES has those matrices. It is only mode 2 that
+    // declines to let the curve decide colour at all.
     //
     // 0 IS KEPT, and not only for taste: every recorded gate baseline in scripts/ was measured
     // through it, so it is the setting that reproduces them.
-    u32  tonemap = 1;
+    u32  tonemap = 2;
 
     // Ceiling applied to scene radiance immediately before the tonemap; 0 disables it.
     //
