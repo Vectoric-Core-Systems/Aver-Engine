@@ -1214,6 +1214,83 @@ bool rtReprojectAo(float3 wpos, float2 pixel, out float hist, out float2 velocit
 // also exactly one frame old and also guarded by a depth test, so the thing velocity still has to
 // pay for is sub-texel alignment -- bounded at half a texel at any speed by the nearest-neighbour
 // lookup. Ambient occlusion tolerates a stale sample better than a shadow edge does, not worse.
+// THE SPATIAL HALF OF THE DENOISER, WHICH THE AMBIENT TERM NEVER HAD.
+//
+// The sun shadow is denoised twice: rtShadowTemporal accumulates over frames, and rtShadowSpatial
+// then filters across pixels on read. Sky occlusion got only the first of those -- so its residual
+// variance had nowhere to go but the screen, and it is ~6/7 of this renderer's measured frame-to-
+// frame flicker (still camera, two captures one frame apart: 0.158% of channels past 8 codes with
+// it on, 0.026% with it off, 0.000% with ray tracing off entirely).
+//
+// A NEAR-COPY OF rtShadowSpatial, ON PURPOSE AND FOR THE REASON ALREADY DOCUMENTED at rtReprojectAo:
+// HLSL below SM 6.6 cannot take a Texture2D as a parameter, and folding the two behind a flag would
+// put a branch in a hot per-pixel path to save a page. The arithmetic is deliberately IDENTICAL --
+// the same plane-distance rejection expressed in last frame's depth, the same Gaussian with
+// sigma = radius/2, the same normal crease test, the same velocity taper. Change one, change both.
+//
+// It reads gAoHist -- LAST frame's openness -- exactly as the shadow filter reads last frame's
+// visibility, which is what makes the reprojected centre the right place to gather around.
+float rtAoSpatial(float centre, float3 wpos, float3 N, float2 pixel, float curDepth) {
+    const int radius = (int)gRtDenoiseParams.x;
+    if (radius <= 0 || gRtHistParams.y < 0.5 || gRtDenoiseParams.w < 0.5) return centre;
+
+    float texW, texH;
+    gAoHist.GetDimensions(texW, texH);
+
+    const float4 pclip  = mul(float4(wpos, 1.0), gPrevViewProj);
+    const float  pdepth = pclip.w;
+    // Hoisted out of the branch for the same undefined-derivative reason the shadow filter spells
+    // out: ddx/ddy in divergent flow differences against a lane that never ran.
+    const float  dpdx   = ddx(pdepth);
+    const float  dpdy   = ddy(pdepth);
+    const float  cdx    = ddx(curDepth);
+    const float  cdy    = ddy(curDepth);
+
+    float2 centrePx = pixel;
+    bool   reproj   = false;
+    if (pdepth > 1e-4) {
+        const float3 pndc = pclip.xyz / pdepth;
+        if (pndc.z >= 0.0 && pndc.z <= 1.0) {
+            centrePx = gSceneViewport.xy +
+                       float2(pndc.x * 0.5 + 0.5, 0.5 - pndc.y * 0.5) * gSceneViewport.zw;
+            reproj = true;
+        }
+    }
+    const int2 base = int2(floor(centrePx));
+
+    const float planeDepth = reproj ? pdepth : curDepth;
+    const float dzdx       = reproj ? dpdx   : cdx;
+    const float dzdy       = reproj ? dpdy   : cdy;
+
+    const float sigma  = max((float)radius * 0.5, 0.5);
+    const float inv2s2 = 1.0 / (2.0 * sigma * sigma);
+
+    float acc = centre;
+    float wsum = 1.0;
+    [loop] for (int oy = -radius; oy <= radius; ++oy) {
+        [loop] for (int ox = -radius; ox <= radius; ++ox) {
+            if (ox == 0 && oy == 0) continue;
+            const int2 t = base + int2(ox, oy);
+            if (any(t < 0) || t.x >= (int)texW || t.y >= (int)texH) continue;
+            const float2 st = gAoHist.Load(int3(t, 0));
+            const float predicted = planeDepth + dzdx * (float)ox + dzdy * (float)oy;
+            const float tol = max(abs(predicted), 1.0) * 0.02 + 1.0;
+            if (abs(st.y - predicted) > tol) continue;
+#if AVER_GBUFFER_HISTORY
+            const float3 nb = gGBufNormalHist.Load(int3(t, 0)).xyz * 2.0 - 1.0;
+            if (dot(N, nb) < 0.5) continue;
+#endif
+            const float w = exp(-(float)(ox * ox + oy * oy) * inv2s2);
+            acc  += st.x * w;
+            wsum += w;
+        }
+    }
+
+    const float velPx = reproj ? length(centrePx - pixel) : 0.0;
+    const float trust = gRtDenoiseParams.z > 0.0 ? saturate((3.0 - velPx) * gRtDenoiseParams.z) : 1.0;
+    return saturate(lerp(centre, acc / wsum, saturate(gRtDenoiseParams.y) * trust));
+}
+
 float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays) {
     const float fresh = rtSkyOcclusion(wpos, N, pixel, rays);
     // gRtDenoiseParams.w, NOT gRtHistParams.x, and the difference matters: the shadow and
@@ -1247,8 +1324,12 @@ float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays) {
     }
     // The ACCUMULATED value, not the fresh one -- writing `fresh` here would restart the average
     // every frame and buy nothing, the same trap the shadow path documents.
+    //
+    // AND RAW, NEVER FILTERED, which is the same single most important line the shadow path has:
+    // feeding the spatially filtered result back into the history turns this into an IIR filter
+    // whose artefacts compound every frame. The filter applies on the way OUT, below.
     gAoHistOut[uint2(pixel)] = float2(vis, curDepth);
-    return vis;
+    return rtAoSpatial(vis, wpos, N, pixel, curDepth);
 }
 
 // The SPATIAL denoiser: average this pixel's shadow with its neighbours' from the history texture,
