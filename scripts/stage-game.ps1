@@ -205,11 +205,34 @@ if ($Compile -and $authoredScripts.Count -gt 0) {
         # even when the exe exits 0. The editor emits ordinary warnings on stderr as a matter of course
         # ("[WARN] [ChunkWorld] cannot enable streaming..."), so staging died on a line that meant
         # nothing. The EXIT CODE is the contract here, not the presence of stderr output.
-        $prevEap = $ErrorActionPreference
-        $ErrorActionPreference = 'Continue'
-        $compileLog = & $sandbox --project $Project --frames 60 --compile-scripts 2>&1
-        $compileCode = $LASTEXITCODE
-        $ErrorActionPreference = $prevEap
+        # START-PROCESS, NOT `& $sandbox`, AND THIS ONE COULD SHIP A STALE PACKAGE. Sandbox.exe is
+        # linked /SUBSYSTEM:WINDOWS as of 0.5.0 so the editor opens no console window, and Windows
+        # PowerShell neither waits for nor captures a GUI-subsystem process: the call returns
+        # immediately, $compileLog comes back EMPTY and $LASTEXITCODE is not set at all.
+        #
+        # NOT SETTING IT IS THE DANGEROUS HALF. $LASTEXITCODE keeps whatever a PREVIOUS native command
+        # left there, so this does not reliably fail -- it can read 0 from something unrelated, fall
+        # through to the Test-Path below, find compiled assemblies left over from an EARLIER build,
+        # and package those. A staging step that silently ships stale scripts is worse than one that
+        # breaks loudly. gates.ps1, pt-compare.ps1 and run.ps1 were converted when the subsystem
+        # changed; this call site was missed.
+        #
+        # -Wait waits whatever the subsystem is. The redirect files replace what `2>&1` used to
+        # capture, and both streams are read back so the failure tail below still has something to
+        # print. The ErrorActionPreference dance is gone with the pipeline that needed it: no native
+        # command writes to this shell's stderr any more, so there is no NativeCommandError to relax.
+        $compileOut = [System.IO.Path]::GetTempFileName()
+        $compileErr = [System.IO.Path]::GetTempFileName()
+        try {
+            $proc = Start-Process -FilePath $sandbox -Wait -NoNewWindow -PassThru `
+                        -ArgumentList @('--project', $Project, '--frames', '60', '--compile-scripts') `
+                        -RedirectStandardOutput $compileOut -RedirectStandardError $compileErr
+            $compileCode = $proc.ExitCode
+            $compileLog = @(Get-Content -LiteralPath $compileOut -ErrorAction SilentlyContinue) +
+                          @(Get-Content -LiteralPath $compileErr -ErrorAction SilentlyContinue)
+        } finally {
+            Remove-Item -LiteralPath $compileOut, $compileErr -Force -ErrorAction SilentlyContinue
+        }
 
         if ($compileCode -ne 0) {
             # The tail only, and only on failure: the editor logs hundreds of lines about shaders and
