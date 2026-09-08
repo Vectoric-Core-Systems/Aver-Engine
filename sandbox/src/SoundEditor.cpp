@@ -18,12 +18,12 @@
 #  include "imgui.h"
 #endif
 
-// AVER_SOUND_EDITOR_AUDIO is defined by sandbox/CMakeLists.txt when Aver.Audio.Abi is linked into
+// AVER_WITH_AUDIO_ABI is defined by sandbox/CMakeLists.txt when Aver.Audio.Abi is linked into
 // this binary. GUARDED SEPARATELY FROM AVER_WITH_IMGUI ON PURPOSE, even though today the two are on
 // together: they mean different things, and conflating them would make "this build has no mixer"
 // read as "this build has no window". tests/editor's target defines neither, and a build configured
 // without the audio seam still compiles the whole tab -- it just cannot make a sound.
-#if AVER_SOUND_EDITOR_AUDIO
+#if AVER_WITH_AUDIO_ABI
 #  include "aver/audio/audio_abi.h"
 #endif
 
@@ -482,7 +482,7 @@ bool SoundEditor::renderPreview(std::string* why) {
 }
 
 void SoundEditor::stopPreview() {
-#if AVER_SOUND_EDITOR_AUDIO
+#if AVER_WITH_AUDIO_ABI
     if (previewVoice_ != 0) { aver_audio_stop(previewVoice_); previewVoice_ = 0; }
     if (previewSound_ != 0) {
         aver_audio_unload(previewSound_);
@@ -504,7 +504,7 @@ void SoundEditor::playPreview() {
         AVER_ERROR("[SoundEditor] preview failed for '{}': {}", path_, why);
         return;
     }
-#if AVER_SOUND_EDITOR_AUDIO
+#if AVER_WITH_AUDIO_ABI
     stopPreview();
     // Idempotent, and 0 when the machine has no output device -- which the ABI states is not an
     // error. The editor has never opened the device for anything else, so this is where it happens.

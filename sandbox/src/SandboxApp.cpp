@@ -19,7 +19,7 @@
 #include "aver/core/Version.hpp"
 #include "aver/formats/OcBeam.hpp"
 #include "aver/formats/OcMap.hpp"
-#if AVER_SOUND_EDITOR_AUDIO
+#if AVER_WITH_AUDIO_ABI
 // Historical name: set whenever Aver.Audio.Abi links in, meaning "this build has the mixer seam", not
 // "the sound editor wants audio" (named when SoundEditor's preview button was the only thing that
 // opened a device). Not renamed to AVER_SANDBOX_AUDIO because tests/editor relies on it undefined.
@@ -1843,7 +1843,7 @@ public:
         }
 #endif
 
-#if AVER_SOUND_EDITOR_AUDIO
+#if AVER_WITH_AUDIO_ABI
         // NOTHING IN THE RUNTIME HAD EVER OPENED THE AUDIO DEVICE, so every PlaySound was a silent
         // no-op during Play: aver_audio_init was reachable only from the Sound Editor's preview
         // button, and every audio_abi.h entry gates on the g_started flag only that call sets.
@@ -3748,7 +3748,7 @@ public:
         // here rather than threaded through as a local.
         // nav_ may be empty or a frame stale (loadNavForLevel/navBakeCheck poll from onRender, not
         // here) -- AgentSystem::tick treats that as "wait for a grid", not an error.
-#if AVER_SOUND_EDITOR_AUDIO
+#if AVER_WITH_AUDIO_ABI
         // Reclaim finished voices, every frame, Play or not -- the second half of the audio-device
         // gap: aver_audio_collect had the same single caller as aver_audio_init, so a graph-started
         // voice was never reclaimed and its slot leaked until the mixer ran out. Not gated on Play:
@@ -6509,7 +6509,7 @@ public:
 #if AVER_MODULE_PHYSICS
         aver_phys_shutdown();
 #endif
-#if AVER_SOUND_EDITOR_AUDIO
+#if AVER_WITH_AUDIO_ABI
         // Stops the mixer, releases the device and forgets every loaded sound. Idempotent, and a
         // no-op when the device was never opened -- so a build with no output device, or one that
         // never reached the init above, is unaffected.
@@ -9074,10 +9074,15 @@ private:
             AVER_INFO("[Project] physics settings will apply once the world exists");
         }
 #endif
-// AVER_SOUND_EDITOR_AUDIO, not a plausible-looking AVER_MODULE_AUDIO -- there is no such macro,
-// and an #if on one compiles this whole block to nothing while the build stays green. The name is
-// historical (see the include at the top of this file): it means "this build links the mixer seam".
-#if AVER_SOUND_EDITOR_AUDIO
+// AVER_WITH_AUDIO_ABI, not a plausible-looking AVER_MODULE_AUDIO -- there is no such macro,
+// and an #if on one compiles this whole block to nothing while the build stays green. It means
+// "this build links the mixer seam", and it is defined on every host that does.
+//
+// IT USED TO BE CALLED AVER_SOUND_EDITOR_AUDIO, and the name was the bug. Named after a TAB IN THE
+// EDITOR, it was defined on exactly one target, so the game runtime was excluded from the audio
+// device by a macro nobody read as a capability -- a packaged game was silent and Audio.Load
+// succeeded into nothing. Renamed for what it actually gates.
+#if AVER_WITH_AUDIO_ABI
         if (project_.hasAudioMix) {
             aver_audio_set_master_volume(project_.masterVolume);
             for (int b = 0; b < 4; ++b) aver_audio_set_bus_volume(b, project_.busVolume[b]);
@@ -21395,7 +21400,7 @@ private:
         ImGui::TextUnformatted("Audio");
         ImGui::SameLine(); ImGui::TextDisabled("(Aver.Audio mixer)");
         ImGui::Separator();
-#if AVER_SOUND_EDITOR_AUDIO
+#if AVER_WITH_AUDIO_ABI
         ImGui::TextDisabled("Applied when the project opens. The device may be closed until a");
         ImGui::TextDisabled("Play session or the Sound Editor opens it; the values still stick.");
         ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.45f);

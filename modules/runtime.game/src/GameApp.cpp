@@ -18,9 +18,13 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
+#if AVER_WITH_AUDIO_ABI
+#  include "aver/audio/audio_abi.h"
+#endif
 #if AVER_MODULE_SCENE
 #  include "aver/scene/World.hpp"
 #  include "aver/anim/AnimSystem.hpp"
+#  include "aver/anim/ControlRig.hpp"
 #  include "aver/save/SaveWorld.hpp"
 #  include "aver/formats/OcSave.hpp"
 #endif
@@ -872,6 +876,16 @@ void GameApp::openProject(Engine& e) {
 #endif
     // Apply the project's render settings to Voxi
     applyProjectRenderSettings();
+#if AVER_WITH_AUDIO_ABI
+    // AUDIO.* FROM THE MANIFEST, the third thing this host read past. SandboxApp applies these when
+    // a project opens; here the master and bus volumes stayed at their defaults, so a project that
+    // ships a quiet mix shipped a loud game. Safe with no device: the ABI's setters are no-ops until
+    // aver_audio_init has succeeded.
+    if (project_.hasAudioMix) {
+        aver_audio_set_master_volume(project_.masterVolume);
+        for (int b = 0; b < 4; ++b) aver_audio_set_bus_volume(b, project_.busVolume[b]);
+    }
+#endif
 }
 
 void GameApp::initScripting() {
@@ -1464,6 +1478,23 @@ void GameApp::onInit(Engine& e) {
     attachParticles(e);
     if (cfg_.pcgVolumeTest) attachPcgTest(e);
     initPhysics();      // BEFORE openProject: level load builds a static body per colliding placement
+#if AVER_WITH_AUDIO_ABI
+    // OPENING THE AUDIO DEVICE, WHICH A PACKAGED GAME HAS NEVER DONE. Every entry in audio_abi.h
+    // gates on a started flag that only this call sets, so until now Audio.Load succeeded, PlaySound
+    // returned a handle and nothing ever made a sound in a shipped build -- while the identical
+    // graph worked in the editor, because SandboxApp does call this. The macro guarding it was named
+    // after a tab in the editor and defined on the editor target alone; see this host's CMakeLists.
+    //
+    // BEFORE openProject, matching initPhysics() above: applying a project's AUDIO.* mix settings
+    // needs a started device, and openProject is where those are read.
+    //
+    // 0 is not an error -- the ABI defines it as "no output device" -- so this stays quiet where
+    // physics warns. No sound card is a machine fact; no collision is a broken engine.
+    if (aver_audio_init()) {
+        AVER_INFO("[Game] audio started ({} Hz, {} channel(s))",
+                  aver_audio_sample_rate(), aver_audio_channels());
+    }
+#endif
 #if AVER_MODULE_SYNAPSE_SCENE
     // BEFORE openProject, matching initPhysics() immediately above -- registration needs no level
     // and no physics, and a class placement spawned by openProject that carries CSynapseAgent (a
@@ -1476,6 +1507,22 @@ void GameApp::onInit(Engine& e) {
     // both must already have a registered component type before this call would be meaningful --
     // it does not itself require one, but there is no reason to race the ordering.
     synapse::registerBuiltinBehaviors(synapse::btSystem());
+#endif
+#if AVER_MODULE_SCENE
+    // THE CONTROL RIG, WHICH A SHIPPED GAME HAS NEVER HAD. SandboxApp::onInit registers and installs
+    // it (see the block there for why installation belongs in the same breath as registration); this
+    // host registered every other runtime-registered component -- the three Synapse ones directly
+    // above -- and never this one. Consequence: `Set Control Rig` returned false and every IK and
+    // aim rig was inert in a packaged build while working perfectly in Play, which is the worst
+    // shape a bug can have because the editor is where anyone would look for it.
+    //
+    // Not a missing dependency: Aver.Anim.Scene is already linked into this target and
+    // anim::animSystem() is already ticked in onUpdate. It was two calls that were never written.
+    //
+    // BEFORE openProject, for the same reason initPhysics() and the Synapse registrations above are:
+    // a class placement the level spawns carrying a CControlRig must find the type already there.
+    anim::controlRigSystem().registerComponents(scene::World::instance());
+    anim::controlRigSystem().install(anim::animSystem(), scene::World::instance());
 #endif
     openProject(e);
 #if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
@@ -1568,6 +1615,13 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     // project asking for RENDER.VOXELRES 256 that got it in the editor and 128 in the packaged build
     // is exactly the host-divergence shape verify-game.ps1 exists to catch.
     voxiRenderer_.applyPendingVoxelResolution();
+#endif
+#if AVER_WITH_AUDIO_ABI
+    // The other half of opening the device: a finished voice's slot is reclaimed here or not at all.
+    // aver_audio_collect had exactly one caller in the tree, the editor's, so a graph-started voice
+    // in a packaged game would have leaked its slot until the mixer ran out. Every frame, not gated
+    // on any play state -- voices outlive the thing that started them.
+    aver_audio_collect();
 #endif
 
     // THE PROFILER A SHIPPED GAME NEVER HAD. See GameConfig::statsIntervalSec for why this is a log
@@ -1787,6 +1841,11 @@ void GameApp::onShutdown(Engine& e) {
 #endif
 #if AVER_MODULE_PHYSICS
     aver_phys_shutdown();
+#endif
+#if AVER_WITH_AUDIO_ABI
+    // Stops the mixer, releases the device and forgets every loaded sound. Idempotent, and a no-op
+    // when the device was never opened -- so a machine with no output device is unaffected.
+    aver_audio_shutdown();
 #endif
 #if AVER_MODULE_SCRIPTING
     // Drains every loaded graph/behaviour and closes the CLR host, if one ever came up. Nothing above

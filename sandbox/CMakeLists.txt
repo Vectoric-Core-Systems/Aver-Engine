@@ -116,14 +116,19 @@ endif()
 # own `#include "aver/sound/Synth.hpp"` needs. Aver.Audio.Abi is the mixer seam, and only the
 # PREVIEW BUTTON needs that: a tree configured without the audio seam still gets the whole editor,
 # a real render and a real waveform, and only loses the ability to make a noise. That distinction is
-# what AVER_SOUND_EDITOR_AUDIO carries into the source, and it is why the tab does not simply reuse
+# what AVER_WITH_AUDIO_ABI carries into the source, and it is why the tab does not simply reuse
 # AVER_WITH_IMGUI to mean both things.
+#
+# THE MACRO IS A CAPABILITY, NOT A TAB, and it was named after the tab until 0.5.1 -- which is how
+# the game runtime came to be excluded from the audio device without anyone noticing. The same
+# block now exists in modules/runtime.game/CMakeLists.txt; the two must stay in step, and
+# verify-game.ps1 is where that belongs to be asserted rather than remembered.
 if(TARGET Aver.Sound)
   target_link_libraries(Sandbox PRIVATE Aver.Sound)
 endif()
 if(TARGET Aver.Audio.Abi)
   target_link_libraries(Sandbox PRIVATE Aver.Audio.Abi)
-  target_compile_definitions(Sandbox PRIVATE AVER_SOUND_EDITOR_AUDIO=1)
+  target_compile_definitions(Sandbox PRIVATE AVER_WITH_AUDIO_ABI=1)
 endif()
 # The actor editor's preview. Its own mesh registry, deliberately: an asset editor that reached
 # into the level editor's table could not exist or be tested without one.
