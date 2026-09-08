@@ -2106,8 +2106,13 @@ void VulkanDevice::packAtmosphere(const SkyAtmosphere& s) {
     // Mirrors D3D12Device::packAtmosphere field for field; see its comment.
     AtmosphereSkySH sh{};
     atmoSkyRadianceSH(fit, altKm, s.sunDirection, e0, sunRadius, sh);
+    // THE SAME CALIBRATION D3D12Device APPLIES, and it has to be the same or the two backends
+    // disagree about how much light the sky delivers -- see that copy for the measurement, why the
+    // sun is the calibrated one of the pair, and why 8 is empirical rather than derived. Change one,
+    // change both.
+    constexpr f32 kSkyIrradianceCalibration = 8.0f;
     for (int k = 0; k < 9; ++k) {
-        for (int i = 0; i < 3; ++i) frameCB_.skySh[k][i] = sh.c[k][i];
+        for (int i = 0; i < 3; ++i) frameCB_.skySh[k][i] = sh.c[k][i] * kSkyIrradianceCalibration;
         frameCB_.skySh[k][3] = 0.0f;
     }
 }

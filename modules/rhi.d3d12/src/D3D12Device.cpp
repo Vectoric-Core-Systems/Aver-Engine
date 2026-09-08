@@ -3872,8 +3872,42 @@ void D3D12Device::packAtmosphere(const SkyAtmosphere& s) {
     // wants the sky's irradiance wants the same nine numbers.
     AtmosphereSkySH sh{};
     atmoSkyRadianceSH(fit, altKm, s.sunDirection, e0, sunRadius, sh);
+    // THE SKY AND THE SUN WERE NOT ON THE SAME SCALE, and the sun is the one that is calibrated.
+    //
+    // A level authors the sun in LUX and LevelSky.hpp converts it with a documented divisor --
+    // `sunLux / (100000.0 / 3.0)` -- so intensity 3 IS 100,000 lux and one engine unit is 33,333
+    // lux. Nothing equivalent was ever applied to the sky: these nine coefficients go to the shader
+    // exactly as the atmosphere produced them, and skyLightIntensity multiplies them by an authored
+    // number that therefore means "1x of an uncalibrated quantity".
+    //
+    // MEASURED, PTTest's Default map (open sky, nothing occluding anything), exposure 1, luminance
+    // percentiles of the viewport with the sun unchanged in every row:
+    //
+    //   sky light 0   p50 119   max 237
+    //   sky light 1   p50 125   max 237
+    //   sky light 8   p50 157   max 237
+    //
+    // Out of gamma, the sky at its authored strength adds ~0.02 linear against direct sun at 0.86 --
+    // it delivers 2.3% of the illumination. A real clear sky delivers 15-20%. Indoors, where the sky
+    // through the openings is ALL the light there is, that shortfall is the whole picture: the
+    // median pixel of the Sponza arcade sat at 8/255 while sunlit stone correctly reached 237.
+    //
+    // 8 IS EMPIRICAL AND IS LABELLED AS SUCH. It is 18% / 2.3%, the factor that puts the diffuse
+    // sky where the physics says it should sit, and it matches what looked right by eye
+    // independently. It is NOT derived from the scattering integral, and the honest reading is that
+    // the atmosphere model under-produces diffuse irradiance -- single-versus-multiple scattering is
+    // the obvious suspect (the level carries `multiscatter 1.9`). Fixing that properly would replace
+    // this constant with a derivation and is its own piece of work; this makes the engine ship a
+    // physically sized sky in the meantime.
+    //
+    // APPLIED HERE, TO THE SH ONLY, on purpose. These coefficients feed the AMBIENT term and nothing
+    // else -- the visible sky dome is shaded from the atmosphere directly -- so this changes how much
+    // light the sky delivers without changing what the sky looks like. Scaling skyLightIntensity
+    // instead would have been wrong twice over: applyLevelSky writes that field back out on save, so
+    // a scale applied on load would compound on every round trip.
+    constexpr f32 kSkyIrradianceCalibration = 8.0f;
     for (int k = 0; k < 9; ++k) {
-        for (int i = 0; i < 3; ++i) frameCB_.skySh[k][i] = sh.c[k][i];
+        for (int i = 0; i < 3; ++i) frameCB_.skySh[k][i] = sh.c[k][i] * kSkyIrradianceCalibration;
         frameCB_.skySh[k][3] = 0.0f;
     }
 }
