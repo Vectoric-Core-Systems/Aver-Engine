@@ -3858,6 +3858,18 @@ public:
         // question behind "the colours look washed out": the sky is Rayleigh-blue and the bounce off
         // stone is warm, so a large unoccluded ambient dilutes chroma toward grey.
         if (skyLightOverride_ >= 0.0f) sunAmbient_ = skyLightOverride_;
+        // --sky-physical / --sky-authored / the sun elevation, re-applied HERE for the same reason
+        // --sky-light is: applyLevelSky overwrites sky_ when a level opens, so anything written at
+        // startup is gone by the first frame. See setSkyPhysical for what that cost.
+        if (skyModelOverride_ >= 0)
+            sky_.model = skyModelOverride_ ? rhi::SkyModel::Physical : rhi::SkyModel::Authored;
+        if (sunElevationOverride_ > -90.0f) {
+            f32 elev = 0.0f, azim = 0.0f;
+            sky_.sunAngles(elev, azim);
+            // Azimuth is left where the level put it: the flag names an elevation, and silently
+            // rotating the sun as well would make two runs differ by more than they claim to.
+            sky_.setSunAngles(sunElevationOverride_, azim);
+        }
         sky_.skyLightIntensity = sunAmbient_;
         sky_.fogDensity = fog;
         sky_.cloudTime = cloudTime_;
@@ -6766,15 +6778,22 @@ public:
         if (coverage >= 0.0f) sky_.cloudCoverage = coverage;
     }
     // Selects the physical sky and optionally moves the sun's elevation. --sky-physical [elevation].
+    //
+    // RECORDED AS AN OVERRIDE RATHER THAN WRITTEN ONCE, and that is the whole fix. Writing sky_ here
+    // happens at startup, and applyLevelSky then overwrites sky_ wholesale the moment a level opens
+    // -- so on any run that loads a level, which is every interesting one, this did nothing at all.
+    // MEASURED: `--sky-physical 20` and `--sky-physical 60` on Sponza produced BYTE-IDENTICAL
+    // frames, and identical to passing no flag, while the log said nothing. It was found while
+    // trying to use the sun's elevation to tell bounced light apart from an ambient term, which is
+    // exactly the kind of measurement a silently-inert flag turns into a confident wrong answer.
+    //
+    // The sixth instance of the flag-versus-authored-state precedence bug this file records; see the
+    // --gi-update-interval block for the previous four and --sky-light for the fifth.
     void setSkyPhysical(f32 elevationDeg) {
-        sky_.model = rhi::SkyModel::Physical;
-        if (elevationDeg > -90.0f) {
-            f32 elev = 0.0f, azim = 0.0f;
-            sky_.sunAngles(elev, azim);
-            sky_.setSunAngles(elevationDeg, azim);
-        }
+        skyModelOverride_ = 1;
+        if (elevationDeg > -90.0f) sunElevationOverride_ = elevationDeg;
     }
-    void setSkyAuthored() { sky_.model = rhi::SkyModel::Authored; }   // --sky-authored
+    void setSkyAuthored() { skyModelOverride_ = 0; }   // --sky-authored
     // Sets exposure, bloom intensity and auto-exposure. --exposure / --bloom / --auto-exposure.
     //
     // ASSIGNS UNCONDITIONALLY, AND HAS TO. argv's defaults are exposure 1.0 and bloom 0.0, and the
@@ -22729,6 +22748,11 @@ private:
     f32  skyLightOverride_=-1.0f;
     // --gi-intensity F. Negative means absent; 0 is a real request (bounce off, direct only).
     f32  giIntensityOverride_=-1.0f;
+    // --sky-physical / --sky-authored: -1 absent, 0 authored, 1 physical. And the sun elevation in
+    // degrees, -999 when absent (a real elevation can legitimately be negative -- the sun below the
+    // horizon is night, not an unset value).
+    int  skyModelOverride_=-1;
+    f32  sunElevationOverride_=-999.0f;
     int  rtPixelsPerRayOverride_=0;  // --rt-pixels-per-ray N: shadow tile edge (0 = flag not given)
     int  rtShadowDenoiseOverride_=-1; // --rt-shadow-denoise N: spatial radius (-1 = flag not given)
     int  rtRenderModeOverride_=-1;    // --rt-render-mode 0|1 (-1 = flag not given)

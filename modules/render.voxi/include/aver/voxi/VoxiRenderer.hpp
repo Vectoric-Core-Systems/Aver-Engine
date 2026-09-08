@@ -1350,6 +1350,13 @@ private:
                         rhi::SkyAtmosphere{}.sunDirection[2]};
     // No sunColor_ and no ambient_ here on purpose. See setSunDirection.
 
+    // HOW MANY EXTRA BAKES A CHANGE BUYS. PSVoxel's feedback term adds one bounce per rebuild, so
+    // this is literally the bounce depth the volume converges to after the scene settles. 5 puts the
+    // residual of a 0.5-albedo room at 3% -- past the point anything is visible -- and each tick is
+    // one voxelise, paid only in the frames right after something actually moved.
+    static constexpr u32 kGiConvergeTicks = 5;
+    u32  giConvergeTicks_ = 0;
+
     u32  voxelMips_ = 0, voxelResBuilt_ = 0;
     bool giReady_ = false, rtSupported_ = false, rtActive_ = false, debugView_ = false;
     bool unlit_ = false;   // --unlit / the viewport view-mode dropdown; see setUnlit

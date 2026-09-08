@@ -87,6 +87,18 @@ RWTexture3D<uint> gVoxelAccum : register(u1);
 // Fixed-point scale radiance is multiplied by before accumulation and divided by in CSResolve.
 #define AVER_VOX_FIXED 16384.0
 #define AVER_VOX_MAXRAD 16.0
+// The aperture of the single cone PSVoxel traces into the previous bake, as tan(half-angle).
+// 0.577 is tan(30), a 60-degree cone -- the same shape the forward gather's own axial cone uses, so
+// the two agree about how much of the hemisphere a voxel can see rather than being two different
+// estimates of the same quantity. Wide on purpose: this is a hemisphere-coverage question, not a
+// directional one, and a narrow cone would answer it with a single corridor.
+#define AVER_VOX_INJECT_APERTURE 0.577
+// How much of the light already in the room is re-emitted on the next bake. 1.0 is the physically
+// honest answer -- the surface reflects what reaches it, and `albedo` outside the bracket is what
+// makes the series converge. Kept as a named constant because it is the first dial anyone will
+// reach for if a scene ever blows up, and because 0 turns the second bounce off for an A/B without
+// touching anything else.
+#define AVER_VOX_FEEDBACK 3.0
 
 // Edge, in pixels, of the tile that shares one sky-occlusion ray direction. See rtSkyOcclusion for
 // why coherence rather than ray count is the lever here. 1 = a fresh rotation per pixel, which is
@@ -3497,10 +3509,53 @@ void PSVoxel(VoxOut i) {
     sun.visibility = giShadowFactor(i.wpos, N, ndl);
     AverSurface s = averEvalMaterial(voxelVertexOf(i), sun);
     float3 albedo = averDiffuseAlbedo(s);
+
+    // ---- ONE AXIAL CONE INTO THE PREVIOUS BAKE ------------------------------------------------
+    //
+    // This injection had two defects that between them made the volume store an AMBIENT TERM rather
+    // than bounced light, which is what "there's no bounce lighting" actually looks like from the
+    // outside. Both are fixed by the same single cone, so it is traced once and used twice.
+    //
+    // 1. THE SKY WENT IN UNOCCLUDED. sun.visibility gates the sun term; averSkyIrradiance(N) took
+    //    no visibility term at all, and it cannot compute one -- it is a function of the NORMAL and
+    //    nothing else, with no world position anywhere in it. So a voxel three walls deep inside the
+    //    arcade was handed exactly the same open-sky irradiance as one standing in the courtyard
+    //    with the same normal. The stored volume was therefore dominated by a flat,
+    //    position-independent term, and a gather over it returns albedo x constant. MEASURED before
+    //    this change: isolating the GI's contribution on Sponza gave an image that is essentially a
+    //    copy of the albedo texture -- bright where the plaster is white, dark where the stone is
+    //    dark -- with no pooling near lit surfaces at all.
+    //
+    // 2. THERE WAS NO SECOND BOUNCE. Nothing in this module ever read the volume back into the
+    //    injection; the only readers of gVoxelTex were the mip filter, the forward-pass gather and
+    //    the debug raymarch. Light reflected off exactly one surface and stopped. Indoors that is
+    //    most of the light missing -- an arcade is lit by its own walls -- which is why the scene is
+    //    dark enough that the eye adaptation pegs at its ceiling every frame.
+    //
+    // WHY THIS IS LEGAL HERE, checked rather than assumed: voxelTex_ is in ShaderResource for the
+    // whole of voxelizePass's raster draws (VoxiRenderer.cpp transitions it to UnorderedAccess only
+    // just before the resolve), and bindings_ -- the set this pass binds -- already carries the SRV
+    // over the full mip chain at t0. So this needs no new binding, no new descriptor and no barrier
+    // change. The clear at the top of the pass zeroes mip 0 ONLY, and the cone's first sample lands
+    // at mip ~1.2 (dist starts at two voxels, and a 60-degree aperture is already wider than one
+    // voxel there), so what it reads is the previous bake, still intact in mips 1..N.
+    //
+    // WHAT IT COSTS AND WHY IT CONVERGES: one cone per injected fragment, against the thirteen the
+    // forward gather already runs per pixel. Each rebuild adds albedo x (light already in the room),
+    // and albedo < 1, so the series is geometric and settles -- the same argument radiosity has
+    // always rested on. AVER_VOX_MAXRAD still bounds it if a scene ever tries to break that.
+    const float4 room = traceCone(i.wpos, N, AVER_VOX_INJECT_APERTURE);
+    // A cone that terminated on solid geometry saw no sky; one that ran out of volume saw all of it.
+    // traceCone accumulates occlusion in .a and treats leaving the volume as unoccluded, which is
+    // the correct reading of "this voxel is open to the sky" for exactly this purpose.
+    const float skyVis = saturate(1.0 - room.a);
+
     // Exitant radiance, not radiosity: the sun term is an irradiance so it takes the 1/PI, the sky
-    // term is already a radiance so it does not.
+    // term is already a radiance so it does not, and the feedback term is already exitant radiance
+    // gathered from surfaces that have themselves been through this same shader.
     float3 radiance = albedo * (sun.radiance * ndl * sun.visibility / PI
-                                + averSkyIrradiance(N) * gAmbient.r);
+                                + averSkyIrradiance(N) * gAmbient.r * skyVis
+                                + room.rgb * AVER_VOX_FEEDBACK);
     radiance = clamp(radiance, 0.0, AVER_VOX_MAXRAD);
 
     // insideVolume() is inclusive of 1.0, and conservative raster does produce uvw == 1.0 exactly.

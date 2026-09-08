@@ -836,10 +836,27 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
             // THE REBUILD GATE. Everything below recomputes a function of (draw list, sun, volume
             // placement); when none of those moved, the volume texture already holds the answer and
             // is still sitting there fully resolved and mip-filtered. See giSnapshotUnchanged.
-            if (giSnapshotUnchanged()) {
+            // CONVERGENCE TICKS, and the multi-bounce injection does not work without them.
+            //
+            // PSVoxel now reads the PREVIOUS bake and re-emits it (see its own comment), so light
+            // accumulates one bounce per REBUILD rather than one bounce per frame. The gate below
+            // is very good at its job -- it skips 96-98% of ticks on a still camera -- which meant
+            // the volume was baked once, the feedback had nothing but an empty volume to read, and
+            // the second bounce never happened at all. MEASURED: adding the feedback term alone
+            // moved the isolated GI contribution from 52.1 to 37.0, i.e. it removed the false
+            // unoccluded sky and put nothing back.
+            //
+            // So a rebuild that CHANGED something schedules a few more. Each one adds a bounce, the
+            // series converges geometrically (albedo < 1), and then the gate goes quiet again --
+            // the cost is a handful of extra bakes after a change, not a permanent tax. A still
+            // scene still settles into skipping everything, which is what the gate was for.
+            const bool converging = giConvergeTicks_ > 0;
+            if (giSnapshotUnchanged() && !converging) {
                 ++giSkipped_;
             } else {
                 ++giRebuilt_;
+                if (converging) --giConvergeTicks_;
+                else            giConvergeTicks_ = kGiConvergeTicks;
                 takeGiSnapshot();
                 // Before voxelizePass, inside this gate: PSVoxel samples the GI-only map through
                 // giShadowFactor, so it must exist before injection reads it, and rebuilding it on
