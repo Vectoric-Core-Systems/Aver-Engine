@@ -157,7 +157,31 @@ struct PostSettings {
     // Eye adaptation, from a luminance histogram of the frame.
     bool autoExposure   = true;
     f32  exposureMin    = 0.05f;   // clamps on the computed multiplier, not on scene luminance
-    f32  exposureMax    = 8.0f;
+    // THE CEILING WAS 8, AND 8 IS THE EXPOSURE AT WHICH COLOUR DIES. It was almost certainly copied
+    // from maxRadiance below, where 8 is genuinely derived -- "the input past which the tone curve
+    // has nothing left to say, acesTonemap(8) = 1.003, pure white". That is the correct ceiling for
+    // a RADIANCE clamp and exactly the wrong one for an exposure MULTIPLIER: it licenses the
+    // adaptation to scale the scene until the AVERAGE pixel sits where the curve maps everything to
+    // white, and no tone operator preserves chroma past its own shoulder.
+    //
+    // MEASURED on PTTest Sponza (an enclosed arcade -- dark enough that the adaptation pegs at this
+    // clamp), 3D viewport means, --frames 244, one run per row:
+    //
+    //   exposure    mean    R-B (chroma)
+    //   1 (off)     19.38   3.32
+    //   2           29.79   4.47   <- peak
+    //   3.2         38.66   4.34
+    //   5           48.76   3.28
+    //   8           61.61   1.40   <- what auto-exposure was picking
+    //
+    // Chroma peaks around 2 and has collapsed by 8, and above 5 BLUE overtakes GREEN -- a warm stone
+    // interior rendering cold, which is what "the colours look washed out" was. `--exposure 8`
+    // reproduces the auto-exposed image to within 0.02 per channel, which is how the clamp was
+    // identified as the thing being hit rather than the metering being wrong.
+    //
+    // 3 keeps the useful range (still 2x brighter than unexposed) and stops short of the shoulder.
+    // A scene that wants more than 3x is under-lit, and the fix for that is light, not gain.
+    f32  exposureMax    = 3.0f;
     f32  exposureSpeed  = 3.0f;    // adaptation rate, in e-folds per second
     f32  exposureKey    = 0.18f;   // middle grey the average luminance is driven towards
     // Fraction of the histogram discarded at each end before averaging.
