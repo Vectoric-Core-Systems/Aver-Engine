@@ -1417,7 +1417,42 @@ float3 rtShadowTemporal(float3 wpos, float3 N, float3 L, float2 pixel, float3 dp
 
     const uint tileBits = (uint)gRtHistParams.w;
     if (tileBits == 0u) {
-        const float3 fresh3 = rtShadow(wpos, N, L, pixel, dpx, dpy, rays, 0.0);
+        // THE SAME GOLDEN-ANGLE FRAME JITTER THE TILED PATH BELOW PASSES, and passing 0.0 here
+        // instead is what made this whole branch's accumulation buy nothing.
+        //
+        // rtShadow builds its sample angle as `ang0 = rtHash(pixel) * 2pi + frameJitter`. With a
+        // jitter of zero that is a pure function of the PIXEL: one fixed direction on the sun's
+        // disc, traced identically every frame for the life of the process. The exponential average
+        // below then averages ten copies of one sample, which is one sample -- so the comment that
+        // used to say the estimate "converges toward the many-ray answer" was describing something
+        // this branch could not do. At rays = 1, which is every shipped tier below Epic, a partially
+        // occluded pixel therefore reported a single hard 0/1-ish sample forever.
+        //
+        // MEASURED at the rt-penumbra probe (gates.ps1:296, --sun-angle 8.0, 1204 frames), against a
+        // converged reference of 16 rays at tile 1 -- which is motion-invariant and so is a real
+        // ground truth, 139,136,133 still and 137,134,133 moving:
+        //
+        //   tile 1, 1 ray (EVERY SHIPPED TIER)   88,92,99    error -51
+        //   tile 2, 1 ray                        132,129,128 error  -7
+        //   tile 4, 1 ray                        137,134,132 error  -2
+        //
+        // The amortised paths are an order of magnitude more accurate than the default, and the only
+        // thing they do differently to the estimate is pass this jitter. The other tell is in the
+        // same table: tile 1 reads 126 with the camera MOVING against 88 still -- motion was
+        // accidentally supplying the decorrelation, because reprojection walked the estimate across
+        // pixels with different rtHash values. An estimator that gets better when you shake the
+        // camera is not sampling.
+        //
+        // WHY THE FRAME INDEX IS SAFE HERE, given this file's standing rule that RT sampling must be
+        // a pure function of pixel position for the gate oracle: the rule exists so a probe is
+        // reproducible, and frameIdx is deterministic -- a --frames N run always ends on the same
+        // index, so the same run gives the same pixel. It is only a hazard when indexed INTO the
+        // radical-inverse sequence on the tiled path, where a pixel traces every 2^(2*tileBits)
+        // frames and that power-of-two stride pins the sequence's low bits (measured, and recorded
+        // as a disproven fix). This is an angular offset, not a sequence index, and here the stride
+        // is 1. Recorded RT gate values move; they are re-recorded, not suppressed.
+        const float frameJitter = (float)((uint)gRtHistParams.z) * 2.39996323;
+        const float3 fresh3 = rtShadow(wpos, N, L, pixel, dpx, dpy, rays, frameJitter);
         const float  fresh   = averShadowLum(fresh3);
         const float3 tint    = averShadowTint(fresh3, fresh);
 

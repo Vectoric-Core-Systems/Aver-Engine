@@ -72,7 +72,18 @@ function Invoke-Capture([string] $name, [string[]] $extra) {
     # prevent it. $Level must now be a real path (.ocmap or .ocworld), not a project-relative name.
     #
     # Placed after a COMPLETE flag pair and before $extra so no flag can swallow them as its value.
-    $args = @('--frames', $Frames, $Project, $Level, '--screenshot', $shot) + $extra
+    # QUOTED, AND THAT IS LOAD-BEARING ON THIS MACHINE. Windows PowerShell's Start-Process joins
+    # -ArgumentList with spaces and does NOT quote an element that contains one, so the default
+    # project root -- "C:\Users\User\Documents\Aver Projects\..." -- arrives as two arguments,
+    # neither with a recognised extension. SandboxApp classifies a bare argument BY EXTENSION, so
+    # both halves are ignored, the empty editor is captured, and this script reports a MAD for two
+    # pictures of nothing. Measured: a capture pair taken this way logged "over 0 entities".
+    #
+    # This is the SAME failure the comment above records ("--project and --open-level, NEITHER FLAG
+    # EXISTS"), reintroduced one layer down: the arguments were made positional and correct, and then
+    # taken apart again by the launcher.
+    $q = { param($s) '"' + $s + '"' }
+    $args = @('--frames', $Frames, (& $q $Project), (& $q $Level), '--screenshot', (& $q $shot)) + $extra
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     # Start-Process, for the reason spelled out in gates.ps1's Invoke-Gate: Sandbox.exe is
