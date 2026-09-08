@@ -1,6 +1,8 @@
 // .ocrig text reader and writer. See OcRig.hpp for what the format is and why it is text.
 #include "aver/formats/OcRig.hpp"
 
+#include "aver/platform/FileSystem.hpp"
+
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -182,11 +184,10 @@ std::string writeOcRig(const OcRigData& rig) {
 }
 
 bool saveOcRig(const std::string& path, const OcRigData& rig, std::string* err) {
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);
-    if (!f) return fail(err, "cannot write " + path);
+    // Atomic rather than truncate-then-write; see writeFileBytesAtomic in FileSystem.hpp. A .ocrig is
+    // authored text a user typed, overwritten in place, so a half-written one is lost work.
     const std::string text = writeOcRig(rig);
-    f.write(text.data(), static_cast<std::streamsize>(text.size()));
-    if (!f) return fail(err, "write failed for " + path);
+    if (!writeFileTextAtomic(path, text)) return fail(err, "write failed for " + path);
     return true;
 }
 

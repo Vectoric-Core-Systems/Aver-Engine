@@ -1193,10 +1193,14 @@ bool loadOcMesh(const std::string& path, OcMeshData& out, std::string* why) {
 bool saveOcMesh(const std::string& path, const OcMeshData& in, std::string* why) {
     std::vector<u8> bytes;
     if (!writeOcMesh(in, bytes, why)) return false;
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);
-    if (!f) return fail(why, ".ocmesh: cannot write " + path);
-    f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-    if (!f) return fail(why, ".ocmesh: write failed on " + path);
+    // ATOMIC, NOT TRUNCATE-THEN-WRITE. An ofstream opened with ios::trunc zeroes the file when the
+    // STREAM IS CONSTRUCTED, before a byte of `bytes` is written, and this overwrites a real asset in
+    // place -- so a crash, a kill or a full disk in that window destroyed the previously-good file and
+    // not merely the unsaved edit. writeFileBytesAtomic writes a temporary beside the target and swaps
+    // only a complete one into place; see its comment in FileSystem.hpp, which already names this
+    // class of caller.
+    if (!writeFileBytesAtomic(path, bytes.data(), bytes.size()))
+        return fail(why, ".ocmesh: write failed on " + path);
     return true;
 }
 

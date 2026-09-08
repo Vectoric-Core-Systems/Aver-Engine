@@ -23877,11 +23877,24 @@ private:
         // author actually was. Guessing is the fallback for a level that has never been saved with
         // one, which is every level written before the record existed.
         //
-        // --cam STILL WINS, and deliberately: it is applied after this in onAttach (see the
-        // camOverride_ block there), so a bounded capture or a gate run still points where it was
-        // told to rather than wherever somebody last left the editor. That ordering is the whole
-        // reason this does not simply assign in onAttach.
-        if (w.hasCamera) {
+        // --cam STILL WINS, and it now does so BY ASKING rather than by ordering. The claim used to
+        // be that the camOverride_ block in onInit runs after this one, which is true only for the
+        // start map: --open-level is drained from the FRAME LOOP, long after onInit has applied the
+        // override, so a level opened that way restored its own CAMERA record straight over it.
+        // Measured: four captures at four different --cam positions returned the same probe
+        // (72,71,79) and the same image, because none of the four cameras was ever used.
+        //
+        // A COMMAND LINE OUTRANKS STORED STATE. That is the same rule a project manifest already
+        // learned the hard way when it silently outranked the render flags, and the failure has the
+        // same shape both times: the run is not wrong, it just measures somewhere else, and nothing
+        // says so. Refusing the restore here rather than re-applying the override afterwards keeps
+        // one writer for the camera on this path instead of two that must stay in order.
+        // BOTH WRITERS ARE SKIPPED, not just the restore: the frameCameraOn fallback below is the
+        // other way this function moves the camera, and letting it run would replace one silent
+        // override with another.
+        if (camOverride_) {
+            if (w.hasCamera) AVER_INFO("[Level] CAMERA record ignored -- --cam was given and outranks it");
+        } else if (w.hasCamera) {
             constexpr f32 kRad = 3.14159265358979323846f / 180.0f;
             camPos_ = Vec3{static_cast<f32>(w.camX), static_cast<f32>(w.camY), static_cast<f32>(w.camZ)};
             yaw_    = static_cast<f32>(w.camYaw) * kRad;
