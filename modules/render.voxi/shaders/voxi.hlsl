@@ -1384,17 +1384,35 @@ float rtAoSpatial(float centre, float3 wpos, float3 N, float2 pixel, float curDe
     return saturate(lerp(clamped, acc / wsum, saturate(gRtDenoiseParams.y) * trust));
 }
 
-float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays) {
+// `coneAo` is the cone gather's own occlusion -- smooth, deterministic, and ALREADY COMPUTED at
+// every tier. At Epic it was computed and then thrown away (coneTracedIndirect says exactly that of
+// its own `rdAo`). Passing it in as the PRIOR therefore costs nothing.
+float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays, float coneAo) {
     const float fresh = rtSkyOcclusion(wpos, N, pixel, rays);
     // gRtDenoiseParams.w, NOT gRtHistParams.x, and the difference matters: the shadow and
     // reflection pairs exist at every ray-tracing tier, but this one is allocated only where the
     // ray is actually traced -- High and Epic. At Low and Medium the slots are genuinely absent,
     // and touching a null UAV is undefined rather than merely wasteful. Returning the fresh trace
     // is also the correct answer there: with no history there is nothing to accumulate against.
-    if (gRtDenoiseParams.w < 0.5) return fresh;
+    // No AO history allocated at all (Low/Medium): the cone's answer, not a lone binary ray.
+    if (gRtDenoiseParams.w < 0.5) return coneAo;
 
     const float curDepth = mul(float4(wpos, 1.0), gViewProj).w;
-    float vis = fresh;
+    // SEEDED FROM THE CONE, NOT FROM THE RAW RAY. At one ray `fresh` is BINARY -- 0 or 1 -- so a
+    // pixel with no usable history put a coin flip on screen and then wrote that coin flip into the
+    // history for its neighbours to read next frame. That is the measured artefact: with a
+    // scale-free metric (each image normalised to its OWN mean, because both an absolute-code metric
+    // and a divide-by-local-median one are confounded by the brightness an ablation changes -- two
+    // rankings had to be discarded before this was measured honestly), ablating this ray takes
+    // bright speckle from 0.071% of pixels to 0.012%. That is 83% of it, and below the 0.038%
+    // measured with ray tracing off altogether.
+    //
+    // The cone gather answers the SAME question -- how much of the hemisphere is open -- smoothly,
+    // deterministically, and it is what every tier below Epic already ships. So it is the right
+    // thing to stand on when the traced estimate has nothing to average against: the pixel starts
+    // from a plausible smooth value and the traced samples refine it over the following frames,
+    // instead of starting from noise and passing noise on.
+    float vis = coneAo;
     float histV = 0.0;
     float2 velocityPx = 0.0;
     if (gRtHistParams.y > 0.5 && rtReprojectAo(wpos, pixel, histV, velocityPx)) {
@@ -1413,6 +1431,7 @@ float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays) {
         // is eight times more visible, and this term rather than the texture is the floor.
         // ~33 frames of history against ~10.
         const float weight = lerp(0.97, 0.5, t);
+        // History exists, so the traced sample is the UPDATE and the prior above goes unused.
         vis = lerp(fresh, histV, weight);
     }
     // The ACCUMULATED value, not the fresh one -- writing `fresh` here would restart the average
@@ -2715,7 +2734,7 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     // happened, and cost a build that reported OK because HLSL compiles at RUNTIME here.
 #if AVER_RT
     ind4.occlusion    = gAmbientParams.x > 0.5
-                      ? rtSkyOcclusionTemporal(i.wpos, N, i.pos.xy, (uint)gAmbientParams.x)
+                      ? rtSkyOcclusionTemporal(i.wpos, N, i.pos.xy, (uint)gAmbientParams.x, ao)
                       : ao;
 #else
     ind4.occlusion    = ao;
@@ -3501,7 +3520,7 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     }
 #elif AVER_RT && AVER_RD_ABLATE != AVER_RD_ABL_SKYOCC
     ind.occlusion    = gAmbientParams.x > 0.5
-                     ? rtSkyOcclusionTemporal(wpos, N, i.pos.xy, (uint)gAmbientParams.x)
+                     ? rtSkyOcclusionTemporal(wpos, N, i.pos.xy, (uint)gAmbientParams.x, rdAo)
                      : rdAo;
 #else
     // ablated (or no ray tracing): the cone gather's own occlusion, which is what every tier below
