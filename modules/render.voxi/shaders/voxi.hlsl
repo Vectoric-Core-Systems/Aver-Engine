@@ -1508,6 +1508,10 @@ float rtShadowSpatial(float centre, float3 wpos, float3 N, float2 pixel, float c
 
     float acc = centre;
     float wsum = 1.0;
+    // Neighbourhood statistics for the clamp below, EXCLUDING the centre -- the question is whether
+    // the centre disagrees with its neighbours, and a statistic containing it cannot answer that.
+    // Free: these taps are already loaded, depth-tested and crease-tested.
+    float nSum = 0.0, nSum2 = 0.0, nCount = 0.0;
     [loop] for (int oy = -radius; oy <= radius; ++oy) {
         [loop] for (int ox = -radius; ox <= radius; ++ox) {
             if (ox == 0 && oy == 0) continue;
@@ -1533,6 +1537,7 @@ float rtShadowSpatial(float centre, float3 wpos, float3 N, float2 pixel, float c
             const float w = exp(-(float)(ox * ox + oy * oy) * inv2s2);
             acc  += st.x * w;
             wsum += w;
+            nSum += st.x; nSum2 += st.x * st.x; nCount += 1.0;
         }
     }
 
@@ -1568,9 +1573,30 @@ float rtShadowSpatial(float centre, float3 wpos, float3 N, float2 pixel, float c
     // gRtDenoiseParams.z is the taper's falloff rate, and 0 means NO TAPER (the pre-existing
     // behaviour) rather than "taper instantly to nothing" -- a knob whose off position silently
     // disables the whole filter is the kind of default that gets measured by accident.
+    // THE OUTLIER CLAMP THIS FILTER NEVER HAD, and its AO twin already argues the case: a Gaussian
+    // is LINEAR, so an isolated extreme is SPREAD across the kernel rather than removed. That is
+    // why raising the shadow ray count from 1 to 16 moved the impulse metric not at all (0.080% ->
+    // 0.080% of pixels past 64 codes) -- more angular samples cannot fix an unclamped impulse, and
+    // measuring ray count was what ruled the sampler out and pointed at the filter.
+    //
+    // Same shape as rtAoSpatial: mean +/- 2 sigma over the accepted neighbours, a floor under sigma
+    // so a perfectly flat neighbourhood does not erase the centre's own detail along with its noise,
+    // and a three-tap minimum so a silhouette pixel -- where the depth and crease rejects have
+    // thrown most of the kernel away -- is not clamped against a statistic built out of nothing.
+    float clamped = centre;
+    if (nCount >= 3.0) {
+        const float mean  = nSum / nCount;
+        const float nsig  = sqrt(max(nSum2 / nCount - mean * mean, 0.0));
+        const float k     = 2.0 * max(nsig, 0.02);
+        clamped = clamp(centre, mean - k, mean + k);
+        acc += clamped - centre;   // the blurred average carried the UNCLAMPED centre at weight 1
+    }
+
     const float velPx = reproj ? length(centrePx - pixel) : 0.0;
     const float trust = gRtDenoiseParams.z > 0.0 ? saturate((3.0 - velPx) * gRtDenoiseParams.z) : 1.0;
-    return lerp(centre, acc / wsum, saturate(gRtDenoiseParams.y) * trust);
+    // Clamped first, then blended, so the impulse is gone before the linear filter ever sees it --
+    // and so a run with the blur turned down still gets the clamp.
+    return lerp(clamped, acc / wsum, saturate(gRtDenoiseParams.y) * trust);
 }
 
 // The PRIMARY sun-shadow call only -- rtReflection's inner rtShadow() call stays one ray with no
@@ -1703,7 +1729,18 @@ float3 rtShadowTemporal(float3 wpos, float3 N, float3 L, float2 pixel, float3 dp
         // return `fresh` unfiltered, leaving the default's hard 0/1 shadow untouched: the penumbra
         // probe read an unchanged 61,59,59 at every radius, which is what caught it. Two returns,
         // two call sites -- easy for a later edit to drop one again.
-        return rtShadowSpatial(vis, wpos, N, pixel, curDepth) * tint;
+        // SATURATED. `tint` is this pixel's RAW ratio v/lum, deliberately unfiltered (see
+        // averShadowTint), while `vis` has been through a 0.97 temporal blend and a spatial filter.
+        // The identity tint * lum == v holds only while vis == lum, and the two are designed to
+        // disagree -- so wherever the filters move vis away from the fresh trace, the product is
+        // free to exceed the transmittance it came from. averShadowTint bounds its DENOMINATOR at
+        // 1e-4 and not its quotient: the per-channel maximum is 1/0.0722 = 13.85 on blue. A deeply
+        // shadowed pixel with vis 0.05 and a saturated tint therefore reports 0.69 -- two thirds
+        // lit -- and that lands in AverLight::visibility, which material_prelude documents as
+        // "(1,1,1) = fully lit" and multiplies straight into the sun's radiance.
+        //
+        // A visibility cannot exceed one. Saturating says so, and costs nothing.
+        return saturate(rtShadowSpatial(vis, wpos, N, pixel, curDepth) * tint);
     }
 
     // Which pixel in its tileBits x tileBits tile traces THIS frame -- a bitmask, not a modulo, since
@@ -1754,7 +1791,8 @@ float3 rtShadowTemporal(float3 wpos, float3 N, float3 L, float2 pixel, float3 dp
     // another name) whose artefacts compound every frame. The filter applies on READ, below; writing
     // it here to "save work" is the bug, not the optimisation.
     gRtShadowHistOut[uint2(pixel)] = float2(vis, curDepth);
-    return rtShadowSpatial(vis, wpos, N, pixel, curDepth) * tint;
+    // The same saturate, and for the same reason -- see the tiled branch above.
+    return saturate(rtShadowSpatial(vis, wpos, N, pixel, curDepth) * tint);
 }
 
 // Traces one reflection ray and shades what it hits. Global, unlike the cone tracer it replaced,
@@ -1844,7 +1882,18 @@ float3 rtReflection(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, flo
     // hardware adapter and WARP. ONE ray, not the full disc -- the single largest saving in the ray
     // path (was 1 reflection + 4-ray disc, 5 rays where 2 do now; a reflected penumbra isn't
     // resolvable in a one-bounce mirror image anyway). float3: a tinted medium tints this too.
-    float3 shadow = rtShadow(hitPos, nWS, L, pixel, float3(0,0,0), float3(0,0,0), 1u, 0.0);
+    // frameJitter, NOT 0.0, AND THE ZERO WAS A FROZEN SAMPLE. rtShadow builds its disc angle as
+    // rtHash(pixel) * 2pi + frameJitter, so passing 0 here made this ray a pure function of the
+    // PIXEL: one direction on the sun's disc, identical on every frame for the life of the process.
+    // At one ray that is a binary value, and temporal accumulation downstream converges TO it rather
+    // than averaging it away -- an estimator cannot be denoised into correctness when every sample
+    // it will ever take is the same sample.
+    //
+    // This is the identical defect fixed for the PRIMARY shadow ray in 421a01e3, which left this
+    // inner one behind. MEASURED consequence: of the isolated bright outliers left in a shadowed
+    // frame, 60.7% sit on the SAME pixels two frames running, and 98.0% of the dark ones do -- the
+    // signature of a deterministic per-pixel error rather than of sampling noise.
+    float3 shadow = rtShadow(hitPos, nWS, L, pixel, float3(0,0,0), float3(0,0,0), 1u, frameJitter);
 
     // LAMBERTIAN EXITANT RADIANCE, and the /PI is the whole point. averGroundRadiance's reference:
     //     E = sunIrradiance*ndl + PI*skyRadiance*ambient;   return albedo * E / PI;
@@ -2700,7 +2749,10 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
         const float skyW = smoothstep(0.5, 0.75, s.rough);
         float3 skyR = float3(0.0, 0.0, 0.0);
         if (!specHit || skyW > 0.0) skyR = skyColor(R);
-        ind4.specular = lerp(specHit ? refl : skyR, skyR, skyW);
+        // The raster twin of the clamp documented at PSRayDriven's own copy of this line. Change
+        // one, change both -- the two primary-visibility paths must agree about how much radiance a
+        // reflection may return, or they disagree about the brightness of the same surface.
+        ind4.specular = clamp(lerp(specHit ? refl : skyR, skyR, skyW), 0.0, AVER_VOX_MAXRAD);
     } else
 #endif
     if (gVoxelParams.w > 0.5) {
@@ -3361,7 +3413,23 @@ RayDrivenOut PSRayDriven(SkyOut i) {
 #else
         if (!specHit || skyW > 0.0) skyR = skyColor(R);
 #endif
-        ind.specular = lerp(specHit ? refl : skyR, skyR, skyW);
+        // CLAMPED, AND THIS WAS THE ONLY UNBOUNDED TERM LEFT IN A SHADOWED PIXEL. Its cone-traced
+        // twin eighteen lines below already does min(sceneSpec.rgb * gVoxelParams.y,
+        // AVER_VOX_MAXRAD); the ray branch had no ceiling at all, and rtReflection returns
+        // reflAlbedo * (direct + ambient) with nothing bounding it.
+        //
+        // WHY IT SHOWS IN SHADOW SPECIFICALLY: where the sun does not reach, diffAmbient is
+        // multiplied by the occlusion and goes to zero, and diffBounce is MAXRAD-clamped on both of
+        // its routes. specEnv is the term left standing, and averIndirectTerms' FssEss and specOcc
+        // are both bounded by ~1, so it inherits this magnitude unchanged. One reflection ray
+        // escaping a dark interior through a window was the entire pixel -- which is exactly the
+        // measured shape: the residual outliers are predominantly BRIGHT, and their rate is 49x
+        // higher in dim regions than with ray tracing off.
+        //
+        // clamp() rather than the twin's min(), deliberately. min bounds above only, and this tree
+        // has a recorded incident where a NEGATIVE radiance rendered BRIGHT because
+        // acesTonemap(-1) = 1.0. The voxel injection's own write already uses this two-sided form.
+        ind.specular = clamp(lerp(specHit ? refl : skyR, skyR, skyW), 0.0, AVER_VOX_MAXRAD);
     } else if (gVoxelParams.w > 0.5) {
         // PSMainVoxi's OWN voxel-cone fallback, for the surfaces PSMainVoxi itself falls back for
         // (rough > 0.75, or RT unavailable): past that roughness a one-ray estimate can't resolve a
