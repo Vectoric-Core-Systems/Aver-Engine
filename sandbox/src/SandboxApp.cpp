@@ -7236,7 +7236,10 @@ public:
     void setGiUpdateInterval(int n) { giUpdateIntervalOverride_ = n; }          // --gi-update-interval N
     void setRenderScale(f32 s) { renderScaleOverride_ = s; }                    // --render-scale F
 #if AVER_MODULE_SR
-    void setAverSrQuality(aver::sr::Quality q) { averSrQuality_ = q; }          // --aversr LEVEL
+    // --aversr LEVEL. Records that the CLI chose it, so loadEditorPreferences leaves it alone --
+    // the same "a flag exists so a human at the keyboard can override recorded state" rule the
+    // render-settings override block spells out at length.
+    void setAverSrQuality(aver::sr::Quality q) { averSrQuality_ = q; averSrFromCli_ = true; }
 
     // Constructs SpatialUpscaler against `dev`'s resource factory if it is not already built.
     // Idempotent -- cheap to call every time the quality combo changes, not just once. See
@@ -20635,6 +20638,28 @@ private:
             }
         }
 
+        // THE UPSCALER'S QUALITY, restored last so it owns the render scale.
+        //
+        // AFTER the render-scale block above on purpose. applyAverSrQuality calls setRenderScale
+        // itself, and the block above is the crash-cookie dance that exists because a stored scale
+        // once bricked the editor. Restoring the quality here means the scale that ends up on the
+        // device is the one the quality implies, rather than a stored number that has drifted from
+        // it -- and a second setRenderScale with the value already set early-outs, so this costs
+        // nothing when the two agree.
+        //
+        // The command line still wins, matching every other override in this file: --aversr sets
+        // averSrQuality_ in onInit, and --render-scale pins the scale, so neither is overwritten by
+        // a stored preference here.
+        if (prefsDevice_ && renderScaleOverride_ == 1.0f && !averSrFromCli_) {
+            const int stored = static_cast<int>(prefFloat("display.aversr",
+                                                          static_cast<f32>(static_cast<int>(averSrQuality_))));
+            // Clamped rather than trusted: editor.ini is a text file a person can edit, and an
+            // out-of-range enum would index the name table off its end.
+            const int q = stored < 0 ? 0 : (stored > 3 ? 3 : stored);
+            if (static_cast<aver::sr::Quality>(q) != averSrQuality_)
+                applyAverSrQuality(prefsDevice_, static_cast<aver::sr::Quality>(q));
+        }
+
         keybinds_.loadFromPrefs();
     }
 
@@ -20702,10 +20727,45 @@ private:
         else
             setPrefString("contentBrowser.ide", "");   // Automatic
 
-        if (prefsDevice_ && prefsDevice_->vsyncCanDisable())
-            setPrefBool("display.vsync", prefsDevice_->vsync());
-        if (prefsDevice_)
-            setPrefFloat("display.renderScale", prefsDevice_->renderScale());
+        // GUARDED ON maxFrames_ == 0 LIKE EVERY OTHER CAPTURE-SENSITIVE PREF, and these two were the
+        // ones that were not. The viewport flags above and the post-processing block above them each
+        // carry this guard with a comment explaining it -- "a --frames run that wrote its CLI
+        // exposure back would leave the next interactive session looking at the capture's eyes" --
+        // and display.vsync/display.renderScale sat just below, unguarded.
+        //
+        // WHY THAT IS WORSE THAN IT SOUNDS: maybeAutosavePrefs() DOES return early on maxFrames_,
+        // but onShutdown() calls saveEditorPreferences() unconditionally, and onShutdown() runs at
+        // the end of every capture, benchmark and gate invocation. So every `--frames N
+        // --render-scale F` or `--no-vsync` run wrote its measurement settings into the SAME
+        // %LOCALAPPDATA%/AverEngine/editor.ini an interactive session reads back -- and the load at
+        // the top of this file then faithfully restored the capture's settings as if the user had
+        // chosen them. Measured against this session's own history: --no-vsync is passed by every
+        // capture harness in scripts/, so the user's vsync preference has been decided by whichever
+        // measurement ran last.
+        //
+        // The guard belongs here rather than in onShutdown() so that a future third caller cannot
+        // reintroduce it, and so the rule reads identically to its two neighbours.
+        if (maxFrames_ == 0) {
+            if (prefsDevice_ && prefsDevice_->vsyncCanDisable())
+                setPrefBool("display.vsync", prefsDevice_->vsync());
+            if (prefsDevice_)
+                setPrefFloat("display.renderScale", prefsDevice_->renderScale());
+            // THE UPSCALER'S QUALITY, WHICH WAS NEVER PERSISTED AT ALL. The Display page's AverSR
+            // combo writes averSrQuality_ and applies it to the device; nothing ever wrote it to a
+            // pref and nothing ever read one back, so it reset to Off on every launch.
+            //
+            // AND IT DESYNCED THE PAIR, which is the part that reads as "upscaling doesn't save
+            // properly" rather than "it forgets": applyAverSrQuality also calls setRenderScale, and
+            // display.renderScale above IS saved. So the reduced render scale came back next launch
+            // while the quality combo showed Off -- and because ensureAverSrUpscaler only ever runs
+            // when averSrQuality_ != Off, the upscaler was never rebuilt. The scene rendered at
+            // reduced resolution with nothing upscaling it, which looks like a soft image nobody
+            // asked for.
+            // setPrefFloat rather than an int helper because there is no int helper -- the prefs
+            // layer is float/bool/string, and every other numeric setting here goes through the
+            // float pair. The enum is four values; a float carries them exactly.
+            setPrefFloat("display.aversr", static_cast<f32>(static_cast<int>(averSrQuality_)));
+        }
 
         keybinds_.saveToPrefs();
 
@@ -22785,6 +22845,9 @@ private:
     // AverSR looks like: no render-scale change beyond --render-scale itself, no SpatialUpscaler
     // construction. See docs/AVERSR.md and onInit()/applyAverSrQuality() for where it's read.
     aver::sr::Quality averSrQuality_ = aver::sr::Quality::Off;
+    // True when --aversr set the value above, so a stored preference does not overwrite the command
+    // line. Persisted state loses to a flag everywhere else in this file; this makes it true here.
+    bool averSrFromCli_ = false;
     // Constructed lazily the first time a non-Off quality is applied; never rebuilt after, only
     // dropped to null when quality returns to Off. `factory` must outlive every execute() call
     // (AverSrSpatial.hpp): satisfied here since it's the SAME rhi::IDevice::resources() the editor uses for as long as the device exists.
