@@ -476,6 +476,9 @@ DXGI_FORMAT toDxgiFormat(Format f) {
         // reach a texture-create or SRV/UAV call instead of refusing to compile.
         case Format::RG16F:          return DXGI_FORMAT_R16G16_FLOAT;
         case Format::RGB10A2Unorm:   return DXGI_FORMAT_R10G10B10A2_UNORM;
+        // NRD's pool formats -- see the enum's own note in RHIResources.hpp.
+        case Format::R16Unorm:       return DXGI_FORMAT_R16_UNORM;
+        case Format::R16Uint:        return DXGI_FORMAT_R16_UINT;
         case Format::BC1Unorm:       return DXGI_FORMAT_BC1_UNORM;
         case Format::BC1UnormSrgb:   return DXGI_FORMAT_BC1_UNORM_SRGB;
         case Format::BC3Unorm:       return DXGI_FORMAT_BC3_UNORM;
@@ -545,6 +548,8 @@ Format fromDxgiFormat(DXGI_FORMAT f) {
         case DXGI_FORMAT_R32_TYPELESS:        return Format::R32Typeless;
         case DXGI_FORMAT_R16G16_FLOAT:        return Format::RG16F;
         case DXGI_FORMAT_R10G10B10A2_UNORM:   return Format::RGB10A2Unorm;
+        case DXGI_FORMAT_R16_UNORM:           return Format::R16Unorm;
+        case DXGI_FORMAT_R16_UINT:            return Format::R16Uint;
         case DXGI_FORMAT_BC1_UNORM:           return Format::BC1Unorm;
         case DXGI_FORMAT_BC1_UNORM_SRGB:      return Format::BC1UnormSrgb;
         case DXGI_FORMAT_BC3_UNORM:           return Format::BC3Unorm;
@@ -571,7 +576,9 @@ u32 texelBytes(Format f) {
         case Format::R32Typeless:
         case Format::RG16F:          // 2 x half-float
         case Format::RGB10A2Unorm:   return 4;   // packed 10-10-10-2
-        case Format::RG8Unorm:       return 2;
+        case Format::RG8Unorm:
+        case Format::R16Unorm:
+        case Format::R16Uint:        return 2;
         case Format::R8Unorm:        return 1;
         default:                     break;
     }

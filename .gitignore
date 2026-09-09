@@ -42,6 +42,12 @@ Thumbs.db
 # --- Third-party fetched deps (kept out of VCS; pulled by CMake) ---
 /third_party/_deps/
 
+# NRD writes its build-time configuration header back into its own source tree: the ShaderMake run
+# uses third_party/nrd/Shaders as its source directory, so NRDConfig.hlsli has to live there. It is
+# generated from the NRD_* CMake options (see cmake/AverNRD.cmake) and is not upstream content.
+/third_party/nrd/Shaders/NRDConfig.hlsli
+/third_party/nrd/_Shaders/
+
 # C# scripting build output
 scripting/**/bin/
 scripting/**/obj/

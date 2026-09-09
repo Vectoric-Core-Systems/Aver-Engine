@@ -334,6 +334,16 @@ inline VkFormat toVkFormat(Format f) {
         // and the architecture scout's finding #6 for why this is simpler than the D3D12 trick,
         // not harder.
         case Format::R32Typeless:    return VK_FORMAT_D32_SFLOAT;
+        // THE G-BUFFER'S TWO FORMATS WERE MISSING FROM THIS TABLE, not from the enum: RG16F and
+        // RGB10A2Unorm have been in Format since the G-buffer landed, and D3D12 maps both, but this
+        // switch never gained them. It has no default and MSVC does not warn on an unhandled
+        // enumerator at /W4, so the omission was silent -- toVkFormat returned VK_FORMAT_UNDEFINED
+        // and any Vulkan attempt to create the velocity or normal target would have failed at the
+        // create call with no hint of why. Added here with NRD's two because it is the same table.
+        case Format::RG16F:          return VK_FORMAT_R16G16_SFLOAT;
+        case Format::RGB10A2Unorm:   return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+        case Format::R16Unorm:       return VK_FORMAT_R16_UNORM;
+        case Format::R16Uint:        return VK_FORMAT_R16_UINT;
         case Format::BC1Unorm:       return VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
         case Format::BC1UnormSrgb:   return VK_FORMAT_BC1_RGBA_SRGB_BLOCK;
         case Format::BC3Unorm:       return VK_FORMAT_BC3_UNORM_BLOCK;
@@ -356,6 +366,10 @@ inline Format fromVkFormat(VkFormat f) {
         case VK_FORMAT_R32G32_SFLOAT:         return Format::RG32Float;
         case VK_FORMAT_R32_UINT:              return Format::R32Uint;
         case VK_FORMAT_D32_SFLOAT:            return Format::D32Float;   // see toVkFormat's note; R32Typeless round-trips as D32Float, which is the RIGHT answer wherever this is asked of a depth image
+        case VK_FORMAT_R16G16_SFLOAT:         return Format::RG16F;
+        case VK_FORMAT_A2B10G10R10_UNORM_PACK32: return Format::RGB10A2Unorm;
+        case VK_FORMAT_R16_UNORM:             return Format::R16Unorm;
+        case VK_FORMAT_R16_UINT:              return Format::R16Uint;
         case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:  return Format::BC1Unorm;
         case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:   return Format::BC1UnormSrgb;
         case VK_FORMAT_BC3_UNORM_BLOCK:       return Format::BC3Unorm;
@@ -382,8 +396,12 @@ inline u32 texelBytesVk(Format f) {
         case Format::R32Float:
         case Format::R32Uint:
         case Format::D32Float:
-        case Format::R32Typeless:    return 4;
-        case Format::RG8Unorm:       return 2;
+        case Format::R32Typeless:
+        case Format::RG16F:          // 2 x half-float
+        case Format::RGB10A2Unorm:   return 4;   // packed 10-10-10-2
+        case Format::RG8Unorm:
+        case Format::R16Unorm:
+        case Format::R16Uint:        return 2;
         case Format::R8Unorm:        return 1;
         default:                     break;
     }

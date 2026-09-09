@@ -210,6 +210,10 @@ endif()
 if(AVER_MODULE_TRIFACTOR)
   add_subdirectory(third_party/meshoptimizer)
 endif()
+# NVIDIA Real-Time Denoisers, plus the two MIT libraries it builds against (ShaderMake, MathLib).
+# NOT permissively licensed, unlike everything above it -- see cmake/AverNRD.cmake for the whole
+# story, including why AVER_WITH_NRD can turn itself off and what happens when it does.
+include(AverNRD)
 
 # ---- Tier 0-6 implemented modules ----
 add_subdirectory(modules/core)
@@ -420,6 +424,11 @@ add_subdirectory(modules/render.skin)
 # init() on a device without DXR 1.1. Its position in this file therefore carries no ordering
 # requirement; it sits here only because that is where it was added.
 add_subdirectory(modules/render.pt)
+# The NRD denoiser seam. Unconditional and RHI-only for the same reason the three above are, plus
+# one of its own: cmake/AverNRD.cmake can turn AVER_WITH_NRD off by itself on a machine with no
+# offline shader compiler, and a module that came and went with it would break consumers' link
+# lines on exactly the machines least able to diagnose it. See modules/render.nrd/CMakeLists.txt.
+add_subdirectory(modules/render.nrd)
 # The audio seam. Added down HERE rather than beside the mixer because it links the WAV reader,
 # which is a target inside modules/formats and so does not exist until that has been added.
 add_subdirectory(modules/audio.abi)
@@ -557,6 +566,11 @@ if(AVER_BUILD_TESTS)
   if(AVER_MODULE_LANDSCAPE)
     add_subdirectory(tests/landscape)
   endif()
+  # NRD's CPU half: the library links, the shaders are embedded, and it plans a frame. Unguarded on
+  # purpose -- Aver.Render.NRD exists in every configuration, and the suite reports SKIP rather than
+  # failing when AVER_WITH_NRD is off, so the guard would only hide the one line that says which of
+  # the two builds this is.
+  add_subdirectory(tests/render.nrd)
   if(AVER_MODULE_OCCLUSION)
     # The HZB conservative-culling math -- projection, mip selection, the four-corner test. Guarded
     # by the module because it links Aver.Occlusion; CPU-only, like tests/trifactor, because what it

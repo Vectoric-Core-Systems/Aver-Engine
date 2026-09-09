@@ -58,6 +58,18 @@ enum class Format : u8 {
     BC5Unorm,
     BC7Unorm,
     BC7UnormSrgb,
+    // Single-channel 16-bit, one integer and one normalised. Added for NVIDIA NRD's internal
+    // texture pools (modules/render.nrd): REBLUR stores its per-pixel accumulation counters as
+    // R16_UINT and its normalised hit distances as R16_UNORM, and a pool texture the engine cannot
+    // allocate is a denoiser that cannot run -- NrdLinkTest fails on exactly that, by name.
+    //
+    // APPENDED HERE rather than filed beside R8Unorm where they read better, because appending is
+    // the only edit to an enum that cannot change an existing enumerator's value. Nothing today
+    // stores or transmits a Format as a number (checked), so this is precaution rather than a
+    // constraint -- but the cost of the precaution is a comment, and the cost of being wrong is a
+    // silent format shift in anything that ever starts to.
+    R16Unorm,
+    R16Uint,
 };
 
 // True for block-compressed formats, whose extents are counted in 4x4 blocks and not texels.
