@@ -61,9 +61,11 @@ that added this file (`31c06a4`) also added the prerequisite §5 calls for**: `I
 setGBufferEnabled`, `gBufferVelocityTexture()`, `gBufferViewZTexture()` and
 `gBufferNormalRoughnessTexture()` (`RHI.hpp`), fully implemented — not just declared — in
 `D3D12Device.cpp` (velocity RG16F, view-space depth R32F, normal+roughness RGB10A2, ~54 MB when on,
-matching this page's own §5 estimate almost exactly). **Nothing calls `setGBufferEnabled(true)`
-anywhere in the tree**, so it defaults off, allocates nothing, and every existing build renders
-bit-identically to before it existed — and the Vulkan backend has no implementation at all, only the
+matching this page's own §5 estimate almost exactly). ~~**Nothing calls `setGBufferEnabled(true)`
+anywhere in the tree**~~ — **corrected 2026-09-09: the editor does, every frame, behind `--gbuffer`
+and `--gbuffer-debug` (`sandbox/src/SandboxApp.cpp`), and the viewport's G-buffer debug view reads
+all three accessors back. The packaged runtime still never turns it on.** It defaults off, so a
+build that leaves the flag alone allocates nothing and renders bit-identically to before it existed — and the Vulkan backend has no implementation at all, only the
 inert base-class default. So "Aver is a forward renderer with no G-buffer" is no longer quite right;
 "Aver has a G-buffer nothing turns on" is the current, more precise statement, and `PSMainVoxi` itself
 is unchanged — it still returns a single `SV_TARGET`, and the G-buffer above is written by the
@@ -117,9 +119,11 @@ It requires depth, **motion vectors** and normals.
 
 So the licence is not what is actually gating this. **The G-buffer is — or rather, was; see §2's
 correction.** Any denoiser worth vendoring wants the same three buffers. We now have them declared
-and, on D3D12, implemented; nothing calls `setGBufferEnabled(true)` to turn them on, and nothing
-reads them once on, so the practical answer is still "not usable" even though "we have none of them"
-is no longer the reason why.
+and, on D3D12, implemented, and the editor turns them on behind `--gbuffer`. **Superseded again on
+2026-09-09**: NRD is vendored and linked (`modules/render.nrd`), and the fourth input it needs —
+a per-pixel hit distance from the sky-occlusion ray, which nothing produced — is now written by
+`modules/render.voxi` to its own R16Unorm target. What is still missing is the pass that records
+NRD's dispatches; see `modules/render.nrd/README.md` for the current state rather than this page.
 
 ## 5. What to do instead
 
@@ -128,8 +132,9 @@ is no longer the reason why.
 **Half of this has since happened, in the very commit that added this page (`31c06a4`), without this
 page being updated to say so — see the corrections in §2 and §4.** The denoiser (FidelityFX Denoiser,
 MIT) is vendored. The prerequisite is declared and, on D3D12, implemented. What has NOT happened is
-either half being turned on or wired to a consumer: no code calls `setGBufferEnabled(true)`, no pass
-populates `UpscalerInput::motionVectors` from it, and Vulkan has no G-buffer implementation at all.
+either half being wired to a consumer. (The "no code calls `setGBufferEnabled(true)`" that stood
+here was already false when written — see §2's correction.) No pass populates
+`UpscalerInput::motionVectors` from it, and Vulkan has no G-buffer implementation at all.
 The description immediately below is therefore still the accurate statement of what remains to be
 *built* in the sense of "connected and exercised," even though the raw render-target plumbing it
 describes already exists in the D3D12 backend:

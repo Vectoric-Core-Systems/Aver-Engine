@@ -661,6 +661,26 @@ RWTexture2D<float2> gRtShadowHistOut : register(u2);
 // pairs at once and no fourth constant is needed.
 Texture2D<float2>   gAoHist    : register(t11);
 RWTexture2D<float2> gAoHistOut : register(u4);
+// THE SAME RAY'S HIT DISTANCE, WRITTEN AND NEVER READ BACK by anything in this file.
+//
+// [0,1] as a fraction of the ray's own TMax (gVoxelParams.z, Settings::giMaxDistance): 1 means
+// every sample escaped to the sky, 0 means every sample hit something at the shading point. It is
+// deliberately NOT normalised the way any particular denoiser wants it -- an external filter's
+// normalisation curve is that filter's business, and baking one in here would make this texture
+// mean whatever the current consumer happens to be. A consumer that wants world units multiplies
+// by giMaxDistance, which it has.
+//
+// WHY THE OCCLUSION ALONE IS NOT ENOUGH, since that is the obvious question. A filter that only
+// knows "this pixel is 30% occluded" cannot tell a wide, distant opening from a tight crevice, so
+// it cannot choose how far to spread a sample without crossing an edge that is really there.
+// Distance is what sets that radius. NVIDIA NRD calls this IN_DIFF_HITDIST and REBLUR_DIFFUSE_
+// OCCLUSION does not run without it -- see modules/render.nrd/README.md.
+//
+// GUARDED BY gRtDenoiseParams.w, the same flag as the u4/t11 pair above, because it is allocated
+// and bound under exactly the same condition (VoxiRenderer::aoHistoryWanted). Low and Medium do
+// not trace this ray at all, so at those tiers the slot is genuinely absent and must not be
+// touched -- writing a null UAV is undefined, not merely wasted.
+RWTexture2D<float>  gAoHitDistOut : register(u5);
 
 // Ray-traced reflection history: same ping-pong as the shadow history above, its own pair of
 // textures. rgb = shaded colour, a = linear hit depth, OR NEGATIVE meaning the ray missed.
@@ -943,6 +963,17 @@ struct AverAmbientTraced {
     float  open;    // fraction of samples that reached the sky. THE ONLY FIELD the legacy path uses.
     float3 sky;     // mean radiance of the sky actually visible, per direction rather than averaged
     float3 bounce;  // mean radiance of whatever stopped the rays that did not escape
+    // MEAN DISTANCE TRAVELLED, as a fraction of TMax, over ALL n samples -- a sample that escaped
+    // contributes a full 1.0, not zero and not nothing. That is what makes it a distance rather
+    // than a distance-among-the-hits: "nothing in the way for the whole length of the ray" is the
+    // largest distance this ray can report, and averaging only over the hits would say the opposite
+    // in exactly the open sky where the answer matters least and the error shows most.
+    //
+    // Computed on EVERY path, unlike `sky`/`bounce` above, and it costs one mad per sample: the
+    // consumer is an external denoiser that is either on or off for the whole frame, so making it
+    // a second compile-time variant of this function would double the permutations to save an
+    // instruction the ray's own BVH traversal dwarfs by four orders of magnitude.
+    float  hitDist;
 };
 
 AverAmbientTraced rtAmbientTraced(float3 wpos, float3 N, float2 pixel, uint rays) {
@@ -1001,7 +1032,11 @@ AverAmbientTraced rtAmbientTraced(float3 wpos, float3 N, float2 pixel, uint rays
     B = cross(N, T);
 
     AverAmbientTraced res;
-    res.open = 0.0; res.sky = float3(0, 0, 0); res.bounce = float3(0, 0, 0);
+    res.open = 0.0; res.sky = float3(0, 0, 0); res.bounce = float3(0, 0, 0); res.hitDist = 0.0;
+    // Hoisted out of the loop because the accumulation below divides by it, and because a TMax of
+    // zero would otherwise be a divide by zero on a scene whose giMaxDistance was authored to
+    // nothing -- max(...,1.0) is the same floor the RayDesc uses a few lines down.
+    const float aoTMax = max(gVoxelParams.z, 1.0);
     [loop] for (uint k = 0; k < n; ++k) {
         const float2 d = rtDiscSample(k, ang0);
         // Malley: lift the disc point onto the hemisphere. r^2 + z^2 == 1 by construction, so the
@@ -1069,8 +1104,22 @@ AverAmbientTraced rtAmbientTraced(float3 wpos, float3 N, float2 pixel, uint rays
 #endif
         averRtProceedSolid(q);
 
+        // ONE `if`, BOTH ANSWERS. CommittedRayT() is meaningful only on a hit; on a miss the ray
+        // ran its whole length, which IS the distance and is why the miss branch adds aoTMax rather
+        // than skipping the term.
+        //
+        // ON THE SHIPPING PATH THIS IS A FIRST HIT, NOT THE NEAREST ONE, and that is worth knowing
+        // rather than discovering. AVER_AO_UNIFIED is 0, so the query above carries
+        // ACCEPT_FIRST_HIT_AND_END_SEARCH: traversal stops at whatever triangle it reaches first
+        // within TMax, which need not be the closest. The distance is therefore an upper-bounded
+        // estimate, never longer than the true one and usually equal to it in the enclosed
+        // geometry this term exists for. Making it exact means dropping the flag and paying full
+        // traversal on the most incoherent ray in the frame -- 5.37 ms for one ray, per this
+        // function's own measurement -- to sharpen a filter radius. Not worth it; recorded so the
+        // next reader does not assume precision that is not here.
         if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {
-            res.open += 1.0;
+            res.open    += 1.0;
+            res.hitDist += aoTMax;
 #if AVER_AO_UNIFIED
             // The sky this sample actually saw. averSkyRadianceCheap is the SH reconstruction, ~20
             // ALU, against skyColor's 32-step march -- affordable once per hemisphere sample in a way
@@ -1103,6 +1152,12 @@ AverAmbientTraced rtAmbientTraced(float3 wpos, float3 N, float2 pixel, uint rays
                                   AVER_VOX_MAXRAD);
         }
 #endif
+        // OUTSIDE THE #if, so the hit distance is accumulated on both paths. Under AVER_AO_UNIFIED
+        // the `else` above has already read CommittedRayT() for the bounce lookup; here it is read
+        // again rather than threaded through, because a hit's T is a register the query already
+        // holds and the alternative is a variable that exists only under one define.
+        if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT)
+            res.hitDist += min(q.CommittedRayT(), aoTMax);
     }
 
     // ALL THREE DIVIDE BY n, NOT BY THEIR OWN HIT COUNTS. These are Monte Carlo estimates of
@@ -1111,9 +1166,14 @@ AverAmbientTraced rtAmbientTraced(float3 wpos, float3 N, float2 pixel, uint rays
     // miss count instead would return the mean brightness of the visible sky and silently drop the
     // occlusion, which is the very thing being measured.
     const float inv = 1.0 / (float)n;
-    res.open   *= inv;
-    res.sky    *= inv;
-    res.bounce *= inv;
+    res.open    *= inv;
+    res.sky     *= inv;
+    res.bounce  *= inv;
+    // Divided by TMax as well, which is what makes it the [0,1] fraction the declaration promises
+    // rather than a world distance. saturate() because CommittedRayT can land a hair past TMax on a
+    // ray that hit almost exactly at its own limit, and a consumer told to expect [0,1] should get
+    // [0,1] rather than 1.0000001.
+    res.hitDist = saturate(res.hitDist * inv / aoTMax);
     return res;
 }
 
@@ -1388,7 +1448,12 @@ float rtAoSpatial(float centre, float3 wpos, float3 N, float2 pixel, float curDe
 // every tier. At Epic it was computed and then thrown away (coneTracedIndirect says exactly that of
 // its own `rdAo`). Passing it in as the PRIOR therefore costs nothing.
 float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays, float coneAo) {
-    const float fresh = rtSkyOcclusion(wpos, N, pixel, rays);
+    // rtAmbientTraced RATHER THAN THE rtSkyOcclusion WRAPPER, and the difference is the hit
+    // distance: the wrapper exists to throw away everything but `.open`, and this function is now
+    // one of the callers its own comment describes as "meaning to use them". Identical cost -- the
+    // wrapper was a field select, not a second trace.
+    const AverAmbientTraced amb = rtAmbientTraced(wpos, N, pixel, rays);
+    const float fresh = amb.open;
     // gRtDenoiseParams.w, NOT gRtHistParams.x, and the difference matters: the shadow and
     // reflection pairs exist at every ray-tracing tier, but this one is allocated only where the
     // ray is actually traced -- High and Epic. At Low and Medium the slots are genuinely absent,
@@ -1441,6 +1506,28 @@ float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays, flo
     // feeding the spatially filtered result back into the history turns this into an IIR filter
     // whose artefacts compound every frame. The filter applies on the way OUT, below.
     gAoHistOut[uint2(pixel)] = float2(vis, curDepth);
+    // THE RAW MEASUREMENT, NOT THE ACCUMULATED ONE -- the exact opposite of the line above it, and
+    // deliberately so. The history write is accumulated because THIS shader is the thing that
+    // consumes it next frame and wants the average. This one goes to an external denoiser that
+    // keeps its own history and does its own accumulation; handing it a value already blended
+    // against ten previous frames would be feeding a filter its own output, which is the IIR trap
+    // the line above spends a paragraph avoiding.
+    //
+    // AFTER the gRtDenoiseParams.w early-out above, which is what makes the slot safe to touch.
+    //
+    // IT INHERITS THE BLENDED-REPLAY DOUBLE WRITE, and that is worth stating rather than leaving to
+    // be found. PSMainVoxi runs for the translucent replay too (its own PSO, same pixel shader), so
+    // a glass pane in front of an opaque surface writes this texel a second time with the PANE's
+    // measurement. The two history writes above have exactly the same problem and have had it since
+    // they were written -- it is the "non-atomic double write" already on the denoising task list,
+    // where the fix is to suppress the history writes on the blended pass, for all of them at once.
+    //
+    // IT IS WORSE HERE THAN THERE, THOUGH, WHICH IS WHY THIS NOTE EXISTS. A wrong value in the
+    // history gets blended away over the following frames. This one goes straight out as THIS
+    // FRAME'S measurement of this pixel, so an external denoiser is handed the pane's distance for
+    // the surface behind it with nothing to average it against. Guarding only this write would make
+    // the three inconsistent for no gain; fix them together or not at all.
+    gAoHitDistOut[uint2(pixel)] = amb.hitDist;
     return rtAoSpatial(vis, wpos, N, pixel, curDepth);
 }
 
@@ -3498,6 +3585,11 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     if (gAmbientParams.x > 0.5) {
         const AverAmbientTraced amb = rtAmbientTraced(wpos, N, i.pos.xy, (uint)gAmbientParams.x);
         ind.occlusion = amb.open;
+        // The same write rtSkyOcclusionTemporal makes, because this branch REPLACES that call
+        // rather than wrapping it -- a build with AVER_AO_UNIFIED on would otherwise leave the hit
+        // distance target holding whatever the last frame with it off had written. Guarded
+        // explicitly since, unlike there, no early-out has already tested the flag here.
+        if (gRtDenoiseParams.w > 0.5) gAoHitDistOut[uint2(i.pos.xy)] = amb.hitDist;
         // THE BOUNCE REPLACES THE CONE GATHER, and carries its own occlusion already: averIndirectTerms
         // computes diffBounce as kD * ind.diffuse with NO occlusion factor, which is exactly right for
         // a quantity gathered by rays that were themselves occluded.

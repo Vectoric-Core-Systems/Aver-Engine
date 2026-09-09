@@ -880,9 +880,19 @@ public:
     // ADDITIVE AND DEFAULTED, THE WHOLE WAY DOWN. setGBufferEnabled defaults to OFF, and every
     // accessor below defaults to its own "nothing here" value (0 for a texture, false/true for the
     // bools, chosen as whichever is the SAFE reading for a caller that forgot to check
-    // gBufferEnabled() first). A build that never calls setGBufferEnabled(true) -- which is every
-    // build today, since nothing yet does -- allocates none of these three targets, records no
-    // extra writes, and renders a frame BIT-IDENTICAL to one from before this declaration existed.
+    // gBufferEnabled() first). A build that never calls setGBufferEnabled(true) allocates none of
+    // these three targets, records no extra writes, and renders a frame BIT-IDENTICAL to one from
+    // before this declaration existed.
+    //
+    // "WHICH IS EVERY BUILD TODAY, SINCE NOTHING YET DOES" STOOD HERE AND WAS FALSE, from the day
+    // after it was written (2026-08-29) until it was corrected. The editor calls this every frame:
+    // sandbox/src/SandboxApp.cpp passes `gbufferOverride_ || gbufferDebugView_ != Mode::Off`, driven
+    // by --gbuffer and --gbuffer-debug, and the viewport's G-buffer debug view reads all three
+    // accessors back. The packaged runtime still never turns it on, which is the true half of what
+    // the sentence was reaching for -- but a reader checking whether this surface has ever been
+    // exercised would have concluded "no" and been wrong, which is the entire cost of the mistake.
+    // Left in rather than deleted because this file has a recorded history of stale absolutes
+    // outliving the thing they described.
     // That is not a nicety: a render-gate oracle (18 gates x 9 configurations) and 89 headless
     // suites both assume it, and a backend that allocates or writes any of this while reporting
     // gBufferEnabled() == false would fail both without the failure pointing at why.

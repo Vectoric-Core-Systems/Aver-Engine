@@ -1569,9 +1569,21 @@ struct RhiBuffer {
 };
 
 // A compiled shader blob and the stage it was compiled for.
+// A shader's bytecode, from one of two places. `blob` is what DXC (or FXC) produced from HLSL text;
+// `bytes` is a COPY of bytecode the caller already had (ShaderDesc::bytecode -- NRD's precompiled
+// permutations are the first). Exactly one is ever populated, and code() is the only thing that
+// should ask which: every consumer wants a {pointer, length} pair and does not care where it came
+// from. Copying rather than borrowing is ShaderDesc::bytecode's documented contract.
 struct RhiShader {
-    ComPtr<ID3DBlob> blob;
-    ShaderStage stage = ShaderStage::Vertex;
+    ComPtr<ID3DBlob>  blob;
+    std::vector<u8>   bytes;
+    ShaderStage       stage = ShaderStage::Vertex;
+
+    [[nodiscard]] bool valid() const { return blob || !bytes.empty(); }
+    [[nodiscard]] D3D12_SHADER_BYTECODE code() const {
+        if (blob) return {blob->GetBufferPointer(), blob->GetBufferSize()};
+        return {bytes.data(), bytes.size()};
+    }
 };
 
 static_assert(kMaxConstantSlots == 5, "slotParam's -1 initialisers are written out per slot");
@@ -1678,6 +1690,11 @@ bool sameLayout(const PipelineLayout& a, const PipelineLayout& b) {
     // identical counts would share a cached root signature, and whichever built first would decide
     // whether the table exists -- silently, for both.
     if (a.bindlessTextureCount != b.bindlessTextureCount) return false;
+    // Part of the key for the same reason bindlessTextureCount is. Two layouts identical but for
+    // the space their constant buffer sits in produce root signatures a shader compiled for the
+    // other one CANNOT be created against -- and the failure would land on whichever pipeline was
+    // built second, naming neither.
+    if (a.constantSpace != b.constantSpace || a.samplerSpace != b.samplerSpace) return false;
     for (u32 i = 0; i < kMaxConstantSlots; ++i) if (a.constantDwords[i] != b.constantDwords[i]) return false;
     for (u32 i = 0; i < a.samplerCount && i < 4; ++i) if (!sameSampler(a.samplers[i], b.samplers[i])) return false;
     return true;
@@ -5275,7 +5292,7 @@ RhiBuffer* D3D12ResourceFactory::buffer(BufferHandle h) {
 RhiShader* D3D12ResourceFactory::shader(ShaderHandle h) {
     if (h == 0 || h > shaders_.size()) return nullptr;
     RhiShader& s = shaders_[h - 1];
-    return s.blob ? &s : nullptr;
+    return s.valid() ? &s : nullptr;
 }
 RhiPipeline* D3D12ResourceFactory::pipeline(PipelineHandle h) {
     if (h == 0 || h > pipelines_.size()) return nullptr;
@@ -5490,14 +5507,22 @@ const RootSigEntry* D3D12ResourceFactory::rootSignature(const PipelineLayout& la
         uavBase += uavCounts[t];
     }
 
+    // RegisterSpace is written unconditionally rather than under `if (layout.constantSpace)`,
+    // because params[] is zero-initialised: assigning 0 is what it already held, so a layout that
+    // leaves constantSpace at its default serialises to exactly the bytes it did before this field
+    // existed. Same for the static samplers below. That byte-identity is the property that makes
+    // this additive for every pipeline in the engine, and it is checked by the gates rather than
+    // asserted here -- every non-RT gate must stay bit-identical across this change.
     for (u32 s = 0; s < kMaxConstantSlots; ++s) {
         if (layout.constantDwords[s]) {
             params[n].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
             params[n].Constants.ShaderRegister = s;
+            params[n].Constants.RegisterSpace = layout.constantSpace;
             params[n].Constants.Num32BitValues = layout.constantDwords[s];
         } else {
             params[n].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
             params[n].Descriptor.ShaderRegister = s;
+            params[n].Descriptor.RegisterSpace = layout.constantSpace;
         }
         e.slotParam[s] = static_cast<i32>(n++);
     }
@@ -5557,6 +5582,7 @@ const RootSigEntry* D3D12ResourceFactory::rootSignature(const PipelineLayout& la
         samplers[i].MaxLOD = layout.samplers[i].maxLod;
         samplers[i].MaxAnisotropy = layout.samplers[i].maxAnisotropy ? layout.samplers[i].maxAnisotropy : 1;
         samplers[i].ShaderRegister = i;
+        samplers[i].RegisterSpace = layout.samplerSpace;
         samplers[i].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     }
 
@@ -5896,6 +5922,41 @@ const char* stagePrefixFor(ShaderStage s) {
 // Compiles one shader and returns its handle.
 ShaderHandle D3D12ResourceFactory::createShader(const ShaderDesc& d) {
     collect();
+
+    // THE PRECOMPILED PATH, TAKEN FIRST AND SHORT-CIRCUITING EVERY GATE BELOW. Not one of the
+    // checks that follow can be applied to bytecode: there is no source to compile, no entry point
+    // to name, and no shader model to request -- DXIL declares its own, so a minShaderModel test
+    // here would be testing a field the caller was told is ignored. The device's own SM cap is not
+    // re-checked either; CreateComputePipelineState rejects bytecode the device cannot run, which
+    // is a real check rather than one made from a struct field. See ShaderDesc::bytecode.
+    if (d.precompiled()) {
+        // MESH AND AMPLIFICATION STILL NEED THE HARDWARE, which is a property of the device and not
+        // of the bytecode, so this one gate survives.
+        if ((d.stage == ShaderStage::Mesh || d.stage == ShaderStage::Amplification)
+            && dev_->caps_.meshShaderTier == 0) {
+            AVER_WARN("[RHI.D3D12] createShader (precompiled) needs mesh-shader hardware, which this "
+                      "device reports as tier 0");
+            return 0;
+        }
+        // THE CONTAINER FOURCC, checked for the same reason the Vulkan side checks SPIR-V's magic
+        // number: the one mistake a caller can actually make here is handing the wrong backend's
+        // blob to the wrong backend, and NRD supplies DXIL and SPIR-V side by side so the two are
+        // one field apart. Caught by name here; caught by CreateComputePipelineState as an opaque
+        // E_INVALIDARG otherwise. Every DXIL container starts with 'DXBC' -- the fourcc kept its
+        // old name across the DXBC-to-DXIL change.
+        const u8* src = static_cast<const u8*>(d.bytecode);
+        if (d.bytecodeSize < 4 || src[0] != 'D' || src[1] != 'X' || src[2] != 'B' || src[3] != 'C') {
+            AVER_ERROR("[RHI.D3D12] createShader (precompiled): {} bytes not beginning with the DXIL "
+                       "container fourcc -- SPIR-V, or a truncated blob?", d.bytecodeSize);
+            return 0;
+        }
+        RhiShader s;
+        s.bytes.assign(src, src + d.bytecodeSize);
+        s.stage = d.stage;
+        shaders_.push_back(std::move(s));
+        return static_cast<ShaderHandle>(shaders_.size());
+    }
+
     if (!d.source || !d.entry) { AVER_ERROR("[RHI.D3D12] createShader without source or entry point"); return 0; }
 
     // Mesh and Amplification share one floor: both are D3D12 Ultimate stages, unavailable below
@@ -6045,9 +6106,9 @@ PipelineHandle D3D12ResourceFactory::createGraphicsPipeline(const GraphicsPipeli
         }
         MeshPsoStream s{};
         s.rootSig = rs->sig.Get();
-        s.ms = D3D12_SHADER_BYTECODE{ms->blob->GetBufferPointer(), ms->blob->GetBufferSize()};
-        if (as) s.as = D3D12_SHADER_BYTECODE{as->blob->GetBufferPointer(), as->blob->GetBufferSize()};
-        if (ps) s.ps = D3D12_SHADER_BYTECODE{ps->blob->GetBufferPointer(), ps->blob->GetBufferSize()};
+        s.ms = ms->code();
+        if (as) s.as = as->code();
+        if (ps) s.ps = ps->code();
         s.raster = raster;
         s.depth = depth;
         s.blend = blend;
@@ -6064,9 +6125,9 @@ PipelineHandle D3D12ResourceFactory::createGraphicsPipeline(const GraphicsPipeli
 
         D3D12_GRAPHICS_PIPELINE_STATE_DESC pd{};
         pd.pRootSignature = rs->sig.Get();
-        pd.VS = {vs->blob->GetBufferPointer(), vs->blob->GetBufferSize()};
-        if (gs) pd.GS = {gs->blob->GetBufferPointer(), gs->blob->GetBufferSize()};
-        if (ps) pd.PS = {ps->blob->GetBufferPointer(), ps->blob->GetBufferSize()};
+        pd.VS = vs->code();
+        if (gs) pd.GS = gs->code();
+        if (ps) pd.PS = ps->code();
         pd.InputLayout = elemCount ? D3D12_INPUT_LAYOUT_DESC{elems, elemCount}
                                    : D3D12_INPUT_LAYOUT_DESC{kMeshInputLayout, kMeshInputLayoutCount};
         pd.RasterizerState = raster;
@@ -6105,7 +6166,7 @@ PipelineHandle D3D12ResourceFactory::createComputePipeline(const ComputePipeline
 
     D3D12_COMPUTE_PIPELINE_STATE_DESC cp{};
     cp.pRootSignature = rs->sig.Get();
-    cp.CS = {cs->blob->GetBufferPointer(), cs->blob->GetBufferSize()};
+    cp.CS = cs->code();
     if (!hrOk(dev_->device_->CreateComputePipelineState(&cp, IID_PPV_ARGS(&p.pso)), "rhi compute pipeline")) return 0;
     pipelines_.push_back(std::move(p));
     return static_cast<PipelineHandle>(pipelines_.size());
@@ -6365,6 +6426,11 @@ void D3D12ResourceFactory::destroyShader(ShaderHandle h) {
     RhiShader* s = shader(h);
     if (!s) return;
     s->blob.Reset();
+    // shrink_to_fit, not clear(): clear() alone leaves the capacity allocated, and a precompiled
+    // shader's bytes are the whole point of this branch existing -- NRD's 159 permutations are
+    // megabytes if none of them is ever really given back.
+    s->bytes.clear();
+    s->bytes.shrink_to_fit();
 }
 
 // Retires a pipeline state; its root signature stays in the cache.

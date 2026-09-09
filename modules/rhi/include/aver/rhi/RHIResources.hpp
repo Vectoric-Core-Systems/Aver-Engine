@@ -205,7 +205,7 @@ struct SamplerDesc {
 // LOD cut runs on, since it is one thread's local test with no dependency on any other cluster.
 enum class ShaderStage : u8 { Vertex, Pixel, Geometry, Compute, Mesh, Amplification };
 
-// One HLSL shader to compile.
+// One shader to create: either HLSL to compile, or bytecode somebody else already compiled.
 struct ShaderDesc {
     const char* source = nullptr;   // HLSL text; the feature module owns its own shader source
     // Prepended verbatim before `source`; use sharedShaderPrelude().
@@ -215,6 +215,35 @@ struct ShaderDesc {
     // Minimum shader model as major*10+minor (60 = SM 6.0); too high yields an invalid handle.
     u32         minShaderModel = 60;
     const char* defines = nullptr;  // semicolon-separated, e.g. "AVER_MS=1;AVER_RT=1"
+
+    // ---- the precompiled path -----------------------------------------------------------------
+    //
+    // ALREADY-COMPILED BYTECODE, in whatever form THIS backend consumes: DXIL for D3D12, SPIR-V for
+    // Vulkan. Set it and `source`/`prelude`/`entry`/`defines`/`minShaderModel` are all ignored --
+    // there is nothing left to compile, nothing to name an entry point in (the name is baked into
+    // the module), and no shader model to request (the bytecode already declares one). `stage` is
+    // still required, because the backend needs to know which kind of pipeline may consume it and
+    // neither DXIL nor SPIR-V is inspected here to find out.
+    //
+    // WHY THIS EXISTS. Every shader in this engine is HLSL text compiled at runtime through DXC,
+    // which is the right default -- it is what makes `--shader-source` reload work and what keeps
+    // one .hlsl file serving both backends. It cannot serve a THIRD-PARTY denoiser, upscaler or
+    // library that ships compiled permutations and no source: NVIDIA NRD (modules/render.nrd) hands
+    // over 159 of them, and until this field existed there was no way to put one into a pipeline.
+    //
+    // THE BYTES ARE COPIED, NOT BORROWED. The caller may free them the moment createShader returns.
+    // Borrowing would be cheaper and is the wrong trade: the handle outlives the call by design, a
+    // dangling pointer here surfaces as a corrupt PSO or a device removal rather than as a crash at
+    // the mistake, and the amounts are small (NRD's entire REBLUR_DIFFUSE_OCCLUSION set is 338 KiB).
+    //
+    // A BACKEND MAY REFUSE. Bytecode is format-specific, so handing DXIL to Vulkan is a caller
+    // error, not a portability question -- it returns an invalid handle and logs, the same degrade
+    // as a shader model the device cannot reach. A caller with both (NRD supplies DXIL and SPIR-V
+    // side by side) picks by asking the device which it is.
+    const void* bytecode     = nullptr;
+    u64         bytecodeSize = 0;
+
+    [[nodiscard]] bool precompiled() const { return bytecode != nullptr && bytecodeSize != 0; }
 };
 
 // Which triangle facing is discarded.
@@ -290,6 +319,33 @@ struct PipelineLayout {
     // serialises byte-identically to before this field existed. Part of the root-signature cache
     // key; see sameLayout in the D3D12 backend.
     u32 bindlessTextureCount = 0;
+
+    // ---- register spaces ----------------------------------------------------------------------
+    //
+    // WHICH REGISTER SPACE THE CONSTANT SLOTS AND THE STATIC SAMPLERS LIVE IN. Zero for every
+    // pipeline this engine compiles itself, which is what the two defaults mean and why they are
+    // separate fields rather than one: they are set together only by accident.
+    //
+    // WHY THEY EXIST AT ALL. HLSL lets a shader put `b0` and `t0` in different spaces, and a shader
+    // this engine did not compile has already made that choice -- it is baked into the bytecode and
+    // is not negotiable at bind time. NVIDIA NRD (modules/render.nrd) is the first such shader here:
+    // its SRVs and UAVs are in space 0, matching this engine, but its constant buffer and its two
+    // immutable samplers are in SPACE 1. Without these fields a root signature built from this
+    // struct simply cannot describe NRD's shaders, and the pipeline fails to create.
+    //
+    // NOT srvSpace/uavSpace, and that omission is deliberate rather than an oversight. Space 1 is
+    // ALREADY SPOKEN FOR on the SRV side: bindlessTextureCount puts the ray path's texture table
+    // there (see the D3D12 root-signature builder). Adding a movable space for the ordinary SRV/UAV
+    // tables would let a caller collide with it, and nothing needs it -- add them when something
+    // does, with the collision worked out then.
+    //
+    // A NON-ZERO SPACE MOVES ALL kMaxConstantSlots SLOTS, not just the ones a shader uses. A root
+    // signature may declare more than its shader reads, so the unused slots are harmless; but they
+    // are also unbound, and a shader that DID read one would read garbage. That is the same
+    // contract slot 0 already has.
+    u32 constantSpace = 0;
+    u32 samplerSpace  = 0;
+
     bool slotKindsDeclared = false;
     SlotKind srvKinds[kMaxBindingSlots]  = {};   // table 0
     SlotKind uavKinds[kMaxBindingSlots]  = {};

@@ -1429,6 +1429,38 @@ VkDescriptorSetLayout VulkanResourceFactory::instanceSetLayout() {
 }
 
 const DescriptorLayoutEntry* VulkanResourceFactory::descriptorLayout(const PipelineLayout& layout, bool mesh, bool instanced) {
+    // REFUSED, LOUDLY, RATHER THAN MIS-BOUND SILENTLY.
+    //
+    // PipelineLayout::constantSpace/samplerSpace are honoured by the D3D12 backend, where a register
+    // space is a free-floating tag on an independent root parameter and moving one costs a field
+    // assignment. Vulkan is not that: an HLSL register space becomes a DESCRIPTOR SET, and a set is
+    // a real allocation and layout-compatibility unit. This backend's whole binding model is the
+    // fixed five-set scheme documented above kVkSetTable0 -- tables at 0 and 1, constants at 2,
+    // samplers at 3, instances at 4 -- and honouring a non-zero space means building a different
+    // set layout AND binding it at a different index in VulkanRenderContext, which hard-codes
+    // kVkSetConstants and kVkSetSamplers at every CmdBindDescriptorSets call site.
+    //
+    // Doing that halfway is the dangerous outcome, not the incomplete one. Wire the space into the
+    // layout builder but not into the bind calls and the descriptors are built correctly and bound
+    // at the wrong set: no validation error (there are no validation-layer binaries on the machines
+    // this is developed on -- see VulkanShaderCompiler.cpp), no crash, just a shader reading the
+    // wrong memory. This engine has been bitten by that exact shape before, which is why the
+    // half-built version is not what sits here.
+    //
+    // AND IT WOULD STILL NOT RUN NRD, the only caller that wants this. NRD's SPIR-V was compiled by
+    // ShaderMake with its own -fvk register shifts, so its (set, binding) pairs are baked in and
+    // are NOT what this backend's convention produces. Consuming it needs the module's real
+    // bindings read back by reflection and a bespoke VkDescriptorSetLayout built from them -- a
+    // different mechanism from a parametric space, and one nothing here has yet. So this refusal
+    // costs the Vulkan path nothing it could otherwise have had.
+    if (layout.constantSpace != 0 || layout.samplerSpace != 0) {
+        AVER_ERROR("[RHI.Vulkan] pipeline layout asks for constants in register space {} and samplers "
+                   "in space {}; this backend implements space 0 only. A shader compiled for another "
+                   "space needs its real descriptor sets read out of its SPIR-V, not renumbered here.",
+                   layout.constantSpace, layout.samplerSpace);
+        return nullptr;
+    }
+
     SlotKind srv0[kMaxBindingSlots], uav0[kMaxBindingSlots], srv1[kMaxBindingSlots], uav1[kMaxBindingSlots];
     for (u32 i = 0; i < kMaxBindingSlots; ++i) srv0[i] = uav0[i] = srv1[i] = uav1[i] = SlotKind::Texture2D;
 
@@ -1985,6 +2017,57 @@ BufferHandle VulkanResourceFactory::createBuffer(const BufferDesc& d) {
 // ================================================================================================
 ShaderHandle VulkanResourceFactory::createShader(const ShaderDesc& d) {
     collect();
+
+    // THE PRECOMPILED PATH -- SPIR-V somebody else produced. See ShaderDesc::bytecode.
+    //
+    // IT LEAVES RhiShader::source EMPTY, AND THAT IS THE WHOLE INTEGRATION. moduleForLayout's very
+    // first act is `if (s.source.empty()) return s.module;`: with no HLSL there is nothing to patch
+    // and nothing to recompile, so the module goes to the pipeline exactly as handed over. That is
+    // not a special case added for this -- it is the existing answer for a shader whose source has
+    // been released, and it is the correct one here for a stronger reason: the SPIR-V's descriptor
+    // set and binding numbers are BAKED IN. This backend normally re-derives placement by
+    // recompiling with a -fvk-bind-register map (see moduleForLayout), which is exactly the one
+    // thing that cannot be done to bytecode. A caller supplying precompiled SPIR-V is therefore
+    // asserting that its bindings already match the PipelineLayout it will be used with; nothing
+    // here can check that, and Vulkan will report the mismatch at pipeline creation if it is wrong.
+    if (d.precompiled()) {
+        if ((d.stage == ShaderStage::Mesh || d.stage == ShaderStage::Amplification)
+            && dev_->cachedCaps().meshShaderTier == 0) {
+            AVER_WARN("[RHI.Vulkan] createShader (precompiled) needs mesh-shader hardware, which this "
+                      "device reports as tier 0");
+            return 0;
+        }
+        // SPIR-V IS A STREAM OF 32-BIT WORDS, and vkCreateShaderModule requires pCode to be 4-byte
+        // aligned as well as codeSize to be a multiple of 4. Refusing a bad size here names the
+        // caller's mistake; passing it on would be undefined behaviour inside the driver. The copy
+        // into a u32 vector gives the alignment for free -- ShaderDesc::bytecode promises a copy
+        // anyway, so this costs nothing extra.
+        if ((d.bytecodeSize % sizeof(u32)) != 0) {
+            AVER_ERROR("[RHI.Vulkan] createShader (precompiled): {} bytes is not a whole number of "
+                       "SPIR-V words -- this is DXIL or a truncated module, not SPIR-V", d.bytecodeSize);
+            return 0;
+        }
+        RhiShader s;
+        s.stage = d.stage;
+        s.spirv.resize(static_cast<usize>(d.bytecodeSize / sizeof(u32)));
+        std::memcpy(s.spirv.data(), d.bytecode, static_cast<usize>(d.bytecodeSize));
+        // The magic number, checked because the alignment test above passes for any 4-byte multiple
+        // and DXIL is one. Getting this wrong is a caller handing the wrong one of NRD's two blobs
+        // to the wrong backend, which is worth catching by name rather than as a driver error.
+        if (s.spirv.empty() || s.spirv[0] != 0x07230203u) {
+            AVER_ERROR("[RHI.Vulkan] createShader (precompiled): bytecode does not begin with the "
+                       "SPIR-V magic number -- wrong backend's blob?");
+            return 0;
+        }
+        VkShaderModuleCreateInfo mi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        mi.codeSize = s.spirv.size() * sizeof(u32);
+        mi.pCode    = s.spirv.data();
+        if (!vkOk(dev_->api().CreateShaderModule(dev_->vkDevice(), &mi, nullptr, &s.module),
+                  "rhi precompiled shader module")) return 0;
+        shaders_.push_back(std::move(s));
+        return static_cast<ShaderHandle>(shaders_.size());
+    }
+
     if (!d.source || !d.entry) { AVER_ERROR("[RHI.Vulkan] createShader without source or entry point"); return 0; }
 
     const bool isMeshFamily = d.stage == ShaderStage::Mesh || d.stage == ShaderStage::Amplification;

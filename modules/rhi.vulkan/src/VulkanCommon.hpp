@@ -599,6 +599,11 @@ inline bool sameSampler(const SamplerDesc& a, const SamplerDesc& b) {
 inline bool sameLayout(const PipelineLayout& a, const PipelineLayout& b) {
     if (a.srvCount != b.srvCount || a.uavCount != b.uavCount || a.samplerCount != b.samplerCount) return false;
     if (a.srvCount1 != b.srvCount1 || a.uavCount1 != b.uavCount1) return false;
+    // Part of the key even though this backend REFUSES a non-zero space (see descriptorLayout).
+    // A refusal that is not in the cache key is worse than no refusal at all: the first layout
+    // through would cache an entry, and a later layout differing only in its space would find that
+    // entry, skip the refusal, and be bound at the wrong descriptor set with no diagnostic.
+    if (a.constantSpace != b.constantSpace || a.samplerSpace != b.samplerSpace) return false;
     for (u32 i = 0; i < kMaxConstantSlots; ++i) if (a.constantDwords[i] != b.constantDwords[i]) return false;
     for (u32 i = 0; i < a.samplerCount && i < 4; ++i) if (!sameSampler(a.samplers[i], b.samplers[i])) return false;
     return true;

@@ -1235,6 +1235,22 @@ private:
     // history buys the sample count over time instead: one ray, no tile, no blocks.
     // RG32Float like the shadow pair, x = openness, y = linear depth for the disocclusion test.
     rhi::TextureHandle rtAoHist_[2] = {0, 0};
+    // THE SKY-OCCLUSION RAY'S HIT DISTANCE, in [0,1] as a fraction of the ray's own TMax
+    // (Settings::giMaxDistance). NOT ping-ponged and NOT a history: it is this frame's raw
+    // measurement, overwritten whole every frame, and the thing that reads it keeps whatever
+    // history it wants of its own.
+    //
+    // WHY IT EXISTS AT ALL, since nothing in Voxi reads it. An external denoiser cannot filter an
+    // occlusion signal from the occlusion alone -- it needs to know how FAR away the occluder was,
+    // because that is what sets how wide a filter may spread the sample without crossing a real
+    // edge. NVIDIA NRD's REBLUR_DIFFUSE_OCCLUSION calls this IN_DIFF_HITDIST and will not run
+    // without it (modules/render.nrd/README.md). The ray already computes the distance and threw
+    // it away; this is where it stops being thrown away.
+    //
+    // R16Unorm, one channel: the value is a fraction, 16 bits of it is finer than the ray count
+    // could justify, and 2 bytes/pixel beside the 112 MB the RG32Float history pair above already
+    // costs at the tiers where either exists is not a number worth optimising.
+    rhi::TextureHandle rtAoHitDist_ = 0;
     u32  rtShadowHistW_ = 0, rtShadowHistH_ = 0;
     u32  rtHistWriteIdx_ = 0;
     // False right after creation or a resize: the textures hold no real previous frame yet, and
@@ -1301,6 +1317,21 @@ private:
     // releasing all of them when ray tracing is off, and the tiers it applies to are precisely the
     // ones most likely to be memory-bound.
     bool aoHistoryWanted() const { return rayTracingWanted() && settings_.giSkyOcclusionRays > 0; }
+
+public:
+    // THE SKY-OCCLUSION RAY'S HIT DISTANCE FOR THIS FRAME, or 0 when the ray is not running at this
+    // tier (Low and Medium never trace it) or ray tracing is off entirely. See rtAoHitDist_.
+    //
+    // The texture rests in ResourceState::UnorderedAccess, which a caller must transition from
+    // before sampling it -- this returns a handle, not a promise about state, exactly like every
+    // other texture accessor that hands out something a different pass wrote.
+    //
+    // 0 IS THE ANSWER, NOT AN ERROR, and a caller must handle it: the tier that has no ray has
+    // nothing to denoise, and the correct behaviour there is to skip the denoiser rather than to
+    // filter a texture that does not exist.
+    [[nodiscard]] rhi::TextureHandle ambientHitDistanceTexture() const { return rtAoHitDist_; }
+
+private:
     // PATH TRACING WANTED, which is a different question from ray tracing wanted and deliberately
     // asks the other setting. Both need the hardware -- a path tracer is built out of rays -- but
     // a project may want ray-traced shadows and no path tracing at all, which is the default.

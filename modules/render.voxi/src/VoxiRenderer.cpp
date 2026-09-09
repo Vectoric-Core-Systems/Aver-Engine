@@ -116,7 +116,7 @@ constexpr u32 kVoxiSrvCount = kGiSrvCount + 3;
 // growing the kinds it declares, and Vulkan refuses a set whose slot types do not match the
 // pipeline layout -- an undeclared fifth slot there would be a validation failure in a file this
 // change never touches. Voxi sizes its OWN table against this instead, so u4 is invisible to it.
-constexpr u32 kVoxiUavCount = kGiUavCount + 1;
+constexpr u32 kVoxiUavCount = kGiUavCount + 2;
 
 // What KIND of resource each of table 0's slots holds, read by both giLayout() (every pipeline) and
 // createVoxelVolume()'s BindingSetDesc (the set those pipelines bind) -- Vulkan refuses a set whose
@@ -152,7 +152,12 @@ void giTableKinds(rhi::SlotKind* srv, rhi::SlotKind* uav) {
     uav[2] = rhi::SlotKind::Texture2D;              // u2 ray-traced shadow history (write)
     uav[3] = rhi::SlotKind::Texture2D;              // u3 ray-traced reflection history (write)
     uav[4] = rhi::SlotKind::Texture2D;              // u4 sky-occlusion history (write)
-    static_assert(kVoxiSrvCount == 12 && kVoxiUavCount == 5 && kGiSrvCount == 9 && kGiUavCount == 4,
+    // u5: the sky-occlusion ray's HIT DISTANCE, written raw and never read back by Voxi -- see
+    // rtAoHitDist_ in VoxiRenderer.hpp. Allocated and bound under exactly the same condition as
+    // the u4/t11 pair (aoHistoryWanted()), which is why gRtDenoiseParams.w speaks for it too and
+    // no fourth flag is needed.
+    uav[5] = rhi::SlotKind::Texture2D;              // u5 sky-occlusion hit distance (write)
+    static_assert(kVoxiSrvCount == 12 && kVoxiUavCount == 6 && kGiSrvCount == 9 && kGiUavCount == 4,
                   "giTableKinds fills exactly kVoxiSrvCount SRVs and kVoxiUavCount UAVs; widen "
                   "those, never kGiSrvCount/kGiUavCount -- those two are the union SandboxApp.cpp's "
                   "cluster path reserves at its own base and fills kinds for by hand, so growing "
@@ -426,6 +431,7 @@ void VoxiRenderer::shutdown() {
     for (rhi::TextureHandle& t : rtShadowHist_) { if (t) res_->destroyTexture(t); t = 0; }
     for (rhi::TextureHandle& t : rtReflHist_)   { if (t) res_->destroyTexture(t); t = 0; }
     for (rhi::TextureHandle& t : rtAoHist_)     { if (t) res_->destroyTexture(t); t = 0; }
+    if (rtAoHitDist_) { res_->destroyTexture(rtAoHitDist_); rtAoHitDist_ = 0; }
     rtShadowHistW_ = rtShadowHistH_ = 0;
     rtHistWriteIdx_ = 0;
     rtHistValid_ = false;
@@ -2865,6 +2871,7 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
         for (rhi::TextureHandle& t : rtShadowHist_) { if (t) res_->destroyTexture(t); t = 0; }
         for (rhi::TextureHandle& t : rtReflHist_)   { if (t) res_->destroyTexture(t); t = 0; }
         for (rhi::TextureHandle& t : rtAoHist_)     { if (t) res_->destroyTexture(t); t = 0; }
+        if (rtAoHitDist_) { res_->destroyTexture(rtAoHitDist_); rtAoHitDist_ = 0; }
         rtShadowHistW_ = rtShadowHistH_ = 0;
         rtHistWriteIdx_ = 0;
         rtHistValid_ = false;
@@ -2876,13 +2883,28 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
     }
 
     if (rtShadowHist_[0] && rtShadowHist_[1] && rtReflHist_[0] && rtReflHist_[1] &&
-        (rtAoHist_[0] && rtAoHist_[1]) == aoHistoryWanted() &&
+        // rtAoHitDist_ IS IN THIS TEST because it is what the test is FOR: this early-out says
+        // "everything the current settings want already exists at the current size". The three are
+        // created together, so leaving one out could only matter if that ever stopped being true --
+        // and then the failure would be an early-out that skips creating it, forever, with the
+        // shader told by gRtDenoiseParams.w not to write it. Silent, and permanent.
+        (rtAoHist_[0] && rtAoHist_[1] && rtAoHitDist_) == aoHistoryWanted() &&
         rtShadowHistW_ == width && rtShadowHistH_ == height)
         return true;
 
     for (rhi::TextureHandle& t : rtShadowHist_) { if (t) res_->destroyTexture(t); t = 0; }
     for (rhi::TextureHandle& t : rtReflHist_)   { if (t) res_->destroyTexture(t); t = 0; }
     for (rhi::TextureHandle& t : rtAoHist_)     { if (t) res_->destroyTexture(t); t = 0; }
+    // THE FOURTH ONE, AND IT WAS MISSING HERE WHILE BEING PRESENT IN THE OTHER TWO TEARDOWNS --
+    // exactly the shape of leak the comment at the top of shutdown() records this function having
+    // had before, and for the same reason: the release paths are three separate lists and adding a
+    // texture to one of them is not adding it to all three. Every viewport resize at High or Epic
+    // orphaned an R16Unorm at the old resolution, unrecoverably (the handle was overwritten by the
+    // create below, so not even shutdown could reach it). Dropping the tier from High to Medium at a
+    // fixed size was worse than a leak: the create block is skipped when aoHistoryWanted() is false,
+    // so the stale non-zero handle SURVIVED, and ambientHitDistanceTexture() went on returning it --
+    // breaking its own documented "0 is the answer at a tier with no ray" contract.
+    if (rtAoHitDist_) { res_->destroyTexture(rtAoHitDist_); rtAoHitDist_ = 0; }
     rtHistValid_ = false;   // the old contents, if any, belonged to a resolution that no longer exists
 
     rhi::TextureDesc d;
@@ -2928,6 +2950,23 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
         d.debugName = "Voxi RT sky-occlusion history B";
         rtAoHist_[1] = res_->createTexture(d);
         if (!rtAoHist_[0] || !rtAoHist_[1]) return false;
+
+        // THE RAW HIT DISTANCE, alongside the pair and under the same condition -- see
+        // rtAoHitDist_ in VoxiRenderer.hpp for what it is and who wants it.
+        //
+        // IT RESTS IN UnorderedAccess AND IS NEVER BARRIERED HERE, unlike the three history pairs
+        // above, and that is deliberate rather than an omission. Those pairs are read by the very
+        // shader that writes them (as t6/t7/t11 the next frame), so each one has to flip state
+        // twice a frame. Nothing in Voxi reads this. It is written whole, every frame, by the only
+        // pass that touches it; the eventual consumer runs after that pass and outside this file,
+        // and gets to make its own transition when it exists. Adding a round trip to
+        // ShaderResource and back now would cost two barriers a frame to serve nobody.
+        d.format = rhi::Format::R16Unorm;
+        d.initialState = rhi::ResourceState::UnorderedAccess;
+        d.debugName = "Voxi RT sky-occlusion hit distance";
+        rtAoHitDist_ = res_->createTexture(d);
+        if (!rtAoHitDist_) return false;
+        d.initialState = rhi::ResourceState::ShaderResource;   // restored for anything added below
     }
 
     rtShadowHistW_ = width;
@@ -2943,6 +2982,9 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
         res_->setUav(bindings_, 4, rtAoHist_[0], 0);
         res_->setSrv(bindings_, 11, rtAoHist_[1]);
     }
+    // Bound once and never rebound: it does not ping-pong, so unlike u4 above there is no per-frame
+    // role for beginShadowHistory to swap.
+    if (rtAoHitDist_) res_->setUav(bindings_, 5, rtAoHitDist_, 0);
     return true;
 }
 
@@ -2981,7 +3023,12 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     // gRtDenoiseParams.w: 1 only while the ambient pair is genuinely bound this frame. The shader
     // must not touch a null UAV, and unlike the other two pairs this one is absent at Low and Medium
     // by design -- so it cannot ride gRtHistParams.x with the others.
-    if (rtAoHist_[writeIdx] && rtAoHist_[readIdx]) {
+    // rtAoHitDist_ IS PART OF THE CONDITION even though it is not rebound here. The flag's whole
+    // job is to tell the shader which of these slots it may touch, and u5 is one of them -- a frame
+    // that somehow had the pair but not the hit-distance target would otherwise be told to write a
+    // null UAV, which is undefined rather than merely wasteful. They are created together, so this
+    // can only ever differ if that changes; then it fails safe instead of silently.
+    if (rtAoHist_[writeIdx] && rtAoHist_[readIdx] && rtAoHitDist_) {
         res_->setUav(bindings_, 4, rtAoHist_[writeIdx], 0);
         res_->setSrv(bindings_, 11, rtAoHist_[readIdx]);
         cb_.rtDenoiseParams[3] = 1.0f;
