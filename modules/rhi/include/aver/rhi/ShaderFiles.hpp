@@ -42,6 +42,12 @@ namespace aver::rhi {
 // two errors describing one cause is better than an abort that describes none.
 const std::string& shaderFile(std::string_view name);
 
+// The same lookup, silent when the file is absent. For a caller that EXPECTS misses: the DXC include
+// handler resolves an include by trying path suffixes longest-first, so all but the last attempt are
+// expected to fail and shaderFile()'s (deliberately loud) error would be noise on every include.
+// Returns nullptr rather than an empty string so "absent" and "empty file" stay distinguishable.
+const std::string* shaderFileIfPresent(std::string_view name);
+
 // A hash of EVERY shader file that could take part in a compile, for a cache key to fold in.
 //
 // WHY A BLOB CACHE NEEDS THIS. The DXIL cache keys on the source text handed to DXC plus the defines

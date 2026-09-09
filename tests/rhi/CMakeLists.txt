@@ -111,3 +111,36 @@ if(AVER_RHI_D3D12)
   endif()
   set_target_properties(PrecompiledShaderTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# ShaderIncludeResolveTest -- can a deployed shader #include a file in a SUBDIRECTORY, and can it do
+# it with ANGLED brackets? Against a real D3D12 device (WARP, so no GPU required).
+#
+# It has to be a runtime test, because HLSL here compiles at runtime: both defects it pins shipped
+# as a clean build that failed in the editor, and one of them took every entry point in voxi.hlsl
+# down at once -- see the file's own comment.
+#
+# ITS FIXTURE IS DEPLOYED BY A DIRECTORY COPY, not aver_deploy_shaders, which globs *.hlsl/*.hlsli
+# and copies each by NAME alone. That helper flattens, and a flattened fixture would test nothing:
+# the whole subject here is that a path survives.
+if(AVER_RHI_D3D12)
+  add_executable(ShaderIncludeResolveTest src/ShaderIncludeResolveTest.cpp)
+  target_link_libraries(ShaderIncludeResolveTest PRIVATE Aver.RHI Aver.RHI.D3D12 Aver.Core Aver.Platform)
+  # Its own composition root, exactly as every device-creating test above is: Aver.RHI dispatches to
+  # detail::create*Device behind AVER_HAS_* without linking the backends, so a consumer must supply
+  # every ENABLED one even when it only ever asks for D3D12.
+  if(AVER_RHI_D3D11)
+    target_link_libraries(ShaderIncludeResolveTest PRIVATE Aver.RHI.D3D11)
+  endif()
+  if(AVER_RHI_VULKAN)
+    target_link_libraries(ShaderIncludeResolveTest PRIVATE Aver.RHI.Vulkan)
+  endif()
+  # POST_BUILD rather than a configure-time file(COPY): a fixture that only lands when CMake happens
+  # to re-run is a fixture that silently goes stale, and this suite would then be asserting on an
+  # old copy of the very thing it is testing.
+  add_custom_command(TARGET ShaderIncludeResolveTest POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/AverIncProbe"
+            "${CMAKE_BINARY_DIR}/bin/shaders/AverIncProbe"
+    COMMENT "Deploying the AverIncProbe include fixture")
+  set_target_properties(ShaderIncludeResolveTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

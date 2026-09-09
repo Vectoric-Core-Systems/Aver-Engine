@@ -237,6 +237,21 @@ public:
             L"-T", wTarget.c_str(),
             L"-Zpr",
             L"-HV", L"2021",
+            // ANGLED INCLUDES. A custom IDxcIncludeHandler is consulted for `#include "x"` on its
+            // own, because a quoted include searches the including file's own directory -- but
+            // `#include <x>` searches ONLY the -I list, and with no -I at all that list is empty,
+            // so DXC never asks the handler and reports `file not found with <angled> include; use
+            // "quotes" instead`. That is not a style note this engine can act on: the angled
+            // includes are inside VENDORED third-party HLSL (RTXDI's Utils/RandomSamplerState.hlsli
+            // includes <Rtxdi/Utils/Math.hlsli>), and rewriting a vendored tree to suit us is the
+            // thing third_party/*/AVER_README.md exists to avoid.
+            //
+            // "." IS NOT A FILESYSTEM PATH HERE. It only gives the angled search a single entry to
+            // form candidates from; the candidate ("./Rtxdi/Utils/Math.hlsli") still goes through
+            // DxcShaderInclude, which strips the "./" and resolves it against bin/shaders exactly
+            // as it does a quoted one. So this changes WHICH includes reach the handler, not where
+            // the handler looks -- --shader-source, the cache and hot reload all still apply.
+            L"-I", L".",
         };
         for (const std::wstring& d : wDefines) { args.push_back(L"-D"); args.push_back(d.c_str()); }
         // A real include handler (rhi::shaderFile(), not DXC's default filesystem one -- see

@@ -165,6 +165,12 @@ bool VulkanShaderCompiler::compile(const char* src, const char* entry, ShaderSta
         // Vulkan 1.3: dynamic rendering, buffer device address, mesh shaders -- everything this
         // backend's VulkanDevice already requires of the device.
         L"-fspv-target-env=vulkan1.3",
+        // Angled `#include <...>` searches ONLY the -I list, which is empty without this, so DXC
+        // never consults the include handler for one -- see D3D12Device.cpp's copy of this argument
+        // for the full argument. Kept identical on both backends deliberately: a shader that
+        // compiles on one and not the other because of an include-resolution difference is the
+        // exact class of divergence DxcShaderInclude.hpp was put in Aver.RHI to prevent.
+        L"-I", L".",
     };
     // THE SHIFT AND THE EXPLICIT MAP ARE MUTUALLY EXCLUSIVE -- DXC rejects the combination outright
     // ("-fvk-u-shift cannot be used together with -fvk-bind-register"), which is how this was found.

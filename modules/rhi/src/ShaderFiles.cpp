@@ -101,6 +101,26 @@ u64 shaderCorpusHash() {
     return g_corpusHash;
 }
 
+const std::string* shaderFileIfPresent(std::string_view name) {
+    if (const auto it = g_cache.find(name); it != g_cache.end())
+        return it->second.empty() ? nullptr : &it->second;
+    const std::string candidates[2] = {
+        g_sourceDir.empty() ? std::string() : join(g_sourceDir, name),
+        join(join(executableDir(), "shaders"), name),
+    };
+    std::string text;
+    for (const std::string& path : candidates) {
+        if (path.empty()) continue;
+        if (readFileText(path, text)) {
+            normaliseNewlines(text);
+            return &g_cache.emplace(std::string(name), std::move(text)).first->second;
+        }
+    }
+    // NOT CACHED AS EMPTY. A miss here is ordinary (the handler is probing suffixes), and caching it
+    // would poison the real shaderFile() into reporting the file absent forever afterwards.
+    return nullptr;
+}
+
 const std::string& shaderFile(std::string_view name) {
     if (const auto it = g_cache.find(name); it != g_cache.end()) return it->second;
 
