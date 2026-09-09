@@ -234,7 +234,16 @@ startup never appeared. Now:
 The importers accept anything in a supported format. The constraint is **licensing, not technical**.
 
 **This repository accepts permissively-licensed content only** — MIT, BSD, Apache-2.0, zlib, CC0,
-CC-BY with attribution. That rules out:
+CC-BY with attribution.
+
+> **One exception exists, granted deliberately.** `third_party/nrd` (NVIDIA Real-Time Denoisers) is
+> under the NVIDIA RTX SDKs License, accepted by the owner on 2026-09-09 after being shown that its
+> grant is not sublicensable — so an Aver licensee shipping an application needs their own grant from
+> NVIDIA, and Aver's EULA must flow NVIDIA's terms through. See `third_party/nrd/AVER_README.md`.
+> This is a named exception for one dependency and does **not** relax the rule for anything else;
+> a second such request should be argued on its own terms, not on this precedent.
+
+That rules out:
 
 - **Fab / Quixel / Megascans** under Epic's Content License. Usable in *your own* game under Epic's
   terms if you accept them; **not** committable to this repository, and not something the engine can

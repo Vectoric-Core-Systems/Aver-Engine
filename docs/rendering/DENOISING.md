@@ -1,5 +1,16 @@
 # Denoising, and why NVIDIA NRD is not the answer here
 
+> **SUPERSEDED ON THE LICENCE QUESTION, 2026-09-09.** NRD is now vendored at `third_party/nrd`. The
+> owner was shown this document's licence argument — that the NVIDIA RTX SDKs License grants
+> distribution only "as incorporated in object code format into a software application" and without
+> the right to sublicense, so every Aver licensee would need their own grant — and accepted it
+> anyway. `third_party/nrd/AVER_README.md` records the decision and the flow-through consequence for
+> Aver's own EULA.
+>
+> **Everything else on this page still stands**, including the technical analysis of what NRD needs
+> from a renderer and the description of what the hand-written filters do. Read the licence section
+> below as history rather than as current policy.
+
 **Investigated 2026-08-27.** The question was whether to vendor NVIDIA's Real-time Denoisers (NRD) to
 replace the hand-written spatial/temporal filters in `modules/render.voxi`.
 
