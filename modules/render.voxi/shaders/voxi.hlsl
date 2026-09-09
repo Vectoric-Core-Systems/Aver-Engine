@@ -1267,6 +1267,10 @@ float rtAoSpatial(float centre, float3 wpos, float3 N, float2 pixel, float curDe
 
     float acc = centre;
     float wsum = 1.0;
+    // NEIGHBOURHOOD STATISTICS, gathered alongside the blur, for the clamp below. Deliberately
+    // EXCLUDING the centre: the whole question is whether the centre disagrees with its neighbours,
+    // and a statistic contaminated by the outlier cannot answer it.
+    float nSum = 0.0, nSum2 = 0.0, nCount = 0.0;
     [loop] for (int oy = -radius; oy <= radius; ++oy) {
         [loop] for (int ox = -radius; ox <= radius; ++ox) {
             if (ox == 0 && oy == 0) continue;
@@ -1283,12 +1287,53 @@ float rtAoSpatial(float centre, float3 wpos, float3 N, float2 pixel, float curDe
             const float w = exp(-(float)(ox * ox + oy * oy) * inv2s2);
             acc  += st.x * w;
             wsum += w;
+            nSum += st.x; nSum2 += st.x * st.x; nCount += 1.0;
         }
+    }
+
+    // ---- THE CLAMP, WHICH IS WHAT ACTUALLY REMOVES SALT AND PEPPER ---------------------------
+    //
+    // The Gaussian above is the wrong instrument for an isolated extreme and always was: a LINEAR
+    // filter SPREADS an impulse over its kernel rather than removing it, turning one bright pixel
+    // into a bright smudge and lowering the peak just enough to look like progress. MEASURED on a
+    // still frame as deviation from the 3x3 MEDIAN -- the quantity "salt and pepper" actually names,
+    // and a different one from the frame-to-frame flicker measured earlier: 0.248% of pixels past 64
+    // codes with ray tracing on, against 0.019% with it off. Raising the SHADOW ray count to 4
+    // changed it to 0.242%, i.e. not the shadow; switching traced sky occlusion off took it to
+    // 0.082%, i.e. mostly this term.
+    //
+    // Clamping to the neighbourhood's own mean +/- k*sigma is what temporal antialiasing has used
+    // against fireflies for years, and it works here for the same reason: an impulse is BY
+    // DEFINITION a value its neighbours do not share, so a statistic taken from the neighbours
+    // bounds it without knowing anything about the scene. A genuine feature -- a real shadow edge,
+    // a real crease -- is supported by neighbours on one side and survives, which is why this is not
+    // simply a blur with extra steps.
+    //
+    // 2 SIGMA, and the two failure directions are not symmetric. Tighter starts eating real
+    // gradients, which is the artefact this renderer has already paid for once by over-filtering.
+    // Looser stops catching anything: the outliers here are many sigma out, not marginal. The
+    // minimum tap count is what stops a pixel with two surviving neighbours -- a silhouette, where
+    // the depth and normal rejects have thrown most of the kernel away -- from being clamped to a
+    // statistic built out of nothing.
+    float clamped = centre;
+    if (nCount >= 3.0) {
+        const float mean  = nSum / nCount;
+        const float sigma = sqrt(max(nSum2 / nCount - mean * mean, 0.0));
+        // A FLOOR UNDER SIGMA. A perfectly flat neighbourhood has zero variance, and clamping to
+        // [mean, mean] there would erase the centre's own legitimate detail along with its noise.
+        const float k = 2.0 * max(sigma, 0.02);
+        clamped = clamp(centre, mean - k, mean + k);
+        // The blurred average carried the UNCLAMPED centre at weight 1; correct it in place rather
+        // than re-running the loop, so the filter and the clamp agree about what the centre is.
+        acc += clamped - centre;
     }
 
     const float velPx = reproj ? length(centrePx - pixel) : 0.0;
     const float trust = gRtDenoiseParams.z > 0.0 ? saturate((3.0 - velPx) * gRtDenoiseParams.z) : 1.0;
-    return saturate(lerp(centre, acc / wsum, saturate(gRtDenoiseParams.y) * trust));
+    // CLAMPED FIRST, THEN BLENDED, so the impulse is gone before the linear filter ever sees it --
+    // and so that a run with the blur turned down to nothing still gets the clamp, which is the part
+    // that actually addresses this artefact.
+    return saturate(lerp(clamped, acc / wsum, saturate(gRtDenoiseParams.y) * trust));
 }
 
 float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays) {
