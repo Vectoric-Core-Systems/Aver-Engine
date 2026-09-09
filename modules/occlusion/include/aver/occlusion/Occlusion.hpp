@@ -63,15 +63,15 @@
 // bug, not a tradeoff.
 //
 // ---------------------------------------------------------------------------------------------------
-// TWO-PASS, AND WHY BOTH PASSES SHARE ONE FRAME. Single-pass occlusion — cull THIS frame against a
-// pyramid built from LAST frame's depth — produces FALSE CULLS the instant the camera moves fast
-// enough that something enters view between the two frames: nothing in last frame's depth buffer
-// could possibly have drawn it, so the pyramid reports it hidden regardless of where it actually is
-// now. That failure mode is an object popping OUT of existence, which is worse than the milliseconds
-// two-pass spends to avoid it. The caller (SandboxApp.cpp) is the one that actually runs both passes,
-// because it is the one holding the entity list and the "was this entity drawn last frame" bit this
-// module deliberately does not store (see the header comment above on what this module does not
-// know) — but the shape is:
+// TWO-PASS, AND WHY BOTH PASSES SHARE ONE FRAME (INTENT — see the correction below for what this
+// RHI actually delivers today). Single-pass occlusion — cull THIS frame against a pyramid built from
+// LAST frame's depth — produces FALSE CULLS the instant the camera moves fast enough that something
+// enters view between the two frames: nothing in last frame's depth buffer could possibly have drawn
+// it, so the pyramid reports it hidden regardless of where it actually is now. That failure mode is
+// an object popping OUT of existence, which is worse than the milliseconds two-pass spends to avoid
+// it. The caller (SandboxApp.cpp) is the one that actually runs both passes, because it is the one
+// holding the entity list and the "was this entity drawn last frame" bit this module deliberately
+// does not store (see the header comment above on what this module does not know) — the SHAPE is:
 //   1. draw the entities that were visible last frame, with THIS frame's camera and transforms —
 //      this is ordinary rendering, no different from a build with occlusion off, and it is what
 //      seeds the depth buffer buildPyramid() reads.
@@ -82,18 +82,47 @@
 //      set forever.
 //   4. draw whichever of step 3's PREVIOUSLY-HIDDEN entities it says might now be visible.
 //
+// THE CORRECTION: steps 1-4 above describe what the CALLER records, in that order, into one frame's
+// command list. It does NOT describe when the GPU actually RUNS them relative to when testBatch()'s
+// CPU readback happens — and those are not the same moment. testBatch() (OcclusionCuller.cpp) ends
+// with IResourceFactory::waitIdle(), and this RHI's waitIdle() only blocks until GPU work ALREADY
+// SUBMITTED (via a previous ExecuteCommandLists/QueueSubmit) has retired — it has no way to close,
+// submit and wait for the CURRENT frame's own still-open, still-recording command list, because no
+// such "flush and resume this same list" primitive exists anywhere in modules/rhi. So step 2's
+// buildPyramid() dispatches and step 3's testBatch() dispatch+copy, all recorded into THIS frame's
+// list, have not reached the GPU by the time testBatch() reads its answer back — what comes back is
+// whichever dispatch+copy the PREVIOUS frame's testBatch() call recorded, which by then has had a
+// full frame to retire. In other words: this design's two passes still SHARE one recorded frame, but
+// the answer a caller reads out of them is (at best) exactly one frame older than that. That is
+// precisely the single-pass failure mode this section opened by describing — camera motion within
+// that one frame of lag can still make something newly-visible read as hidden — just deferred by one
+// frame rather than eliminated. SandboxApp.cpp's own comment above its box-collection loop is where
+// the actual mitigation now lives: a motion-based margin on each tested box, backed by a threshold
+// that disables culling outright for a frame whose camera motion (or whose readback itself, per
+// OcclusionCuller.cpp's generation-stamp check below) is too large to trust the one-frame-old answer
+// for. Verified by reading D3D12Device::waitForGpu() and VulkanDevice::waitForGpu() — both are a bare
+// queue Signal+wait with no ExecuteCommandLists/QueueSubmit of their own, so this is not a D3D12-only
+// gap; a Vulkan build has exactly the same staleness, and inherits the same SandboxApp.cpp mitigation
+// automatically, since none of it is backend-specific.
+//
 // ---------------------------------------------------------------------------------------------------
-// THE ONE COST THIS DESIGN DOES NOT HIDE: testBatch() has to hand the caller a CPU-visible answer
-// before step 4 can decide what to draw, in the SAME frame the pyramid that answer depends on was
-// built. This engine's RHI (modules/rhi) exposes exactly one GPU/CPU synchronisation primitive a
-// feature module can reach for — IResourceFactory::waitIdle(), a full stop — and testBatch() uses it.
-// That is a REAL, MEASURED stall (see the design doc / commit message this lands with for the number),
-// not a free lunch: a production system would replace it with either GPU-side predication (skip a
-// draw call itself based on a GPU-written flag, never surfacing the answer to the CPU at all) or an
-// indirect/GPU-driven draw path, and this codebase currently has neither — every draw call is issued
-// by name from a CPU walk (SandboxApp.cpp), and adding predication or indirect draws to that walk is
-// a change to the CORE draw path this task's own scope does not include. Reporting the stall honestly,
-// including a run where it makes the frame worse, is the more useful result than hiding it.
+// THE ONE COST THIS DESIGN DOES NOT HIDE (CORRECTED — this used to claim a same-frame answer; it does
+// not have one, see above). testBatch() cannot hand the caller a CPU-visible answer for THIS frame's
+// own pyramid before step 4 needs to decide what to draw: this engine's RHI (modules/rhi) exposes
+// exactly one GPU/CPU synchronisation primitive a feature module can reach for —
+// IResourceFactory::waitIdle(), a full stop that only drains ALREADY-SUBMITTED work — and testBatch()
+// uses it, so the CPU-visible answer it hands back is (at best) last frame's, not this frame's. That
+// is a REAL, MEASURED stall (see the design doc / commit message this lands with for the number) for
+// an answer that is ALSO stale — the worst of both: a production system would want either GPU-side
+// predication (skip a draw call itself based on a GPU-written flag, never surfacing the answer to the
+// CPU, and never one frame behind) or an indirect/GPU-driven draw path, and this codebase currently
+// has neither — every draw call is issued by name from a CPU walk (SandboxApp.cpp), and adding
+// predication or indirect draws to that walk is a change to the CORE draw path this module's own
+// scope does not include. A genuine same-frame fix would need a NEW mid-frame "flush this frame's own
+// command list, then keep recording into it" primitive that does not exist in modules/rhi today, on
+// either backend — adding one is a real option for later, but is RHI-level surgery out of scope for
+// this module. Reporting the stall — and the staleness it does not remove — honestly, including a run
+// where it makes the frame worse, is the more useful result than hiding either one.
 #pragma once
 #include "aver/occlusion/OcclusionMath.hpp"
 #include "aver/rhi/RHI.hpp"
@@ -136,12 +165,48 @@ public:
     // Tests every box in `boxes` against the pyramid buildPyramid() most recently built, and fills
     // outVisible with one byte per box (non-zero = "the pyramid could not prove this is hidden; draw
     // it" — see OcclusionMath.hpp's conservativelyHidden for what that promise actually rests on).
-    // Forces the answer to be available before returning (see this header's own top comment on why
-    // that is a real, deliberate synchronisation cost and not an oversight). Opens its own
-    // ScopedGpuStat("HZB test") span, SEPARATE from "HZB build" — the two cost different things and a
-    // caller measuring "does this pay for itself" needs to see them apart.
+    // Blocks until SOME answer is CPU-readable before returning (see this header's own top comment on
+    // why that stall is real and deliberate) — but "available" is not "current": the bytes it hands
+    // back are, at best, from the PREVIOUS call to this function, not this one — see the corrected
+    // "TWO-PASS" section above and readbackLagIsExactlyOneCall() below for how a caller checks whether even
+    // that one-call lag held. Opens its own ScopedGpuStat("HZB test") span, SEPARATE from "HZB build"
+    // — the two cost different things and a caller measuring "does this pay for itself" needs to see
+    // them apart.
     virtual void testBatch(rhi::IRenderContext& ctx, rhi::IResourceFactory& res,
                            const Aabb* boxes, u32 count, std::vector<u8>& outVisible) = 0;
+
+    // STALENESS DETECTOR. testBatch() answers a question one call late (see above); this answers
+    // "was it EXACTLY one call late, the lag every caller's own safety margin assumes, or worse?" —
+    // turning a silently-wrong-by-more-than-expected answer into something a caller can actually
+    // check, rather than trusting the one-call assumption blindly. Trivially true for the very FIRST
+    // testBatch() call ever made (there is no earlier call for it to have been stale relative to —
+    // calling that an anomaly would be a false-positive warning on every run that ever turns culling
+    // on); after that, true only when the bytes testBatch() most recently handed back are provably
+    // the ones the IMMEDIATELY PRECEDING testBatch() call produced (see OcclusionCuller.cpp's
+    // generation-stamp comment on testBatch() for the mechanism — a second, tiny CPU-authored buffer
+    // round-tripped through the SAME command list as the visibility copy, costing one 8-byte
+    // writeBuffer/copyBuffer/readBuffer per call). From the second call on, OcclusionCullerImpl's own
+    // answer defaults to false (distrust) and only earns "true" once that check actually passes --
+    // the same conservative bias testBatch()'s own outVisible all-1 default already uses.
+    //
+    // NOT PURE, and this base-class default is DELIBERATELY THE OPPOSITE BIAS from the concrete
+    // implementation above: "true" (trust unconditionally) preserves this interface's pre-existing
+    // behaviour for a future second implementer that never calls testBatch() with a non-empty batch,
+    // or has no cheap way to stamp one, and is therefore not obligated to add this at all — such an
+    // implementer's callers should not be silently downgraded to "never cull" by a base-class default
+    // they never asked for. A caller wanting the conservative bias for real gets it from
+    // OcclusionCullerImpl, the only implementation that exists today (see createOcclusionCuller
+    // below).
+    // NAMED FOR WHAT IT MEASURES, NOT FOR WHAT A CALLER HOPES. True does NOT mean the answer is
+    // current -- it means the answer is stale by EXACTLY ONE testBatch() call, which is the lag this
+    // design has and cannot remove (see the TWO-PASS section above). It was briefly called
+    // lastReadbackWasFresh(), which returned true for data it had just proved was a frame old; that
+    // is the same species of confidently-wrong name as the "SAME frame" comment whose falseness is
+    // the whole reason this method exists, so it did not survive review.
+    //
+    // False means the lag is something OTHER than one call -- older, newer, or unreadable -- which
+    // is the case no mitigation is calibrated for and every caller must answer by not culling.
+    virtual bool readbackLagIsExactlyOneCall() const { return true; }
 
     // Boxes testBatch() said "hidden" for, and the total it was asked about, across the MOST RECENT
     // testBatch() call only (not accumulated) — a caller wanting a running total (SandboxApp.cpp's

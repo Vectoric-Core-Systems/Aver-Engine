@@ -5122,6 +5122,71 @@ public:
             // the first group exists.
             u32 occlusionPass1Count = n;
             bool occlusionPyramidBuilt = false;
+            // ---- MOTION-SAFE TRUST GATE ----
+            // testBatch()'s answer this frame is (at best) exactly one call stale -- see
+            // Occlusion.hpp's corrected "TWO-PASS" section for why: this RHI has no primitive that
+            // flushes and resumes THIS frame's own still-recording command list, only
+            // IResourceFactory::waitIdle(), which only drains work already submitted. So the pyramid
+            // buildPyramid() is about to build and the bytes testBatch() is about to hand back both
+            // describe LAST frame's camera and LAST frame's depth, applied to THIS frame's entities.
+            // On a static camera that is harmless -- last frame's answer IS this frame's answer,
+            // which is exactly why the user's own report says a still camera is fine. Under motion it
+            // is the precise false-cull failure mode Occlusion.hpp's TWO-PASS section names: an
+            // object that entered view since the stale data was captured reads as hidden and pops
+            // out. This computes how far the camera moved and turned since the LAST basis
+            // occlusionBuildAndTest() stashed (occlusionBasisCamPos_/occlusionBasisForward_, not yet
+            // overwritten for THIS frame -- that happens later, inside occlusionBuildAndTest, right
+            // after buildPyramid() runs), and uses it two ways below: as a per-entity dilation margin
+            // (the box-collection loop just past this comment) and as a global "distrust this whole
+            // frame" gate when the motion is too large for a margin to safely cover (RESULT
+            // APPLICATION inside occlusionBuildAndTest).
+            //
+            // THIS IS A RETROSPECTIVE PREDICTOR, NOT A PROOF OF THE COMING FRAME. It bounds motion
+            // that ALREADY HAPPENED, and is used as an estimate of what the readback -- which will
+            // not actually be consumed until later in THIS frame's own draw walk -- needs to be
+            // trusted against. Under smooth motion that estimate is good; under a sudden
+            // acceleration between two frames that were each individually under the trust threshold,
+            // a margin sized off the slower window could under-cover the faster one. The only thing
+            // that actually GUARANTEES no false cull is the global "not trustworthy" fallback below
+            // (and, separately, IOcclusionCuller::readbackLagIsExactlyOneCall() catching a readback that
+            // was not even the one-call-stale this whole calculation assumes) -- the per-entity
+            // margin makes ordinary motion still cull something, it does not by itself prove safety.
+            const f32 occlusionMoveDist = occlusionBasisValid_
+                ? (camPos_ - occlusionBasisCamPos_).size() : 1e30f;
+            const f32 occlusionRotRad = occlusionBasisValid_
+                ? std::acos(std::clamp(dot(camForward(), occlusionBasisForward_), -1.0f, 1.0f))
+                : 3.2f;   // > pi: forces "untrustworthy" before the first basis has ever landed
+            // 45 degrees -- keeps the tan() below from blowing up before the global fallback (which
+            // fires well before rotRad could reach this anyway, at kOcclusionTeleportRotRad) takes over.
+            constexpr f32 kOcclusionRotClampRad = 0.785f;
+            // Absolute cap on the rotation term's contribution, so a very distant occluder does not
+            // dilate its box without bound. A KNOWN, SMALL RESIDUAL: an extremely distant,
+            // extremely fast-swept occluder edge beyond this cap could in principle still pop for
+            // one frame even when occlusionTrustworthy is true -- the global fallback only protects
+            // against overall camera motion, not this specific distance/cap interaction. Flagged, not
+            // hidden: this is not a claim of zero popping in every conceivable configuration.
+            constexpr f32 kOcclusionMaxRotMarginCm = 2000.0f;
+            // CULLING RUNS WHILE THE CAMERA MOVES, which is the whole point of having it -- the
+            // motion thresholds above no longer VETO culling, they only decide whether the motion
+            // was violent enough that even the dilated boxes cannot be trusted. Gating on "the
+            // camera is still" was measured worse than useless: culling then never runs when it
+            // would save anything, and the artefact it suppresses comes back the instant you move.
+            //
+            // WHAT KEEPS IT SAFE INSTEAD is the per-entity dilation below: every box grows by the
+            // distance the camera has travelled since the pyramid was built, plus a rotation margin
+            // scaled by its own distance. An object that could have entered view during the one
+            // frame of lag is therefore inside its own dilated box and is not culled. That is the
+            // mechanism designed for exactly this lag; the veto was a blunt substitute for it.
+            //
+            // The thresholds survive as an OUTER bound for genuinely discontinuous motion -- a
+            // teleport, a --warp, a level load -- where no finite margin is correct because the
+            // camera did not travel between the two positions at all.
+            constexpr f32 kOcclusionTeleportMoveCm = 3000.0f;
+            constexpr f32 kOcclusionTeleportRotRad = 1.571f;   // 90 degrees in one frame
+            const bool occlusionTrustworthy = occlusionBasisValid_ &&
+                occlusionMoveDist <= kOcclusionTeleportMoveCm &&
+                occlusionRotRad <= kOcclusionTeleportRotRad;
+            const f32 occlusionRotMarginTan = std::tan(std::min(occlusionRotRad, kOcclusionRotClampRad));
             if (occlusionCullEnabled_ && occluder_) {
                 occlusionBoxes_.clear();
                 occlusionBoxEntities_.clear();
@@ -5160,8 +5225,53 @@ public:
                         wlo2.z = std::fmin(wlo2.z, t.z); whi2.z = std::fmax(whi2.z, t.z);
                     }
                     aver::occlusion::Aabb box;
-                    box.min[0] = wlo2.x; box.min[1] = wlo2.y; box.min[2] = wlo2.z;
-                    box.max[0] = whi2.x; box.max[1] = whi2.y; box.max[2] = whi2.z;
+                    if (occlusionTrustworthy) {
+                        // Grown by the camera's own translation since the (last-frame) basis this
+                        // readback will at best reflect, plus a distance-scaled rotation term
+                        // (small-angle arc length ~= distance * tan(angle)) bounding how far a
+                        // rotation of that size could have swept this box's occlusion boundary. A
+                        // LARGER box can only make conservativelyHidden() (OcclusionMath.hpp) HARDER
+                        // to satisfy, never easier -- selectConservativeMip only gets coarser as a
+                        // box grows, per that header's own invariant comment -- so this can only
+                        // REMOVE an existing false cull, never introduce a new one. See this loop's
+                        // own trust-gate comment above for what it does NOT guarantee (bounding
+                        // motion that happens between now and when this readback is actually
+                        // consumed, later in this same frame's draw walk).
+                        const Vec3 boxCentre{(wlo2.x + whi2.x) * 0.5f, (wlo2.y + whi2.y) * 0.5f, (wlo2.z + whi2.z) * 0.5f};
+                        const f32 dist = (boxCentre - camPos_).size();
+                        // TWO INTERVALS, NOT ONE -- and covering only one is why culling still
+                        // popped while moving after the margin was first added. occlusionMoveDist
+                        // measures motion that has ALREADY happened, from the basis to now. But this
+                        // answer is not consumed now: testBatch()'s readback is one call stale, so
+                        // the verdict computed here is applied on the NEXT frame, after the camera
+                        // has moved again by roughly the same amount. A margin sized for the elapsed
+                        // interval alone is short by exactly the interval that matters.
+                        //
+                        // The last interval is the predictor for the next one: a camera moving at
+                        // constant velocity travels the same distance again, so doubling covers both
+                        // exactly. Under acceleration it is approximate -- deliberately, because the
+                        // alternative is a velocity estimator with its own lag -- and the teleport
+                        // bound above catches the case where no finite margin is correct at all.
+                        //
+                        // Dilating too far only costs culling, never correctness: a LARGER box makes
+                        // conservativelyHidden() harder to satisfy, never easier (OcclusionMath.hpp's
+                        // own invariant), so an over-wide margin draws something that was genuinely
+                        // hidden. That is the direction to err in.
+                        constexpr f32 kOcclusionMotionLookahead = 2.0f;
+                        const f32 margin = kOcclusionMotionLookahead *
+                            (occlusionMoveDist +
+                             std::min(dist * occlusionRotMarginTan, kOcclusionMaxRotMarginCm));
+                        box.min[0] = wlo2.x - margin; box.min[1] = wlo2.y - margin; box.min[2] = wlo2.z - margin;
+                        box.max[0] = whi2.x + margin; box.max[1] = whi2.y + margin; box.max[2] = whi2.z + margin;
+                    } else {
+                        // Motion since the last basis (or the lack of a basis at all, or a readback
+                        // the staleness detector could not vouch for -- see RESULT APPLICATION in
+                        // occlusionBuildAndTest) is past what a margin can safely cover. The exact
+                        // box submitted here does not matter: occlusionTrustworthy being false forces
+                        // this WHOLE frame's answer to "visible" regardless of what testBatch() says.
+                        box.min[0] = wlo2.x; box.min[1] = wlo2.y; box.min[2] = wlo2.z;
+                        box.max[0] = whi2.x; box.max[1] = whi2.y; box.max[2] = whi2.z;
+                    }
                     occlusionBoxes_.push_back(box);
                     occlusionBoxEntities_.push_back(e2);
                 }
@@ -5191,11 +5301,31 @@ public:
                 if (occlusionPyramidBuilt) return;
                 occlusionPyramidBuilt = true;
                 if (occlusionBoxes_.empty()) return;
+                // NO EARLY-OUT HERE, AND THE ONE THAT BRIEFLY STOOD HERE WAS A DEADLOCK. It skipped
+                // the work whenever the camera had moved -- but the basis stash below is what tells
+                // the NEXT frame how far the camera has travelled, so skipping it froze the basis at
+                // the last still pose. occlusionMoveDist then measured against an ever-older
+                // reference, stayed above the threshold forever, and culling never switched back on
+                // even once the camera stopped. The symptom was "culling appears to do nothing",
+                // which is exactly what it had been reduced to.
                 rhi::IRenderContext* pctx = e.device()->renderContext();
                 rhi::IResourceFactory* occRes = e.device()->resources();
                 const rhi::TextureHandle depthTex = e.device()->sceneDepthTexture();
                 if (!pctx || !occRes || !depthTex) return;
                 occluder_->buildPyramid(*pctx, depthTex, &viewProj_.m[0][0]);
+                // Stash the camera basis THIS call's readback will (at best, one call from now)
+                // reflect -- see the trust-gate comment above the box-collection loop. camForward()
+                // is the SAME vector that built viewProj_ this frame (the unconditional
+                // camForward()/setCamera call earlier in this function, before either free-fly or
+                // possessed-pawn camera handling has a chance to diverge), so it is authoritative
+                // regardless of camera mode. Deliberately AFTER buildPyramid() (so a frame that
+                // bails out above, before buildPyramid ever runs, does not stash a basis for a
+                // pyramid that was never actually built) and BEFORE testBatch() (order does not
+                // matter for testBatch itself, but keeping the stash immediately beside the call it
+                // documents is the point).
+                occlusionBasisCamPos_ = camPos_;
+                occlusionBasisForward_ = camForward();
+                occlusionBasisValid_ = true;
                 occluder_->testBatch(*pctx, *occRes, occlusionBoxes_.data(),
                                      static_cast<u32>(occlusionBoxes_.size()), occlusionResults_);
                 u32 c = 0, t = 0;
@@ -5203,8 +5333,31 @@ public:
                 occlusionCulledAccum_ += c;
                 occlusionTestedAccum_ += t;
                 ++occlusionReportFrames_;
+                // Trust the raw per-box answer only when BOTH (a) camera motion since the stale
+                // basis stayed under the dilation math's own bound (occlusionTrustworthy, computed
+                // once above the box-collection loop) AND (b) this call's readback actually landed
+                // exactly one call behind, not more (IOcclusionCuller::readbackLagIsExactlyOneCall() --
+                // OcclusionCuller.cpp's generation-stamp check). Failing (b) means the "one call
+                // stale" assumption the whole margin calculation rests on was WRONG this frame -- a
+                // silent wrong answer that would otherwise just look like slightly more aggressive
+                // culling -- so it forces the same safe "everyone visible" fallback as failing (a),
+                // and it is worth knowing about rather than only silently correcting for.
+                const bool occlusionReadbackLagExpected = occluder_->readbackLagIsExactlyOneCall();
+                const bool occlusionResultsTrusted = occlusionTrustworthy && occlusionReadbackLagExpected;
+                if (!occlusionReadbackLagExpected) {
+                    ++occlusionStaleReadbacks_;
+                    if (!occlusionStaleWarnedOnce_) {
+                        occlusionStaleWarnedOnce_ = true;
+                        AVER_WARN("[Occlusion] a readback landed more than one call stale (see "
+                                  "OcclusionCuller.cpp's generation-stamp check) -- culling is "
+                                  "disabled for every frame this keeps happening on, not merely made "
+                                  "more conservative; see the periodic [Occlusion] report line for "
+                                  "how often");
+                    }
+                }
                 for (usize bi = 0; bi < occlusionBoxEntities_.size(); ++bi)
-                    occlusionVisible_[occlusionBoxEntities_[bi]] = occlusionResults_[bi] != 0;
+                    occlusionVisible_[occlusionBoxEntities_[bi]] =
+                        !occlusionResultsTrusted || (occlusionResults_[bi] != 0);
             };
 #endif
 
@@ -5489,9 +5642,17 @@ public:
 #if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
                 // PASS-2 ONLY: `oi < occlusionPass1Count` entities drew unconditionally before
                 // occlusionBuildAndTest() ran. Everything below has ALREADY been tested against a
-                // pyramid built from every pass-1 draw, so occlusionWasVisible(ent) is this frame's
-                // own fresh answer. A box excluded from occlusionBoxes_ (degenerate) was never tested
-                // and defaults to visible, same as haveWorldBox==false for frustum culling above.
+                // pyramid buildPyramid() built from every pass-1 draw -- but CORRECTED: that does NOT
+                // make occlusionWasVisible(ent) "this frame's own fresh answer". testBatch()'s
+                // readback is, at best, one call stale (Occlusion.hpp's corrected "TWO-PASS" section)
+                // -- what actually landed in occlusionVisible_[ent] this frame, inside
+                // occlusionBuildAndTest's RESULT APPLICATION, is the raw (motion-dilated) test result
+                // ONLY when this frame's camera motion since the last basis AND the readback's own
+                // staleness (IOcclusionCuller::readbackLagIsExactlyOneCall()) both stayed inside what the
+                // trust gate above the box-collection loop is willing to trust; otherwise it is
+                // forced to "visible" regardless of what the pyramid says. A box excluded from
+                // occlusionBoxes_ (degenerate) was never tested and defaults to visible, same as
+                // haveWorldBox==false for frustum culling above.
                 if (occlusionCullEnabled_ && occluder_ && oi >= occlusionPass1Count && haveWorldBox &&
                     !occlusionWasVisible(ent)) {
                     // Occluded from the CAMERA is not occluded from the LIGHT: a crate behind a wall
@@ -6074,6 +6235,14 @@ public:
                                                         static_cast<f64>(occlusionTestedAccum_) : 0.0;
                 AVER_INFO("[Occlusion] {} of {} tested entities culled ({:.1f}%) over {} frame(s)",
                           occlusionCulledAccum_, occlusionTestedAccum_, pct, occlusionReportFrames_);
+                // Folded into the same cadence rather than its own: a staleness-detector trip is
+                // rare enough that a separate periodic line would mostly print zero, and this way it
+                // rides the report a reader is already watching.
+                if (occlusionStaleReadbacks_)
+                    AVER_INFO("[Occlusion] {} of those {} frame(s) had a readback more than one call "
+                              "stale (see the one-time warning above) -- culling was fully disabled "
+                              "on those frames, not merely more conservative",
+                              occlusionStaleReadbacks_, occlusionReportFrames_);
             }
 #endif
             {
@@ -9014,6 +9183,7 @@ private:
         if (project_.rtRenderMode       >= 0) k.rtRenderMode       = static_cast<u32>(project_.rtRenderMode);
         if (project_.ptBounces          >= 0) k.ptBounces          = static_cast<u32>(project_.ptBounces);
         if (project_.giCones            >= 0) k.giCones            = static_cast<u32>(project_.giCones);
+        if (project_.giMode             >= 0) k.giMode             = static_cast<u32>(project_.giMode);
         if (project_.refractionMode     >= 0) k.refractionMode     = static_cast<u32>(project_.refractionMode);
         if (project_.refractionStrength >= 0.0f) k.refractionStrength = project_.refractionStrength;
         if (project_.refractionEdgeFade >= 0.0f) k.refractionEdgeFade = project_.refractionEdgeFade;
@@ -9280,6 +9450,7 @@ private:
         project_.ptBounces          = static_cast<int>(requested.ptBounces);
         project_.layeredBsdf        = static_cast<int>(requested.layeredBsdf);
         project_.giCones            = static_cast<int>(requested.giCones);
+        project_.giMode             = static_cast<int>(requested.giMode);
         project_.refractionMode     = static_cast<int>(requested.refractionMode);
         project_.refractionStrength = requested.refractionStrength;
         project_.refractionEdgeFade = requested.refractionEdgeFade;
@@ -21815,6 +21986,28 @@ private:
             // THE MEASURED BASELINE IS IN THE TOOLTIP ON PURPOSE: this trades hardware early-Z (which
             // a ray has no equivalent of) for whatever a primary ray costs, and an author deciding
             // that deserves the number, not a shrug.
+            // ---- Diffuse GI algorithm ----
+            // EXPOSED HERE BECAUSE A SETTING NOBODY CAN REACH IS NOT A SETTING. giMode also
+            // round-trips through the .ocproject as RENDER.GIMODE, so a project remembers the
+            // choice; absent from an older manifest it stays -1 and the engine default (cones)
+            // applies, which is what every project written before this key existed meant.
+            ImGui::Spacing();
+            ImGui::TextUnformatted("Diffuse global illumination");
+            ImGui::Separator();
+            int giAlgo = static_cast<int>(s.giMode);
+            if (ImGui::Combo("Indirect diffuse", &giAlgo, "Voxel cones\0ReSTIR (experimental)\0")) {
+                s.giMode = static_cast<u32>(giAlgo); changed = true;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Voxel cones is what this engine has always shipped: a clipmap\n"
+                                  "marched with cones. It is the default and is unchanged.\n\n"
+                                  "ReSTIR resamples ray-traced indirect samples over time instead\n"
+                                  "(NVIDIA RTXDI, third_party/rtxdi). It has no voxel volume, so\n"
+                                  "the boundary artefacts the clipmap produces -- surfaces near\n"
+                                  "the edge reading as unoccluded, worst while the camera moves\n"
+                                  "-- cannot occur.\n\n"
+                                  "EXPERIMENTAL: temporal reuse only, no spatial pass yet.");
+
             ImGui::Spacing();
             ImGui::TextUnformatted("Primary visibility (experimental)");
             ImGui::Separator();
@@ -22806,6 +22999,23 @@ private:
         const auto it = occlusionVisible_.find(e);
         return it == occlusionVisible_.end() || it->second;
     }
+    // ---- MOTION-SAFE CULLING: the camera basis testBatch()'s (at best one-frame-stale) answer was
+    // actually computed from -- see renderSceneEntities' own trust-gate comment above the
+    // box-collection loop for the full reasoning, and Occlusion.hpp's corrected "TWO-PASS" section
+    // for why an answer needs this at all. Stashed AFTER buildPyramid() runs (inside
+    // occlusionBuildAndTest), the SAME idiom chunkStreamLastCamPos_/chunkStreamHaveLastPos_ already
+    // use for chunk streaming's own "camera value as of last time I looked" bookkeeping -- reused
+    // here rather than adding a second accessor to IOcclusionCuller, per this file's own comment on
+    // occlusionVisible_ above ("this bookkeeping belongs to the CALLER, not the culler").
+    Vec3 occlusionBasisCamPos_{0.0f, 0.0f, 0.0f};
+    Vec3 occlusionBasisForward_{1.0f, 0.0f, 0.0f};
+    bool occlusionBasisValid_ = false;
+    // Diagnostics for the staleness detector (OcclusionCuller.cpp's generation-stamp check, surfaced
+    // through IOcclusionCuller::readbackLagIsExactlyOneCall()): how many tested frames it fired on, and
+    // whether the one-time loud warning has already fired. Folded into the same periodic report as
+    // occlusionCulledAccum_ above.
+    u64  occlusionStaleReadbacks_ = 0;
+    bool occlusionStaleWarnedOnce_ = false;
 #endif
     // All three use -1 for "flag not given", NOT 0 -- 0 is Quality::Off and has to be expressible.
     // It was 0 here, so --gi 0/--rt 0/--pt 0 were silently no-ops through both the startup path and

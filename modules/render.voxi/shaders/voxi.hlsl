@@ -73,6 +73,15 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     // Mirrors FrameConstants::viewParams -- appended at the END, so every offset above is
     // untouched. See VoxiRenderer.hpp's static_assert for the guard that makes that a rule.
     float4   gViewParams;
+    // RTXDI ReSTIR GI control (Settings::giMode) -- mirrors FrameConstants::giRestirParams, also
+    // appended at the end for the same reason gViewParams was. x = 1 while giMode==1 is ACTUALLY
+    // running this frame (VoxiRenderer::giRestirWanted(), never the raw setting -- see that
+    // member's own comment for why touching t12/t13/u6/u7/u8 on the raw setting alone would be a
+    // null-descriptor read on hardware that cannot run this). y = 1 once gGiSurfPosHist/
+    // gGiSurfNrmHist ALSO hold a real previous frame. z = which of RTXDI's two reservoir-array
+    // slices THIS frame writes (the other is last frame's, read as this frame's temporal source).
+    // w spare.
+    float4   gGiRestirParams;
 };
 
 // ---- Voxi: voxel cone traced GI ----
@@ -2044,6 +2053,411 @@ float3 rtReflection(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, flo
     return reflAlbedo * (direct + ambient);
 }
 
+// ================= RTXDI ReSTIR GI (Settings::giMode == 1) =================
+//
+// *** USES THE VENDORED SDK -- third_party/rtxdi -- RATHER THAN HAND-ROLLING A RESERVOIR UPDATE
+// RULE. *** Everything below that combines two candidates into one (RTXDI_MakeGIReservoir,
+// RTXDI_GITemporalResampling) is a call into Rtxdi/GI/Reservoir.hlsli and
+// Rtxdi/GI/TemporalResampling.hlsli; this file supplies only the two things RTXDI cannot know on
+// its own -- how to TRACE a candidate and shade what it hits (giTraceInitialCandidate), and how to
+// answer the RAB_* questions the SDK asks about a surface (RAB_GetGBufferSurface and its neighbours,
+// just below). The Jacobian, the MIS weight and the M-cap are RTXDI's, not reimplemented here.
+//
+// SCOPE: candidate generation + RTXDI TEMPORAL resampling. NO SPATIAL reuse (Settings::giMode's own
+// comment in Voxi.hpp states this as the stage-2 boundary; RTXDI_GISpatialResampling and
+// RTXDI_GISpatioTemporalResampling are vendored and unused).
+
+// ---- the reservoir buffer RTXDI's own Reservoir.hlsli requires be defined before it is included ----
+// RTXDI_GI_RESERVOIR_BUFFER must already point at a declared RWStructuredBuffer<RTXDI_PackedGIReservoir>
+// by the time Reservoir.hlsli's own function bodies are parsed (it is a plain macro substitution,
+// not a template argument), so the TYPE has to exist first -- pulling just the parameters header
+// gets it without duplicating anything, since Reservoir.hlsli's own later #include of the same file
+// is a no-op behind its include guard.
+#include "Rtxdi/GI/ReSTIRGIParameters.h"
+RWStructuredBuffer<RTXDI_PackedGIReservoir> gGiReservoirs : register(u6);
+#define RTXDI_GI_RESERVOIR_BUFFER gGiReservoirs
+// BASIC, not RAY_TRACED: the ray-traced bias-correction mode costs one MORE shadow-style visibility
+// ray per pixel per temporal resample (RAB_GetTemporalConservativeVisibility, implemented below for
+// completeness and because a future change to this line should not have to come back and write it),
+// on top of the one this file's candidate generation already traces. Basic is RTXDI's own
+// documented cheap-but-good option and is what this file selects; the #if this feeds into (RTXDI/
+// GI/TemporalResampling.hlsli) compiles the ray-traced branch out entirely below this setting.
+#define RTXDI_GI_ALLOWED_BIAS_CORRECTION RTXDI_BIAS_CORRECTION_BASIC
+#include "Rtxdi/GI/Reservoir.hlsli"
+// TemporalResampling.hlsli calls RTXDI_GetNextRandom/RTXDI_CalculateJacobian (and takes an
+// RTXDI_RandomSamplerState parameter) WITHOUT including the headers that declare them -- Utils/
+// RandomSamplerState.hlsli (which itself pulls in Utils/Math.hlsli, where RTXDI_CalculateJacobian
+// actually lives). The caller is expected to have included it first; explicit here rather than
+// relying on Reservoir.hlsli's own include chain to have happened to pull it in already.
+#include "Rtxdi/Utils/RandomSamplerState.hlsli"
+// TemporalResampling.hlsli is NOT included here -- it is included at the END of the RAB_ block
+// below, and the order is load-bearing. See that include's own note.
+
+// ---- the previous-frame SURFACE history RAB_GetGBufferSurface(idx, true) reads ----
+// THE ENGINE GAP THE TASK BRIEF NAMED: RTXDI's temporal resampling needs a previous frame's primary
+// surface (world position + normal) at an arbitrary reprojected pixel, and nothing in Voxi carried
+// one before this pair -- the deferred G-buffer, even when on, is current-frame-only.
+// AVER_GBUFFER_HISTORY's own gGBufNormalHist a few hundred lines up is that exact gap's own
+// unfinished half-attempt (declared, referenced in three denoiser tap loops, gated behind a define
+// nothing ever sets to 1) and is left exactly as found: it is a crease term for the SPATIAL shadow/
+// reflection filters, tied to the G-buffer being on at all, and reusing its admittedly-guessed slot
+// for an unrelated feature that must work whether or not the G-buffer is enabled risks the very
+// drift its own comment warns about. This is a NEW pair, added the same way ensureShadowHistory
+// already adds one (VoxiRenderer.cpp/.hpp) -- see giSurfPosHist_/giSurfNrmHist_'s own declaration
+// there for the full reasoning.
+//
+// TWO RG32Float TEXTURES, NOT ONE FOUR-CHANNEL FLOAT TEXTURE: rhi::Format has no such format (only
+// RGBA16F, R32Float, RG32Float are float formats it declares) -- gGiSurfPosHist carries xy of the
+// world position; gGiSurfNrmHist carries z of that SAME position plus the packed normal (an
+// octahedral-packed uint from RTXDI_EncodeNormalizedVectorToSnorm2x16, bit-reinterpreted with
+// asfloat so one float channel can hold it whole). 0 in the packed-normal channel is the "nothing
+// written here" sentinel RAB_GetGBufferSurface tests for.
+Texture2D<float2>   gGiSurfPosHist    : register(t12);
+RWTexture2D<float2> gGiSurfPosHistOut : register(u7);
+Texture2D<float2>   gGiSurfNrmHist    : register(t13);
+RWTexture2D<float2> gGiSurfNrmHistOut : register(u8);
+
+// RTXDI's own RAB_Surface contract. `linearDepth` is carried on the struct rather than re-derived by
+// RAB_GetSurfaceLinearDepth from a hardcoded view-projection, because the SAME accessor is called on
+// BOTH the current pixel's surface (built in giRestirIndirect, current gViewProj) and a previous
+// frame's reprojected one (built in RAB_GetGBufferSurface, gPrevViewProj) -- one function cannot
+// pick the right matrix for both without being told, and computing it once at construction is
+// cheaper than an extra branch at every read.
+struct RAB_Surface {
+    bool   valid;
+    float3 worldPos;
+    float3 normal;
+    float  linearDepth;
+};
+RAB_Surface RAB_EmptySurface() {
+    RAB_Surface s;
+    s.valid = false;
+    s.worldPos = 0.0;
+    s.normal = float3(0, 0, 1);
+    s.linearDepth = 0.0;
+    return s;
+}
+bool   RAB_IsSurfaceValid(RAB_Surface s)   { return s.valid; }
+float3 RAB_GetSurfaceWorldPos(RAB_Surface s) { return s.worldPos; }
+float3 RAB_GetSurfaceNormal(RAB_Surface s)   { return s.normal; }
+float  RAB_GetSurfaceLinearDepth(RAB_Surface s) { return s.linearDepth; }
+
+// RTXDI_GITemporalResampling only ever calls this with previousFrame=true (Rtxdi/GI/
+// TemporalResampling.hlsli) -- a SPATIAL pass (out of scope; see this block's own header comment)
+// would be the first real caller of the false branch, so it returns "no surface" honestly here
+// rather than fabricating one for an ARBITRARY neighbour pixel this file has no cheap way to build.
+RAB_Surface RAB_GetGBufferSurface(int2 pixelPosition, bool previousFrame) {
+    RAB_Surface s = RAB_EmptySurface();
+    if (!previousFrame) return s;
+    if (gGiRestirParams.y < 0.5) return s;   // no real previous frame bound at all this session-frame
+    uint texW, texH;
+    gGiSurfNrmHist.GetDimensions(texW, texH);   // same resolution as gGiSurfPosHist; either would do
+    if (pixelPosition.x < 0 || pixelPosition.y < 0 ||
+        pixelPosition.x >= (int)texW || pixelPosition.y >= (int)texH) return s;
+    // THE NORMAL TEXTURE FIRST, because its sentinel is what decides whether the position texture is
+    // even worth reading -- both were written together (giRestirIndirect), so a zero here means the
+    // position channel is equally meaningless (a sky miss, or a pixel from before this pair ever
+    // held a real frame).
+    const float2 nrmRaw = gGiSurfNrmHist.Load(int3(pixelPosition, 0));
+    const uint packedN = asuint(nrmRaw.y);
+    if (packedN == 0u) return s;
+    const float2 posXY = gGiSurfPosHist.Load(int3(pixelPosition, 0));
+    s.valid = true;
+    s.worldPos = float3(posXY, nrmRaw.x);
+    s.normal = RTXDI_DecodeNormalizedVectorFromSnorm2x16(packedN);
+    // Re-derived, not stored a third time: gPrevViewProj already exists for the shadow/reflection
+    // histories, so this is one free matrix multiply against an exact stored position rather than a
+    // requantised depth that could disagree with it.
+    s.linearDepth = mul(float4(s.worldPos, 1.0), gPrevViewProj).w;
+    return s;
+}
+
+// ---- material similarity: A STATED SIMPLIFICATION, not spatial reuse's "is this the same surface" test ----
+// That job belongs to RTXDI_IsValidNeighbor's normal/depth comparison, already run before this
+// predicate is even asked (Rtxdi/GI/TemporalResampling.hlsli). What THIS adds on top is telling
+// apart two geometrically similar but differently-SHADING surfaces -- glass beside concrete at the
+// same depth and normal, say -- which matters most for SPATIAL reuse (walking onto a neighbour
+// pixel, where crossing a material seam is the common case) and is explicitly out of this slice.
+// Temporal reuse only ever compares one screen location against its own reprojection, already
+// gated tightly by the depth/normal test above it. A real per-material handle would need
+// RtInstance::materialIndex carried through the surface-history pair, which their formats (see
+// those textures' own declaration) have no free channel for.
+// #define, not typedef -- matching RtxdiTypes.h's own idiom (`#define uint32_t uint`) rather than
+// introducing a language feature nothing else in this file's HLSL uses.
+#define RAB_MaterialData uint
+RAB_MaterialData RAB_GetMaterial(RAB_Surface s) { return 0; }
+bool RAB_AreMaterialsSimilar(RAB_MaterialData a, RAB_MaterialData b) { return true; }
+
+// Luminance of the candidate's own radiance -- the standard resampling target-PDF proxy (RTXDI
+// resamples by comparing this scalar across candidates; the BRDF/cosine/distance re-weighting is
+// the Jacobian's job, applied separately at its own call site in RTXDI_GITemporalResampling).
+// averShadowLum already exists in this file for exactly this reduction; reused rather than a second
+// luminance formula. Surface-independent -- a stated simplification, not an oversight: a target PDF
+// that also weighted the RECEIVING surface's own BRDF would need that BRDF evaluated once per
+// candidate rather than once per shaded pixel, which is a real cost this slice does not spend.
+float RAB_GetGISampleTargetPdfForSurface(float3 samplePosition, float3 sampleRadiance, RAB_Surface surface) {
+    return averShadowLum(sampleRadiance);
+}
+
+// RTXDI's own worked bound for a reused sample's Jacobian (the shipped bridge sample clamps here,
+// not invented for this file, since nothing here has ground truth of its own to pick a different
+// bound from). Rejects a NaN/Inf/non-positive Jacobian outright -- a grazing reprojection whose
+// partial terms divide by (near) zero -- rather than let it multiply a reused sample's weight into
+// something that reads as a bright outlier this codebase has a name for already (see
+// aver-negative-radiance-reads-bright's own history elsewhere in this tree).
+bool RAB_ValidateGISampleWithJacobian(inout float jacobian) {
+    if (isnan(jacobian) || isinf(jacobian) || jacobian <= 0.0) return false;
+    jacobian = clamp(jacobian, 1.0 / 25.0, 25.0);
+    return true;
+}
+
+// Used only when the temporal resampling's own bias-correction mode is RAY_TRACED -- this file
+// selects BASIC above, so this is not on today's hot path, but RAB_ requires the symbol and a
+// future change to that one #define should not have to come back and write this too. One shadow-
+// style ray between the CURRENT surface and the REUSED sample's position: RTXDI's own docs call
+// this the approximate check bias correction needs, not a converged one.
+bool RAB_GetTemporalConservativeVisibility(RAB_Surface currentSurface, RAB_Surface temporalSurface,
+                                           float3 samplePosition) {
+    const float3 toSample = samplePosition - currentSurface.worldPos;
+    const float dist = length(toSample);
+    if (dist < 1e-4) return true;
+    const float3 dir = toSample / dist;
+    RayDesc r;
+    const float bias = max(gRtParams.z, 1e-4);
+    r.Origin    = currentSurface.worldPos + currentSurface.normal * bias;
+    r.Direction = dir;
+    r.TMin      = bias;
+    r.TMax      = max(dist - bias, bias);
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
+    q.TraceRayInline(gScene, RAY_FLAG_NONE, AVER_RT_MASK_OPAQUE_ALL, r);
+    averRtProceedSolid(q);
+    return q.CommittedStatus() != COMMITTED_TRIANGLE_HIT;
+}
+
+// ---- AND ONLY NOW THE RESAMPLER ITSELF ----
+// HLSL HAS NO FORWARD DECLARATIONS THE WAY C++ DOES, so every one of the twelve RAB_ symbols
+// TemporalResampling.hlsli names -- the RAB_Surface TYPE most of all -- has to be a complete
+// declaration by the time this line is parsed. It was above the whole block before, and the cost
+// of that was not "ReSTIR does not work": voxi.hlsl is ONE translation unit holding every entry
+// point, so `unknown type name 'RAB_Surface'` failed PSMainVoxi, PSRayDriven, VSky and VSMain
+// alike and took the entire ray-tracing feature set down with it, at giMode 0 as much as 1. A
+// runtime HLSL error is not a build error here -- nothing catches this but a launch.
+#include "Rtxdi/GI/TemporalResampling.hlsli"
+
+// The reservoir buffer's own addressing parameters, derived from gGiSurfNrmHist's ACTUAL
+// dimensions rather than a cbuffer field -- MIRRORS rtxdi::CalculateReservoirBufferParameters
+// (third_party/rtxdi/Source/RtxdiUtils.cpp) exactly (RTXDI_RESERVOIR_BLOCK_SIZE-pixel blocks), and
+// the C++ side (VoxiRenderer.cpp's giReservoirElemCount) computes the identical formula from the
+// SAME width/height it created these textures at -- one source of truth for the resolution both
+// sides derive pitch from, rather than a second cbuffer value that could drift from the texture it
+// describes.
+RTXDI_ReservoirBufferParameters giReservoirBufferParams() {
+    uint w, h;
+    gGiSurfNrmHist.GetDimensions(w, h);   // same resolution as gGiSurfPosHist; either would do
+    const uint blocksX = (w + RTXDI_RESERVOIR_BLOCK_SIZE - 1) / RTXDI_RESERVOIR_BLOCK_SIZE;
+    const uint blocksY = (h + RTXDI_RESERVOIR_BLOCK_SIZE - 1) / RTXDI_RESERVOIR_BLOCK_SIZE;
+    RTXDI_ReservoirBufferParameters p;
+    p.reservoirBlockRowPitch = blocksX * (RTXDI_RESERVOIR_BLOCK_SIZE * RTXDI_RESERVOIR_BLOCK_SIZE);
+    p.reservoirArrayPitch = p.reservoirBlockRowPitch * blocksY;
+    p.pad1 = p.pad2 = 0;
+    return p;
+}
+
+// ---- the initial candidate: ONE cosine ray, traced and shaded through machinery this file already has ----
+// Traces off (wpos, N) along a cosine-weighted hemisphere direction and shades whatever it hits
+// through the SAME RayQuery + flat geometry table + gRtMaterials + averShadeDirect machinery
+// rtReflection and PSRayDriven already use for a mirror ray and a primary ray respectively -- this
+// is that toolkit pointed along a diffuse-importance direction instead of a specular one.
+//
+// Returns false on a miss: nothing a reservoir can reproject. The caller then hands RTXDI an EMPTY
+// initial reservoir for this frame and lets temporal resampling (RTXDI_IsValidGIReservoir gates on
+// M != 0) carry the pixel from history alone -- exactly the situation that function already handles.
+bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJitter,
+                             out float3 samplePos, out float3 sampleNormal, out float3 sampleRadiance) {
+    samplePos = sampleNormal = sampleRadiance = 0.0;
+
+    // Cosine-weighted hemisphere sample (Malley's method: a uniform point on the unit disc, lifted
+    // onto the hemisphere) -- the standard importance sample for a Lambertian receiver, so its own
+    // pdf (cosTheta/PI) is what the caller's RTXDI_MakeGIReservoir divides out. rtDiscSample/rtHash
+    // are the SAME per-pixel-rotated low-discrepancy sequence rtReflection's own cone sample uses,
+    // jittered per frame the same way (frameJitter) rather than frozen per pixel -- see rtReflection
+    // for what a frozen-per-pixel sample cost the reflection ray before that was fixed.
+    const float2 xi = rtDiscSample(0, rtHash(pixel) * 6.2831853 + frameJitter);
+    const float  cosTheta = sqrt(saturate(1.0 - dot(xi, xi)));
+    if (cosTheta <= 1e-4) return false;
+    float3 up = abs(N.z) < 0.9 ? float3(0, 0, 1) : float3(1, 0, 0);
+    float3 T  = normalize(cross(up, N));
+    float3 B  = cross(N, T);
+    const float3 dir = normalize(T * xi.x + B * xi.y + N * cosTheta);
+
+    RayDesc r;
+    const float bias = max(gRtParams.z, 1e-4) * (1.0 + length(wpos - gCamPos.xyz) * 5e-4);
+    r.Origin    = wpos + N * bias;
+    r.Direction = dir;
+    r.TMin      = bias;
+    r.TMax      = max(gVoxelParams.z, 1.0);   // giMaxDistance -- the reach every other GI ray honours
+
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
+    q.TraceRayInline(gScene, RAY_FLAG_NONE, AVER_RT_MASK_OPAQUE_ALL, r);
+    averRtProceedSolid(q);
+    if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) return false;
+
+    RtInstance inst = gRtInstances[q.CommittedInstanceID()];
+    uint tri = inst.firstIndex + q.CommittedPrimitiveIndex() * 3;
+    uint i0 = inst.firstVertex + gRtIndices[tri + 0];
+    uint i1 = inst.firstVertex + gRtIndices[tri + 1];
+    uint i2 = inst.firstVertex + gRtIndices[tri + 2];
+    float2 bary = q.CommittedTriangleBarycentrics();
+    float3 w = float3(1.0 - bary.x - bary.y, bary.x, bary.y);
+    float3 nObj = normalize(gRtVerts[i0].nrm * w.x + gRtVerts[i1].nrm * w.y + gRtVerts[i2].nrm * w.z);
+    float3 hitN = normalize(mul(float4(nObj, 0.0), inst.objectToWorld).xyz);
+    if (dot(hitN, dir) > 0.0) hitN = -hitN;   // face the ray, matching rtReflection/PSRayDriven
+
+    const float3 hitPos = wpos + dir * q.CommittedRayT();
+    const RtMaterial mat = gRtMaterials[inst.materialIndex];
+    const float3 L = normalize(gLightDir.xyz);
+
+    // THE SAME UNTEXTURED SURFACE PSRayDriven BUILDS WHEN AVER_RT_BINDLESS ISN'T COMPILED IN --
+    // per-instance factor times per-material factor, no maps sampled. A second bounce is exactly
+    // where that approximation is cheapest to accept: RTXDI resamples this radiance over many
+    // frames (and, once a spatial pass lands, neighbours), so a flat-shaded hit converges toward a
+    // textured one's LOW-FREQUENCY answer, which is the only part indirect light hands back to the
+    // FIRST surface anyway.
+    AverSurface s = (AverSurface)0;
+    s.N           = hitN;
+    s.V           = -dir;
+    s.H           = normalize(s.V + L);
+    s.albedo      = inst.albedo * mat.baseColorFactor.rgb;
+    s.metallic    = saturate(inst.metallic * mat.metallicFactor);
+    s.rough       = clamp(inst.roughness * mat.roughnessFactor, 0.045, 1.0);
+    s.ndv         = saturate(dot(s.N, s.V));
+    s.f90         = mat.f90;
+    s.reflectance = mat.reflectance;
+    s.backFace    = false;
+    s.sssWeight   = 0.0;
+    s.sssRadius   = 0.0;
+#ifdef AVER_LAYERED_BSDF
+    s.coatWeight = 0.0; s.coatRough = 0.0; s.coatF0 = 0.0;
+#endif
+    s.F0        = lerp(mat.reflectance.xxx, s.albedo, s.metallic);
+    s.F         = fresnelSchlick(saturate(dot(s.H, s.V)), s.F0, s.f90);
+    s.kdAlbedo  = (1.0 - s.metallic) * s.albedo * (1.0 - saturate(mat.transmission));
+    s.model     = AVER_MODEL_STANDARD;
+    s.alpha     = 1.0;
+    s.emissive  = mat.emissiveFactor;
+    s.occlusion = 1.0;
+
+    AverLight sun;
+    sun.direction = L;
+    sun.radiance  = averSunRadiance();
+    // ONE FRESH SHADOW RAY, NOT gRtShadowHist's TEMPORAL AMORTISATION: that history is keyed by
+    // SCREEN PIXEL, and this sample's origin is a WORLD point with no pixel of its own -- the whole
+    // reason a reservoir stores a POSITION -- so reusing it would read another pixel's history
+    // under a different surface. RTXDI's own temporal resampling is what amortises THIS ray across
+    // frames instead, the same way it amortises the rest of the candidate.
+    sun.visibility = rtShadow(hitPos, s.N, L, pixel, float3(0, 0, 0), float3(0, 0, 0), 1u, frameJitter);
+    sun.visibility *= 1.0 + averCausticFocus(hitPos);
+
+    float3 radiance = averShadeDirect(s.emissive, s, sun);
+    // THE SKY, so a bounce off a sunlit wall into open air isn't fixed at direct+emissive alone --
+    // the SAME ambient term rtReflection adds for its own hit. No environment SPECULAR term at this
+    // hit (the second-order "specular of a diffuse bounce" rtReflection's own comment doesn't model
+    // either) and no bounce-of-a-bounce -- both are smaller than one more traced ray would cost here
+    // and neither is in this task's scope.
+    radiance += s.kdAlbedo * averSkyIrradiance(s.N) * gAmbient.r;
+
+    samplePos      = hitPos;
+    sampleNormal   = s.N;
+    sampleRadiance = max(radiance, 0.0);
+    return true;
+}
+
+// ---- the call site's one entry point: candidate + RTXDI temporal resampling, in and out ----
+// A DROP-IN REPLACEMENT FOR coneTracedIndirect's OWN CONTRACT (float3 diffuse radiance, `ao` out) --
+// see the two call sites in PSMainVoxi/PSRayDriven, which choose between the two by Settings::giMode
+// and nothing else. `ao` is left at 1.0 always: ReSTIR GI's one resampled candidate per pixel does
+// not estimate a hemisphere-coverage fraction the way the cone gather's own occlusion accumulator
+// does, and inventing one with no real derivation behind it would be exactly the kind of fudge this
+// codebase's own house style warns against elsewhere. NOT MODELLED, stated rather than silently
+// wrong -- the unified ambient ray (gAmbientParams.x, High/Epic) already supplies AO independently
+// of whichever diffuse estimator is chosen, which is the tier this gap matters least at.
+float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixel, uint frameIdx,
+                        out float ao) {
+    ao = 1.0;
+    const uint2 pixelPos = uint2(pixel);
+    const RTXDI_ReservoirBufferParameters resParams = giReservoirBufferParams();
+    const float frameJitter = (float)frameIdx * 2.39996323;
+
+    float3 samplePos, sampleNormal, sampleRadiance;
+    RTXDI_GIReservoir initial = RTXDI_EmptyGIReservoir();
+    if (giTraceInitialCandidate(wpos, N, pixel, frameJitter, samplePos, sampleNormal, sampleRadiance)) {
+        const float cosTheta = saturate(dot(normalize(samplePos - wpos), N));
+        if (cosTheta > 0.0)
+            initial = RTXDI_MakeGIReservoir(samplePos, sampleNormal, sampleRadiance, cosTheta / PI);
+    }
+
+    const uint writeSlice = (uint)(gGiRestirParams.z + 0.5);
+    RTXDI_GIReservoir result = initial;
+    if (gGiRestirParams.y > 0.5) {   // a real previous frame exists to resample against
+        RAB_Surface surface = RAB_EmptySurface();
+        surface.valid       = true;
+        surface.worldPos    = wpos;
+        surface.normal      = N;
+        surface.linearDepth = curLinearDepth;
+
+        // screenSpaceMotion.xy: REUSES rtReprojectHistory's own reprojection recipe (same
+        // gPrevViewProj, same gSceneViewport convention) rather than averGBufferVelocity's -- that
+        // one returns DESTINATION MINUS SOURCE (UpscalerNeeds::MotionVectors' contract), the
+        // OPPOSITE sign RTXDI_GITemporalResampling wants (`prevPos = pixelPosition +
+        // screenSpaceMotion.xy`, i.e. source relative to destination). .z is the depth delta a
+        // static point's reprojected depth would show, for RTXDI's own disocclusion test.
+        float3 screenSpaceMotion = float3(0, 0, 0);
+        {
+            const float4 prevClip = mul(float4(wpos, 1.0), gPrevViewProj);
+            if (prevClip.w > 1e-4) {
+                const float3 prevNdc = prevClip.xyz / prevClip.w;
+                const float2 prevPx = gSceneViewport.xy +
+                    float2(prevNdc.x * 0.5 + 0.5, 0.5 - prevNdc.y * 0.5) * gSceneViewport.zw;
+                screenSpaceMotion = float3(prevPx - pixel, prevClip.w - curLinearDepth);
+            }
+        }
+
+        RTXDI_RandomSamplerState rng = RTXDI_InitRandomSampler(pixelPos, frameIdx, 1u);
+        RTXDI_GITemporalResamplingParameters tparams = (RTXDI_GITemporalResamplingParameters)0;
+        tparams.depthThreshold        = 0.1;
+        tparams.normalThreshold       = 0.5;
+        tparams.maxHistoryLength      = 20;
+        tparams.enableFallbackSampling = 1;
+        tparams.biasCorrectionMode    = RTXDI_BIAS_CORRECTION_BASIC;
+        tparams.maxReservoirAge       = 30;
+        tparams.enablePermutationSampling = 0;
+        tparams.uniformRandomNumber   = frameIdx * 2654435761u;
+        RTXDI_RuntimeParameters rParams = (RTXDI_RuntimeParameters)0;   // no checkerboard
+
+        result = RTXDI_GITemporalResampling(pixelPos, surface, screenSpaceMotion,
+                                            1u - writeSlice, initial, rng, rParams, resParams, tparams);
+    }
+    RTXDI_StoreGIReservoir(result, resParams, pixelPos, writeSlice);
+
+    // NEXT FRAME'S "previous surface" -- see gGiSurfPosHist/gGiSurfNrmHist's own declaration for
+    // the two-texture format and the 0-packed-normal sentinel RAB_GetGBufferSurface tests for
+    // "nothing written here". Nudged off exactly zero so a legitimately-packed normal never
+    // collides with that sentinel.
+    const uint packedN = RTXDI_EncodeNormalizedVectorToSnorm2x16(N);
+    gGiSurfPosHistOut[pixelPos] = wpos.xy;
+    gGiSurfNrmHistOut[pixelPos] = float2(wpos.z, asfloat(packedN == 0u ? 1u : packedN));
+
+    float3 outDiffuse = 0.0;
+    if (RTXDI_IsValidGIReservoir(result))
+        // radiance * weightSum is RTXDI's own finalised estimator (RTXDI_FinalizeGIResampling
+        // normalises weightSum into exactly this multiplier). Bounded for the reason
+        // coneTracedIndirect's own AVER_VOX_MAXRAD clamp is: an unclamped reused sample with a
+        // small denominator (a near-grazing Jacobian, or M still 1 right after a disocclusion) can
+        // spike arbitrarily bright feeding the same shading path that clamp already protects.
+        outDiffuse = min(max(result.radiance * result.weightSum, 0.0), AVER_VOX_MAXRAD);
+    return outDiffuse;
+}
+
 // How far a view ray travels INSIDE a volume before something stops it, in centimetres --
 // averVolumeTransmittance needs a path length, and a blended surface has no idea how thick it is.
 // The old fluid shader guessed with `depthCm / max(abs(V.z), 0.15)` from a CONSTANT floor height
@@ -2585,8 +2999,21 @@ float3 coneTracedIndirect(float3 wpos, float3 N, out float ao) {
     const float aperture = sqrt(max(1.0 - cosHalf * cosHalf, 1e-6)) / max(cosHalf, 1e-6);   // tan
 
     float4 sum = traceCone(wpos, N, aperture);
-    float occ = sum.a;
     float wsum = 1.0;
+    // AO IS AVERAGED ONLY OVER CONES THAT HAD VOLUME TO MARCH. traceCone breaks the instant a sample
+    // leaves the voxel volume and returns whatever alpha it had, near zero for a cone that exits
+    // early -- which a plain average reads as "nothing occluding this direction", crediting the
+    // surface with full sky. A cone that left the volume has NO INFORMATION about occlusion, which
+    // is not the same as information that nothing is there, so it is excluded from the average
+    // rather than voting "open". The radiance sum still takes every cone: leaving the volume does
+    // genuinely mean no more bounced light was found along that direction.
+    //
+    // The far endpoint is the test rather than a flag out of traceCone, because this function is
+    // mirrored byte-for-byte in voxi.hlsl and voxi_gi.hlsli and a signature change is two files and
+    // a new way for them to drift. A cone whose FAR end is inside the volume never broke early.
+    float occW = insideVolume(voxelUVW(wpos + N * gVoxelParams.z)) ? 1.0 : 0.0;
+    float occ = sum.a * occW;
+    float occWsum = occW;
     // THE RING COMES FROM THE QUALITY TIER NOW, not a hardcoded 5: the axial cone along N is always
     // traced, so gGiParams.x is the TOTAL and the ring is one fewer.
     // A DYNAMIC [loop], not [unroll]: an unrolled loop with a dynamic bound is predicated, not
@@ -2613,9 +3040,14 @@ float3 coneTracedIndirect(float3 wpos, float3 N, out float ao) {
         float3 d = normalize(N * cosT + (T * cos(ang) + B * sin(ang)) * sinT);
         float w = saturate(dot(N, d));
         float4 c = traceCone(wpos, d, aperture);
-        sum += c * w; occ += c.a * w; wsum += w;
+        sum += c * w; wsum += w;
+        const float cw = w * (insideVolume(voxelUVW(wpos + d * gVoxelParams.z)) ? 1.0 : 0.0);
+        occ += c.a * cw; occWsum += cw;
     }
-    sum /= wsum; occ /= wsum;
+    sum /= wsum;
+    // EVERY cone left the volume: there is genuinely nothing here to occlude against, so the old
+    // answer (fully open) is right, and that case must not change.
+    occ = occWsum > 1e-4 ? occ / occWsum : 0.0;
     ao = saturate(1.0 - occ);
     // THE SAME CEILING THE INJECTION ALREADY HAS, applied AFTER the intensity multiply. Every voxel
     // is clamped to AVER_VOX_MAXRAD on the way in (PSVoxel), but gVoxelParams.y (giIntensity, up to
@@ -2750,7 +3182,26 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
 #endif
     float ao = 1.0;
     float3 ind = 0;
+    // GIMODE SWITCHES THE DIFFUSE BOUNCE ESTIMATOR -- see Settings::giMode (Voxi.hpp) for the full
+    // contract. Only reachable in the AVER_RT-compiled variant: ReSTIR GI's candidate ray needs the
+    // ray-tracing toolkit (gScene, RtInstance, gRtMaterials -- all declared inside this file's own
+    // `#if AVER_RT` region) that the non-RT variant never compiles in, so THE DEFAULT PATH (cones,
+    // and every image this shader produced before this field existed) IS BIT-IDENTICAL regardless of
+    // whether that variant exists -- there is no branch here for it to take.
+    // gGiRestirParams.x, NOT the raw Settings::giMode, exactly as giRestirIndirect's own header
+    // comment requires: it is 1 only once VoxiRenderer::giRestirWanted() has actually bound t12/u6/u7
+    // this frame, so a project requesting ReSTIR GI on hardware that cannot run it falls back to the
+    // cone gather here instead of reading a null-filled slot.
+#if AVER_RT
+    if (gVoxelParams.w > 0.5) {
+        if (gGiRestirParams.x > 0.5)
+            ind = giRestirIndirect(i.wpos, N, rtViewZ, i.pos.xy, (uint)gRtHistParams.z, ao);
+        else
+            ind = coneTracedIndirect(i.wpos, N, ao);
+    }
+#else
     if (gVoxelParams.w > 0.5) ind = coneTracedIndirect(i.wpos, N, ao);
+#endif
 
     AverVertex vtx = averVertexOf(i);
 
@@ -3081,6 +3532,14 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         o.viewZ            = 1.0e7;
         o.normalRoughness  = averPackNormalRoughness(-dir, 1.0);
 #endif
+        // A SKY MISS HAS NO SURFACE FOR NEXT FRAME TO REPROJECT EITHER -- write the same 0-packed-
+        // normal sentinel RAB_GetGBufferSurface tests for, rather than leaving THIS pixel's slot
+        // holding whatever it held the last time this pixel WAS a surface (the camera panned away,
+        // say). Only when the pair is actually bound this frame; see giRestirIndirect's own write
+        // for the sentinel's exact contract. The position channel doesn't need writing too -- the
+        // normal channel's 0 alone is what RAB_GetGBufferSurface tests before it ever reads position.
+        if (gGiRestirParams.x > 0.5)
+            gGiSurfNrmHistOut[uint2(i.pos.xy)] = float2(0.0, asfloat(0u));
         return o;
     }
 
@@ -3461,7 +3920,18 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // this point); the difference is that the ray stopped on geometry while the cone averaged across
     // it. See the ambient block further down, which assigns ind.diffuse.
 #else
-    if (gVoxelParams.w > 0.5) ind.diffuse = coneTracedIndirect(wpos, N, rdAo);
+    // GIMODE'S OWN SWITCH, exactly as PSMainVoxi's copy of this branch: gGiRestirParams.x (never the
+    // raw Settings::giMode -- see giRestirIndirect's own header comment) says whether
+    // VoxiRenderer::giRestirWanted() actually bound t12/u6/u7 this frame, and this whole function
+    // only exists inside `#if AVER_RT` already, so there is no non-RT variant to keep bit-identical
+    // here the way PSMainVoxi's copy has to guard for.
+    if (gVoxelParams.w > 0.5) {
+        if (gGiRestirParams.x > 0.5)
+            ind.diffuse = giRestirIndirect(wpos, N, mul(float4(wpos, 1.0), gViewProj).w,
+                                           i.pos.xy, (uint)gRtHistParams.z, rdAo);
+        else
+            ind.diffuse = coneTracedIndirect(wpos, N, rdAo);
+    }
 #endif
 
     // ---- ENVIRONMENT SPECULAR: A REAL MIRROR RAY NOW, GATED THE SAME WAY PSMainVoxi GATES ONE ----

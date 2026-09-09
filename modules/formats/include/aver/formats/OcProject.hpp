@@ -80,6 +80,10 @@ struct ProjectDesc {
     int ptBounces          = -1; // RENDER.PTBOUNCES        PATH tracing: bounces after the first hit, [1,8]
     int layeredBsdf        = -1; // RENDER.LAYEREDBSDF      0=Off 1=Low 2=Medium 3=High 4=Epic
     int giCones            = -1; // RENDER.GICONES          diffuse gather cones, [1,16]
+    // RENDER.GIMODE: 0 = voxel cone gather (the default and what every project written before
+    // this key existed means by its absence), 1 = ReSTIR GI. -1 keeps the engine's own default, so
+    // an older .ocproject is unchanged in meaning as well as in bytes.
+    int giMode             = -1; // RENDER.GIMODE           diffuse GI algorithm, [0,1]
     int refractionMode     = -1; // RENDER.REFRACTIONMODE   0=Off 1=Screen-space 2=Ray-traced
     f32 refractionStrength = -1.0f; // RENDER.REFRACTIONSTRENGTH  bend scale
     f32 refractionEdgeFade = -1.0f; // RENDER.REFRACTIONEDGEFADE  hides the screen-space miss at edges

@@ -63,4 +63,21 @@ target_compile_definitions(Aver.Render.Voxi.Renderer PRIVATE
 # POST_BUILD command: POST_BUILD runs on a RELINK, and a shader-only edit relinks nothing, so
 # the old text stayed deployed and silently kept being compiled. Mirrors modules/rhi/CMakeLists.txt --
 # see ShaderFiles.hpp for why bin/shaders is the only path a shipped build looks at.
+# ---- RTXDI's HLSL, deployed WITH ITS DIRECTORY STRUCTURE ----
+#
+# Copied whole into bin/shaders/Rtxdi/... rather than flattened, and the structure is the point.
+# <exe>/shaders used to be one flat, case-insensitive basename namespace: RTXDI ships Color.hlsli,
+# this engine ships color.hlsli, and deploying both left ONE file on disk -- the engine's colour
+# helpers silently gone, caught only by MaterialGraphTest failing on `undeclared identifier
+# srgbToLin`, because HLSL compiles at RUNTIME here and none of it was a build error. RTXDI's tree
+# also collides with itself (Reservoir.hlsli under DI/, GI/ and PT/). Keeping the directories means
+# neither collision can happen; DxcShaderInclude resolves path suffixes now, so the includes RTXDI
+# writes against a root ("Rtxdi/GI/Reservoir.hlsli") land on exactly these files.
+#
+# NOT via aver_deploy_shaders: that flattens into one directory and globs *.hlsl/*.hlsli only, while
+# RTXDI ships its shared host/shader structs as .h -- half an include closure, failing at runtime.
+# file(COPY) at configure time preserves both the tree and the extensions.
+file(COPY "${CMAKE_SOURCE_DIR}/third_party/rtxdi/Include/Rtxdi"
+     DESTINATION "${CMAKE_BINARY_DIR}/bin/shaders")
+
 aver_deploy_shaders(Aver.Render.Voxi.Renderer "${CMAKE_CURRENT_SOURCE_DIR}/shaders")

@@ -337,6 +337,35 @@ struct Settings {
     // Low still amortises at 8, which is where the trade belongs: not on the default tier.
     u32 giUpdateInterval = 1;
 
+    // ---- WHICH ESTIMATOR ANSWERS THE DIFFUSE BOUNCE: the voxel cone gather, or RTXDI ReSTIR GI ----
+    // 0 = cone gather (DEFAULT, and every build before this field existed). 1 = ReSTIR GI: one
+    // traced candidate per pixel, reused across frames through the vendored RTXDI SDK's temporal
+    // resampling (third_party/rtxdi -- RTXDI_GITemporalResampling, RTXDI_GIReservoir; see
+    // giRestirIndirect in voxi.hlsl for the call and RAB_* implementations it needed).
+    //
+    // NOT ON THE QUALITY LADDER above (giCones, voxelResolution, giUpdateInterval): those all scale
+    // ONE estimator up and down a ladder of the SAME kind of answer. This SWITCHES estimators --
+    // deterministic clipmap march vs. stochastic ray + temporal reuse -- which is an authoring
+    // decision with its own trade (far less per-frame ray-tracing noise, at the cost of a biased,
+    // history-dependent estimate that can lag a moving light or a disoccluding camera) rather than a
+    // rung between Low and Epic. So setSettings never DERIVES this from globalIllumination the way
+    // it derives giCones etc. on a tier change; it only clamps and range-checks it (Voxi.cpp).
+    //
+    // THE DEFAULT IS 0 AND MUST STAY 0 for the reason restated at every other field on this page
+    // that has already been bitten by its opposite: VoxiRenderer::giRestirWanted() gates the actual
+    // switch (it also requires ray-tracing hardware AND the rayTracing tier to be on, so a project
+    // with no RT never allocates the reservoir buffer or the previous-surface history this needs),
+    // but the SHADER-SIDE call sites (PSMainVoxi, PSRayDriven) are edited to branch on this value
+    // directly -- so unlike voxelResolution/giCones, THIS default is not merely "the tier's own
+    // rung", it is "byte-identical to every image this renderer produced before ReSTIR GI existed",
+    // and it stays that way regardless of what tier globalIllumination is set to.
+    //
+    // SCOPE, STATED RATHER THAN LEFT FOR SOMEONE TO DISCOVER BY READING THE SHADER: candidate
+    // generation + RTXDI TEMPORAL resampling only. NO SPATIAL reuse -- RTXDI_GISpatialResampling /
+    // RTXDI_GISpatioTemporalResampling (third_party/rtxdi/Include/Rtxdi/GI/SpatialResampling.hlsli,
+    // SpatioTemporalResampling.hlsli) are vendored and unused; a future slice can add a spatial pass
+    // over the SAME reservoir buffer without touching this field's contract.
+    u32 giMode = 0;
     // SPATIAL denoise radius for the ray-traced sun shadow, in pixels. 0 is off: the shadow term is
     // whatever this pixel's own rays returned, unfiltered. N > 0 averages a (2N+1)^2 neighbourhood
     // of the shadow history, weighted by how well each neighbour's stored depth agrees with this

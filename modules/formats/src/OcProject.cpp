@@ -113,6 +113,8 @@ bool parseOcproject(std::string_view text, ProjectDesc& out, std::string* err) {
             if (t.size() > 1) out.ptBounces = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.GICONES")) {
             if (t.size() > 1) out.giCones = parseI32(t[1], -1);
+        } else if (equalsCI(key, "RENDER.GIMODE")) {
+            if (t.size() > 1) out.giMode = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.REFRACTIONMODE")) {
             if (t.size() > 1) out.refractionMode = parseI32(t[1], -1);
         } else if (equalsCI(key, "RENDER.REFRACTIONSTRENGTH")) {
@@ -283,7 +285,7 @@ bool isOwnedKey(std::string_view line) {
         "RENDER.VOXELRES", "RENDER.GIINTENSITY", "RENDER.GIDISTANCE",
         "RENDER.RTSHADOWRAYS", "RENDER.RTPIXELSPERRAY", "RENDER.RTSHADOWDENOISE",
         "RENDER.RTRENDERMODE", "RENDER.PTBOUNCES", "RENDER.LAYEREDBSDF",
-        "RENDER.GICONES", "RENDER.REFRACTIONMODE", "RENDER.REFRACTIONSTRENGTH",
+        "RENDER.GICONES", "RENDER.GIMODE", "RENDER.REFRACTIONMODE", "RENDER.REFRACTIONSTRENGTH",
         "RENDER.REFRACTIONEDGEFADE", "RENDER.LODSELECT", "RENDER.LODTHRESHOLD",
         "RENDER.OCCLUSIONCULL", "RENDER.DEPTHPREPASS",
         // IN EMIT ORDER, and these two were missing. A key appended to `owned` above but absent
@@ -346,6 +348,7 @@ std::string writeOcproject(const ProjectDesc& d, std::string_view existing) {
     appendKey(owned, "RENDER.PTBOUNCES", d.ptBounces);
     appendKey(owned, "RENDER.LAYEREDBSDF", d.layeredBsdf);
     appendKey(owned, "RENDER.GICONES", d.giCones);
+    appendKey(owned, "RENDER.GIMODE", d.giMode);
     appendKey(owned, "RENDER.REFRACTIONMODE", d.refractionMode);
     appendKey(owned, "RENDER.REFRACTIONSTRENGTH", d.refractionStrength);
     appendKey(owned, "RENDER.REFRACTIONEDGEFADE", d.refractionEdgeFade);

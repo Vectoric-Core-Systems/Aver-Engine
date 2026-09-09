@@ -128,7 +128,14 @@ public:
                    std::vector<u8>& outVisible) override {
         lastTested_ = count;
         lastCulled_ = 0;
-        outVisible.assign(count, 1);   // the always-safe default if anything below bails out early
+        // The always-safe default if anything below bails out early -- and, for readbackLagExpected_,
+        // the always-safe DIRECTION: "do not trust it" until the generation check near the bottom of
+        // this function actually earns "true". A caller combining this with its own trust gate (see
+        // readbackLagIsExactlyOneCall()'s comment in Occlusion.hpp) then falls back to zero culling on
+        // exactly the calls this function could not vouch for, the same conservative bias
+        // outVisible's all-1 default already uses.
+        outVisible.assign(count, 1);
+        readbackLagExpected_ = false;
         if (!staticOk_ || !pyramid_ || count == 0) return;
         if (!ensureBoxCapacity(res, count)) return;
 
@@ -139,6 +146,30 @@ public:
             p[4] = boxes[i].max[0]; p[5] = boxes[i].max[1]; p[6] = boxes[i].max[2]; p[7] = 0.0f;
         }
         res.writeBuffer(boxesBuf_, packed_.data(), static_cast<u64>(packed_.size()) * sizeof(f32), 0);
+
+        // STALENESS DETECTOR: stamp a monotonically-increasing generation number into a tiny
+        // CPU-authored side buffer and round-trip it through the SAME command list, at the SAME
+        // point, as the visibility copy below -- so both copies land in the GPU in the same
+        // ExecuteCommandLists/QueueSubmit batch and retire together. Costs one extra 8-byte
+        // writeBuffer + copyBuffer + readBuffer per call; no shader change, since it never touches
+        // the compute pipelines (see genUpload_/genReadback_'s own comment below for why a plain
+        // buffer-to-buffer copy is enough and CSTest does not need to know this exists).
+        //
+        // WHY THIS EXISTS: every caller of this module (today, only SandboxApp.cpp) that tries to
+        // bound the one-call staleness testBatch() has (see the corrected "TWO-PASS" section in
+        // Occlusion.hpp) is reasoning from an assumption -- "the bytes I just read back are from
+        // EXACTLY the immediately preceding call, not two or more calls back." That assumption has
+        // held in every trace read while building this fix, but nothing in this module previously
+        // PROVED it frame to frame; boxesBuf_/visBuf_/visReadback_ are single-buffered and reused by
+        // every call with no per-call-in-flight fencing beyond the waitIdle() below, so a caller that
+        // skips a call, a device hiccup, or a future change to this file's own submission order could
+        // silently stretch the lag past one call with no symptom louder than "occlusion culls a
+        // little more than it should have." Comparing the generation number actually read back
+        // against the one this exact call submitted -1 turns that possibility into something a
+        // caller can check via readbackLagIsExactlyOneCall() and react to loudly, instead of a silent wrong
+        // answer no screenshot diff would necessarily catch.
+        const u64 thisGeneration = ++submitGeneration_;
+        res.writeBuffer(genUpload_, &thisGeneration, sizeof(thisGeneration), 0);
 
         {
             ScopedGpuStat stat(ctx, "HZB test");
@@ -157,13 +188,28 @@ public:
             ctx.bufferBarrier(visBuf_, ResourceState::UnorderedAccess, ResourceState::CopySource);
             ctx.copyBuffer(visReadback_, visBuf_, static_cast<u64>(count) * 4);
             ctx.bufferBarrier(visBuf_, ResourceState::CopySource, ResourceState::UnorderedAccess);
+            // Both genUpload_ (Upload) and genReadback_ (Readback) sit permanently in states that
+            // already allow a copy (GENERIC_READ / COPY_DEST -- see their creation below), the exact
+            // same reasoning boxesBuf_ and visReadback_ already rely on above, so no extra barrier is
+            // needed here either.
+            ctx.copyBuffer(genReadback_, genUpload_, sizeof(thisGeneration));
         }
 
-        // See Occlusion.hpp's top comment ("THE ONE COST THIS DESIGN DOES NOT HIDE") for why this
-        // stall exists at all: testBatch() promises a CPU-visible answer before it returns, in the
-        // SAME frame the copy above was recorded, and waitIdle() is the only synchronisation primitive
-        // this module's RHI (IResourceFactory) exposes to reach for. Measured, not assumed -- see the
-        // commit this lands with for the actual number on Electric Dreams.
+        // CORRECTED -- this used to claim testBatch() "promises a CPU-visible answer... in the SAME
+        // frame the copy above was recorded." It does not, and cannot with this RHI: waitIdle() (see
+        // Occlusion.hpp's corrected "THE ONE COST" section) only drains GPU work ALREADY SUBMITTED
+        // via a previous ExecuteCommandLists/QueueSubmit -- it does not, and structurally cannot,
+        // close/submit/wait-for THIS call's own dispatch+copy, which are still sitting unexecuted in
+        // the caller's still-open frame command list at this exact point. So this stall waits for
+        // whatever WAS already submitted (ordinarily: everything through the end of the PREVIOUS
+        // frame) to finish, and the bytes readBuffer() below then reads are whatever the PREVIOUS
+        // successful testBatch() call's copy wrote -- whichever call that was; see the generation
+        // check just below for how a caller confirms it was exactly one call back rather than
+        // assuming so. A real same-frame answer would need a NEW "flush this frame's own command
+        // list, then resume recording into it" RHI primitive that does not exist today, on either
+        // backend; adding one is out of this module's scope. This stall is real and measured (see the
+        // commit this lands with for the actual number on Electric Dreams) -- it is just paying for a
+        // stale answer, not a fresh one.
         res.waitIdle();
 
         rawVisible_.resize(count);
@@ -174,9 +220,32 @@ public:
                 if (!visible) ++lastCulled_;
             }
         }
+
+        if (thisGeneration == 1) {
+            // The FIRST call ever has no previous call to have been stale RELATIVE TO -- genReadback_
+            // holds whatever garbage it was created with, same as visReadback_ does on this exact
+            // same call (see outVisible's own all-1 default, which is what actually protects a
+            // caller on this call, not this flag). Calling that "stale" would be a false-positive
+            // warning on every single run that ever turns culling on, for a boundary condition that
+            // is not an anomaly -- so it is defined as trivially fresh instead, and the generation
+            // check below only starts actually proving anything from the SECOND call onward.
+            readbackLagExpected_ = true;
+        } else {
+            u64 readGeneration = 0;
+            if (res.readBuffer(genReadback_, &readGeneration, sizeof(readGeneration), 0) &&
+                readGeneration == thisGeneration - 1) {
+                readbackLagExpected_ = true;
+            }
+            // else: leave it at the always-safe default set at the top of this function (false) --
+            // either the readback failed, or the generation that actually landed is not the
+            // immediately preceding call's, so the one-call-lag assumption every caller's own safety
+            // margin depends on did not hold this time.
+        }
     }
 
     void lastTestCounts(u32& culled, u32& tested) const override { culled = lastCulled_; tested = lastTested_; }
+
+    bool readbackLagIsExactlyOneCall() const override { return readbackLagExpected_; }
 
     void releaseAll(IResourceFactory& res) {
         destroyPyramidResources(res);
@@ -185,6 +254,8 @@ public:
         if (boxesBuf_)    { res.destroyBuffer(boxesBuf_);    boxesBuf_ = 0; }
         if (visBuf_)      { res.destroyBuffer(visBuf_);      visBuf_ = 0; }
         if (visReadback_) { res.destroyBuffer(visReadback_); visReadback_ = 0; }
+        if (genUpload_)   { res.destroyBuffer(genUpload_);   genUpload_ = 0; }
+        if (genReadback_) { res.destroyBuffer(genReadback_); genReadback_ = 0; }
         if (testSet_)     { res.destroyBindingSet(testSet_); testSet_ = 0; }
         boxCapacity_ = 0;
         staticOk_ = false;
@@ -292,6 +363,39 @@ private:
     }
 
     bool ensureBoxCapacity(IResourceFactory& res, u32 count) {
+        // The staleness-detector's stamp buffers: fixed at 8 bytes (one u64), independent of
+        // boxCapacity_, so they are created ONCE (guarded separately) rather than being torn down
+        // and rebuilt every time the box count grows past its own headroom below. Not worth their
+        // own dedicated init function: this is the only place testBatch()'s GPU-side resources are
+        // lazily created at all, so a second such place would just be a second thing to remember to
+        // call.
+        //
+        // Guarded on genReadback_ (the SECOND of the pair), not genUpload_ (the first) -- the same
+        // "guard on the last thing the sequence creates" idiom the box buffers below already use
+        // (guarded on testSet_, their own last step), so a call that got genUpload_ but failed on
+        // genReadback_ retries BOTH next time instead of silently reusing a half-created pair with
+        // genReadback_ stuck at 0 forever.
+        if (!genReadback_) {
+            if (genUpload_) { res.destroyBuffer(genUpload_); genUpload_ = 0; }
+            BufferDesc gud;
+            gud.bytes = sizeof(u64);
+            gud.kind = BufferKind::Upload;
+            gud.debugName = "HZB test generation stamp (upload)";
+            genUpload_ = res.createBuffer(gud);
+
+            BufferDesc grd;
+            grd.bytes = sizeof(u64);
+            grd.kind = BufferKind::Readback;
+            grd.debugName = "HZB test generation stamp (readback)";
+            genReadback_ = res.createBuffer(grd);
+
+            if (!genUpload_ || !genReadback_) {
+                AVER_ERROR("[Occlusion] HZB staleness-detector buffers unavailable -- "
+                           "readbackLagIsExactlyOneCall() will report false forever, which is safe (every "
+                           "caller falls back to no culling) but gives up the culling benefit entirely");
+                return false;
+            }
+        }
         if (count <= boxCapacity_ && testSet_) return true;
         if (boxesBuf_)    { res.destroyBuffer(boxesBuf_);    boxesBuf_ = 0; }
         if (visBuf_)      { res.destroyBuffer(visBuf_);      visBuf_ = 0; }
@@ -351,6 +455,12 @@ private:
     BufferHandle boxesBuf_ = 0, visBuf_ = 0, visReadback_ = 0;
     u32 boxCapacity_ = 0;
     bool visBufLive_ = false;
+
+    // STALENESS DETECTOR -- see testBatch()'s own comment above the writeBuffer(genUpload_, ...)
+    // call. 8 bytes each; created once in ensureBoxCapacity, independent of boxCapacity_.
+    BufferHandle genUpload_ = 0, genReadback_ = 0;
+    u64 submitGeneration_ = 0;      // incremented once per testBatch() call that reaches the dispatch
+    bool readbackLagExpected_ = false;   // see readbackLagIsExactlyOneCall()
 
     f32 viewProjCache_[16] = {};
     std::vector<f32> packed_;

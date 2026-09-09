@@ -83,6 +83,15 @@ cbuffer VoxiFrame : register(AVER_GI_JOIN(b, AVER_GI_FRAME_REG)) {
     // Mirrors FrameConstants::viewParams -- appended at the END, so every offset above is
     // untouched. See VoxiRenderer.hpp's static_assert for the guard that makes that a rule.
     float4   gViewParams;
+    // RTXDI ReSTIR GI control -- mirrors gGiRestirParams in voxi.hlsl and FrameConstants::
+    // giRestirParams (VoxiRenderer.hpp), appended at the end for the same reason gViewParams was.
+    // NOTHING IN THIS PRELUDE READS IT, same as gAmbientParams/gViewParams above it: this cbuffer
+    // is declared as the FULL FrameConstants block so a caller can bind giFrameConstants()
+    // verbatim (see the header note at the top of this file), and this field only exists here to
+    // keep that true. ReSTIR GI itself is voxi.hlsl's own PSMainVoxi/PSRayDriven entry points --
+    // it needs the ray-tracing toolkit (gScene, RtInstance, gRtMaterials) this cone-only prelude's
+    // callers never bind, so the actual switch never reaches this file.
+    float4   gGiRestirParams;
 };
 
 // t(AVER_GI_SRV) the GI volume, t(AVER_GI_SRV_1) the shadow map -- the only two of Voxi's table-0
@@ -178,8 +187,21 @@ float3 coneTracedIndirect(float3 wpos, float3 N, out float ao) {
     const float aperture = 0.577;              // ~60 degree cone
 
     float4 sum = traceCone(wpos, N, aperture);
-    float occ = sum.a;
     float wsum = 1.0;
+    // AO IS AVERAGED ONLY OVER CONES THAT HAD VOLUME TO MARCH. traceCone breaks the instant a sample
+    // leaves the voxel volume and returns whatever alpha it had, near zero for a cone that exits
+    // early -- which a plain average reads as "nothing occluding this direction", crediting the
+    // surface with full sky. A cone that left the volume has NO INFORMATION about occlusion, which
+    // is not the same as information that nothing is there, so it is excluded from the average
+    // rather than voting "open". The radiance sum still takes every cone: leaving the volume does
+    // genuinely mean no more bounced light was found along that direction.
+    //
+    // The far endpoint is the test rather than a flag out of traceCone, because this function is
+    // mirrored byte-for-byte in voxi.hlsl and voxi_gi.hlsli and a signature change is two files and
+    // a new way for them to drift. A cone whose FAR end is inside the volume never broke early.
+    float occW = insideVolume(voxelUVW(wpos + N * gVoxelParams.z)) ? 1.0 : 0.0;
+    float occ = sum.a * occW;
+    float occWsum = occW;
     // Mirrors VoxiShaders.hpp's coneTracedIndirect -- see the note there.
     const uint  ring = (uint)max(gGiParams.x, 1.0) - 1u;
     const float dphi = ring > 0u ? 6.2831853 / (float)ring : 0.0;
@@ -188,9 +210,14 @@ float3 coneTracedIndirect(float3 wpos, float3 N, out float ao) {
         float3 d = normalize(N * 0.5 + (T * cos(ang) + B * sin(ang)) * 0.866);
         float w = saturate(dot(N, d));
         float4 c = traceCone(wpos, d, aperture);
-        sum += c * w; occ += c.a * w; wsum += w;
+        sum += c * w; wsum += w;
+        const float cw = w * (insideVolume(voxelUVW(wpos + d * gVoxelParams.z)) ? 1.0 : 0.0);
+        occ += c.a * cw; occWsum += cw;
     }
-    sum /= wsum; occ /= wsum;
+    sum /= wsum;
+    // EVERY cone left the volume: there is genuinely nothing here to occlude against, so the old
+    // answer (fully open) is right, and that case must not change.
+    occ = occWsum > 1e-4 ? occ / occWsum : 0.0;
     ao = saturate(1.0 - occ);
     // Bounded exactly as VoxiShaders.hpp's coneTracedIndirect is -- read the long note there
     // for why the ceiling is the injection's own constant. Two copies of this gather exist, and

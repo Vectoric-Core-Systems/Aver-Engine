@@ -53,6 +53,11 @@ void Renderer::setSettings(const Settings& s) {
     if (status(Feature::RayTracing) != Status::Ready) {
         if (n.rayTracing != Quality::Off) refuse(Feature::RayTracing);
         n.rayTracing = Quality::Off;
+        // giMode==1 (RTXDI ReSTIR GI) needs the same RayQuery hardware the shadow/reflection rays
+        // do -- it traces its own candidate ray through the identical acceleration structure and
+        // flat geometry table. No separate refuse() call: this is a CONSEQUENCE of the RayTracing
+        // refusal just logged above, not a second reason for the same device to be told about.
+        n.giMode = 0;
     }
     if (status(Feature::PathTracing) != Status::Ready) {
         if (n.pathTracing != Quality::Off) refuse(Feature::PathTracing);
@@ -157,6 +162,9 @@ void Renderer::setSettings(const Settings& s) {
     // 1 is the only mode that exists besides raster; anything else is a manifest typo, and
     // clamping to 1 rather than 0 would turn a typo into a silent renderer swap.
     n.rtRenderMode       = n.rtRenderMode > 1u ? 0u : n.rtRenderMode;
+    // Same reasoning as rtRenderMode directly above: 1 is the only mode besides the cone gather, so
+    // a garbage value clamps to the DEFAULT (0, cones) rather than silently landing on ReSTIR GI.
+    n.giMode             = n.giMode > 1u ? 0u : n.giMode;
     // 8 is arbitrary but finite: an unbounded bounce count in a shader loop is a hang, and the
     // useful range for a real-time path tracer is nowhere near it.
     n.ptBounces          = std::clamp(n.ptBounces, 1u, 8u);
