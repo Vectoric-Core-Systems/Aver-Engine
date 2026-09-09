@@ -1142,6 +1142,10 @@ bool rtReprojectHistory(float3 wpos, float2 pixel, out float hist, out float2 ve
     hist = 0.0;
     velocityPx = 0.0;
     float4 clip = mul(float4(wpos, 1.0), gPrevViewProj);
+    // Taken HERE, above every early-out, so the derivative is never evaluated in divergent flow --
+    // see the tolerance below for what it is for.
+    const float dzdx = ddx(clip.w);
+    const float dzdy = ddy(clip.w);
     if (clip.w <= 1e-4) return false;
     float3 ndc = clip.xyz / clip.w;
     if (ndc.z < 0.0 || ndc.z > 1.0) return false;
@@ -1161,7 +1165,27 @@ bool rtReprojectHistory(float3 wpos, float2 pixel, out float hist, out float2 ve
     // clip.w is the expected depth (same as VSMain's o.pos.w for wpos, through LAST frame's camera).
     // Comparing it to the stored depth catches a disocclusion a screen-position check alone can't: a
     // silhouette edge can reproject onto an already-populated texel at a completely different depth.
-    const float tol = max(clip.w, stored.y) * 0.03 + 1.0;   // 3% relative, +1cm floor at grazing distances
+    // THE TOLERANCE FOLLOWS THE DEPTH GRADIENT, and a flat 3% is what made grazing surfaces speckle.
+    //
+    // `stored.y` is the depth recorded at the TEXEL WE LANDED ON, up to half a texel from where this
+    // pixel actually reprojected to. On a surface seen face-on that is a few millimetres and 3%
+    // covers it easily. On one seen EDGE-ON -- a floor stretching away, the base of a column -- half
+    // a texel of screen space is metres of depth, so the test rejects a history that was perfectly
+    // good, the pixel falls back to its raw ONE-RAY estimate, and at one ray that estimate is
+    // BINARY. A field of pixels each independently choosing 0 or 1 is precisely salt and pepper, and
+    // it appears exactly where the geometry is grazing, which is where the user reported it.
+    //
+    // (|ddz/dx| + |ddz/dy|) is how much depth legitimately changes across one pixel here, so
+    // allowing two pixels of it turns "3% of the depth" into "3% of the depth, plus whatever this
+    // surface's own slope makes unavoidable". Face-on geometry has a gradient near zero and keeps
+    // exactly the old tolerance, so this loosens the test only where it was wrong.
+    //
+    // ddx/ddy ARE SAFE HERE, and that is worth stating because rtShadowSpatial carries a warning
+    // about the opposite case: derivatives in DIVERGENT flow difference against a lane that never
+    // ran. The branch above this call is on gAmbientParams.x, a constant-buffer value, so it is
+    // uniform across the wave -- and the gradient is taken before any of this function's own
+    // early-outs.
+    const float tol = max(clip.w, stored.y) * 0.03 + 1.0 + (abs(dzdx) + abs(dzdy)) * 2.0;   // 3% relative, +1cm floor at grazing distances
     if (abs(clip.w - stored.y) > tol) return false;
 
     hist = stored.x;
@@ -1178,6 +1202,10 @@ bool rtReprojectAo(float3 wpos, float2 pixel, out float hist, out float2 velocit
     hist = 0.0;
     velocityPx = 0.0;
     float4 clip = mul(float4(wpos, 1.0), gPrevViewProj);
+    // Taken HERE, above every early-out, so the derivative is never evaluated in divergent flow --
+    // see the tolerance below for what it is for.
+    const float dzdx = ddx(clip.w);
+    const float dzdy = ddy(clip.w);
     if (clip.w <= 1e-4) return false;
     float3 ndc = clip.xyz / clip.w;
     if (ndc.z < 0.0 || ndc.z > 1.0) return false;
@@ -1188,7 +1216,27 @@ bool rtReprojectAo(float3 wpos, float2 pixel, out float hist, out float2 velocit
     int2 texel = int2(floor(px));
     if (any(texel < 0) || texel.x >= (int)texW || texel.y >= (int)texH) return false;
     const float2 stored = gAoHist.Load(int3(texel, 0));   // x = openness, y = linear depth
-    const float tol = max(clip.w, stored.y) * 0.03 + 1.0;
+    // THE TOLERANCE FOLLOWS THE DEPTH GRADIENT, and a flat 3% is what made grazing surfaces speckle.
+    //
+    // `stored.y` is the depth recorded at the TEXEL WE LANDED ON, up to half a texel from where this
+    // pixel actually reprojected to. On a surface seen face-on that is a few millimetres and 3%
+    // covers it easily. On one seen EDGE-ON -- a floor stretching away, the base of a column -- half
+    // a texel of screen space is metres of depth, so the test rejects a history that was perfectly
+    // good, the pixel falls back to its raw ONE-RAY estimate, and at one ray that estimate is
+    // BINARY. A field of pixels each independently choosing 0 or 1 is precisely salt and pepper, and
+    // it appears exactly where the geometry is grazing, which is where the user reported it.
+    //
+    // (|ddz/dx| + |ddz/dy|) is how much depth legitimately changes across one pixel here, so
+    // allowing two pixels of it turns "3% of the depth" into "3% of the depth, plus whatever this
+    // surface's own slope makes unavoidable". Face-on geometry has a gradient near zero and keeps
+    // exactly the old tolerance, so this loosens the test only where it was wrong.
+    //
+    // ddx/ddy ARE SAFE HERE, and that is worth stating because rtShadowSpatial carries a warning
+    // about the opposite case: derivatives in DIVERGENT flow difference against a lane that never
+    // ran. The branch above this call is on gAmbientParams.x, a constant-buffer value, so it is
+    // uniform across the wave -- and the gradient is taken before any of this function's own
+    // early-outs.
+    const float tol = max(clip.w, stored.y) * 0.03 + 1.0 + (abs(dzdx) + abs(dzdy)) * 2.0;
     if (abs(clip.w - stored.y) > tol) return false;
     hist = stored.x;
     velocityPx = px - pixel;
