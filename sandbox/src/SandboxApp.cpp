@@ -106,6 +106,8 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "aver/mcp/McpBridge.hpp"
 #endif
 #include "ToolGlyphs.hpp"
+#include "EditorWidgets.hpp"
+#include "FoliageAlign.hpp"
 #include "AssetEditor.hpp"
 #include "ActorEditor.hpp"
 #include "AnimEditor.hpp"
@@ -12260,10 +12262,16 @@ private:
 
         Transform xf;
         xf.position = Vec3{x, y, z};
-        // Yaw only. Rolling a tree sideways to match a slope looks worse than leaving it upright,
-        // which is why "align to slope" is off by default and, when on, is applied gently.
+        // "Align to slope" used to be dead UI: foliageAlignToNormal_ was read nowhere, so this was
+        // yaw-only regardless of the checkbox (see its own declaration comment). foliagePlacementRotation
+        // (FoliageAlign.hpp) is the fix -- yaw is still a random azimuth either way, and now genuinely
+        // tilts the instance to the surface normal SAMPLED AT ITS OWN (x, y) when the option is on.
+        // eps of 10 cm sits comfortably inside a section's own sample spacing (see
+        // OcLandData::spacingCm's typical range), so the four extra probes stay local to this
+        // instance's own patch of ground rather than blurring across several samples.
         const f32 yaw = foliageRand(foliageSeed_) * 6.2831853f;
-        xf.rotation = Quat{0.0f, 0.0f, std::sin(yaw * 0.5f), std::cos(yaw * 0.5f)};
+        xf.rotation = editor::foliagePlacementRotation(landscapeData_, x, y, /*epsCm=*/10.0f, yaw,
+                                                        foliageAlignToNormal_);
         const f32 sc = foliageScaleMin_ + foliageRand(foliageSeed_) * (foliageScaleMax_ - foliageScaleMin_);
         xf.scale = Vec3{sc, sc, sc};
 
@@ -16215,9 +16223,17 @@ private:
                                               : "The UI render feature is unavailable on this backend.");
                 ImGui::Separator();
                 // Reset Layout is scoped to whichever tab is in front.
+                //
+                // ROUTED THROUGH THE FOCUSED EDITOR, NOT HARDCODED TO THE ACTOR EDITOR. This used to
+                // call editor::resetActorEditorLayout() unconditionally whenever ANY asset tab was
+                // open, so resetting a Sound or Graph tab's layout silently reset the Actor editor's
+                // instead -- assetTabActive said only "some asset tab is open", never which one.
+                // AssetEditorHost::resetFocusedLayout() tracks which tab's ImGui window was actually
+                // focused (see its own comment) and calls that editor's own resetLayout(), which is
+                // exactly what the previous behaviour needed and never had.
                 const bool assetTabActive = !levelVisible_ && assetEditors_.anyOpen();
                 if (ImGui::MenuItem(assetTabActive ? "Reset Tab Layout" : "Reset Layout")) {
-                    if (assetTabActive) editor::resetActorEditorLayout();
+                    if (assetTabActive) assetEditors_.resetFocusedLayout();
                     else              { dockBuilt_ = false; dockResetRequested_ = true; }
                 }
                 if (ImGui::IsItemHovered())
@@ -19678,25 +19694,9 @@ private:
         return changed;
     }
 
-    // Caption ABOVE the control, control full width below.
-    // ImGui's default puts the label to the RIGHT of a slider and does not clip it -- it just runs
-    // out of panel and disappears. In a 20%-width dock at 300% DPI that turned "Radius (cm)" into
-    // "Radiu". Every panel control in this file's mode panels goes through here so none can regress.
-    static bool panelFloat(const char* label, f32* v, f32 lo, f32 hi, const char* fmt,
-                           ImGuiSliderFlags flags = 0) {
-        ImGui::TextUnformatted(label);
-        ImGui::SetNextItemWidth(-1);
-        char id[96];
-        std::snprintf(id, sizeof id, "##%s", label);
-        return ImGui::SliderFloat(id, v, lo, hi, fmt, flags);
-    }
-    static bool panelInt(const char* label, int* v, int lo, int hi) {
-        ImGui::TextUnformatted(label);
-        ImGui::SetNextItemWidth(-1);
-        char id[96];
-        std::snprintf(id, sizeof id, "##%s", label);
-        return ImGui::SliderInt(id, v, lo, hi);
-    }
+    // panelFloat/panelInt MOVED to EditorWidgets.hpp (aver::editor namespace), with no behaviour
+    // change, so any editor -- not just SandboxApp's own mode panels -- can avoid the narrow-dock
+    // label-truncation bug they fix. Call sites below now say editor::panelFloat/editor::panelInt.
 
     void buildSelectModePanel() {
         ImGui::TextDisabled("TRANSFORM");
@@ -19872,9 +19872,9 @@ private:
             int seed = static_cast<int>(landscapeNoiseParams_.seed);
             ImGui::SetNextItemWidth(-1.0f);
             if (ImGui::InputInt("Seed", &seed)) landscapeNoiseParams_.seed = static_cast<u32>(seed);
-            panelFloat("Feature Size (cm)", &landscapeNoiseParams_.featureSizeCm, 500.0f, 40000.0f,
+            editor::panelFloat("Feature Size (cm)", &landscapeNoiseParams_.featureSizeCm, 500.0f, 40000.0f,
                        "%.0f", ImGuiSliderFlags_Logarithmic);
-            panelFloat("Amplitude (cm)", &landscapeNoiseParams_.amplitudeCm, 0.0f, 6000.0f, "%.0f");
+            editor::panelFloat("Amplitude (cm)", &landscapeNoiseParams_.amplitudeCm, 0.0f, 6000.0f, "%.0f");
             ImGui::SetNextItemWidth(-1.0f);
             ImGui::SliderInt("Octaves", &landscapeNoiseParams_.octaves, 1, 8);
             ImGui::Spacing();
@@ -19922,12 +19922,12 @@ private:
 
         ImGui::Spacing();
         ImGui::TextDisabled("BRUSH");
-        panelFloat("Radius (cm)", &sculptRadiusCm_, 50.0f, 5000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
-        panelFloat("Strength (cm/s)", &sculptStrengthCm_, 5.0f, 2000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
+        editor::panelFloat("Radius (cm)", &sculptRadiusCm_, 50.0f, 5000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
+        editor::panelFloat("Strength (cm/s)", &sculptStrengthCm_, 5.0f, 2000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
         // FALLOFF is new all the way down: applyBrush's curve was a hardcoded smoothstep with no way
         // to reach it. A hard-edged brush and a soft one are different tools for different jobs, and
         // every terrain editor exposes the difference.
-        panelFloat("Falloff", &sculptFalloff_, 0.0f, 1.0f, "%.2f");
+        editor::panelFloat("Falloff", &sculptFalloff_, 0.0f, 1.0f, "%.2f");
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("0 is a hard edge, 1 is a soft smoothstep shoulder.");
 
@@ -19944,9 +19944,9 @@ private:
         // The noise generator existed and was reachable from nowhere: terrainHeightAt() was wired
         // only as the height source for procedural tiles past the authored rim, never as something a
         // level author could apply to the section they are editing.
-        panelFloat("Feature size (cm)", &landscapeNoiseParams_.featureSizeCm, 500.0f, 50000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
-        panelFloat("Amplitude (cm)", &landscapeNoiseParams_.amplitudeCm, 0.0f, 10000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
-        panelInt("Octaves", &landscapeNoiseParams_.octaves, 1, 8);
+        editor::panelFloat("Feature size (cm)", &landscapeNoiseParams_.featureSizeCm, 500.0f, 50000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
+        editor::panelFloat("Amplitude (cm)", &landscapeNoiseParams_.amplitudeCm, 0.0f, 10000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
+        editor::panelInt("Octaves", &landscapeNoiseParams_.octaves, 1, 8);
         int seed = static_cast<int>(landscapeNoiseParams_.seed);
         ImGui::TextUnformatted("Seed");
         ImGui::SetNextItemWidth(-1);
@@ -19980,18 +19980,18 @@ private:
 
         ImGui::Spacing();
         ImGui::TextDisabled("BRUSH");
-        panelFloat("Radius (cm)", &foliageRadiusCm_, 100.0f, 10000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
-        panelFloat("Density", &foliageDensity_, 1.0f, 64.0f, "%.0f");
+        editor::panelFloat("Radius (cm)", &foliageRadiusCm_, 100.0f, 10000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
+        editor::panelFloat("Density", &foliageDensity_, 1.0f, 64.0f, "%.0f");
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Placements attempted per brush application.");
-        panelFloat("Min spacing (cm)", &foliageSpacingCm_, 0.0f, 2000.0f, "%.0f");
+        editor::panelFloat("Min spacing (cm)", &foliageSpacingCm_, 0.0f, 2000.0f, "%.0f");
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Placements closer than this to an existing one are rejected, which is\n"
                               "what stops a brush from stacking meshes on top of each other.");
 
         ImGui::Spacing();
         ImGui::TextDisabled("PLACEMENT");
-        panelFloat("Scale min", &foliageScaleMin_, 0.1f, 3.0f, "%.2f");
-        panelFloat("Scale max", &foliageScaleMax_, 0.1f, 3.0f, "%.2f");
+        editor::panelFloat("Scale min", &foliageScaleMin_, 0.1f, 3.0f, "%.2f");
+        editor::panelFloat("Scale max", &foliageScaleMax_, 0.1f, 3.0f, "%.2f");
         if (foliageScaleMax_ < foliageScaleMin_) foliageScaleMax_ = foliageScaleMin_;
         ImGui::Checkbox("Align to slope", &foliageAlignToNormal_);
 
@@ -22798,7 +22798,7 @@ private:
             if (ImGui::Button(landscapeDirty_ ? "Save Terrain *" : "Save Terrain")) saveLandscape();
             uiReg_.track("landscape.save");
             if (ImGui::BeginPopup("brushParams")) {
-                panelFloat("Radius (cm)", &sculptRadiusCm_, 50.0f, 5000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
+                editor::panelFloat("Radius (cm)", &sculptRadiusCm_, 50.0f, 5000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
                 ImGui::SliderFloat("Strength (cm)", &sculptStrengthCm_, 5.0f, 2000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
                 ImGui::EndPopup();
             }
@@ -23429,7 +23429,7 @@ private:
     f32  foliageScaleMin_    = 0.8f;
     f32  foliageScaleMax_    = 1.3f;
     f32  foliageSpacingCm_   = 200.0f;   // minimum gap between placed instances
-    bool foliageAlignToNormal_ = false;
+    bool foliageAlignToNormal_ = false;   // tilts placed instances to the sampled slope; see foliagePlaceOne
     bool foliageErase_       = false;    // Shift: remove instead of place
     u32  foliageSeed_        = 1u;
 #endif

@@ -321,3 +321,44 @@ add_executable(AssetRefScanTest src/AssetRefScanTest.cpp)
 target_include_directories(AssetRefScanTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
 target_link_libraries(AssetRefScanTest PRIVATE Aver.Core)
 set_target_properties(AssetRefScanTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# ActorEditorTitleTest -- the actor tab's title never carries a manual dirty marker on top of the
+# host's own ImGuiWindowFlags_UnsavedDocument (see AssetEditorHost::draw and the doubled-marker bug
+# this closes). Header-only and Core-only, for EditorEulerTest's precedent above: ActorEditor itself
+# is a file-local class with no public way to force its dirty_ flag true outside a live ImGui mouse
+# drag, so the title logic was extracted to actorTabTitle (ActorEditor.hpp) specifically so this
+# could be proven headlessly. See the test's own header comment for the full reasoning.
+add_executable(ActorEditorTitleTest src/ActorEditorTitleTest.cpp)
+target_include_directories(ActorEditorTitleTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(ActorEditorTitleTest PRIVATE Aver.Core)
+set_target_properties(ActorEditorTitleTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# ResetTabLayoutTest -- "Reset Tab Layout" dispatches to the FOCUSED asset editor, not to one
+# hardcoded editor type. Compiles sandbox/src/AssetEditor.cpp directly, for EditorPrefsTest's
+# precedent (Sandbox is add_executable-only). AVER_WITH_IMGUI is deliberately left UNDEFINED: every
+# ImGui-touching include and body in AssetEditor.cpp sits behind that macro (see its own #if guards),
+# so this target needs no window and no ImGui context -- AssetEditorHost::setFocusedPathForTest
+# stands in for the ImGui::IsWindowFocused() call draw() makes each real frame. See the test's own
+# header comment for the defect this reproduces.
+add_executable(ResetTabLayoutTest
+  src/ResetTabLayoutTest.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/AssetEditor.cpp)
+target_include_directories(ResetTabLayoutTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(ResetTabLayoutTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(ResetTabLayoutTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# FoliageAlignTest -- the foliage brush's "Align to slope" option, which used to be dead UI (see
+# FoliageAlign.hpp's own header comment). Header-only and needs no ImGui, no scene::World, no Engine
+# -- OcLandData is plain data, so a synthetic ramp with a known analytic normal is built directly in
+# memory, matching EditorEulerTest/DropPlacementTest's own precedent for placement arithmetic pulled
+# out specifically so it can be proven without a window.
+#
+# GUARDED ON Aver.Landscape existing, the same way SoundEditorTest guards on Aver.Sound: this whole
+# directory is NOT itself conditional on AVER_MODULE_LANDSCAPE (unlike tests/landscape), so a tree
+# configured with that module off must still configure this one.
+if(TARGET Aver.Landscape)
+  add_executable(FoliageAlignTest src/FoliageAlignTest.cpp)
+  target_include_directories(FoliageAlignTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+  target_link_libraries(FoliageAlignTest PRIVATE Aver.Landscape Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(FoliageAlignTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

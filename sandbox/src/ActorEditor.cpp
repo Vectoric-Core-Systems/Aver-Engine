@@ -228,8 +228,16 @@ public:
     }
 
     const std::string& path() const override { return path_; }
-    std::string title() const override { return dirty_ ? title_ + " *" : title_; }
+    // No manual dirty marker -- see actorTabTitle's own comment in ActorEditor.hpp for why this
+    // used to double up with the host's ImGuiWindowFlags_UnsavedDocument, matching SoundEditor and
+    // BtEditor's own title()s.
+    std::string title() const override { return actorTabTitle(title_, dirty_); }
     bool dirty() const override { return dirty_; }
+
+    // Restores this tab's column widths. Every open actor tab shares ONE column-width pair
+    // (g_leftColW/g_rightColW below), so this simply forwards to the existing free function rather
+    // than owning per-instance state -- see resetActorEditorLayout()'s own comment further down.
+    void resetLayout() override { resetActorEditorLayout(); }
 
     // Latches an external change; the file is re-read on the next draw.
     void onFileChanged() override { externalChange_ = true; }

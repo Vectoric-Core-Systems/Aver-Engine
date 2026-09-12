@@ -108,6 +108,16 @@ void AssetEditorHost::notifyWatchLost() {
     for (const auto& ed : editors_) ed->onWatchLost();
 }
 
+// Routes "Reset Tab Layout" to whichever editor is actually FOCUSED.
+//
+// THE BUG THIS REPLACES. SandboxApp.cpp used to gate the menu item on "some asset tab is open" (one
+// bool, no per-editor-type branch) and then unconditionally call the Actor editor's own layout reset
+// -- so resetting a Sound or Graph tab's layout reset the Actor editor's instead, silently, because
+// nothing checked WHICH tab was in front. find(focusedPath_) is that check.
+void AssetEditorHost::resetFocusedLayout() {
+    if (AssetEditor* ed = find(focusedPath_)) ed->resetLayout();
+}
+
 // Draws every open editor window and destroys the ones the user closed. True if any remain.
 bool AssetEditorHost::draw(Engine& e, unsigned dockInto, float dpi) {
 #if AVER_WITH_IMGUI
@@ -127,6 +137,10 @@ bool AssetEditorHost::draw(Engine& e, unsigned dockInto, float dpi) {
         if (ImGui::Begin(label.c_str(), &open, ed.dirty() ? ImGuiWindowFlags_UnsavedDocument : 0)) {
             ed.draw(e);
         }
+        // Checked whether or not Begin returned true (a collapsed tab can still be focused), and
+        // before End() -- IsWindowFocused() answers for whichever window Begin/End currently bracket.
+        // This is what resetFocusedLayout() below routes "Reset Tab Layout" through.
+        if (ImGui::IsWindowFocused()) focusedPath_ = ed.path();
         ImGui::End();
 
         if (!open) closing_.push_back(i);

@@ -11,6 +11,20 @@ namespace aver { class Engine; namespace render::preview { class ActorPreview; c
 
 namespace aver::editor {
 
+// The bare tab title, with no manual dirty marker appended: the host (AssetEditorHost::draw, in
+// AssetEditor.cpp) already applies ImGuiWindowFlags_UnsavedDocument whenever an editor's dirty() is
+// true, so a title that appends its own "*" on top doubles the marker. SoundEditor::title() and
+// BtEditor::title() document this exact rule with a comment instead of a shared function; this is
+// the same rule for ActorEditor, pulled out as a free function for one reason: ActorEditor itself is
+// a file-local class (defined inside ActorEditor.cpp, reachable only through the AssetEditor
+// interface returned by makeActorEditor), and its dirty_ flag is private with no public setter --
+// it is only ever set true from mouse-driven ImGui gizmo dragging inside draw(), so no headless
+// caller can force it true to prove "regardless of dirty()" against the class directly. `dirty` is
+// accepted and deliberately ignored (not removed) so the signature states the invariant it enforces,
+// and ActorEditorTitleTest asserts exactly that against this function, which is the one
+// ActorEditor::title() actually calls.
+inline std::string actorTabTitle(const std::string& baseTitle, bool /*dirty*/) { return baseTitle; }
+
 // THE ONE PREVIEW FEATURE EVERY ASSET TAB SHARES, created lazily by whichever tab draws first.
 //
 // One, not one each: a second feature would be registered alongside this one in the device's list

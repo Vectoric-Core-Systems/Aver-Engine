@@ -30,6 +30,14 @@ public:
     // Draws the editor's contents into a window the host has already begun.
     virtual void draw(Engine& e) = 0;
 
+    // Restores this tab's own panel layout to its defaults (column widths and the like). Default is
+    // a no-op, for editors with nothing to reset. "Reset Tab Layout" (SandboxApp.cpp's Window menu)
+    // routes through AssetEditorHost::resetFocusedLayout(), which calls this on whichever editor is
+    // actually FOCUSED -- see that method's own comment for the bug this replaces: the menu item used
+    // to call one hardcoded editor's reset function whenever ANY asset tab was open, so resetting a
+    // Sound or Graph tab's layout silently reset the Actor editor's instead.
+    virtual void resetLayout() {}
+
     // Writes the asset back. Returns false and sets `why` if it could not.
     virtual bool save(std::string* why) { (void)why; return true; }
 
@@ -84,6 +92,17 @@ public:
     // Tells every open editor the watcher overflowed.
     void notifyWatchLost();
 
+    // Resets the layout of whichever editor is FOCUSED (see AssetEditor::resetLayout's own comment).
+    // A no-op when nothing is focused -- e.g. the level view is in front, in which case the "Reset
+    // Tab Layout" menu item does not even appear (SandboxApp.cpp gates on assetTabActive first).
+    void resetFocusedLayout();
+
+    // Test-only: sets which editor is considered focused, bypassing the ImGui::IsWindowFocused()
+    // call draw() makes once per open tab every real frame. A headless test has no window to focus,
+    // so this stands in for it -- see ResetTabLayoutTest, and GraphEditor.hpp's undoForTest()/
+    // redoForTest() for the same naming precedent.
+    void setFocusedPathForTest(std::string path) { focusedPath_ = std::move(path); }
+
 private:
     // Draws the "close without saving?" prompt for `closeAskPath_`. Returns nothing; the answer is
     // applied to closeAskPath_ itself.
@@ -93,6 +112,12 @@ private:
     std::vector<std::unique_ptr<AssetEditor>> editors_;
     std::string focusRequest_;          // path to bring forward on the next draw
     std::vector<usize> closing_;        // deferred: an editor must not be destroyed mid-draw
+
+    // Which open editor's window was focused as of the last draw() -- see resetFocusedLayout(). Set
+    // from ImGui::IsWindowFocused() once per tab, per frame; sticky across frames where the menu bar
+    // itself (not any tab) holds focus, which is exactly the case when the user is mid-click on the
+    // "Reset Tab Layout" item that reads this.
+    std::string focusedPath_;
 
     // The tab whose X was clicked while it had unsaved edits, held open until the question is
     // answered. Empty when nothing is being asked about.
