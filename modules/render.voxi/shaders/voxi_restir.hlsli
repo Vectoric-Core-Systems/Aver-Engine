@@ -525,9 +525,10 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     // material instead of hardcoding the coat off, which silently meant "no material has a coat in
     // ReSTIR GI's candidate hit" no matter what mat.coat* actually said -- the identical trap that
     // comment names for ray-driven mode's own history, now closed here too.
-    // INERT ON ITS OWN, so fixed in the same change as the specular term below rather than as two:
-    // averCoatTerms (material_prelude.hlsl) only ever attenuates or adds through ind.specular, and
-    // this function had no environment-specular term for it to touch until that term exists.
+    // INERT TODAY, and kept anyway: averCoatTerms (material_prelude.hlsl) only ever acts through
+    // ind.specular, and the environment-specular term this was paired with has been reverted (see
+    // below). Reading the real coat is still strictly better than hardcoding it off -- it means the
+    // data is correct on the day a properly scaled specular term lands, instead of a second trap.
     s.coatWeight = (mat.flags & AVER_MAT_COAT) ? saturate(mat.coatWeight)    : 0.0;
     s.coatRough  = (mat.flags & AVER_MAT_COAT) ? saturate(mat.coatRoughness) : 0.0;
     s.coatF0     = (mat.flags & AVER_MAT_COAT) ? saturate(mat.coatF0)        : 0.0;
@@ -555,51 +556,30 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     // "adds ambient, bounce, environment specular and self-emission, in that order"), matching the
     // averShadeDirect(radiance=0)/averShadeIndirect(radiance) pairing PSRayDriven uses for the same
     // AverSurface (voxi.hlsl:1094-1096, :1775). Passing s.emissive here too would count it twice.
-    float3 radiance = averShadeDirect(0.0, s, sun);
+    float3 radiance = averShadeDirect(s.emissive, s, sun);
 
-    // THE SKY, through the SAME split-sum machinery averShadeIndirect/averIndirectTerms already
-    // implement for every other consumer of AverSurface -- not the old hand-rolled diffuse-only
-    // line. That line was this file's OWN instance of the white-furnace bug the ray-driven path
-    // already found and fixed (voxi.hlsl:1510-1519): a metal's kdAlbedo is 0, so a diffuse-only sky
-    // term gave a full-metallic candidate hit NOTHING, and a glossy one nothing in proportion to its
-    // gloss -- exactly the "metals are black holes for indirect light" symptom this task named.
-    // Routing through averShadeIndirect also switches the coat fields above from inert to load-
-    // bearing: averCoatTerms only ever touches specEnv/diffAmbient/diffBounce through ind, so a coat
-    // could not have had any effect before this call existed either.
+    // ---- DIFFUSE AMBIENT ONLY. AN ENVIRONMENT-SPECULAR TERM HERE FLATTENS THE WHOLE IMAGE ----
     //
-    // ind.specular IS THE ONE DELIBERATE APPROXIMATION HERE, and it is the answer to "keep it
-    // cheap": PSRayDriven's own environment specular (voxi.hlsl, from :1620) traces a REAL mirror
-    // ray with a sky-march fallback -- a second ray plus a fallback march, on top of the shadow ray
-    // this function already pays for ITS OWN hit. That is reference-renderer cost for a value RTXDI
-    // is about to resample and a denoiser is about to filter, not what one candidate in a resampled
-    // estimator should spend. averSkyRadianceCheap is the SAME cheap SH reconstruction this
-    // function already pays for above (the COMMITTED_TRIANGLE_HIT miss branch) -- reused here along
-    // the reflection vector instead of the miss direction, so a glossy hit gets a real, direction-
-    // dependent environment sample rather than the zero it had, at a cost this file already accepts
-    // elsewhere. It cannot represent a mirror-sharp reflection of nearby geometry (there is no local
-    // reflection probe at a second-bounce hit), which costs least here: RTXDI's resampling and the
-    // denoiser both average this estimate over many frames and neighbours already, so a low-
-    // frequency environment answer is the fidelity this bounce can actually deliver on screen.
+    // MEASURED, by shipping it and looking: adding `ind.specular = averSkyRadianceCheap(reflect(...))`
+    // and shading through averShadeIndirect turned Sponza's interior into a uniform grey wash with no
+    // bounce gradient left in it. The reason is visible in averIndirectTerms
+    // (material_prelude.hlsl): `specEnv = FssEss * ind.specular * specOcc` is NOT multiplied by
+    // ind.ambientScale, where `diffAmbient` IS. So a secondary hit received the sky at FULL radiance,
+    // unscaled by gAmbient.r and unoccluded, while the diffuse half of the same hit was correctly
+    // scaled down. Inside an enclosed space every candidate hit is a wall that cannot see the sky at
+    // all, so that term is not a small correction -- it dominates the real bounce and erases the
+    // variation the estimator exists to capture.
     //
-    // ind.diffuse = 0.0: still no bounce-of-a-bounce, unchanged scope from the line this replaces.
-    // ind.occlusion = 1.0: matches giRestirIndirect's own top-level `ao` output, which this file's
-    // header comment already documents as NOT MODELLED for this whole estimator.
+    // The original code omitted this deliberately and its comment said so; that judgement was right
+    // and this comment replaces the one that overrode it.
     //
-    // TRANSMISSION AND VOLUME ABSORPTION REMAIN KNOWINGLY UNHANDLED, recorded so the next person
-    // does not re-derive it: kdAlbedo above already dampens the diffuse response by
-    // (1 - transmission), same as averBuildSurface, but attenuationColor/attenuationDistance (the
-    // tinted-thickness term material volume shading applies elsewhere -- see
-    // aver-material-volume-absorption) are never referenced by this second-bounce hit. There is no
-    // ray-marched thickness at a point sampled this cheaply to tint by, and no downstream consumer
-    // of a transmitted colour here even if there were one.
-    const float3 R = reflect(dir, s.N);
-    AverIndirect ind;
-    ind.ambient      = averSkyIrradiance(s.N);
-    ind.ambientScale = gAmbient.r;
-    ind.diffuse      = 0.0;
-    ind.occlusion    = 1.0;
-    ind.specular     = averSkyRadianceCheap(R);
-    radiance = averShadeIndirect(radiance, s, ind);
+    // WHAT IT COSTS, STATED RATHER THAN LEFT TO BE REDISCOVERED: a metallic hit has kdAlbedo = 0, so
+    // it contributes almost NO bounce light and reads as a black hole for GI. That is a real gap and
+    // it is still open. Closing it needs a term weighted by metalness AND scaled/occluded the way the
+    // diffuse ambient is -- not an unconditional sky specular on every surface, which is what this
+    // reverts. See aver-ambient-overbright-open-vs-enclosed for why unoccluded ambient in an interior
+    // is already over-bright here before anything is added to it.
+    radiance += s.kdAlbedo * averSkyIrradiance(s.N) * gAmbient.r;
 
     samplePos      = hitPos;
     sampleNormal   = s.N;
