@@ -300,6 +300,19 @@ private:
     // why), which rewrites clip_ WHOLE) picks it up along with everything else already in clip_.
     void flagCheckbox(u8 bit, const char* label);
 
+    // NOTIFY STATE DURATIONS. clip_.notifyDurations is left EMPTY until the first one is authored --
+    // see OcAnimation::notifyDurations in OcAnim.hpp -- so these two are the only places this editor
+    // touches it, and both keep it either empty or exactly parallel to clip_.notifies, never a third
+    // shape writeOcAnim would refuse.
+    f32 notifyDurationAt(usize i) const {
+        return i < clip_.notifyDurations.size() ? clip_.notifyDurations[i] : 0.0f;
+    }
+    void setNotifyDuration(usize i, f32 seconds) {
+        if (clip_.notifyDurations.size() != clip_.notifies.size())
+            clip_.notifyDurations.assign(clip_.notifies.size(), 0.0f);
+        if (i < clip_.notifyDurations.size()) clip_.notifyDurations[i] = seconds;
+    }
+
     // THE ASSET BROWSER, which is Persona's name for it and its shape too: every clip this
     // skeleton can play, listed beside the preview, one click to watch it.
     //
@@ -936,6 +949,9 @@ void AnimEditor::drawNotifies() {
         n.time = time_;
         n.name = "OnNotify";
         clip_.notifies.push_back(n);
+        // Only when durations are ALREADY in use for this clip -- keeps a clip with no states at all
+        // leaving notifyDurations empty, which is what keeps it writing no NTFD chunk.
+        if (!clip_.notifyDurations.empty()) clip_.notifyDurations.push_back(0.0f);
         selectedNotify_ = static_cast<int>(clip_.notifies.size()) - 1;
         std::snprintf(notifyNameBuf_, sizeof notifyNameBuf_, "%s", n.name.c_str());
         dirty_ = true;
@@ -958,7 +974,13 @@ void AnimEditor::drawNotifies() {
         // everything drawn there is off the end of the panel. PushID above already makes the row
         // unique, so two notifies with identical text are still two rows.
         char row[160];
-        std::snprintf(row, sizeof row, "%7.3f s   %s", n.time, n.name.c_str());
+        const f32 rowDur = notifyDurationAt(i);
+        // A STATE'S WINDOW SHOWS IN THE COLLAPSED ROW, not only once expanded -- otherwise the one
+        // fact that makes a notify a hit window rather than an instant is invisible until clicked.
+        if (rowDur > 0.0f)
+            std::snprintf(row, sizeof row, "%7.3f s + %5.3f s   %s", n.time, rowDur, n.name.c_str());
+        else
+            std::snprintf(row, sizeof row, "%7.3f s   %s", n.time, n.name.c_str());
         if (ImGui::Selectable(row, sel)) {
             selectedNotify_ = static_cast<int>(i);
             std::snprintf(notifyNameBuf_, sizeof notifyNameBuf_, "%s", n.name.c_str());
@@ -992,8 +1014,22 @@ void AnimEditor::drawNotifies() {
                 playing_ = false;
                 dirty_ = true;
             }
+            // DURATION: the ONE thing this editor could not author before item 7.1 -- turning a
+            // plain instant notify into a notify STATE that opens at Time and stays open this long.
+            // 0 is instant, exactly as an untouched notify always was; see AnimSystem.hpp's own
+            // banner for what the runtime does with a non-zero value.
+            f32 stateDur = notifyDurationAt(i);
+            ImGui::SetNextItemWidth(180.0f * (ImGui::GetFontSize() / 16.0f));
+            if (ImGui::SliderFloat("Duration", &stateDur, 0.0f, dur, "%.3f s")) {
+                setNotifyDuration(i, stateDur);
+                dirty_ = true;
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled(stateDur > 0.0f ? "(state)" : "(instant)");
             if (ImGui::SmallButton("Delete")) {
                 clip_.notifies.erase(clip_.notifies.begin() + static_cast<isize>(i));
+                if (!clip_.notifyDurations.empty())
+                    clip_.notifyDurations.erase(clip_.notifyDurations.begin() + static_cast<isize>(i));
                 selectedNotify_ = -1;
                 dirty_ = true;
                 ImGui::Unindent();
@@ -1060,6 +1096,19 @@ void AnimEditor::drawTimeline() {
         const f32 x = p0.x + (p1.x - p0.x) * (dur > 0.0f ? n.time / dur : 0.0f);
         const bool sel = (static_cast<int>(i) == selectedNotify_);
         const ImU32 col = sel ? IM_COL32(255, 220, 90, 255) : IM_COL32(120, 200, 255, 230);
+
+        // A STATE'S WINDOW, drawn as a translucent band UNDER the marker -- visual-only, matching
+        // the clamp AnimSystem itself applies at the loop seam, so an author dragging a window past
+        // the end of the clip sees it stop exactly where the runtime will actually close it rather
+        // than being told nothing until the surprise shows up in play.
+        const f32 stateDur = notifyDurationAt(i);
+        if (stateDur > 0.0f) {
+            const f32 endT = dur > 0.0f ? std::min(n.time + stateDur, dur) : 0.0f;
+            const f32 xEnd = p0.x + (p1.x - p0.x) * (dur > 0.0f ? endT / dur : 0.0f);
+            dl->AddRectFilled(ImVec2(x, p0.y), ImVec2(xEnd, p1.y),
+                              sel ? IM_COL32(255, 220, 90, 70) : IM_COL32(120, 200, 255, 55));
+        }
+
         // A downward triangle sitting on the bar: a shape rather than another vertical line, so a
         // notify is never mistaken for the key ticks it sits among.
         const f32 top = p0.y;

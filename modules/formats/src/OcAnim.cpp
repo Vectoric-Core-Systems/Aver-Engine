@@ -29,6 +29,12 @@ constexpr u32 kChunkTRKS = avrFourCC("TRKS");
 constexpr u32 kChunkNOTF = avrFourCC("NOTF");
 // Optional, exactly as NOTF and SOCK are.
 constexpr u32 kChunkCRVE = avrFourCC("CRVE");
+// OPTIONAL, and DENSE rather than sparse: when present it holds exactly notifies.size() floats, one
+// per NOTF entry in the same order, entry i being how long notifies[i] stays open (0 = instant). A
+// clip where every notify is instantaneous -- which is every clip written before notify states
+// existed -- omits this chunk entirely rather than writing a column of zeros, which is what keeps
+// such a clip's rewrite byte-identical. See OcAnimation::notifyDurations for the full reasoning.
+constexpr u32 kChunkNTFD = avrFourCC("NTFD");
 
 // Sets `why` and returns false.
 bool fail(std::string* why, std::string m) { if (why) *why = std::move(m); return false; }
@@ -119,6 +125,11 @@ const OcSocket* OcSkeleton::socket(const std::string& name) const {
 const OcCurve* OcAnimation::curve(const std::string& name) const {
     for (const OcCurve& c : curves) if (c.name == name) return &c;
     return nullptr;
+}
+
+f32 OcAnimation::notifyDuration(u32 index) const {
+    if (index >= notifyDurations.size()) return 0.0f;   // absent chunk, or a stale/out-of-range index
+    return notifyDurations[index];
 }
 
 const OcCurve* OcAnimation::curveById(u64 id) const {
@@ -337,6 +348,29 @@ bool writeOcAnim(const OcAnimation& in, std::vector<u8>& out, std::string* why) 
         }
     }
 
+    // Notify DURATIONS -- see notifyDurations' own comment for why this is a separate chunk rather
+    // than a wider NOTF. Refused rather than silently reshaped when the caller built a mismatched
+    // pair: truncating or padding here would save a bad edit instead of surfacing it.
+    if (!in.notifyDurations.empty() && in.notifyDurations.size() != in.notifies.size())
+        return fail(why, ".ocanim: " + std::to_string(in.notifyDurations.size()) + " notify duration(s) for " +
+                         std::to_string(in.notifies.size()) + " notify(ies)");
+    for (const f32 d : in.notifyDurations)
+        if (!(d >= 0.0f)) return fail(why, ".ocanim: a notify duration is negative or NaN");
+
+    // OMITTED WHENEVER EVERY DURATION IS ZERO, checked by VALUE rather than by "is the vector
+    // empty" -- an editor that always sizes this array to match notifies (rather than leaving it
+    // empty until the first state is authored) must still get a byte-identical file for a clip
+    // where nobody ever set one above zero. That is what keeps an old clip's round trip intact
+    // regardless of which shape the caller happens to build.
+    std::vector<u8> ntfd;
+    bool anyDuration = false;
+    for (const f32 d : in.notifyDurations) if (d > 0.0f) { anyDuration = true; break; }
+    if (anyDuration) {
+        W w{ntfd};
+        w.u32v(static_cast<u32>(in.notifyDurations.size()));
+        for (const f32 d : in.notifyDurations) w.f32v(d);
+    }
+
     // Curves. Same placement reasoning as the notifies above: built before AHDR only because the
     // string table both intern into is written last.
     std::vector<u8> crve;
@@ -379,6 +413,7 @@ bool writeOcAnim(const OcAnimation& in, std::vector<u8>& out, std::string* why) 
     f.add(kChunkAHDR, std::move(ahdr), kAvrChunkRequired);
     f.add(kChunkTRKS, std::move(trks));
     if (!notf.empty()) f.add(kChunkNOTF, std::move(notf));
+    if (!ntfd.empty()) f.add(kChunkNTFD, std::move(ntfd));
     if (!crve.empty()) f.add(kChunkCRVE, std::move(crve));
     // AFTER the notify names have been interned, or the table would be written without them.
     f.add(kChunkSTRT, strt.bytes());
@@ -455,6 +490,28 @@ bool parseOcAnim(const u8* bytes, usize size, OcAnimation& out, std::string* why
             entry.name = std::string(strt.get(n.u32v()));
             out.notifies.push_back(std::move(entry));
         }
+    }
+
+    // NOTIFY DURATIONS. Absent is ordinary -- every clip predating notify states, and every clip
+    // whose notifies are all still instantaneous, has no NTFD chunk. Read AFTER notifies so the
+    // size check below has something to check against.
+    out.notifyDurations.clear();
+    if (const AvrChunk* ntfd = f.find(kChunkNTFD)) {
+        R d{ntfd->data.data(), ntfd->data.data() + ntfd->data.size()};
+        const u32 count = d.u32v();
+        // Bounded by what the chunk could possibly hold (4 bytes each) before reserving, the same
+        // guard NOTF and CRVE use against a corrupt count driving an enormous allocation.
+        if (count > ntfd->data.size() / 4) return fail(why, ".ocanim: NTFD says it holds more durations than it can");
+        out.notifyDurations.resize(count);
+        for (u32 i = 0; i < count; ++i) out.notifyDurations[i] = d.f32v();
+        if (!d.ok) return fail(why, ".ocanim: truncated NTFD chunk");
+        // DENSE AND PARALLEL is the whole contract: a count that does not match NOTF's cannot be
+        // lined up against it, so this is a malformed file rather than something to pad or trim.
+        if (out.notifyDurations.size() != out.notifies.size())
+            return fail(why, ".ocanim: NTFD holds " + std::to_string(out.notifyDurations.size()) +
+                             " duration(s) for " + std::to_string(out.notifies.size()) + " notify(ies)");
+        for (const f32 dur : out.notifyDurations)
+            if (!(dur >= 0.0f)) return fail(why, ".ocanim: a notify duration is negative or NaN");
     }
     if (!r.ok) return fail(why, ".ocanim: truncated AHDR");
     if (n == 0) return fail(why, ".ocanim: TrackCount is 0");

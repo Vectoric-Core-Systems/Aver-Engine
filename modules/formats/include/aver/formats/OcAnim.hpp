@@ -127,13 +127,14 @@ struct OcTrack {
 // engine (see the CustomEvent node, which exists for exactly this shape). An enum would have made
 // every project share one vocabulary and required an engine change to add a footstep.
 //
-// NO DURATION, deliberately, and this is the one place this diverges from Unreal. Unreal has both a
-// Notify (instant) and a Notify State (begin/tick/end over a range), and the state form needs the
-// runtime to track which states are open, close them when a clip is interrupted, and decide what
-// happens when it loops mid-state. None of that machinery exists here yet, and a half-built version
-// that silently fails to close a state on interruption would be worse than not having it: the
-// symptom is a hit window that never shuts. Two instant notifies express the same thing today, and
-// say out loud that nothing is tracking the span between them.
+// A NOTIFY ITSELF IS STILL INSTANT -- `time` is the only moment it names, exactly as it always was.
+// A hit window that OPENS, STAYS OPEN and CLOSES is a NOTIFY STATE, and it is layered on top of this
+// record rather than folded into it: see OcAnimation::notifyDurations and notifyDuration() below.
+// It stayed unbuilt for a long time on purpose -- the runtime needs real open/close tracking (a
+// clock that remembers what is open, not a second point in time) before a duration means anything,
+// and a half-built version that sometimes fails to close is a hit window that never shuts, which is
+// worse than not having the feature. AnimSystem now carries that tracking; see its own comment on
+// the four ways an open state leaks and how each is closed.
 struct OcNotify {
     f32 time = 0.0f;      // seconds from the clip start
     std::string name;     // the event name fired; opaque here, exactly as OcAnimation::skeletonRef is
@@ -176,6 +177,25 @@ struct OcAnimation {
     // every writer can be trusted to have done so. Empty for every clip written before they
     // existed, which is every clip: the NOTF chunk is optional and its absence is not an error.
     std::vector<OcNotify> notifies;
+
+    // How long each notify STAYS OPEN, in seconds -- one entry per notify, in the SAME order as
+    // `notifies` (entry i belongs to notifies[i]). 0 means that notify is instantaneous, which is
+    // every entry in every clip written before notify states existed.
+    //
+    // EMPTY, NOT ZERO-FILLED, is how a clip says "nothing here is a state" -- and that distinction is
+    // the whole reason this is a separate optional array rather than a field added to OcNotify. A
+    // clip with a plain notify and no state has an EMPTY vector, writes NO chunk for it (see the
+    // NTFD chunk in OcAnim.cpp), and rewrites byte-identically to a file saved before states existed.
+    // Widening OcNotify itself would have changed NOTF's own byte layout for every clip that has ever
+    // had a notify, state or not.
+    //
+    // When non-empty its size equals notifies.size(); see writeOcAnim, which refuses to write a
+    // mismatched pair rather than truncating or padding one of them.
+    std::vector<f32> notifyDurations;
+
+    // The duration of notifies[index], in seconds -- 0.0 (instant) when notifyDurations is empty or
+    // too short to cover it, which includes every out-of-range index a stale caller might hold.
+    f32 notifyDuration(u32 index) const;
 
     // Named float curves. Optional in the same way notifies are: a clip with none emits no chunk,
     // so a file written now is byte-identical to one written before curves existed.

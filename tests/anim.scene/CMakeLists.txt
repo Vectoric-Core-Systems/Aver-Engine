@@ -7,6 +7,15 @@ add_executable(AnimSystemTest src/AnimSystemTest.cpp)
 target_link_libraries(AnimSystemTest PRIVATE Aver.Anim.Scene Aver.Anim Aver.Scene Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(AnimSystemTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# AnimNotifyStateTest -- notify STATES (item 7.1): a window that opens, stays open and closes, and
+# the four ways an open one leaks (normal playback, the clip changing, the entity dying, the loop
+# seam). A SEPARATE executable from AnimSystemTest for the reason its own banner gives: this is
+# entirely about the close being GUARANTEED under interruption, which normal playback alone can never
+# distinguish from "no bug yet".
+add_executable(AnimNotifyStateTest src/AnimNotifyStateTest.cpp)
+target_link_libraries(AnimNotifyStateTest PRIVATE Aver.Anim.Scene Aver.Anim Aver.Scene Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(AnimNotifyStateTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # AnimNotifyGraphTest â€” the notify wire END TO END, with a real .NET runtime in the process.
 #
 # It links the SCRIPTING HOST, which no other test does, and that is the whole reason it exists as a

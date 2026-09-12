@@ -350,3 +350,11 @@ set_target_properties(AverAssetCTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE
 add_executable(OcRigTest src/OcRigTest.cpp)
 target_link_libraries(OcRigTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(OcRigTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# OcAnimTest -- the .ocanim NOTIFY DURATION chunk (NTFD), item 7.1's format half. Its own executable
+# rather than a block in MeshTest: MeshTest is about the AVR1 container generically, and this is
+# about ONE clip field whose whole point is a negative claim (absent means absent, byte-identically)
+# that deserves its own fixture rather than sharing MeshTest's.
+add_executable(OcAnimTest src/OcAnimTest.cpp)
+target_link_libraries(OcAnimTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(OcAnimTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

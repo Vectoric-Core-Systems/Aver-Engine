@@ -162,6 +162,15 @@ private:
         // curves is a real thing, and Posed exists only once a skeleton has resolved.
         const fmt::OcAnimation* asset = nullptr;
         f32 wrapped = 0.0f;   // `prev` is the last OBSERVATION; this is where the clock is NOW
+
+        // WHICH NOTIFY STATES ARE CURRENTLY OPEN, one byte per notify in `asset`, index-for-index --
+        // resized (and zeroed) only when it disagrees with asset->notifies.size(), which happens
+        // exactly once per clip switch, right after the reset below throws the old array away with
+        // everything else. This is the ONE piece of state a notify's Begin/End pairing depends on,
+        // and it lives here rather than being recomputed, for the identical reason `prev` does: an
+        // entity can be inspected (paused, scrubbed) for any number of ticks with nothing to
+        // recompute it from.
+        std::vector<u8> open;
     };
     // An asset that failed to load is cached as a null so a missing file is not re-opened every
     // frame for the life of the session.
@@ -186,6 +195,34 @@ private:
     void stepNotifies(scene::Entity e, const scene::CAnimator& a, f32 step, bool paused);
     // Runs one step's crossings out to the sink.
     void deliver(scene::Entity e, const fmt::OcAnimation& c, const ClipStep& s);
+
+    // NOTIFY STATES: a window that opens, stays open and closes, layered beside the instant notifies
+    // `deliver` already handles (see OcAnimation::notifyDurations for the format half). Runs the SAME
+    // step `deliver` just ran through every duration>0 notify in `c`, firing "<Name>_Begin" and
+    // "<Name>_End" through the identical sink -- two suffixed instant events, not a second wire, which
+    // is what keeps this reachable from a node with no C# involved.
+    //
+    // THE FOUR WAYS AN OPEN STATE LEAKS, and where each is actually closed:
+    //   (a) normal playback out the far side of the window -- closed HERE, by the ordinary crossing
+    //       test below reaching the window's end point on some later call.
+    //   (b) the clip changing while a window is open -- closed in stepNotifies, BEFORE the clock
+    //       resets for the new clip (see closeAllOpen there).
+    //   (c) the entity being destroyed or pruned mid-window -- closed in tick()'s clock-pruning loop,
+    //       for the identical reason (b) is: there is no later call on a dead entity to close it.
+    //   (d) the loop seam, playback wrapping past the end while a window is open -- closed HERE, for
+    //       free: the window's end point is clamped to `c.duration` (never past it, see the local
+    //       `endT` below), and a wrapped step's tail segment always runs up to `c.duration`, so a
+    //       clamped end point is always inside it. No separate "detect a wrap" branch exists because
+    //       none is needed once the end point cannot outrun the clip it belongs to.
+    void stepNotifyStates(scene::Entity e, const fmt::OcAnimation& c, const ClipStep& s, NotifyClock& clock);
+    // Fires one "<Name>_Begin" or "<Name>_End" through the sink and counts it, exactly like `deliver`
+    // does for an instant notify -- including doing NOTHING when no sink is installed, so installing
+    // one later still delivers no backlog.
+    void fireState(scene::Entity e, const fmt::OcAnimation& c, u32 index, bool begin);
+    // Fires "_End" for every notify still open under `clock` and marks them closed. The shared tail
+    // of leaks (b) and (c): both are "this clock's bookkeeping is about to be thrown away", and the
+    // only difference between them is what throws it away.
+    void closeAllOpen(scene::Entity e, NotifyClock& clock);
 
     std::unordered_map<scene::Entity, NotifyClock> clocks_;
     AssetPathFn resolve_ = nullptr;
