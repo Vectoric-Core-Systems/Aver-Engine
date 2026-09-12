@@ -2548,6 +2548,9 @@ public:
             else if (giUpdateIntervalOverride_ < 0)
                 AVER_WARN("[Sandbox] --gi-update-interval {} is not a frame count; the default of {} stands",
                           giUpdateIntervalOverride_, k.giUpdateInterval);
+            // >= 0, not > 0: 0 is a real ESTIMATOR ("voxel cones"), not "flag not given" -- the
+            // sentinel is -1, same reasoning as rtShadowDenoiseOverride_ and giSkyOccRaysOverride_ above.
+            if (giModeOverride_ >= 0) k.giMode = static_cast<u32>(giModeOverride_);
             voxi::Renderer::get().setSettings(k);
             AVER_INFO("[Voxi] attached: MSAA {}x, RT tier {}, SM {}, mesh tier {}", caps.maxMsaaSamples, caps.rayTracingTier, caps.shaderModel, caps.meshShaderTier);
 
@@ -7403,6 +7406,11 @@ public:
     void setLayeredBsdf(int n) { layeredBsdfOverride_ = n; }                    // --layered-bsdf N
     void setCoat(f32 w, f32 r, f32 f0) { coatWeight_=w; coatRough_=r; coatF0_=f0; }   // --coat W [R] [F0]
     void setGiUpdateInterval(int n) { giUpdateIntervalOverride_ = n; }          // --gi-update-interval N
+    // --gi-mode N. Unlike --rd-ablate this is NOT a shader define -- both estimators are compiled
+    // into every scene pipeline and PSMainVoxi/PSRayDriven choose between them per pixel by
+    // Settings::giMode at draw time -- so, unlike --rd-ablate, it does not have to be handed over
+    // before init() below; it only has to reach setSettings() before the frame that reads it.
+    void setGiMode(int n) { giModeOverride_ = n; }                             // --gi-mode N
     void setRenderScale(f32 s) { renderScaleOverride_ = s; }                    // --render-scale F
 #if AVER_MODULE_SR
     // --aversr LEVEL. Records that the CLI chose it, so loadEditorPreferences leaves it alone --
@@ -9365,6 +9373,13 @@ private:
             // at the keyboard can override recorded state, which means it is applied LAST and a
             // disagreement is said out loud.
             if (giUpdateIntervalOverride_ > 0) take(giUpdateIntervalOverride_, k.giUpdateInterval, "--gi-update-interval");
+            // --gi-mode HAS a manifest key (RENDER.GIMODE) and, until this line, no entry here -- the
+            // same gap the paragraph above just closed for --gi-update-interval, on the flag this task
+            // exists to add. Concretely: PTTest.ocproject records GIMODE 1, so without this take(),
+            // `--gi-mode 0` opening that project would be silently re-outranked by the recorded 1 and
+            // an A/B meant to compare voxel cones against RTXDI ReSTIR would compare ReSTIR to itself
+            // and report the two estimators as identical.
+            if (giModeOverride_ >= 0) take(giModeOverride_, k.giMode, "--gi-mode");
             // THE THIRD INSTANCE, predicted above: --no-gi/--no-rt are BOOLEANS, not the -1-sentinel
             // integers `take` understands, so closing the rule for integers left these two behind.
             // Measured cost: on RENDER.RAYTRACING 4, `--no-rt` was silently discarded and an A/B built
@@ -23049,6 +23064,11 @@ private:
     f32  coatRough_=0.1f;
     f32  coatF0_=0.04f;
     int  giUpdateIntervalOverride_=0; // --gi-update-interval N: GI revoxelise interval (0 = flag not given)
+    // --gi-mode N: indirect-diffuse estimator, 0 = voxel cones, 1 = RTXDI ReSTIR GI (Settings::giMode).
+    // Sentinel is -1, NOT 0 like its neighbour above -- 0 is a real, meaningful VALUE here ("voxel
+    // cones"), not "flag not given", so the giUpdateIntervalOverride_ convention would silently make
+    // `--gi-mode 0` indistinguishable from never passing the flag at all.
+    int  giModeOverride_=-1;
     f32  renderScaleOverride_=1.0f;  // --render-scale F: scene render resolution as a fraction of present, clamped [0.25,1]
 #if AVER_MODULE_SR
     // --aversr LEVEL / the render-settings quality combo. Off (default) is what a build with no
@@ -25910,6 +25930,10 @@ Application* createApplication(int argc, char** argv) {
     // Anything new lands here instead until that chain is broken up.
     // Removes ONE term from the ray-driven pixel shader so its cost can be attributed by difference. Every non-zero value renders a deliberately WRONG frame.
     int rdAblate = 0;
+    // --gi-mode N: same C1061 reason as every other flag in this loop -- the else-if chain below is
+    // already at MSVC's nesting limit. -1 is "not given" (0 is the real value "voxel cones"), so an
+    // A/B against a manifest that already picks an estimator (RENDER.GIMODE) can be overridden at all.
+    int giModeArg = -1;
     // REFRACTION: the tier picks a mode, these override it. -1 is "not given", the sentinel every
     // other render override here uses, since `take()` tests for exactly that -- a 0-means-absent
     // sentinel would make `--refraction 0` (OFF) silently undiscardable.
@@ -25952,6 +25976,9 @@ Application* createApplication(int argc, char** argv) {
     f32 rtDenoiseMotionArg = 0.0f;   // --rt-denoise-motion, 0 = the shipped default (no taper)
     for (int i = 1; i + 1 < argc; ++i) {
         if (!std::strcmp(argv[i], "--rd-ablate"))            rdAblate = std::atoi(argv[i + 1]);
+        // --gi-mode N: selects the indirect-diffuse estimator (0 = voxel cones, 1 = RTXDI ReSTIR GI).
+        // In THIS loop for the same C1061 reason as --rd-ablate above.
+        if (!std::strcmp(argv[i], "--gi-mode"))              giModeArg = std::atoi(argv[i + 1]);
         // --rt-denoise-motion F: see VoxiRenderer::setRtDenoiseMotionTaper. In THIS loop rather than
         // the chain below for the reason stated at the top of it -- that chain is at MSVC's nesting
         // limit and one more else-if there is a hard compile error.
@@ -26921,6 +26948,7 @@ Application* createApplication(int argc, char** argv) {
     if (layeredBsdf >= 0) app->setLayeredBsdf(layeredBsdf);
     app->setPtOverride(pt);
     app->setGiUpdateInterval(giUpdateInterval);
+    app->setGiMode(giModeArg);
     app->setRtForceOff(noRt);
     app->setRayDrivenAblation(rdAblate);
     app->setRtDenoiseMotionTaper(rtDenoiseMotionArg);

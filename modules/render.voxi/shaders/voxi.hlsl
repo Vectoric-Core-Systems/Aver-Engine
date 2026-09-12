@@ -2056,16 +2056,23 @@ float3 rtReflection(float3 wpos, float3 N, float3 R, float3 L, float2 pixel, flo
 // ================= RTXDI ReSTIR GI (Settings::giMode == 1) =================
 //
 // *** USES THE VENDORED SDK -- third_party/rtxdi -- RATHER THAN HAND-ROLLING A RESERVOIR UPDATE
-// RULE. *** Everything below that combines two candidates into one (RTXDI_MakeGIReservoir,
-// RTXDI_GITemporalResampling) is a call into Rtxdi/GI/Reservoir.hlsli and
-// Rtxdi/GI/TemporalResampling.hlsli; this file supplies only the two things RTXDI cannot know on
-// its own -- how to TRACE a candidate and shade what it hits (giTraceInitialCandidate), and how to
-// answer the RAB_* questions the SDK asks about a surface (RAB_GetGBufferSurface and its neighbours,
-// just below). The Jacobian, the MIS weight and the M-cap are RTXDI's, not reimplemented here.
+// RULE. *** Everything below that combines candidates into one (RTXDI_MakeGIReservoir,
+// RTXDI_GISpatioTemporalResampling) is a call into Rtxdi/GI/Reservoir.hlsli and
+// Rtxdi/GI/SpatioTemporalResampling.hlsli; this file supplies only the two things RTXDI cannot know
+// on its own -- how to TRACE a candidate and shade what it hits (giTraceInitialCandidate), and how
+// to answer the RAB_* questions the SDK asks about a surface (RAB_GetGBufferSurface and its
+// neighbours, just below). The Jacobian, the MIS weight and the M-cap are RTXDI's, not reimplemented
+// here.
 //
-// SCOPE: candidate generation + RTXDI TEMPORAL resampling. NO SPATIAL reuse (Settings::giMode's own
-// comment in Voxi.hpp states this as the stage-2 boundary; RTXDI_GISpatialResampling and
-// RTXDI_GISpatioTemporalResampling are vendored and unused).
+// SCOPE: candidate generation + RTXDI SPATIO-TEMPORAL resampling -- temporal reuse AND a spatial
+// pass, not just the former. NOT the plain RTXDI_GISpatialResampling (vendored, unused): it calls
+// RAB_GetGBufferSurface(idx, FALSE) for a neighbour -- THIS frame's surface at a pixel that may not
+// have run yet, which a pixel shader cannot answer, and which this file's RAB_GetGBufferSurface
+// honestly refuses by returning "no surface" whenever previousFrame is false. Spatio-temporal reads
+// every neighbour, spatial taps included, from the PREVIOUS frame instead
+// (RAB_GetGBufferSurface(idx, true), and an RTXDI_LoadGIReservoir sourceBufferIndex that is always
+// the slice NOT being written this frame) -- no read of data this frame is still producing, no race,
+// so it drops into this single-pass pixel-shader design where the plain spatial variant cannot.
 
 // ---- the reservoir buffer RTXDI's own Reservoir.hlsli requires be defined before it is included ----
 // RTXDI_GI_RESERVOIR_BUFFER must already point at a declared RWStructuredBuffer<RTXDI_PackedGIReservoir>
@@ -2189,14 +2196,28 @@ RAB_MaterialData RAB_GetMaterial(RAB_Surface s) { return 0; }
 bool RAB_AreMaterialsSimilar(RAB_MaterialData a, RAB_MaterialData b) { return true; }
 
 // Luminance of the candidate's own radiance -- the standard resampling target-PDF proxy (RTXDI
-// resamples by comparing this scalar across candidates; the BRDF/cosine/distance re-weighting is
-// the Jacobian's job, applied separately at its own call site in RTXDI_GITemporalResampling).
-// averShadowLum already exists in this file for exactly this reduction; reused rather than a second
-// luminance formula. Surface-independent -- a stated simplification, not an oversight: a target PDF
-// that also weighted the RECEIVING surface's own BRDF would need that BRDF evaluated once per
-// candidate rather than once per shaded pixel, which is a real cost this slice does not spend.
+// resamples by comparing this scalar across candidates) -- times the cosine at the RECEIVING
+// surface. averShadowLum already exists in this file for exactly the luminance reduction; reused
+// rather than a second formula. RIS is unbiased for ANY positive target pdf p^: the resampling math
+// (RTXDI_FinalizeGIResampling) divides the same p^ back out when it turns weightSum into a
+// normalised weight, so multiplying by cosR here changes no expected value. What it changes is
+// VARIANCE, which is the entire reason resampling exists -- the closer p^ tracks the true integrand,
+// the more often the one surviving reservoir slot holds the candidate that actually contributes.
+// Luminance alone rated a bright, near-grazing candidate (one giRestirIndirect's own cosine term at
+// the FINAL estimator will go on to multiply toward zero anyway) as highly as the same brightness
+// arriving head-on, so a grazing outlier could win the single slot over the sample that mattered.
+// The BRDF's albedo/PI is a constant across every candidate ON ONE SURFACE (same pixel, same
+// material) so it cannot change which candidate wins and is correctly left out of a target pdf; the
+// cosine is NOT constant across candidates -- each arrives from wherever its own traced ray happened
+// to land -- so it belongs here, in the resampling weight, and not only in the final estimator.
 float RAB_GetGISampleTargetPdfForSurface(float3 samplePosition, float3 sampleRadiance, RAB_Surface surface) {
-    return averShadowLum(sampleRadiance);
+    // Recomputed per candidate, not per pixel: samplePosition is wherever THIS candidate's ray
+    // landed, independent of every other candidate sharing this surface, so it cannot be hoisted out
+    // as a per-surface constant the way the BRDF's albedo/PI term above can.
+    const float3 toSample = samplePosition - surface.worldPos;
+    const float  dist2    = dot(toSample, toSample);
+    const float  cosR     = dist2 > 1e-8 ? saturate(dot(toSample * rsqrt(dist2), surface.normal)) : 0.0;
+    return averShadowLum(sampleRadiance) * cosR;
 }
 
 // RTXDI's own worked bound for a reused sample's Jacobian (the shipped bridge sample clamps here,
@@ -2234,15 +2255,63 @@ bool RAB_GetTemporalConservativeVisibility(RAB_Surface currentSurface, RAB_Surfa
     return q.CommittedStatus() != COMMITTED_TRIANGLE_HIT;
 }
 
+// ---- the neighbour-offset table RTXDI_CalculateSpatialResamplingOffset indexes ----
+// NVIDIA's own samples bind this as an 8192-entry R8G8_SNORM Buffer<float2> that
+// rtxdi::FillNeighborOffsetBuffer (third_party/rtxdi/Source/RtxdiUtils.cpp) fills once at startup.
+// Voxi's descriptor table is a FIXED kVoxiSrvCount/kVoxiUavCount pair guarded by its own
+// static_assert -- adding an 8192-entry bound buffer for one feature is not how this file's
+// descriptor budget works, and RTXDI_CalculateSpatialResamplingOffset masks its index by
+// rParams.neighborOffsetMask before ever touching the table anyway, so a small constant array with
+// a matching small mask is sufficient: 32 taps, mask 31, comfortably covers the 8 spatial samples
+// plus temporal-jitter offsets actually drawn per pixel below.
+//
+// THESE ARE NVIDIA'S OWN VALUES, not a made-up substitute for them: generated by running
+// FillNeighborOffsetBuffer's exact algorithm (an R=250-scaled low-discrepancy spiral, rejected to
+// the unit disc) for the first 32 entries and decoding the resulting int8 pair the same way an
+// R8G8_SNORM buffer VIEW would at sample time -- v / 127 -- rather than the raw disc coordinates.
+static const float2 kGiNeighborOffsets[32] = {
+    float2(-0.48031,-0.84252), float2(+0.51969,-0.56693), float2(+0.03150,+0.54331), float2(-0.44094,-0.29134),
+    float2(+0.55906,-0.01575), float2(+0.07087,-0.86614), float2(-0.40157,+0.25197), float2(+0.59055,+0.52756),
+    float2(+0.11024,-0.31496), float2(-0.36220,+0.79528), float2(-0.84252,-0.03937), float2(+0.14961,+0.22835),
+    float2(-0.32283,-0.61417), float2(-0.81102,+0.50394), float2(+0.66929,-0.33858), float2(+0.18898,+0.77953),
+    float2(-0.28346,-0.06299), float2(+0.70866,+0.20472), float2(+0.22835,-0.62992), float2(-0.25197,+0.48031),
+    float2(-0.73228,-0.36220), float2(+0.26772,-0.08661), float2(-0.21260,-0.92913), float2(-0.69291,+0.18110),
+    float2(+0.30709,+0.45669), float2(-0.17323,-0.37795), float2(+0.82677,-0.10236), float2(-0.13386,+0.16535),
+    float2(-0.61417,-0.67717), float2(+0.86614,+0.43307), float2(+0.37795,-0.40157), float2(-0.09449,+0.70866),
+};
+#define RTXDI_NEIGHBOR_OFFSETS_BUFFER kGiNeighborOffsets
+static const uint kGiNeighborOffsetMask = 31u;
+
+// ---- the one RAB_ callback TemporalResampling.hlsli never needed but the spatial half does ----
+// SpatioTemporalResampling.hlsli's spatial samples (via Rtxdi/GI/SpatialResampling.hlsli) walk off
+// the reprojected pixel by up to samplingRadius and have to be pulled back on-screen before anything
+// reads them; RTXDI names that operation RAB_ClampSamplePositionIntoView and calls it itself rather
+// than clamping inline, exactly the way it calls RAB_GetGBufferSurface instead of reading a texture
+// directly. gSceneViewport, NOT gSceneViewportCur: every call on this whole path passes
+// previousFrame = true (see the include swap's own comment below for why), and this file's standing
+// convention wherever gPrevViewProj is used -- rtReprojectHistory, giRestirIndirect's own
+// screenSpaceMotion further down -- is that the PREVIOUS frame's rect is gSceneViewport. Clamping to
+// the VIEWPORT rather than the history TEXTURE matters at the frame edge: the texture is the whole
+// backbuffer, and the pixels outside the 3D view are editor chrome with no surface behind them for a
+// clamped sample to land on.
+int2 RAB_ClampSamplePositionIntoView(int2 pixelPosition, bool previousFrame) {
+    const int2 lo = int2(gSceneViewport.xy);
+    const int2 hi = lo + int2(gSceneViewport.zw) - 1;
+    return clamp(pixelPosition, lo, max(hi, lo));
+}
+
 // ---- AND ONLY NOW THE RESAMPLER ITSELF ----
-// HLSL HAS NO FORWARD DECLARATIONS THE WAY C++ DOES, so every one of the twelve RAB_ symbols
-// TemporalResampling.hlsli names -- the RAB_Surface TYPE most of all -- has to be a complete
-// declaration by the time this line is parsed. It was above the whole block before, and the cost
-// of that was not "ReSTIR does not work": voxi.hlsl is ONE translation unit holding every entry
-// point, so `unknown type name 'RAB_Surface'` failed PSMainVoxi, PSRayDriven, VSky and VSMain
-// alike and took the entire ray-tracing feature set down with it, at giMode 0 as much as 1. A
-// runtime HLSL error is not a build error here -- nothing catches this but a launch.
-#include "Rtxdi/GI/TemporalResampling.hlsli"
+// HLSL HAS NO FORWARD DECLARATIONS THE WAY C++ DOES, so every RAB_ symbol named anywhere in
+// SpatioTemporalResampling.hlsli's own include chain (Reservoir, SpatialResampling and
+// TemporalResampling -- that header's first three includes, so nothing from the temporal-only
+// version above is lost) -- the RAB_Surface TYPE most of all, plus RAB_ClampSamplePositionIntoView
+// just above, which only the spatial half calls -- has to be a complete declaration by the time this
+// line is parsed. It was above the whole block before, and the cost of that was not "ReSTIR does not
+// work": voxi.hlsl is ONE translation unit holding every entry point, so `unknown type name
+// 'RAB_Surface'` failed PSMainVoxi, PSRayDriven, VSky and VSMain alike and took the entire
+// ray-tracing feature set down with it, at giMode 0 as much as 1. A runtime HLSL error is not a
+// build error here -- nothing catches this but a launch.
+#include "Rtxdi/GI/SpatioTemporalResampling.hlsli"
 
 // The reservoir buffer's own addressing parameters, derived from gGiSurfNrmHist's ACTUAL
 // dimensions rather than a cbuffer field -- MIRRORS rtxdi::CalculateReservoirBufferParameters
@@ -2368,7 +2437,18 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
 
     samplePos      = hitPos;
     sampleNormal   = s.N;
-    sampleRadiance = max(radiance, 0.0);
+    // Clamped here, not just left non-negative: averShadeDirect runs the FULL Cook-Torrance path at
+    // this second-bounce hit, and its visibility term (visSmithCorrelated, `0.5 / max(lv + ll,
+    // 1e-7)`) blows up exactly at a grazing hit, where both lv and ll go to zero -- the specular lobe
+    // can return an enormous value for one cosine-weighted sample in a hundred (cos < 0.1 happens
+    // 1% of the time over a uniform disc). The cone gather is structurally immune to this same
+    // failure -- it averages over a mip footprint, and PSVoxel clamps to AVER_VOX_MAXRAD before
+    // injection -- but this value is about to become the reservoir's STORED radiance, and a
+    // reservoir KEEPS its sample (maxReservoirAge is 30 below): an unclamped spike here does not
+    // flicker for one frame, it sits on this pixel for thirty and spreads to neighbours the moment a
+    // spatial pass exists. So the clamp has to land BEFORE the value reaches the target pdf or the
+    // reservoir, not merely at final output where giRestirIndirect already clamps its own estimate.
+    sampleRadiance = clamp(radiance, 0.0, AVER_VOX_MAXRAD);
     return true;
 }
 
@@ -2423,20 +2503,58 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         }
 
         RTXDI_RandomSamplerState rng = RTXDI_InitRandomSampler(pixelPos, frameIdx, 1u);
-        RTXDI_GITemporalResamplingParameters tparams = (RTXDI_GITemporalResamplingParameters)0;
-        tparams.depthThreshold        = 0.1;
-        tparams.normalThreshold       = 0.5;
-        tparams.maxHistoryLength      = 20;
-        tparams.enableFallbackSampling = 1;
-        tparams.biasCorrectionMode    = RTXDI_BIAS_CORRECTION_BASIC;
-        tparams.maxReservoirAge       = 30;
-        tparams.enablePermutationSampling = 0;
-        tparams.uniformRandomNumber   = frameIdx * 2654435761u;
+        RTXDI_GISpatioTemporalResamplingParameters stparams = (RTXDI_GISpatioTemporalResamplingParameters)0;
+        stparams.depthThreshold        = 0.1;
+        stparams.normalThreshold       = 0.5;
+        stparams.maxHistoryLength      = 20;
+        stparams.enableFallbackSampling = 1;
+        stparams.biasCorrectionMode    = RTXDI_BIAS_CORRECTION_BASIC;
+        stparams.maxReservoirAge       = 30;
+        stparams.enablePermutationSampling = 0;
+        stparams.uniformRandomNumber   = frameIdx * 2654435761u;
+        // NVIDIA's own ReSTIR GI sample defaults for the spatial half this variant adds on top of
+        // temporal reuse: 8 taps at a 32-pixel radius. That radius is wide enough to bleed indirect
+        // light across a corner if nothing were watching it, but RTXDI_IsValidNeighbor's depth/
+        // normal similarity test -- already run for every neighbour, temporal jitter and spatial tap
+        // alike, inside SpatioTemporalResampling.hlsli -- rejects a tap landing on a dissimilar
+        // surface before its reservoir is ever combined in. The rejection is what keeps reuse local,
+        // not the radius, so the radius can afford to stay generous.
+        stparams.numSamples     = 8;
+        stparams.samplingRadius = 32.0;
         RTXDI_RuntimeParameters rParams = (RTXDI_RuntimeParameters)0;   // no checkerboard
+        // neighborOffsetMask is the field the spatial half actually reads: RTXDI_
+        // CalculateSpatialResamplingOffset masks its index by this before it ever touches
+        // kGiNeighborOffsets above, so it has to match that table's own size minus one, or the mask
+        // opens the index onto whatever garbage sits past the array's 32 entries. frameIndex, by
+        // contrast, is NOT read by anything under third_party/rtxdi/Include -- checked the whole
+        // tree, not assumed -- it only feeds ReSTIRDIContext's own uniformRandomNumber/checkerboard
+        // bookkeeping on the CPU side of the DI half of this SDK, which this file does not use (it
+        // hashes its own uniformRandomNumber above instead). Set anyway, because leaving a struct
+        // field the SDK's own convention expects populated silently zeroed is the kind of thing that
+        // stops mattering right up until a future header reads it.
+        rParams.neighborOffsetMask = kGiNeighborOffsetMask;
+        rParams.frameIndex         = frameIdx;
 
-        result = RTXDI_GITemporalResampling(pixelPos, surface, screenSpaceMotion,
-                                            1u - writeSlice, initial, rng, rParams, resParams, tparams);
+        // ARGUMENT ORDER DIFFERS FROM RTXDI_GITemporalResampling ABOVE: Rtxdi/GI/
+        // SpatioTemporalResampling.hlsli's own signature takes sourceBufferIndex BEFORE
+        // screenSpaceMotion, the opposite of Rtxdi/GI/TemporalResampling.hlsli's. Swapping them back
+        // to the old order would still COMPILE -- HLSL implicitly truncates a float3 argument passed
+        // where a scalar uint is expected (taking .x) and broadcasts a scalar into a float3 position
+        // -- so this order is only trustworthy because it was read off the vendored signature, not
+        // because a compile with the wrong order would have said so.
+        result = RTXDI_GISpatioTemporalResampling(pixelPos, surface, 1u - writeSlice, screenSpaceMotion,
+                                                   initial, rng, rParams, resParams, stparams);
     }
+    // KNOWN LIMITATION, not fixed here: a pixel covered by TRANSLUCENT geometry is written to THIS
+    // reservoir slot TWICE in one frame. PSRayDriven writes every pixel first; the blended glass
+    // replay is PSMainVoxi drawn over the same pixels, and the two share one compiled shader binary
+    // differing only in blend state and depth-write, so no #define or per-pass constant can tell
+    // them apart from inside this function. It degrades gracefully rather than silently: next frame
+    // the OPAQUE surface reprojects into a slot that still describes the glass hit,
+    // RTXDI_IsValidNeighbor's depth/normal test rejects the mismatch (glass and whatever sits behind
+    // it are rarely coplanar), and that pixel falls back to a fresh candidate exactly as if no
+    // history existed at all. The cost is LOST TEMPORAL REUSE behind glass -- one extra frame of
+    // noise where reuse should have carried over -- not wrong light.
     RTXDI_StoreGIReservoir(result, resParams, pixelPos, writeSlice);
 
     // NEXT FRAME'S "previous surface" -- see gGiSurfPosHist/gGiSurfNrmHist's own declaration for
@@ -2448,13 +2566,43 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     gGiSurfNrmHistOut[pixelPos] = float2(wpos.z, asfloat(packedN == 0u ? 1u : packedN));
 
     float3 outDiffuse = 0.0;
-    if (RTXDI_IsValidGIReservoir(result))
-        // radiance * weightSum is RTXDI's own finalised estimator (RTXDI_FinalizeGIResampling
-        // normalises weightSum into exactly this multiplier). Bounded for the reason
-        // coneTracedIndirect's own AVER_VOX_MAXRAD clamp is: an unclamped reused sample with a
-        // small denominator (a near-grazing Jacobian, or M still 1 right after a disocclusion) can
-        // spike arbitrarily bright feeding the same shading path that clamp already protects.
-        outDiffuse = min(max(result.radiance * result.weightSum, 0.0), AVER_VOX_MAXRAD);
+    if (RTXDI_IsValidGIReservoir(result)) {
+        // Recomputed HERE against THIS pixel's (wpos, N), not reused from the initial candidate's
+        // cosTheta up at giTraceInitialCandidate's call site: temporal resampling can hand `result`
+        // back holding a completely different sample than the one this pixel traced this frame --
+        // that is the whole point of a reservoir, and RTXDI_GITemporalResampling is free to replace
+        // it wholesale -- so the receiving-surface cosine has to be derived from wherever
+        // result.position actually landed, not cached from a direction that may no longer be the one
+        // that won. A reservoir stores a world POSITION rather than a cached angle for exactly this
+        // reason.
+        const float3 toSample = result.position - wpos;
+        const float  dist2    = dot(toSample, toSample);
+        const float  cosR     = dist2 > 1e-8 ? saturate(dot(toSample * rsqrt(dist2), N)) : 0.0;
+
+        // result.radiance * result.weightSum is RTXDI's own finalised estimator (weightSum already
+        // folds in 1/pdf and the resampling normalisation -- RTXDI_FinalizeGIResampling is what
+        // produces it). But RTXDI's contract leaves the REST of the integrand to the caller: for a
+        // Lambertian receiver that is cosR/PI, and cosR is exactly the factor that cancels the
+        // 1/cosTheta baked into weightSum by the cosine-weighted sample giTraceInitialCandidate drew
+        // (see its own comment on where that magnitude comes from) -- dropping it is what let the
+        // estimator diverge toward the tangent plane. Also folded in here: gVoxelParams.y
+        // (giIntensity), which coneTracedIndirect already applies at its own `sum.rgb *
+        // gVoxelParams.y` and this path never did, so Settings > Rendering > GI intensity (and
+        // RENDER.GIINTENSITY) silently did nothing whenever giMode selected ReSTIR over the cone
+        // gather. Intensity is applied BEFORE the clamp below, matching coneTracedIndirect's order,
+        // so the two estimators stay comparable at the same intensity setting.
+        const float3 est = result.radiance * (cosR * result.weightSum / PI) * gVoxelParams.y;
+
+        // HLSL's max is `x > y ? x : y`, and every comparison against NaN is false -- so
+        // max(NaN, 0.0) silently returns 0.0, not NaN. An unguarded NaN estimator (a near-zero
+        // Jacobian, a reservoir aged past a disocclusion) would have become PURE BLACK with nothing
+        // in the log to say why: the mirror image of this codebase's own acesTonemap(-1)==1.0 trap,
+        // where the bug hides behind a comparison instead of behind the tonemap. Zero is still the
+        // right answer for a broken sample; the isnan/isinf check just makes that a decision instead
+        // of an accident of comparison semantics.
+        outDiffuse = any(isnan(est)) || any(isinf(est)) ? float3(0.0, 0.0, 0.0)
+                                                         : min(max(est, 0.0), AVER_VOX_MAXRAD);
+    }
     return outDiffuse;
 }
 
