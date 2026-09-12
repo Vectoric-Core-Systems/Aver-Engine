@@ -7,3 +7,30 @@
 add_executable(NrdLinkTest src/NrdLinkTest.cpp)
 target_link_libraries(NrdLinkTest PRIVATE Aver.Render.NRD Aver.Core)
 set_target_properties(NrdLinkTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# NrdRecordTest -- the dispatches NrdLinkTest only PLANS, actually recorded onto a command list.
+#
+# The two are complementary and neither subsumes the other: NrdLinkTest needs no device and so runs
+# everywhere, proving the library is linked and the plan is coherent; this one needs D3D12 (WARP is
+# enough) and proves that plan can be turned into work. For most of this module's life the second
+# question had never been asked, and the answer was no.
+#
+# D3D12 ONLY, DELIBERATELY. NRD wants its constant buffer and samplers in register space 1, which
+# VulkanResourceFactory::descriptorLayout refuses on purpose -- so a Vulkan run of this test would
+# report a documented design decision as a failure. It SKIPs rather than failing when D3D12 is
+# absent, and when NRD is compiled out.
+if(AVER_RHI_D3D12)
+  add_executable(NrdRecordTest src/NrdRecordTest.cpp)
+  target_link_libraries(NrdRecordTest PRIVATE Aver.Render.NRD Aver.RHI Aver.RHI.D3D12 Aver.Core Aver.Platform)
+  # Its own composition root, exactly as every other device-creating test in this tree: Aver.RHI
+  # dispatches to detail::create*Device behind AVER_HAS_*, so a consumer must supply every ENABLED
+  # backend even when it only ever asks for one. Leaving these out links fine right up to LNK2019
+  # on symbols this test never names.
+  if(AVER_RHI_D3D11)
+    target_link_libraries(NrdRecordTest PRIVATE Aver.RHI.D3D11)
+  endif()
+  if(AVER_RHI_VULKAN)
+    target_link_libraries(NrdRecordTest PRIVATE Aver.RHI.Vulkan)
+  endif()
+  set_target_properties(NrdRecordTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

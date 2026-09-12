@@ -10,13 +10,19 @@
 // wanted. Every function below is `inline`.
 //
 // TWO REGISTRIES, ONE FILE, DELIBERATELY NOT SPLIT: the command table (`help`, `frametime`, `get`,
-// `set`, `vars`) and the variable table (`voxi.*`, `post.*`) are two different shapes of data, but
-// `get`/`set`/`vars` are themselves commands that exist only to walk the variable table, so the two
-// are one feature wearing two tables, not two features that happen to share a file.
+// `set`, `vars`) and the variable table (`voxi.*`, `post.*`, `rhi.*`) are two different shapes of
+// data, but `get`/`set`/`vars` are themselves commands that exist only to walk the variable table, so
+// the two are one feature wearing two tables, not two features that happen to share a file.
 //
-// SCOPE: this table only reads/writes aver::voxi::Renderer's process-wide settings and one
-// rhi::IDevice's post-process settings -- both already-public surfaces (Voxi.hpp, RHI.hpp). Nothing
-// here adds a member to SandboxApp beyond what SandboxApp.cpp declares for the console panel itself.
+// SCOPE: this table only reads/writes aver::voxi::Renderer's process-wide settings, one
+// rhi::IDevice's post-process settings, and (rhi.* -- one entry so far, depthPrepass) a handful of
+// other already-public rhi::IDevice toggles that live OUTSIDE PostSettings -- all already-public
+// surfaces (Voxi.hpp, RHI.hpp). Nothing here adds a member to SandboxApp beyond what SandboxApp.cpp
+// declares for the console panel itself: settings this file cannot reach because they are PRIVATE
+// SandboxApp state with no accessor threaded through voxi::Renderer or rhi::IDevice (occlusion
+// culling, virtualized-geometry LOD selection -- see registerVoxiVars' own comment on why those two
+// are not here) stay out of this table until such an accessor exists, rather than growing a second
+// way for this file to reach into SandboxApp.
 
 #include "aver/core/Types.hpp"
 #include "aver/core/Log.hpp"
@@ -59,7 +65,7 @@ inline bool ciEquals(std::string_view a, std::string_view b) {
 } // namespace detail
 
 // =================================================================================================
-// PART B: the live-variable registry (voxi.*, post.*)
+// PART B: the live-variable registry (voxi.*, post.*, rhi.*)
 // =================================================================================================
 
 // A tagged union covering every scalar type a Settings/PostSettings field actually is. `Str` is a
@@ -181,6 +187,10 @@ struct ConsoleBatch {
     rhi::PostSettings post;
     bool seededPost = false;
     bool touchedPost = false;
+    // rhi.* vars that are a single immediate IDevice call rather than a field in a struct like `post`
+    // above -- see registerRhiVars' own comment for why there is no seed-then-commit struct for these.
+    // Run at commit, after Voxi and Post, so a line mixing namespaces still applies all-or-nothing.
+    std::vector<std::function<void(rhi::IDevice&)>> deviceSetters;
     rhi::IDevice* device = nullptr;
     // (dotted name, requested value) pairs, filled by the `set` handler right after each stage()
     // call -- used only for the post-commit diff report, so every field's "requested" line is
@@ -211,6 +221,16 @@ inline const ConsoleVar* findVar(std::string_view dotted) {
 // Tier fields (msaa, globalIllumination, rayTracing, pathTracing, meshShaders) go through
 // tierSetters; everything setSettings derives FROM a tier goes through dialSetters. See
 // ConsoleBatch's own comment for why the split is closures rather than two struct copies.
+//
+// TWO RENDER SETTINGS THAT LOOK LIKE THEY BELONG HERE AND ARE DELIBERATELY ABSENT: occlusion culling
+// (SandboxApp::occlusionCullEnabled_) and virtualized-geometry LOD selection
+// (SandboxApp::lodSelectEnabled_, SandboxApp::setLodSelect). Both are toggled live already -- the
+// editor's own Rendering-settings panel flips them every frame -- but as PRIVATE SandboxApp state
+// with no accessor on voxi::Renderer or rhi::IDevice, which is the only surface this table is allowed
+// to reach (see this file's own SCOPE comment). Reaching them would mean either making them public on
+// SandboxApp or adding a per-frame consoleApp() slot mirroring setConsoleDevice() below -- both real
+// options, but both a change to SandboxApp.cpp, which is out of scope for this file. Left out rather
+// than routed around, so the gap is visible instead of quietly worked around with a parallel path.
 inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
     using voxi::Renderer;
     using voxi::Settings;
@@ -250,6 +270,18 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         []{ return vBool(Renderer::get().settings().meshShaders); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.tierSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->meshShaders = on; }); }});
 
+    // ---- read-only: sits beside the tier fields in Settings (same Quality type, same ladder shape)
+    // but is NOT one, and must not be staged like one. Settings::layeredBsdf's own comment says why:
+    // VoxiRenderer builds its raster PSOs once at init from whatever this held at that moment, so a
+    // `set` here would update settings_ and change NOTHING on screen until a project reload rebuilds
+    // the pipelines -- exactly the "lies about what is running" failure voxi.giMode's own honesty
+    // requirement (see below) exists to prevent, just with no live value to read back that would
+    // reveal the lie. Read-only is what keeps `get`/`vars` truthful about it instead: this is the
+    // tier that will apply on next load, not one that is live now.
+    t.push_back({"voxi.layeredBsdf", VarType::Quality, true,
+        "Layered BSDF (clear coat) tier over the base BRDF -- NOT live: pipelines are built from this once at project load, so changing it here takes a reload to have any effect (read-only for that reason)",
+        []{ return vQualityRaw(static_cast<u32>(Renderer::get().settings().layeredBsdf)); }, nullptr});
+
     // ---- dial fields, each derived from a tier above unless set explicitly -----------------
     t.push_back({"voxi.voxelResolution", VarType::U32, false,
         "Cubic voxel grid edge (engine clamps to [32,512])",
@@ -259,14 +291,47 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "Diffuse gather cone count -- the one GI setting that actually costs anything (engine clamps to [1,16])",
         []{ return vU32(Renderer::get().settings().giCones); },
         [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->giCones = n; }); }});
+    t.push_back({"voxi.giSkyOcclusionRays", VarType::U32, false,
+        "Sky-visibility rays the ambient term traces per pixel; 0 estimates it from the cone gather instead, which is optimistic in enclosed geometry (renderer clamps to VoxiRenderer::kMaxShadowRays=32 at use, and forces 0 whenever ray tracing is not active this frame regardless of what is set here)",
+        []{ return vU32(Renderer::get().settings().giSkyOcclusionRays); },
+        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->giSkyOcclusionRays = n; }); }});
+    t.push_back({"voxi.giSkyOcclusionTile", VarType::U32, false,
+        "Coherence tile edge those sky-occlusion rays share one ray direction across, in pixels; 1 is a fresh direction per pixel (engine clamps to [1,16])",
+        []{ return vU32(Renderer::get().settings().giSkyOcclusionTile); },
+        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->giSkyOcclusionTile = n; }); }});
     t.push_back({"voxi.giIntensity", VarType::F32, false,
         "Indirect bounce multiplier (engine clamps to [0,8])",
         []{ return vF32(Renderer::get().settings().giIntensity); },
         [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->giIntensity = n; }); }});
+    t.push_back({"voxi.causticStrength", VarType::F32, false,
+        "How strongly light focused by a water surface brightens what is beneath it; 0 switches the term off entirely -- a look, not a quality rung, so it is not on any ladder (no engine clamp)",
+        []{ return vF32(Renderer::get().settings().causticStrength); },
+        [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->causticStrength = n; }); }});
     t.push_back({"voxi.giMaxDistance", VarType::F32, false,
         "Cone-trace range, in centimetres (engine clamps to [1,100000])",
         []{ return vF32(Renderer::get().settings().giMaxDistance); },
         [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->giMaxDistance = n; }); }});
+    // ---- refraction: how a translucent surface bends what is behind it (Settings::refractionMode's
+    // own comment has the full three-mode writeup). Voxi.cpp does not range-check this field the way
+    // it does rtRenderMode/giMode (both hard-clamp out-of-range back to a safe default) -- so unlike
+    // every other voxi.* validate in this file, THIS ONE also stands in for a check the engine itself
+    // does not perform, not merely an earlier, friendlier copy of one it does.
+    t.push_back({"voxi.refractionMode", VarType::U32, false,
+        "How a translucent surface bends what is behind it: 0 = off (straight sample), 1 = screen-space offset (nearly free, the Medium/Low rung), 2 = ray-traced hit point (costs a ray, the High/Epic rung)",
+        []{ return vU32(Renderer::get().settings().refractionMode); },
+        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->refractionMode = n; }); },
+        [](const VarValue& v, std::string& err) -> bool {
+            if (v.as.u > 2) { err = "refractionMode must be 0 (off), 1 (screen-space) or 2 (ray-traced) -- the engine does not clamp this field itself"; return false; }
+            return true;
+        }});
+    t.push_back({"voxi.refractionStrength", VarType::F32, false,
+        "Multiplies the refraction offset; 1.0 is the physically correct bend for the material's own IOR, below trades correctness for calm, above exaggerates (no engine clamp)",
+        []{ return vF32(Renderer::get().settings().refractionStrength); },
+        [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->refractionStrength = n; }); }});
+    t.push_back({"voxi.refractionEdgeFade", VarType::F32, false,
+        "How far from the screen edge the refraction offset is faded out, as a fraction of the smaller dimension; 0 disables the fade and lets the screen-space artefact show (no engine clamp)",
+        []{ return vF32(Renderer::get().settings().refractionEdgeFade); },
+        [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->refractionEdgeFade = n; }); }});
     t.push_back({"voxi.rtShadowRays", VarType::U32, false,
         "Occlusion rays per pixel when it traces this frame (engine clamps to [1,32])",
         []{ return vU32(Renderer::get().settings().rtShadowRays); },
@@ -279,6 +344,23 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "Frames between GI volume revoxelisations (engine clamps to [1,8])",
         []{ return vU32(Renderer::get().settings().giUpdateInterval); },
         [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->giUpdateInterval = n; }); }});
+    // THE HEADLINE ADDITION THIS FILE EXISTS FOR: the switch between the voxel-cone and RTXDI ReSTIR
+    // GI diffuse-bounce estimators (Settings::giMode's own comment has the full writeup). NOT staged
+    // as a tierSetter even though it reads like one -- setSettings never derives it from a tier, it
+    // only clamps and range-checks it, so it belongs with the other dials that setSettings leaves
+    // alone unless a caller touches them directly.
+    //
+    // THE READ CLOSURE IS THE HONESTY MECHANISM voxi.rtRenderMode etc. already rely on, not a special
+    // case added for this field: it reads Renderer::get().settings().giMode LIVE, the same object
+    // Voxi.cpp's setSettings just clamped, so `set voxi.giMode 1` on a device with no RayQuery hardware
+    // (or with rayTracing forced Off for lack of it -- see Voxi.cpp's refuse() path) stages 1, commits
+    // it, and then this same read() call -- already wired into commitBatch's "requested vs now" diff,
+    // see ConsoleBatch's own comment -- reports back 0. `get`/`vars` show the same live value, so this
+    // variable can never claim ReSTIR GI is running when the engine silently refused it.
+    t.push_back({"voxi.giMode", VarType::U32, false,
+        "Which estimator answers the diffuse GI bounce: 0 = voxel cone gather (default), 1 = RTXDI ReSTIR GI. Needs RayQuery hardware and rayTracing != Off -- the engine clamps back to 0 when either is missing, and this always reads back what is ACTUALLY running, not merely what was last requested",
+        []{ return vU32(Renderer::get().settings().giMode); },
+        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->giMode = n; }); }});
     t.push_back({"voxi.rtShadowDenoise", VarType::U32, false,
         "Spatial denoise radius for the ray-traced sun shadow, in pixels (engine clamps to [0,3])",
         []{ return vU32(Renderer::get().settings().rtShadowDenoise); },
@@ -386,6 +468,35 @@ inline void registerPostVars(std::vector<ConsoleVar>& t) {
         readField(&rhi::PostSettings::histogramLowPercent), stageClamped(&rhi::PostSettings::histogramLowPercent, 0.0f, 1.0f)});
     t.push_back({"post.histogramHighPercent", VarType::F32, false, "Fraction of the exposure histogram discarded at the bright end (clamped [0,1])",
         readField(&rhi::PostSettings::histogramHighPercent), stageClamped(&rhi::PostSettings::histogramHighPercent, 0.0f, 1.0f)});
+
+    // Not an f32, so it cannot go through stageClamped above -- clamped by hand, same [0,2] shape.
+    t.push_back({"post.tonemap", VarType::U32, false,
+        "Which tone curve: 0 = per-channel Narkowicz/Hill, 1 = ACES matrixed, 2 = ACES on luminance only so hue/saturation survive any exposure (the default) (clamped to [0,2])",
+        []{ rhi::IDevice* d = consoleDevice(); return vU32(d ? d->postProcess().tonemap : 0u); },
+        [](ConsoleBatch& b, VarValue v){
+            if (!b.seededPost) { b.post = b.device ? b.device->postProcess() : rhi::PostSettings{}; b.seededPost = true; }
+            b.post.tonemap = std::min(v.as.u, 2u);
+            b.touchedPost = true;
+        }});
+    t.push_back({"post.maxRadiance", VarType::F32, false, "Ceiling applied to scene radiance immediately before the tonemap; 0 disables it (clamped >= 0)",
+        readField(&rhi::PostSettings::maxRadiance), stageClamped(&rhi::PostSettings::maxRadiance, 0.0f, 1e6f)});
+}
+
+// Direct rhi::IDevice toggles that live OUTSIDE PostSettings entirely -- rhi.* rather than post.*,
+// because they are not part of the camera post-processing chain PostSettings describes, they are raw
+// per-device render state. Staged through ConsoleBatch::deviceSetters (a plain list of "call this on
+// the device" closures) rather than through a seed-then-commit struct the way Post is: there is no
+// struct backing these to seed, each one is a single immediate IDevice call, so batching only needs
+// to defer WHEN it runs (until commit, so `set` stays all-or-nothing), not merge several fields into
+// one call the way Post's setPostProcess(one struct) does.
+inline void registerRhiVars(std::vector<ConsoleVar>& t) {
+    t.push_back({"rhi.depthPrepass", VarType::Bool, false,
+        "Same-frame depth-only pass ahead of the opaque colour walk, so an occluded fragment never reaches PSMainVoxi's shadow lookup/cone trace/fog -- off by default (identical to every render before this existed), on with --depth-prepass or here",
+        []{ rhi::IDevice* d = consoleDevice(); return vBool(d && d->depthPrepassEnabled()); },
+        [](ConsoleBatch& b, VarValue v){
+            const bool on = v.as.b;
+            b.deviceSetters.push_back([on](rhi::IDevice& d){ d.setDepthPrepassEnabled(on); });
+        }});
 }
 
 inline std::vector<ConsoleVar> buildVarTable() {
@@ -394,6 +505,7 @@ inline std::vector<ConsoleVar> buildVarTable() {
     registerVoxiVars(t);
 #endif
     registerPostVars(t);
+    registerRhiVars(t);
     return t;
 }
 // Cached exactly like GraphNodeDefs.hpp's own catalog(): built once, on first call.
@@ -404,10 +516,12 @@ inline const std::vector<ConsoleVar>& allVars() {
 
 // Runs a staged batch through AT MOST TWO voxi::Renderer::setSettings calls (tier phase, then dial
 // phase -- see ConsoleBatch's own comment for why each phase's snapshot is taken fresh, right here,
-// rather than pre-built when the batch was staged) plus at most one IDevice::setPostProcess call, then
-// diffs every staged field's REQUESTED value against what actually landed, using each field's own
-// `read()` -- one diff path for both sources, since a field can move either because the engine clamped
-// it (Voxi) or because this table clamped it before ever calling setPostProcess (Post).
+// rather than pre-built when the batch was staged), at most one IDevice::setPostProcess call, and
+// then every staged rhi.* deviceSetters closure, then diffs every staged field's REQUESTED value
+// against what actually landed, using each field's own `read()` -- one diff path for all three
+// sources, since a field can move because the engine clamped it (Voxi), because this table clamped
+// it before ever calling setPostProcess (Post), or -- so far, never, rhi.* fields being plain bools
+// with nothing to clamp -- because a future rhi.* entry's own device call declines the request.
 inline SetOutcome commitBatch(ConsoleBatch& b) {
     SetOutcome out;
 #if AVER_MODULE_VOXI
@@ -426,6 +540,7 @@ inline SetOutcome commitBatch(ConsoleBatch& b) {
     }
 #endif
     if (b.touchedPost && b.device) b.device->setPostProcess(b.post);
+    if (b.device) for (auto& fn : b.deviceSetters) fn(*b.device);
 
     for (const auto& [name, requested] : b.requested) {
         const ConsoleVar* v = findVar(name);

@@ -7,13 +7,18 @@
 # the NRD edge and the AVER_WITH_NRD define are conditional, and NrdDenoiser.cpp compiles both ways.
 # A caller writes `if (!denoiser.create(...)) { /* hand-written filter */ }` and needs no #if.
 add_library(Aver.Render.NRD STATIC
-  src/NrdDenoiser.cpp)
+  src/NrdDenoiser.cpp
+  src/NrdRecorder.cpp)
 
 target_include_directories(Aver.Render.NRD PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(Aver.Render.NRD PUBLIC cxx_std_20)
 
-# Aver.RHI is the GENERIC interface, for rhi::Format and nothing else. Never a backend: this module
-# describes dispatches, it does not record them -- same rule as Aver.Occlusion.
+# Aver.RHI is the GENERIC interface, and NEVER a backend. That rule is unchanged; the sentence that
+# used to follow it is what changed. This module no longer only DESCRIBES dispatches --
+# NrdRecorder.cpp records them, through rhi::IDevice / IRenderContext / IResourceFactory and nothing
+# else. Whether that recording actually works is a RUNTIME question (D3D12 honours NRD's register
+# spaces, Vulkan deliberately refuses them), which is why it stays a create()-time report rather
+# than a link-time or compile-time one.
 target_link_libraries(Aver.Render.NRD PUBLIC Aver.Core Aver.RHI)
 
 if(AVER_WITH_NRD AND TARGET NRD)
