@@ -658,6 +658,45 @@ inline void registerRhiVars(std::vector<ConsoleVar>& t) {
         }});
 }
 
+#if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
+// occlusion.* -- ONE entry, for OcclusionCullerImpl::debugForceWaitIdle_ (Occlusion.hpp's
+// setDebugForceWaitIdle). Every OTHER occlusion setting is exactly the case this file's own comment
+// above registerVoxiVars calls out and deliberately leaves out ("occlusion culling... PRIVATE
+// SandboxApp state with no accessor on voxi::Renderer or rhi::IDevice, which is the only surface this
+// table is allowed to reach") -- that reasoning still holds for occlusionCullEnabled_ itself, which
+// stays out. This one is different in exactly the way that comment's own "real options" describe: it
+// needs no call into SandboxApp or IOcclusionCuller at all, only a bool SandboxApp itself reasserts
+// onto the live occluder_ every frame (onUpdate, the same idiom occlusionCullForceOff_ already uses to
+// survive a manifest reload) -- so a raw bool slot this header owns, written by `set`/read by `get`
+// and read back by SandboxApp once a frame, is enough, with none of the complete-type problem a
+// consoleApp() mirroring setConsoleDevice() would have (SandboxApp is only forward-declared up top).
+// Defaults to TRUE -- NOT the base interface's own default-off contract (IOcclusionCuller::
+// setDebugForceWaitIdle's base is a false no-op for a hypothetical future implementer). A follow-up
+// investigation found the no-wait path measurably worse (against a path-traced ground truth, and in
+// a same-shader controlled A/B reproducing a "flat lighting" report) without finding which GI/
+// lighting resource actually depends on the wait -- see OcclusionCuller.cpp's FOLLOW-UP comment
+// above its kInFlight member. This pays the stall by default until that dependency is found and
+// fixed narrowly; set false here (or launch with --no-occlusion-waitidle) to opt back into the
+// faster, not-yet-proven-correct path. SandboxApp seeds this from occlusionDebugForceWaitIdleArg_
+// (--occlusion-waitidle / --no-occlusion-waitidle) before the first read.
+inline bool& consoleOcclusionForceWaitIdleSlot() { static bool v = true; return v; }
+
+inline void registerOcclusionVars(std::vector<ConsoleVar>& t) {
+    t.push_back({"occlusion.debugForceWaitIdle", VarType::Bool, false,
+        "A-B SWITCH, DEFAULT TRUE: forces OcclusionCuller::testBatch() to end with the unconditional "
+        "res.waitIdle() the buffer-rotation fix made unnecessary for correctness of THAT fix, but "
+        "which a later investigation found something else in GI/lighting still depends on (root "
+        "cause not yet found -- see Occlusion.hpp's setDebugForceWaitIdle comment). Flip off to try "
+        "the faster, not-yet-proven-correct no-wait path live. Same effect as launching with "
+        "--occlusion-waitidle / --no-occlusion-waitidle.",
+        []{ return vBool(consoleOcclusionForceWaitIdleSlot()); },
+        [](ConsoleBatch& b, VarValue v){
+            const bool on = v.as.b;
+            b.deviceSetters.push_back([on](rhi::IDevice&){ consoleOcclusionForceWaitIdleSlot() = on; });
+        }});
+}
+#endif
+
 inline std::vector<ConsoleVar> buildVarTable() {
     std::vector<ConsoleVar> t;
 #if AVER_MODULE_VOXI
@@ -665,6 +704,9 @@ inline std::vector<ConsoleVar> buildVarTable() {
 #endif
     registerPostVars(t);
     registerRhiVars(t);
+#if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
+    registerOcclusionVars(t);
+#endif
     return t;
 }
 // Cached exactly like GraphNodeDefs.hpp's own catalog(): built once, on first call.

@@ -2612,6 +2612,13 @@ public:
         // to own, and every call it drives is already gated on occlusionCullEnabled_.
         if (rhi::IResourceFactory* occRes = e.device()->resources()) {
             occluder_ = aver::occlusion::createOcclusionCuller(*occRes);
+            // --occlusion-waitidle's seed, applied once here and reasserted every frame from onUpdate
+            // (see occlusionDebugForceWaitIdleArg_'s own comment) -- editor::
+            // consoleOcclusionForceWaitIdleSlot() is EditorConsole.hpp's live source of truth from
+            // this point on, so a console `set occlusion.debugForceWaitIdle` and this CLI flag are the
+            // exact same switch, not two that can disagree.
+            editor::consoleOcclusionForceWaitIdleSlot() = occlusionDebugForceWaitIdleArg_;
+            occluder_->setDebugForceWaitIdle(occlusionDebugForceWaitIdleArg_);
             // Warmed up here, not on first per-frame call -- a safety requirement. ensureSized()
             // builds the module's three compute pipelines, and D3D12RenderContext caches the bound
             // pipeline as a raw pointer (pipe_): a push_back reallocating while another feature's
@@ -2971,6 +2978,25 @@ public:
             const f32 phase = 6.2831853f * (f32)(t.frame - 1) / (f32)camWobblePeriod_;
             yaw_ = camWobbleBaseYaw_ + camWobbleDeg_ * 0.01745329252f * std::sin(phase);
         }
+        // --cam-translate SPEED: see setCamTranslate's own comment. One fixed step per frame along
+        // whatever camForward() is THIS frame (after the wobble update above, so the two compose),
+        // so occlusion relationships -- what is in front of what -- change every frame instead of
+        // just the screen-space position of the same relationships a pure yaw wobble produces.
+        if (camTranslateSpeed_ != 0.0f) {
+            camPos_ += camForward() * camTranslateSpeed_;
+        }
+#if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
+        // --no-occlusion-cull: see setOcclusionCullForceOff's own comment for why this cannot be a
+        // one-shot CLI setter -- applyProjectVoxiSettings rewrites occlusionCullEnabled_ from the
+        // manifest during project/level load, which happens after every CLI setter has already run.
+        // Reasserted every frame here, which also means it wins back over a LATER --open-level or
+        // project reload mid-run, not just the first one.
+        if (occlusionCullForceOff_) occlusionCullEnabled_ = false;
+        // --occlusion-waitidle / occlusion.debugForceWaitIdle: reasserted every frame for the same
+        // reason -- and so a console `set` this frame is live on occluder_ before this SAME frame's
+        // testBatch() call runs (occlusionBuildAndTest() below onUpdate returns), not one frame late.
+        if (occluder_) occluder_->setDebugForceWaitIdle(editor::consoleOcclusionForceWaitIdleSlot());
+#endif
         // Single-instance forwarding, drain. Polled rather than an Event (Event.hpp is a fixed POD
         // with no string field), latched on window_ and drained unconditionally every frame -- safe
         // since window_->pumpEvents() runs BEFORE onUpdate and WM_COPYDATA is synchronous on this thread.
@@ -7486,6 +7512,27 @@ public:
     // reorders the entity walk or calls occluder_ at all, reproducing today's frame exactly. Guarded
     // the same as the member it assigns: with the module OFF, that member doesn't exist either.
     void setOcclusionCullOverride(bool on) { occlusionCullEnabled_ = on; }
+    // --no-occlusion-cull: the CLI has no way to say "off" that BEATS a level's own manifest --
+    // project_.occlusionCull >= 0 (applyProjectVoxiSettings) writes occlusionCullEnabled_ during
+    // project/level load, which runs AFTER every CLI setter fires at construction, so a bare
+    // setOcclusionCullOverride(false) here would be silently overwritten the instant the level
+    // opens -- exactly the repro project's own case, whose manifest records OCCLUSIONCULL 1.
+    // Applied instead every frame in onUpdate (occlusionCullForceOff_ below), the same runtime
+    // point the Project Settings "Occlusion culling" checkbox writes this member from -- i.e. this
+    // reproduces headlessly the identical live toggle the user already did by hand for the A/B this
+    // flag exists to automate, not a new code path.
+    void setOcclusionCullForceOff() { occlusionCullForceOff_ = true; }
+    // --occlusion-waitidle / --no-occlusion-waitidle: forces (or releases) OcclusionCuller::
+    // testBatch()'s res.waitIdle() at runtime, no rebuild -- see IOcclusionCuller::
+    // setDebugForceWaitIdle's own comment (Occlusion.hpp) for exactly what it does and why it now
+    // defaults ON (a real, unresolved GI/lighting dependency on the wait, not merely the buffer race
+    // the rotation fix already covers -- see OcclusionCuller.cpp's FOLLOW-UP comment above its
+    // kInFlight member). Only SEEDS occlusionDebugForceWaitIdleArg_ here, at construction, before
+    // occluder_ exists -- onInit copies it into editor::consoleOcclusionForceWaitIdleSlot() once
+    // occluder_ is created, and onUpdate reasserts that slot onto occluder_ every frame, the same
+    // "CLI sets the seed, a per-frame reassert makes it live" shape --no-occlusion-cull already uses
+    // for occlusionCullForceOff_ above.
+    void setOcclusionDebugForceWaitIdle(bool on) { occlusionDebugForceWaitIdleArg_ = on; }
 #endif
     void setGiOverride(int q, bool dbg) { giOverride_ = q; giDebugView_ = dbg; } // --gi / --gi-debug
     void setGiForceOff(bool off) { giForceOff_ = off; }                        // --no-gi
@@ -7795,6 +7842,15 @@ public:
         camWobbleDeg_ = degrees;
         camWobblePeriod_ = periodFrames > 0 ? periodFrames : 0;
     }
+    // --cam-translate SPEED: fly the camera forward along camForward() by SPEED world-cm every
+    // frame, starting at frame 1. UNLIKE --cam-wobble (pure rotation about a fixed point, which
+    // barely changes what-occludes-what -- the same walls occlude the same objects, just at
+    // different screen positions), this is TRANSLATION through the scene: occlusion relationships
+    // change continuously, the way WASD forward-flight does. Driven off the frame counter (see
+    // onUpdate), never the clock, so the path is identical every run at a given --frames count.
+    // Composes with --cam-wobble if both are given: wobble only ever touches yaw_, this only ever
+    // touches camPos_.
+    void setCamTranslate(f32 speedCmPerFrame) { camTranslateSpeed_ = speedCmPerFrame; }
     void setCamera(Vec3 pos, f32 pitchDeg, f32 yawDeg) {
         camOverride_ = true;
         camPosOverride_ = pos;
@@ -23660,6 +23716,16 @@ private:
     // mechanism, which reorders IN PLACE rather than duplicating the walk depthPrepassOverride_ uses,
     // since the draw logic it reuses (LOD, material binding, GPU-cluster paths) that walk doesn't replicate.
     bool occlusionCullEnabled_ = false;
+    bool occlusionCullForceOff_ = false;   // --no-occlusion-cull: see setOcclusionCullForceOff's own comment
+    // --occlusion-waitidle / --no-occlusion-waitidle: see setOcclusionDebugForceWaitIdle's own
+    // comment. CLI-seeded default only -- once occluder_ exists, EditorConsole.hpp's
+    // consoleOcclusionForceWaitIdleSlot() (seeded from this in onInit) is the live source of truth,
+    // reasserted onto occluder_ every frame in onUpdate, so a console `set
+    // occlusion.debugForceWaitIdle` takes effect the same way either flag does. DEFAULTS TRUE (a
+    // later investigation found the no-wait path measurably worse without finding why -- see
+    // OcclusionCuller.cpp's FOLLOW-UP comment above its kInFlight member); --no-occlusion-waitidle
+    // opts back into the faster, unproven-correct path.
+    bool occlusionDebugForceWaitIdleArg_ = true;
     // NON-owning would be wrong here: this module has no registry of its own the way IRenderFeature
     // does, so SandboxApp owns the one instance for the run and destroys it in onShutdown.
     aver::occlusion::IOcclusionCuller* occluder_ = nullptr;
@@ -23777,6 +23843,8 @@ private:
     i32  camWobblePeriod_=0;         // ...and its period in FRAMES; sin is 0 at every multiple
     f32  camWobbleBaseYaw_=0.0f;     // the yaw to swing about, latched on the first wobbled frame
     bool camWobbleBased_=false;
+    f32  camTranslateSpeed_=0.0f;    // --cam-translate SPEED: forward-flight, cm/frame, 0 = no motion
+
     Vec3 camPosOverride_{};
     f32  pitchOverride_=0.0f, yawOverride_=0.0f;   // radians, converted in setCamera
     bool useWarp_=false;             // --warp: run on the D3D12 software rasteriser
@@ -26762,6 +26830,32 @@ Application* createApplication(int argc, char** argv) {
             rayProbeXArg = static_cast<f32>(std::atof(argv[i + 1]));
             rayProbeYArg = static_cast<f32>(std::atof(argv[i + 2]));
         }
+    // --cam-translate SPEED: see SandboxApp::setCamTranslate's own comment -- TRANSLATION through
+    // the scene, not the rotation --cam-wobble gives. PARSED IN ITS OWN LOOP, like --ray-probe just
+    // above: the main else-if chain is at MSVC's C1061 nesting limit and one more branch does not compile.
+    f32 camTranslateArg = 0.0f;
+    for (int i = 1; i + 1 < argc; ++i)
+        if (!std::strcmp(argv[i], "--cam-translate")) camTranslateArg = (f32)std::atof(argv[i + 1]);
+    // --no-occlusion-cull: see SandboxApp::setOcclusionCullForceOff's own comment -- a level whose
+    // own manifest records OCCLUSIONCULL 1 (the repro project this exists for) turns culling back on
+    // during project/level load no matter what a one-shot CLI setter did at construction, so this
+    // needs to be a distinct flag applied every frame rather than reusing --occlusion-cull's false
+    // case. Takes no value, so its own FULL-LENGTH loop like --unlit/--gpu-timing above -- matched
+    // only in the i+1<argc loop, a trailing "--no-occlusion-cull" would be silently ignored.
+    bool noOcclusionCullArg = false;
+    for (int i = 1; i < argc; ++i)
+        if (!std::strcmp(argv[i], "--no-occlusion-cull")) noOcclusionCullArg = true;
+    // --occlusion-waitidle / --no-occlusion-waitidle: see SandboxApp::setOcclusionDebugForceWaitIdle's
+    // own comment -- forces (or releases) OcclusionCuller::testBatch()'s res.waitIdle(). The member
+    // this seeds now DEFAULTS true, so --occlusion-waitidle is redundant with a fresh build but kept
+    // for explicitness/scripts; --no-occlusion-waitidle is the flag that actually changes behaviour
+    // today, opting into the faster, not-yet-proven-correct no-wait path. Both take no value, so both
+    // get their own FULL-LENGTH loop, same reasoning as --no-occlusion-cull above.
+    bool occlusionWaitIdleArg = false, occlusionNoWaitIdleArg = false;
+    for (int i = 1; i < argc; ++i)
+        if (!std::strcmp(argv[i], "--occlusion-waitidle")) occlusionWaitIdleArg = true;
+    for (int i = 1; i < argc; ++i)
+        if (!std::strcmp(argv[i], "--no-occlusion-waitidle")) occlusionNoWaitIdleArg = true;
 
     u64 frames=0; bool headless=false, focusVoxi=false, focusScript=false, focusTools=false, focusCompileMenu=false, focusCompile=false, startScreen=false; int drawerOpen=0; std::string drawerSub; std::string beam, shot, project, scriptsDir, spawnTest; std::string shaderSourceDir; bool playTest=false; bool skinTest=false; bool skinDrawTest=false; bool particleTest=false; bool noParticleGi=false; int particleStressEmitters=0; int particleStressMaxParticles=0; bool particleStressSecondEmitter=false; bool reflTest=false; bool furnaceTest=false; bool furnaceSun=false; bool furnaceGrid=false; f32 furnaceTilt=0.0f; bool ptFurnace=false; bool ptScene=false; int deviceLostAt=0; int ptQualityRamp=0; int ptSceneToggleOn=0; int ptSceneToggleOff=0; int aversrCycle=0; int projectSettingsPage=-1; f32 sunAngle=-1.0f; std::string skinSceneDir; Tool tool=Tool::Select; int msaa=0; int gi=-1; int rt=-1; int rtRays=0; int rtPixelsPerRay=0; int rtShadowDenoise=-1; int rtRenderMode=-1; int pt=-1; int ptBounces=-1; int layeredBsdf=-1; f32 coatWeight=0.0f; f32 coatRough=0.1f; f32 coatF0=0.04f; int giUpdateInterval=0; f32 renderScale=1.0f; std::string aversrArg; bool frameTime=false; bool noGi=false; bool noRt=false; bool giConeOff=false; f32 camWobbleDeg=0.0f; int camWobblePeriod=0; bool giDbg=false, ms=false; u32 probeX=0, probeY=0; f32 probeU=-1.0f, probeV=-1.0f; bool camSet=false; f32 camX=0, camY=0, camZ=0, camPitch=0, camYaw=0; int reloadAt=0; bool warp=false, debugLayer=false; std::string backendName; const char* forceCaps=nullptr; f32 bloom=0.0f, exposure=1.0f; bool bloomSet=false, exposureSet=false; bool autoExposure=false; int clouds=0; f32 cloudCover=-1.0f; bool skyPhysical=false, skyAuthored=false; f32 skyElevation=-999.0f; bool vsyncOff=false; bool uiDemo=false; bool inputProbe=false; bool autoCompile=false; bool showPrefs=false; bool scrollPrefsToKeybinds=false; bool saveProject=false; std::string importSrc, importDst; int focusLevelAt=0; int hudTest=-1; std::string openAsset; std::string selectEntity; bool openLegacy=false; bool waterOn=false; f32 waterHeight=0.0f; std::string graphSelectNode; std::string graphTab; int chunkStream=0; int droneAuto=0; int undoTestAuto=0; int keybindTestAuto=0; std::string keybindTestMode; std::string droneGraph; std::string landscapePath; bool fogMatch=false; f32 fogMatchOpacity=-1.0f; bool lodSelect=true; f32 lodErrorPx=1.0f; bool lodClusterStats=false; bool lodPerCluster=false; int lodMeshShader=-1; bool depthPrepass=false; bool edgeAa=false; bool occlusionCull=false; bool bakeNav=false; f32 bakeNavCell=50.0f; std::string openMap; bool gbuffer=false; std::string gbufferDebug; std::string crashTest; std::string startMode;
     bool openLevelPickerArg=false; std::string openLevelArg; bool noEditorChrome=false; bool sceneCensus=false;
@@ -27683,6 +27777,7 @@ Application* createApplication(int argc, char** argv) {
     app->setRtDenoiseMotionTaper(rtDenoiseMotionArg);
     app->setRefractionOverrides(refraction, refractionStrength, refractionFade);
     app->setCamWobble(camWobbleDeg, camWobblePeriod);
+    if (camTranslateArg != 0.0f) app->setCamTranslate(camTranslateArg);
     app->setRenderScale(renderScale);
     if (!aversrArg.empty()) {
 #if AVER_MODULE_SR
@@ -27708,6 +27803,33 @@ Application* createApplication(int argc, char** argv) {
         else if (m == "normals")  app->setGBufferDebugView(GBufferDebugFeature::Mode::NormalRoughness);
         else AVER_ERROR("[Sandbox] --gbuffer-debug '{}' not recognised (velocity|viewz|normals)",
                         gbufferDebug);
+    }
+    if (noOcclusionCullArg) {
+#if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
+        app->setOcclusionCullForceOff();
+#else
+        AVER_WARN("[Occlusion] --no-occlusion-cull was given but this build has no Occlusion module "
+                  "(-DAVER_MODULE_OCCLUSION=ON to include it); there was nothing to turn off");
+#endif
+    }
+    if (occlusionWaitIdleArg) {
+#if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
+        app->setOcclusionDebugForceWaitIdle(true);
+#else
+        AVER_WARN("[Occlusion] --occlusion-waitidle was given but this build has no Occlusion module "
+                  "(-DAVER_MODULE_OCCLUSION=ON to include it); there was nothing to force");
+#endif
+    }
+    // Checked AFTER --occlusion-waitidle so that if both are somehow passed, the flag that actually
+    // does something today (opting OUT of the new default) wins -- see occlusionNoWaitIdleArg's own
+    // comment above.
+    if (occlusionNoWaitIdleArg) {
+#if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
+        app->setOcclusionDebugForceWaitIdle(false);
+#else
+        AVER_WARN("[Occlusion] --no-occlusion-waitidle was given but this build has no Occlusion "
+                  "module (-DAVER_MODULE_OCCLUSION=ON to include it); there was nothing to release");
+#endif
     }
     if (occlusionCull) {
 #if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE

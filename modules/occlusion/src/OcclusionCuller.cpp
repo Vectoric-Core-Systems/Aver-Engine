@@ -76,6 +76,92 @@ ShaderHandle compileCS(IResourceFactory& res, const char* source, const char* en
 
 class OcclusionCullerImpl final : public IOcclusionCuller {
 public:
+    // MEASURED, on the PTTest/NewSponza repro under --cam-translate (continuous translation, not
+    // --cam-wobble's rotation -- see the commit this lands with): with the per-frame res.waitIdle()
+    // that used to sit at the bottom of testBatch(), turning occlusion culling on versus off at the
+    // SAME frame count produced a large, deterministic, non-noise difference in the FINAL RENDERED
+    // IMAGE -- 45.96% of pixels differing by >40/765 at frame 50, a broad darkening of every GI-lit
+    // surface, reproduced independently twice. Content reaching VoxiRenderer is provably identical
+    // either way (an occlusion-hidden entity still submits via submitShadowOnly with the same mesh/
+    // transform/material as the visible path -- already established elsewhere in this investigation),
+    // so nothing about WHAT gets drawn explains it. Temporarily removing the waitIdle() (reverted
+    // before landing, see the commit) collapsed that same comparison to 0.011% -- the ordinary
+    // run-to-run noise floor this tree documents elsewhere (aver-render-nondeterminism.md) -- which
+    // is strong, direct evidence that the STALL ITSELF, not merely "occlusion is on", is what was
+    // perturbing the GI/denoiser pipeline into a different (but internally consistent) result every
+    // time it ran. Full-queue waitIdle() does not merely wait; forcing the CPU to fully catch up with
+    // the GPU mid-frame is a real, engine-wide perturbation this module has no business causing just
+    // to protect its OWN small, reused buffers.
+    //
+    // A bare removal is NOT safe, though, and was shown not to be: boxesBuf_/visBuf_/visReadback_/
+    // genUpload_/genReadback_ were each a SINGLE instance, written by the CPU (an immediate memcpy
+    // for the Upload-heap ones) and consumed by a GPU dispatch+copy that will not actually execute
+    // until sometime after this function returns (see testBatch()'s own "CORRECTED" comment on why).
+    // Without the wait, a later call's CPU write can land before an earlier call's GPU read of the
+    // SAME buffer has retired -- a genuine torn read/write, not merely a stale one -- which is
+    // consistent with a real, separately measured cost: a bare removal (no re-buffering) made TWO
+    // back-to-back reruns of the IDENTICAL configuration disagree with EACH OTHER by ~50x more than
+    // with the wait present, a new self-race, not a revealed old one.
+    //
+    // The fix kept here is the standard one for exactly this shape of hazard, already used
+    // everywhere else in this codebase a per-frame GPU resource is CPU-written and GPU-consumed
+    // (D3D12Device's frameCBs_[kFrameCount], postCBs_[kFrameCount], ring_[kFrameCount], etc., all
+    // sized by the swapchain's own buffer count, currently 2): rotate through several independent
+    // copies of each such buffer instead of reusing one, so a later call's write lands in a copy the
+    // GPU finished with calls ago, never the one it might still be reading. kInFlight is 3, not the
+    // engine's own kFrameCount==2: this module's dispatch runs from SandboxApp's onUpdate(), which
+    // this codebase's own comments document as running BEFORE that frame's device_->beginFrame() (see
+    // Engine::frameStep() and SandboxApp.cpp's own comment beside its ptSceneView reconciliation), so
+    // occlusion's call cadence is one step out of phase with the swapchain's own back-buffer index --
+    // tracing the exact margin that phase shift leaves needs backend internals this module does not
+    // have (and should not reach for). One extra slot of headroom over the engine's own 2 costs a few
+    // KB of GPU memory (boxCapacity_ entities * 32/4/4 bytes, times one extra copy) and removes the
+    // need to get that phase arithmetic exactly right.
+    //
+    // WHAT DOES NOT CHANGE: the "exactly one call stale" design (Occlusion.hpp's TWO-PASS section) --
+    // testBatch() still reads the IMMEDIATELY PRECEDING call's answer, from a DIFFERENT slot than the
+    // one it is about to write, so the one-call lag every caller's motion-dilation margin is
+    // calibrated for is untouched; only which physical buffer holds "the previous call's answer" now
+    // rotates. The generation-stamp/identity staleness detectors (readbackLagIsExactlyOneCall(),
+    // boxIdentityChurnCount()) are UNCHANGED and keep doing their job: a readback that is not exactly
+    // one call old is still detected and rejected by the caller, the same safety net that already
+    // existed -- this fix removes the disruptive wait, it does not remove the check that made
+    // removing the wait safe to attempt at all.
+    //
+    // FOLLOW-UP (why debugForceWaitIdle_ defaults TRUE below, not false): a later investigation into a
+    // "lighting is now flat" report re-measured this exact A/B on the same repro and found the wait's
+    // removal is not the clean win the paragraphs above conclude. Two independent, controlled results:
+    // (1) against a converged, static-camera PATH-TRACED reference (ground truth, no occlusion
+    // involved at all), THIS file's post-fix default (no wait) rendered 3.9x too bright (mean luminance
+    // 53.30 vs 13.65) -- the fix's own "converged to OFF" framing never checked OFF against a ground
+    // truth, only against itself; (2) with voxi_restir.hlsli byte-for-byte UNCHANGED, toggling ONLY
+    // this flag on the CURRENT (rotated-buffer) build reproduces the same washed-out/plateau-vs-
+    // structured difference the flat-lighting report describes, which means whatever the removed wait
+    // was incidentally doing for the GI/lighting path is NOT fully explained by the buffer race fixed
+    // above -- whatever it is was never found (a targeted search of every CPU<->GPU crossing in the GI/
+    // denoiser path came back empty; the leading remaining theory is a frame-CADENCE dependency, e.g.
+    // giUpdateInterval's re-bake gate seeing a different effective tick rate, not a memory race). Per
+    // this investigation's own rule -- do not ship a guess, default to whichever image is correct even
+    // if slower -- debugForceWaitIdle_ below defaults to TRUE (pays the stall, matches the better-
+    // corroborated image) until that mechanism is actually found and given its own narrow fix. This
+    // does NOT revive the ORIGINAL bug: the race this class's top comment measured was a hazard in the
+    // single-buffered boxes/visibility/generation resources, and kInFlight rotation (immediately below)
+    // removes that hazard unconditionally, whether or not the wait also runs. The two fixes are
+    // independent; only the wait's default changed.
+    static constexpr u32 kInFlight = 3;
+
+    // A-B SWITCH -- see Occlusion.hpp's own comment on setDebugForceWaitIdle for what it is for and who
+    // reaches it (SandboxApp.cpp's --occlusion-waitidle / --no-occlusion-waitidle, and the matching
+    // console var occlusion.debugForceWaitIdle). DEFAULTS TRUE (see the FOLLOW-UP paragraph above this
+    // class's kInFlight member): true re-adds the exact res.waitIdle() call the top-of-class comment
+    // describes removing, at the exact point it used to sit (end of testBatch(), after the
+    // dispatch+copies are recorded) -- this is now the SHIPPING default, a known, deliberate,
+    // engine-wide per-frame stall paid ONLY while occlusion culling is enabled, kept until the actual
+    // GI/lighting dependency on frame cadence is found and given a narrower fix. Setting this false
+    // (--no-occlusion-waitidle, or `set occlusion.debugForceWaitIdle false` live) opts back into the
+    // faster, rotated-buffers-only path for A/B comparison or once that narrower fix lands.
+    void setDebugForceWaitIdle(bool on) override { debugForceWaitIdle_ = on; }
+
     bool ensureSized(IResourceFactory& res, u32 sceneW, u32 sceneH, u32 sampleCount) override {
         if (!staticOk_) staticOk_ = createStaticPipelines(res);
         if (!staticOk_) return false;
@@ -139,13 +225,27 @@ public:
         if (!staticOk_ || !pyramid_ || count == 0) return;
         if (!ensureBoxCapacity(res, count)) return;
 
+        // WHICH OF THE kInFlight COPIES THIS CALL OWNS -- see this class's own top comment for why
+        // there are several instead of one. `write` is the copy THIS call's box upload/dispatch/copy
+        // targets; `read` is the copy the IMMEDIATELY PRECEDING call targeted, which is what this
+        // call reads back (the "exactly one call stale" design is unchanged, only which physical
+        // buffer holds that previous answer now rotates). The two are always different slots for any
+        // kInFlight > 1, so the read below and the write further down never touch the same memory --
+        // there is no ordering hazard to reason about BETWEEN them, only between one call's write and
+        // a call kInFlight ago's write to that SAME slot, which is what the rotation exists to space
+        // out. thisGeneration - 1 cannot underflow: thisGeneration is a post-increment of a counter
+        // starting at 0, so it is always >= 1 here.
+        const u64 thisGeneration = ++submitGeneration_;
+        const u32 writeSlot = static_cast<u32>(thisGeneration % kInFlight);
+        const u32 readSlot  = static_cast<u32>((thisGeneration - 1) % kInFlight);
+
         packed_.resize(static_cast<usize>(count) * 8);
         for (u32 i = 0; i < count; ++i) {
             f32* p = &packed_[static_cast<usize>(i) * 8];
             p[0] = boxes[i].min[0]; p[1] = boxes[i].min[1]; p[2] = boxes[i].min[2]; p[3] = 0.0f;
             p[4] = boxes[i].max[0]; p[5] = boxes[i].max[1]; p[6] = boxes[i].max[2]; p[7] = 0.0f;
         }
-        res.writeBuffer(boxesBuf_, packed_.data(), static_cast<u64>(packed_.size()) * sizeof(f32), 0);
+        res.writeBuffer(boxesBuf_[writeSlot], packed_.data(), static_cast<u64>(packed_.size()) * sizeof(f32), 0);
 
         // SECOND STALENESS DIMENSION -- IDENTITY, NOT JUST TIMING. See hashIdentityKey()'s own
         // comment (OcclusionMath.hpp) for the full gap this closes, why it takes the CALLER's own
@@ -160,82 +260,86 @@ public:
         // point, as the visibility copy below -- so both copies land in the GPU in the same
         // ExecuteCommandLists/QueueSubmit batch and retire together. Costs one extra 8-byte
         // writeBuffer + copyBuffer + readBuffer per call; no shader change, since it never touches
-        // the compute pipelines (see genUpload_/genReadback_'s own comment below for why a plain
-        // buffer-to-buffer copy is enough and CSTest does not need to know this exists).
+        // the compute pipelines.
         //
         // WHY THIS EXISTS: every caller of this module (today, only SandboxApp.cpp) that tries to
         // bound the one-call staleness testBatch() has (see the corrected "TWO-PASS" section in
         // Occlusion.hpp) is reasoning from an assumption -- "the bytes I just read back are from
-        // EXACTLY the immediately preceding call, not two or more calls back." That assumption has
-        // held in every trace read while building this fix, but nothing in this module previously
-        // PROVED it frame to frame; boxesBuf_/visBuf_/visReadback_ are single-buffered and reused by
-        // every call with no per-call-in-flight fencing beyond the waitIdle() below, so a caller that
-        // skips a call, a device hiccup, or a future change to this file's own submission order could
-        // silently stretch the lag past one call with no symptom louder than "occlusion culls a
-        // little more than it should have." Comparing the generation number actually read back
-        // against the one this exact call submitted -1 turns that possibility into something a
-        // caller can check via readbackLagIsExactlyOneCall() and react to loudly, instead of a silent wrong
-        // answer no screenshot diff would necessarily catch.
-        // THE STAMP IS WRITTEN AT THE *END* OF THIS FUNCTION, NOT HERE, AND THAT IS THE WHOLE FIX.
+        // EXACTLY the immediately preceding call, not two or more calls back." Comparing the
+        // generation number actually read back against the one this exact call submitted -1 turns
+        // that possibility into something a caller can check via readbackLagIsExactlyOneCall() and
+        // react to loudly, instead of a silent wrong answer no screenshot diff would necessarily
+        // catch. Written into genUpload_[writeSlot] now (not "at the end", as an earlier revision of
+        // this file needed -- see below) because writeSlot is a copy no earlier call is still using.
         //
-        // It used to be written right here, and that raced with its own readback so reliably that
-        // the detector reported "stale" on essentially every frame -- which, because a caller treats
-        // that as "do not trust the answer", meant occlusion culling was DISABLED PERMANENTLY while
-        // appearing to be enabled. The warning was real; what it was detecting was itself.
-        //
-        // The race: genUpload_ is a single buffer and writeBuffer on an upload heap is an immediate
-        // CPU memcpy, but copyBuffer below is recorded and does not execute until this frame's
-        // command list is submitted -- after this function returns. So call N's write landed in the
-        // buffer BEFORE waitIdle() had drained call N-1's copy, and that copy, reading at GPU
-        // execute time, captured N instead of the N-1 it was recorded to capture. The readback then
-        // disagreed with thisGeneration - 1 by exactly one, forever.
-        //
-        // Writing the stamp after waitIdle() and after the readback closes it with no new
-        // synchronisation: by then the previous copy has provably retired, so the buffer is free,
-        // and this call's own copy -- recorded below but executed at submit -- still reads the value
-        // this call wants it to carry.
-        const u64 thisGeneration = ++submitGeneration_;
+        // THE RACE THIS USED TO HAVE, AND WHY IT DOES NOT ANY MORE. With a single genUpload_ buffer
+        // (this file's previous shape) writing the stamp here raced its own readback so reliably that
+        // the detector reported "stale" on essentially every frame -- writeBuffer on an upload heap is
+        // an immediate CPU memcpy, but the copyBuffer that reads it is only RECORDED here and does not
+        // execute until this frame's command list is submitted, after this function returns; call N's
+        // write could land before call N-1's copy (reading the SAME single buffer) had actually
+        // retired, and that copy then captured N instead of the N-1 it was recorded to capture. The
+        // fix at the time was to write the stamp only after an unconditional res.waitIdle() had
+        // provably drained call N-1's copy -- correct, but it meant this module could not answer a
+        // visibility query without a full engine-wide GPU/CPU sync every single call, which MEASURING
+        // this repro (see this class's own top comment) showed was not merely slow: it was
+        // deterministically perturbing the ray-driven GI/denoiser pipeline into a different rendered
+        // image depending on whether occlusion happened to be enabled, unrelated to anything
+        // occlusion actually culled. Rotating genUpload_/genReadback_ the same way as the box/
+        // visibility buffers removes the NEED for that wait: writeSlot was last used kInFlight calls
+        // ago, comfortably retired by now (see the top comment for the margin), so writing it here,
+        // before this call's own copy is even recorded, is safe with no wait at all.
+        res.writeBuffer(genUpload_[writeSlot], &thisGeneration, sizeof(thisGeneration), 0);
 
         {
             ScopedGpuStat stat(ctx, "HZB test");
-            if (!visBufLive_) {
-                ctx.bufferBarrier(visBuf_, ResourceState::Common, ResourceState::UnorderedAccess);
-                visBufLive_ = true;
+            if (!visBufLive_[writeSlot]) {
+                ctx.bufferBarrier(visBuf_[writeSlot], ResourceState::Common, ResourceState::UnorderedAccess);
+                visBufLive_[writeSlot] = true;
             }
             ctx.setPipeline(testPso_);
-            ctx.setBindingSet(testSet_);
+            ctx.setBindingSet(testSet_[writeSlot]);
             struct TestCB { f32 vp[16]; u32 count, w, h, mips; } cb{};
             std::memcpy(cb.vp, viewProjCache_, sizeof(cb.vp));
             cb.count = count; cb.w = pyramidW_; cb.h = pyramidH_; cb.mips = mipCount_;
             ctx.setConstants(1, &cb, 20);
             ctx.dispatch((count + 63) / 64, 1, 1);
-            ctx.uavBarrierBuffer(visBuf_);
-            ctx.bufferBarrier(visBuf_, ResourceState::UnorderedAccess, ResourceState::CopySource);
-            ctx.copyBuffer(visReadback_, visBuf_, static_cast<u64>(count) * 4);
-            ctx.bufferBarrier(visBuf_, ResourceState::CopySource, ResourceState::UnorderedAccess);
+            ctx.uavBarrierBuffer(visBuf_[writeSlot]);
+            ctx.bufferBarrier(visBuf_[writeSlot], ResourceState::UnorderedAccess, ResourceState::CopySource);
+            ctx.copyBuffer(visReadback_[writeSlot], visBuf_[writeSlot], static_cast<u64>(count) * 4);
+            ctx.bufferBarrier(visBuf_[writeSlot], ResourceState::CopySource, ResourceState::UnorderedAccess);
             // Both genUpload_ (Upload) and genReadback_ (Readback) sit permanently in states that
             // already allow a copy (GENERIC_READ / COPY_DEST -- see their creation below), the exact
             // same reasoning boxesBuf_ and visReadback_ already rely on above, so no extra barrier is
             // needed here either.
-            ctx.copyBuffer(genReadback_, genUpload_, sizeof(thisGeneration));
+            ctx.copyBuffer(genReadback_[writeSlot], genUpload_[writeSlot], sizeof(thisGeneration));
         }
 
-        // CORRECTED -- this used to claim testBatch() "promises a CPU-visible answer... in the SAME
-        // frame the copy above was recorded." It does not, and cannot with this RHI: waitIdle() (see
-        // Occlusion.hpp's corrected "THE ONE COST" section) only drains GPU work ALREADY SUBMITTED
-        // via a previous ExecuteCommandLists/QueueSubmit -- it does not, and structurally cannot,
-        // close/submit/wait-for THIS call's own dispatch+copy, which are still sitting unexecuted in
-        // the caller's still-open frame command list at this exact point. So this stall waits for
-        // whatever WAS already submitted (ordinarily: everything through the end of the PREVIOUS
-        // frame) to finish, and the bytes readBuffer() below then reads are whatever the PREVIOUS
-        // successful testBatch() call's copy wrote -- whichever call that was; see the generation
-        // check just below for how a caller confirms it was exactly one call back rather than
-        // assuming so. A real same-frame answer would need a NEW "flush this frame's own command
-        // list, then resume recording into it" RHI primitive that does not exist today, on either
-        // backend; adding one is out of this module's scope. This stall is real and measured (see the
-        // commit this lands with for the actual number on Electric Dreams) -- it is just paying for a
-        // stale answer, not a fresh one.
-        res.waitIdle();
+        // res.waitIdle() HERE IS NOW THE DEFAULT (debugForceWaitIdle_ defaults true -- see the
+        // FOLLOW-UP paragraph on this class's kInFlight member for why). It is NOT here to protect
+        // boxesBuf_/visBuf_/visReadback_/genUpload_/genReadback_ any more -- kInFlight rotation already
+        // does that unconditionally, wait or no wait -- it is here because a later investigation found
+        // the GI/lighting path still looks measurably different (against a path-traced ground truth,
+        // and in a same-shader, wait-only A/B) with the wait gone, and could not pin down why. This is
+        // the "last resort, scoped as tightly as this module can manage" case: a real, engine-wide
+        // GPU/CPU drain, paid on every testBatch() call while occlusion culling is enabled (never when
+        // it is off), at whatever framerate cost that measures as on the caller's scene -- accepted
+        // because a right image outweighs a fast wrong one until the actual dependency is found and
+        // given its own narrow fix (a fence on just that resource, not this module's queue drain).
+        // Setting debugForceWaitIdle_ false (--no-occlusion-waitidle / the console var) removes the
+        // stall and returns to reading whatever the call that owned `readSlot` (the IMMEDIATELY
+        // PRECEDING call, thisGeneration - 1) already left there -- possibly not yet landed, if the GPU
+        // is behind, which is exactly what the generation check further down exists to catch; this
+        // function has never promised a same-frame answer (see the corrected "TWO-PASS" section,
+        // Occlusion.hpp) and still does not, wait or no wait.
+        //
+        // Positioned exactly where the pre-fix build had it: after the dispatch+copies above are
+        // RECORDED (not yet executed; see the "CORRECTED" comment on why waitIdle() here still cannot
+        // drain THIS call's own still-open command list) and before the readback below. Draining
+        // whatever WAS already submitted -- ordinarily everything through the end of the previous
+        // frame -- does not change which slot is written or read (kInFlight rotation is unconditional
+        // either way), only whether the CPU stalls here first.
+        if (debugForceWaitIdle_) res.waitIdle();
 
         // THE FIRST CALL READS NOTHING, BECAUSE THERE IS NOTHING TO READ, and reading it anyway is
         // what produced "19 of 19 tested entities culled (100.0%)" on the opening frame of every
@@ -251,22 +355,44 @@ public:
         // occluded, so "everything visible" is exactly true, and it is true in the conservative
         // direction that costs a frame of drawing rather than a frame of missing geometry.
         //
-        // AND IT IS > 2, NOT > 1, BECAUSE THE FIRST DISPATCH IS ALSO WORTHLESS -- for a different
-        // reason than the first readback, which is why both guards are needed. This is a two-pass
-        // occlusion scheme: buildPyramid() runs from the scene depth texture BEFORE this frame's
-        // scene is drawn, so it is always reading the PREVIOUS frame's depth. On the opening frame
-        // there is no previous frame, so pyramid mip 0 comes from a depth target nothing has
-        // rendered into, every box tests as occluded against it, and call 2 -- which reads call 1's
-        // dispatch -- reported a flat "19 of 19 tested entities culled (100.0%)". A caller acting on
-        // that culls the ENTIRE SCENE for one frame.
+        // ORIGINALLY ">2, NOT >1, BECAUSE THE FIRST DISPATCH IS ALSO WORTHLESS" -- for a different
+        // reason than the first readback, which is why two guards were needed even before this fix.
+        // This is a two-pass occlusion scheme: buildPyramid() runs from the scene depth texture
+        // BEFORE this frame's scene is drawn, so it is always reading the PREVIOUS frame's depth. On
+        // the opening frame there is no previous frame, so pyramid mip 0 comes from a depth target
+        // nothing has rendered into, every box tests as occluded against it, and call 2 -- which
+        // reads call 1's dispatch -- reported a flat "19 of 19 tested entities culled (100.0%)". A
+        // caller acting on that culls the ENTIRE SCENE for one frame.
         //
-        // MEASURED, which is how the second guard was found at all: with only the > 1 guard the
+        // MEASURED, which is how that second guard was found at all: with only a >1 guard the
         // opening frame correctly read 0 of 19, and the 19 simply moved to the next report instead
         // of disappearing. Same scene, same frame count, identical in raster and ray-driven mode --
         // so it was never about which renderer wrote the depth, only about there not being one yet.
-        if (thisGeneration > 2) {
+        //
+        // NOW GENERALISED to minReadableGeneration_ (default 3, i.e. exactly the ">2" above) rather
+        // than a bare literal, because "the opening frame's depth/pyramid is not real yet" turned out
+        // to have a SECOND trigger this repro hit live and the ORIGINAL bare ">2" could not see:
+        // createPyramidResources()'s own comment covers the depth/pyramid recreation case (a scene
+        // resize mid-run); ensureBoxCapacity()'s resize branch covers a DIFFERENT one this fix's own
+        // rotation exposed measurably -- a box-count growth that outgrows the current headroom
+        // destroys and recreates every boxesBuf_/visBuf_/visReadback_/testSet_ slot, and the
+        // generation stamp (genUpload_/genReadback_, deliberately sized once and never touched by
+        // that resize) has no way to know the slot it is vouching for was just thrown away and
+        // rebuilt empty -- "was the lag exactly one call" and "is this the same buffer that call
+        // actually wrote" are different questions, and only the first one had a check. MEASURED: on
+        // this repro, that gap alone produced 224 of 691 (32.4%) freshly-culled entities in one
+        // report window against a baseline of 0, and the pyramid-recreation trigger (the SAME
+        // resize, in practice -- see createPyramidResources()'s own comment) produced several more
+        // calls each reporting close to the FULL box count culled, structurally the exact "19 of 19"
+        // bug this module's history already describes, just retriggered mid-run. Both triggers push
+        // the SAME floor forward by the SAME margin (createPyramidResources()'s comment has the
+        // measured number and why it is wider than the original startup guard's "+3"); this is
+        // deliberately the more conservative of the two requirements rather than trying to prove a
+        // narrower warmup would have sufficed for the box-only case -- an extra "assume everything
+        // visible" frame costs a few unnecessary draws, never a false cull.
+        if (thisGeneration >= minReadableGeneration_) {
             rawVisible_.resize(count);
-            if (res.readBuffer(visReadback_, rawVisible_.data(), static_cast<u64>(count) * 4, 0)) {
+            if (res.readBuffer(visReadback_[readSlot], rawVisible_.data(), static_cast<u64>(count) * 4, 0)) {
                 for (u32 i = 0; i < count; ++i) {
                     const bool visible = rawVisible_[i] != 0;
                     outVisible[i] = visible ? 1 : 0;
@@ -290,7 +416,7 @@ public:
             readbackLagExpected_ = true;
         } else {
             u64 readGeneration = 0;
-            if (res.readBuffer(genReadback_, &readGeneration, sizeof(readGeneration), 0) &&
+            if (res.readBuffer(genReadback_[readSlot], &readGeneration, sizeof(readGeneration), 0) &&
                 readGeneration == thisGeneration - 1 && boxesStableAcrossLag) {
                 readbackLagExpected_ = true;
             } else if (readGeneration == thisGeneration - 1 && !boxesStableAcrossLag) {
@@ -308,14 +434,6 @@ public:
             // answered for were not this call's own -- the one-call-lag assumption every caller's own
             // safety margin depends on did not hold this time, for one reason or the other.
         }
-
-        // AND ONLY NOW THE STAMP -- see the long comment where thisGeneration is computed. The copy
-        // recorded above has not executed yet (it goes out with this frame's command list, after
-        // this function returns), so it will read exactly this value; and the PREVIOUS call's copy
-        // has provably retired, because waitIdle() above drained it and the readback just consumed
-        // its result. Both halves of the race are closed by position alone, with no extra fence and
-        // no second buffer.
-        res.writeBuffer(genUpload_, &thisGeneration, sizeof(thisGeneration), 0);
     }
 
     void lastTestCounts(u32& culled, u32& tested) const override { culled = lastCulled_; tested = lastTested_; }
@@ -328,12 +446,16 @@ public:
         destroyPyramidResources(res);
         if (reducePso_) { res.destroyPipeline(reducePso_); reducePso_ = 0; }
         if (testPso_)   { res.destroyPipeline(testPso_);   testPso_ = 0; }
-        if (boxesBuf_)    { res.destroyBuffer(boxesBuf_);    boxesBuf_ = 0; }
-        if (visBuf_)      { res.destroyBuffer(visBuf_);      visBuf_ = 0; }
-        if (visReadback_) { res.destroyBuffer(visReadback_); visReadback_ = 0; }
-        if (genUpload_)   { res.destroyBuffer(genUpload_);   genUpload_ = 0; }
-        if (genReadback_) { res.destroyBuffer(genReadback_); genReadback_ = 0; }
-        if (testSet_)     { res.destroyBindingSet(testSet_); testSet_ = 0; }
+        // kInFlight independent copies, one per in-flight slot -- see this class's own top comment.
+        for (u32 i = 0; i < kInFlight; ++i) {
+            if (boxesBuf_[i])    { res.destroyBuffer(boxesBuf_[i]);    boxesBuf_[i] = 0; }
+            if (visBuf_[i])      { res.destroyBuffer(visBuf_[i]);      visBuf_[i] = 0; }
+            if (visReadback_[i]) { res.destroyBuffer(visReadback_[i]); visReadback_[i] = 0; }
+            if (genUpload_[i])   { res.destroyBuffer(genUpload_[i]);   genUpload_[i] = 0; }
+            if (genReadback_[i]) { res.destroyBuffer(genReadback_[i]); genReadback_[i] = 0; }
+            if (testSet_[i])     { res.destroyBindingSet(testSet_[i]); testSet_[i] = 0; }
+            visBufLive_[i] = false;
+        }
         boxCapacity_ = 0;
         staticOk_ = false;
         res_ = nullptr;
@@ -368,6 +490,31 @@ private:
     }
 
     bool createPyramidResources(IResourceFactory& res) {
+        // FOUND AND MEASURED WHILE BUILDING THIS FIX -- a SECOND, independent way to read a buffer no
+        // real dispatch has answered for, distinct from ensureBoxCapacity()'s box-buffer resize (see
+        // minReadableGeneration_'s own comment). A scene resize -- a render-scale change, a window
+        // resize, the editor viewport settling to its real size a frame or two after launch, all
+        // observed live on this exact repro -- recreates pyramid_ at the new resolution here, but
+        // does NOT, by itself, mean the SCENE DEPTH TEXTURE buildPyramid() reads from is already
+        // full of real content: that texture is very often resized at the SAME moment (same trigger,
+        // same frame), so the next call or two are seeding the pyramid from a depth target nothing
+        // has rendered into yet -- the IDENTICAL "opening frame" problem testBatch()'s own ">2"
+        // history solved once, recurring every time this fires instead of only at startup.
+        // MEASURED: on the PTTest repro, a resize landing here (2049x1152, settling from an initial
+        // 3532x1987, one frame after the module's own construction) made testBatch() calls up
+        // through generation 5 each report ~100% of the ~112 tested entities culled -- structurally
+        // the exact "19 of 19 tested entities culled" bug this module's history describes, just
+        // retriggered mid-run instead of only once at the top. That is a WIDER window than the naive
+        // "one buildPyramid() call to see real depth, one testBatch() call to be read" count would
+        // predict (which would put the margin at +3, matching the original startup guard) -- a
+        // resize commonly changes the UNDERLYING SCENE DEPTH TEXTURE's own resolution at the very
+        // same moment, not merely this module's pyramid, which needs its own frame to fill with
+        // real content before buildPyramid() has anything real to seed from; the exact mechanism
+        // was not fully isolated, so the margin below is the MEASURED safe point plus one call of
+        // headroom rather than a value derived from first principles. Widening it costs nothing but
+        // a few extra "assume visible" frames right at a resize; the direction to err in is safety,
+        // not precision, exactly as this module's own dilation math already does.
+        minReadableGeneration_ = std::max(minReadableGeneration_, submitGeneration_ + 6);
         destroyPyramidResources(res);
         pyramidW_ = sceneW_; pyramidH_ = sceneH_;
 
@@ -439,84 +586,108 @@ private:
         mipCount_ = 0;
     }
 
+    // Creates (or resizes) all kInFlight copies of testBatch()'s per-call resources together --
+    // see this class's own top comment for why there are several. Every copy is always the SAME
+    // capacity; there is no per-slot sizing, since box count is a property of the SCENE this frame,
+    // not of which rotation slot happens to be live.
     bool ensureBoxCapacity(IResourceFactory& res, u32 count) {
-        // The staleness-detector's stamp buffers: fixed at 8 bytes (one u64), independent of
-        // boxCapacity_, so they are created ONCE (guarded separately) rather than being torn down
-        // and rebuilt every time the box count grows past its own headroom below. Not worth their
-        // own dedicated init function: this is the only place testBatch()'s GPU-side resources are
-        // lazily created at all, so a second such place would just be a second thing to remember to
-        // call.
+        // The staleness-detector's stamp buffers: fixed at 8 bytes (one u64) each, independent of
+        // boxCapacity_, so they are created ONCE per slot (guarded separately) rather than being torn
+        // down and rebuilt every time the box count grows past its own headroom below. Not worth
+        // their own dedicated init function: this is the only place testBatch()'s GPU-side resources
+        // are lazily created at all, so a second such place would just be a second thing to remember
+        // to call.
         //
-        // Guarded on genReadback_ (the SECOND of the pair), not genUpload_ (the first) -- the same
-        // "guard on the last thing the sequence creates" idiom the box buffers below already use
-        // (guarded on testSet_, their own last step), so a call that got genUpload_ but failed on
-        // genReadback_ retries BOTH next time instead of silently reusing a half-created pair with
-        // genReadback_ stuck at 0 forever.
-        if (!genReadback_) {
-            if (genUpload_) { res.destroyBuffer(genUpload_); genUpload_ = 0; }
-            BufferDesc gud;
-            gud.bytes = sizeof(u64);
-            gud.kind = BufferKind::Upload;
-            gud.debugName = "HZB test generation stamp (upload)";
-            genUpload_ = res.createBuffer(gud);
+        // Guarded on genReadback_[kInFlight - 1] (the LAST slot's SECOND buffer of the pair) -- the
+        // same "guard on the last thing the sequence creates" idiom the box buffers below already use
+        // (guarded on testSet_[kInFlight - 1]), so a call that created some slots' pairs but failed
+        // partway through retries the WHOLE set next time instead of silently reusing a half-created
+        // batch.
+        if (!genReadback_[kInFlight - 1]) {
+            for (u32 i = 0; i < kInFlight; ++i) {
+                if (genUpload_[i])   { res.destroyBuffer(genUpload_[i]);   genUpload_[i] = 0; }
+                if (genReadback_[i]) { res.destroyBuffer(genReadback_[i]); genReadback_[i] = 0; }
 
-            BufferDesc grd;
-            grd.bytes = sizeof(u64);
-            grd.kind = BufferKind::Readback;
-            grd.debugName = "HZB test generation stamp (readback)";
-            genReadback_ = res.createBuffer(grd);
+                BufferDesc gud;
+                gud.bytes = sizeof(u64);
+                gud.kind = BufferKind::Upload;
+                gud.debugName = "HZB test generation stamp (upload)";
+                genUpload_[i] = res.createBuffer(gud);
 
-            if (!genUpload_ || !genReadback_) {
-                AVER_ERROR("[Occlusion] HZB staleness-detector buffers unavailable -- "
-                           "readbackLagIsExactlyOneCall() will report false forever, which is safe (every "
-                           "caller falls back to no culling) but gives up the culling benefit entirely");
-                return false;
+                BufferDesc grd;
+                grd.bytes = sizeof(u64);
+                grd.kind = BufferKind::Readback;
+                grd.debugName = "HZB test generation stamp (readback)";
+                genReadback_[i] = res.createBuffer(grd);
+
+                if (!genUpload_[i] || !genReadback_[i]) {
+                    AVER_ERROR("[Occlusion] HZB staleness-detector buffers unavailable -- "
+                               "readbackLagIsExactlyOneCall() will report false forever, which is safe "
+                               "(every caller falls back to no culling) but gives up the culling "
+                               "benefit entirely");
+                    return false;
+                }
             }
         }
-        if (count <= boxCapacity_ && testSet_) return true;
-        if (boxesBuf_)    { res.destroyBuffer(boxesBuf_);    boxesBuf_ = 0; }
-        if (visBuf_)      { res.destroyBuffer(visBuf_);      visBuf_ = 0; }
-        if (visReadback_) { res.destroyBuffer(visReadback_); visReadback_ = 0; }
-        if (testSet_)     { res.destroyBindingSet(testSet_); testSet_ = 0; }
-        visBufLive_ = false;
+        if (count <= boxCapacity_ && testSet_[kInFlight - 1]) return true;
+        // A REAL RESIZE, ABOUT TO THROW AWAY WHATEVER ANY SLOT WAS HOLDING -- see
+        // minReadableGeneration_'s own comment (testBatch()) for the gap this closes, and
+        // createPyramidResources()'s own comment (this same margin, "+6" not the naively-expected
+        // "+3") for what was actually measured and why the wider number is kept here too: on this
+        // repro a box-driven resize and the depth/pyramid resize both land within the SAME one- or
+        // two-frame settling window, so there is no evidence the two need DIFFERENT margins, and
+        // using the smaller, unproven one here would reopen exactly the gap this fix exists to close
+        // the moment a level settles in a way that separates them. submitGeneration_ is the count of
+        // calls BEFORE this one (this function runs before testBatch() increments it for the call in
+        // progress).
+        minReadableGeneration_ = std::max(minReadableGeneration_, submitGeneration_ + 6);
+        for (u32 i = 0; i < kInFlight; ++i) {
+            if (boxesBuf_[i])    { res.destroyBuffer(boxesBuf_[i]);    boxesBuf_[i] = 0; }
+            if (visBuf_[i])      { res.destroyBuffer(visBuf_[i]);      visBuf_[i] = 0; }
+            if (visReadback_[i]) { res.destroyBuffer(visReadback_[i]); visReadback_[i] = 0; }
+            if (testSet_[i])     { res.destroyBindingSet(testSet_[i]); testSet_[i] = 0; }
+            visBufLive_[i] = false;
+        }
 
         // Headroom so a count that drifts by a handful of entities frame to frame (an actor spawned
         // or destroyed) does not reallocate every single frame -- 25% or 64, whichever is larger.
         boxCapacity_ = count + std::max<u32>(count / 4, 64);
 
-        BufferDesc bd;
-        bd.bytes = static_cast<u64>(boxCapacity_) * 32;   // AabbGpu: 8 floats
-        bd.kind = BufferKind::Upload;
-        bd.debugName = "HZB test boxes";
-        boxesBuf_ = res.createBuffer(bd);
+        for (u32 i = 0; i < kInFlight; ++i) {
+            BufferDesc bd;
+            bd.bytes = static_cast<u64>(boxCapacity_) * 32;   // AabbGpu: 8 floats
+            bd.kind = BufferKind::Upload;
+            bd.debugName = "HZB test boxes";
+            boxesBuf_[i] = res.createBuffer(bd);
 
-        BufferDesc vd;
-        vd.bytes = static_cast<u64>(boxCapacity_) * 4;
-        vd.kind = BufferKind::Default;
-        vd.allowUnorderedAccess = true;
-        vd.debugName = "HZB visible";
-        visBuf_ = res.createBuffer(vd);
+            BufferDesc vd;
+            vd.bytes = static_cast<u64>(boxCapacity_) * 4;
+            vd.kind = BufferKind::Default;
+            vd.allowUnorderedAccess = true;
+            vd.debugName = "HZB visible";
+            visBuf_[i] = res.createBuffer(vd);
 
-        BufferDesc rd;
-        rd.bytes = static_cast<u64>(boxCapacity_) * 4;
-        rd.kind = BufferKind::Readback;
-        rd.debugName = "HZB visible readback";
-        visReadback_ = res.createBuffer(rd);
+            BufferDesc rd;
+            rd.bytes = static_cast<u64>(boxCapacity_) * 4;
+            rd.kind = BufferKind::Readback;
+            rd.debugName = "HZB visible readback";
+            visReadback_[i] = res.createBuffer(rd);
 
-        BindingSetDesc sd;
-        sd.srvCount = 2; sd.uavCount = 1;
-        sd.srvKinds[0] = SlotKind::StructuredBuffer;
-        sd.srvKinds[1] = SlotKind::Texture2D;
-        sd.uavKinds[0] = SlotKind::StructuredBuffer;
-        testSet_ = res.createBindingSet(sd);
+            BindingSetDesc sd;
+            sd.srvCount = 2; sd.uavCount = 1;
+            sd.srvKinds[0] = SlotKind::StructuredBuffer;
+            sd.srvKinds[1] = SlotKind::Texture2D;
+            sd.uavKinds[0] = SlotKind::StructuredBuffer;
+            testSet_[i] = res.createBindingSet(sd);
 
-        if (!boxesBuf_ || !visBuf_ || !visReadback_ || !testSet_) {
-            AVER_ERROR("[Occlusion] HZB test resources for {} boxes unavailable", boxCapacity_);
-            return false;
+            if (!boxesBuf_[i] || !visBuf_[i] || !visReadback_[i] || !testSet_[i]) {
+                AVER_ERROR("[Occlusion] HZB test resources for {} boxes unavailable (slot {})", boxCapacity_, i);
+                return false;
+            }
+            res.setSrvBuffer(testSet_[i], 0, boxesBuf_[i], 32, boxCapacity_, 0);
+            if (pyramid_) res.setSrv(testSet_[i], 1, pyramid_, kAllMips);
+            res.setUavBuffer(testSet_[i], 0, visBuf_[i], 4, boxCapacity_, 0);
         }
-        res.setSrvBuffer(testSet_, 0, boxesBuf_, 32, boxCapacity_, 0);
-        if (pyramid_) res.setSrv(testSet_, 1, pyramid_, kAllMips);
-        res.setUavBuffer(testSet_, 0, visBuf_, 4, boxCapacity_, 0);
         return true;
     }
 
@@ -526,18 +697,40 @@ private:
 
     bool staticOk_ = false;
     PipelineHandle reducePso_ = 0, testPso_ = 0, seedPso_ = 0;
-    BindingSetHandle seedSet_ = 0, testSet_ = 0;
+    BindingSetHandle seedSet_ = 0;
     std::vector<BindingSetHandle> reduceSets_;
 
-    BufferHandle boxesBuf_ = 0, visBuf_ = 0, visReadback_ = 0;
-    u32 boxCapacity_ = 0;
-    bool visBufLive_ = false;
+    // kInFlight independent copies of every buffer a call to testBatch() writes and later reads back
+    // -- see this class's own top comment for why. Indexed by (generation % kInFlight); NOT
+    // double-buffered to match this engine's own swapchain (kFrameCount == 2 on D3D12), because this
+    // module's dispatch runs from onUpdate(), one step out of phase with the swapchain's own
+    // back-buffer index (see the top comment) -- kInFlight buys enough headroom not to have to prove
+    // that phase relationship exactly.
+    BufferHandle boxesBuf_[kInFlight] = {}, visBuf_[kInFlight] = {}, visReadback_[kInFlight] = {};
+    BindingSetHandle testSet_[kInFlight] = {};
+    u32 boxCapacity_ = 0;   // shared: every slot is always sized identically
+    bool visBufLive_[kInFlight] = {};
+
+    // THE GENERATION A READ FIRST BECOMES TRUSTWORTHY -- see testBatch()'s own comment on the read
+    // guard that uses this. Starts at 3, the ORIGINAL bare ">2" startup warmup (call 1 has nothing
+    // written yet; call 2's dispatch ran against a not-yet-real pyramid); createPyramidResources()
+    // and ensureBoxCapacity()'s resize branch each push this forward by the SAME margin whenever
+    // something they own would otherwise hand back a buffer no real dispatch has answered for yet --
+    // a scene resize (recreates pyramid_, and very often the scene depth texture buildPyramid()
+    // reads alongside it) or a box-count growth past headroom (recreates every boxesBuf_/visBuf_/
+    // visReadback_/testSet_ slot), respectively. Monotonic non-decreasing: std::max at both call
+    // sites, so an overlapping pair of resizes takes the LATER (larger) floor, never regresses to
+    // an earlier, already-superseded one.
+    u64 minReadableGeneration_ = 3;
 
     // STALENESS DETECTOR -- see testBatch()'s own comment above the writeBuffer(genUpload_, ...)
-    // call. 8 bytes each; created once in ensureBoxCapacity, independent of boxCapacity_.
-    BufferHandle genUpload_ = 0, genReadback_ = 0;
+    // call. 8 bytes each, kInFlight copies of the pair; created once per slot in ensureBoxCapacity,
+    // independent of boxCapacity_.
+    BufferHandle genUpload_[kInFlight] = {}, genReadback_[kInFlight] = {};
     u64 submitGeneration_ = 0;      // incremented once per testBatch() call that reaches the dispatch
     bool readbackLagExpected_ = false;   // see readbackLagIsExactlyOneCall()
+    bool debugForceWaitIdle_ = true;     // see setDebugForceWaitIdle() / this class's own top comment
+                                          // -- defaults true: see the FOLLOW-UP paragraph above kInFlight
 
     // SECOND STALENESS DETECTOR -- box IDENTITY across the one-call lag, not GPU timing. See
     // testBatch()'s own comment beside boxesStableAcrossLag's computation for what this catches that

@@ -84,10 +84,12 @@
 //
 // THE CORRECTION: steps 1-4 above describe what the CALLER records, in that order, into one frame's
 // command list. It does NOT describe when the GPU actually RUNS them relative to when testBatch()'s
-// CPU readback happens — and those are not the same moment. testBatch() (OcclusionCuller.cpp) ends
-// with IResourceFactory::waitIdle(), and this RHI's waitIdle() only blocks until GPU work ALREADY
-// SUBMITTED (via a previous ExecuteCommandLists/QueueSubmit) has retired — it has no way to close,
-// submit and wait for the CURRENT frame's own still-open, still-recording command list, because no
+// CPU readback happens — and those are not the same moment. testBatch() (OcclusionCuller.cpp) USED TO
+// end with IResourceFactory::waitIdle() to get an answer at all (see "THE ONE COST" below for why that
+// is CORRECTED too, and OcclusionCullerImpl's own top comment in OcclusionCuller.cpp for the measured
+// reason it no longer does) — but even with the wait gone, the STRUCTURAL lag this paragraph describes
+// has not changed, because that RHI limitation has not: it has no way to close, submit and wait for
+// the CURRENT frame's own still-open, still-recording command list, because no
 // such "flush and resume this same list" primitive exists anywhere in modules/rhi. So step 2's
 // buildPyramid() dispatches and step 3's testBatch() dispatch+copy, all recorded into THIS frame's
 // list, have not reached the GPU by the time testBatch() reads its answer back — what comes back is
@@ -106,23 +108,31 @@
 // automatically, since none of it is backend-specific.
 //
 // ---------------------------------------------------------------------------------------------------
-// THE ONE COST THIS DESIGN DOES NOT HIDE (CORRECTED — this used to claim a same-frame answer; it does
-// not have one, see above). testBatch() cannot hand the caller a CPU-visible answer for THIS frame's
-// own pyramid before step 4 needs to decide what to draw: this engine's RHI (modules/rhi) exposes
-// exactly one GPU/CPU synchronisation primitive a feature module can reach for —
-// IResourceFactory::waitIdle(), a full stop that only drains ALREADY-SUBMITTED work — and testBatch()
-// uses it, so the CPU-visible answer it hands back is (at best) last frame's, not this frame's. That
-// is a REAL, MEASURED stall (see the design doc / commit message this lands with for the number) for
-// an answer that is ALSO stale — the worst of both: a production system would want either GPU-side
-// predication (skip a draw call itself based on a GPU-written flag, never surfacing the answer to the
-// CPU, and never one frame behind) or an indirect/GPU-driven draw path, and this codebase currently
-// has neither — every draw call is issued by name from a CPU walk (SandboxApp.cpp), and adding
-// predication or indirect draws to that walk is a change to the CORE draw path this module's own
-// scope does not include. A genuine same-frame fix would need a NEW mid-frame "flush this frame's own
-// command list, then keep recording into it" primitive that does not exist in modules/rhi today, on
-// either backend — adding one is a real option for later, but is RHI-level surgery out of scope for
-// this module. Reporting the stall — and the staleness it does not remove — honestly, including a run
-// where it makes the frame worse, is the more useful result than hiding either one.
+// THE ONE COST THIS DESIGN USED TO NOT HIDE, AND NO LONGER PAYS (CORRECTED A SECOND TIME — this
+// section used to claim a same-frame answer; then that it cost a real, unconditional GPU/CPU stall to
+// get even a stale one; neither is true any more, and the reason is worth keeping because the first
+// "fix" attempted here made things WORSE, not better). testBatch() still cannot hand the caller a
+// CPU-visible answer for THIS frame's own pyramid before step 4 needs to decide what to draw — this
+// engine's RHI (modules/rhi) exposes exactly one GPU/CPU synchronisation primitive a feature module can
+// reach for, IResourceFactory::waitIdle(), a full stop that only drains ALREADY-SUBMITTED work, and
+// still has no mid-frame "flush and resume" primitive that would make a same-frame answer possible. THE
+// STALENESS IS THEREFORE UNCHANGED AND STRUCTURAL, not something this correction removes. What
+// changed is HOW testBatch() gets a stale-but-safe answer without a stall: it used to call waitIdle()
+// on every single call specifically to protect its own small, single-buffered boxes/visibility/
+// generation-stamp resources from a CPU write racing a GPU read of the SAME memory (see
+// OcclusionCullerImpl's own top comment, OcclusionCuller.cpp, for the measurement that found this
+// stall — not merely slow, but a real, DETERMINISTIC perturbation of the unrelated ray-driven GI/
+// denoiser pipeline, present whenever occlusion was enabled and gone when it was not). Removing the
+// wait outright, with no other change, made a DIFFERENT thing worse: those single-buffered resources
+// then raced for real (a later call's CPU write landing before an earlier call's GPU read had
+// retired), measured as a ~50x increase in run-to-run image instability with occlusion on. The actual
+// fix rotates several independent copies of each such resource (kInFlight, OcclusionCuller.cpp) so a
+// later call's write always lands in a copy the GPU finished with calls ago — the same double/triple-
+// buffering idiom this codebase already uses for every OTHER per-frame CPU-written GPU resource
+// (D3D12Device's frameCBs_[kFrameCount] and friends) — which removes the NEED for a wait rather than
+// removing the wait's own effects by force. The one-call-stale design this file describes above is
+// exactly preserved: a caller still gets, at best, the answer from one call ago, gated by the same
+// readbackLagIsExactlyOneCall() safety net this header already documents below.
 #pragma once
 #include "aver/occlusion/OcclusionMath.hpp"
 #include "aver/rhi/RHI.hpp"
@@ -162,14 +172,42 @@ public:
     virtual void buildPyramid(rhi::IRenderContext& ctx, rhi::TextureHandle sceneDepth,
                               const f32 viewProj[16]) = 0;
 
+    // DEBUG / A-B SWITCH. When `on` is true, testBatch() re-adds the unconditional res.waitIdle()
+    // this file's own top comment ("THE ONE COST...") describes removing -- i.e. it restores the
+    // EXACT pre-fix behaviour (a full GPU/CPU drain at the end of every testBatch() call) at runtime,
+    // with no rebuild, so a live session can A/B "wait restored" against "wait removed" directly
+    // against each other (SandboxApp.cpp's --occlusion-waitidle / --no-occlusion-waitidle CLI flags
+    // and the occlusion.debugForceWaitIdle console var reach this without editing code).
+    //
+    // THIS BASE CLASS's default is a false no-op (safe for a future second implementer with nothing
+    // to restore, who is not obligated to add a real one) -- but OcclusionCullerImpl, the only
+    // implementation in this tree, OVERRIDES the default to TRUE (OcclusionCuller.cpp, see the
+    // FOLLOW-UP comment above its kInFlight member). A follow-up investigation into a "lighting looks
+    // flat" report found the no-wait path measurably worse against a path-traced ground truth and, in
+    // a same-shader controlled A/B, found the wait's removal alone reproduces the flatness -- without
+    // ever pinning down which GI/lighting resource actually depends on it. Per this module's own
+    // rule (do not ship a guess; default to whichever image is correct even if slower), the shipping
+    // default now pays the stall until that dependency is found and given a narrower fix of its own.
+    // Safe to call every frame; NOT PURE.
+    virtual void setDebugForceWaitIdle(bool on) { (void)on; }
+
     // Tests every box in `boxes` against the pyramid buildPyramid() most recently built, and fills
     // outVisible with one byte per box (non-zero = "the pyramid could not prove this is hidden; draw
     // it" — see OcclusionMath.hpp's conservativelyHidden for what that promise actually rests on).
-    // Blocks until SOME answer is CPU-readable before returning (see this header's own top comment on
-    // why that stall is real and deliberate) — but "available" is not "current": the bytes it hands
+    // DOES NOT BLOCK BY ITS OWN DESIGN (CORRECTED — it used to, unconditionally, via a wait this
+    // header's top comment now explains was removed) — but OcclusionCullerImpl currently blocks
+    // again ANYWAY, by default, via the debugForceWaitIdle_ switch just above (see its own comment
+    // for why): read this paragraph as describing the design's floor, not this build's shipping
+    // behaviour. With that switch off, the bytes it hands back are read WITHOUT waiting for the GPU,
+    // on the premise the answer from one call ago has ordinarily had a full call's worth of GPU time
+    // to retire by now — and "available" was never "current" even when this did block: the bytes it hands
     // back are, at best, from the PREVIOUS call to this function, not this one — see the corrected
-    // "TWO-PASS" section above and readbackLagIsExactlyOneCall() below for how a caller checks whether even
-    // that one-call lag held. Opens its own ScopedGpuStat("HZB test") span, SEPARATE from "HZB build"
+    // "TWO-PASS" section above and readbackLagIsExactlyOneCall() below for how a caller checks whether
+    // even that one-call lag held, INCLUDING the case (now more frequent than when this function
+    // blocked, precisely because it no longer forces the GPU to catch up) where the GPU had not
+    // actually finished and the bytes are stale by more than one call — that case was always possible
+    // and is caught the same way either way, only its frequency changed. Opens its own
+    // ScopedGpuStat("HZB test") span, SEPARATE from "HZB build"
     // — the two cost different things and a caller measuring "does this pay for itself" needs to see
     // them apart.
     //
