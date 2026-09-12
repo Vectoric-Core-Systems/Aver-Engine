@@ -41,6 +41,7 @@
 // is hosted -- independent of AVER_MODULE_SCENE, since a section is not an ECS entity.
 #if AVER_MODULE_LANDSCAPE
 #include "aver/formats/OcLand.hpp"
+#include "aver/formats/OcFoliage.hpp"
 #include "aver/landscape/LandscapeTree.hpp"
 #include "aver/landscape/LandscapeRenderer.hpp"
 // The sculpt editor: a cursor ray against the section's surface, and the brush edits themselves.
@@ -124,6 +125,9 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #if AVER_MODULE_PARTICLES
 #include "ParticleEditor.hpp"
 #endif
+// Unconditional, unlike ParticleEditor.hpp above: .ocfoliage is not gated behind any module -- see
+// OcFoliage.hpp's own comment on why the format needs neither Aver.Scene nor Aver.Landscape.
+#include "FoliageTypeEditor.hpp"
 #include "EditorEuler.hpp"
 #include "AssetRefScan.hpp"
 #include "EditorTransform.hpp"   // dropRestLift, so a dropped asset rests on what it landed on
@@ -1796,6 +1800,9 @@ public:
 #if AVER_MODULE_PARTICLES
         assetEditors_.registerFactory(&editor::makeParticleEditor);
 #endif
+        // And again for .ocfoliage -- the eighth factory. Unconditional, unlike the particle one just
+        // above: see FoliageTypeEditor.hpp/OcFoliage.hpp for why this tab needs no optional module.
+        assetEditors_.registerFactory(&editor::makeFoliageTypeEditor);
         // Must run before any actor factory: the "is Roslyn available" answer is cached on first ask.
         locateAverDesign();
         {
@@ -12182,25 +12189,56 @@ private:
     u32  strokeX0_ = 0, strokeY0_ = 0, strokeX1_ = 0, strokeY1_ = 0;
     std::vector<f32> strokeBefore_;
 
-    // Fills the foliage palette from whatever meshes the project actually has loaded.
-    // FROM sceneMeshes_, NOT a filesystem walk: that map is the set of meshes already resolved and
-    // uploaded, keyed by the same fnv1a64 placement needs. Scanning the content folder would offer
-    // meshes that cannot be placed without a synchronous reload.
+    // Fills the foliage palette from every .ocfoliage TYPE ASSET under the project's content folder --
+    // NOT one entry per loaded mesh, unlike before this format existed (see FoliageSpecies' own
+    // comment). A type whose meshPath does not resolve in sceneMeshes_ is skipped with a warning
+    // rather than added: loadProjectMeshes' own reason for keying its discovery off already-resolved
+    // meshes (not a raw filesystem walk) applies here one layer up -- a type naming a mesh that
+    // failed to load, or was never imported, cannot be placed without a synchronous reload, so
+    // offering it would be a palette entry that silently does nothing when picked.
     void refreshFoliagePalette() {
         foliagePalette_.clear();
-        for (const auto& kv : meshPathById_) {
+        const std::string dir = project_.contentDir();
+        if (dir.empty()) return;
+        std::error_code ec;
+        if (!std::filesystem::exists(dir, ec)) return;
+
+        for (std::filesystem::recursive_directory_iterator it(dir, ec), end; it != end; it.increment(ec)) {
+            if (ec) break;
+            if (!it->is_regular_file(ec)) continue;
+            std::string ext = it->path().extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (ext != ".ocfoliage") continue;
+
+            const std::string full = it->path().string();
+            fmt::OcFoliageData type;
+            std::string why;
+            if (!fmt::loadOcFoliage(full, type, &why)) {
+                AVER_WARN("[Foliage] {}", why);
+                continue;
+            }
+            const u64 meshId = fnv1a64(std::string_view(type.meshPath));
+            if (sceneMeshes_.find(meshId) == sceneMeshes_.end()) {
+                AVER_WARN("[Foliage] '{}' names mesh '{}', which is not loaded -- skipping",
+                          full, type.meshPath);
+                continue;
+            }
+
             FoliageSpecies sp;
-            sp.meshPath = kv.second;
-            sp.name     = std::filesystem::path(kv.second).stem().string();
+            sp.assetPath = full;
+            sp.name = it->path().stem().string();
+            sp.type = std::move(type);
             foliagePalette_.push_back(std::move(sp));
         }
         std::sort(foliagePalette_.begin(), foliagePalette_.end(),
                   [](const FoliageSpecies& a, const FoliageSpecies& b) { return a.name < b.name; });
-        // ONE SPECIES TICKED, not all of them: a project with 33 meshes would otherwise open with a
+        // ONE SPECIES TICKED, not all of them: a project with many types would otherwise open with a
         // brush painting a uniform random mix of every asset -- boulders, ferns and tree trunks
-        // together -- never what anyone wants and 32 clicks to undo. Starting from one is the right direction.
+        // together -- never what anyone wants and many clicks to undo. Starting from one is the right
+        // direction.
         for (size_t i = 0; i < foliagePalette_.size(); ++i) foliagePalette_[i].enabled = (i == 0);
-        AVER_INFO("[Foliage] palette: {} mesh(es) available to scatter", foliagePalette_.size());
+        AVER_INFO("[Foliage] palette: {} type(s) available to scatter", foliagePalette_.size());
     }
 
     // A cheap deterministic hash, so a brush stroke is repeatable for the same seed and cursor.
@@ -12258,7 +12296,15 @@ private:
     }
 
     // One placement attempt inside the brush disc. Rejected if it lands too close to something
-    // already there, which is what stops a held brush from stacking meshes in a single spot.
+    // already there (per the picked species' OWN collisionRadiusCm), which is what stops a held
+    // brush from stacking meshes in a single spot.
+    //
+    // NOT SPLIT INTO A SEPARATE "pick a species" HELPER, deliberately: a member function's own
+    // signature is evaluated at its point of declaration, not deferred into the class's later
+    // complete-class context the way a function BODY is -- so a helper returning `FoliageSpecies*`
+    // declared up here (before FoliageSpecies itself, far below in the AVER_MODULE_LANDSCAPE member
+    // block) would not compile. Everything referencing the type stays inside a function BODY instead,
+    // exactly like the rest of this class already relies on for the identical reason.
     void foliagePlaceOne(Engine& e, f32 cx, f32 cy) {
         std::vector<const FoliageSpecies*> live;
         for (const auto& sp : foliagePalette_) if (sp.enabled) live.push_back(&sp);
@@ -12274,35 +12320,69 @@ private:
         f32 z = 0.0f;
         if (!landscape::surfaceHeightAt(landscapeData_, x, y, z)) return;   // off the section
 
-        if (foliageSpacingCm_ > 0.0f) {
-            const f32 minSq = foliageSpacingCm_ * foliageSpacingCm_;
-            for (const Vec3& p : foliagePlaced_) {
-                const f32 dx = p.x - x, dy = p.y - y;
-                if (dx*dx + dy*dy < minSq) return;
+        // WHICH SPECIES, weighted by its own type.weight -- mirroring
+        // aver::world::ChunkGenerator.cpp's pickSpecies, minus the density-band test that has no
+        // meaning here (see OcFoliage.hpp's own comment on why this format carries no density band
+        // at all). A species with weight <= 0 is never picked, matching ScatterSpecies' documented
+        // rule exactly; if EVERY live species happens to have weight <= 0 (a freshly zeroed
+        // palette), this falls back to a uniform pick rather than placing nothing -- ticking a
+        // species should never silently stop it from ever being chosen. Decided before the
+        // collision test below: collisionRadiusCm and the scale it is multiplied against are both
+        // per-type now, so which species this attempt is testing has to be known first, unlike the
+        // single global spacing value this replaced.
+        f32 totalWeight = 0.0f;
+        for (const FoliageSpecies* s : live) if (s->type.weight > 0.0f) totalWeight += s->type.weight;
+        const FoliageSpecies* picked = nullptr;
+        if (totalWeight > 0.0f) {
+            f32 pick = foliageRand(foliageSeed_) * totalWeight;
+            for (const FoliageSpecies* s : live) {
+                if (s->type.weight <= 0.0f) continue;
+                if (pick < s->type.weight) { picked = s; break; }
+                pick -= s->type.weight;
+            }
+            if (!picked) picked = live.back();   // float rounding at the very top of the range
+        } else {
+            picked = live[static_cast<size_t>(foliageRand(foliageSeed_) * live.size()) % live.size()];
+        }
+        const FoliageSpecies& sp = *picked;
+
+        const u64 meshId = fnv1a64(std::string_view(sp.type.meshPath));
+        if (sceneMeshes_.find(meshId) == sceneMeshes_.end()) return;
+
+        const f32 sc = sp.type.scaleMin +
+                       foliageRand(foliageSeed_) * (sp.type.scaleMax - sp.type.scaleMin);
+
+        // Interpenetration check, mirroring aver::world::ChunkGenerator.cpp's placedSolid exactly:
+        // SUMMED radii (this instance's own, scaled, plus whatever the neighbour was placed with),
+        // and a neighbour that was placed with collisionRadiusCm == 0 (grass and other
+        // overlap-tolerant fill) never blocks anything and is never itself blocked by it -- it simply
+        // never entered the check at all, on either side.
+        if (sp.type.collisionRadiusCm > 0.0f) {
+            const f32 r = sp.type.collisionRadiusCm * sc;
+            for (const FoliagePlaced& p : foliagePlaced_) {
+                if (!(p.solidRadiusCm > 0.0f)) continue;
+                const f32 dx = p.pos.x - x, dy = p.pos.y - y;
+                const f32 minDist = p.solidRadiusCm + r;
+                if (dx*dx + dy*dy < minDist*minDist) return;
             }
         }
 
-        const FoliageSpecies& sp = *live[static_cast<size_t>(foliageRand(foliageSeed_) * live.size()) % live.size()];
-        const u64 meshId = fnv1a64(std::string_view(sp.meshPath));
-        if (sceneMeshes_.find(meshId) == sceneMeshes_.end()) return;
-
         Transform xf;
         xf.position = Vec3{x, y, z};
-        // "Align to slope" used to be dead UI: foliageAlignToNormal_ was read nowhere, so this was
-        // yaw-only regardless of the checkbox (see its own declaration comment). foliagePlacementRotation
-        // (FoliageAlign.hpp) is the fix -- yaw is still a random azimuth either way, and now genuinely
-        // tilts the instance to the surface normal SAMPLED AT ITS OWN (x, y) when the option is on.
-        // eps of 10 cm sits comfortably inside a section's own sample spacing (see
-        // OcLandData::spacingCm's typical range), so the four extra probes stay local to this
-        // instance's own patch of ground rather than blurring across several samples.
-        const f32 yaw = foliageRand(foliageSeed_) * 6.2831853f;
+        // "Align to slope" is now authored PER TYPE (sp.type.alignToNormal), not a single checkbox
+        // for the whole palette -- foliagePlacementRotation (FoliageAlign.hpp) is unchanged, only
+        // where its `alignToNormal` argument comes from. Yaw stays a random azimuth unless the type
+        // says otherwise (randomizeYaw == false means every instance faces the same way). eps of
+        // 10 cm sits comfortably inside a section's own sample spacing (see OcLandData::spacingCm's
+        // typical range), so the four extra probes stay local to this instance's own patch of ground
+        // rather than blurring across several samples.
+        const f32 yaw = sp.type.randomizeYaw ? foliageRand(foliageSeed_) * 6.2831853f : 0.0f;
         xf.rotation = editor::foliagePlacementRotation(landscapeData_, x, y, /*epsCm=*/10.0f, yaw,
-                                                        foliageAlignToNormal_);
-        const f32 sc = foliageScaleMin_ + foliageRand(foliageSeed_) * (foliageScaleMax_ - foliageScaleMin_);
+                                                        sp.type.alignToNormal);
         xf.scale = Vec3{sc, sc, sc};
 
         scene::World& world = scene::World::instance();
-        const scene::Entity ent = world.create(sp.meshPath, scene::kInvalidEntity, xf);
+        const scene::Entity ent = world.create(sp.type.meshPath, scene::kInvalidEntity, xf);
         if (ent == scene::kInvalidEntity) return;
         if (auto* mr = static_cast<scene::CMeshRenderer*>(
                 world.addComponent(ent, scene::kComponentMeshRenderer))) {
@@ -12310,10 +12390,25 @@ private:
             mr->flags |= scene::kMeshRendererVisible;
             mr->aabbMin[0] = mr->aabbMin[1] = mr->aabbMin[2] = -1.0f;
             mr->aabbMax[0] = mr->aabbMax[1] = mr->aabbMax[2] =  1.0f;
+            // MATERIAL OVERRIDE, empty means "the mesh's own cooked material" -- OcFoliageData's own
+            // documented default, and previously not honoured at all: the old ad hoc FoliageSpecies
+            // carried no material field, so a painted instance could never be anything but whatever
+            // the mesh itself cooked with. Same resolve-and-bind pair LevelInstance.cpp uses for an
+            // .ocworld PLACE's own `material` field.
+            if (!sp.type.material.empty()) {
+                mr->material = aver_scene_material(0, sp.type.material.c_str());
+#if AVER_MODULE_PBR
+                if (mr->material) {
+                    const pbr::MaterialHandle h = materialForSurface(sp.type.material);
+                    if (h) surfaceMaterials_[mr->material] = h;
+                }
+#endif
+            }
         }
         levelEntities_.push_back(ent);
-        entityLabels_[static_cast<u32>(ent)] = makeEntityLabel(std::string(), sp.meshPath);
-        foliagePlaced_.push_back(xf.position);
+        entityLabels_[static_cast<u32>(ent)] = makeEntityLabel(sp.type.material, sp.type.meshPath);
+        foliagePlaced_.push_back({xf.position,
+                                   sp.type.collisionRadiusCm > 0.0f ? sp.type.collisionRadiusCm * sc : 0.0f});
 
         EditCmd one = describeEntity(ent);
         foliageBatch_.batchSnaps.push_back(one.snap);
@@ -12335,7 +12430,7 @@ private:
             if (dx*dx + dy*dy > rSq) continue;
             bool mine = false;
             for (size_t k = 0; k < foliagePlaced_.size(); ++k) {
-                const Vec3& p = foliagePlaced_[k];
+                const Vec3& p = foliagePlaced_[k].pos;
                 if (std::fabs(p.x - xf.position.x) < 1.0f && std::fabs(p.y - xf.position.y) < 1.0f) {
                     mine = true;
                     foliagePlaced_.erase(foliagePlaced_.begin() + static_cast<long>(k));
@@ -12353,7 +12448,12 @@ private:
     bool    foliageStroking_ = false;
     f32     foliageAccum_    = 0.0f;
     EditCmd foliageBatch_{};
-    std::vector<Vec3> foliagePlaced_;   // what this session's brush put down, for spacing and erase
+    // One entry per instance THIS SESSION'S BRUSH put down: its position (matched by erase) and the
+    // collision radius it was placed with (0 for a type whose collisionRadiusCm is 0 -- see
+    // foliagePlaceOne's own comment on why that must stay excluded from the interpenetration test on
+    // BOTH sides, exactly like aver::world::ChunkGenerator.cpp's placedSolid).
+    struct FoliagePlaced { Vec3 pos; f32 solidRadiusCm; };
+    std::vector<FoliagePlaced> foliagePlaced_;
 #endif
 #endif
 
@@ -17556,6 +17656,32 @@ private:
     }
 #endif
 
+    // Writes a starter .ocfoliage -- one foliage type -- and opens it. Same shape as
+    // cbCreateParticleEffect immediately above, for the same reason its own comment gives: a format
+    // with a working editor tab that, until now, nothing could bring into existence from inside the
+    // editor at all.
+    //
+    // UNCONDITIONAL, unlike cbCreateParticleEffect: editor::foliageStarterType and
+    // fmt::saveOcFoliage are both reachable with every module configuration -- see OcFoliage.hpp's
+    // own comment on why the format needs neither Aver.Scene nor Aver.Landscape.
+    void cbCreateFoliageType() {
+        const std::filesystem::path target = cbFreeAssetPath("NewFoliageType", ".ocfoliage");
+        if (target.empty()) return;
+        std::string why;
+        if (!fmt::saveOcFoliage(target.string(), editor::foliageStarterType(), &why)) {
+            cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+            AVER_ERROR("[Editor] new foliage type failed: {}", why);
+            return;
+        }
+        cbAdoptNewAsset(target);
+#if AVER_MODULE_LANDSCAPE
+        // Immediate, not lazy: refreshFoliagePalette() is otherwise only called from
+        // loadProjectMeshes() and setEditorMode() -- without this, a type created while the Foliage
+        // panel is already open would not appear until one of those ran again.
+        refreshFoliagePalette();
+#endif
+    }
+
     // Writes a starter .ocgraph -- an Aver Node visual-scripting graph -- and opens it.
     // The bytes come from editor::graphStarterText rather than being built here, so a test can parse
     // exactly what this writes; it is TEXT, not an OcGraphData through fmt::saveOcgraph, because the
@@ -18135,6 +18261,8 @@ private:
             if (ImGui::MenuItem("New Particle Effect")) cbCreateParticleEffect();
             uiReg_.track("cb.add.particleEffect");
 #endif
+            if (ImGui::MenuItem("New Foliage Type"))    cbCreateFoliageType();
+            uiReg_.track("cb.add.foliageType");
             if (ImGui::MenuItem("New Material"))        cbCreateMaterial();
             uiReg_.track("cb.add.material");
             ImGui::EndDisabled();
@@ -18600,6 +18728,7 @@ private:
             {".ocanim",     {ICON_PLAY,       IM_COL32(181, 230,  29, 255), "Animation"}},
             {".ocmat",      {ICON_TUNE,       IM_COL32( 64, 192,  64, 255), "Material"}},
             {".ocparticle", {ICON_ADD,        IM_COL32(  0, 200, 180, 255), "Particles"}},
+            {".ocfoliage",  {ICON_TERRAIN,    IM_COL32( 60, 200,  90, 255), "Foliage Type"}},
             {".ocsnd",      {ICON_WAVE,       IM_COL32(  0, 175, 255, 255), "Sound Graph"}},
             {".ocaudio",    {ICON_AUDIO,      IM_COL32(  0, 175, 255, 255), "Audio"}},
             {".wav",        {ICON_AUDIO,      IM_COL32(  0, 175, 255, 255), "Audio"}},
@@ -20056,15 +20185,23 @@ private:
 
     void buildFoliageModePanel() {
         if (foliagePalette_.empty()) {
-            ImGui::TextWrapped("No meshes found to scatter. Import a mesh into the project's content "
-                               "folder, then reopen this mode.");
+            ImGui::TextWrapped("No foliage types found. Content Browser: + Add > New Foliage Type, "
+                               "point it at an imported mesh, then reopen this mode.");
             return;
         }
         ImGui::TextDisabled("PALETTE");
-        ImGui::TextWrapped("Ticked species are placed, chosen at random per instance.");
+        ImGui::TextWrapped("Ticked types are placed, chosen at random (weighted by each type's own "
+                           "Weight) per instance. Scale, spacing, slope alignment and material are "
+                           "authored on each type's own tab -- click " ICON_EDIT " to open it.");
         for (auto& sp : foliagePalette_) {
-            ImGui::PushID(sp.meshPath.c_str());
+            ImGui::PushID(sp.assetPath.c_str());
             ImGui::Checkbox(sp.name.c_str(), &sp.enabled);
+            ImGui::SameLine();
+            if (ImGui::SmallButton(ICON_EDIT)) assetEditors_.open(sp.assetPath);
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Open %s", sp.assetPath.c_str());
+            ImGui::SameLine();
+            ImGui::TextDisabled("scale %.2f-%.2f, weight %.2f",
+                                sp.type.scaleMin, sp.type.scaleMax, sp.type.weight);
             ImGui::PopID();
         }
 
@@ -20073,17 +20210,6 @@ private:
         editor::panelFloat("Radius (cm)", &foliageRadiusCm_, 100.0f, 10000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
         editor::panelFloat("Density", &foliageDensity_, 1.0f, 64.0f, "%.0f");
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Placements attempted per brush application.");
-        editor::panelFloat("Min spacing (cm)", &foliageSpacingCm_, 0.0f, 2000.0f, "%.0f");
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Placements closer than this to an existing one are rejected, which is\n"
-                              "what stops a brush from stacking meshes on top of each other.");
-
-        ImGui::Spacing();
-        ImGui::TextDisabled("PLACEMENT");
-        editor::panelFloat("Scale min", &foliageScaleMin_, 0.1f, 3.0f, "%.2f");
-        editor::panelFloat("Scale max", &foliageScaleMax_, 0.1f, 3.0f, "%.2f");
-        if (foliageScaleMax_ < foliageScaleMin_) foliageScaleMax_ = foliageScaleMin_;
-        ImGui::Checkbox("Align to slope", &foliageAlignToNormal_);
 
         ImGui::Spacing();
         ImGui::Separator();
@@ -23511,23 +23637,27 @@ private:
     // 1.0 is the smoothstep the brush always had; see BrushParams::falloff.
     f32 sculptFalloff_ = 1.0f;
 
-    // FOLIAGE. One entry per mesh the brush can scatter, discovered from the project's content
-    // folder. Empty means the mode cannot be entered at all, and editorModeAvailable says why --
-    // which is the honest behaviour for a paint mode with nothing to paint.
+    // FOLIAGE. One entry per .ocfoliage TYPE ASSET found in the project's content folder -- NOT one
+    // per mesh, unlike before this format existed. What a species places, and how (mesh, material,
+    // scale range, weight, randomizeYaw, collisionRadiusCm, alignToNormal), now lives in the loaded
+    // fmt::OcFoliageData itself, authored from its own FoliageTypeEditor tab, rather than as ad hoc
+    // fields shared by the WHOLE palette at once -- see OcFoliage.hpp for the format and why this
+    // split makes a foliage type a real, reusable asset instead of a global brush setting. Empty
+    // means the mode cannot be entered at all, and editorModeAvailable says why -- which is the
+    // honest behaviour for a paint mode with nothing to paint.
     struct FoliageSpecies {
-        std::string name;        // display name, the file stem
-        std::string meshPath;    // absolute .ocmesh path
-        bool        enabled = true;
+        std::string name;         // display name, the file stem
+        std::string assetPath;    // the .ocfoliage this came from -- opened by the palette's Edit button
+        fmt::OcFoliageData type;  // mesh/material/scale/weight/randomizeYaw/collisionRadiusCm/alignToNormal
+        bool         enabled = true;
     };
     std::vector<FoliageSpecies> foliagePalette_;
+    // BRUSH-ONLY settings: how the tool is held, not what it places -- everything about WHAT gets
+    // placed and how each instance randomises now lives per type above.
     f32  foliageRadiusCm_    = 800.0f;
     f32  foliageDensity_     = 6.0f;     // attempted placements per brush application
-    f32  foliageScaleMin_    = 0.8f;
-    f32  foliageScaleMax_    = 1.3f;
-    f32  foliageSpacingCm_   = 200.0f;   // minimum gap between placed instances
-    bool foliageAlignToNormal_ = false;   // tilts placed instances to the sampled slope; see foliagePlaceOne
     bool foliageErase_       = false;    // Shift: remove instead of place
-    u32  foliageSeed_        = 1u;
+    u32  foliageSeed_        = 1u;       // one running RNG stream for the whole paint session
 #endif
 
     // True only when terrain editing is actually possible right now: mode is Landscape AND a section
@@ -23563,8 +23693,8 @@ private:
                 if (!landscapeLoaded_)
                     return no("Foliage paints onto terrain, and this level has no landscape section.");
                 if (foliagePalette_.empty())
-                    return no("No foliage meshes available. Import a mesh into the project's content "
-                              "folder first.");
+                    return no("No foliage types available. Create one from the Content Browser's "
+                              "+ Add > New Foliage Type first.");
                 return true;
 #else
             case EditorMode::Landscape:
@@ -23590,6 +23720,13 @@ private:
     // gizmo move and finishes as a brush stroke would apply one to the other's target.
     void setEditorMode(EditorMode m) {
         if (mode_ == m) return;
+#if AVER_MODULE_LANDSCAPE
+        // Refreshed here, BEFORE the availability check just below: a type authored moments ago
+        // (Content Browser's New Foliage Type, or an edit saved from a palette row's own tab) must
+        // make the mode enterable on this very click, not only after some other event happens to
+        // call refreshFoliagePalette() first.
+        if (m == EditorMode::Foliage) refreshFoliagePalette();
+#endif
         const char* whyNot = "";
         if (!editorModeAvailable(m, &whyNot)) {
             AVER_WARN("[Editor] cannot enter {} mode: {}", kEditorModeNames[static_cast<int>(m)], whyNot);

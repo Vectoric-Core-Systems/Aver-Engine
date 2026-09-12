@@ -410,6 +410,15 @@ void ParticleEditor::tickPreview(f32 dt) {
 
 #if AVER_WITH_IMGUI
 
+namespace {
+// The preview/params split -- see EditorWidgets.hpp's own top comment for why this is a FRACTION
+// (SplitPane) rather than ActorEditor's pixel-width convention. 0.42f is this tab's own PRE-EXISTING
+// default (it used to be `avail.x * 0.42f`, recomputed fresh every frame with no persistence at
+// all) -- kept exactly, so adopting the shared helper changes draggability and persistence only.
+constexpr f32 kDefaultPreviewFraction = 0.42f;
+constexpr const char* kPrefPreviewSplit = "particleEditor.previewSplit";
+} // namespace
+
 void ParticleEditor::drawParams() {
     ImGui::SeparatorText("Identity");
     if (ImGui::InputText("Name", nameBuf_, sizeof nameBuf_)) setName(nameBuf_);
@@ -679,13 +688,26 @@ void ParticleEditor::draw(Engine& e) {
 
     ImGui::Separator();
 
-    const f32 leftW = ImGui::GetContentRegionAvail().x * 0.42f;
+    // Draggable, persisted, through the shared SplitPane helper (EditorWidgets.hpp) -- see this
+    // file's own kDefaultPreviewFraction comment for why 0.42f is not a new number.
+    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 avail = ImGui::GetContentRegionAvail().x;
+    const f32 minPreview = 180.0f * dpi, minParams = 220.0f * dpi;
+    const f32 leftW = splitPaneWidth(split_, kPrefPreviewSplit, kDefaultPreviewFraction, avail,
+                                      minPreview, minParams);
     const f32 h = ImGui::GetContentRegionAvail().y;
     if (ImGui::BeginChild("##pxpreview", ImVec2(leftW, h), true)) drawPreviewPane(e);
     ImGui::EndChild();
-    ImGui::SameLine();
+    drawSplitHandle(split_, "##pxsplit", kPrefPreviewSplit, avail, minPreview, minParams, 6.0f * dpi);
     if (ImGui::BeginChild("##pxparams", ImVec2(0, h), true)) drawParams();
     ImGui::EndChild();
+}
+
+// Restores the preview/params split to its default proportion and persists that immediately -- see
+// AssetEditor.hpp's own resetLayout() comment for why "Reset Tab Layout" needs every tab to implement
+// this rather than just ActorEditor.
+void ParticleEditor::resetLayout() {
+    resetSplitPane(split_, kPrefPreviewSplit, kDefaultPreviewFraction);
 }
 
 #else   // AVER_WITH_IMGUI
@@ -695,6 +717,9 @@ void ParticleEditor::draw(Engine& e) {
 // preview TICK (tickPreview() is not gated on ImGui at all); only the window is absent. Bt/Sound/
 // GraphEditor's own #else branches do exactly this.
 void ParticleEditor::draw(Engine& e) { (void)e; }
+
+// A headless build never lays the panels out at all, so there is nothing for a reset to restore.
+void ParticleEditor::resetLayout() {}
 
 #endif  // AVER_WITH_IMGUI
 

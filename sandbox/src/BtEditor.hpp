@@ -8,6 +8,7 @@
 // and nothing else. draw(Engine&) carries no dpi, but this tab needs none (it has no canvas to
 // scale, unlike GraphEditor's node graph), so there is no push-setter counterpart here.
 #include "AssetEditor.hpp"
+#include "EditorWidgets.hpp"
 #include "SnapshotUndo.hpp"
 
 #include "aver/formats/OcBt.hpp"
@@ -99,6 +100,13 @@ public:
     bool save(std::string* why) override;
     void onFileChanged() override;
 
+    // Restores the tree/details split to its default proportion and persists that -- see
+    // EditorWidgets.hpp's own comment for why this tab's split is a FRACTION (SplitPane) rather than
+    // ActorEditor's pixel-width convention. Declared unconditionally (matching draw()/save() above)
+    // but only does anything `#if AVER_WITH_IMGUI` -- see the .cpp: a headless build never lays the
+    // panels out at all, so there is nothing for a reset to restore.
+    void resetLayout() override;
+
     // Reachable for a headless test, and for the same reason the edits above are free functions.
     bool loaded() const { return loaded_; }
     const std::string& loadError() const { return loadError_; }
@@ -136,6 +144,11 @@ private:
     i32 selected_ = 0;
 
     SnapshotUndo<fmt::OcBtData> history_;
+
+    // The tree/details divider. A plain SplitPane (EditorWidgets.hpp), not gated on AVER_WITH_IMGUI,
+    // for ParticleEditor.hpp's own reason: an editor tab's fields must keep compiling headless even
+    // though only draw() and resetLayout() actually read or write it.
+    SplitPane split_;
 
 #if AVER_WITH_IMGUI
     void drawTreeRow(i32 index);

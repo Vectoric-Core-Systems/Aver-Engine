@@ -351,6 +351,17 @@ add_executable(OcRigTest src/OcRigTest.cpp)
 target_link_libraries(OcRigTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(OcRigTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# OcFoliageTest -- the .ocfoliage foliage-type format. An AVR1 binary container like .ocland/.ocbt,
+# not a text format like .ocrig/.ocgraph, so the checks are the ones a binary chunk format needs:
+# byte-identical round trip, valid()'s own refusals, container-level corruption (wrong subtype, a
+# missing required chunk), and -- the one this format's header comment calls out by name -- the
+# ABSENT-VS-ZERO rule: a chunk shorter than the reader expects must default the fields it could not
+# reach rather than zero them, and that default must stay visibly distinct from a full-length chunk
+# that explicitly authored zero/false for the same field.
+add_executable(OcFoliageTest src/OcFoliageTest.cpp)
+target_link_libraries(OcFoliageTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(OcFoliageTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # OcAnimTest -- the .ocanim NOTIFY DURATION chunk (NTFD), item 7.1's format half. Its own executable
 # rather than a block in MeshTest: MeshTest is about the AVR1 container generically, and this is
 # about ONE clip field whose whole point is a negative claim (absent means absent, byte-identically)

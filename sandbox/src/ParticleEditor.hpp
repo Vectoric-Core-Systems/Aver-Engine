@@ -28,6 +28,7 @@
 // `#include "aver/formats/OcParticle.hpp"` with C1083 before either guard is ever consulted.
 #if AVER_MODULE_PARTICLES
 #include "AssetEditor.hpp"
+#include "EditorWidgets.hpp"
 #include "SnapshotUndo.hpp"
 
 #include "aver/formats/OcParticle.hpp"
@@ -63,6 +64,13 @@ public:
     void draw(Engine& e) override;
     bool save(std::string* why) override;
     void onFileChanged() override;
+
+    // Restores the preview/params split to its default proportion and persists that -- see
+    // EditorWidgets.hpp's own comment for why this tab's split is a FRACTION (SplitPane) rather than
+    // ActorEditor's pixel-width convention. Declared unconditionally (matching draw()/save() above)
+    // but only does anything `#if AVER_WITH_IMGUI` -- see the .cpp: a headless build never lays the
+    // panels out at all, so there is nothing for a reset to restore.
+    void resetLayout() override;
 
     // Reachable for a headless test, for BtEditor/SoundEditor's own reason.
     bool loaded() const { return loaded_; }
@@ -162,6 +170,11 @@ private:
     // char arrays so they need no #if either, even though only drawParams() (ImGui) reads them.
     char nameBuf_[128] = {};
     char texBuf_[32] = {};
+
+    // The preview/params divider. A plain SplitPane (EditorWidgets.hpp), not gated on
+    // AVER_WITH_IMGUI, for the same reason the ImGui-only bookkeeping just above IS: an editor tab's
+    // fields must keep compiling headless even though only draw() and resetLayout() actually touch it.
+    SplitPane split_;
 
 #if AVER_WITH_IMGUI
     void drawParams();

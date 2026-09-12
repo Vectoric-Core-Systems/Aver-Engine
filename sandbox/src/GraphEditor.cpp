@@ -17,6 +17,7 @@
 //      testUnknownRecords exercises (tests/formats/src/OcGraphTest.cpp:183).
 #include "EditorTransform.hpp"
 #include "EditorKeybinds.hpp"
+#include "EditorPrefs.hpp"
 #include "GraphEditor.hpp"
 #include "GraphNodeDefs.hpp"
 #if AVER_MODULE_FLUIDS
@@ -1659,6 +1660,16 @@ void GraphEditor::recomputeLayouts(float dpi) {
     }
 }
 
+// The details ("Gap B") column's default width and its persisted preference key -- a
+// DPI-INDEPENDENT PIXEL WIDTH, ActorEditor's own convention (ActorEditor.cpp), not the FRACTION
+// most other editors' splits use: see EditorWidgets.hpp's own top comment for why. 260.0f is this
+// tab's own PRE-EXISTING default -- it used to be `std::clamp(260.0f * dpi, 180.0f * dpi,
+// std::max(avail.x * 0.45f, 120.0f * dpi))`, recomputed fresh every frame with no persistence at
+// all -- kept exactly for the ordinary (wide-enough) case; see drawEventGraph() below for what
+// changed in the narrow-window squeeze that formula's middle branch also covered.
+constexpr float kDefaultDetailsColumn = 260.0f;
+constexpr const char* kPrefDetailsColumn = "graphEditor.detailsColumn";
+
 void GraphEditor::draw(Engine& e) {
 #if AVER_WITH_IMGUI
     const float dpi = g_graphEditorDpi;
@@ -1786,6 +1797,18 @@ void GraphEditor::draw(Engine& e) {
 #endif
 }
 
+// Restores the canvas/details ("Gap B") split to its default width and persists that immediately --
+// see AssetEditor.hpp's own resetLayout() comment for why "Reset Tab Layout" needs every tab to
+// implement this rather than just ActorEditor. A no-op `#if AVER_WITH_IMGUI` is off: a headless
+// build never lays the panels out at all, so there is nothing for a reset to restore.
+void GraphEditor::resetLayout() {
+#if AVER_WITH_IMGUI
+    detailsColW_ = 0.0f;
+    setPrefFloat(kPrefDetailsColumn, kDefaultDetailsColumn);
+    flushEditorPrefs();
+#endif
+}
+
 // The Event Graph tab: the node canvas and its details column. Lifted out of draw() unchanged when
 // the Viewport tab arrived -- draw() is now the tab bar and nothing else, which is the only way
 // either tab's body stays readable.
@@ -1813,13 +1836,19 @@ void GraphEditor::drawEventGraph(float dpi) {
 #if AVER_WITH_IMGUI
     recomputeLayouts(dpi);
 
-    // The canvas gives up a fixed-width strip on the right for the details panel (Gap B). Every
-    // downstream canvas calculation (originIm, canvasSize, mouse-to-canvas conversion) derives from
-    // GetContentRegionAvail() called AFTER ##graphCanvas's BeginChild below, so it automatically sees
-    // the narrowed region -- nothing past this point needed to change for that to hold.
+    // The canvas gives up a strip on the right for the details panel (Gap B), draggable and
+    // persisted through the shared splitterHandle/clampSplitWidth primitives (EditorWidgets.hpp) --
+    // see kDefaultDetailsColumn's own comment above for the DPI-independent-pixel-width convention
+    // this keeps from ActorEditor. Every downstream canvas calculation (originIm, canvasSize,
+    // mouse-to-canvas conversion) derives from GetContentRegionAvail() called AFTER ##graphCanvas's
+    // BeginChild below, so it automatically sees the narrowed region -- nothing past this point
+    // needed to change for that to hold.
     const ImVec2 avail = ImGui::GetContentRegionAvail();
-    const float detailsW = std::clamp(260.0f * dpi, 180.0f * dpi, std::max(avail.x * 0.45f, 120.0f * dpi));
-    const float canvasW = std::max(avail.x - detailsW - ImGui::GetStyle().ItemSpacing.x, 40.0f * dpi);
+    const float minDetails = 180.0f * dpi, minCanvas = 40.0f * dpi;
+    if (detailsColW_ <= 0.0f) detailsColW_ = prefFloat(kPrefDetailsColumn, kDefaultDetailsColumn) * dpi;
+    detailsColW_ = clampSplitWidth(detailsColW_, avail.x, minDetails, minCanvas);
+    const float detailsW = detailsColW_;
+    const float canvasW = std::max(avail.x - detailsW - ImGui::GetStyle().ItemSpacing.x, minCanvas);
     ImGui::BeginChild("##graphCanvas", ImVec2(canvasW, std::max(avail.y, 80.0f * dpi)), true,
                        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
@@ -2619,7 +2648,18 @@ void GraphEditor::drawEventGraph(float dpi) {
     // GraphEditorGeometry.hpp's getNodeAttribute/setNodeAttribute/removeNodeAttribute/
     // computeAttributeRows for the per-node rows below -- both exercised headlessly by
     // GraphEditorGeometryTest and GraphEditorLoadSaveTest.
-    ImGui::SameLine();
+    //
+    // The handle mutates detailsColW_ for the NEXT frame (`detailsW` above is this frame's already-
+    // captured value), and persists it -- as a DPI-independent pixel width, ActorEditor's own
+    // convention -- the instant the drag ends. Matches ActorEditor's own right-column splitter site
+    // (ActorEditor.cpp) exactly: capture-then-size, drag-after, persist-on-release.
+    bool detailsReleased = false;
+    splitterHandle("##graphSplit", 6.0f * dpi, &detailsColW_, avail.x, minDetails, minCanvas,
+                    &detailsReleased);
+    if (detailsReleased) {
+        setPrefFloat(kPrefDetailsColumn, detailsColW_ / dpi);
+        flushEditorPrefs();
+    }
     ImGui::BeginChild("##graphDetails", ImVec2(detailsW, std::max(avail.y, 80.0f * dpi)), true);
 
     drawFunctionsPanel(dpi);

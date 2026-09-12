@@ -34,6 +34,7 @@
 // makeGraphEditor automatically once step 2 lands; nothing else needs to know the extension exists.
 // ============================================================================================
 #include "AssetEditor.hpp"
+#include "EditorWidgets.hpp"
 #include "GraphEditorGeometry.hpp"
 #include "SnapshotUndo.hpp"
 #include "aver/formats/OcGraph.hpp"
@@ -79,6 +80,13 @@ public:
     void draw(Engine& e) override;
     bool save(std::string* why) override;
     void onFileChanged() override;
+
+    // Restores the canvas/details ("Gap B") split to its default width and persists that -- see
+    // EditorWidgets.hpp's own comment for why THIS tab's split persists a WIDTH (like ActorEditor's
+    // own columns) rather than the fraction most other editors' splits use: the details column is
+    // deliberately a near-constant width, not a proportion of the window. A no-op `#if
+    // AVER_WITH_IMGUI` is off, matching draw()'s own headless branch.
+    void resetLayout() override;
 
     // ---- read access for the details panel and for headless tests ----------------------------------
     // The real data model -- read-only. Exposed (unlike graph_ itself) so GraphEditorLoadSaveTest can
@@ -572,6 +580,14 @@ private:
     CanvasTransform view_;
     GraphLayoutStyle style_;
     std::vector<GraphNodeLayout> layouts_; // recomputed once at the top of every draw() call
+
+    // The canvas/details ("Gap B") divider's width, in DPI-INDEPENDENT pixels -- ActorEditor's own
+    // convention (ActorEditor.cpp), not SplitPane's fraction: see this header's resetLayout() comment
+    // for why. <= 0 means "not yet seeded from its preference", matching ActorEditor's own
+    // g_leftColW/g_rightColW sentinel. A plain float, not gated on AVER_WITH_IMGUI, so this class
+    // keeps compiling headless (GraphEditorLoadSaveTest) even though only drawEventGraph() and
+    // resetLayout() actually touch it.
+    f32 detailsColW_ = 0.0f;
 
     // ---- selection ------------------------------------------------------------------------------
     std::vector<std::string> selectedNodes_;

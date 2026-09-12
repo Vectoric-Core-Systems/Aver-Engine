@@ -14,6 +14,7 @@
 // shows the same information with none of that, and it costs no persisted layout the format would
 // then have to grow a chunk for.
 #include "AssetEditor.hpp"
+#include "EditorWidgets.hpp"
 #include "SnapshotUndo.hpp"
 
 #include "aver/formats/OcSound.hpp"
@@ -120,6 +121,13 @@ public:
     bool save(std::string* why) override;
     void onFileChanged() override;
 
+    // Restores the list/details split to its default proportion and persists that -- see
+    // EditorWidgets.hpp's own comment for why this tab's split is a FRACTION (SplitPane) rather than
+    // ActorEditor's pixel-width convention. Declared unconditionally (matching draw()/save() above)
+    // but only does anything `#if AVER_WITH_IMGUI` -- see the .cpp: a headless build never lays the
+    // panels out at all, so there is nothing for a reset to restore.
+    void resetLayout() override;
+
     // Reachable for a headless test, for the same reason the edits above are free functions.
     bool loaded() const { return loaded_; }
     const std::string& loadError() const { return loadError_; }
@@ -180,6 +188,11 @@ private:
     u32 previewSeed_ = 1;
     i32 previewSound_ = 0;   // aver_audio_load_pcm handle, 0 when none
     i32 previewVoice_ = 0;   // aver_audio_play handle, 0 when none
+
+    // The list/details divider. A plain SplitPane (EditorWidgets.hpp), not gated on AVER_WITH_IMGUI,
+    // for BtEditor.hpp's own reason: an editor tab's fields must keep compiling headless even though
+    // only draw() and resetLayout() actually read or write it.
+    SplitPane split_;
 
 #if AVER_WITH_IMGUI
     void drawNodeList();

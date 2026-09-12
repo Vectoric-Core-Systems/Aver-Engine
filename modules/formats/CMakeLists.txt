@@ -54,6 +54,10 @@ aver_add_module(Aver.Formats
     # .ocrig -- a control rig. TEXT rather than an AVR1 container, unlike its neighbours here:
     # a rig is four lines a person writes and reads, not a baked array. See OcRig.hpp.
     src/OcRig.cpp
+    # .ocfoliage -- one authored foliage type. Beside the other AVR1 readers for OcBt.cpp's own
+    # reason: a header record and a string table, nothing that needs Aver.Scene or Aver.Landscape --
+    # see OcFoliage.hpp for why the format itself stays independent of both.
+    src/OcFoliage.cpp
     src/Texture.cpp
   DEPS
     Aver.Core

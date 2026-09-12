@@ -214,6 +214,22 @@ if(TARGET Aver.Formats.Particles)
   set_target_properties(ParticleEditorLoadSaveTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
 
+# FoliageTypeEditorTest -- the .ocfoliage foliage-type editor tab's headless core: load / save /
+# dirty / undo and every field setter's own clamping.
+#
+# Same BtEditorTest arrangement above (Sandbox is add_executable-only, so this compiles
+# sandbox/src/FoliageTypeEditor.cpp directly), and AVER_WITH_IMGUI is likewise left undefined --
+# FoliageTypeEditor.cpp's `#include "imgui.h"` and its whole drawing half (drawParams()) sit behind
+# that macro. UNGUARDED, unlike ParticleEditorLoadSaveTest just above: this tab needs neither
+# Aver.Particles nor Aver.Sound -- .ocfoliage lives in the BASE Aver.Formats target (see
+# modules/formats/CMakeLists.txt), so this configuration is never entitled to be turned off.
+add_executable(FoliageTypeEditorTest
+  src/FoliageTypeEditorTest.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/FoliageTypeEditor.cpp)
+target_include_directories(FoliageTypeEditorTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(FoliageTypeEditorTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(FoliageTypeEditorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # ProjectCopyTest -- copyProjectTree, the "Upgrade a Copy" branch of the upgrade prompt.
 #
 # Compiles sandbox/src/ProjectScaffold.cpp directly, for EditorPrefsTest's precedent above (Sandbox
@@ -415,3 +431,20 @@ target_include_directories(AnimCurveGeometryTest PRIVATE
   ${CMAKE_SOURCE_DIR}/sandbox/src)
 target_link_libraries(AnimCurveGeometryTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(AnimCurveGeometryTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# EditorWidgetsTest -- item 4.3's shared, persisted panel-split helper (sandbox/src/EditorWidgets.hpp):
+# clampSplitWidth's minimum-floor guarantee, splitFractionOf/splitWidthOf's pixel<->fraction
+# round trip across a container resize, and SplitPane/resetSplitPane/loadSplitFraction/
+# storeSplitFraction against the REAL preference store -- same EditorPrefsTest arrangement (compiles
+# sandbox/src/EditorPrefs.cpp directly rather than linking a library, for that test's own precedent:
+# Sandbox is add_executable-only).
+#
+# AVER_WITH_IMGUI is deliberately left UNDEFINED: EditorWidgets.hpp's splitterHandle/drawSplitHandle
+# (the actual mouse-driven divider) and the `#include "imgui.h"` they need sit behind that macro --
+# see the header's own top comment. What is left outside it is exactly the arithmetic this target
+# proves; the drag gesture itself is visual-only, per this test file's own header comment.
+add_executable(EditorWidgetsTest
+  src/EditorWidgetsTest.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/EditorPrefs.cpp)
+target_link_libraries(EditorWidgetsTest PRIVATE Aver.Platform Aver.Core)
+set_target_properties(EditorWidgetsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

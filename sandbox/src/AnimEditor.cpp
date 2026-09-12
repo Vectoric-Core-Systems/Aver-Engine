@@ -16,6 +16,7 @@
 // traded one incomplete answer for another.
 #include "AnimEditor.hpp"
 #include "EditorKeybinds.hpp"
+#include "EditorWidgets.hpp"
 #include "AnimCurveGeometry.hpp"
 
 #include "ActorEditor.hpp"
@@ -46,6 +47,16 @@ std::string g_contentRoot;
 // scatter of cubes. A root, having no parent, gets a small cube at its own joint.
 constexpr f32 kBoneThicknessCm = 2.2f;
 constexpr f32 kRootCubeCm      = 4.0f;
+
+// The view/tracks split (draw()'s "view" preview column against "tracks", its notify/curve/track
+// column to the right) -- see EditorWidgets.hpp's own top comment for why this is a FRACTION
+// (SplitPane) rather than ActorEditor's pixel-width convention. 0.62f is this tab's own
+// PRE-EXISTING default (it used to be `avail.x * 0.62f` of whatever remained right of the bones
+// column, recomputed fresh every frame with no persistence at all) -- kept exactly, so adopting the
+// shared helper changes draggability and persistence only. The bones/sockets/animations column to
+// its left stays a fixed width, untouched -- see draw()'s own comment where it is sized.
+constexpr f32 kDefaultViewFraction = 0.62f;
+constexpr const char* kPrefViewSplit = "animEditor.viewSplit";
 
 // The path a clip's skeletonRef names, looked for beside the clip and then under the content root.
 // OcAnimation::skeletonRef was written by the importer and read by NOTHING before this.
@@ -282,6 +293,14 @@ public:
     void draw(Engine& e) override;
     void onFileChanged() override { reload_ = true; }
 
+    // Restores the view/tracks split to its default proportion and persists that -- see
+    // EditorWidgets.hpp's own comment for why this tab's split is a FRACTION (SplitPane) rather than
+    // ActorEditor's pixel-width convention. Only the view/tracks boundary: the bones/sockets/
+    // animations column to its left is a fixed width, not the fraction-of-content-region pattern this
+    // helper was generalised from, and its own internal vertical splits are untouched -- see this
+    // file's own draw() for both.
+    void resetLayout() override;
+
 private:
     void drawTransport();
     void drawTimeline();
@@ -385,6 +404,11 @@ private:
     bool framed_ = false;
     u32 pendingW_ = 0, pendingH_ = 0;
     f64 resizeDue_ = 0.0;
+
+    // The view/tracks divider. A plain SplitPane (EditorWidgets.hpp), not gated on AVER_WITH_IMGUI,
+    // matching every plain-POD field above it: this tab's fields must keep compiling with no ImGui
+    // even though only draw() and resetLayout() actually touch it.
+    SplitPane split_;
 };
 
 void AnimEditor::reloadIfNeeded() {
@@ -1496,7 +1520,15 @@ void AnimEditor::draw(Engine& e) {
     ImGui::SameLine();
 
     render::preview::ActorPreview* preview = sharedPreview(e);
-    const f32 midW = ImGui::GetContentRegionAvail().x * 0.62f;
+    // Draggable, persisted, through the shared SplitPane helper (EditorWidgets.hpp) -- see this
+    // file's own kDefaultViewFraction comment for why 0.62f is not a new number. `midAvail` is the
+    // width remaining after the fixed-width bones/sockets/animations column just drawn -- the SAME
+    // base the original `avail.x * 0.62f` measured, so the default view width at a given window size
+    // is unchanged.
+    const f32 midAvail = ImGui::GetContentRegionAvail().x;
+    const f32 minView = 200.0f * uiScale, minTracks = 200.0f * uiScale;
+    const f32 midW = splitPaneWidth(split_, kPrefViewSplit, kDefaultViewFraction, midAvail,
+                                     minView, minTracks);
     if (ImGui::BeginChild("view", ImVec2(midW, h), true)) {
         if (preview && preview->uiTextureId()) {
             const ImVec2 avail = ImGui::GetContentRegionAvail();
@@ -1525,7 +1557,8 @@ void AnimEditor::draw(Engine& e) {
         }
     }
     ImGui::EndChild();
-    ImGui::SameLine();
+    drawSplitHandle(split_, "##animsplit", kPrefViewSplit, midAvail, minView, minTracks,
+                     6.0f * uiScale);
 
     if (ImGui::BeginChild("tracks", ImVec2(0, h), true)) {
         ImGui::TextDisabled("NOTIFIES");
@@ -1542,6 +1575,16 @@ void AnimEditor::draw(Engine& e) {
     ImGui::EndChild();
 #else
     (void)e;
+#endif
+}
+
+// Restores the view/tracks split to its default proportion and persists that immediately -- see
+// AssetEditor.hpp's own resetLayout() comment for why "Reset Tab Layout" needs every tab to implement
+// this rather than just ActorEditor. A no-op `#if AVER_WITH_IMGUI` is off: a headless build never
+// lays the panels out at all, so there is nothing for a reset to restore.
+void AnimEditor::resetLayout() {
+#if AVER_WITH_IMGUI
+    resetSplitPane(split_, kPrefViewSplit, kDefaultViewFraction);
 #endif
 }
 

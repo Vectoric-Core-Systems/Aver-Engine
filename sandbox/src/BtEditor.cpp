@@ -344,6 +344,13 @@ namespace {
 // own conditions and actions into the same registry and the editor has no way to know them.
 const char* const kBuiltinConditions[] = {"HasTarget", "CanSeeTarget", "DistanceToTargetLess"};
 const char* const kBuiltinActions[] = {"MoveTo", "Wait", "LookAt", "FireEvent"};
+
+// The tree/details split -- see EditorWidgets.hpp's own top comment for why this is a FRACTION
+// (SplitPane) rather than ActorEditor's pixel-width convention. 0.45f is this tab's own PRE-EXISTING
+// default (it used to be `avail.x * 0.45f`, recomputed fresh every frame with no persistence at
+// all) -- kept exactly, so adopting the shared helper changes draggability and persistence only.
+constexpr f32 kDefaultTreeFraction = 0.45f;
+constexpr const char* kPrefTreeSplit = "btEditor.treeSplit";
 } // namespace
 
 void BtEditor::drawTreeRow(i32 index) {
@@ -520,14 +527,27 @@ void BtEditor::draw(Engine& e) {
 
     ImGui::Separator();
 
-    const float paneW = ImGui::GetContentRegionAvail().x * 0.45f;
+    // Draggable, persisted, through the shared SplitPane helper (EditorWidgets.hpp) -- see this
+    // file's own kDefaultTreeFraction comment for why 0.45f is not a new number.
+    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 avail = ImGui::GetContentRegionAvail().x;
+    const f32 minTree = 140.0f * dpi, minDetails = 200.0f * dpi;
+    const f32 paneW = splitPaneWidth(split_, kPrefTreeSplit, kDefaultTreeFraction, avail,
+                                      minTree, minDetails);
     if (ImGui::BeginChild("##bttree", ImVec2(paneW, 0), true)) {
         if (!tree_.nodes.empty()) drawTreeRow(0);
     }
     ImGui::EndChild();
-    ImGui::SameLine();
+    drawSplitHandle(split_, "##btsplit", kPrefTreeSplit, avail, minTree, minDetails, 6.0f * dpi);
     if (ImGui::BeginChild("##btdetails", ImVec2(0, 0), true)) drawDetails();
     ImGui::EndChild();
+}
+
+// Restores the tree/details split to its default proportion and persists that immediately -- see
+// AssetEditor.hpp's own resetLayout() comment for why "Reset Tab Layout" needs every tab to implement
+// this rather than just ActorEditor.
+void BtEditor::resetLayout() {
+    resetSplitPane(split_, kPrefTreeSplit, kDefaultTreeFraction);
 }
 
 #else   // AVER_WITH_IMGUI
@@ -536,6 +556,9 @@ void BtEditor::draw(Engine& e) {
 // undefined -- see tests/editor/CMakeLists.txt) still gets load/save/undo/edits; only the window is
 // absent. GraphEditor.cpp does exactly this.
 void BtEditor::draw(Engine& e) { (void)e; }
+
+// A headless build never lays the panels out at all, so there is nothing for a reset to restore.
+void BtEditor::resetLayout() {}
 
 #endif  // AVER_WITH_IMGUI
 
