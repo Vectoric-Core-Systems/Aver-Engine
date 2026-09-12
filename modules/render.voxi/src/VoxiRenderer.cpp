@@ -3363,14 +3363,36 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
             fs.resourceHeight = fs.rectHeight = th;
             fs.frameIndex      = nrdFrame_++;
             fs.denoisingRange  = settings_.giMaxDistance > 1.0f ? settings_.giMaxDistance : 500000.0f;
-            // THE SIGN IS THE ONE THING MOST LIKELY TO BE WRONG HERE and it is silent when it is:
-            // the G-buffer's velocity is DESTINATION minus SOURCE (this frame's position minus last
-            // frame's -- see averGBufferVelocity), and NRD reprojects by ADDING the motion vector to
-            // find where a pixel CAME FROM. Those are opposite conventions, so the x/y scale is
-            // negative. A sign error here does not fail, it just denoises against the wrong pixels
-            // and looks like smearing under motion.
-            fs.motionVectorScale[0] = -1.0f;
-            fs.motionVectorScale[1] = -1.0f;
+            // ---- THE SCALE CARRIES A SIGN *AND* A UNIT CONVERSION, AND THE UNIT WAS MISSING ----
+            //
+            // THE SIGN, which this comment used to be entirely about: the G-buffer's velocity is
+            // DESTINATION minus SOURCE (this frame's position minus last frame's, see
+            // averGBufferVelocity) and NRD reprojects by ADDING the motion vector to find where a
+            // pixel CAME FROM. Opposite conventions, hence negative.
+            //
+            // THE UNIT, which was wrong for as long as this pass has existed. NRD consumes the vector
+            // as `float2 smbPixelUv = pixelUv + mv.xy` (REBLUR_TemporalAccumulation.cs.hlsl), where
+            // `pixelUv = (pixelPos + 0.5) * gRectSizeInv` -- a NORMALISED [0,1] UV. So NRD wants the
+            // motion in UV. averGBufferVelocity returns PIXELS (curPx - prevPx). Scaling by -1 alone
+            // therefore handed NRD a one-pixel camera movement as a ONE-UV jump: the entire screen.
+            //
+            // WHAT THAT LOOKS LIKE, and it is the bug the user reported as "the white impression of
+            // the geometry is just burned into the screen": every reprojection lands nowhere near the
+            // pixel it describes, so the temporal history never lines up with the frame it is being
+            // blended into. Instead of decaying, stale geometry accumulates in place and burns in. It
+            // was never a ReSTIR defect -- it degrades the sky-occlusion denoiser identically, since
+            // both read this same CommonSettings.
+            //
+            // DIVIDE BY THE RECT, NOT THE RESOURCE. gRectSizeInv is the RENDERED rect; under dynamic
+            // resolution that is smaller than the allocation, and rectWidth/rectHeight above are
+            // already resolved to the right one for exactly this reason.
+            //
+            // THE THIRD UNIT BUG OF THIS KIND HERE, after the hit-distance constant that read metres
+            // as centimetres and the normal/roughness packing that read one layout as another. All
+            // three were silent, all three produced a confident wrong image, and none of them could
+            // fail a build. When a vendored library takes a number, find the line that CONSUMES it.
+            fs.motionVectorScale[0] = fs.rectWidth  ? -1.0f / static_cast<f32>(fs.rectWidth)  : -1.0f;
+            fs.motionVectorScale[1] = fs.rectHeight ? -1.0f / static_cast<f32>(fs.rectHeight) : -1.0f;
             fs.motionVectorScale[2] =  0.0f;   // the engine's velocity carries no Z
             fs.resetHistory = nrd_.historyIsStale() || !rtHistValid_;
             // ReSTIR GI's radiance only exists when ReSTIR GI is the estimator, so the diffuse
