@@ -8,6 +8,7 @@
 // AVER_WITH_NRD is a build-system fact, not a runtime one. When it is off this file still compiles
 // and every entry point fails cleanly, so a caller never needs an #if of its own -- the fallback
 // path is `if (!denoiser.create(...))`, which is a path it has to have anyway.
+#include <cstdlib>
 #include <aver/render/nrd/NrdDenoiser.hpp>
 
 #include <vector>

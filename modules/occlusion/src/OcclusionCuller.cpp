@@ -147,6 +147,14 @@ public:
         }
         res.writeBuffer(boxesBuf_, packed_.data(), static_cast<u64>(packed_.size()) * sizeof(f32), 0);
 
+        // SECOND STALENESS DIMENSION -- IDENTITY, NOT JUST TIMING. See hashPackedBoxes()'s own
+        // comment (OcclusionMath.hpp) for the full gap this closes and what was measured about it;
+        // this is just where a caller's box array turns into the fingerprint that check compares.
+        const u64 boxesHash = hashPackedBoxes(packed_.data(), packed_.size(), count);
+        const bool boxesStableAcrossLag = havePrevBoxesHash_ && boxesHash == prevBoxesHash_;
+        prevBoxesHash_ = boxesHash;
+        havePrevBoxesHash_ = true;
+
         // STALENESS DETECTOR: stamp a monotonically-increasing generation number into a tiny
         // CPU-authored side buffer and round-trip it through the SAME command list, at the SAME
         // point, as the visibility copy below -- so both copies land in the GPU in the same
@@ -283,13 +291,22 @@ public:
         } else {
             u64 readGeneration = 0;
             if (res.readBuffer(genReadback_, &readGeneration, sizeof(readGeneration), 0) &&
-                readGeneration == thisGeneration - 1) {
+                readGeneration == thisGeneration - 1 && boxesStableAcrossLag) {
                 readbackLagExpected_ = true;
+            } else if (readGeneration == thisGeneration - 1 && !boxesStableAcrossLag) {
+                // GPU timing was exactly right (the generation matches), but the IDENTITY check just
+                // above says the box array itself changed shape or content since the call whose
+                // answer this is -- see that check's own comment. Counted separately from a genuine
+                // timing miss so a future reader of occlusionStaleReadbacks_ (SandboxApp.cpp) is not
+                // misled into re-auditing genUpload_/genReadback_'s buffer-copy ordering for a defect
+                // that lives here instead.
+                ++boxSetChurnedAcrossLag_;
             }
             // else: leave it at the always-safe default set at the top of this function (false) --
-            // either the readback failed, or the generation that actually landed is not the
-            // immediately preceding call's, so the one-call-lag assumption every caller's own safety
-            // margin depends on did not hold this time.
+            // either the readback failed, the generation that actually landed is not the immediately
+            // preceding call's, or (see boxSetChurnedAcrossLag_ above) it was but the boxes it
+            // answered for were not this call's own -- the one-call-lag assumption every caller's own
+            // safety margin depends on did not hold this time, for one reason or the other.
         }
 
         // AND ONLY NOW THE STAMP -- see the long comment where thisGeneration is computed. The copy
@@ -304,6 +321,8 @@ public:
     void lastTestCounts(u32& culled, u32& tested) const override { culled = lastCulled_; tested = lastTested_; }
 
     bool readbackLagIsExactlyOneCall() const override { return readbackLagExpected_; }
+
+    u64 boxIdentityChurnCount() const override { return boxSetChurnedAcrossLag_; }
 
     void releaseAll(IResourceFactory& res) {
         destroyPyramidResources(res);
@@ -519,6 +538,18 @@ private:
     BufferHandle genUpload_ = 0, genReadback_ = 0;
     u64 submitGeneration_ = 0;      // incremented once per testBatch() call that reaches the dispatch
     bool readbackLagExpected_ = false;   // see readbackLagIsExactlyOneCall()
+
+    // SECOND STALENESS DETECTOR -- box IDENTITY across the one-call lag, not GPU timing. See
+    // testBatch()'s own comment beside boxesHash's computation for what this catches that the
+    // generation stamp above cannot (a caller whose box array changed shape or content between the
+    // call this readback answers and the call consuming it). CPU-only bookkeeping, no GPU resource.
+    u64 prevBoxesHash_ = 0;
+    bool havePrevBoxesHash_ = false;
+    // Calls where the GPU-timing check passed (the generation stamp matched) but the identity check
+    // did not -- a caller's own box population changed under it, not this module racing itself. Kept
+    // separate from a caller's own occlusionStaleReadbacks_-style GPU-timing counter so the two
+    // failure modes, which point at different files, are not conflated in a report.
+    u64 boxSetChurnedAcrossLag_ = 0;
 
     f32 viewProjCache_[16] = {};
     std::vector<f32> packed_;

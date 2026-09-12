@@ -175,19 +175,31 @@ public:
     virtual void testBatch(rhi::IRenderContext& ctx, rhi::IResourceFactory& res,
                            const Aabb* boxes, u32 count, std::vector<u8>& outVisible) = 0;
 
-    // STALENESS DETECTOR. testBatch() answers a question one call late (see above); this answers
-    // "was it EXACTLY one call late, the lag every caller's own safety margin assumes, or worse?" —
-    // turning a silently-wrong-by-more-than-expected answer into something a caller can actually
-    // check, rather than trusting the one-call assumption blindly. Trivially true for the very FIRST
-    // testBatch() call ever made (there is no earlier call for it to have been stale relative to —
-    // calling that an anomaly would be a false-positive warning on every run that ever turns culling
-    // on); after that, true only when the bytes testBatch() most recently handed back are provably
-    // the ones the IMMEDIATELY PRECEDING testBatch() call produced (see OcclusionCuller.cpp's
-    // generation-stamp comment on testBatch() for the mechanism — a second, tiny CPU-authored buffer
-    // round-tripped through the SAME command list as the visibility copy, costing one 8-byte
-    // writeBuffer/copyBuffer/readBuffer per call). From the second call on, OcclusionCullerImpl's own
-    // answer defaults to false (distrust) and only earns "true" once that check actually passes --
-    // the same conservative bias testBatch()'s own outVisible all-1 default already uses.
+    // STALENESS DETECTOR, ACROSS TWO INDEPENDENT DIMENSIONS. testBatch() answers a question one
+    // call late (see above); this answers "was that lag actually safe to apply" — which takes BOTH
+    // of the following, not just the first:
+    //   (a) TIMING: was it EXACTLY one call late, the lag every caller's own safety margin assumes,
+    //       or worse? Trivially true for the very FIRST testBatch() call ever made (there is no
+    //       earlier call for it to have been stale relative to — calling that an anomaly would be a
+    //       false-positive warning on every run that ever turns culling on); after that, true only
+    //       when the bytes testBatch() most recently handed back are provably the ones the
+    //       IMMEDIATELY PRECEDING testBatch() call produced (see OcclusionCuller.cpp's
+    //       generation-stamp comment on testBatch() for the mechanism — a second, tiny CPU-authored
+    //       buffer round-tripped through the SAME command list as the visibility copy, costing one
+    //       8-byte writeBuffer/copyBuffer/readBuffer per call).
+    //   (b) IDENTITY: even when (a) holds, were the PREVIOUS call's boxes the SAME boxes — same
+    //       count, same order, same content — as THIS call's? This module matches box[i] one call to
+    //       box[i] the next by bare array index (see the header comment above and OcclusionMath.hpp's
+    //       hashPackedBoxes()), and every caller today rebuilds that array fresh each frame from
+    //       whichever entities currently pass its own gates — so a population that streamed an entity
+    //       in or out between the two calls this lag spans breaks the correspondence just as surely
+    //       as a GPU-timing miss would, with no timing anomaly to show for it. OcclusionCuller.cpp's
+    //       testBatch() checks this by hashing the packed box bytes call-to-call; a run against a
+    //       live streaming scene (see that function's own comment for the numbers) found it disagree
+    //       exactly twice, both during initial load, and never again once the population settled.
+    // From the second call on, OcclusionCullerImpl's own answer defaults to false (distrust) and
+    // only earns "true" once BOTH checks actually pass -- the same conservative bias testBatch()'s
+    // own outVisible all-1 default already uses.
     //
     // NOT PURE, and this base-class default is DELIBERATELY THE OPPOSITE BIAS from the concrete
     // implementation above: "true" (trust unconditionally) preserves this interface's pre-existing
@@ -204,8 +216,9 @@ public:
     // is the same species of confidently-wrong name as the "SAME frame" comment whose falseness is
     // the whole reason this method exists, so it did not survive review.
     //
-    // False means the lag is something OTHER than one call -- older, newer, or unreadable -- which
-    // is the case no mitigation is calibrated for and every caller must answer by not culling.
+    // False means EITHER the lag was something other than one call (older, newer, unreadable) OR
+    // the lag was exactly one call but the box population changed under it -- either way, the case
+    // no mitigation is calibrated for, and every caller must answer by not culling.
     virtual bool readbackLagIsExactlyOneCall() const { return true; }
 
     // Boxes testBatch() said "hidden" for, and the total it was asked about, across the MOST RECENT
@@ -213,6 +226,17 @@ public:
     // periodic log line) accumulates these itself, once per frame, the same way every other counter
     // in that file already does.
     virtual void lastTestCounts(u32& culled, u32& tested) const = 0;
+
+    // Calls where readbackLagIsExactlyOneCall() returned false specifically because of the IDENTITY
+    // check (b) above, not the timing check (a) -- i.e. the GPU generation stamp matched but the box
+    // population itself changed shape or content under the lag. Cumulative since this culler was
+    // created, never reset, the same shape as a caller's own running totals (SandboxApp.cpp's
+    // occlusionStaleReadbacks_) rather than a per-call value, since a caller wanting to separate "the
+    // GPU timing raced" from "my own box array changed under me" in its own periodic report needs a
+    // number to diff against, not just a instantaneous bool. NOT PURE, default 0, same reasoning as
+    // readbackLagIsExactlyOneCall()'s own default: a future second implementer with no box-identity
+    // concept to report is not obligated to add one.
+    virtual u64 boxIdentityChurnCount() const { return 0; }
 };
 
 // Owns nothing the caller does not already own (the resource factory, the depth texture) except its

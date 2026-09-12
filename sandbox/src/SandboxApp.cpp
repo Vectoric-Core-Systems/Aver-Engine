@@ -7107,6 +7107,11 @@ public:
     // above for the two dials it is meant to be read alongside. FLAG-ONLY and additive -- default
     // off, and it only affects what gets READ BACK and logged, never what the renderer draws.
     void setLumaSweep(bool on, int stride) { lumaSweep_ = on; lumaSweepStride_ = stride > 0 ? stride : 1; }
+    // --firefly-metric [MULT]: OUTLIER pixels, not mean luminance -- see lumaSweepCheck() for the
+    // measurement itself (it shares --luma-sweep's own readback/decode rather than opening a second
+    // one). FLAG-ONLY, default off, additive: a run that never passes this is bit-for-bit the run it
+    // always was, exactly like --luma-sweep beside it.
+    void setFireflyMetric(bool on, f32 mult) { fireflyMetric_ = on; fireflyMult_ = mult > 0.0f ? mult : 8.0f; }
     void setPieCameraTest(int n) { pieCamFrames_ = n; }                            // --pie-camera-test
     void setInputStuckTest(int n) { inputStuckFrames_ = n; }                       // --input-stuck-test
     void setInputSourceTest(int n) { inputSrcFrames_ = n; }                        // --input-source-test
@@ -22641,11 +22646,12 @@ private:
     }
 
     void captureCheck(Engine& e) {
-        // --luma-sweep owns the device's single capture slot for the whole run (it requests a new
-        // frame every tick, not once near the end) -- sharing it with the one-shot probe/--shot
+        // --luma-sweep (and --firefly-metric, which shares its readback cycle -- see
+        // lumaSweepCheck()) owns the device's single capture slot for the whole run (it requests a
+        // new frame every tick, not once near the end) -- sharing it with the one-shot probe/--shot
         // logic below would have the two stomp each other's request on whichever frame they land on
         // the same tick. Not expected to matter to a measurement run, so refuse rather than guess.
-        if (lumaSweep_) return;
+        if (lumaSweep_ || fireflyMetric_) return;
         const u64 f = e.time().frame;
         const u64 sf = maxFrames_>8?maxFrames_-3:4;
         const u32 px_ = probeU_ >= 0.0f ? (u32)(vpX_ + vpW_ * probeU_)
@@ -22708,8 +22714,33 @@ private:
     // contribution to scene RADIANCE grows, and radiance is additive in LINEAR light, not in the
     // gamma-encoded backbuffer. Averaging the raw 0-255 bytes would still trend the same direction
     // but compress the low end relative to the claim being tested.
+    //
+    // ---- --firefly-metric, ADDED HERE RATHER THAN AS A SECOND READBACK ----
+    //
+    // A REAL ReSTIR GI FIREFLY IS A SPATIAL OUTLIER, NOT A MEAN: four rounds of fixes to giMode 1's
+    // fireflies shipped with nothing that could count one, because meanLinLuma above is exactly
+    // blind to them -- a handful of pixels pegged at the clamp are swamped by a multi-million-pixel
+    // average. This extends the SAME readback (one getFrameImage, one sRGB->linear decode, gated by
+    // its own flag so a run that never passes --firefly-metric costs nothing extra and changes no
+    // existing log line) to also report OUTLIER PIXELS: the count and the peak of pixels whose linear
+    // luminance exceeds a multiple of their LOCAL neighbourhood's, which is what marks a pixel as a
+    // firefly rather than a legitimately bright surface -- a sunlit floor is bright over a wide area,
+    // a firefly is bright against its own immediate surroundings.
+    //
+    // THE GRID IS THE EXISTING STRIDE-4 SUBSAMPLE, reused rather than a second, denser decode: the
+    // mean above already visits every 4th pixel in each direction, so storing that same per-sample
+    // luminance into a small 2D array is the only added cost -- no new pass over the image.
+    //
+    // OUTER RING MINUS INNER CORE, not a plain window mean, for the reference each candidate is
+    // judged against: the task this metric exists to serve reports CLUSTERS as well as lone pixels,
+    // and a plain window mean over a cluster is dragged upward by the very outlier it is meant to
+    // judge -- the more of the window the cluster fills, the more it hides itself. Excluding a small
+    // inner core (a candidate's own immediate neighbourhood) from its reference means a cluster up to
+    // that size cannot inflate the average it is compared to. Ro/Ri below are grid-cell radii,
+    // REASONED not measured (no sweep was run to fit them): Ro=3 is the smallest outer radius that
+    // still leaves a full ring of reference cells outside a 3x3 (Ri=1) core at every position.
     void lumaSweepCheck(Engine& e) {
-        if (!lumaSweep_ || maxFrames_ == 0) return;
+        if ((!lumaSweep_ && !fireflyMetric_) || maxFrames_ == 0) return;
         // STRIDE: only sample every Nth simulation frame. The pending readback from the PREVIOUS
         // sampled frame is always collected first regardless of phase, since it was already
         // requested and costs nothing extra to pick up; only the decision to issue a NEW request is
@@ -22726,13 +22757,24 @@ private:
                     const f32 s = c / 255.0f;
                     return s <= 0.04045f ? s / 12.92f : std::pow((s + 0.055f) / 1.055f, 2.4f);
                 };
+                // gridW/gridH: same stride-4 walk the mean loop below performs, sized only when
+                // --firefly-metric actually needs the samples kept around -- --luma-sweep alone
+                // allocates nothing extra, staying exactly as cheap as before this flag existed.
+                const u32 gridW = (fireflyMetric_ && x1 > x0) ? (x1 - 1 - x0) / 4 + 1 : 0;
+                const u32 gridH = (fireflyMetric_ && y1 > y0) ? (y1 - 1 - y0) / 4 + 1 : 0;
+                std::vector<f32> grid;
+                if (gridW && gridH) grid.assign((size_t)gridW * gridH, 0.0f);
+
                 f64 sum = 0.0; u64 n = 0;
                 for (u32 y = y0; y + 1 < y1; y += 4) {
                     const u8* row = img.data() + static_cast<size_t>(y) * iw * 4;
+                    const u32 gy = (y - y0) / 4;
                     for (u32 x = x0; x + 1 < x1; x += 4) {
                         const u8* px = row + static_cast<size_t>(x) * 4;
-                        sum += 0.2126 * toLin(px[0]) + 0.7152 * toLin(px[1]) + 0.0722 * toLin(px[2]);
+                        const f32 lin = 0.2126f * toLin(px[0]) + 0.7152f * toLin(px[1]) + 0.0722f * toLin(px[2]);
+                        sum += lin;
                         ++n;
+                        if (!grid.empty()) grid[(size_t)gy * gridW + (x - x0) / 4] = lin;
                     }
                 }
                 const f64 meanLin = n ? sum / (f64)n : -1.0;
@@ -22743,11 +22785,68 @@ private:
                 // invisible near a wobble peak (slope ~0 there) but real at a zero-crossing (slope at
                 // its max). Found by noticing matched-pose frames a period apart logged a suspiciously
                 // EXACT repeated angle instead of the expected per-frame sinusoid value.
-                AVER_INFO("[LumaSweep] frame={} meanLinLuma={:.6f} samples={} viewport=({},{} {}x{}) "
-                          "giMode={} camWobbleDeg={:.2f} camWobblePeriod={} yawDeg={:.3f}",
-                          lumaSweepFrame_, meanLin, n, (int)lumaSweepVpX_, (int)lumaSweepVpY_,
-                          (int)lumaSweepVpW_, (int)lumaSweepVpH_, giModeOverride_, camWobbleDeg_,
-                          camWobblePeriod_, lumaSweepYaw_ * 57.29577951f);
+                if (lumaSweep_) {
+                    AVER_INFO("[LumaSweep] frame={} meanLinLuma={:.6f} samples={} viewport=({},{} {}x{}) "
+                              "giMode={} camWobbleDeg={:.2f} camWobblePeriod={} yawDeg={:.3f}",
+                              lumaSweepFrame_, meanLin, n, (int)lumaSweepVpX_, (int)lumaSweepVpY_,
+                              (int)lumaSweepVpW_, (int)lumaSweepVpH_, giModeOverride_, camWobbleDeg_,
+                              camWobblePeriod_, lumaSweepYaw_ * 57.29577951f);
+                }
+
+                if (fireflyMetric_ && !grid.empty()) {
+                    // Summed-area table over the grid, so a windowed sum is O(1) regardless of
+                    // window size instead of re-scanning a neighbourhood per candidate cell -- the
+                    // grid is already built above from the mean loop's own samples, so this is one
+                    // extra O(gridW*gridH) pass, not a second full-resolution image decode.
+                    std::vector<f64> sat((size_t)(gridW + 1) * (gridH + 1), 0.0);
+                    for (u32 gy = 0; gy < gridH; ++gy) {
+                        f64 rowSum = 0.0;
+                        for (u32 gx = 0; gx < gridW; ++gx) {
+                            rowSum += grid[(size_t)gy * gridW + gx];
+                            sat[(size_t)(gy + 1) * (gridW + 1) + (gx + 1)] =
+                                rowSum + sat[(size_t)gy * (gridW + 1) + (gx + 1)];
+                        }
+                    }
+                    auto boxSum = [&](int bx0, int by0, int bx1, int by1) -> f64 {
+                        // Inclusive [bx0,bx1] x [by0,by1]; caller has already clamped to the grid.
+                        return sat[(size_t)(by1 + 1) * (gridW + 1) + (bx1 + 1)]
+                             - sat[(size_t)(by0)     * (gridW + 1) + (bx1 + 1)]
+                             - sat[(size_t)(by1 + 1) * (gridW + 1) + (bx0)]
+                             + sat[(size_t)(by0)     * (gridW + 1) + (bx0)];
+                    };
+                    const int Ro = 3, Ri = 1;   // see this function's own header comment for why
+                    // Absolute floor, not ratio alone: in a black region the local reference is
+                    // ~0, and any nonzero noise pixel would then clear an N-times-zero threshold
+                    // for free. A pixel below this linear luminance is not what anyone would call
+                    // a firefly regardless of what its neighbours read.
+                    const f64 kAbsFloor = 0.02;
+                    u64 outlierCount = 0; f64 outlierMax = 0.0;
+                    for (u32 gy = 0; gy < gridH; ++gy) {
+                        const int oy0 = std::max(0, (int)gy - Ro), oy1 = std::min((int)gridH - 1, (int)gy + Ro);
+                        const int iy0 = std::max(0, (int)gy - Ri), iy1 = std::min((int)gridH - 1, (int)gy + Ri);
+                        for (u32 gx = 0; gx < gridW; ++gx) {
+                            const f64 lum = grid[(size_t)gy * gridW + gx];
+                            if (lum < kAbsFloor) continue;
+                            const int ox0 = std::max(0, (int)gx - Ro), ox1 = std::min((int)gridW - 1, (int)gx + Ro);
+                            const int ix0 = std::max(0, (int)gx - Ri), ix1 = std::min((int)gridW - 1, (int)gx + Ri);
+                            const f64 outerSum = boxSum(ox0, oy0, ox1, oy1);
+                            const f64 innerSum = boxSum(ix0, iy0, ix1, iy1);
+                            const f64 outerCnt = (f64)(ox1 - ox0 + 1) * (f64)(oy1 - oy0 + 1);
+                            const f64 innerCnt = (f64)(ix1 - ix0 + 1) * (f64)(iy1 - iy0 + 1);
+                            const f64 ringCnt  = outerCnt - innerCnt;
+                            const f64 localRef = ringCnt > 0.0 ? (outerSum - innerSum) / ringCnt
+                                                                : (outerCnt > 0.0 ? outerSum / outerCnt : 0.0);
+                            if (lum > (f64)fireflyMult_ * std::max(localRef, kAbsFloor)) {
+                                ++outlierCount;
+                                outlierMax = std::max(outlierMax, lum);
+                            }
+                        }
+                    }
+                    AVER_INFO("[FireflyMetric] frame={} outliers={} maxLin={:.4f} meanLin={:.6f} mult={:.2f} "
+                              "grid={}x{} giMode={} camWobbleDeg={:.2f} camWobblePeriod={}",
+                              lumaSweepFrame_, outlierCount, outlierMax, meanLin, fireflyMult_,
+                              gridW, gridH, giModeOverride_, camWobbleDeg_, camWobblePeriod_);
+                }
             } else {
                 AVER_WARN("[LumaSweep] frame={}: getFrameImage() returned nothing -- this backend may "
                           "not support a full-frame readback", lumaSweepFrame_);
@@ -22773,6 +22872,8 @@ private:
     u64  lumaSweepFrame_ = 0;
     f32  lumaSweepYaw_ = 0.0f;        // yaw_ cached at REQUEST time -- see lumaSweepCheck()
     f32  lumaSweepVpX_=0, lumaSweepVpY_=0, lumaSweepVpW_=0, lumaSweepVpH_=0;
+    bool fireflyMetric_ = false;      // --firefly-metric [MULT]: see lumaSweepCheck()
+    f32  fireflyMult_ = 8.0f;         // outlier threshold: local-neighbourhood-mean multiplier
     // MOVE, NOT SELECT, and the difference is whether a gizmo exists at all. Select draws none
     // (see drawGizmo's tool_ test), so an editor that opened in Select showed nothing to grab on a
     // freshly picked object and gave no hint that 2 would summon one -- "I cannot move things" is
@@ -26251,6 +26352,22 @@ Application* createApplication(int argc, char** argv) {
                 lumaSweepStrideArg = s > 0 ? s : 1;
             }
         }
+    // --firefly-metric [MULT]: its own full-length loop for the same C1061 reason as --luma-sweep
+    // just above, with the same optional-numeric-argument handling (MULT, the outlier threshold
+    // multiplier over the local neighbourhood -- default 8.0, see lumaSweepCheck()). Shares
+    // --luma-sweep's own STRIDE (lumaSweepStride_) rather than adding a second one: both flags drive
+    // the SAME per-frame readback cycle, so one cadence knob for it is enough, and combining
+    // "--luma-sweep N --firefly-metric" already gives independent control of it when wanted.
+    bool fireflyMetricArg = false;
+    f32 fireflyMultArg = 8.0f;
+    for (int i = 1; i < argc; ++i)
+        if (!std::strcmp(argv[i], "--firefly-metric")) {
+            fireflyMetricArg = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                const f32 m = (f32)std::atof(argv[i + 1]);
+                fireflyMultArg = m > 0.0f ? m : 8.0f;
+            }
+        }
     bool clearShaderCacheArg = false;
     std::string clearShaderCacheDirArg;
     for (int i = 1; i < argc; ++i)
@@ -27288,6 +27405,7 @@ Application* createApplication(int argc, char** argv) {
     // neighbours happen to sit in for reasons unrelated to this flag): --luma-sweep has nothing to
     // do with AverSR and must apply whether or not that module is built.
     if (lumaSweepArg) app->setLumaSweep(true, lumaSweepStrideArg);
+    if (fireflyMetricArg) app->setFireflyMetric(true, fireflyMultArg);
 #if AVER_MODULE_SYNAPSE
     if (bakeNav) app->setBakeNavOnStart(bakeNavCell);
 #else

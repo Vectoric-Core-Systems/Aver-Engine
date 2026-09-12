@@ -321,12 +321,66 @@ static void checkFalseCullRegression() {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// hashPackedBoxes: the fingerprint OcclusionCuller.cpp's testBatch() compares call-to-call to
+// catch a caller whose box array changed IDENTITY (size, order, or content) across the one-call
+// readback lag -- see that function's own comment for the false-cull mechanism this closes and
+// what was measured about it on a live Sponza run. Checked here with no GPU, the same split every
+// other function in this file already gets.
+// ---------------------------------------------------------------------------------------------
+static void checkHashPackedBoxes() {
+    AVER_INFO("hashPackedBoxes");
+    // Two independently-packed copies of the SAME three boxes, byte for byte: this is the common
+    // case (a static scene, no streaming churn between two consecutive testBatch() calls) and must
+    // hash equal, or the caller's readback would be treated as untrustworthy on every ordinary frame.
+    const f32 boxesA[24] = {
+        -1, -1, -1, 0,  1, 1, 1, 0,      // box 0
+         2,  0,  0, 0,  3, 1, 1, 0,      // box 1
+        -5, -5,  0, 0, -4,-4, 1, 0,      // box 2
+    };
+    f32 boxesB[24];
+    std::memcpy(boxesB, boxesA, sizeof(boxesA));
+    check(hashPackedBoxes(boxesA, 24, 3) == hashPackedBoxes(boxesB, 24, 3),
+          "identical box arrays (same count, same content) hash equal");
+
+    // Same COUNT, one box's content perturbed (this is the "same-count swap" the function's own
+    // comment says a bare count compare alone would miss) -- must hash different.
+    f32 boxesC[24];
+    std::memcpy(boxesC, boxesA, sizeof(boxesA));
+    boxesC[8] += 0.001f;   // nudge box 1's min.x
+    check(hashPackedBoxes(boxesA, 24, 3) != hashPackedBoxes(boxesC, 24, 3),
+          "same count, one box's content differs -> hashes differ");
+
+    // Same total bytes actually submitted would require the same count (8 floats/box), so the
+    // count fold is exercised by comparing a 2-box array against the first 16 floats of the
+    // 3-box one: identical BYTES, different COUNT (an entity despawning mid-array shifted here for
+    // a self-contained fixture) -- the fold must still tell them apart.
+    check(hashPackedBoxes(boxesA, 16, 2) != hashPackedBoxes(boxesA, 16, 3),
+          "identical bytes, different declared count -> hashes differ (the count fold matters)");
+
+    // A population that GREW (streaming added a box) changes the byte length outright -- the common
+    // real-world case this whole mechanism exists to catch.
+    check(hashPackedBoxes(boxesA, 24, 3) != hashPackedBoxes(boxesA, 16, 2),
+          "appending a box changes the hash");
+
+    // Reordering two boxes (same count, same multiset of bytes, different ARRAY ORDER) must also
+    // read as a change: index i means something different now even though nothing was added or
+    // removed, which is exactly the "one entity's box leaves an index the same call another's
+    // arrives there" case the function's own comment calls out as what a count-only check would miss.
+    f32 boxesSwapped[24];
+    std::memcpy(boxesSwapped, boxesA, sizeof(boxesA));
+    for (int i = 0; i < 8; ++i) std::swap(boxesSwapped[i], boxesSwapped[8 + i]);   // box 0 <-> box 1
+    check(hashPackedBoxes(boxesA, 24, 3) != hashPackedBoxes(boxesSwapped, 24, 3),
+          "swapping two boxes' positions in the array -> hashes differ");
+}
+
 int main() {
     AVER_INFO("OcclusionMathTest");
     checkProjection();
     checkMipSelect();
     checkConservativelyHidden();
     checkFalseCullRegression();
+    checkHashPackedBoxes();
     if (g_failures) AVER_ERROR("OcclusionMathTest: {} failure(s)", g_failures);
     else            AVER_INFO("OcclusionMathTest: all checks passed");
     return g_failures ? 1 : 0;

@@ -254,9 +254,47 @@ float RAB_GetGISampleTargetPdfForSurface(float3 samplePosition, float3 sampleRad
     // Recomputed per candidate, not per pixel: samplePosition is wherever THIS candidate's ray
     // landed, independent of every other candidate sharing this surface, so it cannot be hoisted out
     // as a per-surface constant the way the BRDF's albedo/PI term above can.
+    //
+    // ---- THE SAME COSINE FLOOR AS AVER_GI_MIN_COS, AND FOR THE SAME REASON, APPLIED HERE TOO ----
+    //
+    // MEASURED to be A REAL SOURCE of the --firefly-metric spike this file's other comments describe
+    // (giTraceInitialCandidate's, and giRestirIndirect's own -- see that function for the full
+    // measurement history, including three backstops tried AFTER this floor and none of them keeping):
+    // adding this floor alone, before any backstop, measurably reduced how often the spike fired on
+    // the --cam-wobble repro -- several previously-spiking sampled frames read clean afterward -- but
+    // did not eliminate a residual. giRestirIndirect's own comment lays out why that residual survives
+    // three different backstops and what it is instead (irreducible per-pixel Monte Carlo variance,
+    // not a further instance of this same bug); this floor is kept because it IS a measured
+    // improvement on its own terms, stated honestly as partial rather than complete.
+    //
+    // THE MECHANISM: this return value is `p^`, the target pdf RIS resamples by, and per this
+    // function's own header comment RIS is unbiased for ANY positive p^ -- but `weightSum` after
+    // RTXDI_FinalizeGIResampling divides by it (SpatioTemporalResampling.hlsli:
+    // `weightSum * normalizationNumerator / (selectedTargetPdf * piSum)`), so a p^ allowed to approach
+    // zero lets weightSum approach infinity for a SAMPLE THAT IS NOT ITSELF ANY BRIGHTER -- the same
+    // 1/cosTheta blow-up AVER_GI_MIN_COS already bounds at the sample's OWN creation, unbounded again
+    // here at every surface that later RESAMPLES it, temporal self and spatial neighbours alike. A
+    // near-grazing angle between a stored sample and whichever surface is now evaluating it is common
+    // under camera rotation (the geometry keeps shifting relative to a position that does not), so this
+    // is not a rare edge case -- it is what --cam-wobble exercises every pass through its cycle.
+    //
+    // NOT BEHIND THE SURFACE, THOUGH: the floor only replaces a SMALL POSITIVE cosine (a grazing but
+    // genuine view of the sample), never a negative one (the sample is on the wrong side of the
+    // surface's hemisphere and has no business contributing at all) -- computed on the UNCLAMPED dot
+    // product, not the old saturate()'d one, so that distinction survives.
+    //
+    // WHY A FLOOR AND NOT A REJECT, UNLIKE AVER_GI_MIN_COS'S OWN CHOICE: that site rejects rather than
+    // clamps because clamping there would understate ONE CANDIDATE's own weight and bias the whole
+    // estimator dark (its own comment explains why). This function computes an IMPORTANCE PROXY, not
+    // the physical integrand -- giRestirIndirect's own final estimate recomputes cosR separately and
+    // unfloored for the actual shading math -- so raising the floor here only changes which candidate
+    // RIS is more likely to keep, not what any kept candidate is worth. RIS stays unbiased under any
+    // positive, self-consistent p^ function (again, this function's own header comment), so this is a
+    // variance fix, not a second correctness trade to weigh against the first.
     const float3 toSample = samplePosition - surface.worldPos;
     const float  dist2    = dot(toSample, toSample);
-    const float  cosR     = dist2 > 1e-8 ? saturate(dot(toSample * rsqrt(dist2), surface.normal)) : 0.0;
+    const float  rawCos   = dist2 > 1e-8 ? dot(toSample * rsqrt(dist2), surface.normal) : -1.0;
+    const float  cosR     = rawCos > 0.0 ? max(rawCos, AVER_GI_MIN_COS) : 0.0;
     return averShadowLum(sampleRadiance) * cosR;
 }
 
@@ -785,6 +823,57 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         result = RTXDI_GISpatioTemporalResampling(pixelPos, surface, 1u - writeSlice, screenSpaceMotion,
                                                    initial, rng, rParams, resParams, stparams);
     }
+
+    // ---- THE RESIDUAL AFTER THE cosR FLOOR ABOVE -- THREE BACKSTOPS TRIED, ALL MEASURED, NONE KEPT ----
+    //
+    // --firefly-metric (SandboxApp.cpp), added for this task, is the first thing that could count a
+    // ReSTIR GI firefly rather than guess at one. On the user's own repro (PTTest Sponza, giMode 1,
+    // --cam-wobble) it found a real, motion-triggered spike: outlier pixel count sat in a ~150-350
+    // band and jumped past 800-1200 for single sampled frames with the denoiser off, while the SAME
+    // run with --denoiser 1 never left the low band across 200 frames. A screenshot at one spiking
+    // frame confirms it by eye -- a field of small bright dots across an otherwise dark wall, gone
+    // completely with the denoiser on. This is the measurement the four prior rounds of fixes to this
+    // bug shipped without. Flooring cosR in RAB_GetGISampleTargetPdfForSurface (above) measurably
+    // reduced how often this fires -- several previously-spiking sampled frames read clean afterward
+    // -- but did not eliminate it; a residual, still motion-triggered, remained.
+    //
+    // THREE BACKSTOPS WERE TRIED AGAINST THAT RESIDUAL, IN THIS ORDER, EACH MEASURED AND EACH LEFT NO
+    // MARK -- kept here as recorded negative results rather than deleted, per this task's own
+    // instruction not to reinvent a hypothesis already tried:
+    //
+    // 1. A WAVE-LEVEL AVERAGE (WaveActiveSum/WaveActiveCountBits over the pixel's own wave) -- the
+    //    closest a pixel shader can get to RTXDI_GIBoilingFilter's own groupshared reduction (Rtxdi/
+    //    GI/BoilingFilter.hlsli), which needs a COMPUTE thread group and is illegal here
+    //    (giRestirIndirect runs from PSMainVoxi/PSRayDriven, pixel shaders both -- moving this pass
+    //    onto compute is a real restructuring, out of this task's file ownership). Re-measuring showed
+    //    no improvement: frame 70 still spiked to 1016 (was 980), and a NEW spike appeared at frame
+    //    110 that had not been one before.
+    // 2. EACH PIXEL AGAINST ITS OWN RESERVOIR FROM LAST FRAME (`1u - writeSlice` at the raw,
+    //    un-reprojected pixelPos). Reasoned to dodge the spatial contamination above, since it depends
+    //    on no neighbour at all -- measured to not matter either: frames 110/150/190 still spiked
+    //    (1039/1082/903).
+    // 3. AN ABSOLUTE CEILING on the finalised weightSum, at a multiple of PI/AVER_GI_MIN_COS (~62.8,
+    //    the most a single well-formed candidate's own 1/pdf can be -- see that constant's own
+    //    comment). Independent of any neighbour or history, so immune to the contamination that
+    //    plausibly explains why (1) and (2) did nothing. Swept from a generous 8x down to 1x -- the
+    //    SAME ceiling a single candidate itself is already held to -- and at EVERY multiple tried, the
+    //    spike frames were UNCHANGED (1x: frame 110 = 1042, 115 = 1070, 150 = 843; the un-clamped
+    //    baseline was 1024/1066/1037 at the same three frames). A ceiling this tight, doing nothing,
+    //    is decisive: no reservoir feeding these frames' pixels is exceeding even a single candidate's
+    //    own honest weight.
+    //
+    // WHAT THAT RULES IN, SINCE IT RULES OUT EVERY weightSum-SIDE EXPLANATION: the widespread, fully-
+    // correlated brightening is not any one reservoir's weight running away. The remaining candidate is
+    // GENUINE, CORRECT MONTE CARLO VARIANCE -- many nearby pixels, each drawing its OWN independent
+    // cosine-weighted candidate direction (rtDiscSample/rtHash, giTraceInitialCandidate above), having
+    // a small but real chance of independently landing on the SAME narrow, high-contrast light path
+    // (glimpsing the sun or a small sunlit patch through a gap) at THIS specific camera angle. Nothing
+    // about that is a bug to clamp away -- clamping it would mean discarding real light transport that
+    // a single candidate per pixel is not enough to smoothly resolve on its own, which is exactly the
+    // job RTXDI's own spatiotemporal reuse and this engine's REBLUR integration exist to do, and
+    // measurably already do (the denoiser-on band above). Shipping a FOURTH unmeasured backstop on top
+    // of three that measured as no-ops would be exactly the pattern this task was written to stop.
+
     // KNOWN LIMITATION, not fixed here: a pixel covered by TRANSLUCENT geometry is written to THIS
     // reservoir slot TWICE in one frame. PSRayDriven writes every pixel first; the blended glass
     // replay is PSMainVoxi drawn over the same pixels, and the two share one compiled shader binary

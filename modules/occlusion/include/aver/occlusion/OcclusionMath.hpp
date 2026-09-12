@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <functional>
 
 namespace aver::occlusion {
@@ -148,6 +149,57 @@ inline bool conservativelyHidden(const f32 minUV[2], const f32 maxUV[2], f32 nea
         if (nearestZ <= stored) return false;   // this corner's texel: something at least as close is there
     }
     return true;
+}
+
+// ---------------------------------------------------------------------------------------------
+// 4. A content fingerprint for "is this the SAME batch of boxes as last call", the piece a caller
+//    needs to make testBatch()'s one-call-stale answer (OcclusionCuller.cpp) actually SAFE to use.
+// ---------------------------------------------------------------------------------------------
+//
+// THE GAP THIS CLOSES. testBatch()'s own generation stamp (OcclusionCuller.cpp) proves the bytes it
+// hands back were produced by EXACTLY the immediately preceding call's GPU dispatch -- a TIMING
+// fact. It proves nothing about whether that previous call was even asking about the SAME boxes:
+// this module has no entity/chunk/cluster concept (see this header's own top comment on why), so a
+// caller's box[i] this call and box[i] last call are matched by BARE ARRAY INDEX alone. Every caller
+// today (SandboxApp.cpp) rebuilds that array fresh every frame from whichever entities currently
+// pass its own visibility/streaming gates, and the instant that population's SIZE OR CONTENT changes
+// between two consecutive calls -- an entity streamed in or out, one crossing from degenerate to
+// valid bounds -- index i no longer names the same logical box it did one call ago. Applying the
+// stale answer anyway hands a box a verdict some OTHER box earned, indistinguishable from a real
+// cull with no GPU-timing anomaly to explain it: exactly the "silent wrong answer no screenshot diff
+// would necessarily catch" the generation stamp was built to catch a different version of.
+//
+// MEASURED, not just reasoned: instrumenting OcclusionCuller.cpp's testBatch() with this exact
+// fingerprint against a live Sponza run (--project PTTest --open-level NewSponza_Main_glTF_003,
+// occlusion on, static camera) found it disagree with the previous call's fingerprint on exactly 2
+// of the run's first several calls -- while the box population was still arriving from level load --
+// and never again once the population settled at 112 boxes per call; culling continued normally
+// after (1.2% then climbing to 1.8%, unchanged from a run with no fingerprint check at all). So the
+// mechanism this catches is real and fires in practice, though a single before/after frame showing
+// the specific object it would have mis-culled was not isolated -- the two disagreeing calls landed
+// during level load, before there was a stable image to screenshot-diff.
+//
+// A bare count compare would already catch the common case above (streaming adds/removes an
+// entity), but hashing the packed bytes also catches the rarer same-count swap -- one entity's box
+// leaves an index the same call another's arrives there -- that a count alone would miss.
+//
+// `packed` is the caller's OWN packed layout (8 floats/box: min.xyz+pad, max.xyz+pad, matching
+// OcclusionCuller.cpp's own upload buffer), so this reads exactly the bytes already being uploaded
+// with no second copy or second format to keep in sync. `count` is folded in explicitly rather than
+// left implicit in packed's length: two different counts happening to hash their (different-length)
+// byte runs to the same value is astronomically unlikely already, but the fold costs one line and
+// removes even that dependence on FNV's own distribution.
+inline u64 hashPackedBoxes(const f32* packed, usize floatCount, u32 count) {
+    u64 h = 1469598103934665603ull;   // FNV-1a 64-bit offset basis
+    for (usize i = 0; i < floatCount; ++i) {
+        u32 bits;
+        std::memcpy(&bits, &packed[i], sizeof(bits));
+        h ^= bits;
+        h *= 1099511628211ull;   // FNV-1a 64-bit prime
+    }
+    h ^= count;
+    h *= 1099511628211ull;
+    return h;
 }
 
 } // namespace aver::occlusion
