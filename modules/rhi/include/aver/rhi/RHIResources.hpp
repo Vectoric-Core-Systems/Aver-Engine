@@ -43,9 +43,23 @@ enum class Format : u8 {
     // every pixel of a target that already exists only because bandwidth was being counted (see
     // that feature's own task brief: ~54 MB at 2750x1639 for all three new targets together).
     RG16F,
-    // 10-10-10-2 unorm. Packs a world-space normal (xyz) and a roughness (w) into 4 bytes/pixel --
-    // see IDevice::gBufferNormalRoughnessTexture for the exact encoding (xyz maps [-1,1] to [0,1];
-    // w is roughness, already [0,1], stored as-is). NOT an RGBA8Unorm: 8 bits per normal component
+    // 10-10-10-2 unorm. Packs a world-space normal AND a roughness into 4 bytes/pixel -- see
+    // IDevice::gBufferNormalRoughnessTexture for the encoding, and DO NOT restate it here.
+    //
+    // THIS COMMENT USED TO SPELL THE PACKING OUT ("xyz maps [-1,1] to [0,1]; w is roughness, stored
+    // as-is") AND THAT DESCRIPTION IS NOW FALSE. The G-buffer writes NVIDIA NRD's own
+    // R10G10B10A2_UNORM layout, where the normal and the roughness SHARE xyz -- roughness rides in z,
+    // signed by n.z's sign -- and w carries a material id, not roughness. Anyone who trusted the old
+    // sentence would decode a plausible, confidently wrong normal.
+    //
+    // That is not a hypothetical: the engine shipped for months with the naive packing while NRD was
+    // compiled for the real one, and the self-check meant to catch it restated the assumption in prose
+    // instead of testing it, so it asserted the bug away rather than reporting it. The lesson is why
+    // this comment now points at the contract instead of duplicating it -- a format contract with two
+    // descriptions has two chances to drift and no way to notice. NrdNormalRoughnessEncodingTest
+    // round-trips the real thing.
+    //
+    // NOT an RGBA8Unorm: 8 bits per normal component
     // bands visibly on a smoothly curved surface under directional light, which is exactly the
     // artifact a G-buffer feeding a denoiser or a temporal filter cannot afford to introduce
     // upstream of the very passes meant to clean an image up, not add a new defect to it.

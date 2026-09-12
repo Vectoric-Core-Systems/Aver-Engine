@@ -315,6 +315,9 @@ bool Denoiser::setReblurTuning(u32 denoiserIndex, const ReblurTuning& s) {
     r.hitDistanceParameters.B = s.hitDistB;
     r.hitDistanceParameters.C = s.hitDistC;
     r.enableAntiFirefly       = s.enableAntiFirefly;
+    r.diffusePrepassBlurRadius = s.diffusePrepassBlurRadius;
+    r.maxStabilizedFrameNum    = s.maxStabilizedFrameNum;
+    r.maxAccumulatedFrameNum   = s.maxAccumulatedFrameNum;
     return ::nrd::SetDenoiserSettings(*static_cast<::nrd::Instance*>(instance_),
                                       static_cast<::nrd::Identifier>(denoiserIndex), &r)
            == ::nrd::Result::SUCCESS;

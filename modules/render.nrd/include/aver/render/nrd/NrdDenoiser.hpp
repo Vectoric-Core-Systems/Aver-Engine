@@ -252,6 +252,36 @@ public:
         // nrd::ReblurSettings already -- named here so turning it OFF is a decision someone made
         // rather than a default nobody saw.
         bool  enableAntiFirefly = true;
+
+        // ---- THE THREE KNOBS THAT REMOVE WORK RATHER THAN MERELY RETUNE IT ----
+        //
+        // Every default below is NRD'S OWN, so a caller that constructs this struct and changes
+        // nothing gets exactly the behaviour it had before these fields existed. They are exposed
+        // because the denoiser measured at roughly 3x the frame cost of running without it and
+        // nothing had ever been tuned -- not because any particular value is known to be better.
+        // DO NOT change a default here on reasoning alone; the whole point of the seam is that the
+        // trade can be measured.
+        //
+        // TWO OF THEM GENUINELY SKIP A DISPATCH, which is why they are worth more than the quality
+        // dials NRD also offers. Source/Reblur.cpp decides both:
+        //     skipPrePass               = diffusePrepassBlurRadius == 0 (and the specular twin)
+        //     skipTemporalStabilization = maxStabilizedFrameNum == 0
+        // so each is a whole pass off the plan, not a pass that runs and does nothing.
+        //
+        // AND TURNING STABILIZATION OFF IS WORTH MORE THAN ITS DISPATCH. That pass is the ONLY thing
+        // in REBLUR_DIFFUSE that writes IN_MV -- see Recorder::mvScratch_, which exists solely to give
+        // NRD a motion-vector texture it may scribble on. With stabilization off, the full-resolution
+        // CopyResource that feeds mvScratch_ every frame has nothing left to protect against.
+        //
+        // WHAT EACH COSTS, so the measurement is not run blind: the pre-pass is a spatial pre-blur
+        // that matters most for a NOISY input, and ReSTIR GI is exactly that; temporal stabilization
+        // is what suppresses frame-to-frame flicker, though this signal is already resampled
+        // temporally by RTXDI before NRD ever sees it, so the two may overlap more than usual here.
+        float diffusePrepassBlurRadius = 30.0f;   // 0 skips the Pre-pass dispatch entirely
+        // 63 is NRD's REBLUR_MAX_HISTORY_FRAME_NUM, restated because NRD's headers cannot be included
+        // outside this module. 0 skips the Temporal stabilization dispatch entirely.
+        u32   maxStabilizedFrameNum = 63;
+        u32   maxAccumulatedFrameNum = 30;        // history depth; latency/noise, not dispatch count
     };
 
     // `denoiserIndex` is the index into the kinds array create() was given -- the same index
