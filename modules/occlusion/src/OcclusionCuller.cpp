@@ -229,23 +229,56 @@ public:
         // stale answer, not a fresh one.
         res.waitIdle();
 
-        rawVisible_.resize(count);
-        if (res.readBuffer(visReadback_, rawVisible_.data(), static_cast<u64>(count) * 4, 0)) {
-            for (u32 i = 0; i < count; ++i) {
-                const bool visible = rawVisible_[i] != 0;
-                outVisible[i] = visible ? 1 : 0;
-                if (!visible) ++lastCulled_;
+        // THE FIRST CALL READS NOTHING, BECAUSE THERE IS NOTHING TO READ, and reading it anyway is
+        // what produced "19 of 19 tested entities culled (100.0%)" on the opening frame of every
+        // single run. visReadback_ is filled only by a previous call's copyBuffer; on call 1 it holds
+        // whatever the allocation happened to contain. The loop below then overwrote outVisible's
+        // deliberately-safe all-1 default with that uninitialised VRAM and counted every zero byte in
+        // it as a cull -- and the generation branch immediately underneath declared the result
+        // TRUSTWORTHY, so a caller had no way to reject it. Whole-scene garbage, marked reliable, on
+        // the first frame.
+        //
+        // Skipping the read leaves outVisible all-1 and lastCulled_ at 0, which is not a fallback --
+        // it is the correct answer. Before anything has been tested, nothing has been proven
+        // occluded, so "everything visible" is exactly true, and it is true in the conservative
+        // direction that costs a frame of drawing rather than a frame of missing geometry.
+        //
+        // AND IT IS > 2, NOT > 1, BECAUSE THE FIRST DISPATCH IS ALSO WORTHLESS -- for a different
+        // reason than the first readback, which is why both guards are needed. This is a two-pass
+        // occlusion scheme: buildPyramid() runs from the scene depth texture BEFORE this frame's
+        // scene is drawn, so it is always reading the PREVIOUS frame's depth. On the opening frame
+        // there is no previous frame, so pyramid mip 0 comes from a depth target nothing has
+        // rendered into, every box tests as occluded against it, and call 2 -- which reads call 1's
+        // dispatch -- reported a flat "19 of 19 tested entities culled (100.0%)". A caller acting on
+        // that culls the ENTIRE SCENE for one frame.
+        //
+        // MEASURED, which is how the second guard was found at all: with only the > 1 guard the
+        // opening frame correctly read 0 of 19, and the 19 simply moved to the next report instead
+        // of disappearing. Same scene, same frame count, identical in raster and ray-driven mode --
+        // so it was never about which renderer wrote the depth, only about there not being one yet.
+        if (thisGeneration > 2) {
+            rawVisible_.resize(count);
+            if (res.readBuffer(visReadback_, rawVisible_.data(), static_cast<u64>(count) * 4, 0)) {
+                for (u32 i = 0; i < count; ++i) {
+                    const bool visible = rawVisible_[i] != 0;
+                    outVisible[i] = visible ? 1 : 0;
+                    if (!visible) ++lastCulled_;
+                }
             }
         }
 
         if (thisGeneration == 1) {
-            // The FIRST call ever has no previous call to have been stale RELATIVE TO -- genReadback_
-            // holds whatever garbage it was created with, same as visReadback_ does on this exact
-            // same call (see outVisible's own all-1 default, which is what actually protects a
-            // caller on this call, not this flag). Calling that "stale" would be a false-positive
-            // warning on every single run that ever turns culling on, for a boundary condition that
-            // is not an anomaly -- so it is defined as trivially fresh instead, and the generation
-            // check below only starts actually proving anything from the SECOND call onward.
+            // The FIRST call ever has no previous call to have been stale RELATIVE TO, and
+            // genReadback_ holds whatever garbage it was created with. Calling that "stale" would be
+            // a false-positive warning on every single run that ever turns culling on, for a
+            // boundary condition that is not an anomaly -- so it is trivially fresh instead, and the
+            // generation check below only starts proving anything from the SECOND call onward.
+            //
+            // AND THAT IS NOW HONEST, which it was not before. This flag used to vouch for a result
+            // read out of an uninitialised visReadback_ -- it said "trust this" about garbage. The
+            // guard above means call 1 no longer reads that buffer at all, so what this vouches for
+            // is "every box visible, nothing culled", which is genuinely correct on a call that has
+            // tested nothing yet. The flag and the data it describes finally agree.
             readbackLagExpected_ = true;
         } else {
             u64 readGeneration = 0;
