@@ -22760,21 +22760,34 @@ private:
                 // gridW/gridH: same stride-4 walk the mean loop below performs, sized only when
                 // --firefly-metric actually needs the samples kept around -- --luma-sweep alone
                 // allocates nothing extra, staying exactly as cheap as before this flag existed.
-                const u32 gridW = (fireflyMetric_ && x1 > x0) ? (x1 - 1 - x0) / 4 + 1 : 0;
-                const u32 gridH = (fireflyMetric_ && y1 > y0) ? (y1 - 1 - y0) / 4 + 1 : 0;
+                // ---- STRIDE 1 WHEN HUNTING FIREFLIES, 4 WHEN JUST AVERAGING ----
+                //
+                // A FIREFLY IS OFTEN A SINGLE PIXEL, and a stride-4 walk inspects one pixel in
+                // SIXTEEN -- so any given firefly had about a 1-in-16 chance of being looked at,
+                // which is not a measurement, it is a lottery. That is why the first version of this
+                // metric reported an unchanging count in a scene where fireflies were being reported
+                // by eye: the handful of cells it did sample were large sunlit windows, which are
+                // stable by nature, and the actual outliers fell between its samples.
+                //
+                // --luma-sweep keeps stride 4: a MEAN converges perfectly well on 1/16 of the pixels
+                // and that flag exists to be cheap. The firefly pass is a diagnostic that runs only
+                // when asked, so it pays full resolution to be able to see what it is looking for.
+                const u32 step = fireflyMetric_ ? 1u : 4u;
+                const u32 gridW = (fireflyMetric_ && x1 > x0) ? (x1 - 1 - x0) / step + 1 : 0;
+                const u32 gridH = (fireflyMetric_ && y1 > y0) ? (y1 - 1 - y0) / step + 1 : 0;
                 std::vector<f32> grid;
                 if (gridW && gridH) grid.assign((size_t)gridW * gridH, 0.0f);
 
                 f64 sum = 0.0; u64 n = 0;
-                for (u32 y = y0; y + 1 < y1; y += 4) {
+                for (u32 y = y0; y + 1 < y1; y += step) {
                     const u8* row = img.data() + static_cast<size_t>(y) * iw * 4;
-                    const u32 gy = (y - y0) / 4;
-                    for (u32 x = x0; x + 1 < x1; x += 4) {
+                    const u32 gy = (y - y0) / step;
+                    for (u32 x = x0; x + 1 < x1; x += step) {
                         const u8* px = row + static_cast<size_t>(x) * 4;
                         const f32 lin = 0.2126f * toLin(px[0]) + 0.7152f * toLin(px[1]) + 0.0722f * toLin(px[2]);
                         sum += lin;
                         ++n;
-                        if (!grid.empty()) grid[(size_t)gy * gridW + (x - x0) / 4] = lin;
+                        if (!grid.empty()) grid[(size_t)gy * gridW + (x - x0) / step] = lin;
                     }
                 }
                 const f64 meanLin = n ? sum / (f64)n : -1.0;
@@ -22814,13 +22827,41 @@ private:
                              - sat[(size_t)(by1 + 1) * (gridW + 1) + (bx0)]
                              + sat[(size_t)(by0)     * (gridW + 1) + (bx0)];
                     };
-                    const int Ro = 3, Ri = 1;   // see this function's own header comment for why
+                    // SCALED WITH THE STRIDE so the ring covers the same SCREEN neighbourhood it did
+                    // when a cell was 4 pixels wide -- otherwise going to stride 1 would silently
+                    // shrink the reference region 4x and compare a pixel against its immediate
+                    // neighbours, which a real firefly partly contaminates.
+                    const int Ro = (step == 1u) ? 12 : 3, Ri = (step == 1u) ? 4 : 1;
                     // Absolute floor, not ratio alone: in a black region the local reference is
                     // ~0, and any nonzero noise pixel would then clear an N-times-zero threshold
                     // for free. A pixel below this linear luminance is not what anyone would call
                     // a firefly regardless of what its neighbours read.
                     const f64 kAbsFloor = 0.02;
-                    u64 outlierCount = 0; f64 outlierMax = 0.0;
+                    // ---- AND HOW MANY OF THOSE OUTLIERS ARE ACTUALLY FLICKERING ----
+                    //
+                    // A SPATIAL OUTLIER IS NOT THE SAME THING AS A FIREFLY, and conflating the two
+                    // is what made this metric unusable on its first outing: in converged Sponza it
+                    // sat at a rock-steady 56 outliers, IDENTICAL with the denoiser on and off, and
+                    // that was read as a stuck readback. It was not stuck. Those 56 are sunlight
+                    // through windows -- genuinely far brighter than their surroundings, genuinely
+                    // there every frame, and nothing a GI denoiser touches. The count was correct and
+                    // measuring the wrong population.
+                    //
+                    // A firefly is distinguished from a bright feature by INSTABILITY, so the subset
+                    // that matters is the outliers whose own luminance changed materially since the
+                    // previous sampled frame. A sunlit window sill does not; a reservoir that won a
+                    // freak sample for one frame does.
+                    //
+                    // MEANINGFUL WITH A STILL CAMERA, and only approximately under motion -- say so
+                    // rather than let someone trust it in the wrong regime. On a static scene with a
+                    // static camera every temporal change IS estimator noise, which is exactly the
+                    // quantity wanted. Under --cam-wobble a static highlight SLIDES across the grid,
+                    // so it changes cell to cell and inflates this count; isolating that properly
+                    // needs reprojection, which is more machinery than a diagnostic warrants. Measure
+                    // fireflies with the camera still; use the spatial count under motion.
+                    const bool havePrev = fireflyPrevW_ == gridW && fireflyPrevH_ == gridH &&
+                                          fireflyPrevGrid_.size() == grid.size();
+                    u64 outlierCount = 0; f64 outlierMax = 0.0; u64 flickerCount = 0; f64 flickerMax = 0.0;
                     for (u32 gy = 0; gy < gridH; ++gy) {
                         const int oy0 = std::max(0, (int)gy - Ro), oy1 = std::min((int)gridH - 1, (int)gy + Ro);
                         const int iy0 = std::max(0, (int)gy - Ri), iy1 = std::min((int)gridH - 1, (int)gy + Ri);
@@ -22839,13 +22880,31 @@ private:
                             if (lum > (f64)fireflyMult_ * std::max(localRef, kAbsFloor)) {
                                 ++outlierCount;
                                 outlierMax = std::max(outlierMax, lum);
+                                // Relative to the LARGER of the two, so a cell going bright and a
+                                // cell going dark are treated alike and neither divides by ~0.
+                                if (havePrev) {
+                                    const f64 was = fireflyPrevGrid_[(size_t)gy * gridW + gx];
+                                    const f64 den = std::max(std::max(was, lum), kAbsFloor);
+                                    if (std::fabs(lum - was) / den > 0.5) {
+                                        ++flickerCount;
+                                        flickerMax = std::max(flickerMax, lum);
+                                    }
+                                }
                             }
                         }
                     }
-                    AVER_INFO("[FireflyMetric] frame={} outliers={} maxLin={:.4f} meanLin={:.6f} mult={:.2f} "
-                              "grid={}x{} giMode={} camWobbleDeg={:.2f} camWobblePeriod={}",
-                              lumaSweepFrame_, outlierCount, outlierMax, meanLin, fireflyMult_,
+                    // flicker=-1 rather than 0 on the first sampled frame: there is no previous grid
+                    // to compare against, and reporting "no fireflies" for "could not tell" is the
+                    // kind of confident zero this metric already got wrong once.
+                    AVER_INFO("[FireflyMetric] frame={} outliers={} flicker={} maxLin={:.4f} "
+                              "flickerMax={:.4f} meanLin={:.6f} mult={:.2f} grid={}x{} giMode={} "
+                              "camWobbleDeg={:.2f} camWobblePeriod={}",
+                              lumaSweepFrame_, outlierCount, havePrev ? (i64)flickerCount : -1,
+                              outlierMax, flickerMax, meanLin, fireflyMult_,
                               gridW, gridH, giModeOverride_, camWobbleDeg_, camWobblePeriod_);
+                    fireflyPrevGrid_ = grid;
+                    fireflyPrevW_ = gridW;
+                    fireflyPrevH_ = gridH;
                 }
             } else {
                 AVER_WARN("[LumaSweep] frame={}: getFrameImage() returned nothing -- this backend may "
@@ -22873,6 +22932,9 @@ private:
     f32  lumaSweepYaw_ = 0.0f;        // yaw_ cached at REQUEST time -- see lumaSweepCheck()
     f32  lumaSweepVpX_=0, lumaSweepVpY_=0, lumaSweepVpW_=0, lumaSweepVpH_=0;
     bool fireflyMetric_ = false;      // --firefly-metric [MULT]: see lumaSweepCheck()
+    // Last sampled frame's luminance grid, so an outlier can be told from a FLICKERING outlier.
+    std::vector<f32> fireflyPrevGrid_;
+    u32 fireflyPrevW_ = 0, fireflyPrevH_ = 0;
     f32  fireflyMult_ = 8.0f;         // outlier threshold: local-neighbourhood-mean multiplier
     // MOVE, NOT SELECT, and the difference is whether a gizmo exists at all. Select draws none
     // (see drawGizmo's tool_ test), so an editor that opened in Select showed nothing to grab on a
