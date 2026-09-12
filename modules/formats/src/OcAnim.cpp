@@ -5,6 +5,7 @@
 #include "aver/formats/Avr1.hpp"
 #include "aver/core/Hash.hpp"   // fnv1a64: how a component names a socket
 
+#include <cmath>                // std::isfinite: guards NTFD and CTAN against a NaN/Inf payload
 #include <cstring>
 #include "aver/platform/FileSystem.hpp"
 
@@ -35,6 +36,15 @@ constexpr u32 kChunkCRVE = avrFourCC("CRVE");
 // existed -- omits this chunk entirely rather than writing a column of zeros, which is what keeps
 // such a clip's rewrite byte-identical. See OcAnimation::notifyDurations for the full reasoning.
 constexpr u32 kChunkNTFD = avrFourCC("NTFD");
+// OPTIONAL, and DENSE PER CURVE rather than sparse, for NTFD's own reason applied one level deeper:
+// when present it holds, for EVERY curve in CRVE (same order, same key count), a KeyCount-long
+// in-tangent array followed by a KeyCount-long out-tangent array. A clip where every curve's every
+// tangent is zero -- which is every clip written before tangents existed, Linear and Step curves
+// included -- omits this chunk entirely, which is what keeps such a clip's rewrite byte-identical.
+// See OcCurve::inTangents/outTangents for the full reasoning, including the one place this differs
+// from a per-curve chunk would: a curve with no tangents of its own still gets a dense zero-filled
+// pair back from disk once another curve in the same clip needed the chunk written at all.
+constexpr u32 kChunkCTAN = avrFourCC("CTAN");
 
 // Sets `why` and returns false.
 bool fail(std::string* why, std::string m) { if (why) *why = std::move(m); return false; }
@@ -336,6 +346,24 @@ bool writeOcAnim(const OcAnimation& in, std::vector<u8>& out, std::string* why) 
                              " time(s) and " + std::to_string(c.values.size()) + " value(s)");
     }
 
+    // TANGENTS -- same three refusals NTFD applies to notifyDurations, at curve granularity: only one
+    // side set, a side whose length does not match the curve's own keys, or a non-finite value. All
+    // caught here, where the caller still knows what it built, rather than reshaped into something
+    // that silently samples wrong.
+    for (const OcCurve& c : in.curves) {
+        if (c.inTangents.empty() != c.outTangents.empty())
+            return fail(why, ".ocanim: curve '" + c.name + "' has tangents on only one side");
+        if (!c.inTangents.empty() &&
+            (c.inTangents.size() != c.times.size() || c.outTangents.size() != c.times.size()))
+            return fail(why, ".ocanim: curve '" + c.name + "' has " + std::to_string(c.inTangents.size()) +
+                             " in-tangent(s) and " + std::to_string(c.outTangents.size()) +
+                             " out-tangent(s) for " + std::to_string(c.times.size()) + " key(s)");
+        for (const f32 v : c.inTangents)
+            if (!std::isfinite(v)) return fail(why, ".ocanim: curve '" + c.name + "' has a non-finite in-tangent");
+        for (const f32 v : c.outTangents)
+            if (!std::isfinite(v)) return fail(why, ".ocanim: curve '" + c.name + "' has a non-finite out-tangent");
+    }
+
     // Notifies, before AHDR only because both intern into the same string table and the table is
     // written last. A clip with none adds no chunk at all rather than an empty one.
     std::vector<u8> notf;
@@ -386,6 +414,35 @@ bool writeOcAnim(const OcAnimation& in, std::vector<u8>& out, std::string* why) 
         }
     }
 
+    // Curve TANGENTS -- see OcCurve::inTangents and kChunkCTAN's own comment for why this is a
+    // separate chunk, parallel-indexed to CRVE, rather than a widening of it. OMITTED WHENEVER EVERY
+    // TANGENT IN THE WHOLE CLIP IS ZERO, checked BY VALUE rather than by a vector being empty -- the
+    // same rule NTFD applies to notifyDurations, so an editor that always sizes a curve's tangent
+    // arrays (rather than leaving them empty until a handle is first dragged) still gets a byte-
+    // identical file for a clip nobody has touched.
+    std::vector<u8> ctan;
+    bool anyTangent = false;
+    for (const OcCurve& c : in.curves) {
+        for (const f32 v : c.inTangents)  if (v != 0.0f) { anyTangent = true; break; }
+        if (anyTangent) break;
+        for (const f32 v : c.outTangents) if (v != 0.0f) { anyTangent = true; break; }
+        if (anyTangent) break;
+    }
+    if (anyTangent) {
+        W w{ctan};
+        w.u32v(static_cast<u32>(in.curves.size()));
+        for (const OcCurve& c : in.curves) {
+            const u32 n = static_cast<u32>(c.times.size());
+            w.u32v(n);
+            // DENSE even for a curve whose own tangents were never authored (inTangents empty): the
+            // chunk's granularity is the whole clip, so every curve gets an entry once ANY curve
+            // needs one, and an absent side reads as all zero here exactly as notifyDuration() reads
+            // an absent NTFD entry as zero.
+            for (u32 k = 0; k < n; ++k) w.f32v(k < c.inTangents.size()  ? c.inTangents[k]  : 0.0f);
+            for (u32 k = 0; k < n; ++k) w.f32v(k < c.outTangents.size() ? c.outTangents[k] : 0.0f);
+        }
+    }
+
     std::vector<u8> ahdr;
     {
         W w{ahdr};
@@ -415,6 +472,7 @@ bool writeOcAnim(const OcAnimation& in, std::vector<u8>& out, std::string* why) 
     if (!notf.empty()) f.add(kChunkNOTF, std::move(notf));
     if (!ntfd.empty()) f.add(kChunkNTFD, std::move(ntfd));
     if (!crve.empty()) f.add(kChunkCRVE, std::move(crve));
+    if (!ctan.empty()) f.add(kChunkCTAN, std::move(ctan));
     // AFTER the notify names have been interned, or the table would be written without them.
     f.add(kChunkSTRT, strt.bytes());
     return writeAvr1(f, out, why);
@@ -473,6 +531,41 @@ bool parseOcAnim(const u8* bytes, usize size, OcAnimation& out, std::string* why
             out.curves.push_back(std::move(cur));
         }
         if (!c.ok) return fail(why, ".ocanim: truncated curve table");
+    }
+
+    // CURVE TANGENTS. Absent is ordinary -- every clip predating tangents, and every clip whose
+    // curves' tangents are all still zero, has no CTAN chunk. Read AFTER curves, exactly as NTFD is
+    // read after NOTF, so the per-curve size checks below have something to check against; each
+    // curve's own key count (already bounds-checked above) is what bounds the tangent counts read
+    // here, so there is no separate huge-allocation guard to write.
+    if (const AvrChunk* ctan = f.find(kChunkCTAN)) {
+        R c{ctan->data.data(), ctan->data.data() + ctan->data.size()};
+        const u32 curveCount = c.u32v();
+        if (!c.ok) return fail(why, ".ocanim: truncated CTAN header");
+        // DENSE AND PARALLEL, to CRVE this time rather than to NOTF: a curve count that does not
+        // match cannot be lined up against it.
+        if (curveCount != out.curves.size())
+            return fail(why, ".ocanim: CTAN holds tangents for " + std::to_string(curveCount) +
+                             " curve(s) but CRVE has " + std::to_string(out.curves.size()) + " curve(s)");
+        for (u32 i = 0; i < curveCount; ++i) {
+            OcCurve& cur = out.curves[i];
+            const u32 keys = c.u32v();
+            if (!c.ok) return fail(why, ".ocanim: truncated CTAN curve header");
+            if (keys != cur.times.size())
+                return fail(why, ".ocanim: CTAN curve '" + cur.name + "' has " + std::to_string(keys) +
+                                 " tangent key(s) for " + std::to_string(cur.times.size()) + " CRVE key(s)");
+            cur.inTangents.resize(keys);
+            cur.outTangents.resize(keys);
+            for (u32 k = 0; k < keys; ++k) cur.inTangents[k] = c.f32v();
+            for (u32 k = 0; k < keys; ++k) cur.outTangents[k] = c.f32v();
+        }
+        if (!c.ok) return fail(why, ".ocanim: truncated CTAN chunk");
+        for (const OcCurve& cur : out.curves) {
+            for (const f32 v : cur.inTangents)
+                if (!std::isfinite(v)) return fail(why, ".ocanim: curve '" + cur.name + "' has a non-finite in-tangent");
+            for (const f32 v : cur.outTangents)
+                if (!std::isfinite(v)) return fail(why, ".ocanim: curve '" + cur.name + "' has a non-finite out-tangent");
+        }
     }
 
     if (const AvrChunk* notf = f.find(kChunkNOTF)) {

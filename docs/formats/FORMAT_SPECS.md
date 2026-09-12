@@ -416,7 +416,7 @@ the first time something attaches.
 **Imported from glTF as an Empty parented to a bone** — see `docs/ASSET_IMPORT.md`.
 ## 9. `.ocanim` — animation clip
 
-Subtype `'ANIM'`. Fixes the three fidelity losses from recon `assets §7/§9`: **no forced 30 fps resample**, **cubicspline tangents preserved**, **step curves preserved**. Chunks: `AHDR` (required), `TRKS` (track data), `NOTF` (notifies, optional), `CRVE` (curves, optional), `STRT`.
+Subtype `'ANIM'`. Fixes the three fidelity losses from recon `assets §7/§9`: **no forced 30 fps resample**, **cubicspline tangents preserved**, **step curves preserved**. Chunks: `AHDR` (required), `TRKS` (track data), `NOTF` (notifies, optional), `NTFD` (notify durations, optional), `CRVE` (curves, optional), `CTAN` (curve tangents, optional), `STRT`.
 
 ### 9.1 `AHDR`
 | Off | Size | Type | Field |
@@ -469,9 +469,11 @@ moments.
 **Scalar, not a vector** — a stated limit, matching Unreal. Vector cases decompose into named
 components without the format growing a width field every reader must branch on.
 
-**`CUBICSPLINE` is carried but read as LINEAR.** A curve stores one value per key with no tangent
-slots, so there is nothing to build a Hermite from; inventing tangents would be a different curve
-than the one authored. An unknown interp value also reads as LINEAR rather than refusing the file.
+**`CUBICSPLINE` uses real per-key tangents when the curve carries them — see `CTAN` below.** A curve
+saved before tangents existed, or whose `CTAN` entry does not line up 1:1 with its own keys, has none:
+it reads as LINEAR in that case, exactly as every `CUBICSPLINE`-tagged curve always has, rather than
+inventing a flat-tangent Hermite for data nobody authored. An unknown interp value also reads as
+LINEAR rather than refusing the file.
 
 Times and values **must be the same length** — refused at write, because the sampler indexes values
 by the key it found in times. Sampling **clamps at both ends**: a time past the last key reads that
@@ -480,6 +482,31 @@ jump, held rather than divided by a zero span.
 
 Read at runtime with `AnimSystem::curveValue` (native), `Entity.GetAnimationCurve` /
 `TryGetAnimationCurve` (C#), or the `GetAnimCurve` node.
+
+### 9.4a `CTAN` — curve tangents (optional)
+`u32 CurveCount` (must equal `CRVE`'s own count), then per curve, IN THE SAME ORDER `CRVE` LISTS
+THEM: `u32 KeyCount` (must equal that curve's own `KeyCount`), `KeyCount` f32 in-tangents, then
+`KeyCount` f32 out-tangents.
+
+**Parallel-indexed to `CRVE`, not a widening of it** — index `i` of a curve's in/out-tangent arrays is
+the tangent pair for that curve's key `i`. A wider `CRVE` record would change the byte layout, and so
+the rewrite, of every clip that already has a curve, tangents or not; this separate chunk leaves an
+untouched curve's bytes alone.
+
+**Optional, and DENSE PER CURVE rather than sparse**, one level deeper than `NTFD` applies the same
+rule to `NOTF`: omitted whenever every tangent in the WHOLE CLIP is zero, checked BY VALUE rather than
+by an array being empty, so a zero-filled tangent pair and an absent one write the identical file. When
+present it is dense for every curve in the clip, not only the ones an author actually dragged a handle
+on — a curve with no tangent of its own still gets a same-length, all-zero pair back once ANOTHER
+curve in the same clip needed the chunk written at all.
+
+A curve count or per-curve key count that disagrees with `CRVE`'s own is a malformed file, refused at
+read with a reason; so is a non-finite tangent value, refused at both read and write.
+
+Read at runtime through the same curve sampler `CRVE` is (`AnimSampler.cpp`'s `sampleCurve`), which
+falls back to LINEAR precisely when a curve's tangent arrays are absent or mis-sized — see `CRVE`'s
+own `CUBICSPLINE` note above. Authored in the animation editor's curve canvas: draggable keys and
+draggable tangent handles, same shape as the graph editor's node canvas.
 
 ### 9.5 `TRKS` key layout
 Per track, for each present channel, a sub-array. **Keyframed** (`Storage=0`): each key = `f32 Time` + value(s): T/S = 3×f32, R = 4×f32 quat; for `CUBICSPLINE`, each key = `Time` + `inTangent` + `value` + `outTangent` (glTF cubic spec preserved). **Baked-uniform** (`Storage=1`): no per-key time; `KeyCount = round(Duration*SampleRate)+1` samples at `frame/SampleRate`, values only (this is the runtime-fast form, equivalent to the current `.ocbeam` ANIM but with chosen rate). Quaternions renormalized on read; slerp for LINEAR, hold for STEP, Hermite for CUBICSPLINE. A cooker can emit both: keep the keyframed source, bake a uniform variant into `.ocpak` for shipping.

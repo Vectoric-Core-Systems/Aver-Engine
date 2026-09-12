@@ -16,6 +16,7 @@
 // traded one incomplete answer for another.
 #include "AnimEditor.hpp"
 #include "EditorKeybinds.hpp"
+#include "AnimCurveGeometry.hpp"
 
 #include "ActorEditor.hpp"
 
@@ -290,6 +291,10 @@ private:
     void drawNotifies();
     void drawSockets();
     void drawCurves();
+    // ITEM 7.2: the 2D curve canvas -- draggable keys and draggable tangent handles. Split out of
+    // drawCurves() because it is the one part of that panel with real geometry to get right (see its
+    // own header comment for the ImGui-free math it calls into and what is and is not tested).
+    void drawCurveWidget(fmt::OcCurve& c);
     void buildPreview(Engine& e);
     void reloadIfNeeded();
 
@@ -354,6 +359,12 @@ private:
     char socketNameBuf_[96] = {};
     int  selectedCurve_ = -1;
     char curveNameBuf_[96] = {};
+    // CURVE WIDGET DRAG STATE. Set once, at the moment the mouse goes down on the canvas (see
+    // drawCurveWidget), and held for the rest of the drag so a fast mouse movement that strays out of
+    // a key's hit radius mid-drag does not drop it -- the same press-time-hit-test-then-hold shape
+    // GraphEditor.cpp's own DragMode state machine uses for moving nodes.
+    CurveHitKind curveDragKind_ = CurveHitKind::None;
+    usize curveDragKeyIndex_ = 0;
 
     f32 time_ = 0.0f;
     f32 speed_ = 1.0f;
@@ -659,10 +670,12 @@ void AnimEditor::drawTransport() {
 // question an author has is "what does it read HERE" -- which is answered by scrubbing and reading,
 // not by looking at three keyframes and interpolating in your head.
 //
-// NOT A GRAPH EDITOR. Unreal draws curves on a 2D graph with draggable tangents; this draws the
-// shape over the timeline and edits keys as numbers. That is a real difference in authoring comfort
-// and it is stated rather than glossed: the format stores no tangents (see OcCurve), so a tangent
-// handle would have nothing to write to.
+// ITEM 7.2: A REAL 2D CURVE WIDGET, not numbers with a shape drawn over the timeline bar. That used
+// to be the honest limit here -- the format stored no tangents, so a tangent handle would have had
+// nothing to write to (see OcCurve::inTangents/outTangents' own comment for the CTAN chunk that
+// closed that gap). The canvas itself is drawCurveWidget, below; this panel still keeps the numeric
+// key rows underneath it for precise entry, the same way Unreal's own Curve Editor keeps a details
+// panel beside its graph.
 void AnimEditor::drawCurves() {
 #if AVER_WITH_IMGUI
     if (!isClip_) { ImGui::TextDisabled("a skeleton has no curves"); return; }
@@ -720,15 +733,29 @@ void AnimEditor::drawCurves() {
                 } else if (!next.empty() && next != c.name) { c.name = next; dirty_ = true; }
             }
 
-            // CUBICSPLINE IS NOT OFFERED. The format can carry it and the sampler reads it as linear,
-            // because a curve stores one value per key with no tangents -- so putting it in this combo
-            // would let an author choose a mode that does nothing.
-            int mode = c.interp == fmt::OcInterp::Step ? 1 : 0;
+            // CUBICSPLINE IS OFFERED NOW that a curve has somewhere to keep tangents (CTAN). Picking
+            // it for the first time gives every existing key a FLAT (zero) tangent pair to drag from
+            // -- see OcCurve::inTangents' own comment on why a zero-filled array and an absent one are
+            // indistinguishable on disk until a handle actually moves, which is exactly what makes
+            // this safe to do unconditionally rather than only when the arrays are still empty.
+            int mode = c.interp == fmt::OcInterp::Step ? 1 : (c.interp == fmt::OcInterp::CubicSpline ? 2 : 0);
             ImGui::SetNextItemWidth(w);
-            if (ImGui::Combo("Interp", &mode, "Linear\0Step\0")) {
-                c.interp = mode == 1 ? fmt::OcInterp::Step : fmt::OcInterp::Linear;
+            if (ImGui::Combo("Interp", &mode, "Linear\0Step\0CubicSpline\0")) {
+                c.interp = mode == 1 ? fmt::OcInterp::Step
+                         : mode == 2 ? fmt::OcInterp::CubicSpline
+                                     : fmt::OcInterp::Linear;
+                if (c.interp == fmt::OcInterp::CubicSpline &&
+                    (c.inTangents.size() != c.times.size() || c.outTangents.size() != c.times.size())) {
+                    c.inTangents.assign(c.times.size(), 0.0f);
+                    c.outTangents.assign(c.times.size(), 0.0f);
+                }
                 dirty_ = true;
             }
+
+            // WHETHER THIS CURVE CARRIES TANGENTS AT ALL, decided once per frame here so both the
+            // "add key" and "delete key" edits below and the canvas can agree on it without each
+            // re-deriving the same size comparison.
+            const bool hasTangents = c.inTangents.size() == c.times.size() && c.outTangents.size() == c.times.size();
 
             if (ImGui::SmallButton("Add key at playhead")) {
                 // INSERTED IN TIME ORDER. The sampler binary-searches `times`, so an out-of-order key
@@ -737,6 +764,13 @@ void AnimEditor::drawCurves() {
                 while (at < c.times.size() && c.times[at] < time_) ++at;
                 c.times.insert(c.times.begin() + static_cast<isize>(at), time_);
                 c.values.insert(c.values.begin() + static_cast<isize>(at), anim::sampleCurve(c, time_));
+                // KEPT PARALLEL: a new key starts flat (zero tangent both sides) if this curve already
+                // carries tangent data at all -- see OcCurve::inTangents' own comment on why the two
+                // arrays must stay exactly times.size() long or not exist at all.
+                if (hasTangents) {
+                    c.inTangents.insert(c.inTangents.begin() + static_cast<isize>(at), 0.0f);
+                    c.outTangents.insert(c.outTangents.begin() + static_cast<isize>(at), 0.0f);
+                }
                 dirty_ = true;
             }
             ImGui::SameLine();
@@ -748,6 +782,11 @@ void AnimEditor::drawCurves() {
                 ImGui::PopID();
                 break;
             }
+
+            // THE CANVAS. See drawCurveWidget's own header comment for what it draws, what it lets an
+            // author drag, and -- the honest limit stated plainly rather than glossed -- that the drag
+            // interaction itself is visual-only and reachable by no test in this tree.
+            drawCurveWidget(c);
 
             for (usize k = 0; k < c.times.size() && k < c.values.size(); ++k) {
                 ImGui::PushID(static_cast<int>(k));
@@ -766,6 +805,11 @@ void AnimEditor::drawCurves() {
                 }
                 ImGui::SameLine();
                 if (ImGui::SmallButton("x")) {
+                    // KEPT PARALLEL on delete too, same reason as the insert above.
+                    if (hasTangents) {
+                        c.inTangents.erase(c.inTangents.begin() + static_cast<isize>(k));
+                        c.outTangents.erase(c.outTangents.begin() + static_cast<isize>(k));
+                    }
                     c.times.erase(c.times.begin() + static_cast<isize>(k));
                     c.values.erase(c.values.begin() + static_cast<isize>(k));
                     dirty_ = true;
@@ -777,6 +821,164 @@ void AnimEditor::drawCurves() {
             ImGui::Unindent();
         }
         ImGui::PopID();
+    }
+#endif
+}
+
+// THE 2D CURVE WIDGET: a canvas with draggable keys and draggable tangent handles, in the SAME
+// hand-rolled ImGui style GraphEditor.cpp already uses for its own canvas (one big InvisibleButton
+// for input capture, hit-testing done by hand against a plain draw-list, no vendored curve-editor
+// widget anywhere in this tree). ALL LAYOUT, MAPPING AND HIT-TESTING GO THROUGH
+// AnimCurveGeometry.hpp's free functions -- see that file's own header for why: they are ImGui-free
+// and Engine-free on purpose, so AnimCurveGeometryTest can reach them with no window and no GPU.
+//
+// THE DRAG ITSELF IS VISUAL-ONLY, and is NOT covered by any test in this tree. Reading ImGui's
+// per-frame mouse position and delta, deciding (once, at press time) what a click landed on, and
+// writing the result into clip_ through screenToCurve/tangentSlopeFromHandle is all real editor
+// behaviour, but it can only be exercised by a real mouse over a real window -- there is no ImGui
+// context to drive headlessly the way GraphEditorLoadSaveTest drives GraphEditor.cpp's non-drawing
+// half. What IS tested, in AnimCurveGeometryTest, is everything this function CALLS: the screen<->
+// curve mapping, where a key or handle's geometry places it, and which one a given point resolves
+// to -- which is every part of "does this widget do the right thing" that arithmetic can answer.
+void AnimEditor::drawCurveWidget(fmt::OcCurve& c) {
+#if AVER_WITH_IMGUI
+    const f32 uiScale = ImGui::GetFontSize() / 16.0f;
+    const f32 height = 160.0f * uiScale;
+    const f32 width = std::max(ImGui::GetContentRegionAvail().x, 40.0f);
+
+    ImGui::InvisibleButton("##curveCanvas", ImVec2(width, height));
+    const ImVec2 p0 = ImGui::GetItemRectMin();
+    const ImVec2 p1 = ImGui::GetItemRectMax();
+    const bool canvasActive = ImGui::IsItemActive();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(p0, p1, IM_COL32(24, 24, 28, 255));
+    dl->AddRect(p0, p1, IM_COL32(80, 80, 90, 255));
+
+    if (c.times.empty() || c.values.size() != c.times.size()) {
+        ImGui::TextDisabled("No keys to show. Add one at the playhead above.");
+        curveDragKind_ = CurveHitKind::None;
+        return;
+    }
+
+    // THE VIEW: time spans the WHOLE CLIP, so a key's position here reads against the same timeline
+    // the notify/track bar above already shows. Value spans this curve's OWN authored min/max, padded
+    // 10% each way so a point sitting exactly on the top or bottom edge stays fully visible and
+    // grabbable -- the same normalise-to-own-range choice drawTimeline's older curve overlay makes,
+    // now with the padding a real hit target needs that a one-pixel-tall line never did.
+    f32 vLo = c.values[0], vHi = c.values[0];
+    for (const f32 v : c.values) { vLo = std::min(vLo, v); vHi = std::max(vHi, v); }
+    if (vHi - vLo < 1e-4f) { vHi += 0.5f; vLo -= 0.5f; }   // a flat curve still gets a visible band
+    const f32 pad = (vHi - vLo) * 0.1f;
+    vLo -= pad; vHi += pad;
+    const f32 dur = clip_.duration > 0.0f ? clip_.duration : 1.0f;
+
+    CurveView view;
+    view.rectMin = Vec2{p0.x, p0.y};
+    view.rectMax = Vec2{p1.x, p1.y};
+    view.tMin = 0.0f; view.tMax = dur;
+    view.vMin = vLo;  view.vMax = vHi;
+
+    // GRID: a zero line, when zero sits inside the visible band, so a value's sign reads at a glance.
+    if (vLo < 0.0f && vHi > 0.0f) {
+        const Vec2 z = curveToScreen(view, 0.0f, 0.0f);
+        dl->AddLine(ImVec2(p0.x, z.y), ImVec2(p1.x, z.y), IM_COL32(70, 70, 78, 255));
+    }
+
+    // THE SHAPE, sampled across the whole width through the REAL sampler (anim::sampleCurve) --
+    // exactly what plays back, tangents and all, not a reconstruction of it.
+    {
+        const int steps = 128;
+        ImVec2 prev{}; bool have = false;
+        for (int s = 0; s <= steps; ++s) {
+            const f32 u = static_cast<f32>(s) / static_cast<f32>(steps);
+            const Vec2 sp = curveToScreen(view, u * dur, anim::sampleCurve(c, u * dur));
+            const ImVec2 pt(sp.x, sp.y);
+            if (have) dl->AddLine(prev, pt, IM_COL32(150, 230, 160, 230), 1.5f);
+            prev = pt;
+            have = true;
+        }
+    }
+
+    // THE PLAYHEAD, so scrubbing the transport above visibly moves against this canvas too.
+    {
+        const Vec2 ph = curveToScreen(view, time_, vHi);
+        dl->AddLine(ImVec2(ph.x, p0.y), ImVec2(ph.x, p1.y), IM_COL32(255, 210, 90, 150), 1.0f);
+    }
+
+    // KEYS AND TANGENT HANDLES. handleSeconds is a FIXED FRACTION of the clip's own duration rather
+    // than a constant pixel length, so a one-second clip and a sixty-second clip both get a handle
+    // long enough to grab and short enough not to overlap its neighbours -- see CurveKeyLayout's own
+    // comment on why the offset is in TIME, not pixels.
+    const f32 handleSeconds = dur * 0.04f;
+    const auto layout = computeCurveLayout(c, view, handleSeconds);
+    const f32 hitRadius = 8.0f * uiScale;
+    const ImVec2 mouse = ImGui::GetIO().MousePos;
+
+    // PRESS: decide once, at the instant the mouse goes down over this canvas, what it landed on.
+    // Held for the rest of the drag (see curveDragKind_'s own comment) so a fast movement that
+    // strays outside a key's hit radius mid-drag does not drop it.
+    if (canvasActive && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        const CurveHitResult hit = curveHitTest(layout, Vec2{mouse.x, mouse.y}, hitRadius);
+        curveDragKind_ = hit.kind;
+        curveDragKeyIndex_ = hit.keyIndex;
+    }
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) curveDragKind_ = CurveHitKind::None;
+
+    // DRAG: apply this frame's mouse delta through the SAME curve-space math the geometry file
+    // exposes for testing -- a key MOVES; a handle's new screen position implies a new tangent SLOPE.
+    if (canvasActive && curveDragKind_ != CurveHitKind::None &&
+        curveDragKeyIndex_ < c.times.size()) {
+        const ImVec2 md = ImGui::GetIO().MouseDelta;
+        if (md.x != 0.0f || md.y != 0.0f) {
+            const usize idx = curveDragKeyIndex_;
+            const Vec2 keyScreen = curveToScreen(view, c.times[idx], c.values[idx]);
+            if (curveDragKind_ == CurveHitKind::Key) {
+                f32 newTime = 0.0f, newValue = 0.0f;
+                screenToCurve(view, Vec2{keyScreen.x + md.x, keyScreen.y + md.y}, newTime, newValue);
+                // TIME CLAMPED BETWEEN ITS NEIGHBOURS, the identical rule the numeric row below
+                // applies and for the identical reason: the sampler binary-searches `times`.
+                const f32 lo = idx > 0 ? c.times[idx - 1] : -1e9f;
+                const f32 hi = (idx + 1) < c.times.size() ? c.times[idx + 1] : 1e9f;
+                c.times[idx] = std::min(std::max(newTime, lo), hi);
+                c.values[idx] = newValue;
+                dirty_ = true;
+            } else if (curveDragKind_ == CurveHitKind::InHandle && idx < c.inTangents.size()) {
+                const Vec2 handle = curveToScreen(view, c.times[idx] - handleSeconds,
+                                                            c.values[idx] - c.inTangents[idx] * handleSeconds);
+                c.inTangents[idx] = tangentSlopeFromHandle(
+                    view, keyScreen, Vec2{handle.x + md.x, handle.y + md.y}, /*isOutHandle=*/false);
+                dirty_ = true;
+            } else if (curveDragKind_ == CurveHitKind::OutHandle && idx < c.outTangents.size()) {
+                const Vec2 handle = curveToScreen(view, c.times[idx] + handleSeconds,
+                                                            c.values[idx] + c.outTangents[idx] * handleSeconds);
+                c.outTangents[idx] = tangentSlopeFromHandle(
+                    view, keyScreen, Vec2{handle.x + md.x, handle.y + md.y}, /*isOutHandle=*/true);
+                dirty_ = true;
+            }
+        }
+    }
+
+    // DRAW: keys and, where this curve carries them, their two tangent handles joined by a line
+    // through the key -- the usual "broken tangent" presentation, matching the fact that OcCurve
+    // stores an INDEPENDENT in- and out-tangent per key rather than one shared slope.
+    for (const CurveKeyLayout& k : layout) {
+        const bool isDragTarget = curveDragKeyIndex_ == k.index && curveDragKind_ != CurveHitKind::None;
+        if (k.hasTangents) {
+            const ImVec2 inPt(k.inHandleScreen.x, k.inHandleScreen.y);
+            const ImVec2 outPt(k.outHandleScreen.x, k.outHandleScreen.y);
+            const ImVec2 keyPt(k.keyScreen.x, k.keyScreen.y);
+            dl->AddLine(inPt, keyPt, IM_COL32(230, 190, 90, 200), 1.0f);
+            dl->AddLine(keyPt, outPt, IM_COL32(230, 190, 90, 200), 1.0f);
+            const bool inDrag = isDragTarget && curveDragKind_ == CurveHitKind::InHandle;
+            const bool outDrag = isDragTarget && curveDragKind_ == CurveHitKind::OutHandle;
+            dl->AddCircleFilled(inPt, hitRadius * 0.45f,
+                                 inDrag ? IM_COL32(255, 235, 140, 255) : IM_COL32(230, 190, 90, 220));
+            dl->AddCircleFilled(outPt, hitRadius * 0.45f,
+                                 outDrag ? IM_COL32(255, 235, 140, 255) : IM_COL32(230, 190, 90, 220));
+        }
+        const bool keyDrag = isDragTarget && curveDragKind_ == CurveHitKind::Key;
+        dl->AddCircleFilled(ImVec2(k.keyScreen.x, k.keyScreen.y), hitRadius * 0.5f,
+                             keyDrag ? IM_COL32(255, 255, 255, 255) : IM_COL32(150, 230, 160, 255));
     }
 #endif
 }

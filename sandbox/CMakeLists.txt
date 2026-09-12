@@ -28,6 +28,7 @@ add_executable(Sandbox WIN32
   src/ToolsMenu.cpp
   src/GraphEditorGeometry.cpp
   src/GraphEditor.cpp
+  src/AnimCurveGeometry.cpp
   src/BtEditor.cpp
   src/SoundEditor.cpp
   src/ParticleEditor.cpp

@@ -399,3 +399,19 @@ if(TARGET Aver.Landscape)
   target_link_libraries(FoliageAlignTest PRIVATE Aver.Landscape Aver.Formats Aver.Core Aver.Platform)
   set_target_properties(FoliageAlignTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# AnimCurveGeometryTest -- item 7.2's curve editor: screen<->curve mapping, key/tangent-handle layout,
+# and hit-testing (sandbox/src/AnimCurveGeometry.hpp/.cpp). Same GraphEditorGeometryTest precedent
+# immediately above, for the same reason: keeping the geometry in ImGui-free free functions is what
+# lets a headless test reach the widget's math -- everything the actual mouse drag decides on top of
+# it is visual-only and untestable outside a real window (see AnimEditor.cpp's drawCurves()).
+#
+# COMPILES sandbox/src/AnimCurveGeometry.cpp directly into the test binary rather than linking a
+# library, for EditorPrefsTest's exact reason (Sandbox is add_executable-only).
+add_executable(AnimCurveGeometryTest
+  src/AnimCurveGeometryTest.cpp
+  ${CMAKE_SOURCE_DIR}/sandbox/src/AnimCurveGeometry.cpp)
+target_include_directories(AnimCurveGeometryTest PRIVATE
+  ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(AnimCurveGeometryTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(AnimCurveGeometryTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

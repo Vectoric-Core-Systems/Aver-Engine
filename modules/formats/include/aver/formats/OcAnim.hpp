@@ -157,11 +157,38 @@ struct OcNotify {
 // SCALAR, NOT A VECTOR, and that is a real limit rather than an oversight. Unreal's curves are
 // float curves too, and every vector case decomposes into named components without needing the
 // format to grow a width field that every reader must then branch on.
+//
+// CUBICSPLINE USES REAL TANGENTS when the curve carries them -- see inTangents/outTangents below.
+// A curve authored before tonight, or one whose tangent arrays do not line up with its keys, has
+// none: sampleCurve (aver/anim/AnimSampler.hpp) reads it as LINEAR in that case, exactly as every
+// CubicSpline-tagged curve always has, rather than inventing a flat-tangent Hermite for data nobody
+// authored. That is what makes the format change purely additive -- see inTangents' own comment.
 struct OcCurve {
     std::string name;            // what a script asks for; opaque here
-    OcInterp interp = OcInterp::Linear;   // Step holds; CubicSpline is NOT supported -- see below
+    OcInterp interp = OcInterp::Linear;   // Step holds; CubicSpline uses tangents below when present
     std::vector<f32> times;      // seconds from the clip start, ascending
     std::vector<f32> values;     // one per time
+
+    // Per-key tangents for CubicSpline interpolation -- PARALLEL to times/values (index i is the
+    // in/out tangent pair for keys[i]), NOT a widening of the CRVE layout itself. A widened CRVE
+    // would change the byte layout -- and so the rewrite -- of every clip that already has a curve,
+    // Linear or Step, tangents or not; a separate optional chunk (CTAN, see OcAnim.cpp) leaves an
+    // untouched curve's bytes alone.
+    //
+    // EMPTY, NOT ZERO-FILLED, is how a curve says "nobody authored a tangent here" -- exactly the
+    // convention OcAnimation::notifyDurations uses and for the same reason: the CTAN chunk is
+    // omitted whenever every tangent in the clip is zero, checked BY VALUE rather than by these
+    // vectors being empty, so a zero-filled tangent array and an absent one write the identical
+    // file. See writeOcAnim's CTAN block for the full rule, including why a curve with no authored
+    // tangents of its own can still come back from disk with a dense (zero-filled) pair once ANOTHER
+    // curve in the same clip needs the chunk -- the chunk's granularity is the whole clip, matching
+    // NTFD's.
+    //
+    // Either both are empty or both are exactly times.size() long -- writeOcAnim refuses a curve
+    // where only one side was set, or where either is a different length than its keys, or carries
+    // a non-finite value, the same three refusals NTFD applies to notifyDurations.
+    std::vector<f32> inTangents;
+    std::vector<f32> outTangents;
 };
 
 struct OcAnimation {

@@ -462,12 +462,15 @@ int main() {
         checkNear(anim::sampleCurve(step, 0.999f), 0.0f, 1e-5f, "right up to the next one");
         checkNear(anim::sampleCurve(step, 1.0f), 10.0f, 1e-5f, "and takes it exactly on the key");
 
-        // A CubicSpline curve reads as linear rather than as nonsense -- the format can carry the
-        // mode but a curve stores no tangents, so there is nothing to build a Hermite from.
+        // A CubicSpline curve WITH NO TANGENT DATA reads as linear rather than as nonsense -- `c`
+        // never had inTangents/outTangents set, which is every curve saved before tonight, so there
+        // is nothing to build a Hermite from. This is the "existing curves sample EXACTLY as before"
+        // guarantee the task brief calls out by name; see the real-tangent block below for the case
+        // where a curve DOES carry them.
         fmt::OcCurve cubic = c;
         cubic.interp = fmt::OcInterp::CubicSpline;
         checkNear(anim::sampleCurve(cubic, 0.5f), 5.0f, 1e-5f,
-                  "a CUBICSPLINE curve reads as LINEAR, the stated limit");
+                  "a CUBICSPLINE curve with no tangents reads as LINEAR, unchanged from before");
 
         // Two keys at one time is a JUMP, not a division by zero.
         fmt::OcCurve jump;
@@ -482,6 +485,108 @@ int main() {
         fmt::OcCurve empty;
         checkNear(anim::sampleCurve(empty, 0.5f, -7.0f), -7.0f, 1e-6f,
                   "an empty curve returns the FALLBACK, not 0");
+    }
+
+    AVER_INFO("=== curve sampling: CUBICSPLINE with real tangents, against hand-computed numbers ===");
+    {
+        // Two keys, 0 -> 10 over 2 seconds, with asymmetric tangents (out=+5 leaving key0, in=-5
+        // arriving at key1) so a wrong tangent side or a wrong sign shows up immediately rather than
+        // cancelling out the way a symmetric fixture would. Expected values are the SAME glTF cubic
+        // Hermite basis AnimSampler.cpp's own hermite() implements
+        // (p(s) = h00*v0 + h10*dt*b0 + h01*v1 + h11*dt*a1), worked out by hand at s = 0.25, 0.5, 0.75:
+        //   s=0.25: h00=0.84375 h10=0.140625 h01=0.15625  h11=-0.046875 -> 0*0.84375 + 2*5*0.140625
+        //           + 10*0.15625 + 2*(-5)*(-0.046875) = 1.40625 + 1.5625 + 0.46875 = 3.4375
+        //   s=0.50: h10=0.125 h01=0.5 h11=-0.125 -> 2*5*0.125 + 10*0.5 + 2*(-5)*(-0.125)
+        //           = 1.25 + 5.0 + 1.25 = 7.5
+        //   s=0.75: h10=0.046875 h01=0.84375 h11=-0.140625 -> 2*5*0.046875 + 10*0.84375
+        //           + 2*(-5)*(-0.140625) = 0.46875 + 8.4375 + 1.40625 = 10.3125
+        fmt::OcCurve c;
+        c.name = "Tangented";
+        c.interp = fmt::OcInterp::CubicSpline;
+        c.times = {0.0f, 2.0f};
+        c.values = {0.0f, 10.0f};
+        c.outTangents = {5.0f, 0.0f};    // key0's OUT tangent; key1's is unused (nothing leaves it)
+        c.inTangents  = {0.0f, -5.0f};   // key1's IN tangent; key0's is unused (nothing arrives at it)
+
+        checkNear(anim::sampleCurve(c, 0.0f), 0.0f, 1e-5f, "still exact at the first key");
+        checkNear(anim::sampleCurve(c, 0.5f), 3.4375f, 1e-4f, "s=0.25: matches the hand-computed Hermite value");
+        checkNear(anim::sampleCurve(c, 1.0f), 7.5f, 1e-4f, "s=0.5: ditto");
+        checkNear(anim::sampleCurve(c, 1.5f), 10.3125f, 1e-4f, "s=0.75: ditto");
+        checkNear(anim::sampleCurve(c, 2.0f), 10.0f, 1e-5f, "still exact at the last key");
+        checkNear(anim::sampleCurve(c, -1.0f), 0.0f, 1e-5f, "still clamped before the first key");
+        checkNear(anim::sampleCurve(c, 9.0f), 10.0f, 1e-5f, "still clamped past the last key");
+
+        // ZERO TANGENTS, BUT PRESENT (not merely absent), are a real flat-tangent Hermite -- the
+        // smoothstep ease curve, NOT a straight line. This is a different, sharper claim than "zero
+        // tangents behave like no tangents": it is what an animator gets the instant a dragged handle
+        // sits exactly horizontal, before any save/reload collapses it back to an absent chunk (see
+        // OcCurve::inTangents' own comment on that collapse). Same values AnimTest's own bone-track
+        // "flat-tangent cubic" case already checks (100 over 2s), so a disagreement here would mean
+        // sampleCurve and sampleAnimation disagree about what "zero tangent" means.
+        fmt::OcCurve flat;
+        flat.interp = fmt::OcInterp::CubicSpline;
+        flat.times = {0.0f, 2.0f};
+        flat.values = {0.0f, 100.0f};
+        flat.inTangents = {0.0f, 0.0f};
+        flat.outTangents = {0.0f, 0.0f};
+        checkNear(anim::sampleCurve(flat, 1.0f), 50.0f, 1e-4f, "a flat-tangent cubic is half way at half time");
+        checkNear(anim::sampleCurve(flat, 0.5f), 15.625f, 1e-3f, "and follows the smoothstep, not a straight line");
+        checkNear(anim::sampleCurve(c, 0.5f), 3.4375f, 1e-4f, "(the asymmetric fixture is unaffected by this one)");
+
+        // DEGENERATE: a single key. Every read clamps to it, tangents or not, CubicSpline or not --
+        // there is no span to build a Hermite across.
+        fmt::OcCurve one;
+        one.interp = fmt::OcInterp::CubicSpline;
+        one.times = {1.0f};
+        one.values = {42.0f};
+        one.inTangents = {7.0f};
+        one.outTangents = {-7.0f};
+        checkNear(anim::sampleCurve(one, -5.0f), 42.0f, 1e-5f, "a single key reads as itself before it");
+        checkNear(anim::sampleCurve(one, 1.0f), 42.0f, 1e-5f, "exactly on it");
+        checkNear(anim::sampleCurve(one, 99.0f), 42.0f, 1e-5f, "and long after it");
+
+        // DEGENERATE: two keys AT THE SAME TIME, CubicSpline this time (the plain `jump` case above
+        // already covers the default LINEAR interp). With only two keys sharing one time, the two
+        // CLAMP checks at the top of sampleCurve (seconds <= times[0], seconds >= times[n-1]) resolve
+        // every query before the binary search or the cubic branch ever runs -- there is no span to
+        // divide by, degenerate or otherwise, so a real, nonzero tangent pair cannot produce a NaN or
+        // an Inf here even though it is never actually evaluated.
+        fmt::OcCurve sameTime;
+        sameTime.interp = fmt::OcInterp::CubicSpline;
+        sameTime.times = {3.0f, 3.0f};
+        sameTime.values = {1.0f, 9.0f};
+        sameTime.inTangents  = {100.0f, 100.0f};
+        sameTime.outTangents = {100.0f, 100.0f};
+        checkNear(anim::sampleCurve(sameTime, 2.0f), 1.0f, 1e-5f, "before the shared time reads the first key");
+        checkNear(anim::sampleCurve(sameTime, 3.0f), 1.0f, 1e-5f, "AT the shared time it is still the first key");
+        checkNear(anim::sampleCurve(sameTime, 4.0f), 9.0f, 1e-5f, "after it, the jump has landed on the second");
+        check(std::isfinite(anim::sampleCurve(sameTime, 3.0f)), "and none of that is a NaN/Inf");
+
+        // A REPEATED time in the MIDDLE of a longer curve (the same shape the existing LINEAR `jump`
+        // fixture below uses): sampleCurve's own binary search maintains times[lo] <= seconds <
+        // times[hi] throughout, which two equal times can never both satisfy, so it always converges
+        // to a real, non-degenerate neighbouring span either side of the tie rather than ever pairing
+        // the two equal-time keys together -- exercising the SAME convergence behaviour as the LINEAR
+        // jump test, now with the cubic branch live and real tangents in play, and it stays finite.
+        fmt::OcCurve jumpCubic;
+        jumpCubic.interp = fmt::OcInterp::CubicSpline;
+        jumpCubic.times = {0.0f, 1.0f, 1.0f, 2.0f};
+        jumpCubic.values = {0.0f, 0.0f, 5.0f, 5.0f};
+        jumpCubic.inTangents  = {3.0f, 3.0f, -9.0f, -9.0f};
+        jumpCubic.outTangents = {3.0f, 3.0f, -9.0f, -9.0f};
+        const f32 cubicBefore = anim::sampleCurve(jumpCubic, 0.999f);
+        const f32 cubicAfter  = anim::sampleCurve(jumpCubic, 1.5f);
+        check(std::isfinite(cubicBefore) && std::isfinite(cubicAfter),
+              "a repeated-time curve stays finite under CubicSpline with real tangents");
+        checkNear(cubicBefore, 0.0f, 0.1f, "close to the key just before the jump");
+        checkNear(cubicAfter, 5.0f, 0.1f, "and close to the key just after it");
+
+        // A curve whose tangent arrays do NOT line up with its keys (a stale edit, or a CTAN entry
+        // that lost a key) reads as LINEAR rather than indexing past the end of a short array.
+        fmt::OcCurve mismatched = c;
+        mismatched.inTangents.pop_back();
+        checkNear(anim::sampleCurve(mismatched, 1.0f), 5.0f, 1e-5f,
+                  "a tangent count that disagrees with the key count falls back to LINEAR, not a crash");
     }
 
     AVER_INFO("=== sockets follow the posed bone ===");
