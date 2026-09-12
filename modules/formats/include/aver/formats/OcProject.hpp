@@ -84,6 +84,9 @@ struct ProjectDesc {
     // this key existed means by its absence), 1 = ReSTIR GI. -1 keeps the engine's own default, so
     // an older .ocproject is unchanged in meaning as well as in bytes.
     int giMode             = -1; // RENDER.GIMODE           diffuse GI algorithm, [0,1]
+    // RENDER.DENOISER: 0/1, NVIDIA NRD over the sky occlusion and the ReSTIR GI radiance. Needs the
+    // G-buffer and MSAA 1 -- see Voxi::Settings::denoiser, which owns the explanation.
+    int denoiser           = -1; // RENDER.DENOISER         0/1
     int refractionMode     = -1; // RENDER.REFRACTIONMODE   0=Off 1=Screen-space 2=Ray-traced
     f32 refractionStrength = -1.0f; // RENDER.REFRACTIONSTRENGTH  bend scale
     f32 refractionEdgeFade = -1.0f; // RENDER.REFRACTIONEDGEFADE  hides the screen-space miss at edges

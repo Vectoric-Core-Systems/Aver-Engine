@@ -361,6 +361,17 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "Which estimator answers the diffuse GI bounce: 0 = voxel cone gather (default), 1 = RTXDI ReSTIR GI. Needs RayQuery hardware and rayTracing != Off -- the engine clamps back to 0 when either is missing, and this always reads back what is ACTUALLY running, not merely what was last requested",
         []{ return vU32(Renderer::get().settings().giMode); },
         [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->giMode = n; }); }});
+    // DIAL, NOT A TIER, and it reads back what is ACTUALLY running rather than what was asked for --
+    // the same honesty voxi.giMode above documents at length, and for a closely related reason. NRD
+    // refuses to run at any MSAA above 1 (D3D12 will not mix sample counts in one render-target set,
+    // so the G-buffer would be cleared and never written), so `set voxi.denoiser true` at 8x MSAA
+    // stages true, commits true, and the pass still does nothing. Settings keeps the request, which is
+    // why this reads true there; the WARN from VoxiRenderer is what says the pass skipped itself. Set
+    // voxi.msaa 1 alongside it.
+    t.push_back({"voxi.denoiser", VarType::Bool, false,
+        "NVIDIA NRD over the ReSTIR indirect diffuse and the ray-traced sky occlusion. Allocates the thin G-buffer (velocity, view Z, normal/roughness -- nothing else in the engine wants it) and REQUIRES MSAA 1 and D3D12; above 1x sample count the pass skips itself and says so once at WARN",
+        []{ return vBool(Renderer::get().settings().denoiser); },
+        [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->denoiser = on; }); }});
     t.push_back({"voxi.rtShadowDenoise", VarType::U32, false,
         "Spatial denoise radius for the ray-traced sun shadow, in pixels (engine clamps to [0,3])",
         []{ return vU32(Renderer::get().settings().rtShadowDenoise); },

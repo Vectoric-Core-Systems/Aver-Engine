@@ -2551,6 +2551,8 @@ public:
             // >= 0, not > 0: 0 is a real ESTIMATOR ("voxel cones"), not "flag not given" -- the
             // sentinel is -1, same reasoning as rtShadowDenoiseOverride_ and giSkyOccRaysOverride_ above.
             if (giModeOverride_ >= 0) k.giMode = static_cast<u32>(giModeOverride_);
+            // Same -1 sentinel reasoning: 0 is a real answer ("denoiser off"), not an absent flag.
+            if (denoiserOverride_ >= 0) k.denoiser = denoiserOverride_ != 0;
             voxi::Renderer::get().setSettings(k);
             AVER_INFO("[Voxi] attached: MSAA {}x, RT tier {}, SM {}, mesh tier {}", caps.maxMsaaSamples, caps.rayTracingTier, caps.shaderModel, caps.meshShaderTier);
 
@@ -3765,7 +3767,18 @@ public:
         // immediately. OR'd together: --gbuffer alone must still write with no view selected, and a
         // debug view alone must still turn the G-buffer on. No module gate -- default stays OFF for
         // the render-gate oracle and the 89 headless suites.
-        e.device()->setGBufferEnabled(gbufferOverride_ || gbufferDebugView_ != GBufferDebugFeature::Mode::Off);
+        // VOXI'S DENOISER IS THE THIRD REASON THE G-BUFFER EXISTS, alongside --gbuffer and the
+        // debug views. NRD is its only consumer in the engine and it reads these three targets every
+        // frame it runs, so the setting that turns it on has to turn them on too -- otherwise the
+        // checkbox in Project Settings silently does nothing, which is how this pass spent its whole
+        // life reachable only from a command line.
+#if AVER_MODULE_VOXI
+        const bool wantGbufForDenoiser = voxi::Renderer::get().settings().denoiser;
+#else
+        const bool wantGbufForDenoiser = false;
+#endif
+        e.device()->setGBufferEnabled(gbufferOverride_ || wantGbufForDenoiser ||
+                                      gbufferDebugView_ != GBufferDebugFeature::Mode::Off);
         gbufferDebugFeature_.setDevice(e.device());
         // vpX_/vpY_/vpW_/vpH_ are this frame's 3D-viewport rect (see buildViewportOverlay), a frame
         // stale at worst on the very first draw -- the identical tolerance captureCheck()'s own
@@ -7416,6 +7429,7 @@ public:
     // Settings::giMode at draw time -- so, unlike --rd-ablate, it does not have to be handed over
     // before init() below; it only has to reach setSettings() before the frame that reads it.
     void setGiMode(int n) { giModeOverride_ = n; }                             // --gi-mode N
+    void setDenoiser(int n) { denoiserOverride_ = n; }                          // --denoiser 0|1
     void setRenderScale(f32 s) { renderScaleOverride_ = s; }                    // --render-scale F
 #if AVER_MODULE_SR
     // --aversr LEVEL. Records that the CLI chose it, so loadEditorPreferences leaves it alone --
@@ -9197,6 +9211,7 @@ private:
         if (project_.ptBounces          >= 0) k.ptBounces          = static_cast<u32>(project_.ptBounces);
         if (project_.giCones            >= 0) k.giCones            = static_cast<u32>(project_.giCones);
         if (project_.giMode             >= 0) k.giMode             = static_cast<u32>(project_.giMode);
+        if (project_.denoiser           >= 0) k.denoiser           = project_.denoiser != 0;
         if (project_.refractionMode     >= 0) k.refractionMode     = static_cast<u32>(project_.refractionMode);
         if (project_.refractionStrength >= 0.0f) k.refractionStrength = project_.refractionStrength;
         if (project_.refractionEdgeFade >= 0.0f) k.refractionEdgeFade = project_.refractionEdgeFade;
@@ -9385,6 +9400,14 @@ private:
             // an A/B meant to compare voxel cones against RTXDI ReSTIR would compare ReSTIR to itself
             // and report the two estimators as identical.
             if (giModeOverride_ >= 0) take(giModeOverride_, k.giMode, "--gi-mode");
+            // take() on a bool field needs an lvalue of the field's own type, so the flag is staged
+            // through a u32 and assigned back -- RENDER.DENOISER must not outrank a human who just
+            // typed --denoiser, which is the whole point of this pass.
+            if (denoiserOverride_ >= 0) {
+                u32 den = k.denoiser ? 1u : 0u;
+                take(static_cast<u32>(denoiserOverride_ != 0), den, "--denoiser");
+                k.denoiser = den != 0;
+            }
             // THE THIRD INSTANCE, predicted above: --no-gi/--no-rt are BOOLEANS, not the -1-sentinel
             // integers `take` understands, so closing the rule for integers left these two behind.
             // Measured cost: on RENDER.RAYTRACING 4, `--no-rt` was silently discarded and an A/B built
@@ -9471,6 +9494,7 @@ private:
         project_.layeredBsdf        = static_cast<int>(requested.layeredBsdf);
         project_.giCones            = static_cast<int>(requested.giCones);
         project_.giMode             = static_cast<int>(requested.giMode);
+        project_.denoiser           = requested.denoiser ? 1 : 0;
         project_.refractionMode     = static_cast<int>(requested.refractionMode);
         project_.refractionStrength = requested.refractionStrength;
         project_.refractionEdgeFade = requested.refractionEdgeFade;
@@ -21932,8 +21956,40 @@ private:
                                   "while the camera moves -- cannot occur.\n\n"
                                   "NEEDS RAY TRACING: with no RayQuery hardware giMode is forced\n"
                                   "back to cones (Voxi.cpp), so this will not appear to take.\n\n"
-                                  "EXPERIMENTAL: spatio-temporal resampling, but NO DENOISER on\n"
-                                  "the result yet, so it is grainier than the cone gather.");
+                                  "EXPERIMENTAL: spatio-temporal resampling. Grainier than the\n"
+                                  "cone gather unless Denoiser below is on -- which is what the\n"
+                                  "NRD pass is for, and it needs MSAA 1 to run at all.");
+
+            // THE DENOISER SITS HERE, UNDER THE ESTIMATOR IT FILTERS, because it is only reachable from
+            // this page's own choices: it denoises the ReSTIR radiance above and the sky occlusion the
+            // ray-tracing page turns on, and it is the ONLY thing in the engine that asks for the
+            // G-buffer. Before this checkbox existed the whole pass was reachable only by passing
+            // --gbuffer on a command line, which meant the editor could never see it at all.
+            //
+            // THE MSAA NOTE IS NOT DECORATION. At any sample count above 1 the pass skips itself -- see
+            // Voxi::Settings::denoiser for the D3D12 rule that forces that -- so a user who ticks this at
+            // 8x MSAA would otherwise see no change and no reason for it. Said inline rather than in the
+            // tooltip, because a tooltip nobody hovers is not a warning.
+            bool den = s.denoiser;
+            if (ImGui::Checkbox("Denoiser (NVIDIA NRD)", &den)) { s.denoiser = den; changed = true; }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Filters the ReSTIR indirect diffuse above and the ray-traced sky\n"
+                                        "occlusion, with NVIDIA NRD's REBLUR (third_party/nrd).\n\n"
+                                        "COSTS THE G-BUFFER: velocity, view-space depth and packed\n"
+                                        "normal/roughness -- three render targets NOTHING ELSE in\n"
+                                        "this engine needs, about 54 MB at 1080p. That is why it is\n"
+                                        "off by default rather than something enabled for you.\n\n"
+                                        "REQUIRES MSAA 1 and D3D12. Above 1x the G-buffer is cleared\n"
+                                        "but never written, so the pass refuses to run rather than\n"
+                                        "filter blanks into a confidently wrong image.\n\n"
+                                        "Round-trips as RENDER.DENOISER.");
+            // s.msaa, NOT the device's live sample count: this is the value being edited on this very
+            // page, so the warning appears the moment the two settings disagree rather than only after
+            // Apply -- and it goes away as soon as Anti-aliasing is set to 1, before anything commits.
+            if (den && static_cast<u32>(s.msaa) != 1u)
+                ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.2f, 1.0f),
+                                   "   Anti-aliasing is %ux -- set it to 1 or the denoiser stays off.",
+                                   static_cast<u32>(s.msaa));
 
             int res = static_cast<int>(s.voxelResolution);
             const char* resLabels[] = {"64", "128", "256", "512"};
@@ -23172,6 +23228,7 @@ private:
     // cones"), not "flag not given", so the giUpdateIntervalOverride_ convention would silently make
     // `--gi-mode 0` indistinguishable from never passing the flag at all.
     int  giModeOverride_=-1;
+    int  denoiserOverride_=-1;       // --denoiser 0|1: -1 is "flag not given"; see setDenoiser
     f32  renderScaleOverride_=1.0f;  // --render-scale F: scene render resolution as a fraction of present, clamped [0.25,1]
 #if AVER_MODULE_SR
     // --aversr LEVEL / the render-settings quality combo. Off (default) is what a build with no
@@ -26037,6 +26094,7 @@ Application* createApplication(int argc, char** argv) {
     // already at MSVC's nesting limit. -1 is "not given" (0 is the real value "voxel cones"), so an
     // A/B against a manifest that already picks an estimator (RENDER.GIMODE) can be overridden at all.
     int giModeArg = -1;
+    int denoiserArg = -1;   // --denoiser 0|1
     // REFRACTION: the tier picks a mode, these override it. -1 is "not given", the sentinel every
     // other render override here uses, since `take()` tests for exactly that -- a 0-means-absent
     // sentinel would make `--refraction 0` (OFF) silently undiscardable.
@@ -26082,6 +26140,10 @@ Application* createApplication(int argc, char** argv) {
         // --gi-mode N: selects the indirect-diffuse estimator (0 = voxel cones, 1 = RTXDI ReSTIR GI).
         // In THIS loop for the same C1061 reason as --rd-ablate above.
         if (!std::strcmp(argv[i], "--gi-mode"))              giModeArg = std::atoi(argv[i + 1]);
+        // --denoiser 0|1: NVIDIA NRD over the ReSTIR GI and the sky occlusion. In THIS loop for the
+        // same C1061 reason, and it exists at all because the pass needs the G-buffer -- which for
+        // most of this pass's life meant it was reachable ONLY by also passing --gbuffer by hand.
+        if (!std::strcmp(argv[i], "--denoiser"))              denoiserArg = std::atoi(argv[i + 1]);
         // --rt-denoise-motion F: see VoxiRenderer::setRtDenoiseMotionTaper. In THIS loop rather than
         // the chain below for the reason stated at the top of it -- that chain is at MSVC's nesting
         // limit and one more else-if there is a hard compile error.
@@ -27072,6 +27134,7 @@ Application* createApplication(int argc, char** argv) {
     app->setPtOverride(pt);
     app->setGiUpdateInterval(giUpdateInterval);
     app->setGiMode(giModeArg);
+    app->setDenoiser(denoiserArg);
     app->setRtForceOff(noRt);
     app->setRayDrivenAblation(rdAblate);
     app->setRtDenoiseMotionTaper(rtDenoiseMotionArg);

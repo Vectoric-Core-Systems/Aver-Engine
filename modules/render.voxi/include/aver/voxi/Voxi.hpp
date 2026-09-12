@@ -366,6 +366,23 @@ struct Settings {
     // SpatioTemporalResampling.hlsli) are vendored and unused; a future slice can add a spatial pass
     // over the SAME reservoir buffer without touching this field's contract.
     u32 giMode = 0;
+    // ---- NVIDIA NRD, DENOISING THE SKY OCCLUSION AND THE ReSTIR GI RADIANCE ----
+    //
+    // Off by default, and ON IS A REAL COST the user is choosing rather than one a denoiser helped
+    // itself to: NRD needs the thin G-buffer (velocity, view Z, normal/roughness -- three more render
+    // targets, ~54 MB at 1080p) and it needs them WRITTEN, and nothing else in this engine turns that
+    // on. A renderer that silently allocated them because a filter wanted them would be spending a
+    // frame budget nobody agreed to, so this field is the agreement.
+    //
+    // IT REQUIRES MSAA 1, and that is D3D12's rule rather than a choice made here: every target in
+    // one OMSetRenderTargets call must share a sample count, and the G-buffer's three are always
+    // single-sample, so above 1x the backend clears them without writing and every NRD input would be
+    // blank. A denoiser fed blank inputs does not fail -- it returns a confident, uniformly wrong
+    // image -- so VoxiRenderer skips the pass instead and says so once at WARN. Turning this on at
+    // MSAA 8x is therefore a no-op, which is why the UI says so next to the checkbox.
+    //
+    // D3D12 only; see modules/render.nrd for why (NRD wants register space 1, Vulkan refuses it).
+    bool denoiser = false;
     // SPATIAL denoise radius for the ray-traced sun shadow, in pixels. 0 is off: the shadow term is
     // whatever this pixel's own rays returned, unfiltered. N > 0 averages a (2N+1)^2 neighbourhood
     // of the shadow history, weighted by how well each neighbour's stored depth agrees with this
