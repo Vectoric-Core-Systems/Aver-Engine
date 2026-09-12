@@ -168,8 +168,25 @@ public:
         // against the one this exact call submitted -1 turns that possibility into something a
         // caller can check via readbackLagIsExactlyOneCall() and react to loudly, instead of a silent wrong
         // answer no screenshot diff would necessarily catch.
+        // THE STAMP IS WRITTEN AT THE *END* OF THIS FUNCTION, NOT HERE, AND THAT IS THE WHOLE FIX.
+        //
+        // It used to be written right here, and that raced with its own readback so reliably that
+        // the detector reported "stale" on essentially every frame -- which, because a caller treats
+        // that as "do not trust the answer", meant occlusion culling was DISABLED PERMANENTLY while
+        // appearing to be enabled. The warning was real; what it was detecting was itself.
+        //
+        // The race: genUpload_ is a single buffer and writeBuffer on an upload heap is an immediate
+        // CPU memcpy, but copyBuffer below is recorded and does not execute until this frame's
+        // command list is submitted -- after this function returns. So call N's write landed in the
+        // buffer BEFORE waitIdle() had drained call N-1's copy, and that copy, reading at GPU
+        // execute time, captured N instead of the N-1 it was recorded to capture. The readback then
+        // disagreed with thisGeneration - 1 by exactly one, forever.
+        //
+        // Writing the stamp after waitIdle() and after the readback closes it with no new
+        // synchronisation: by then the previous copy has provably retired, so the buffer is free,
+        // and this call's own copy -- recorded below but executed at submit -- still reads the value
+        // this call wants it to carry.
         const u64 thisGeneration = ++submitGeneration_;
-        res.writeBuffer(genUpload_, &thisGeneration, sizeof(thisGeneration), 0);
 
         {
             ScopedGpuStat stat(ctx, "HZB test");
@@ -241,6 +258,14 @@ public:
             // immediately preceding call's, so the one-call-lag assumption every caller's own safety
             // margin depends on did not hold this time.
         }
+
+        // AND ONLY NOW THE STAMP -- see the long comment where thisGeneration is computed. The copy
+        // recorded above has not executed yet (it goes out with this frame's command list, after
+        // this function returns), so it will read exactly this value; and the PREVIOUS call's copy
+        // has provably retired, because waitIdle() above drained it and the readback just consumed
+        // its result. Both halves of the race are closed by position alone, with no extra fence and
+        // no second buffer.
+        res.writeBuffer(genUpload_, &thisGeneration, sizeof(thisGeneration), 0);
     }
 
     void lastTestCounts(u32& culled, u32& tested) const override { culled = lastCulled_; tested = lastTested_; }
