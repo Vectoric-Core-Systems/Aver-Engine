@@ -172,8 +172,17 @@ public:
     // that one-call lag held. Opens its own ScopedGpuStat("HZB test") span, SEPARATE from "HZB build"
     // — the two cost different things and a caller measuring "does this pay for itself" needs to see
     // them apart.
+    //
+    // `identityKey` is the caller's OWN fingerprint of which logical boxes these are, in which
+    // order — e.g. a hash of the entity ids `boxes` came from (OcclusionMath.hpp's
+    // hashIdentityKey()), NOT a hash of the box bytes themselves. See that function's own comment
+    // for why: this module cannot tell "the population changed" apart from "the caller re-dilated
+    // every box's bounds this frame" by looking at coordinates alone, and SandboxApp.cpp's own
+    // motion-safety margin (see its "MOTION-SAFE TRUST GATE" comment) makes the latter happen on
+    // nearly every frame of camera motion. Comparing THIS against the identityKey the immediately
+    // preceding call was given is how readbackLagIsExactlyOneCall()'s IDENTITY half is decided.
     virtual void testBatch(rhi::IRenderContext& ctx, rhi::IResourceFactory& res,
-                           const Aabb* boxes, u32 count, std::vector<u8>& outVisible) = 0;
+                           const Aabb* boxes, u32 count, u64 identityKey, std::vector<u8>& outVisible) = 0;
 
     // STALENESS DETECTOR, ACROSS TWO INDEPENDENT DIMENSIONS. testBatch() answers a question one
     // call late (see above); this answers "was that lag actually safe to apply" — which takes BOTH
@@ -189,14 +198,22 @@ public:
     //       8-byte writeBuffer/copyBuffer/readBuffer per call).
     //   (b) IDENTITY: even when (a) holds, were the PREVIOUS call's boxes the SAME boxes — same
     //       count, same order, same content — as THIS call's? This module matches box[i] one call to
-    //       box[i] the next by bare array index (see the header comment above and OcclusionMath.hpp's
-    //       hashPackedBoxes()), and every caller today rebuilds that array fresh each frame from
-    //       whichever entities currently pass its own gates — so a population that streamed an entity
-    //       in or out between the two calls this lag spans breaks the correspondence just as surely
-    //       as a GPU-timing miss would, with no timing anomaly to show for it. OcclusionCuller.cpp's
-    //       testBatch() checks this by hashing the packed box bytes call-to-call; a run against a
-    //       live streaming scene (see that function's own comment for the numbers) found it disagree
-    //       exactly twice, both during initial load, and never again once the population settled.
+    //       box[i] the next by bare array index (see the header comment above), and every caller
+    //       today rebuilds that array fresh each frame from whichever entities currently pass its
+    //       own gates — so a population that streamed an entity in or out between the two calls this
+    //       lag spans breaks the correspondence just as surely as a GPU-timing miss would, with no
+    //       timing anomaly to show for it. OcclusionCuller.cpp's testBatch() checks this against the
+    //       caller-supplied `identityKey` parameter (OcclusionMath.hpp's hashIdentityKey()) rather
+    //       than by hashing the box bytes it uploads — CORRECTED: an earlier revision hashed the
+    //       packed bytes instead, which found a real gap (a run against a live streaming scene
+    //       disagreed exactly twice, both during initial load, and never again once the population
+    //       settled) but opened a bigger one: SandboxApp.cpp's own motion-safety margin (see its
+    //       "MOTION-SAFE TRUST GATE" comment) changes those same bytes on nearly every frame the
+    //       camera moves, for a population that has not changed at all, and hashing them could not
+    //       tell the two apart — MEASURED at 244 of 255 tested frames under a gentle 5-degree/30-frame
+    //       --cam-wobble, i.e. this check reporting "stale" almost continuously while the camera was
+    //       simply moving. Hashing the caller's own entity-id sequence instead answers the identity
+    //       question directly and is insensitive to what the caller does with each box's bounds.
     // From the second call on, OcclusionCullerImpl's own answer defaults to false (distrust) and
     // only earns "true" once BOTH checks actually pass -- the same conservative bias testBatch()'s
     // own outVisible all-1 default already uses.

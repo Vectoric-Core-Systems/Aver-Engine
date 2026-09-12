@@ -5342,8 +5342,21 @@ public:
                 occlusionBasisCamPos_ = camPos_;
                 occlusionBasisForward_ = camForward();
                 occlusionBasisValid_ = true;
+                // IDENTITY, NOT GEOMETRY -- hashed from occlusionBoxEntities_ (which entities, in
+                // which order), not from occlusionBoxes_'s bounds. THE BOUNDS ARE THE WRONG THING TO
+                // HASH HERE: every box in occlusionBoxes_ was just dilated by occlusionMoveDist/
+                // occlusionRotMarginTan above, both of which are a different float on nearly every
+                // frame the camera is in motion, for the SAME population of entities. An identity
+                // check keyed on those bytes (as this used to be) cannot tell "the population
+                // changed" apart from "my own safety margin changed" -- see hashIdentityKey()'s own
+                // comment (OcclusionMath.hpp) for the 244-of-255-frames measurement that caught it,
+                // and testBatch()'s doc comment (Occlusion.hpp) for why the module now takes this as
+                // a parameter instead of deriving it from the upload bytes itself.
+                const u64 occlusionIdentityKey = aver::occlusion::hashIdentityKey(
+                    occlusionBoxEntities_.data(), static_cast<u32>(occlusionBoxEntities_.size()));
                 occluder_->testBatch(*pctx, *occRes, occlusionBoxes_.data(),
-                                     static_cast<u32>(occlusionBoxes_.size()), occlusionResults_);
+                                     static_cast<u32>(occlusionBoxes_.size()), occlusionIdentityKey,
+                                     occlusionResults_);
                 u32 c = 0, t = 0;
                 occluder_->lastTestCounts(c, t);
                 occlusionCulledAccum_ += c;
@@ -6286,6 +6299,26 @@ public:
                               "stale (see the one-time warning above) -- culling was fully disabled "
                               "on those frames, not merely more conservative",
                               occlusionStaleReadbacks_, occlusionReportFrames_);
+                // SPLITS occlusionStaleReadbacks_ BY WHICH of the two independent checks failed --
+                // IOcclusionCuller::boxIdentityChurnCount() isolates the IDENTITY dimension (the
+                // caller's identityKey disagreed even though the GPU generation stamp matched),
+                // separate from the TIMING dimension (the generation stamp itself missed by more
+                // than one call). Occlusion.hpp's own comment on boxIdentityChurnCount() names
+                // exactly this gap ("a caller wanting to separate... needs a number to diff against,
+                // not just an instantaneous bool"), and no caller read it before this. THIS SPLIT IS
+                // WHAT FOUND THE BUG hashIdentityKey()'s own comment (OcclusionMath.hpp) documents:
+                // before that fix, identityChurn tracked occlusionStaleReadbacks_ exactly 1:1 under
+                // --cam-wobble (244 of 255 frames, both counters) -- every "stale" warning while the
+                // camera moved was the identity check misreading the caller's own motion-dilation
+                // margin as population churn, not a GPU timing race. Left in place as a standing
+                // diagnostic: a future regression that reopens that gap (or a genuine new one) shows
+                // up here as the same 1:1 tracking, rather than as an unexplained stale-readback count.
+                if (const u64 identityChurn = occluder_->boxIdentityChurnCount())
+                    AVER_INFO("[Occlusion] {} of those {} stale readback(s) were the IDENTITY check "
+                              "(caller's box population/order actually changed), not a GPU timing "
+                              "race -- see hashIdentityKey()'s comment (OcclusionMath.hpp) if this "
+                              "number is tracking staleReadbacks almost 1:1 under camera motion",
+                              identityChurn, occlusionStaleReadbacks_);
             }
 #endif
             {

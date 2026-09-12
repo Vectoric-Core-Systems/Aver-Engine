@@ -322,10 +322,13 @@ static void checkFalseCullRegression() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// hashPackedBoxes: the fingerprint OcclusionCuller.cpp's testBatch() compares call-to-call to
-// catch a caller whose box array changed IDENTITY (size, order, or content) across the one-call
-// readback lag -- see that function's own comment for the false-cull mechanism this closes and
-// what was measured about it on a live Sponza run. Checked here with no GPU, the same split every
+// hashPackedBoxes: a generic byte-content fingerprint, still used as-is by anything that wants to
+// know whether a packed float buffer changed size/order/content call-to-call. CORRECTED: this used
+// to also be the fingerprint OcclusionCuller.cpp's testBatch() compared to catch a caller whose box
+// array changed IDENTITY across the one-call readback lag -- it no longer is (see
+// hashIdentityKey()'s own comment below and in OcclusionMath.hpp for why hashing box BOUNDS was the
+// wrong tool for an IDENTITY question). Kept and still tested here because it remains a correct,
+// generically useful function in its own right. Checked here with no GPU, the same split every
 // other function in this file already gets.
 // ---------------------------------------------------------------------------------------------
 static void checkHashPackedBoxes() {
@@ -374,6 +377,55 @@ static void checkHashPackedBoxes() {
           "swapping two boxes' positions in the array -> hashes differ");
 }
 
+// ---------------------------------------------------------------------------------------------
+// hashIdentityKey: the fingerprint OcclusionCuller.cpp's testBatch() now compares call-to-call
+// instead of hashPackedBoxes() above -- see that function's own comment (OcclusionMath.hpp) for
+// WHY the switch was needed: hashPackedBoxes() hashes box BOUNDS, and SandboxApp.cpp deliberately
+// changes every box's bounds by a motion-dependent margin on nearly every frame the camera moves
+// (its own "MOTION-SAFE TRUST GATE" comment), which made hashPackedBoxes() misreport that as a
+// population change 244 of 255 tested frames under a gentle --cam-wobble. hashIdentityKey() takes
+// the caller's entity-id sequence instead, so it cannot see a bounds change at all -- only an
+// actual change in which entities, or their order.
+// ---------------------------------------------------------------------------------------------
+static void checkHashIdentityKey() {
+    AVER_INFO("hashIdentityKey");
+    // Same ids, same order: the ordinary case (a static population, no streaming churn between two
+    // consecutive testBatch() calls) must hash equal.
+    const u32 idsA[5] = {10, 11, 12, 13, 14};
+    u32 idsB[5];
+    std::memcpy(idsB, idsA, sizeof(idsA));
+    check(hashIdentityKey(idsA, 5) == hashIdentityKey(idsB, 5),
+          "identical id sequences (same count, same order) hash equal");
+
+    // THE REGRESSION THIS FUNCTION EXISTS TO FIX: the SAME entity ids, in the SAME order, must hash
+    // equal regardless of what happened to those entities' BOUNDS this call -- hashIdentityKey()
+    // never even sees bounds, so there is nothing for a motion-dependent dilation margin to perturb.
+    // (hashPackedBoxes() above WOULD see that perturbation and hash differently -- see
+    // checkHashPackedBoxes()'s "one box's content perturbed" case, which is exactly what a changing
+    // margin does to every box, every frame, under camera motion.)
+    check(hashIdentityKey(idsA, 5) == hashIdentityKey(idsB, 5),
+          "identity is a function of WHICH entities, not their bounds -- unaffected by a per-frame "
+          "dilation margin the way hashPackedBoxes() was");
+
+    // A population that GREW (streaming added an entity) changes the byte length outright -- the
+    // real case this mechanism exists to catch.
+    const u32 idsGrown[6] = {10, 11, 12, 13, 14, 15};
+    check(hashIdentityKey(idsA, 5) != hashIdentityKey(idsGrown, 6), "appending an id changes the hash");
+
+    // Same count, one id swapped for a different one (an entity despawned and another streamed in
+    // at the same array slot the same frame) -- must hash different.
+    const u32 idsSwappedContent[5] = {10, 11, 99, 13, 14};
+    check(hashIdentityKey(idsA, 5) != hashIdentityKey(idsSwappedContent, 5),
+          "same count, one id differs -> hashes differ");
+
+    // Same MULTISET of ids, different ARRAY ORDER -- index i now names a different logical box even
+    // though nothing was added or removed, exactly the "one entity's box leaves an index the same
+    // call another's arrives there" case a count-only (or even a set-only) check would miss.
+    const u32 idsReordered[5] = {11, 10, 12, 13, 14};
+    check(hashIdentityKey(idsA, 5) != hashIdentityKey(idsReordered, 5),
+          "reordering the same ids -> hashes differ");
+}
+
 int main() {
     AVER_INFO("OcclusionMathTest");
     checkProjection();
@@ -381,6 +433,7 @@ int main() {
     checkConservativelyHidden();
     checkFalseCullRegression();
     checkHashPackedBoxes();
+    checkHashIdentityKey();
     if (g_failures) AVER_ERROR("OcclusionMathTest: {} failure(s)", g_failures);
     else            AVER_INFO("OcclusionMathTest: all checks passed");
     return g_failures ? 1 : 0;

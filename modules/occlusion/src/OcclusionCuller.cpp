@@ -125,7 +125,7 @@ public:
     }
 
     void testBatch(IRenderContext& ctx, IResourceFactory& res, const Aabb* boxes, u32 count,
-                   std::vector<u8>& outVisible) override {
+                   u64 identityKey, std::vector<u8>& outVisible) override {
         lastTested_ = count;
         lastCulled_ = 0;
         // The always-safe default if anything below bails out early -- and, for readbackLagExpected_,
@@ -147,13 +147,13 @@ public:
         }
         res.writeBuffer(boxesBuf_, packed_.data(), static_cast<u64>(packed_.size()) * sizeof(f32), 0);
 
-        // SECOND STALENESS DIMENSION -- IDENTITY, NOT JUST TIMING. See hashPackedBoxes()'s own
-        // comment (OcclusionMath.hpp) for the full gap this closes and what was measured about it;
-        // this is just where a caller's box array turns into the fingerprint that check compares.
-        const u64 boxesHash = hashPackedBoxes(packed_.data(), packed_.size(), count);
-        const bool boxesStableAcrossLag = havePrevBoxesHash_ && boxesHash == prevBoxesHash_;
-        prevBoxesHash_ = boxesHash;
-        havePrevBoxesHash_ = true;
+        // SECOND STALENESS DIMENSION -- IDENTITY, NOT JUST TIMING. See hashIdentityKey()'s own
+        // comment (OcclusionMath.hpp) for the full gap this closes, why it takes the CALLER's own
+        // identity fingerprint rather than hashing the (dilated, motion-dependent) box bytes this
+        // function uploads, and what was measured about the difference.
+        const bool boxesStableAcrossLag = havePrevIdentityKey_ && identityKey == prevIdentityKey_;
+        prevIdentityKey_ = identityKey;
+        havePrevIdentityKey_ = true;
 
         // STALENESS DETECTOR: stamp a monotonically-increasing generation number into a tiny
         // CPU-authored side buffer and round-trip it through the SAME command list, at the SAME
@@ -540,11 +540,14 @@ private:
     bool readbackLagExpected_ = false;   // see readbackLagIsExactlyOneCall()
 
     // SECOND STALENESS DETECTOR -- box IDENTITY across the one-call lag, not GPU timing. See
-    // testBatch()'s own comment beside boxesHash's computation for what this catches that the
-    // generation stamp above cannot (a caller whose box array changed shape or content between the
-    // call this readback answers and the call consuming it). CPU-only bookkeeping, no GPU resource.
-    u64 prevBoxesHash_ = 0;
-    bool havePrevBoxesHash_ = false;
+    // testBatch()'s own comment beside boxesStableAcrossLag's computation for what this catches that
+    // the generation stamp above cannot (a caller whose box array changed shape or content between
+    // the call this readback answers and the call consuming it) -- keyed on the CALLER-SUPPLIED
+    // identityKey parameter, not a hash of the box bytes themselves (OcclusionMath.hpp's
+    // hashIdentityKey() own comment explains why that distinction is the whole fix). CPU-only
+    // bookkeeping, no GPU resource.
+    u64 prevIdentityKey_ = 0;
+    bool havePrevIdentityKey_ = false;
     // Calls where the GPU-timing check passed (the generation stamp matched) but the identity check
     // did not -- a caller's own box population changed under it, not this module racing itself. Kept
     // separate from a caller's own occlusionStaleReadbacks_-style GPU-timing counter so the two

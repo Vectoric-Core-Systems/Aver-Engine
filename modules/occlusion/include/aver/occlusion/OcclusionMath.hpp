@@ -202,4 +202,48 @@ inline u64 hashPackedBoxes(const f32* packed, usize floatCount, u32 count) {
     return h;
 }
 
+// ---------------------------------------------------------------------------------------------
+// 5. A content fingerprint over a caller-supplied IDENTITY sequence -- NOT over the geometry that
+//    gets tested. This is what OcclusionCuller.cpp's testBatch() now compares call-to-call instead
+//    of hashPackedBoxes() above, and the distinction is the whole fix.
+// ---------------------------------------------------------------------------------------------
+//
+// THE GAP hashPackedBoxes() OPENED WHILE CLOSING ANOTHER ONE. Hashing the exact bytes uploaded to
+// the GPU sounds like the obvious way to detect "box[i] this call is not box[i] last call" -- and
+// it is, for a caller whose per-box bytes only change when the POPULATION changes. SandboxApp.cpp
+// is not that caller: see renderSceneEntities' own "MOTION-SAFE TRUST GATE" comment, every box
+// submitted while occlusionTrustworthy holds is DILATED by a margin computed from how far the
+// camera has moved and turned since the last basis -- a quantity that is a different float on
+// practically every frame the camera is in motion, for a population that has not changed at all.
+// hashPackedBoxes() over THOSE bytes cannot tell "the population changed" apart from "the caller's
+// own safety margin changed", and reports the former on nearly every frame of continuous motion --
+// MEASURED on a live Sponza run under a gentle 5-degree/30-frame --cam-wobble: 244 of 255 tested
+// frames, i.e. the caller's own trust gate treating the readback as unusable and falling back to
+// "cull nothing" almost the entire time the camera moved, not because anything was actually stale.
+//
+// A caller that has a stable per-box IDENTITY of its own -- SandboxApp.cpp has scene::Entity,
+// which this module has never known about and still does not, see this header's own top comment --
+// hashes THAT sequence instead and hands testBatch() the result directly, rather than asking this
+// module to infer identity from geometry that is deliberately supposed to change under motion.
+// Same count, same order, same ids call-to-call is exactly "box[i] still names the same logical
+// thing it did last call", independent of what margin got added to its bounds this frame, which is
+// the ONLY property the identity check ever needed to prove.
+//
+// `count` is folded in explicitly for the same reason hashPackedBoxes() does: two different-length
+// sequences hashing their differing runs to the same value is already astronomically unlikely, but
+// the fold costs one line and removes even that dependence on FNV's own distribution. Takes plain
+// u32 (matching aver::scene::Entity's own underlying type, AvId) rather than the caller's entity
+// type by name, for the same "this module does not know what a box belongs to" reason the rest of
+// this header holds to.
+inline u64 hashIdentityKey(const u32* ids, u32 count) {
+    u64 h = 1469598103934665603ull;   // FNV-1a 64-bit offset basis
+    for (u32 i = 0; i < count; ++i) {
+        h ^= ids[i];
+        h *= 1099511628211ull;   // FNV-1a 64-bit prime
+    }
+    h ^= count;
+    h *= 1099511628211ull;
+    return h;
+}
+
 } // namespace aver::occlusion
