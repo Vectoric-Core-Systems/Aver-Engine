@@ -1,4 +1,4 @@
-﻿// Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
+// Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems. All rights reserved.
 // Proprietary. See LICENSE.md at the repository root.
 #pragma once
@@ -6,6 +6,7 @@
 #include "aver/rhi/RHIResources.hpp"
 #include "aver/pbr/MaterialSystem.hpp"
 #include "aver/voxi/Voxi.hpp"
+#include "aver/render/nrd/NrdRecorder.hpp"
 
 #include <unordered_map>
 #include "aver/formats/GiCache.hpp"
@@ -1274,6 +1275,29 @@ private:
     // could justify, and 2 bytes/pixel beside the 112 MB the RG32Float history pair above already
     // costs at the tiers where either exists is not a number worth optimising.
     rhi::TextureHandle rtAoHitDist_ = 0;
+
+    // ---- NVIDIA NRD, denoising the sky-occlusion signal rtAoHitDist_ above feeds ----
+    //
+    // WHY THIS SIGNAL FIRST, out of everything that is noisy: it is the one already measured. NRD's
+    // own AVER_README puts ambient/sky occlusion at 78% of the engine's remaining speckle, and
+    // IN_DIFF_HITDIST -- the one input NRD needs that an engine does not usually already have -- is
+    // written today, because closing that was the third of NRD's three original blockers. Every
+    // other input (view Z, motion vectors, packed normal/roughness) comes from the G-buffer.
+    //
+    // IT REQUIRES THE G-BUFFER, which is off by default, so nrdWanted() asks for it rather than
+    // assuming it. A denoiser handed a null input texture is refused by Recorder::record rather
+    // than binding one, so the failure is a log line and an undenoised frame, never a crash.
+    //
+    // OPTIONAL AT EVERY LEVEL AND THAT IS THE POINT: absent on Vulkan (NRD's register spaces), absent
+    // in a build with AVER_WITH_NRD off, absent without the G-buffer. nrdOutput_ being 0 means "not
+    // denoised this frame" and the shader falls back to the hand-written temporal filter, which is
+    // what every tier below this already ships.
+    render::nrd::Recorder nrd_;
+    bool                  nrdActive_  = false;   // create() succeeded AND this frame has its inputs
+    rhi::TextureHandle    nrdOutput_  = 0;       // OUT_DIFF_HITDIST, 0 when not denoised
+    u32                   nrdFrame_   = 0;
+    bool                  nrdWarnedEncoding_ = false;
+    bool                  nrdWarnedMsaa_     = false;
 
     // ---- RTXDI ReSTIR GI: the reservoir buffer and the previous-frame surface it resamples against ----
     //

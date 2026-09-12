@@ -1,4 +1,4 @@
-﻿// Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
+// Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems. All rights reserved.
 // Proprietary. See LICENSE.md at the repository root.
 #include "aver/voxi/VoxiRenderer.hpp"
@@ -128,7 +128,12 @@ void giSamplers(rhi::PipelineLayout& l) {
 // newest ones: t12/t13, RTXDI ReSTIR GI's previous-frame surface history (read side, position and
 // normal split across a PAIR of textures -- see giSurfPosHist_ in VoxiRenderer.hpp for why one
 // alone could not hold both: rhi::Format has no four-channel 32-bit float).
-constexpr u32 kVoxiSrvCount = kGiSrvCount + 5;
+constexpr u32 kVoxiSrvCount = kGiSrvCount + 6;
+
+// The denoiser index Voxi asks NRD to run. create() is handed exactly one kind
+// (ReblurDiffuseOcclusion), so this is 0 -- named rather than written as a bare literal at the
+// call site, because the two must agree and nothing else would say so.
+constexpr u32 kNrdAoDenoiser[] = {0u};
 
 // THE SAME ARGUMENT ON THE UAV SIDE, and it needs its own constant for a reason the SRV side
 // already documents. SandboxApp.cpp's cluster path sets `bsd.uavCount = voxi::kGiUavCount` and
@@ -177,6 +182,14 @@ void giTableKinds(rhi::SlotKind* srv, rhi::SlotKind* uav) {
     // is its own switch (Settings::giMode), independent of which ray-tracing tier is active.
     srv[12] = rhi::SlotKind::Texture2D;             // t12 GI-restir surface POSITION history (read)
     srv[13] = rhi::SlotKind::Texture2D;             // t13 GI-restir surface NORMAL history (read)
+    // t14: NRD's DENOISED sky occlusion, and it is the only SRV here that is routinely ABSENT.
+    // The pass is optional at three independent levels -- no NRD in the build, a backend whose
+    // descriptor model refuses NRD's register spaces (Vulkan), or no G-buffer to feed it -- so the
+    // shader must not assume it is bound. It tests GetDimensions() rather than reading a cbuffer
+    // flag, the same trick averBlendBackdropValid already uses for t10: a null-filled Texture2D
+    // reports zero dimensions, which is a signal the descriptor already carries and costs no
+    // fourth mirror of the constant block to express (see aver-voxi-cbuffer-three-mirrors).
+    srv[14] = rhi::SlotKind::Texture2D;             // t14 NRD-denoised sky occlusion (read)
     uav[0] = rhi::SlotKind::Texture3D;              // u0 volume mip 0
     uav[1] = rhi::SlotKind::Texture3D;              // u1 injection accumulator
     uav[2] = rhi::SlotKind::Texture2D;              // u2 ray-traced shadow history (write)
@@ -194,7 +207,7 @@ void giTableKinds(rhi::SlotKind* srv, rhi::SlotKind* uav) {
     uav[6] = rhi::SlotKind::StructuredBuffer;       // u6 GI-restir reservoir buffer
     uav[7] = rhi::SlotKind::Texture2D;              // u7 GI-restir surface POSITION history (write)
     uav[8] = rhi::SlotKind::Texture2D;              // u8 GI-restir surface NORMAL history (write)
-    static_assert(kVoxiSrvCount == 14 && kVoxiUavCount == 9 && kGiSrvCount == 9 && kGiUavCount == 4,
+    static_assert(kVoxiSrvCount == 15 && kVoxiUavCount == 9 && kGiSrvCount == 9 && kGiUavCount == 4,
                   "giTableKinds fills exactly kVoxiSrvCount SRVs and kVoxiUavCount UAVs; widen "
                   "those, never kGiSrvCount/kGiUavCount -- those two are the union SandboxApp.cpp's "
                   "cluster path reserves at its own base and fills kinds for by hand, so growing "
@@ -409,6 +422,12 @@ bool VoxiRenderer::init(rhi::IDevice& device) {
 // Destroys every resource and returns the feature to its uninitialised state.
 void VoxiRenderer::shutdown() {
     reportFrameTime("run total");
+    // BEFORE the `if (!res_)` bail below, because the denoiser owns device resources of its own
+    // (pipelines, two texture pools, a descriptor table per dispatch) and is the one object here
+    // that would leak them on the path where this renderer never had a factory to begin with.
+    nrd_.destroy();
+    nrdActive_ = false;
+    nrdOutput_ = 0;
     materials_.shutdown();
     if (!res_) { dev_ = nullptr; return; }
     for (rhi::BindingSetHandle s : mipBindings_) if (s) res_->destroyBindingSet(s);
@@ -3036,6 +3055,30 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
         rtAoHitDist_ = res_->createTexture(d);
         if (!rtAoHitDist_) return false;
         d.initialState = rhi::ResourceState::ShaderResource;   // restored for anything added below
+
+        // ---- and the denoiser that consumes it, created ONCE beside the signal it filters ----
+        // Its create() is the thing that decides whether NRD can run at all -- no NRD in the build,
+        // or a backend whose descriptor model refuses NRD's register spaces -- and it says which at
+        // INFO. A false here is not an error: nothing downstream is required, and Voxi keeps the
+        // hand-written temporal filter it has always shipped. The pools are NOT allocated here;
+        // resize() does that per frame from the hit-distance target's own dimensions, so the
+        // denoiser follows a render-target change without a second place needing to know about it.
+        if (!nrd_.valid()) {
+            const render::nrd::DenoiserKind kinds[] = {render::nrd::DenoiserKind::ReblurDiffuseOcclusion};
+            nrdActive_ = nrd_.create(*dev_, kinds, 1);
+            // THE ENCODING CHECK IS THE ONE SILENT FAILURE MODE LEFT. NRD's shaders were BUILT
+            // against a specific normal/roughness packing (cmake/AverNRD.cmake picks it); the
+            // G-buffer packs RGB10A2 as normal*0.5+0.5 with roughness in w. If those disagree the
+            // denoiser still runs and still produces an image -- a plausible, wrong one. Reported
+            // once rather than per frame, because a warning nobody can act on every frame is noise.
+            u32 nEnc = 0, rEnc = 0;
+            if (nrdActive_ && !nrdWarnedEncoding_ && render::nrd::Denoiser::encodings(nEnc, rEnc)) {
+                AVER_INFO("[NRD] denoising sky occlusion; NRD normal encoding {}, roughness encoding "
+                          "{} -- the G-buffer packs RGB10A2 (normal*0.5+0.5, roughness in w), and a "
+                          "mismatch here is silent, not an error", nEnc, rEnc);
+                nrdWarnedEncoding_ = true;
+            }
+        }
     }
 
     // ---- RTXDI ReSTIR GI: the previous-surface pair(s) and the reservoir buffer, together ----
@@ -3196,6 +3239,84 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
         cb_.giRestirParams[2] = static_cast<f32>(writeIdx);  // this frame's reservoir array slice
         cb_.giRestirParams[3] = 0.0f;                        // spare
     }
+
+    // ---- NVIDIA NRD, denoising LAST FRAME's sky-occlusion hit distance into t14 ----
+    //
+    // LAST FRAME'S, AND THAT IS NOT A COMPROMISE -- it is the only ordering this pass can have.
+    // rtAoHitDist_ (u5) is written by the scene pixel shader, which has not run yet when
+    // beginShadowHistory records; running the denoiser here filters the measurement the previous
+    // frame left behind. That is exactly what every temporal filter in this file already consumes
+    // (the u4/t11 pair is read one frame after it is written), so the lag is the same one the
+    // hand-written path already has, not a new one -- and NRD is built to be fed a history.
+    //
+    // EVERY INPUT BUT THE HIT DISTANCE IS THE G-BUFFER'S, which is off by default. Nothing here
+    // turns it on: a renderer that silently enabled an extra four render targets because a denoiser
+    // wanted them would be spending the user's frame budget on a decision they never made. The pass
+    // reports itself absent instead, and Voxi falls back to the filter it has always shipped.
+    nrdOutput_ = 0;
+    // gBufferEnabled() IS NOT THE SAME QUESTION AS "the G-buffer has anything in it", and the
+    // difference is a silent one. D3D12 requires every render target in one OMSetRenderTargets call
+    // to share a sample count, and the G-buffer's three targets are always single-sample -- so under
+    // MSAA the backend CLEARS them and does not write them, saying so once at WARN. A denoiser fed
+    // cleared normals, a cleared view Z and cleared motion vectors does not fail: it produces a
+    // confident, uniformly wrong image, which is the worst outcome available here. Skipping is the
+    // honest answer, and it is said once rather than every frame.
+    const bool gbufWritten = dev_ && dev_->gBufferEnabled() && dev_->sampleCount() == 1;
+    if (dev_ && dev_->gBufferEnabled() && dev_->sampleCount() != 1 && !nrdWarnedMsaa_) {
+        AVER_WARN("[NRD] denoising is OFF: the G-buffer is enabled but MSAA is {}x, so the backend "
+                  "clears its targets without writing them and every NRD input would be blank. Set "
+                  "MSAA to 1 (voxi.msaa 1) to denoise.", dev_->sampleCount());
+        nrdWarnedMsaa_ = true;
+    }
+    if (nrd_.valid() && rtAoHitDist_ && gbufWritten) {
+        render::nrd::Recorder::Inputs in;
+        in.viewZ           = dev_->gBufferViewZTexture();
+        in.motionVectors   = dev_->gBufferVelocityTexture();
+        in.normalRoughness = dev_->gBufferNormalRoughnessTexture();
+        in.diffuseHitDist  = rtAoHitDist_;
+        rhi::TextureDesc aoDesc{};
+        const bool haveSize = res_->textureInfo(rtAoHitDist_, aoDesc);
+        const u32 tw = haveSize ? aoDesc.width : 0u, th = haveSize ? aoDesc.height : 0u;
+        if (in.viewZ && in.motionVectors && in.normalRoughness && tw && th && nrd_.resize(tw, th)) {
+            render::nrd::FrameSettings fs{};
+            // WORLD SPACE IS VIEW SPACE, AS FAR AS NRD IS TOLD, and that is a deliberate encoding
+            // rather than a missing matrix. NRD wants worldToView and viewToClip SEPARATELY; this
+            // renderer only ever receives the two combined (IDevice::camera hands back one viewProj,
+            // and curViewProj_/prevViewProj_ are what every other temporal consumer here reprojects
+            // with). Passing identity for worldToView and the full viewProj for viewToClip is
+            // self-consistent: NRD composes the two to reconstruct position, so the product it
+            // actually uses is unchanged, and IN_VIEWZ stays exactly what it always was -- clip.w,
+            // which IS the view-space Z of that same combined transform. What it costs is that any
+            // NRD feature reading view space ALONE would be reading world space; none of the ones
+            // REBLUR_DIFFUSE_OCCLUSION uses do, and this is the line to revisit first if a denoiser
+            // that does is ever added here.
+            fs.worldToView[0]     = fs.worldToView[5]     = fs.worldToView[10]     = fs.worldToView[15]     = 1.0f;
+            fs.worldToViewPrev[0] = fs.worldToViewPrev[5] = fs.worldToViewPrev[10] = fs.worldToViewPrev[15] = 1.0f;
+            std::memcpy(fs.viewToClip,     curViewProj_,  sizeof(fs.viewToClip));
+            std::memcpy(fs.viewToClipPrev, prevViewProj_, sizeof(fs.viewToClipPrev));
+            fs.resourceWidth = fs.rectWidth  = tw;
+            fs.resourceHeight = fs.rectHeight = th;
+            fs.frameIndex      = nrdFrame_++;
+            fs.denoisingRange  = settings_.giMaxDistance > 1.0f ? settings_.giMaxDistance : 500000.0f;
+            // THE SIGN IS THE ONE THING MOST LIKELY TO BE WRONG HERE and it is silent when it is:
+            // the G-buffer's velocity is DESTINATION minus SOURCE (this frame's position minus last
+            // frame's -- see averGBufferVelocity), and NRD reprojects by ADDING the motion vector to
+            // find where a pixel CAME FROM. Those are opposite conventions, so the x/y scale is
+            // negative. A sign error here does not fail, it just denoises against the wrong pixels
+            // and looks like smearing under motion.
+            fs.motionVectorScale[0] = -1.0f;
+            fs.motionVectorScale[1] = -1.0f;
+            fs.motionVectorScale[2] =  0.0f;   // the engine's velocity carries no Z
+            fs.resetHistory = nrd_.historyIsStale() || !rtHistValid_;
+            if (nrd_.record(ctx, fs, in, kNrdAoDenoiser, 1)) nrdOutput_ = nrd_.outputDiffuseHitDistance();
+        }
+    }
+    // BOUND EVERY FRAME, INCLUDING AS NOTHING. clearSrv is what makes the shader's GetDimensions
+    // test mean "not denoised THIS frame" rather than "never denoised" -- leaving last frame's
+    // texture bound after the pass stops running would feed the shader a frozen image with no
+    // indication anything had changed.
+    if (nrdOutput_) res_->setSrv(bindings_, 14, nrdOutput_);
+    else            res_->clearSrv(bindings_, 14);
 
     // Read fresh every frame rather than cached: unlike the texture resolution, the scene viewport
     // can change (an editor panel resize) without a full onRenderTargetsChanged notification. A

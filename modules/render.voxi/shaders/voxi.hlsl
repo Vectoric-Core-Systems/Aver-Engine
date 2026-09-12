@@ -691,6 +691,20 @@ RWTexture2D<float2> gAoHistOut : register(u4);
 // touched -- writing a null UAV is undefined, not merely wasted.
 RWTexture2D<float>  gAoHitDistOut : register(u5);
 
+// t14: the same signal, one frame later, after NVIDIA NRD has filtered it.
+//
+// DECLARED HERE RATHER THAN BESIDE ITS REGISTER NEIGHBOURS t12/t13, which sit ~700 lines further
+// down with the ReSTIR block: HLSL has no forward declarations, and rtSkyOcclusionTemporal -- the
+// only reader -- comes BEFORE them. Beside the u5 it filters is also where it explains itself, since
+// the two textures hold the same quantity in the same encoding (see AverAmbientTraced::hitDist).
+//
+// ROUTINELY ABSENT, AND THE READER MUST TEST FOR IT. The pass needs NRD in the build, a D3D12
+// device (NRD wants its constant buffer and samplers in register space 1, which Vulkan refuses on
+// purpose) and the G-buffer, which is off by default. VoxiRenderer clears this slot on any frame it
+// did not denoise, so GetDimensions() returning 0 means "not denoised THIS frame" rather than
+// "never" -- a frozen last-good image would be the worse failure.
+Texture2D<float>    gNrdAo        : register(t14);
+
 // Ray-traced reflection history: same ping-pong as the shadow history above, its own pair of
 // textures. rgb = shaded colour, a = linear hit depth, OR NEGATIVE meaning the ray missed.
 Texture2D<float4>   gRtReflHist    : register(t7);
@@ -1508,6 +1522,34 @@ float rtSkyOcclusionTemporal(float3 wpos, float3 N, float2 pixel, uint rays, flo
         // History exists, so the traced sample is the UPDATE and the prior above goes unused.
         vis = lerp(fresh, histV, weight);
     }
+    // ---- NRD's ANSWER WINS WHEN THERE IS ONE, and it replaces the blend above rather than
+    // filtering it ----
+    //
+    // gNrdAo holds LAST frame's hit distance run through NVIDIA's REBLUR_DIFFUSE_OCCLUSION. Both
+    // quantities are the same thing in the same units: AverAmbientTraced::hitDist is the mean
+    // distance travelled as a FRACTION OF TMax with an escaping sample contributing a full 1.0, so
+    // 1 is "nothing in the way" and 0 is "blocked at once" -- exactly the polarity and range of the
+    // openness `vis` carries. No remap, and none should be invented here.
+    //
+    // IT REPLACES THE EMA RATHER THAN FEEDING IT. Handing a denoised value back into the 0.97
+    // history blend would be feeding a filter its own output -- the IIR trap the history write
+    // below spends a paragraph avoiding -- and it would also double-count NRD's own temporal
+    // accumulation, which is the whole thing NRD's permanent pool exists to do.
+    //
+    // THE ZERO-DIMENSIONS TEST IS THE BOUND-OR-NOT SIGNAL, the same one averBlendBackdropValid uses
+    // for the backdrop: the pass is absent on Vulkan, absent without NRD in the build, and absent
+    // without the G-buffer, so the shader cannot assume t14 exists. A null-filled Texture2D reports
+    // zero dimensions, which the descriptor already tells us -- no fourth mirror of the constant
+    // block, which is a trap this file has been caught by before.
+    uint nrdW = 0, nrdH = 0;
+    gNrdAo.GetDimensions(nrdW, nrdH);
+    if (nrdW > 0u && nrdH > 0u) {
+        // STILL WRITTEN TO THE HISTORY BELOW, because that history is what the NEXT frame's
+        // reprojection reads and what the pass falls back to the moment NRD stops running -- a
+        // frame where the G-buffer is switched off would otherwise resume from a stale average.
+        vis = saturate(gNrdAo.Load(int3(pixel, 0)).r);
+    }
+
     // The ACCUMULATED value, not the fresh one -- writing `fresh` here would restart the average
     // every frame and buy nothing, the same trap the shadow path documents.
     //
