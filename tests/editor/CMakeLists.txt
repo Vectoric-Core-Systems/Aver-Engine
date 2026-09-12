@@ -177,6 +177,30 @@ if(TARGET Aver.Sound)
   set_target_properties(SoundEditorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
 
+# ParticleEditorTest -- the .ocparticle editor tab's headless core: load / save / dirty, every field
+# setter's own range clamping, and the preview simulation's tick (spawn, the once-only burst, the
+# maxParticles cap, and decay).
+#
+# Same SoundEditorTest arrangement immediately above (Sandbox is add_executable-only, so this
+# compiles sandbox/src/ParticleEditor.cpp directly), and AVER_WITH_IMGUI is likewise left undefined:
+# ParticleEditor.cpp's `#include "imgui.h"` and its whole drawing half (drawParams(),
+# drawPreviewPane()) sit behind that macro -- see its own header comment for why tickPreview() is
+# NOT gated on it at all, unlike the drawing half.
+#
+# GUARDED ON Aver.Formats.Particles, which itself only exists when Aver.Particles does (see
+# modules/formats.particles/CMakeLists.txt's own `if(TARGET Aver.Particles)`), for
+# SoundEditorTest's identical reason: this is a configuration the module matrix is entitled to turn
+# off (AVER_MODULE_PARTICLES, or the AVER_MODULE_SCENE cascade that force-disables it).
+if(TARGET Aver.Formats.Particles)
+  add_executable(ParticleEditorLoadSaveTest
+    src/ParticleEditorLoadSaveTest.cpp
+    ${CMAKE_SOURCE_DIR}/sandbox/src/ParticleEditor.cpp)
+  target_include_directories(ParticleEditorLoadSaveTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+  target_link_libraries(ParticleEditorLoadSaveTest PRIVATE
+    Aver.Formats.Particles Aver.Particles Aver.Formats Aver.Core Aver.Platform)
+  set_target_properties(ParticleEditorLoadSaveTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
 # ProjectCopyTest -- copyProjectTree, the "Upgrade a Copy" branch of the upgrade prompt.
 #
 # Compiles sandbox/src/ProjectScaffold.cpp directly, for EditorPrefsTest's precedent above (Sandbox

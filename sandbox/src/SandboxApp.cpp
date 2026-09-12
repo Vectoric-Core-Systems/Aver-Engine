@@ -114,6 +114,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "GraphEditor.hpp"
 #include "BtEditor.hpp"
 #include "SoundEditor.hpp"
+#include "ParticleEditor.hpp"
 #include "EditorEuler.hpp"
 #include "AssetRefScan.hpp"
 #include "EditorTransform.hpp"   // dropRestLift, so a dropped asset rests on what it landed on
@@ -1773,6 +1774,9 @@ public:
         assetEditors_.registerFactory(&editor::makeBtEditor);
         // And again for .ocsnd, which likewise nothing above claims. See SoundEditor.hpp.
         assetEditors_.registerFactory(&editor::makeSoundEditor);
+        // And again for .ocparticle -- the format, the runtime and level-drop placement all already
+        // existed with zero authoring UI until now. See ParticleEditor.hpp.
+        assetEditors_.registerFactory(&editor::makeParticleEditor);
         // Must run before any actor factory: the "is Roslyn available" answer is cached on first ask.
         locateAverDesign();
         {
@@ -6771,6 +6775,7 @@ public:
         }
         editor::shutdownActorEditors();
     editor::shutdownAnimEditors();
+        editor::shutdownParticleEditors();
         setMouseCaptured(false);
 #if AVER_FLUIDS_SIMULATED
         // BEFORE aver_phys_shutdown below, explicitly rather than leaving it to ~FluidScene: that
@@ -17488,6 +17493,24 @@ private:
         cbAdoptNewAsset(target);
     }
 
+    // Writes a starter .ocparticle -- a small warm ember burst -- and opens it. Same shape as
+    // cbCreateSoundGraph immediately above, for the same reason its own comment gives: this is a
+    // format with a working editor tab and an icon (see the Content Browser's extension table) that,
+    // until now, nothing could BRING INTO EXISTENCE from inside the editor at all.
+    void cbCreateParticleEffect() {
+        const std::filesystem::path target = cbFreeAssetPath("NewParticle", ".ocparticle");
+        if (target.empty()) return;
+        fmt::OcParticleExtras extras;
+        const particles::ParticleEffect fx = editor::pxStarterEffect(&extras);
+        std::string why;
+        if (!fmt::saveOcparticle(target.string(), fx, &extras, &why)) {
+            cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
+            AVER_ERROR("[Editor] new particle effect failed: {}", why);
+            return;
+        }
+        cbAdoptNewAsset(target);
+    }
+
     // Writes a starter .ocgraph -- an Aver Node visual-scripting graph -- and opens it.
     // The bytes come from editor::graphStarterText rather than being built here, so a test can parse
     // exactly what this writes; it is TEXT, not an OcGraphData through fmt::saveOcgraph, because the
@@ -18063,6 +18086,8 @@ private:
             uiReg_.track("cb.add.behaviourTree");
             if (ImGui::MenuItem("New Sound Graph"))     cbCreateSoundGraph();
             uiReg_.track("cb.add.soundGraph");
+            if (ImGui::MenuItem("New Particle Effect")) cbCreateParticleEffect();
+            uiReg_.track("cb.add.particleEffect");
             if (ImGui::MenuItem("New Material"))        cbCreateMaterial();
             uiReg_.track("cb.add.material");
             ImGui::EndDisabled();
