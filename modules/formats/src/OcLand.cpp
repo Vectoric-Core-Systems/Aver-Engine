@@ -101,6 +101,28 @@ bool parseOcLand(const u8* bytes, usize size, OcLandData& out, std::string* why)
     out.boundsMax[0] = origin[0] + out.extentCm();
     out.boundsMax[1] = origin[1] + out.extentCm();
     out.boundsMax[2] = hi;
+
+    // Pin the AUTHORED quantisation range: the optional LRNG chunk if this file already carries one,
+    // or -- a file saved before LRNG existed -- the range this file's own LHDR bias/scale already
+    // encode. Either way, from this load onward writeOcLand reuses this range instead of rescanning
+    // `heights`, which is the one-time migration ITEM 0.7 asks for: an old file's very next save gains
+    // the LRNG chunk (the one change), and every save after that reuses the same pinned numbers.
+    f32 quantMin = origin[2] + bias;
+    f32 quantMax = quantMin + scale;
+    if (const AvrChunk* rng = file.find(kOcLandChunkRange)) {
+        if (rng->data.size() >= sizeof(f32) * 2) {
+            Cursor rc{rng->data.data(), rng->data.size()};
+            const f32 rmin = rc.take<f32>();
+            const f32 rmax = rc.take<f32>();
+            if (rc.ok && std::isfinite(rmin) && std::isfinite(rmax) && rmax >= rmin) {
+                quantMin = rmin;
+                quantMax = rmax;
+            }
+        }
+    }
+    out.quantMinCm = quantMin;
+    out.quantMaxCm = quantMax;
+    out.hasQuantRange = true;
     return true;
 }
 
@@ -113,16 +135,60 @@ bool loadOcLand(const std::string& path, OcLandData& out, std::string* why) {
     return parseOcLand(bytes.data(), bytes.size(), out, why);
 }
 
-// Encodes a section into AVR1 bytes, quantising the heights to u16 across their own range.
+// Encodes a section into AVR1 bytes, quantising the heights to u16 against the authored range.
 bool writeOcLand(const OcLandData& in, std::vector<u8>& out, std::string* why) {
     if (!in.valid()) return fail(why, "OcLandData is not internally consistent");
     if (in.sampleCount > kOcLandMaxSamples) return fail(why, "sampleCount above the maximum of 4097");
 
-    f32 lo = in.heights[0], hi = in.heights[0];
+    f32 liveLo = in.heights[0], liveHi = in.heights[0];
     for (f32 h : in.heights) {
         if (!std::isfinite(h)) return fail(why, "a height is not finite");
-        if (h < lo) lo = h;
-        if (h > hi) hi = h;
+        if (h < liveLo) liveLo = h;
+        if (h > liveHi) liveHi = h;
+    }
+
+    // ITEM 0.7's fix: quantise against the AUTHORED range, not the live extent of `in.heights`.
+    // Deriving lo/hi fresh from the live heights on every save was the FIRST bug -- editing one
+    // sample could move the whole section's range, which silently re-quantised every OTHER sample. A
+    // struct that has never been loaded (hasQuantRange == false) has no prior range to protect, so it
+    // still derives one fresh here, exactly as before; that is the migration/first-save case, not the
+    // bug.
+    //
+    // Once a range IS pinned, an in-range live value reuses it exactly -- so an edit that stays inside
+    // the range leaves it untouched, and every untouched sample's quantised code (and therefore its
+    // decoded height) is bit-for-bit what it was. That is the first bug, still fixed.
+    //
+    // THE SECOND BUG: reusing the pinned range UNCONDITIONALLY and clamping anything outside it. Before
+    // this fix existed, lo/hi always covered the live heights, so that clamp never fired; once the
+    // range was pinned, it did -- sculpting terrain above the pinned ceiling was silently flattened on
+    // save. Landscape sculpting is the one authoring mode that ships, and raising ground past the
+    // original maximum is the most ordinary thing a user does with it, so trading the first bug's
+    // drift for the clamp's silent data loss was not an improvement.
+    //
+    // THE FIX: the range GROWS to cover a live value outside it, and never shrinks. A grow is a real
+    // authoring event -- the user deliberately sculpted past where the terrain had ever been -- and it
+    // re-quantises every OTHER sample once, by at most one step of the newly grown scale (proven in
+    // LandscapeTest's ITEM 0.7 (c2)). That is a bounded, one-time cost, not the unbounded loss of a
+    // clamp, and it only happens on an edit that actually needs a wider range -- an in-range edit still
+    // costs nothing per case (c1).
+    //
+    // HEADROOM. Growing to EXACTLY the live extreme means the very next stroke that nudges the same
+    // peak higher grows the range AGAIN -- on every single autosave while a user sculpts a rising
+    // ridge, each one touching untouched samples by up to a step. Since a grow is the only event that
+    // is allowed to move untouched samples at all, fewer grow events is strictly better for a whole
+    // sculpting session, and the price is a proportionally larger step size for ALL samples -- at
+    // 65536 steps across a section's full relief, a few percent of headroom is nowhere near visible.
+    // So a grow overshoots the live extreme by kGrowHeadroomFrac of the (pre-grow) span, floored at
+    // kGrowHeadroomMinCm for a flat or near-flat section where a percentage alone would be too small
+    // to matter.
+    constexpr f32 kGrowHeadroomFrac = 0.05f;   // 5% of the pre-grow span
+    constexpr f32 kGrowHeadroomMinCm = 10.0f;  // floor, for a flat/near-flat pinned range
+    f32 lo = in.hasQuantRange ? in.quantMinCm : liveLo;
+    f32 hi = in.hasQuantRange ? in.quantMaxCm : liveHi;
+    if (in.hasQuantRange) {
+        const f32 headroom = std::max((hi - lo) * kGrowHeadroomFrac, kGrowHeadroomMinCm);
+        if (liveLo < lo) lo = liveLo - headroom;
+        if (liveHi > hi) hi = liveHi + headroom;
     }
     const f32 bias  = lo - in.originCm[2];
     const f32 scale = hi - lo;
@@ -137,6 +203,10 @@ bool writeOcLand(const OcLandData& in, std::vector<u8>& out, std::string* why) {
     put<f32>(hdr, bias);
     put<f32>(hdr, scale);
 
+    // lo/hi were just grown (above) to cover every live height, so this clamp should never fire in
+    // normal operation -- it stays only as a defensive floor/ceiling against float edge cases (e.g. a
+    // value equal to lo/hi landing a hair outside [0, 65535] after the multiply), not as the mechanism
+    // that used to silently flatten an above-ceiling sculpt.
     std::vector<u8> hgt(in.heights.size() * sizeof(u16));
     const f32 fwd = scale > 0.0f ? 65535.0f / scale : 0.0f;
     for (usize i = 0; i < in.heights.size(); ++i) {
@@ -147,10 +217,16 @@ bool writeOcLand(const OcLandData& in, std::vector<u8>& out, std::string* why) {
         std::memcpy(hgt.data() + i * sizeof(u16), &q, sizeof(u16));
     }
 
+    std::vector<u8> rng;
+    rng.reserve(sizeof(f32) * 2);
+    put<f32>(rng, lo);
+    put<f32>(rng, hi);
+
     Avr1File file;
     file.subtype = kAvrSubtypeLand;
     file.add(kOcLandChunkHeader, std::move(hdr), kAvrChunkRequired);
     file.add(kOcLandChunkHeights, std::move(hgt), kAvrChunkGpuUploadable);
+    file.add(kOcLandChunkRange, std::move(rng), 0);
     return writeAvr1(file, out, why);
 }
 

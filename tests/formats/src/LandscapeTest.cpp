@@ -4,6 +4,7 @@
 #include "aver/core/Log.hpp"
 #include "aver/formats/OcLand.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -174,6 +175,182 @@ int main() {
         check(out.valid() && out.sampleCount == 8, "and the surface is intact");
     }
 
+
+    AVER_INFO("=== ITEM 0.7: an old file (no LRNG chunk) migrates its range exactly once ===");
+    {
+        // Simulate a file saved before the authored-range fix existed. A struct that has never been
+        // loaded still derives its range fresh from the live heights on its FIRST save -- exactly
+        // what the pre-fix writer always did -- so writeOcLand's own output here is what an old
+        // writer would have produced, except that it ALSO now carries the new LRNG chunk. Stripping
+        // that one chunk back out leaves exactly an old-style file.
+        std::string why;
+        const fmt::OcLandData src = makeGrid(9);
+        std::vector<u8> freshWrite;
+        check(fmt::writeOcLand(src, freshWrite, &why), "a baseline write (" + why + ")");
+
+        fmt::Avr1File container;
+        check(fmt::parseAvr1(freshWrite.data(), freshWrite.size(), container, &why),
+              "reopened as a raw container (" + why + ")");
+        const usize chunksBefore = container.chunks.size();
+        container.chunks.erase(
+            std::remove_if(container.chunks.begin(), container.chunks.end(),
+                            [](const fmt::AvrChunk& c) { return c.id == fmt::kOcLandChunkRange; }),
+            container.chunks.end());
+        check(container.chunks.size() == chunksBefore - 1,
+              "the LRNG chunk was present in a fresh write and is now removed");
+        std::vector<u8> oldStyle;
+        check(fmt::writeAvr1(container, oldStyle, &why), "rewritten without it (" + why + ")");
+
+        fmt::OcLandData loaded1;
+        check(fmt::parseOcLand(oldStyle.data(), oldStyle.size(), loaded1, &why),
+              "the old-style file still loads (" + why + ")");
+        check(loaded1.hasQuantRange,
+              "loading it PINS an authored range even though the file itself carried none");
+
+        std::vector<u8> migrated;
+        check(fmt::writeOcLand(loaded1, migrated, &why), "the migration save (" + why + ")");
+        check(migrated != oldStyle,
+              "the migration save DOES change the file once -- it gains the LRNG chunk the old file lacked");
+        check(migrated.size() > oldStyle.size(), "specifically, it grows by the new chunk");
+
+        fmt::OcLandData loaded2;
+        check(fmt::parseOcLand(migrated.data(), migrated.size(), loaded2, &why),
+              "the migrated file loads (" + why + ")");
+        std::vector<u8> again;
+        check(fmt::writeOcLand(loaded2, again, &why), "saved again with no further edits (" + why + ")");
+        check(again == migrated,
+              "and from the migration onward, every further save is byte-identical -- exactly once, then stable");
+    }
+
+    AVER_INFO("=== ITEM 0.7: a new file saved repeatedly is byte-identical every time ===");
+    {
+        std::string why;
+        const fmt::OcLandData src = makeGrid(9);
+        std::vector<u8> first, second;
+        check(fmt::writeOcLand(src, first, &why), "first save of a never-loaded struct (" + why + ")");
+        check(fmt::writeOcLand(src, second, &why), "second save of the SAME struct, no edits (" + why + ")");
+        check(first == second, "byte-identical with no intervening load");
+
+        fmt::OcLandData loaded;
+        check(fmt::parseOcLand(first.data(), first.size(), loaded, &why), "loads back (" + why + ")");
+        std::vector<u8> third;
+        check(fmt::writeOcLand(loaded, third, &why), "and a save after a load with no edits (" + why + ")");
+        check(third == first,
+              "is ALSO byte-identical -- pinning the range on load introduces no drift of its own");
+    }
+
+    AVER_INFO("=== ITEM 0.7 (c1): an edit WITHIN the pinned range never drifts an untouched sample ===");
+    {
+        // THE FIRST BUG, still fixed: an edit that stays inside the already-pinned range must not
+        // move the range at all, so every untouched sample's quantised code -- and therefore its
+        // decoded height -- is IDENTICAL between saves. No growth, no headroom, no quantisation-step
+        // bound needed: this case admits no ambiguity.
+        std::string why;
+        const fmt::OcLandData src = makeGrid(9);   // height(ix,iy) = iy*1000 + ix: corner (0,0) is the
+                                                    // section's current MINIMUM (0), corner (8,8) its
+                                                    // max (8008)
+        std::vector<u8> baseline;
+        check(fmt::writeOcLand(src, baseline, &why),
+              "the section's existing, already-saved state (" + why + ")");
+
+        fmt::OcLandData editing;
+        check(fmt::parseOcLand(baseline.data(), baseline.size(), editing, &why),
+              "loaded into the editor (" + why + ")");
+        check(editing.hasQuantRange, "and carries a pinned range");
+
+        const u32 ux = 4, uy = 4;   // the grid's centre: never touched below
+        std::vector<u8> save1;
+        check(fmt::writeOcLand(editing, save1, &why), "save #1, before any edit (" + why + ")");
+        fmt::OcLandData afterSave1;
+        check(fmt::parseOcLand(save1.data(), save1.size(), afterSave1, &why),
+              "reads save #1 back (" + why + ")");
+
+        // THE EDIT: raise corner (0,0) to the MIDPOINT of the pinned range -- comfortably inside it,
+        // nowhere near either end.
+        const f32 mid = 0.5f * (editing.quantMinCm + editing.quantMaxCm);
+        editing.heights[0] = mid;
+
+        std::vector<u8> save2;
+        check(fmt::writeOcLand(editing, save2, &why),
+              "save #2, after an edit WITHIN the pinned range (" + why + ")");
+        fmt::OcLandData afterSave2;
+        check(fmt::parseOcLand(save2.data(), save2.size(), afterSave2, &why),
+              "reads save #2 back (" + why + ")");
+
+        check(afterSave1.heightAt(ux, uy) == afterSave2.heightAt(ux, uy),
+              "the untouched sample decodes to the EXACT SAME value after both saves (" +
+              std::to_string(afterSave1.heightAt(ux, uy)) + " vs " +
+              std::to_string(afterSave2.heightAt(ux, uy)) +
+              ") -- an in-range edit does not move the range");
+
+        check(afterSave2.quantMinCm == editing.quantMinCm && afterSave2.quantMaxCm == editing.quantMaxCm,
+              "and the pinned range itself did not move");
+
+        const f32 step = (editing.quantMaxCm - editing.quantMinCm) / 65535.0f;
+        check(std::fabs(afterSave2.heightAt(0, 0) - mid) <= step,
+              "the edited corner lands within one quantisation step of the authored midpoint");
+    }
+
+    AVER_INFO("=== ITEM 0.7 (c2): an edit ABOVE the pinned range grows it instead of clipping the edit ===");
+    {
+        // THE SECOND BUG: writeOcLand used to reuse the pinned range UNCONDITIONALLY and clamp
+        // anything outside it. Before ITEM 0.7's first fix, lo/hi always covered the live heights, so
+        // that clamp never fired; after it, sculpting past the pinned ceiling was silently flattened
+        // on save -- and landscape sculpting is the one authoring mode that ships. The fix GROWS the
+        // range (with headroom) to cover the new extreme instead of clamping, so this case checks all
+        // three parts of that contract:
+        //   1. the edit SURVIVES -- decoded near the authored value, not clamped to the old ceiling;
+        //   2. the pinned range actually grew;
+        //   3. an untouched sample may drift from the regrow, but the drift is BOUNDED by one
+        //      quantisation step of the resulting (grown) scale -- asserted numerically, not as "no
+        //      change", because a real regrow does perturb every sample's step size once.
+        std::string why;
+        const fmt::OcLandData src = makeGrid(9);
+        std::vector<u8> baseline;
+        check(fmt::writeOcLand(src, baseline, &why),
+              "the section's existing, already-saved state (" + why + ")");
+
+        fmt::OcLandData editing;
+        check(fmt::parseOcLand(baseline.data(), baseline.size(), editing, &why),
+              "loaded into the editor (" + why + ")");
+        check(editing.hasQuantRange, "and carries a pinned range");
+        const f32 oldMax = editing.quantMaxCm;
+
+        const u32 ux = 4, uy = 4;   // untouched throughout
+        std::vector<u8> save1;
+        check(fmt::writeOcLand(editing, save1, &why), "save #1, before any edit (" + why + ")");
+        fmt::OcLandData afterSave1;
+        check(fmt::parseOcLand(save1.data(), save1.size(), afterSave1, &why),
+              "reads save #1 back (" + why + ")");
+        const f32 untouchedBefore = afterSave1.heightAt(ux, uy);
+
+        // THE EDIT: sculpt corner (8,8) -- already the section's max at 8008 -- further up, past the
+        // pinned ceiling.
+        const f32 authored = oldMax + 500.0f;
+        editing.heights[static_cast<usize>(8) * 9 + 8] = authored;
+
+        std::vector<u8> save2;
+        check(fmt::writeOcLand(editing, save2, &why), "save #2, after the above-ceiling edit (" + why + ")");
+        fmt::OcLandData afterSave2;
+        check(fmt::parseOcLand(save2.data(), save2.size(), afterSave2, &why),
+              "reads save #2 back (" + why + ")");
+
+        check(afterSave2.quantMaxCm > oldMax,
+              "the pinned range GREW to cover the new height (was " + std::to_string(oldMax) +
+              ", now " + std::to_string(afterSave2.quantMaxCm) + ")");
+
+        const f32 newStep = (afterSave2.quantMaxCm - afterSave2.quantMinCm) / 65535.0f;
+        check(std::fabs(afterSave2.heightAt(8, 8) - authored) <= newStep,
+              "the edit SURVIVES -- decoded within one quantisation step of the authored value, not "
+              "clamped to the old ceiling (decoded " + std::to_string(afterSave2.heightAt(8, 8)) +
+              " vs authored " + std::to_string(authored) + ")");
+
+        const f32 untouchedAfter = afterSave2.heightAt(ux, uy);
+        check(std::fabs(untouchedAfter - untouchedBefore) <= newStep,
+              "an untouched sample may drift from the regrow, but by at most one quantisation step of "
+              "the new scale (" + std::to_string(untouchedBefore) + " vs " +
+              std::to_string(untouchedAfter) + ", step " + std::to_string(newStep) + ")");
+    }
 
     AVER_INFO("=== through a real file ===");
     {
