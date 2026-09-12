@@ -2620,7 +2620,29 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         RTXDI_GISpatioTemporalResamplingParameters stparams = (RTXDI_GISpatioTemporalResamplingParameters)0;
         stparams.depthThreshold        = 0.1;
         stparams.normalThreshold       = 0.5;
-        stparams.maxHistoryLength      = 20;
+        // ---- 8, NOT 20, AND THE REASON IS THE STABILITY MARGIN RATHER THAN LAG ----
+        //
+        // Write the weight recursion with K taps each capped at M, plus the fresh candidate's M = 1:
+        //     W_next = [ (PI/cos)*1 + K*M*J*W ] / (1 + K*M)
+        // The fresh candidate is the ONLY term pinned to a physically-derived 1/pdf; every other
+        // term is W multiplied by that stream's Jacobian. So W is a multiplicative accumulator whose
+        // contraction factor is K*M*E[J]/(1 + K*M), and it is stable in the mean only while
+        // E[J] < (1 + K*M)/(K*M).
+        //
+        // At the old 20 with numSamples 8 that is 181/180 -- a margin of 0.56%. The Jacobian of a
+        // spatial tap 32 pixels away is a ratio of squared distances between two different receivers
+        // and a shared sample; under camera motion its mean is nowhere near within half a percent of
+        // one, and RAB_ValidateGISampleWithJacobian only clamps each sample to [1/25, 25], which
+        // bounds a single step and does nothing about the compounding. That is the remaining
+        // reported symptom: at rest J is close to 1 and the estimate creeps toward correct, and the
+        // moment the camera moves J scatters and W runs away -- bright, with flat wrong-bright
+        // regions where a whole neighbourhood shares one runaway sample.
+        //
+        // 8 taps of 8 gives K*M = 24 and a margin of 25/24, about 4.2% -- roughly eight times the
+        // headroom for a history still deep enough to be worth having. The cost is a shorter
+        // effective sample count, which is noise, and noise is the thing a denoiser can actually
+        // fix; a runaway multiplicative weight is not.
+        stparams.maxHistoryLength      = 8;
         // ---- 0, AND THE 1 IT REPLACES WAS DISARMING EVERY SPATIAL TAP ----
         //
         // `usingFallback` inside RTXDI_GISpatioTemporalResampling is a LATCH, not a per-tap flag: it
@@ -2654,7 +2676,11 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         // alike, inside SpatioTemporalResampling.hlsli -- rejects a tap landing on a dissimilar
         // surface before its reservoir is ever combined in. The rejection is what keeps reuse local,
         // not the radius, so the radius can afford to stay generous.
-        stparams.numSamples     = 8;
+        // 2, NOT NVIDIA'S 8, and for the stability reason maxHistoryLength above spells out rather
+        // than to save the taps. Those 8 are the default for a STANDALONE SPATIAL PASS, which runs
+        // once over an already-normalised frame; here they are fused into the temporal pass and so
+        // they multiply the history length in K*M. Taking K from 9 to 3 is most of the margin.
+        stparams.numSamples     = 2;
         stparams.samplingRadius = 32.0;
         RTXDI_RuntimeParameters rParams = (RTXDI_RuntimeParameters)0;   // no checkerboard
         // neighborOffsetMask is the field the spatial half actually reads: RTXDI_
