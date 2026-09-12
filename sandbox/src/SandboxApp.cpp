@@ -16822,12 +16822,34 @@ private:
         // `get <partial>`, `set <partial>`, and simply typing a name with no command at all, which is
         // the common case for someone who does not yet think of this as a command language.
         if (out.size() < 8) {
-            for (const editor::ConsoleVar& v : editor::allVars()) {
-                if (!editor::varMatchesQuery(v, partial)) continue;
-                std::string disp = v.name + "  =  " + editor::formatValue(v.read());
-                if (v.readOnly) disp += " (ro)";
-                disp += "  -- " + elide(v.help, 60);
-                out.push_back({std::move(disp), v.name, editor::varTooltipText(v)});
+            // ---- SHORTEST MATCH FIRST, NOT TABLE ORDER ----
+            //
+            // MEASURED, by looking at the panel: typing "voxi.gi" listed giCones,
+            // giSkyOcclusionRays, giSkyOcclusionTile, giIntensity, giMaxDistance and
+            // giUpdateInterval -- and pushed voxi.giMode off the end. That is the single variable a
+            // person typing "voxi.gi" is most likely to be after (it chooses the GI estimator at all),
+            // and in table order it simply lost to whatever happened to be declared earlier. A
+            // completion list that hides the most general name under six specialisations of it is
+            // worse than no completion list, because it reads as "that variable does not exist".
+            //
+            // Shortest-first is the heuristic, and it is chosen because it needs no relevance
+            // scoring to maintain: within a family sharing a prefix, the shortest name IS the most
+            // general one -- voxi.giMode over voxi.giSkyOcclusionRays, post.tonemap over
+            // post.tonemapWhitePoint. Ties break on the name so the order is stable frame to frame
+            // rather than dependent on the table, which someone editing the table would otherwise
+            // perturb without ever touching this code.
+            std::vector<const editor::ConsoleVar*> hits;
+            for (const editor::ConsoleVar& v : editor::allVars())
+                if (editor::varMatchesQuery(v, partial)) hits.push_back(&v);
+            std::sort(hits.begin(), hits.end(), [](const editor::ConsoleVar* a, const editor::ConsoleVar* b) {
+                if (a->name.size() != b->name.size()) return a->name.size() < b->name.size();
+                return a->name < b->name;
+            });
+            for (const editor::ConsoleVar* v : hits) {
+                std::string disp = v->name + "  =  " + editor::formatValue(v->read());
+                if (v->readOnly) disp += " (ro)";
+                disp += "  -- " + elide(v->help, 60);
+                out.push_back({std::move(disp), v->name, editor::varTooltipText(*v)});
                 if (out.size() >= 8) break;
             }
         }
@@ -16964,6 +16986,16 @@ private:
         if (consoleLines_.empty())
             for (const std::string& line : editor::consoleWelcomeLines())
                 consoleLines_.push_back({LogLevel::Info, line});
+
+        // --drawer console:<seed> (verification-only; see drawerStartSub_'s own comment): pre-fills
+        // the input box ONCE so a screenshot script can capture the live suggestion popup without a
+        // mouse to type with. Consumed before computeConsoleSuggestions() below so the very first
+        // frame already shows suggestions for it, not just the seeded text with an empty popup.
+        if (!drawerStartSub_.empty()) {
+            std::strncpy(consoleInput_, drawerStartSub_.c_str(), sizeof(consoleInput_) - 1);
+            consoleInput_[sizeof(consoleInput_) - 1] = '\0';
+            drawerStartSub_.clear();
+        }
 
         // Live suggestions (WHAT TO BUILD item 2) are computed from THIS frame's starting buffer, so
         // how tall the panel needs to be is known before laying out the transcript above it.
@@ -26220,7 +26252,11 @@ private:
     f32                 drawerRate_ = 14.0f;      // slide easing rate; higher is snappier
     bool                cbDoubleClickEnter_ = true;   // double-click a folder to enter it (vs single)
     bool                drawerRaise_ = false;     // focus it on the frame it opens, so it is on top
-    std::string         drawerStartSub_;          // --drawer content:<sub>, applied once at first draw
+    // --drawer content:<sub> or console:<sub>, applied ONCE at first draw and cleared -- generic
+    // across drawer kinds because only one drawer body ever runs in a given process (drawer_ picks
+    // which), never because two kinds interpret it the same way: the content browser treats it as a
+    // folder path, the console (see drawConsoleTranscriptTab) treats it as text to seed the input box.
+    std::string         drawerStartSub_;
 #if AVER_MODULE_SCENE
     // fnv1a64(asset path) -> mesh handle, for the scene-render pass.
     std::unordered_map<u64, rhi::MeshHandle> sceneMeshes_;
@@ -27113,12 +27149,20 @@ Application* createApplication(int argc, char** argv) {
             keybindTestMode = argv[++i];
             keybindTestAuto = (i+1 < argc && argv[i+1][0] != '-') ? std::atoi(argv[++i]) : 10;
         }
-        // --drawer log|content[:<sub>]|console opens a bottom drawer, optionally in a Content
-        // subfolder. `console` takes no :<sub> (drawerSub stays unused for it, same as for `log`).
+        // --drawer log|content[:<sub>]|console[:<seed>] opens a bottom drawer, optionally in a
+        // Content subfolder or (console, verification-only) with the console's input box pre-seeded
+        // -- see drawConsoleTranscriptTab's own comment on drawerStartSub_ for what console does
+        // with it; a screenshot script has no mouse to type with, so this is how it gets the live
+        // suggestion popup into shot. FIXED here while adding it: the kind is now compared BEFORE
+        // the colon, not against the whole argument -- "--drawer console:gi" used to fail the
+        // "console" strcmp outright (v was the whole "console:gi", never equal to "console") and
+        // silently fall through to Content, which nobody typing a colon after "console" could have meant.
         else if (!std::strcmp(argv[i],"--drawer") && i+1<argc) {
             const char* v = argv[++i];
-            drawerOpen = !std::strcmp(v,"log") ? 2 : !std::strcmp(v,"console") ? 3 : 1;
-            if (const char* colon = std::strchr(v, ':')) drawerSub = colon + 1;
+            const char* colon = std::strchr(v, ':');
+            const std::string kind = colon ? std::string(v, static_cast<size_t>(colon - v)) : std::string(v);
+            drawerOpen = kind == "log" ? 2 : kind == "console" ? 3 : 1;
+            if (colon) drawerSub = colon + 1;
         }
         else if (!std::strcmp(argv[i],"--msaa") && i+1<argc) msaa=std::atoi(argv[++i]);
         // --gi [tier], --rt [tier], --pt [tier]: quality 0..4 (Off..Epic); bare means High.
