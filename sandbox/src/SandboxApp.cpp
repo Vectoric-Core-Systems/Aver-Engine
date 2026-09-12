@@ -161,18 +161,26 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
 #include "aver/particles/ParticleEffectLibrary.hpp"
 #include "aver/particles/ParticleRenderer.hpp"
-#if AVER_MODULE_FLUIDS
-#if AVER_MODULE_RENDER_SOFTBODY
-#  include "aver/render/SoftBodyScene.hpp"
-#endif
-#if AVER_FLUIDS_SIMULATED
-#  include "aver/fluids/FluidScene.hpp"
-#endif
-#  include "aver/fluids/WaterRenderer.hpp"
-#  include "aver/fluids/Underwater.hpp"
-#endif
 #include "aver/particles/ParticleSystem.hpp"
 #include "aver/formats/OcParticle.hpp"
+#endif
+
+// Fluids and Soft-Body rendering are INDEPENDENT modules -- neither depends on Particles at all (see
+// modules/fluids/CMakeLists.txt and modules/render.softbody/CMakeLists.txt) -- so each gets its own
+// guard keyed on the module that actually owns it, matching the guards their own use sites below
+// already use (AVER_MODULE_RENDER_SOFTBODY && AVER_MODULE_SCENE at softBodyScene_, AVER_FLUIDS_
+// SIMULATED at fluidScene_/FluidScene.hpp). b6881c49 nested all four headers inside
+// `AVER_MODULE_PARTICLES && AVER_MODULE_SCENE` above, so a particles-off tree dropped these headers
+// too while the members and calls they declare stayed compiled in -- ~40 errors with particles off.
+#if AVER_MODULE_RENDER_SOFTBODY && AVER_MODULE_SCENE
+#include "aver/render/SoftBodyScene.hpp"
+#endif
+#if AVER_MODULE_FLUIDS
+#if AVER_FLUIDS_SIMULATED
+#include "aver/fluids/FluidScene.hpp"
+#endif
+#include "aver/fluids/WaterRenderer.hpp"
+#include "aver/fluids/Underwater.hpp"
 #endif
 
 #if AVER_MODULE_PBR
@@ -666,8 +674,8 @@ static const char* kToolNames[4] = {"Select", "Move", "Rotate", "Scale"};
 
 #if AVER_MODULE_LANDSCAPE
 // Terrain brushes. Only meaningful in EditorMode::Landscape.
-enum class SculptTool { Raise, Lower, Smooth, Flatten };
-static const char* kSculptToolNames[4] = {"Raise", "Lower", "Smooth", "Flatten"};
+enum class SculptTool { Raise, Lower, Smooth, Flatten, Ramp, Noise };
+static const char* kSculptToolNames[6] = {"Raise", "Lower", "Smooth", "Flatten", "Ramp", "Noise"};
 #endif
 
 // Which bottom drawer is up. Only one at a time.
@@ -13422,6 +13430,18 @@ private:
         if (ImGui::IsMouseClicked(0) && overScene && haveHit) {
             beginSculptStroke();
             sculptFlattenTargetCm_ = hit.posCm[2];   // captured once per stroke -- see BrushParams
+            // Ramp's start point AND its height, captured the same way and for the same reason:
+            // see BrushParams::rampStartCm.
+            sculptRampStartCm_[0] = hit.posCm[0];
+            sculptRampStartCm_[1] = hit.posCm[1];
+            sculptRampStartHeightCm_ = hit.posCm[2];
+            // Noise's seed, captured once per stroke from the stroke's own start position -- NOT the
+            // clock (see BrushParams::noiseSeed) -- so replaying the same drag always noises the same
+            // way. fnv1a64 over the two raw floats, truncated to 32 bits: plenty of entropy for a
+            // seed, and bit-for-bit reproducible across runs since it hashes the exact bit pattern
+            // rather than a printed/rounded form of the position.
+            const f32 seedInput[2] = {hit.posCm[0], hit.posCm[1]};
+            sculptNoiseSeed_ = static_cast<u32>(fnv1a64(seedInput, sizeof(seedInput)));
         }
         // RELEASE ENDS THE STROKE AND PUSHES THE UNDO ENTRY: before this existed, sculpting was
         // completely invisible to Ctrl+Z, since handleSculpt mutated the heightfield in place and the
@@ -13436,10 +13456,16 @@ private:
             p.strength = sculptStrengthCm_;
             p.flattenTargetCm = sculptFlattenTargetCm_;
             p.falloff = sculptFalloff_;
-            p.mode = sculptTool_==SculptTool::Raise  ? landscape::BrushMode::Raise
-                   : sculptTool_==SculptTool::Lower  ? landscape::BrushMode::Lower
-                   : sculptTool_==SculptTool::Smooth ? landscape::BrushMode::Smooth
-                                                : landscape::BrushMode::Flatten;
+            p.rampStartCm[0] = sculptRampStartCm_[0];
+            p.rampStartCm[1] = sculptRampStartCm_[1];
+            p.rampStartHeightCm = sculptRampStartHeightCm_;
+            p.noiseSeed = sculptNoiseSeed_;
+            p.mode = sculptTool_==SculptTool::Raise   ? landscape::BrushMode::Raise
+                   : sculptTool_==SculptTool::Lower   ? landscape::BrushMode::Lower
+                   : sculptTool_==SculptTool::Smooth  ? landscape::BrushMode::Smooth
+                   : sculptTool_==SculptTool::Flatten ? landscape::BrushMode::Flatten
+                   : sculptTool_==SculptTool::Ramp    ? landscape::BrushMode::Ramp
+                                                : landscape::BrushMode::Noise;
 
             // dt-scaled so holding the button paints at a constant rate regardless of frame rate,
             // clamped the same way the other per-frame dt reads in this file are (see e.g. the fly
@@ -19958,12 +19984,15 @@ private:
         ImGui::Spacing();
 
         ImGui::TextDisabled("SCULPT");
-        for (int i = 0; i < 4; ++i) {
+        // 6 tools, but only the first 4 have a bound hotkey (SculptRaise..SculptFlatten, keys 1-4) --
+        // Ramp and Noise are new and mouse/panel-only for now, so the tooltip below is not shown for
+        // them rather than advertising a key that does nothing.
+        for (int i = 0; i < 6; ++i) {
             const bool on = static_cast<int>(sculptTool_) == i;
             if (on) ImGui::PushStyleColor(ImGuiCol_Button, kAverOrangeDim);
             if (ImGui::Button(kSculptToolNames[i], ImVec2(-1, 0))) sculptTool_ = static_cast<SculptTool>(i);
             if (on) ImGui::PopStyleColor();
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Hotkey %d", i + 1);
+            if (i < 4 && ImGui::IsItemHovered()) ImGui::SetTooltip("Hotkey %d", i + 1);
         }
 
         ImGui::Spacing();
@@ -19982,6 +20011,21 @@ private:
             ImGui::TextDisabled("FLATTEN TARGET");
             ImGui::Text("%.0f cm", sculptFlattenTargetCm_);
             ImGui::TextDisabled("Picked from the first click of each stroke.");
+        }
+        if (sculptTool_ == SculptTool::Ramp) {
+            ImGui::Spacing();
+            ImGui::TextDisabled("RAMP START");
+            ImGui::Text("(%.0f, %.0f) @ %.0f cm", sculptRampStartCm_[0], sculptRampStartCm_[1],
+                        sculptRampStartHeightCm_);
+            ImGui::TextDisabled("Picked from the first click of each stroke. Strength is the total");
+            ImGui::TextDisabled("rise from there to wherever the brush is now.");
+        }
+        if (sculptTool_ == SculptTool::Noise) {
+            ImGui::Spacing();
+            ImGui::TextDisabled("NOISE SEED");
+            ImGui::Text("%u", sculptNoiseSeed_);
+            ImGui::TextDisabled("Derived from the first click of each stroke -- not the clock -- so");
+            ImGui::TextDisabled("re-applying the same stroke gives the same terrain.");
         }
 
         ImGui::Spacing();
@@ -22835,6 +22879,12 @@ private:
             ImGui::SameLine(0, gap);
             if (toolBtn("##tSFlatten", 7, sculptTool_==SculptTool::Flatten)) sculptTool_=SculptTool::Flatten;
             uiReg_.track("tool.sculptFlatten");
+            ImGui::SameLine(0, gap);
+            if (toolBtn("##tSRamp", 8, sculptTool_==SculptTool::Ramp)) sculptTool_=SculptTool::Ramp;
+            uiReg_.track("tool.sculptRamp");
+            ImGui::SameLine(0, gap);
+            if (toolBtn("##tSNoise", 9, sculptTool_==SculptTool::Noise)) sculptTool_=SculptTool::Noise;
+            uiReg_.track("tool.sculptNoise");
             ImGui::SameLine(0, gap*2);
             // The brush settings live HERE, in the mode that owns them, rather than appearing and
             // disappearing from a shared row depending on which tool happened to be selected.
@@ -23996,9 +24046,17 @@ private:
     // outlive the device, torn down in onShutdown.
     particles::ParticleRenderer particleRenderer_;
     bool particlesAttached_=false;
+#endif
 
-    // Water. OFF UNLESS ASKED FOR, unlike particles beside it: a particle renderer with no emitters
-    // draws nothing, whereas a water plane is an infinite sheet that would appear in every level ever
+    // Water is an INDEPENDENT module from Particles (see the include-block comment near the top of
+    // this file for the full story) -- b6881c49 nested this whole group inside
+    // `AVER_MODULE_PARTICLES && AVER_MODULE_SCENE` above, so a particles-off, fluids-on tree declared
+    // none of these members while setWater()/applyLevelWater() (guarded correctly, on AVER_MODULE_
+    // FLUIDS alone) still used them -- undeclared-identifier errors, not a missing-header ones, which
+    // is why this half of the bug survived fixing only the includes.
+    //
+    // OFF UNLESS ASKED FOR, unlike particles above: a particle renderer with no emitters draws
+    // nothing, whereas a water plane is an infinite sheet that would appear in every level ever
     // opened. --water <heightCm> is the opt-in.
 #if AVER_MODULE_FLUIDS
     fluids::WaterRenderer waterRenderer_;
@@ -24009,7 +24067,6 @@ private:
     // module can say "this build has no water" rather than silently ignoring --water.
     bool  waterEnabled_  = false;
     f32   waterHeightCm_ = 0.0f;
-#endif
 #if AVER_MODULE_SCRIPTING
     // THE ANIMATION-NOTIFY WIRE: a clip crosses a marker, the marker names a graph event, the entity
     // playing the clip raises it. Each part belongs to a different module, and this is the only place
@@ -24398,6 +24455,9 @@ private:
     f32 sculptStrengthCm_ = 150.0f;
     bool sculpting_ = false;              // LMB down, over the terrain, with a sculpt tool active
     f32 sculptFlattenTargetCm_ = 0.0f;    // captured once per stroke -- see BrushParams::flattenTargetCm
+    f32 sculptRampStartCm_[2] = {0.0f, 0.0f};   // captured once per stroke -- see BrushParams::rampStartCm
+    f32 sculptRampStartHeightCm_ = 0.0f;        // captured once per stroke -- see BrushParams::rampStartCm
+    u32 sculptNoiseSeed_ = 0;                   // captured once per stroke -- see BrushParams::noiseSeed
     bool sculptCursorValid_ = false;      // true when this frame's cursor ray actually hit the section
     Vec3 sculptCursor_{0, 0, 0};          // world hit point, for the brush-radius ring and the next tick
     rhi::LineHandle brushRing_ = 0;       // a unit ring in the XY plane -- landscape heights run +Z
@@ -27171,6 +27231,8 @@ Application* createApplication(int argc, char** argv) {
                 sculptMode == "lower"   ? landscape::BrushMode::Lower
               : sculptMode == "smooth"  ? landscape::BrushMode::Smooth
               : sculptMode == "flatten" ? landscape::BrushMode::Flatten
+              : sculptMode == "ramp"    ? landscape::BrushMode::Ramp
+              : sculptMode == "noise"   ? landscape::BrushMode::Noise
                                         : landscape::BrushMode::Raise;
             landscape::BrushParams sp;
             sp.centerCm[0] = sd.originCm[0] + sd.extentCm() * 0.5f;
@@ -27180,6 +27242,14 @@ Application* createApplication(int argc, char** argv) {
             sp.mode = sculptModeVal;
             const u32 cix = (sd.sampleCount - 1) / 2, ciy = cix;
             sp.flattenTargetCm = sd.heightAt(cix, ciy) + 500.0f;   // only read by Flatten
+            // Ramp only: an arbitrary start point a quarter of the section's extent from centerCm, so
+            // the two endpoints this mode interpolates between are actually distinct.
+            sp.rampStartCm[0] = sp.centerCm[0] - sd.extentCm() * 0.25f;
+            sp.rampStartCm[1] = sp.centerCm[1];
+            sp.rampStartHeightCm = sd.heightAt(cix, ciy);
+            // Noise only: a fixed literal, not the clock -- see BrushParams::noiseSeed -- so running
+            // this flag twice on the same input is a determinism check, not a coin flip.
+            sp.noiseSeed = 20260913u;
             const f32 sculptBefore = sd.heightAt(cix, ciy);
             // Eight ticks at amount 0.25, like ~130ms of a held mouse button at the dt*6 rate
             // handleSculpt uses -- not one amount=1 jump, so the result actually depends on

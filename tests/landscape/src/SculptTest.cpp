@@ -151,6 +151,88 @@ int main() {
         check(d.boundsMin[2] == 500.0f, "the flat baseline is still the recomputed minimum");
     }
 
+    AVER_INFO("=== ramp ===");
+    {
+        // Endpoints 4000 cm apart along +X, at sample x=10 and the brush's CURRENT position x=50
+        // (both exact multiples of the 100 cm spacing, like every other fixture here). The two
+        // heights are arbitrary and deliberately NOT the flat baseline (500), the same way flatten's
+        // own test picks an 800 cm target against a 500 cm floor -- this is exercising the
+        // interpolation math BrushParams describes, not asserting anything about pre-existing terrain.
+        fmt::OcLandData d = makeFlat(65, 500.0f);
+        BrushParams p;
+        p.centerCm[0] = 5000.0f; p.centerCm[1] = 3200.0f;      // sample (50, 32): the "now" endpoint
+        p.rampStartCm[0] = 1000.0f; p.rampStartCm[1] = 3200.0f; // sample (10, 32): the stroke's start
+        p.rampStartHeightCm = 200.0f;
+        p.strength = 800.0f;                                    // total rise, start -> current
+        p.radiusCm = 4200.0f;   // comfortably past the 4000 cm span, so both ends sit well inside it
+        p.falloff = 0.0f;       // hard disc: isolates the AXIS interpolation from radial shaping,
+                                 // which every other brush's own tests (and noise's, below) already
+                                 // cover on the shared falloff code every mode goes through via `w`.
+        p.mode = BrushMode::Ramp;
+
+        const BrushRect r = applyBrush(d, p, 1.0f);
+        check(!r.empty, "the stroke touched samples");
+        check(std::fabs(d.heightAt(10, 32) - 200.0f) < 0.01f,
+              "at the start endpoint (t=0), height is exactly rampStartHeightCm (got " +
+              std::to_string(d.heightAt(10, 32)) + ")");
+        check(std::fabs(d.heightAt(30, 32) - 600.0f) < 0.01f,
+              "halfway between the endpoints (t=0.5), height is exactly the midpoint (got " +
+              std::to_string(d.heightAt(30, 32)) + ")");
+        check(std::fabs(d.heightAt(64, 32) - 1000.0f) < 0.01f,
+              "PAST the current endpoint (t clamped to 1, not extrapolated), height holds at "
+              "rampStartHeightCm + strength (got " + std::to_string(d.heightAt(64, 32)) + ")");
+        check(d.heightAt(0, 0) == 500.0f, "the far corner, outside the brush radius, is untouched");
+    }
+
+    AVER_INFO("=== noise ===");
+    {
+        // Same grid/centre/radius as the raise test above, so the exact rim sample (42, 32) and the
+        // exact off-grid corner (0, 0) are already known-good coordinates for "untouched".
+        fmt::OcLandData d = makeFlat(65, 500.0f);
+        BrushParams p;
+        p.centerCm[0] = 3200.0f; p.centerCm[1] = 3200.0f;
+        p.radiusCm = 1000.0f;
+        p.strength = 60.0f;
+        p.mode = BrushMode::Noise;
+        // A fixed literal, NOT the clock -- see BrushParams::noiseSeed. Any constant works for this
+        // test; what matters is that it is the same constant a real re-application would also use.
+        p.noiseSeed = 20260913u;
+
+        // Determinism: the identical stroke applied to two INDEPENDENT copies of the same starting
+        // terrain must land byte-for-byte the same -- terrainHeightAt() is a pure function of world
+        // (x, y) and this seed, nothing else, so there is no hidden state that could make them differ.
+        fmt::OcLandData d2 = makeFlat(65, 500.0f);
+        applyBrush(d, p, 1.0f);
+        applyBrush(d2, p, 1.0f);
+        bool identical = d.heights.size() == d2.heights.size();
+        for (usize i = 0; identical && i < d.heights.size(); ++i)
+            if (d.heights[i] != d2.heights[i]) identical = false;
+        check(identical, "the same stroke applied to two fresh copies of the same terrain agrees exactly");
+
+        // Bounded by strength: TerrainNoise's fbm() is a convex combination of [0,1] terms remapped
+        // to [-1,1], so no touched sample may move by more than p.strength in one amount=1 tick --
+        // the same bound Raise/Lower give that field, which Noise must not be a way around.
+        f32 maxAbsDelta = 0.0f;
+        for (u32 y = 22; y <= 42; ++y)
+            for (u32 x = 22; x <= 42; ++x)
+                maxAbsDelta = std::fmax(maxAbsDelta, std::fabs(d.heightAt(x, y) - 500.0f));
+        check(maxAbsDelta <= p.strength + 0.1f,
+              "no touched sample moved more than the brush strength (got " +
+              std::to_string(maxAbsDelta) + " > " + std::to_string(p.strength) + ")");
+        check(maxAbsDelta > 0.5f, "...and something actually moved, so the bound above is not vacuous");
+
+        // Respects falloff: nine samples out (900 of the 1000 cm radius, s=0.9) the shared smoothstep
+        // already every other brush's own tests exercise has fallen to ~2.8% of full weight, so noise
+        // there must be far smaller than the strength bound above -- and exactly AT the rim (sample
+        // 42, dist == radiusCm) weight is precisely 0, so noise moves nothing there at all, same as
+        // raise/flatten's own rim checks.
+        check(std::fabs(d.heightAt(41, 32) - 500.0f) <= 2.0f,
+              "nine-tenths of the way to the rim, falloff has suppressed noise to a fraction of the "
+              "strength bound (got " + std::to_string(std::fabs(d.heightAt(41, 32) - 500.0f)) + ")");
+        check(d.heightAt(42, 32) == 500.0f, "exactly at the rim, noise moves nothing (falloff 0)");
+        check(d.heightAt(0, 0) == 500.0f, "outside the radius entirely, untouched");
+    }
+
     AVER_INFO("=== raycastHeightfield: a flat plane ===");
     {
         fmt::OcLandData d = makeFlat(33, 200.0f);   // 32 quads, flat at z=200
