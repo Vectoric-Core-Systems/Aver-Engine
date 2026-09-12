@@ -293,6 +293,13 @@ private:
     void buildPreview(Engine& e);
     void reloadIfNeeded();
 
+    // ITEM 1.3: loop, additive-base and root-motion all persist through parseOcAnim/writeOcAnim
+    // already (clip_.flags is a plain u8 the parser fills and the writer emits verbatim) -- this
+    // editor just never offered anywhere to CHANGE one. One checkbox per bit, each toggling `bit` in
+    // clip_.flags and marking the tab dirty so the existing Save path (fmt::saveOcAnim(path_, clip_,
+    // why), which rewrites clip_ WHOLE) picks it up along with everything else already in clip_.
+    void flagCheckbox(u8 bit, const char* label);
+
     // THE ASSET BROWSER, which is Persona's name for it and its shape too: every clip this
     // skeleton can play, listed beside the preview, one click to watch it.
     //
@@ -1120,6 +1127,22 @@ void AnimEditor::drawBones() {
 #endif
 }
 
+// One clip-flag bit as a checkbox, bound straight to clip_.flags. Not `#if AVER_WITH_IMGUI`-only
+// itself since it is called only from draw(), which already is -- but it lives in its own function
+// (rather than inline three times in draw()) so the bit-toggle logic is written once.
+void AnimEditor::flagCheckbox(u8 bit, const char* label) {
+#if AVER_WITH_IMGUI
+    bool set = (clip_.flags & bit) != 0;
+    if (ImGui::Checkbox(label, &set)) {
+        if (set) clip_.flags = static_cast<u8>(clip_.flags | bit);
+        else     clip_.flags = static_cast<u8>(clip_.flags & ~bit);
+        dirty_ = true;
+    }
+#else
+    (void)bit; (void)label;
+#endif
+}
+
 void AnimEditor::draw(Engine& e) {
 #if AVER_WITH_IMGUI
     reloadIfNeeded();
@@ -1141,11 +1164,26 @@ void AnimEditor::draw(Engine& e) {
     ImGui::Text("%s", isClip_ ? "Animation clip" : "Skeleton");
     ImGui::SameLine();
     if (isClip_)
-        ImGui::TextDisabled("%.3f s   %zu track(s)   %s   %s", clip_.duration, clip_.tracks.size(),
-                            clip_.storage == fmt::OcAnimStorage::BakedUniform ? "baked" : "keyframed",
-                            (clip_.flags & fmt::kOcAnimLoop) ? "loop" : "one-shot");
+        ImGui::TextDisabled("%.3f s   %zu track(s)   %s", clip_.duration, clip_.tracks.size(),
+                            clip_.storage == fmt::OcAnimStorage::BakedUniform ? "baked" : "keyframed");
     else
         ImGui::TextDisabled("%zu bone(s)", skel_.bones.size());
+
+    // Was static text reading ONE of the three flags (loop) with no way to change it or the other
+    // two. All three round-trip through the format already; this is what was missing to author them.
+    //
+    // NOT LABELLED "Loop": drawTransport() already has an unrelated ImGui::Checkbox("Loop", &loop_)
+    // for this TAB's own PREVIEW playback (loop_, a session-only bool, never saved). Reusing that
+    // label here, in the same window's ID scope, would collide two different checkboxes onto one
+    // ImGui id -- and would read as the same setting to an author even if it did not. "Clip loops"
+    // names the AUTHORED, persisted bit this one actually writes (clip_.flags).
+    if (isClip_) {
+        flagCheckbox(fmt::kOcAnimLoop, "Clip loops");
+        ImGui::SameLine();
+        flagCheckbox(fmt::kOcAnimAdditiveBase, "Additive base");
+        ImGui::SameLine();
+        flagCheckbox(fmt::kOcAnimRootMotion, "Root motion");
+    }
 
     if (skel_.bones.empty()) {
         ImGui::Separator();
