@@ -339,8 +339,7 @@ void SoundEditor::loadFromDisk() {
     // output is the node whose panel actually describes the sound, and it is where an author
     // reading somebody else's graph starts.
     selected_ = static_cast<i32>(graph_.outputNode);
-    undoStack_.clear();
-    redoStack_.clear();
+    history_.clear();
     previewPcm_.clear();
     previewError_.clear();
 }
@@ -374,27 +373,18 @@ void SoundEditor::onFileChanged() {
 }
 
 void SoundEditor::pushUndo() {
-    undoStack_.push_back(graph_);
-    constexpr usize kUndoCap = 200;   // GraphEditor::pushUndo's own cap
-    if (undoStack_.size() > kUndoCap) undoStack_.erase(undoStack_.begin());
-    redoStack_.clear();
+    history_.push(graph_);
 }
 
 void SoundEditor::undo() {
-    if (undoStack_.empty()) return;
-    redoStack_.push_back(graph_);
-    graph_ = std::move(undoStack_.back());
-    undoStack_.pop_back();
+    if (!history_.undo(graph_)) return;
     dirty_ = true;
     // The selection is an INDEX, and undo can shrink the array under it.
     if (!inRange(graph_, selected_)) selected_ = 0;
 }
 
 void SoundEditor::redo() {
-    if (redoStack_.empty()) return;
-    undoStack_.push_back(graph_);
-    graph_ = std::move(redoStack_.back());
-    redoStack_.pop_back();
+    if (!history_.redo(graph_)) return;
     dirty_ = true;
     if (!inRange(graph_, selected_)) selected_ = 0;
 }
@@ -410,7 +400,7 @@ void SoundEditor::deleteSelected() {
     if (!loaded_) return;
     pushUndo();
     const i32 next = snDeleteNode(graph_, selected_);
-    if (next < 0) { undoStack_.pop_back(); return; }
+    if (next < 0) { history_.cancelPush(); return; }
     selected_ = next;
     dirty_ = true;
 }
@@ -427,7 +417,7 @@ void SoundEditor::linkInto(i32 from, i32 to, u32 toInput) {
     if (!loaded_) return;
     pushUndo();
     const i32 moved = snAddLink(graph_, from, to, toInput);
-    if (moved < 0) { undoStack_.pop_back(); return; }
+    if (moved < 0) { history_.cancelPush(); return; }
     // The re-sort can have moved `to`; follow it, so the panel the author is looking at stays on
     // the node they were wiring rather than jumping to whatever landed at the old index.
     selected_ = moved;
@@ -437,7 +427,7 @@ void SoundEditor::linkInto(i32 from, i32 to, u32 toInput) {
 void SoundEditor::unlink(i32 from, i32 to, u32 toInput) {
     if (!loaded_) return;
     pushUndo();
-    if (!snRemoveLink(graph_, from, to, toInput)) { undoStack_.pop_back(); return; }
+    if (!snRemoveLink(graph_, from, to, toInput)) { history_.cancelPush(); return; }
     dirty_ = true;
 }
 

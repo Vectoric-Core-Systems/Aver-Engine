@@ -152,6 +152,52 @@ int main() {
         check(!ed.dirty(), "re-setting the same blend is a no-op");
     }
 
+    // ---- undo/redo, through the shared SnapshotUndo<State> template -----------------------------------
+    AVER_INFO("undo/redo, added this stage through SnapshotUndo<State>");
+    {
+        editor::ParticleEditor ed(path);
+        check(ed.loaded(), "loaded for the undo checks");
+        check(!ed.canUndo() && !ed.canRedo(), "a freshly loaded tab has nothing to undo or redo");
+
+        const f32 before = ed.effect().damping;
+        ed.setDamping(0.77f);
+        check(ed.canUndo(), "a real edit pushes an undo entry");
+        check(!ed.canRedo(), "and leaves nothing to redo yet");
+
+        ed.undo();
+        check(std::fabs(ed.effect().damping - before) < 1e-6f, "undo restores the pre-edit value");
+        check(!ed.canUndo() && ed.canRedo(), "and moves the entry to the redo side");
+
+        ed.redo();
+        check(std::fabs(ed.effect().damping - 0.77f) < 1e-6f, "redo restores the edited value");
+
+        // A no-op setter call (same value) returns before pushUndo() -- exactly like Bt/Sound's own
+        // structural edits -- so it must not grow the undo stack. setReceivesGI has that early-out
+        // guard (setDamping, exercised just above, deliberately does not: see its own definition),
+        // so it is the one to prove this with.
+        ed.undo();   // back to `before` damping; canUndo() is now false again
+        check(!ed.canUndo(), "back to a clean undo stack before the no-op check");
+        ed.setReceivesGI(ed.effect().receivesGI);
+        check(!ed.canUndo(), "re-setting the same value through a guarded setter pushes no undo entry");
+
+        // The snapshot bundles extras_ alongside effect_ (GraphEditor's own {graph, displayPos}
+        // shape) -- setName edits extras_.name ONLY, and undo must still restore it.
+        editor::ParticleEditor ed2(path);
+        const std::string originalName = ed2.extras().name;
+        ed2.setName("a renamed effect, mid-edit");
+        check(ed2.extras().name == "a renamed effect, mid-edit", "the rename applied");
+        ed2.undo();
+        check(ed2.extras().name == originalName, "undo restores the name field too, not just effect_");
+
+        // undo() at the bottom / redo() at the top are no-ops, not crashes.
+        editor::ParticleEditor ed3(path);
+        check(!ed3.canUndo(), "sanity: nothing to undo on a fresh tab");
+        ed3.undo();   // must not crash or misbehave
+        check(!ed3.dirty(), "an undo with nothing to undo does not even mark the tab dirty");
+        ed3.redo();   // likewise for redo with nothing to redo
+        check(!ed3.dirty(), "nor does a redo with nothing to redo");
+    }
+
     // ---- the preview simulation, entirely headless ---------------------------------------------------
     AVER_INFO("the preview burst fires exactly once, regardless of dt");
     {

@@ -11,14 +11,24 @@
 // shutdownActorEditors()/shutdownAnimEditors() -- see its own comment in the .cpp for why this tab
 // needs one even though it registers no new render feature.
 //
-// SHIPS WITH NO UNDO, DELIBERATELY. ActorEditor and AnimEditor both ship with none, and Bt/Sound/
-// Graph each hand-roll an identical snapshot-undo triad (pushUndo/undo/redo over a whole-state copy)
-// that consolidating into one shared implementation is a separate, already-planned stage. Adding a
-// FOURTH copy of that triad here, the night before that consolidation, would be exactly the
-// duplication the plan exists to remove -- so this tab does not have one. Every edit here is a
-// single field write with no structural edit to lose (no add/remove/reparent the way a graph or a
-// tree has), so a mis-typed value is undone by typing it back, not by Ctrl+Z.
+// UNDO THROUGH THE SHARED SnapshotUndo<State> TEMPLATE (SnapshotUndo.hpp), the fourth user, now that
+// GraphEditor/SoundEditor/BtEditor's own hand-rolled triads have all been migrated onto it in the
+// same change. This tab shipped with no undo at all the night it landed -- see the plan note this
+// paragraph replaces -- specifically so that stage would not have to consolidate a fourth
+// hand-written copy; with the template already extracted, adding this tab costs SnapshotUndo.hpp
+// nothing and this tab a small pushUndo() before each field write. ActorEditor and AnimEditor are
+// still unmigrated (out of scope for this stage -- AnimEditor's clip_ carries full sample arrays,
+// where a whole-state copy per edit may be the wrong shape).
+//
+// GUARDED ON AVER_MODULE_PARTICLES, whole-file. This header unconditionally #includes aver/formats/
+// OcParticle.hpp (Aver.Formats.Particles), which only exists when Aver.Particles does -- sandbox/
+// CMakeLists.txt links both `if(TARGET ...)`. Every include of this header (SandboxApp.cpp) is
+// itself guarded the same way, but ParticleEditor.cpp includes it unconditionally as its own first
+// line, so the guard has to live here too or a module-off tree fails at this file's own
+// `#include "aver/formats/OcParticle.hpp"` with C1083 before either guard is ever consulted.
+#if AVER_MODULE_PARTICLES
 #include "AssetEditor.hpp"
+#include "SnapshotUndo.hpp"
 
 #include "aver/formats/OcParticle.hpp"
 
@@ -60,6 +70,15 @@ public:
     const particles::ParticleEffect& effect() const { return effect_; }
     const fmt::OcParticleExtras& extras() const { return extras_; }
     void markDirty() { dirty_ = true; }
+
+    // Snapshot undo, through the shared SnapshotUndo<State> template -- see the header comment above.
+    // State bundles effect_ AND extras_, matching GraphEditor's own {graph, displayPos} pair: extras_
+    // carries the name, which setName() edits and which an undo must therefore restore too.
+    void pushUndo();
+    void undo();
+    void redo();
+    bool canUndo() const { return history_.canUndo(); }
+    bool canRedo() const { return history_.canRedo(); }
 
     // ---- field edits, as MEMBERS, not free functions ------------------------------------------
     //
@@ -105,6 +124,11 @@ public:
 
 private:
     void loadFromDisk();
+    // Resyncs nameBuf_/texBuf_ from effect_/extras_ -- loadFromDisk()'s own two snprintf calls,
+    // factored out so undo()/redo() can share them: an undo that changes extras_.name or
+    // effect_.textureId without this would leave the visible text field showing the PRE-undo value
+    // until the author happened to touch it.
+    void syncEditBuffers();
 
     std::string path_;
     particles::ParticleEffect effect_;
@@ -112,6 +136,10 @@ private:
     bool loaded_ = false;
     std::string loadError_;
     bool dirty_ = false;
+
+    // Through the shared SnapshotUndo<State> template (SnapshotUndo.hpp).
+    struct UndoState { particles::ParticleEffect effect; fmt::OcParticleExtras extras; };
+    SnapshotUndo<UndoState> history_;
 
     // Preview simulation state. A FIXED seed (re-applied by restartPreview(), including from
     // loadFromDisk()) rather than a wall-clock one: an author toggling Restart, or reloading the
@@ -153,3 +181,4 @@ std::unique_ptr<AssetEditor> makeParticleEditor(const std::string& path);
 void shutdownParticleEditors();
 
 } // namespace aver::editor
+#endif  // AVER_MODULE_PARTICLES

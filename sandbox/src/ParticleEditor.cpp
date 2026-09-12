@@ -1,6 +1,14 @@
 // The .ocparticle editor tab. See the header for the three-line SandboxApp hook, for why every edit
-// is a member function rather than a free structural edit, and for why this ships with no undo.
+// is a member function rather than a free structural edit, and for its undo through the shared
+// SnapshotUndo<State> template.
 #include "ParticleEditor.hpp"
+
+// GUARDED ON AVER_MODULE_PARTICLES, whole-file -- see ParticleEditor.hpp's own comment. With the
+// header's content compiled out, everything below would otherwise reference an undeclared
+// ParticleEditor class and undeclared particles::/fmt:: types; this .cpp is listed unconditionally
+// in sandbox/CMakeLists.txt's SOURCES, so it has to reduce to an empty translation unit on its own
+// rather than relying on the caller not to compile it.
+#if AVER_MODULE_PARTICLES
 #include "EditorKeybinds.hpp"
 #include "EditorIcons.hpp"
 #include "aver/core/Log.hpp"
@@ -133,15 +141,20 @@ void ParticleEditor::loadFromDisk() {
     loaded_ = true;
     loadError_.clear();
     dirty_ = false;
+    history_.clear();
 
+    syncEditBuffers();
+
+    previewFramed_ = false;   // a freshly (re)loaded effect gets its camera distance picked again
+    restartPreview();
+}
+
+void ParticleEditor::syncEditBuffers() {
     std::snprintf(nameBuf_, sizeof nameBuf_, "%s", extras_.name.c_str());
     if (effect_.textureId != 0)
         std::snprintf(texBuf_, sizeof texBuf_, "%016llX", static_cast<unsigned long long>(effect_.textureId));
     else
         texBuf_[0] = '\0';
-
-    previewFramed_ = false;   // a freshly (re)loaded effect gets its camera distance picked again
-    restartPreview();
 }
 
 std::string ParticleEditor::title() const {
@@ -178,34 +191,69 @@ void ParticleEditor::onFileChanged() {
     loadFromDisk();
 }
 
+// ---- undo -----------------------------------------------------------------------------------------
+//
+// Through the shared SnapshotUndo<State> template (SnapshotUndo.hpp) -- see the header comment for
+// why this tab did not have one before tonight's consolidation stage. Every setter below pushes
+// BEFORE mutating, exactly like Bt/Sound/GraphEditor's own field-edit call sites, and after the
+// existing no-op guard where one exists -- so retyping the same value again costs no undo entry,
+// consistent with how those three editors' own structural edits already behave.
+
+void ParticleEditor::pushUndo() {
+    history_.push(UndoState{effect_, extras_});
+}
+
+void ParticleEditor::undo() {
+    UndoState s{effect_, extras_};
+    if (!history_.undo(s)) return;
+    effect_ = std::move(s.effect);
+    extras_ = std::move(s.extras);
+    dirty_ = true;
+    syncEditBuffers();   // extras_.name / effect_.textureId may have just changed under the text fields
+}
+
+void ParticleEditor::redo() {
+    UndoState s{effect_, extras_};
+    if (!history_.redo(s)) return;
+    effect_ = std::move(s.effect);
+    extras_ = std::move(s.extras);
+    dirty_ = true;
+    syncEditBuffers();
+}
+
 // ---- field edits ----------------------------------------------------------------------------------
 
 void ParticleEditor::setName(std::string name) {
     if (!loaded_ || extras_.name == name) return;
+    pushUndo();
     extras_.name = std::move(name);
     dirty_ = true;
 }
 
 void ParticleEditor::setShape(particles::EmitterShape shape) {
     if (!loaded_ || effect_.shape == shape) return;
+    pushUndo();
     effect_.shape = shape;
     dirty_ = true;
 }
 
 void ParticleEditor::setShapeSize(Vec3 size) {
     if (!loaded_) return;
+    pushUndo();
     effect_.shapeSize = size;
     dirty_ = true;
 }
 
 void ParticleEditor::setBlend(rhi::BlendMode blend) {
     if (!loaded_ || effect_.blend == blend) return;
+    pushUndo();
     effect_.blend = blend;
     dirty_ = true;
 }
 
 void ParticleEditor::setEmission(f32 rate, u32 burstCount, u32 maxParticles) {
     if (!loaded_) return;
+    pushUndo();
     effect_.emissionRate = std::max(0.0f, rate);
     effect_.burstCount = burstCount;
     // >=1: a maxParticles of 0 would mean nothing can ever spawn (ParticleSystem.cpp's own `room`
@@ -217,6 +265,7 @@ void ParticleEditor::setEmission(f32 rate, u32 burstCount, u32 maxParticles) {
 
 void ParticleEditor::setLifetime(f32 lifetimeMin, f32 lifetimeMax) {
     if (!loaded_) return;
+    pushUndo();
     lifetimeMin = std::max(0.0f, lifetimeMin);
     lifetimeMax = std::max(lifetimeMin, lifetimeMax);   // the parser requires min <= max
     effect_.lifetimeMin = lifetimeMin;
@@ -226,6 +275,7 @@ void ParticleEditor::setLifetime(f32 lifetimeMin, f32 lifetimeMax) {
 
 void ParticleEditor::setDirection(Vec3 direction, f32 spreadDeg) {
     if (!loaded_) return;
+    pushUndo();
     effect_.direction = direction;
     effect_.spreadDeg = std::clamp(spreadDeg, 0.0f, 180.0f);   // the parser's own range
     dirty_ = true;
@@ -233,6 +283,7 @@ void ParticleEditor::setDirection(Vec3 direction, f32 spreadDeg) {
 
 void ParticleEditor::setSpeed(f32 speedMin, f32 speedMax) {
     if (!loaded_) return;
+    pushUndo();
     speedMin = std::max(0.0f, speedMin);
     speedMax = std::max(speedMin, speedMax);
     effect_.speedMin = speedMin;
@@ -242,12 +293,14 @@ void ParticleEditor::setSpeed(f32 speedMin, f32 speedMax) {
 
 void ParticleEditor::setGravity(Vec3 gravity) {
     if (!loaded_) return;
+    pushUndo();
     effect_.gravity = gravity;
     dirty_ = true;
 }
 
 void ParticleEditor::setDamping(f32 damping) {
     if (!loaded_) return;
+    pushUndo();
     // [0, 1): OcParticle.cpp's own range check -- a negative or >=1 damping is a velocity MULTIPLIER
     // above one, so a mistyped sign would accelerate every particle without bound rather than damp
     // it. Clamped here so this field can never be edited into a value save() would go on to refuse.
@@ -257,6 +310,7 @@ void ParticleEditor::setDamping(f32 damping) {
 
 void ParticleEditor::setSize(f32 sizeStart, f32 sizeEnd) {
     if (!loaded_) return;
+    pushUndo();
     effect_.sizeStart = std::max(0.0f, sizeStart);
     effect_.sizeEnd = std::max(0.0f, sizeEnd);
     dirty_ = true;
@@ -264,24 +318,28 @@ void ParticleEditor::setSize(f32 sizeStart, f32 sizeEnd) {
 
 void ParticleEditor::setColorStart(const f32 rgba[4]) {
     if (!loaded_) return;
+    pushUndo();
     for (int i = 0; i < 4; ++i) effect_.colorStart[i] = std::clamp(rgba[i], 0.0f, 1.0f);
     dirty_ = true;
 }
 
 void ParticleEditor::setColorEnd(const f32 rgba[4]) {
     if (!loaded_) return;
+    pushUndo();
     for (int i = 0; i < 4; ++i) effect_.colorEnd[i] = std::clamp(rgba[i], 0.0f, 1.0f);
     dirty_ = true;
 }
 
 void ParticleEditor::setTextureId(u64 id) {
     if (!loaded_ || effect_.textureId == id) return;
+    pushUndo();
     effect_.textureId = id;
     dirty_ = true;
 }
 
 void ParticleEditor::setReceivesGI(bool on) {
     if (!loaded_ || effect_.receivesGI == on) return;
+    pushUndo();
     effect_.receivesGI = on;
     dirty_ = true;
 }
@@ -604,15 +662,20 @@ void ParticleEditor::draw(Engine& e) {
         if (!save(&why)) AVER_ERROR("[ParticleEditor] save failed for '{}': {}", path_, why);
     }
     ImGui::SameLine();
+    ImGui::BeginDisabled(!canUndo());
+    if (ImGui::Button(ICON_UNDO " Undo")) undo();
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!canRedo());
+    if (ImGui::Button(ICON_REDO " Redo")) redo();
+    ImGui::EndDisabled();
+    ImGui::SameLine();
     if (ImGui::Button(previewPlaying_ ? ICON_PAUSE " Pause preview" : ICON_PLAY " Play preview"))
         previewPlaying_ = !previewPlaying_;
     ImGui::SameLine();
     if (ImGui::Button(ICON_REFRESH " Restart preview")) restartPreview();
     ImGui::SameLine();
     ImGui::TextDisabled("%zu live particle(s) in this preview", preview_.size());
-    // NO UNDO / REDO BUTTONS HERE. See the header's own comment: this tab ships without an undo
-    // stack, deliberately, rather than hand-rolling a fourth copy of the snapshot-undo triad
-    // Bt/Sound/GraphEditor each already carry.
 
     ImGui::Separator();
 
@@ -669,3 +732,4 @@ void shutdownParticleEditors() {
 }
 
 } // namespace aver::editor
+#endif  // AVER_MODULE_PARTICLES

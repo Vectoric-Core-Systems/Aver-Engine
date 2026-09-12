@@ -1,3 +1,16 @@
+# SnapshotUndoTest -- SnapshotUndo<State> itself: push/undo/redo, the 200-entry cap (and that it
+# evicts the OLDEST entry), redo cleared on push (including a cancelled speculative push), undo at
+# empty, redo at top, and clear(). Header-only and Core-only (Aver.Core is here only for AVER_INFO/
+# AVER_ERROR in the test's own check() helper): the template itself touches no ImGui, no Engine, no
+# scene::, and no sandbox .cpp, unlike every test below that exercises one MIGRATED editor's tab
+# around it. This is the one place the shared triad's own rules are checked directly rather than
+# through a load/save/dirty story that could not tell "the template is right" apart from "the editor
+# built around it happens to still work".
+add_executable(SnapshotUndoTest src/SnapshotUndoTest.cpp)
+target_include_directories(SnapshotUndoTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(SnapshotUndoTest PRIVATE Aver.Core)
+set_target_properties(SnapshotUndoTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # EditorPrefsTest -- the editor's own preferences store.
 #
 # It COMPILES the sandbox translation unit directly rather than linking a library, because the store

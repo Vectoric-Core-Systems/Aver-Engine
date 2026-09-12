@@ -241,8 +241,7 @@ void BtEditor::loadFromDisk() {
     loadError_.clear();
     dirty_ = false;
     selected_ = 0;
-    undoStack_.clear();
-    redoStack_.clear();
+    history_.clear();
 }
 
 std::string BtEditor::title() const {
@@ -275,27 +274,18 @@ void BtEditor::onFileChanged() {
 }
 
 void BtEditor::pushUndo() {
-    undoStack_.push_back(tree_);
-    constexpr usize kUndoCap = 200;   // GraphEditor::pushUndo's own cap
-    if (undoStack_.size() > kUndoCap) undoStack_.erase(undoStack_.begin());
-    redoStack_.clear();
+    history_.push(tree_);
 }
 
 void BtEditor::undo() {
-    if (undoStack_.empty()) return;
-    redoStack_.push_back(tree_);
-    tree_ = std::move(undoStack_.back());
-    undoStack_.pop_back();
+    if (!history_.undo(tree_)) return;
     dirty_ = true;
     // The selection is an INDEX, and undo can shrink the array under it.
     if (!inRange(tree_.nodes, selected_)) selected_ = 0;
 }
 
 void BtEditor::redo() {
-    if (redoStack_.empty()) return;
-    undoStack_.push_back(tree_);
-    tree_ = std::move(redoStack_.back());
-    redoStack_.pop_back();
+    if (!history_.redo(tree_)) return;
     dirty_ = true;
     if (!inRange(tree_.nodes, selected_)) selected_ = 0;
 }
@@ -306,7 +296,7 @@ void BtEditor::addChild(fmt::OcBtNodeKind kind) {
     // Added under whatever is selected, matching GraphEditor's own addComponent: building a
     // hierarchy means adding under the thing just clicked, not at the root every time.
     const i32 added = btAddChild(tree_.nodes, selected_, kind);
-    if (added < 0) { undoStack_.pop_back(); return; }
+    if (added < 0) { history_.cancelPush(); return; }
     selected_ = added;
     dirty_ = true;
 }
@@ -315,7 +305,7 @@ void BtEditor::deleteSelected() {
     if (!loaded_ || selected_ == 0) return;
     pushUndo();
     const i32 next = btDeleteSubtree(tree_.nodes, selected_);
-    if (next < 0) { undoStack_.pop_back(); return; }
+    if (next < 0) { history_.cancelPush(); return; }
     selected_ = next;
     dirty_ = true;
 }
@@ -324,7 +314,7 @@ void BtEditor::reparentSelected(i32 newParent) {
     if (!loaded_) return;
     pushUndo();
     const i32 moved = btReparent(tree_.nodes, selected_, newParent);
-    if (moved < 0) { undoStack_.pop_back(); return; }
+    if (moved < 0) { history_.cancelPush(); return; }
     selected_ = moved;
     dirty_ = true;
 }
@@ -333,7 +323,7 @@ void BtEditor::moveSelected(i32 delta) {
     if (!loaded_) return;
     pushUndo();
     const i32 moved = btMoveSibling(tree_.nodes, selected_, delta);
-    if (moved < 0) { undoStack_.pop_back(); return; }
+    if (moved < 0) { history_.cancelPush(); return; }
     selected_ = moved;
     dirty_ = true;
 }

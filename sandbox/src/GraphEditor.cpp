@@ -238,8 +238,7 @@ void GraphEditor::loadFromDisk() {
 
     selectedNodes_.clear();
     selectedLink_ = -1;
-    undoStack_.clear();
-    redoStack_.clear();
+    history_.clear();
     dragMode_ = DragMode::None;
     view_ = CanvasTransform{};
 }
@@ -406,18 +405,12 @@ void GraphEditor::pushUndo() {
     UndoState s;
     s.graph = graph_;
     s.displayPos = displayPos_;
-    undoStack_.push_back(std::move(s));
-    constexpr usize kUndoCap = 200;
-    if (undoStack_.size() > kUndoCap) undoStack_.erase(undoStack_.begin());
-    redoStack_.clear();
+    history_.push(std::move(s));
 }
 
 void GraphEditor::undo() {
-    if (undoStack_.empty()) return;
-    UndoState redoEntry{graph_, displayPos_};
-    redoStack_.push_back(std::move(redoEntry));
-    UndoState s = std::move(undoStack_.back());
-    undoStack_.pop_back();
+    UndoState s{graph_, displayPos_};
+    if (!history_.undo(s)) return;
     graph_ = std::move(s.graph);
     displayPos_ = std::move(s.displayPos);
     dirty_ = true;
@@ -426,11 +419,8 @@ void GraphEditor::undo() {
 }
 
 void GraphEditor::redo() {
-    if (redoStack_.empty()) return;
-    UndoState undoEntry{graph_, displayPos_};
-    undoStack_.push_back(std::move(undoEntry));
-    UndoState s = std::move(redoStack_.back());
-    redoStack_.pop_back();
+    UndoState s{graph_, displayPos_};
+    if (!history_.redo(s)) return;
     graph_ = std::move(s.graph);
     displayPos_ = std::move(s.displayPos);
     dirty_ = true;
@@ -1722,11 +1712,11 @@ void GraphEditor::draw(Engine& e) {
                            validateErr_.c_str());
         ImGui::SameLine();
     }
-    ImGui::BeginDisabled(undoStack_.empty());
+    ImGui::BeginDisabled(!history_.canUndo());
     if (ImGui::Button("Undo")) undo();
     ImGui::EndDisabled();
     ImGui::SameLine();
-    ImGui::BeginDisabled(redoStack_.empty());
+    ImGui::BeginDisabled(!history_.canRedo());
     if (ImGui::Button("Redo")) redo();
     ImGui::EndDisabled();
     ImGui::SameLine();
@@ -2040,10 +2030,7 @@ void GraphEditor::drawEventGraph(float dpi) {
         if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
             const Vec2 delta = mouseCanvas - dragStartCanvas_;
             if (!moveUndoPushed_ && vecLen(delta) * view_.zoom > 3.0f) {
-                undoStack_.push_back(pendingMoveSnapshot_);
-                constexpr usize kUndoCap = 200;
-                if (undoStack_.size() > kUndoCap) undoStack_.erase(undoStack_.begin());
-                redoStack_.clear();
+                history_.push(pendingMoveSnapshot_);
                 moveUndoPushed_ = true;
             }
             for (const auto& id : selectedNodes_) displayPos_[id] = moveStart_[id] + delta;
@@ -2117,10 +2104,7 @@ void GraphEditor::drawEventGraph(float dpi) {
             // Same lazy undo boundary MoveNodes uses, and the same 3px-of-travel threshold, so a
             // plain click to select a box does not push an identical state onto the stack.
             if (!commentUndoPushed_ && vecLen(delta) * view_.zoom > 3.0f) {
-                undoStack_.push_back(pendingCommentSnapshot_);
-                constexpr usize kUndoCap = 200;
-                if (undoStack_.size() > kUndoCap) undoStack_.erase(undoStack_.begin());
-                redoStack_.clear();
+                history_.push(pendingCommentSnapshot_);
                 commentUndoPushed_ = true;
             }
             if (dragMode_ == DragMode::MoveComment) {
@@ -3591,7 +3575,7 @@ bool GraphEditor::buildMaterialPreview(Engine& e, render::preview::PreviewDraw& 
     // Undo-stack depth is used as the edit counter because every edit path calls pushUndo() first,
     // so it moves exactly when the graph does. A plain dirty_ flag would not: it latches true on the
     // first edit and never resets, so the preview would recompile once and then never again.
-    const i64 mark = static_cast<i64>(undoStack_.size()) - static_cast<i64>(redoStack_.size());
+    const i64 mark = static_cast<i64>(history_.undoCount()) - static_cast<i64>(history_.redoCount());
     if (materialPreviewDirtyMark_ != mark) {
         materialPreviewDirtyMark_ = mark;
         const u32 id = pbr::materialGraphs().add(path_, graph_.name, graph_);

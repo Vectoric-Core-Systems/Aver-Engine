@@ -14,6 +14,7 @@
 // shows the same information with none of that, and it costs no persisted layout the format would
 // then have to grow a chunk for.
 #include "AssetEditor.hpp"
+#include "SnapshotUndo.hpp"
 
 #include "aver/formats/OcSound.hpp"
 
@@ -126,14 +127,15 @@ public:
     i32 selected() const { return selected_; }
     void select(i32 index) { selected_ = index; }
 
-    // Snapshot undo, copying GraphEditor::pushUndo's whole-state approach rather than command
-    // objects: a sound graph is a short pair of vectors, so a full copy per edit is cheaper than
-    // the bookkeeping an undoable-command layer would need.
+    // Snapshot undo, through the shared SnapshotUndo<State> template (SnapshotUndo.hpp) now --
+    // GraphEditor/BtEditor migrated to the same template in the same change; see that header for why
+    // a whole-graph copy per edit is cheaper here than the bookkeeping an undoable-command layer
+    // would need.
     void pushUndo();
     void undo();
     void redo();
-    bool canUndo() const { return !undoStack_.empty(); }
-    bool canRedo() const { return !redoStack_.empty(); }
+    bool canUndo() const { return history_.canUndo(); }
+    bool canRedo() const { return history_.canRedo(); }
 
     // The structural edits as the TAB performs them: push undo, apply, remap the selection, mark
     // dirty. A test drives these to check the tab's bookkeeping, not just the free functions'.
@@ -171,8 +173,7 @@ private:
     bool dirty_ = false;
     i32 selected_ = 0;
 
-    std::vector<fmt::OcSoundData> undoStack_;
-    std::vector<fmt::OcSoundData> redoStack_;
+    SnapshotUndo<fmt::OcSoundData> history_;
 
     std::vector<f32> previewPcm_;
     std::string previewError_;

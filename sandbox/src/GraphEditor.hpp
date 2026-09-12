@@ -35,6 +35,7 @@
 // ============================================================================================
 #include "AssetEditor.hpp"
 #include "GraphEditorGeometry.hpp"
+#include "SnapshotUndo.hpp"
 #include "aver/formats/OcGraph.hpp"
 
 #include <cstdint>
@@ -578,8 +579,10 @@ private:
 
     // ---- undo (declared here, ahead of the interaction state below, because MoveNodes drag needs
     // the UndoState type for its lazily-pushed pending snapshot) ------------------------------------
+    // Through the shared SnapshotUndo<State> template (SnapshotUndo.hpp) now -- Sound/BtEditor
+    // migrated to the same template in the same change.
     struct UndoState { fmt::OcGraphData graph; std::unordered_map<std::string, Vec2> displayPos; };
-    std::vector<UndoState> undoStack_, redoStack_;
+    SnapshotUndo<UndoState> history_;
     void pushUndo();
     void undo();
     void redo();
@@ -603,7 +606,7 @@ private:
     bool moveUndoPushed_ = false;   // see .cpp: undo for a move is pushed lazily, only once real
                                      // movement crosses a small threshold, so a plain click-to-select
                                      // never pollutes the undo stack with a no-op entry
-    UndoState pendingMoveSnapshot_; // pre-move state, captured at drag start, pushed onto undoStack_
+    UndoState pendingMoveSnapshot_; // pre-move state, captured at drag start, pushed into history_
                                      // only if moveUndoPushed_ becomes true
     Vec2 boxSelectCurrentCanvas_{};
     std::string linkDragFromNode_, linkDragFromPin_;

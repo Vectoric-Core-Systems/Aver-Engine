@@ -8,6 +8,7 @@
 // and nothing else. draw(Engine&) carries no dpi, but this tab needs none (it has no canvas to
 // scale, unlike GraphEditor's node graph), so there is no push-setter counterpart here.
 #include "AssetEditor.hpp"
+#include "SnapshotUndo.hpp"
 
 #include "aver/formats/OcBt.hpp"
 
@@ -105,14 +106,15 @@ public:
     i32 selected() const { return selected_; }
     void select(i32 index) { selected_ = index; }
 
-    // Snapshot undo, copying GraphEditor::pushUndo's own whole-state approach rather than command
-    // objects -- a behaviour tree is a short vector, so a full copy per edit is cheaper than the
-    // bookkeeping an undoable-command layer would need. Every structural edit calls pushUndo first.
+    // Snapshot undo, through the shared SnapshotUndo<State> template (SnapshotUndo.hpp) now --
+    // Sound/GraphEditor migrated to the same template in the same change; a full tree copy per edit
+    // is cheaper here than the bookkeeping an undoable-command layer would need. Every structural
+    // edit calls pushUndo first.
     void pushUndo();
     void undo();
     void redo();
-    bool canUndo() const { return !undoStack_.empty(); }
-    bool canRedo() const { return !redoStack_.empty(); }
+    bool canUndo() const { return history_.canUndo(); }
+    bool canRedo() const { return history_.canRedo(); }
 
     // The structural edits as the TAB performs them: push undo, apply, remap the selection, mark
     // dirty. A test drives these to check the tab's own bookkeeping, not just the free functions'.
@@ -133,8 +135,7 @@ private:
     bool dirty_ = false;
     i32 selected_ = 0;
 
-    std::vector<fmt::OcBtData> undoStack_;
-    std::vector<fmt::OcBtData> redoStack_;
+    SnapshotUndo<fmt::OcBtData> history_;
 
 #if AVER_WITH_IMGUI
     void drawTreeRow(i32 index);

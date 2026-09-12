@@ -114,7 +114,16 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "GraphEditor.hpp"
 #include "BtEditor.hpp"
 #include "SoundEditor.hpp"
+// Guarded: ParticleEditor.hpp unconditionally #includes aver/formats/OcParticle.hpp (Aver.Formats.
+// Particles), which sandbox/CMakeLists.txt links only `if(TARGET Aver.Formats.Particles)` -- itself
+// gated on Aver.Particles existing at all. A tree configured with AVER_MODULE_PARTICLES=OFF has
+// neither target, so the header is unreachable and every reference to this tab must be guarded the
+// same way (the factory registration, the shutdown call, and the Content Browser's create-menu entry
+// below), matching the `#if AVER_MODULE_PARTICLES` already used everywhere else in this file for the
+// scene-component half of this same optional module.
+#if AVER_MODULE_PARTICLES
 #include "ParticleEditor.hpp"
+#endif
 #include "EditorEuler.hpp"
 #include "AssetRefScan.hpp"
 #include "EditorTransform.hpp"   // dropRestLift, so a dropped asset rests on what it landed on
@@ -1776,7 +1785,9 @@ public:
         assetEditors_.registerFactory(&editor::makeSoundEditor);
         // And again for .ocparticle -- the format, the runtime and level-drop placement all already
         // existed with zero authoring UI until now. See ParticleEditor.hpp.
+#if AVER_MODULE_PARTICLES
         assetEditors_.registerFactory(&editor::makeParticleEditor);
+#endif
         // Must run before any actor factory: the "is Roslyn available" answer is cached on first ask.
         locateAverDesign();
         {
@@ -6775,7 +6786,9 @@ public:
         }
         editor::shutdownActorEditors();
     editor::shutdownAnimEditors();
+#if AVER_MODULE_PARTICLES
         editor::shutdownParticleEditors();
+#endif
         setMouseCaptured(false);
 #if AVER_FLUIDS_SIMULATED
         // BEFORE aver_phys_shutdown below, explicitly rather than leaving it to ~FluidScene: that
@@ -17497,6 +17510,11 @@ private:
     // cbCreateSoundGraph immediately above, for the same reason its own comment gives: this is a
     // format with a working editor tab and an icon (see the Content Browser's extension table) that,
     // until now, nothing could BRING INTO EXISTENCE from inside the editor at all.
+    //
+    // Guarded: editor::pxStarterEffect comes from ParticleEditor.hpp and fmt::OcParticleExtras/
+    // saveOcparticle from aver/formats/OcParticle.hpp, neither reachable with AVER_MODULE_PARTICLES
+    // off -- see the #include guard near the top of this file.
+#if AVER_MODULE_PARTICLES
     void cbCreateParticleEffect() {
         const std::filesystem::path target = cbFreeAssetPath("NewParticle", ".ocparticle");
         if (target.empty()) return;
@@ -17510,6 +17528,7 @@ private:
         }
         cbAdoptNewAsset(target);
     }
+#endif
 
     // Writes a starter .ocgraph -- an Aver Node visual-scripting graph -- and opens it.
     // The bytes come from editor::graphStarterText rather than being built here, so a test can parse
@@ -18086,8 +18105,10 @@ private:
             uiReg_.track("cb.add.behaviourTree");
             if (ImGui::MenuItem("New Sound Graph"))     cbCreateSoundGraph();
             uiReg_.track("cb.add.soundGraph");
+#if AVER_MODULE_PARTICLES
             if (ImGui::MenuItem("New Particle Effect")) cbCreateParticleEffect();
             uiReg_.track("cb.add.particleEffect");
+#endif
             if (ImGui::MenuItem("New Material"))        cbCreateMaterial();
             uiReg_.track("cb.add.material");
             ImGui::EndDisabled();
