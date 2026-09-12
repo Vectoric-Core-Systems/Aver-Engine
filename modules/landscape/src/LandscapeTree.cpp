@@ -64,14 +64,14 @@ bool Frustum::intersectsSphere(const f32 c[3], f32 radius) const {
 }
 
 // Subdivides a section into the node tree. Returns false and fills `why` on a bad section or nodeQuads.
+//
+// ITEM 0.4: builds into a SCRATCH tree (nodes/levelError/rootIndex/levels below are all locals, not
+// members) and only swaps it into this object's own state once every step below has succeeded. A
+// rebuild that fails partway -- or on input that never validates -- must leave whatever tree was
+// already resident untouched rather than clearing it first: a caller that re-triggers a build from
+// bad or mid-edit data would otherwise go from "drawing stale but correct terrain" to "drawing
+// nothing at all" for however long the bad data persists.
 bool LandscapeTree::build(const fmt::OcLandData& d, u32 nodeQuads, std::string* why) {
-    nodes_.clear();
-    levelError_.clear();
-    refined_.clear();
-    rootIndex_ = kInvalidNode;
-    levels_ = 0;
-    nodeQuads_ = nodeQuads;
-
     if (!d.valid()) return fail(why, "the section is not internally consistent");
     if (nodeQuads < 2 || (nodeQuads & (nodeQuads - 1)) != 0)
         return fail(why, "nodeQuads must be a power of two of at least 2");
@@ -83,16 +83,21 @@ bool LandscapeTree::build(const fmt::OcLandData& d, u32 nodeQuads, std::string* 
     if ((nodesAcross & (nodesAcross - 1)) != 0)
         return fail(why, "(sampleCount - 1) / nodeQuads must be a power of two");
 
+    // From here on, every write goes to these locals -- this object's nodes_/levelError_/rootIndex_/
+    // levels_ are untouched until the swap at the very end.
+    std::vector<LandscapeNode> nodes;
+    std::vector<f32> levelError;
+
     // Count the levels: nodesAcross halves each time until one node covers the section.
     u32 top = 0;
     for (u32 n = nodesAcross; n > 1; n >>= 1) ++top;
-    levels_ = top + 1;
-    levelError_.assign(levels_, 0.0f);
+    const u32 levels = top + 1;
+    levelError.assign(levels, 0.0f);
 
     // Built bottom-up, so a parent can be given its children's indices.
-    std::vector<std::vector<u32>> byLevel(levels_);
+    std::vector<std::vector<u32>> byLevel(levels);
 
-    for (u32 level = 0; level < levels_; ++level) {
+    for (u32 level = 0; level < levels; ++level) {
         const u32 stride = 1u << level;
         const u32 span   = nodeQuads * stride;          // source quads on a side
         const u32 across = nodesAcross >> level;
@@ -136,7 +141,7 @@ bool LandscapeTree::build(const fmt::OcLandData& d, u32 nodeQuads, std::string* 
                             e = std::fmax(e, runDeviation(d, n.sampleX + x, n.sampleY + y, 0, 1, stride));
                     n.errorCm = e;
                 }
-                levelError_[level] = std::fmax(levelError_[level], n.errorCm);
+                levelError[level] = std::fmax(levelError[level], n.errorCm);
 
                 if (level > 0) {
                     // The four children are the 2x2 block at (2nx, 2ny) on the level below.
@@ -152,21 +157,30 @@ bool LandscapeTree::build(const fmt::OcLandData& d, u32 nodeQuads, std::string* 
                         n.child[i] = c[i] < below.size() ? below[c[i]] : kInvalidNode;
                 }
 
-                byLevel[level].push_back(static_cast<u32>(nodes_.size()));
-                nodes_.push_back(n);
+                byLevel[level].push_back(static_cast<u32>(nodes.size()));
+                nodes.push_back(n);
             }
         }
     }
 
-    rootIndex_ = byLevel[levels_ - 1].front();
+    const u32 rootIndex = byLevel[levels - 1].front();
 
     // Skirt depth, sized last: it is the COARSER neighbour's error that opens the crack, and 2:1
-    // balanced selection makes that neighbour exactly one level up.
-    for (LandscapeNode& n : nodes_) {
-        const f32 coarser = levelErrorCm(n.level + 1);
+    // balanced selection makes that neighbour exactly one level up. Reads the SCRATCH levelError, not
+    // levelErrorCm() -- that member function answers for the tree currently resident, which during a
+    // rebuild is still the PREVIOUS good one (or none), not the one being computed here.
+    for (LandscapeNode& n : nodes) {
+        const u32 coarserLevel = n.level + 1;
+        const f32 coarser = coarserLevel < levelError.size() ? levelError[coarserLevel] : 0.0f;
         n.skirtCm = std::fmax(coarser * 1.5f, d.spacingCm * 0.25f);
     }
 
+    // Every validation and every step above succeeded: only now does this object's own state change.
+    nodes_ = std::move(nodes);
+    levelError_ = std::move(levelError);
+    rootIndex_ = rootIndex;
+    levels_ = levels;
+    nodeQuads_ = nodeQuads;
     refined_.assign(nodes_.size(), 0);
     return true;
 }

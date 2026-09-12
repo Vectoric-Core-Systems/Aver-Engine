@@ -75,6 +75,60 @@ int main() {
         check(!bad.build(odd, 64, &why), "a sampleCount that is not (k*q)+1 is refused (" + why + ")");
     }
 
+    AVER_INFO("=== ITEM 0.4: a failed rebuild does not destroy a good tree ===");
+    {
+        // build() used to clear nodes_/levelError_/refined_/rootIndex_/levels_ UNCONDITIONALLY,
+        // before validating its input -- so an invalid rebuild attempt on an ALREADY-BUILT tree left
+        // it empty rather than leaving the previous good tree in place. Fixed by building into a
+        // scratch tree and swapping in on success only. Proven here on a SECOND tree object (not the
+        // `tree` the rest of this file keeps using), rebuilt with bad input after a good build, and
+        // checked not just for unchanged bookkeeping but for still being usable: select() run before
+        // and after the failed rebuild must pick the exact same nodes.
+        LandscapeTree good;
+        std::string why;
+        check(good.build(terrain, 64, &why), "a good tree builds (" + why + ")");
+        const u32 goodLevels = good.levelCount();
+        const u32 goodNodeCount = static_cast<u32>(good.nodes().size());
+        const u32 goodRoot = good.root();
+        const u32 goodNodeQuads = good.nodeQuads();
+        const f32 goodLevelError1 = good.levelErrorCm(1);
+
+        SelectParams sp;
+        const LandscapeNode& rootBefore = good.nodes()[good.root()];
+        sp.cameraCm[0] = rootBefore.centre[0];
+        sp.cameraCm[1] = rootBefore.centre[1];
+        sp.cameraCm[2] = rootBefore.centre[2];
+        SelectResult before;
+        good.resetHysteresis();
+        good.select(sp, before);
+        check(!before.nodes.empty(), "and it selects real nodes before the bad rebuild is attempted");
+
+        why.clear();
+        check(!good.build(terrain, 63, &why),
+              "an invalid rebuild (bad nodeQuads) on the SAME already-good tree is refused (" + why + ")");
+
+        check(good.levelCount() == goodLevels, "levelCount is unchanged after the failed rebuild");
+        check(good.nodes().size() == goodNodeCount, "the node count is unchanged");
+        check(good.root() == goodRoot, "the root index is unchanged");
+        check(good.nodeQuads() == goodNodeQuads, "nodeQuads is unchanged");
+        check(good.levelErrorCm(1) == goodLevelError1, "the per-level error table is unchanged");
+
+        SelectResult after;
+        good.resetHysteresis();
+        good.select(sp, after);
+        check(after.nodes == before.nodes,
+              "STILL QUERYABLE: the same camera selects the exact same node indices as before the "
+              "failed rebuild (" + std::to_string(after.nodes.size()) + " nodes both times)");
+
+        // A second, differently-shaped invalid input (bad sampleCount alignment rather than bad
+        // nodeQuads) must not clear it either -- the guard is not specific to one validation branch.
+        fmt::OcLandData odd = makeTerrain(200);
+        why.clear();
+        check(!good.build(odd, 64, &why),
+              "a second, differently-invalid rebuild is also refused (" + why + ")");
+        check(good.nodes().size() == goodNodeCount, "and the tree is still intact after that one too");
+    }
+
     AVER_INFO("=== the LOD metric ===");
     {
         f32 worstL0 = 0.0f;
