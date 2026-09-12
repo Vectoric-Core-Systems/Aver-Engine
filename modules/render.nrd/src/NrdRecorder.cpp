@@ -108,6 +108,7 @@ void Recorder::releasePools() {
     for (Slot& s : slots_) if (s.set) res_->destroyBindingSet(s.set);
     slots_.clear();
     outDiffHitDist_ = 0;
+    outDiffRadHitDist_ = 0;
 }
 
 void Recorder::destroy() {
@@ -129,6 +130,12 @@ void Recorder::destroy() {
 bool Recorder::resize(u32 width, u32 height) {
     if (!valid() || width == 0 || height == 0) return false;
     if (width == width_ && height == height_ && !permanent_.empty()) return true;
+    // A POOL THAT FAILED TO ALLOCATE AT A GIVEN SIZE WILL FAIL AGAIN AT THAT SIZE, and a caller
+    // that asks once per frame turns one real problem into an unreadable wall of identical log
+    // lines -- which is exactly what an unmapped NRD format did on the first run of this pass.
+    // Remembering the size that failed makes the report happen once and the retry happen only when
+    // something actually changed.
+    if (width == failedWidth_ && height == failedHeight_) return false;
 
     releasePools();
     width_ = width;
@@ -161,14 +168,15 @@ bool Recorder::resize(u32 width, u32 height) {
     };
     for (u32 i = 0; i < lay.permanentPoolSize; ++i) {
         const rhi::TextureHandle t = make(lay.permanentPool[i], "NRD permanent", i);
-        if (!t) { releasePools(); return false; }
+        if (!t) { releasePools(); failedWidth_ = width; failedHeight_ = height; return false; }
         permanent_.push_back(t);
     }
     for (u32 i = 0; i < lay.transientPoolSize; ++i) {
         const rhi::TextureHandle t = make(lay.transientPool[i], "NRD transient", i);
-        if (!t) { releasePools(); return false; }
+        if (!t) { releasePools(); failedWidth_ = width; failedHeight_ = height; return false; }
         transient_.push_back(t);
     }
+    failedWidth_ = failedHeight_ = 0;   // this size works; a later one may still not
     return true;
 }
 
@@ -178,12 +186,14 @@ rhi::TextureHandle Recorder::poolTexture(SlotRole role, u32 index, const Inputs&
         case SlotRole::InMotionVectors:       return in.motionVectors;
         case SlotRole::InNormalRoughness:     return in.normalRoughness;
         case SlotRole::InDiffuseHitDistance:  return in.diffuseHitDist;
+        case SlotRole::InDiffuseRadianceHitDistance: return in.diffuseRadianceHitDist;
         case SlotRole::PermanentPool:         return index < permanent_.size() ? permanent_[index] : 0;
         case SlotRole::TransientPool:         return index < transient_.size() ? transient_[index] : 0;
         // OUT_DIFF_HITDIST is a pool texture like any other as far as NRD is concerned -- it hands
         // back whichever permanent slot holds the result. It is resolved by the caller reading
         // outputDiffuseHitDistance() after record(), which is set from whatever this dispatch bound.
         case SlotRole::OutDiffuseHitDistance: return index < permanent_.size() ? permanent_[index] : 0;
+        case SlotRole::OutDiffuseRadianceHitDistance: return index < permanent_.size() ? permanent_[index] : 0;
         default:                              return 0;
     }
 }
@@ -194,8 +204,13 @@ rhi::TextureHandle Recorder::poolTexture(SlotRole role, u32 index, const Inputs&
 bool Recorder::record(rhi::IRenderContext& ctx, const FrameSettings& settings, const Inputs& in,
                       const u32* denoiserIndices, u32 indexCount) {
     if (!valid() || permanent_.empty()) return false;
-    if (!in.viewZ || !in.motionVectors || !in.normalRoughness || !in.diffuseHitDist) {
-        AVER_WARN("[NRD] record called with a null input texture; skipping the pass");
+    // THE G-BUFFER TRIO IS ALWAYS REQUIRED; the two signal textures are not. Which signals a frame
+    // needs is decided by WHICH DENOISERS it selected, and the plan is what knows that -- so a null
+    // signal is caught per slot as the tables are filled below (a slot resolving to no texture is
+    // already a named failure there), not guessed at up front. Demanding both here would refuse a
+    // perfectly good occlusion-only frame from a caller that produces no radiance texture.
+    if (!in.viewZ || !in.motionVectors || !in.normalRoughness) {
+        AVER_WARN("[NRD] record called with a null G-buffer input; skipping the pass");
         return false;
     }
     if (!denoiser_.setFrameSettings(settings)) {
@@ -209,6 +224,12 @@ bool Recorder::record(rhi::IRenderContext& ctx, const FrameSettings& settings, c
         return false;
 
     const InstanceLayout lay = denoiser_.layout();
+
+    // CLEARED PER FRAME, because an output handle is a fact about THIS plan. A caller that ran both
+    // denoisers last frame and only the occlusion one this frame would otherwise still be handed
+    // last frame's radiance texture, and would read a filtered image nothing had refreshed.
+    outDiffHitDist_    = 0;
+    outDiffRadHitDist_ = 0;
 
     // ---- descriptor tables FIRST, every one of them, before a single dispatch is recorded ----
     //
@@ -254,6 +275,7 @@ bool Recorder::record(rhi::IRenderContext& ctx, const FrameSettings& settings, c
             if (sb.cls == ResourceClass::StorageTexture) {
                 res_->setUav(slot.set, uIdx++, t, 0);
                 if (sb.role == SlotRole::OutDiffuseHitDistance) outDiffHitDist_ = t;
+                if (sb.role == SlotRole::OutDiffuseRadianceHitDistance) outDiffRadHitDist_ = t;
             } else {
                 res_->setSrv(slot.set, sIdx++, t);
             }
@@ -283,9 +305,26 @@ bool Recorder::record(rhi::IRenderContext& ctx, const FrameSettings& settings, c
         }
         ctx.setPipeline(pipelines_[dp.pipelineIndex]);
         ctx.setBindingSet(slots_[d].set);
-        // constantsUnchanged is NRD telling us the bytes are identical to the previous dispatch's.
-        // Honoured rather than ignored: a root CBV upload is a real copy, and NRD sets this often.
-        if (dp.constants && dp.constantsSize && !dp.constantsUnchanged)
+        // constantsUnchanged IS DELIBERATELY IGNORED, and ignoring it is not laziness -- honouring
+        // it removes the device.
+        //
+        // NRD sets that flag when a dispatch's constant bytes are identical to the previous one's,
+        // and skipping the upload looks like free bandwidth. It is not, because a D3D12 root
+        // argument is not a property of the command list, it is a property of the CURRENTLY BOUND
+        // ROOT SIGNATURE: SetPipelineState with a pipeline whose root signature differs INVALIDATES
+        // every root argument, this root CBV included. Two consecutive dispatches with identical
+        // constants but different pipelines therefore leave the second one reading an UNBOUND CBV,
+        // which is undefined -- and on this hardware it is a GPU fault, surfacing as
+        // DXGI_ERROR_DEVICE_REMOVED (0x887A0005) and taking the whole post chain down with it.
+        //
+        // MEASURED, not theorised: the occlusion denoiser alone (11 pipelines) never hit the case
+        // and ran for days; adding REBLUR_DIFFUSE took the plan to 34 dispatches and the device died
+        // on the first frame. This engine already has one recorded TDR whose cause was an unbound
+        // root CBV -- that is the same failure, reached a different way.
+        //
+        // The correct optimisation, if this upload ever measures, is to track the last bound
+        // pipeline and honour the flag only when it has not changed. It has not measured.
+        if (dp.constants && dp.constantsSize)
             ctx.setConstantBuffer(lay.binding.constantBufferRegister, dp.constants, dp.constantsSize);
         ctx.dispatch(dp.groupsX ? dp.groupsX : 1u, dp.groupsY ? dp.groupsY : 1u, 1u);
         for (u32 b = 0; b < dp.bindingCount; ++b) {

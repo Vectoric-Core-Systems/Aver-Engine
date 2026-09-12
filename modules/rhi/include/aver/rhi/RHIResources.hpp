@@ -70,6 +70,14 @@ enum class Format : u8 {
     // silent format shift in anything that ever starts to.
     R16Unorm,
     R16Uint,
+    // R16F: NRD asks for R16_SFLOAT in REBLUR_DIFFUSE's permanent pool (texture 9), and without it
+    // createTexture refused and the whole denoiser fell over -- the same shape of gap R16Unorm and
+    // R16Uint were added to close, found the same way, by a live run rather than by reading.
+    R16F,
+    // R8Uint: NRD's REBLUR_DIFFUSE transient pool asks for R8_UINT. Found the same way R16F above
+    // was -- by running it, not by reading the spec -- which is what the pool-allocation warning
+    // naming the NRD format string exists for.
+    R8Uint,
 };
 
 // True for block-compressed formats, whose extents are counted in 4x4 blocks and not texels.

@@ -41,6 +41,8 @@ rhi::Format toRhiFormat(::nrd::Format f) {
         // REBLUR's own pool formats. rhi::Format gained these two FOR this table -- see the note on
         // the enum in modules/rhi/include/aver/rhi/RHIResources.hpp.
         case ::nrd::Format::R16_UNORM:             return rhi::Format::R16Unorm;
+        case ::nrd::Format::R16_SFLOAT:            return rhi::Format::R16F;
+        case ::nrd::Format::R8_UINT:               return rhi::Format::R8Uint;
         case ::nrd::Format::R16_UINT:              return rhi::Format::R16Uint;
         default:                                   return rhi::Format::Unknown;
     }
@@ -100,9 +102,11 @@ SlotRole toSlotRole(::nrd::ResourceType t) {
         case ::nrd::ResourceType::IN_MV:                    return SlotRole::InMotionVectors;
         case ::nrd::ResourceType::IN_NORMAL_ROUGHNESS:      return SlotRole::InNormalRoughness;
         case ::nrd::ResourceType::IN_DIFF_HITDIST:          return SlotRole::InDiffuseHitDistance;
+        case ::nrd::ResourceType::IN_DIFF_RADIANCE_HITDIST:  return SlotRole::InDiffuseRadianceHitDistance;
         case ::nrd::ResourceType::IN_PENUMBRA:              return SlotRole::InPenumbra;
         case ::nrd::ResourceType::IN_TRANSLUCENCY:          return SlotRole::InTranslucency;
         case ::nrd::ResourceType::OUT_DIFF_HITDIST:         return SlotRole::OutDiffuseHitDistance;
+        case ::nrd::ResourceType::OUT_DIFF_RADIANCE_HITDIST: return SlotRole::OutDiffuseRadianceHitDistance;
         case ::nrd::ResourceType::OUT_SHADOW_TRANSLUCENCY:  return SlotRole::OutShadowTranslucency;
         case ::nrd::ResourceType::PERMANENT_POOL:           return SlotRole::PermanentPool;
         case ::nrd::ResourceType::TRANSIENT_POOL:           return SlotRole::TransientPool;

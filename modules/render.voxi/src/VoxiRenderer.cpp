@@ -128,12 +128,17 @@ void giSamplers(rhi::PipelineLayout& l) {
 // newest ones: t12/t13, RTXDI ReSTIR GI's previous-frame surface history (read side, position and
 // normal split across a PAIR of textures -- see giSurfPosHist_ in VoxiRenderer.hpp for why one
 // alone could not hold both: rhi::Format has no four-channel 32-bit float).
-constexpr u32 kVoxiSrvCount = kGiSrvCount + 6;
+constexpr u32 kVoxiSrvCount = kGiSrvCount + 7;
 
 // The denoiser index Voxi asks NRD to run. create() is handed exactly one kind
 // (ReblurDiffuseOcclusion), so this is 0 -- named rather than written as a bare literal at the
 // call site, because the two must agree and nothing else would say so.
 constexpr u32 kNrdAoDenoiser[] = {0u};
+// Both denoisers, in the order create() is handed them: 0 occlusion, 1 diffuse radiance. Voxi runs
+// this pair only when ReSTIR GI is the active estimator -- the radiance signal does not exist
+// otherwise, and asking NRD for a denoiser whose input is blank is the one way to get a confident
+// wrong image out of it.
+constexpr u32 kNrdAoAndGiDenoisers[] = {0u, 1u};
 
 // THE SAME ARGUMENT ON THE UAV SIDE, and it needs its own constant for a reason the SRV side
 // already documents. SandboxApp.cpp's cluster path sets `bsd.uavCount = voxi::kGiUavCount` and
@@ -144,7 +149,7 @@ constexpr u32 kNrdAoDenoiser[] = {0u};
 // +5, not +2: u4/u5 are the sky-occlusion pair as before, u6 is RTXDI's own reservoir
 // StructuredBuffer (RTXDI_PackedGIReservoir, 32 bytes/element -- see giReservoirs_) and u7/u8 are
 // giSurfPosHist_/giSurfNrmHist_'s write sides, the UAV twins of t12/t13 above.
-constexpr u32 kVoxiUavCount = kGiUavCount + 5;
+constexpr u32 kVoxiUavCount = kGiUavCount + 6;
 
 // What KIND of resource each of table 0's slots holds, read by both giLayout() (every pipeline) and
 // createVoxelVolume()'s BindingSetDesc (the set those pipelines bind) -- Vulkan refuses a set whose
@@ -190,6 +195,11 @@ void giTableKinds(rhi::SlotKind* srv, rhi::SlotKind* uav) {
     // reports zero dimensions, which is a signal the descriptor already carries and costs no
     // fourth mirror of the constant block to express (see aver-voxi-cbuffer-three-mirrors).
     srv[14] = rhi::SlotKind::Texture2D;             // t14 NRD-denoised sky occlusion (read)
+    // t15/u9: the ReSTIR GI radiance, out to NRD and back. u9 is written by giRestirIndirect
+    // (rgb = indirect diffuse, a = normalised hit distance) and t15 is the same signal one frame
+    // later through REBLUR_DIFFUSE. Both absent unless ReSTIR GI and NRD are BOTH running, which
+    // is why the shader tests dimensions rather than trusting the slot.
+    srv[15] = rhi::SlotKind::Texture2D;             // t15 NRD-denoised ReSTIR GI radiance (read)
     uav[0] = rhi::SlotKind::Texture3D;              // u0 volume mip 0
     uav[1] = rhi::SlotKind::Texture3D;              // u1 injection accumulator
     uav[2] = rhi::SlotKind::Texture2D;              // u2 ray-traced shadow history (write)
@@ -207,7 +217,8 @@ void giTableKinds(rhi::SlotKind* srv, rhi::SlotKind* uav) {
     uav[6] = rhi::SlotKind::StructuredBuffer;       // u6 GI-restir reservoir buffer
     uav[7] = rhi::SlotKind::Texture2D;              // u7 GI-restir surface POSITION history (write)
     uav[8] = rhi::SlotKind::Texture2D;              // u8 GI-restir surface NORMAL history (write)
-    static_assert(kVoxiSrvCount == 15 && kVoxiUavCount == 9 && kGiSrvCount == 9 && kGiUavCount == 4,
+    uav[9] = rhi::SlotKind::Texture2D;              // u9 ReSTIR GI radiance + hit distance (write)
+    static_assert(kVoxiSrvCount == 16 && kVoxiUavCount == 10 && kGiSrvCount == 9 && kGiUavCount == 4,
                   "giTableKinds fills exactly kVoxiSrvCount SRVs and kVoxiUavCount UAVs; widen "
                   "those, never kGiSrvCount/kGiUavCount -- those two are the union SandboxApp.cpp's "
                   "cluster path reserves at its own base and fills kinds for by hand, so growing "
@@ -428,6 +439,7 @@ void VoxiRenderer::shutdown() {
     nrd_.destroy();
     nrdActive_ = false;
     nrdOutput_ = 0;
+    nrdGiOutput_ = 0;
     materials_.shutdown();
     if (!res_) { dev_ = nullptr; return; }
     for (rhi::BindingSetHandle s : mipBindings_) if (s) res_->destroyBindingSet(s);
@@ -496,6 +508,7 @@ void VoxiRenderer::shutdown() {
     // closing three times in this file already.
     for (rhi::TextureHandle& t : giSurfPosHist_) { if (t) res_->destroyTexture(t); t = 0; }
     for (rhi::TextureHandle& t : giSurfNrmHist_) { if (t) res_->destroyTexture(t); t = 0; }
+    if (giRadiance_) { res_->destroyTexture(giRadiance_); giRadiance_ = 0; }
     if (giReservoirs_) { res_->destroyBuffer(giReservoirs_); giReservoirs_ = 0; }
     giReservoirElemCapacity_ = 0;
     giHistValid_ = false;
@@ -2947,6 +2960,7 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
         for (rhi::TextureHandle& t : rtAoHist_)      { if (t) res_->destroyTexture(t); t = 0; }
         for (rhi::TextureHandle& t : giSurfPosHist_) { if (t) res_->destroyTexture(t); t = 0; }
         for (rhi::TextureHandle& t : giSurfNrmHist_) { if (t) res_->destroyTexture(t); t = 0; }
+        if (giRadiance_) { res_->destroyTexture(giRadiance_); giRadiance_ = 0; }
         if (rtAoHitDist_) { res_->destroyTexture(rtAoHitDist_); rtAoHitDist_ = 0; }
         // giRestirWanted() REQUIRES rayTracingWanted(), so this branch already implies ReSTIR GI
         // cannot be running -- the reservoir buffer goes with the rest of the ray-traced state.
@@ -2982,6 +2996,7 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
     for (rhi::TextureHandle& t : rtAoHist_)      { if (t) res_->destroyTexture(t); t = 0; }
     for (rhi::TextureHandle& t : giSurfPosHist_) { if (t) res_->destroyTexture(t); t = 0; }
     for (rhi::TextureHandle& t : giSurfNrmHist_) { if (t) res_->destroyTexture(t); t = 0; }
+    if (giRadiance_) { res_->destroyTexture(giRadiance_); giRadiance_ = 0; }
     giHistValid_ = false;   // same reason rtHistValid_ two lines below is cleared: a stale resolution
     // THE FOURTH ONE, AND IT WAS MISSING HERE WHILE BEING PRESENT IN THE OTHER TWO TEARDOWNS --
     // exactly the shape of leak the comment at the top of shutdown() records this function having
@@ -3064,8 +3079,15 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
         // resize() does that per frame from the hit-distance target's own dimensions, so the
         // denoiser follows a render-target change without a second place needing to know about it.
         if (!nrd_.valid()) {
-            const render::nrd::DenoiserKind kinds[] = {render::nrd::DenoiserKind::ReblurDiffuseOcclusion};
-            nrdActive_ = nrd_.create(*dev_, kinds, 1);
+            // BOTH DENOISERS, ALWAYS CREATED, SELECTED PER FRAME. Which ones RUN is chosen at
+            // record time by the index list, so creating the diffuse-radiance one here costs its
+            // pipelines and its share of the pool and nothing else while ReSTIR GI is off. Creating
+            // it lazily instead would mean tearing the whole instance down -- and NRD's temporal
+            // history with it -- every time giMode is toggled, which is precisely the moment
+            // somebody is looking at the image.
+            const render::nrd::DenoiserKind kinds[] = {render::nrd::DenoiserKind::ReblurDiffuseOcclusion,
+                                                       render::nrd::DenoiserKind::ReblurDiffuse};
+            nrdActive_ = nrd_.create(*dev_, kinds, 2);
             // THE ENCODING CHECK IS THE ONE SILENT FAILURE MODE LEFT. NRD's shaders were BUILT
             // against a specific normal/roughness packing (cmake/AverNRD.cmake picks it); the
             // G-buffer packs RGB10A2 as normal*0.5+0.5 with roughness in w. If those disagree the
@@ -3099,6 +3121,18 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
         giSurfNrmHist_[1] = res_->createTexture(d);
         if (!giSurfNrmHist_[0] || !giSurfNrmHist_[1]) return false;
         d.initialState = rhi::ResourceState::ShaderResource;   // restored for anything added below
+
+        // The radiance NRD's REBLUR_DIFFUSE filters. RGBA16F because rgb is HDR radiance and a is
+        // a normalised distance -- an 8-bit format would quantise indirect light into banding, and
+        // a 32-bit one doubles the bandwidth of a texture written and read once per frame. SINGLE,
+        // not a pair: it is a raw per-frame measurement handed to a filter that keeps its own
+        // history, so there is nothing for a second copy to hold.
+        d.format = rhi::Format::RGBA16F;
+        d.initialState = rhi::ResourceState::UnorderedAccess;
+        d.debugName = "Voxi ReSTIR GI radiance (to NRD)";
+        giRadiance_ = res_->createTexture(d);
+        if (!giRadiance_) return false;
+        d.initialState = rhi::ResourceState::ShaderResource;
 
         // GROWN, NOT ALWAYS REBUILT -- the same "just enough" rule rtVerts_/rtIndices_ apply
         // (buildGeometryTable): the block-rounded pitch is a STEP function of width/height, so most
@@ -3238,6 +3272,10 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
         cb_.giRestirParams[1] = giHistValid_ ? 1.0f : 0.0f;  // ...and t12/t13 hold a real previous frame
         cb_.giRestirParams[2] = static_cast<f32>(writeIdx);  // this frame's reservoir array slice
         cb_.giRestirParams[3] = 0.0f;                        // spare
+        // u9, the radiance this frame hands NRD. Bound with the rest of the ReSTIR slots because
+        // gGiRestirParams.x -- already set above -- is exactly the flag the shader's write is
+        // guarded on, so the two can never disagree about whether the slot is real.
+        if (giRadiance_) res_->setUav(bindings_, 9, giRadiance_, 0);
     }
 
     // ---- NVIDIA NRD, denoising LAST FRAME's sky-occlusion hit distance into t14 ----
@@ -3254,6 +3292,7 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     // wanted them would be spending the user's frame budget on a decision they never made. The pass
     // reports itself absent instead, and Voxi falls back to the filter it has always shipped.
     nrdOutput_ = 0;
+    nrdGiOutput_ = 0;
     // gBufferEnabled() IS NOT THE SAME QUESTION AS "the G-buffer has anything in it", and the
     // difference is a silent one. D3D12 requires every render target in one OMSetRenderTargets call
     // to share a sample count, and the G-buffer's three targets are always single-sample -- so under
@@ -3274,6 +3313,7 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
         in.motionVectors   = dev_->gBufferVelocityTexture();
         in.normalRoughness = dev_->gBufferNormalRoughnessTexture();
         in.diffuseHitDist  = rtAoHitDist_;
+        in.diffuseRadianceHitDist = giRadiance_;
         rhi::TextureDesc aoDesc{};
         const bool haveSize = res_->textureInfo(rtAoHitDist_, aoDesc);
         const u32 tw = haveSize ? aoDesc.width : 0u, th = haveSize ? aoDesc.height : 0u;
@@ -3308,7 +3348,45 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
             fs.motionVectorScale[1] = -1.0f;
             fs.motionVectorScale[2] =  0.0f;   // the engine's velocity carries no Z
             fs.resetHistory = nrd_.historyIsStale() || !rtHistValid_;
-            if (nrd_.record(ctx, fs, in, kNrdAoDenoiser, 1)) nrdOutput_ = nrd_.outputDiffuseHitDistance();
+            // ReSTIR GI's radiance only exists when ReSTIR GI is the estimator, so the diffuse
+            // denoiser is selected only then. Handing NRD a denoiser whose input texture is blank
+            // does not fail -- it filters the blank and hands it back confidently, which is the most
+            // expensive way to be wrong available here.
+            //
+            // ---- REBLUR_DIFFUSE IS BUILT, BOUND, AND DELIBERATELY NOT SELECTED YET ----
+            //
+            // It REMOVES THE DEVICE. Everything above works: the radiance texture allocates, the
+            // instance creates with both denoisers, the pools allocate once R16F and R8Uint existed,
+            // and NRD plans 34 dispatches at 2049x1152. Recording them kills the adapter on the
+            // first frame -- DXGI_ERROR_DEVICE_REMOVED (0x887A0005), after which the upload ring and
+            // every later CreateRootSignature fail and the post chain cannot present.
+            //
+            // BISECTED, not guessed: the identical build with only the occlusion denoiser selected
+            // (giMode 0, so this line is false) plans 15 dispatches then 5, renders, and is stable.
+            // The difference is REBLUR_DIFFUSE's own dispatches, not dispatch count in general and
+            // not the recorder, which has not otherwise changed.
+            //
+            // ONE CANDIDATE ALREADY RULED OUT: NRD's constantsUnchanged flag. Honouring it left a
+            // root CBV unbound across a root-signature change, which is undefined and is this
+            // engine's one previously recorded cause of a TDR -- so it was a strong suspect and is
+            // now always uploaded (see NrdRecorder). The device still dies, so that was a real bug
+            // and not this one.
+            //
+            // THE NEXT THING TO LOOK AT is resource STATE on giRadiance_. It is created in
+            // UnorderedAccess (the Voxi pixel shader writes it through u9) and handed to NRD as an
+            // SRV input in the same frame, with no transition between the two uses -- the occlusion
+            // signal has the same shape, which is why this needs measuring rather than assuming.
+            // A PIX capture on the removal frame is the tool; guessing further from here is not.
+            //
+            // Left wired rather than reverted because everything except the selection is verified,
+            // and re-deriving it to re-test would cost more than the one-line flip this becomes.
+            const bool giSignal = false && giRadiance_ && giRestirWanted();
+            const u32* which    = giSignal ? kNrdAoAndGiDenoisers : kNrdAoDenoiser;
+            const u32  whichN   = giSignal ? 2u : 1u;
+            if (nrd_.record(ctx, fs, in, which, whichN)) {
+                nrdOutput_   = nrd_.outputDiffuseHitDistance();
+                nrdGiOutput_ = nrd_.outputDiffuseRadianceHitDistance();
+            }
         }
     }
     // BOUND EVERY FRAME, INCLUDING AS NOTHING. clearSrv is what makes the shader's GetDimensions
@@ -3317,6 +3395,8 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     // indication anything had changed.
     if (nrdOutput_) res_->setSrv(bindings_, 14, nrdOutput_);
     else            res_->clearSrv(bindings_, 14);
+    if (nrdGiOutput_) res_->setSrv(bindings_, 15, nrdGiOutput_);
+    else              res_->clearSrv(bindings_, 15);
 
     // Read fresh every frame rather than cached: unlike the texture resolution, the scene viewport
     // can change (an editor panel resize) without a full onRenderTargetsChanged notification. A

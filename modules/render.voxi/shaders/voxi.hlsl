@@ -705,6 +705,24 @@ RWTexture2D<float>  gAoHitDistOut : register(u5);
 // "never" -- a frozen last-good image would be the worse failure.
 Texture2D<float>    gNrdAo        : register(t14);
 
+// u9/t15: the ReSTIR GI radiance on its way to NRD's REBLUR_DIFFUSE, and on its way back.
+//
+// rgb = the indirect diffuse radiance giRestirIndirect produced for this pixel, a = the NORMALISED
+// distance the candidate ray travelled to find it. NRD packs and unpacks that pair itself, so both
+// channels are written raw -- and the normalisation is by the SAME giMaxDistance the sky-occlusion
+// hit distance uses (gVoxelParams.z), which is what lets one hitDistParams describe both signals.
+//
+// WHY THE RADIANCE NEEDS ITS OWN TEXTURE rather than riding the occlusion one: they are different
+// quantities with different denoisers. Occlusion is a scalar NRD filters with
+// REBLUR_DIFFUSE_OCCLUSION; this is colour, filtered by REBLUR_DIFFUSE, which keeps its own separate
+// history. Sharing a texture would mean sharing a history, and the two signals decorrelate.
+//
+// BOTH ARE ABSENT UNLESS ReSTIR GI IS ON *AND* NRD IS RUNNING, and the readers test for that the
+// same way t14's does -- a null-filled Texture2D reports zero dimensions. Writing is guarded on
+// gGiRestirParams.x, which already says whether this frame bound the ReSTIR slots at all.
+RWTexture2D<float4> gGiRadianceOut : register(u9);
+Texture2D<float4>   gNrdGi         : register(t15);
+
 // Ray-traced reflection history: same ping-pong as the shadow history above, its own pair of
 // textures. rgb = shaded colour, a = linear hit depth, OR NEGATIVE meaning the ray missed.
 Texture2D<float4>   gRtReflHist    : register(t7);
@@ -2675,6 +2693,36 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         outDiffuse = any(isnan(est)) || any(isinf(est)) ? float3(0.0, 0.0, 0.0)
                                                          : min(max(est, 0.0), AVER_VOX_MAXRAD);
     }
+
+    // ---- hand this frame's estimate to NRD, and take back last frame's ----
+    //
+    // THE WRITE IS THE RAW PER-PIXEL ESTIMATE, never the denoised value read below. Feeding a
+    // filter its own output is the IIR trap the sky-occlusion history write documents at length,
+    // and here it would also fight REBLUR's own temporal accumulation, which is the entire job of
+    // the permanent pool NRD keeps for this signal.
+    //
+    // THE HIT DISTANCE IS THE SELECTED SAMPLE'S, normalised by giMaxDistance -- the same divisor
+    // the sky-occlusion signal uses, so one hitDistParams on the C++ side describes both. A
+    // reservoir holds a world POSITION, so this is a real distance to a real point, not the
+    // candidate ray's length: after resampling they are frequently different rays.
+    if (gGiRestirParams.x > 0.5) {
+        const float giMaxDist = max(gVoxelParams.z, 1.0);
+        const float hitT = RTXDI_IsValidGIReservoir(result)
+                         ? saturate(length(result.position - wpos) / giMaxDist)
+                         : 1.0;   // nothing found: "the ray went the whole way", as the sky ray encodes it
+        gGiRadianceOut[pixelPos] = float4(outDiffuse, hitT);
+    }
+
+    // LAST FRAME'S DENOISED ANSWER REPLACES THIS FRAME'S RAW ONE. One frame of lag, which is what
+    // every temporal consumer in this file already carries (the pass runs in beginShadowHistory,
+    // before the pixel shader that produces the input has run), and it is the lag NRD is built to
+    // be fed. Zero dimensions means the pass did not run this frame -- no NRD in the build, a
+    // backend that refuses its register spaces, no G-buffer, or MSAA above 1x -- and then the raw
+    // ReSTIR estimate stands, noisy but correct.
+    uint gw = 0, gh = 0;
+    gNrdGi.GetDimensions(gw, gh);
+    if (gw > 0u && gh > 0u) outDiffuse = max(gNrdGi.Load(int3(pixelPos, 0)).rgb, 0.0);
+
     return outDiffuse;
 }
 

@@ -1,4 +1,4 @@
-﻿// Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
+// Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems. All rights reserved.
 // Proprietary. See LICENSE.md at the repository root.
 // DirectX 12 backend for Aver.RHI: device, swapchain, scene pipelines, the camera post chain,
@@ -493,6 +493,8 @@ DXGI_FORMAT toDxgiFormat(Format f) {
         case Format::RGB10A2Unorm:   return DXGI_FORMAT_R10G10B10A2_UNORM;
         // NRD's pool formats -- see the enum's own note in RHIResources.hpp.
         case Format::R16Unorm:       return DXGI_FORMAT_R16_UNORM;
+        case Format::R16F:           return DXGI_FORMAT_R16_FLOAT;
+        case Format::R8Uint:         return DXGI_FORMAT_R8_UINT;
         case Format::R16Uint:        return DXGI_FORMAT_R16_UINT;
         case Format::BC1Unorm:       return DXGI_FORMAT_BC1_UNORM;
         case Format::BC1UnormSrgb:   return DXGI_FORMAT_BC1_UNORM_SRGB;
@@ -564,6 +566,8 @@ Format fromDxgiFormat(DXGI_FORMAT f) {
         case DXGI_FORMAT_R16G16_FLOAT:        return Format::RG16F;
         case DXGI_FORMAT_R10G10B10A2_UNORM:   return Format::RGB10A2Unorm;
         case DXGI_FORMAT_R16_UNORM:           return Format::R16Unorm;
+        case DXGI_FORMAT_R16_FLOAT:           return Format::R16F;
+        case DXGI_FORMAT_R8_UINT:             return Format::R8Uint;
         case DXGI_FORMAT_R16_UINT:            return Format::R16Uint;
         case DXGI_FORMAT_BC1_UNORM:           return Format::BC1Unorm;
         case DXGI_FORMAT_BC1_UNORM_SRGB:      return Format::BC1UnormSrgb;
@@ -593,8 +597,10 @@ u32 texelBytes(Format f) {
         case Format::RGB10A2Unorm:   return 4;   // packed 10-10-10-2
         case Format::RG8Unorm:
         case Format::R16Unorm:
+        case Format::R16F:
         case Format::R16Uint:        return 2;
-        case Format::R8Unorm:        return 1;
+        case Format::R8Unorm:
+        case Format::R8Uint:         return 1;
         default:                     break;
     }
     return 0;

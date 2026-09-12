@@ -1298,6 +1298,12 @@ private:
     u32                   nrdFrame_   = 0;
     bool                  nrdWarnedEncoding_ = false;
     bool                  nrdWarnedMsaa_     = false;
+    // The ReSTIR GI radiance handed to NRD (u9): rgb indirect diffuse, a normalised hit distance.
+    // NOT ping-ponged, unlike every history pair here -- it is this frame's raw measurement handed
+    // to a filter that keeps its OWN history in NRD's permanent pool, so a second copy would buy
+    // nothing. Allocated only when ReSTIR GI is the active estimator, because nothing else writes it.
+    rhi::TextureHandle    giRadiance_ = 0;
+    rhi::TextureHandle    nrdGiOutput_ = 0;   // OUT_DIFF_RADIANCE_HITDIST, 0 when not denoised
 
     // ---- RTXDI ReSTIR GI: the reservoir buffer and the previous-frame surface it resamples against ----
     //

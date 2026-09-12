@@ -107,10 +107,16 @@ enum class SlotRole : u8 {
     InMotionVectors,
     InNormalRoughness,
     InDiffuseHitDistance,
+    // RADIANCE AND HIT DISTANCE IN ONE TEXTURE, which is REBLUR_DIFFUSE's input and a different
+    // signal from InDiffuseHitDistance above rather than a superset of it: rgb carries the diffuse
+    // radiance arriving at the pixel and a carries the NORMALISED distance it travelled. NRD packs
+    // and unpacks this pair itself on the shader side, so the engine writes the two channels raw.
+    InDiffuseRadianceHitDistance,
     InPenumbra,
     InTranslucency,
     // The denoised result.
     OutDiffuseHitDistance,
+    OutDiffuseRadianceHitDistance,
     OutShadowTranslucency,
     // NRD's own storage. `poolIndex` says which.
     PermanentPool,

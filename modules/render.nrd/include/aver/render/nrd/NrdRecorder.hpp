@@ -52,6 +52,12 @@ public:
         rhi::TextureHandle motionVectors    = 0;   // IN_MV
         rhi::TextureHandle normalRoughness  = 0;   // IN_NORMAL_ROUGHNESS, packed to NRD's encoding
         rhi::TextureHandle diffuseHitDist   = 0;   // IN_DIFF_HITDIST
+        // IN_DIFF_RADIANCE_HITDIST, for ReblurDiffuse. rgb = diffuse radiance, a = NORMALISED hit
+        // distance. OPTIONAL in a way the four above are not: a caller running only the occlusion
+        // denoiser never produces one, and record() only refuses a null here when the plan it was
+        // handed actually asks for the slot -- which is exactly what selecting denoisers by index
+        // is for.
+        rhi::TextureHandle diffuseRadianceHitDist = 0;
     };
 
     // Creates the NRD instance, its pipelines and nothing size-dependent. Returns false -- and says
@@ -78,6 +84,11 @@ public:
     // the texture merely holds stale data, because on the first frame it holds nothing at all.
     [[nodiscard]] rhi::TextureHandle outputDiffuseHitDistance() const { return outDiffHitDist_; }
 
+    // The denoised diffuse RADIANCE (rgb) and hit distance (a), from ReblurDiffuse. Zero on any
+    // frame that denoiser did not run, for the same reason and with the same contract as the
+    // occlusion output above.
+    [[nodiscard]] rhi::TextureHandle outputDiffuseRadianceHitDistance() const { return outDiffRadHitDist_; }
+
 private:
     // One dispatch's descriptor table. Created once per plan slot and rewritten before ANY dispatch
     // is recorded, never between them -- see record() for why that ordering is load-bearing.
@@ -100,7 +111,9 @@ private:
     std::vector<Slot>                slots_;          // one per dispatch in the plan
 
     rhi::TextureHandle outDiffHitDist_ = 0;
+    rhi::TextureHandle outDiffRadHitDist_ = 0;
     u32  width_ = 0, height_ = 0;
+    u32  failedWidth_ = 0, failedHeight_ = 0;   // the size whose pools would not allocate
     bool historyStale_ = true;
     u32  loggedPlanSize_ = 0;   // so the plan is described once, not every frame
 };

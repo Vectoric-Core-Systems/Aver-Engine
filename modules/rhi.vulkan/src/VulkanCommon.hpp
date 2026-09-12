@@ -343,6 +343,8 @@ inline VkFormat toVkFormat(Format f) {
         case Format::RG16F:          return VK_FORMAT_R16G16_SFLOAT;
         case Format::RGB10A2Unorm:   return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
         case Format::R16Unorm:       return VK_FORMAT_R16_UNORM;
+        case Format::R16F:           return VK_FORMAT_R16_SFLOAT;
+        case Format::R8Uint:         return VK_FORMAT_R8_UINT;
         case Format::R16Uint:        return VK_FORMAT_R16_UINT;
         case Format::BC1Unorm:       return VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
         case Format::BC1UnormSrgb:   return VK_FORMAT_BC1_RGBA_SRGB_BLOCK;
