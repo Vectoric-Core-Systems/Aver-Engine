@@ -2459,7 +2459,31 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
     q.TraceRayInline(gScene, RAY_FLAG_NONE, AVER_RT_MASK_OPAQUE_ALL, r);
     averRtProceedSolid(q);
-    if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) return false;
+    // ---- A MISS IS A SAMPLE OF THE SKY, NOT A FAILED SAMPLE ----
+    //
+    // This used to `return false`, and that is the single clearest reason the reported darkness is
+    // ReSTIR-ONLY: a cosine-weighted ray that escapes carries the sky's radiance, and for a shadowed
+    // surface under an open arcade the sky is most of the hemisphere and therefore most of the true
+    // indirect term. coneTracedIndirect gathers it (the volume is injected with sky), so switching
+    // Indirect diffuse from Voxel cones to ReSTIR dropped that entire contribution on the floor --
+    // exactly the surfaces the user reports going near-black while sunlit ones stay correct.
+    //
+    // IT ALSO COST THE ESTIMATOR ITS ANCHOR. Returning false leaves `initial` empty with M = 0, and
+    // the MIS denominator is seeded `selectedTargetPdf * inputReservoir.M` -- so a miss was not
+    // counted even as an observation. The fresh candidate is the only term in the whole recursion
+    // pinned to a physically-derived 1/pdf; losing it on miss-heavy pixels leaves the estimate
+    // free-running on reused weights alone.
+    //
+    // averSkyRadianceCheap IS THE SIBLING'S OWN FUNCTION, not a new sky model -- rtAmbientTraced
+    // shades its own escaping rays with it, so the two ray paths now agree about what the sky is
+    // worth. sampleNormal faces back down the ray, and samplePos sits at TMax so the Jacobian sees a
+    // real, finite direction rather than a degenerate one.
+    if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {
+        samplePos      = wpos + dir * r.TMax;
+        sampleNormal   = -dir;
+        sampleRadiance = clamp(averSkyRadianceCheap(dir) * gAmbient.r, 0.0, AVER_VOX_MAXRAD);
+        return true;
+    }
 
     RtInstance inst = gRtInstances[q.CommittedInstanceID()];
     uint tri = inst.firstIndex + q.CommittedPrimitiveIndex() * 3;
@@ -2597,7 +2621,28 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         stparams.depthThreshold        = 0.1;
         stparams.normalThreshold       = 0.5;
         stparams.maxHistoryLength      = 20;
-        stparams.enableFallbackSampling = 1;
+        // ---- 0, AND THE 1 IT REPLACES WAS DISARMING EVERY SPATIAL TAP ----
+        //
+        // `usingFallback` inside RTXDI_GISpatioTemporalResampling is a LATCH, not a per-tap flag: it
+        // is set when the temporal taps fail, never cleared, and the loop then runs the fallback tap
+        // AND all 8 spatial taps with `!usingFallback && !RTXDI_IsValidNeighbor(...)` short-circuited.
+        // Camera motion is precisely what makes the temporal taps fail, so in motion every spatial
+        // tap at radius 32 was landing on arbitrary pixels -- sky, disoccluded, anything -- with no
+        // depth or normal test between them and the combine. RAB_AreMaterialsSimilar returns true
+        // unconditionally here, and the only remaining gate, RTXDI_IsValidGIReservoir, tests M != 0,
+        // which is a property of the reservoir SLOT and not of the surface.
+        //
+        // WHAT THAT COST, and it is the motion half of the reported bug: an invalid neighbour enters
+        // the MIS NUMERATOR (targetPdf * jacobian * W * M) but contributes nothing to the DENOMINATOR,
+        // because piSum is built from the selected sample's pdf evaluated AT THAT NEIGHBOUR'S surface
+        // -- which is invalid, so RAB_GetGISampleTargetPdfForSurface correctly returns 0. Streams in
+        // the numerator and absent from the denominator inflate W by up to 180x (9 streams x M=20
+        // against a seed of 1). That is the frame washing out the instant the camera moves.
+        //
+        // Turning it off costs the fallback's intended job -- finding SOME temporal history after a
+        // disocclusion -- and that is the correct trade: with the similarity test disarmed it was not
+        // finding history, it was reusing 32-pixel-distant strangers indiscriminately.
+        stparams.enableFallbackSampling = 0;
         stparams.biasCorrectionMode    = RTXDI_BIAS_CORRECTION_BASIC;
         stparams.maxReservoirAge       = 30;
         stparams.enablePermutationSampling = 0;
@@ -2645,6 +2690,27 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     // it are rarely coplanar), and that pixel falls back to a fresh candidate exactly as if no
     // history existed at all. The cost is LOST TEMPORAL REUSE behind glass -- one extra frame of
     // noise where reuse should have carried over -- not wrong light.
+    // ---- NEVER STORE A CORPSE: weightSum 0 with M != 0 POISONS EVERY PIXEL THAT TAPS IT ----
+    //
+    // RTXDI_FinalizeGIResampling writes ONLY weightSum -- it never touches M or radiance. So a
+    // reservoir whose MIS numerator finalised to zero is stored carrying weightSum = 0, a fully
+    // bright radiance, and an M of up to 181. RTXDI_IsValidGIReservoir tests `M != 0` and nothing
+    // else, so next frame that corpse is a perfectly valid neighbour: it adds `ps * M` to piSum and
+    // `targetPdf * jacobian * 0 * M` -- exactly zero -- to the numerator. It is pure denominator.
+    //
+    // THAT MAKES BLACKNESS CONTAGIOUS, and it is the still-camera half of the bug. One dead tap among
+    // nine costs the surviving pixels about 21x; those pixels then finalise darker, some of them to
+    // zero, and spread it to the nine that tap THEM next frame. It converges to black over a second
+    // or two of holding still, and one camera movement rejects the history and hides it again.
+    //
+    // AND d4e56396 IS WHAT MANUFACTURES THE CORPSES, so this is the other half of that fix rather
+    // than a separate concern: making RAB_GetGISampleTargetPdfForSurface return 0 for an invalid
+    // surface was right -- an absent surface must not contribute a weight -- but a zero arriving as
+    // `pi` finalises the whole reservoir to zero, and nothing was stopping that being written back.
+    //
+    // An M = 0 reservoir is skipped by RTXDI_IsValidGIReservoir at the top of the neighbour loop, so
+    // emptying it here removes it from both sums instead of leaving it in one.
+    if (result.weightSum <= 0.0) result = RTXDI_EmptyGIReservoir();
     RTXDI_StoreGIReservoir(result, resParams, pixelPos, writeSlice);
 
     // NEXT FRAME'S "previous surface" -- see gGiSurfPosHist/gGiSurfNrmHist's own declaration for
