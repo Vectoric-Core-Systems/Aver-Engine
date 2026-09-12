@@ -15,6 +15,7 @@
 #endif
 
 #include <cctype>
+#include <cstdio>
 #include <filesystem>
 
 #if AVER_WITH_IMGUI
@@ -235,7 +236,18 @@ void AssetEditorHost::drawClosePrompt(float dpi) {
 
 namespace {
 
-// Read-only viewer for one .ocmesh file: counts, bounds and submesh table.
+// Viewer AND (as of ITEM 1.2) editor for one .ocmesh file: counts, bounds, an editable material-slot
+// list, a read-only UV-shell wireframe, and the submesh table.
+//
+// MeshEditor had never written an .ocmesh before this. save() reuses fmt::saveOcMesh on `mesh_` --
+// the SAME struct parseOcMesh (via loadOcMesh) populated, edited in place -- rather than rebuilding a
+// fresh OcMeshData from scratch, which is what keeps every chunk the parser captured (skin joints/
+// weights, multi-LOD Trifactor cluster data, ...) but this editor never surfaces intact through a
+// save, instead of silently dropping it the way "rebuild from what the UI shows" would. Proven, not
+// assumed: TrifactorTest.cpp's "ITEM 1.2 GATE" combines skin + multi-LOD cluster data + multiple
+// material slots in one mesh, round-trips it through real files with zero edits, and asserts the
+// result is BYTE-IDENTICAL to the original -- see that test for the one chunk this format does NOT
+// actually carry (a second UV set) and why "extra UV sets" could not be included in that fixture.
 class MeshEditor final : public AssetEditor {
 public:
     // Loads the mesh; a failed load is shown as an error page.
@@ -247,8 +259,30 @@ public:
     const std::string& path() const override { return path_; }
 
     // Window title: file name plus a kind tag.
+    //
+    // No manual dirty marker: the host passes ImGuiWindowFlags_UnsavedDocument for every editor whose
+    // dirty() is true (AssetEditorHost::draw, above), so adding one here would double it up -- the
+    // same convention BtEditor/SoundEditor's own title() comments already document.
     std::string title() const override {
         return std::filesystem::path(path_).filename().string() + "  [Mesh]";
+    }
+
+    // True once a material slot has been renamed, added or removed. Geometry/bounds/submesh ranges
+    // are still read-only (no UI mutates them), so this can only ever be set from drawMaterialSlots().
+    bool dirty() const override { return dirty_; }
+
+    // Writes `mesh_` back via the SAME fmt::saveOcMesh every other .ocmesh writer in this tree uses --
+    // see this class's own header comment for why editing `mesh_` in place (rather than reconstructing
+    // an OcMeshData from what the UI shows) is what keeps every chunk this editor never surfaces
+    // (skin, multi-LOD cluster data, ...) intact through a save.
+    bool save(std::string* why) override {
+        if (!loaded_) {
+            if (why) *why = "cannot save: this file failed to load in the first place";
+            return false;
+        }
+        if (!fmt::saveOcMesh(path_, mesh_, why)) return false;
+        dirty_ = false;
+        return true;
     }
 
     // Draws the mesh summary, or the load error.
@@ -276,6 +310,14 @@ public:
             ImGui::Text("Min   %8.1f  %8.1f  %8.1f", lo.x, lo.y, lo.z);
             ImGui::Text("Max   %8.1f  %8.1f  %8.1f", hi.x, hi.y, hi.z);
             ImGui::Text("Size  %8.1f  %8.1f  %8.1f  cm", hi.x - lo.x, hi.y - lo.y, hi.z - lo.z);
+        }
+
+        if (ImGui::CollapsingHeader("Material Slots", ImGuiTreeNodeFlags_DefaultOpen)) {
+            drawMaterialSlots();
+        }
+
+        if (ImGui::CollapsingHeader("UV Layout")) {
+            drawUvWireframe();
         }
 
         if (ImGui::CollapsingHeader("Submeshes", ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -415,6 +457,101 @@ private:
                               static_cast<u32>(mesh_.indices.size()));
     }
 
+    // ITEM 1.2 (i): the material-slot list, editable. OcMeshSubmesh::materialSlot is a POSITIONAL
+    // index into OcMeshData::materialSlots (§5.6), not a token, so removing a slot has to fix up every
+    // submesh that pointed at it or past it -- leaving a dangling index would read the wrong name (or
+    // past the end) the moment the mesh reloads.
+    void drawMaterialSlots() {
+        int removeIdx = -1;
+        for (usize i = 0; i < mesh_.materialSlots.size(); ++i) {
+            ImGui::PushID(static_cast<int>(i));
+            char buf[128];
+            std::snprintf(buf, sizeof buf, "%s", mesh_.materialSlots[i].c_str());
+            ImGui::SetNextItemWidth(-96.0f);
+            if (ImGui::InputText("##slotname", buf, sizeof buf)) {
+                mesh_.materialSlots[i] = buf;
+                dirty_ = true;
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("slot %zu", i);
+            ImGui::SameLine();
+            // A mesh needs at least one slot for its submeshes to resolve against -- see
+            // OcMeshSubmesh::materialSlot's own comment above -- so the last one cannot be removed
+            // from here; renaming or adding are still available.
+            ImGui::BeginDisabled(mesh_.materialSlots.size() <= 1);
+            if (ImGui::SmallButton("Remove")) removeIdx = static_cast<int>(i);
+            ImGui::EndDisabled();
+            ImGui::PopID();
+        }
+        if (removeIdx >= 0) {
+            mesh_.materialSlots.erase(mesh_.materialSlots.begin() + removeIdx);
+            for (fmt::OcMeshSubmesh& s : mesh_.submeshes) {
+                if (s.materialSlot == static_cast<u32>(removeIdx)) s.materialSlot = 0;
+                else if (s.materialSlot > static_cast<u32>(removeIdx)) --s.materialSlot;
+            }
+            dirty_ = true;
+        }
+        if (ImGui::SmallButton("Add Slot")) {
+            mesh_.materialSlots.push_back("M_Slot" + std::to_string(mesh_.materialSlots.size()));
+            dirty_ = true;
+        }
+    }
+
+    // ITEM 1.2 (ii): a READ-ONLY wireframe of every LOD-0 triangle's UV shell. mesh_.uvs is already
+    // flat, per-vertex data (§5.2 UV0) -- no format change needed, only a new view onto data the
+    // parser already captures. Judged by eye only: there is no oracle for "does this UV layout look
+    // right", so this is never compared against a rendered image or a recorded baseline anywhere.
+    void drawUvWireframe() {
+        if (mesh_.uvs.size() < 2 || mesh_.indices.size() < 3) {
+            ImGui::TextDisabled("No UVs to show.");
+            return;
+        }
+        const f32 avail = std::max(64.0f, ImGui::GetContentRegionAvail().x);
+        const f32 side = std::min(avail, 420.0f);
+        ImGui::InvisibleButton("##uvcanvas", ImVec2(side, side));
+        const ImVec2 p0 = ImGui::GetItemRectMin();
+        const ImVec2 p1 = ImGui::GetItemRectMax();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddRectFilled(p0, p1, IM_COL32(24, 24, 28, 255));
+        dl->AddRect(p0, p1, IM_COL32(90, 90, 100, 255));
+        // Quarter gridlines at 0/.25/.5/.75/1 on both axes, purely for orientation.
+        for (int i = 1; i < 4; ++i) {
+            const f32 t = static_cast<f32>(i) / 4.0f;
+            const f32 x = p0.x + t * side, y = p0.y + t * side;
+            dl->AddLine(ImVec2(x, p0.y), ImVec2(x, p1.y), IM_COL32(60, 60, 68, 255));
+            dl->AddLine(ImVec2(p0.x, y), ImVec2(p1.x, y), IM_COL32(60, 60, 68, 255));
+        }
+
+        // UV -> canvas, V flipped to the usual texture-space convention (V=0 at the top). Clipped to
+        // the canvas rect: a tiled UV set legitimately runs outside [0,1], and without a clip its
+        // edges would be drawn over whatever ImGui content sits next to this panel.
+        const u32 vcount = mesh_.vertexCount();
+        const f32 baseX = p0.x, baseY = p0.y;
+        const auto toPt = [baseX, baseY, side, this](u32 vi) {
+            const f32 u = mesh_.uvs[usize(vi) * 2 + 0], v = mesh_.uvs[usize(vi) * 2 + 1];
+            return ImVec2(baseX + u * side, baseY + (1.0f - v) * side);
+        };
+
+        // A dense LOD-0 could be hundreds of thousands of edges; this is a debug view, not a
+        // renderer, so triangles beyond the cap are simply not drawn rather than stalling the frame.
+        constexpr usize kMaxTris = 20000;
+        const usize triCount = mesh_.indices.size() / 3;
+        const usize shown = std::min(triCount, kMaxTris);
+        dl->PushClipRect(p0, p1, true);
+        for (usize t = 0; t < shown; ++t) {
+            const u32 ia = mesh_.indices[t * 3 + 0], ib = mesh_.indices[t * 3 + 1], ic = mesh_.indices[t * 3 + 2];
+            if (ia >= vcount || ib >= vcount || ic >= vcount) continue;
+            const ImVec2 a = toPt(ia), b = toPt(ib), c = toPt(ic);
+            const ImU32 col = IM_COL32(120, 190, 255, 160);
+            dl->AddLine(a, b, col);
+            dl->AddLine(b, c, col);
+            dl->AddLine(c, a, col);
+        }
+        dl->PopClipRect();
+        if (triCount > kMaxTris)
+            ImGui::TextDisabled("Showing %zu of %zu triangles (capped).", shown, triCount);
+    }
+
     rhi::MeshHandle gpuMesh_ = 0;
     bool uploadTried_ = false;
     bool framed_ = false;
@@ -424,6 +561,7 @@ private:
     fmt::OcMeshData mesh_;
     std::string error_;
     bool loaded_ = false;
+    bool dirty_ = false;   // set only by drawMaterialSlots(); see dirty()'s own comment
 };
 
 } // namespace

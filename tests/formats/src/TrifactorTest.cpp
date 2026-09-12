@@ -1142,6 +1142,127 @@ int main() {
         check(report.ok, "validateLodDag passes");
     }
 
+    AVER_INFO("=== ITEM 1.2 GATE: a mesh carrying EVERY optional chunk together round-trips through a "
+              "real file with zero drift (the exact path MeshEditor's save() will take) ===");
+    {
+        // MeshEditor has never written an .ocmesh. Before shipping ANY save path from it, the task
+        // brief demands proof that load -> save with no edits is byte-identical for a mesh carrying
+        // every optional chunk at once -- skin joints/weights, multiple LOD levels with Trifactor
+        // cluster data, and multiple material slots (see this test's own header comment on why "extra
+        // UV sets" is NOT included: OcMeshData has no second UV channel field at all -- kOcMeshHasUV1
+        // is declared in OcMesh.hpp and named in FORMAT_SPECS.md 5.1/5.2, but writeOcMesh always
+        // clears the bit and never sets it, parseOcMesh has no kSemUV1 case, and grepping the whole
+        // tree turns up no second uvs array anywhere -- so a real "second UV set" fixture cannot be
+        // built at all with what this format currently implements. That is a premise gap in the task
+        // brief, not a bug this item fixes; see the session report for the full trail).
+        //
+        // The other three DO combine here, in one mesh, saved through REAL FILES in a temp directory
+        // (never anything under "Aver Projects") -- not just in-memory vectors -- because that is the
+        // actual code path AssetEditor::save() drives: open a file, parse it, and on Ctrl+S/Save write
+        // it back with whatever the parser captured. If the writer silently dropped a chunk the parser
+        // did not fully capture, this is where it would show up.
+        fmt::OcMeshData mesh = makeSkinnedGridMesh(16);   // skin: joints/weights, non-uniform (see
+                                                           // makeSkinnedGridMesh's own comment on why)
+        check(mesh.hasSkin(), "the fixture starts out skinned");
+
+        // Multiple material slots: split the grid's triangle list in half between two submeshes/slots
+        // (mirrors MeshTest's makeCube fixture, which uses this same two-submesh shape for its own
+        // material-slot survival check).
+        const u32 totalIdx = static_cast<u32>(mesh.indices.size());
+        const u32 half = (totalIdx / 2) - (totalIdx / 2) % 3;   // keep the split on a triangle boundary
+        check(half > 0 && half < totalIdx, "the split point is a real, non-degenerate triangle boundary");
+        mesh.submeshes.clear();
+        mesh.submeshes.push_back(fmt::OcMeshSubmesh{"grid_a", 0, 0, half, 0, mesh.vertexCount()});
+        mesh.submeshes.push_back(fmt::OcMeshSubmesh{"grid_b", 1, half, totalIdx - half, 0, mesh.vertexCount()});
+        mesh.materialSlots = {"M_GridA", "M_GridB"};
+
+        // Multiple LOD levels / Trifactor cluster data: the same buildClusters -> buildLodHierarchy ->
+        // packLodDag pipeline ConvertTool and RelodTool's write path use, run on the now-skinned,
+        // now-multi-material mesh -- packLodDag "never touches mesh.positions/indices/submeshes/
+        // materialSlots/joints/weights" (its own doc comment, ClusterBuilder.hpp), which is exactly
+        // the independence this combined fixture is checking is actually true rather than merely
+        // documented.
+        trifactor::LodDag dag;
+        std::string why;
+        check(trifactor::buildClusters(mesh, dag, &why), "buildClusters on the combined fixture: " + why);
+        check(trifactor::buildLodHierarchy(mesh, dag, &why), "buildLodHierarchy: " + why);
+        check(dag.levelCount() >= 2,
+              "the fixture actually produces more than one LOD level (got " +
+                  std::to_string(dag.levelCount()) + ")");
+        std::string packWhy;
+        check(trifactor::packLodDag(dag, mesh, &packWhy), "packLodDag: " + packWhy);
+        check(!mesh.coarserLods.empty(), "the fixture has coarser LODs to persist");
+        check(mesh.hasSkin(), "packLodDag did not disturb the skin streams");
+        check(mesh.materialSlots.size() == 2 && mesh.submeshes.size() == 2,
+              "packLodDag did not disturb the material slots/submeshes");
+
+        // ---- through REAL FILES, in a temp directory ----
+        const std::filesystem::path dir =
+            std::filesystem::temp_directory_path() / "aver-mesheditor-gate";
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        const std::string path = (dir / "combined.ocmesh").string();
+
+        check(fmt::saveOcMesh(path, mesh, &why), "the combined fixture saves to a real file: " + why);
+
+        fmt::OcMeshData loaded;
+        check(fmt::loadOcMesh(path, loaded, &why), "MeshEditor's open path loads it back: " + why);
+        check(loaded.hasSkin(), "skin survived the file round trip");
+        check(loaded.coarserLods.size() == mesh.coarserLods.size(), "LOD count survived the file round trip");
+        check(loaded.materialSlots.size() == 2 && loaded.materialSlots[0] == "M_GridA" &&
+                  loaded.materialSlots[1] == "M_GridB",
+              "both material slot names survived the file round trip");
+        check(loaded.submeshes.size() == 2, "both submeshes survived the file round trip");
+        check(loaded.joints == mesh.joints && loaded.weights == mesh.weights,
+              "joints and weights survive the file round trip byte for byte");
+
+        // ---- THE GATE ITSELF: MeshEditor's save(), with NO edits, must reproduce the file exactly.
+        // Read the original bytes back off disk (not the in-memory `mesh` -- the point is to compare
+        // against what is ACTUALLY on disk, the same way a user reopening the file and hitting Ctrl+S
+        // would), save the freshly-loaded struct to a second path, and compare byte for byte. ----
+        std::vector<u8> onDiskBytes;
+        {
+            std::FILE* fp = std::fopen(path.c_str(), "rb");
+            check(fp != nullptr, "the original file reopens for a raw byte comparison");
+            if (fp) {
+                std::fseek(fp, 0, SEEK_END);
+                const long n = std::ftell(fp);
+                std::fseek(fp, 0, SEEK_SET);
+                onDiskBytes.resize(static_cast<usize>(n));
+                const usize got = std::fread(onDiskBytes.data(), 1, onDiskBytes.size(), fp);
+                std::fclose(fp);
+                check(got == onDiskBytes.size(), "the whole original file was read");
+            }
+        }
+
+        const std::string resavedPath = (dir / "combined_resaved.ocmesh").string();
+        check(fmt::saveOcMesh(resavedPath, loaded, &why),
+              "MeshEditor's save(), applied to the just-loaded struct with NO edits: " + why);
+
+        std::vector<u8> resavedBytes;
+        {
+            std::FILE* fp = std::fopen(resavedPath.c_str(), "rb");
+            check(fp != nullptr, "the resaved file reopens for a raw byte comparison");
+            if (fp) {
+                std::fseek(fp, 0, SEEK_END);
+                const long n = std::ftell(fp);
+                std::fseek(fp, 0, SEEK_SET);
+                resavedBytes.resize(static_cast<usize>(n));
+                const usize got = std::fread(resavedBytes.data(), 1, resavedBytes.size(), fp);
+                std::fclose(fp);
+                check(got == resavedBytes.size(), "the whole resaved file was read");
+            }
+        }
+
+        check(!onDiskBytes.empty() && onDiskBytes == resavedBytes,
+              "BYTE-IDENTICAL: load -> save with no edits reproduces the original file exactly, for a "
+              "mesh carrying skin + multi-LOD Trifactor cluster data + multiple material slots all at "
+              "once (" + std::to_string(onDiskBytes.size()) + " vs " + std::to_string(resavedBytes.size()) +
+              " bytes) -- MeshEditor's save path is safe to ship for (i) the material-slot editor");
+
+        std::filesystem::remove_all(dir, ec);
+    }
+
     if (g_failures == 0) AVER_INFO("=== all {} Trifactor checks passed ===", g_checks);
     else                 AVER_ERROR("=== {} of {} Trifactor checks FAILED ===", g_failures, g_checks);
     return g_failures == 0 ? 0 : 1;
