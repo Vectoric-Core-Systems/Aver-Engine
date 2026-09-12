@@ -671,7 +671,14 @@ static void testPack() {
     // tautology and what these two files can silently do that no offsetof can see.
     {
         const std::string prelude = readRepoFile("modules/render.pbr/shaders/material_prelude.hlsl");
-        const std::string voxi    = readRepoFile("modules/render.voxi/shaders/voxi.hlsl");
+        // BOTH HALVES OF THE VOXI SHADER, because it is no longer one file. `struct RtMaterial`
+        // moved into voxi_rt.hlsli when voxi.hlsl was split, and reading only voxi.hlsl made
+        // blockAfter() return nothing -- which this block's own guard comment predicts would let the
+        // ordering loop pass without comparing anything. Concatenating the two keeps the assertion
+        // about the SHADER rather than about a filename, so the struct moving between voxi.hlsl and
+        // its includes is a refactor this test correctly ignores.
+        const std::string voxi    = readRepoFile("modules/render.voxi/shaders/voxi.hlsl") + "\n" +
+                                    readRepoFile("modules/render.voxi/shaders/voxi_rt.hlsli");
         // A MISSING FILE IS A FAILURE, NOT A SKIP. Every declPos below would return npos against an
         // empty string and the ordering loop would pass without comparing anything -- the exact
         // shape of guard this whole block exists because of.

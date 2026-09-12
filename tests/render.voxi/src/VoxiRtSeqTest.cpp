@@ -18,6 +18,7 @@
 // the HLSL, not the compiled shader. Nothing in this process runs DXC or a GPU. The mirror is tied
 // to the shader by the source assertions at the bottom, which read the shader text the renderer
 // actually compiles and fail if the expression drifts from the one modelled here.
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 
@@ -146,15 +147,36 @@ f32 minSeparation(Generator gen, u32 n, f32 ang0) {
 // that proves nothing while reporting success.
 const std::string& hlslText() {
     static const std::string s = [] {
-        const std::string path = std::string(AVER_REPO_ROOT) + "/modules/render.voxi/shaders/voxi.hlsl";
-        std::ifstream f(path, std::ios::binary);
-        if (!f) {
-            AVER_ERROR("[VoxiRtSeq] cannot read {} -- every source assertion below would pass "
-                       "vacuously against an empty string, so this is a failure, not a skip.", path);
+        // THE SHADER IS A DIRECTORY NOW, NOT A FILE, and this test found that out the hard way:
+        // voxi.hlsl was split into voxi_rt.hlsli / voxi_restir.hlsli / voxi_cone.hlsli, the sampling
+        // primitives this file mirrors (rtDiscSample, rtRadicalInverse2) moved into voxi_rt.hlsli,
+        // and five assertions here failed at once while the SHADER WAS ENTIRELY CORRECT. The test
+        // was asserting about a filename; what it means to assert about is the Voxi shader source.
+        //
+        // Concatenating voxi.hlsl with every voxi_*.hlsli beside it fixes that permanently: code
+        // moving between those files is a refactor this test should not notice, and code leaving
+        // them altogether still fails it, which is the behaviour worth keeping. Order does not
+        // matter -- every assertion below is a substring search, not a parse.
+        const std::string dir = std::string(AVER_REPO_ROOT) + "/modules/render.voxi/shaders";
+        std::ostringstream ss;
+        u32 read = 0;
+        std::error_code ec;
+        for (const auto& e : std::filesystem::directory_iterator(dir, ec)) {
+            const std::string name = e.path().filename().string();
+            const bool wanted = name == "voxi.hlsl" ||
+                                (name.rfind("voxi_", 0) == 0 && e.path().extension() == ".hlsli");
+            if (!wanted) continue;
+            std::ifstream f(e.path(), std::ios::binary);
+            if (!f) continue;
+            ss << f.rdbuf() << '\n';
+            ++read;
+        }
+        if (read == 0) {
+            AVER_ERROR("[VoxiRtSeq] read no shader source from {} -- every source assertion below "
+                       "would pass vacuously against an empty string, so this is a failure, not a "
+                       "skip.", dir);
             return std::string();
         }
-        std::ostringstream ss;
-        ss << f.rdbuf();
         return ss.str();
     }();
     return s;
