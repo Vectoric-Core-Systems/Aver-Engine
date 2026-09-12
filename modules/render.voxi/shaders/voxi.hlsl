@@ -2211,6 +2211,36 @@ bool RAB_AreMaterialsSimilar(RAB_MaterialData a, RAB_MaterialData b) { return tr
 // cosine is NOT constant across candidates -- each arrives from wherever its own traced ray happened
 // to land -- so it belongs here, in the resampling weight, and not only in the final estimator.
 float RAB_GetGISampleTargetPdfForSurface(float3 samplePosition, float3 sampleRadiance, RAB_Surface surface) {
+    // ---- NO SURFACE, NO TARGET PDF, and this guard is what makes the cosine above SAFE ----
+    //
+    // THE BUG IT CLOSES, because it is not obvious and it cost a day. Until the cosine was added
+    // this function IGNORED `surface` entirely -- it was luminance alone -- so it did not matter in
+    // the slightest what was passed in. Making it surface-dependent silently made it sensitive to
+    // an argument that is ROUTINELY INVALID, and nothing warned about that.
+    //
+    // Where the invalid surfaces come from: RTXDI's bias-correction pass evaluates the SELECTED
+    // sample's pdf at each NEIGHBOUR's surface (Rtxdi/GI/SpatioTemporalResampling.hlsli, the second
+    // loop's `ps`), and those neighbours come from RAB_GetGBufferSurface(idx, true). That legitimately
+    // answers "no surface" -- a pixel that was sky last frame, one outside the previous viewport, or
+    // any pixel at all on the first frame after the history pair is (re)created. Worse,
+    // enableFallbackSampling is 1, and the fallback tap deliberately SKIPS RTXDI_IsValidNeighbor, so
+    // an invalid neighbour reaches this function by design rather than by accident.
+    //
+    // What that produced: RAB_EmptySurface() reports worldPos (0,0,0) and normal (0,0,1), so the
+    // cosine was computed from the sample's ABSOLUTE world position against the Z axis -- for Sponza
+    // geometry metres above the origin that is close to 1, where a real receiving surface would have
+    // given perhaps 0.3. An inflated `ps` inflates piSum, and piSum is the DENOMINATOR of
+    // RTXDI_FinalizeGIResampling, so every reused sample came back systematically UNDER-weighted.
+    // At rest that compounds through the stored weight frame after frame and the indirect term sinks
+    // toward black; move the camera and the history is rejected, the estimate falls back to the
+    // single fresh candidate, and it snaps bright again. "Visible when I move, otherwise black" is
+    // that bias seen from both ends -- and it is ReSTIR-only, because nothing else consults a
+    // previous-frame surface this way.
+    //
+    // Zero is the honest answer and the one RIS wants: a stream whose surface does not exist
+    // contributes no candidate and must contribute no normalisation weight either.
+    if (!RAB_IsSurfaceValid(surface)) return 0.0;
+
     // Recomputed per candidate, not per pixel: samplePosition is wherever THIS candidate's ray
     // landed, independent of every other candidate sharing this surface, so it cannot be hoisted out
     // as a per-surface constant the way the BRDF's albedo/PI term above can.
