@@ -29,6 +29,14 @@ bool Recorder::create(rhi::IDevice& dev, const DenoiserKind* kinds, u32 count) {
     dev_ = &dev;
     res_ = dev.resources();
     if (!res_) return false;
+    // WHICH OUT_* TARGETS resize() WILL HAVE TO ALLOCATE, decided here because this is the only place
+    // that is ever told. See the members' own comment for why those targets are ours rather than
+    // NRD's, and why allocating the radiance one for a caller that never asked for REBLUR_DIFFUSE
+    // would be 8 bytes a pixel of waste.
+    for (u32 i = 0; i < count; ++i) {
+        if (kinds[i] == DenoiserKind::ReblurDiffuseOcclusion) wantDiffHitDist_    = true;
+        if (kinds[i] == DenoiserKind::ReblurDiffuse)          wantDiffRadHitDist_ = true;
+    }
     if (!denoiser_.create(kinds, count)) {
         AVER_WARN("[NRD] could not create an instance for {} denoiser(s)", count);
         return false;
@@ -105,6 +113,9 @@ void Recorder::releasePools() {
     for (rhi::TextureHandle t : transient_) if (t) res_->destroyTexture(t);
     permanent_.clear();
     transient_.clear();
+    if (outDiffHitDistTex_)    { res_->destroyTexture(outDiffHitDistTex_);    outDiffHitDistTex_ = 0; }
+    if (outDiffRadHitDistTex_) { res_->destroyTexture(outDiffRadHitDistTex_); outDiffRadHitDistTex_ = 0; }
+    if (mvScratch_)            { res_->destroyTexture(mvScratch_);            mvScratch_ = 0; }
     for (Slot& s : slots_) if (s.set) res_->destroyBindingSet(s.set);
     slots_.clear();
     outDiffHitDist_ = 0;
@@ -121,6 +132,7 @@ void Recorder::destroy() {
     width_ = height_ = 0;
     historyStale_ = true;
     loggedPlanSize_ = 0;
+    wantDiffHitDist_ = wantDiffRadHitDist_ = false;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -176,6 +188,32 @@ bool Recorder::resize(u32 width, u32 height) {
         if (!t) { releasePools(); failedWidth_ = width; failedHeight_ = height; return false; }
         transient_.push_back(t);
     }
+    // ---- and the OUT_* targets, which are the integration's own (see the members' comment) ----
+    // Full resolution and never downsampled: NRD reports a downsampleFactor for its POOL textures
+    // and says nothing about these, because an output is the application's to size -- and every pass
+    // that writes one is dispatched over the full rect.
+    auto makeOut = [&](rhi::Format f, const char* what) -> rhi::TextureHandle {
+        rhi::TextureDesc d{};
+        d.width  = width_;
+        d.height = height_;
+        d.format = f;
+        d.bind   = static_cast<rhi::ResourceBind>(
+                       static_cast<u32>(rhi::ResourceBind::ShaderResource) |
+                       static_cast<u32>(rhi::ResourceBind::UnorderedAccess));
+        d.initialState = rhi::ResourceState::UnorderedAccess;
+        d.debugName = what;
+        const rhi::TextureHandle t = res_->createTexture(d);
+        if (!t) AVER_WARN("[NRD] {} failed to allocate at {}x{}", what, width_, height_);
+        return t;
+    };
+    if (wantDiffHitDist_) {
+        outDiffHitDistTex_ = makeOut(rhi::Format::R16Unorm, "NRD OUT_DIFF_HITDIST");
+        if (!outDiffHitDistTex_) { releasePools(); failedWidth_ = width; failedHeight_ = height; return false; }
+    }
+    if (wantDiffRadHitDist_) {
+        outDiffRadHitDistTex_ = makeOut(rhi::Format::RGBA16F, "NRD OUT_DIFF_RADIANCE_HITDIST");
+        if (!outDiffRadHitDistTex_) { releasePools(); failedWidth_ = width; failedHeight_ = height; return false; }
+    }
     failedWidth_ = failedHeight_ = 0;   // this size works; a later one may still not
     return true;
 }
@@ -183,17 +221,23 @@ bool Recorder::resize(u32 width, u32 height) {
 rhi::TextureHandle Recorder::poolTexture(SlotRole role, u32 index, const Inputs& in) const {
     switch (role) {
         case SlotRole::InViewZ:               return in.viewZ;
-        case SlotRole::InMotionVectors:       return in.motionVectors;
+        // THE SCRATCH, NOT THE CALLER'S TEXTURE -- see mvScratch_ in the header. REBLUR_DIFFUSE writes
+        // this slot, so handing over the engine's velocity target would both remove the device (no UAV
+        // flag on a render target) and corrupt a buffer the rest of the frame reads.
+        case SlotRole::InMotionVectors:       return mvScratch_ ? mvScratch_ : in.motionVectors;
         case SlotRole::InNormalRoughness:     return in.normalRoughness;
         case SlotRole::InDiffuseHitDistance:  return in.diffuseHitDist;
         case SlotRole::InDiffuseRadianceHitDistance: return in.diffuseRadianceHitDist;
         case SlotRole::PermanentPool:         return index < permanent_.size() ? permanent_[index] : 0;
         case SlotRole::TransientPool:         return index < transient_.size() ? transient_[index] : 0;
-        // OUT_DIFF_HITDIST is a pool texture like any other as far as NRD is concerned -- it hands
-        // back whichever permanent slot holds the result. It is resolved by the caller reading
-        // outputDiffuseHitDistance() after record(), which is set from whatever this dispatch bound.
-        case SlotRole::OutDiffuseHitDistance: return index < permanent_.size() ? permanent_[index] : 0;
-        case SlotRole::OutDiffuseRadianceHitDistance: return index < permanent_.size() ? permanent_[index] : 0;
+        // AN OUT_* SLOT IGNORES `index` ON PURPOSE. NRD leaves indexInPool unwritten for every
+        // non-pool resource type, so it arrives here as 0 for every dispatch; honouring it is what
+        // aliased both outputs onto permanent pool texture 0 and removed the device. The members'
+        // comment in the header has the full account. NRD also re-reads these targets between its own
+        // passes (Reblur_DiffuseOcclusion.hpp defines DIFF_TEMP1 as OUT_DIFF_HITDIST outright), which
+        // is why they are created with both binds rather than write-only.
+        case SlotRole::OutDiffuseHitDistance:         return outDiffHitDistTex_;
+        case SlotRole::OutDiffuseRadianceHitDistance: return outDiffRadHitDistTex_;
         default:                              return 0;
     }
 }
@@ -213,6 +257,39 @@ bool Recorder::record(rhi::IRenderContext& ctx, const FrameSettings& settings, c
         AVER_WARN("[NRD] record called with a null G-buffer input; skipping the pass");
         return false;
     }
+    // ---- NRD'S OWN COPY OF IN_MV, because NRD WRITES IN_MV (see mvScratch_ in the header) ----
+    // Allocated from the caller's own velocity texture so the format can never disagree -- a
+    // mismatched CopyResource is undefined on a release runtime rather than a failed call -- with only
+    // the bind flags and the resting state overridden. Lazy rather than in resize() because resize()
+    // is never told the velocity format; released with the pools, so a resolution change rebuilds it.
+    if (!mvScratch_) {
+        rhi::TextureDesc md{};
+        if (!res_->textureInfo(in.motionVectors, md)) {
+            AVER_WARN("[NRD] could not read the motion-vector texture's description; skipping the pass");
+            return false;
+        }
+        md.bind = static_cast<rhi::ResourceBind>(
+                      static_cast<u32>(rhi::ResourceBind::ShaderResource) |
+                      static_cast<u32>(rhi::ResourceBind::UnorderedAccess));
+        md.initialState = rhi::ResourceState::UnorderedAccess;
+        md.debugName    = "NRD IN_MV scratch (NRD writes this)";
+        mvScratch_      = res_->createTexture(md);
+        if (!mvScratch_) {
+            AVER_WARN("[NRD] could not allocate the IN_MV scratch copy; skipping the pass");
+            return false;
+        }
+    }
+    // BRACKETED AND PUT BACK, because the caller's velocity texture is a RENDER TARGET that the frame
+    // is about to clear and draw into. Leaving it in CopySource is not a silent inefficiency -- the
+    // very next ClearRenderTargetView on it is invalid (debug layer #538) and on a release runtime
+    // that is undefined rather than reported. The pass borrows the texture for one CopyResource and
+    // hands it back in exactly the state it was found in.
+    ctx.textureBarrier(in.motionVectors, rhi::ResourceState::RenderTarget, rhi::ResourceState::CopySource);
+    ctx.textureBarrier(mvScratch_, rhi::ResourceState::UnorderedAccess, rhi::ResourceState::CopyDest);
+    ctx.copyTexture(mvScratch_, in.motionVectors);
+    ctx.textureBarrier(mvScratch_, rhi::ResourceState::CopyDest, rhi::ResourceState::UnorderedAccess);
+    ctx.textureBarrier(in.motionVectors, rhi::ResourceState::CopySource, rhi::ResourceState::RenderTarget);
+
     if (!denoiser_.setFrameSettings(settings)) {
         AVER_WARN("[NRD] rejected this frame's settings");
         return false;

@@ -6509,6 +6509,24 @@ void D3D12ResourceFactory::setUav(BindingSetHandle set, u32 slot, TextureHandle 
     if (!s || !t) { AVER_ERROR("[RHI.D3D12] setUav with an invalid handle"); return; }
     if (slot >= s->uavCount) { AVER_ERROR("[RHI.D3D12] setUav slot {} past the {} declared", slot, s->uavCount); return; }
     if (mip == kAllMips || mip >= t->desc.mips) { AVER_ERROR("[RHI.D3D12] setUav needs a single valid mip"); return; }
+    // REFUSED RATHER THAN ATTEMPTED, BECAUSE ATTEMPTING IT REMOVES THE DEVICE. A texture created
+    // without ResourceBind::UnorderedAccess has no D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, and
+    // CreateUnorderedAccessView on one is not a failed call that returns an error -- D3D12 treats it
+    // as undefined behaviour and triggers RemoveDevice with DXGI_ERROR_INVALID_CALL on the spot. The
+    // whole adapter goes, the upload ring and every later CreateRootSignature fail, and the post
+    // chain cannot present. With the debug layer off it is completely silent about the cause; with it
+    // on it is debug layer #340, which is how this was finally found after it had been misattributed
+    // to NRD dispatch counts, to a resource state and to an unbound root CBV in turn.
+    //
+    // One line here converts the worst diagnostic in the engine into a named texture and a live frame.
+    if (!(static_cast<u32>(t->desc.bind) & static_cast<u32>(ResourceBind::UnorderedAccess))) {
+        AVER_ERROR("[RHI.D3D12] setUav slot {} binds texture '{}' ({}x{}), which was created without "
+                   "ResourceBind::UnorderedAccess -- refusing, because creating the view would remove "
+                   "the device. Add UnorderedAccess to its TextureDesc::bind.",
+                   slot, t->desc.debugName ? t->desc.debugName : "(unnamed)", t->desc.width,
+                   t->desc.height);
+        return;
+    }
 
     D3D12_UNORDERED_ACCESS_VIEW_DESC uv{};
     uv.Format = toDxgiSrvFormat(t->desc.format);

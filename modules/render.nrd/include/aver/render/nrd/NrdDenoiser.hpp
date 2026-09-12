@@ -109,8 +109,20 @@ enum class SlotRole : u8 {
     InDiffuseHitDistance,
     // RADIANCE AND HIT DISTANCE IN ONE TEXTURE, which is REBLUR_DIFFUSE's input and a different
     // signal from InDiffuseHitDistance above rather than a superset of it: rgb carries the diffuse
-    // radiance arriving at the pixel and a carries the NORMALISED distance it travelled. NRD packs
-    // and unpacks this pair itself on the shader side, so the engine writes the two channels raw.
+    // radiance arriving at the pixel and a carries the NORMALISED distance it travelled.
+    //
+    // THE PRODUCING SHADER MUST ENCODE BOTH CHANNELS; NRD DOES NOT DO IT FOR YOU. This comment used
+    // to say NRD packed and unpacked the pair itself and that the engine could write the two
+    // channels raw, and that was simply wrong -- REBLUR_FrontEnd_PackRadianceAndNormHitDist and
+    // REBLUR_BackEnd_UnpackRadianceAndNormHitDist (Shaders/NRD.hlsli) are helpers the PRODUCER and
+    // the CONSUMER call, not anything NRD's own passes apply on the way in. Two obligations follow,
+    // and neither fails loudly: rgb must be YCoCg, not linear RGB (the pack converts
+    // unconditionally, and REBLUR_Config.hlsli sets REBLUR_USE_YCOCG 1, so REBLUR filters chroma in
+    // that basis) and must be converted back by whoever reads the output; and a must be a hit
+    // distance normalised by REBLUR's OWN divisor, saturate(dist / ((A + |viewZ|*B) * lerp(C,1,smc)))
+    // with A/B/C from nrd::ReblurHitDistanceParameters -- not by any distance of the engine's
+    // choosing, or REBLUR sizes its blur kernel and its disocclusion logic off a number that means
+    // something else. See giRestirIndirect in voxi_restir.hlsli, which does both.
     InDiffuseRadianceHitDistance,
     InPenumbra,
     InTranslucency,
@@ -210,6 +222,41 @@ public:
 
     // Per frame, before dispatches(). False if NRD rejected the settings.
     bool setFrameSettings(const FrameSettings& s);
+
+    // ---- per-denoiser REBLUR tuning, and the hit-distance half of it is NOT optional ----
+    //
+    // Until this existed nothing in this seam ever called nrd::SetDenoiserSettings, so every REBLUR
+    // denoiser ran on nrd::ReblurSettings' own defaults. For most fields that is the right answer and
+    // still is -- these are NVIDIA's tuned numbers and this struct deliberately exposes only the two
+    // that the engine knows something NRD cannot.
+    //
+    // hitDistA IS A LENGTH, AND NRD'S DEFAULT IS IN METRES WHILE THIS ENGINE IS IN CENTIMETRES.
+    // REBLUR turns a hit distance into the normalised [0,1] value it filters by dividing by
+    // (A + |viewZ| * B) * lerp(C, 1, smc) -- NRD.hlsli's _REBLUR_GetHitDistanceNormalization -- and
+    // the producing shader must divide by the SAME thing before it writes the alpha channel. B is a
+    // ratio and C is a roughness scale, so both are unit-free; A is 3.0, meaning three METRES, and
+    // left at that against a centimetre viewZ it becomes three centimetres. The B term then
+    // dominates everywhere past 30cm of depth, so at 2m from the camera the divisor is 23cm and
+    // every GI bounce longer than that saturates to 1.0 -- the signal REBLUR sizes its blur kernel
+    // and its disocclusion logic from goes flat exactly where the geometry is closest. 300 is the
+    // same three metres, said in the engine's units.
+    //
+    // MIRRORED IN voxi_restir.hlsli (kNrdHitDistA/B/C in giRestirIndirect), because a shader cannot
+    // include this header and NRD's front-end pack helper lives in a vendored tree that is
+    // deliberately confined to this module. The two must agree; they are commented at each other.
+    struct ReblurTuning {
+        float hitDistA = 300.0f;   // cm -- NRD's 3.0 metres in engine units
+        float hitDistB = 0.1f;     // unit-free viewZ scale
+        float hitDistC = 20.0f;    // unit-free roughness scale; collapses to 1 at roughness 1
+        // Cheap and unbiased in most cases by NRD's own description, and on by default in
+        // nrd::ReblurSettings already -- named here so turning it OFF is a decision someone made
+        // rather than a default nobody saw.
+        bool  enableAntiFirefly = true;
+    };
+
+    // `denoiserIndex` is the index into the kinds array create() was given -- the same index
+    // dispatches() selects by. False if NRD rejected the settings or this build has no NRD.
+    bool setReblurTuning(u32 denoiserIndex, const ReblurTuning& s);
 
     // Plan this frame's work for the denoisers named by index into the create() array. `out` and
     // `outCount` are set to a buffer owned by this object, valid until the next call.

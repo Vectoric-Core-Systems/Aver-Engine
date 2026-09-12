@@ -300,6 +300,26 @@ bool Denoiser::setFrameSettings(const FrameSettings& s) {
            == ::nrd::Result::SUCCESS;
 }
 
+// See ReblurTuning in the header for why hitDistanceParameters.A must be restated in engine units
+// and for the shader-side mirror that has to agree with it.
+bool Denoiser::setReblurTuning(u32 denoiserIndex, const ReblurTuning& s) {
+    if (!valid()) {
+        return false;
+    }
+    // DEFAULT-CONSTRUCTED FIRST, then only the fields this seam names are overwritten: nrd::
+    // ReblurSettings carries roughly twenty tuned fields and SetDenoiserSettings replaces the whole
+    // block, so building it from {} is what keeps the other nineteen at NVIDIA's values instead of
+    // silently zeroing them.
+    ::nrd::ReblurSettings r{};
+    r.hitDistanceParameters.A = s.hitDistA;
+    r.hitDistanceParameters.B = s.hitDistB;
+    r.hitDistanceParameters.C = s.hitDistC;
+    r.enableAntiFirefly       = s.enableAntiFirefly;
+    return ::nrd::SetDenoiserSettings(*static_cast<::nrd::Instance*>(instance_),
+                                      static_cast<::nrd::Identifier>(denoiserIndex), &r)
+           == ::nrd::Result::SUCCESS;
+}
+
 bool Denoiser::dispatches(const u32* denoiserIndices, u32 indexCount,
                           const Dispatch*& out, u32& outCount) {
     out      = nullptr;
@@ -403,6 +423,7 @@ bool Denoiser::create(const DenoiserKind*, u32) { return false; }
 void Denoiser::destroy() {}
 InstanceLayout Denoiser::layout() { return {}; }
 bool Denoiser::setFrameSettings(const FrameSettings&) { return false; }
+bool Denoiser::setReblurTuning(u32, const ReblurTuning&) { return false; }
 bool Denoiser::dispatches(const u32*, u32, const Dispatch*& out, u32& outCount) {
     out = nullptr;
     outCount = 0;

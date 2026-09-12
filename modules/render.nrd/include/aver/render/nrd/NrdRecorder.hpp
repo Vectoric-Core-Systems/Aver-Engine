@@ -74,6 +74,13 @@ public:
     bool resize(u32 width, u32 height);
     [[nodiscard]] bool historyIsStale() const { return historyStale_; }
 
+    // Per-denoiser REBLUR tuning -- see Denoiser::ReblurTuning, which documents why the caller has to
+    // supply the hit-distance constants rather than accept NRD's. NRD keeps these until they are set
+    // again, so once after create() is enough; `denoiserIndex` indexes the kinds create() was given.
+    bool setReblurTuning(u32 denoiserIndex, const Denoiser::ReblurTuning& s) {
+        return denoiser_.setReblurTuning(denoiserIndex, s);
+    }
+
     // Plans and records one frame. `denoiserIndices` selects which of the denoisers passed to
     // create() run this frame, by the same index. Clears historyIsStale() on success.
     bool record(rhi::IRenderContext& ctx, const FrameSettings& settings, const Inputs& in,
@@ -109,6 +116,54 @@ private:
     std::vector<rhi::TextureHandle>  permanent_;
     std::vector<rhi::TextureHandle>  transient_;
     std::vector<Slot>                slots_;          // one per dispatch in the plan
+
+    // THE OUT_* SLOTS ARE OURS TO ALLOCATE, NOT NRD'S TO HAND BACK, and getting that backwards is
+    // what removed the device. NRD's own reference integration resolves a dispatch's resources three
+    // ways (Integration/NRDIntegration.hpp, _Dispatch): TRANSIENT_POOL and PERMANENT_POOL index its
+    // pools by ResourceDesc::indexInPool, and EVERY OTHER ResourceType -- every IN_* and every
+    // OUT_* -- is looked up by the resource TYPE in a snapshot the application filled in. For those
+    // types indexInPool is never written and stays 0, so reading it as a pool index silently aliases
+    // the output onto permanent pool texture 0, which for a REBLUR instance is its PREV_VIEWZ
+    // history (R32_SFLOAT, Source/Reblur.cpp).
+    //
+    // Two separate consequences followed, and only the second one was visible. The occlusion
+    // denoiser's output pass is compiled RWTexture2D<float> (REBLUR_Config.hlsli's REBLUR_TYPE under
+    // NRD_MODE_OCCLUSION), so a single-channel write into a single-channel R32_SFLOAT view did not
+    // fault -- it quietly corrupted NRD's own depth history and ran that way for as long as this
+    // pass has existed. REBLUR_DIFFUSE's output pass is compiled RWTexture2D<float4>, and
+    // D3D12ResourceFactory::setUav builds the descriptor from the bound texture's OWN format with no
+    // override, so that one bound a four-component shader to a one-component UAV: DEVICE_REMOVED on
+    // the first recorded frame, which is exactly where the bisection landed.
+    //
+    // FORMATS ARE NRD'S, NOT A CHOICE MADE HERE. Source/Reblur.cpp names REBLUR_FORMAT_OCCLUSION
+    // (R16_UNORM) for the occlusion result and REBLUR_FORMAT (RGBA16_SFLOAT, ".xyz - color, .w -
+    // normalized hit distance") for the radiance result, and those are the element types its shaders
+    // were compiled against. Allocated only for the denoisers create() was actually given, because
+    // the radiance target is 8 bytes a pixel at full resolution and an occlusion-only caller has no
+    // use for it.
+    rhi::TextureHandle outDiffHitDistTex_    = 0;   // OUT_DIFF_HITDIST, R16Unorm
+    rhi::TextureHandle outDiffRadHitDistTex_ = 0;   // OUT_DIFF_RADIANCE_HITDIST, RGBA16F
+
+    // ---- IN_MV IS AN OUTPUT TOO, WHICH NRD DOES NOT DOCUMENT ANYWHERE ----
+    //
+    // REBLUR_DIFFUSE's "Temporal stabilization" pass ends with PushOutput(AsUint(ResourceType::IN_MV))
+    // (Source/Denoisers/Reblur_Diffuse.hpp). NRD reuses the motion-vector texture as scratch and
+    // writes it through a UAV, and nothing in NRDDescs.h, NRDSettings.h or the README says so -- IN_MV
+    // is listed under "NON-NOISY INPUTS" with no hint that it is written. REBLUR_DIFFUSE_OCCLUSION has
+    // no stabilization pass and so never does this, which is exactly why the occlusion denoiser ran for
+    // as long as it did while adding the diffuse one removed the adapter on its first recorded frame.
+    //
+    // TWO REASONS THIS IS A COPY RATHER THAN JUST A UAV FLAG ON THE ENGINE'S TEXTURE. The first is
+    // mechanical: the G-buffer's velocity target is a RENDER TARGET, created without
+    // D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, and CreateUnorderedAccessView on such a resource is
+    // not a call that fails -- D3D12 calls RemoveDevice with DXGI_ERROR_INVALID_CALL and the whole
+    // adapter goes. The second is the one that matters more: the engine's motion vectors have other
+    // readers (the upscaler among them), and letting a denoiser scribble on a buffer the rest of the
+    // frame depends on would be a coupling no caller could see. NRD gets its own, and the engine's
+    // stays exactly what the G-buffer wrote.
+    rhi::TextureHandle mvScratch_ = 0;              // IN_MV, ours: same format, plus UnorderedAccess
+    bool wantDiffHitDist_    = false;               // a ReblurDiffuseOcclusion was requested
+    bool wantDiffRadHitDist_ = false;               // a ReblurDiffuse was requested
 
     rhi::TextureHandle outDiffHitDist_ = 0;
     rhi::TextureHandle outDiffRadHitDist_ = 0;

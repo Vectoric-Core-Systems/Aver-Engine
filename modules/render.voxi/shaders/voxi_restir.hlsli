@@ -68,6 +68,22 @@
 // the slice NOT being written this frame) -- no read of data this frame is still producing, no race,
 // so it drops into this single-pass pixel-shader design where the plain spatial variant cannot.
 
+// The cosine floor both of this file's candidate gates use, and the only bound that exists on a
+// stored reservoir's 1/pdf -- see giTraceInitialCandidate, where the cost of this particular number
+// is worked out. Named once so the two gates cannot drift apart again; they already had.
+#define AVER_GI_MIN_COS 0.05
+
+// REBLUR's hit-distance normalisation constants, MIRRORING aver::render::nrd::Denoiser::ReblurTuning
+// (modules/render.nrd/include/aver/render/nrd/NrdDenoiser.hpp), which is what actually configures the
+// denoiser. NRD normalises a hit distance by (A + |viewZ|*B) * lerp(C, 1, smc) and REQUIRES the
+// producing shader to have divided by the same thing -- NRD.hlsli's _REBLUR_GetHitDistanceNormalization
+// and REBLUR_FrontEnd_GetNormHitDist. A is a LENGTH in engine units (300cm = NRD's default 3m); B and
+// C are unit-free. Restated here rather than included because NRD's headers are confined to
+// modules/render.nrd by its vendoring terms, so these two declarations are commented at each other
+// and have to be changed together.
+#define AVER_NRD_HITDIST_A 300.0
+#define AVER_NRD_HITDIST_B 0.1
+
 // ---- the reservoir buffer RTXDI's own Reservoir.hlsli requires be defined before it is included ----
 // RTXDI_GI_RESERVOIR_BUFFER must already point at a declared RWStructuredBuffer<RTXDI_PackedGIReservoir>
 // by the time Reservoir.hlsli's own function bodies are parsed (it is a plain macro substitution,
@@ -377,7 +393,29 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     // for what a frozen-per-pixel sample cost the reflection ray before that was fixed.
     const float2 xi = rtDiscSample(0, rtHash(pixel) * 6.2831853 + frameJitter);
     const float  cosTheta = sqrt(saturate(1.0 - dot(xi, xi)));
-    if (cosTheta <= 1e-4) return false;
+    // ---- THE FLOOR IS A FIREFLY BOUND, AND 1e-4 WAS NOT ONE ----
+    //
+    // This cosTheta IS the sample pdf (cosTheta/PI), so the reservoir the caller builds from it
+    // carries weightSum = PI/cosTheta. At the old 1e-4 that is ~31,400, and the reason that was
+    // invisible for so long is that it CANCELS in the single-candidate case: the estimator
+    // multiplies by the receiver cosine at the same surface, so est reduces algebraically to plain
+    // `radiance` however small cosTheta got.
+    //
+    // IT STOPS CANCELLING THE MOMENT THE RESERVOIR IS REUSED. Stored unclamped, the same weightSum
+    // re-enters RIS next frame against a DIFFERENT receiver -- RTXDI_CombineGIReservoirs weighs it by
+    // a target pdf evaluated at that neighbour's surface, whose cosine has nothing to do with the
+    // grazing one that produced the weight. Nothing downstream bounds it either: the AVER_VOX_MAXRAD
+    // clamps cap sampleRadiance and the final on-screen estimate, and both run AFTER
+    // RTXDI_StoreGIReservoir, so the unbounded weight is what neighbours inherit. One pixel that
+    // happened to sample near its own tangent plane becomes a bright speck that spreads.
+    //
+    // 0.05 bounds weightSum at ~63 instead, a 500x cut in the worst case. What it costs is exactly
+    // measurable rather than guessed: for a cosine-weighted disc sample P(cosTheta < c) = c^2, so
+    // this discards 0.25% of directions, all of them within 3 degrees of the tangent plane where the
+    // Lambertian lobe carries least weight. Rejected rather than clamped -- clamping the pdf while
+    // keeping the sample would understate its weight and bias the whole estimator dark, which is the
+    // mistake this file has already made once.
+    if (cosTheta <= AVER_GI_MIN_COS) return false;
     float3 up = abs(N.z) < 0.9 ? float3(0, 0, 1) : float3(1, 0, 0);
     float3 T  = normalize(cross(up, N));
     float3 B  = cross(N, T);
@@ -520,7 +558,11 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     RTXDI_GIReservoir initial = RTXDI_EmptyGIReservoir();
     if (giTraceInitialCandidate(wpos, N, pixel, frameJitter, samplePos, sampleNormal, sampleRadiance)) {
         const float cosTheta = saturate(dot(normalize(samplePos - wpos), N));
-        if (cosTheta > 0.0)
+        // THE SAME FLOOR, because this is the gate that actually decides what gets stored. The
+        // recomputed cosTheta is the sampled one up to precision (dir is built from it and samplePos
+        // lies along dir), so a `> 0.0` here was strictly weaker than the reject inside
+        // giTraceInitialCandidate and quietly let the 1/cos blow-up through anyway.
+        if (cosTheta > AVER_GI_MIN_COS)
             initial = RTXDI_MakeGIReservoir(samplePos, sampleNormal, sampleRadiance, cosTheta / PI);
     }
 
@@ -727,16 +769,38 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     // and here it would also fight REBLUR's own temporal accumulation, which is the entire job of
     // the permanent pool NRD keeps for this signal.
     //
-    // THE HIT DISTANCE IS THE SELECTED SAMPLE'S, normalised by giMaxDistance -- the same divisor
-    // the sky-occlusion signal uses, so one hitDistParams on the C++ side describes both. A
-    // reservoir holds a world POSITION, so this is a real distance to a real point, not the
-    // candidate ray's length: after resampling they are frequently different rays.
+    // BOTH CHANNELS ARE ENCODED TO REBLUR'S CONTRACT HERE, and neither half of that contract fails
+    // loudly if it is skipped -- which is why this was wrong in two independent ways until NRD's own
+    // REBLUR_FrontEnd_PackRadianceAndNormHitDist was read rather than assumed about. NRD's pack and
+    // unpack helpers are things the PRODUCER and the CONSUMER call; no NRD pass applies them for you.
+    //
+    // ALPHA: NORMALISED BY REBLUR'S OWN DIVISOR, NOT BY giMaxDistance. This used to divide by
+    // giMaxDistance (4000cm by default) on the reasoning that one hitDistParams could then describe
+    // both this signal and the sky-occlusion one. It cannot: REBLUR reconstructs a real distance from
+    // this channel by multiplying back by (A + |viewZ|*B) * lerp(C, 1, smc), so a value normalised by
+    // anything else is a distance REBLUR reads as some other number -- and it sizes its blur kernel,
+    // its disocclusion test and its variance estimate from exactly that. A 40m divisor against a true
+    // divisor of ~4m made every bounce read as point-blank, which is a denoiser that cannot converge
+    // no matter what its anti-firefly setting says. roughness is 1 for a purely diffuse signal, and
+    // NRD's smc curve is 1.0 there, so lerp(C, 1, smc) collapses to 1 and C drops out of this end of
+    // the mirror -- it still has to be set on the C++ side, where NRD applies it itself.
+    //
+    // RGB: YCoCg, NOT LINEAR RGB. REBLUR_Config.hlsli sets REBLUR_USE_YCOCG 1 and the front-end pack
+    // converts unconditionally, so REBLUR filters chroma in that basis; handing it linear RGB is not a
+    // format error, it is a confidently wrong colour. The inverse is applied where gNrdGi is read,
+    // just below -- the two are a matched pair and neither is correct alone.
     if (gGiRestirParams.x > 0.5) {
-        const float giMaxDist = max(gVoxelParams.z, 1.0);
+        const float hitDistNorm = AVER_NRD_HITDIST_A + abs(curLinearDepth) * AVER_NRD_HITDIST_B;
         const float hitT = RTXDI_IsValidGIReservoir(result)
-                         ? saturate(length(result.position - wpos) / giMaxDist)
+                         ? saturate(length(result.position - wpos) / max(hitDistNorm, 1e-4))
                          : 1.0;   // nothing found: "the ray went the whole way", as the sky ray encodes it
-        gGiRadianceOut[pixelPos] = float4(outDiffuse, hitT);
+        // _NRD_LinearToYCoCg, transcribed (see this block's comment for why it is transcribed and
+        // not included). Y is the luminance REBLUR accumulates; Co/Cg are signed, which is why the
+        // target is RGBA16F and not a UNORM format.
+        const float3 ycocg = float3(dot(outDiffuse, float3( 0.25, 0.5,  0.25)),
+                                    dot(outDiffuse, float3( 0.5,  0.0, -0.5 )),
+                                    dot(outDiffuse, float3(-0.25, 0.5, -0.25)));
+        gGiRadianceOut[pixelPos] = float4(ycocg, hitT);
     }
 
     // LAST FRAME'S DENOISED ANSWER REPLACES THIS FRAME'S RAW ONE. One frame of lag, which is what
@@ -747,7 +811,15 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     // ReSTIR estimate stands, noisy but correct.
     uint gw = 0, gh = 0;
     gNrdGi.GetDimensions(gw, gh);
-    if (gw > 0u && gh > 0u) outDiffuse = max(gNrdGi.Load(int3(pixelPos, 0)).rgb, 0.0);
+    if (gw > 0u && gh > 0u) {
+        // _NRD_YCoCgToLinear, the matching half of the write above. REBLUR hands back what it
+        // filtered, in the basis it filtered it in; NRD's own back-end unpack is this same transform
+        // and also ends in a max against zero, because the chroma round trip can put a channel
+        // slightly negative and negative radiance reads BRIGHT once it reaches the tonemap.
+        const float3 y = gNrdGi.Load(int3(pixelPos, 0)).rgb;
+        const float  t = y.x - y.z;
+        outDiffuse = max(float3(t + y.y, y.x + y.z, t - y.y), 0.0);
+    }
 
     return outDiffuse;
 }

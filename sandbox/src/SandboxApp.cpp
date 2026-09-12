@@ -6466,6 +6466,7 @@ public:
             skinScene_->tick(e, vpX_, vpY_, vpW_, vpH_, 0u);
 #endif
         captureCheck(e);
+        lumaSweepCheck(e);
         resizeCheck(e);
         gpuTimingCheck(e);
         rayProbeCheck(e);
@@ -7062,6 +7063,10 @@ public:
 #endif
     void setResizeCycle(int n) { resizeCycle_ = n < 0 ? 0 : (u64)n; }              // --resize-cycle [N]
     void setGpuTiming(bool on) { gpuTiming_ = on; }                                // --gpu-timing
+    // --luma-sweep [STRIDE]: see lumaSweepCheck() for what it measures and setGiMode/setCamWobble
+    // above for the two dials it is meant to be read alongside. FLAG-ONLY and additive -- default
+    // off, and it only affects what gets READ BACK and logged, never what the renderer draws.
+    void setLumaSweep(bool on, int stride) { lumaSweep_ = on; lumaSweepStride_ = stride > 0 ? stride : 1; }
     void setPieCameraTest(int n) { pieCamFrames_ = n; }                            // --pie-camera-test
     void setInputStuckTest(int n) { inputStuckFrames_ = n; }                       // --input-stuck-test
     void setInputSourceTest(int n) { inputSrcFrames_ = n; }                        // --input-source-test
@@ -22534,6 +22539,11 @@ private:
     }
 
     void captureCheck(Engine& e) {
+        // --luma-sweep owns the device's single capture slot for the whole run (it requests a new
+        // frame every tick, not once near the end) -- sharing it with the one-shot probe/--shot
+        // logic below would have the two stomp each other's request on whichever frame they land on
+        // the same tick. Not expected to matter to a measurement run, so refuse rather than guess.
+        if (lumaSweep_) return;
         const u64 f = e.time().frame;
         const u64 sf = maxFrames_>8?maxFrames_-3:4;
         const u32 px_ = probeU_ >= 0.0f ? (u32)(vpX_ + vpW_ * probeU_)
@@ -22572,11 +22582,95 @@ private:
         }
     }
 
+    // --luma-sweep: FRONT D's measurement flag, added to test (rather than assume) whether the GI
+    // estimator's output actually inflates while --cam-wobble moves the camera and settles back
+    // down once it is still. Logs one [LumaSweep] line per simulated frame with the 3D viewport's
+    // MEAN LINEAR LUMINANCE, decoded from the backbuffer. FLAG-ONLY: it reuses the exact
+    // requestCapture()/getFrameImage() readback --shot and --probe already call (see captureCheck
+    // above) -- no new GPU pass, no new pipeline, nothing added to what the renderer draws. Default
+    // off, so a run that never passes --luma-sweep is bit-for-bit the run it always was.
+    //
+    // ONE FRAME OF LAG IS INHERENT TO THE CAPTURE API, not a bug here: requestCapture() is serviced
+    // inside present(), so a request made while handling frame f is not ready to read back until the
+    // NEXT tick. captureCheck()'s probe has the same lag (see aver-capture-frame-offset); this
+    // function just pays it every frame instead of once -- read back the PENDING request (frame
+    // f-1's image) first, then issue a fresh one for frame f, so the line logged this tick always
+    // describes the PREVIOUS tick's frame number.
+    //
+    // SUBSAMPLED 4x4 (~170k samples over a 2750x1639 viewport): a mean does not need every pixel, and
+    // a full-resolution decode every frame of a multi-hundred-frame sweep is unnecessary cost for a
+    // diagnostic whose own CPU/GPU sync (waitForGpu inside present(), see RHI.D3D12/RHI.Vulkan
+    // getFrameImage) already makes every sampled frame slower than an unsampled one.
+    //
+    // sRGB -> linear BEFORE averaging, not after: the estimator's claimed defect is that its
+    // contribution to scene RADIANCE grows, and radiance is additive in LINEAR light, not in the
+    // gamma-encoded backbuffer. Averaging the raw 0-255 bytes would still trend the same direction
+    // but compress the low end relative to the claim being tested.
+    void lumaSweepCheck(Engine& e) {
+        if (!lumaSweep_ || maxFrames_ == 0) return;
+        // STRIDE: only sample every Nth simulation frame. The pending readback from the PREVIOUS
+        // sampled frame is always collected first regardless of phase, since it was already
+        // requested and costs nothing extra to pick up; only the decision to issue a NEW request is
+        // strided, so a stride>1 run also does fewer GPU stalls, not just fewer log lines.
+        const bool sampleThisFrame = (e.time().frame % (u64)lumaSweepStride_) == 0;
+        if (lumaSweepPending_) {
+            std::vector<u8> img; u32 iw = 0, ih = 0;
+            if (e.device()->getFrameImage(img, iw, ih) && iw && ih) {
+                const u32 x0 = (u32)std::fmax(0.0f, lumaSweepVpX_);
+                const u32 y0 = (u32)std::fmax(0.0f, lumaSweepVpY_);
+                const u32 x1 = (u32)std::fmin((f32)iw, lumaSweepVpX_ + lumaSweepVpW_);
+                const u32 y1 = (u32)std::fmin((f32)ih, lumaSweepVpY_ + lumaSweepVpH_);
+                auto toLin = [](u8 c) -> f32 {
+                    const f32 s = c / 255.0f;
+                    return s <= 0.04045f ? s / 12.92f : std::pow((s + 0.055f) / 1.055f, 2.4f);
+                };
+                f64 sum = 0.0; u64 n = 0;
+                for (u32 y = y0; y + 1 < y1; y += 4) {
+                    const u8* row = img.data() + static_cast<size_t>(y) * iw * 4;
+                    for (u32 x = x0; x + 1 < x1; x += 4) {
+                        const u8* px = row + static_cast<size_t>(x) * 4;
+                        sum += 0.2126 * toLin(px[0]) + 0.7152 * toLin(px[1]) + 0.0722 * toLin(px[2]);
+                        ++n;
+                    }
+                }
+                const f64 meanLin = n ? sum / (f64)n : -1.0;
+                // lumaSweepYaw_ -- CACHED AT REQUEST TIME, not read live here. yaw_ by the time this
+                // collection code runs has already been advanced by THIS tick's camWobble update
+                // (that runs earlier in onUpdate, before lumaSweepCheck), so reading yaw_ live would
+                // pair frame f's image with frame f+1's camera angle -- a one-frame mismatch that is
+                // invisible near a wobble peak (slope ~0 there) but real at a zero-crossing (slope at
+                // its max). Found by noticing matched-pose frames a period apart logged a suspiciously
+                // EXACT repeated angle instead of the expected per-frame sinusoid value.
+                AVER_INFO("[LumaSweep] frame={} meanLinLuma={:.6f} samples={} viewport=({},{} {}x{}) "
+                          "giMode={} camWobbleDeg={:.2f} camWobblePeriod={} yawDeg={:.3f}",
+                          lumaSweepFrame_, meanLin, n, (int)lumaSweepVpX_, (int)lumaSweepVpY_,
+                          (int)lumaSweepVpW_, (int)lumaSweepVpH_, giModeOverride_, camWobbleDeg_,
+                          camWobblePeriod_, lumaSweepYaw_ * 57.29577951f);
+            } else {
+                AVER_WARN("[LumaSweep] frame={}: getFrameImage() returned nothing -- this backend may "
+                          "not support a full-frame readback", lumaSweepFrame_);
+            }
+            lumaSweepPending_ = false;
+        }
+        if (!sampleThisFrame) return;
+        e.device()->requestCapture((u32)(vpX_ + vpW_ * 0.5f), (u32)(vpY_ + vpH_ * 0.5f));
+        lumaSweepVpX_ = vpX_; lumaSweepVpY_ = vpY_; lumaSweepVpW_ = vpW_; lumaSweepVpH_ = vpH_;
+        lumaSweepFrame_ = e.time().frame;
+        lumaSweepYaw_ = yaw_;   // THIS tick's angle, for THIS tick's image -- see the log site above.
+        lumaSweepPending_ = true;
+    }
+
     u64 maxFrames_; bool headless_; std::string beamPath_, shot_;
     u64 resizeCycle_ = 0;   // --resize-cycle N: 0 is off. See resizeCheck() for what it reproduces.
     bool gpuTiming_ = false;      // --gpu-timing: dump the per-pass GPU tree once, near the end
     bool gpuTimingDone_ = false;
     u32 resizeStep_ = 0;
+    bool lumaSweep_ = false;          // --luma-sweep [STRIDE]: see lumaSweepCheck()
+    int  lumaSweepStride_ = 1;        // frames between logged samples
+    bool lumaSweepPending_ = false;
+    u64  lumaSweepFrame_ = 0;
+    f32  lumaSweepYaw_ = 0.0f;        // yaw_ cached at REQUEST time -- see lumaSweepCheck()
+    f32  lumaSweepVpX_=0, lumaSweepVpY_=0, lumaSweepVpW_=0, lumaSweepVpH_=0;
     // MOVE, NOT SELECT, and the difference is whether a gizmo exists at all. Select draws none
     // (see drawGizmo's tool_ test), so an editor that opened in Select showed nothing to grab on a
     // freshly picked object and gave no hint that 2 would summon one -- "I cannot move things" is
@@ -26029,6 +26123,26 @@ Application* createApplication(int argc, char** argv) {
     // --clear-shader-cache: a maintenance action, valueless, so it gets its own full-length loop
     // for --gpu-timing's reason -- matched only in the i+1<argc loop, a trailing one would be
     // silently ignored, which for a "did it clear?" command is the worst possible failure.
+    // --luma-sweep [STRIDE]: its own full-length loop for the same reason as --gpu-timing/--unlit
+    // above, EXTENDED to accept an optional numeric STRIDE the way --clear-shader-cache's directory
+    // arg does just below -- consumed only when present and not itself another flag, so a trailing
+    // "--luma-sweep --frames 300" is not misread as stride "--frames". STRIDE is frames between
+    // logged samples (default 1, every frame): the MCP aver_run tool that is this repo's preferred
+    // way to run headlessly caps its returned grep match list at 60 lines (aver_mcp.py's
+    // `matched[:60]`), so an unstrided sweep over a several-hundred-frame run would silently lose
+    // every sample past the 60th with no error -- stride lets a long run stay under that cap instead
+    // of the caller having to discover the truncation by counting. See lumaSweepCheck() for what it
+    // measures.
+    bool lumaSweepArg = false;
+    int lumaSweepStrideArg = 1;
+    for (int i = 1; i < argc; ++i)
+        if (!std::strcmp(argv[i], "--luma-sweep")) {
+            lumaSweepArg = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                const int s = std::atoi(argv[i + 1]);
+                lumaSweepStrideArg = s > 0 ? s : 1;
+            }
+        }
     bool clearShaderCacheArg = false;
     std::string clearShaderCacheDirArg;
     for (int i = 1; i < argc; ++i)
@@ -27061,6 +27175,10 @@ Application* createApplication(int argc, char** argv) {
 #endif
     if (!skinSceneDir.empty()) app->setSkinSceneDir(skinSceneDir);
     if (!shaderSourceDir.empty()) app->setShaderSourceDir(shaderSourceDir);
+    // Unconditional (not inside the AVER_MODULE_SR block above, which --gpu-timing and its
+    // neighbours happen to sit in for reasons unrelated to this flag): --luma-sweep has nothing to
+    // do with AverSR and must apply whether or not that module is built.
+    if (lumaSweepArg) app->setLumaSweep(true, lumaSweepStrideArg);
 #if AVER_MODULE_SYNAPSE
     if (bakeNav) app->setBakeNavOnStart(bakeNavCell);
 #else

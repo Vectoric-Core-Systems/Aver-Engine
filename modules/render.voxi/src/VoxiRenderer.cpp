@@ -3088,6 +3088,15 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
             const render::nrd::DenoiserKind kinds[] = {render::nrd::DenoiserKind::ReblurDiffuseOcclusion,
                                                        render::nrd::DenoiserKind::ReblurDiffuse};
             nrdActive_ = nrd_.create(*dev_, kinds, 2);
+            // ONCE, NOT PER FRAME: NRD keeps per-denoiser settings until they are set again, and the
+            // defaults are wrong for this engine in one field that matters -- see
+            // Denoiser::ReblurTuning, which explains why a length constant tuned in metres cannot be
+            // left alone against a centimetre viewZ. Index 1 is ReblurDiffuse in the kinds array
+            // above; the occlusion denoiser at index 0 is left on NRD's defaults because the signal
+            // it filters is already unit-free.
+            if (nrdActive_ && !nrd_.setReblurTuning(1u, render::nrd::Denoiser::ReblurTuning{}))
+                AVER_WARN("[NRD] REBLUR_DIFFUSE would not take its hit-distance tuning; it will "
+                          "normalise against NRD's metre-based defaults and over-blur near geometry");
             // THE ENCODING CHECK IS THE ONE SILENT FAILURE MODE LEFT. NRD's shaders were BUILT
             // against a specific normal/roughness packing (cmake/AverNRD.cmake picks it); the
             // G-buffer packs RGB10A2 as normal*0.5+0.5 with roughness in w. If those disagree the
@@ -3353,34 +3362,34 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
             // does not fail -- it filters the blank and hands it back confidently, which is the most
             // expensive way to be wrong available here.
             //
-            // ---- REBLUR_DIFFUSE IS BUILT, BOUND, AND DELIBERATELY NOT SELECTED YET ----
+            // ---- REBLUR_DIFFUSE IS SELECTED NOW; WHAT USED TO KILL THE ADAPTER WAS THIS SEAM ----
             //
-            // It REMOVES THE DEVICE. Everything above works: the radiance texture allocates, the
-            // instance creates with both denoisers, the pools allocate once R16F and R8Uint existed,
-            // and NRD plans 34 dispatches at 2049x1152. Recording them kills the adapter on the
-            // first frame -- DXGI_ERROR_DEVICE_REMOVED (0x887A0005), after which the upload ring and
-            // every later CreateRootSignature fail and the post chain cannot present.
+            // It removed the device, and the cause was never anything on this side of the call. The
+            // recorder resolved NRD's OUT_DIFF_HITDIST and OUT_DIFF_RADIANCE_HITDIST slots by
+            // indexing its PERMANENT POOL with ResourceDesc::indexInPool. NRD writes that field only
+            // for the two pool resource types; for every IN_*/OUT_* type it stays 0 and the resource
+            // is the integration's own to supply, looked up by resource TYPE -- which is exactly what
+            // NRD's reference integration does. So both outputs aliased permanent pool texture 0,
+            // a REBLUR instance's PREV_VIEWZ history, R32_SFLOAT.
             //
-            // BISECTED, not guessed: the identical build with only the occlusion denoiser selected
-            // (giMode 0, so this line is false) plans 15 dispatches then 5, renders, and is stable.
-            // The difference is REBLUR_DIFFUSE's own dispatches, not dispatch count in general and
-            // not the recorder, which has not otherwise changed.
+            // The occlusion denoiser survived that for as long as this pass has existed, which is why
+            // it read as "REBLUR_DIFFUSE is the problem": its output pass is compiled
+            // RWTexture2D<float>, so a one-channel write into a one-channel view faulted on nothing
+            // and merely corrupted NRD's own depth history. REBLUR_DIFFUSE's is RWTexture2D<float4>,
+            // and setUav builds the descriptor from the bound texture's format with no override, so
+            // that one bound four components to a one-component UAV -- DEVICE_REMOVED on the first
+            // recorded frame. The bisection was reporting the difference between float and float4,
+            // not between 15 dispatches and 34.
             //
-            // ONE CANDIDATE ALREADY RULED OUT: NRD's constantsUnchanged flag. Honouring it left a
-            // root CBV unbound across a root-signature change, which is undefined and is this
-            // engine's one previously recorded cause of a TDR -- so it was a strong suspect and is
-            // now always uploaded (see NrdRecorder). The device still dies, so that was a real bug
-            // and not this one.
+            // THE EARLIER GUESS IN THIS COMMENT WAS WRONG and is recorded because it cost time:
+            // giRadiance_'s resource state was named as the next thing to look at. It is not
+            // implicated -- it has the same shape as the sky-occlusion signal, which works -- and no
+            // PIX capture was needed in the end, only NRD's own integration source.
             //
-            // THE NEXT THING TO LOOK AT is resource STATE on giRadiance_. It is created in
-            // UnorderedAccess (the Voxi pixel shader writes it through u9) and handed to NRD as an
-            // SRV input in the same frame, with no transition between the two uses -- the occlusion
-            // signal has the same shape, which is why this needs measuring rather than assuming.
-            // A PIX capture on the removal frame is the tool; guessing further from here is not.
-            //
-            // Left wired rather than reverted because everything except the selection is verified,
-            // and re-deriving it to re-test would cost more than the one-line flip this becomes.
-            const bool giSignal = false && giRadiance_ && giRestirWanted();
+            // See Recorder's outDiffHitDistTex_/outDiffRadHitDistTex_ for the fix, and
+            // Denoiser::ReblurTuning for the hit-distance constants this signal also needed before
+            // REBLUR could do anything useful with it.
+            const bool giSignal = giRadiance_ && giRestirWanted();
             const u32* which    = giSignal ? kNrdAoAndGiDenoisers : kNrdAoDenoiser;
             const u32  whichN   = giSignal ? 2u : 1u;
             if (nrd_.record(ctx, fs, in, which, whichN)) {
