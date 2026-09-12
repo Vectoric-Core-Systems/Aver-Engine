@@ -139,6 +139,10 @@ constexpr u32 kNrdAoDenoiser[] = {0u};
 // otherwise, and asking NRD for a denoiser whose input is blank is the one way to get a confident
 // wrong image out of it.
 constexpr u32 kNrdAoAndGiDenoisers[] = {0u, 1u};
+// THE DIFFUSE RADIANCE DENOISER ALONE. The two signals are INDEPENDENTLY available and were wrongly
+// treated as though the GI one implied the other: sky occlusion is Epic-tier only, ReSTIR GI is not,
+// so a project can want GI denoising with no occlusion signal in the frame at all.
+constexpr u32 kNrdGiDenoiser[] = {1u};
 
 // THE SAME ARGUMENT ON THE UAV SIDE, and it needs its own constant for a reason the SRV side
 // already documents. SandboxApp.cpp's cluster path sets `bsd.uavCount = voxi::kGiUavCount` and
@@ -3071,6 +3075,25 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
         if (!rtAoHitDist_) return false;
         d.initialState = rhi::ResourceState::ShaderResource;   // restored for anything added below
 
+    }
+
+    // ---- NRD IS CREATED FOR EITHER SIGNAL, NOT ONLY FOR SKY OCCLUSION ----
+    //
+    // This block used to sit INSIDE the aoHistoryWanted() branch above, so the NRD instance itself --
+    // all twenty pipelines, the whole thing -- was never constructed unless sky-occlusion rays were
+    // on. aoHistoryWanted() is `rayTracingWanted() && settings_.giSkyOcclusionRays > 0`, and
+    // giSkyOcclusionRays is TIER-DERIVED: Voxi.cpp recomputes it only when the ray-tracing tier
+    // CHANGES. Open a project whose recorded tier already equals the current one, the derivation never
+    // fires, the field keeps its struct default of 0, and NRD is silently absent for the whole session.
+    //
+    // MEASURED, and it is exactly what the user saw as the denoiser working only sometimes: four
+    // consecutive runs of their project denoised nothing while the log said NRD was ready, and four
+    // more with --gi-sky-occlusion-rays 1 denoised every frame -- same binary, same flags otherwise.
+    //
+    // ReSTIR GI runs at ANY ray-tracing tier; sky occlusion is Epic-only
+    // (giSkyOcclusionRaysForQuality). Tying the first to the second was never a decision, it is just
+    // where this code happened to be written back when occlusion was its only consumer.
+    if (aoHistoryWanted() || giRestirWanted()) {
         // ---- and the denoiser that consumes it, created ONCE beside the signal it filters ----
         // Its create() is the thing that decides whether NRD can run at all -- no NRD in the build,
         // or a backend whose descriptor model refuses NRD's register spaces -- and it says which at
@@ -3332,16 +3355,25 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
                   "MSAA to 1 (voxi.msaa 1) to denoise.", dev_->sampleCount());
         nrdWarnedMsaa_ = true;
     }
-    if (nrd_.valid() && rtAoHitDist_ && gbufWritten) {
+    // EITHER SIGNAL IS ENOUGH -- see the creation site above for why demanding the occlusion one
+    // silently disabled GI denoising for a whole session. Only the denoisers whose input actually
+    // exists are selected below; handing NRD one with a blank input is the single most expensive way
+    // to be wrong here, which is what made the original coupling look defensible.
+    if (nrd_.valid() && gbufWritten && (rtAoHitDist_ || (giRadiance_ && giRestirWanted()))) {
         render::nrd::Recorder::Inputs in;
         in.viewZ           = dev_->gBufferViewZTexture();
         in.motionVectors   = dev_->gBufferVelocityTexture();
         in.normalRoughness = dev_->gBufferNormalRoughnessTexture();
         in.diffuseHitDist  = rtAoHitDist_;
         in.diffuseRadianceHitDist = giRadiance_;
-        rhi::TextureDesc aoDesc{};
-        const bool haveSize = res_->textureInfo(rtAoHitDist_, aoDesc);
-        const u32 tw = haveSize ? aoDesc.width : 0u, th = haveSize ? aoDesc.height : 0u;
+        // SIZED FROM WHICHEVER SIGNAL IS THERE. Both are allocated at the render resolution so they
+        // agree when both exist; asking the occlusion target for dimensions when only the radiance
+        // one was allocated is how "GI denoising without sky occlusion" would resolve to 0x0 and skip
+        // even once the gate above let it through.
+        rhi::TextureDesc sizeDesc{};
+        const rhi::TextureHandle sizeFrom = rtAoHitDist_ ? rtAoHitDist_ : giRadiance_;
+        const bool haveSize = res_->textureInfo(sizeFrom, sizeDesc);
+        const u32 tw = haveSize ? sizeDesc.width : 0u, th = haveSize ? sizeDesc.height : 0u;
         if (in.viewZ && in.motionVectors && in.normalRoughness && tw && th && nrd_.resize(tw, th)) {
             render::nrd::FrameSettings fs{};
             // WORLD SPACE IS VIEW SPACE, AS FAR AS NRD IS TOLD, and that is a deliberate encoding
@@ -3428,8 +3460,11 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
             // Denoiser::ReblurTuning for the hit-distance constants this signal also needed before
             // REBLUR could do anything useful with it.
             const bool giSignal = giRadiance_ && giRestirWanted();
-            const u32* which    = giSignal ? kNrdAoAndGiDenoisers : kNrdAoDenoiser;
-            const u32  whichN   = giSignal ? 2u : 1u;
+            const bool aoSignal = rtAoHitDist_ != 0;
+            const u32* which  = (giSignal && aoSignal) ? kNrdAoAndGiDenoisers
+                              : giSignal               ? kNrdGiDenoiser
+                                                       : kNrdAoDenoiser;
+            const u32  whichN = (giSignal && aoSignal) ? 2u : 1u;
             if (nrd_.record(ctx, fs, in, which, whichN)) {
                 nrdOutput_   = nrd_.outputDiffuseHitDistance();
                 nrdGiOutput_ = nrd_.outputDiffuseRadianceHitDistance();
