@@ -21899,6 +21899,37 @@ private:
             const char* qs[] = {"Off","Low","Medium","High","Epic"};
             if (ImGui::Combo("Quality", &q, qs, 5)) { s.globalIllumination = static_cast<Quality>(q); changed = true; }
 
+            // ---- WHICH DIFFUSE GI ESTIMATOR, and it lives on THIS page deliberately ----
+            // It was on the Ray Tracing page, because ReSTIR needs RayQuery and that looked like
+            // the dependency that mattered. It is not. Someone looking for the diffuse GI
+            // algorithm looks under Global Illumination, finds Quality / Voxel grid / Diffuse
+            // cones -- every one of which describes the CONE gather specifically -- and reasonably
+            // concludes cones are the only option there is. Reported as "I cannot find that
+            // project setting", which is the correct bug report for a control filed under its
+            // IMPLEMENTATION instead of its JOB. It sits above the cone knobs because it decides
+            // whether they apply at all.
+            //
+            // giMode round-trips through the .ocproject as RENDER.GIMODE, so a project remembers
+            // the choice; absent from an older manifest it stays -1 and the engine default (cones)
+            // applies, which is what every project written before this key existed meant.
+            int giAlgo = static_cast<int>(s.giMode);
+            if (ImGui::Combo("Indirect diffuse", &giAlgo, "Voxel cones\0ReSTIR (experimental)\0")) {
+                s.giMode = static_cast<u32>(giAlgo); changed = true;
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Voxel cones is what this engine has always shipped: a clipmap\n"
+                                  "marched with cones. It is the default and is unchanged. The\n"
+                                  "Voxel grid and Diffuse cones settings below apply ONLY to it.\n\n"
+                                  "ReSTIR resamples ray-traced indirect samples over time AND\n"
+                                  "across neighbouring pixels (NVIDIA RTXDI, third_party/rtxdi).\n"
+                                  "It has no voxel volume, so the boundary artefacts the clipmap\n"
+                                  "produces -- surfaces near the edge reading as unoccluded, worst\n"
+                                  "while the camera moves -- cannot occur.\n\n"
+                                  "NEEDS RAY TRACING: with no RayQuery hardware giMode is forced\n"
+                                  "back to cones (Voxi.cpp), so this will not appear to take.\n\n"
+                                  "EXPERIMENTAL: spatio-temporal resampling, but NO DENOISER on\n"
+                                  "the result yet, so it is grainier than the cone gather.");
+
             int res = static_cast<int>(s.voxelResolution);
             const char* resLabels[] = {"64", "128", "256", "512"};
             const int resValues[] = {64, 128, 256, 512};
@@ -22001,28 +22032,6 @@ private:
             // THE MEASURED BASELINE IS IN THE TOOLTIP ON PURPOSE: this trades hardware early-Z (which
             // a ray has no equivalent of) for whatever a primary ray costs, and an author deciding
             // that deserves the number, not a shrug.
-            // ---- Diffuse GI algorithm ----
-            // EXPOSED HERE BECAUSE A SETTING NOBODY CAN REACH IS NOT A SETTING. giMode also
-            // round-trips through the .ocproject as RENDER.GIMODE, so a project remembers the
-            // choice; absent from an older manifest it stays -1 and the engine default (cones)
-            // applies, which is what every project written before this key existed meant.
-            ImGui::Spacing();
-            ImGui::TextUnformatted("Diffuse global illumination");
-            ImGui::Separator();
-            int giAlgo = static_cast<int>(s.giMode);
-            if (ImGui::Combo("Indirect diffuse", &giAlgo, "Voxel cones\0ReSTIR (experimental)\0")) {
-                s.giMode = static_cast<u32>(giAlgo); changed = true;
-            }
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Voxel cones is what this engine has always shipped: a clipmap\n"
-                                  "marched with cones. It is the default and is unchanged.\n\n"
-                                  "ReSTIR resamples ray-traced indirect samples over time instead\n"
-                                  "(NVIDIA RTXDI, third_party/rtxdi). It has no voxel volume, so\n"
-                                  "the boundary artefacts the clipmap produces -- surfaces near\n"
-                                  "the edge reading as unoccluded, worst while the camera moves\n"
-                                  "-- cannot occur.\n\n"
-                                  "EXPERIMENTAL: temporal reuse only, no spatial pass yet.");
-
             ImGui::Spacing();
             ImGui::TextUnformatted("Primary visibility (experimental)");
             ImGui::Separator();

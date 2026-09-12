@@ -156,9 +156,27 @@ void CSExposure() {
     float target = gPostTone.x;
 
     if (gPostMisc.y > 0.5) {
+        // BIN 0 IS READ AND DELIBERATELY NOT COUNTED, and getting that wrong disabled half of this
+        // function. CSHistogram puts every pixel with luminance <= 1e-4 in bin 0 -- "black", not a
+        // measured luminance -- and the averaging loop below starts at b = 1 to exclude it. `total`
+        // used to sum ALL 256 bins anyway, so the two percentile cuts were fractions of a
+        // population the loop never walks.
+        //
+        // WHAT THAT COST: `seen` only ever accumulates bins 1..255, so it can only reach highCut if
+        // the lit pixels alone exceed histogramHighPercent of the WHOLE frame. In an enclosed scene
+        // -- the arcade this engine is developed against, where bin 0 routinely holds a third of the
+        // frame -- it never does, and `hi` is zero for every bin. The high cut simply never fires.
+        // That cut is the only thing standing between a handful of blown-out pixels and the
+        // metering, which is exactly the guard a ray-traced GI estimator with fireflies needs most.
+        // The low cut misfires the same way in reverse: it discards `lowCut` genuinely-lit pixels
+        // as "the darkest", when the real darkest are all sitting in bin 0, unexamined.
+        //
+        // Counting the lit population only makes both cuts mean what histogramLowPercent and
+        // histogramHighPercent say they mean: percentiles of the pixels actually being averaged.
         uint total = 0;
         uint counts[256];
-        for (uint i = 0; i < 256; ++i) { counts[i] = gPostHist.Load(i * 4); total += counts[i]; }
+        counts[0] = gPostHist.Load(0);
+        for (uint i = 1; i < 256; ++i) { counts[i] = gPostHist.Load(i * 4); total += counts[i]; }
 
         float lowCut  = total * gPostLimit.z;
         float highCut = total * gPostLimit.w;
