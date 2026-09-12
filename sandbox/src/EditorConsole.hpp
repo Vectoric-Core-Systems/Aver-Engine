@@ -62,6 +62,26 @@ inline bool ciEquals(std::string_view a, std::string_view b) {
     }
     return true;
 }
+// Case-insensitive SUBSTRING test, the other half of ciEquals: completion and the variable browser
+// both need "does this name or description CONTAIN what was typed", not just "is it equal to it" --
+// see this file's own note on the console rework (someone who remembers a word from a description,
+// not a name, should still find the entry). O(n*m); every caller is a UI list of a few dozen entries
+// re-filtered a keystroke at a time, not a hot loop.
+inline bool ciContains(std::string_view hay, std::string_view needle) {
+    if (needle.empty()) return true;
+    if (needle.size() > hay.size()) return false;
+    for (std::size_t i = 0; i + needle.size() <= hay.size(); ++i) {
+        bool ok = true;
+        for (std::size_t j = 0; j < needle.size(); ++j) {
+            char a = hay[i + j], b = needle[j];
+            if (a >= 'A' && a <= 'Z') a = static_cast<char>(a - 'A' + 'a');
+            if (b >= 'A' && b <= 'Z') b = static_cast<char>(b - 'A' + 'a');
+            if (a != b) { ok = false; break; }
+        }
+        if (ok) return true;
+    }
+    return false;
+}
 } // namespace detail
 
 // =================================================================================================
@@ -215,6 +235,134 @@ inline const std::vector<ConsoleVar>& allVars();
 inline const ConsoleVar* findVar(std::string_view dotted) {
     for (const ConsoleVar& v : allVars()) if (detail::ciEquals(v.name, dotted)) return &v;
     return nullptr;
+}
+
+// =================================================================================================
+// DISCOVERABILITY: tooltips, grouping, and substring search over the table above. Added for the
+// console rework ("make a tool someone can learn FROM rather than one they must already know") --
+// every function here reads ConsoleVar's existing fields, it adds none, because the design brief for
+// this table already produced the raw material (a rich one-line `help` per entry, a `readOnly` flag,
+// a live `read()`) and the gap was never the data, only that nothing besides `get`/`vars` ever showed
+// it. Kept in Part B, beside the table these read, rather than in SandboxApp.cpp: the same reason the
+// table itself lives here and not there (see this file's own header comment).
+// =================================================================================================
+
+inline const char* varTypeName(VarType t) {
+    switch (t) {
+        case VarType::U32:     return "integer";
+        case VarType::F32:     return "float";
+        case VarType::Bool:    return "bool";
+        case VarType::Quality: return "quality tier";
+        case VarType::Str:     return "text (read-only)";
+    }
+    return "?";
+}
+
+// Three honesty states a variable's VALUE can be in, named for the ones the table's own comments
+// already call out at length: voxi.giMode and voxi.denoiser read back what is ACTUALLY running
+// (LiveTruth), voxi.layeredBsdf is NOT live until a reload (NotLive) -- rather than a generic "has
+// caveats" flag every entry would need to opt into.
+// Detected from the SAME help text a tooltip already shows in full, by the words those two entries'
+// help strings already use ("ACTUALLY running" on voxi.giMode, "skips itself" on voxi.denoiser, "NOT
+// live" on voxi.layeredBsdf) -- a second field on ConsoleVar that only three entries would ever set is
+// more machinery than re-reading the sentence that already has to exist for the tooltip anyway.
+// "silently refus[ed/es]" is included pre-emptively (this table's own comments already reach for that
+// exact phrase in prose) so a future entry worded the same way is caught without touching this again.
+enum class Honesty : u8 { Normal, LiveTruth, NotLive };
+inline Honesty varHonesty(const ConsoleVar& v) {
+    if (v.help.find("NOT live") != std::string::npos) return Honesty::NotLive;
+    if (v.help.find("ACTUALLY running") != std::string::npos ||
+        v.help.find("skips itself") != std::string::npos ||
+        v.help.find("silently refus") != std::string::npos)
+        return Honesty::LiveTruth;
+    return Honesty::Normal;
+}
+// Short tag for a value shown next to a var: transcript lines, the browser, and `vars <filter>` all
+// use the identical two words so the meaning does not drift between surfaces.
+inline const char* varHonestyTag(Honesty h) {
+    switch (h) {
+        case Honesty::LiveTruth: return "[live]";
+        case Honesty::NotLive:   return "[reload]";
+        default:                 return "";
+    }
+}
+
+// The valid range or enum a name's OWN description or validate() already documents, not a second
+// source of truth someone has to remember to update alongside the help string. Bool/Quality have a
+// fixed vocabulary (parseBool/parseQuality already accept exactly this); everything else either has a
+// `validate` closure whose error message already spells the legal set out in words (voxi.msaa,
+// voxi.refractionMode -- calling it with a value no real field would accept is free, validate stages
+// nothing), or a help string ending in a parenthetical containing the word "clamp" (registerVoxiVars
+// and registerPostVars put one on nearly every dial: "(engine clamps to [1,16])", "(no engine
+// clamp)", "(clamped >= 0)"). Returns empty when none of those apply -- voxi.giMode and voxi.denoiser
+// are the two that matters most: varHonesty above already flags both with a fuller explanation of why
+// "valid range" is not even the right question for them (any u32/bool is accepted; what the engine
+// then does with it is the part worth reading).
+inline std::string varRangeHint(const ConsoleVar& v) {
+    switch (v.type) {
+        case VarType::Bool:    return "true/false, 1/0, on/off";
+        case VarType::Quality: return "off, low, medium, high, epic (or 0-4)";
+        case VarType::Str:     return "";
+        default: break;
+    }
+    if (v.validate) {
+        const VarValue probe = v.type == VarType::F32 ? vF32(-1e30f) : vU32(0xFFFFFFFFu);
+        std::string err;
+        if (!v.validate(probe, err) && !err.empty()) return err;
+    }
+    std::string lower = v.help;
+    for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    const std::size_t word = lower.find("clamp");
+    if (word == std::string::npos) return "";
+    const std::size_t open = v.help.rfind('(', word);
+    const std::size_t close = v.help.find(')', word);
+    if (open == std::string::npos || close == std::string::npos) return "";
+    return v.help.substr(open + 1, close - open - 1);
+}
+
+// Group label for the browsable listing: the first TWO dotted segments when there are three or more
+// ("voxi.status.*" and "voxi.device.*" are each a coherent little table of their own -- see
+// registerVoxiVars' own comment -- so they get their own heading instead of drowning in "voxi.*"'s
+// twenty-odd dials), otherwise just the first segment. Generic on purpose: a future voxi.foo.bar
+// namespace needs no change here, unlike a hand-maintained list of group names would.
+inline std::string varGroupKey(const std::string& dotted) {
+    const std::size_t first = dotted.find('.');
+    if (first == std::string::npos) return dotted;
+    const std::size_t second = dotted.find('.', first + 1);
+    return second == std::string::npos ? dotted.substr(0, first) : dotted.substr(0, second);
+}
+inline std::string varGroupLabel(const std::string& groupKey) { return groupKey + ".*"; }
+
+// Does this variable answer a search for `query`? Matches the NAME or the DESCRIPTION, substring not
+// prefix -- see WHAT TO BUILD item 2 in the task this exists for: someone who remembers "firefly" but
+// not the exact dotted name of whatever dial it lives on should still find it if the word is in the
+// help text. An empty query matches everything (the unfiltered `vars`/browser state).
+inline bool varMatchesQuery(const ConsoleVar& v, std::string_view query) {
+    return detail::ciContains(v.name, query) || detail::ciContains(v.help, query);
+}
+
+// The one tooltip body every surface shares -- the completion popup, the browser, and the transcript
+// hover all call this SAME function, so the three cannot drift into showing different information for
+// the same name. Multi-line: what it is, its live value right now, its valid range if known, and the
+// live-truth/reload note if it is one of the entries this table's own comments single out for it.
+inline std::string varTooltipText(const ConsoleVar& v) {
+    std::string s = v.name;
+    s += "  (";
+    s += varTypeName(v.type);
+    if (v.readOnly) s += ", read-only";
+    s += ")\n\n";
+    s += v.help.empty() ? std::string("(no description)") : v.help;
+    s += "\n\nCurrent value: ";
+    s += formatValue(v.read());
+    const std::string range = varRangeHint(v);
+    if (!range.empty()) { s += "\nValid: "; s += range; }
+    const Honesty h = varHonesty(v);
+    if (h == Honesty::LiveTruth)
+        s += "\n\n[live] This reads back what the engine is ACTUALLY doing right now, which can differ "
+             "from the last value you asked for -- see the description above for why.";
+    else if (h == Honesty::NotLive)
+        s += "\n\n[reload] Not live: this needs a project reload before a change here has any effect.";
+    return s;
 }
 
 #if AVER_MODULE_VOXI
@@ -585,6 +733,22 @@ struct ConsoleCommandDesc {
 
 inline const std::vector<ConsoleCommandDesc>& consoleCatalog();
 
+// A short, DISTINCT-from-`help` welcome banner for the transcript's OWN empty state (drawConsole in
+// SandboxApp.cpp seeds these in whenever consoleLines_ is empty, including right after Clear) -- see
+// WHAT TO BUILD item 4, "an empty console worth reading". Kept short on purpose: `help` below has the
+// full command list and grammar, this only orients someone who has never typed anything here.
+inline std::vector<std::string> consoleWelcomeLines() {
+    return {
+        "This is a live REPL over the engine's own render/post settings, not a log viewer.",
+        "Every name it knows has a one-line description -- hover it anywhere it appears (as you",
+        "type below, in a listing, or in this transcript) to see it, plus the type, the current",
+        "value, and the valid range where one is known.",
+        "",
+        "Type 'help' for the full command list, grammar and worked examples -- or just start typing",
+        "a name below and watch the suggestions.",
+    };
+}
+
 // ---- handlers -----------------------------------------------------------------------------------
 
 inline bool handleHelp(SandboxApp&, Engine&, const std::vector<std::string>&, const ConsolePrint& print) {
@@ -596,6 +760,27 @@ inline bool handleHelp(SandboxApp&, Engine&, const std::vector<std::string>&, co
         line.resize(w, ' ');
         print(LogLevel::Info, line + "  -- " + c.help);
     }
+    // GRAMMAR AND WORKED EXAMPLES, appended below the command list rather than replacing it -- the
+    // "help that teaches" half of the console rework (WHAT TO BUILD item 4). Every example below
+    // names a variable that is genuinely in allVars() right now, so copy-pasting one always runs
+    // rather than teaching a name this table used to have.
+    print(LogLevel::Info, "");
+    print(LogLevel::Info, "Names are dotted (voxi.giCones, post.exposure, rhi.depthPrepass) and case-insensitive.");
+    print(LogLevel::Info, "Values: a whole number, a decimal, a bool (true/false, 1/0, on/off), or a");
+    print(LogLevel::Info, "quality name (off/low/medium/high/epic, or 0-4).");
+    print(LogLevel::Info, "Examples:");
+    print(LogLevel::Info, "  get voxi.giCones                 read one variable");
+    print(LogLevel::Info, "  set voxi.giCones 6                write one variable");
+    print(LogLevel::Info, "  set voxi.msaa 4 post.tonemap 2    write several at once, all-or-nothing");
+    print(LogLevel::Info, "  vars gi                           list every variable whose name or");
+    print(LogLevel::Info, "                                    description mentions 'gi', grouped");
+    print(LogLevel::Info, "A [live] tag on a value means it reads back what the engine is ACTUALLY doing,");
+    print(LogLevel::Info, "which the request behind it may not have gotten (see that variable's own");
+    print(LogLevel::Info, "description). A [reload] tag means a project reload is needed before a change");
+    print(LogLevel::Info, "takes effect. Both are explained in full in that name's own tooltip.");
+    print(LogLevel::Info, "Not everything the editor can toggle is here yet: occlusion culling and");
+    print(LogLevel::Info, "virtualized-geometry LOD selection are deliberately absent (see this file's");
+    print(LogLevel::Info, "own EditorConsole.hpp comment on registerVoxiVars for why).");
     return true;
 }
 
@@ -636,18 +821,47 @@ inline bool handleVarGet(SandboxApp&, Engine&, const std::vector<std::string>& a
     if (!v) { print(LogLevel::Error, "Unknown variable '" + args[0] + "'. Type 'vars' for a list."); return false; }
     std::string line = v->name + " = " + formatValue(v->read());
     if (v->readOnly) line += "  (read-only)";
+    const char* tag = varHonestyTag(varHonesty(*v));
+    if (*tag) line += std::string("  ") + tag;
     if (!v->help.empty()) line += "  -- " + v->help;
     print(LogLevel::Info, line);
     return true;
 }
 
-inline bool handleVarsList(SandboxApp&, Engine&, const std::vector<std::string>&, const ConsolePrint& print) {
+// `vars` (no args): EXACTLY the original output, unchanged line-for-line -- WHAT TO BUILD says the
+// existing command "should stay working exactly as they do", and this is the form anything already
+// relying on today's shape (a screenshot script's grep, a person's muscle memory) depends on.
+// `vars <text>` (WHAT TO BUILD item 3, the new half): a substring FILTER over name-or-description,
+// grouped by prefix (see varGroupKey's own comment) with a [live]/[reload] honesty tag inline -- "vars
+// gi" finds every voxi.gi* dial under one heading instead of scattered among fifty other lines, and
+// "vars firefly" (a word no variable's NAME contains) still finds anything whose DESCRIPTION does.
+inline bool handleVarsList(SandboxApp&, Engine&, const std::vector<std::string>& args, const ConsolePrint& print) {
+    if (args.empty()) {
+        for (const ConsoleVar& v : allVars()) {
+            std::string line = v.name + " = " + formatValue(v.read());
+            if (v.readOnly) line += "  (read-only)";
+            if (!v.help.empty()) line += "  -- " + v.help;
+            print(LogLevel::Info, line);
+        }
+        return true;
+    }
+    std::string query;
+    for (std::size_t i = 0; i < args.size(); ++i) { if (i) query += ' '; query += args[i]; }
+    std::string lastGroup;
+    std::size_t shown = 0;
     for (const ConsoleVar& v : allVars()) {
-        std::string line = v.name + " = " + formatValue(v.read());
+        if (!varMatchesQuery(v, query)) continue;
+        const std::string group = varGroupKey(v.name);
+        if (group != lastGroup) { print(LogLevel::Info, "-- " + varGroupLabel(group) + " --"); lastGroup = group; }
+        std::string line = "  " + v.name + " = " + formatValue(v.read());
         if (v.readOnly) line += "  (read-only)";
+        const char* tag = varHonestyTag(varHonesty(v));
+        if (*tag) line += std::string("  ") + tag;
         if (!v.help.empty()) line += "  -- " + v.help;
         print(LogLevel::Info, line);
+        ++shown;
     }
+    if (shown == 0) print(LogLevel::Warn, "No variable's name or description contains '" + query + "'.");
     return true;
 }
 
@@ -715,7 +929,12 @@ inline bool handleVarSet(SandboxApp&, Engine& e, const std::vector<std::string>&
         for (const std::string& note : outcome.notes) {
             if (note.rfind(prefix, 0) == 0) { print(LogLevel::Warn, note); noted = true; break; }
         }
-        if (!noted) print(LogLevel::Info, s.var->name + " = " + formatValue(s.var->read()));
+        if (!noted) {
+            std::string line = s.var->name + " = " + formatValue(s.var->read());
+            const char* tag = varHonestyTag(varHonesty(*s.var));
+            if (*tag) line += std::string("  ") + tag;
+            print(LogLevel::Info, line);
+        }
     }
     return true;
 }
@@ -723,11 +942,11 @@ inline bool handleVarSet(SandboxApp&, Engine& e, const std::vector<std::string>&
 namespace detail {
 inline std::vector<ConsoleCommandDesc> buildConsoleCatalog() {
     std::vector<ConsoleCommandDesc> t;
-    t.push_back({"help", "List every console command", &handleHelp});
+    t.push_back({"help", "List every console command, the grammar, and worked examples", &handleHelp});
     t.push_back({"frametime", "Print the current per-pass GPU frame-time breakdown", &handleFrameTime});
     t.push_back({"get", "get <name> -- print an engine variable's current value", &handleVarGet});
     t.push_back({"set", "set <name> <value> [<name> <value> ...] -- set one or more engine variables", &handleVarSet});
-    t.push_back({"vars", "List every readable/settable engine variable", &handleVarsList});
+    t.push_back({"vars", "vars [text] -- list every variable, or filter by name/description and group by prefix", &handleVarsList});
     return t;
 }
 } // namespace detail
@@ -747,6 +966,13 @@ inline const std::vector<ConsoleCommandDesc>& consoleCatalog() {
 inline const ConsoleCommandDesc* findCommand(std::string_view name) {
     for (const ConsoleCommandDesc& c : consoleCatalog()) if (detail::ciEquals(c.name, name)) return &c;
     return nullptr;
+}
+
+// Substring search over a command, name or one-line help -- the command-table twin of varMatchesQuery
+// above, used by the live suggestion popup (SandboxApp.cpp) so typing a fragment of what a command
+// DOES ("frame" for frametime's "frame-time breakdown") finds it same as typing its name would.
+inline bool commandMatchesQuery(const ConsoleCommandDesc& c, std::string_view query) {
+    return detail::ciContains(c.name, query) || detail::ciContains(c.help, query);
 }
 
 } // namespace aver::editor

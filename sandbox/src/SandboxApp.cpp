@@ -16775,17 +16775,167 @@ private:
         ImGui::EndChild();
     }
 
-    // The command console: a REPL over editor::consoleCatalog() (help/frametime/get/set/vars).
-    // `e` is threaded through exactly as drawDrawer(Engine&) threads it into every other drawer-body
-    // method that needs it.
-    // ITS OWN SCROLLBACK, NOT logLines_: see consoleLines_'s own declaration. The level->colour switch
-    // that used to be copied here now lives in drawLogLine(), shared with drawOutputLog -- the earlier
-    // "not worth the indirection" reasoning stopped holding once six levels existed, two with a row background.
-    void drawConsole(Engine& e) {
-        // Hands this frame's device to EditorConsole.hpp's post.* variable table, which cannot reach
-        // Engine& itself (ConsoleVar::read takes no arguments -- see its own file comment for why).
-        editor::setConsoleDevice(e.device());
+    // Truncates to at most `maxLen` bytes, appending "..." when it had to cut -- used for the ONE-LINE
+    // rows in the suggestion popup and the variable browser, both of which show the FULL text in a
+    // hover tooltip anyway (see editor::varTooltipText), so nothing here is ever the only copy.
+    static std::string elide(const std::string& s, std::size_t maxLen) {
+        if (s.size() <= maxLen) return s;
+        return s.substr(0, maxLen > 3 ? maxLen - 3 : 0) + "...";
+    }
 
+    // One row of the live suggestion popup: what to SHOW (name plus a short description) and what to
+    // INSERT if it is picked (the bare name, so the same row serves a command or a variable).
+    struct ConsoleSuggestion { std::string display; std::string insert; std::string tooltip; };
+
+    // Computes up to a handful of live suggestions for whatever is currently in `consoleInput_` --
+    // WHAT TO BUILD item 2, "discoverability while typing". Reads the buffer as it stood at the START
+    // of this frame (i.e. after the input widget's own edits last frame), which is what will be drawn
+    // in the box this frame too -- the normal one-widget-reads-what-the-other-just-wrote ordering
+    // every ImGui filter-as-you-type panel uses. The word being completed is the LAST whitespace run
+    // in the buffer; a trailing space means that word is already finished and there is nothing partial
+    // left to suggest. Matches SUBSTRING (editor::commandMatchesQuery/varMatchesQuery), not prefix, so
+    // "cone" finds voxi.giCones from the middle of the name and "firefly" would find anything whose
+    // DESCRIPTION mentions it even with no matching name at all.
+    std::vector<ConsoleSuggestion> computeConsoleSuggestions() const {
+        std::vector<ConsoleSuggestion> out;
+        const std::string_view sv(consoleInput_);
+        if (sv.empty() || std::isspace(static_cast<unsigned char>(sv.back()))) return out;
+
+        std::vector<std::string_view> words;
+        for (std::size_t i = 0; i < sv.size();) {
+            while (i < sv.size() && std::isspace(static_cast<unsigned char>(sv[i]))) ++i;
+            const std::size_t start = i;
+            while (i < sv.size() && !std::isspace(static_cast<unsigned char>(sv[i]))) ++i;
+            if (i > start) words.push_back(sv.substr(start, i - start));
+        }
+        if (words.empty()) return out;
+        const std::string_view partial = words.back();
+
+        if (words.size() == 1) {
+            for (const editor::ConsoleCommandDesc& c : editor::consoleCatalog()) {
+                if (!editor::commandMatchesQuery(c, partial)) continue;
+                out.push_back({c.name + "  -- " + elide(c.help, 70), c.name, c.help});
+                if (out.size() >= 6) break;
+            }
+        }
+        // Variable names fill the rest of the list (or all of it, past the first word) -- covers
+        // `get <partial>`, `set <partial>`, and simply typing a name with no command at all, which is
+        // the common case for someone who does not yet think of this as a command language.
+        if (out.size() < 8) {
+            for (const editor::ConsoleVar& v : editor::allVars()) {
+                if (!editor::varMatchesQuery(v, partial)) continue;
+                std::string disp = v.name + "  =  " + editor::formatValue(v.read());
+                if (v.readOnly) disp += " (ro)";
+                disp += "  -- " + elide(v.help, 60);
+                out.push_back({std::move(disp), v.name, editor::varTooltipText(v)});
+                if (out.size() >= 8) break;
+            }
+        }
+        return out;
+    }
+
+    // Overwrites consoleInput_ wholesale and arms the same consoleFocusPending_ latch
+    // toggleDrawer(Console) uses -- so seeding a line (a click on a Browse Variables row) both fills
+    // the box and puts the caret back in it, whichever tab of the drawer happens to be showing right
+    // now (see drawConsole's own comment on ImGuiTabItemFlags_SetSelected for why that latch also has
+    // to steer the tab bar).
+    void seedConsoleInput(const std::string& line) {
+        std::strncpy(consoleInput_, line.c_str(), sizeof(consoleInput_) - 1);
+        consoleInput_[sizeof(consoleInput_) - 1] = '\0';
+        consoleFocusPending_ = true;
+    }
+
+    // Replaces only the LAST whitespace-delimited word of consoleInput_ with `insertText` plus a
+    // trailing space -- the live suggestion popup's accept action, distinct from seedConsoleInput
+    // above: a popup completes the word being TYPED, it does not discard whatever precedes it (a
+    // partly-typed `set voxi.msaa 4 post.t` picking "post.tonemap" from the popup must keep "set
+    // voxi.msaa 4 ", not erase it).
+    void acceptConsoleSuggestion(const std::string& insertText) {
+        const std::string cur(consoleInput_);
+        const std::size_t lastSpace = cur.find_last_of(" \t");
+        const std::string prefix = lastSpace == std::string::npos ? std::string() : cur.substr(0, lastSpace + 1);
+        seedConsoleInput(prefix + insertText + " ");
+    }
+
+    // Draws one transcript line, splitting it into whitespace runs so a token that IS a known
+    // variable name carries its OWN hover tooltip -- the transcript half of WHAT TO BUILD item 1
+    // ("hovering a name anywhere it appears"). Runs that match nothing are left as one TextUnformatted
+    // call each, same as before this existed -- only a line containing at least one dot (every name in
+    // the table is dotted; see EditorConsole.hpp's own naming convention) pays the per-token cost, and
+    // even then only tokens that also contain a dot ever reach findVar. Wrapped in a Begin/EndGroup so
+    // the CALLER's one IsItemHovered()-after-the-call (the existing right-click-to-copy-this-line
+    // feature) keeps meaning "hovering anywhere on this line", not just its last token.
+    void drawConsoleTranscriptLine(LogLevel level, const std::string& text) {
+        ImGui::BeginGroup();
+        if (text.find('.') == std::string::npos) {
+            drawLogLine(level, text.c_str());
+        } else {
+            ImVec4 fg, bg; bool filled = false;
+            logLineStyle(level, fg, bg, filled);
+            if (filled) {
+                const ImVec2 p = ImGui::GetCursorScreenPos();
+                const float w = ImGui::GetContentRegionAvail().x;
+                const float h = ImGui::GetTextLineHeight();
+                ImGui::GetWindowDrawList()->AddRectFilled(p, ImVec2(p.x + w, p.y + h),
+                                                          ImGui::ColorConvertFloat4ToU32(bg));
+            }
+            ImGui::PushStyleColor(ImGuiCol_Text, fg);
+            bool any = false;
+            auto emit = [&](const std::string& s) {
+                if (s.empty()) return;
+                if (any) ImGui::SameLine(0.0f, 0.0f);
+                ImGui::TextUnformatted(s.c_str());
+                any = true;
+            };
+            std::size_t lastEnd = 0, i = 0;
+            while (i < text.size()) {
+                while (i < text.size() && std::isspace(static_cast<unsigned char>(text[i]))) ++i;
+                const std::size_t wordStart = i;
+                while (i < text.size() && !std::isspace(static_cast<unsigned char>(text[i]))) ++i;
+                if (wordStart == i) break;
+                const std::string word = text.substr(wordStart, i - wordStart);
+                if (word.find('.') != std::string::npos) {
+                    std::string trimmed = word;
+                    while (!trimmed.empty() &&
+                           (trimmed.back() == ':' || trimmed.back() == ',' || trimmed.back() == '='))
+                        trimmed.pop_back();
+                    if (const editor::ConsoleVar* v = editor::findVar(trimmed)) {
+                        emit(text.substr(lastEnd, wordStart - lastEnd));
+                        emit(word);
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", editor::varTooltipText(*v).c_str());
+                        lastEnd = i;
+                    }
+                }
+            }
+            emit(text.substr(lastEnd));
+            if (!any) ImGui::TextUnformatted("");   // an all-punctuation line; never seen in practice
+            ImGui::PopStyleColor();
+        }
+        ImGui::EndGroup();
+    }
+
+    // One row of the Browse Variables tab: name, live value, read-only/[live]/[reload] tags, and a
+    // trimmed description -- WHAT TO BUILD item 3 ("descriptions, current values, and whether each is
+    // read-only") -- plus the full editor::varTooltipText on hover (item 1 again: this is the
+    // "listing" surface). Clicking seeds a ready-to-run `get`/`set` line into the console input, which
+    // is what actually gets someone from "found it while browsing" to "used it" without retyping the
+    // name they just spent effort finding.
+    void drawConsoleVarRow(const editor::ConsoleVar& v) {
+        ImGui::PushID(v.name.c_str());
+        std::string row = v.name + "  =  " + editor::formatValue(v.read());
+        if (v.readOnly) row += "   (read-only)";
+        const char* tag = editor::varHonestyTag(editor::varHonesty(v));
+        if (*tag) { row += "   "; row += tag; }
+        if (!v.help.empty()) { row += "  -- "; row += elide(v.help, 100); }
+        if (ImGui::Selectable(row.c_str()))
+            seedConsoleInput((v.readOnly ? std::string("get ") : std::string("set ")) + v.name + " ");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", editor::varTooltipText(v).c_str());
+        ImGui::PopID();
+    }
+
+    // The REPL: transcript, live suggestions, and the input line. Was the whole of drawConsole()
+    // before the console rework split it from drawConsoleBrowserTab() below; unchanged in shape.
+    void drawConsoleTranscriptTab(Engine& e) {
         if (ImGui::SmallButton("Clear")) consoleLines_.clear();
         ImGui::SameLine();
         // COPY, BECAUSE THE TEXT CANNOT BE SELECTED. drawLogLine emits ImGui text, which draws a
@@ -16807,11 +16957,27 @@ private:
         ImGui::Checkbox("Auto-scroll", &consoleAutoScroll_);
         ImGui::Separator();
 
+        // An empty transcript teaches nothing -- WHAT TO BUILD item 4's other half ("an empty console
+        // worth reading"). Re-seeded any time it goes empty, Clear included: `help` below covers the
+        // full grammar, this is only the orientation someone needs before they have typed a first
+        // thing here.
+        if (consoleLines_.empty())
+            for (const std::string& line : editor::consoleWelcomeLines())
+                consoleLines_.push_back({LogLevel::Info, line});
+
+        // Live suggestions (WHAT TO BUILD item 2) are computed from THIS frame's starting buffer, so
+        // how tall the panel needs to be is known before laying out the transcript above it.
+        const std::vector<ConsoleSuggestion> suggestions = computeConsoleSuggestions();
         const f32 inputLineH = ImGui::GetFrameHeightWithSpacing();
-        ImGui::BeginChild("##consolescroll", ImVec2(0, -inputLineH), false, ImGuiWindowFlags_HorizontalScrollbar);
+        const f32 suggestRowH = ImGui::GetTextLineHeightWithSpacing();
+        const f32 suggestH = suggestions.empty() ? 0.0f
+            : std::min<f32>(static_cast<f32>(suggestions.size()), 6.0f) * suggestRowH + 8.0f * dpi_;
+
+        ImGui::BeginChild("##consolescroll", ImVec2(0, -(inputLineH + suggestH)), false,
+                           ImGuiWindowFlags_HorizontalScrollbar);
         {
             for (const LogLine& ln : consoleLines_) {
-                drawLogLine(ln.level, ln.text.c_str());
+                drawConsoleTranscriptLine(ln.level, ln.text);
                 // ONE line, for when the whole buffer is not what is wanted. Right-click is where a
                 // person looks for this, and it costs nothing when unused.
                 if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
@@ -16821,6 +16987,18 @@ private:
         if (consoleAutoScroll_ && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4.0f)
             ImGui::SetScrollHereY(1.0f);
         ImGui::EndChild();
+
+        if (!suggestions.empty()) {
+            ImGui::BeginChild("##consolesuggest", ImVec2(0, suggestH), true);
+            for (std::size_t i = 0; i < suggestions.size(); ++i) {
+                ImGui::PushID(static_cast<int>(i));
+                const bool clicked = ImGui::Selectable(suggestions[i].display.c_str());
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", suggestions[i].tooltip.c_str());
+                if (clicked) acceptConsoleSuggestion(suggestions[i].insert);
+                ImGui::PopID();
+            }
+            ImGui::EndChild();
+        }
 
         if (consoleFocusPending_) { ImGui::SetKeyboardFocusHere(); consoleFocusPending_ = false; }
         ImGui::SetNextItemWidth(-1.0f);
@@ -16833,6 +17011,66 @@ private:
             consoleHistoryPos_ = -1;
             consoleInput_[0] = '\0';
             ImGui::SetKeyboardFocusHere(-1);   // keep focus in the input box after Enter
+        }
+    }
+
+    // The Browse Variables tab: a filter box over EVERY entry in editor::allVars(), grouped by prefix
+    // (editor::varGroupKey) -- WHAT TO BUILD item 3 in full. `get`/`set`/`vars` still work exactly as
+    // they always did (see EditorConsole.hpp's own handleVarsList comment); this is a second way to
+    // reach the same table for someone who does not yet know a name to type.
+    void drawConsoleBrowserTab() {
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputTextWithHint("##consolebrowsefilter", "Filter by name or description (e.g. \"gi\", \"exposure\", \"read-only\")...",
+                                  consoleBrowseFilter_, sizeof(consoleBrowseFilter_));
+        ImGui::Separator();
+
+        ImGui::BeginChild("##consolevarlist", ImVec2(0, -ImGui::GetTextLineHeightWithSpacing()));
+        std::string lastGroup;
+        std::size_t shown = 0, total = 0;
+        for (const editor::ConsoleVar& v : editor::allVars()) {
+            ++total;
+            if (!editor::varMatchesQuery(v, consoleBrowseFilter_)) continue;
+            const std::string group = editor::varGroupKey(v.name);
+            if (group != lastGroup) {
+                if (!lastGroup.empty()) ImGui::Spacing();
+                ImGui::TextDisabled("%s", editor::varGroupLabel(group).c_str());
+                lastGroup = group;
+            }
+            drawConsoleVarRow(v);
+            ++shown;
+        }
+        if (shown == 0) ImGui::TextDisabled("No variable's name or description matches '%s'.", consoleBrowseFilter_);
+        ImGui::EndChild();
+
+        // The two omissions EditorConsole.hpp's own header comment names (occlusion culling,
+        // virtualized-geometry LOD selection) stay visible here too, not just in `help` -- someone
+        // browsing rather than reading the transcript should not have to find that gap by its absence.
+        ImGui::TextDisabled("%zu of %zu variables shown. Click a row to copy a ready-to-run line to the console input.", shown, total);
+    }
+
+    // The bottom Console drawer: a tab bar over the REPL transcript (unchanged behaviour) and the new
+    // Browse Variables listing. The Transcript tab is FORCED to the front (ImGuiTabItemFlags_SetSelected)
+    // exactly on the frame consoleFocusPending_ is set -- toggleDrawer(Console) sets it when the drawer
+    // is freshly opened (backtick, the Window menu, or the toolbar button), and drawConsoleVarRow /
+    // acceptConsoleSuggestion set it too, so either path lands the caret in the input box on the tab
+    // that actually has one, instead of leaving the latch to fire uselessly against a hidden widget.
+    void drawConsole(Engine& e) {
+        // Hands this frame's device to EditorConsole.hpp's post.* variable table, which cannot reach
+        // Engine& itself (ConsoleVar::read takes no arguments -- see its own file comment for why).
+        editor::setConsoleDevice(e.device());
+
+        if (ImGui::BeginTabBar("##consoleTabs")) {
+            const ImGuiTabItemFlags replFlags =
+                consoleFocusPending_ ? ImGuiTabItemFlags_SetSelected : ImGuiTabItemFlags_None;
+            if (ImGui::BeginTabItem("Transcript", nullptr, replFlags)) {
+                drawConsoleTranscriptTab(e);
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Browse Variables")) {
+                drawConsoleBrowserTab();
+                ImGui::EndTabItem();
+            }
+            ImGui::EndTabBar();
         }
     }
 
@@ -25948,6 +26186,9 @@ private:
     char                      consoleInput_[256] = {};
     std::vector<std::string>  consoleHistory_;                // command strings, most-recent-last
     int                       consoleHistoryPos_ = -1;         // -1 = not currently recalling history
+    // Browse Variables tab's filter box (WHAT TO BUILD item 3) -- separate from cbFilter_ above,
+    // which filters the unrelated Content Browser.
+    char                      consoleBrowseFilter_[128] = {};
     // Content Browser: the folder whose files are listed, and the Import modal's source-path field.
     std::string         cbSelectedDir_;           // empty -> the content root
     char                importPath_[512] = {};
