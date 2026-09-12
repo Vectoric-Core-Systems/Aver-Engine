@@ -5440,9 +5440,13 @@ public:
                 f32 c[4] = {0.80f, 0.80f, 0.85f, 1.0f};
                 f32 metal = 0.0f, rough = 0.5f;
                 u32 authored = 0;
+                // See the visible-draw path for why a handle that no longer resolves must not be
+                // trusted; this path reimplements the same decision and has to make the same one.
+                bool authoredLive = false;
 #if AVER_MODULE_PBR
                 if (const auto a = surfaceMaterials_.find(sMat); a != surfaceMaterials_.end())
                     authored = a->second;
+                authoredLive = authored != 0;
                 // GLASS IS EXCLUDED FROM SUBMITDRAW EVEN HERE: since IDevice::drawMesh is the ONLY
                 // thing that broadcasts submitDraw() to VoxiRenderer, a culled entity skipping
                 // drawMesh() via `continue` would vanish from shadows/GI/TLAS the instant it left the
@@ -5458,11 +5462,21 @@ public:
                     // THE SECOND, INDEPENDENT SHADOW EXCLUSION -- the off-screen-caster path
                     // reimplemented the same test by hand. Its having drifted from the visible-draw
                     // path is exactly what a shared predicate prevents: a culled pane and a visible one must agree about whether they are translucent.
-                    if (const pbr::MaterialDesc* d = pbr::MaterialLibrary::get().desc(authored);
-                        d && pbr::isTranslucent(*d)) return;
+                    const pbr::MaterialDesc* d = pbr::MaterialLibrary::get().desc(authored);
+                    authoredLive = d != nullptr;
+                    if (d && pbr::isTranslucent(*d)) return;
                 }
 #endif
-                if (authored) {
+                // A HANDLE THAT NO LONGER RESOLVES MUST NOT BE TRUSTED. The white/metal=1/rough=1 below is a
+                // MULTIPLICATIVE IDENTITY, not an appearance: it is only correct because the real values arrive
+                // from the material binding set. When bindingSet() cannot resolve the handle it degrades to the
+                // fallback set, and this branch then bakes the identity in as the entity's FINAL look -- a bright
+                // white mirror, which is among the worst possible failure appearances because it reads as
+                // confident, deliberate lighting rather than as missing content. desc() is the same liveness test
+                // the translucency check above already performs, so a dead handle now falls through to the named
+                // look (or the flat fallback) instead, and says so once rather than silently.
+                if (authored && !authoredLive) warnDeadMaterialHandle(sMat);
+                if (authoredLive) {
                     c[0] = c[1] = c[2] = 1.0f;
                     metal = rough = 1.0f;
                 } else if (const auto look = surfaceLooks_.find(sMat); look != surfaceLooks_.end()) {
@@ -5756,13 +5770,26 @@ public:
                 // built-in-only surface is NEVER translucent regardless of its name. SurfaceLook is
                 // {colour, metallic, roughness} with no alphaMode at all -- see M_Glass's own comment.
                 bool blended = false;
+                // Reuses the ONE desc() lookup below rather than adding a second: with PBR compiled
+                // out there is no library to ask, so a handle is taken at face value exactly as before.
+                bool authoredLive = authored != 0;
 #if AVER_MODULE_PBR
                 if (authored) {
-                    if (const pbr::MaterialDesc* d = pbr::MaterialLibrary::get().desc(authored))
-                        blended = pbr::isTranslucent(*d);
+                    const pbr::MaterialDesc* d = pbr::MaterialLibrary::get().desc(authored);
+                    authoredLive = d != nullptr;
+                    if (d) blended = pbr::isTranslucent(*d);
                 }
 #endif
-                if (authored) {
+                // A HANDLE THAT NO LONGER RESOLVES MUST NOT BE TRUSTED. The white/metal=1/rough=1 below is a
+                // MULTIPLICATIVE IDENTITY, not an appearance: it is only correct because the real values arrive
+                // from the material binding set. When bindingSet() cannot resolve the handle it degrades to the
+                // fallback set, and this branch then bakes the identity in as the entity's FINAL look -- a bright
+                // white mirror, which is among the worst possible failure appearances because it reads as
+                // confident, deliberate lighting rather than as missing content. desc() is the same liveness test
+                // the translucency check above already performs, so a dead handle now falls through to the named
+                // look (or the flat fallback) instead, and says so once rather than silently.
+                if (authored && !authoredLive) warnDeadMaterialHandle(mat);
+                if (authoredLive) {
                     col[0] = col[1] = col[2] = 1.0f;
                     metallic = roughness = 1.0f;
                 } else if (const auto look = surfaceLooks_.find(mat); look != surfaceLooks_.end()) {
@@ -7392,6 +7419,25 @@ public:
 #endif
     void setFocusCompile(bool b) { tools_.armCompile(b); }   // --compile-scripts
     void setFocusReload(int frames) { if (frames > 0) tools_.armReload(frames); } // --reload-scripts [N]
+    // ONCE PER NAME, beside the missing-material warning this mirrors (see the "SAY SO, ONCE PER NAME"
+    // block in the visible-draw path). A surface whose pbr::MaterialLibrary handle no longer resolves
+    // used to be drawn with the multiplicative identity baked in as its FINAL appearance -- white,
+    // metallic 1, roughness 1 -- i.e. a bright mirror, which reads as confident lighting rather than as
+    // missing content and so is among the worst appearances a content error can take. It now falls
+    // through to the named look or the flat fallback instead, and says why.
+    //
+    // NOT KNOWN TO FIRE. An investigation of a white-under-motion artefact could not trigger this path
+    // and found a different cause, so this is a latent hazard closed on inspection rather than a
+    // reproduced bug -- if this line ever appears in a log, that is new information worth chasing.
+    void warnDeadMaterialHandle(i32 mat) {
+        static std::unordered_set<i32> s_warnedDeadHandle;
+        if (!s_warnedDeadHandle.insert(mat).second) return;
+        AVER_WARN("[Editor] surface '{}' holds a material handle that no longer resolves in "
+                  "pbr::MaterialLibrary; drawing its named look instead of the white/metal=1 "
+                  "placeholder. A stale handle here would otherwise render as a bright mirror.",
+                  aver_scene_material_name(mat));
+    }
+
     void setMsaaOverride(int n) { msaaOverride_ = n; }   // --msaa N
     void setDepthPrepassOverride(bool on) { depthPrepassOverride_ = on; }   // --depth-prepass
     void setGBufferOverride(bool on) { gbufferOverride_ = on; }             // --gbuffer

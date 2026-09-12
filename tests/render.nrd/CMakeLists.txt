@@ -34,3 +34,14 @@ if(AVER_RHI_D3D12)
   endif()
   set_target_properties(NrdRecordTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# NrdNormalRoughnessEncodingTest -- the G-buffer's normal/roughness packing round-trips through
+# NRD's own decoder, within R10G10B10A2's precision. See the file's own top comment for why this is
+# CPU-only and why it carries a negative control.
+#
+# UNGUARDED, UNLIKE NrdRecordTest: averPackNormalRoughness and NRD's decode maths are both
+# transcribed C++ here, not the real HLSL or the real library, so this needs neither AVER_WITH_NRD
+# nor a D3D12 device -- it runs the same on every machine and every configuration.
+add_executable(NrdNormalRoughnessEncodingTest src/NrdNormalRoughnessEncodingTest.cpp)
+target_link_libraries(NrdNormalRoughnessEncodingTest PRIVATE Aver.Core)
+set_target_properties(NrdNormalRoughnessEncodingTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

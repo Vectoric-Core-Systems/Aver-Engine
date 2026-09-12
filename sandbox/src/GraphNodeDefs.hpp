@@ -1193,10 +1193,10 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
 
     // -- OUTPUT: the one sink a material graph has. NO OUTPUT PINS AT ALL -- nothing ever reads a
     //    MaterialOutput, by construction, since it is where the backward walk that reads everything
-    //    else in the graph starts. AND NO DEFAULT VALUE ON ANY OF ITS TWELVE INPUTS -- that emptiness
+    //    else in the graph starts. AND NO DEFAULT VALUE ON ANY OF ITS SEVENTEEN INPUTS -- that emptiness
     //    is load-bearing, not an oversight: compileMaterialGraph treats an input as DRIVEN when it is
     //    linked OR carries a NON-EMPTY literal, so a default here would make a freshly spawned
-    //    MaterialOutput drive all eight fields the moment it exists, destroying the partial-graph
+    //    MaterialOutput drive all seventeen fields the moment it exists, destroying the partial-graph
     //    behaviour that lets a real graph say only "base colour is red" and leave roughness, the
     //    normal map and alpha exactly what the stock material already had. See
     //    compileMaterialGraph's own "ONLY THE FIELDS THE AUTHOR ACTUALLY DROVE" comment for the full
@@ -1216,6 +1216,12 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         // with a frosted band, or a bottle with an opaque label, instead of two meshes and two
         // materials. Ior is per-pixel for the same reason, though it moves far less often.
         pin("Ior", "float", false), pin("Transmission", "float", false),
+        // The volume, alongside Ior/Transmission above: AttenuationColor is the transmittance after
+        // AttenuationDistance centimetres (see kOutputFields in MaterialGraphHlsl.cpp), so driving
+        // the pair per pixel is a thin clear pane at a mesh's face and a deep green edge down its
+        // length, instead of one uniform tint. Same no-default rule as every pin here -- a distance
+        // of 0 or less already means "no volume" for every material that never drives this pin.
+        pin("AttenuationColor", "float3", false), pin("AttenuationDistance", "float", false),
         // The coat, and this is where a coat stops being three numbers and starts being a surface:
         // a weight mask makes one material polished where an object is handled and bare where it is
         // worn, and a roughness mask puts a clear panel and a scuffed edge on the same car-paint

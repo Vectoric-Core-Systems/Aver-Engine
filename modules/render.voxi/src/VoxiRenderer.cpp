@@ -3098,15 +3098,31 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
                 AVER_WARN("[NRD] REBLUR_DIFFUSE would not take its hit-distance tuning; it will "
                           "normalise against NRD's metre-based defaults and over-blur near geometry");
             // THE ENCODING CHECK IS THE ONE SILENT FAILURE MODE LEFT. NRD's shaders were BUILT
-            // against a specific normal/roughness packing (cmake/AverNRD.cmake picks it); the
-            // G-buffer packs RGB10A2 as normal*0.5+0.5 with roughness in w. If those disagree the
-            // denoiser still runs and still produces an image -- a plausible, wrong one. Reported
-            // once rather than per frame, because a warning nobody can act on every frame is noise.
+            // against a specific normal/roughness packing (cmake/AverNRD.cmake picks it), and
+            // averPackNormalRoughness (voxi.hlsl) implements one specific packing too. If those
+            // disagree the denoiser still runs and still produces an image -- a plausible, wrong
+            // one -- so this COMPARES the two numbers instead of describing one of them in prose.
+            // A prose description is exactly what stood here before: it named the encoding NRD
+            // reported correctly and then asserted, in English, what the G-buffer wrote -- a
+            // statement about the code that could drift the moment the packer changed, and did.
+            // That is how this bug survived a whole session: the one check built to catch it
+            // described the mismatch instead of detecting it. Reported once rather than per frame,
+            // because a warning nobody can act on every frame is noise.
+            constexpr u32 kEngineNormalEncoding    = 2;   // NRD_NORMAL_ENCODING_R10G10B10A2_UNORM
+            constexpr u32 kEngineRoughnessEncoding = 1;   // NRD_ROUGHNESS_ENCODING_LINEAR
             u32 nEnc = 0, rEnc = 0;
             if (nrdActive_ && !nrdWarnedEncoding_ && render::nrd::Denoiser::encodings(nEnc, rEnc)) {
-                AVER_INFO("[NRD] denoising sky occlusion; NRD normal encoding {}, roughness encoding "
-                          "{} -- the G-buffer packs RGB10A2 (normal*0.5+0.5, roughness in w), and a "
-                          "mismatch here is silent, not an error", nEnc, rEnc);
+                if (nEnc != kEngineNormalEncoding || rEnc != kEngineRoughnessEncoding) {
+                    AVER_WARN("[NRD] ENCODING MISMATCH: NRD was built for normal encoding {} / "
+                              "roughness encoding {}, but averPackNormalRoughness (voxi.hlsl) writes "
+                              "normal encoding {} / roughness encoding {} -- REBLUR will decode a "
+                              "garbage normal and a view-angle-dependent roughness. Fix "
+                              "averPackNormalRoughness or cmake/AverNRD.cmake so the two agree.",
+                              nEnc, rEnc, kEngineNormalEncoding, kEngineRoughnessEncoding);
+                } else {
+                    AVER_INFO("[NRD] denoising sky occlusion; normal/roughness encoding {}/{} "
+                              "matches averPackNormalRoughness (voxi.hlsl)", nEnc, rEnc);
+                }
                 nrdWarnedEncoding_ = true;
             }
         }

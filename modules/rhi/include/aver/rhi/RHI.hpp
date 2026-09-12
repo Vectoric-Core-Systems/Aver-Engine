@@ -937,17 +937,23 @@ public:
     // 0 when gBufferEnabled() is false or unimplemented, matching gBufferVelocityTexture() above.
     virtual TextureHandle gBufferViewZTexture() { return 0; }
 
-    // Scene-resolution normal and roughness, Format::RGB10A2Unorm. xyz: the shaded surface's
-    // WORLD-SPACE (not view-space, not tangent-space) normal, ENCODED from its real range of
-    // [-1, 1] into the unorm-storable range [0, 1] via n*0.5 + 0.5 -- a reader must decode with
-    // n*2 - 1 before using it as a direction, and a reader that forgets the decode gets a vector
-    // that LOOKS plausible (still roughly unit-length-ish, still roughly pointing outward) while
-    // being wrong at every pixel, which is exactly the shape of bug that survives a casual visual
-    // check. w: perceptual roughness, already [0, 1], stored as-is with no further transform -- it
-    // gets only 2 bits of the format's 10/10/10/2 split, which is deliberately coarse: this channel
-    // is read by a denoiser's edge-stopping weight (FFX_DNSR_Shadows_ReadNormals reads roughness
-    // alongside the normal for exactly that), never by anything doing actual PBR shading with it,
-    // so 2-bit banding here costs nothing a consumer of this field would notice.
+    // Scene-resolution normal and roughness, Format::RGB10A2Unorm -- packed to NRD's OWN
+    // NRD_NORMAL_ENCODING_R10G10B10A2_UNORM layout (third_party/nrd/Shaders/NRDConfig.hlsli), NOT
+    // the plain n*0.5+0.5-with-roughness-in-w scheme an earlier version of this contract documented
+    // (that was NRD's #else layout, for encodings 0/3 -- wrong for the format this texture actually
+    // is, and the reason REBLUR used to decode a garbage normal and a view-angle-dependent
+    // roughness instead of the real ones). xyz JOINTLY encode the normal AND the roughness: an
+    // improved-octahedral fold puts N into x/y, and z carries roughness's MAGNITUDE with the SIGN
+    // OF N.z riding on z's own sign (roughness can never be exactly 0, or that sign bit has nothing
+    // to carry it). See averPackNormalRoughness (modules/render.voxi/shaders/voxi.hlsl, transcribed
+    // byte-exact from NRD's _NRD_EncodeNormalRoughness101010) for the encode, and
+    // sandbox/shaders/gbuffer_debug.hlsl for the matching decode. w: materialID/3 in NRD's
+    // convention -- this engine has no material-ID concept yet, so it is always 0 here, NOT
+    // roughness. A raw sample of this texture is NOT directly interpretable with a cheap n*2-1 on
+    // xyz; a reader needs the full decode (NRD_FrontEnd_UnpackNormalAndRoughness's own job, or the
+    // transcribed pair named above) to recover either channel, and a reader that assumes the OLD
+    // contract gets a vector that LOOKS plausible while being wrong at every pixel -- exactly the
+    // shape of bug that survives a casual visual check, and exactly how this one did.
     //
     // 0 when gBufferEnabled() is false or unimplemented, matching the two accessors above.
     virtual TextureHandle gBufferNormalRoughnessTexture() { return 0; }

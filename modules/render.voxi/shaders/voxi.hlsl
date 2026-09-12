@@ -766,9 +766,12 @@ cbuffer MipCB : register(b3) { uint gSrcMip; uint3 _mipPad; };
 //                                rhi::UpscalerNeeds::MotionVectors' documented convention.
 //   SV_TARGET2 viewZ:           R32F. VIEW-SPACE LINEAR depth (clip.w), NOT the post-projective
 //                                [0,1] SV_Position.z/SV_DEPTH a hardware depth buffer stores.
-//   SV_TARGET3 normalRoughness: RGB10A2. xyz = world normal*0.5+0.5 (decode N=xyz*2-1); w = roughness.
-//                                ALPHA IS TWO BITS (four levels), specified for this feature, not
-//                                chosen here; finer roughness reads the material's own SRV instead.
+//   SV_TARGET3 normalRoughness: RGB10A2, packed to NRD's OWN encoding (NRD_NORMAL_ENCODING_
+//                                R10G10B10A2_UNORM, third_party/nrd/Shaders/NRDConfig.hlsli), NOT a
+//                                plain n*0.5+0.5-with-roughness-in-w scheme -- see
+//                                averPackNormalRoughness below for the layout and why. w =
+//                                materialID/3 in NRD's convention; this engine has no material-ID
+//                                concept yet, so it is always 0, NOT roughness.
 #if AVER_GBUFFER
 struct GBufferOut {
     float4 col              : SV_TARGET0;   // exactly PSMainVoxi's own colour -- unchanged by this define
@@ -778,9 +781,44 @@ struct GBufferOut {
 };
 
 // Packs a world-space unit normal and roughness into the RGB10A2 convention above. Shared by
-// PSMainVoxi and PSRayDriven so the encode is written once, not risking divergence.
+// PSMainVoxi and PSRayDriven (both its sky-hit and sky-miss branches, further down this same file)
+// so the encode is written once, not risking divergence.
+//
+// THIS IS NRD'S NORMAL_ENCODING_R10G10B10A2_UNORM LAYOUT, TRANSCRIBED BYTE-EXACT FROM
+// _NRD_EncodeNormalRoughness101010 (third_party/nrd/Shaders/NRD.hlsli) -- NOT the naive
+// N*0.5+0.5-with-roughness-in-w scheme this function used to compute, which is NRD's #else layout
+// for encodings 0/3 and is WRONG for the format this texture actually uses. Confined-vendoring
+// terms keep NRD's headers out of modules/render.voxi, so the maths is transcribed here rather than
+// included, the same pattern the YCoCg pair in voxi_restir.hlsli already follows; the matching
+// decode is transcribed a second time in sandbox/shaders/gbuffer_debug.hlsl for the debug view, and
+// a third time (for a CPU-side round-trip test, no GPU needed since it's pure arithmetic) in
+// tests/render.nrd/src/NrdNormalRoughnessEncodingTest.cpp.
+//
+// THE LAYOUT: an improved-octahedral encode folds N into x/y (L1-normalize, then a fold that always
+// lands both channels in [0,1] -- see the two lines below, or work the algebra: r.x = 0.5 +
+// 0.5*(n.x+n.y) and |n.x+n.y| <= |n.x|+|n.y|+|n.z| = 1 after the L1-normalize, so r.x can never
+// leave [0,1], and the same argument covers r.y). z carries roughness's MAGNITUDE with the SIGN OF
+// n.z riding on z's own sign -- which is why roughness is clamped away from exactly 0 below: a zero
+// magnitude has no sign to carry n.z's, and the decoder recovers that sign from `t < 0`.
 float4 averPackNormalRoughness(float3 N, float roughness) {
-    return float4(N * 0.5 + 0.5, saturate(roughness));
+    N /= abs(N.x) + abs(N.y) + abs(N.z);
+
+    float3 r;
+    r.y = N.y * 0.5 + 0.5;
+    r.x = N.x * 0.5 + r.y;
+    r.y -= N.x * 0.5;
+
+    // Can't be exactly 0, or it erases n.z's sign bit -- NRD's own comment on the line this
+    // transcribes, and the reason a caller passing an unclamped/zero roughness still gets a
+    // decodable normal back.
+    roughness = max(saturate(roughness), 1.5 / 512.0);
+    const float s = N.z < 0.0 ? -roughness : roughness;
+    r.z = s * 0.5 + 0.5;
+
+    // w: NRD's materialID/3 slot. This engine has no material-ID concept, so always 0 -- see the
+    // G-buffer's own header comment above and RHI.hpp's gBufferNormalRoughnessTexture for why a
+    // reader must not mistake this for roughness.
+    return float4(r, 0.0);
 }
 
 // Screen-space motion for the velocity channel: `wpos` reprojected through THIS frame's camera minus

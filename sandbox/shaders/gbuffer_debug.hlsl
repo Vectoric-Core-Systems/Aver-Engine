@@ -55,10 +55,30 @@ float4 PSGBufferDebug(GBufferDebugVSOut i) : SV_TARGET {
         return float4(shown, shown, shown, 1.0);
     }
     if (mode == 3) {
-        // NORMAL + ROUGHNESS -- IDevice::gBufferNormalRoughnessTexture's own encoding: xyz is
-        // ALREADY n*0.5+0.5 (see that accessor's own comment), i.e. already the standard displayable
-        // world-normal range, so unlike the two modes above this one needs no remap to be legible.
-        return float4(gGBufferDebugTex.Sample(gGBufferDebugSamp, i.uv).rgb, 1.0);
+        // NORMAL + ROUGHNESS -- IDevice::gBufferNormalRoughnessTexture's own encoding is NRD's
+        // NRD_NORMAL_ENCODING_R10G10B10A2_UNORM (see that accessor's own comment in RHI.hpp), NOT a
+        // plain n*0.5+0.5 this view used to assume it could show unmodified. xyz jointly carry the
+        // normal AND the roughness now, so a raw sample is meaningless as a colour -- it has to be
+        // decoded first.
+        //
+        // _NRD_DecodeNormalRoughness101010, transcribed from third_party/nrd/Shaders/NRD.hlsli (see
+        // averPackNormalRoughness's own comment in voxi.hlsl for why transcribed, not included --
+        // this is the SAME transcription a second time, and the two are a matched pair: this decode
+        // is only correct against that encode).
+        const float3 p = gGBufferDebugTex.Sample(gGBufferDebugSamp, i.uv).xyz;
+        const float t = p.z * 2.0 - 1.0;   // signed roughness; its SIGN is N.z's sign
+        float3 n;
+        n.x = p.x - p.y;
+        n.y = p.x + p.y - 1.0;
+        n.z = (t < 0.0 ? -1.0 : 1.0) * (1.0 - abs(n.x) - abs(n.y));
+        // _NRD_SafeNormalize, transcribed likewise: rsqrt(dot+eps) rather than a bare normalize(),
+        // so a grazing sample that decodes to a near-zero vector stays finite instead of NaN-ing the
+        // whole debug view.
+        n *= rsqrt(dot(n, n) + 1e-9);
+        // roughness itself is abs(t) (NRD's own decode) -- unused here, because this view answers
+        // "does the normal decode right", the same question it answered before this change, and
+        // there is no separate roughness debug mode to feed it into.
+        return float4(n * 0.5 + 0.5, 1.0);
     }
     return float4(1.0, 0.0, 1.0, 1.0);   // unreached while `mode` is set from GBufferDebugFeature::Mode
 }

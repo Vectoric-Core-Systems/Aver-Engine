@@ -260,15 +260,44 @@ float RAB_GetGISampleTargetPdfForSurface(float3 samplePosition, float3 sampleRad
     return averShadowLum(sampleRadiance) * cosR;
 }
 
-// RTXDI's own worked bound for a reused sample's Jacobian (the shipped bridge sample clamps here,
-// not invented for this file, since nothing here has ground truth of its own to pick a different
-// bound from). Rejects a NaN/Inf/non-positive Jacobian outright -- a grazing reprojection whose
-// partial terms divide by (near) zero -- rather than let it multiply a reused sample's weight into
-// something that reads as a bright outlier this codebase has a name for already (see
-// aver-negative-radiance-reads-bright's own history elsewhere in this tree).
+// ---- CLOSE THE JACOBIAN ASYMMETRY: keep rejecting on the real value, but hand back 1.0 ----
+//
+// THE BUG THIS CLOSES. RTXDI's BASIC bias correction (SpatioTemporalResampling.hlsli) combines each
+// stream's contribution into the numerator as `targetPdf * jacobian * ...` (around :183) but seeds
+// the MIS denominator from `ps * neighborReservoir.M`, with NO jacobian term at all (around :267).
+// That is one-sided: any tap whose reprojection geometry differs from the current pixel's inflates
+// the numerator with nothing in the denominator to cancel it. It is exactly the taps whose geometry
+// SHOULD differ under camera rotation that supply the inflated jacobians -- the +-1-2px jittered tap
+// and the +-32px spatial taps (SpatioTemporalResampling.hlsli :114-122, :222-230), all six-of-seven
+// candidates that are not the i==0 temporal anchor. That anchor's own Jacobian stays close to 1
+// under a pure rotation (its receiver does not move), so it was never the source of this; the other
+// six are, every one of them re-tapping a screen location that never repeats frame to frame while
+// the camera turns.
+//
+// THE FIX IS THE RESTIR-DI FORM, not a smaller clamp. This function's one documented job stays --
+// reject on the REAL jacobian, since RTXDI's own comment calls the value "valuable information to
+// determine if the GI sample should be combined", and a NaN/Inf/non-positive value (a grazing
+// reprojection whose partial terms divide by near-zero) must still be refused outright rather than
+// multiply a reused sample's weight into a bright outlier this codebase already has a name for (see
+// aver-negative-radiance-reads-bright's own history elsewhere in this tree). What changes is what an
+// ACCEPTED tap reports: 1.0, not the measured ratio. A jacobian of 1.0 multiplies the numerator by
+// 1.0 -- the same effect the denominator's missing term already has by omission -- so once a tap has
+// passed the reject test, neither sum carries a jacobian and the two sides agree again.
+//
+// [1/4, 4], NOT [1/25, 25] -- REASONED HERE, NOT MEASURED (no ground-truth sweep was run to fit
+// this number; it is a judgement call, stated as one, and a narrower or wider window was not tried
+// against the luma-sweep measurement below). With acceptance now geometry-blind, the window's only
+// remaining job is deciding "is this still plausibly the same surface patch", not "how far may I
+// trust the weight to scale", so it can be tighter than a bound picked for the old numerator-only
+// use. A jacobian is a ratio of solid angles/areas between the current and the reused receiver;
+// +-2 stops (4x either way) is generous enough to admit the near-1 anchor tap and a genuinely
+// similar spatial neighbour at rest, while rejecting the kind of extreme foreshortening a 32px tap
+// can produce across a real depth discontinuity -- RTXDI_IsValidNeighbor's own depth/normal test is
+// already the first line of defence against that case; this is the second, narrower one.
 bool RAB_ValidateGISampleWithJacobian(inout float jacobian) {
     if (isnan(jacobian) || isinf(jacobian) || jacobian <= 0.0) return false;
-    jacobian = clamp(jacobian, 1.0 / 25.0, 25.0);
+    if (jacobian < 0.25 || jacobian > 4.0) return false;
+    jacobian = 1.0;
     return true;
 }
 
@@ -492,7 +521,16 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     s.sssWeight   = 0.0;
     s.sssRadius   = 0.0;
 #ifdef AVER_LAYERED_BSDF
-    s.coatWeight = 0.0; s.coatRough = 0.0; s.coatF0 = 0.0;
+    // Mirrors PSRayDriven's own hand-built surface (voxi.hlsl:1469-1477): read the hit's own
+    // material instead of hardcoding the coat off, which silently meant "no material has a coat in
+    // ReSTIR GI's candidate hit" no matter what mat.coat* actually said -- the identical trap that
+    // comment names for ray-driven mode's own history, now closed here too.
+    // INERT ON ITS OWN, so fixed in the same change as the specular term below rather than as two:
+    // averCoatTerms (material_prelude.hlsl) only ever attenuates or adds through ind.specular, and
+    // this function had no environment-specular term for it to touch until that term exists.
+    s.coatWeight = (mat.flags & AVER_MAT_COAT) ? saturate(mat.coatWeight)    : 0.0;
+    s.coatRough  = (mat.flags & AVER_MAT_COAT) ? saturate(mat.coatRoughness) : 0.0;
+    s.coatF0     = (mat.flags & AVER_MAT_COAT) ? saturate(mat.coatF0)        : 0.0;
 #endif
     s.F0        = lerp(mat.reflectance.xxx, s.albedo, s.metallic);
     s.F         = fresnelSchlick(saturate(dot(s.H, s.V)), s.F0, s.f90);
@@ -513,13 +551,55 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     sun.visibility = rtShadow(hitPos, s.N, L, pixel, float3(0, 0, 0), float3(0, 0, 0), 1u, frameJitter);
     sun.visibility *= 1.0 + averCausticFocus(hitPos);
 
-    float3 radiance = averShadeDirect(s.emissive, s, sun);
-    // THE SKY, so a bounce off a sunlit wall into open air isn't fixed at direct+emissive alone --
-    // the SAME ambient term rtReflection adds for its own hit. No environment SPECULAR term at this
-    // hit (the second-order "specular of a diffuse bounce" rtReflection's own comment doesn't model
-    // either) and no bounce-of-a-bounce -- both are smaller than one more traced ray would cost here
-    // and neither is in this task's scope.
-    radiance += s.kdAlbedo * averSkyIrradiance(s.N) * gAmbient.r;
+    // 0.0, NOT s.emissive: averShadeIndirect below adds s.emissive itself (its own header comment,
+    // "adds ambient, bounce, environment specular and self-emission, in that order"), matching the
+    // averShadeDirect(radiance=0)/averShadeIndirect(radiance) pairing PSRayDriven uses for the same
+    // AverSurface (voxi.hlsl:1094-1096, :1775). Passing s.emissive here too would count it twice.
+    float3 radiance = averShadeDirect(0.0, s, sun);
+
+    // THE SKY, through the SAME split-sum machinery averShadeIndirect/averIndirectTerms already
+    // implement for every other consumer of AverSurface -- not the old hand-rolled diffuse-only
+    // line. That line was this file's OWN instance of the white-furnace bug the ray-driven path
+    // already found and fixed (voxi.hlsl:1510-1519): a metal's kdAlbedo is 0, so a diffuse-only sky
+    // term gave a full-metallic candidate hit NOTHING, and a glossy one nothing in proportion to its
+    // gloss -- exactly the "metals are black holes for indirect light" symptom this task named.
+    // Routing through averShadeIndirect also switches the coat fields above from inert to load-
+    // bearing: averCoatTerms only ever touches specEnv/diffAmbient/diffBounce through ind, so a coat
+    // could not have had any effect before this call existed either.
+    //
+    // ind.specular IS THE ONE DELIBERATE APPROXIMATION HERE, and it is the answer to "keep it
+    // cheap": PSRayDriven's own environment specular (voxi.hlsl, from :1620) traces a REAL mirror
+    // ray with a sky-march fallback -- a second ray plus a fallback march, on top of the shadow ray
+    // this function already pays for ITS OWN hit. That is reference-renderer cost for a value RTXDI
+    // is about to resample and a denoiser is about to filter, not what one candidate in a resampled
+    // estimator should spend. averSkyRadianceCheap is the SAME cheap SH reconstruction this
+    // function already pays for above (the COMMITTED_TRIANGLE_HIT miss branch) -- reused here along
+    // the reflection vector instead of the miss direction, so a glossy hit gets a real, direction-
+    // dependent environment sample rather than the zero it had, at a cost this file already accepts
+    // elsewhere. It cannot represent a mirror-sharp reflection of nearby geometry (there is no local
+    // reflection probe at a second-bounce hit), which costs least here: RTXDI's resampling and the
+    // denoiser both average this estimate over many frames and neighbours already, so a low-
+    // frequency environment answer is the fidelity this bounce can actually deliver on screen.
+    //
+    // ind.diffuse = 0.0: still no bounce-of-a-bounce, unchanged scope from the line this replaces.
+    // ind.occlusion = 1.0: matches giRestirIndirect's own top-level `ao` output, which this file's
+    // header comment already documents as NOT MODELLED for this whole estimator.
+    //
+    // TRANSMISSION AND VOLUME ABSORPTION REMAIN KNOWINGLY UNHANDLED, recorded so the next person
+    // does not re-derive it: kdAlbedo above already dampens the diffuse response by
+    // (1 - transmission), same as averBuildSurface, but attenuationColor/attenuationDistance (the
+    // tinted-thickness term material volume shading applies elsewhere -- see
+    // aver-material-volume-absorption) are never referenced by this second-bounce hit. There is no
+    // ray-marched thickness at a point sampled this cheaply to tint by, and no downstream consumer
+    // of a transmitted colour here even if there were one.
+    const float3 R = reflect(dir, s.N);
+    AverIndirect ind;
+    ind.ambient      = averSkyIrradiance(s.N);
+    ind.ambientScale = gAmbient.r;
+    ind.diffuse      = 0.0;
+    ind.occlusion    = 1.0;
+    ind.specular     = averSkyRadianceCheap(R);
+    radiance = averShadeIndirect(radiance, s, ind);
 
     samplePos      = hitPos;
     sampleNormal   = s.N;
@@ -608,16 +688,25 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         // At the old 20 with numSamples 8 that is 181/180 -- a margin of 0.56%. The Jacobian of a
         // spatial tap 32 pixels away is a ratio of squared distances between two different receivers
         // and a shared sample; under camera motion its mean is nowhere near within half a percent of
-        // one, and RAB_ValidateGISampleWithJacobian only clamps each sample to [1/25, 25], which
-        // bounds a single step and does nothing about the compounding. That is the remaining
-        // reported symptom: at rest J is close to 1 and the estimate creeps toward correct, and the
-        // moment the camera moves J scatters and W runs away -- bright, with flat wrong-bright
-        // regions where a whole neighbourhood shares one runaway sample.
+        // one, and RAB_ValidateGISampleWithJacobian USED TO only clamp each sample to [1/25, 25],
+        // which bounded a single step and did nothing about the compounding. That was the remaining
+        // reported symptom: at rest J was close to 1 and the estimate crept toward correct, and the
+        // moment the camera moved J scattered and W ran away -- bright, with flat wrong-bright
+        // regions where a whole neighbourhood shared one runaway sample.
         //
         // 8 taps of 8 gives K*M = 24 and a margin of 25/24, about 4.2% -- roughly eight times the
         // headroom for a history still deep enough to be worth having. The cost is a shorter
         // effective sample count, which is noise, and noise is the thing a denoiser can actually
         // fix; a runaway multiplicative weight is not.
+        //
+        // UPDATE, now that RAB_ValidateGISampleWithJacobian (above) reports 1.0 for every ACCEPTED
+        // tap instead of the measured ratio: E[J] over accepted taps is now exactly 1.0 by
+        // construction, not merely close to it, so the contraction factor K*M/(1+K*M) is stable for
+        // ANY K*M -- the runaway this margin analysis was defending against can no longer arise
+        // through the Jacobian at all. maxHistoryLength is left at 8 anyway rather than reopened
+        // here: revisiting it is a separate change from the two this task scoped (the Jacobian fix
+        // and the motion discount below), and 8 costs nothing now that it is no longer load-bearing
+        // for stability -- it just means less history than the number could safely support.
         stparams.maxHistoryLength      = 8;
         // ---- 0, AND THE 1 IT REPLACES WAS DISARMING EVERY SPATIAL TAP ----
         //
@@ -650,14 +739,48 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         // light across a corner if nothing were watching it, but RTXDI_IsValidNeighbor's depth/
         // normal similarity test -- already run for every neighbour, temporal jitter and spatial tap
         // alike, inside SpatioTemporalResampling.hlsli -- rejects a tap landing on a dissimilar
-        // surface before its reservoir is ever combined in. The rejection is what keeps reuse local,
-        // not the radius, so the radius can afford to stay generous.
-        // 2, NOT NVIDIA'S 8, and for the stability reason maxHistoryLength above spells out rather
-        // than to save the taps. Those 8 are the default for a STANDALONE SPATIAL PASS, which runs
-        // once over an already-normalised frame; here they are fused into the temporal pass and so
-        // they multiply the history length in K*M. Taking K from 9 to 3 is most of the margin.
-        stparams.numSamples     = 2;
-        stparams.samplingRadius = 32.0;
+        // surface before its reservoir is ever combined in. The rejection is what keeps reuse local
+        // AT REST, not the radius -- see the motion discount just below for why "at rest" matters.
+        // 2, NOT NVIDIA'S 8, AT REST, and for the stability reason maxHistoryLength above spells out
+        // rather than to save the taps. Those 8 are the default for a STANDALONE SPATIAL PASS, which
+        // runs once over an already-normalised frame; here they are fused into the temporal pass and
+        // so they multiply the history length in K*M. Taking K from 9 to 3 is most of the margin.
+        //
+        // ---- DISCOUNT SPATIAL REUSE UNDER MOTION -- the change most directly supported by the
+        // ghosting measurement (this file's own header comment) ----
+        //
+        // WHY THE COMBINE NEEDS ONE AND NEVER HAD ONE: under rotation the reprojected screen
+        // position moves every frame, so the SAME 32px neighbourhood the depth/normal test above
+        // approves this frame is a DIFFERENT 32px neighbourhood next frame -- the taps are locally
+        // valid at every instant and STILL never converge, because "locally valid" was never the
+        // same test as "the same sample twice". RTXDI_IsValidNeighbor cannot see that; it has no
+        // notion of history at all. Fewer taps, drawn from a narrower ring, is what actually answers
+        // it: it does not fix any one tap's Jacobian (RAB_ValidateGISampleWithJacobian above already
+        // does that), it reduces how much never-converging spatial content is combined in per frame
+        // while the camera moves, at the honest cost of more noise for the denoiser to absorb.
+        //
+        // THE SAME SHAPE AS rtShadowTemporal's OWN VELOCITY DISCOUNT (voxi_rt.hlsli, around
+        // :1695-1712: `t = saturate(length(velocityPx) / 32.0); weight = lerp(0.9, 0.5, t)`), not a
+        // new mechanism invented for this file -- that function already answers "how much should a
+        // reused estimate be trusted as reprojection distance grows" for a different signal (traced
+        // shadow visibility), and this is the identical question asked of ReSTIR's spatial reuse.
+        // 32.0, the SAME divisor, for the same reason: motionPx is the same "pixels of reprojection
+        // this frame" quantity rtShadowTemporal's velocityPx measures, so reusing its calibration is
+        // more defensible than inventing a second number with no measurement behind it either.
+        // REASONED, NOT MEASURED: no sweep was run here to confirm 32px is also the right knee for
+        // THIS discount, only that it is this engine's own existing answer to the same question
+        // asked of a different signal, restated rather than a fresh guess.
+        //
+        // FLOORS, NOT ZERO AT FULL MOTION. samplingRadius 0 would not mean "no spatial reuse", it
+        // would mean "every one of numSamples taps lands on (0,0)" -- RTXDI_CalculateSpatialResamplingOffset
+        // (Rtxdi/GI/SpatialResampling.hlsli) scales kGiNeighborOffsets by samplingRadius, so a radius
+        // of zero collapses every offset to the CENTRE pixel, re-tapping prevPos's own temporal
+        // result under a different name rather than reusing nothing. 1 tap at an 8px radius is the
+        // smallest neighbourhood that still counts as spatial reuse rather than a disguised no-op.
+        const float motionPx = length(screenSpaceMotion.xy);
+        const float motionT  = saturate(motionPx / 32.0);
+        stparams.numSamples     = (uint)round(lerp(2.0, 1.0, motionT));
+        stparams.samplingRadius = lerp(32.0, 8.0, motionT);
         RTXDI_RuntimeParameters rParams = (RTXDI_RuntimeParameters)0;   // no checkerboard
         // neighborOffsetMask is the field the spatial half actually reads: RTXDI_
         // CalculateSpatialResamplingOffset masks its index by this before it ever touches
