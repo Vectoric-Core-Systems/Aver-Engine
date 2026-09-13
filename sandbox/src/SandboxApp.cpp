@@ -78,6 +78,8 @@
 #include "LevelClassSave.hpp"
 #include "LevelList.hpp"
 #include "ProjectScaffold.hpp"
+#include "GraphAssetPresentation.hpp"
+#include "MaterialResolve.hpp"
 #include "ClusterMaterialShader.hpp"
 
 // The material sampler register on the cluster pipeline (materialShaderDefines() gets the same
@@ -916,6 +918,13 @@ struct DirEntry {
     // every frame, and an extension lookup per tile per frame is what the 20-frame cache avoids.
     int kind = -1;
     std::string kindExt;   // lower-cased extension, for assetKindFor at draw time
+    // ONLY MEANINGFUL when kindExt == ".ocgraph". Read from the file's DOMAIN record at LISTING
+    // time, same as `kind`/`kindExt` above, and for the same reason: this view redraws every frame,
+    // and re-parsing a graph's header per tile per frame is the cost the 20-frame listing cache
+    // exists to avoid. Defaults to Gameplay, which is also what an absent DOMAIN record means, so a
+    // non-graph entry (which never reads this field) and a graph this build failed to open both read
+    // the same, harmless way.
+    editor::GraphAssetFamily graphFamily = editor::GraphAssetFamily::Gameplay;
 };
 
 // A Content Browser directory listing, refreshed on a frame stamp. Folders sort first and are counted.
@@ -4169,24 +4178,22 @@ public:
         pbr::MaterialHandle h = 0;
         const std::string content = project_.contentDir();
         if (!content.empty()) {
-            // Built .ocmat under Binaries wins over a hand-authored one under Content.
-            const std::string candidates[3] = {
-                project_.binariesDir() + "\\Materials\\" + name + ".ocmat",
-                content + "\\Materials\\" + name + ".ocmat",
-                content + "\\" + name,
-            };
-            for (const std::string& path : candidates) {
-                std::error_code ec;
-                if (!std::filesystem::exists(path, ec)) continue;
+            // Built .ocmat under Binaries wins over a hand-authored one under Content -- see
+            // MaterialResolve.hpp for the full three-candidate order, shared with
+            // loadProjectMaterials() below so the two never drift apart.
+            const std::string path = editor::resolveMaterialPath(project_.binariesDir(), content, name);
+            if (!path.empty()) {
                 pbr::MaterialDesc d;
                 fmt::OcMatExtras extras;
                 std::string err;
-                if (!fmt::loadOcmat(path, d, &extras, &err)) { AVER_WARN("[Material] {}", err); break; }
-                d.graphId = resolveMaterialGraph(extras.graphRef);
-                h = pbr::MaterialLibrary::get().create(d);
-                if (h) AVER_INFO("[Material] '{}' loaded from {}{}", d.name, path,
-                                 d.graphId ? " (graph " + std::to_string(d.graphId) + ")" : "");
-                break;
+                if (!fmt::loadOcmat(path, d, &extras, &err)) {
+                    AVER_WARN("[Material] {}", err);
+                } else {
+                    d.graphId = resolveMaterialGraph(extras.graphRef);
+                    h = pbr::MaterialLibrary::get().create(d);
+                    if (h) AVER_INFO("[Material] '{}' loaded from {}{}", d.name, path,
+                                     d.graphId ? " (graph " + std::to_string(d.graphId) + ")" : "");
+                }
             }
         }
         materialAssets_.emplace(name, h);
@@ -4659,28 +4666,34 @@ public:
         projectMeshIds_.clear();
     }
 
-    // Loads every .ocmat under Content/Materials and binds each to the surface token its stem interns to.
+    // Loads every .ocmat under Binaries/Materials AND Content/Materials and binds each to the
+    // surface token its stem interns to -- the SAME two homes (and the SAME precedence) the
+    // per-name resolver materialForSurface() already honours. A name is gathered once even when
+    // it exists under both: materialForSurface() itself tries binariesDir first, so the built one
+    // under Binaries wins the collision, matching the runtime's documented order.
+    // NON-RECURSIVE in each directory, matching the runtime's loadProjectMaterials().
 #if AVER_MODULE_PBR
     void loadProjectMaterials() {
 #if AVER_MODULE_SCENE
         const std::string dir = project_.contentDir();
         if (dir.empty()) return;
-        const std::string matDir = dir + "\\Materials";
-        std::error_code ec;
-        if (!std::filesystem::exists(matDir, ec)) return;
+        const std::string contentMatDir = dir + "\\Materials";
+        const std::string binMatDir = project_.binariesDir() + "\\Materials";
+
+        // MaterialResolve.hpp, so this enumeration and materialForSurface()'s own resolution can
+        // never name the two directories differently or disagree on what ".ocmat" means.
+        const std::vector<std::string> stems = editor::projectMaterialStems(project_.binariesDir(), dir);
 
         u32 loaded = 0;
-        for (std::filesystem::directory_iterator it(matDir, ec), end; it != end; it.increment(ec)) {
-            if (ec) break;
-            if (!it->is_regular_file(ec)) continue;
-            if (assetTypeFromPath(it->path().string()) != AssetType::Material) continue;
-            const std::string stem = it->path().stem().string();
+        for (const std::string& stem : stems) {
             const pbr::MaterialHandle h = materialForSurface(stem);
             if (!h) continue;
             surfaceMaterials_[aver_scene_material(0, stem.c_str())] = h;
             ++loaded;
         }
-        if (loaded) AVER_INFO("[Material] {} project material(s) loaded from {}", loaded, matDir);
+        if (loaded)
+            AVER_INFO("[Material] {} project material(s) loaded from {} and {}", loaded, binMatDir,
+                      contentMatDir);
 #endif
     }
 
@@ -5880,9 +5893,10 @@ public:
                     // on this; the editor, where a level is authored, did not.
                     static std::unordered_set<i32> s_warnedMissingMaterial;
                     if (s_warnedMissingMaterial.insert(mat).second)
-                        AVER_WARN("[Editor] surface '{}' has no .ocmat under Content/Materials and no "
-                                  "built-in look; drawing the flat fallback (0.80, 0.80, 0.85). Either "
-                                  "author the material or use one of the built-in names.",
+                        AVER_WARN("[Editor] surface '{}' has no .ocmat under Binaries/Materials or "
+                                  "Content/Materials and no built-in look; drawing the flat fallback "
+                                  "(0.80, 0.80, 0.85). Either author the material or use one of the "
+                                  "built-in names.",
                                   aver_scene_material_name(mat));
                 }
                 // This entity's material, resolved ONCE and kept in locals because TWO paths below
@@ -18686,6 +18700,26 @@ private:
         ImGui::PopStyleVar();
     }
 
+    // Which family a .ocgraph presents as in the Content Browser -- Material, Gameplay or Unknown,
+    // per GraphAssetPresentation.hpp -- read from its DOMAIN record and cached against the file's
+    // mtime exactly like fileIconTile()'s .cs classification above. A read failure (the file
+    // vanished between the directory scan and here, or is not a graph this build can parse at all)
+    // reads as Gameplay: the SAME safe default an absent DOMAIN record gets, not Unknown, because a
+    // transient I/O failure saying "not mine" would be worse than it saying "ordinary graph" for one
+    // cache cycle.
+    editor::GraphAssetFamily graphAssetFamilyFor(const std::string& path) {
+        std::error_code ec;
+        const auto mtime = std::filesystem::last_write_time(path, ec);
+        if (auto it = graphDomainCache_.find(path);
+            it != graphDomainCache_.end() && !ec && it->second.first == mtime) return it->second.second;
+
+        fmt::OcGraphData g;
+        editor::GraphAssetFamily family = editor::GraphAssetFamily::Gameplay;
+        if (fmt::loadOcgraph(path, g)) family = editor::graphAssetPresentationFor(fmt::ocGraphDomainOf(g)).family;
+        if (!ec) graphDomainCache_[path] = {mtime, family};
+        return family;
+    }
+
     // Returns a directory's sorted listing, cached for 20 frames.
     const DirListing& dirListing(const std::string& dir) {
         DirListing& c = dirCache_[dir];
@@ -18719,6 +18753,10 @@ private:
                         ent.kind = 1;
                         ent.kindExt = lext;
                     }
+                    // A material graph is not a generic graph -- see GraphAssetPresentation.hpp for
+                    // why Gameplay/Material/Unknown must not collapse into one bucket. Read HERE,
+                    // once per 20-frame listing refresh, not per frame: see graphAssetFamilyFor().
+                    if (lext == ".ocgraph") ent.graphFamily = graphAssetFamilyFor(ent.full);
                 }
                 c.entries.push_back(std::move(ent));
             }
@@ -18764,7 +18802,31 @@ private:
     // frame K+1 reusing the target. copyTexture is the missing primitive; ThumbnailCache is its first
     // consumer, falling through to this glyph until a thumbnail exists.
     struct AssetKind { const char* icon; ImU32 tint; const char* label; };
-    static const AssetKind* assetKindFor(const std::string& ext) {
+    // `graphFamily` matters ONLY for ext == ".ocgraph" and defaults to Gameplay -- the ordinary
+    // "Graph" row in the table below -- so every call site that has no domain to offer (the
+    // existence check in dirListing(), any other extension) gets EXACTLY today's behaviour.
+    // Material and Unknown are handled before the table lookup because the table is keyed by
+    // extension alone and a linear search over it can return only one row per key: it cannot hold
+    // three different ".ocgraph" presentations.
+    static const AssetKind* assetKindFor(const std::string& ext,
+                                          editor::GraphAssetFamily graphFamily = editor::GraphAssetFamily::Gameplay) {
+        if (ext == ".ocgraph") {
+            // Material's own icon+tint from the table below (ICON_TUNE, Unreal's Material green):
+            // a material graph IS a material as far as anyone browsing Content is concerned, not a
+            // link-icon graph that happens to be green.
+            if (graphFamily == editor::GraphAssetFamily::Material) {
+                static const AssetKind kMaterialGraph{ICON_TUNE, IM_COL32(64, 192, 64, 255),
+                                                       "Material Graph"};
+                return &kMaterialGraph;
+            }
+            // NEITHER Gameplay's blue "Graph" NOR Material's green -- a DOMAIN this build does not
+            // recognise must not be presented as either. See GraphAssetPresentation.hpp.
+            if (graphFamily == editor::GraphAssetFamily::Unknown) {
+                static const AssetKind kUnknownGraph{ICON_WARNING, IM_COL32(200, 160, 40, 255),
+                                                      "Unknown Graph"};
+                return &kUnknownGraph;
+            }
+        }
         // COLOURED THE WAY UNREAL COLOURS ITS CONTENT BROWSER, because that coding is already known.
         // Where this engine has a type Unreal also has, the colour is Unreal's own
         // (FAssetTypeActions_*::GetTypeColor):
@@ -18835,10 +18897,11 @@ private:
     // `skinned` is the one thing the extension alone cannot answer: a skeletal mesh here is a .ocmesh
     // with skin weights, not a separate file type, so it's Unreal's Static Mesh cyan until something
     // reads kOcMeshHasSkin out of the header -- which loadProjectMeshes already did (skinnedMeshIds_).
-    static ImU32 cardAccent(const std::string& ext, bool isDir, bool skinned) {
+    static ImU32 cardAccent(const std::string& ext, bool isDir, bool skinned,
+                             editor::GraphAssetFamily graphFamily = editor::GraphAssetFamily::Gameplay) {
         if (isDir) return IM_COL32(150, 156, 166, 255);          // neutral: a folder has no type
         if (skinned) return IM_COL32(241, 163, 241, 255);        // Skeletal Mesh, per the table above
-        if (const AssetKind* k = assetKindFor(ext)) return k->tint;
+        if (const AssetKind* k = assetKindFor(ext, graphFamily)) return k->tint;
         return IM_COL32(130, 136, 146, 255);                     // an unrecognised file
     }
 
@@ -18932,24 +18995,31 @@ private:
     }
 
     void drawEntryIcon(ImDrawList* dl, ImVec2 centre, f32 s, bool isDir, int tile, bool module,
-                       const std::string& kindExt = std::string()) {
+                       const std::string& kindExt = std::string(),
+                       editor::GraphAssetFamily graphFamily = editor::GraphAssetFamily::Gameplay) {
         if (isDir) {
             if (folderIconsUiId_) blitTile(dl, folderIconsUiId_, centre, s, folderIconAspect_, module ? 1 : 0, 2);
             else                  folderGlyph(dl, centre, s, IM_COL32(232, 187, 92, 255));
             return;
         }
-        if (tile >= kAssetTileBase && assetIconsUiId_) {
+        // The asset sheet's one "graph" tile is Gameplay's picture -- there is no separate Material
+        // Graph or Unknown Graph art -- so a non-Gameplay .ocgraph skips it rather than showing a
+        // Material-green type bar behind an icon that still reads as a plain blue graph. Falls to
+        // the domain-aware typed glyph below instead.
+        const bool skipGenericGraphSprite =
+            kindExt == ".ocgraph" && graphFamily != editor::GraphAssetFamily::Gameplay;
+        if (!skipGenericGraphSprite && tile >= kAssetTileBase && assetIconsUiId_) {
             blitTile(dl, assetIconsUiId_, centre, s, assetIconAspect_, tile - kAssetTileBase, kAssetIconTiles);
             return;
         }
-        if (tile >= 0 && tile < kAssetTileBase && fileIconsUiId_) {
+        if (!skipGenericGraphSprite && tile >= 0 && tile < kAssetTileBase && fileIconsUiId_) {
             blitTile(dl, fileIconsUiId_, centre, s, fileIconAspect_, tile, kFileIconTiles);
             return;
         }
         // The typed glyph, before the anonymous page. This is the line that makes twenty different
         // asset types stop looking like twenty identical documents.
         if (!kindExt.empty())
-            if (const AssetKind* k = assetKindFor(kindExt)) { typedGlyph(dl, centre, s, *k); return; }
+            if (const AssetKind* k = assetKindFor(kindExt, graphFamily)) { typedGlyph(dl, centre, s, *k); return; }
         fileGlyph(dl, centre, s, IM_COL32(150, 154, 162, 255));
     }
 
@@ -19310,7 +19380,7 @@ private:
                     const f32 prevH  = tile - barH;                 // the preview square, above the bar
                     const ImVec2 cardMin = o, cardMax(o.x + cellW, o.y + cellH);
                     const ImU32 accent = cardAccent(e.kindExt.empty() ? lowerExt(e.path) : e.kindExt,
-                                                    e.isDir, isSkinnedMeshEntry(e));
+                                                    e.isDir, isSkinnedMeshEntry(e), e.graphFamily);
 
                     dl->AddRectFilled(cardMin, cardMax,
                                       ImGui::GetColorU32(selected ? ImGuiCol_Header
@@ -19360,7 +19430,8 @@ private:
                     }
 #endif
                     if (!drewThumb)
-                        drawEntryIcon(dl, iconCentre, prevH*0.58f, e.isDir, e.tile, e.module, e.kindExt);
+                        drawEntryIcon(dl, iconCentre, prevH*0.58f, e.isDir, e.tile, e.module, e.kindExt,
+                                      e.graphFamily);
                     const f32 wrap = cellW - 6.0f*dpi_;
                     const std::string label = fitLabel(e.name, wrap, 2);
                     const ImVec2 ts = ImGui::CalcTextSize(label.c_str());
@@ -19445,7 +19516,8 @@ private:
                 const ImVec2 o = ImGui::GetCursorScreenPos();
                 ImGui::Dummy(ImVec2(h * 0.78f, h));
                 ImGui::SameLine();
-                drawEntryIcon(dl, ImVec2(o.x + h*0.39f, o.y + h*0.5f), h*0.82f, e.isDir, e.tile, e.module, e.kindExt);
+                drawEntryIcon(dl, ImVec2(o.x + h*0.39f, o.y + h*0.5f), h*0.82f, e.isDir, e.tile, e.module,
+                              e.kindExt, e.graphFamily);
                 if (ImGui::Selectable(e.name.c_str(), cbIsSelected(e.full),
                                       ImGuiSelectableFlags_AllowDoubleClick)) {
                     cbClickSelect(shown, i);
@@ -19693,6 +19765,11 @@ private:
     // trying each in turn. Returns the file written, or "" with err set.
     // THE GUARD IS ABOVE THE SIGNATURE, not inside the body, and it was inside: `pbr::MaterialDesc`
     // is in the parameter list, so with PBR off the function did not compile at all.
+    // Content\Materials, NOT Binaries\Materials -- unlike loadProjectMaterials()'s READ, which
+    // honours both, there is nothing to walk in Binaries here: it holds avermatc's compiled
+    // .ocmat output, never the .cs source this function edits. A project whose materials were
+    // moved to Binaries\Materials with no .cs left behind has nothing this function can write to,
+    // which is what the error below now says.
 #if AVER_MODULE_PBR
     std::string saveMaterialSource(const std::string& name, const pbr::MaterialDesc& d, std::string& err) {
         namespace fs = std::filesystem;
@@ -19700,7 +19777,12 @@ private:
         if (content.empty()) { err = "no project"; return {}; }
         const fs::path dir = fs::path(content) / "Materials";
         std::error_code ec;
-        if (!fs::exists(dir, ec)) { err = "no Content\\Materials directory"; return {}; }
+        if (!fs::exists(dir, ec)) {
+            err = "no Content\\Materials directory -- materials are edited from their C# source "
+                  "there; Binaries\\Materials holds only avermatc's compiled output and has no "
+                  "source to edit";
+            return {};
+        }
 
         std::string firstError;
         for (fs::recursive_directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec), end;
@@ -24242,6 +24324,11 @@ private:
     // the file sheet, at or above it the asset sheet.
     static constexpr int kAssetTileBase   = 100;
     std::unordered_map<std::string, std::pair<std::filesystem::file_time_type, int>> fileIconCache_;
+    // A .ocgraph's DOMAIN record, read once and kept against the file's mtime -- the SAME cache
+    // shape as fileIconCache_ above, for the same reason: dirListing() rebuilds every 20 frames, and
+    // this is where that rebuild reads it, not the per-frame draw.
+    std::unordered_map<std::string, std::pair<std::filesystem::file_time_type, editor::GraphAssetFamily>>
+        graphDomainCache_;
     std::unordered_map<std::string, DirListing> dirCache_;
     int frameNo_ = 0;                                      // bumped once per UI frame; the cache freshness clock
     rhi::TextureHandle compileIconTexture_=0;   // the Compile C# status sprite sheet (3 tiles)

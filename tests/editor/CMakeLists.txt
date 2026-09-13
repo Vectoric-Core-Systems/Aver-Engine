@@ -91,6 +91,17 @@ target_include_directories(LevelListTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src
 target_link_libraries(LevelListTest PRIVATE Aver.Core Aver.Platform)
 set_target_properties(LevelListTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# MaterialResolveTest -- the editor's material-name resolution (sandbox/src/MaterialResolve.hpp):
+# which of Binaries\Materials, Content\Materials or a bare content-relative path a surface name
+# resolves to, and the project-wide enumeration loadProjectMaterials() drives off the same header.
+# Header-only and Core-only, exactly like LevelListTest immediately above, for the same reason: the
+# live pbr::MaterialDesc/MaterialLibrary half needs Aver.Pbr and an Engine; deciding WHICH FILE WINS
+# needs neither.
+add_executable(MaterialResolveTest src/MaterialResolveTest.cpp)
+target_include_directories(MaterialResolveTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(MaterialResolveTest PRIVATE Aver.Core Aver.Platform)
+set_target_properties(MaterialResolveTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # GraphEditorGeometryTest -- the .ocgraph node editor's headless core: the node descriptor table
 # (sandbox/src/GraphNodeDefs.hpp), and layout/hit-testing/link-rules/cycle-detection/canvas-transform
 # (sandbox/src/GraphEditorGeometry.hpp/.cpp). No ImGui, no Engine, no scene:: -- an editor that only
@@ -150,6 +161,17 @@ target_compile_definitions(GraphEditorLoadSaveTest PRIVATE
 # functions there are `inline`, so this adds an include directory and no object code.
 target_link_libraries(GraphEditorLoadSaveTest PRIVATE Aver.Formats Aver.World Aver.Core Aver.Platform)
 set_target_properties(GraphEditorLoadSaveTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# GraphAssetPresentationTest -- the Content Browser's .ocgraph classification
+# (sandbox/src/GraphAssetPresentation.hpp): Gameplay/Material/Unknown, off a REAL fixture written
+# through fmt::saveOcgraph and read back through fmt::loadOcgraph, not a hand-typed OCGRAPH string.
+# Header-only plus OcGraph.hpp's load/save, same GraphEditorGeometryTest/LevelListTest precedent:
+# the ImGui-drawn icon/colour are visual-only and untestable headless; the classification feeding
+# them is not.
+add_executable(GraphAssetPresentationTest src/GraphAssetPresentationTest.cpp)
+target_include_directories(GraphAssetPresentationTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(GraphAssetPresentationTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(GraphAssetPresentationTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # BtEditorTest -- the .ocbt behaviour-tree editor tab's headless core: the four structural edits
 # (add/delete/reparent/reorder) and the tab's own load/save/dirty/undo bookkeeping.
