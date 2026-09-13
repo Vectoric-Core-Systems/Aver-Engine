@@ -31,6 +31,10 @@
 #include "aver/runtime/Engine.hpp"
 #if AVER_MODULE_VOXI
 #include "aver/voxi/Voxi.hpp"
+// Scalability.hpp pulls in QualityLadder.hpp and RenderSettingsResolver.hpp along the way -- one
+// include gives this file voxi::resolve() (the effective-value reads below), voxi::ladder::* (the RT
+// tier var's derived-knob help text) and voxi::applyOverall/overallFromSettings (voxi.scalability).
+#include "aver/voxi/Scalability.hpp"
 #endif
 
 #include <algorithm>
@@ -425,7 +429,13 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         []{ return vQualityRaw(static_cast<u32>(Renderer::get().settings().globalIllumination)); },
         [](ConsoleBatch& b, VarValue v){ const u32 q=v.as.u; b.tierSetters.push_back([q](void* sp){ static_cast<Settings*>(sp)->globalIllumination = static_cast<Quality>(q); }); }});
     t.push_back({"voxi.rayTracing", VarType::Quality, false,
-        "Ray-traced sun shadow quality tier; changing it derives rtShadowRays/rtPixelsPerRayTile/rtShadowDenoise/rtRenderMode unless set in the same line",
+        // THE RETUNED LADDER (QualityLadder.hpp): rtShadowRays 1/1/4/8, rtShadowDenoise 2/2/1/1,
+        // rtRenderMode 0/1/1/1 at Low/Medium/High/Epic (rtPixelsPerRayTile stays flat at 1 everywhere).
+        // Low rasterises primary visibility by explicit product decision (D3) -- 0 is not a hardware
+        // gap the way Off's 0 is.
+        "Ray-traced sun shadow quality tier; changing it derives rtShadowRays (1/1/4/8), "
+        "rtPixelsPerRayTile (1 flat), rtShadowDenoise (2/2/1/1) and rtRenderMode (0/1/1/1, Low "
+        "rasterises by product decision) at Low/Medium/High/Epic unless set in the same line",
         []{ return vQualityRaw(static_cast<u32>(Renderer::get().settings().rayTracing)); },
         [](ConsoleBatch& b, VarValue v){ const u32 q=v.as.u; b.tierSetters.push_back([q](void* sp){ static_cast<Settings*>(sp)->rayTracing = static_cast<Quality>(q); }); }});
     t.push_back({"voxi.pathTracing", VarType::Quality, false,
@@ -436,6 +446,43 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "Mesh-shader submission path on/off",
         []{ return vBool(Renderer::get().settings().meshShaders); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.tierSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->meshShaders = on; }); }});
+    // THE UE-STYLE OVERALL QUALITY PRESET (D2, Scalability.hpp), reachable from the console the same
+    // way the Rendering settings page's own Overall row is. STAGED AS A TIER SETTER, not a dial one,
+    // even though applyOverall ALSO writes every one of the three groups' derived knobs directly (not
+    // relying on setSettings' own change-gated derivation at all) -- it belongs with the tier setters
+    // because it must run in the FIRST commitBatch phase: `set voxi.scalability 4 voxi.rtShadowRays 2`
+    // needs the Overall preset applied and committed BEFORE the dial phase re-reads live settings and
+    // stages the explicit rtShadowRays 2 on top of them, or the two would race the same way a UI edit
+    // mixing tier and knob flags in one setSettings call used to (see SandboxApp.cpp's take(), N7).
+    // commitBatch already re-reads voxi::Renderer::get().settings() FRESH right before the dial phase
+    // (this file's own commitBatch comment) -- that existing re-read is what makes the example above
+    // end at rtShadowRays 2, not the ladder's 8, with no change needed here.
+    t.push_back({"voxi.scalability", VarType::U32, false,
+        "UE-style Overall Quality preset: 1 (Low) .. 4 (Epic) moves Global Illumination, Ray Tracing "
+        "and Path Tracing to the same rung at once (Path Tracing always goes to Off -- a locked "
+        "decision, see Scalability.hpp), writing every derived knob to the ladder's value for that "
+        "rung. An unavailable group (no RT hardware, say) is left completely untouched. 0 (Custom) "
+        "reads back when the settings do not agree with any single rung -- it is derived, not settable",
+        []{
+            const Renderer& r = Renderer::get();
+            return vU32(static_cast<u32>(voxi::overallFromSettings(r.settings(), r.deviceInfo())));
+        },
+        [](ConsoleBatch& b, VarValue v){
+            const u32 q = v.as.u;
+            b.tierSetters.push_back([q](void* sp){
+                voxi::applyOverall(*static_cast<Settings*>(sp), static_cast<voxi::OverallQuality>(q),
+                                    Renderer::get().deviceInfo());
+            });
+        },
+        [](const VarValue& v, std::string& err) -> bool {
+            if (v.as.u < 1 || v.as.u > 4) {
+                err = "voxi.scalability must be 1 (Low), 2 (Medium), 3 (High) or 4 (Epic) -- 0 (Custom) "
+                      "is read-only, derived from whatever the settings already are, never something "
+                      "you can set";
+                return false;
+            }
+            return true;
+        }});
 
     // ---- read-only: sits beside the tier fields in Settings (same Quality type, same ladder shape)
     // but is NOT one, and must not be staged like one. Settings::layeredBsdf's own comment says why:
@@ -488,16 +535,22 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         []{ return vF32(Renderer::get().settings().giRadianceCeiling); },
         [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->giRadianceCeiling = n; }); }});
     // ---- refraction: how a translucent surface bends what is behind it (Settings::refractionMode's
-    // own comment has the full three-mode writeup). Voxi.cpp does not range-check this field the way
-    // it does rtRenderMode/giMode (both hard-clamp out-of-range back to a safe default) -- so unlike
-    // every other voxi.* validate in this file, THIS ONE also stands in for a check the engine itself
-    // does not perform, not merely an earlier, friendlier copy of one it does.
+    // own comment has the full three-mode writeup). THERE NOW IS AN ENGINE-SIDE RANGE CLAMP (Voxi.cpp,
+    // between the REBLUR clamps and the resolve() call: any value above 2 clamps down to 1) -- this
+    // validate() still refuses out-of-range values up front so a bad `set` reports its OWN mistake
+    // rather than the different number the engine silently substituted, the same reason every other
+    // voxi.* validate in this file exists. What the engine does NOT do is clamp a request of 2
+    // (RayTraced) back down when RT hardware or the RT tier cannot honour it -- that is answered by
+    // resolve() (RenderSettingsResolver.hpp), the same effective-value mechanism voxi.giMode and
+    // voxi.denoiser below already read through: this var still reads the RAW requested field, not the
+    // effective one, since refraction's own UI control (buildRenderingSettings) shows the same
+    // distinction its own way and this table stays consistent with what setSettings actually stores.
     t.push_back({"voxi.refractionMode", VarType::U32, false,
-        "How a translucent surface bends what is behind it: 0 = off (straight sample), 1 = screen-space offset (nearly free, the Medium/Low rung), 2 = ray-traced hit point (costs a ray, the High/Epic rung)",
+        "How a translucent surface bends what is behind it: 0 = off (straight sample), 1 = screen-space offset (nearly free, the Medium/Low rung), 2 = ray-traced hit point (costs a ray, the High/Epic rung; resolves back to 1 without RT hardware or with the RT tier Off)",
         []{ return vU32(Renderer::get().settings().refractionMode); },
         [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->refractionMode = n; }); },
         [](const VarValue& v, std::string& err) -> bool {
-            if (v.as.u > 2) { err = "refractionMode must be 0 (off), 1 (screen-space) or 2 (ray-traced) -- the engine does not clamp this field itself"; return false; }
+            if (v.as.u > 2) { err = "refractionMode must be 0 (off), 1 (screen-space) or 2 (ray-traced) -- values above 2 are clamped to 1 by the engine, but this refuses them up front so the message names your own mistake, not the substitute"; return false; }
             return true;
         }});
     t.push_back({"voxi.refractionStrength", VarType::F32, false,
@@ -523,19 +576,22 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
     // THE HEADLINE ADDITION THIS FILE EXISTS FOR: the switch between the voxel-cone and RTXDI ReSTIR
     // GI diffuse-bounce estimators (Settings::giMode's own comment has the full writeup). NOT staged
     // as a tierSetter even though it reads like one -- setSettings never derives it from a tier, it
-    // only clamps and range-checks it, so it belongs with the other dials that setSettings leaves
-    // alone unless a caller touches them directly.
+    // only range-checks it (not even that, since the settings-separation pass, see below), so it
+    // belongs with the other dials that setSettings leaves alone unless a caller touches them directly.
     //
-    // THE READ CLOSURE IS THE HONESTY MECHANISM voxi.rtRenderMode etc. already rely on, not a special
-    // case added for this field: it reads Renderer::get().settings().giMode LIVE, the same object
-    // Voxi.cpp's setSettings just clamped, so `set voxi.giMode 1` on a device with no RayQuery hardware
-    // (or with rayTracing forced Off for lack of it -- see Voxi.cpp's refuse() path) stages 1, commits
-    // it, and then this same read() call -- already wired into commitBatch's "requested vs now" diff,
-    // see ConsoleBatch's own comment -- reports back 0. `get`/`vars` show the same live value, so this
-    // variable can never claim ReSTIR GI is running when the engine silently refused it.
+    // THE READ CLOSURE NO LONGER READS THE RAW STORED FIELD (F-d, the settings-separation pass):
+    // Renderer::setSettings used to hard-clamp giMode back to 0 whenever RayQuery hardware, the RT
+    // tier or the GI tier could not honour it, which is what let a plain `Renderer::get().settings().
+    // giMode` read double as "is it actually running" -- that clamp is gone, so a raw read here would
+    // now show 1 forever once requested, even on a device that refused it. voxi::resolve()
+    // (RenderSettingsResolver.hpp) is the one place that question is still answered, so this reads
+    // resolve(...).giMode.effective instead -- the SAME honesty guarantee as before (`set voxi.giMode 1`
+    // on a device with no RayQuery hardware, or with rayTracing/globalIllumination Off, stages 1,
+    // commits it, and this read reports back 0, wired into commitBatch's "requested vs now" diff same
+    // as always), just computed a different way now that the raw field cannot be trusted to carry it.
     t.push_back({"voxi.giMode", VarType::U32, false,
-        "Which estimator answers the diffuse GI bounce: 0 = voxel cone gather (default), 1 = RTXDI ReSTIR GI. Needs RayQuery hardware and rayTracing != Off -- the engine clamps back to 0 when either is missing, and this always reads back what is ACTUALLY running, not merely what was last requested",
-        []{ return vU32(Renderer::get().settings().giMode); },
+        "Which estimator answers the diffuse GI bounce: 0 = voxel cone gather (default), 1 = RTXDI ReSTIR GI. Needs RayQuery hardware, rayTracing != Off and globalIllumination != Off -- resolves back to 0 (the stored request is kept, untouched) when any is missing, and this always reads back what is ACTUALLY running, not merely what was last requested",
+        []{ const Renderer& r = Renderer::get(); return vU32(voxi::resolve(r.settings(), r.deviceInfo()).giMode.effective); },
         [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->giMode = n; }); }});
     // NOT a Settings field -- see consoleGiPoisonViewSlot()'s own comment for why this is the raw-slot
     // idiom rather than an ordinary dialSetters entry. SEVEN of the eight colours below are giMode 1
@@ -581,15 +637,21 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
             b.deviceSetters.push_back([on](rhi::IDevice&){ consoleNrdLegacyCameraSlot() = on; });
         }});
     // DIAL, NOT A TIER, and it reads back what is ACTUALLY running rather than what was asked for --
-    // the same honesty voxi.giMode above documents at length, and for a closely related reason. NRD
-    // refuses to run at any MSAA above 1 (D3D12 will not mix sample counts in one render-target set,
-    // so the G-buffer would be cleared and never written), so `set voxi.denoiser true` at 8x MSAA
-    // stages true, commits true, and the pass still does nothing. Settings keeps the request, which is
-    // why this reads true there; the WARN from VoxiRenderer is what says the pass skipped itself. Set
-    // voxi.msaa 1 alongside it.
+    // the same honesty voxi.giMode above documents at length, and through the SAME mechanism now:
+    // voxi::resolve()'s denoiser field, not a raw Settings read. denoiser was never clamped inside
+    // Settings itself (unlike giMode's old, now-removed clamp), but "read the raw field" and "read
+    // whether it is actually running" only ever coincided because nothing could refuse it that
+    // Settings' own honesty didn't already cover -- RequiresNrd/RequiresRayTracingEnabled/
+    // RequiresGlobalIllumination/NothingToDenoise below all can now (RenderSettingsResolver.hpp). NRD
+    // also refuses to run at any MSAA above 1 (D3D12 will not mix sample counts in one render-target
+    // set, so the G-buffer would be cleared and never written) -- that ONE reason is SOFT
+    // (RequiresMsaaOne): resolve() still reports it as not-effective here, so `set voxi.denoiser true`
+    // at 8x MSAA stages true, commits true, and this read reports back false, with nothing more needed
+    // than `set voxi.msaa 1` alongside it -- the WARN from VoxiRenderer is the other half of that same
+    // story, printed once from the render side.
     t.push_back({"voxi.denoiser", VarType::Bool, false,
-        "NVIDIA NRD over the ReSTIR indirect diffuse and the ray-traced sky occlusion. Allocates the thin G-buffer (velocity, view Z, normal/roughness -- nothing else in the engine wants it) and REQUIRES MSAA 1 and D3D12; above 1x sample count the pass skips itself and says so once at WARN",
-        []{ return vBool(Renderer::get().settings().denoiser); },
+        "NVIDIA NRD over the ReSTIR indirect diffuse and the ray-traced sky occlusion. Allocates the thin G-buffer (velocity, view Z, normal/roughness -- nothing else in the engine wants it) and REQUIRES RT hardware, the RT tier not Off, something to denoise, D3D12+NRD and MSAA 1; above 1x sample count the pass skips itself and says so once at WARN, and this always reads back what is ACTUALLY running, not merely what was last requested",
+        []{ const Renderer& r = Renderer::get(); return vBool(voxi::resolve(r.settings(), r.deviceInfo()).denoiser.effective != 0); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->denoiser = on; }); }});
     // ---- REBLUR_DIFFUSE history/prepass tuning -- LIVE: VoxiRenderer re-issues NRD's own
     // SetDenoiserSettings every frame (see applyReblurTuning, VoxiRenderer.cpp), so a change here
@@ -623,7 +685,11 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         []{ return vU32(Renderer::get().settings().rtShadowDenoise); },
         [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->rtShadowDenoise = n; }); }});
     t.push_back({"voxi.rtRenderMode", VarType::U32, false,
-        "EXPERIMENTAL: 0 = rasteriser finds the first surface, 1 = a primary ray per pixel does -- gives up hardware early-Z; opt-in only, no quality tier turns this on",
+        // NO LONGER "opt-in only, no quality tier turns this on" -- the ladder does now (D3, the
+        // settings-separation retune): Medium/High/Epic derive this to 1, Low derives it to 0
+        // (rasteriser, by explicit product decision, not a hardware gap) and Off to 0 (no acceleration
+        // structure to trace against). ladder::rtRenderMode (QualityLadder.hpp) has the full reasoning.
+        "0 = rasteriser finds the first surface, 1 = a primary ray per pixel does -- gives up hardware early-Z. Derived from the RT tier on a tier change (Off/Low 0, Medium/High/Epic 1) unless set in the same line",
         []{ return vU32(Renderer::get().settings().rtRenderMode); },
         [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->rtRenderMode = n; }); }});
     t.push_back({"voxi.ptBounces", VarType::U32, false,

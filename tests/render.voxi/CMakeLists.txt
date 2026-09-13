@@ -38,3 +38,18 @@ target_link_libraries(CameraFactorTest PRIVATE Aver.Core)
 # include path rather than a library dependency that would pull in machinery this test never uses.
 target_include_directories(CameraFactorTest PRIVATE ${CMAKE_SOURCE_DIR}/modules/render.voxi/include)
 set_target_properties(CameraFactorTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# RenderSettingsResolverTest -- the quality ladder (QualityLadder.hpp), the prerequisite resolver that
+# decides what greys and why (RenderSettingsResolver.hpp), and the UE-style Overall Quality scalability
+# preset (Scalability.hpp).
+#
+# Guarded by if(TARGET Aver.Render.Voxi): unlike CameraFactorTest and VoxiRtSeqTest above, this test
+# DOES call exported Renderer functions (Renderer::get(), Renderer::setDeviceInfo(), the
+# Renderer::*ForQuality statics) to exercise the one behaviour (giMode/denoiser stored as requested,
+# resolved at read time) that only the live singleton's own setSettings() can regression-test -- so it
+# needs the real DLL target to exist, not merely the header tree CameraFactorTest borrows.
+if(TARGET Aver.Render.Voxi)
+  add_executable(RenderSettingsResolverTest src/RenderSettingsResolverTest.cpp)
+  target_link_libraries(RenderSettingsResolverTest PRIVATE Aver.Render.Voxi Aver.Core)
+  set_target_properties(RenderSettingsResolverTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

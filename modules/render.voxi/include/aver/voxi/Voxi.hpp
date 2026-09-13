@@ -47,6 +47,12 @@ struct DeviceInfo {
     u32 shaderModel = 50;      // 60 = SM 6.0, 65 = SM 6.5
     u32 meshShaderTier = 0;    // 0 = none, 1 = Tier 1
     bool dxcAvailable = false; // DXIL compiler present
+    // D3D12 with the NVIDIA denoiser library actually built in AND willing to run on this backend --
+    // see RenderSettingsResolver.hpp's DisableReason::RequiresNrd. Computed by the host at the same
+    // two call sites that already know both halves (`backend() == rhi::Backend::D3D12 &&
+    // render::nrd::Denoiser::available()`); this struct only carries the answer, it does not derive
+    // it, so this core-only library still depends on nothing RHI-shaped.
+    bool nrdSupported = false;
 };
 
 // The renderer quality settings, as requested. Clamped to the device by Renderer::setSettings.
@@ -152,13 +158,16 @@ struct Settings {
     //
     // ONE, NOT FOUR, and this sentence said four until the two were read side by side --
     // giSkyOcclusionRaysForQuality has always returned 1. The number matters more than a typo
-    // normally would, because the obvious analogy is exactly the wrong one: rtShadowRays IS 4 at
-    // Epic, and copying that reads as harmless. It is not. Those four rays all point at the sun,
-    // walk the same BVH nodes and cost 0.05 ms between them; THIS ray is cosine-distributed over the
-    // hemisphere, so neighbouring lanes descend unrelated parts of the tree and the wave runs at the
-    // speed of its unluckiest lane. One of them measures 5.37 ms -- more than the sun's four
-    // together. Four here would be roughly 21 ms on a 50 ms frame. See rtSkyOcclusion in voxi.hlsl,
-    // which states the coherence argument at the ray itself.
+    // normally would, because the obvious analogy is exactly the wrong one: rtShadowRays WAS 4 at
+    // Epic when this measurement was taken -- it is 8 now (see ladder::rtShadowRays,
+    // QualityLadder.hpp), but the four-ray figure below is what was actually measured and is left
+    // as measured rather than rescaled to match -- and copying that number here reads as harmless.
+    // It is not. Those four sun rays all point at the sun, walk the same BVH nodes and cost 0.05 ms
+    // between them; THIS ray is cosine-distributed over the hemisphere, so neighbouring lanes
+    // descend unrelated parts of the tree and the wave runs at the speed of its unluckiest lane. One
+    // of them measures 5.37 ms -- more than the sun's four together. Four here would be roughly
+    // 21 ms on a 50 ms frame. See rtSkyOcclusion in voxi.hlsl, which states the coherence argument
+    // at the ray itself.
     //
     // THE COUNT IS NOW SWEEPABLE: --gi-sky-occlusion-rays N. It was not when this field landed --
     // there was no flag and no manifest key -- so the one dial the shader names as the lever for
@@ -275,11 +284,13 @@ struct Settings {
     // [1, VoxiRenderer::kMaxShadowRays].
     //
     // DERIVED FROM rayTracing on a tier change, exactly as giUpdateInterval is derived from
-    // globalIllumination: Low 1, Medium 1, High 2, Epic 4. THE DEFAULT IS 1 BECAUSE THE DEFAULT TIER
-    // IS Medium -- the derivation only fires when the tier CHANGES, so a struct whose defaults
-    // contradict its own tier never reaches the rung it claims. That is not hypothetical here: this
-    // field defaulted to 4 while rayTracing defaulted to Off, so the moment RT was switched on by
-    // default it would have run Epic's ray count under Medium's name.
+    // globalIllumination: Low 1, Medium 1, High 4, Epic 8 -- see ladder::rtShadowRays
+    // (QualityLadder.hpp) for the per-rung reasoning, including why High and Epic moved up from
+    // 2 and 4. THE DEFAULT IS 1 BECAUSE THE DEFAULT TIER IS Medium -- the derivation only fires
+    // when the tier CHANGES, so a struct whose defaults contradict its own tier never reaches the
+    // rung it claims. That is not hypothetical here: this field defaulted to 4 while rayTracing
+    // defaulted to Off, so the moment RT was switched on by default it would have run Epic's ray
+    // count under Medium's name.
     u32 rtShadowRays = 1;
     // Edge length of the square tile a single traced pixel is amortised over via the ray-traced
     // shadow's temporal history: 1 = every pixel traces every frame (bit-identical to no denoiser
@@ -340,25 +351,50 @@ struct Settings {
     // lighting lagging scene changes by up to N-1 frames -- a visible latency trade, not a resolution
     // one. Clamped to [1, VoxiRenderer::kMaxGiUpdateInterval].
     //
-    // DERIVED FROM globalIllumination on a tier change, exactly as voxelResolution above is: Low 8,
-    // Medium 1, High 1, Epic 1. Set it explicitly in the same call that changes the tier to override
-    // the derived value.
+    // DERIVED FROM globalIllumination on a tier change, exactly as voxelResolution above is: Low 4,
+    // Medium 2, High 1, Epic 1 -- see ladder::giUpdateInterval (QualityLadder.hpp) for the per-rung
+    // switch. Set it explicitly in the same call that changes the tier to override the derived value.
     //
-    // THE DEFAULT IS 1 BECAUSE THE DEFAULT TIER IS Medium, and the two have to agree by construction
+    // THE DEFAULT IS 2 BECAUSE THE DEFAULT TIER IS Medium, and the two have to agree by construction
     // -- the derivation only fires when the tier CHANGES, so a struct whose defaults contradict each
     // other never reaches the rung it claims. voxelResolution's 128 is Medium's rung for exactly this
-    // reason. This field has now been wrong in BOTH directions for that same reason: it was 1 while
-    // Medium derived to 4, and it would be 4 now that Medium derives to 1.
+    // reason. This field has now moved more than once for that same reason: it was 1 while Medium
+    // derived to 4 (below), then briefly consistent at 1 while Medium derived to 1, and is now 2
+    // while Medium derives to 2 -- see MEDIUM IS NOW 2 below for why it moved again.
     //
     // MEDIUM MOVED 4 -> 1 BECAUSE 4 IS WHAT MAKES LIGHTING TRAIL THE CAMERA, and the frame time it was
     // buying is not there to buy. An earlier revision of this comment claimed interval 1 left 187.9 ms
     // on the table against 104.5 ms at interval 4. Re-measured on the same scene (Release,
     // ElectricDreams, 1600x900, --no-vsync, --frames 200): intervals 1, 2, 4 and 8 give medians of
-    // 18.54, 18.47, 18.50 and 18.46 ms -- a 0.09 ms spread across the whole range, which is noise.
-    // Whatever made revoxelisation the bottleneck when that pair of numbers was taken is no longer
-    // true, and the figure outlived it; it is quoted here as refuted rather than quietly deleted.
-    // Low still amortises at 8, which is where the trade belongs: not on the default tier.
-    u32 giUpdateInterval = 1;
+    // 18.54, 18.47, 18.50 and 18.46 ms -- a 0.09 ms spread across the whole range, which is noise on a
+    // STILL camera. Whatever made revoxelisation the bottleneck when that pair of numbers was taken is
+    // no longer true, and the figure outlived it; it is quoted here as refuted rather than quietly
+    // deleted.
+    //
+    // WHAT A STILL CAMERA CANNOT SEE, MEASURED SEPARATELY: under a wobbling camera the "Voxi GI
+    // update" span itself (not the whole frame) went 36.00 ms at interval 1 to 16.57 ms at interval 4
+    // (aver-gi-update-dominates-under-motion.md; Sponza, --cam-wobble 15 50, ray-driven + AverSR
+    // Balanced) -- EVIDENCE that amortising this pass costs real time under motion, contradicting the
+    // still-camera table above. That run also used tile 4 on the unrelated RT shadow amortisation, and
+    // beginShadowHistory sits inside the same measured span (VoxiRenderer.cpp), so crediting the whole
+    // gap to giUpdateInterval alone is UNCONFIRMED rather than settled. Lag at interval 4 is itself
+    // UNMEASURED -- the note this evidence comes from says so directly ("both untested").
+    //
+    // LOW IS NOW 4, NOT 8 (kMaxGiUpdateInterval, the widest the clamp allows). The move to 4 leans on
+    // the EVIDENCE immediately above; a further step to 8 is UNMEASURED in both directions -- this
+    // file has no cost or lag figure for interval 8 under motion, only the still-camera table, which
+    // this whole comment has already shown cannot rank these rungs against each other.
+    //
+    // MEDIUM IS NOW 2. UNMEASURED FOR BOTH COST AND LAG AT THIS SPECIFIC RUNG: nothing above was taken
+    // AT interval 2 under motion, and this comment says so rather than borrowing the interval-4 number
+    // as if it applied here. What is known rather than measured: at interval 2 the volume rebuilds
+    // every other frame, so indirect light can lag a moving scene by at most one frame before the next
+    // rebuild catches it up, and a still scene converges to exactly the same image interval 1 produces
+    // either way (setSettings' own derivation comment). This does not reverse the 4 -> 1 reasoning
+    // above -- 4 still trails visibly and the frame time it bought was still noise -- it reopens a
+    // narrower question on the other side of "always fresh": whether Medium, the tier most projects
+    // actually run, should pay 1's full cost for a lag this file has no evidence is visible at 2.
+    u32 giUpdateInterval = 2;
 
     // ---- WHICH ESTIMATOR ANSWERS THE DIFFUSE BOUNCE: the voxel cone gather, or RTXDI ReSTIR GI ----
     // 0 = cone gather (DEFAULT, and every build before this field existed). 1 = ReSTIR GI: one
@@ -377,11 +413,22 @@ struct Settings {
     // THE DEFAULT IS 0 AND MUST STAY 0 for the reason restated at every other field on this page
     // that has already been bitten by its opposite: VoxiRenderer::giRestirWanted() gates the actual
     // switch (it also requires ray-tracing hardware AND the rayTracing tier to be on, so a project
-    // with no RT never allocates the reservoir buffer or the previous-surface history this needs),
-    // but the SHADER-SIDE call sites (PSMainVoxi, PSRayDriven) are edited to branch on this value
-    // directly -- so unlike voxelResolution/giCones, THIS default is not merely "the tier's own
-    // rung", it is "byte-identical to every image this renderer produced before ReSTIR GI existed",
-    // and it stays that way regardless of what tier globalIllumination is set to.
+    // with no RT never allocates the reservoir buffer or the previous-surface history this needs).
+    //
+    // WHAT THE SHADER ACTUALLY READS IS THE EFFECTIVE VALUE, NOT THIS RAW FIELD -- an earlier
+    // revision of this comment said the shader-side call sites "branch on this value directly", which
+    // is stale. giMode_ itself is read only by giRestirWanted() (VoxiRenderer.hpp); the per-frame
+    // constant buffer resets gGiRestirParams.x to 0 every frame and sets it to 1 only inside the
+    // block already gated on giRestirWanted()'s own ReSTIR history textures (VoxiRenderer.cpp).
+    // PSMainVoxi and PSRayDriven both branch on that constant, gGiRestirParams.x, never on this
+    // field. So a value this field holds that the device or the tier cannot honour is never seen by
+    // a shader regardless of whether setSettings clamps it -- which is what lets it be stored exactly
+    // as requested (RenderSettingsResolver.hpp's resolve() computes the effective value the UI and
+    // the console show; see its own prerequisite table for the chain: ray-tracing hardware, the
+    // rayTracing tier, and the globalIllumination tier all have to agree before giMode=1 does
+    // anything). So unlike voxelResolution/giCones, THIS default is not merely "the tier's own rung",
+    // it is "byte-identical to every image this renderer produced before ReSTIR GI existed", and it
+    // stays that way regardless of what tier globalIllumination is set to.
     //
     // SCOPE, STATED RATHER THAN LEFT FOR SOMEONE TO DISCOVER BY READING THE SHADER: candidate
     // generation + RTXDI TEMPORAL resampling only. NO SPATIAL reuse -- RTXDI_GISpatialResampling /
@@ -464,17 +511,22 @@ struct Settings {
     // lines above: "a temporal denoiser hides its own artefacts as readily as the tracer's." It was
     // sound while it was written.
     //
-    // RAY-DRIVEN PRIMARY VISIBILITY (Settings::rtRenderMode, default 1) CHANGED THE TRADE, not the
-    // philosophy. The ray pass is one fullscreen triangle with no per-triangle coverage, so it always
-    // runs at a single sample regardless of Settings::msaa (see rtRenderMode's own "WHAT DEFAULTING TO
-    // IT TRADES AWAY" list) -- there is no antialiasing pass quietly softening anything any more. At
-    // one ray per pixel, which is what Low, Medium and High all trace at least, the raw sun-shadow
-    // term is a hard 0 or 1 (see THE PROBLEM IT IS FOR, above): with 4x MSAA gone, that dithering is
-    // now the whole picture rather than a texture MSAA's resolve used to quietly soften at every
-    // silhouette. Leaving the filter off no longer shows an evaluator the renderer's honest raw
-    // fidelity; it shows them a defect a filter this cheap (+0.02 ms at the widest rung the clamp
-    // allows, against +1.69 ms for one more traced ray -- VoxiRenderer.cpp) already fixes to within
-    // one code of a sixteen-ray reference on a still camera.
+    // RAY-DRIVEN PRIMARY VISIBILITY (Settings::rtRenderMode) CHANGED THE TRADE AT MEDIUM AND ABOVE,
+    // not the philosophy, and Low is now the deliberate exception to it (D3; see ladder::rtRenderMode,
+    // QualityLadder.hpp): Low still rasterises primary visibility through PSMainVoxi, at this struct's
+    // own 4x MSAA default. The ray pass is one fullscreen triangle with no per-triangle coverage, so
+    // wherever rtRenderMode IS 1 -- Medium, High and Epic -- it always runs at a single sample
+    // regardless of Settings::msaa (see rtRenderMode's own "WHAT DEFAULTING TO IT TRADES AWAY" list),
+    // and there is no antialiasing pass quietly softening anything any more AT THOSE TIERS. Low keeps
+    // its shadow ray -- one ray per pixel, the same count as Medium -- but fires it from inside the
+    // rasterised PSMainVoxi rather than the ray-driven pixel shader: the PRIMARY VISIBILITY method is
+    // what changes at Low, not whether the shadow ray exists. So the raw sun-shadow term is a hard 0
+    // or 1 at Medium and High (see THE PROBLEM IT IS FOR, above), with 4x MSAA gone at those tiers to
+    // soften it, while Low's own dithering is still quietly resolved by the MSAA pass it kept. Leaving
+    // the filter off no longer shows an evaluator the renderer's honest raw fidelity at Medium and
+    // above; it shows them a defect a filter this cheap (+0.02 ms at the widest rung the clamp allows,
+    // against +1.69 ms for one more traced ray -- VoxiRenderer.cpp) already fixes to within one code
+    // of a sixteen-ray reference on a still camera.
     //
     // WHAT IS ACCEPTED IN EXCHANGE, HONESTLY, rather than left for someone to discover by eye: the
     // gather centre is reprojected through LAST frame's camera to stay aligned with the shadow history
@@ -487,11 +539,12 @@ struct Settings {
     // Any future change to these rungs must be checked against a MOVING-camera penumbra probe, not a
     // parked one, before it ships.
     //
-    // DERIVED FROM rayTracing on a tier change, like the two knobs above: Low 2, Medium 2, High 2,
-    // Epic 1. See rtShadowDenoiseForQuality in Voxi.cpp for the per-rung reasoning. THE DEFAULT IS 2
-    // BECAUSE THE DEFAULT TIER IS Medium -- the derivation only fires when the tier CHANGES, so a
-    // struct default that contradicts its own tier never reaches the rung it claims -- a trap this
-    // file has already fallen into in both directions with giUpdateInterval.
+    // DERIVED FROM rayTracing on a tier change, like the two knobs above: Low 2, Medium 2, High 1
+    // (was 2), Epic 1. See ladder::rtShadowDenoise (QualityLadder.hpp) for the per-rung reasoning,
+    // including why High moved down to join Epic. THE DEFAULT IS 2 BECAUSE THE DEFAULT TIER IS
+    // Medium -- the derivation only fires when the tier CHANGES, so a struct default that contradicts
+    // its own tier never reaches the rung it claims -- a trap this file has already fallen into in
+    // both directions with giUpdateInterval.
     u32 rtShadowDenoise = 2;
 
     // ---- ray-driven rendering ---------------------------------------------------------------
@@ -507,11 +560,19 @@ struct Settings {
     // 1.6 ms at the same resolution. A primary ray has to fit inside that difference to be worth
     // having.
     //
-    // 1 FOR EVERY TIER THAT CAN RUN IT, now -- BY EXPLICIT PRODUCT DECISION, not an experiment
-    // left behind a flag. The user calls this "the Wavefront Primary rays model" and has decided
-    // it is the default render path. See rtRenderModeForQuality for the one tier that still
-    // answers 0 (Off, because there is no ray-tracing hardware path to assume there) and why
-    // answering 1 there instead would be incoherent rather than merely wrong.
+    // 1 FROM MEDIUM UP; LOW RASTERISES INSTEAD (D3, retuned) -- BY EXPLICIT PRODUCT DECISION, not an
+    // experiment left behind a flag. The user calls the ray-driven path "the Wavefront Primary rays
+    // model" and has decided it is the default render path from Medium up; Low is deliberately kept
+    // on the rasteriser. THE EVIDENCE FOR LOW IS PARTIAL, NOT SETTLED: at overview cameras raster
+    // measures slower than ray-driven (ElectricDreams 20.55 vs 8.05 ms; PTTest with Path Tracing
+    // pinned off, 13.51 vs 8.04 ms), so Low can be slower than Medium at some cameras; a close-up
+    // case that once favoured raster (9.02 vs 24.04 ms) is UNCONFIRMED, because the run that produced
+    // it also had Path Tracing on, which silently took the frame over instead of ray-driven. D3
+    // stands regardless -- it is the user's decision, made with this evidence in view, not a claim
+    // that raster is faster at Low. See ladder::rtRenderMode (QualityLadder.hpp) for the switch and
+    // rtRenderModeForQuality for why Off and Low both answer 0, for two different reasons: Off
+    // because there is no ray-tracing hardware path to assume there, Low because the product decision
+    // deliberately excludes it.
     //
     // WHAT DEFAULTING TO IT TRADES AWAY, written down here rather than left for someone to
     // rediscover by eye, because whoever turns this on deserves to know what they traded:
@@ -567,6 +628,12 @@ public:
     // Returns a readable reason for a feature's status.
     const char* statusText(Feature f) const;
     bool available(Feature f) const { return status(f) == Status::Ready; }
+    // Returns whether this feature's refusal has already been logged once by setSettings' refuse()
+    // lambda (Voxi.cpp) since the last setDeviceInfo call -- refusalLogged_ is reset there. Exists so
+    // a load-time contradiction report elsewhere (RenderSettingsResolver.hpp's manifestContradictions,
+    // read by the manifest loaders) can skip warning about a device limitation refuse() already told
+    // the log about, rather than saying the same thing twice from two different call sites.
+    bool refusalLogged(Feature f) const { return (refusalLogged_ & (1u << static_cast<u32>(f))) != 0; }
 
     // Returns true once after settings.msaa changes, then clears the flag.
     bool consumeMsaaDirty();
@@ -607,15 +674,17 @@ public:
     // The RT sun-shadow rungs, mirroring giUpdateIntervalForQuality: applied by setSettings when the
     // rayTracing tier changes and the field arrives unchanged.
     static u32 rtShadowRaysForQuality(Quality q);
-    // Sky-visibility rays per pixel for a ray-tracing tier. Epic only; see Settings::giSkyOcclusionRays.
+    // Sky-visibility rays per pixel for a ray-tracing tier. High and Epic, not Epic alone -- see
+    // Settings::giSkyOcclusionRays and ladder::giSkyOcclusionRays (QualityLadder.hpp).
     static u32 giSkyOcclusionRaysForQuality(Quality q);
     // Sky-occlusion ray coherence tile for a ray-tracing tier; see Settings::giSkyOcclusionTile.
     static u32 giSkyOcclusionTileForQuality(Quality q);
     static u32 rtPixelsPerRayTileForQuality(Quality q);
     static u32 rtShadowDenoiseForQuality(Quality q);
-    // 1 for every tier that runs ray tracing at all, 0 for Off -- ray-driven PRIMARY VISIBILITY is
-    // the default render path now, not an opt-in a quality preset must avoid switching on. See the
-    // definition in Voxi.cpp for why Off is the one tier that still answers 0.
+    // 1 for every tier that runs ray tracing at all EXCEPT Low, which rasterises primary visibility
+    // by explicit product decision (D3) -- 0 for Off and for Low, 1 for Medium, High and Epic. See
+    // ladder::rtRenderMode (QualityLadder.hpp) for why Off and Low answer the same value for two
+    // different reasons.
     static u32 rtRenderModeForQuality(Quality q);
     // Derived from the PATH TRACING tier, not the ray-tracing one. See Settings::ptBounces.
     static u32 ptBouncesForQuality(Quality q);

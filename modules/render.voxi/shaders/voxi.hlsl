@@ -125,11 +125,16 @@ RWTexture3D<uint> gVoxelAccum : register(u1);
 // estimates of the same quantity. Wide on purpose: this is a hemisphere-coverage question, not a
 // directional one, and a narrow cone would answer it with a single corridor.
 #define AVER_VOX_INJECT_APERTURE 0.577
-// How much of the light already in the room is re-emitted on the next bake. 1.0 is the physically
-// honest answer -- the surface reflects what reaches it, and `albedo` outside the bracket is what
-// makes the series converge. Kept as a named constant because it is the first dial anyone will
-// reach for if a scene ever blows up, and because 0 turns the second bounce off for an A/B without
-// touching anything else.
+// How much of the light already in the room is re-emitted on the next bake. THIS IS A COMPENSATION
+// CONSTANT, not a physical quantity: this cone estimates radiance along the surface normal from a
+// single 60-degree cone, while the forward gather it feeds integrates thirteen cones over the
+// hemisphere and normalises by their cosine weights -- one cone under-counts what the gather
+// actually integrates, and the multiplier makes up the difference. 1.0 and 8.0 were measured (8.0
+// ran far too hot); 3.0 was checked once against the path tracer on Sponza (commit c6d1a750,
+// scripts/pt-compare.ps1) and closed most of the gap to the reference. It is not derived
+// analytically -- a proper sweep would likely move it. Kept as a named constant because it is the
+// first dial anyone will reach for if a scene ever blows up, and because 0 turns the second bounce
+// off for an A/B without touching anything else.
 #define AVER_VOX_FEEDBACK 3.0
 
 // Edge, in pixels, of the tile that shares one sky-occlusion ray direction. See rtSkyOcclusion for

@@ -369,3 +369,16 @@ set_target_properties(OcFoliageTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_
 add_executable(OcAnimTest src/OcAnimTest.cpp)
 target_link_libraries(OcAnimTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(OcAnimTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# ProjectRenderApplyTest -- modules/render.voxi/include/aver/voxi/ProjectRenderApply.hpp, the shared
+# .ocproject <-> voxi::Settings apply/capture logic both hosts (the editor and the packaged game) now
+# call through instead of each carrying its own copy. Guarded on the TARGET rather than on
+# AVER_MODULE_VOXI for MaterialTest's own reason above: an AVER_MODULE_VOXI=OFF tree has no
+# Aver.Render.Voxi target to link, and the guard has to ask the question CMake can actually answer.
+if(TARGET Aver.Render.Voxi)
+  add_executable(ProjectRenderApplyTest src/ProjectRenderApplyTest.cpp)
+  target_link_libraries(ProjectRenderApplyTest PRIVATE
+    Aver.Render.Voxi Aver.Formats Aver.Assets Aver.Core Aver.Platform)
+  set_target_properties(ProjectRenderApplyTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

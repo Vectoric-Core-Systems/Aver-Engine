@@ -168,6 +168,18 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 // Stage 3: the narrow GI/shadow HLSL slice the GPU per-cluster pipeline composes into
 // ClusterMaterialShader.hpp's PSClusterMain. See its own header comment for what this is and is not.
 #include "aver/voxi/VoxiGiShaders.hpp"
+// ProjectRenderApply.hpp: the shared, header-only two-phase manifest apply (Lane 2 of the settings-
+// separation pass) -- applyProjectVoxiSettings and captureRenderSettingsFromUi below are both thin
+// callers of it now. Pulls in QualityLadder.hpp, RenderSettingsResolver.hpp (voxi::resolve, used
+// throughout buildRenderingSettings and the G-buffer switch) and Scalability.hpp (the Overall Quality
+// preset) along the way, so this one include is every settings-separation header this file needs.
+#include "aver/voxi/ProjectRenderApply.hpp"
+// NrdDenoiser.hpp, for Denoiser::available() alone -- the DeviceInfo::nrdSupported computation just
+// below is R1's other mirror site (GameApp::attachVoxi, modules/runtime.game/src/GameApp.cpp, is the
+// first; same expression, `backend() == D3D12 && available()`). Aver.Render.Voxi.Renderer links
+// Aver.Render.NRD PUBLIC (modules/render.voxi/CMakeLists.txt), and this file already links against
+// the former for VoxiRenderer.hpp above, so the include needs no extra guard.
+#include "aver/render/nrd/NrdDenoiser.hpp"
 #endif
 
 #if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
@@ -2519,6 +2531,10 @@ public:
             di.typedUavLoads = caps.typedUavLoads; di.conservativeRaster = caps.conservativeRaster;
             di.shaderModel = caps.shaderModel; di.meshShaderTier = caps.meshShaderTier;
             di.dxcAvailable = caps.dxcAvailable;
+            // R1: computed only at this site and GameApp::attachVoxi's mirror, same expression both
+            // places -- see DeviceInfo::nrdSupported's own comment (Voxi.hpp) for why the struct only
+            // carries the answer rather than deriving it itself.
+            di.nrdSupported = e.device()->backend() == rhi::Backend::D3D12 && render::nrd::Denoiser::available();
             voxi::Renderer::get().setDeviceInfo(di);
 
             // THE PROJECT MANIFEST GOES IN HERE, BEFORE THE FLAGS AND BEFORE init().
@@ -3174,6 +3190,35 @@ public:
             applyAverSrQuality(e.device(), aver::sr::Quality::Performance);
             applyAverSrQuality(e.device(), aver::sr::Quality::Off);
             AVER_INFO("[AverSR] --aversr-cycle: survived the round trip");
+        }
+#endif
+#if AVER_MODULE_VOXI
+        // N8 FIX, PART 1: THE PT VIEW NOW FOLLOWS A PATH TRACING TIER CHANGE FROM ANYWHERE. Before
+        // this, ptSceneViewWantEnabled_ was only ever flipped by four call sites this file's own
+        // ptSceneViewFromCli_ comment already lists (CLI, the settings-page Quality combo, the
+        // toggle-test flags, a project manifest) -- and NONE of them fired for a change made through
+        // the console's voxi.pathTracing var, the new Overall Quality preset (applyOverall,
+        // Scalability.hpp), or the new voxi.scalability var: all three write vx.settings().pathTracing
+        // directly, so the tier changed but the want flag, and therefore PtSceneView's registration,
+        // silently did not.
+        {
+            const voxi::Quality curPtTier = voxi::Renderer::get().settings().pathTracing;
+            if (curPtTier != ptTierSeen_) {
+                if (curPtTier != voxi::Quality::Off) {
+                    ptSceneViewWantEnabled_ = true;
+                    // Quality::Low is 1, so the rung is one less; mirrors buildRenderingSettings'
+                    // (page == 4) own live re-quality call for the case the view is already registered
+                    // and only its accumulator resolution needs to move.
+                    if (ptSceneView_) ptSceneView_->setQuality(static_cast<u32>(curPtTier) - 1);
+                } else if (!ptSceneViewFromCli_) {
+                    // --pt-scene still wins even here: a console edit or a mid-session project open
+                    // that turns Path Tracing Off must not silently take away a view the command line
+                    // explicitly asked to keep, the same precedence applyProjectRenderSettings already
+                    // honours for the manifest's own RENDER.PATHTRACING.
+                    ptSceneViewWantEnabled_ = false;
+                }
+                ptTierSeen_ = curPtTier;
+            }
         }
 #endif
         // BEFORE device_->beginFrame() (see Engine::frameStep()) -- the only safe place to add or
@@ -3858,7 +3903,14 @@ public:
         // checkbox in Project Settings silently does nothing, which is how this pass spent its whole
         // life reachable only from a command line.
 #if AVER_MODULE_VOXI
-        const bool wantGbufForDenoiser = voxi::Renderer::get().settings().denoiser;
+        // N3 fix: the raw `denoiser` checkbox no longer gates this alone -- a ticked denoiser that can
+        // never actually run (no NRD on this device, RT tier Off, nothing producing a signal to
+        // filter) must not still cost the ~54 MB G-buffer allocation every frame. See
+        // Resolution::denoiserGBufferWanted (RenderSettingsResolver.hpp) for the exact rule: wanted
+        // when denoiser is requested and nothing but the soft MSAA reason (if even that) stands
+        // between the request and NRD actually running.
+        voxi::Renderer& vx = voxi::Renderer::get();
+        const bool wantGbufForDenoiser = voxi::resolve(vx.settings(), vx.deviceInfo()).denoiserGBufferWanted;
 #else
         const bool wantGbufForDenoiser = false;
 #endif
@@ -7979,6 +8031,22 @@ public:
             ptSceneViewWantEnabled_ = false;
         } else if (!rayDrivenPaints) {
             ptSceneViewYieldLogged_ = false;   // re-arm the message if the mode changes back
+#if AVER_MODULE_VOXI
+            // N8 FIX, PART 2: THE PT VIEW ACTUALLY COMES BACK -- the promise the INFO/WARN messages
+            // above already made ("--rt-render-mode 0 hands the frame back to it") but that this
+            // branch never kept before this fix: it only ever re-armed the log/suppression flags, so
+            // ptSceneViewWantEnabled_ stayed false forever once ray-driven had suppressed it, even
+            // after ray-driven itself stopped painting. Restored here, ONLY if this yield was actually
+            // the reason the want flag went false (ptSceneViewSuppressedByRayDriven_, read BEFORE the
+            // line below clears it) and the request it suppressed is still live: the Path Tracing tier
+            // is still above Off, or --pt-scene explicitly asked to keep the view regardless of tier.
+            // Guarded on AVER_MODULE_VOXI, like occlusionSuppressingFeatureName()'s own Voxi read a
+            // little above in this file -- this function must still build with the module off, and
+            // voxi::Renderer::get() (a type this read needs) does not exist in that build at all.
+            if (ptSceneViewSuppressedByRayDriven_ &&
+                (voxi::Renderer::get().settings().pathTracing != voxi::Quality::Off || ptSceneViewFromCli_))
+                ptSceneViewWantEnabled_ = true;
+#endif
             ptSceneViewSuppressedByRayDriven_ = false;   // A1: same re-arm trigger as the log message
         }
 
@@ -9542,46 +9610,19 @@ private:
 
         voxi::Renderer& vx = voxi::Renderer::get();
 
-        // TIERS FIRST, IN THEIR OWN CALL, for the reason the startup path documents at length:
-        // setSettings decides "did the caller set this" BY VALUE, so a knob asked for at the value
-        // it already holds is indistinguishable from one never asked for, and the tier's derived
-        // rung silently wins. This function used to push tiers and knobs in ONE call, so a manifest
-        // stating RENDER.GI 4 beside a RENDER.VOXELRES that happened to equal the live value had
-        // that resolution overwritten by the tier -- the same "accepted and ignored" class as the
-        // bug above, just needing a coincidence to show. PTTest escaped it only because 512 differs
-        // from the default.
-        voxi::Settings s = vx.settings();
-        if (project_.giQuality   >= 0) s.globalIllumination = static_cast<voxi::Quality>(project_.giQuality);
-        if (project_.rayTracing  >= 0) s.rayTracing         = static_cast<voxi::Quality>(project_.rayTracing);
-        if (project_.pathTracing >= 0) s.pathTracing        = static_cast<voxi::Quality>(project_.pathTracing);
-        if (project_.layeredBsdf >= 0) s.layeredBsdf        = static_cast<voxi::Quality>(project_.layeredBsdf);
-        vx.setSettings(s);
-
-        // SECOND CALL: every knob a tier derives. Read back first, so these are compared against
-        // what the tiers just settled on rather than against pre-tier values.
-        voxi::Settings k = vx.settings();
-        if (project_.voxelResolution >  0)    k.voxelResolution    = static_cast<u32>(project_.voxelResolution);
-        if (project_.giIntensity     >= 0.0f) k.giIntensity        = project_.giIntensity;
-        if (project_.giMaxDistance   >= 0.0f) k.giMaxDistance      = project_.giMaxDistance;
-        if (project_.rtShadowRays       >= 0) k.rtShadowRays       = static_cast<u32>(project_.rtShadowRays);
-        if (project_.rtPixelsPerRayTile >= 0) k.rtPixelsPerRayTile = static_cast<u32>(project_.rtPixelsPerRayTile);
-        if (project_.rtShadowDenoise    >= 0) k.rtShadowDenoise    = static_cast<u32>(project_.rtShadowDenoise);
-        if (project_.rtRenderMode       >= 0) k.rtRenderMode       = static_cast<u32>(project_.rtRenderMode);
-        if (project_.ptBounces          >= 0) k.ptBounces          = static_cast<u32>(project_.ptBounces);
-        if (project_.giCones            >= 0) k.giCones            = static_cast<u32>(project_.giCones);
-        if (project_.giMode             >= 0) k.giMode             = static_cast<u32>(project_.giMode);
-        if (project_.denoiser           >= 0) k.denoiser           = project_.denoiser != 0;
-        if (project_.refractionMode     >= 0) k.refractionMode     = static_cast<u32>(project_.refractionMode);
-        if (project_.refractionStrength >= 0.0f) k.refractionStrength = project_.refractionStrength;
-        if (project_.refractionEdgeFade >= 0.0f) k.refractionEdgeFade = project_.refractionEdgeFade;
-        // THE THREE NEW KEYS. msaa and meshShaders are not tier-derived, so they could equally have
-        // gone in the first call; they sit here because this is the call that carries every knob a
-        // manifest can state, and splitting them by derivation would be a distinction only this
-        // file's history explains.
-        if (project_.msaa            >  0) k.msaa             = static_cast<voxi::Msaa>(project_.msaa);
-        if (project_.meshShaders     >= 0) k.meshShaders      = project_.meshShaders != 0;
-        if (project_.giUpdateInterval >= 0) k.giUpdateInterval = static_cast<u32>(project_.giUpdateInterval);
-        vx.setSettings(k);   // clamps to this device; the manifest keeps what was asked for
+        // TWO-PHASE MANIFEST APPLY, now the shared helper both hosts use (Lane 2,
+        // ProjectRenderApply.hpp) rather than this file's own hand-rolled copy: tiers committed and
+        // read back FIRST, for the reason this function used to document at length here -- setSettings
+        // decides "did the caller set this" BY VALUE, so a knob asked for at the value it already
+        // holds is indistinguishable from one never asked for, and the tier's derived rung silently
+        // wins if both land in the same call. Then every knob, against the POST-derivation tiers, and
+        // committed again. See applyManifestTwoPhase's own comment for the exact R2 regression this
+        // ordering exists to avoid, and applyManifestKnobs' for the N6 fix riding along in the same
+        // call: a manifest that states a tier but omits one of its nine derived knobs now follows
+        // whatever THIS commit's tier resolved to, not whatever was already live before this project
+        // opened.
+        voxi::Settings x = vx.settings();
+        voxi::applyManifestTwoPhase(project_, x, [&]() { vx.setSettings(x); x = vx.settings(); });
 
         // The GI volume, which is not a voxi::Settings field at all -- it is set through
         // setVolume(centre, extent), so it has to be applied separately from the knob block above.
@@ -9686,6 +9727,20 @@ private:
         // (applyProjectVoxiSettings(), already applied above) resolved to BEFORE any flag gets a say.
         const u32  manifestRtRenderMode  = vx.settings().rtRenderMode;
         const bool manifestPathTracingOn = vx.settings().pathTracing != voxi::Quality::Off;
+        // ---- PHASE A (N7): TIER FLAGS AND FORCE-OFFS, COMMITTED ALONE, FIRST ----
+        // THE BUG THIS SPLIT FIXES. A tier flag (--gi/--rt/--pt) and a knob flag for THAT SAME tier
+        // (e.g. --rt-rays) used to land in one merged setSettings call below. take()'s own "ignore an
+        // override already equal to the live value" rule reads the knob against the OLD tier's live
+        // value -- so an explicit --rt-rays 4 that happened to equal the OLD tier's own rtShadowRays
+        // looked like a no-op to take(), was never marked overridden, and rode into that one
+        // setSettings() call still at its pre-flag value. setSettings' own tier-derivation then saw
+        // the tier change AND an "untouched" knob in the SAME call and rederived the knob to the NEW
+        // tier's ladder rung, silently discarding the 4 the flag asked for: PTTest (RENDER.RAYTRACING
+        // 4, RENDER.RTSHADOWRAYS 4) opened with `--rt 1 --rt-rays 4` lost the explicit 4 to Low's
+        // derived 1, with nothing logged, purely because the coincidence made the flag look unchanged.
+        // Committing the tier ALONE here means Phase B below reads back settings that already carry
+        // the NEW tier's derived knobs, so its take() calls compare each flag against those -- the
+        // same coincidence can no longer hide an override.
         {
             auto k = vx.settings();
             bool overridden = false;
@@ -9704,10 +9759,51 @@ private:
             take(giOverride_, reinterpret_cast<u32&>(k.globalIllumination), "--gi");
             take(rtOverride_, reinterpret_cast<u32&>(k.rayTracing),         "--rt");
             take(ptOverride_, reinterpret_cast<u32&>(k.pathTracing),        "--pt");
-            take(rtRenderModeOverride_,    k.rtRenderMode,       "--rt-render-mode");
+            // THE THIRD INSTANCE, predicted above: --no-gi/--no-rt are BOOLEANS, not the -1-sentinel
+            // integers `take` understands, so closing the rule for integers left these two behind.
+            // Measured cost: on RENDER.RAYTRACING 4, `--no-rt` was silently discarded and an A/B built
+            // on it said ray tracing cost -0.3ms (appeared FASTER to turn on) when the real answer was
+            // 6.7ms. A silently-failing override manufactures a wrong conclusion, confidently.
+            // MOVED UP INTO THIS SAME PHASE (N7): forceOff changes a TIER exactly like take(giOverride_,
+            // ...) above does, so it belongs beside the other tier changes, committed before any knob
+            // flag is ever compared against what follows from it.
+            const auto forceOff = [&](bool want, voxi::Quality& dst, const char* name) {
+                if (!want || dst == voxi::Quality::Off) return;
+                AVER_INFO("[Sandbox] {}: the command line asked for Off and the project manifest for "
+                          "{}; the command line wins", name, static_cast<int>(dst));
+                dst = voxi::Quality::Off;
+                overridden = true;
+            };
+            forceOff(giForceOff_, k.globalIllumination, "--no-gi");
+            forceOff(rtForceOff_, k.rayTracing,         "--no-rt");
+            // COMMIT THE TIERS ALONE. Phase B below re-reads vx.settings() fresh, so whatever
+            // setSettings just derived from a tier change here (rtShadowRays, giUpdateInterval, and
+            // the rest of the nine tier-derived knobs) is what Phase B's take() calls are compared
+            // against -- not the pre-flag values this block started from.
+            if (overridden) vx.setSettings(k);
+        }
+
+        // ---- PHASE B (N7): EVERY KNOB FLAG, AGAINST THE POST-TIER SETTINGS ----
+        // Read AFTER Phase A's commit, deliberately -- see that phase's own comment for why. THIS
+        // CALL TRULY HAS NO TIER CHANGES IN IT (an earlier version of this comment claimed that for
+        // the single merged call above and was wrong -- the tier takes used to live in this same
+        // block): nothing below ever touches k.globalIllumination/rayTracing/pathTracing again, so
+        // setSettings' own change-gated derivation sees no tier change here and leaves every knob this
+        // block writes exactly as written.
+        {
+            auto k = vx.settings();
+            bool overridden = false;
+            const auto take = [&](int ov, u32& dst, const char* name) {
+                if (ov < 0 || static_cast<u32>(ov) == dst) return;
+                AVER_INFO("[Sandbox] {}: the command line asked for {} and the project manifest for "
+                          "{}; the command line wins", name, ov, dst);
+                dst = static_cast<u32>(ov);
+                overridden = true;
+            };
             // Wired in from the start rather than after it bites: this is the third knob-shaped
             // feature added since that rule was written, and the previous two both had to be fixed
             // afterwards (--pt-scene in e2830db, --no-rt/--no-gi in fac36a3).
+            take(rtRenderModeOverride_,    k.rtRenderMode,       "--rt-render-mode");
             take(refractionOverride_,      k.refractionMode,     "--refraction");
             take(rtShadowDenoiseOverride_, k.rtShadowDenoise,    "--rt-shadow-denoise");
             take(ptBouncesOverride_,       k.ptBounces,          "--pt-bounces");
@@ -9774,23 +9870,6 @@ private:
                 take(static_cast<u32>(denoiserOverride_ != 0), den, "--denoiser");
                 k.denoiser = den != 0;
             }
-            // THE THIRD INSTANCE, predicted above: --no-gi/--no-rt are BOOLEANS, not the -1-sentinel
-            // integers `take` understands, so closing the rule for integers left these two behind.
-            // Measured cost: on RENDER.RAYTRACING 4, `--no-rt` was silently discarded and an A/B built
-            // on it said ray tracing cost -0.3ms (appeared FASTER to turn on) when the real answer was
-            // 6.7ms. A silently-failing override manufactures a wrong conclusion, confidently.
-            const auto forceOff = [&](bool want, voxi::Quality& dst, const char* name) {
-                if (!want || dst == voxi::Quality::Off) return;
-                AVER_INFO("[Sandbox] {}: the command line asked for Off and the project manifest for "
-                          "{}; the command line wins", name, static_cast<int>(dst));
-                dst = voxi::Quality::Off;
-                overridden = true;
-            };
-            forceOff(giForceOff_, k.globalIllumination, "--no-gi");
-            forceOff(rtForceOff_, k.rayTracing,         "--no-rt");
-            // A SECOND setSettings CALL, deliberately, for the reason the startup path documents at
-            // its own two-call site: no TIER changes here, so the tier-derivation rule cannot fire and
-            // overwrite these explicit knobs the way it would if folded into the call above.
             if (overridden) vx.setSettings(k);
         }
 
@@ -9842,6 +9921,32 @@ private:
             }
         }
 
+        // MANIFEST CONTRADICTIONS (section 2's load-time report rule, RenderSettingsResolver.hpp):
+        // once per project apply, warn about any of the four fields the manifest actually STATED
+        // (project_.X >= 0) whose EFFECTIVE value -- after everything above, flag precedence and
+        // hardware clamping included -- does not match what was asked. A RT-Off manifest that also
+        // pins RENDER.GIMODE 1 is the case this exists for: F-d (Lane 1) stores giMode as requested
+        // rather than clamping it, so nothing else in this file would ever say the pin is not actually
+        // running. A reason that maps to a Feature refuse() ALREADY logged this same apply
+        // (vx.refusalLogged) is skipped -- see refusalFeatureFor's own comment for exactly which
+        // reasons that covers -- so a device limitation is never reported twice from two call sites.
+        {
+            voxi::FieldReport reports[4];
+            const voxi::ManifestAsks asks{project_.giMode, project_.denoiser, project_.rtRenderMode,
+                                          project_.refractionMode};
+            const u32 nReports =
+                voxi::manifestContradictions(vx.settings(), vx.deviceInfo(), asks, reports);
+            for (u32 i = 0; i < nReports; ++i) {
+                voxi::Feature feature;
+                if (voxi::refusalFeatureFor(reports[i].reason, feature) && vx.refusalLogged(feature))
+                    continue;
+                AVER_WARN("[Project] {} sets RENDER.{} {}, but {} The recorded value is not what is "
+                          "actually running.",
+                          project_.manifestPath, reports[i].manifestKey, reports[i].requested,
+                          voxi::disableReasonText(reports[i].reason));
+            }
+        }
+
         voxiRenderer_.setSettings(vx.settings());
         // A manifest that names Path Tracing explicitly should actually (de)register PtSceneView at
         // load: PathTracing needs an explicit register/unregister step (syncPtSceneView(), called
@@ -9877,17 +9982,25 @@ private:
     }
 
     // Copies the controls' requested values into the manifest struct, before the renderer clamps them.
-    void captureRenderSettingsFromUi(const voxi::Settings& requested) {
-        project_.giQuality       = static_cast<int>(requested.globalIllumination);
-        project_.rayTracing      = static_cast<int>(requested.rayTracing);
-        project_.pathTracing     = static_cast<int>(requested.pathTracing);
-        // If the GI tier just changed here and voxelResolution was NOT independently touched, leave
-        // the manifest's voxelResolution unset (-1) instead of baking in the OLD tier's number:
-        // vx.setSettings (called right after) derives the new tier's rung from the identical signal,
-        // and pinning the stale value would silently stop this project from ever re-deriving it.
-        const voxi::Settings& live = voxi::Renderer::get().settings();
-        const bool tierOnlyChange = requested.globalIllumination != live.globalIllumination
-                                  && requested.voxelResolution == live.voxelResolution;
+    // `overallFollowMask` is whatever applyOverall wrote THIS SAME EDIT (0 when no Overall Quality
+    // button ran) -- forwarded straight through to captureVoxiSettings' own follow-the-tier rule, so a
+    // group an Overall preset just moved is captured as "follow the tier", not as nine explicit pins.
+    void captureRenderSettingsFromUi(const voxi::Settings& requested, u32 overallFollowMask) {
+        voxi::Renderer& vx = voxi::Renderer::get();
+        // EVERY VOXI-OWNED FIELD NOW GOES THROUGH THE ONE SHARED CAPTURE RULE (Lane 2,
+        // ProjectRenderApply.hpp), replacing this function's own hand-rolled copy -- including the
+        // voxelResolution-only "still following the tier" special case this function used to carry
+        // alone: captureVoxiSettings' captureKnob applies the identical test to all NINE tier-derived
+        // knobs (voxelResolution, giCones, giUpdateInterval; rtShadowRays, rtPixelsPerRayTile,
+        // rtShadowDenoise, rtRenderMode, refractionMode; ptBounces), not just this one. `live` is
+        // voxi::Renderer::get().settings() -- the settings from BEFORE this edit -- which is why this
+        // call must run before vx.setSettings(s) at this function's own call site (see the comment
+        // there for why "before" is what makes "live" mean what it says). The five device-clamped
+        // fields (the three tier enums, meshShaders, msaa) get captureClamped's N5 rule instead, so an
+        // edit on a machine without RT/PT/mesh-shader hardware never rewrites a teammate's pin for
+        // hardware this device does not have.
+        voxi::captureVoxiSettings(project_, requested, vx.settings(), vx.deviceInfo(), overallFollowMask);
+
         project_.backend = projectBackend_;
         // NOT WHEN --frame-budget SUPPLIED IT. frameBudgetMs_ holds either the project's own value or
         // a CLI test override, and this function cannot tell them apart on its own -- so writing it
@@ -9897,30 +10010,10 @@ private:
         // The forced flag is exactly the distinction, and it already exists for the symmetric bug on
         // the way in (applyProjectRenderSettings clobbering the flag from the manifest's default).
         if (!frameBudgetForced_) project_.frameBudgetMs = frameBudgetMs_;
-        project_.voxelResolution = tierOnlyChange ? -1 : static_cast<int>(requested.voxelResolution);
-        project_.giIntensity     = requested.giIntensity;
-        project_.giMaxDistance   = requested.giMaxDistance;
-        project_.rtShadowRays       = static_cast<int>(requested.rtShadowRays);
-        project_.rtPixelsPerRayTile = static_cast<int>(requested.rtPixelsPerRayTile);
-        project_.rtShadowDenoise    = static_cast<int>(requested.rtShadowDenoise);
-        project_.rtRenderMode       = static_cast<int>(requested.rtRenderMode);
-        project_.ptBounces          = static_cast<int>(requested.ptBounces);
-        project_.layeredBsdf        = static_cast<int>(requested.layeredBsdf);
-        project_.giCones            = static_cast<int>(requested.giCones);
-        project_.giMode             = static_cast<int>(requested.giMode);
-        project_.denoiser           = requested.denoiser ? 1 : 0;
-        project_.refractionMode     = static_cast<int>(requested.refractionMode);
-        project_.refractionStrength = requested.refractionStrength;
-        project_.refractionEdgeFade = requested.refractionEdgeFade;
         project_.lodSelect          = lodSelectEnabled_ ? 1 : 0;
         project_.lodThresholdPx     = lodErrorThresholdPx_;
         project_.occlusionCull      = occlusionCullEnabled_ ? 1 : 0;
         project_.depthPrepass       = depthPrepassOverride_ ? 1 : 0;
-        // FOUR THAT WERE MISSING, each of them a control on this very window that applied live and
-        // then vanished on the next open. See ProjectDesc for the shape of each key.
-        project_.msaa            = static_cast<int>(requested.msaa);
-        project_.meshShaders     = requested.meshShaders ? 1 : 0;
-        project_.giUpdateInterval = static_cast<int>(requested.giUpdateInterval);
         // The GI volume's placement, which had no key at all -- so a level whose geometry is not at
         // the origin could never record where its indirect light should be gathered.
         project_.hasGiVolume = true;
@@ -22786,10 +22879,142 @@ private:
         ImGui::Separator();
 
         Settings s = vx.settings();
+        // Every prerequisite this page's controls grey against, resolved ONCE per frame from the
+        // settings this page itself is about to edit -- see RenderSettingsResolver.hpp's own comment
+        // for why the same question answered four different ways (a setSettings clamp, an ad hoc
+        // BeginDisabled check, a console var's validate(), and nothing at all for a load-time warning)
+        // is the defect this header exists to remove.
+        const Resolution er = resolve(s, vx.deviceInfo());
         bool changed = false;
+        // Set by an Overall Quality button or one of the three per-group rows below (section 3): which
+        // groups this edit just moved to a rung, so captureRenderSettingsFromUi's call to
+        // captureVoxiSettings (Lane 2) knows to write "follow the tier" (-1) for those groups' knobs
+        // rather than nine explicit pins.
+        u32 overallFollowMask = 0;
         ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.45f);
 
         if (page == 1) {
+            // ---- OVERALL QUALITY (D2): UE-STYLE ENGINE SCALABILITY PRESET --------------------------
+            // One button moves every group this project has a LADDER for -- Global Illumination, Ray
+            // Tracing, Path Tracing -- to the SAME rung at once (Scalability.hpp). MSAA, AverSR,
+            // shadows and post are deliberately not among them; see that header's own "Groups excluded,
+            // and why" for the full list this comment does not repeat. Placed at the very top of this
+            // page, before even the MSAA radios, the way UE's own Scalability panel leads its settings.
+            ImGui::TextUnformatted("Overall Quality");
+            {
+                const auto qualityButton = [&](const char* label, bool active) {
+                    if (active) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+                    const bool hit = ImGui::Button(label);
+                    if (active) ImGui::PopStyleColor();
+                    return hit;
+                };
+                const OverallQuality cur = overallFromSettings(s, vx.deviceInfo());
+                static const OverallQuality kRungs[] = {OverallQuality::Low, OverallQuality::Medium,
+                                                        OverallQuality::High, OverallQuality::Epic};
+                static const char* kRungNames[] = {"Low", "Medium", "High", "Epic"};
+                for (int i = 0; i < 4; ++i) {
+                    if (i) ImGui::SameLine();
+                    if (qualityButton(kRungNames[i], cur == kRungs[i])) {
+                        overallFollowMask |= applyOverall(s, kRungs[i], vx.deviceInfo());
+                        changed = true;
+                    }
+                    if (kRungs[i] == OverallQuality::Epic && ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Global Illumination's voxel grid goes to 512^3, about\n"
+                                          "3.2 GB -- by far the steepest rung on that ladder. The grid\n"
+                                          "is only ever built at init, so this takes effect on the\n"
+                                          "next project reload, not immediately.");
+                }
+                // AMBER "CUSTOM" rather than leaving all four rungs unhighlighted with no explanation:
+                // overallFromSettings reads Custom the moment any available group's knobs have drifted
+                // off the ladder, the groups disagree on a rung, or Path Tracing is above Off.
+                if (cur == OverallQuality::Custom) {
+                    ImGui::SameLine();
+                    ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1), "Custom");
+                }
+                // T-7: EVERY rung above turns Path Tracing OFF (scalabilityRung's own comment, a locked
+                // decision) -- a PT tier above Off always reads Custom and would silently drop to Off
+                // the moment any button above is clicked. Said here, in amber, rather than discovered
+                // by the path-traced view vanishing with no visible cause.
+                if (s.pathTracing != Quality::Off)
+                    ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1),
+                                       "Picking a preset turns Path Tracing off (currently %s).",
+                                       Renderer::qualityName(s.pathTracing));
+            }
+
+            // The three groups an Overall preset moves together, each as its own Off..Epic row: this
+            // is where a project that reads Custom above actually lives, and "(modified)" flags a
+            // group that is nominally AT the right tier but has a hand-edited knob (groupFollowsLadder,
+            // Scalability.hpp) -- nominally-Epic-but-modified and actually-Custom look identical from
+            // the Overall row alone, and this is the page that tells them apart.
+            {
+                static const ScalabilityGroup kGroups[] = {ScalabilityGroup::GlobalIllumination,
+                                                           ScalabilityGroup::RayTracing,
+                                                           ScalabilityGroup::PathTracing};
+                static const Feature kGroupFeature[] = {Feature::GlobalIllumination, Feature::RayTracing,
+                                                        Feature::PathTracing};
+                static const char* kGroupLabel[] = {"Global Illumination", "Ray Tracing", "Path Tracing"};
+                static const char* kTierNames[] = {"Off", "Low", "Medium", "High", "Epic"};
+                // Writes ONE group's tier and its own derived knobs to a rung -- the per-group
+                // equivalent of applyOverall (Scalability.hpp), which always moves all three together
+                // and so cannot serve a single row here. Mirrors applyOverall's own field list exactly,
+                // group for group.
+                const auto setGroupTier = [](Settings& set, ScalabilityGroup g, Quality t) {
+                    switch (g) {
+                        case ScalabilityGroup::GlobalIllumination:
+                            set.globalIllumination = t;
+                            set.voxelResolution    = ladder::voxelResolution(t);
+                            set.giCones            = ladder::giCones(t);
+                            set.giUpdateInterval   = ladder::giUpdateInterval(t);
+                            break;
+                        case ScalabilityGroup::RayTracing:
+                            set.rayTracing         = t;
+                            set.rtShadowRays       = ladder::rtShadowRays(t);
+                            set.rtPixelsPerRayTile = ladder::rtPixelsPerRayTile(t);
+                            set.rtShadowDenoise    = ladder::rtShadowDenoise(t);
+                            set.rtRenderMode       = ladder::rtRenderMode(t);
+                            set.refractionMode     = ladder::refraction(t);
+                            set.giSkyOcclusionRays = ladder::giSkyOcclusionRays(t);
+                            set.giSkyOcclusionTile = ladder::giSkyOcclusionTile(t);
+                            break;
+                        case ScalabilityGroup::PathTracing:
+                            set.pathTracing = t;
+                            set.ptBounces   = ladder::ptBounces(t);
+                            break;
+                        default: break;
+                    }
+                };
+                for (int gi = 0; gi < 3; ++gi) {
+                    const ScalabilityGroup group = kGroups[gi];
+                    ImGui::PushID(gi);
+                    ImGui::TextUnformatted(kGroupLabel[gi]);
+                    featureStatusBadge(vx, kGroupFeature[gi]);
+                    if (!groupFollowsLadder(s, group)) {
+                        ImGui::SameLine();
+                        ImGui::TextColored(ImVec4(0.95f,0.72f,0.25f,1), "(modified)");
+                    }
+                    const bool avail = groupAvailable(group, vx.deviceInfo());
+                    ImGui::BeginDisabled(!avail);
+                    const Quality gt = groupTier(s, group);
+                    const auto qualityButton = [&](const char* label, bool active) {
+                        if (active) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+                        const bool hit = ImGui::Button(label);
+                        if (active) ImGui::PopStyleColor();
+                        return hit;
+                    };
+                    for (int i = 0; i < 5; ++i) {
+                        if (i) ImGui::SameLine();
+                        if (qualityButton(kTierNames[i], static_cast<u32>(gt) == static_cast<u32>(i))) {
+                            setGroupTier(s, group, static_cast<Quality>(i));
+                            overallFollowMask |= 1u << static_cast<u32>(group);
+                            changed = true;
+                        }
+                    }
+                    ImGui::EndDisabled();
+                    ImGui::PopID();
+                }
+            }
+            ImGui::Separator();
+
             ImGui::TextUnformatted(Renderer::featureName(Feature::Msaa));
             const u32 mask = vx.deviceInfo().msaaMask;
             const u32 counts[4] = {1,2,4,8};
@@ -22801,6 +23026,15 @@ private:
                 if (ImGui::RadioButton(labels[i], static_cast<u32>(s.msaa)==counts[i])) { s.msaa=static_cast<Msaa>(counts[i]); changed=true; }
                 ImGui::EndDisabled();
             }
+            // er.rtRenderMode.effective, not the raw request: what matters here is whether the ray
+            // pass is ACTUALLY the thing finding primary visibility this frame -- it is one fullscreen
+            // triangle with no per-triangle coverage, so it always runs at a single sample regardless
+            // of what is picked above (Settings::rtRenderMode's own "WHAT DEFAULTING TO IT TRADES
+            // AWAY" list). RT Low rasterises (D3), so this note does not apply there even though the
+            // RT tier itself is not Off.
+            if (er.rtRenderMode.effective == 1)
+                ImGui::TextDisabled("Primary visibility is ray-driven -- the ray pass runs at a single "
+                                    "sample regardless of the setting above.");
 
             ImGui::Separator();
             const Status st = vx.status(Feature::MeshShaders);
@@ -22844,9 +23078,26 @@ private:
             ImGui::Separator();
             ImGui::TextUnformatted("Refraction");
             {
-                int rm = static_cast<int>(s.refractionMode);
-                const char* rms[] = {"Off", "Screen-space", "Ray-traced"};
-                if (ImGui::Combo("Mode", &rm, rms, 3)) { s.refractionMode = static_cast<u32>(rm); changed = true; }
+                // BeginCombo/Selectable rather than a plain Combo: only the RAY-TRACED entry has a
+                // prerequisite (RT hardware, RT tier not Off -- er.refractionMode.reason), and a plain
+                // Combo has no way to grey out one entry while leaving Off and Screen-space selectable.
+                // A request already at or below Screen-space never needed a ray tracer and is never
+                // touched by this reason at all (RenderSettingsResolver.hpp's resolve(), refractionMode).
+                static const char* rms[] = {"Off", "Screen-space", "Ray-traced"};
+                if (ImGui::BeginCombo("Mode", rms[s.refractionMode])) {
+                    for (int i = 0; i < 3; ++i) {
+                        const bool rayTracedGreyed = (i == 2) && greysControl(er.refractionMode.reason);
+                        ImGui::BeginDisabled(rayTracedGreyed);
+                        if (ImGui::Selectable(rms[i], s.refractionMode == static_cast<u32>(i))) {
+                            s.refractionMode = static_cast<u32>(i);
+                            changed = true;
+                        }
+                        ImGui::EndDisabled();
+                        if (rayTracedGreyed && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                            ImGui::SetTooltip("%s", disableReasonText(er.refractionMode.reason));
+                    }
+                    ImGui::EndCombo();
+                }
                 uiReg_.track("project.refraction.mode");
                 ImGui::BeginDisabled(s.refractionMode == 0);
                 if (ImGui::SliderFloat("Strength", &s.refractionStrength, 0.0f, 2.0f)) changed = true;
@@ -22939,7 +23190,17 @@ private:
             // giMode round-trips through the .ocproject as RENDER.GIMODE, so a project remembers
             // the choice; absent from an older manifest it stays -1 and the engine default (cones)
             // applies, which is what every project written before this key existed meant.
-            int giAlgo = static_cast<int>(s.giMode);
+            //
+            // SHOWS er.giMode.EFFECTIVE, NOT THE RAW STORED REQUEST (F-d, Lane 1): giMode is no
+            // longer clamped inside Settings itself, so a project asking for ReSTIR on a device or RT/
+            // GI tier that cannot run it right now still remembers the ask (s.giMode is untouched
+            // below) rather than being silently rewritten to 0 -- see RenderSettingsResolver.hpp's
+            // resolve() for exactly which three things have to agree first. Showing the raw value here
+            // while the renderer quietly ran cones instead would read as a control that does nothing;
+            // showing the effective one means the combo reads Voxel cones until it actually can switch,
+            // and switches back on its own the moment the reason clears, since the stored request was
+            // never touched.
+            int giAlgo = static_cast<int>(er.giMode.effective);
             if (ImGui::Combo("Indirect diffuse", &giAlgo, "Voxel cones\0ReSTIR (experimental)\0")) {
                 s.giMode = static_cast<u32>(giAlgo); changed = true;
             }
@@ -22952,11 +23213,16 @@ private:
                                   "It has no voxel volume, so the boundary artefacts the clipmap\n"
                                   "produces -- surfaces near the edge reading as unoccluded, worst\n"
                                   "while the camera moves -- cannot occur.\n\n"
-                                  "NEEDS RAY TRACING: with no RayQuery hardware giMode is forced\n"
-                                  "back to cones (Voxi.cpp), so this will not appear to take.\n\n"
                                   "EXPERIMENTAL: spatio-temporal resampling. Grainier than the\n"
                                   "cone gather unless Denoiser below is on -- which is what the\n"
                                   "NRD pass is for, and it needs MSAA 1 to run at all.");
+            // ReSTIR is REQUESTED (the combo above just picked it, or a manifest already had it) but
+            // not EFFECTIVE: named here, in this page's own red-reason idiom, rather than left for the
+            // combo silently reading "Voxel cones" with no explanation of why the choice did not take.
+            if (s.giMode != 0 && er.giMode.reason != DisableReason::None)
+                ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1),
+                                   "   ReSTIR is selected and resumes when %s",
+                                   disableReasonText(er.giMode.reason));
 
             // THE DENOISER SITS HERE, UNDER THE ESTIMATOR IT FILTERS, because it is only reachable from
             // this page's own choices: it denoises the ReSTIR radiance above and the sky occlusion the
@@ -22964,13 +23230,24 @@ private:
             // G-buffer. Before this checkbox existed the whole pass was reachable only by passing
             // --gbuffer on a command line, which meant the editor could never see it at all.
             //
-            // THE MSAA NOTE IS NOT DECORATION. At any sample count above 1 the pass skips itself -- see
-            // Voxi::Settings::denoiser for the D3D12 rule that forces that -- so a user who ticks this at
-            // 8x MSAA would otherwise see no change and no reason for it. Said inline rather than in the
-            // tooltip, because a tooltip nobody hovers is not a warning.
-            bool den = s.denoiser;
+            // GREYED FOR A HARD REASON (er.denoiser.reason, greysControl -- RT hardware/tier, NRD
+            // support, or nothing to denoise); LEFT CLICKABLE FOR THE SOFT ONE (RequiresMsaaOne),
+            // because the same page's own MSAA radios can undo that in one click and the amber line
+            // below already says so -- see the prerequisite table's own "soft reasons only warn
+            // inline" rule (RenderSettingsResolver.hpp). The displayed check state is the EFFECTIVE
+            // value while hard-greyed (s.denoiser is kept, untouched, so a request survives a
+            // temporary hardware loss) and the RAW request otherwise, so the soft MSAA case still
+            // shows what was actually asked for.
+            const bool denoiserHardGreyed = greysControl(er.denoiser.reason);
+            ImGui::BeginDisabled(denoiserHardGreyed);
+            bool den = s.denoiser && !denoiserHardGreyed;
             if (ImGui::Checkbox("Denoiser (NVIDIA NRD)", &den)) { s.denoiser = den; changed = true; }
-            if (ImGui::IsItemHovered())
+            ImGui::EndDisabled();
+            if (denoiserHardGreyed) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1), "[%s]", disableReasonText(er.denoiser.reason));
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
                 ImGui::SetTooltip("Filters the ReSTIR indirect diffuse above and the ray-traced sky\n"
                                         "occlusion, with NVIDIA NRD's REBLUR (third_party/nrd).\n\n"
                                         "COSTS THE G-BUFFER: velocity, view-space depth and packed\n"
@@ -22984,6 +23261,8 @@ private:
             // s.msaa, NOT the device's live sample count: this is the value being edited on this very
             // page, so the warning appears the moment the two settings disagree rather than only after
             // Apply -- and it goes away as soon as Anti-aliasing is set to 1, before anything commits.
+            // Kept exactly as the soft reason's own dedicated line: RequiresMsaaOne never greys, so it
+            // needs this rather than the red reason tag above, which fires only for the hard reasons.
             if (den && static_cast<u32>(s.msaa) != 1u)
                 ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.2f, 1.0f),
                                    "   Anti-aliasing is %ux -- set it to 1 or the denoiser stays off.",
@@ -23001,6 +23280,15 @@ private:
                                    "Changing Quality above moves this to match its rung (Off/Low=64,\n"
                                    "Medium=128, High=256, Epic=512) unless you pick a value here\n"
                                    "yourself, which then overrides the tier's default.");
+            // THE GRID IS ONLY EVER BUILT AT INIT (VoxiRenderer::createVoxelVolume) -- nothing resizes
+            // it afterward, so a Quality change or a hand-picked value above is recorded immediately
+            // but does not reach the GPU volume until the project reloads. voxelResolutionBuilt()
+            // (Lane 3) is the edge that IS actually running; comparing against it, rather than against
+            // whatever this session started with, is what lets this note clear itself the moment a
+            // reload catches up.
+            if (s.voxelResolution != voxiRenderer_.voxelResolutionBuilt())
+                ImGui::TextWrapped("Takes effect when the project is reloaded; the volume built for "
+                                   "this session is still %u^3.", voxiRenderer_.voxelResolutionBuilt());
             if (ImGui::SliderFloat("GI intensity", &s.giIntensity, 0.0f, 4.0f)) changed = true;
             if (ImGui::SliderFloat("GI distance", &s.giMaxDistance, 10.0f, 20000.0f, "%.0f")) changed = true;
             ImGui::DragFloat3("Volume centre", &giCenter_.x, 0.5f);
@@ -23031,6 +23319,16 @@ private:
             int q = static_cast<int>(s.rayTracing);
             const char* qs[] = {"Off","Low","Medium","High","Epic"};
             if (ImGui::Combo("Quality", &q, qs, 5)) { s.rayTracing = static_cast<Quality>(q); changed = true; }
+
+            // INNER GREY, BENEATH THE OUTER ONE ABOVE (st != Status::Ready, hardware-only): everything
+            // from here to this page's own EndDisabled below is inert while the RT TIER itself is Off,
+            // which the outer grey does not cover -- a device WITH ray-tracing hardware and Quality set
+            // to Off has every row below still fully interactive today, sliding rays and filter radii
+            // that do nothing. er.rtSubControls carries exactly that second reason (rtGate,
+            // RenderSettingsResolver.hpp), so this second BeginDisabled greys the sub-rows without
+            // touching the Quality combo above, which must stay choosable regardless -- it is the only
+            // control on this page that can turn the tier back on.
+            ImGui::BeginDisabled(greysControl(er.rtSubControls));
 
             ImGui::Spacing();
             ImGui::TextUnformatted("Sun shadow");
@@ -23092,7 +23390,14 @@ private:
             // a ray has no equivalent of) for whatever a primary ray costs, and an author deciding
             // that deserves the number, not a shrug.
             ImGui::Spacing();
-            ImGui::TextUnformatted("Primary visibility (experimental)");
+            // NO LONGER "(experimental)" -- it is the shipped default from Medium up (D3, this
+            // retune). Low is the one deliberate exception, kept on the rasteriser by explicit product
+            // decision rather than a hardware gap; see ladder::rtRenderMode (QualityLadder.hpp) for
+            // the full reasoning and its own honest accounting of what the evidence for Low does and
+            // does not show.
+            ImGui::TextUnformatted("Primary visibility");
+            ImGui::SameLine();
+            ImGui::TextDisabled("(default at Medium and above; Low rasterises)");
             ImGui::Separator();
             int mode = static_cast<int>(s.rtRenderMode);
             if (ImGui::Combo("Finds the first surface", &mode,
@@ -23100,15 +23405,19 @@ private:
                 s.rtRenderMode = static_cast<u32>(mode); changed = true;
             }
             if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Rasteriser is what every version of this engine has shipped.\n"
-                                   "Primary rays trace one ray per pixel to find the first surface\n"
-                                   "instead, then shade it exactly as the raster path does.\n\n"
+                ImGui::SetTooltip("Rasteriser is what every version of this engine has shipped, and\n"
+                                   "is Ray Tracing Low's own tier default (D3): the user's explicit\n"
+                                   "decision to keep Low on it, not a hardware limit. Primary rays\n"
+                                   "trace one ray per pixel to find the first surface instead, then\n"
+                                   "shade it exactly as the raster path does -- the default from\n"
+                                   "Medium up.\n\n"
                                    "Measured baseline to beat: raster primary visibility plus\n"
                                    "material shading is 9.2ms on ElectricDreams at 4x MSAA,\n"
                                    "2750x1639; one extra shadow ray costs 1.6ms at the same size.");
             // BOUNCES ARE NOT ON THIS PAGE ANY MORE: they are a PATH TRACING quantity living with
             // that setting; leaving the slider here, disabled on ray-tracing mode, made the two look
             // like one feature. See Settings::ptBounces.
+            ImGui::EndDisabled();   // the inner grey opened beside the Quality combo above
             ImGui::EndDisabled();
         }
 
@@ -23150,7 +23459,14 @@ private:
                                    "only -- no CLight (point/spot/area) and no emissive term --\n"
                                    "static geometry only, flat albedo only, no denoiser -- see\n"
                                    "PtSceneView.hpp for the full list of what it deliberately does\n"
-                                   "not do. No tiers yet: any value but Off means on.");
+                                   "not do.\n\n"
+                                   "HAS TIERS NOW: Low..Epic drive the reference view's accumulator\n"
+                                   "resolution (480x270 up to 1280x720, see Bounces below for the\n"
+                                   "bounce budget each rung buys) -- both this combo and the Overall\n"
+                                   "Quality preset on the General page set it, though Overall always\n"
+                                   "sets it to Off (a locked decision: a PT tier above Off takes over\n"
+                                   "the entire view, too large a side effect for one preset button).\n"
+                                   "The console's voxi.pathTracing/voxi.scalability reach it too.");
             ImGui::EndDisabled();
 
             // BOUNCES, WHICH THE MANIFEST HAS ALWAYS CARRIED AND NOTHING EVER SHOWED.
@@ -23223,8 +23539,12 @@ private:
         ImGui::PopTextWrapPos();
 
         if (changed) {
-            // The requested settings reach the manifest before setSettings can clamp them.
-            captureRenderSettingsFromUi(s);
+            // The requested settings reach the manifest BEFORE setSettings can clamp them -- "live"
+            // inside captureRenderSettingsFromUi's own capture rule means "before this edit", which
+            // only holds while this call runs first. overallFollowMask carries whatever an Overall
+            // Quality button or a per-group row above wrote this same edit (0 otherwise), so the
+            // groups it just moved are captured as "follow the tier" rather than nine explicit pins.
+            captureRenderSettingsFromUi(s, overallFollowMask);
             vx.setSettings(s);
         }
     }
@@ -24821,6 +25141,14 @@ private:
     // reconciles the two, only ever from onUpdate(), before beginFrame(). Deliberately NOT itself a
     // read of voxi::Settings::pathTracing: this flag and PT's registration must keep working with AVER_MODULE_VOXI off.
     bool ptSceneViewWantEnabled_ = false;
+#if AVER_MODULE_VOXI
+    // N8: the Path Tracing tier onUpdate's own reconcile block (above ptSceneViewWantEnabled_'s own
+    // syncPtSceneView call) last saw vx.settings().pathTracing read as. Guarded on AVER_MODULE_VOXI,
+    // unlike ptSceneViewWantEnabled_ itself, because its TYPE is voxi::Quality -- this member cannot
+    // exist at all in a build without Voxi, which is exactly why the reconcile block that reads it is
+    // guarded the same way and every OTHER member on this page stays outside the guard.
+    voxi::Quality ptTierSeen_ = voxi::Quality::Off;
+#endif
     // --pt-scene WAS GIVEN ON THE COMMAND LINE. Sticky for the session, separate from the want flag
     // above because that flag is written by four different things (CLI, settings combo, toggle-test
     // flags, a project manifest), and this answers which ONE asked -- see applyProjectRenderSettings, where a manifest used to silently outrank a typed flag.

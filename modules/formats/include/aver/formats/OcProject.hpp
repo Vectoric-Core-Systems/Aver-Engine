@@ -145,12 +145,20 @@ struct ProjectDesc {
     f32  giExtent    = 0.0f;    // cm, half-edge of the cube
 
     // True when the manifest stated at least one RENDER.* key.
+    //
+    // GIMODE AND DENOISER WERE MISSING (N9), and a manifest stating only those two keys was invisible
+    // to both loaders: hasRenderSettings() gated the whole apply block in each of them (SandboxApp.cpp's
+    // applyProjectRenderSettings, GameApp::applyProjectRenderSettings), so RENDER.GIMODE 1 or
+    // RENDER.DENOISER 1 with nothing else stated in the file was parsed correctly into giMode/denoiser
+    // above and then never read by either apply function, silently. No format change and no new key --
+    // the two fields already existed; this OR-chain was simply never taught about them.
     bool hasRenderSettings() const {
         return giQuality >= 0 || rayTracing >= 0 || pathTracing >= 0 ||
                voxelResolution > 0 || giIntensity >= 0.0f || giMaxDistance >= 0.0f ||
                rtShadowRays >= 0 || rtPixelsPerRayTile >= 0 || rtShadowDenoise >= 0 ||
                rtRenderMode >= 0 || ptBounces >= 0 || layeredBsdf >= 0 ||
-               giCones >= 0 || refractionMode >= 0 || refractionStrength >= 0.0f ||
+               giCones >= 0 || giMode >= 0 || denoiser >= 0 ||
+               refractionMode >= 0 || refractionStrength >= 0.0f ||
                refractionEdgeFade >= 0.0f || lodSelect >= 0 || lodThresholdPx >= 0.0f ||
                occlusionCull >= 0 || depthPrepass >= 0 ||
                msaa >= 0 || meshShaders >= 0 || giUpdateInterval >= 0 || hasGiVolume ||

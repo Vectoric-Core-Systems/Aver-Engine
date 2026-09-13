@@ -158,6 +158,12 @@ public:
     // whether to say a reload is needed -- see the Shading model combo on the Rendering page.
     bool layeredBsdfActive() const { return layeredBsdf_; }
 
+    // The edge length the GI volume was ACTUALLY built at, set once inside createVoxelVolume --
+    // not Settings::voxelResolution, which can be edited at any time before the next reload picks
+    // it up. The editor compares the two the same way it compares layeredBsdfActive() above, to
+    // decide whether a resolution change needs a reload note.
+    u32 voxelResolutionBuilt() const { return voxelResBuilt_; }
+
     // Turns on the frame-period report. See rtShadowRays_ for what it is for and what it is not.
     // MEASUREMENT ONLY -- see AVER_RD_ABLATE's own block in voxi.hlsl for what each value removes and
     // why a timestamp cannot answer this question. Must be set BEFORE init(), because it becomes a

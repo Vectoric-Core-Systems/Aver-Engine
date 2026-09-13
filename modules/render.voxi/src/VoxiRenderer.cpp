@@ -4024,6 +4024,10 @@ bool VoxiRenderer::createVoxelVolume(u32 resolution) {
     if (!res_->textureInfo(voxelTex_, got)) { AVER_ERROR("[Voxi] textureInfo failed for the radiance volume"); return false; }
     voxelMips_     = got.mips;
     voxelResBuilt_ = resolution;
+    // By-hand verification aid: the settings page and the manifest both name a resolution before
+    // this runs, and this is the one line that says what actually got built. Matched against
+    // RENDER.VOXELRES by the tier-verification protocol.
+    AVER_INFO("[Voxi] GI voxel volume {}^3", resolution);
 
     // Main table. Each slot declares its kind because Tier 1 hardware null-fills by dimension.
     rhi::BindingSetDesc bd;

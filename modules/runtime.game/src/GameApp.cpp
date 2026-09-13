@@ -48,6 +48,18 @@
 #include "aver/world/SceneCensus.hpp"
 #if AVER_MODULE_VOXI
 #  include "aver/voxi/Voxi.hpp"
+// ProjectRenderApply.hpp: the shared, header-only two-phase manifest apply (Lane 2 of the settings-
+// separation pass) -- see attachVoxi and applyProjectRenderSettings below for the two call sites.
+// Pulls in RenderSettingsResolver.hpp (voxi::resolve, for pushFrame's G-buffer switch) along the way.
+#  include "aver/voxi/ProjectRenderApply.hpp"
+// NrdDenoiser.hpp, for Denoiser::available() alone -- attachVoxi's nrdSupported computation below is
+// the SandboxApp.cpp:2508-2514 mirror site R1 requires (same expression, `backend() == D3D12 &&
+// available()`). Aver.Render.NRD is "ALWAYS linkable" (its own CMakeLists' own words) and reaches this
+// translation unit transitively: Aver.Runtime.Game links Aver.Render.Voxi.Renderer PUBLICly, which
+// itself links Aver.Render.NRD PUBLICly (modules/render.voxi/CMakeLists.txt) -- the same edge
+// VoxiRenderer.hpp already rides unconditionally (its own #include of NrdRecorder.hpp carries no
+// AVER_MODULE_RENDER_NRD guard), so this include needs none either.
+#  include "aver/render/nrd/NrdDenoiser.hpp"
 #endif
 #if AVER_MODULE_VOXI && AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
 // particles DECIDED 4's GI seam glue (particleGiPrepare/particleGiBind, below) is the ONLY reason
@@ -616,10 +628,59 @@ void GameApp::attachVoxi(Engine& e) {
     di.typedUavLoads = caps.typedUavLoads; di.conservativeRaster = caps.conservativeRaster;
     di.shaderModel = caps.shaderModel; di.meshShaderTier = caps.meshShaderTier;
     di.dxcAvailable = caps.dxcAvailable;
+    // R1: computed only at this site and SandboxApp.cpp's own DeviceInfo build (:2508-2514 there),
+    // same expression -- see NrdDenoiser.hpp's include comment above for why this needs no module
+    // guard. rhi::DeviceCaps itself is untouched; this is derived from the device, not read off caps.
+    di.nrdSupported = dev->backend() == rhi::Backend::D3D12 && render::nrd::Denoiser::available();
     voxi::Renderer::get().setDeviceInfo(di);
 
+    // SEED THE MANIFEST'S RENDER SETTINGS BEFORE init() (N2). VoxiRenderer::init calls
+    // createVoxelVolume(settings_.voxelResolution) and that is the ONLY place the volume is ever
+    // sized -- nothing downstream watches the field afterwards. Before this fix, a packaged game's
+    // only encounter with the manifest was the LATER applyProjectRenderSettings call, by which point
+    // init() had already built the default 128^3 grid: a project stating RENDER.VOXELRES 512 shipped
+    // a grid 64x smaller than it asked for, silently. Seeding here mirrors openProject's own manifest
+    // resolution (cfg_.projectPath, else Game.ocproject beside the executable) rather than waiting for
+    // project_ itself, which openProject does not load until well after this function returns.
+    //
+    // A LOCAL fmt::ProjectDesc, deliberately not project_: the member is not populated until
+    // openProject runs, and this function has no business writing to it early -- openProject's own
+    // later call to applyProjectRenderSettings re-applies the same file through project_ once it is
+    // actually loaded, which is intentional and idempotent (see that function's own comment): by then
+    // every tier this seed already committed equals what phase 1 would derive again, so nothing
+    // re-derives and phase 2 writes the same knob values back.
+    //
+    // THIS ALSO FIXES N10: layeredBsdf is read once, before VoxiRenderer's raster PSOs are built
+    // (Settings::layeredBsdf's own comment), and the unseeded path used to latch it from Settings{}'s
+    // default (Off) regardless of what RENDER.LAYEREDBSDF asked for -- a manifest with a layer above
+    // Off warned about a latch it could never actually resolve, on every launch.
+    int manifestMsaa = -1;
+    {
+        std::string manifestPath = cfg_.projectPath;
+        if (manifestPath.empty()) {
+            const std::string beside = executableDir() + "\\Game.ocproject";
+            if (fileExists(beside)) manifestPath = beside;
+        }
+        if (!manifestPath.empty()) {
+            fmt::ProjectDesc seed;
+            std::string seedErr;
+            if (fmt::loadOcproject(manifestPath, seed, &seedErr) && seed.hasRenderSettings()) {
+                manifestMsaa = seed.msaa;
+                voxi::Renderer& vx = voxi::Renderer::get();
+                voxi::Settings seeded = vx.settings();
+                voxi::applyManifestTwoPhase(seed, seeded, [&]() {
+                    vx.setSettings(seeded);
+                    seeded = vx.settings();
+                });
+            }
+        }
+    }
+
     voxi::Settings s = voxi::Renderer::get().settings();
-    s.msaa = static_cast<voxi::Msaa>(dev->sampleCount());
+    // ONLY WHEN RENDER.MSAA IS UNSTATED: the seed above already applied an explicit manifest MSAA
+    // through applyManifestKnobs (same "-1 means unstated" sentinel every other knob here uses), and
+    // this device-derived fallback must not un-pin it.
+    if (manifestMsaa < 0) s.msaa = static_cast<voxi::Msaa>(dev->sampleCount());
     voxi::Renderer::get().setSettings(s);
     voxiRenderer_.setSettings(s);
 
@@ -1279,28 +1340,49 @@ void GameApp::applyProjectRenderSettings() {
     if (!project_.valid() || !project_.hasRenderSettings()) return;
     if (!voxiAttached_) return;
 
-    voxi::Renderer& vx = voxi::Renderer::get();
-    voxi::Settings s = vx.settings();
-    if (project_.giQuality >= 0) s.globalIllumination = static_cast<voxi::Quality>(project_.giQuality);
-    if (project_.rayTracing >= 0) s.rayTracing = static_cast<voxi::Quality>(project_.rayTracing);
-    if (project_.pathTracing >= 0) s.pathTracing = static_cast<voxi::Quality>(project_.pathTracing);
-    if (project_.voxelResolution > 0) s.voxelResolution = static_cast<u32>(project_.voxelResolution);
-    if (project_.giIntensity >= 0.0f) s.giIntensity = project_.giIntensity;
-    if (project_.giMaxDistance >= 0.0f) s.giMaxDistance = project_.giMaxDistance;
-    if (project_.rtShadowRays >= 0) s.rtShadowRays = static_cast<u32>(project_.rtShadowRays);
-    if (project_.rtPixelsPerRayTile >= 0) s.rtPixelsPerRayTile = static_cast<u32>(project_.rtPixelsPerRayTile);
-    if (project_.rtShadowDenoise >= 0) s.rtShadowDenoise = static_cast<u32>(project_.rtShadowDenoise);
     // BOTH ROOTS OR NEITHER. A render setting the editor applies and the shipped game ignores is
     // this repo's most-repeated defect: the project looks right while it is being made and ships
-    // looking different. These two lines are the whole reason the key exists in OcProject rather
-    // than in the editor's own preferences.
-    if (project_.rtRenderMode >= 0) s.rtRenderMode = static_cast<u32>(project_.rtRenderMode);
-    if (project_.ptBounces >= 0) s.ptBounces = static_cast<u32>(project_.ptBounces);
-    vx.setSettings(s);
+    // looking different. This whole function is the reason RENDER.* lives in OcProject rather than
+    // in the editor's own preferences.
+    //
+    // TWO-PHASE, NOT ONE (R2): tiers commit first, so the derivation that fills in an unstated
+    // derived knob (voxelResolution, giCones, ...) runs against the NEW tier before the manifest's
+    // OWN knob values are laid on top of it -- see ProjectRenderApply.hpp's own comment for the
+    // regression a single merged call reintroduces.
+    voxi::Renderer& vx = voxi::Renderer::get();
+    voxi::Settings s = vx.settings();
+    voxi::applyManifestTwoPhase(project_, s, [&]() {
+        vx.setSettings(s);
+        s = vx.settings();
+    });
     voxiRenderer_.setSettings(vx.settings());
     AVER_INFO("[Project] applied render settings: gi={}, rt={}, pt={}, voxelRes={}, giIntensity={}, giDist={}",
               static_cast<int>(s.globalIllumination), static_cast<int>(s.rayTracing),
               static_cast<int>(s.pathTracing), s.voxelResolution, s.giIntensity, s.giMaxDistance);
+
+    // A MANIFEST CONTRADICTION -- RENDER.GIMODE/DENOISER/RTRENDERMODE/REFRACTIONMODE asking for
+    // something that did not survive into the effective settings (RenderSettingsResolver.hpp's own
+    // prerequisite table) -- logs one WARN per project open. Skips any report whose reason already
+    // has a Feature attached that refuse() logged once already for this device (Renderer::
+    // refusalLogged, reset on setDeviceInfo): the four hardware reasons would otherwise say the same
+    // thing twice, once here and once from setSettings' own refusal path.
+    voxi::ManifestAsks asks;
+    asks.giMode         = project_.giMode;
+    asks.denoiser       = project_.denoiser;
+    asks.rtRenderMode   = project_.rtRenderMode;
+    asks.refractionMode = project_.refractionMode;
+    voxi::FieldReport reports[4];
+    const u32 reportCount = voxi::manifestContradictions(vx.settings(), vx.deviceInfo(), asks, reports);
+    for (u32 i = 0; i < reportCount; ++i) {
+        voxi::Feature alreadyReportedBy;
+        if (voxi::refusalFeatureFor(reports[i].reason, alreadyReportedBy) &&
+            vx.refusalLogged(alreadyReportedBy)) {
+            continue;
+        }
+        AVER_WARN("[Project] RENDER.{} asked for {} but it is not in effect: {}",
+                  reports[i].manifestKey, reports[i].requested,
+                  voxi::disableReasonText(reports[i].reason));
+    }
 #endif
 }
 
@@ -1421,6 +1503,18 @@ void GameApp::pushFrame(Engine& e) {
 
 #if AVER_MODULE_VOXI
     if (voxiAttached_) {
+        voxi::Renderer& vx = voxi::Renderer::get();
+        // N4: the game never allocated the G-buffer or pushed a live MSAA change, so DENOISER 1 in a
+        // manifest ran with no G-buffer written and NRD silently skipped itself (its own WARN-once
+        // path, gated on nrdWarnedMsaa_/the create check, never even got a G-buffer to complain about
+        // upstream of it), and RENDER.MSAA changed mid-session never reached the device at all. Both
+        // mirror SandboxApp.cpp's own onUpdate pattern (:3865-3882 there): the G-buffer switch reads
+        // resolve()'s denoiserGBufferWanted (wanted whenever only the soft MSAA-above-1x reason, or
+        // nothing, stands between "requested" and "running" -- see RenderSettingsResolver.hpp), and
+        // the MSAA push is the same one-shot consumeMsaaDirty() flag setSettings raises on a change.
+        dev->setGBufferEnabled(voxi::resolve(vx.settings(), vx.deviceInfo()).denoiserGBufferWanted);
+        if (vx.consumeMsaaDirty()) dev->setSampleCount(static_cast<u32>(vx.settings().msaa));
+
         // The volume the editor would be showing, pushed every frame exactly as the editor pushes it
         // (SandboxApp.cpp:1641). Centre and extent are the LEVEL's, fitted once at load by
         // fitGiVolumeToLevel -- deliberately not the camera's. A camera-following volume is a
