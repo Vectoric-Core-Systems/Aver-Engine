@@ -1010,7 +1010,34 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         // slightly negative and negative radiance reads BRIGHT once it reaches the tonemap.
         const float3 y = gNrdGi.Load(int3(pixelPos, 0)).rgb;
         const float  t = y.x - y.z;
-        outDiffuse = max(float3(t + y.y, y.x + y.z, t - y.y), 0.0);
+        const float3 decoded = float3(t + y.y, y.x + y.z, t - y.y);
+        // ---- THE SAME GUARD THE RAW ESTIMATOR ABOVE ALREADY HAS, NOW APPLIED HERE TOO ----
+        //
+        // Before this, decoding NRD's own output only ever floored the negative-chroma-round-trip
+        // case (max(..., 0.0), comment above) -- it trusted a THIRD-PARTY filter's output to be
+        // finite and bounded, which is exactly the trust `outDiffuse`'s own raw estimator (see its
+        // isnan/isinf check ~20 lines up, and the sibling comment on HLSL's NaN-is-always-false
+        // comparison semantics) refuses to extend to ITS OWN inputs. A denoiser is not exempt from
+        // that: REBLUR's temporal accumulation and variance-driven history clamp are third-party
+        // maths this file does not control, and this file's own house rule (this task's brief, and
+        // aver-negative-radiance-reads-bright's history elsewhere in this tree) is that a value which
+        // can go non-finite or unbounded must be caught at the point it is CONSUMED, not assumed safe
+        // because its producer is trusted -- acesTonemap(-1) == 1.0 here, so a stray NaN/Inf/huge
+        // finite value in this exact spot renders as confident WHITE, not as visible corruption.
+        //
+        // THIS CODEPATH ONLY WENT LIVE RECENTLY: NRD was never created at all for a project whose
+        // ray-tracing tier had not just changed (98b2b9a9 "NRD was never created unless SKY
+        // OCCLUSION was on"), so for exactly this project's configuration `gw/gh` used to always read
+        // 0x0 and this branch was dead code -- every prior round of fixes to THIS function (the
+        // cosR floor, the Jacobian symmetry fix, the corpse-reservoir guard, all documented above)
+        // was necessarily exercised and measured against the RAW path alone, never this one. Closing
+        // the asymmetry is cheap insurance now that the branch is reachable for real: zero cost when
+        // `decoded` is what it always is (finite, small), and it turns a would-be white-out into the
+        // same "zero is the honest answer for a broken sample" the raw path already chose, rather
+        // than a screen-filling flash with nothing in the log to explain it.
+        outDiffuse = (any(isnan(decoded)) || any(isinf(decoded)))
+                   ? float3(0.0, 0.0, 0.0)
+                   : min(max(decoded, 0.0), AVER_VOX_MAXRAD);
     }
 
     return outDiffuse;
