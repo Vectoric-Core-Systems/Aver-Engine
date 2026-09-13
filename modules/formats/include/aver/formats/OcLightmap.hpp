@@ -20,7 +20,8 @@
 // memory and half the disk footprint for a format whose whole reason to exist is that atlases get
 // large. And it makes "this texel is negative" a type error rather than a runtime one: RGB9E5 has
 // no sign bit to mis-set, which closes off exactly the class of bug the negative-radiance note
-// documents (acesTonemap(-1) reading as a *confident* 1.0 rather than an obviously broken value) for
+// documents (acesTonemap(-1) reading as a *confident* 0.0 -- acesTonemap floors negative/NaN input
+// at zero since ded8784a; it read 1.0 before that fix -- rather than an obviously broken value) for
 // this data specifically -- an arithmetic slip upstream of the bake can still hand this format a
 // negative float, but it cannot survive the encode, because negative numbers are not representable
 // at all. See OcLightmap.cpp's encodeRGB9E5/decodeRGB9E5 for the actual bit layout (9-bit mantissa x

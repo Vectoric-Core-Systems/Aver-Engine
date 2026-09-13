@@ -366,6 +366,16 @@ inline std::string varTooltipText(const ConsoleVar& v) {
 }
 
 #if AVER_MODULE_VOXI
+// The ReSTIR-GI poison debug view's live source of truth -- SAME SHAPE as
+// consoleOcclusionForceWaitIdleSlot() below (registerOcclusionVars' own comment has the full
+// reasoning): VoxiRenderer::setGiPoisonView is private renderer state with no path through
+// voxi::Renderer::Settings/setSettings, so this table cannot stage it as an ordinary dial the way
+// voxi.denoiser etc. are staged. A raw bool slot this header owns, written by `set voxi.giPoisonView`
+// and reasserted onto the live voxiRenderer_ once a frame from SandboxApp.cpp's onUpdate (right
+// beside voxiRenderer_.setDebugView(giDebugView_)), is the same "console sets the seed, a per-frame
+// reassert makes it live" idiom occlusion.debugForceWaitIdle already uses.
+inline bool& consoleGiPoisonViewSlot() { static bool v = false; return v; }
+
 // Tier fields (msaa, globalIllumination, rayTracing, pathTracing, meshShaders) go through
 // tierSetters; everything setSettings derives FROM a tier goes through dialSetters. See
 // ConsoleBatch's own comment for why the split is closures rather than two struct copies.
@@ -509,6 +519,20 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "Which estimator answers the diffuse GI bounce: 0 = voxel cone gather (default), 1 = RTXDI ReSTIR GI. Needs RayQuery hardware and rayTracing != Off -- the engine clamps back to 0 when either is missing, and this always reads back what is ACTUALLY running, not merely what was last requested",
         []{ return vU32(Renderer::get().settings().giMode); },
         [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->giMode = n; }); }});
+    // NOT a Settings field -- see consoleGiPoisonViewSlot()'s own comment for why this is the raw-slot
+    // idiom rather than an ordinary dialSetters entry. giMode 1 (ReSTIR) only: the guards this paints
+    // live in voxi_restir.hlsli's giRestirIndirect, which giMode 0 never calls.
+    t.push_back({"voxi.giPoisonView", VarType::Bool, false,
+        "ReSTIR-GI poison debug view (giMode 1 only): paints an unmistakable colour over any pixel "
+        "where one of voxi_restir.hlsli's non-finite/NaN guards fired THIS frame -- magenta = the "
+        "store-time reservoir guard (the one that matters most), cyan = a candidate-radiance clamp, "
+        "yellow = the target-pdf guard, orange = the pre-existing final-estimate guard, blue = the "
+        "NRD-readback guard. All colours zero (the scene renders normally) means no guard is firing.",
+        []{ return vBool(consoleGiPoisonViewSlot()); },
+        [](ConsoleBatch& b, VarValue v){
+            const bool on = v.as.b;
+            b.deviceSetters.push_back([on](rhi::IDevice&){ consoleGiPoisonViewSlot() = on; });
+        }});
     // DIAL, NOT A TIER, and it reads back what is ACTUALLY running rather than what was asked for --
     // the same honesty voxi.giMode above documents at length, and for a closely related reason. NRD
     // refuses to run at any MSAA above 1 (D3D12 will not mix sample counts in one render-target set,
@@ -989,6 +1013,70 @@ inline std::vector<ConsoleCommandDesc> buildConsoleCatalog() {
     t.push_back({"get", "get <name> -- print an engine variable's current value", &handleVarGet});
     t.push_back({"set", "set <name> <value> [<name> <value> ...] -- set one or more engine variables", &handleVarSet});
     t.push_back({"vars", "vars [text] -- list every variable, or filter by name/description and group by prefix", &handleVarsList});
+#if AVER_MODULE_VOXI
+    // ---- per-history reset commands: bisect a burned-in ReSTIR-GI/RT/NRD artifact by hand, one
+    // history at a time, without a resize (a resize's own "cure" is a same-shape flag flip -- see
+    // VoxiRenderer::resetGiHistory's own comment). Each raises a one-shot request on voxi::Renderer
+    // (Voxi.hpp), consumed next frame by SandboxApp.cpp right beside voxiRenderer_.setSettings(vs)
+    // and forwarded to the matching VoxiRenderer::reset*History() method. TRY resetgihistory FIRST --
+    // see each command's own help string for why, and Part 3(a) of this task's own notes for the
+    // full order. The voxel-cone GI volume needs none of these: voxelizePass clears before every
+    // injection (VoxiRenderer.cpp), so it cannot accumulate poison across rebuilds the way a
+    // ping-ponged history can.
+    t.push_back({"resetgihistory",
+        "Invalidate the ReSTIR-GI reservoir + surface history (voxi.giMode 1 only) on the next frame "
+        "-- the same thing a viewport resize does to this one resource, without resizing anything. "
+        "TRY THIS FIRST if a GI blotch/burn-in appears: it is the resource this task's own "
+        "investigation found the concrete NaN-storage gap in.",
+        [](SandboxApp&, Engine&, const std::vector<std::string>&, const ConsolePrint& print) -> bool {
+            voxi::Renderer::get().requestGiHistoryReset();
+            print(LogLevel::Info, "Requested: GI ReSTIR reservoir history reset. Watch the Output "
+                                   "Log for '[Voxi] GI ReSTIR reservoir history reset' next frame.");
+            return true;
+        }});
+    t.push_back({"resetrthistory",
+        "Invalidate RT shadow + reflection + sky-occlusion history on the next frame (all three share "
+        "one validity flag today) -- the same thing a resize or an RT-tier toggle does. Try this if "
+        "resetgihistory alone did not clear the artifact.",
+        [](SandboxApp&, Engine&, const std::vector<std::string>&, const ConsolePrint& print) -> bool {
+            voxi::Renderer::get().requestRtHistoryReset();
+            print(LogLevel::Info, "Requested: RT shadow/reflection/AO history reset. Watch the "
+                                   "Output Log for '[Voxi] RT temporal history reset' next frame.");
+            return true;
+        }});
+    t.push_back({"resetaohistory",
+        "Invalidate AO/sky-occlusion history -- CURRENTLY IDENTICAL to resetrthistory (no independent "
+        "validity flag exists yet; see that command's own log line for why).",
+        [](SandboxApp&, Engine&, const std::vector<std::string>&, const ConsolePrint& print) -> bool {
+            voxi::Renderer::get().requestAoHistoryReset();
+            print(LogLevel::Info, "Requested: AO history reset (also resets RT shadow/reflection -- "
+                                   "shared flag, see help resetrthistory).");
+            return true;
+        }});
+    t.push_back({"resetnrdhistory",
+        "Force NVIDIA NRD/REBLUR to throw away its own internal temporal history on the next frame, "
+        "without a resize -- uses NRD's own resetHistory contract (NrdRecorder::forceHistoryReset). "
+        "Try this if neither resetgihistory nor resetrthistory cleared the artifact.",
+        [](SandboxApp&, Engine&, const std::vector<std::string>&, const ConsolePrint& print) -> bool {
+            voxi::Renderer::get().requestNrdHistoryReset();
+            print(LogLevel::Info, "Requested: NRD history reset. Watch the Output Log for "
+                                   "'[NRD] history reset' next frame.");
+            return true;
+        }});
+    t.push_back({"resetallhistory",
+        "Run every reset* command above in one call: GI reservoir, RT shadow/reflection/AO, and NRD. "
+        "Do NOT run this FIRST during a bisection -- it clears everything at once and tells you "
+        "nothing about which buffer was actually poisoned; try the individual commands one at a time "
+        "first. The voxel-cone GI volume needs none of these -- it clears itself every rebuild.",
+        [](SandboxApp&, Engine&, const std::vector<std::string>&, const ConsolePrint& print) -> bool {
+            voxi::Renderer::get().requestGiHistoryReset();
+            voxi::Renderer::get().requestRtHistoryReset();
+            voxi::Renderer::get().requestNrdHistoryReset();
+            print(LogLevel::Info, "Requested: GI + RT/shadow/reflection/AO + NRD history reset, all "
+                                   "next frame. Watch the Output Log for three separate lines.");
+            return true;
+        }});
+#endif
     return t;
 }
 } // namespace detail

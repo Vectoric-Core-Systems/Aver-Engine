@@ -3874,12 +3874,25 @@ public:
             frameBudgetTick(t.dt, vs);
             const f32 c[3] = {giCenter_.x, giCenter_.y, giCenter_.z};
             voxiRenderer_.setSettings(vs);
+            // Consume-and-forward for the five reset* console commands (EditorConsole.hpp) -- one
+            // request flag per history, raised on voxi::Renderer (the settings singleton the console
+            // can reach) and consumed here, right beside setSettings, into the actual VoxiRenderer
+            // instance the console cannot reach directly. Same "raise on the singleton, consume once
+            // a frame" shape as consumeMsaaDirty() just above onUpdate's own Voxi block.
+            if (voxi::Renderer::get().consumeGiHistoryResetRequest())  voxiRenderer_.resetGiHistory();
+            if (voxi::Renderer::get().consumeRtHistoryResetRequest())  voxiRenderer_.resetRtHistory();
+            if (voxi::Renderer::get().consumeAoHistoryResetRequest())  voxiRenderer_.resetAoHistory();
+            if (voxi::Renderer::get().consumeNrdHistoryResetRequest()) voxiRenderer_.resetNrdHistory();
             voxiRenderer_.setVolume(c, giExtent_);
             // WHERE A BAKED VOLUME MAY BE REMEMBERED. Pushed every frame like everything else here,
             // and empty with no project open -- which disables the cache rather than scattering
             // derived data beside the executable. See VoxiRenderer::setGiCacheDir.
             voxiRenderer_.setGiCacheDir(project_.valid() ? fmt::giCacheDir(project_.dir) : std::string());
             voxiRenderer_.setDebugView(giDebugView_);
+            // voxi.giPoisonView: EditorConsole.hpp's own live source of truth, reasserted every frame
+            // the same way occlusion.debugForceWaitIdle already is -- see
+            // editor::consoleGiPoisonViewSlot()'s own comment.
+            voxiRenderer_.setGiPoisonView(editor::consoleGiPoisonViewSlot());
             // --no-gi-cone: see setGiConeTraceOff's own comment. Applied every frame, same as
             // setDebugView beside it, so the toggle takes effect the instant the flag is set rather
             // than only at attach time.

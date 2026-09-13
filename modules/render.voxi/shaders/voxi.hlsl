@@ -80,7 +80,10 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     // null-descriptor read on hardware that cannot run this). y = 1 once gGiSurfPosHist/
     // gGiSurfNrmHist ALSO hold a real previous frame. z = which of RTXDI's two reservoir-array
     // slices THIS frame writes (the other is last frame's, read as this frame's temporal source).
-    // w spare.
+    // w = the ReSTIR-GI poison debug view (voxi.giPoisonView / VoxiRenderer::setGiPoisonView): >0.5
+    // makes voxi_restir.hlsli's giRestirIndirect paint an unmistakable colour per non-finite guard
+    // instead of the real indirect diffuse -- see that function's own POISON DEBUG VIEW comment for
+    // the legend. Was "spare"; this is a repurposed bit, not a new field -- packing/size unchanged.
     float4   gGiRestirParams;
 };
 
@@ -1724,8 +1727,12 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         // higher in dim regions than with ray tracing off.
         //
         // clamp() rather than the twin's min(), deliberately. min bounds above only, and this tree
-        // has a recorded incident where a NEGATIVE radiance rendered BRIGHT because
-        // acesTonemap(-1) = 1.0. The voxel injection's own write already uses this two-sided form.
+        // has a recorded incident class where a NEGATIVE radiance rendered wrong -- historically
+        // BRIGHT, because acesTonemap(-1) used to equal 1.0; acesTonemap now floors input at zero
+        // (color.hlsli, since ded8784a) so the same mistake would instead render as confident BLACK,
+        // not white -- silent rather than alarming, which is if anything a stronger reason to floor
+        // it HERE, at the point this value is computed, rather than leave it to whatever the tonemap
+        // happens to do with it. The voxel injection's own write already uses this two-sided form.
         ind.specular = clamp(lerp(specHit ? refl : skyR, skyR, skyW), 0.0, AVER_VOX_MAXRAD);
     } else if (gVoxelParams.w > 0.5) {
         // PSMainVoxi's OWN voxel-cone fallback, for the surfaces PSMainVoxi itself falls back for

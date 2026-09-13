@@ -831,8 +831,11 @@ float3 averShRadiance(float3 d) {
     e += gSkySh[6].rgb * ((3.0 * d.z * d.z - 1.0) * 0.315392);
     e += gSkySh[8].rgb * ((d.x * d.x - d.y * d.y) * 0.546274);
     // Same clamp and same reason as averShIrradiance: L2 undershoots on a sky with a strong, small
-    // bright region, and negative radiance is not a dim colour -- acesTonemap(-1) reads 1.0, so it
-    // would come out BRIGHT. That failure is recorded in this tree already.
+    // bright region, and negative radiance is not a dim colour -- acesTonemap floors negative/NaN
+    // input at zero (color.hlsli, since ded8784a), so an unclamped negative here would render as
+    // confident BLACK rather than a plausible dim colour, not the BRIGHT this comment used to warn
+    // of from acesTonemap's pre-ded8784a behaviour. That failure mode -- a broken value reading as a
+    // plausible one -- is recorded in this tree already, just dark now instead of bright.
     return max(e, 0.0);
 }
 

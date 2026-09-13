@@ -55,6 +55,30 @@ public:
 
     // Replaces the scene with a raymarch of the volume.
     void setDebugView(bool on);
+    // The ReSTIR-GI poison debug view (Part 2's non-finite guards, voxi_restir.hlsli): on, it paints
+    // an unmistakable colour per guard wherever one fires this frame, instead of touching the scene
+    // at all -- unlike setDebugView above, which REPLACES the whole scene with a raymarch, this rides
+    // the existing giMode==1 pixel shaders and only overrides their own return value, so it needs no
+    // separate suppressesScene()-style plumbing. See giRestirIndirect's own POISON DEBUG VIEW comment
+    // for the legend, and gGiRestirParams.w (the repurposed cbuffer slot this forwards through) for
+    // how it reaches the shader. Reachable by hand via the console: `set voxi.giPoisonView true`.
+    void setGiPoisonView(bool on);
+
+    // ---- per-history reset commands, each a plain bool flip -- NO reallocation, ever ----
+    // Driven from the console (resetgihistory/resetrthistory/resetaohistory/resetnrdhistory/
+    // resetallhistory in EditorConsole.hpp, via voxi::Renderer's own request/consume flags -- see
+    // Voxi.hpp's requestGiHistoryReset() and siblings) so the user can bisect which cross-frame GPU
+    // history is carrying a burned-in artifact, one at a time, without a resize. Every one of these
+    // is exactly what ensureShadowHistory already does to the same flag on a resize/RT-tier toggle --
+    // see each method's own body for the precise citation -- just without the surrounding teardown/
+    // rebuild, because none of these buffers needs one: the shader-side read gate treats the flag
+    // going false as "no real previous frame" for one frame, and the WRITE side runs unconditionally
+    // every frame regardless, so both ping-pong slices are clean again within two frames.
+    void resetGiHistory();
+    void resetRtHistory();
+    void resetAoHistory();   // alias of resetRtHistory today -- see its own body for why
+    void resetNrdHistory();
+
     // The editor's Unlit view mode. Mirrors RhiDevice::setUnlit, which only ever reaches the
     // RASTER path -- ray-driven primary visibility bypasses drawMesh entirely, so it has to be
     // told separately or the mode silently does nothing in the default renderer.
@@ -1025,7 +1049,10 @@ private:
         // freshly created while the shadow/reflection pair already isn't). z = which of the
         // reservoir buffer's two array slices (rtxdi::c_NumReSTIRGIReservoirBuffers) THIS frame
         // writes -- shares rtHistWriteIdx_'s cadence (see beginShadowHistory) since both flip in the
-        // same lockstep whenever ray tracing is active. w spare.
+        // same lockstep whenever ray tracing is active. w = the ReSTIR-GI poison debug view
+        // (giPoisonView_ / setGiPoisonView); was "spare" -- a repurposed bit, not a new field, so
+        // this struct's size and every other field's offset are unchanged. See beginShadowHistory
+        // for where this is filled and voxi_restir.hlsli's giRestirIndirect for the shader side.
         f32 giRestirParams[4] = {};
     } cb_;
 
@@ -1561,6 +1588,9 @@ private:
 
     u32  voxelMips_ = 0, voxelResBuilt_ = 0;
     bool giReady_ = false, rtSupported_ = false, rtActive_ = false, debugView_ = false;
+    // See setGiPoisonView's own comment. Independent of debugView_ above -- the two can never be
+    // confused for each other because this one never sets debugViewActive()/suppressesScene().
+    bool giPoisonView_ = false;
     bool unlit_ = false;   // --unlit / the viewport view-mode dropdown; see setUnlit
     // See setConeTraceEnabled's own comment. Defaults to true, i.e. bit-identical to every build
     // before this toggle existed -- nobody who never calls the setter sees any difference at all.

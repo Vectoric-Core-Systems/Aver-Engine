@@ -609,6 +609,48 @@ void VoxiRenderer::setSunDirection(const f32 dirToLight[3]) {
 
 void VoxiRenderer::setDebugView(bool on) { debugView_ = on; }
 
+void VoxiRenderer::setGiPoisonView(bool on) { giPoisonView_ = on; }
+
+// See the header's own comment for the shape every one of these five shares: flip an existing
+// validity flag, touch no texture/buffer handle, log through AVER_INFO so the bisection survives even
+// if the user closes the editor before reading the console's own scrollback.
+void VoxiRenderer::resetGiHistory() {
+    giHistValid_ = false;
+    AVER_INFO("[Voxi] GI ReSTIR reservoir history reset by console command (resetgihistory); "
+              "next frame uses a fresh candidate only (expect one visibly noisier frame), both "
+              "ping-pong slices clean within 2 frames.");
+}
+
+void VoxiRenderer::resetRtHistory() {
+    rtHistValid_ = false;
+    AVER_INFO("[Voxi] RT temporal history reset by console command (resetrthistory): shadow, "
+              "reflection AND sky-occlusion reprojection are ALL invalidated -- they share one "
+              "validity flag today (see rtHistValid_'s own comment, VoxiRenderer.hpp, and "
+              "voxi_rt.hlsli's rtReprojectAo gate).");
+}
+
+// ALIAS OF resetRtHistory, TODAY -- not a separate mechanism. rtSkyOcclusionTemporal's reprojection
+// (voxi_rt.hlsli) is gated by the SAME gRtHistParams.y that mirrors rtHistValid_ (VoxiRenderer.cpp's
+// beginShadowHistory), and cb_.rtDenoiseParams.w answers a different question ("is the AO pair bound
+// at all this frame", not "does it hold valid history") -- repurposing it as an independent validity
+// flag would also have to gate whether the pass runs at all, which would skip the WRITE into
+// gAoHistOut too and leave the poisoned texel un-refreshed instead of clearing it. True independence
+// needs new plumbing this task did not add; this ships as an honest alias with its own log line so
+// the Output Log still says which command the user actually typed.
+void VoxiRenderer::resetAoHistory() {
+    rtHistValid_ = false;
+    AVER_INFO("[Voxi] AO/sky-occlusion history reset by console command (resetaohistory) -- this "
+              "currently ALSO resets RT shadow/reflection history, since all three share one "
+              "validity flag today (see resetrthistory's own log line; true independence would need "
+              "new plumbing).");
+}
+
+void VoxiRenderer::resetNrdHistory() {
+    nrd_.forceHistoryReset();
+    AVER_INFO("[NRD] history reset by console command (resetnrdhistory); REBLUR restarts its own "
+              "internal temporal accumulation from this frame.");
+}
+
 // Sets the occlusion rays per pixel, clamped rather than refused: a caller asking for 0 wants the
 // cheapest shadow, not no shadow at all, and rtShadow divides by this.
 void VoxiRenderer::setShadowRays(u32 n) {
@@ -3319,7 +3361,10 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
         cb_.giRestirParams[0] = 1.0f;                       // t12/t13/u6/u7/u8 are bound this frame
         cb_.giRestirParams[1] = giHistValid_ ? 1.0f : 0.0f;  // ...and t12/t13 hold a real previous frame
         cb_.giRestirParams[2] = static_cast<f32>(writeIdx);  // this frame's reservoir array slice
-        cb_.giRestirParams[3] = 0.0f;                        // spare
+        // Was "spare" -- repurposed (not a new field; packing/size unchanged) as the ReSTIR-GI poison
+        // debug view toggle. See setGiPoisonView's own comment and giRestirIndirect's POISON DEBUG
+        // VIEW block (voxi_restir.hlsli) for what this drives.
+        cb_.giRestirParams[3] = giPoisonView_ ? 1.0f : 0.0f;
         // u9, the radiance this frame hands NRD. Bound with the rest of the ReSTIR slots because
         // gGiRestirParams.x -- already set above -- is exactly the flag the shader's write is
         // guarded on, so the two can never disagree about whether the slot is real.

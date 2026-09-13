@@ -205,6 +205,19 @@ RAB_Surface RAB_GetGBufferSurface(int2 pixelPosition, bool previousFrame) {
 RAB_MaterialData RAB_GetMaterial(RAB_Surface s) { return 0; }
 bool RAB_AreMaterialsSimilar(RAB_MaterialData a, RAB_MaterialData b) { return true; }
 
+// ---- POISON-VIEW INSTRUMENTATION: a thread-private flag RAB_GetGISampleTargetPdfForSurface sets ----
+//
+// `static`, NOT groupshared or a resource: in HLSL this is per-invocation storage, fresh for every
+// pixel-shader thread (identical in effect to a local variable, just reachable from a helper function
+// without changing that helper's signature) -- it does NOT persist across separate invocations of the
+// entry point the way a C++ function-local static would. Needed here specifically because
+// RAB_GetGISampleTargetPdfForSurface's signature is RTXDI's own RAB_ contract (this vendored SDK calls
+// it directly with exactly these three arguments), so it cannot grow an `out` parameter the way
+// giTraceInitialCandidate above could. giRestirIndirect resets this to false at the top of its own
+// invocation, before any call into RTXDI's resampling reaches this function, then reads it back once
+// at the end to paint the poison-view colour -- see giRestirIndirect's own comment on that.
+static bool gGiPoisonPdfHit = false;
+
 // Luminance of the candidate's own radiance -- the standard resampling target-PDF proxy (RTXDI
 // resamples by comparing this scalar across candidates) -- times the cosine at the RECEIVING
 // surface. averShadowLum already exists in this file for exactly the luminance reduction; reused
@@ -295,7 +308,16 @@ float RAB_GetGISampleTargetPdfForSurface(float3 samplePosition, float3 sampleRad
     const float  dist2    = dot(toSample, toSample);
     const float  rawCos   = dist2 > 1e-8 ? dot(toSample * rsqrt(dist2), surface.normal) : -1.0;
     const float  cosR     = rawCos > 0.0 ? max(rawCos, AVER_GI_MIN_COS) : 0.0;
-    return averShadowLum(sampleRadiance) * cosR;
+    // ---- DEFENSE IN DEPTH: mirrors RAB_ValidateGISampleWithJacobian's own idiom two functions below
+    // it (isnan/isinf/non-positive -> reject) ----
+    // Given Fix #1 above (giTraceInitialCandidate's NaN-safe clamps), sampleRadiance arriving here
+    // should already be finite, so this should never fire -- included because every other
+    // radiance/weight sink in this file already has exactly this shape, and it is a one-line, zero-
+    // cost addition against a case not 100% ruled out (a NaN surviving `cosR`, or a future caller of
+    // this function that does not route through giTraceInitialCandidate's own guards).
+    const float pdf = averShadowLum(sampleRadiance) * cosR;
+    if (isnan(pdf) || isinf(pdf)) { gGiPoisonPdfHit = true; return 0.0; }
+    return pdf;
 }
 
 // ---- CLOSE THE JACOBIAN ASYMMETRY: keep rejecting on the real value, but hand back 1.0 ----
@@ -449,8 +471,13 @@ RTXDI_ReservoirBufferParameters giReservoirBufferParams() {
 // initial reservoir for this frame and lets temporal resampling (RTXDI_IsValidGIReservoir gates on
 // M != 0) carry the pixel from history alone -- exactly the situation that function already handles.
 bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJitter,
-                             out float3 samplePos, out float3 sampleNormal, out float3 sampleRadiance) {
+                             out float3 samplePos, out float3 sampleNormal, out float3 sampleRadiance,
+                             out bool nonFiniteCandidate) {
     samplePos = sampleNormal = sampleRadiance = 0.0;
+    // Set on every path, including the early `return false` below: this is an `out` parameter and
+    // HLSL, like C++, requires it be written on every exit -- and false is the correct default,
+    // since neither early-out here has computed a radiance yet for a guard to have caught anything.
+    nonFiniteCandidate = false;
 
     // Cosine-weighted hemisphere sample (Malley's method: a uniform point on the unit disc, lifted
     // onto the hemisphere) -- the standard importance sample for a Lambertian receiver, so its own
@@ -520,7 +547,18 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {
         samplePos      = wpos + dir * r.TMax;
         sampleNormal   = -dir;
-        sampleRadiance = clamp(averSkyRadianceCheap(dir) * gAmbient.r, 0.0, AVER_VOX_MAXRAD);
+        // ---- NaN-SAFE, REPLACING A NATIVE clamp() -- see this function's own header note on why ----
+        // HLSL's three-argument clamp() has compiler/driver-defined behaviour on a NaN input (unlike
+        // this file's own hand-rolled min(max(x,lo),hi) idiom, which floors a NaN to lo via the same
+        // "comparison against NaN is false" semantics documented in giRestirIndirect). A temporary is
+        // needed here because this branch clamps an EXPRESSION, not a variable already named
+        // `radiance` the way the hit branch below does.
+        {
+            const float3 rawSky = averSkyRadianceCheap(dir) * gAmbient.r;
+            const bool   bad    = any(isnan(rawSky)) || any(isinf(rawSky));
+            nonFiniteCandidate  = nonFiniteCandidate || bad;
+            sampleRadiance      = bad ? float3(0.0, 0.0, 0.0) : min(max(rawSky, 0.0), AVER_VOX_MAXRAD);
+        }
         return true;
     }
 
@@ -548,7 +586,15 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     AverSurface s = (AverSurface)0;
     s.N           = hitN;
     s.V           = -dir;
-    s.H           = normalize(s.V + L);
+    // ---- GUARDED: a genuine 0/0 if the traced ray ever lands exactly antiparallel to the sun ----
+    // Cheap risk reduction, not a confirmed trigger (see this file's own header note) -- closes it
+    // outright since it feeds directly into the same clamp below. s.N is always finite and a
+    // reasonable fallback at this measure-zero case.
+    {
+        const float3 VL  = s.V + L;
+        const float  vl2 = dot(VL, VL);
+        s.H = vl2 > 1e-12 ? VL * rsqrt(vl2) : s.N;
+    }
     s.albedo      = inst.albedo * mat.baseColorFactor.rgb;
     s.metallic    = saturate(inst.metallic * mat.metallicFactor);
     s.rough       = clamp(inst.roughness * mat.roughnessFactor, 0.045, 1.0);
@@ -632,7 +678,17 @@ bool giTraceInitialCandidate(float3 wpos, float3 N, float2 pixel, float frameJit
     // flicker for one frame, it sits on this pixel for thirty and spreads to neighbours the moment a
     // spatial pass exists. So the clamp has to land BEFORE the value reaches the target pdf or the
     // reservoir, not merely at final output where giRestirIndirect already clamps its own estimate.
-    sampleRadiance = clamp(radiance, 0.0, AVER_VOX_MAXRAD);
+    //
+    // NaN-SAFE, REPLACING A NATIVE clamp() -- see this function's own header note and the sky-miss
+    // branch above for why a native three-argument clamp() is not trusted with a possibly-NaN input
+    // here: min(max(x,lo),hi) floors a NaN to lo by this codebase's own documented comparison
+    // semantics, where a native clamp()'s NaN behaviour is compiler/driver codegen order, not a
+    // language guarantee.
+    {
+        const bool bad     = any(isnan(radiance)) || any(isinf(radiance));
+        nonFiniteCandidate = nonFiniteCandidate || bad;
+        sampleRadiance     = bad ? float3(0.0, 0.0, 0.0) : min(max(radiance, 0.0), AVER_VOX_MAXRAD);
+    }
     return true;
 }
 
@@ -652,9 +708,15 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     const RTXDI_ReservoirBufferParameters resParams = giReservoirBufferParams();
     const float frameJitter = (float)frameIdx * 2.39996323;
 
+    // Reset THIS invocation's poison-view flag before anything below can set it -- see its own
+    // declaration for why it is a `static` rather than a parameter.
+    gGiPoisonPdfHit = false;
+
     float3 samplePos, sampleNormal, sampleRadiance;
+    bool nonFiniteCandidate = false;
     RTXDI_GIReservoir initial = RTXDI_EmptyGIReservoir();
-    if (giTraceInitialCandidate(wpos, N, pixel, frameJitter, samplePos, sampleNormal, sampleRadiance)) {
+    if (giTraceInitialCandidate(wpos, N, pixel, frameJitter, samplePos, sampleNormal, sampleRadiance,
+                                 nonFiniteCandidate)) {
         const float cosTheta = saturate(dot(normalize(samplePos - wpos), N));
         // THE SAME FLOOR, because this is the gate that actually decides what gets stored. The
         // recomputed cosTheta is the sampled one up to precision (dir is built from it and samplePos
@@ -904,7 +966,31 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     //
     // An M = 0 reservoir is skipped by RTXDI_IsValidGIReservoir at the top of the neighbour loop, so
     // emptying it here removes it from both sums instead of leaving it in one.
-    if (result.weightSum <= 0.0) result = RTXDI_EmptyGIReservoir();
+    //
+    // ---- EXTENDED: NaN/Inf stops here too, not only an exact-zero weight -- THE FIX THAT MATTERS
+    // MOST IN THIS FILE ----
+    //
+    // A comparison against NaN is false, so the corpse guard above (`<= 0.0`) silently let a NaN
+    // weightSum straight through to RTXDI_StoreGIReservoir. RTXDI_CombineGIReservoirs's own
+    // `weightSum += risWeight` (third_party/rtxdi/Include/Rtxdi/GI/Reservoir.hlsli) propagates a NaN
+    // unconditionally -- unlike this codebase's own comparison-based idioms, `+=` does not self-heal
+    // -- and RTXDI_FinalizeGIResampling only ever guards an EXACT-zero denominator. Neither vendored
+    // function has ever protected against this. Once stored, RTXDI_IsValidGIReservoir tests only
+    // `M != 0`, so a poisoned reservoir reads as a perfectly "valid" neighbour forever after: every
+    // later comparison against a NaN weightSum is false, so it can never again be selected OUT, and
+    // the 8-32px spatial/temporal taps spread it one hop per frame, forever.
+    //
+    // THIS GUARD DOES NOT NEED TO KNOW WHERE THE FIRST NON-FINITE VALUE CAME FROM. Whatever
+    // manufactures it -- the candidate-radiance clamps below, the target-pdf guard, or a cause nobody
+    // has found yet -- a reservoir that is never STORED non-finite can never spread or persist. This is
+    // the circuit breaker; the guards elsewhere in this file (giTraceInitialCandidate's clamps,
+    // RAB_GetGISampleTargetPdfForSurface's own return) are risk reduction on top of it, not a
+    // substitute for it.
+    const bool corpseWeight     = result.weightSum <= 0.0;
+    const bool nonFiniteWeight  = isnan(result.weightSum) || isinf(result.weightSum);
+    const bool nonFiniteRad     = any(isnan(result.radiance)) || any(isinf(result.radiance));
+    const bool giPoisonStoreHit = nonFiniteWeight || nonFiniteRad;
+    if (corpseWeight || giPoisonStoreHit) result = RTXDI_EmptyGIReservoir();
     RTXDI_StoreGIReservoir(result, resParams, pixelPos, writeSlice);
 
     // NEXT FRAME'S "previous surface" -- see gGiSurfPosHist/gGiSurfNrmHist's own declaration for
@@ -914,6 +1000,11 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     const uint packedN = RTXDI_EncodeNormalizedVectorToSnorm2x16(N);
     gGiSurfPosHistOut[pixelPos] = wpos.xy;
     gGiSurfNrmHistOut[pixelPos] = float2(wpos.z, asfloat(packedN == 0u ? 1u : packedN));
+
+    // Hoisted to function scope (not declared inside the block below) so the poison-view combination
+    // at the end of this function -- after the NRD block further down -- can still read them.
+    bool giPoisonEstHit = false;
+    bool giPoisonNrdHit = false;
 
     float3 outDiffuse = 0.0;
     if (RTXDI_IsValidGIReservoir(result)) {
@@ -946,12 +1037,16 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         // HLSL's max is `x > y ? x : y`, and every comparison against NaN is false -- so
         // max(NaN, 0.0) silently returns 0.0, not NaN. An unguarded NaN estimator (a near-zero
         // Jacobian, a reservoir aged past a disocclusion) would have become PURE BLACK with nothing
-        // in the log to say why: the mirror image of this codebase's own acesTonemap(-1)==1.0 trap,
-        // where the bug hides behind a comparison instead of behind the tonemap. Zero is still the
-        // right answer for a broken sample; the isnan/isinf check just makes that a decision instead
-        // of an accident of comparison semantics.
-        outDiffuse = any(isnan(est)) || any(isinf(est)) ? float3(0.0, 0.0, 0.0)
-                                                         : min(max(est, 0.0), AVER_VOX_MAXRAD);
+        // in the log to say why: the SAME SHAPE as this codebase's own acesTonemap negative-radiance
+        // guard (color.hlsli's `x = max(x, 0.0)`, added by ded8784a) -- both hide a bad value behind
+        // a comparison instead of an obvious break, and BOTH now resolve to confident BLACK, not the
+        // WHITE an older comment here once claimed (acesTonemap floored negative/NaN input to 0.0,
+        // not 1.0, by the time this guard was written -- see color.hlsli's own history). Zero is
+        // still the right answer for a broken sample; the isnan/isinf check just makes that a
+        // decision instead of an accident of comparison semantics.
+        giPoisonEstHit = any(isnan(est)) || any(isinf(est));
+        outDiffuse = giPoisonEstHit ? float3(0.0, 0.0, 0.0)
+                                     : min(max(est, 0.0), AVER_VOX_MAXRAD);
     }
 
     // ---- hand this frame's estimate to NRD, and take back last frame's ----
@@ -1022,8 +1117,10 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         // maths this file does not control, and this file's own house rule (this task's brief, and
         // aver-negative-radiance-reads-bright's history elsewhere in this tree) is that a value which
         // can go non-finite or unbounded must be caught at the point it is CONSUMED, not assumed safe
-        // because its producer is trusted -- acesTonemap(-1) == 1.0 here, so a stray NaN/Inf/huge
-        // finite value in this exact spot renders as confident WHITE, not as visible corruption.
+        // because its producer is trusted -- acesTonemap floors negative/NaN input at zero as of
+        // ded8784a (2026-08-31, predating this guard), so a stray NaN/Inf/huge finite value in this
+        // exact spot renders as confident BLACK, not as visible corruption. (An older version of this
+        // comment said WHITE, describing acesTonemap's behaviour before that fix -- corrected here.)
         //
         // THIS CODEPATH ONLY WENT LIVE RECENTLY: NRD was never created at all for a project whose
         // ray-tracing tier had not just changed (98b2b9a9 "NRD was never created unless SKY
@@ -1035,9 +1132,42 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         // `decoded` is what it always is (finite, small), and it turns a would-be white-out into the
         // same "zero is the honest answer for a broken sample" the raw path already chose, rather
         // than a screen-filling flash with nothing in the log to explain it.
-        outDiffuse = (any(isnan(decoded)) || any(isinf(decoded)))
+        giPoisonNrdHit = any(isnan(decoded)) || any(isinf(decoded));
+        outDiffuse = giPoisonNrdHit
                    ? float3(0.0, 0.0, 0.0)
                    : min(max(decoded, 0.0), AVER_VOX_MAXRAD);
+    }
+
+    // ---- POISON DEBUG VIEW (voxi.giPoisonView / gGiRestirParams.w) -- OVERRIDE 2/3's by-hand tool ----
+    //
+    // Default off, and cheap when off: one dynamic branch on a cbuffer float already being read this
+    // frame, no new binding, no buffer, no readback. While on, this REPLACES the final indirect-
+    // diffuse colour at any pixel where one of this file's non-finite guards fired THIS frame, in an
+    // unmistakable, scene-lighting-cannot-produce-this colour PER GUARD -- so the user can see both
+    // WHERE a guard is catching something and WHICH one. Priority order below (checked highest first)
+    // matters only for the rare pixel where more than one fires in the same frame; each is otherwise
+    // independent.
+    //
+    // LEGEND (also in resetgihistory's neighbourhood in buildConsoleCatalog, and in `help`):
+    //   MAGENTA (1,0,1) -- the store-time reservoir guard (giPoisonStoreHit, Part 2.4): a poisoned
+    //                      reservoir was about to be written into CROSS-FRAME history and was emptied
+    //                      instead. THE ONE THAT MATTERS MOST -- this is the circuit breaker.
+    //   CYAN    (0,1,1) -- the candidate-radiance clamp guard (nonFiniteCandidate, Part 2.1): a fresh
+    //                      candidate's own shaded/sky radiance was non-finite before it ever reached a
+    //                      reservoir.
+    //   YELLOW  (1,1,0) -- the target-pdf guard (gGiPoisonPdfHit, Part 2.3): RAB_GetGISampleTargetPdfForSurface
+    //                      computed a non-finite importance weight for some candidate/neighbour this
+    //                      pixel combined this frame.
+    //   ORANGE  (1,0.5,0) -- the pre-existing final-estimate guard (giPoisonEstHit, ~40 lines up):
+    //                      this pixel's own finalised weightSum*radiance was non-finite.
+    //   BLUE    (0,0,1) -- 301418ec's NRD-readback guard (giPoisonNrdHit, just above): REBLUR handed
+    //                      back a non-finite value on the denoised read-back path.
+    if (gGiRestirParams.w > 0.5) {
+        if (giPoisonStoreHit)     return float3(1.0, 0.0, 1.0);
+        if (nonFiniteCandidate)   return float3(0.0, 1.0, 1.0);
+        if (gGiPoisonPdfHit)      return float3(1.0, 1.0, 0.0);
+        if (giPoisonEstHit)       return float3(1.0, 0.5, 0.0);
+        if (giPoisonNrdHit)       return float3(0.0, 0.0, 1.0);
     }
 
     return outDiffuse;

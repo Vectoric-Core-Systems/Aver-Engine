@@ -73,6 +73,12 @@ public:
     // FrameSettings::resetHistory = true -- historyIsStale() says when.
     bool resize(u32 width, u32 height);
     [[nodiscard]] bool historyIsStale() const { return historyStale_; }
+    // Forces the NEXT record() to pass FrameSettings::resetHistory = true, without a resize --
+    // exactly what resize() and destroy() already do to this same flag when they actually have a
+    // reason to (a genuine size change or teardown); this is the on-demand equivalent for
+    // VoxiRenderer::resetNrdHistory's own console command. Cleared automatically once that record()
+    // succeeds (see record()'s own historyStale_ = false).
+    void forceHistoryReset() { historyStale_ = true; }
 
     // Per-denoiser REBLUR tuning -- see Denoiser::ReblurTuning, which documents why the caller has to
     // supply the hit-distance constants rather than accept NRD's. NRD keeps these until they are set

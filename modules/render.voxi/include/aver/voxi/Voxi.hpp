@@ -522,6 +522,24 @@ public:
     // Returns true once after settings.msaa changes, then clears the flag.
     bool consumeMsaaDirty();
 
+    // ---- per-history reset requests: EditorConsole.hpp raises these, SandboxApp.cpp consumes and
+    // forwards them to the live VoxiRenderer once a frame (mirrors consumeMsaaDirty's own shape
+    // exactly) -- this settings-service singleton has no path to VoxiRenderer's private instance
+    // itself, only the console does the raising and only SandboxApp owns the renderer to forward to.
+    // resetaohistory is an honest ALIAS of resetrthistory today (VoxiRenderer::resetAoHistory's own
+    // comment has the full reason); requestAoHistoryReset exists anyway so the two commands stay
+    // textually distinct all the way through, in case that stops being true later.
+    void requestGiHistoryReset()  { giHistoryResetRequested_ = true; }
+    void requestRtHistoryReset()  { rtHistoryResetRequested_ = true; }
+    void requestAoHistoryReset()  { aoHistoryResetRequested_ = true; }
+    void requestNrdHistoryReset() { nrdHistoryResetRequested_ = true; }
+    // Each returns true once after its matching request*Reset() call, then clears itself -- same
+    // one-shot contract as consumeMsaaDirty().
+    bool consumeGiHistoryResetRequest();
+    bool consumeRtHistoryResetRequest();
+    bool consumeAoHistoryResetRequest();
+    bool consumeNrdHistoryResetRequest();
+
     // Returns a feature's display name.
     static const char* featureName(Feature f);
     // Returns a quality level's display name.
@@ -558,6 +576,12 @@ private:
     Settings settings_{};
     DeviceInfo device_{};
     bool msaaDirty_ = true;
+    // One-shot request flags for the five reset* console commands -- see requestGiHistoryReset() and
+    // its siblings above. False by default: nothing is reset merely by the process starting up.
+    bool giHistoryResetRequested_  = false;
+    bool rtHistoryResetRequested_  = false;
+    bool aoHistoryResetRequested_  = false;
+    bool nrdHistoryResetRequested_ = false;
     u32 refusalLogged_ = 0;   // one bit per Feature: its refusal has already been logged
 };
 

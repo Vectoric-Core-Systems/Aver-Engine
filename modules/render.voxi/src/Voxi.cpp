@@ -645,6 +645,29 @@ bool Renderer::consumeMsaaDirty() {
     return d;
 }
 
+// Same one-shot shape as consumeMsaaDirty() above, one per reset* console command -- see the header's
+// own comment on requestGiHistoryReset() and its siblings.
+bool Renderer::consumeGiHistoryResetRequest() {
+    const bool d = giHistoryResetRequested_;
+    giHistoryResetRequested_ = false;
+    return d;
+}
+bool Renderer::consumeRtHistoryResetRequest() {
+    const bool d = rtHistoryResetRequested_;
+    rtHistoryResetRequested_ = false;
+    return d;
+}
+bool Renderer::consumeAoHistoryResetRequest() {
+    const bool d = aoHistoryResetRequested_;
+    aoHistoryResetRequested_ = false;
+    return d;
+}
+bool Renderer::consumeNrdHistoryResetRequest() {
+    const bool d = nrdHistoryResetRequested_;
+    nrdHistoryResetRequested_ = false;
+    return d;
+}
+
 } // namespace aver::voxi
 
 // ------------------------------------------------------------------ C ABI
