@@ -32,6 +32,40 @@ namespace aver::editor {
 // check exactly that, matching those two functions' own precedent.
 inline fmt::OcFoliageData foliageStarterType() { return fmt::OcFoliageData{}; }
 
+// ---- Foliage mode's entry gate -------------------------------------------------------------------
+//
+// Whether SandboxApp's Foliage editor mode can be ENTERED right now, and -- when it can, but there is
+// nothing in the palette -- what its own panel should say about that. Pulled out of
+// SandboxApp::editorModeAvailable's Foliage case as two bools in, one small struct out, so a headless
+// test can walk every combination without an App, an Engine, or a live scene::World.
+//
+// THE REGRESSION THIS UNDOES: when foliagePalette_ moved from "one entry per already-loaded mesh" to
+// "one entry per .ocfoliage asset" (see foliageStarterType()'s own comment above), the Foliage case
+// started refusing entry outright whenever that palette was empty -- so a project with no .ocfoliage
+// authored yet lost foliage painting entirely, the mode's dropdown entry greyed out with no way to
+// even reach the panel, which already had text for exactly this case (SandboxApp::
+// buildFoliageModePanel's empty-palette branch) that nothing could ever open to show. This module's
+// own commit history had already named that failure shape -- "a mode that cannot be entered is a dead
+// dropdown entry" -- as the reason the palette was made a real asset in the first place; refusing
+// again on empty would reintroduce the exact complaint that change was meant to answer.
+//
+// So the mode now OPENS on an empty palette (showEmptyState tells the panel to draw its
+// create-a-type action instead of the palette list) and refuses ONLY for the other, still-genuine
+// reason: nothing to paint ONTO. That second reason is unchanged -- it is not the bug being fixed.
+struct FoliageModeGate {
+    bool available;       // false only when there is no landscape section to paint onto
+    const char* whyNot;   // set when !available -- the dropdown's disabled-entry tooltip; empty otherwise
+    bool showEmptyState;  // true when available but the palette has no .ocfoliage types yet
+};
+
+inline FoliageModeGate foliageModeGate(bool landscapeLoaded, bool paletteEmpty) {
+    if (!landscapeLoaded) {
+        return FoliageModeGate{
+            false, "Foliage paints onto terrain, and this level has no landscape section.", false};
+    }
+    return FoliageModeGate{true, "", paletteEmpty};
+}
+
 // ---- the tab ------------------------------------------------------------------------------------
 //
 // Declared in the header rather than hidden behind the factory, for BtEditor.hpp's own reason: a

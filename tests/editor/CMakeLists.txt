@@ -300,6 +300,21 @@ if(TARGET Aver.Scene)
   set_target_properties(EditorEntitySnapshotTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
 
+# PlayerStartRefreshTest -- SandboxApp's Player Start cached-handle refresh
+# (sandbox/src/PlayerStartRefresh.hpp), pinning the regression where both its comparisons used to
+# read `w.name(x) == "PlayerStart"`: a `const char*` compared against a string literal with `==`
+# compares POINTERS, so neither branch could ever match and the cached handle was silently wiped on
+# every undo, redo and delete. Header-only, but needs a REAL scene::World -- guarded on Aver.Scene
+# existing, matching EditorEntitySnapshotTest's own precedent immediately above, for the same reason:
+# this whole directory is not itself conditional on AVER_MODULE_SCENE, so a tree configured with that
+# module off must still configure this one.
+if(TARGET Aver.Scene)
+  add_executable(PlayerStartRefreshTest src/PlayerStartRefreshTest.cpp)
+  target_include_directories(PlayerStartRefreshTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+  target_link_libraries(PlayerStartRefreshTest PRIVATE Aver.Scene Aver.Core Aver.Platform)
+  set_target_properties(PlayerStartRefreshTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
 # DumpClusterPs -- prints the composed HLSL (and -D list) for the cluster path's pixel shader, so it
 # can be compiled with dxc offline. A shader here is a C++ string built at runtime from two preludes
 # plus a feature's own source, and the only thing that ever type-checks it is createShader inside a

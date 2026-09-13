@@ -17,6 +17,7 @@
 // Rot, ActorBuilder.Place, and the .ocgraph COMP record's own `rot=` -- states them as (yaw, pitch,
 // roll). Unifying them would mean silently reversing one caller's argument order, which is the
 // single most dangerous edit possible in rotation code.
+#include "aver/core/Math.hpp"   // aver::kPi -- see composeEditorTransform's own comment
 #include "aver/core/Types.hpp"
 
 #include <cmath>
@@ -30,7 +31,9 @@ namespace aver::editor {
 // Rotation is applied Z (yaw) then Y (pitch) then X (roll) -- the order the framework applies them.
 inline void composeEditorTransform(const f32 pos[3], const f32 rotDeg[3], const f32 scale[3],
                                     f32 out[16]) {
-    constexpr f32 kPi = 3.14159265358979f;
+    // aver::kPi (aver/core/Math.hpp), not a local redeclaration: this function sits inside
+    // namespace aver::editor, so a same-named local constant here SHADOWED it (C4459) rather than
+    // ever being a distinct value -- both spelled the same digits anyway.
     const f32 y = rotDeg[0] * kPi / 180.0f, p = rotDeg[1] * kPi / 180.0f, r = rotDeg[2] * kPi / 180.0f;
     const f32 cy = std::cos(y), sy = std::sin(y);
     const f32 cp = std::cos(p), sp = std::sin(p);

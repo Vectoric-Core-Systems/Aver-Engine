@@ -12,6 +12,7 @@
 #include "EditorKeybinds.hpp"
 #include "EditorIcons.hpp"
 #include "aver/core/Log.hpp"
+#include "aver/core/Math.hpp"   // aver::kPi -- see pxConeSample's own comment
 
 #include <algorithm>
 #include <cctype>
@@ -107,7 +108,9 @@ Vec3 pxShapeOffset(const particles::ParticleEffect& fx, std::mt19937& rng) {
 }
 
 Vec3 pxConeSample(const Vec3& axis, f32 spreadDeg, std::mt19937& rng) {
-    constexpr f32 kPi = 3.14159265358979f;
+    // aver::kPi (aver/core/Math.hpp), not a local redeclaration: this function sits inside
+    // namespace aver::editor, so a same-named local constant here SHADOWED it (C4459) rather than
+    // ever being a distinct value -- both spelled the same digits anyway.
     const f32 spreadRad = spreadDeg * (kPi / 180.0f);
     const f32 cosSpread = std::cos(spreadRad < 0.0f ? 0.0f : (spreadRad > kPi ? kPi : spreadRad));
     const f32 cosTheta = pxUniform(rng, cosSpread, 1.0f);

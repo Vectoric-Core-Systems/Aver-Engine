@@ -190,6 +190,37 @@ int main() {
         check(ed.loaded() && !ed.dirty(), "and it opens clean rather than showing a load error");
     }
 
+    // THE EMPTY-PALETTE REGRESSION, PINNED: editor::foliageModeGate is SandboxApp::
+    // editorModeAvailable's Foliage case extracted to two bools in, one struct out, so this can be
+    // checked without an App. Before this fix, an empty palette REFUSED mode entry outright --
+    // exactly the "mode that cannot be entered is a dead dropdown entry" complaint this module's own
+    // history already recorded -- so the panel's own empty-state text could never be reached to show
+    // it. See FoliageTypeEditor.hpp's own comment on foliageModeGate for the full story.
+    AVER_INFO("foliageModeGate: an empty palette no longer refuses entry, but no landscape still does");
+    {
+        const auto noLandscapeFullPalette = editor::foliageModeGate(/*landscapeLoaded=*/false,
+                                                                     /*paletteEmpty=*/false);
+        check(!noLandscapeFullPalette.available, "no landscape refuses entry even with types authored");
+        check(noLandscapeFullPalette.whyNot[0] != '\0', "and says why");
+        check(!noLandscapeFullPalette.showEmptyState, "no point flagging an empty state on a refusal");
+
+        const auto noLandscapeEmptyPalette = editor::foliageModeGate(/*landscapeLoaded=*/false,
+                                                                      /*paletteEmpty=*/true);
+        check(!noLandscapeEmptyPalette.available, "no landscape refuses entry regardless of the palette");
+
+        const auto readyEmptyPalette = editor::foliageModeGate(/*landscapeLoaded=*/true,
+                                                                /*paletteEmpty=*/true);
+        check(readyEmptyPalette.available,
+              "THE FIX: landscape present, palette empty -> the mode OPENS rather than refusing");
+        check(readyEmptyPalette.showEmptyState,
+              "and says the panel should show its create-a-type empty state");
+
+        const auto readyFullPalette = editor::foliageModeGate(/*landscapeLoaded=*/true,
+                                                               /*paletteEmpty=*/false);
+        check(readyFullPalette.available, "landscape present, palette non-empty -> opens");
+        check(!readyFullPalette.showEmptyState, "and shows the normal palette, not the empty state");
+    }
+
     std::filesystem::remove_all(dir, ec);
     AVER_INFO("FoliageTypeEditorTest: {} of {} checks passed", g_checks - g_failures, g_checks);
     return g_failures ? 1 : 0;

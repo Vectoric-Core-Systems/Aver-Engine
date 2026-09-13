@@ -1843,6 +1843,27 @@ void GraphEditor::drawEventGraph(float dpi) {
     // mouse-to-canvas conversion) derives from GetContentRegionAvail() called AFTER ##graphCanvas's
     // BeginChild below, so it automatically sees the narrowed region -- nothing past this point
     // needed to change for that to hold.
+    //
+    // WHAT ACTUALLY CHANGED IN THE NARROW-WINDOW SQUEEZE (the substance kDefaultDetailsColumn's
+    // comment above promises and EditorWidgets.hpp's top comment also points at -- this is that
+    // third place, spelled out rather than forward-referenced again):
+    //
+    // BEFORE: `std::clamp(260.0f * dpi, 180.0f * dpi, std::max(avail.x * 0.45f, 120.0f * dpi))`,
+    // recomputed from scratch every frame with nothing persisted or draggable. As the window
+    // narrowed, the upper bound `avail.x * 0.45f` fell below the 260*dpi default, and std::clamp
+    // pinned the column to that falling bound -- a SMOOTH, PROPORTIONAL squeeze: the column tracked
+    // 45% of whatever room remained, continuously, all the way down to a 120*dpi floor.
+    //
+    // AFTER: detailsColW_ is a real value -- dragged by the user, or seeded once from
+    // kDefaultDetailsColumn/the pref -- and clampSplitWidth only pushes it when it would violate one
+    // of two FIXED bounds: at least minDetails (180*dpi) for itself, at least minCanvas (40*dpi) left
+    // for the canvas. Between those bounds nothing narrows it at all, proportionally or otherwise --
+    // a wide-then-narrowed window holds the SAME details width right up until the canvas would drop
+    // under 40*dpi, at which point clampSplitWidth's own "minSelf wins" rule holds the column at its
+    // 180*dpi floor even if that leaves the canvas smaller than minCanvas, rather than continuing to
+    // give up width the way the old 0.45f term did. So: no more gradual, avail-proportional give as
+    // the window narrows -- just two hard floors and a value that otherwise stays exactly where a
+    // drag (or the default) put it.
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     const float minDetails = 180.0f * dpi, minCanvas = 40.0f * dpi;
     if (detailsColW_ <= 0.0f) detailsColW_ = prefFloat(kPrefDetailsColumn, kDefaultDetailsColumn) * dpi;

@@ -109,6 +109,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "ToolGlyphs.hpp"
 #include "EditorWidgets.hpp"
 #include "FoliageAlign.hpp"
+#include "PlayerStartRefresh.hpp"
 #include "AssetEditor.hpp"
 #include "ActorEditor.hpp"
 #include "AnimEditor.hpp"
@@ -3125,8 +3126,10 @@ public:
                 std::vector<aver::FileEvent> events;
                 const bool rescan = shaderWatch_.poll(events);
                 if (rescan || !events.empty()) {
-                    for (const aver::FileEvent& e : events)
-                        AVER_INFO("[Sandbox] shader file changed: {}", e.path);
+                    // `evt`, not `e`: onUpdate's own Engine& parameter is named `e`, and this loop
+                    // variable shadowed it (C4457).
+                    for (const aver::FileEvent& evt : events)
+                        AVER_INFO("[Sandbox] shader file changed: {}", evt.path);
                     if (aver::rhi::reloadShaderFiles() > 0)
                         AVER_INFO("[Sandbox] shaders will recompile on the next frame's prePass");
                 }
@@ -6200,7 +6203,18 @@ public:
                                 // cheap, complete, stable geometry, and voxelisation in particular
                                 // resolves the world into 512^3 cells where a cluster-level cut is far
                                 // below one voxel. The cut still draws the colour pass, unchanged.
-                                depthProxy_[newHandle] = mr->mesh;
+                                //
+                                // FIXED (a real defect, found chasing a /W4 C4244 on this line, not a
+                                // cosmetic one): this read `mr->mesh`, the mesh's u64 CONTENT-HASH asset
+                                // id (the key meshClusterData_/meshLods_ are looked up by, a few lines
+                                // above) -- not a handle at all. depthProxy_ maps rhi::MeshHandle ->
+                                // rhi::MeshHandle (u32), so that u64 was truncated into whatever 32 bits
+                                // happened to survive, which depthProxyLookup would then have handed to
+                                // the four depth-only consumers this comment already names as a mesh
+                                // handle. `mesh` -- still the pre-cut, SOURCE handle at this point,
+                                // exactly what the paragraph above asks for -- is the value that belongs
+                                // here.
+                                depthProxy_[newHandle] = mesh;
                             }
                             // newHandle == 0 (empty cut this frame, or the device refused): keep
                             // whatever handle the cache already had (fail-safe), or fall through to the
@@ -11649,7 +11663,12 @@ private:
             c.hadCollide = it->second;
         if (const auto it = entitySnapZ_.find(static_cast<u32>(e)); it != entitySnapZ_.end()) {
             c.hadSnapZ = true;
-            c.snapZ    = it->second;
+            // entitySnapZ_ is f64 to round-trip the LEVEL FORMAT's own f64 placement z VERBATIM (see
+            // its own declaration comment); EditCmd::snapZ is f32, matching every other undo-system
+            // field. Narrowing here is intended and safe -- a snap-to-ground z OFFSET in centimetres
+            // has nothing near f32's ~7-decimal-digit precision to lose -- and scoped to undo/redo of
+            // a delete, never to the load/save path that comment cares about bit-exactness for.
+            c.snapZ    = static_cast<f32>(it->second);
         }
         return c;
     }
@@ -11887,7 +11906,9 @@ private:
                 n.hadCollide = ci->second;
             if (const auto si = entitySnapZ_.find(static_cast<u32>(d)); si != entitySnapZ_.end()) {
                 n.hadSnapZ = true;
-                n.snapZ    = si->second;
+                // See captureEntity's own comment on the identical f64->f32 narrowing just above:
+                // intended and safe, DestroyedNode::snapZ being f32 like every other undo-system field.
+                n.snapZ    = static_cast<f32>(si->second);
             }
 #  if AVER_MODULE_PHYSICS
             if (entityBodies_.find(static_cast<u32>(d)) != entityBodies_.end()) {
@@ -12718,15 +12739,28 @@ private:
     // either points at nothing -- Add > Player Start refuses to add a second one because it thinks
     // one exists -- or, worse, at whatever entity id got reused, which the viewport then draws a
     // spawn icon on. Cheap: one pass over the level's own entities, only on undo/redo and delete.
+    //
+    // FIXED (was a real bug, not cosmetic): both comparisons here used to be
+    // `w.name(x) == "PlayerStart"`. World::name returns `const char*`, and comparing that against a
+    // string literal with `==` compares POINTERS, not characters -- a heap-owned name buffer never
+    // lives at a string literal's address, so neither comparison could ever match. The early-out at
+    // the top never fired and the loop below never found anything, so playerStart_ was silently reset
+    // to kInvalidEntity on EVERY undo, redo and delete: precisely the failure this function exists to
+    // prevent, per the paragraph above. Now std::string_view, which compares content.
+    //
+    // DELIBERATELY NOT world::find("PlayerStart"): that runs a linear scan over EVERY live entity in
+    // the one process-global World, not just this level's own levelEntities_ -- a broader scope than
+    // the walk below is deliberately restricted to (levelEntities_ is the level-ownership boundary
+    // isLevelOwned() itself is keyed on). A same-named entity that is not part of this level would
+    // make find() return the wrong handle with nothing to signal the mismatch; the loop below cannot
+    // make that mistake because it only ever looks at entities this level itself owns.
     void refreshPlayerStart() {
 #if AVER_MODULE_SCENE
-        scene::World& w = scene::World::instance();
-        if (playerStart_ != scene::kInvalidEntity && w.valid(playerStart_) &&
-            w.name(playerStart_) == "PlayerStart")
-            return;                                  // still good, nothing to do
-        playerStart_ = scene::kInvalidEntity;
-        for (const scene::Entity e : levelEntities_)
-            if (w.valid(e) && w.name(e) == "PlayerStart") { playerStart_ = e; return; }
+        // The decision itself lives in editor::refreshPlayerStart (PlayerStartRefresh.hpp) -- pulled
+        // out as a free function over plain scene::World + std::vector<Entity> so a headless test can
+        // exercise it against a real scene::World. See that header for the pointer-comparison bug
+        // this used to hide.
+        playerStart_ = editor::refreshPlayerStart(scene::World::instance(), playerStart_, levelEntities_);
 #endif
     }
 #endif
@@ -15899,6 +15933,7 @@ private:
     // in a project that has streamed a scatter, and re-walking it every frame to draw a list that
     // cannot have changed is work nobody asked for.
     void drawOpenLevelPrompt(Engine& e) {
+        (void)e;   // required by the caller's uniform signature (buildPanels/menu dispatch); unused here
 #if AVER_WITH_IMGUI && AVER_MODULE_SCENE
         // ARMED BY --open-level-picker, consumed once. Done here rather than at startup because the
         // list needs project_ to be applied, which happens after the flags are read.
@@ -15981,8 +16016,6 @@ private:
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
-#else
-        (void)e;
 #endif
     }
 
@@ -17667,8 +17700,28 @@ private:
     void cbCreateFoliageType() {
         const std::filesystem::path target = cbFreeAssetPath("NewFoliageType", ".ocfoliage");
         if (target.empty()) return;
+        fmt::OcFoliageData starter = editor::foliageStarterType();
+#if AVER_MODULE_SCENE
+        // JUDGMENT CALL: default the starter's mesh to one already loaded in the level, when one is
+        // available, rather than leaving the format's own placeholder (Meshes/cube.ocmesh, which most
+        // projects never actually have on disk). meshPathById_ is exactly "meshes this project has
+        // already resolved into the scene" -- see its own declaration comment -- so a type created
+        // this way is paintable IMMEDIATELY, which is the whole point of offering this button from an
+        // empty-palette panel in the first place; one created against a path that resolves to nothing
+        // is not, until its author fixes meshPath by hand first. Lowest path wins for determinism --
+        // "whichever the unordered_map iterates first" would make this starter non-reproducible for
+        // no reason. The trade: the chosen mesh may not be what the author actually meant to scatter.
+        // That is acceptable because it is a STARTING POINT, not a guess confident enough to skip
+        // opening the tab this still opens -- the author can repoint meshPath from there in one edit.
+        if (!meshPathById_.empty()) {
+            std::string best;
+            for (const auto& kv : meshPathById_)
+                if (best.empty() || kv.second < best) best = kv.second;
+            starter.meshPath = best;
+        }
+#endif
         std::string why;
-        if (!fmt::saveOcFoliage(target.string(), editor::foliageStarterType(), &why)) {
+        if (!fmt::saveOcFoliage(target.string(), starter, &why)) {
             cbStatus_ = "Could not write " + target.filename().string() + ": " + why;
             AVER_ERROR("[Editor] new foliage type failed: {}", why);
             return;
@@ -20183,10 +20236,33 @@ private:
                             landscapeData_.spacingCm);
     }
 
+    // The Foliage panel's empty-palette action: writes a starter .ocfoliage and opens its tab,
+    // reusing cbCreateFoliageType() rather than duplicating its write-then-open logic (see that
+    // function's own comment for why it is unconditional and what it writes). The only thing this
+    // wrapper adds is WHERE it lands: cbCreateFoliageType() writes into cbSelectedDir_, the Content
+    // Browser's currently browsed folder, which from this panel could be anything -- read-only engine
+    // content, some deeply nested subfolder, or empty. Content/Foliage is created if needed and the
+    // browser is pointed at it first, so a click here always lands somewhere sensible instead of
+    // wherever the browser last happened to be. cbCreateFoliageType() itself already refreshes the
+    // palette on success, so a freshly created type is paintable on this very frame.
+    void foliagePanelCreateType() {
+        if (!project_.valid()) return;
+        const std::filesystem::path dir = std::filesystem::path(project_.contentDir()) / "Foliage";
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        cbNavigate(dir.string());
+        cbCreateFoliageType();
+    }
+
     void buildFoliageModePanel() {
         if (foliagePalette_.empty()) {
-            ImGui::TextWrapped("No foliage types found. Content Browser: + Add > New Foliage Type, "
-                               "point it at an imported mesh, then reopen this mode.");
+            ImGui::TextWrapped("No foliage types are authored in this project yet, so Foliage mode "
+                               "has nothing to paint.");
+            ImGui::Spacing();
+            if (ImGui::Button("Create Foliage Type", ImVec2(-1, 0))) foliagePanelCreateType();
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Writes a starter .ocfoliage into Content/Foliage and opens its "
+                                  "tab -- the palette refreshes as soon as it's saved.");
             return;
         }
         ImGui::TextDisabled("PALETTE");
@@ -20752,8 +20828,11 @@ private:
                         cands.reserve(surfaceMaterials_.size());
                         for (const auto& kv : surfaceMaterials_) {
                             if (!kv.second) continue;   // interned but no .ocmat loaded behind it
-                            const char* nm = aver_scene_material_name(kv.first);
-                            cands.push_back({nm && *nm ? nm : "(unnamed)",
+                            // `matName`, not `nm`: this Details branch's own entity-name `nm` (set
+                            // above, from selEntity_) is still in scope here, and this shadowed it
+                            // (C4456) despite naming an unrelated thing -- a MATERIAL's display name.
+                            const char* matName = aver_scene_material_name(kv.first);
+                            cands.push_back({matName && *matName ? matName : "(unnamed)",
                                              static_cast<u64>(static_cast<u32>(kv.first))});
                         }
                         std::sort(cands.begin(), cands.end(),
@@ -23642,9 +23721,9 @@ private:
     // scale range, weight, randomizeYaw, collisionRadiusCm, alignToNormal), now lives in the loaded
     // fmt::OcFoliageData itself, authored from its own FoliageTypeEditor tab, rather than as ad hoc
     // fields shared by the WHOLE palette at once -- see OcFoliage.hpp for the format and why this
-    // split makes a foliage type a real, reusable asset instead of a global brush setting. Empty
-    // means the mode cannot be entered at all, and editorModeAvailable says why -- which is the
-    // honest behaviour for a paint mode with nothing to paint.
+    // split makes a foliage type a real, reusable asset instead of a global brush setting. Empty no
+    // longer refuses mode entry -- see editor::foliageModeGate (FoliageTypeEditor.hpp) -- it means
+    // buildFoliageModePanel() shows a create-a-type empty state instead of the palette list.
     struct FoliageSpecies {
         std::string name;         // display name, the file stem
         std::string assetPath;    // the .ocfoliage this came from -- opened by the palette's Edit button
@@ -23689,13 +23768,14 @@ private:
                 // Create Landscape button when none is resident; every tool inside it is still gated
                 // on landscapeLoaded_ by that same early return.
                 return true;
-            case EditorMode::Foliage:
-                if (!landscapeLoaded_)
-                    return no("Foliage paints onto terrain, and this level has no landscape section.");
-                if (foliagePalette_.empty())
-                    return no("No foliage types available. Create one from the Content Browser's "
-                              "+ Add > New Foliage Type first.");
+            case EditorMode::Foliage: {
+                // See editor::foliageModeGate (FoliageTypeEditor.hpp) for why an empty palette no
+                // longer refuses entry, and for the headless test covering both branches.
+                const editor::FoliageModeGate gate =
+                    editor::foliageModeGate(landscapeLoaded_, foliagePalette_.empty());
+                if (!gate.available) return no(gate.whyNot);
                 return true;
+            }
 #else
             case EditorMode::Landscape:
             case EditorMode::Foliage:
