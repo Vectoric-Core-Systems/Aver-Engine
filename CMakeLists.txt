@@ -1,5 +1,14 @@
 cmake_minimum_required(VERSION 3.24)
-project(AverEngine VERSION 0.5.0 LANGUAGES C CXX RC)
+project(AverEngine VERSION 0.6.0 LANGUAGES C CXX RC)
+
+# THE FULL ENGINE VERSION IS 0.6.0-1, and the "-1" cannot live in project() above: CMake accepts only
+# numeric components there. So the suffix is kept here and appended wherever the version reaches the
+# binaries (modules/core/CMakeLists.txt). The split is deliberate: upgrade::parseVersion stops at '-' by
+# design ("the suffix is not ours to interpret"), so series checks and upgrade planning see 0.6.0, while
+# every CREATEDWITH/ENGINE stamp and the UI record the full 0.6.0-1.
+# scripts/stage-payload.ps1 and scripts/publish-release.ps1 read only the NUMERIC part of project(); teach
+# them this suffix before cutting a release from this series, or the payload and tag will say 0.6.0.
+set(AVER_VERSION_SUFFIX "-1")
 
 # ---------------------------------------------------------------------------
 # Aver Engine — permissively-licensed, modular 3D engine (see docs/ARCHITECTURE.md).
@@ -198,7 +207,7 @@ if(MSVC)
     _CRT_SECURE_NO_WARNINGS)
 endif()
 
-message(STATUS "Aver Engine ${PROJECT_VERSION} | D3D12=${AVER_RHI_D3D12} D3D11=${AVER_RHI_D3D11} Vulkan=${AVER_RHI_VULKAN}")
+message(STATUS "Aver Engine ${PROJECT_VERSION}${AVER_VERSION_SUFFIX} | D3D12=${AVER_RHI_D3D12} D3D11=${AVER_RHI_D3D11} Vulkan=${AVER_RHI_VULKAN}")
 
 # ---- Third-party (permissively-licensed) ----
 if(AVER_ENABLE_UI)
