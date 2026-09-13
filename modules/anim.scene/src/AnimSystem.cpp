@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 namespace aver::anim {
 
@@ -83,13 +84,35 @@ const fmt::OcAnimation* AnimSystem::clip(u64 objectId) {
 }
 
 void AnimSystem::clear() {
+    // REENTRANCY GUARD. Firing "_End" below runs the host's notify sink, which is arbitrary code (a
+    // graph node, in practice) -- if it reacts by calling clear() again, that reentrant call must do
+    // nothing at all: proceeding would drop clips_ out from under THIS call's loop just below, which
+    // is still reading clock.asset -- a pointer into clips_ -- for every entry it has not reached yet.
+    if (clearing_) return;
+    clearing_ = true;
+
+    // LEAK (e): see the header comment on both this method and stepNotifyStates. A reload drops
+    // every clock outright, and any notify state still open under one (a hit window a graph opened,
+    // say) would vanish with no "_End" ever telling that graph it's over.
+    //
+    // MOVED OUT, not iterated in place. The guard above stops the notify sink from clearing clips_
+    // or skeletons_ mid-loop, but it does not stop it touching clocks_ ITSELF through some other
+    // call (a fresh animator ticked from inside the callback, say) -- and inserting into the map
+    // this loop is walking would be exactly the iterator invalidation tick()'s own pruning loop
+    // avoids by erasing as it goes. Emptying the member first means any such call lands on a clean,
+    // empty map instead of one mid-iteration.
+    auto closing = std::move(clocks_);
+    clocks_.clear();
+    for (auto& [e, clock] : closing) closeAllOpen(e, clock);
+
     skeletons_.clear();
     clips_.clear();
     posed_.clear();
-    // The clock history goes with the clips it refers to. Keeping it would have the first tick after
-    // a project reload compare against times measured in a world that no longer exists.
-    clocks_.clear();
+    // Reset AFTER the fires above, matching notifiesFired()'s own contract ("since the last
+    // clear()") -- the forced Ends just delivered belong to the epoch that ended, not the one
+    // starting.
     fired_ = 0;
+    clearing_ = false;
 }
 
 void AnimSystem::tick(scene::World& world, f32 dt) {

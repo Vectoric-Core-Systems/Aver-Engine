@@ -127,6 +127,15 @@ public:
     const fmt::OcAnimation* clip(u64 objectId);
 
     // Drops every cached asset and pose. Call when a project closes or content changes on disk.
+    //
+    // ALSO CLOSES ANY NOTIFY STATE STILL OPEN, firing its "_End" first -- the fifth way an open
+    // window leaks, and the one none of stepNotifyStates' four (see its own comment) can reach: a
+    // reload drops every clock outright, with no clip switch, no destroy and no later tick for any
+    // of those four to hang a close off of. Verified safe to fire rather than merely documented
+    // around: BOTH real callers (GameContent::adopt, SandboxApp::rebuildContentIndex) run at
+    // PROJECT-OPEN, before the old level's entities are torn down and before a new one is spawned --
+    // never at engine or world teardown -- so the sink this reaches is exactly as alive as it is on
+    // an ordinary tick, and staying silent here would BE the leak, not a way of avoiding one.
     void clear();
 
     u32 loadedSkeletons() const { return static_cast<u32>(skeletons_.size()); }
@@ -214,6 +223,9 @@ private:
     //       `endT` below), and a wrapped step's tail segment always runs up to `c.duration`, so a
     //       clamped end point is always inside it. No separate "detect a wrap" branch exists because
     //       none is needed once the end point cannot outrun the clip it belongs to.
+    //   (e) a full reload dropping every clock outright -- NOT closed here, because there is no
+    //       ClipStep for a reload to reuse this crossing math with. Closed in clear() instead; see
+    //       its own comment for why firing there is safe rather than merely documented as unsafe.
     void stepNotifyStates(scene::Entity e, const fmt::OcAnimation& c, const ClipStep& s, NotifyClock& clock);
     // Fires one "<Name>_Begin" or "<Name>_End" through the sink and counts it, exactly like `deliver`
     // does for an instant notify -- including doing NOTHING when no sink is installed, so installing
@@ -234,6 +246,10 @@ private:
     void* poseModUser_ = nullptr;
     u64 fired_ = 0;
     u32 attachmentsPlaced_ = 0;
+    // Set for the duration of clear() itself, so a notify sink that reacts to a forced "_End" by
+    // calling clear() again -- reentrantly, from inside the loop clear() is still running -- does
+    // nothing rather than clearing clips_/skeletons_ out from under that still-in-flight loop.
+    bool clearing_ = false;
     // Reused across entities and ticks so a frame of notifies costs no allocation after the first.
     std::vector<u32> crossed_;
 };
