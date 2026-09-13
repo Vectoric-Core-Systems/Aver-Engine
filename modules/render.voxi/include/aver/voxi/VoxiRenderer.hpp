@@ -58,11 +58,29 @@ public:
     // The ReSTIR-GI poison debug view (Part 2's non-finite guards, voxi_restir.hlsli): on, it paints
     // an unmistakable colour per guard wherever one fires this frame, instead of touching the scene
     // at all -- unlike setDebugView above, which REPLACES the whole scene with a raymarch, this rides
-    // the existing giMode==1 pixel shaders and only overrides their own return value, so it needs no
-    // separate suppressesScene()-style plumbing. See giRestirIndirect's own POISON DEBUG VIEW comment
-    // for the legend, and gGiRestirParams.w (the repurposed cbuffer slot this forwards through) for
-    // how it reaches the shader. Reachable by hand via the console: `set voxi.giPoisonView true`.
+    // the existing PSMainVoxi/PSRayDriven pixel shaders and only overrides their own return value, so
+    // it needs no separate suppressesScene()-style plumbing. Seven of its colours are painted only
+    // inside giRestirIndirect (giMode==1); an eighth, violet (B1/F5), is painted directly in
+    // PSMainVoxi/PSRayDriven for the ray-traced specular term's own ceiling hit and fires under either
+    // giMode. See giRestirIndirect's own POISON DEBUG VIEW comment (and, for violet,
+    // aver_IsGiRestirPoisonColour just above PSMainVoxi in voxi.hlsl) for the legend, and
+    // gGiRestirParams.w (the repurposed cbuffer slot this forwards through, published unconditionally
+    // now -- see beginShadowHistory's own F5 comment) for how it reaches the shader. Reachable by hand
+    // via the console: `set voxi.giPoisonView true`.
     void setGiPoisonView(bool on);
+
+    // LIVE A/B SWITCH for the NRD camera-contract fix in beginShadowHistory (see that function's own
+    // comment on its NRD block for the mechanism and the third_party citations). Default OFF, i.e.
+    // bit-identical to the fixed behaviour for anyone who never touches this. ON reinstates the
+    // OLD, WRONG pre-fix encoding -- identity worldToView, the combined viewProj for viewToClip,
+    // read from LAST frame's curViewProj_/prevViewProj_ rather than this frame's fresh camera -- so
+    // the user can compare the two by hand, on the live editor, with no rebuild. NEVER a setting to
+    // leave on: it exists only so the fix's effect is provable, not because the old encoding is ever
+    // preferable. Toggling it EITHER way resets NRD's history on the next frame (see the .cpp) --
+    // the two encodings' notions of "the previous camera" are shaped differently, and blending one
+    // denoiser history across the switch would silently mix them. Reachable by hand via the console:
+    // `set voxi.nrdLegacyCamera true`.
+    void setNrdLegacyCamera(bool on);
 
     // ---- per-history reset commands, each a plain bool flip -- NO reallocation, ever ----
     // Driven from the console (resetgihistory/resetrthistory/resetaohistory/resetnrdhistory/
@@ -1059,8 +1077,11 @@ private:
         // writes -- shares rtHistWriteIdx_'s cadence (see beginShadowHistory) since both flip in the
         // same lockstep whenever ray tracing is active. w = the ReSTIR-GI poison debug view
         // (giPoisonView_ / setGiPoisonView); was "spare" -- a repurposed bit, not a new field, so
-        // this struct's size and every other field's offset are unchanged. See beginShadowHistory
-        // for where this is filled and voxi_restir.hlsli's giRestirIndirect for the shader side.
+        // this struct's size and every other field's offset are unchanged. Published unconditionally,
+        // near the top of beginShadowHistory, so it reaches PSMainVoxi/PSRayDriven's OWN violet
+        // specular-ceiling marker (B1/F5, voxi.hlsl) on every giMode, not only the frames that reach
+        // this comment's giRestirWanted() block further down -- see beginShadowHistory's own F5
+        // comment for why. See voxi_restir.hlsli's giRestirIndirect for the giMode==1 shader side.
         f32 giRestirParams[4] = {};
     } cb_;
 
@@ -1333,6 +1354,28 @@ private:
     u32                   nrdFrame_   = 0;
     bool                  nrdWarnedEncoding_ = false;
     bool                  nrdWarnedMsaa_     = false;
+    // ---- NRD's OWN previous camera, separate from curViewProj_/prevViewProj_ ----
+    // Those two describe the COMBINED viewProj every other reprojection consumer in this file wants;
+    // NRD needs the FACTORISED pair (CameraFactor.hpp), a different shape, so it keeps its own
+    // latch rather than reusing theirs -- see beginShadowHistory's NRD block for where these are
+    // read and written. Row-major, same layout as viewProj itself (so a memcpy into
+    // FrameSettings::worldToViewPrev/viewToClipPrev is exactly as direct as into worldToView/
+    // viewToClip). Valid only once nrdPrevCameraValid_ is true: latched after a frame's
+    // FrameSettings were built from a SUCCESSFULLY FACTORISED camera, and invalidated both by a
+    // factorisation failure and by beginShadowHistory's own skipped-frame branch (shadowHistoryActive()
+    // false) -- see each site's own comment for why.
+    f32                   nrdPrevWorldToView_[16] = {};
+    f32                   nrdPrevViewToClip_[16]  = {};
+    bool                  nrdPrevCameraValid_     = false;
+    // Set the first time CameraFactor::factor() rejects this frame's camera (or dev_->camera() has
+    // none to give) while the legacy A/B switch is off -- see beginShadowHistory's own comment for
+    // why that frame skips the NRD dispatch entirely rather than falling back to a wrong encoding.
+    // Warned once for the same reason nrdWarnedMsaa_ is: a condition that cannot self-heal by
+    // waiting would just repeat the same WARN every frame.
+    bool                  nrdWarnedCameraFactor_ = false;
+    // voxi.nrdLegacyCamera's live backing store -- see setNrdLegacyCamera's own comment (VoxiRenderer.hpp)
+    // for what ON reinstates and why toggling either way resets NRD's history.
+    bool                  nrdLegacyCamera_ = false;
     // Set the first time applyReblurTuning() fails while nrd_ reports itself valid -- a real error
     // (NRD rejected the settings), not the ordinary "not created yet" case setReblurTuning() already
     // no-ops on silently. Warned once, same shape as nrdWarnedEncoding_/nrdWarnedMsaa_ above: this can

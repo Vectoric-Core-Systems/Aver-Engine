@@ -1205,6 +1205,16 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     //   GREEN   (0,1,0)   -- NEW: the NRD-denoised readback hit the same ceiling (giPoisonNrdCeilHit,
     //                        just above) -- REBLUR's own accumulation can push an already-hot value
     //                        higher still before this pixel ever sees it.
+    //
+    //   AN EIGHTH COLOUR LIVES OUTSIDE THIS FUNCTION (B1/F5): voxi.hlsl's PSMainVoxi/PSRayDriven paint
+    //   VIOLET (0.55,0,1) over the ray-traced SPECULAR indirect term's own ceiling hit, gated by this
+    //   same gGiRestirParams.w flag but NOT by giMode -- it fires under either diffuse estimator,
+    //   since the specular ray this checks has nothing to do with which of giRestirIndirect/
+    //   coneTracedIndirect answered the diffuse bounce. It is applied at each pixel shader's own final
+    //   output, AFTER this function has already returned, so it cannot interfere with the seven-way
+    //   precedence immediately below -- see aver_IsGiRestirPoisonColour's own comment (voxi.hlsl, just
+    //   above PSMainVoxi) for how it stays subordinate to whichever of these seven colours this
+    //   function itself returns.
     if (gGiRestirParams.w > 0.5) {
         if (giPoisonStoreHit)     return float3(1.0, 0.0, 1.0);
         if (nonFiniteCandidate)   return float3(0.0, 1.0, 1.0);

@@ -376,6 +376,15 @@ inline std::string varTooltipText(const ConsoleVar& v) {
 // reassert makes it live" idiom occlusion.debugForceWaitIdle already uses.
 inline bool& consoleGiPoisonViewSlot() { static bool v = false; return v; }
 
+// The NRD legacy-camera A/B switch's live source of truth -- the SAME raw-slot idiom as
+// consoleGiPoisonViewSlot() directly above and for the identical reason: VoxiRenderer::
+// setNrdLegacyCamera is private renderer state (a toggle on an internal camera-factorisation path,
+// VoxiRenderer::beginShadowHistory) with no path through voxi::Renderer::Settings/setSettings, so
+// this table cannot stage it as an ordinary dial. Written by `set voxi.nrdLegacyCamera` and
+// reasserted onto the live voxiRenderer_ once a frame from SandboxApp.cpp's onUpdate, right beside
+// the voxiRenderer_.setGiPoisonView(consoleGiPoisonViewSlot()) call this mirrors.
+inline bool& consoleNrdLegacyCameraSlot() { static bool v = false; return v; }
+
 // Tier fields (msaa, globalIllumination, rayTracing, pathTracing, meshShaders) go through
 // tierSetters; everything setSettings derives FROM a tier goes through dialSetters. See
 // ConsoleBatch's own comment for why the split is closures rather than two struct copies.
@@ -474,8 +483,8 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "default. The tonemap is already flat white by about x = 4-5, so a value pinned at the "
         "ceiling paints solid white -- lowering this can remove a white patch caused by that, but it "
         "also dims any legitimately bright bounce near the same number, and there is no way to tell "
-        "the two apart from this dial alone. Compare by hand; voxi.giPoisonView's red/green paint "
-        "exactly which pixels are hitting this ceiling (engine clamps to [0.1,256])",
+        "the two apart from this dial alone. Compare by hand; voxi.giPoisonView's red/green/violet "
+        "paint exactly which pixels are hitting this ceiling (engine clamps to [0.1,256])",
         []{ return vF32(Renderer::get().settings().giRadianceCeiling); },
         [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->giRadianceCeiling = n; }); }});
     // ---- refraction: how a translucent surface bends what is behind it (Settings::refractionMode's
@@ -529,22 +538,47 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         []{ return vU32(Renderer::get().settings().giMode); },
         [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->giMode = n; }); }});
     // NOT a Settings field -- see consoleGiPoisonViewSlot()'s own comment for why this is the raw-slot
-    // idiom rather than an ordinary dialSetters entry. giMode 1 (ReSTIR) only: the guards this paints
-    // live in voxi_restir.hlsli's giRestirIndirect, which giMode 0 never calls.
+    // idiom rather than an ordinary dialSetters entry. SEVEN of the eight colours below are giMode 1
+    // (ReSTIR) only: those guards live in voxi_restir.hlsli's giRestirIndirect, which giMode 0 never
+    // calls. The eighth, VIOLET, is NOT giMode-gated (B1/F5, added by the build/shader-safety review):
+    // it is painted directly in voxi.hlsl's PSMainVoxi/PSRayDriven over the ray-traced specular
+    // indirect term's own AVER_VOX_MAXRAD ceiling hit, which exists under either diffuse estimator --
+    // see aver_IsGiRestirPoisonColour's own comment (voxi.hlsl, just above PSMainVoxi) for the
+    // precedence between the two families.
     t.push_back({"voxi.giPoisonView", VarType::Bool, false,
-        "ReSTIR-GI poison debug view (giMode 1 only): paints an unmistakable colour over any pixel "
-        "where one of voxi_restir.hlsli's guards fired THIS frame -- magenta = the store-time "
-        "reservoir guard (the one that matters most), cyan = a candidate-radiance clamp, yellow = the "
-        "target-pdf guard, orange = the pre-existing final-estimate guard, blue = the NRD-readback "
-        "guard (these five are all non-finite/NaN corruption); red = the raw estimate hit the "
-        "voxi.giRadianceCeiling clamp while still finite, green = the NRD-denoised readback hit the "
-        "same ceiling -- these last two are WHERE a white patch's cause lives, not a bug: a non-finite "
-        "guard above always outranks them at the same pixel. All colours zero (the scene renders "
-        "normally) means no guard is firing.",
+        "ReSTIR-GI poison debug view: paints an unmistakable colour over any pixel where one of "
+        "voxi_restir.hlsli's guards fired THIS frame -- magenta = the store-time reservoir guard (the "
+        "one that matters most), cyan = a candidate-radiance clamp, yellow = the target-pdf guard, "
+        "orange = the pre-existing final-estimate guard, blue = the NRD-readback guard (these five are "
+        "all non-finite/NaN corruption); red = the raw estimate hit the voxi.giRadianceCeiling clamp "
+        "while still finite, green = the NRD-denoised readback hit the same ceiling -- these last two "
+        "are WHERE a white patch's cause lives, not a bug: a non-finite guard above always outranks "
+        "them at the same pixel. These seven are giMode 1 (ReSTIR) only. An EIGHTH colour, violet, is "
+        "NOT giMode-gated: it marks the ray-traced specular indirect term's own ceiling hit "
+        "(voxi.hlsl's PSMainVoxi/PSRayDriven), which exists under either diffuse estimator. All "
+        "colours zero (the scene renders normally) means no guard is firing.",
         []{ return vBool(consoleGiPoisonViewSlot()); },
         [](ConsoleBatch& b, VarValue v){
             const bool on = v.as.b;
             b.deviceSetters.push_back([on](rhi::IDevice&){ consoleGiPoisonViewSlot() = on; });
+        }});
+    // NOT a Settings field, SAME SHAPE as voxi.giPoisonView directly above and for the identical
+    // reason -- see consoleNrdLegacyCameraSlot()'s own comment. [live]: toggling this resets NRD's
+    // history on the very next frame (VoxiRenderer::setNrdLegacyCamera's own comment has the
+    // mechanism), which is what lets an A/B comparison be made by hand without a rebuild or a
+    // project reload.
+    t.push_back({"voxi.nrdLegacyCamera", VarType::Bool, false,
+        "A/B switch for the NRD camera-contract fix in VoxiRenderer::beginShadowHistory (see its own "
+        "comment on the NRD block for the mechanism this reinstates). Default OFF is the FIXED "
+        "behaviour: NRD is handed this frame's camera, freshly read and factorised into a real "
+        "worldToView/viewToClip pair. ON REINSTATES A KNOWN-WRONG ENCODING FOR COMPARISON ONLY: "
+        "identity worldToView and last frame's combined viewProj standing in for viewToClip -- the "
+        "exact pre-fix behaviour, never a setting to leave on. Toggling either way resets NRD's "
+        "denoiser history on the next frame, so the two encodings are never blended into one image.",
+        []{ return vBool(consoleNrdLegacyCameraSlot()); },
+        [](ConsoleBatch& b, VarValue v){
+            const bool on = v.as.b;
+            b.deviceSetters.push_back([on](rhi::IDevice&){ consoleNrdLegacyCameraSlot() = on; });
         }});
     // DIAL, NOT A TIER, and it reads back what is ACTUALLY running rather than what was asked for --
     // the same honesty voxi.giMode above documents at length, and for a closely related reason. NRD

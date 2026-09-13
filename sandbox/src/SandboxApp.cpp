@@ -3894,6 +3894,10 @@ public:
             // the same way occlusion.debugForceWaitIdle already is -- see
             // editor::consoleGiPoisonViewSlot()'s own comment.
             voxiRenderer_.setGiPoisonView(editor::consoleGiPoisonViewSlot());
+            // voxi.nrdLegacyCamera: identical idiom, right beside the toggle it mirrors -- see
+            // editor::consoleNrdLegacyCameraSlot()'s own comment and VoxiRenderer::setNrdLegacyCamera's
+            // for what this reasserts and why the setter itself only acts on an actual change.
+            voxiRenderer_.setNrdLegacyCamera(editor::consoleNrdLegacyCameraSlot());
             // --no-gi-cone: see setGiConeTraceOff's own comment. Applied every frame, same as
             // setDebugView beside it, so the toggle takes effect the instant the flag is set rather
             // than only at attach time.

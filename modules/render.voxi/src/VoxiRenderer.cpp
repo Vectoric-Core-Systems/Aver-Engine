@@ -4,6 +4,7 @@
 #include "aver/voxi/VoxiRenderer.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/Math.hpp"   // light-frustum fit: Vec3 / Mat4::lookAtLH
+#include "aver/voxi/CameraFactor.hpp"   // beginShadowHistory's NRD block: recovers worldToView/viewToClip
 #include "aver/pbr/MaterialGraphRegistry.hpp"
 #include "aver/pbr/MaterialSystem.hpp"
 #include "aver/pbr/PbrShaders.hpp"
@@ -620,6 +621,26 @@ void VoxiRenderer::setDebugView(bool on) { debugView_ = on; }
 
 void VoxiRenderer::setGiPoisonView(bool on) { giPoisonView_ = on; }
 
+// See the header's own comment for what this switch reinstates and why. Guarded on an actual CHANGE
+// (unlike setGiPoisonView above) because SandboxApp reasserts this from the console slot every frame
+// regardless of whether the user just touched it (the same per-frame idiom
+// editor::consoleGiPoisonViewSlot() uses) -- without the guard, EVERY frame would force an NRD
+// history reset and no denoiser history would ever accumulate past one frame.
+void VoxiRenderer::setNrdLegacyCamera(bool on) {
+    if (on == nrdLegacyCamera_) return;
+    nrdLegacyCamera_ = on;
+    // The two encodings' previous cameras are shaped differently (the legacy one is last frame's
+    // COMBINED viewProj; the fixed one is a factorised pair) -- reprojecting one frame's history
+    // against the OTHER encoding's idea of "the previous camera" would silently blend the two rather
+    // than compare them, so both the texture history and this renderer's own latch of NRD's previous
+    // camera reset together, on the very frame the switch flips.
+    nrd_.forceHistoryReset();
+    nrdPrevCameraValid_ = false;
+    AVER_INFO("[NRD] camera encoding switched to {} by console command (voxi.nrdLegacyCamera); "
+              "history reset on the next frame so the two encodings are never blended together.",
+              on ? "the OLD, WRONG pre-fix encoding (comparison only)" : "the fixed encoding");
+}
+
 // See the header's own comment for the shape every one of these five shares: flip an existing
 // validity flag, touch no texture/buffer handle, log through AVER_INFO so the bisection survives even
 // if the user closes the editor before reading the console's own scrollback.
@@ -941,15 +962,6 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
     // viewParams's comment (VoxiRenderer.hpp) for why .y is safe to repurpose. Sent every frame from
     // this already-per-frame block, same as viewParams[0] directly above.
     cb_.viewParams[1] = settings_.giRadianceCeiling;
-    // GATED ON rtActive_, NOT ON THE SETTING ALONE. The shader traces these against the same
-    // acceleration structure the shadow ray uses, and there is not one on a frame that built no
-    // TLAS -- publishing a non-zero count then would have every pixel trace into nothing and read
-    // back "sky visible everywhere", which is BRIGHTER than the cone estimate it replaced and would
-    // look like this feature making the bug worse. Zero here means the shader keeps the cone
-    // gather's own occlusion, which is the correct fallback and the pre-existing behaviour.
-    cb_.ambientParams[0] = rtActive_ ? static_cast<f32>(std::min(settings_.giSkyOcclusionRays,
-                                                                 kMaxShadowRays))
-                                     : 0.0f;
     // y IS THE COHERENCE TILE EDGE, and it is sent whether or not the rays are on: the shader divides
     // the pixel coordinate by it unconditionally, so a 0 arriving here would be a division by zero in
     // every pixel rather than a disabled feature. max(1) is the identity, not a guard against a
@@ -977,6 +989,23 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
     // CPU-only bookkeeping -- starting the scope here keeps its inclusive time real GPU work end to end.
     rhi::ScopedGpuStat voxiGpuStat(ctx, "Voxi GI update");
     buildAccelerationStructures(ctx);   // sets rtActive_, which beginShadowHistory reads
+    // GATED ON rtActive_, NOT ON THE SETTING ALONE. The shader traces these against the same
+    // acceleration structure the shadow ray uses, and there is not one on a frame that built no
+    // TLAS -- publishing a non-zero count then would have every pixel trace into nothing and read
+    // back "sky visible everywhere", which is BRIGHTER than the cone estimate it replaced and would
+    // look like this feature making the bug worse. Zero here means the shader keeps the cone
+    // gather's own occlusion, which is the correct fallback and the pre-existing behaviour.
+    //
+    // MOVED HERE BY THE BUILD/SHADER-SAFETY REVIEW (audit finding F4): this used to sit in the
+    // CPU-only block above, BEFORE buildAccelerationStructures() ran, so it read LAST frame's
+    // rtActive_ instead of the one this call just computed -- a frame where ray tracing turns off
+    // (or the scene goes briefly empty, leaving no TLAS) still published a nonzero ray count, which
+    // is exactly the "sky visible everywhere, BRIGHTER" case the comment above already warned
+    // against. rtActive_ is fresh as of the line immediately above; cb_ is not uploaded
+    // (setConstantBuffer) until deep inside shadowPass()/scenePass(), well below this.
+    cb_.ambientParams[0] = rtActive_ ? static_cast<f32>(std::min(settings_.giSkyOcclusionRays,
+                                                                 kMaxShadowRays))
+                                     : 0.0f;
     beginShadowHistory(ctx);
     shadowPass(ctx);                    // fitCascades(), called from here, fills curViewProj_
     if (giEnabled()) {
@@ -3333,7 +3362,55 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
     // Same reasoning again: giRestirParams.x says whether t12/u6/u7 are bound to real resources this
     // frame, and must not still read 1.0 from a previous frame once this one returns early below.
     cb_.giRestirParams[0] = 0.0f;
-    if (!shadowHistoryActive()) return;
+    // ---- F5: THE POISON-VIEW FLAG, PUBLISHED HERE SO IT REACHES giMode 0 TOO ----
+    // This USED TO be written only inside the giSurfPosHist_/giSurfNrmHist_ block further down,
+    // which runs only when giRestirWanted() -- i.e. only in giMode 1 (RTXDI ReSTIR GI). PSMainVoxi
+    // and PSRayDriven read gGiRestirParams.w for their OWN poison-colour paint (the ray-traced
+    // specular ceiling clamp, voxi.hlsl -- see F5 in the audit this fixes) regardless of which giMode
+    // is running, and those shaders execute on every frame the scene renders normally, not only the
+    // frames shadowHistoryActive() lets reach the rest of this function. Publishing giPoisonView_
+    // unconditionally, this early, means giMode 0 -- the default -- gets a live flag instead of
+    // whatever giMode 1 last left behind (0 if ReSTIR has never run this session, but a STALE stuck
+    // 1.0 the instant it has, since the block below would then stop updating it the moment giMode
+    // flips back to 0). The write further down, inside the giRestirWanted() block, is now redundant
+    // with this one and has been removed rather than kept as a silently-agreeing second source of
+    // truth for the same cbuffer field.
+    cb_.giRestirParams[3] = giPoisonView_ ? 1.0f : 0.0f;
+    if (!shadowHistoryActive()) {
+        // ---- F3: A SKIPPED FRAME MUST NOT LEAVE THE VALIDITY FLAGS TRUSTING FROZEN STATE ----
+        //
+        // Before this, rtHistValid_/giHistValid_ were set false only at init/resize/teardown/console
+        // resets -- NEVER on a frame that simply skipped (an empty TLAS build leaving rtActive_
+        // false, or the debug raymarch taking over the scene). Such a frame leaves every history
+        // texture and prevViewProj_/prevSceneViewport_ exactly as they were, while the validity flags
+        // still said "usable" -- so the NEXT active frame would reproject against a FROZEN camera as
+        // if it were one frame old, not however many frames were actually skipped. Setting both false
+        // here, exactly once per skipped frame (this function runs once per frame; this branch is the
+        // only place a skip is detected), makes the next active frame start from no history instead --
+        // one extra noisy frame, the same cost a resize or a console reset already pays, rather than a
+        // silently wrong reprojection.
+        //
+        // nrdPrevCameraValid_ (the NRD-specific previous-camera latch from CameraFactor -- see the NRD
+        // block below and its own comment) is invalidated for the identical reason: it is exactly as
+        // frozen as prevViewProj_ across the same gap, and NRD's own resetHistory already follows from
+        // !rtHistValid_ a few lines below (fs.resetHistory = fs.resetHistory || ... || !rtHistValid_),
+        // so demoting it here is the one extra flag that reasoning does not already cover for free.
+        //
+        // NOT resetGiHistory()/resetRtHistory(): those are the NAMED, user-facing console commands and
+        // each logs an AVER_INFO line -- calling them here would log every single skipped frame (an
+        // empty scene or a debug-view session could mean every frame) and would blur "the user asked
+        // for a reset" with "a skip made a reset unavoidable". This sets the same two flags directly,
+        // silently, because it is a structural invariant of a skipped frame, not a user action. See
+        // shadowHistoryActive()'s own comment for confirmation that in this project's steady state
+        // (ray tracing on, NRD on, no debug view, and therefore at least one draw building a non-empty
+        // TLAS every frame) this branch is never taken at all -- rtActive_ stays true, the four history
+        // textures stay allocated once ray tracing is on, and debugViewActive() stays false, so nothing
+        // here resets history on a frame that was not actually skipped.
+        rtHistValid_ = false;
+        giHistValid_ = false;
+        nrdPrevCameraValid_ = false;
+        return;
+    }
 
     const u32 writeIdx = rtHistWriteIdx_;
     const u32 readIdx  = 1 - writeIdx;
@@ -3394,10 +3471,11 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
         cb_.giRestirParams[0] = 1.0f;                       // t12/t13/u6/u7/u8 are bound this frame
         cb_.giRestirParams[1] = giHistValid_ ? 1.0f : 0.0f;  // ...and t12/t13 hold a real previous frame
         cb_.giRestirParams[2] = static_cast<f32>(writeIdx);  // this frame's reservoir array slice
-        // Was "spare" -- repurposed (not a new field; packing/size unchanged) as the ReSTIR-GI poison
-        // debug view toggle. See setGiPoisonView's own comment and giRestirIndirect's POISON DEBUG
-        // VIEW block (voxi_restir.hlsli) for what this drives.
-        cb_.giRestirParams[3] = giPoisonView_ ? 1.0f : 0.0f;
+        // giRestirParams[3] (the poison-view flag; was "spare", repurposed rather than a new field --
+        // see setGiPoisonView's own comment and giRestirIndirect's POISON DEBUG VIEW block,
+        // voxi_restir.hlsli, for what it drives) is published UNCONDITIONALLY near the top of this
+        // function now, not here -- see that site's own F5 comment for why giMode 0 needed the same
+        // flag this block used to be the only writer of.
         // u9, the radiance this frame hands NRD. Bound with the rest of the ReSTIR slots because
         // gGiRestirParams.x -- already set above -- is exactly the flag the shader's write is
         // guarded on, so the two can never disagree about whether the slot is real.
@@ -3454,98 +3532,191 @@ void VoxiRenderer::beginShadowHistory(rhi::IRenderContext& ctx) {
         const u32 tw = haveSize ? sizeDesc.width : 0u, th = haveSize ? sizeDesc.height : 0u;
         if (in.viewZ && in.motionVectors && in.normalRoughness && tw && th && nrd_.resize(tw, th)) {
             render::nrd::FrameSettings fs{};
-            // WORLD SPACE IS VIEW SPACE, AS FAR AS NRD IS TOLD, and that is a deliberate encoding
-            // rather than a missing matrix. NRD wants worldToView and viewToClip SEPARATELY; this
-            // renderer only ever receives the two combined (IDevice::camera hands back one viewProj,
-            // and curViewProj_/prevViewProj_ are what every other temporal consumer here reprojects
-            // with). Passing identity for worldToView and the full viewProj for viewToClip is
-            // self-consistent: NRD composes the two to reconstruct position, so the product it
-            // actually uses is unchanged, and IN_VIEWZ stays exactly what it always was -- clip.w,
-            // which IS the view-space Z of that same combined transform. What it costs is that any
-            // NRD feature reading view space ALONE would be reading world space; none of the ones
-            // REBLUR_DIFFUSE_OCCLUSION uses do, and this is the line to revisit first if a denoiser
-            // that does is ever added here.
-            fs.worldToView[0]     = fs.worldToView[5]     = fs.worldToView[10]     = fs.worldToView[15]     = 1.0f;
-            fs.worldToViewPrev[0] = fs.worldToViewPrev[5] = fs.worldToViewPrev[10] = fs.worldToViewPrev[15] = 1.0f;
-            std::memcpy(fs.viewToClip,     curViewProj_,  sizeof(fs.viewToClip));
-            std::memcpy(fs.viewToClipPrev, prevViewProj_, sizeof(fs.viewToClipPrev));
             fs.resourceWidth = fs.rectWidth  = tw;
             fs.resourceHeight = fs.rectHeight = th;
-            fs.frameIndex      = nrdFrame_++;
             fs.denoisingRange  = settings_.giMaxDistance > 1.0f ? settings_.giMaxDistance : 500000.0f;
-            // ---- THE SCALE CARRIES A SIGN *AND* A UNIT CONVERSION, AND THE UNIT WAS MISSING ----
+
+            // ---- THE FOURTH SILENT NRD CONTRACT BUG IN THIS BLOCK (beside the hit-distance unit,
+            // the normal/roughness packing, and the motionVectorScale unit below): worldToView and
+            // viewToClip were NEVER SEPARATE, and NRD does not treat them as interchangeable with
+            // their product ----
             //
-            // THE SIGN, which this comment used to be entirely about: the G-buffer's velocity is
-            // DESTINATION minus SOURCE (this frame's position minus last frame's, see
-            // averGBufferVelocity) and NRD reprojects by ADDING the motion vector to find where a
-            // pixel CAME FROM. Opposite conventions, hence negative.
+            // THE OLD COMMENT HERE CLAIMED "NRD composes the two to reconstruct position, so the
+            // product it actually uses is unchanged". THAT IS FALSE, verified against the vendored
+            // source rather than assumed. third_party/nrd/Source/InstanceImpl.cpp:384 runs
+            // DecomposeProjection on viewToClip ALONE -- never on a product -- to recover the
+            // projection's frustum AND to decide whether the scene reads as left- or right-handed
+            // (PROJ_LEFT_HANDED); :386-397 then conditionally negates row 2 of BOTH viewToClip and
+            // worldToView (worldToView via a transpose, a row negate, and a transpose back) depending
+            // on that one decision. With identity standing in for worldToView, the handedness verdict
+            // -- and therefore whether that flip happens at all -- was driven entirely by whatever
+            // rotation the camera happened to have baked into the COMBINED viewProj that frame, i.e.
+            // by which way the camera was facing, never by anything about the scene that could
+            // actually change it. REBLUR_TemporalAccumulation.cs.hlsl:88-89 reconstructs every
+            // pixel's CURRENT view-space position from viewToClip's frustum alone and rotates it into
+            // world space with gViewToWorld (worldToView's inverse); :144-163 reprojects the PREVIOUS
+            // position the identical way through gFrustumPrev/gWorldToViewPrev/gCameraDelta. Every one
+            // of those reads WORLD space when worldToView is identity -- so the reprojection, the
+            // plane-distance disocclusion test and the parallax term were all evaluated against wrong
+            // positions, worst exactly while the camera moves, which is when a denoiser has the most
+            // work to do.
             //
-            // THE UNIT, which was wrong for as long as this pass has existed. NRD consumes the vector
-            // as `float2 smbPixelUv = pixelUv + mv.xy` (REBLUR_TemporalAccumulation.cs.hlsl), where
-            // `pixelUv = (pixelPos + 0.5) * gRectSizeInv` -- a NORMALISED [0,1] UV. So NRD wants the
-            // motion in UV. averGBufferVelocity returns PIXELS (curPx - prevPx). Scaling by -1 alone
-            // therefore handed NRD a one-pixel camera movement as a ONE-UV jump: the entire screen.
+            // THE FIX has two parts. First, read THIS frame's camera FRESH (dev_->camera(), not
+            // curViewProj_ -- curViewProj_ is written by fitCascades(), called from shadowPass() AFTER
+            // this function returns, so on every steady frame it still holds LAST frame's camera; this
+            // was bug (a) in the audit that found this block, alongside the identity encoding as bug
+            // (b)). Second, factorise that combined matrix with CameraFactor
+            // (aver/voxi/CameraFactor.hpp) into the separate worldToView/viewToClip NRD actually reads,
+            // in the SAME row-major layout the combined viewProj already used here -- so this stays a
+            // straight memcpy into fs.worldToView/viewToClip, of two matrices instead of one matrix
+            // asked to be both.
             //
-            // WHAT THAT LOOKS LIKE, and it is the bug the user reported as "the white impression of
-            // the geometry is just burned into the screen": every reprojection lands nowhere near the
-            // pixel it describes, so the temporal history never lines up with the frame it is being
-            // blended into. Instead of decaying, stale geometry accumulates in place and burns in. It
-            // was never a ReSTIR defect -- it degrades the sky-occlusion denoiser identically, since
-            // both read this same CommonSettings.
-            //
-            // DIVIDE BY THE RECT, NOT THE RESOURCE. gRectSizeInv is the RENDERED rect; under dynamic
-            // resolution that is smaller than the allocation, and rectWidth/rectHeight above are
-            // already resolved to the right one for exactly this reason.
-            //
-            // THE THIRD UNIT BUG OF THIS KIND HERE, after the hit-distance constant that read metres
-            // as centimetres and the normal/roughness packing that read one layout as another. All
-            // three were silent, all three produced a confident wrong image, and none of them could
-            // fail a build. When a vendored library takes a number, find the line that CONSUMES it.
-            fs.motionVectorScale[0] = fs.rectWidth  ? -1.0f / static_cast<f32>(fs.rectWidth)  : -1.0f;
-            fs.motionVectorScale[1] = fs.rectHeight ? -1.0f / static_cast<f32>(fs.rectHeight) : -1.0f;
-            fs.motionVectorScale[2] =  0.0f;   // the engine's velocity carries no Z
-            fs.resetHistory = nrd_.historyIsStale() || !rtHistValid_;
-            // ReSTIR GI's radiance only exists when ReSTIR GI is the estimator, so the diffuse
-            // denoiser is selected only then. Handing NRD a denoiser whose input texture is blank
-            // does not fail -- it filters the blank and hands it back confidently, which is the most
-            // expensive way to be wrong available here.
-            //
-            // ---- REBLUR_DIFFUSE IS SELECTED NOW; WHAT USED TO KILL THE ADAPTER WAS THIS SEAM ----
-            //
-            // It removed the device, and the cause was never anything on this side of the call. The
-            // recorder resolved NRD's OUT_DIFF_HITDIST and OUT_DIFF_RADIANCE_HITDIST slots by
-            // indexing its PERMANENT POOL with ResourceDesc::indexInPool. NRD writes that field only
-            // for the two pool resource types; for every IN_*/OUT_* type it stays 0 and the resource
-            // is the integration's own to supply, looked up by resource TYPE -- which is exactly what
-            // NRD's reference integration does. So both outputs aliased permanent pool texture 0,
-            // a REBLUR instance's PREV_VIEWZ history, R32_SFLOAT.
-            //
-            // The occlusion denoiser survived that for as long as this pass has existed, which is why
-            // it read as "REBLUR_DIFFUSE is the problem": its output pass is compiled
-            // RWTexture2D<float>, so a one-channel write into a one-channel view faulted on nothing
-            // and merely corrupted NRD's own depth history. REBLUR_DIFFUSE's is RWTexture2D<float4>,
-            // and setUav builds the descriptor from the bound texture's format with no override, so
-            // that one bound four components to a one-component UAV -- DEVICE_REMOVED on the first
-            // recorded frame. The bisection was reporting the difference between float and float4,
-            // not between 15 dispatches and 34.
-            //
-            // THE EARLIER GUESS IN THIS COMMENT WAS WRONG and is recorded because it cost time:
-            // giRadiance_'s resource state was named as the next thing to look at. It is not
-            // implicated -- it has the same shape as the sky-occlusion signal, which works -- and no
-            // PIX capture was needed in the end, only NRD's own integration source.
-            //
-            // See Recorder's outDiffHitDistTex_/outDiffRadHitDistTex_ for the fix, and
-            // Denoiser::ReblurTuning for the hit-distance constants this signal also needed before
-            // REBLUR could do anything useful with it.
-            const bool giSignal = giRadiance_ && giRestirWanted();
-            const bool aoSignal = rtAoHitDist_ != 0;
-            const u32* which  = (giSignal && aoSignal) ? kNrdAoAndGiDenoisers
-                              : giSignal               ? kNrdGiDenoiser
-                                                       : kNrdAoDenoiser;
-            const u32  whichN = (giSignal && aoSignal) ? 2u : 1u;
-            if (nrd_.record(ctx, fs, in, which, whichN)) {
-                nrdOutput_   = nrd_.outputDiffuseHitDistance();
-                nrdGiOutput_ = nrd_.outputDiffuseRadianceHitDistance();
+            // voxi.nrdLegacyCamera (default OFF) reinstates the exact OLD, WRONG encoding below for an
+            // A/B comparison against this fix without a rebuild -- see its own console entry.
+            f32 camVp[16] = {}, camIvp[16] = {}, camEye[3] = {};
+            const bool haveCamera = dev_ && dev_->camera(camVp, camIvp, camEye);
+            bool cameraReady = false;
+            if (nrdLegacyCamera_) {
+                // EXACTLY today's pre-fix encoding, both halves of it: identity worldToView, and
+                // curViewProj_/prevViewProj_ (LAST frame's camera on every steady frame, not this
+                // frame's fresh one) for viewToClip -- reproducing bug (a) alongside bug (b) is the
+                // point of a faithful comparison, not an oversight.
+                fs.worldToView[0]     = fs.worldToView[5]     = fs.worldToView[10]     = fs.worldToView[15]     = 1.0f;
+                fs.worldToViewPrev[0] = fs.worldToViewPrev[5] = fs.worldToViewPrev[10] = fs.worldToViewPrev[15] = 1.0f;
+                std::memcpy(fs.viewToClip,     curViewProj_,  sizeof(fs.viewToClip));
+                std::memcpy(fs.viewToClipPrev, prevViewProj_, sizeof(fs.viewToClipPrev));
+                cameraReady = true;
+            } else if (haveCamera && CameraFactor::factor(camVp, fs.worldToView, fs.viewToClip)) {
+                // NRD keeps ITS OWN previous camera (nrdPrevWorldToView_/nrdPrevViewToClip_), latched
+                // below only once this frame's camera is known good. Deliberately separate from
+                // curViewProj_/prevViewProj_: those describe the COMBINED matrix every other
+                // reprojection consumer in this file wants, a different shape than the factorised pair
+                // NRD needs, so reusing them would still pair a factorised CURRENT camera with a
+                // combined PREVIOUS one.
+                const bool hadPrevCamera = nrdPrevCameraValid_;
+                if (hadPrevCamera) {
+                    std::memcpy(fs.worldToViewPrev, nrdPrevWorldToView_, sizeof(fs.worldToViewPrev));
+                    std::memcpy(fs.viewToClipPrev,  nrdPrevViewToClip_,  sizeof(fs.viewToClipPrev));
+                } else {
+                    // NO VALID PREVIOUS CAMERA YET -- the first frame NRD ever runs, or the first
+                    // active frame after beginShadowHistory's own skipped-frame branch invalidated the
+                    // latch above. Passing THIS frame's camera for both halves makes the reprojection a
+                    // no-op (zero parallax, zero motion) instead of reprojecting against an
+                    // uninitialised array, and fs.resetHistory below throws away whatever the texture
+                    // history still holds from before the gap regardless.
+                    std::memcpy(fs.worldToViewPrev, fs.worldToView, sizeof(fs.worldToViewPrev));
+                    std::memcpy(fs.viewToClipPrev,  fs.viewToClip,  sizeof(fs.viewToClipPrev));
+                }
+                std::memcpy(nrdPrevWorldToView_, fs.worldToView, sizeof(nrdPrevWorldToView_));
+                std::memcpy(nrdPrevViewToClip_,  fs.viewToClip,  sizeof(nrdPrevViewToClip_));
+                nrdPrevCameraValid_ = true;
+                fs.resetHistory = !hadPrevCamera;
+                cameraReady = true;
+            }
+
+            if (!cameraReady) {
+                // FACTORISATION FAILED, OR THE DEVICE HAD NO CAMERA TO GIVE, AND THE LEGACY SWITCH IS
+                // OFF. NEVER fall through to the old identity encoding silently -- that would be the
+                // exact bug this rewrite removes, just reappearing on an error path instead of every
+                // frame. This block already has an honest answer for "an input is missing this frame":
+                // the same one gbufWritten/tw/th/nrd_.resize() failing already take a little further up
+                // -- skip the dispatch entirely. nrdOutput_/nrdGiOutput_ stay at 0 (already reset above
+                // this function's early return), the shader's own GetDimensions() test already reads
+                // that as "not denoised this frame" through slots 14/15 (cleared just below this
+                // function), and forceHistoryReset() makes the NEXT successful frame reset rather than
+                // reproject through the gap. Logged once: a condition that cannot self-heal by waiting
+                // would just be noise repeated every frame.
+                if (!nrdWarnedCameraFactor_) {
+                    AVER_WARN("[NRD] this frame's camera did not factorise into a worldToView/"
+                              "viewToClip pair NRD can trust ({}); skipping the NRD dispatch this "
+                              "frame rather than handing it a wrong or stale camera encoding. Neither "
+                              "an orthographic nor a mirrored camera is something this engine's own "
+                              "call sites (SandboxApp.cpp, GameApp.cpp) produce, so this firing in "
+                              "practice means camera construction changed somewhere and this is the "
+                              "first symptom of it.",
+                              haveCamera ? "CameraFactor::factor rejected it" : "dev_->camera() had none to give");
+                    nrdWarnedCameraFactor_ = true;
+                }
+                nrd_.forceHistoryReset();
+                nrdPrevCameraValid_ = false;
+            } else {
+                fs.frameIndex = nrdFrame_++;
+                // ---- THE SCALE CARRIES A SIGN *AND* A UNIT CONVERSION, AND THE UNIT WAS MISSING ----
+                //
+                // THE SIGN, which this comment used to be entirely about: the G-buffer's velocity is
+                // DESTINATION minus SOURCE (this frame's position minus last frame's, see
+                // averGBufferVelocity) and NRD reprojects by ADDING the motion vector to find where a
+                // pixel CAME FROM. Opposite conventions, hence negative.
+                //
+                // THE UNIT, which was wrong for as long as this pass has existed. NRD consumes the
+                // vector as `float2 smbPixelUv = pixelUv + mv.xy` (REBLUR_TemporalAccumulation.cs.hlsl),
+                // where `pixelUv = (pixelPos + 0.5) * gRectSizeInv` -- a NORMALISED [0,1] UV. So NRD
+                // wants the motion in UV. averGBufferVelocity returns PIXELS (curPx - prevPx). Scaling
+                // by -1 alone therefore handed NRD a one-pixel camera movement as a ONE-UV jump: the
+                // entire screen.
+                //
+                // WHAT THAT LOOKS LIKE, and it is the bug the user reported as "the white impression of
+                // the geometry is just burned into the screen": every reprojection lands nowhere near
+                // the pixel it describes, so the temporal history never lines up with the frame it is
+                // being blended into. Instead of decaying, stale geometry accumulates in place and
+                // burns in. It was never a ReSTIR defect -- it degrades the sky-occlusion denoiser
+                // identically, since both read this same CommonSettings.
+                //
+                // DIVIDE BY THE RECT, NOT THE RESOURCE. gRectSizeInv is the RENDERED rect; under
+                // dynamic resolution that is smaller than the allocation, and rectWidth/rectHeight
+                // above are already resolved to the right one for exactly this reason.
+                //
+                // THE THIRD UNIT BUG OF THIS KIND HERE, after the hit-distance constant that read
+                // metres as centimetres and the normal/roughness packing that read one layout as
+                // another. All three were silent, all three produced a confident wrong image, and none
+                // of them could fail a build. When a vendored library takes a number, find the line
+                // that CONSUMES it.
+                fs.motionVectorScale[0] = fs.rectWidth  ? -1.0f / static_cast<f32>(fs.rectWidth)  : -1.0f;
+                fs.motionVectorScale[1] = fs.rectHeight ? -1.0f / static_cast<f32>(fs.rectHeight) : -1.0f;
+                fs.motionVectorScale[2] =  0.0f;   // the engine's velocity carries no Z
+                fs.resetHistory = fs.resetHistory || nrd_.historyIsStale() || !rtHistValid_;
+                // ReSTIR GI's radiance only exists when ReSTIR GI is the estimator, so the diffuse
+                // denoiser is selected only then. Handing NRD a denoiser whose input texture is blank
+                // does not fail -- it filters the blank and hands it back confidently, which is the
+                // most expensive way to be wrong available here.
+                //
+                // ---- REBLUR_DIFFUSE IS SELECTED NOW; WHAT USED TO KILL THE ADAPTER WAS THIS SEAM ----
+                //
+                // It removed the device, and the cause was never anything on this side of the call.
+                // The recorder resolved NRD's OUT_DIFF_HITDIST and OUT_DIFF_RADIANCE_HITDIST slots by
+                // indexing its PERMANENT POOL with ResourceDesc::indexInPool. NRD writes that field
+                // only for the two pool resource types; for every IN_*/OUT_* type it stays 0 and the
+                // resource is the integration's own to supply, looked up by resource TYPE -- which is
+                // exactly what NRD's reference integration does. So both outputs aliased permanent pool
+                // texture 0, a REBLUR instance's PREV_VIEWZ history, R32_SFLOAT.
+                //
+                // The occlusion denoiser survived that for as long as this pass has existed, which is
+                // why it read as "REBLUR_DIFFUSE is the problem": its output pass is compiled
+                // RWTexture2D<float>, so a one-channel write into a one-channel view faulted on nothing
+                // and merely corrupted NRD's own depth history. REBLUR_DIFFUSE's is
+                // RWTexture2D<float4>, and setUav builds the descriptor from the bound texture's format
+                // with no override, so that one bound four components to a one-component UAV --
+                // DEVICE_REMOVED on the first recorded frame. The bisection was reporting the
+                // difference between float and float4, not between 15 dispatches and 34.
+                //
+                // THE EARLIER GUESS IN THIS COMMENT WAS WRONG and is recorded because it cost time:
+                // giRadiance_'s resource state was named as the next thing to look at. It is not
+                // implicated -- it has the same shape as the sky-occlusion signal, which works -- and
+                // no PIX capture was needed in the end, only NRD's own integration source.
+                //
+                // See Recorder's outDiffHitDistTex_/outDiffRadHitDistTex_ for the fix, and
+                // Denoiser::ReblurTuning for the hit-distance constants this signal also needed before
+                // REBLUR could do anything useful with it.
+                const bool giSignal = giRadiance_ && giRestirWanted();
+                const bool aoSignal = rtAoHitDist_ != 0;
+                const u32* which  = (giSignal && aoSignal) ? kNrdAoAndGiDenoisers
+                                  : giSignal               ? kNrdGiDenoiser
+                                                           : kNrdAoDenoiser;
+                const u32  whichN = (giSignal && aoSignal) ? 2u : 1u;
+                if (nrd_.record(ctx, fs, in, which, whichN)) {
+                    nrdOutput_   = nrd_.outputDiffuseHitDistance();
+                    nrdGiOutput_ = nrd_.outputDiffuseRadianceHitDistance();
+                }
             }
         }
     }

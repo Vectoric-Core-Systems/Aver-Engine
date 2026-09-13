@@ -85,7 +85,14 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     // w = the ReSTIR-GI poison debug view (voxi.giPoisonView / VoxiRenderer::setGiPoisonView): >0.5
     // makes voxi_restir.hlsli's giRestirIndirect paint an unmistakable colour per non-finite guard
     // instead of the real indirect diffuse -- see that function's own POISON DEBUG VIEW comment for
-    // the legend. Was "spare"; this is a repurposed bit, not a new field -- packing/size unchanged.
+    // the legend. ALSO READ DIRECTLY IN THIS FILE, in BOTH PSMainVoxi and PSRayDriven, for an EIGHTH
+    // colour (violet) that has nothing to do with giRestirIndirect: the ray-traced SPECULAR indirect
+    // term (ind4.specular / ind.specular) has its own AVER_VOX_MAXRAD ceiling clamp, and this flag
+    // makes a pinned pixel there paint violet too (B1/F5) -- see aver_IsGiRestirPoisonColour's own
+    // comment, just above PSMainVoxi, for the precedence chosen between the two families. UNLIKE the
+    // seven giRestirIndirect colours, this eighth one is NOT giMode-gated: the RT specular ray runs
+    // under either diffuse estimator, so it fires on giMode 0 too. Was "spare"; this is a repurposed
+    // bit, not a new field -- packing/size unchanged.
     float4   gGiRestirParams;
 };
 
@@ -858,8 +865,19 @@ float2 averGBufferVelocity(float3 wpos) {
 
     const float2 curNdc  = curClip.xy  / curClip.w;
     const float2 prevNdc = prevClip.xy / prevClip.w;
-    const float2 curPx  = gSceneViewport.xy +
-                          float2(curNdc.x * 0.5 + 0.5, 0.5 - curNdc.y * 0.5) * gSceneViewport.zw;
+    // B2 (F6): THIS frame's clip position (curClip, above, built from gViewProj) has to land in THIS
+    // frame's viewport rect, not last frame's -- the cbuffer's own field comments pair gViewProj with
+    // gSceneViewportCur and gPrevViewProj with gSceneViewport (see the VoxiFrame struct at the top of
+    // this file), and the editor can resize/redock the 3D view between frames, so the two rects are
+    // not interchangeable even when they happen to agree most frames. THIS WAS WRONG: curPx used to
+    // map through gSceneViewport (last frame's rect) exactly like prevPx does, four lines below --
+    // paired with the CURRENT clip position it should never have shared prevPx's rect at all. Falls
+    // back to gSceneViewport when the device had no current rect yet this frame (gSceneViewportCur.w
+    // == 0 is that field's own documented sentinel, set at VoxiRenderer.cpp's beginShadowHistory)
+    // rather than mapping into a zero-sized rect and dividing by zero.
+    const float4 curRect = gSceneViewportCur.w > 0.0 ? gSceneViewportCur : gSceneViewport;
+    const float2 curPx  = curRect.xy +
+                          float2(curNdc.x * 0.5 + 0.5, 0.5 - curNdc.y * 0.5) * curRect.zw;
     const float2 prevPx = gSceneViewport.xy +
                           float2(prevNdc.x * 0.5 + 0.5, 0.5 - prevNdc.y * 0.5) * gSceneViewport.zw;
     // DESTINATION (curPx) minus SOURCE (prevPx) -- see header and UpscalerNeeds::MotionVectors
@@ -878,6 +896,44 @@ float2 averGBufferVelocity(float3 wpos) {
 // before this feature existed -- see the #if branch above for what they become when it is on.
 #define AVER_GBUF_RETURN(colorExpr) return (colorExpr)
 #endif
+
+// ---- B1: DOES A COLOUR ALREADY MARK THIS PIXEL'S DIFFUSE CHANNEL AS POISONED? ----
+//
+// giRestirIndirect (voxi_restir.hlsli) paints one of SEVEN sentinel colours over its own return
+// value -- never the real indirect diffuse -- whenever gGiRestirParams.w > 0.5 and one of its own
+// guards fired THIS frame (see that function's own POISON DEBUG VIEW comment for the legend and the
+// precedence among those seven). PSMainVoxi/PSRayDriven below add an EIGHTH colour, VIOLET, for a
+// DIFFERENT guard entirely -- the ray-traced SPECULAR term's own ceiling clamp (F5) -- and it is
+// computed and applied in THIS file, not inside giRestirIndirect, so it cannot sit inside that
+// function's own if/else-if precedence ladder and cannot silently pre-empt one of its seven returns.
+//
+// It CAN still collide at the pixel level: both markers are gated by the SAME flag
+// (gGiRestirParams.w), and a pixel's diffuse and specular channels are independent, so nothing stops
+// both guards firing together. THE PRECEDENCE CHOSEN: a giRestirIndirect colour on the diffuse
+// channel always wins over violet. Rationale -- those seven already carry their OWN internal
+// precedence (a non-finite guard always outranks a mere ceiling hit, per that function's own
+// comment), so they are the more carefully arbitrated signal and diffuse corruption/ceiling is the
+// established diagnostic this view exists for; violet is new and narrower (specular only), and
+// overwriting an existing colour with it would destroy information the seven already spent effort
+// ranking. Each PSMainVoxi/PSRayDriven call site below reads this back as `giDiffusePoisoned`.
+//
+// EXACT EQUALITY IS SAFE AND DELIBERATE, not a fragile float compare: every one of the seven colours
+// below is built from the literals 0.0/0.5/1.0 alone, each exactly representable in IEEE754, and none
+// is a value real shaded radiance can produce by coincidence -- the whole reason they were chosen as
+// "unmistakable, scene-lighting-cannot-produce-this" sentinels in giRestirIndirect's own words.
+// Comparing for exact equality is the same design already at work there, applied by the reader
+// instead of the writer. Only meaningful right after a giRestirIndirect call (giMode 0's
+// coneTracedIndirect never produces one of these by construction), so every call site below only
+// tests it there.
+bool aver_IsGiRestirPoisonColour(float3 c) {
+    return (c.r == 1.0 && c.g == 0.0 && c.b == 1.0)    // magenta: store-time reservoir guard
+        || (c.r == 0.0 && c.g == 1.0 && c.b == 1.0)    // cyan: candidate-radiance clamp guard
+        || (c.r == 1.0 && c.g == 1.0 && c.b == 0.0)    // yellow: target-pdf guard
+        || (c.r == 1.0 && c.g == 0.5 && c.b == 0.0)    // orange: final-estimate guard
+        || (c.r == 0.0 && c.g == 0.0 && c.b == 1.0)    // blue: NRD-readback non-finite guard
+        || (c.r == 1.0 && c.g == 0.0 && c.b == 0.0)    // red: raw estimate hit the ceiling
+        || (c.r == 0.0 && c.g == 1.0 && c.b == 0.0);   // green: NRD-denoised readback hit the ceiling
+}
 
 // The Voxi lit pixel shader. Voxi supplies light transport only â€” sun visibility, sky, bounce â€”
 // and the material shades it. Returns linear radiance; the post chain tonemaps.
@@ -919,6 +975,11 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
 #endif
     float ao = 1.0;
     float3 ind = 0;
+    // B1: true only when the call below actually took the ReSTIR branch AND it painted one of
+    // giRestirIndirect's own seven poison colours over `ind` -- see aver_IsGiRestirPoisonColour's own
+    // comment (just above this function) for why exact-equality detection is safe here and what
+    // precedence this buys the new specular-ceiling marker further down.
+    bool giDiffusePoisoned = false;
     // GIMODE SWITCHES THE DIFFUSE BOUNCE ESTIMATOR -- see Settings::giMode (Voxi.hpp) for the full
     // contract. Only reachable in the AVER_RT-compiled variant: ReSTIR GI's candidate ray needs the
     // ray-tracing toolkit (gScene, RtInstance, gRtMaterials -- all declared inside this file's own
@@ -931,9 +992,10 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     // cone gather here instead of reading a null-filled slot.
 #if AVER_RT
     if (gVoxelParams.w > 0.5) {
-        if (gGiRestirParams.x > 0.5)
+        if (gGiRestirParams.x > 0.5) {
             ind = giRestirIndirect(i.wpos, N, rtViewZ, i.pos.xy, (uint)gRtHistParams.z, ao);
-        else
+            giDiffusePoisoned = aver_IsGiRestirPoisonColour(ind);
+        } else
             ind = coneTracedIndirect(i.wpos, N, ao);
     }
 #else
@@ -997,6 +1059,9 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     float3 V = normalize(gCamPos.xyz - i.wpos);
     float3 R = reflect(-V, averShadingNormal(s));
     AverIndirect ind4;
+    // B1: set below, inside the RT reflection branch only -- see that branch's own comment for why
+    // only the RAY-TRACED specular term gets this marker (F5), not the voxel-cone/flat-sky fallbacks.
+    bool giPoisonSpecCeilHit = false;
     ind4.ambient      = averSkyIrradiance(averShadingNormal(s));
     ind4.ambientScale = gAmbient.r;
     ind4.diffuse      = ind;
@@ -1046,7 +1111,17 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
         // The raster twin of the clamp documented at PSRayDriven's own copy of this line. Change
         // one, change both -- the two primary-visibility paths must agree about how much radiance a
         // reflection may return, or they disagree about the brightness of the same surface.
-        ind4.specular = clamp(lerp(specHit ? refl : skyR, skyR, skyW), 0.0, AVER_VOX_MAXRAD);
+        //
+        // B1 (F5): PRE-clamp value tested against the SAME ceiling the clamp below enforces, so a
+        // pinned pixel can be told apart from one that was always going to land under it. `>=`, not a
+        // negated `<` -- NaN compares false either way in HLSL, so `any(specRaw >= AVER_VOX_MAXRAD)`
+        // is false for a NaN component (this guard is about a FINITE value being too large, not about
+        // corruption -- there is no non-finite guard on this term today, and clamp()'s own
+        // min(max(x,lo),hi) already floors a NaN component to 0.0 by this codebase's documented
+        // comparison semantics, so a NaN here goes quiet rather than pinned OR painted).
+        const float3 specRaw = lerp(specHit ? refl : skyR, skyR, skyW);
+        giPoisonSpecCeilHit = any(specRaw >= AVER_VOX_MAXRAD);
+        ind4.specular = clamp(specRaw, 0.0, AVER_VOX_MAXRAD);
     } else
 #endif
     if (gVoxelParams.w > 0.5) {
@@ -1142,6 +1217,11 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
         // about. Fogging `outc.rgb` once is symmetric with the opaque branch's single fog call below.
         // Alpha is coverage, not radiance, and is untouched by fog either way.
         outc.rgb = averApplyFog(outc.rgb, i.wpos);
+        // B1 (F5): applied LAST, after fog, so the marker is the true final colour and cannot be
+        // fogged or blended away -- see aver_IsGiRestirPoisonColour's own comment for why a
+        // giRestirIndirect colour on the diffuse channel (giDiffusePoisoned) outranks this one.
+        if (gGiRestirParams.w > 0.5 && giPoisonSpecCeilHit && !giDiffusePoisoned)
+            outc.rgb = float3(0.55, 0.0, 1.0);   // VIOLET: ray-traced specular hit AVER_VOX_MAXRAD
         AVER_GBUF_RETURN(outc);
     }
 
@@ -1149,6 +1229,9 @@ float4 PSMainVoxi(VSOut i) : SV_TARGET {
     radiance = averShadeDirect(radiance, s, sun);
     radiance = averShadeIndirect(radiance, s, ind4);
     radiance = averApplyFog(radiance, i.wpos);
+    // B1 (F5): same override, same precedence, as the translucent branch's copy above.
+    if (gGiRestirParams.w > 0.5 && giPoisonSpecCeilHit && !giDiffusePoisoned)
+        radiance = float3(0.55, 0.0, 1.0);   // VIOLET: ray-traced specular hit AVER_VOX_MAXRAD
     AVER_GBUF_RETURN(float4(radiance, averOpacity(s)));
 }
 
@@ -1648,6 +1731,10 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // CALL the raster path makes, as the comment beside it says.
     float rdAo  = 1.0;
     ind.diffuse = 0.0;
+    // B1: mirrors PSMainVoxi's own copy (search aver_IsGiRestirPoisonColour) -- true only when the
+    // ReSTIR branch below actually painted one of giRestirIndirect's own seven colours over
+    // ind.diffuse.
+    bool giDiffusePoisoned = false;
 #if AVER_RD_ABLATE == AVER_RD_ABL_GI || AVER_RD_ABLATE == AVER_RD_ABL_ALL
     // ablated: no cone gather
 #elif AVER_AO_UNIFIED
@@ -1663,10 +1750,11 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // only exists inside `#if AVER_RT` already, so there is no non-RT variant to keep bit-identical
     // here the way PSMainVoxi's copy has to guard for.
     if (gVoxelParams.w > 0.5) {
-        if (gGiRestirParams.x > 0.5)
+        if (gGiRestirParams.x > 0.5) {
             ind.diffuse = giRestirIndirect(wpos, N, mul(float4(wpos, 1.0), gViewProj).w,
                                            i.pos.xy, (uint)gRtHistParams.z, rdAo);
-        else
+            giDiffusePoisoned = aver_IsGiRestirPoisonColour(ind.diffuse);
+        } else
             ind.diffuse = coneTracedIndirect(wpos, N, rdAo);
     }
 #endif
@@ -1704,6 +1792,11 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // Nearest reference: the wave-bound-shadow finding's ~2.0ms for one tile-amortised full-screen
     // ray-query pass on ElectricDreams at full coverage; gated to a roughness minority, real cost
     // should land well under that.
+    //
+    // B1 (F5): set below, inside this branch only -- see PSMainVoxi's identical copy for why only the
+    // RAY-TRACED specular term gets this marker, and aver_IsGiRestirPoisonColour's own comment for
+    // the precedence against giDiffusePoisoned above.
+    bool giPoisonSpecCeilHit = false;
     if (gShadowParams.z > 0.5 && gRtParams.w > 0.5 && s.rough <= 0.75) {
         const float rdReflDzdx = mul(float4(rdRayDx, 0.0), gViewProj).w;
         const float rdReflDzdy = mul(float4(rdRayDy, 0.0), gViewProj).w;
@@ -1746,7 +1839,12 @@ RayDrivenOut PSRayDriven(SkyOut i) {
         // not white -- silent rather than alarming, which is if anything a stronger reason to floor
         // it HERE, at the point this value is computed, rather than leave it to whatever the tonemap
         // happens to do with it. The voxel injection's own write already uses this two-sided form.
-        ind.specular = clamp(lerp(specHit ? refl : skyR, skyR, skyW), 0.0, AVER_VOX_MAXRAD);
+        //
+        // B1 (F5): same PRE-clamp ceiling test as PSMainVoxi's copy -- see there for why `>=` (not a
+        // negated `<`) is the NaN-safe form and why a NaN component here needs no separate guard.
+        const float3 specRaw = lerp(specHit ? refl : skyR, skyR, skyW);
+        giPoisonSpecCeilHit = any(specRaw >= AVER_VOX_MAXRAD);
+        ind.specular = clamp(specRaw, 0.0, AVER_VOX_MAXRAD);
     } else if (gVoxelParams.w > 0.5) {
         // PSMainVoxi's OWN voxel-cone fallback, for the surfaces PSMainVoxi itself falls back for
         // (rough > 0.75, or RT unavailable): past that roughness a one-ray estimate can't resolve a
@@ -1925,6 +2023,14 @@ RayDrivenOut PSRayDriven(SkyOut i) {
     // both return sites about. s.albedo is the SAMPLED base colour; shading a base-colour CONSTANT
     // is what made this mode pure white on every textured mesh.
     o.col   = float4(gViewParams.x > 0.5 ? s.albedo : radiance, 1.0);
+    // B1 (F5): applied LAST, after the unlit substitution just above and after fog/shading upstream,
+    // so this is unconditionally the final colour whenever it fires -- see PSMainVoxi's identical
+    // override for the precedence against giDiffusePoisoned (a giRestirIndirect colour on the diffuse
+    // channel wins), and aver_IsGiRestirPoisonColour's own comment for why. Takes precedence over the
+    // unlit substitution too: giPoisonView is an explicit diagnostic the user turned on by hand, and
+    // it should not go dark just because unlit view is also active.
+    if (gGiRestirParams.w > 0.5 && giPoisonSpecCeilHit && !giDiffusePoisoned)
+        o.col.rgb = float3(0.55, 0.0, 1.0);   // VIOLET: ray-traced specular hit AVER_VOX_MAXRAD
 #if AVER_GBUFFER
     // clip.w IS the view-space linear depth viewZ wants, reused from o.depth's divide above rather
     // than a second mul. Velocity uses the SAME static-geometry function as PSMainVoxi (see

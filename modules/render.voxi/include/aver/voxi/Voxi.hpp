@@ -219,11 +219,13 @@ struct Settings {
     // THE CEILING GI RADIANCE IS CLAMPED TO before the tonemap, mirrored to the shader as
     // AVER_VOX_MAXRAD (voxi.hlsl / voxi_gi.hlsli) via FrameConstants::viewParams.y. 16.0 is not a
     // headroom number, it is a SYMPTOM's shape: acesTonemap (rhi/shaders/color.hlsli) floors NaN/
-    // negative input at zero but is already flat WHITE by roughly x = 4-5, so any finite value
-    // pinned at this ceiling paints solid white and is invisible to voxi.giPoisonView (which only
-    // flags isnan/isinf, not "clamped"). Both the raw ReSTIR GI estimate and its NRD-denoised
-    // readback (voxi_restir.hlsli) and the cone-gather estimator (voxi_gi.hlsli) share this one
-    // ceiling.
+    // negative input at zero but is already flat WHITE by roughly x = 4-5, so any finite value pinned
+    // at this ceiling paints solid white. voxi.giPoisonView DOES have a dedicated ceiling-hit colour
+    // for this (red for the raw ReSTIR GI estimate, green for its NRD-denoised readback, both
+    // voxi_restir.hlsli; violet for the ray-traced specular indirect term, voxi.hlsl -- B1/F5, not
+    // giMode-gated); it is only the five NON-FINITE guards (magenta/cyan/yellow/orange/blue) that flag
+    // isnan/isinf rather than "clamped". Both the raw ReSTIR GI estimate and its NRD-denoised readback
+    // (voxi_restir.hlsli) and the cone-gather estimator (voxi_gi.hlsli) share this one ceiling.
     //
     // DEFAULT MUST STAY 16.0 -- this is the value every image this renderer has ever produced was
     // already clamped to as a compile-time #define; moving it changes nothing until a project or the
@@ -232,8 +234,9 @@ struct Settings {
     // LOWERING IT is the by-hand tool this field exists for: it can remove a white patch that turns
     // out to be a poisoned-but-finite value pinned at the ceiling, but it also dims any legitimately
     // bright bounce that happens to be near 16 -- there is no way to tell the two apart from this
-    // number alone, which is why voxi_restir.hlsli's poison view (giPoisonView) paints a ceiling HIT
-    // in its own colour rather than asking this dial to double as a diagnostic.
+    // number alone, which is why voxi.giPoisonView paints a ceiling HIT in its own colour (red/green,
+    // voxi_restir.hlsli; violet, voxi.hlsl -- B1/F5) rather than asking this dial to double as a
+    // diagnostic.
     f32 giRadianceCeiling = 16.0f;
 
     // ---- refraction: how a translucent surface BENDS what is behind it ----
