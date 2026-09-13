@@ -21,6 +21,21 @@
 
 namespace aver::occlusion {
 
+// The scene's own sub-rect of the target depth/pyramid texture, IN TARGET PIXELS (not UV, not
+// NDC) -- SandboxApp.cpp's setViewportRect() argument space, e.g. (vpX_, vpY_, vpW_, vpH_). This
+// is F7's fix for the trigger described beside section 1b's projectAabbScreenBounds overload
+// below: the pyramid this module tests against is sized to the WHOLE target texture, but the
+// scene a camera actually draws can occupy only part of it (the editor's Level tab within a
+// dockspace being the case that surfaced this).
+//
+// `w <= 0` or `h <= 0` means "the whole target": every caller that has no sub-rect at all (a
+// fullscreen game view, most of this file's own existing tests) passes a default-constructed or
+// zeroed ViewportRect and gets the exact behaviour projectAabbScreenBounds's plain 6-argument
+// overload already had -- no rect arithmetic is done in that case, not merely arithmetic that
+// happens to be a no-op, so there is nothing here for a whole-target caller to pay for or to
+// diverge on.
+struct ViewportRect { f32 x, y, w, h; };
+
 // ---------------------------------------------------------------------------------------------
 // 1. Project a world-space AABB through the camera.
 // ---------------------------------------------------------------------------------------------
@@ -75,6 +90,68 @@ inline bool projectAabbScreenBounds(const f32 viewProj[16], const f32 worldMin[3
     outMinUV[0] = minX; outMinUV[1] = minY;
     outMaxUV[0] = maxX; outMaxUV[1] = maxY;
     outNearestZ = std::max(0.0f, nearestZ);
+    return true;
+}
+
+// ---------------------------------------------------------------------------------------------
+// 1b. F7's fix -- the same projection, but relative to the SCENE's own sub-rect of the target
+//     depth/pyramid texture, not the whole thing.
+// ---------------------------------------------------------------------------------------------
+//
+// THE BUG THIS CLOSES (occlusion-fix-plan.md section 1, "Link 6" -- the trigger, not the root
+// cause, but what turns the root cause into something visible entities hit constantly): the
+// function above assumes the box's footprint fills the WHOLE target texture end to end. That is
+// only true when the 3D scene is drawn edge-to-edge into that texture. In the editor it is not --
+// SandboxApp.cpp confines the scene to the Level tab's own rectangle within the dockspace
+// (setViewportRect((u32)vpX_, (u32)vpY_, ...)) while the depth/pyramid texture this module reads
+// stays sized to the WHOLE backbuffer, cleared to 1.0 (far) everywhere outside that rectangle.
+// Treating the box's own [0,1] viewport-relative UV as if it already were [0,1] TEXTURE UV
+// samples the wrong texels entirely -- shifted by (vpX, vpY) and stretched by targetW/vpW and
+// targetH/vpH -- which depends only on the current dock layout, not on the camera at all: exactly
+// the "no matter how the camera moves" shape of the reported symptom.
+//
+// `rect` is that sub-rect, IN TARGET PIXELS (SandboxApp.cpp's own setViewportRect() argument
+// space) -- see ViewportRect's own comment for the w<=0/h<=0 "whole target" convention. The
+// projection itself (8 corners, clip, divide by w, the clip-Y-up/texture-V-down flip) is
+// IDENTICAL to the 6-argument function above -- called directly, not re-derived, so a caller with
+// no sub-rect at all gets a result that is not merely numerically close to that function's, it IS
+// that function's result (see tests/occlusion/src/OcclusionMathTest.cpp's
+// WholeTargetRect_MatchesLegacyCall). The clamp to [0,1] that function already performs is done in
+// VIEWPORT space -- a box can only ever be visible somewhere inside the viewport itself, never in
+// whatever the rest of the target texture happens to extend to -- which is exactly the semantics
+// this fix needs: only AFTER that clamp does a real rect get mapped into target-UV space, so a box
+// straddling the viewport's own edge clamps at that edge (rect.x + rect.w), never at the target's.
+//
+// If `rect.w` and `rect.h` are both positive, the viewport-relative [0,1] bounds are mapped as
+//   U = (rect.x + u * rect.w) / targetW
+//   V = (rect.y + v * rect.h) / targetH
+// in EXACTLY this operation order (multiply, then add, then divide) -- occlusion_test.hlsl's
+// CSTest kernel mirrors this token for token (see that file's own comment on gViewport), because a
+// divergence here is a divergence between what this CPU pre-walk trusts (SandboxApp.cpp's
+// occlusionTrustworthy trust gate is computed from THIS function's answer) and what the GPU
+// pyramid test actually samples -- the two have to agree bit-for-bit, not merely to visual
+// tolerance, or a box could pass this function's pre-check and still get a different verdict from
+// the shader that actually decides it.
+//
+// `rect.w <= 0` or `rect.h <= 0` means "the whole target" (ViewportRect's own comment): no
+// division, no rect.x/rect.y offset is applied at all -- the viewport-relative bounds ARE the
+// target UV, unchanged, so a caller with no sub-rect pays no extra arithmetic and gets a result
+// with no extra rounding relative to the plain function above.
+inline bool projectAabbScreenBounds(const f32 viewProj[16], const f32 worldMin[3], const f32 worldMax[3],
+                                     const ViewportRect& rect, u32 targetW, u32 targetH,
+                                     f32 outMinUV[2], f32 outMaxUV[2], f32& outNearestZ) {
+    f32 vpMinUV[2], vpMaxUV[2];
+    if (!projectAabbScreenBounds(viewProj, worldMin, worldMax, vpMinUV, vpMaxUV, outNearestZ)) return false;
+    if (rect.w <= 0.0f || rect.h <= 0.0f) {
+        outMinUV[0] = vpMinUV[0]; outMinUV[1] = vpMinUV[1];
+        outMaxUV[0] = vpMaxUV[0]; outMaxUV[1] = vpMaxUV[1];
+        return true;
+    }
+    const f32 tw = static_cast<f32>(targetW), th = static_cast<f32>(targetH);
+    outMinUV[0] = (rect.x + vpMinUV[0] * rect.w) / tw;
+    outMaxUV[0] = (rect.x + vpMaxUV[0] * rect.w) / tw;
+    outMinUV[1] = (rect.y + vpMinUV[1] * rect.h) / th;
+    outMaxUV[1] = (rect.y + vpMaxUV[1] * rect.h) / th;
     return true;
 }
 

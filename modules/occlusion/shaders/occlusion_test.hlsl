@@ -13,6 +13,15 @@ cbuffer TestCB : register(b1) {
     uint gPyramidW;
     uint gPyramidH;
     uint gMipCount;
+    // F7: the scene's own sub-rect of this target, IN TARGET PIXELS -- xy = origin, zw = size --
+    // mirroring OcclusionMath.hpp's ViewportRect{x,y,w,h} exactly (OcclusionCuller.cpp packs the
+    // same four floats straight into this field). z <= 0.5 stands in for "w <= 0" (a whole-pixel
+    // width can never be exactly 0.5, so this is an exact test, not a tolerance) and means "the
+    // whole target": no rect arithmetic runs below at all. 16 (gViewProj) + 4 (the uints above) +
+    // 4 (this) = 24 dwords total -- OcclusionCuller.cpp's TestCB struct, its setConstants call and
+    // its constantDwords[1] must all agree on that count, or this cbuffer reads past what the CPU
+    // actually uploaded.
+    float4 gViewport;
 };
 
 // One corner's contribution to the running screen-space bounds -- a plain function instead of a
@@ -54,10 +63,29 @@ void CSTest(uint3 tid : SV_DispatchThreadID) {
     accumulateCorner(float3(b.hi.x, b.hi.y, b.hi.z), gViewProj, minX, minY, maxX, maxY, nearestZ, anyInFront);
 
     if (!anyInFront) { gVisible[i] = 1; return; }
+    // Clamped in VIEWPORT space -- a box can only ever be visible somewhere inside the viewport
+    // itself, never in whatever the rest of the target texture happens to extend to. This must
+    // happen BEFORE the rect mapping below, or a box straddling the viewport's own edge would
+    // clamp at the TARGET's edge instead (see OcclusionMath.hpp's matching overload comment).
     minX = max(0.0, minX); minY = max(0.0, minY);
     maxX = min(1.0, maxX); maxY = min(1.0, maxY);
     if (maxX <= minX || maxY <= minY) { gVisible[i] = 1; return; }
     nearestZ = max(0.0, nearestZ);
+
+    // F7: map the viewport-relative [0,1] bounds into this SCENE's own sub-rect of the target,
+    // in EXACTLY the same operation order as OcclusionMath.hpp's viewport-relative
+    // projectAabbScreenBounds overload (multiply, then add, then divide) -- see that function's
+    // own comment for why a divergence here would be a divergence between what SandboxApp.cpp's
+    // CPU-side trust gate checked and what this shader actually samples. gViewport.z <= 0.5 means
+    // "the whole target" (ViewportRect's own "w <= 0" convention): minX/minY/maxX/maxY are left
+    // exactly as the viewport-space clamp above produced them, so a caller with no sub-rect pays
+    // no extra arithmetic here and reads the identical texels the pre-F7 shader always did.
+    if (gViewport.z > 0.5) {
+        minX = (gViewport.x + minX * gViewport.z) / (float)gPyramidW;
+        maxX = (gViewport.x + maxX * gViewport.z) / (float)gPyramidW;
+        minY = (gViewport.y + minY * gViewport.w) / (float)gPyramidH;
+        maxY = (gViewport.y + maxY * gViewport.w) / (float)gPyramidH;
+    }
 
     // ---- selectConservativeMip -- MUST stay bit-for-bit the same decision as OcclusionMath.hpp's
     // CPU copy of this function (its own comment has the full "why 1.0 texel" derivation): mip 0 is

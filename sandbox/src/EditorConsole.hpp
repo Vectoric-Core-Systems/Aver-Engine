@@ -779,6 +779,35 @@ inline void registerRhiVars(std::vector<ConsoleVar>& t) {
 // (--occlusion-waitidle / --no-occlusion-waitidle) before the first read.
 inline bool& consoleOcclusionForceWaitIdleSlot() { static bool v = true; return v; }
 
+// occlusion.showCulled -- THE FALSE-CULL FINDER, added for the white-panel investigation's by-hand
+// verification instrument (see the plan's section 3B). Every entity SceneSubmission.hpp's
+// chooseRoute() would otherwise route around drawMesh() -- frustum- or occlusion-culled, but NOT
+// owner-hidden, exactly chooseRoute's own debug case -- is instead sent through the ordinary raster
+// route with its colour tinted magenta, so what culling is skipping becomes VISIBLE instead of merely
+// absent. Ray-driven shows the identical tint through inst.albedo, because the direct route shares
+// deliver()'s look with the raster one by construction (that sharing is F1's whole point). At a still
+// camera with this on, any magenta over a surface you can plainly see is a false cull.
+// DEFAULT FALSE -- the OPPOSITE of debugForceWaitIdle's default above, and deliberately so: that one
+// only changes a wait's timing, while this one changes the rendered image (a tinted draw is a
+// different colour going into GI's voxelisation hash, so GI re-voxelises while this is on), which
+// must never happen by accident just from opening the Console tab. Cost when off: one bool test per
+// culled entity, the same shape chooseRoute already pays for the frustum/occlusion booleans.
+inline bool& consoleOcclusionShowCulledSlot() { static bool v = false; return v; }
+
+// occlusion.cullUnderSuppression -- keeps the occlusion test running even while a render feature
+// (ray-driven Voxi, Path Tracing) has claimed the frame and is painting the scene itself
+// (e.device()->sceneSuppressed()), which is exactly when SandboxApp's F8 gate would otherwise idle
+// culling entirely: in ray-driven mode culling legitimately saves almost no work, because every
+// culled entity still has to be submitted for primary rays, so F8 turns the test off there by
+// default rather than pay HZB seed/reduce/test and a waitIdle for nothing. Without this override,
+// showCulled above (and F1-F4's route-parity guarantee generally) would have nothing left to exercise
+// in the one render mode PTTest actually runs in once F8 lands -- this is the only way to force the
+// occlusion test to keep producing verdicts under suppression so those verdicts can be inspected.
+// DEFAULT FALSE: RENDER.OCCLUSIONCULL and project_.occlusionCull are never written by this slot or by
+// its reader -- it overrides only the idle F8 introduces, never the manifest's own on/off switch, so
+// turning F8's idle back off stays an explicit, named choice made from the Console.
+inline bool& consoleOcclusionCullUnderSuppressionSlot() { static bool v = false; return v; }
+
 inline void registerOcclusionVars(std::vector<ConsoleVar>& t) {
     t.push_back({"occlusion.debugForceWaitIdle", VarType::Bool, false,
         "A-B SWITCH, DEFAULT TRUE: forces OcclusionCuller::testBatch() to end with the unconditional "
@@ -791,6 +820,31 @@ inline void registerOcclusionVars(std::vector<ConsoleVar>& t) {
         [](ConsoleBatch& b, VarValue v){
             const bool on = v.as.b;
             b.deviceSetters.push_back([on](rhi::IDevice&){ consoleOcclusionForceWaitIdleSlot() = on; });
+        }});
+
+    t.push_back({"occlusion.showCulled", VarType::Bool, false,
+        "debug view; tinted draws change GI's colour hash, so GI re-voxelises while on. Every "
+        "frustum- or occlusion-culled entity that is NOT owner-hidden draws through the raster route "
+        "with its colour tinted magenta instead of being skipped -- ray-driven shows the same tint "
+        "through inst.albedo, since both routes share one delivered look. Magenta over a surface you "
+        "can plainly see, at a still camera, means a false cull. Off by default because it changes "
+        "the rendered image, not only which work runs.",
+        []{ return vBool(consoleOcclusionShowCulledSlot()); },
+        [](ConsoleBatch& b, VarValue v){
+            const bool on = v.as.b;
+            b.deviceSetters.push_back([on](rhi::IDevice&){ consoleOcclusionShowCulledSlot() = on; });
+        }});
+
+    t.push_back({"occlusion.cullUnderSuppression", VarType::Bool, false,
+        "Runs the occlusion test even while a render feature (ray-driven Voxi, Path Tracing) is "
+        "painting the scene and would otherwise idle it -- the only way to exercise F1-F4's route "
+        "parity in ray-driven mode once that idle is in effect. Overrides only the idle; never writes "
+        "RENDER.OCCLUSIONCULL or project_.occlusionCull, so the manifest's own on/off switch is "
+        "untouched either way.",
+        []{ return vBool(consoleOcclusionCullUnderSuppressionSlot()); },
+        [](ConsoleBatch& b, VarValue v){
+            const bool on = v.as.b;
+            b.deviceSetters.push_back([on](rhi::IDevice&){ consoleOcclusionCullUnderSuppressionSlot() = on; });
         }});
 }
 #endif

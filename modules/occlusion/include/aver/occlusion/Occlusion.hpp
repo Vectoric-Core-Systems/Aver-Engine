@@ -219,8 +219,27 @@ public:
     // motion-safety margin (see its "MOTION-SAFE TRUST GATE" comment) makes the latter happen on
     // nearly every frame of camera motion. Comparing THIS against the identityKey the immediately
     // preceding call was given is how readbackLagIsExactlyOneCall()'s IDENTITY half is decided.
+    //
+    // `viewportRect` — F7's fix for the trigger described in this module's own top comment being
+    // wrong for years: it is the SCENE's own sub-rect of the target depth/pyramid texture, in
+    // TARGET PIXELS, as {x, y, w, h} (SandboxApp.cpp's setViewportRect() argument space) —
+    // OcclusionMath.hpp's ViewportRect, flattened to four floats at this ABI boundary the same
+    // way `boxes` flattens Aabb rather than passing a caller-side type across it. A NULL pointer
+    // means "the whole target" (this module's own historical assumption, and still correct for a
+    // caller whose scene fills the target edge-to-edge, e.g. a packaged game with no dockable
+    // panels) — equivalent to OcclusionMath.hpp's own `w <= 0` convention, just spelled as "no
+    // rect at all" rather than "a degenerate one", since a caller with nothing to pass should not
+    // have to fabricate a zeroed struct just to say so. A non-null rect is threaded straight
+    // through to occlusion_test.hlsl's CSTest kernel as the gViewport constant
+    // (OcclusionCuller.cpp), which maps the projected NDC bounds into it EXACTLY as
+    // OcclusionMath.hpp's viewport-relative projectAabbScreenBounds overload does on the CPU side
+    // — see that header's own comment on why the two must agree token for token, not merely to
+    // visual tolerance. Before this parameter existed, this function always behaved as if the
+    // scene filled the whole target, which is what let a windowed Level tab occlusion-cull
+    // entities the camera could plainly see (occlusion-fix-plan.md section 1, "Link 6").
     virtual void testBatch(rhi::IRenderContext& ctx, rhi::IResourceFactory& res,
-                           const Aabb* boxes, u32 count, u64 identityKey, std::vector<u8>& outVisible) = 0;
+                           const Aabb* boxes, u32 count, u64 identityKey,
+                           const f32 viewportRect[4], std::vector<u8>& outVisible) = 0;
 
     // STALENESS DETECTOR, ACROSS TWO INDEPENDENT DIMENSIONS. testBatch() answers a question one
     // call late (see above); this answers "was that lag actually safe to apply" — which takes BOTH

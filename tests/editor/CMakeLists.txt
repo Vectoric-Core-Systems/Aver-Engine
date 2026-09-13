@@ -497,3 +497,19 @@ add_executable(PtRenderConflictTest src/PtRenderConflictTest.cpp)
 target_include_directories(PtRenderConflictTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
 target_link_libraries(PtRenderConflictTest PRIVATE Aver.Core)
 set_target_properties(PtRenderConflictTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# SceneSubmissionTest -- the white-panel investigation's F1 decisions, all of
+# sandbox/src/SceneSubmission.hpp: planEntityDraws' part-split rule (the single copy of
+# SandboxApp.cpp's former 6360-6365 plus 8297-8299), resolveSurfaceLook's authored/dead-handle/
+# look/fallback chain (the single copy of 5584-5591, 5897-5903 and 8313-8324), chooseRoute's
+# raster/direct/showCulled-tint decision, deliver()'s route-independent draw content (mirroring
+# VoxiRenderer::submitDraw at VoxiRenderer.cpp:861-880), and F8's occlusionTestShouldRun gate.
+# Header-only and dependency-free, for PtRenderConflictTest's exact reason above: every function
+# under test takes plain bools/u32/i32/f32 in and returns plain data out, precisely so the rule a
+# cull verdict must never change WHAT an entity delivers (only WHO delivers it) could be pinned
+# without a window, a device, a project file, or a scene -- SandboxApp.cpp keeps every ImGui call,
+# every pbr:: and rhi:: lookup, and every AVER_WARN; only the decisions moved here.
+add_executable(SceneSubmissionTest src/SceneSubmissionTest.cpp)
+target_include_directories(SceneSubmissionTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(SceneSubmissionTest PRIVATE Aver.Core)
+set_target_properties(SceneSubmissionTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

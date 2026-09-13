@@ -81,6 +81,14 @@
 #include "GraphAssetPresentation.hpp"
 #include "MaterialResolve.hpp"
 #include "ClusterMaterialShader.hpp"
+// F1 (occlusion-fix-plan.md): the ONE place the "which route delivers this entity's draws" rule
+// lives -- see that header's own top comment. A pure header, like PtRenderConflict.hpp, so
+// aver::editor::SurfaceLook below is a DIFFERENT type from this file's own (unqualified) SurfaceLook
+// a few thousand lines down (24819) -- always write aver::editor::SurfaceLook in full here; SandboxApp
+// is declared in namespace aver, not aver::editor, so the two never collide as types, but an
+// unqualified `SurfaceLook` inside a SandboxApp member function resolves to the nested one every time
+// (class-scope lookup wins over a namespace one), never to this header's.
+#include "SceneSubmission.hpp"
 
 // The material sampler register on the cluster pipeline (materialShaderDefines() gets the same
 // number). Fixed at s0 so it never moves whether or not AVER_MODULE_VOXI is compiled in -- Voxi's own
@@ -3039,6 +3047,12 @@ public:
         // reason -- and so a console `set` this frame is live on occluder_ before this SAME frame's
         // testBatch() call runs (occlusionBuildAndTest() below onUpdate returns), not one frame late.
         if (occluder_) occluder_->setDebugForceWaitIdle(editor::consoleOcclusionForceWaitIdleSlot());
+        // 3B (occlusion-fix-plan.md): occlusion.showCulled / occlusion.cullUnderSuppression, read
+        // every frame beside debugForceWaitIdle's own reassertion just above, for the same reason --
+        // so a console `set` this frame is live for THIS SAME frame's onRender walk
+        // (chooseRoute()/occlusionTestShouldRun(), SceneSubmission.hpp) rather than one frame late.
+        occlusionShowCulled_ = editor::consoleOcclusionShowCulledSlot();
+        occlusionCullUnderSuppression_ = editor::consoleOcclusionCullUnderSuppressionSlot();
 #endif
         // Single-instance forwarding, drain. Polled rather than an Event (Event.hpp is a fixed POD
         // with no string field), latched on window_ and drained unconditionally every frame -- safe
@@ -5024,6 +5038,11 @@ public:
         {
             scene::World& w = scene::World::instance();
             int drawn = 0, culled = 0, ownerHidden = 0;
+            // 3B's periodic-report extension: how many Draw records the direct route actually
+            // delivered for THIS frame's culled entities, and how many of those entities were
+            // multi-part -- the concrete evidence that a culled tree still yields N draws instead of
+            // collapsing to slot 0's single one.
+            u32 culledDraws = 0, culledMultiPart = 0;
 #if AVER_MODULE_TRIFACTOR
             lodStats_ = LodSelectStats{};   // this frame's counters, from zero -- see the struct comment
             lodClusterStats_ = LodClusterStats{};
@@ -5174,37 +5193,41 @@ public:
                             }
                         }
 #endif
-#if AVER_MODULE_PBR && AVER_MODULE_VOXI
-                        {
-                            const i32 pmat = pmr->material;
-                            u32 pauthored = 0;
-                            if (const auto pit2 = surfaceMaterials_.find(pmat); pit2 != surfaceMaterials_.end())
-                                pauthored = pit2->second;
-                            // TRANSLUCENT: EXCLUDED, joining skinned/GPU-cluster/CPU-per-cluster -- but for a
-                            // DIFFERENT reason: those three are excluded because depth is written some
-                            // OTHER way; glass must not write depth AT ALL, EVER (the blended replay in
-                            // endFrame runs with depth-WRITE off so a translucent surface never occludes
-                            // what's behind it). Pre-writing opaque depth for a glass pane here would
-                            // leave that depth unconsumed by the colour loop's `prepassEligible` gate
-                            // (which also excludes `blended`) AND make every opaque object BEHIND the
-                            // glass depth-test against a surface meant to be see-through, vanishing
-                            // under it instead of showing through. Skipping the instance entirely
-                            // matches the colour loop's own material resolution: `desc(pauthored)`
-                            // reads the SAME pbr::MaterialDesc `blended` reads off `authored` -- two
-                            // call sites, one source of truth.
-                            if (pauthored) {
-                                // pbr::isTranslucent, not a fourth hand-spelled `alphaMode == Blend`.
-                                // See Material.hpp: the rule now also covers a nominally-opaque
-                                // material that authors transmission, and it lives in ONE place.
-                                if (const pbr::MaterialDesc* d = pbr::MaterialLibrary::get().desc(pauthored);
-                                    d && pbr::isTranslucent(*d)) continue;
-                            }
-                            if (pbr::MaterialSystem& pms = voxiRenderer_.materials(); pms.ready())
-                                e.device()->setDrawBinding(pms.bindingSet(pauthored), &pms.constants(pauthored),
-                                                           sizeof(pbr::MaterialConstants));
+                        // F6 (occlusion-fix-plan.md): this walk used to read the RAW `pmr->material`
+                        // with no meshDefaultMaterial fallback and no per-part split -- a THIRD copy of
+                        // the material-resolution rule, independently wrong in a way neither the entity
+                        // loop nor (the now-deleted) submitShadowOnly was: a multi-material mesh always
+                        // prepassed as whatever pmr->material happened to be (usually 0, "every plant"),
+                        // never any individual part's own translucency. planEntityDraws() is the SAME
+                        // split the colour walk uses below, so a mesh this walk excludes here (every
+                        // part translucent) is exactly the mesh the colour walk's own `blended` gate
+                        // (prepassEligibleBase's per-draw check) would also have excluded.
+                        const i32 pmat = pmr->material ? pmr->material : meshDefaultMaterial(pmr->mesh);
+                        const auto ppit = meshParts_.find(pmr->mesh);
+                        aver::editor::PlannedDraw pdraws[kMaxPlannedDraws];
+                        const u32 pdrawCount = aver::editor::planEntityDraws(
+                            pit->second, pmesh,
+                            ppit != meshParts_.end() ? ppit->second.data() : nullptr,
+                            ppit != meshParts_.end() ? static_cast<u32>(ppit->second.size()) : 0u,
+                            pmat, pdraws, kMaxPlannedDraws);
+                        for (u32 pdi = 0; pdi < pdrawCount; ++pdi) {
+                            const aver::editor::PlannedDraw& pd = pdraws[pdi];
+                            if (!pd.mesh) continue;
+                            const ResolvedSurface prs = resolveSurface(pd.material);
+                            // TRANSLUCENT: EXCLUDED, per part now, joining skinned/GPU-cluster/
+                            // CPU-per-cluster -- but for a DIFFERENT reason: those three are excluded
+                            // because depth is written some OTHER way; glass must not write depth AT
+                            // ALL, EVER (the blended replay in endFrame runs with depth-WRITE off so a
+                            // translucent surface never occludes what's behind it). Pre-writing opaque
+                            // depth for a glass part here would leave that depth unconsumed by the
+                            // colour loop's per-draw prepass gate (which also excludes `blended`) AND
+                            // make every opaque object BEHIND the glass depth-test against a surface
+                            // meant to be see-through, vanishing under it instead of showing through.
+                            if (prs.look.blended) continue;
+                            if (prs.matBytes)
+                                e.device()->setDrawBinding(prs.matSet, prs.matConstants, prs.matBytes);
+                            e.device()->drawMeshDepthPrepass(pd.mesh, &pwm.m[0][0]);
                         }
-#endif
-                        e.device()->drawMeshDepthPrepass(pmesh, &pwm.m[0][0]);
                     }
                 }
             }
@@ -5231,6 +5254,20 @@ public:
             // the first group exists.
             u32 occlusionPass1Count = n;
             bool occlusionPyramidBuilt = false;
+            // F7 (occlusion-fix-plan.md, "Link 6" -- the trigger): THE SCENE'S OWN SUB-RECT of the
+            // target depth/pyramid texture, in target pixels, read fresh every frame regardless of
+            // whether culling is even on -- the trust gate just below needs to compare it against
+            // LAST frame's basis (occlusionBasisRect_) before anything else here runs, and the
+            // box-collection loop and testBatch() call further down both need THIS frame's own copy.
+            // False (RHI.hpp's sceneViewport doc: "False when the backend has no viewport to give")
+            // zeroes it explicitly rather than trusting an untouched caller buffer, which lands on
+            // exactly the same "whole target" convention ViewportRect's own w<=0/h<=0 rule already
+            // uses (OcclusionMath.hpp) -- a backend that cannot answer this degrades to today's
+            // assume-the-whole-target behaviour, never to a nonsense rect.
+            f32 occRect[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            if (!e.device()->sceneViewport(occRect)) {
+                occRect[0] = occRect[1] = occRect[2] = occRect[3] = 0.0f;
+            }
             // ---- MOTION-SAFE TRUST GATE ----
             // testBatch()'s answer this frame is (at best) exactly one call stale -- see
             // Occlusion.hpp's corrected "TWO-PASS" section for why: this RHI has no primitive that
@@ -5292,11 +5329,47 @@ public:
             // camera did not travel between the two positions at all.
             constexpr f32 kOcclusionTeleportMoveCm = 3000.0f;
             constexpr f32 kOcclusionTeleportRotRad = 1.571f;   // 90 degrees in one frame
+            // F7: a dock-layout drag between the pyramid this basis describes and the (one-call-stale)
+            // readback actually being consumed is a discontinuity no motion margin was ever meant to
+            // cover -- occlusionBasisRect_ is the SAME scene sub-rect that produced the CURRENT basis,
+            // so an exact mismatch here forces the same safe "everyone visible" fallback a teleport
+            // does, rather than silently applying last basis's verdicts to a different mapping.
+            const bool occlusionRectUnchanged =
+                occRect[0] == occlusionBasisRect_[0] && occRect[1] == occlusionBasisRect_[1] &&
+                occRect[2] == occlusionBasisRect_[2] && occRect[3] == occlusionBasisRect_[3];
             const bool occlusionTrustworthy = occlusionBasisValid_ &&
                 occlusionMoveDist <= kOcclusionTeleportMoveCm &&
-                occlusionRotRad <= kOcclusionTeleportRotRad;
+                occlusionRotRad <= kOcclusionTeleportRotRad &&
+                occlusionRectUnchanged;
             const f32 occlusionRotMarginTan = std::tan(std::min(occlusionRotRad, kOcclusionRotClampRad));
-            if (occlusionCullEnabled_ && occluder_) {
+            // F8 (occlusion-fix-plan.md): should the test even run THIS frame. `occluder_ != nullptr`
+            // is haveOccluder; e.device()->sceneSuppressed() is true whenever a registered feature
+            // (ray-driven Voxi, Path Tracing, the GI debug raymarch) has claimed the frame and is
+            // painting the scene itself, in which case culling saves almost no work -- every culled
+            // entity still has to be submitted for primary rays (see occlusionTestShouldRun's own
+            // comment, SceneSubmission.hpp, for the full accounting) -- so it idles unless
+            // occlusion.cullUnderSuppression overrides it back on. THE WALK RUNS IN onRender AFTER
+            // beginFrame (Engine.cpp's own onUpdate/beginFrame/onRender order), so sceneSuppressed()
+            // here is THIS frame's own election result, not a stale one from before the ray-driven
+            // pass ran.
+            const bool occlusionRuns = aver::editor::occlusionTestShouldRun(
+                occlusionCullEnabled_, occluder_ != nullptr, e.device()->sceneSuppressed(),
+                occlusionCullUnderSuppression_);
+            // ONCE PER TRANSITION, not every idle frame -- ray-driven primary visibility is this
+            // project's own standing default, so a per-frame line here would flood the log for nearly
+            // the entire session. occlusionIdleLogged_ resets the moment occlusionRuns is next true, so
+            // idle -> running -> idle again logs a second time rather than only ever once per process.
+            if (occlusionCullEnabled_ && occluder_ && !occlusionRuns) {
+                if (!occlusionIdleLogged_) {
+                    occlusionIdleLogged_ = true;
+                    AVER_INFO("[Occlusion] idle: '{}' paints the scene, so culling can save no raster "
+                              "work; RENDER.OCCLUSIONCULL is unchanged.",
+                              occlusionSuppressingFeatureName());
+                }
+            } else {
+                occlusionIdleLogged_ = false;
+            }
+            if (occlusionRuns) {
                 occlusionBoxes_.clear();
                 occlusionBoxEntities_.clear();
                 occlusionOrder_.resize(n);
@@ -5396,10 +5469,34 @@ public:
                     if (const rhi::TextureHandle depthTex = e.device()->sceneDepthTexture();
                         depthTex && occRes->textureInfo(depthTex, sceneDesc)) {
                         occluder_->ensureSized(*occRes, sceneDesc.width, sceneDesc.height, e.device()->sampleCount());
+                        // F7's once-per-change diagnostic: fires exactly when the rect or the pyramid
+                        // it sits inside actually changed since the last time this printed, so a dock
+                        // layout drag (or a backend that starts/stops answering sceneViewport()) leaves
+                        // a trail instead of only a silent change in which entities get culled.
+                        if (occRect[0] != occlusionLoggedRect_[0] || occRect[1] != occlusionLoggedRect_[1] ||
+                            occRect[2] != occlusionLoggedRect_[2] || occRect[3] != occlusionLoggedRect_[3] ||
+                            sceneDesc.width != occlusionLoggedPyramidW_ ||
+                            sceneDesc.height != occlusionLoggedPyramidH_) {
+                            occlusionLoggedRect_[0] = occRect[0]; occlusionLoggedRect_[1] = occRect[1];
+                            occlusionLoggedRect_[2] = occRect[2]; occlusionLoggedRect_[3] = occRect[3];
+                            occlusionLoggedPyramidW_ = sceneDesc.width;
+                            occlusionLoggedPyramidH_ = sceneDesc.height;
+                            AVER_INFO("[Occlusion] testing against scene rect {:.0f},{:.0f} {:.0f}x{:.0f} "
+                                      "of a {}x{} pyramid",
+                                      occRect[0], occRect[1], occRect[2], occRect[3],
+                                      sceneDesc.width, sceneDesc.height);
+                        }
                     }
                 }
             } else {
+                // F8: re-entry starts from "never tested = visible" -- the same safe default a freshly
+                // spawned entity already gets (occlusionWasVisible's own comment) -- so a wall that
+                // moved in front of something while culling was idle is discovered fresh on resume
+                // rather than trusted from a verdict computed before the idle period began, and the
+                // NEXT resumed frame does not silently reuse a motion basis from before the gap.
+                occlusionVisible_.clear();
                 occlusionOrder_.clear();   // empty means "no reordering" -- see the loop below
+                occlusionBasisValid_ = false;
             }
 
             // Runs buildPyramid()+testBatch() ONCE this frame -- either at the pass-1/pass-2 boundary
@@ -5434,6 +5531,10 @@ public:
                 // documents is the point).
                 occlusionBasisCamPos_ = camPos_;
                 occlusionBasisForward_ = camForward();
+                // F7: stashed alongside the camera basis, same idiom, same reasoning -- see
+                // occlusionBasisRect_'s own member comment.
+                occlusionBasisRect_[0] = occRect[0]; occlusionBasisRect_[1] = occRect[1];
+                occlusionBasisRect_[2] = occRect[2]; occlusionBasisRect_[3] = occRect[3];
                 occlusionBasisValid_ = true;
                 // IDENTITY, NOT GEOMETRY -- hashed from occlusionBoxEntities_ (which entities, in
                 // which order), not from occlusionBoxes_'s bounds. THE BOUNDS ARE THE WRONG THING TO
@@ -5447,9 +5548,12 @@ public:
                 // a parameter instead of deriving it from the upload bytes itself.
                 const u64 occlusionIdentityKey = aver::occlusion::hashIdentityKey(
                     occlusionBoxEntities_.data(), static_cast<u32>(occlusionBoxEntities_.size()));
+                // F7: `occRect` is THIS frame's own scene sub-rect (never folded into
+                // occlusionIdentityKey above, which stays keyed on entity identity alone -- 0f85785a/
+                // e04efdab's own rule, unchanged).
                 occluder_->testBatch(*pctx, *occRes, occlusionBoxes_.data(),
                                      static_cast<u32>(occlusionBoxes_.size()), occlusionIdentityKey,
-                                     occlusionResults_);
+                                     occRect, occlusionResults_);
                 u32 c = 0, t = 0;
                 occluder_->lastTestCounts(c, t);
                 occlusionCulledAccum_ += c;
@@ -5484,131 +5588,47 @@ public:
 #endif
 
 #if AVER_MODULE_VOXI
-            // A CASTER THE CAMERA CANNOT SEE STILL CASTS A SHADOW, and until now it did not.
-            // The frustum/occlusion culls below skip DRAWING an entity via a bare `continue` past
-            // drawMesh() -- but drawMesh() is the ONLY thing that reaches the render features
-            // (submitDraw() is how VoxiRenderer learns an entity exists), so a culled entity was
-            // absent from shadow cascades, GI voxelisation and the RT TLAS: its shadow vanished the
-            // instant it left the view. THAT IS THE "SHADOWS ARE SCREEN-SPACE" SYMPTOM, fair even
-            // though no shadowing technique here is screen-space -- what FED the world-space cascades
-            // and RayQuery was the camera frustum.
-            // This submits the entity to the features WITHOUT drawing it; Voxi applies its own
-            // per-cascade cull in LIGHT space, the cull a shadow caster should have gotten all along.
-            // BOUNDED BY ANGULAR SIZE -- the difference between free and unaffordable: submitting
-            // EVERY culled entity was measured at +64ms/frame in ElectricDreams (5,884 of 6,617
-            // entities culled, mostly scatter plants), since the RT TLAS is a full rebuild every frame
-            // and 759->6,571 instances took it from 9.1ms to 64.2ms. The floor is Voxi's own
-            // per-cascade argument -- an object too small to fill a shadow texel cannot cast a visible
-            // shadow -- applied earlier, where it can stop the work, not just the draw.
-            // A NEGATIVE radius means the caller had no bounds, so the entity submits regardless,
-            // matching the frustum cull's own "must not vanish" rule.
-            // For scale: a crate at 5 m subtends ~0.2 rad and is kept; an ankle-height plant at 100 m
-            // subtends ~0.003 rad and is not.
+            // A CASTER THE CAMERA CANNOT SEE STILL CASTS A SHADOW. The frustum/occlusion/owner-hide
+            // verdicts below used to skip DRAWING an entity via a bare `continue` past drawMesh() --
+            // but drawMesh() is the ONLY thing that reaches the render features (submitDraw() is how
+            // VoxiRenderer learns an entity exists), so a culled entity was absent from shadow
+            // cascades, GI voxelisation and the RT TLAS: its shadow vanished the instant it left the
+            // view. THAT IS THE "SHADOWS ARE SCREEN-SPACE" SYMPTOM, fair even though no shadowing
+            // technique here is screen-space -- what FED the world-space cascades and RayQuery was the
+            // camera frustum. F4 (occlusion-fix-plan.md) closes this by submitting the entity to the
+            // features WITHOUT drawing it -- Voxi applies its own per-cascade cull in LIGHT space, the
+            // cull a shadow caster should have gotten all along -- via the SAME emitEntityDraws() the
+            // visible route uses, from the unified direct-route branch further down this walk. The
+            // lambda that used to live here (submitShadowOnly) is gone: it read a different material
+            // (mesh-slot-0's, not each part's own), dropped multi-part splits entirely, and had DRIFTED
+            // on the translucency test from the visible path's copy -- see SceneSubmission.hpp's own
+            // top comment for the full history this closes.
+            //
+            // BOUNDED BY ANGULAR SIZE -- the difference between free and unaffordable: submitting EVERY
+            // culled entity was measured at +64ms/frame in ElectricDreams (5,884 of 6,617 entities
+            // culled, mostly scatter plants), since the RT TLAS is a full rebuild every frame and
+            // 759->6,571 instances took it from 9.1ms to 64.2ms. The floor is Voxi's own per-cascade
+            // argument -- an object too small to fill a shadow texel cannot cast a visible shadow --
+            // applied earlier, where it can stop the work, not just the draw. A NEGATIVE radius means
+            // the caller had no bounds, so the entity submits regardless, matching the frustum cull's
+            // own "must not vanish" rule. For scale: a crate at 5 m subtends ~0.2 rad and is kept; an
+            // ankle-height plant at 100 m subtends ~0.003 rad and is not.
             constexpr f32 kMinCasterAngle = 0.02f;   // radians (~1.1 degrees)
-            // THIS FLOOR IS ASYMMETRIC, AND THAT ASYMMETRY IS THE BUG. It exists only on this path:
-            // an entity INSIDE the frustum reaches the renderer through drawMesh() with no size test
-            // at all, and the moment it rotates outside it arrives here and may be dropped. So an
-            // object sitting near ~1.1 degrees does not merely lose its shadow when it leaves the
-            // view -- it leaves the GI draw list entirely, changing what giDrawsKey hashes, and
-            // rejecting the rebuild gate on the frame it crosses. Panning past a field of small props
-            // re-bakes the whole volume once per prop.
+            // THIS FLOOR IS ASYMMETRIC, AND THAT ASYMMETRY IS THE BUG. It exists only on the direct
+            // route: an entity INSIDE the frustum reaches the renderer through drawMesh() with no size
+            // test at all, and the moment it rotates outside it may be dropped here instead. So an
+            // object sitting near ~1.1 degrees does not merely lose its shadow when it leaves the view
+            // -- it leaves the GI draw list entirely, changing what giDrawsKey hashes, and rejecting
+            // the rebuild gate on the frame it crosses. Panning past a field of small props re-bakes
+            // the whole volume once per prop.
             //
             // GATED ON WHETHER ANYONE BUT THE SHADOW CARES. Voxi's submission feeds voxelisation and
-            // the ray-traced TLAS as well as the cascades, and neither of those has any business
-            // being decided by a caster-size heuristic -- a prop too small to cast a resolvable
-            // shadow still occludes a ray and still bounces light. When Voxi is attached the floor is
-            // skipped and the draw goes through; the heuristic survives for the case it was written
-            // for, which is a build with no Voxi where this really is only feeding cascades.
-            auto submitShadowOnly = [&](scene::Entity sEnt, rhi::MeshHandle baseMesh, const Mat4& sWm, i32 sMat,
-                                        const Vec3& sCentre, f32 sRadius, bool sHiddenFromOwner) {
-                // Skipped entirely when Voxi is attached, per the note above.
-                if (!voxiAttached_ && sRadius >= 0.0f) {
-                    const f32 dx = sCentre.x - camPos_.x, dy = sCentre.y - camPos_.y, dz = sCentre.z - camPos_.z;
-                    const f32 dsq = dx * dx + dy * dy + dz * dz;
-                    // Inside its own radius of the camera it is always kept: the ratio is meaningless
-                    // there and that is exactly where a caster matters most.
-                    if (dsq > sRadius * sRadius) {
-                        const f32 d = std::sqrt(dsq);
-                        if (2.0f * sRadius / d < kMinCasterAngle) return;
-                    }
-                }
-                // The same substitution THE SEAM does further down: a skinned or soft-body entity's
-                // posed vertices live in a different MeshHandle, and its shadow has to come from the
-                // pose, not the rest position.
-                rhi::MeshHandle m = 0;
-                if (skinnedScene_) m = skinnedScene_->drawHandle(sEnt);
-#if AVER_MODULE_RENDER_SOFTBODY
-                if (!m && softBodyScene_) m = softBodyScene_->drawHandle(sEnt);
-#endif
-                if (!m) m = baseMesh;
-                if (!m) return;
-
-                f32 c[4] = {0.80f, 0.80f, 0.85f, 1.0f};
-                f32 metal = 0.0f, rough = 0.5f;
-                u32 authored = 0;
-                // See the visible-draw path for why a handle that no longer resolves must not be
-                // trusted; this path reimplements the same decision and has to make the same one.
-                bool authoredLive = false;
-#if AVER_MODULE_PBR
-                if (const auto a = surfaceMaterials_.find(sMat); a != surfaceMaterials_.end())
-                    authored = a->second;
-                authoredLive = authored != 0;
-                // GLASS IS EXCLUDED FROM SUBMITDRAW EVEN HERE: since IDevice::drawMesh is the ONLY
-                // thing that broadcasts submitDraw() to VoxiRenderer, a culled entity skipping
-                // drawMesh() via `continue` would vanish from shadows/GI/TLAS the instant it left the
-                // frustum. This lambda WORKS AROUND that: it calls voxiRenderer_.submit() directly,
-                // routing AROUND drawMesh(), for a frustum-culled/occlusion-culled/owner-hidden entity
-                // that still needs to cast a shadow. The fixed contract states glass casts no
-                // ray-traced shadow, enters no reflection, contributes no GI bounce BECAUSE it's
-                // excluded from submitDraw -- enforced in exactly one spot on the visible path
-                // (IDevice::drawMesh diverts on setDrawBlended(true)). Without this check a pane of
-                // glass leaving the frustum would start casting a shadow the instant it did -- the
-                // OPPOSITE of its visible-instance behaviour one frame earlier.
-                if (authored) {
-                    // THE SECOND, INDEPENDENT SHADOW EXCLUSION -- the off-screen-caster path
-                    // reimplemented the same test by hand. Its having drifted from the visible-draw
-                    // path is exactly what a shared predicate prevents: a culled pane and a visible one must agree about whether they are translucent.
-                    const pbr::MaterialDesc* d = pbr::MaterialLibrary::get().desc(authored);
-                    authoredLive = d != nullptr;
-                    if (d && pbr::isTranslucent(*d)) return;
-                }
-#endif
-                // A HANDLE THAT NO LONGER RESOLVES MUST NOT BE TRUSTED. The white/metal=1/rough=1 below is a
-                // MULTIPLICATIVE IDENTITY, not an appearance: it is only correct because the real values arrive
-                // from the material binding set. When bindingSet() cannot resolve the handle it degrades to the
-                // fallback set, and this branch then bakes the identity in as the entity's FINAL look -- a bright
-                // white mirror, which is among the worst possible failure appearances because it reads as
-                // confident, deliberate lighting rather than as missing content. desc() is the same liveness test
-                // the translucency check above already performs, so a dead handle now falls through to the named
-                // look (or the flat fallback) instead, and says so once rather than silently.
-                if (authored && !authoredLive) warnDeadMaterialHandle(sMat);
-                if (authoredLive) {
-                    c[0] = c[1] = c[2] = 1.0f;
-                    metal = rough = 1.0f;
-                } else if (const auto look = surfaceLooks_.find(sMat); look != surfaceLooks_.end()) {
-                    c[0] = look->second.col[0]; c[1] = look->second.col[1]; c[2] = look->second.col[2];
-                    metal = look->second.metallic; rough = look->second.roughness;
-                }
-
-                // The material matters even for a pass that writes only depth: voxelisation shades
-                // the fragment it injects, so an off-screen caster contributing GI has to carry its
-                // own albedo or it bounces the default grey.
-                rhi::BindingSetHandle ms = 0;
-                const void* mc = nullptr;
-                u32 mb = 0;
-#if AVER_MODULE_PBR
-                if (pbr::MaterialSystem& sys = voxiRenderer_.materials(); sys.ready()) {
-                    ms = sys.bindingSet(authored);
-                    mc = &sys.constants(authored);
-                    mb = sizeof(pbr::MaterialConstants);
-                }
-#endif
-                // translucent=false, then the owner-hide lane. A draw reaching HERE is opaque by
-                // construction -- the authored-glass check above returns before this line -- so the
-                // false is a statement of fact rather than a default being accepted.
-                voxiRenderer_.submit(m, &sWm.m[0][0], c, metal, rough, ms, mc, mb,
-                                     /*translucent=*/false, sHiddenFromOwner);
-            };
+            // the ray-traced TLAS as well as the cascades, and neither of those has any business being
+            // decided by a caster-size heuristic -- a prop too small to cast a resolvable shadow still
+            // occludes a ray and still bounces light. When Voxi is attached the floor is skipped and
+            // the draw goes through; the heuristic survives for the case it was written for, which is a
+            // build with no Voxi where this really is only feeding cascades. Applied ONCE PER ENTITY
+            // (not per part) at the direct-route branch below, exactly where it applied before.
 #endif
 
             // ONE GPU SPAN AROUND THE WHOLE OPAQUE WALK -- the raster path's counterpart to "Voxi
@@ -5630,7 +5650,7 @@ public:
             for (u32 oi = 0; oi < n; ++oi) {
 #if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
                 const u32 i = occlusionOrder_.empty() ? oi : occlusionOrder_[oi];
-                if (occlusionCullEnabled_ && occluder_ && oi == occlusionPass1Count) occlusionBuildAndTest();
+                if (occlusionRuns && oi == occlusionPass1Count) occlusionBuildAndTest();
 #else
                 const u32 i = oi;
 #endif
@@ -5694,10 +5714,10 @@ public:
                 const Mat4& wm = w.worldMatrix(ent);
 
                 // ---- OWNER HIDE, DECIDED BEFORE THE CULLS ----
-                // Needed by all THREE submitShadowOnly calls, not just the owner-hide branch's own:
-                // an entity both frustum-culled and owner-hidden would otherwise reach the
-                // acceleration structure through the frustum branch with the flag unset, and be
-                // primary-visible again once back on screen.
+                // Needed by chooseRoute() below regardless of which cull (if any) also applies: an
+                // entity both frustum-culled and owner-hidden must still carry hiddenFromOwner=true on
+                // its one (direct-route) delivery, or it would be primary-visible again once back on
+                // screen -- the 0d3bcf1 regression chooseRoute's own contract pins a test against.
                 // COSTS ESSENTIALLY NOTHING to hoist: the walk runs only for an entity that both
                 // carries the flag and has a first-person viewer to hide from -- in practice one
                 // entity, the possessed pawn's own body.
@@ -5729,6 +5749,7 @@ public:
                 // is drawn rather than culled: an entity whose bounds were never filled in must not
                 // vanish -- being conservative costs a draw call where being wrong costs a character.
                 bool haveWorldBox = false;
+                bool frustumCulled = false;
                 Vec3 wlo{1e30f, 1e30f, 1e30f}, whi{-1e30f, -1e30f, -1e30f};
                 {
                     const Vec3 lo{mr->aabbMin[0], mr->aabbMin[1], mr->aabbMin[2]};
@@ -5752,29 +5773,16 @@ public:
                                         + pl[pi][3];
                             if (d < 0.0f) outside = true;
                         }
-                        if (outside) {
-                            ++culled;
-#if AVER_MODULE_VOXI
-                            submitShadowOnly(ent, it->second, wm,
-                                             // THE SAME FALLBACK THE VISIBLE PATH RESOLVES a few
-                                             // dozen lines down (`mr->material ? ... : meshDefaultMaterial`).
-                                             // Passing the raw handle here meant a mesh whose material is 0 --
-                                             // "every plant", per meshDefaultMaterial's own comment -- baked a
-                                             // flat grey into GI on exactly the frames it was off-screen, and
-                                             // its authored look on the frames it was not. That flips a value
-                                             // inside giDrawsKey every time it crosses the frustum edge, so it
-                                             // rejected the GI rebuild gate as well as being wrong.
-                                             mr->material ? mr->material : meshDefaultMaterial(mr->mesh),
-                                             Vec3{(wlo.x + whi.x) * 0.5f, (wlo.y + whi.y) * 0.5f, (wlo.z + whi.z) * 0.5f},
-                                             0.5f * std::sqrt((whi.x - wlo.x) * (whi.x - wlo.x) +
-                                                              (whi.y - wlo.y) * (whi.y - wlo.y) +
-                                                              (whi.z - wlo.z) * (whi.z - wlo.z)),
-                                             ownerHiddenHere);
-#endif
-                            continue;
-                        }
+                        // F4 (occlusion-fix-plan.md): STORE the verdict rather than acting on it here.
+                        // chooseRoute() (SceneSubmission.hpp), a few lines down once the occlusion
+                        // verdict is known too, is the ONE place that decides what happens next -- a
+                        // frustum-culled entity and an occlusion-culled one are now handled by the
+                        // exact same code from there on. This used to `continue` right here, through
+                        // the deleted submitShadowOnly lambda.
+                        frustumCulled = outside;
                     }
                 }
+                bool occlusionCulled = false;
 #if AVER_MODULE_OCCLUSION && AVER_MODULE_SCENE
                 // PASS-2 ONLY: `oi < occlusionPass1Count` entities drew unconditionally before
                 // occlusionBuildAndTest() ran. Everything below has ALREADY been tested against a
@@ -5788,71 +5796,91 @@ public:
                 // trust gate above the box-collection loop is willing to trust; otherwise it is
                 // forced to "visible" regardless of what the pyramid says. A box excluded from
                 // occlusionBoxes_ (degenerate) was never tested and defaults to visible, same as
-                // haveWorldBox==false for frustum culling above.
-                if (occlusionCullEnabled_ && occluder_ && oi >= occlusionPass1Count && haveWorldBox &&
-                    !occlusionWasVisible(ent)) {
-                    // Occluded from the CAMERA is not occluded from the LIGHT: a crate behind a wall
-                    // still throws a shadow through the doorway. Same reasoning as the frustum cull
-                    // just above -- see submitShadowOnly.
+                // haveWorldBox==false for frustum culling above. F8: occlusionRuns (computed once,
+                // above the box-collection pre-walk) replaces occlusionCullEnabled_ && occluder_ here.
+                occlusionCulled = occlusionRuns && oi >= occlusionPass1Count && haveWorldBox &&
+                    !occlusionWasVisible(ent);
+#endif
+                // F4: THE ONE PLACE that decides who delivers this entity -- see SceneSubmission.hpp's
+                // own top comment for the rule (culling may change WHO delivers the draws, never WHAT
+                // is in them). showCulled sends an otherwise-culled, non-owner-hidden entity through
+                // the raster route too, tinted, for the by-hand false-cull finder (section 3B).
+                const aver::editor::RouteDecision route = aver::editor::chooseRoute(
+                    frustumCulled, occlusionCulled, ownerHiddenHere, occlusionShowCulled_);
+
+                if (!route.raster) {
 #if AVER_MODULE_VOXI
-                    submitShadowOnly(ent, it->second, wm,
-                                             // THE SAME FALLBACK THE VISIBLE PATH RESOLVES a few
-                                             // dozen lines down (`mr->material ? ... : meshDefaultMaterial`).
-                                             // Passing the raw handle here meant a mesh whose material is 0 --
-                                             // "every plant", per meshDefaultMaterial's own comment -- baked a
-                                             // flat grey into GI on exactly the frames it was off-screen, and
-                                             // its authored look on the frames it was not. That flips a value
-                                             // inside giDrawsKey every time it crosses the frustum edge, so it
-                                             // rejected the GI rebuild gate as well as being wrong.
-                                             mr->material ? mr->material : meshDefaultMaterial(mr->mesh),
-                                     Vec3{(wlo.x + whi.x) * 0.5f, (wlo.y + whi.y) * 0.5f, (wlo.z + whi.z) * 0.5f},
-                                     0.5f * std::sqrt((whi.x - wlo.x) * (whi.x - wlo.x) +
-                                                      (whi.y - wlo.y) * (whi.y - wlo.y) +
-                                                      (whi.z - wlo.z) * (whi.z - wlo.z)),
-                                     ownerHiddenHere);
-#endif
-                    continue;
-                }
-#endif
-                // ---- OWNER HIDE: a first-person camera does not see its own pawn's body ----
-                // The WALK is hoisted above the culls (see ownerHiddenHere's own comment); this is
-                // where acting on it belongs -- after both culls and before any colour-path work below,
-                // since an entity this frame decides not to rasterise needs none of that.
-                {
-                    if (ownerHiddenHere) {
-#if AVER_MODULE_VOXI
-                        // Still a shadow caster, still in the GI volume, still in the RT geometry
-                        // table -- skipping IT rather than drawMesh() below would lose all three,
-                        // reintroducing the "shadows are screen-space" bug already closed. A degenerate
-                        // box submits with a negative radius, read as "unknown, never angular-size-cull".
-                        // THE FLAG IS WHAT MAKES THE HIDE REACH THE RENDERER THAT ACTUALLY DRAWS.
-                        // Skipping drawMesh() removes this mesh from the RASTER image only; ray-driven
-                        // primary visibility reads the acceleration structure instead, and the flag
-                        // puts the instance in the AVER_RT_MASK_OWNER_HIDDEN lane, excluded only from
-                        // the primary ray.
-                        submitShadowOnly(ent, it->second, wm,
-                                             // THE SAME FALLBACK THE VISIBLE PATH RESOLVES a few
-                                             // dozen lines down (`mr->material ? ... : meshDefaultMaterial`).
-                                             // Passing the raw handle here meant a mesh whose material is 0 --
-                                             // "every plant", per meshDefaultMaterial's own comment -- baked a
-                                             // flat grey into GI on exactly the frames it was off-screen, and
-                                             // its authored look on the frames it was not. That flips a value
-                                             // inside giDrawsKey every time it crosses the frustum edge, so it
-                                             // rejected the GI rebuild gate as well as being wrong.
-                                             mr->material ? mr->material : meshDefaultMaterial(mr->mesh),
-                                         haveWorldBox
-                                             ? Vec3{(wlo.x + whi.x) * 0.5f, (wlo.y + whi.y) * 0.5f, (wlo.z + whi.z) * 0.5f}
-                                             : Vec3{0.0f, 0.0f, 0.0f},
-                                         haveWorldBox
-                                             ? 0.5f * std::sqrt((whi.x - wlo.x) * (whi.x - wlo.x) +
-                                                                 (whi.y - wlo.y) * (whi.y - wlo.y) +
-                                                                 (whi.z - wlo.z) * (whi.z - wlo.z))
-                                             : -1.0f,
-                                         /*sHiddenFromOwner=*/true);
-#endif
-                        ++ownerHidden;
-                        continue;
+                    // THE UNIFIED DIRECT ROUTE: frustum-culled, occlusion-culled or owner-hidden.
+                    // Still submitted to Voxi so shadows, GI voxelisation and the RT TLAS never depend
+                    // on what the camera itself can see -- see this walk's own "A CASTER THE CAMERA
+                    // CANNOT SEE STILL CASTS A SHADOW" comment above for the full history, and
+                    // SceneSubmission.hpp's deliver() for the exact translucent/hiddenFromOwner
+                    // formula emitEntityDraws() applies below (raster: hiddenFromOwner always false;
+                    // direct: route.hiddenFromOwner, which chooseRoute already set to ownerHiddenHere
+                    // on EVERY route, including frustum-culled-AND-owner-hidden -- the 0d3bcf1 fix).
+                    // KNOWN RESIDUAL, STATED RATHER THAN FIXED (occlusion-fix-plan.md F4): this route
+                    // never runs LOD/cluster selection, so a posed (skinned/soft-body) entity aside,
+                    // it always plans from the BASE mesh and its full part split. A VISIBLE entity
+                    // whose LOD or cluster cut substitutes a different, unsplit handle therefore
+                    // delivers ONE draw of that handle while the SAME entity, culled, delivers its
+                    // base parts -- only live with LOD selection or the CLI cluster paths (LODSELECT
+                    // is 0 in PTTest, so dormant here). Closing it means Voxi taking source geometry
+                    // independently of the raster LOD choice (the TLAS is keyed on d.mesh,
+                    // VoxiRenderer.cpp:1136) -- out of scope for this fix; the SceneSubmission.hpp
+                    // pure-function tests pin the rule as-is rather than hiding it.
+                    const rhi::MeshHandle chosenMesh = posedHandle(ent);
+                    const rhi::MeshHandle baseMeshForCull = chosenMesh ? chosenMesh : it->second;
+                    const Vec3 cullCentre = haveWorldBox
+                        ? Vec3{(wlo.x + whi.x) * 0.5f, (wlo.y + whi.y) * 0.5f, (wlo.z + whi.z) * 0.5f}
+                        : Vec3{0.0f, 0.0f, 0.0f};
+                    const f32 cullRadius = haveWorldBox
+                        ? 0.5f * std::sqrt((whi.x - wlo.x) * (whi.x - wlo.x) +
+                                            (whi.y - wlo.y) * (whi.y - wlo.y) +
+                                            (whi.z - wlo.z) * (whi.z - wlo.z))
+                        : -1.0f;
+                    // THE ANGULAR-SIZE FLOOR -- see its own comment above (moved here from the deleted
+                    // submitShadowOnly lambda) for the full "GATED ON WHETHER ANYONE BUT THE SHADOW
+                    // CARES" reasoning. Applied ONCE PER ENTITY, matching its old home exactly.
+                    bool angularFloorOk = true;
+                    if (!voxiAttached_ && cullRadius >= 0.0f) {
+                        const f32 dx = cullCentre.x - camPos_.x, dy = cullCentre.y - camPos_.y,
+                                  dz = cullCentre.z - camPos_.z;
+                        const f32 dsq = dx * dx + dy * dy + dz * dz;
+                        if (dsq > cullRadius * cullRadius) {
+                            const f32 d = std::sqrt(dsq);
+                            if (2.0f * cullRadius / d < kMinCasterAngle) angularFloorOk = false;
+                        }
                     }
+                    if (angularFloorOk) {
+                        // THE SAME FALLBACK THE VISIBLE PATH RESOLVES a few dozen lines down
+                        // (`mr->material ? ... : meshDefaultMaterial`) -- passing the raw handle here
+                        // meant a mesh whose material is 0 ("every plant", per meshDefaultMaterial's
+                        // own comment) baked a flat grey into GI on exactly the frames it was
+                        // off-screen, and its authored look on the frames it was not, flipping a value
+                        // inside giDrawsKey every time it crossed the frustum edge.
+                        const i32 directMat = mr->material ? mr->material : meshDefaultMaterial(mr->mesh);
+                        const auto directParts = meshParts_.find(mr->mesh);
+                        aver::editor::PlannedDraw pdraws[kMaxPlannedDraws];
+                        const u32 pdrawCount = aver::editor::planEntityDraws(
+                            it->second, baseMeshForCull,
+                            directParts != meshParts_.end() ? directParts->second.data() : nullptr,
+                            directParts != meshParts_.end()
+                                ? static_cast<u32>(directParts->second.size()) : 0u,
+                            directMat, pdraws, kMaxPlannedDraws);
+                        emitEntityDraws(e, pdraws, pdrawCount, wm, route, /*prepassEligibleBase=*/false);
+                        if (frustumCulled || occlusionCulled) {
+                            culledDraws += pdrawCount;
+                            if (pdrawCount > 1) ++culledMultiPart;
+                        }
+                    }
+#endif
+                    // Priority matches the OLD sequential-continue shape exactly (frustum/occlusion
+                    // checked before owner-hide used to mean a frustum-culled-AND-owner-hidden entity
+                    // was counted as culled, never as owner-hidden, even though route.hiddenFromOwner
+                    // -- via ownerHiddenHere above -- was always true regardless): this is a counting
+                    // convention only, not a correctness question.
+                    if (frustumCulled || occlusionCulled) ++culled; else ++ownerHidden;
+                    continue;
                 }
                 // THE ONE READ everything downstream keys off: surfaceMaterials_, surfaceLooks_,
                 // the PBR binding set -- and, because VoxiRenderer::submitDraw stores whatever
@@ -5860,79 +5888,25 @@ public:
                 // voxelisation and the ray-driven alpha-mask cutout too. Resolving here is what makes
                 // one fallback reach the renderer that is actually on screen.
                 const i32 mat = mr->material ? mr->material : meshDefaultMaterial(mr->mesh);
-                f32 col[4] = {0.80f, 0.80f, 0.85f, 1.0f};
-                f32 metallic = 0.0f, roughness = 0.5f;
-
-                u32 authored = 0;
-#if AVER_MODULE_PBR
-                if (const auto it2 = surfaceMaterials_.find(mat); it2 != surfaceMaterials_.end())
-                    authored = it2->second;
-#endif
-                // TRANSLUCENCY, read straight off the resolved material's alphaMode -- the ONE place
-                // in the loop that decides it; the depth prepass gate, the cluster-dispatch entry test
-                // and setDrawBlended() all read THIS local so the three can never disagree mid-frame.
-                // `authored` is a live pbr::MaterialLibrary handle or 0 for a surface drawn from
-                // surfaceLooks_ instead -- and desc(0) returns nullptr (0 is never a live slot), so a
-                // built-in-only surface is NEVER translucent regardless of its name. SurfaceLook is
-                // {colour, metallic, roughness} with no alphaMode at all -- see M_Glass's own comment.
-                bool blended = false;
-                // Reuses the ONE desc() lookup below rather than adding a second: with PBR compiled
-                // out there is no library to ask, so a handle is taken at face value exactly as before.
-                bool authoredLive = authored != 0;
-#if AVER_MODULE_PBR
-                if (authored) {
-                    const pbr::MaterialDesc* d = pbr::MaterialLibrary::get().desc(authored);
-                    authoredLive = d != nullptr;
-                    if (d) blended = pbr::isTranslucent(*d);
-                }
-#endif
-                // A HANDLE THAT NO LONGER RESOLVES MUST NOT BE TRUSTED. The white/metal=1/rough=1 below is a
-                // MULTIPLICATIVE IDENTITY, not an appearance: it is only correct because the real values arrive
-                // from the material binding set. When bindingSet() cannot resolve the handle it degrades to the
-                // fallback set, and this branch then bakes the identity in as the entity's FINAL look -- a bright
-                // white mirror, which is among the worst possible failure appearances because it reads as
-                // confident, deliberate lighting rather than as missing content. desc() is the same liveness test
-                // the translucency check above already performs, so a dead handle now falls through to the named
-                // look (or the flat fallback) instead, and says so once rather than silently.
-                if (authored && !authoredLive) warnDeadMaterialHandle(mat);
-                if (authoredLive) {
-                    col[0] = col[1] = col[2] = 1.0f;
-                    metallic = roughness = 1.0f;
-                } else if (const auto look = surfaceLooks_.find(mat); look != surfaceLooks_.end()) {
-                    col[0] = look->second.col[0]; col[1] = look->second.col[1]; col[2] = look->second.col[2];
-                    metallic = look->second.metallic; roughness = look->second.roughness;
-                } else if (mat != 0) {
-                    // SAY SO, ONCE PER NAME. A material resolving to neither an authored .ocmat nor a
-                    // built-in look silently kept the flat {0.80, 0.80, 0.85} fallback -- and it does
-                    // not look like missing content: PTTest's range named M_Concrete on floor and
-                    // walls (nothing defined it) and all rendered undifferentiated near-white,
-                    // investigated as a renderer defect through the GI bounce, cone trace, shadow rays
-                    // and denoiser before a raster capture came back PIXEL-IDENTICAL -- both paths
-                    // were faithfully shading a material that did not exist. The runtime already warns
-                    // on this; the editor, where a level is authored, did not.
-                    static std::unordered_set<i32> s_warnedMissingMaterial;
-                    if (s_warnedMissingMaterial.insert(mat).second)
-                        AVER_WARN("[Editor] surface '{}' has no .ocmat under Binaries/Materials or "
-                                  "Content/Materials and no built-in look; drawing the flat fallback "
-                                  "(0.80, 0.80, 0.85). Either author the material or use one of the "
-                                  "built-in names.",
-                                  aver_scene_material_name(mat));
-                }
-                // This entity's material, resolved ONCE and kept in locals because TWO paths below
-                // need it through different objects: the ordinary drawMesh() reads the DEVICE's copy,
-                // the cluster dispatch is handed the CONTEXT's. Declared outside the module guard so
-                // the code below compiles with PBR or VOXI off, staying zero ("no per-draw material").
-                rhi::BindingSetHandle matSet = 0;
-                const void* matConstants = nullptr;
-                u32 matConstantBytes = 0;
-#if AVER_MODULE_PBR && AVER_MODULE_VOXI
-                if (pbr::MaterialSystem& ms = voxiRenderer_.materials(); ms.ready()) {
-                    matSet = ms.bindingSet(authored);
-                    matConstants = &ms.constants(authored);   // a reference into the system's own storage
-                    matConstantBytes = sizeof(pbr::MaterialConstants);
-                    e.device()->setDrawBinding(matSet, matConstants, matConstantBytes);
-                }
-#endif
+                // F2: ONE call replaces the resolution this loop used to run by hand (surfaceMaterials_.
+                // find, MaterialLibrary::desc, isTranslucent, surfaceLooks_.find, the MaterialSystem
+                // lookup, the dead-handle warning, the once-per-name missing-material warning) -- see
+                // resolveSurface's own comment. Kept in LOCALS, not just read off `rsEntity` at the
+                // final dispatch, because the GPU-cluster path below reads col/metallic/roughness/
+                // matSet/matConstants through the CONTEXT rather than the device, `blended` gates
+                // whether that path may run at all, and the skin-scene-test override just below
+                // overwrites `col` directly. `matConstantBytes` staying 0 (module compiled out, or the
+                // system not ready) is what tells emitEntityDraws() below not to touch the device's
+                // sticky draw binding at all -- see its own comment on why that must be a branch, not
+                // an unconditional call with zeros.
+                const ResolvedSurface rsEntity = resolveSurface(mat);
+                f32 col[4] = {rsEntity.look.col[0], rsEntity.look.col[1], rsEntity.look.col[2],
+                              rsEntity.look.col[3]};
+                f32 metallic = rsEntity.look.metallic, roughness = rsEntity.look.roughness;
+                const bool blended = rsEntity.look.blended;
+                const rhi::BindingSetHandle matSet = rsEntity.matSet;
+                const void* matConstants = rsEntity.matConstants;
+                const u32 matConstantBytes = rsEntity.matBytes;
                 // The scene test paints its two entities so a probe can tell which it is looking
                 // at. Only ever active behind --skin-scene-test.
                 if (skinScene_) {
@@ -6045,15 +6019,36 @@ public:
                             // submitDraw(), the ONLY way geometry reaches VoxiRenderer::draws_ -- so
                             // this instance never appeared in shadowPass, giShadowPass or
                             // voxelizePass. A tree that casts no shadow is not a cheaper tree, it's wrong.
-                            // voxiRenderer_.submit() is VoxiRenderer's own non-virtual method, appending
-                            // one Draw with no GPU commands -- safe to call regardless of what
-                            // dispatchMeshClusters just bound. Passing `mesh` (this instance's
-                            // FULL-detail handle) rather than a depth proxy is deliberate: submit()
-                            // already resolves d.depthMesh through the SAME depthProxyFn_ every
-                            // ordinary instance goes through, so depth-only passes draw the cheap proxy
-                            // with no new resolution logic. All fields are already resolved above.
-                            voxiRenderer_.submit(mesh, &wm.m[0][0], col, metallic, roughness, matSet,
-                                                  matConstants, matConstantBytes);
+                            //
+                            // F4 (occlusion-fix-plan.md): goes through planEntityDraws()/
+                            // emitEntityDraws() now, same as every other route, instead of a single
+                            // hand-written submit() naming only `mesh` -- that used to submit a
+                            // multi-material mesh as ONE draw carrying the ENTITY's material, silently
+                            // losing the per-part split the raster and direct-cull routes both already
+                            // had. `mesh` still equals `it->second` here (no LOD/skin substitution has
+                            // run yet at this point in the walk), so this is exactly F4's "goes through
+                            // planEntityDraws with chosenMesh = it->second" case. submit() still
+                            // resolves d.depthMesh through the SAME depthProxyFn_ every ordinary
+                            // instance goes through, so depth-only passes draw the cheap proxy with no
+                            // new resolution logic.
+                            {
+                                const auto clusterParts = meshParts_.find(mr->mesh);
+                                aver::editor::PlannedDraw cdraws[kMaxPlannedDraws];
+                                const u32 cdrawCount = aver::editor::planEntityDraws(
+                                    it->second, mesh,
+                                    clusterParts != meshParts_.end() ? clusterParts->second.data() : nullptr,
+                                    clusterParts != meshParts_.end()
+                                        ? static_cast<u32>(clusterParts->second.size()) : 0u,
+                                    mat, cdraws, kMaxPlannedDraws);
+                                // A DIRECT-ONLY delivery: colour already came from dispatchMeshClusters
+                                // just above, so this call exists purely to register the shadow/GI/TLAS
+                                // submission drawMesh() would otherwise have made. Never owner-hidden or
+                                // tinted -- this whole block only ever runs for a route.raster entity
+                                // (the culled branch above already `continue`d before reaching here).
+                                const aver::editor::RouteDecision clusterRoute{false, false, false};
+                                emitEntityDraws(e, cdraws, cdrawCount, wm, clusterRoute,
+                                                /*prepassEligibleBase=*/false);
+                            }
 #endif
 
                             ++lodMeshShaderStats_.instancesTested;
@@ -6307,62 +6302,51 @@ public:
                     }
                 }
 #endif
-                // WHICH FEATURE OWNS THIS ENTITY'S VERTICES. One explicit variable rather than
-                // chained ifs: `if (skinnedScene_) if (...)` is a DANGLING-ELSE TRAP -- soft body
-                // would be consulted only when skinning existed AND declined, never when
-                // skinnedScene_ is null, silently drawing the authored mesh forever.
-                // SKINNING WINS WHERE BOTH CLAIM AN ENTITY: nothing forbids CSoftBody on an
-                // already-skinned mesh, so asking skinning first makes the collision deterministic.
-                rhi::MeshHandle substituted = 0;
-                if (skinnedScene_) substituted = skinnedScene_->drawHandle(ent);
-#if AVER_MODULE_RENDER_SOFTBODY
-                if (!substituted && softBodyScene_) substituted = softBodyScene_->drawHandle(ent);
-#endif
-                if (substituted) mesh = substituted;
+                // WHICH FEATURE OWNS THIS ENTITY'S VERTICES -- posedHandle() (F4), the SAME helper the
+                // direct route above already called, so the seam agrees with itself instead of two
+                // near-identical hand-written copies: skinning checked first (nothing forbids
+                // CSoftBody on an already-skinned mesh, so asking skinning first makes the collision
+                // deterministic), soft body only filling in where it declined.
+                if (const rhi::MeshHandle substituted = posedHandle(ent)) mesh = substituted;
+                // F6/F4: the ENTITY-level half of depth-prepass eligibility. BLENDED IS NO LONGER
+                // CHECKED HERE, unlike the shape this replaces: it is now a PER-DRAW question,
+                // decided inside emitEntityDraws() from each draw's own resolveSurface() result,
+                // because F6 made the depth-prepass walk itself split into parts and skip translucent
+                // ones individually -- a single entity-level check here would be wrong for a mesh with
+                // both an opaque trunk and a translucent leaf part. Still mirrors the depth-prepass
+                // walk's OTHER exclusions exactly -- skinned, GPU cluster dispatch, CPU per-cluster.
+                bool prepassEligibleBase = false;
 #if AVER_MODULE_VOXI
-                // Mirrors the depth-prepass walk's own exclusions EXACTLY -- skinned, GPU cluster
-                // dispatch, CPU per-cluster. Must stay in lockstep with the walk above: asking for the
-                // LessEqual/no-write pipeline on geometry nothing wrote depth for leaves a hole.
                 {
-                    bool prepassEligible = e.device()->depthPrepassEnabled() && !clusterDispatched && !skinned;
-                    // BLENDED IS ALSO EXCLUDED, unlike the others: skinned/GPU-cluster/CPU-per-cluster
-                    // are opaque geometry the depth-prepass walk already wrote depth for; glass writes
-                    // NO depth, ever (endFrame replay is depth-test ON, depth-WRITE off). Without this,
-                    // requesting the LessEqual/no-write PSO would claim depth was ALREADY written for a
-                    // blended instance, never true.
-                    if (blended) prepassEligible = false;
+                    prepassEligibleBase = e.device()->depthPrepassEnabled() && !clusterDispatched && !skinned;
 #if AVER_MODULE_TRIFACTOR
-                    if (prepassEligible && lodMeshShaderEnabled_ && lodMeshPipelineReady_ &&
-                        meshClusterGpu_.count(mr->mesh)) prepassEligible = false;
-                    if (prepassEligible && lodPerClusterEnabled_ && meshClusterData_.count(mr->mesh))
-                        prepassEligible = false;
+                    if (prepassEligibleBase && lodMeshShaderEnabled_ && lodMeshPipelineReady_ &&
+                        meshClusterGpu_.count(mr->mesh)) prepassEligibleBase = false;
+                    if (prepassEligibleBase && lodPerClusterEnabled_ && meshClusterData_.count(mr->mesh))
+                        prepassEligibleBase = false;
 #endif
-                    if (prepassEligible) e.device()->setNextDrawPrepassed(true);
                 }
 #endif
                 // The GPU per-cluster path already dispatched this instance's geometry -- drawing
-                // again here would double-draw.
-                // setDrawBlended(blended), UNCONDITIONALLY, EVERY draw, not a set/restore pair: the
-                // flag is STICKY, so the only idiom that cannot leak is "every draw states its own
-                // answer" -- a set/restore pair is a trap for the next `continue` added between them,
-                // and this loop already has several.
-                e.device()->setDrawBlended(blended);
+                // again here would double-draw. setDrawBinding/setDrawBlended/setNextDrawPrepassed are
+                // now all set PER DRAW, inside emitEntityDraws() below (F3) -- not here beforehand --
+                // since a multi-part mesh's parts can each carry a different material/blend/prepass
+                // answer, the same reason drawMeshParts used to override this loop's own
+                // setDrawBlended(blended) call per part.
                 if (!clusterDispatched) {
-                    // A MESH THAT NAMES SEVERAL MATERIALS DRAWS AS SEVERAL MESHES, one per slot.
-                    //
-                    // GATED ON `mesh == it->second`, which is the LOD and skinning exclusion stated
-                    // as a condition rather than a comment: both substitute a DIFFERENT MeshHandle
-                    // (a LOD level, or the compute-posed copy), and the split parts were cut from
-                    // the unsubstituted geometry. A substituted handle keeps today's single draw and
-                    // the entity's own material -- which is also the right answer for LOD >= 1,
-                    // where Trifactor's clustering straddles submesh boundaries anyway
-                    // (see OcMesh.cpp's own note on meshlets crossing two submeshes).
-                    const auto pit = (mesh == it->second) ? meshParts_.find(mr->mesh)
-                                                          : meshParts_.end();
-                    if (pit != meshParts_.end())
-                        drawMeshParts(e, pit->second, &wm.m[0][0], mat, col, metallic, roughness);
-                    else
-                        e.device()->drawMesh(mesh, &wm.m[0][0], col, metallic, roughness);
+                    // F4: THE ONE PLACE 6360-6365/8297-8299's old duplication used to live -- see
+                    // planEntityDraws' own comment (SceneSubmission.hpp) for the exact rule (a mesh
+                    // that names several materials draws as several meshes, one per slot; a
+                    // substituted handle -- LOD or posed -- keeps today's single draw and the entity's
+                    // own material, since the split was cut from the UNSUBSTITUTED geometry).
+                    const auto pit = meshParts_.find(mr->mesh);
+                    aver::editor::PlannedDraw pdraws[kMaxPlannedDraws];
+                    const u32 pdrawCount = aver::editor::planEntityDraws(
+                        it->second, mesh,
+                        pit != meshParts_.end() ? pit->second.data() : nullptr,
+                        pit != meshParts_.end() ? static_cast<u32>(pit->second.size()) : 0u,
+                        mat, pdraws, kMaxPlannedDraws);
+                    emitEntityDraws(e, pdraws, pdrawCount, wm, route, prepassEligibleBase);
                 }
                 // EVERY SELECTED ENTITY, NOT ONLY THE ANCHOR. This kept one Mat4 and one mesh id,
                 // so a multi-selection was highlighted in the Outliner tree and invisible in the 3D
@@ -6386,16 +6370,28 @@ public:
             // The pass-2-empty fallback: occlusionVisible_ still needs a fresh answer for every
             // entity even when there was nothing left to gate, or a wall walked in front of a
             // previously "visible" entity would never be discovered and it would stay drawn forever.
-            if (occlusionCullEnabled_ && occluder_) occlusionBuildAndTest();
+            if (occlusionRuns) occlusionBuildAndTest();
             // Reported on the SAME "power-of-two frame count" cadence D3D12Device's own GPU-timing
             // report uses, so the culled-count line and the "HZB build"/"HZB test" spans it names land
             // at a frame this app was already printing at, not a second unrelated rhythm.
-            if (occlusionCullEnabled_ && occluder_ && occlusionReportFrames_ &&
+            // F8: occlusionRuns, not occlusionCullEnabled_ && occluder_ -- occlusionReportFrames_ only
+            // INCREMENTS when occlusionRuns is true (the pass-2-empty fallback just above, and the
+            // pass-1/pass-2-boundary call inside the walk, both already switched), so gating the PRINT
+            // on the wider occlusionCullEnabled_ && occluder_ condition would keep re-satisfying this
+            // power-of-two check every single frame culling sits idle (F8's whole point) once the
+            // count freezes on a 2^n-1 value, instead of printing once and stopping like it does today.
+            if (occlusionRuns && occlusionReportFrames_ &&
                 (occlusionReportFrames_ & (occlusionReportFrames_ + 1)) == 0) {
                 const f64 pct = occlusionTestedAccum_ ? 100.0 * static_cast<f64>(occlusionCulledAccum_) /
                                                         static_cast<f64>(occlusionTestedAccum_) : 0.0;
                 AVER_INFO("[Occlusion] {} of {} tested entities culled ({:.1f}%) over {} frame(s)",
                           occlusionCulledAccum_, occlusionTestedAccum_, pct, occlusionReportFrames_);
+                // 3B: THIS FRAME's own snapshot (unlike the lifetime accumulators just above) -- the
+                // concrete evidence F1-F4 actually deliver what they promise: a culled multi-part
+                // entity still yields N draws here, never one collapsed to slot 0's material.
+                AVER_INFO("[Occlusion] this frame: {} entities culled (frustum or occlusion) delivered "
+                          "as {} draws ({} multi-part)",
+                          culled, culledDraws, culledMultiPart);
                 // Folded into the same cadence rather than its own: a staleness-detector trip is
                 // rare enough that a separate periodic line would mostly print zero, and this way it
                 // rides the report a reader is already watching.
@@ -6438,7 +6434,12 @@ public:
                 ++sceneWalkReports_;
             }
             if (drawn != lastSceneDrawn_ || culled != lastSceneCulled_ || ownerHidden != lastSceneOwnerHidden_) {
-                AVER_INFO("[Sandbox] scene-render: {} spawned CMeshRenderer entit{} drawn, {} frustum-culled, {} owner-hidden",
+                // F4 (occlusion-fix-plan.md): `culled` now counts an occlusion-culled entity too, not
+                // only a frustum-culled one -- previously the occlusion branch incremented no counter
+                // at all, so occlusion's own contribution was invisible here. Relabelled from
+                // "frustum-culled" to plain "culled" to match; see chooseRoute()'s own priority
+                // ordering for which counter an entity that is BOTH culled and owner-hidden lands in.
+                AVER_INFO("[Sandbox] scene-render: {} spawned CMeshRenderer entit{} drawn, {} culled, {} owner-hidden",
                           drawn, drawn == 1 ? "y" : "ies", culled, ownerHidden);
                 lastSceneDrawn_ = drawn;
                 lastSceneCulled_ = culled;
@@ -7584,6 +7585,174 @@ public:
                   aver_scene_material_name(mat));
     }
 
+    // Bounds a caller-supplied PlannedDraw buffer -- see planEntityDraws' own "Capacity truncation"
+    // test case (SceneSubmissionTest.cpp T1). No content in PTTest or JungleRuins comes close (the
+    // plan's own MADR/MHDR parse found 3-7 parts per multi-material tree, the deepest split seen);
+    // 64 is a wide margin over that, not a tuned minimum.
+    static constexpr u32 kMaxPlannedDraws = 64;
+
+    // F2: THE ONE RESOLVER. Every one of the three copies this closes (the entity loop's own steps,
+    // formerly 5862-5935; the deleted submitShadowOnly lambda's, formerly 5546-5605; drawMeshParts'
+    // own, formerly 8299-8330 -- drawMeshParts itself is gone too, subsumed by planEntityDraws +
+    // emitEntityDraws below) ran surfaceMaterials_.find, MaterialLibrary::desc, isTranslucent,
+    // surfaceLooks_.find and the MaterialSystem lookup BY HAND, and the third of those had already
+    // drifted from the other two -- it never checked liveness, so a dead handle there baked in the
+    // bright-white-mirror identity as final (see resolveSurfaceLook's own comment in
+    // SceneSubmission.hpp for why that is one of the worst possible failure appearances).
+    //
+    // `mat` is the material TOKEN, already carrying whatever entity- or part-level
+    // meshDefaultMaterial/part-slot fallback the caller resolved -- this never re-derives that
+    // fallback itself, only what the token resolves to.
+    struct ResolvedSurface {
+        aver::editor::SurfaceLook look;
+        u32 authored = 0;                    // pbr::MaterialLibrary handle, or 0 (built-in look/fallback)
+        rhi::BindingSetHandle matSet = 0;
+        const void* matConstants = nullptr;   // a reference into MaterialSystem's own storage (5931's contract)
+        u32 matBytes = 0;
+    };
+
+    ResolvedSurface resolveSurface(i32 mat) {
+        ResolvedSurface rs;
+        aver::editor::SurfaceInputs in;
+#if AVER_MODULE_PBR
+        if (const auto it = surfaceMaterials_.find(mat); it != surfaceMaterials_.end()) rs.authored = it->second;
+        in.authored = rs.authored != 0;
+        const pbr::MaterialDesc* d = rs.authored ? pbr::MaterialLibrary::get().desc(rs.authored) : nullptr;
+        in.authoredLive = d != nullptr;
+        in.translucent = d != nullptr && pbr::isTranslucent(*d);
+#endif
+        if (const auto lookIt = surfaceLooks_.find(mat); lookIt != surfaceLooks_.end()) {
+            in.haveLook = true;
+            in.lookCol[0] = lookIt->second.col[0];
+            in.lookCol[1] = lookIt->second.col[1];
+            in.lookCol[2] = lookIt->second.col[2];
+            in.lookMetallic = lookIt->second.metallic;
+            in.lookRoughness = lookIt->second.roughness;
+        }
+        rs.look = aver::editor::resolveSurfaceLook(in);
+        if (rs.look.warnDeadHandle) warnDeadMaterialHandle(mat);
+        if (rs.look.usedFallback && mat != 0) {
+            // SAY SO, ONCE PER NAME -- moved verbatim from the entity loop's own copy (formerly
+            // 5904-5919), same static set, now the only place this warning can fire from.
+            static std::unordered_set<i32> s_warnedMissingMaterial;
+            if (s_warnedMissingMaterial.insert(mat).second)
+                AVER_WARN("[Editor] surface '{}' has no .ocmat under Binaries/Materials or "
+                          "Content/Materials and no built-in look; drawing the flat fallback "
+                          "(0.80, 0.80, 0.85). Either author the material or use one of the "
+                          "built-in names.",
+                          aver_scene_material_name(mat));
+        }
+#if AVER_MODULE_PBR && AVER_MODULE_VOXI
+        if (pbr::MaterialSystem& ms = voxiRenderer_.materials(); ms.ready()) {
+            rs.matSet = ms.bindingSet(rs.authored);
+            rs.matConstants = &ms.constants(rs.authored);
+            rs.matBytes = sizeof(pbr::MaterialConstants);
+        }
+#endif
+        return rs;
+    }
+
+    // F3: THE ONE EMITTER. For every planned draw, resolveSurface() once and hand the result to
+    // whichever route actually delivers it -- raster's drawMesh() or Voxi's direct submit() -- so
+    // both produce the SAME Draw record for the same material (translucent = look.blended on both;
+    // hiddenFromOwner = false on raster, route.hiddenFromOwner on direct -- see SceneSubmission.hpp's
+    // deliver(), which this hand-writes rather than calls, to keep col/metallic/roughness and the
+    // translucent/hiddenFromOwner decision reading from the exact same ResolvedSurface in one place).
+    //
+    // prepassEligibleBase is the ENTITY-level half of the depth-prepass eligibility test (formerly
+    // 6323-6341's shape, minus the blended check, which F6 made a PER-PART question): with the depth
+    // prepass walk now writing one drawMeshDepthPrepass per part and skipping translucent ones
+    // individually, a single setNextDrawPrepassed(true) call before a multi-part loop would only
+    // cover draw 0 -- the flag is AUTO-CONSUMED by the very next drawMesh(), not sticky (RHI.hpp's own
+    // comment on setNextDrawPrepassed) -- silently asking the LessEqual/no-write pipeline for parts
+    // the prepass walk never wrote depth for. Deciding it per draw, right here, is what keeps the two
+    // walks in lockstep at the new per-part granularity. `(void)` up front because a non-VOXI build
+    // never reads it below (the whole prepass feature is VOXI-only) and an unreferenced-parameter
+    // warning on a build that never fires it would be a strange place for /W4 to complain.
+    void emitEntityDraws(Engine& e, const aver::editor::PlannedDraw* draws, u32 n, const Mat4& wm,
+                        const aver::editor::RouteDecision& route, bool prepassEligibleBase) {
+        (void)prepassEligibleBase;
+        for (u32 i = 0; i < n; ++i) {
+            const aver::editor::PlannedDraw& d = draws[i];
+            if (!d.mesh) continue;
+            const ResolvedSurface rs = resolveSurface(d.material);
+            f32 col[4] = {rs.look.col[0], rs.look.col[1], rs.look.col[2], rs.look.col[3]};
+            // occlusion.showCulled: (1, 0.15, 1) knocks the green channel down so a false cull reads
+            // as an obvious magenta tint. A BRANCH, not a multiply that silently becomes identity at
+            // 1.0 when the debug view is off -- see EditorConsole.hpp's own doc comment on the cost
+            // this is supposed to be ("one bool test per culled entity").
+            if (route.tint) col[1] *= 0.15f;
+            if (route.raster) {
+                // Only when a live MaterialSystem actually resolved something -- calling this with
+                // rs.matBytes == 0 (module compiled out, or the system not ready yet) would STOMP
+                // whatever binding a previous draw left sticky (RHI.hpp's own "sticky until changed"
+                // contract on setDrawBinding), which is not what "nothing to bind" ever meant before.
+                if (rs.matBytes) e.device()->setDrawBinding(rs.matSet, rs.matConstants, rs.matBytes);
+                e.device()->setDrawBlended(rs.look.blended);
+#if AVER_MODULE_VOXI
+                if (prepassEligibleBase && !rs.look.blended) e.device()->setNextDrawPrepassed(true);
+#endif
+                e.device()->drawMesh(d.mesh, &wm.m[0][0], col, rs.look.metallic, rs.look.roughness);
+            }
+#if AVER_MODULE_VOXI
+            else {
+                // THE UNIFIED DIRECT ROUTE: frustum-culled, occlusion-culled or owner-hidden, still
+                // handed to Voxi so shadows/GI/the RT TLAS never depend on what the camera itself can
+                // see -- see the call site's own comment for the "shadows are screen-space" history
+                // this closes.
+                //
+                // F5: translucent = rs.look.blended, the SAME value the raster branch just above feeds
+                // setDrawBlended() -- glass leaving the frustum now joins the translucent lane exactly
+                // like visible glass, matching VoxiRenderer::submitDraw's own opaque/blended split
+                // (VoxiRenderer.cpp:861-880, read-only citation, not edited by this lane) and the "10b"
+                // contract that glass DOES cast an attenuated shadow now (VoxiRenderer.cpp:4603-4615,
+                // read-only citation) -- the stale comment this replaces (formerly 5556-5566, deleted
+                // with submitShadowOnly) claimed the opposite, a contract that no longer existed. The
+                // exclusion from voxelisation/cascades/the GI shadow map is unchanged: submit() still
+                // reads this same `translucent` flag to route into the non-opaque TLAS lane.
+                voxiRenderer_.submit(d.mesh, &wm.m[0][0], col, rs.look.metallic, rs.look.roughness,
+                                     rs.matSet, rs.matConstants, rs.matBytes,
+                                     /*translucent=*/rs.look.blended, route.hiddenFromOwner);
+            }
+#endif
+        }
+    }
+
+#if AVER_MODULE_SCENE
+    // F4: shared by the direct route and the raster substitution below (formerly 6316-6321) --
+    // skinning checked first, matching "SKINNING WINS WHERE BOTH CLAIM AN ENTITY" (nothing forbids
+    // CSoftBody on an already-skinned mesh, so asking skinning first makes the collision deterministic).
+    rhi::MeshHandle posedHandle(scene::Entity ent) {
+        rhi::MeshHandle h = 0;
+        if (skinnedScene_) h = skinnedScene_->drawHandle(ent);
+#if AVER_MODULE_RENDER_SOFTBODY
+        if (!h && softBodyScene_) h = softBodyScene_->drawHandle(ent);
+#endif
+        return h;
+    }
+#endif
+
+    // F8's idle log names WHICH feature is painting the scene. INTEGRATOR FIX: the plan's own text
+    // named this as VoxiRenderer::debugViewActive()/rayDrivenActive() individually (checked in
+    // suppressesScene()'s own priority, VoxiRenderer.cpp:2955 -- debugViewActive() before
+    // rayDrivenActive()), but both are PRIVATE to VoxiRenderer (VoxiRenderer.hpp:1611,1615) and
+    // SandboxApp is not a friend -- a genuine compile error (C2248), not a contradiction worth
+    // stopping the item over, since this function only ever feeds a human-readable log string, never
+    // a decision. Fixed by reading the one PUBLIC signal that already answers "is Voxi the cause"
+    // (suppressesScene(), VoxiRenderer.hpp:253) instead of asking which of its two sub-reasons fired --
+    // this loses the debug-raymarch-vs-ray-driven distinction in the log line's wording only; the F8
+    // gate itself (occlusionTestShouldRun, fed by e.device()->sceneSuppressed()) never called either
+    // private method and is unaffected. Widening VoxiRenderer's access instead was rejected: the
+    // plan's own review checklist (section 6, item 18) requires "No file under modules/render.voxi
+    // has changed", and no lane owned that file.
+    const char* occlusionSuppressingFeatureName() const {
+#if AVER_MODULE_VOXI
+        if (voxiRenderer_.suppressesScene()) return "ray-driven Voxi";
+#endif
+        if (ptSceneView_) return "Path Tracing";
+        return "a registered feature";
+    }
+
     void setMsaaOverride(int n) { msaaOverride_ = n; }   // --msaa N
     void setDepthPrepassOverride(bool on) { depthPrepassOverride_ = on; }   // --depth-prepass
     void setGBufferOverride(bool on) { gbufferOverride_ = on; }             // --gbuffer
@@ -8283,58 +8452,13 @@ private:
         meshParts_[id] = std::move(parts);
     }
 
-    // Draws one entity's split parts, each with the material its own slot named.
-    //
-    // MIRRORS THE ENTITY LOOP'S OWN RESOLUTION, deliberately and in the same order (authored .ocmat
-    // first, then a built-in SurfaceLook, then the caller's colour). It does NOT re-warn about a
-    // material that resolves to neither: the entity loop already said it once per name, and saying
-    // it again per part would multiply one missing material into seven lines.
-    //
-    // A PART WHOSE SLOT NAMED NOTHING falls back to the entity's own material, so a mesh that
-    // half-declares its slots still draws the way it did before the split.
-    void drawMeshParts(Engine& e, const std::vector<MeshPart>& parts, const f32 world[16],
-                       i32 entityMat, const f32 entityCol[4], f32 entityMetallic, f32 entityRoughness) {
-        for (const MeshPart& p : parts) {
-            if (!p.mesh) continue;
-            const i32 mat = p.material ? p.material : entityMat;
-
-            f32 col[4] = {entityCol[0], entityCol[1], entityCol[2], entityCol[3]};
-            f32 metallic = entityMetallic, roughness = entityRoughness;
-            bool blended = false;
-            u32 authored = 0;
-#if AVER_MODULE_PBR
-            if (const auto it = surfaceMaterials_.find(mat); it != surfaceMaterials_.end())
-                authored = it->second;
-            if (authored) {
-                if (const pbr::MaterialDesc* d = pbr::MaterialLibrary::get().desc(authored))
-                    blended = pbr::isTranslucent(*d);
-            }
-#endif
-            if (authored) {
-                // The material's own texture/factor pair supplies everything; the per-draw colour
-                // becomes the identity, exactly as the entity loop does it.
-                col[0] = col[1] = col[2] = col[3] = 1.0f;
-                metallic = roughness = 1.0f;
-            } else if (const auto look = surfaceLooks_.find(mat); look != surfaceLooks_.end()) {
-                col[0] = look->second.col[0];
-                col[1] = look->second.col[1];
-                col[2] = look->second.col[2];
-                metallic = look->second.metallic;
-                roughness = look->second.roughness;
-            }
-#if AVER_MODULE_PBR && AVER_MODULE_VOXI
-            if (pbr::MaterialSystem& ms = voxiRenderer_.materials(); ms.ready()) {
-                e.device()->setDrawBinding(ms.bindingSet(authored), &ms.constants(authored),
-                                           sizeof(pbr::MaterialConstants));
-            }
-#endif
-            // PER PART, both of them: setDrawBlended is a per-draw switch and the parts of one tree
-            // genuinely differ -- a trunk is opaque where its leaves are cutout or blended.
-            e.device()->setDrawBlended(blended);
-            e.device()->drawMesh(p.mesh, world, col, metallic, roughness);
-        }
-    }
-
+    // drawMeshParts is GONE. F4 (occlusion-fix-plan.md) folded its whole job -- "a mesh that names
+    // several materials draws as several meshes, one per slot" -- into planEntityDraws()
+    // (SceneSubmission.hpp) plus emitEntityDraws() above, which both the raster and the direct route
+    // now call the SAME way, so the split can never drift between them the way this function's own
+    // copy of the resolution rule once had (it never checked material-handle liveness, unlike the
+    // entity loop's copy -- see resolveSurface's own comment for the bright-white-mirror failure that
+    // gap could have produced). Its lone call site (formerly 6360-6363) is replaced accordingly.
 
     // ---- the selection outline, as LINES ----------------------------------------------------------
     //
@@ -24270,6 +24394,28 @@ private:
     Vec3 occlusionBasisCamPos_{0.0f, 0.0f, 0.0f};
     Vec3 occlusionBasisForward_{1.0f, 0.0f, 0.0f};
     bool occlusionBasisValid_ = false;
+    // F7: the scene's own sub-rect (target pixels) that produced THIS basis's pyramid, stashed
+    // alongside occlusionBasisCamPos_/occlusionBasisForward_ for the exact same reason -- a dock
+    // layout drag between the pyramid being built and its (one-call-stale) readback being consumed
+    // is a discontinuity a motion margin cannot cover, same as a teleport. occlusionTrustworthy
+    // requires this to still equal THIS frame's own sceneViewport() read.
+    f32 occlusionBasisRect_[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    // F7's once-per-change diagnostic: the last rect/pyramid size the "[Occlusion] testing against
+    // scene rect..." line actually printed for, so a static dock layout logs it exactly once instead
+    // of every frame culling runs. occlusionLoggedPyramidW_ starts at a value no real texture width
+    // will ever equal, so the very first frame culling turns on always logs.
+    f32 occlusionLoggedRect_[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    u32 occlusionLoggedPyramidW_ = 0xFFFFFFFFu, occlusionLoggedPyramidH_ = 0xFFFFFFFFu;
+    // F8: has the "[Occlusion] idle: ..." line already fired for the CURRENT idle streak. Reset to
+    // false the moment occlusionRuns is next true, so idle -> running -> idle logs a second time
+    // rather than only ever once per process.
+    bool occlusionIdleLogged_ = false;
+    // 3B: this frame's own copy of the two EditorConsole.hpp slots, reasserted every frame in
+    // onUpdate (beside occlusionDebugForceWaitIdle's own reassertion) so onRender's walk reads a
+    // value that is live for THIS frame, not last frame's -- see onUpdate's own comment. Both default
+    // false, matching the slots' own defaults.
+    bool occlusionShowCulled_ = false;
+    bool occlusionCullUnderSuppression_ = false;
     // Diagnostics for the staleness detector (OcclusionCuller.cpp's generation-stamp check, surfaced
     // through IOcclusionCuller::readbackLagIsExactlyOneCall()): how many tested frames it fired on, and
     // whether the one-time loud warning has already fired. Folded into the same periodic report as

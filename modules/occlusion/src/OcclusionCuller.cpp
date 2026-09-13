@@ -81,10 +81,19 @@ public:
     // that used to sit at the bottom of testBatch(), turning occlusion culling on versus off at the
     // SAME frame count produced a large, deterministic, non-noise difference in the FINAL RENDERED
     // IMAGE -- 45.96% of pixels differing by >40/765 at frame 50, a broad darkening of every GI-lit
-    // surface, reproduced independently twice. Content reaching VoxiRenderer is provably identical
-    // either way (an occlusion-hidden entity still submits via submitShadowOnly with the same mesh/
-    // transform/material as the visible path -- already established elsewhere in this investigation),
-    // so nothing about WHAT gets drawn explains it. Temporarily removing the waitIdle() (reverted
+    // surface, reproduced independently twice. CORRECTED -- this paragraph used to claim "content
+    // reaching VoxiRenderer is provably identical either way (an occlusion-hidden entity still
+    // submits via submitShadowOnly with the same mesh/transform/material as the visible path)".
+    // That premise is false: submitShadowOnly (SandboxApp.cpp, removed by F1-F4) resolved a culled
+    // entity's material as slot 0 regardless of which submesh actually owned it, while the visible
+    // path split a multi-part mesh per part -- for 110 of the 142 distinct meshes PTTest actually
+    // places, those two routes handed VoxiRenderer a DIFFERENT material, and sometimes a different
+    // draw count, not the same content this paragraph asserted. That gap does not retract the
+    // measurement below (the waitIdle A/B was run with occlusion's ROUTE difference held constant,
+    // toggling only the wait), but it does mean the "nothing about WHAT gets drawn explains it"
+    // conclusion was resting on a false premise, not a verified one -- see occlusion-fix-plan.md
+    // section 1.4 ("occlusion-waitidle: no refuter voted on it... its supporting measurements rest
+    // on OcclusionCuller.cpp:84-86, which is false for 110 of 142 meshes"). Temporarily removing the waitIdle() (reverted
     // before landing, see the commit) collapsed that same comparison to 0.011% -- the ordinary
     // run-to-run noise floor this tree documents elsewhere (aver-render-nondeterminism.md) -- which
     // is strong, direct evidence that the STALL ITSELF, not merely "occlusion is on", is what was
@@ -109,14 +118,23 @@ public:
     // sized by the swapchain's own buffer count, currently 2): rotate through several independent
     // copies of each such buffer instead of reusing one, so a later call's write lands in a copy the
     // GPU finished with calls ago, never the one it might still be reading. kInFlight is 3, not the
-    // engine's own kFrameCount==2: this module's dispatch runs from SandboxApp's onUpdate(), which
-    // this codebase's own comments document as running BEFORE that frame's device_->beginFrame() (see
-    // Engine::frameStep() and SandboxApp.cpp's own comment beside its ptSceneView reconciliation), so
-    // occlusion's call cadence is one step out of phase with the swapchain's own back-buffer index --
-    // tracing the exact margin that phase shift leaves needs backend internals this module does not
-    // have (and should not reach for). One extra slot of headroom over the engine's own 2 costs a few
-    // KB of GPU memory (boxCapacity_ entities * 32/4/4 bytes, times one extra copy) and removes the
-    // need to get that phase arithmetic exactly right.
+    // engine's own kFrameCount==2: CORRECTED -- this used to justify that with "this module's
+    // dispatch runs from SandboxApp's onUpdate(), which this codebase's own comments document as
+    // running BEFORE that frame's device_->beginFrame()". That is backwards: Engine::frameStep()
+    // (modules/runtime/src/Engine.cpp:280-283) runs onUpdate(), THEN beginFrame(), THEN onRender()
+    // -- and this module's actual dispatch site, SandboxApp.cpp's occlusion box-collection walk and
+    // its buildPyramid()/testBatch() calls, lives in onRender(), not onUpdate() (onUpdate only
+    // reasserts this call's own debugForceWaitIdle_ switch every frame, per its own comment beside
+    // that setter, specifically so a live `set occlusion.debugForceWaitIdle` is visible before THIS
+    // SAME frame's testBatch() runs "once onUpdate returns" -- which already said the dispatch was
+    // AFTER onUpdate, this comment just never caught up to it). So occlusion's call cadence is not
+    // "one step ahead of beginFrame" as originally claimed; it runs inside the same beginFrame/
+    // endFrame span the swapchain's own back-buffer index is scoped to. Nothing about kInFlight's
+    // VALUE depended on the wrong half of this claim -- one extra slot of headroom over the engine's
+    // own 2 (a few KB of GPU memory: boxCapacity_ entities * 32/4/4 bytes, times one extra copy)
+    // remains cheap insurance against needing to prove the exact phase relationship either way --
+    // only the REASON given for choosing 3 over 2 was wrong, and is corrected here rather than left
+    // to mislead the next reader into "fixing" a phase-shift that was never real.
     //
     // WHAT DOES NOT CHANGE: the "exactly one call stale" design (Occlusion.hpp's TWO-PASS section) --
     // testBatch() still reads the IMMEDIATELY PRECEDING call's answer, from a DIFFERENT slot than the
@@ -211,7 +229,7 @@ public:
     }
 
     void testBatch(IRenderContext& ctx, IResourceFactory& res, const Aabb* boxes, u32 count,
-                   u64 identityKey, std::vector<u8>& outVisible) override {
+                   u64 identityKey, const f32 viewportRect[4], std::vector<u8>& outVisible) override {
         lastTested_ = count;
         lastCulled_ = 0;
         // The always-safe default if anything below bails out early -- and, for readbackLagExpected_,
@@ -299,10 +317,21 @@ public:
             }
             ctx.setPipeline(testPso_);
             ctx.setBindingSet(testSet_[writeSlot]);
-            struct TestCB { f32 vp[16]; u32 count, w, h, mips; } cb{};
+            // F7: `viewport` mirrors occlusion_test.hlsl's gViewport, NOT `vp` (gViewProj) --
+            // deliberately a distinct name from the matrix field above, so this struct cannot grow
+            // a second "vp"-named member with two different meanings. A NULL or degenerate
+            // viewportRect (w or h <= 0, OcclusionMath.hpp's ViewportRect "whole target"
+            // convention) leaves `viewport` at its `cb{}` zero-init, which the shader reads as
+            // gViewport.z <= 0.5 -- "run no rect arithmetic at all", the exact pre-F7 behaviour.
+            struct TestCB { f32 vp[16]; u32 count, w, h, mips; f32 viewport[4]; } cb{};
             std::memcpy(cb.vp, viewProjCache_, sizeof(cb.vp));
             cb.count = count; cb.w = pyramidW_; cb.h = pyramidH_; cb.mips = mipCount_;
-            ctx.setConstants(1, &cb, 20);
+            if (viewportRect && viewportRect[2] > 0.0f && viewportRect[3] > 0.0f)
+                std::memcpy(cb.viewport, viewportRect, sizeof(cb.viewport));
+            // 24 dwords: 16 (gViewProj) + 4 (count/w/h/mips) + 4 (gViewport) -- see
+            // occlusion_test.hlsl's TestCB cbuffer comment and createStaticPipelines' matching
+            // constantDwords[1] below; all three must agree or this cbuffer under- or over-reads.
+            ctx.setConstants(1, &cb, 24);
             ctx.dispatch((count + 63) / 64, 1, 1);
             ctx.uavBarrierBuffer(visBuf_[writeSlot]);
             ctx.bufferBarrier(visBuf_[writeSlot], ResourceState::UnorderedAccess, ResourceState::CopySource);
@@ -482,7 +511,7 @@ private:
             p.cs = cs;
             p.layout.srvCount = 2;   // t0 boxes, t1 pyramid
             p.layout.uavCount = 1;   // u0 visible
-            p.layout.constantDwords[1] = 20;   // b1: TestCB (float4x4 + 4 uints)
+            p.layout.constantDwords[1] = 24;   // b1: TestCB (float4x4 + 4 uints + gViewport float4, F7)
             testPso_ = res.createComputePipeline(p);
         }
         if (!testPso_) { AVER_ERROR("[Occlusion] HZB test pipeline unavailable"); ok = false; }
@@ -702,10 +731,10 @@ private:
 
     // kInFlight independent copies of every buffer a call to testBatch() writes and later reads back
     // -- see this class's own top comment for why. Indexed by (generation % kInFlight); NOT
-    // double-buffered to match this engine's own swapchain (kFrameCount == 2 on D3D12), because this
-    // module's dispatch runs from onUpdate(), one step out of phase with the swapchain's own
-    // back-buffer index (see the top comment) -- kInFlight buys enough headroom not to have to prove
-    // that phase relationship exactly.
+    // double-buffered to match this engine's own swapchain (kFrameCount == 2 on D3D12) -- kInFlight
+    // buys headroom over that floor without this module having to prove exactly how its own call
+    // cadence lines up with the swapchain's back-buffer index (see the top comment's CORRECTED
+    // paragraph on kInFlight for what this module's dispatch site actually is, and is not).
     BufferHandle boxesBuf_[kInFlight] = {}, visBuf_[kInFlight] = {}, visReadback_[kInFlight] = {};
     BindingSetHandle testSet_[kInFlight] = {};
     u32 boxCapacity_ = 0;   // shared: every slot is always sized identically
