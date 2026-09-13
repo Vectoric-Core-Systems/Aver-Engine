@@ -142,6 +142,7 @@ constexpr aver::u32 kClusterGiFrameRegister = 3;
 #include "ViewportIconRenderer.hpp"
 #include "PhysicsSceneSync.hpp"
 #include "InputOwnership.hpp"
+#include "PtRenderConflict.hpp"
 #include "EditorConsole.hpp"
 #include "EditorEntitySnapshot.hpp"
 #include "aver/platform/DirectoryWatcher.hpp"
@@ -7776,8 +7777,20 @@ public:
         // AN EXPLICIT --pt-scene IS NOT SILENTLY IGNORED: it is told what happened, because "asked for
         // the path-traced view, got the ray-driven one with no message" is a class of silence this
         // file has been bitten by before.
-        const bool rayDrivenPaints = voxiRenderer_.suppressesScene();
+        // A3: willSuppressSceneThisFrame(), NOT suppressesScene(). This function runs from
+        // onUpdate(), before device_->beginFrame() -- see this function's own header comment above.
+        // suppressesScene() reads rtActive_, which buildAccelerationStructures() (called from
+        // prePass(), inside THIS frame's beginFrame(), AFTER beginScene() has already swapped
+        // drawsPrev_/draws_) has not recomputed for this frame yet -- so suppressesScene() here would
+        // answer LAST frame's question. willSuppressSceneThisFrame() predicts what prePass is about
+        // to make true instead; see its own comment in VoxiRenderer.hpp for the swap it accounts for.
+        const bool rayDrivenPaints = voxiRenderer_.willSuppressSceneThisFrame();
         if (rayDrivenPaints && ptSceneViewWantEnabled_) {
+            // A1: named for the Path Tracing page's Quality-combo tag (see PtRenderConflict.hpp's
+            // choosePtViewTag and this function's caller in buildUI()). Set every frame this branch
+            // fires, same as the log-once flag below is CHECKED every frame -- so it stays true for as
+            // long as the suppression does, not just on the first frame it started.
+            ptSceneViewSuppressedByRayDriven_ = true;
             if (!ptSceneViewYieldLogged_) {
                 ptSceneViewYieldLogged_ = true;
                 if (ptSceneViewFromCli_)
@@ -7793,6 +7806,7 @@ public:
             ptSceneViewWantEnabled_ = false;
         } else if (!rayDrivenPaints) {
             ptSceneViewYieldLogged_ = false;   // re-arm the message if the mode changes back
+            ptSceneViewSuppressedByRayDriven_ = false;   // A1: same re-arm trigger as the log message
         }
 
         if (ptSceneViewWantEnabled_ == (ptSceneView_ != nullptr)) return;
@@ -9537,6 +9551,13 @@ private:
         // not the rule left every other RENDER.* knob carrying the same bug; this closes the rule.
         // A FLAG IS AN INSTRUCTION FROM A HUMAN STANDING RIGHT THERE; a manifest is a recorded
         // preference. When they disagree the human wins, out loud.
+        //
+        // CAPTURED HERE, BEFORE the override block below can touch either field: the A2 conflict
+        // check further down needs to tell "the manifest alone asks for this" apart from "a flag is
+        // what produced this", and the only honest way to do that is to remember what the manifest
+        // (applyProjectVoxiSettings(), already applied above) resolved to BEFORE any flag gets a say.
+        const u32  manifestRtRenderMode  = vx.settings().rtRenderMode;
+        const bool manifestPathTracingOn = vx.settings().pathTracing != voxi::Quality::Off;
         {
             auto k = vx.settings();
             bool overridden = false;
@@ -9643,6 +9664,54 @@ private:
             // its own two-call site: no TIER changes here, so the tier-derivation rule cannot fire and
             // overwrite these explicit knobs the way it would if folded into the call above.
             if (overridden) vx.setSettings(k);
+        }
+
+        // A2: A SELF-CONTRADICTORY MANIFEST NEVER SAID SO. RENDER.RTRENDERMODE 1 (ray-driven primary
+        // visibility) and a RENDER.PATHTRACING level that is not Off can both be recorded in the same
+        // .ocproject -- PTTest.ocproject does exactly this. Only one can ever paint the scene: the
+        // beginFrame() election awards it to the first registered feature whose suppressesScene() is
+        // true, and Voxi (ray-driven) always registers before PtSceneView can (see
+        // syncPtSceneView()'s own comment), so ray-driven always wins. Until now nothing said so at
+        // load time -- the Path Tracing page's Quality combo just silently did nothing (see its
+        // ptSceneViewSuppressedByRayDriven_ tag, added alongside this).
+        //
+        // checkPtRtConflict() (PtRenderConflict.hpp) is pure and takes the EFFECTIVE settings, i.e.
+        // vx.settings() AFTER the flag>manifest block immediately above already resolved precedence --
+        // not the raw project_.rtRenderMode/project_.pathTracing manifest fields. A `--rt-render-mode
+        // 0` or `--pt 0` that already fixed the contradiction must never be reported as one; that
+        // would be exactly the silent-then-wrong-message shape this file's own history warns about
+        // (see the block above's "COMMAND LINE OUTRANKS THE MANIFEST" comment).
+        //
+        // decidedByCli is computed from manifestRtRenderMode/manifestPathTracingOn (captured BEFORE
+        // the override block, above) actually CHANGING -- not merely from a flag being present. A
+        // redundant `--rt-render-mode 1` against a manifest that already said 1 must still read as
+        // "the manifest says this", not "the command line decided it": nothing the human typed moved
+        // this outcome away from what the file alone already produced.
+        {
+            const voxi::Settings& fs = vx.settings();
+            const bool rtRenderModeChangedByCli  = fs.rtRenderMode != manifestRtRenderMode;
+            const bool pathTracingOnChangedByCli =
+                (fs.pathTracing != voxi::Quality::Off) != manifestPathTracingOn;
+            const aver::editor::PtRtConflict conflict = aver::editor::checkPtRtConflict(
+                fs.rtRenderMode, fs.pathTracing != voxi::Quality::Off,
+                rtRenderModeChangedByCli, pathTracingOnChangedByCli);
+            if (conflict.conflicts) {
+                if (conflict.decidedByCli)
+                    AVER_WARN("[Project] {} asks for both ray-driven primary visibility "
+                              "(RENDER.RTRENDERMODE 1) and Path Tracing (RENDER.PATHTRACING {}); "
+                              "the command line decided ray-driven wins and paints the scene, so "
+                              "Path Tracing's view will not be shown. Pass --rt-render-mode 0 (or "
+                              "--pt 0) to see it instead.",
+                              project_.manifestPath, static_cast<int>(fs.pathTracing));
+                else
+                    AVER_WARN("[Project] {} sets RENDER.RTRENDERMODE 1 AND RENDER.PATHTRACING {} -- "
+                              "only one can paint the scene, and ray-driven primary visibility wins "
+                              "the election (it registers before Path Tracing's view ever can), so "
+                              "Path Tracing's view will never be shown. Set RENDER.RTRENDERMODE 0 in "
+                              "the manifest, or switch Ray Tracing > \"Finds the first surface\" to "
+                              "Rasteriser in the Rendering settings, to see it instead.",
+                              project_.manifestPath, static_cast<int>(fs.pathTracing));
+            }
         }
 
         voxiRenderer_.setSettings(vx.settings());
@@ -22977,15 +23046,41 @@ private:
                 ImGui::SetTooltip("Light paths after the first hit. Changing Quality above re-derives\n"
                                   "this from the tier, so set it after picking one.");
 
-            if (ptSceneViewUnavailable_) {
+            // A1: the priority between these three used to be two `if`s (unavailable, else active)
+            // with no way to say "suppressed" at all -- the Quality combo would just silently do
+            // nothing while ray-driven painted the scene. choosePtViewTag() is the pure decision
+            // (see PtRenderConflict.hpp for the full priority reasoning); every ImGui call stays here.
+            switch (aver::editor::choosePtViewTag(ptSceneViewUnavailable_,
+                                                   ptSceneViewSuppressedByRayDriven_,
+                                                   ptSceneView_ != nullptr)) {
+            case aver::editor::PtViewTag::Unavailable:
                 ImGui::SameLine();
                 ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1), "[unavailable on this device]");
-            } else if (ptSceneView_) {
+                break;
+            case aver::editor::PtViewTag::SuppressedByRayDriven:
+                // SAME COLOUR AS [unavailable on this device] ABOVE, deliberately: both are "this
+                // combo is not doing anything right now", and the existing red is this page's own
+                // idiom for that -- inventing a second colour here would say the two situations
+                // matter differently when, from this control's point of view, they don't.
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.75f,0.35f,0.35f,1),
+                                    "[suppressed: ray-driven rendering is drawing]");
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Ray-driven primary visibility is painting the scene, and it "
+                                       "always wins the\nelection over this view when both want the "
+                                       "frame -- see syncPtSceneView().\nSet Ray Tracing > \"Finds "
+                                       "the first surface\" to Rasteriser, above, to see this\nview "
+                                       "instead.");
+                break;
+            case aver::editor::PtViewTag::Active:
                 ImGui::SameLine();
                 ImGui::TextColored(ImVec4(0.45f,0.85f,0.45f,1), "[active]");
                 ImGui::Text("%s, %u sample(s) accumulated",
                             ptSceneView_->sceneReady() ? "tracing" : "no static geometry captured yet",
                             ptSceneView_->samplesAccumulated());
+                break;
+            case aver::editor::PtViewTag::None:
+                break;
             }
         }
 
@@ -24581,6 +24676,12 @@ private:
     // flags, a project manifest), and this answers which ONE asked -- see applyProjectRenderSettings, where a manifest used to silently outrank a typed flag.
     bool ptSceneViewFromCli_ = false;
     bool ptSceneViewUnavailable_ = false;   // init() refused once this session -- stop re-asking
+    // A1: true while syncPtSceneView() is holding ptSceneViewWantEnabled_ down because ray-driven
+    // primary visibility is painting the scene -- set/cleared in the SAME block that already decides
+    // it (see ptSceneViewYieldLogged_'s neighbouring flag, which only tracks whether the log line
+    // fired once). Read by the Path Tracing page's Quality-combo tag (see PtRenderConflict.hpp's
+    // choosePtViewTag) so the UI says why the combo does nothing, instead of nothing at all.
+    bool ptSceneViewSuppressedByRayDriven_ = false;
     // --pt-scene-toggle-on/--pt-scene-toggle-off [N]: VERIFICATION ONLY. Simulates a human flipping
     // the Path Tracing settings-page Quality combo N frames into a bounded run, proving the RUNTIME
     // toggle (register/unregister mid-session, not just --pt-scene's register-before-frame-1 path)

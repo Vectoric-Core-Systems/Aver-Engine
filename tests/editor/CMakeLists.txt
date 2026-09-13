@@ -485,3 +485,15 @@ add_executable(EditorWidgetsTest
   ${CMAKE_SOURCE_DIR}/sandbox/src/EditorPrefs.cpp)
 target_link_libraries(EditorWidgetsTest PRIVATE Aver.Platform Aver.Core)
 set_target_properties(EditorWidgetsTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# PtRenderConflictTest -- the Path Tracing page's Quality-combo tag priority (choosePtViewTag) and
+# the ray-driven/Path-Tracing self-contradictory-manifest check (checkPtRtConflict), both in
+# sandbox/src/PtRenderConflict.hpp. Header-only and dependency-free, for InputOwnershipTest's exact
+# reason above: both functions take plain bools/u32 and return plain data, precisely so the priority
+# between "unavailable"/"suppressed"/"active" and the manifest-vs-CLI attribution rule could be
+# pinned without a window, a device, or a voxi::Renderer -- SandboxApp.cpp keeps every ImGui call and
+# every AVER_WARN; only the two decisions moved here.
+add_executable(PtRenderConflictTest src/PtRenderConflictTest.cpp)
+target_include_directories(PtRenderConflictTest PRIVATE ${CMAKE_SOURCE_DIR}/sandbox/src)
+target_link_libraries(PtRenderConflictTest PRIVATE Aver.Core)
+set_target_properties(PtRenderConflictTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
