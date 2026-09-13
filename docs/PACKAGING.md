@@ -113,6 +113,9 @@ Two new directories:
 - `src/GameApp.cpp` — the `aver::Application` subclass: `config()`, `onInit`, `onUpdate`, `onRender`, `onShutdown`.
 - `src/ContentIndex.cpp` — `rebuildContentIndex`, `resolveAssetPath`, `resolveAnimAsset`, `resolveSceneMesh`, `materialForSurface`, `loadProjectMeshes`, `loadProjectMaterials`. All of that currently sits inside `#if AVER_MODULE_PBR`, so a `PBR=OFF, SCENE=ON` build resolves no assets by id and hands the anim system no resolver.
 
+  > **CORRECTED 2026-09-13.** `loadProjectMaterials` no longer exists in the runtime: it had no caller
+  > and was removed. Per-surface material resolution goes through `materialForSurface`.
+
   > **CORRECTED 2026-08-02, twice.** The block opens at `SandboxApp.cpp:1132` and closes at `:1347`,
   > not the 1130/1345 written here — this section was authored against `ae47a2f` despite the header
   > claiming `5714ba3`. And the claim that relocating the code "fixes a bug" is **wrong**: a verbatim

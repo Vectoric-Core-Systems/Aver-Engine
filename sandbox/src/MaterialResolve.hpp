@@ -65,9 +65,9 @@ inline std::string resolveMaterialPath(const std::string& binariesDir, const std
 }
 
 // Every surface NAME with an .ocmat directly under EITHER Binaries\Materials or Content\Materials
-// (non-recursive in each, matching the runtime's own loadProjectMaterials()). A name present under
-// both directories is returned exactly once -- resolveMaterialPath() above, not this enumeration,
-// is what decides which FILE wins.
+// (non-recursive in each, since materialForSurface() only ever looks directly inside those two
+// folders). A name present under both directories is returned exactly once -- resolveMaterialPath()
+// above, not this enumeration, is what decides which FILE wins.
 inline std::vector<std::string> projectMaterialStems(const std::string& binariesDir,
                                                       const std::string& contentDir) {
     std::unordered_set<std::string> stems;

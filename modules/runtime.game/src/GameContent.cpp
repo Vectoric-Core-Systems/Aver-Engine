@@ -7,11 +7,12 @@
 #include <filesystem>
 #include <system_error>
 
-// UNCONDITIONAL, and it was inside the scene guard below. AssetType/assetTypeFromPath live in
-// modules/assets -- a leaf with no module switch at all, always linked through Aver.Formats -- and
-// they have TWO callers here: loadProjectMeshes(), which is scene-guarded, and
-// loadProjectMaterials(), which is PBR-guarded and has nothing to do with the scene. Scoping the
-// include to one of the two guards left the other branch without the type.
+// UNCONDITIONAL, deliberately. AssetType/assetTypeFromPath live in modules/assets -- a leaf with no
+// module switch at all, always linked through Aver.Formats -- and they have TWO callers here under
+// DIFFERENT guards: loadProjectMeshes(), which is scene-guarded, and loadProjectParticleEffects(),
+// which is particles-guarded. Scoping the include to either guard leaves the other branch without
+// the type. (A PBR-guarded loadProjectMaterials() was a third caller until it was removed as dead
+// code; that removal changes nothing here, because the two remaining guards still differ.)
 #include "aver/assets/AssetId.hpp"
 
 #if AVER_MODULE_PBR
@@ -602,24 +603,6 @@ pbr::MaterialHandle GameContent::materialForSurface(const std::string& name) {
     // surfaces would otherwise stat three paths per surface per level load.
     materialAssets_.emplace(name, h);
     return h;
-}
-
-void GameContent::loadProjectMaterials() {
-    const std::string dir = project_.contentDir();
-    if (dir.empty()) return;
-    const std::string matDir = dir + "\\Materials";
-    std::error_code ec;
-    if (!std::filesystem::exists(matDir, ec)) return;
-
-    u32 n = 0;
-    // NON-RECURSIVE, matching the editor: Content\Materials only, not every .ocmat in the tree.
-    for (std::filesystem::directory_iterator it(matDir, ec), end; it != end; it.increment(ec)) {
-        if (ec) break;
-        if (!it->is_regular_file(ec)) continue;
-        if (assetTypeFromPath(it->path().string()) != AssetType::Material) continue;
-        if (materialForSurface(it->path().stem().string())) ++n;
-    }
-    if (n) AVER_INFO("[Material] {} project material(s) loaded from {}", n, matDir);
 }
 
 void GameContent::releaseProjectMaterials() {

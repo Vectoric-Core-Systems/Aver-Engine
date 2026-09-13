@@ -76,8 +76,11 @@ public:
     // The material a surface token names, loading it on first use. 0 when the project has none.
     pbr::MaterialHandle materialForSurface(const std::string& name);
 
-    // Loads every .ocmat under Content\Materials. NON-RECURSIVE, matching the editor.
-    void loadProjectMaterials();
+    // NO loadProjectMaterials(), deliberately. The runtime carried a copy of the editor's, nothing
+    // ever called it, and it was removed: a level resolves each surface it references through
+    // materialForSurface(), lazily and Binaries-first, so eagerly loading every project material would
+    // only cost load time and memory. If an eager preload is ever wanted, wire one deliberately --
+    // scanning Binaries\Materials as well as Content\Materials -- rather than reviving a stale copy.
     void releaseProjectMaterials();
 #endif
 
@@ -145,8 +148,8 @@ public:
     // keyed by fnv1a64(relative path) -- the SAME id space contentIndex_ already uses for every other
     // project asset (adopt()'s own "FROZEN" comment), so a CParticleEmitter::effect a level or a
     // script names resolves the identical way a CMeshRenderer::mesh or CAnimator::clip does. Recursive
-    // over the whole content root, matching loadProjectMeshes rather than loadProjectMaterials'
-    // Content\Materials convention: DECIDED 3 gave .ocparticle no such folder rule.
+    // over the whole content root, matching loadProjectMeshes rather than the Materials-folder
+    // convention .ocmat follows: DECIDED 3 gave .ocparticle no such folder rule.
     //
     // particles::particleEffects() is the SAME process-global table SandboxApp.cpp's
     // loadProjectParticleEffects() fills and --particle-test's hardcoded content calls set() on

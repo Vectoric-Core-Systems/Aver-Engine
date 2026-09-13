@@ -4671,7 +4671,8 @@ public:
     // per-name resolver materialForSurface() already honours. A name is gathered once even when
     // it exists under both: materialForSurface() itself tries binariesDir first, so the built one
     // under Binaries wins the collision, matching the runtime's documented order.
-    // NON-RECURSIVE in each directory, matching the runtime's loadProjectMaterials().
+    // NON-RECURSIVE in each directory, matching materialForSurface(), which only ever looks directly
+    // inside those two folders.
 #if AVER_MODULE_PBR
     void loadProjectMaterials() {
 #if AVER_MODULE_SCENE
