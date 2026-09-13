@@ -469,6 +469,15 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "Cone-trace range, in centimetres (engine clamps to [1,100000])",
         []{ return vF32(Renderer::get().settings().giMaxDistance); },
         [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->giMaxDistance = n; }); }});
+    t.push_back({"voxi.giRadianceCeiling", VarType::F32, false,
+        "Caps GI radiance before the tonemap (mirrored to the shader as AVER_VOX_MAXRAD); 16 is the "
+        "default. The tonemap is already flat white by about x = 4-5, so a value pinned at the "
+        "ceiling paints solid white -- lowering this can remove a white patch caused by that, but it "
+        "also dims any legitimately bright bounce near the same number, and there is no way to tell "
+        "the two apart from this dial alone. Compare by hand; voxi.giPoisonView's red/green paint "
+        "exactly which pixels are hitting this ceiling (engine clamps to [0.1,256])",
+        []{ return vF32(Renderer::get().settings().giRadianceCeiling); },
+        [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->giRadianceCeiling = n; }); }});
     // ---- refraction: how a translucent surface bends what is behind it (Settings::refractionMode's
     // own comment has the full three-mode writeup). Voxi.cpp does not range-check this field the way
     // it does rtRenderMode/giMode (both hard-clamp out-of-range back to a safe default) -- so unlike
@@ -524,10 +533,14 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
     // live in voxi_restir.hlsli's giRestirIndirect, which giMode 0 never calls.
     t.push_back({"voxi.giPoisonView", VarType::Bool, false,
         "ReSTIR-GI poison debug view (giMode 1 only): paints an unmistakable colour over any pixel "
-        "where one of voxi_restir.hlsli's non-finite/NaN guards fired THIS frame -- magenta = the "
-        "store-time reservoir guard (the one that matters most), cyan = a candidate-radiance clamp, "
-        "yellow = the target-pdf guard, orange = the pre-existing final-estimate guard, blue = the "
-        "NRD-readback guard. All colours zero (the scene renders normally) means no guard is firing.",
+        "where one of voxi_restir.hlsli's guards fired THIS frame -- magenta = the store-time "
+        "reservoir guard (the one that matters most), cyan = a candidate-radiance clamp, yellow = the "
+        "target-pdf guard, orange = the pre-existing final-estimate guard, blue = the NRD-readback "
+        "guard (these five are all non-finite/NaN corruption); red = the raw estimate hit the "
+        "voxi.giRadianceCeiling clamp while still finite, green = the NRD-denoised readback hit the "
+        "same ceiling -- these last two are WHERE a white patch's cause lives, not a bug: a non-finite "
+        "guard above always outranks them at the same pixel. All colours zero (the scene renders "
+        "normally) means no guard is firing.",
         []{ return vBool(consoleGiPoisonViewSlot()); },
         [](ConsoleBatch& b, VarValue v){
             const bool on = v.as.b;
@@ -544,6 +557,33 @@ inline void registerVoxiVars(std::vector<ConsoleVar>& t) {
         "NVIDIA NRD over the ReSTIR indirect diffuse and the ray-traced sky occlusion. Allocates the thin G-buffer (velocity, view Z, normal/roughness -- nothing else in the engine wants it) and REQUIRES MSAA 1 and D3D12; above 1x sample count the pass skips itself and says so once at WARN",
         []{ return vBool(Renderer::get().settings().denoiser); },
         [](ConsoleBatch& b, VarValue v){ const bool on=v.as.b; b.dialSetters.push_back([on](void* sp){ static_cast<Settings*>(sp)->denoiser = on; }); }});
+    // ---- REBLUR_DIFFUSE history/prepass tuning -- LIVE: VoxiRenderer re-issues NRD's own
+    // SetDenoiserSettings every frame (see applyReblurTuning, VoxiRenderer.cpp), so a change here
+    // takes effect on the NEXT frame with no project reload and no NRD instance recreation -- unlike
+    // voxi.layeredBsdf above, this is NOT a [reload] entry. Only meaningful once voxi.denoiser is on
+    // and REBLUR_DIFFUSE has actually been created (giMode 1 or the sky-occlusion rays wanting it);
+    // harmless and silently kept for later otherwise, same as any other dial set before its feature is
+    // active. Ranges are NRD's own (third_party/nrd/Include/NRDSettings.h's ReblurSettings).
+    t.push_back({"voxi.reblurDiffusePrepassBlurRadius", VarType::F32, false,
+        "REBLUR_DIFFUSE pre-accumulation spatial blur radius, in pixels; 0 skips the pre-pass dispatch "
+        "entirely. NRD's own default and this engine's is 30 (engine clamps to [0,100] -- NRD's header "
+        "states only the 0 lower bound, 100 is a defensive ceiling this engine adds)",
+        []{ return vF32(Renderer::get().settings().reblurDiffusePrepassBlurRadius); },
+        [](ConsoleBatch& b, VarValue v){ const f32 n=v.as.f; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->reblurDiffusePrepassBlurRadius = n; }); }});
+    t.push_back({"voxi.reblurMaxAccumulatedFrameNum", VarType::U32, false,
+        "REBLUR_DIFFUSE main history depth, in frames -- latency/noise trade, not a dispatch toggle. "
+        "NRD's own default and this engine's is 30 (engine clamps to [0,63], NRD's own "
+        "REBLUR_MAX_HISTORY_FRAME_NUM)",
+        []{ return vU32(Renderer::get().settings().reblurMaxAccumulatedFrameNum); },
+        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->reblurMaxAccumulatedFrameNum = n; }); }});
+    t.push_back({"voxi.reblurMaxStabilizedFrameNum", VarType::U32, false,
+        "REBLUR_DIFFUSE temporal-stabilization history depth, in frames; 0 skips the stabilization "
+        "dispatch entirely, and a value at or above voxi.reblurMaxAccumulatedFrameNum gets REDUCED to "
+        "it by NRD ITSELF (its own header documents this), not by this engine -- today's defaults (63 "
+        "here, 30 there) are exactly such a pair, unchanged. NRD's own default and this engine's is 63 "
+        "(engine clamps to [0,63], NRD's own REBLUR_MAX_HISTORY_FRAME_NUM)",
+        []{ return vU32(Renderer::get().settings().reblurMaxStabilizedFrameNum); },
+        [](ConsoleBatch& b, VarValue v){ const u32 n=v.as.u; b.dialSetters.push_back([n](void* sp){ static_cast<Settings*>(sp)->reblurMaxStabilizedFrameNum = n; }); }});
     t.push_back({"voxi.rtShadowDenoise", VarType::U32, false,
         "Spatial denoise radius for the ray-traced sun shadow, in pixels (engine clamps to [0,3])",
         []{ return vU32(Renderer::get().settings().rtShadowDenoise); },

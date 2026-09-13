@@ -1032,12 +1032,20 @@ private:
         // reads fine for a week and then costs an afternoon.
         f32 ambientParams[4] = {};
         // EDITOR VIEW MODES that the ray-driven path has to honour itself. x = unlit (flat
-        // authored albedo, no lighting); y/z/w spare.
+        // authored albedo, no lighting); z/w spare.
         //
         // A PASS-LEVEL FIELD, not a per-draw one, because a ray hit has no per-draw cbuffer
         // to read: gShadingModel rides in the b1 block that the raster path sets per mesh,
         // and PSRayDriven never binds it. That asymmetry is the whole reason unlit reached
         // the rasteriser and not the renderer that actually draws the scene by default.
+        //
+        // y WAS SPARE; NOW Settings::giRadianceCeiling (mirrored as AVER_VOX_MAXRAD in voxi.hlsl /
+        // voxi_gi.hlsli -- see that field's own comment in Voxi.hpp for the full story). 0 here reads
+        // as "unset" and the shader macro falls back to 16.0, so a FrameConstants block nobody has
+        // written yet (giFrameConstants() read before this renderer's first prePass -- SandboxApp.cpp
+        // documents exactly that all-zero-block window for the cluster-GI binder) behaves exactly as
+        // it always has. A repurposed bit, not a new field -- packing/size unchanged, same shape as
+        // gGiRestirParams.w below.
         f32 viewParams[4] = {};
         // RTXDI ReSTIR GI control -- mirrored as gGiRestirParams. x = 1 while giMode==1 is ACTUALLY
         // running this frame (giRestirWanted(): hardware, tier and giMode all agree) -- NOT a raw
@@ -1325,6 +1333,12 @@ private:
     u32                   nrdFrame_   = 0;
     bool                  nrdWarnedEncoding_ = false;
     bool                  nrdWarnedMsaa_     = false;
+    // Set the first time applyReblurTuning() fails while nrd_ reports itself valid -- a real error
+    // (NRD rejected the settings), not the ordinary "not created yet" case setReblurTuning() already
+    // no-ops on silently. Warned once, same shape as nrdWarnedEncoding_/nrdWarnedMsaa_ above: this can
+    // run every frame once NRD exists, and a per-frame WARN for a condition that will not self-heal is
+    // noise, not information.
+    bool                  nrdWarnedReblurRetune_ = false;
     // The ReSTIR GI radiance handed to NRD (u9): rgb indirect diffuse, a normalised hit distance.
     // NOT ping-ponged, unlike every history pair here -- it is this frame's raw measurement handed
     // to a filter that keeps its OWN history in NRD's permanent pool, so a second copy would buy
@@ -1470,6 +1484,16 @@ private:
     // match, and resets rtHistValid_ when it does -- the old contents belong to a resolution that
     // no longer exists. DESTROYS all four instead when rayTracingWanted() is false; see there.
     bool ensureShadowHistory(u32 width, u32 height);
+    // Builds a render::nrd::Denoiser::ReblurTuning from settings_'s three live REBLUR dials
+    // (reblurDiffusePrepassBlurRadius/reblurMaxAccumulatedFrameNum/reblurMaxStabilizedFrameNum) plus
+    // the engine's own fixed hitDistA/B/C/enableAntiFirefly, and hands it to nrd_.setReblurTuning.
+    // Called both right after nrd_.create() succeeds (so creation-time tuning already reflects
+    // whatever was set before NRD existed, rather than ReblurTuning{}'s bare defaults) and from
+    // setSettings() every time it runs thereafter (nrd::SetDenoiserSettings is documented, NRD.h, as
+    // legal to call every frame -- see setSettings' own comment) -- so a console change to one of the
+    // three dials takes effect on the NEXT frame without tearing the NRD instance down. A no-op
+    // before nrd_.valid(): setReblurTuning() itself checks that and returns false.
+    void applyReblurTuning();
     // The size onRenderTargetsChanged last asked for, kept because the histories are created and
     // destroyed on the ray-tracing on/off edge as well as on a resize -- and setSettings, which is
     // where that edge is seen, is not told a resolution.
@@ -1547,6 +1571,48 @@ private:
     // which is a working image rather than a black one.
     bool rayDrivenActive() const { return rtActive_ && rtRenderMode_ == 1u && rayDrivenPso_ != 0; }
 
+public:
+    // PREDICTS suppressesScene() (== debugViewActive() || rayDrivenActive(), see the .cpp) for THIS
+    // frame, for the one caller that needs an answer before this frame's real one exists yet:
+    // SandboxApp::syncPtSceneView(), called from onUpdate(), BEFORE device_->beginFrame() runs this
+    // frame's prePass() (see that function's own header comment for why it must run there).
+    //
+    // debugViewActive() is read straight -- no race. It depends on giReady_/giEnabled()/debugView_,
+    // none of which prePass() is about to touch, so its value right now already IS this frame's value.
+    //
+    // rayDrivenActive() is the racy half being fixed. It reads rtActive_, and rtActive_ is reset to
+    // false at the TOP of buildAccelerationStructures() and set true only after a successful TLAS
+    // build over drawsPrev_ -- and buildAccelerationStructures() runs from prePass(), which runs
+    // inside THIS frame's beginFrame(), AFTER beginScene() (called immediately before prePass(), over
+    // every feature, in that same beginFrame()) has already done `drawsPrev_.swap(draws_);
+    // draws_.clear();`. So the drawsPrev_ this frame's build is about to consume is NOT the member's
+    // value right now -- that list was already consumed by LAST frame's build, back when THIS frame's
+    // onUpdate() had not even run yet. It is today's draws_: whatever onRender submitted last frame,
+    // sitting here unswapped, at the exact moment onUpdate() calls this accessor. Reading rtActive_
+    // (what rayDrivenActive() does) answers last frame's question a second time; reading draws_
+    // instead answers the question THIS frame's election is actually about to ask.
+    //
+    // rtRenderMode_ and rayDrivenPso_ carry no such race and are read unchanged: neither is reset or
+    // reassigned anywhere inside beginFrame -- both are only ever written by setSettings() or pipeline
+    // creation, long before any frame that reads them starts, so their value right now already IS
+    // this frame's value.
+    //
+    // NOT REPLAYED: whether the per-draw loop over drawsPrev_ actually yields a non-empty TLAS
+    // instance list. buildAccelerationStructures() can still end with rtActive_ == false on a
+    // non-empty draws_ if every draw's mesh fails to produce a BLAS (e.g. a mesh destroyed since it
+    // was last drawn) -- a per-mesh runtime outcome this accessor has no cheap way to replay without
+    // duplicating that whole loop here. draws_ non-empty is treated as sufficient: the gap this
+    // leaves is the SAME SHAPE as the one-frame race being fixed (a rare, brief disagreement), never
+    // a new kind of one, and it only opens on a frame where a draw's mesh is destroyed the very frame
+    // its draw would otherwise have entered the TLAS.
+    bool willSuppressSceneThisFrame() const {
+        const bool rayDrivenWillBeActive = rtSupported_ && settings_.rayTracing != Quality::Off &&
+                                            !draws_.empty() && rtRenderMode_ == 1u &&
+                                            rayDrivenPso_ != 0;
+        return debugViewActive() || rayDrivenWillBeActive;
+    }
+
+private:
     // Whether the ray-traced history textures will be read and written this frame.
     //
     // TESTS debugViewActive(), NOT suppressesScene(), and the difference is load-bearing. Both

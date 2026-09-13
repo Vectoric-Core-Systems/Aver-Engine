@@ -69,9 +69,11 @@ cbuffer VoxiFrame : register(AVER_CB_JOIN(b, AVER_FEATURE_FRAME_CB)) {
     // days of this row being written down as spare, which is what gGiParams directly above warns
     // happens; z/w are what is left, and the warning still applies to them.
     float4   gAmbientParams;
-    // Editor view modes the ray-driven path honours itself. x = unlit; y/z/w spare.
+    // Editor view modes the ray-driven path honours itself. x = unlit; z/w spare.
     // Mirrors FrameConstants::viewParams -- appended at the END, so every offset above is
     // untouched. See VoxiRenderer.hpp's static_assert for the guard that makes that a rule.
+    // y WAS SPARE; NOW the live GI radiance ceiling (Settings::giRadianceCeiling) -- see
+    // AVER_VOX_MAXRAD below, which reads this field with a fallback to today's 16.0 literal.
     float4   gViewParams;
     // RTXDI ReSTIR GI control (Settings::giMode) -- mirrors FrameConstants::giRestirParams, also
     // appended at the end for the same reason gViewParams was. x = 1 while giMode==1 is ACTUALLY
@@ -98,7 +100,18 @@ RWTexture3D<uint> gVoxelAccum : register(u1);
 
 // Fixed-point scale radiance is multiplied by before accumulation and divided by in CSResolve.
 #define AVER_VOX_FIXED 16384.0
-#define AVER_VOX_MAXRAD 16.0
+// THE CEILING ON VOXEL/GI RADIANCE -- NOW A LIVE PER-FRAME VALUE, not a compile-time constant. Rides
+// gViewParams.y (Settings::giRadianceCeiling -> VoxiRenderer::prePass -> cb_.viewParams[1], see that
+// field's cbuffer comment above and Voxi.hpp's own comment on the field for the full story of what
+// this caps and why 16.0 is not a headroom number). Falls back to today's literal 16.0 whenever the
+// field reads exactly 0 -- an UNSET FrameConstants block (giFrameConstants() read before this
+// renderer's first prePass ever ran; SandboxApp.cpp's cluster-GI binder documents exactly that
+// all-zero-block window) -- so this macro is BYTE-IDENTICAL to the #define it replaces until a
+// project or the console (voxi.giRadianceCeiling) actually asks for a different number.
+// Parenthesised as a single expression so every existing `AVER_VOX_MAXRAD` use site (a runtime
+// function argument in every case in this file, never a static const initialiser) stays live without
+// being rewritten.
+#define AVER_VOX_MAXRAD (gViewParams.y > 0.0 ? gViewParams.y : 16.0)
 // The aperture of the single cone PSVoxel traces into the previous bake, as tan(half-angle).
 // 0.577 is tan(30), a 60-degree cone -- the same shape the forward gather's own axial cone uses, so
 // the two agree about how much of the hemisphere a voxel can see rather than being two different

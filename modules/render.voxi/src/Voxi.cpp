@@ -150,6 +150,14 @@ void Renderer::setSettings(const Settings& s) {
     n.giSkyOcclusionTile = std::clamp(n.giSkyOcclusionTile, 1u, 16u);
     n.giIntensity     = std::clamp(n.giIntensity, 0.0f, 8.0f);
     n.giMaxDistance   = std::clamp(n.giMaxDistance, 1.0f, 100000.0f);
+    // The GI radiance ceiling (AVER_VOX_MAXRAD's live half -- see the field's own comment). Lower
+    // bound is deliberately > 0: the shader macro (voxi.hlsl/voxi_gi.hlsli) falls back to the
+    // engine default 16.0 only when gViewParams.y arrives as exactly 0 (an UNSET FrameConstants
+    // block, e.g. giFrameConstants() read before VoxiRenderer::init() has run at all), and letting a
+    // real `set voxi.giRadianceCeiling 0` through here would collide with that sentinel and silently
+    // do nothing instead of the near-zero ceiling the user actually asked for. Upper bound is
+    // generous headroom, not a measured ceiling of its own.
+    n.giRadianceCeiling = std::clamp(n.giRadianceCeiling, 0.1f, 256.0f);
     // Mirrors VoxiRenderer::kMaxShadowRays / kMaxPixelsPerRayTile, restated rather than shared: this
     // library is core-only and must not depend on the RHI-backed renderer that owns those constants.
     // The renderer's own setters are the authority on the exact contract (kMaxPixelsPerRayTile also
@@ -171,6 +179,17 @@ void Renderer::setSettings(const Settings& s) {
     n.rtPixelsPerRayTile = std::clamp(n.rtPixelsPerRayTile, 1u, 16u);
     // Mirrors VoxiRenderer::kMaxGiUpdateInterval for the same reason as rtPixelsPerRayTile above.
     n.giUpdateInterval   = std::clamp(n.giUpdateInterval, 1u, 8u);
+    // REBLUR history/prepass dials -- ranges are NRD's OWN (third_party/nrd/Include/NRDSettings.h's
+    // ReblurSettings), not guessed: maxAccumulatedFrameNum and maxStabilizedFrameNum are each
+    // documented there as "[0; REBLUR_MAX_HISTORY_FRAME_NUM]" (63); a maxStabilizedFrameNum at or
+    // above maxAccumulatedFrameNum is NRD's own business to clamp down further (its header says so
+    // explicitly), not this engine's -- which is exactly the relationship today's defaults (63, 30)
+    // already have, unchanged here. diffusePrepassBlurRadius's own doc gives only a lower bound ("0 =
+    // disabled"); 100 is a defensive ceiling this engine adds so a manifest typo cannot select an
+    // unbounded pixel radius, not a value NRD itself states.
+    n.reblurMaxAccumulatedFrameNum = std::clamp(n.reblurMaxAccumulatedFrameNum, 0u, 63u);
+    n.reblurMaxStabilizedFrameNum  = std::clamp(n.reblurMaxStabilizedFrameNum, 0u, 63u);
+    n.reblurDiffusePrepassBlurRadius = std::clamp(n.reblurDiffusePrepassBlurRadius, 0.0f, 100.0f);
 
     if (n.msaa != settings_.msaa) msaaDirty_ = true;
     settings_ = n;

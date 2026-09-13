@@ -26,7 +26,15 @@
 // defines this identically for the raster path, the two preludes are never in one compile, and
 // the value has to match. It bounds BOTH ends of the volume -- what PSVoxel injects and what
 // coneTracedIndirect hands back -- so a change here is a change to VoxiShaders.hpp too.
-#define AVER_VOX_MAXRAD 16.0
+//
+// NOW A LIVE PER-FRAME VALUE, not a compile-time constant -- rides gViewParams.y, exactly as
+// voxi.hlsl's own copy of this macro does (that file's comment on the define has the full story:
+// Settings::giRadianceCeiling, the 0-means-unset fallback to today's 16.0, and why every use site
+// stays live without being rewritten). This prelude's own cbuffer VoxiFrame below mirrors
+// voxi.hlsl's gViewParams byte for byte -- see its own header comment -- so the SAME per-frame
+// value (VoxiRenderer::giFrameConstants() is one shared struct, not two) reaches every caller of
+// coneTracedIndirect (the particle pass, the sandbox cluster PS) as it does PSVoxel/PSMainVoxi.
+#define AVER_VOX_MAXRAD (gViewParams.y > 0.0 ? gViewParams.y : 16.0)
 
 // BYTE FOR BYTE aver::voxi::VoxiRenderer::FrameConstants (VoxiRenderer.hpp), same as Voxi's own
 // `cbuffer VoxiFrame` in VoxiShaders.hpp -- deliberately the FULL block, not a trimmed one, so a
@@ -79,9 +87,12 @@ cbuffer VoxiFrame : register(AVER_GI_JOIN(b, AVER_GI_FRAME_REG)) {
     // header note above), and a shorter declaration would quietly stop being that. Appended, never
     // inserted: every field above keeps its offset.
     float4   gAmbientParams;
-    // Editor view modes the ray-driven path honours itself. x = unlit; y/z/w spare.
+    // Editor view modes the ray-driven path honours itself. x = unlit; z/w spare. NOTHING IN THIS
+    // PRELUDE READS x, same as gAmbientParams above it -- declared for size only.
     // Mirrors FrameConstants::viewParams -- appended at the END, so every offset above is
     // untouched. See VoxiRenderer.hpp's static_assert for the guard that makes that a rule.
+    // y WAS SPARE; NOW the live GI radiance ceiling -- THIS PRELUDE DOES READ IT, via
+    // AVER_VOX_MAXRAD above (coneTracedIndirect's own min(..., AVER_VOX_MAXRAD) call).
     float4   gViewParams;
     // RTXDI ReSTIR GI control -- mirrors gGiRestirParams in voxi.hlsl and FrameConstants::
     // giRestirParams (VoxiRenderer.hpp), appended at the end for the same reason gViewParams was.

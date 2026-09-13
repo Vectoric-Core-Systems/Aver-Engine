@@ -1005,6 +1005,14 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
     // at the end of this function -- after the NRD block further down -- can still read them.
     bool giPoisonEstHit = false;
     bool giPoisonNrdHit = false;
+    // THE TWO NEW BITS: not a non-finite guard catching corruption, but AVER_VOX_MAXRAD's ceiling
+    // clamp actually engaging on a FINITE value -- see this function's own POISON DEBUG VIEW comment
+    // below for why that distinction, and Settings::giRadianceCeiling (Voxi.hpp) for what the ceiling
+    // is and why hitting it paints solid white downstream. Hoisted for the same reason as the two
+    // above: giPoisonNrdCeilHit is set inside the NRD block further down, read at the same
+    // combination site.
+    bool giPoisonEstCeilHit = false;
+    bool giPoisonNrdCeilHit = false;
 
     float3 outDiffuse = 0.0;
     if (RTXDI_IsValidGIReservoir(result)) {
@@ -1045,8 +1053,18 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         // still the right answer for a broken sample; the isnan/isinf check just makes that a
         // decision instead of an accident of comparison semantics.
         giPoisonEstHit = any(isnan(est)) || any(isinf(est));
+        // THE NEW GUARD: not "is this broken", "is this about to be PAINTED SOLID WHITE by a ceiling
+        // that exists to hide exactly this". A value can be perfectly finite and still saturate
+        // acesTonemap (flat white by roughly x = 4-5, per its own comment) once clamped to
+        // AVER_VOX_MAXRAD -- see Settings::giRadianceCeiling's own comment for the full diagnosis.
+        // Computed against the SAME non-negative value the clamp below actually clamps (estNonNeg),
+        // not the raw `est`, so a legitimately negative-then-floored component cannot register as a
+        // false ceiling hit; skipped when giPoisonEstHit already fired above -- a non-finite value is
+        // never "above the ceiling", it is a different failure the guard above already owns.
+        const float3 estNonNeg = max(est, 0.0);
+        giPoisonEstCeilHit = !giPoisonEstHit && any(estNonNeg > AVER_VOX_MAXRAD);
         outDiffuse = giPoisonEstHit ? float3(0.0, 0.0, 0.0)
-                                     : min(max(est, 0.0), AVER_VOX_MAXRAD);
+                                     : min(estNonNeg, AVER_VOX_MAXRAD);
     }
 
     // ---- hand this frame's estimate to NRD, and take back last frame's ----
@@ -1133,41 +1151,68 @@ float3 giRestirIndirect(float3 wpos, float3 N, float curLinearDepth, float2 pixe
         // same "zero is the honest answer for a broken sample" the raw path already chose, rather
         // than a screen-filling flash with nothing in the log to explain it.
         giPoisonNrdHit = any(isnan(decoded)) || any(isinf(decoded));
+        // THE NRD-SIDE TWIN OF giPoisonEstCeilHit above, same reasoning: a finite REBLUR readback
+        // that is nonetheless above the ceiling paints solid white once tonemapped, invisible to the
+        // isnan/isinf guard directly above. Same shape -- checked against the clamp's own
+        // already-floored input, skipped when giPoisonNrdHit already fired.
+        const float3 decodedNonNeg = max(decoded, 0.0);
+        giPoisonNrdCeilHit = !giPoisonNrdHit && any(decodedNonNeg > AVER_VOX_MAXRAD);
         outDiffuse = giPoisonNrdHit
                    ? float3(0.0, 0.0, 0.0)
-                   : min(max(decoded, 0.0), AVER_VOX_MAXRAD);
+                   : min(decodedNonNeg, AVER_VOX_MAXRAD);
     }
 
     // ---- POISON DEBUG VIEW (voxi.giPoisonView / gGiRestirParams.w) -- OVERRIDE 2/3's by-hand tool ----
     //
     // Default off, and cheap when off: one dynamic branch on a cbuffer float already being read this
     // frame, no new binding, no buffer, no readback. While on, this REPLACES the final indirect-
-    // diffuse colour at any pixel where one of this file's non-finite guards fired THIS frame, in an
-    // unmistakable, scene-lighting-cannot-produce-this colour PER GUARD -- so the user can see both
-    // WHERE a guard is catching something and WHICH one. Priority order below (checked highest first)
-    // matters only for the rare pixel where more than one fires in the same frame; each is otherwise
-    // independent.
+    // diffuse colour at any pixel where one of this file's non-finite guards -- OR, now, one of its
+    // two CEILING guards -- fired THIS frame, in an unmistakable, scene-lighting-cannot-produce-this
+    // colour PER GUARD -- so the user can see both WHERE a guard is catching something and WHICH one.
+    //
+    // TWO KINDS OF GUARD, AND THE PRECEDENCE ORDER SAYS SO: the five NON-FINITE guards (magenta
+    // through blue below) catch actual corruption -- a NaN/Inf that should never have existed. The
+    // two CEILING guards (red, green) catch something else entirely: a perfectly FINITE value that is
+    // merely large enough to saturate AVER_VOX_MAXRAD and, downstream, acesTonemap -- which is the
+    // very white-patch symptom this whole task diagnoses, not a bug in this file. Deliberately
+    // NEITHER WHITE (that is the symptom, not a diagnosis) and both checked LAST: a non-finite guard
+    // always outranks a mere ceiling hit at the same pixel, because corruption is the more urgent
+    // thing to see and because giPoisonEstCeilHit/giPoisonNrdCeilHit are already false whenever their
+    // non-finite sibling fired (see each guard's own comment) -- so in practice the two families never
+    // actually compete for the same pixel; the ordering below is what happens if that ever changes.
+    // Priority order below (checked highest first) matters only for the rare pixel where more than one
+    // fires in the same frame; each is otherwise independent.
     //
     // LEGEND (also in resetgihistory's neighbourhood in buildConsoleCatalog, and in `help`):
-    //   MAGENTA (1,0,1) -- the store-time reservoir guard (giPoisonStoreHit, Part 2.4): a poisoned
-    //                      reservoir was about to be written into CROSS-FRAME history and was emptied
-    //                      instead. THE ONE THAT MATTERS MOST -- this is the circuit breaker.
-    //   CYAN    (0,1,1) -- the candidate-radiance clamp guard (nonFiniteCandidate, Part 2.1): a fresh
-    //                      candidate's own shaded/sky radiance was non-finite before it ever reached a
-    //                      reservoir.
-    //   YELLOW  (1,1,0) -- the target-pdf guard (gGiPoisonPdfHit, Part 2.3): RAB_GetGISampleTargetPdfForSurface
-    //                      computed a non-finite importance weight for some candidate/neighbour this
-    //                      pixel combined this frame.
-    //   ORANGE  (1,0.5,0) -- the pre-existing final-estimate guard (giPoisonEstHit, ~40 lines up):
-    //                      this pixel's own finalised weightSum*radiance was non-finite.
-    //   BLUE    (0,0,1) -- 301418ec's NRD-readback guard (giPoisonNrdHit, just above): REBLUR handed
-    //                      back a non-finite value on the denoised read-back path.
+    //   MAGENTA (1,0,1)   -- the store-time reservoir guard (giPoisonStoreHit, Part 2.4): a poisoned
+    //                        reservoir was about to be written into CROSS-FRAME history and was
+    //                        emptied instead. THE ONE THAT MATTERS MOST -- this is the circuit
+    //                        breaker.
+    //   CYAN    (0,1,1)   -- the candidate-radiance clamp guard (nonFiniteCandidate, Part 2.1): a
+    //                        fresh candidate's own shaded/sky radiance was non-finite before it ever
+    //                        reached a reservoir.
+    //   YELLOW  (1,1,0)   -- the target-pdf guard (gGiPoisonPdfHit, Part 2.3):
+    //                        RAB_GetGISampleTargetPdfForSurface computed a non-finite importance
+    //                        weight for some candidate/neighbour this pixel combined this frame.
+    //   ORANGE  (1,0.5,0) -- the pre-existing final-estimate guard (giPoisonEstHit, ~50 lines up):
+    //                        this pixel's own finalised weightSum*radiance was non-finite.
+    //   BLUE    (0,0,1)   -- 301418ec's NRD-readback guard (giPoisonNrdHit, just above): REBLUR
+    //                        handed back a non-finite value on the denoised read-back path.
+    //   RED     (1,0,0)   -- NEW: the raw estimate hit the radiance CEILING (giPoisonEstCeilHit,
+    //                        ~50 lines up) -- finite, but AVER_VOX_MAXRAD clamped it, which is what
+    //                        paints solid white once tonemapped. THIS is where a white patch's own
+    //                        cause is diagnosed, not merely its symptom hidden.
+    //   GREEN   (0,1,0)   -- NEW: the NRD-denoised readback hit the same ceiling (giPoisonNrdCeilHit,
+    //                        just above) -- REBLUR's own accumulation can push an already-hot value
+    //                        higher still before this pixel ever sees it.
     if (gGiRestirParams.w > 0.5) {
         if (giPoisonStoreHit)     return float3(1.0, 0.0, 1.0);
         if (nonFiniteCandidate)   return float3(0.0, 1.0, 1.0);
         if (gGiPoisonPdfHit)      return float3(1.0, 1.0, 0.0);
         if (giPoisonEstHit)       return float3(1.0, 0.5, 0.0);
         if (giPoisonNrdHit)       return float3(0.0, 0.0, 1.0);
+        if (giPoisonEstCeilHit)   return float3(1.0, 0.0, 0.0);
+        if (giPoisonNrdCeilHit)   return float3(0.0, 1.0, 0.0);
     }
 
     return outDiffuse;

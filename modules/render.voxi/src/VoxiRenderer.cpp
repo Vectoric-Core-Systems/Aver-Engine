@@ -593,6 +593,15 @@ void VoxiRenderer::setSettings(const Settings& s) {
         if (!ensureShadowHistory(rtHistWantW_, rtHistWantH_))
             AVER_ERROR("[Voxi] ray-traced history could not follow a ray-tracing setting change at {}x{}",
                        rtHistWantW_, rtHistWantH_);
+
+    // B4: REBLUR history/prepass tuning as LIVE dials. setSettings already runs every frame (this is
+    // no new per-frame call site), so re-issuing setReblurTuning here -- rather than only once at NRD
+    // creation, see applyReblurTuning's own comment -- is what makes a console-set
+    // voxi.reblur{DiffusePrepassBlurRadius,MaxAccumulatedFrameNum,MaxStabilizedFrameNum} take effect
+    // on the NEXT frame without tearing the NRD instance (and its accumulated history) down. Guarded
+    // on nrd_.valid() only to skip the redundant call on every frame before NRD exists at all --
+    // applyReblurTuning()/setReblurTuning() would no-op harmlessly either way.
+    if (nrd_.valid()) applyReblurTuning();
 }
 
 // Places the GI volume: centre in world units, half-edge extent.
@@ -927,6 +936,11 @@ void VoxiRenderer::prePass(rhi::IRenderContext& ctx) {
     // scene. A view mode that "does something" is not evidence it did the RIGHT something.
     // prePass runs every frame before the constants are uploaded, which is what this needs.
     cb_.viewParams[0] = unlit_ ? 1.0f : 0.0f;
+    // THE LIVE GI RADIANCE CEILING (AVER_VOX_MAXRAD in voxi.hlsl/voxi_gi.hlsli) -- see
+    // Settings::giRadianceCeiling's own comment for what this caps and why, and FrameConstants::
+    // viewParams's comment (VoxiRenderer.hpp) for why .y is safe to repurpose. Sent every frame from
+    // this already-per-frame block, same as viewParams[0] directly above.
+    cb_.viewParams[1] = settings_.giRadianceCeiling;
     // GATED ON rtActive_, NOT ON THE SETTING ALONE. The shader traces these against the same
     // acceleration structure the shadow ray uses, and there is not one on a frame that built no
     // TLAS -- publishing a non-zero count then would have every pixel trace into nothing and read
@@ -3153,15 +3167,15 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
             const render::nrd::DenoiserKind kinds[] = {render::nrd::DenoiserKind::ReblurDiffuseOcclusion,
                                                        render::nrd::DenoiserKind::ReblurDiffuse};
             nrdActive_ = nrd_.create(*dev_, kinds, 2);
-            // ONCE, NOT PER FRAME: NRD keeps per-denoiser settings until they are set again, and the
-            // defaults are wrong for this engine in one field that matters -- see
-            // Denoiser::ReblurTuning, which explains why a length constant tuned in metres cannot be
-            // left alone against a centimetre viewZ. Index 1 is ReblurDiffuse in the kinds array
-            // above; the occlusion denoiser at index 0 is left on NRD's defaults because the signal
-            // it filters is already unit-free.
-            if (nrdActive_ && !nrd_.setReblurTuning(1u, render::nrd::Denoiser::ReblurTuning{}))
-                AVER_WARN("[NRD] REBLUR_DIFFUSE would not take its hit-distance tuning; it will "
-                          "normalise against NRD's metre-based defaults and over-blur near geometry");
+            // NOT ONCE-WITH-BARE-DEFAULTS ANY MORE: applyReblurTuning() reads settings_ (already
+            // current -- setSettings assigns it before ensureShadowHistory can ever be reached), so
+            // creation-time tuning reflects whatever reblur* dials were requested before NRD existed
+            // at all, not ReblurTuning{}'s own defaults. setSettings() below re-issues this same call
+            // every frame thereafter, which is what makes a later console change live without
+            // recreating the instance -- see applyReblurTuning's own comment. Index 1 is ReblurDiffuse
+            // in the kinds array above; the occlusion denoiser at index 0 is left on NRD's defaults
+            // because the signal it filters is already unit-free.
+            if (nrdActive_) applyReblurTuning();
             // THE ENCODING CHECK IS THE ONE SILENT FAILURE MODE LEFT. NRD's shaders were BUILT
             // against a specific normal/roughness packing (cmake/AverNRD.cmake picks it), and
             // averPackNormalRoughness (voxi.hlsl) implements one specific packing too. If those
@@ -3285,6 +3299,25 @@ bool VoxiRenderer::ensureShadowHistory(u32 width, u32 height) {
         res_->setUavBuffer(bindings_, 6, giReservoirs_, kGiReservoirElemBytes,
                            giReservoirElemCapacity_, 0);
     return true;
+}
+
+// See the header's own comment on applyReblurTuning for when this runs (once at NRD creation, then
+// every setSettings() call thereafter) and why that is safe (nrd::SetDenoiserSettings is documented,
+// NRD.h, as legal at any cadence). hitDistA/B/C/enableAntiFirefly are left at ReblurTuning{}'s own
+// defaults here -- those are the engine's fixed unit-conversion constants (see ReblurTuning's own
+// comment on why metres-vs-centimetres matters), not something reblur* console dials touch.
+void VoxiRenderer::applyReblurTuning() {
+    render::nrd::Denoiser::ReblurTuning t{};
+    t.diffusePrepassBlurRadius = settings_.reblurDiffusePrepassBlurRadius;
+    t.maxAccumulatedFrameNum   = settings_.reblurMaxAccumulatedFrameNum;
+    t.maxStabilizedFrameNum    = settings_.reblurMaxStabilizedFrameNum;
+    // Index 1 is ReblurDiffuse -- see the two call sites' own comments for why index 0 (occlusion)
+    // stays on NRD's own defaults.
+    if (!nrd_.setReblurTuning(1u, t) && !nrdWarnedReblurRetune_) {
+        nrdWarnedReblurRetune_ = true;
+        AVER_WARN("[NRD] REBLUR_DIFFUSE tuning was rejected by NRD; it keeps whatever the last "
+                  "successful call set instead of the requested voxi.reblur* values (said once)");
+    }
 }
 
 // See VoxiRenderer.hpp for the ping-pong rationale.

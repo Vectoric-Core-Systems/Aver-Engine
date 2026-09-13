@@ -26,7 +26,10 @@
 //     file's read-only gather, and are left where they are for the same reason. AVER_VOX_FIXED/
 //     AVER_VOX_MAXRAD/AVER_VOX_INJECT_APERTURE/AVER_VOX_FEEDBACK are defined with that same block
 //     and stay there too; this file uses only AVER_VOX_MAXRAD, already visible by the time this
-//     file is reached.
+//     file is reached. AVER_VOX_MAXRAD itself now expands to a read of cbuffer VoxiFrame's own
+//     gViewParams.y (the live GI radiance ceiling -- see that macro's own comment in voxi.hlsl),
+//     which is the SAME cbuffer this file already depends on, so nothing new needs to precede this
+//     #include beyond what already does.
 //   - the entire #if AVER_RT region (voxi_rt.hlsli, voxi_restir.hlsli, and the rest of voxi.hlsl's
 //     own RT-only code between them) and its #endif, plus the unconditional shadow helpers
 //     immediately after it (shadowSampleCascade/shadowFactor/giShadowFactor) and cbuffer MipCB

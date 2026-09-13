@@ -216,6 +216,26 @@ struct Settings {
     f32 causticStrength = 0.6f;
     f32 giMaxDistance   = 4000.0f;  // centimetres
 
+    // THE CEILING GI RADIANCE IS CLAMPED TO before the tonemap, mirrored to the shader as
+    // AVER_VOX_MAXRAD (voxi.hlsl / voxi_gi.hlsli) via FrameConstants::viewParams.y. 16.0 is not a
+    // headroom number, it is a SYMPTOM's shape: acesTonemap (rhi/shaders/color.hlsli) floors NaN/
+    // negative input at zero but is already flat WHITE by roughly x = 4-5, so any finite value
+    // pinned at this ceiling paints solid white and is invisible to voxi.giPoisonView (which only
+    // flags isnan/isinf, not "clamped"). Both the raw ReSTIR GI estimate and its NRD-denoised
+    // readback (voxi_restir.hlsli) and the cone-gather estimator (voxi_gi.hlsli) share this one
+    // ceiling.
+    //
+    // DEFAULT MUST STAY 16.0 -- this is the value every image this renderer has ever produced was
+    // already clamped to as a compile-time #define; moving it changes nothing until a project or the
+    // console (voxi.giRadianceCeiling) asks for a different number.
+    //
+    // LOWERING IT is the by-hand tool this field exists for: it can remove a white patch that turns
+    // out to be a poisoned-but-finite value pinned at the ceiling, but it also dims any legitimately
+    // bright bounce that happens to be near 16 -- there is no way to tell the two apart from this
+    // number alone, which is why voxi_restir.hlsli's poison view (giPoisonView) paints a ceiling HIT
+    // in its own colour rather than asking this dial to double as a diagnostic.
+    f32 giRadianceCeiling = 16.0f;
+
     // ---- refraction: how a translucent surface BENDS what is behind it ----
     //
     // Absorption (attenuationColor) decides what COLOUR survives a medium; refraction decides where
@@ -383,6 +403,32 @@ struct Settings {
     //
     // D3D12 only; see modules/render.nrd for why (NRD wants register space 1, Vulkan refuses it).
     bool denoiser = false;
+
+    // ---- REBLUR history/prepass tuning -- LIVE dials over render.nrd::Denoiser::ReblurTuning ----
+    // Three of ReblurTuning's fields (hitDistA/B/C and enableAntiFirefly are NOT here -- they are
+    // unit-conversion constants the engine owns, not a look anyone should be turning by hand) exposed
+    // so the REBLUR_DIFFUSE denoiser's history depth and pre-pass blur can be swept without a rebuild.
+    // VoxiRenderer applies these every time setSettings() runs (already once a frame), via
+    // nrd::SetDenoiserSettings -- NRD.h documents that call as needing "at least once per denoiser,
+    // not necessarily on each frame", so re-issuing it here takes effect on the NEXT frame without
+    // tearing the NRD instance (and its accumulated history) down and recreating it.
+    //
+    // DEFAULTS ARE TODAY'S HARDCODED VALUES, UNCHANGED: VoxiRenderer used to construct a
+    // default-initialised ReblurTuning{} once at NRD creation and never touch it again; these three
+    // fields default to exactly the numbers ReblurTuning{} already carried, so nothing about the
+    // image moves until one of them is set to something else.
+    //
+    // Ranges are NRD's own (third_party/nrd/Include/NRDSettings.h's ReblurSettings), not guessed.
+    float reblurDiffusePrepassBlurRadius = 30.0f;
+    // [0; REBLUR_MAX_HISTORY_FRAME_NUM=63] per NRDSettings.h. History depth in frames, not dispatch
+    // count -- see ReblurTuning's own comment for why this is latency/noise, not a pass toggle.
+    u32   reblurMaxAccumulatedFrameNum = 30;
+    // [0; REBLUR_MAX_HISTORY_FRAME_NUM=63] per NRDSettings.h ("0 disables the stabilization pass";
+    // a value >= maxAccumulatedFrameNum is clamped down to it BY NRD ITSELF, not by this engine --
+    // today's defaults (63 here, 30 above) are exactly such a pair, left exactly as they already
+    // were).
+    u32   reblurMaxStabilizedFrameNum = 63;
+
     // SPATIAL denoise radius for the ray-traced sun shadow, in pixels. 0 is off: the shadow term is
     // whatever this pixel's own rays returned, unfiltered. N > 0 averages a (2N+1)^2 neighbourhood
     // of the shadow history, weighted by how well each neighbour's stored depth agrees with this
