@@ -85,6 +85,15 @@ bool saveGiCache(const std::string& path, const GiCacheEntry& in, std::string* w
 // at ~18 MiB each. Age-ordered rather than LRU: last-write time is what the filesystem already
 // tracks, and the difference between the two only matters for entries that are being hit, which are
 // exactly the ones being rewritten.
-u32 giCacheSweep(const std::string& dir, u32 keep);
+// Keeps the `keep` newest .cache files, and additionally stops at `maxBytes` if that is reached
+// first. maxBytes == 0 means "no byte limit", which is the behaviour this had before it took the
+// argument at all.
+//
+// A COUNT ALONE IS THE WRONG UNIT and that is why the byte cap exists. An entry is one GI volume,
+// and a volume is 18 MB at 128^3 but 256 MB at the largest size the writer will accept
+// (kMaxCachedGiEntryBytes) -- so "keep 8" means 144 MB in one project and 2 GB in another, with
+// nothing in the code saying which. Raising the count to hold a real working set at 128^3 would
+// have silently authorised multiple gigabytes at the top end.
+u32 giCacheSweep(const std::string& dir, u32 keep, u64 maxBytes = 0);
 
 }  // namespace aver::fmt

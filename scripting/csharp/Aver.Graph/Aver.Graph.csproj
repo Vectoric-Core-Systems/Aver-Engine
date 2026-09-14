@@ -1,10 +1,14 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- Graph runtime: parse .ocgraph text files and compile them to .NET IL using System.Reflection.Emit.
-       This is a minimal slice proving the core property: a graph loaded from text, compiled to IL,
-       and invoked returns the same value as hand-written C#. No canvas, no editor panel, no node
-       library beyond what proves the slice. Five or six node types covering constants, arithmetic,
-       comparison, and one engine P/Invoke call. -->
+  <!-- Graph runtime: parses .ocgraph text files and compiles them to .NET IL using
+       System.Reflection.Emit. THIS IS NO LONGER THE MINIMAL SLICE THIS COMMENT USED TO DESCRIBE.
+       It said "five or six node types" and "no canvas, no editor panel" for long after both had
+       stopped being true. It now covers roughly 180 gameplay node types (math, vectors, scene,
+       physics, input, audio, animation, save/load, custom events, graph variables and user-defined
+       functions with real recursion), authored on a canvas in sandbox/src/GraphEditor.cpp.
+       docs/VISUAL_SCRIPTING.md is the reference; this file only builds the assembly.
+       (No double hyphens anywhere in here: MSBuild parses this as XML, where a double hyphen
+       inside a comment is MSB4025 and fails the whole build.) -->
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>

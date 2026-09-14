@@ -6,7 +6,8 @@ aver_run             run Sandbox.exe for N frames with flags; returns the parsed
 aver_inspect_image   crop/scale a screenshot so a region is legible
 aver_tests           run the headless suites; pass/fail with each one's assertion summary
 aver_gates           the render-gate oracle, READ-ONLY
-aver_flags           the engine's 43 CLI flags, read from source so the list cannot go stale
+aver_package         stage the engine payload (stage-payload.ps1), optionally verify it
+aver_flags           the engine's CLI flags (128 today), read from source so the list cannot go stale
 ```
 
 Enable it by trusting `.mcp.json` when the editor asks. Pure Python stdlib — nothing to `pip install`
@@ -22,7 +23,7 @@ up compiling, linking, passing tests and never having been seen.
 
 ## It drives the existing CLI and changes nothing in the engine
 
-`Sandbox.exe` already takes 43 flags and the whole gates oracle is built out of them, so there is no
+`Sandbox.exe` already takes 128 flags and the whole gates oracle is built out of them, so there is no
 engine-side listener here: no socket, no named pipe, no new thread, and no risk to a working editor.
 
 That is a deliberate first cut. **It is batch control, not live control** — each call is a fresh process

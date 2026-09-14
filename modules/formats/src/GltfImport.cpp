@@ -63,6 +63,42 @@ bool base64Decode(std::string_view in, std::vector<u8>& out) {
     return true;
 }
 
+// A URI's escapes turned back into bytes. Lifted out of loadBuffers rather than copied: images
+// resolve their relative URIs by exactly the same rule buffers do, and a second copy of this loop
+// would be a second place for "%20" to stop meaning a space.
+std::string percentDecode(std::string_view uri) {
+    const auto hex = [](char c) {
+        return c >= '0' && c <= '9' ? c - '0'
+             : (c >= 'a' && c <= 'f') ? c - 'a' + 10
+             : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
+    };
+    std::string out;
+    out.reserve(uri.size());
+    for (usize k = 0; k < uri.size(); ++k) {
+        if (uri[k] == '%' && k + 2 < uri.size()) {
+            const int h = hex(uri[k + 1]), l = hex(uri[k + 2]);
+            if (h >= 0 && l >= 0) { out.push_back(char(h * 16 + l)); k += 2; continue; }
+        }
+        out.push_back(uri[k]);
+    }
+    return out;
+}
+
+// A name safe to use as a filename stem. Anything that is not a letter, digit, dash or underscore
+// becomes an underscore, because a glTF is free to name a material "Wall / Brick (wet)" and this
+// engine addresses materials BY FILENAME.
+std::string sanitizeStem(std::string_view in) {
+    std::string out;
+    out.reserve(in.size());
+    for (const char c : in) {
+        const bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                        (c >= '0' && c <= '9') || c == '-' || c == '_';
+        out.push_back(ok ? c : '_');
+    }
+    while (!out.empty() && out.back() == '_') out.pop_back();
+    return out;
+}
+
 // Every glTF buffer, resolved to bytes.
 struct Buffers {
     std::vector<std::vector<u8>> data;
@@ -78,8 +114,12 @@ struct AccessorF {
 // Walks one glTF document and fills a GltfImportResult.
 class Gltf {
 public:
-    Gltf(const JsonValue& doc, Buffers& bufs, const GltfImportOptions& opt, GltfImportResult& out)
-        : d_(doc), b_(bufs), o_(opt), r_(out) {}
+    // baseDir resolves an image's relative URI, exactly as it already resolves a buffer's. Empty
+    // means "there is no directory to be relative to" -- a .glb handed over as bytes -- and an
+    // external URI is then refused by name rather than guessed at.
+    Gltf(const JsonValue& doc, Buffers& bufs, const GltfImportOptions& opt, GltfImportResult& out,
+         const std::string& baseDir)
+        : d_(doc), b_(bufs), o_(opt), r_(out), baseDir_(baseDir) {}
 
     // Imports every mesh in the document. Returns false with `why` set.
     bool run(std::string* why);
@@ -89,6 +129,7 @@ private:
     Buffers& b_;
     const GltfImportOptions& o_;
     GltfImportResult& r_;
+    std::string baseDir_;   // for relative image URIs; empty refuses them
     // Old joint index -> new, from the parents-before-children sort of skin 0. Meshes and animation
     // channels both address joints by the FILE's order, so both have to be rewritten through this.
     std::vector<i32> jointRemap_;
@@ -103,6 +144,27 @@ private:
         for (const std::string& s : r_.unsupported) if (s == what) return;
         r_.unsupported.push_back(what);
     }
+
+    // The name a material is known by. SHARED with importPrimitive's slot naming on purpose: the
+    // slot string and GltfMaterial::name have to agree exactly or the rename that joins a cooked
+    // .ocmat to its mesh slot silently matches nothing.
+    std::string materialName(i64 idx) const {
+        const JsonValue& mats = d_["materials"];
+        if (idx >= 0 && usize(idx) < mats.size() && mats[usize(idx)].has("name"))
+            return std::string(mats[usize(idx)]["name"].asString());
+        return "Material_" + std::to_string(idx);
+    }
+
+    // Every image the file names, as encoded bytes. Runs BEFORE importMaterials, which bounds-checks
+    // texture references against r_.images.size().
+    void importImages();
+
+    // texture index -> image index, with the indirection glTF puts in the way:
+    //   material -> textureInfo{index} -> textures[index]{source} -> images[source]
+    GltfMaterial::TexRef readTexRef(const JsonValue& info, const char* slot, const std::string& matName);
+
+    // Every material, flattened. Notes each extension it had to ignore, by name.
+    void importMaterials();
 
     // Resolves a bufferView to the bytes it names, with its stride.
     bool viewBytes(i64 viewIdx, const u8*& base, usize& len, u32& stride, std::string* why) const {
@@ -364,10 +426,8 @@ bool Gltf::importPrimitive(const JsonValue& prim, const f32 node[16], OcMeshData
     const i64 mat = prim["material"].asInt(-1);
     u32 slot = 0;
     if (mat >= 0) {
-        const JsonValue& mats = d_["materials"];
-        std::string name = "Material_" + std::to_string(mat);
-        if (usize(mat) < mats.size() && mats[usize(mat)].has("name"))
-            name = std::string(mats[usize(mat)]["name"].asString());
+        // Through the shared helper, so this string and GltfMaterial::name cannot drift apart.
+        const std::string name = materialName(mat);
         for (usize i = 0; i < m.materialSlots.size(); ++i) if (m.materialSlots[i] == name) { slot = u32(i); goto found; }
         slot = static_cast<u32>(m.materialSlots.size());
         m.materialSlots.push_back(name);
@@ -928,9 +988,187 @@ bool Gltf::importAnimations(std::string* why) {
     return true;
 }
 
+void Gltf::importImages() {
+    const JsonValue& imgs = d_["images"];
+    r_.images.resize(imgs.size());
+    for (usize i = 0; i < imgs.size(); ++i) {
+        const JsonValue& img = imgs[i];
+        GltfImage& out = r_.images[i];
+
+        const std::string declaredName = img.has("name") ? std::string(img["name"].asString()) : std::string();
+        const std::string mime = img.has("mimeType") ? std::string(img["mimeType"].asString()) : std::string();
+        out.ext = (mime == "image/jpeg") ? ".jpeg" : ".png";
+
+        if (img.has("uri")) {
+            const std::string uri(img["uri"].asString());
+            if (uri.rfind("data:", 0) == 0) {
+                // A base64 data: URI. The mimeType lives in the URI itself here, not in a sibling
+                // field, so it is read from there.
+                constexpr std::string_view kB64 = "base64,";
+                const usize marker = uri.find(kB64);
+                if (uri.find("image/jpeg") != std::string::npos) out.ext = ".jpeg";
+                if (marker == std::string::npos) {
+                    note("an image data: URI that is not base64 (image " + std::to_string(i) + ")");
+                    continue;
+                }
+                if (!base64Decode(std::string_view(uri).substr(marker + kB64.size()), out.bytes)) {
+                    note("an image data: URI that failed to decode (image " + std::to_string(i) + ")");
+                    out.bytes.clear();
+                    continue;
+                }
+                out.suggestedName = sanitizeStem(declaredName.empty() ? ("image" + std::to_string(i)) : declaredName);
+                out.ok = true;
+                continue;
+            }
+            // An external file, relative to the glTF. THE COMMON REAL-WORLD FAILURE: a .glb that
+            // names a sibling texture which was never shipped with it. Both Kenney packs in this
+            // tree do exactly that. It is refused BY PATH -- a material that quietly kept a texture
+            // slot pointing at a file that is not there would look like a renderer fault.
+            const std::string rel = percentDecode(uri);
+            if (baseDir_.empty()) {
+                note("an external image URI with no directory to resolve it against ('" + rel + "')");
+                continue;
+            }
+            const std::string full = baseDir_ + "\\" + rel;
+            std::ifstream f(full, std::ios::binary | std::ios::ate);
+            if (!f) {
+                note("an image the file names but does not ship: '" + rel + "'");
+                continue;
+            }
+            const std::streamoff n = f.tellg();
+            out.bytes.resize(usize(n > 0 ? n : 0));
+            f.seekg(0);
+            if (!out.bytes.empty()) f.read(reinterpret_cast<char*>(out.bytes.data()), std::streamsize(out.bytes.size()));
+            // The URI's own basename beats the JSON name: it is what the author actually called the
+            // file, and it keeps a re-import landing on the same filename.
+            std::string stem = rel;
+            const usize slash = stem.find_last_of("/\\");
+            if (slash != std::string::npos) stem = stem.substr(slash + 1);
+            const usize dot = stem.find_last_of('.');
+            if (dot != std::string::npos) { out.ext = stem.substr(dot); stem = stem.substr(0, dot); }
+            out.suggestedName = sanitizeStem(stem);
+            out.ok = true;
+            continue;
+        }
+
+        if (img.has("bufferView")) {
+            // Inside the binary chunk. viewBytes gives the span; the bytes are copied VERBATIM --
+            // never decoded and re-encoded, which would change bytes the source is entitled to get
+            // back and would throw away quality on a JPEG for nothing.
+            const u8* base = nullptr; usize len = 0; u32 stride = 0;
+            std::string ignored;
+            if (!viewBytes(img["bufferView"].asInt(-1), base, len, stride, &ignored)) {
+                note("an image whose bufferView could not be read (image " + std::to_string(i) + ")");
+                continue;
+            }
+            out.bytes.assign(base, base + len);
+            out.suggestedName = sanitizeStem(declaredName.empty() ? ("image" + std::to_string(i)) : declaredName);
+            out.ok = true;
+            continue;
+        }
+
+        note("an image with neither a uri nor a bufferView (image " + std::to_string(i) + ")");
+    }
+}
+
+GltfMaterial::TexRef Gltf::readTexRef(const JsonValue& info, const char* slot, const std::string& matName) {
+    GltfMaterial::TexRef ref;
+    if (!info.has("index")) return ref;
+
+    // EXTENSIONS HANG OFF THE textureInfo TOO, not just the material, and that is where the common
+    // one actually lives: both Kenney packs in this tree put KHR_texture_transform here. Checking
+    // only the material's own extensions block misses every one of them.
+    if (info.has("extensions"))
+        for (const JsonMember& e : info["extensions"].members())
+            note("a texture extension this importer does not carry: " + e.key +
+                 " (on " + matName + "." + slot + ")");
+
+    const i64 texIdx = info["index"].asInt(-1);
+    const JsonValue& texes = d_["textures"];
+    if (texIdx < 0 || usize(texIdx) >= texes.size()) {
+        note(std::string("a texture index out of range on ") + matName + "." + slot);
+        return ref;
+    }
+    const JsonValue& tex = texes[usize(texIdx)];
+
+    // Sampling state is not carried. Said once rather than per material, because a scene has one
+    // answer to this and repeating it per material would bury everything else.
+    if (tex.has("sampler")) note("texture samplers (wrap and filter modes; engine defaults apply)");
+
+    const i64 src = tex["source"].asInt(-1);
+    if (src < 0 || usize(src) >= r_.images.size()) {
+        note(std::string("a texture with no readable image on ") + matName + "." + slot);
+        return ref;
+    }
+    if (!r_.images[usize(src)].ok) {
+        // The image itself already said why, by name. Leaving the slot unbound is the point.
+        return ref;
+    }
+
+    ref.texCoord = static_cast<u32>(info["texCoord"].asInt(0));
+    if (ref.texCoord != 0) {
+        // OcMeshData carries exactly one UV stream, so a second set has nowhere to go.
+        note(std::string("texCoord ") + std::to_string(ref.texCoord) + " on " + matName + "." + slot +
+             " (only uv0 exists; uv0 was used)");
+        ref.texCoord = 0;
+    }
+    ref.imageIndex = static_cast<i32>(src);
+    return ref;
+}
+
+void Gltf::importMaterials() {
+    const JsonValue& mats = d_["materials"];
+    r_.materials.resize(mats.size());
+    for (usize i = 0; i < mats.size(); ++i) {
+        const JsonValue& jm = mats[i];
+        GltfMaterial& m = r_.materials[i];
+        m.name = materialName(static_cast<i64>(i));
+
+        // EVERY FALLBACK BELOW IS glTF'S OWN DEFAULT, PASSED EXPLICITLY. asFloat/asBool default to
+        // 0.0f/false, which is the wrong answer for four of these -- metallic and roughness are 1.0
+        // by spec, so a material stating neither is a rough METAL. Taking the implicit fallback
+        // would produce a plausible dielectric that is wrong on every asset relying on the spec.
+        if (jm.has("pbrMetallicRoughness")) {
+            const JsonValue& p = jm["pbrMetallicRoughness"];
+            if (p.has("baseColorFactor")) {
+                const JsonValue& v = p["baseColorFactor"];
+                for (usize k = 0; k < 4 && k < v.size(); ++k) m.baseColorFactor[k] = v[k].asFloat(1.0f);
+            }
+            m.metallicFactor  = p["metallicFactor"].asFloat(1.0f);
+            m.roughnessFactor = p["roughnessFactor"].asFloat(1.0f);
+            if (p.has("baseColorTexture"))         m.baseColorTex  = readTexRef(p["baseColorTexture"], "baseColor", m.name);
+            if (p.has("metallicRoughnessTexture")) m.metalRoughTex = readTexRef(p["metallicRoughnessTexture"], "metalRough", m.name);
+        }
+        if (jm.has("normalTexture")) {
+            m.normalTex   = readTexRef(jm["normalTexture"], "normal", m.name);
+            m.normalScale = jm["normalTexture"]["scale"].asFloat(1.0f);
+        }
+        if (jm.has("occlusionTexture")) {
+            m.occlusionTex      = readTexRef(jm["occlusionTexture"], "occlusion", m.name);
+            m.occlusionStrength = jm["occlusionTexture"]["strength"].asFloat(1.0f);
+        }
+        if (jm.has("emissiveTexture")) m.emissiveTex = readTexRef(jm["emissiveTexture"], "emissive", m.name);
+        if (jm.has("emissiveFactor")) {
+            const JsonValue& v = jm["emissiveFactor"];
+            for (usize k = 0; k < 3 && k < v.size(); ++k) m.emissiveFactor[k] = v[k].asFloat(0.0f);
+        }
+        m.alphaMode    = jm.has("alphaMode") ? std::string(jm["alphaMode"].asString("OPAQUE")) : std::string("OPAQUE");
+        m.alphaCutoff  = jm["alphaCutoff"].asFloat(0.5f);
+        m.doubleSided  = jm["doubleSided"].asBool(false);
+
+        // Extensions, NAMED. A material carrying KHR_materials_transmission is not a material this
+        // importer understood and quietly simplified -- it is one whose glass is missing, and the
+        // author is entitled to be told which one.
+        if (jm.has("extensions"))
+            for (const JsonMember& e : jm["extensions"].members())
+                note("a material extension this importer does not carry: " + e.key);
+    }
+}
+
 bool Gltf::run(std::string* why) {
-    if (d_.has("materials"))   note("material definitions (names are kept as slots; parameters are not)");
-    if (d_.has("images") || d_.has("textures")) note("textures");
+    // Images first: readTexRef bounds-checks against r_.images.
+    importImages();
+    importMaterials();
 
     const JsonValue& meshes = d_["meshes"];
     if (meshes.size() == 0) return fail(why, "glTF: the file contains no meshes");
@@ -975,9 +1213,32 @@ bool Gltf::run(std::string* why) {
 
         const i64 meshIdx = n["mesh"].asInt(-1);
         if (meshIdx >= 0 && usize(meshIdx) < meshes.size()) {
-            if (!importMesh(meshes[usize(meshIdx)], world, r_.meshes[usize(meshIdx)], why)) return false;
+            // THE TRANSLATION COMES OUT OF THE GEOMETRY AND BECOMES A PLACEMENT. Rotation and scale
+            // stay baked -- they are what the mesh IS -- but the node's position never was geometry,
+            // and baking it put every mesh's pivot wherever the author's world origin happened to be.
+            // See GltfPlacement for what that cost, measured.
+            //
+            // Row-major, row-vector: the translation is row 3, elements 12..14 (see nodeLocal's own
+            // comment). Zeroing that row leaves exactly the rotation/scale basis in rows 0-2, so the
+            // split is a copy and two assignments rather than a decomposition that could fail on
+            // shear the way splitTrs() has to worry about.
+            f32 basis[16];
+            std::memcpy(basis, world, sizeof(basis));
+            basis[12] = basis[13] = basis[14] = 0.0f;
+
+            if (!importMesh(meshes[usize(meshIdx)], basis, r_.meshes[usize(meshIdx)], why)) return false;
             visited[usize(meshIdx)] = 1;
             if (n.has("skin")) meshRawSkin_[usize(meshIdx)] = static_cast<i32>(n["skin"].asInt(-1));
+
+            // THROUGH toEngine, exactly as a vertex position is, so the placement lands in the same
+            // space and unit as the geometry it positions -- axis-swapped and metres-to-centimetres.
+            // Doing this by hand here is how a 100x or a Y/Z swap gets in.
+            GltfPlacement pl;
+            pl.meshIndex = static_cast<i32>(meshIdx);
+            pl.position  = toEngine(world[12], world[13], world[14], false);
+            pl.name      = n["name"].asString("");
+            if (pl.name.empty()) pl.name = r_.meshNames[usize(meshIdx)];
+            r_.placements.push_back(std::move(pl));
         }
         const JsonValue& kids = n["children"];
         for (usize i = 0; i < kids.size(); ++i) {
@@ -1024,19 +1285,7 @@ bool loadBuffers(const JsonValue& d, const std::vector<u8>& glbBin, const std::s
             continue;
         }
         if (baseDir.empty()) return fail(why, "glTF: the file references '" + uri + "' but no directory context was given");
-        // Percent-decode the relative path.
-        std::string rel;
-        for (usize k = 0; k < uri.size(); ++k) {
-            if (uri[k] == '%' && k + 2 < uri.size()) {
-                auto hex = [](char c) { return c >= '0' && c <= '9' ? c - '0'
-                                             : (c >= 'a' && c <= 'f') ? c - 'a' + 10
-                                             : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1; };
-                const int h = hex(uri[k+1]), l = hex(uri[k+2]);
-                if (h >= 0 && l >= 0) { rel.push_back(char(h * 16 + l)); k += 2; continue; }
-            }
-            rel.push_back(uri[k]);
-        }
-        const std::string full = baseDir + "\\" + rel;
+        const std::string full = baseDir + "\\" + percentDecode(uri);
         std::ifstream f(full, std::ios::binary | std::ios::ate);
         if (!f) return fail(why, "glTF: cannot open referenced buffer " + full);
         const std::streamoff n = f.tellg();
@@ -1098,7 +1347,7 @@ bool importGltfFromMemory(const u8* bytes, usize size, const std::string& baseDi
     Buffers bufs;
     if (!loadBuffers(doc, glbBin, baseDir, bufs, why)) return false;
 
-    Gltf g(doc, bufs, opt, out);
+    Gltf g(doc, bufs, opt, out, baseDir);
     return g.run(why);
 }
 

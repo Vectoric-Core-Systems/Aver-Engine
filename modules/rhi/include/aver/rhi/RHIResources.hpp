@@ -43,9 +43,23 @@ enum class Format : u8 {
     // every pixel of a target that already exists only because bandwidth was being counted (see
     // that feature's own task brief: ~54 MB at 2750x1639 for all three new targets together).
     RG16F,
-    // 10-10-10-2 unorm. Packs a world-space normal (xyz) and a roughness (w) into 4 bytes/pixel --
-    // see IDevice::gBufferNormalRoughnessTexture for the exact encoding (xyz maps [-1,1] to [0,1];
-    // w is roughness, already [0,1], stored as-is). NOT an RGBA8Unorm: 8 bits per normal component
+    // 10-10-10-2 unorm. Packs a world-space normal AND a roughness into 4 bytes/pixel -- see
+    // IDevice::gBufferNormalRoughnessTexture for the encoding, and DO NOT restate it here.
+    //
+    // THIS COMMENT USED TO SPELL THE PACKING OUT ("xyz maps [-1,1] to [0,1]; w is roughness, stored
+    // as-is") AND THAT DESCRIPTION IS NOW FALSE. The G-buffer writes NVIDIA NRD's own
+    // R10G10B10A2_UNORM layout, where the normal and the roughness SHARE xyz -- roughness rides in z,
+    // signed by n.z's sign -- and w carries a material id, not roughness. Anyone who trusted the old
+    // sentence would decode a plausible, confidently wrong normal.
+    //
+    // That is not a hypothetical: the engine shipped for months with the naive packing while NRD was
+    // compiled for the real one, and the self-check meant to catch it restated the assumption in prose
+    // instead of testing it, so it asserted the bug away rather than reporting it. The lesson is why
+    // this comment now points at the contract instead of duplicating it -- a format contract with two
+    // descriptions has two chances to drift and no way to notice. NrdNormalRoughnessEncodingTest
+    // round-trips the real thing.
+    //
+    // NOT an RGBA8Unorm: 8 bits per normal component
     // bands visibly on a smoothly curved surface under directional light, which is exactly the
     // artifact a G-buffer feeding a denoiser or a temporal filter cannot afford to introduce
     // upstream of the very passes meant to clean an image up, not add a new defect to it.
@@ -58,6 +72,26 @@ enum class Format : u8 {
     BC5Unorm,
     BC7Unorm,
     BC7UnormSrgb,
+    // Single-channel 16-bit, one integer and one normalised. Added for NVIDIA NRD's internal
+    // texture pools (modules/render.nrd): REBLUR stores its per-pixel accumulation counters as
+    // R16_UINT and its normalised hit distances as R16_UNORM, and a pool texture the engine cannot
+    // allocate is a denoiser that cannot run -- NrdLinkTest fails on exactly that, by name.
+    //
+    // APPENDED HERE rather than filed beside R8Unorm where they read better, because appending is
+    // the only edit to an enum that cannot change an existing enumerator's value. Nothing today
+    // stores or transmits a Format as a number (checked), so this is precaution rather than a
+    // constraint -- but the cost of the precaution is a comment, and the cost of being wrong is a
+    // silent format shift in anything that ever starts to.
+    R16Unorm,
+    R16Uint,
+    // R16F: NRD asks for R16_SFLOAT in REBLUR_DIFFUSE's permanent pool (texture 9), and without it
+    // createTexture refused and the whole denoiser fell over -- the same shape of gap R16Unorm and
+    // R16Uint were added to close, found the same way, by a live run rather than by reading.
+    R16F,
+    // R8Uint: NRD's REBLUR_DIFFUSE transient pool asks for R8_UINT. Found the same way R16F above
+    // was -- by running it, not by reading the spec -- which is what the pool-allocation warning
+    // naming the NRD format string exists for.
+    R8Uint,
 };
 
 // True for block-compressed formats, whose extents are counted in 4x4 blocks and not texels.
@@ -193,7 +227,7 @@ struct SamplerDesc {
 // LOD cut runs on, since it is one thread's local test with no dependency on any other cluster.
 enum class ShaderStage : u8 { Vertex, Pixel, Geometry, Compute, Mesh, Amplification };
 
-// One HLSL shader to compile.
+// One shader to create: either HLSL to compile, or bytecode somebody else already compiled.
 struct ShaderDesc {
     const char* source = nullptr;   // HLSL text; the feature module owns its own shader source
     // Prepended verbatim before `source`; use sharedShaderPrelude().
@@ -203,6 +237,35 @@ struct ShaderDesc {
     // Minimum shader model as major*10+minor (60 = SM 6.0); too high yields an invalid handle.
     u32         minShaderModel = 60;
     const char* defines = nullptr;  // semicolon-separated, e.g. "AVER_MS=1;AVER_RT=1"
+
+    // ---- the precompiled path -----------------------------------------------------------------
+    //
+    // ALREADY-COMPILED BYTECODE, in whatever form THIS backend consumes: DXIL for D3D12, SPIR-V for
+    // Vulkan. Set it and `source`/`prelude`/`entry`/`defines`/`minShaderModel` are all ignored --
+    // there is nothing left to compile, nothing to name an entry point in (the name is baked into
+    // the module), and no shader model to request (the bytecode already declares one). `stage` is
+    // still required, because the backend needs to know which kind of pipeline may consume it and
+    // neither DXIL nor SPIR-V is inspected here to find out.
+    //
+    // WHY THIS EXISTS. Every shader in this engine is HLSL text compiled at runtime through DXC,
+    // which is the right default -- it is what makes `--shader-source` reload work and what keeps
+    // one .hlsl file serving both backends. It cannot serve a THIRD-PARTY denoiser, upscaler or
+    // library that ships compiled permutations and no source: NVIDIA NRD (modules/render.nrd) hands
+    // over 159 of them, and until this field existed there was no way to put one into a pipeline.
+    //
+    // THE BYTES ARE COPIED, NOT BORROWED. The caller may free them the moment createShader returns.
+    // Borrowing would be cheaper and is the wrong trade: the handle outlives the call by design, a
+    // dangling pointer here surfaces as a corrupt PSO or a device removal rather than as a crash at
+    // the mistake, and the amounts are small (NRD's entire REBLUR_DIFFUSE_OCCLUSION set is 338 KiB).
+    //
+    // A BACKEND MAY REFUSE. Bytecode is format-specific, so handing DXIL to Vulkan is a caller
+    // error, not a portability question -- it returns an invalid handle and logs, the same degrade
+    // as a shader model the device cannot reach. A caller with both (NRD supplies DXIL and SPIR-V
+    // side by side) picks by asking the device which it is.
+    const void* bytecode     = nullptr;
+    u64         bytecodeSize = 0;
+
+    [[nodiscard]] bool precompiled() const { return bytecode != nullptr && bytecodeSize != 0; }
 };
 
 // Which triangle facing is discarded.
@@ -233,7 +296,22 @@ constexpr u32 kMaxConstantSlots = 5;
 // Slots per range. Enforced: counts above this cannot declare a kind. Defined HERE, above
 // PipelineLayout, because that struct sizes its slot-kind arrays with it; BindingSetDesc further
 // down uses the same one.
-constexpr u32 kMaxBindingSlots = 16;
+//
+// 16 -> 24, optimisation-wave-2 (U1/2.9, contract C2-8, integration cross-lane fix): kVoxiSrvCount
+// (VoxiRenderer.cpp) grew to 17 with the half-resolution ReSTIR visibility history's read slot
+// (t16), one past the old 16-slot ceiling -- BindingSetDesc::srvCount is checked against this
+// constant on every backend (D3D12Device.cpp's createBindingSet, VulkanResourceFactory.cpp's
+// identical check) and would refuse Voxi's own main binding set outright, and
+// VoxiRenderer::giTableKinds' `srv[16] = ...` write would be one past the end of a 16-element
+// C array -- undefined behaviour, not merely a refused set. Every array, loop bound and
+// static_assert sized off this one constant (PipelineLayout/BindingSetDesc's four slot-kind
+// arrays, VulkanCommon.hpp's kVkUavBindingBase and its own slot-state arrays,
+// VulkanResourceFactory.cpp's register-map loops, VulkanRegisterMap.hpp's kMaxRegisterBinds)
+// widens automatically with it -- no other file hardcodes the literal 16 independently (checked
+// by grep). Raised to 24, not merely 17, for headroom: this is the second wave in a row to grow
+// Voxi's SRV table, and the material table (table 1, pbr::kMaterialSrvCount) has its own,
+// independent budget against this same ceiling that this headroom also protects.
+constexpr u32 kMaxBindingSlots = 24;
 
 // The binding layout a pipeline declares.
 // Declared ahead of PipelineLayout, which now carries slot kinds; defined in full further down,
@@ -278,6 +356,33 @@ struct PipelineLayout {
     // serialises byte-identically to before this field existed. Part of the root-signature cache
     // key; see sameLayout in the D3D12 backend.
     u32 bindlessTextureCount = 0;
+
+    // ---- register spaces ----------------------------------------------------------------------
+    //
+    // WHICH REGISTER SPACE THE CONSTANT SLOTS AND THE STATIC SAMPLERS LIVE IN. Zero for every
+    // pipeline this engine compiles itself, which is what the two defaults mean and why they are
+    // separate fields rather than one: they are set together only by accident.
+    //
+    // WHY THEY EXIST AT ALL. HLSL lets a shader put `b0` and `t0` in different spaces, and a shader
+    // this engine did not compile has already made that choice -- it is baked into the bytecode and
+    // is not negotiable at bind time. NVIDIA NRD (modules/render.nrd) is the first such shader here:
+    // its SRVs and UAVs are in space 0, matching this engine, but its constant buffer and its two
+    // immutable samplers are in SPACE 1. Without these fields a root signature built from this
+    // struct simply cannot describe NRD's shaders, and the pipeline fails to create.
+    //
+    // NOT srvSpace/uavSpace, and that omission is deliberate rather than an oversight. Space 1 is
+    // ALREADY SPOKEN FOR on the SRV side: bindlessTextureCount puts the ray path's texture table
+    // there (see the D3D12 root-signature builder). Adding a movable space for the ordinary SRV/UAV
+    // tables would let a caller collide with it, and nothing needs it -- add them when something
+    // does, with the collision worked out then.
+    //
+    // A NON-ZERO SPACE MOVES ALL kMaxConstantSlots SLOTS, not just the ones a shader uses. A root
+    // signature may declare more than its shader reads, so the unused slots are harmless; but they
+    // are also unbound, and a shader that DID read one would read garbage. That is the same
+    // contract slot 0 already has.
+    u32 constantSpace = 0;
+    u32 samplerSpace  = 0;
+
     bool slotKindsDeclared = false;
     SlotKind srvKinds[kMaxBindingSlots]  = {};   // table 0
     SlotKind uavKinds[kMaxBindingSlots]  = {};
@@ -511,7 +616,7 @@ public:
     // A FIXED-SIZE ARRAY OF TEXTURE SRVs a shader may index by a value it COMPUTED, rather than by
     // a register the pipeline bound. This is the one exception to the "explicit descriptor tables,
     // NOT bindless" rule at the top of this file, and it is deliberately not an extension of
-    // BindingSetDesc: that path hard-refuses anything past kMaxBindingSlots (16) and every raster
+    // BindingSetDesc: that path hard-refuses anything past kMaxBindingSlots (24) and every raster
     // pipeline in the engine depends on it staying exactly as small and explicit as it is.
     //
     // WHY IT EXISTS. A ray hit has no "current draw", so there is no per-material descriptor table
@@ -567,9 +672,49 @@ public:
     // been bitten by before.
     virtual MeshHandle blasMesh(BlasHandle h) const { (void)h; return 0; }
 
+    // A structure already BUILT from this mesh, or 0 if there is none yet -- the reverse of
+    // blasMesh, and the thing that stops two features paying for the same geometry twice.
+    //
+    // createBlas ALLOCATES; it does not deduplicate, so every caller that asks gets its own pair of
+    // buffers. That was invisible while one feature ray-traced, and stopped being invisible when a
+    // second did: VoxiRenderer and PathTracer each keep a MeshHandle -> BlasHandle map of their own,
+    // so a scene both of them touch built, sized and kept TWO bottom-level structures per mesh.
+    // MEASURED on Sponza: 220 meshes, 154.3 ms of allocation at load, and double the resident BLAS
+    // memory, for structures that describe byte-identical geometry.
+    //
+    // A BLAS IS A PURE FUNCTION OF ITS MESH, which is what makes sharing correct rather than merely
+    // cheaper: the build hardcodes OPAQUE and takes only the vertex/index buffers, and everything
+    // per-use -- transform, material, and whether the instance is non-opaque -- is applied at TLAS
+    // build time. So there is no per-consumer state in one to disagree about.
+    //
+    // BUILT, NOT MERELY ALLOCATED, and that qualifier is the contract. A handle whose structure has
+    // been created but not yet built points at uninitialised memory, and a second feature reusing it
+    // would trace garbage or race the first feature's build over the same scratch buffer. Returning
+    // only built structures means the caller can use one as-is; a caller that gets 0 creates and
+    // builds its own, exactly as before.
+    //
+    // OWNERSHIP DOES NOT CHANGE HANDS: a shared structure belongs to the MESH, and destroyMesh ->
+    // destroyBlasForMesh already frees every structure for a mesh. A caller that reuses a handle it
+    // did not create must therefore not destroy it.
+    virtual BlasHandle blasForMesh(MeshHandle mesh) const { (void)mesh; return 0; }
+
     // Populates a binding set. Slots left unset are null-filled.
     virtual void setSrv(BindingSetHandle set, u32 slot, TextureHandle t, u32 mip = kAllMips) = 0;
     virtual void setUav(BindingSetHandle set, u32 slot, TextureHandle t, u32 mip) = 0;
+    // Returns an SRV slot to the null-filled state it had when the set was created.
+    //
+    // EXISTS BECAUSE A BOUND DESCRIPTOR OUTLIVES ITS TEXTURE, AND THAT IS A GPU CRASH RATHER THAN A
+    // WRONG PIXEL. Once a slot has been pointed at a texture, destroying that texture does not
+    // unbind it: the descriptor keeps naming memory the factory has retired and will free. A shader
+    // that then samples the slot faults, and a fault in a shader removes the device -- the window
+    // dies with no message beyond "the GPU stopped responding".
+    //
+    // The case this was written for is a target that comes and goes across a resize. D3D12Device's
+    // resize() releases the post-process targets and does NOT recreate them in the same call, so
+    // anything holding one of their handles sees it go to 0 for a frame or more. `if (h) setSrv(...)`
+    // is the natural-looking guard and it is exactly wrong: it skips the update and leaves the dead
+    // descriptor in place. Call this instead when the handle a slot tracks becomes 0.
+    virtual void clearSrv(BindingSetHandle set, u32 slot) = 0;
     // Puts a TLAS in an SRV slot.
     virtual void setSrvTlas(BindingSetHandle set, u32 slot, TlasHandle tlas) = 0;
     // Puts a buffer in a SlotKind::StructuredBuffer slot. `stride` is the element size in bytes,
@@ -877,6 +1022,17 @@ public:
                                          bool blended = false) const {
         (void)meshShaders; (void)wireframe; (void)depthPrepassed; (void)blended; return 0;
     }
+
+    // The bindless texture table the pipelines returned above expect to have bound, or 0 for a
+    // feature whose pipelines declare none.
+    //
+    // WHY THE BACKEND HAS TO ASK. A blended draw is CAPTURED and replayed by the device, after the
+    // deferred sky -- see scenePipeline's own comment. The feature is not on the stack at that
+    // moment, so it cannot bind anything itself, and the device does not own the table. It asks,
+    // exactly as it already asks for the pipeline. Returning 0 is answered by setBindlessTable
+    // being a no-op on a pipeline that declared no range, so a feature that has no table and a
+    // pipeline that wants none cost one virtual call between them.
+    virtual BindlessTableHandle sceneBindlessTable() const { return 0; }
     // The DEPTH-ONLY pipeline for a same-frame depth prepass. A caller pairs this with
     // scenePipeline(..., depthPrepassed=true) for the SAME instance later in the frame: this one
     // writes depth (test=Less, write=true, matching scenePipeline()'s own default depth state

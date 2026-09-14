@@ -89,6 +89,58 @@ struct SyntheticPyramid {
     }
 };
 
+// ---------------------------------------------------------------------------------------------
+// A second synthetic pyramid (not SyntheticPyramid above): a single ROW pattern is enough to
+// demonstrate a gap between two occluded texels, or (for the viewport-rect tests below) a
+// near/far split at a chosen column -- reduced through the same max()-of-2x2, edge-clamped rule
+// OcclusionCuller.cpp's CSReduce kernel runs on the GPU, so the mip chain this fixture builds is
+// constructed the same way the real one is, not a hand-waved stand-in. Moved above checkProjection
+// (originally declared just before checkFalseCullRegression, which still uses it below) because
+// the F7 viewport-rect tests need it too, and they run earlier in this file.
+// ---------------------------------------------------------------------------------------------
+struct GapPyramid {
+    static constexpr u32 kW = 8, kH = 8, kMips = 4;
+    f32 mip0[kH][kW];
+    f32 mip1[4][4];
+    f32 mip2[2][2];
+    f32 mip3[1][1];
+
+    explicit GapPyramid(const f32 (&baseRow)[kW]) {
+        for (u32 y = 0; y < kH; ++y)
+            for (u32 x = 0; x < kW; ++x)
+                mip0[y][x] = baseRow[x];
+        for (u32 y = 0; y < 4; ++y)
+            for (u32 x = 0; x < 4; ++x) {
+                f32 m = 0.0f;
+                for (u32 dy = 0; dy < 2; ++dy)
+                    for (u32 dx = 0; dx < 2; ++dx)
+                        m = std::max(m, mip0[y * 2 + dy][x * 2 + dx]);
+                mip1[y][x] = m;
+            }
+        for (u32 y = 0; y < 2; ++y)
+            for (u32 x = 0; x < 2; ++x) {
+                f32 m = 0.0f;
+                for (u32 dy = 0; dy < 2; ++dy)
+                    for (u32 dx = 0; dx < 2; ++dx)
+                        m = std::max(m, mip1[y * 2 + dy][x * 2 + dx]);
+                mip2[y][x] = m;
+            }
+        mip3[0][0] = std::max({mip2[0][0], mip2[0][1], mip2[1][0], mip2[1][1]});
+    }
+
+    f32 sample(u32 mip, f32 u, f32 v) const {
+        u32 w = std::max(kW >> mip, 1u), h = std::max(kH >> mip, 1u);
+        u32 x = static_cast<u32>(std::min(std::max(u * static_cast<f32>(w), 0.0f), static_cast<f32>(w) - 1.0f));
+        u32 y = static_cast<u32>(std::min(std::max(v * static_cast<f32>(h), 0.0f), static_cast<f32>(h) - 1.0f));
+        switch (mip) {
+            case 0: return mip0[y][x];
+            case 1: return mip1[y][x];
+            case 2: return mip2[y][x];
+            default: return mip3[0][0];
+        }
+    }
+};
+
 static void checkProjection() {
     AVER_INFO("projectAabbScreenBounds (identity camera)");
 
@@ -120,6 +172,172 @@ static void checkProjection() {
         check(!ok, "off-screen box does not produce a visible rect");
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// T2 (occlusion-fix-plan.md section 4): the viewport-relative projectAabbScreenBounds overload --
+// F7's fix for the trigger. See OcclusionMath.hpp's own comment on this overload (section "1b")
+// for the bug it closes: the plain 6-argument function above assumes the box's footprint fills
+// the WHOLE target texture, which is false the instant a caller's scene is confined to a sub-rect
+// of it (SandboxApp.cpp's Level tab within a dockspace being the case that surfaced this).
+// ---------------------------------------------------------------------------------------------
+static void checkViewportProjection() {
+    AVER_INFO("projectAabbScreenBounds (viewport-relative overload, F7)");
+
+    // WholeTargetRect_MatchesLegacyCall: a whole-target rect (w<=0 or h<=0, per ViewportRect's own
+    // "whole target" convention) must reproduce the LEGACY 6-argument call's result BIT-FOR-BIT,
+    // not merely to some tolerance -- the overload delegates to that exact function for its
+    // projection step and only skips (never shrinks) the rect-mapping arithmetic when there is no
+    // rect, so there is nothing left that could introduce even a rounding difference.
+    {
+        const f32 lo[3] = {-0.25f, -0.25f, 0.20f}, hi[3] = {0.25f, 0.25f, 0.40f};
+        f32 legacyMinUV[2], legacyMaxUV[2], legacyZ = 0.0f;
+        const bool legacyOk = projectAabbScreenBounds(kIdentity, lo, hi, legacyMinUV, legacyMaxUV, legacyZ);
+        const ViewportRect wholeTarget{0.0f, 0.0f, 0.0f, 0.0f};   // w<=0 and h<=0: whole target
+        f32 minUV[2], maxUV[2], nearestZ = 0.0f;
+        const bool ok = projectAabbScreenBounds(kIdentity, lo, hi, wholeTarget, 1000, 600, minUV, maxUV, nearestZ);
+        check(legacyOk && ok, "both the legacy and whole-target-rect calls project the box");
+        check(minUV[0] == legacyMinUV[0] && minUV[1] == legacyMinUV[1] &&
+              maxUV[0] == legacyMaxUV[0] && maxUV[1] == legacyMaxUV[1] && nearestZ == legacyZ,
+              "WholeTargetRect_MatchesLegacyCall: exact (==, not tolerance) match against the legacy "
+              "6-argument call, for one of the existing identity-camera boxes above");
+    }
+
+    // SubRect_HandComputed: sub-rect (200, 100, 600, 400) in a 1000x600 target. A world-space box
+    // built to land its NDC bounds at exactly x in [-1,0], y in [0,1] (viewport-relative u in
+    // [0,0.5], v in [0,0.5] -- V DOWN, so ndcY=1 gives the MIN v, same flip as the legacy function)
+    // hand-computes to U in [0.2, 0.5] and V in [100/600, 300/600]:
+    //   U = (rect.x + u*rect.w) / targetW: u=0 -> (200+0)/1000=0.2; u=0.5 -> (200+300)/1000=0.5.
+    //   V = (rect.y + v*rect.h) / targetH: v=0 -> (100+0)/600=100/600; v=0.5 -> (100+200)/600=300/600.
+    {
+        const f32 lo[3] = {-1.0f, 0.0f, 0.5f}, hi[3] = {0.0f, 1.0f, 0.6f};
+        const ViewportRect rect{200.0f, 100.0f, 600.0f, 400.0f};
+        f32 minUV[2], maxUV[2], nearestZ = 0.0f;
+        const bool ok = projectAabbScreenBounds(kIdentity, lo, hi, rect, 1000, 600, minUV, maxUV, nearestZ);
+        check(ok, "sub-rect box projects");
+        checkNear(minUV[0], 0.2f, 1e-5f, "SubRect_HandComputed: minU maps into the sub-rect, not the whole target");
+        checkNear(maxUV[0], 0.5f, 1e-5f, "SubRect_HandComputed: maxU");
+        checkNear(minUV[1], 100.0f / 600.0f, 1e-5f, "SubRect_HandComputed: minV");
+        checkNear(maxUV[1], 300.0f / 600.0f, 1e-5f, "SubRect_HandComputed: maxV");
+    }
+
+    // RightEdgeStraddle_ClampsAtViewport: a box straddling the viewport's own right edge (its
+    // viewport-relative u would exceed 1.0 before any rect mapping) must clamp at rect.x+rect.w --
+    // the VIEWPORT's own right edge in target pixels -- not at the target's own edge (U=1.0). This
+    // is the exact shape of the bug F7 removes: the pre-fix code had no viewport concept at all, so
+    // an out-of-viewport u mapped straight across the WHOLE target instead of stopping at the
+    // scene's own sub-rect.
+    {
+        // world x=2 alone pushes ndcX (and hence u) to 1.5 under the identity camera, past the
+        // viewport's own right edge (u=1.0).
+        const f32 lo[3] = {-1.0f, 0.0f, 0.5f}, hi[3] = {2.0f, 1.0f, 0.6f};
+        const ViewportRect rect{200.0f, 100.0f, 600.0f, 400.0f};
+        f32 minUV[2], maxUV[2], nearestZ = 0.0f;
+        const bool ok = projectAabbScreenBounds(kIdentity, lo, hi, rect, 1000, 600, minUV, maxUV, nearestZ);
+        check(ok, "straddling box still projects (clamped, not rejected outright)");
+        checkNear(maxUV[0], (rect.x + rect.w) / 1000.0f, 1e-5f,
+                  "RightEdgeStraddle_ClampsAtViewport: clamps at rect.x+rect.w (800/1000=0.8), "
+                  "not the target's own right edge (1.0)");
+    }
+}
+
+// FalseCull_ViewportSubRectIgnored: the actual bug, reproduced end to end through
+// conservativelyHidden -- not just the projection in isolation above. Reuses GapPyramid's
+// max()-reduced mip chain (built the same way OcclusionCuller.cpp's CSReduce reduces on the GPU)
+// rather than inventing a third hand-rolled pyramid type.
+static void checkFalseCull_ViewportSubRectIgnored() {
+    AVER_INFO("FalseCull_ViewportSubRectIgnored (F7): a false cull the pre-fix mapping produced, "
+              "and the rect-aware call does not");
+
+    // An 8x8 pyramid where the LEFT half (columns 0-3, target U < 0.5) is a NEAR wall (z=0.30) and
+    // the RIGHT half (columns 4-7, U >= 0.5) is open sky (z=1.0). The scene's own viewport occupies
+    // only the RIGHT half of this 8-wide target -- rect = {4,0,4,8} -- exactly the shape of the
+    // real bug: a Level tab confined to part of a backbuffer-sized depth/pyramid texture, just at a
+    // size small enough to hand-verify here.
+    f32 row[GapPyramid::kW];
+    for (u32 x = 0; x < GapPyramid::kW; ++x) row[x] = (x < 4) ? 0.30f : 1.0f;
+    const GapPyramid pyr(row);
+    PyramidSample sample4 = [&](u32 mip, f32 u, f32 v) { return pyr.sample(mip, u, v); };
+
+    // A box whose VIEWPORT-relative footprint (u in roughly [0.1,0.2]) sits in what the pre-fix
+    // code would have sampled directly as pyramid UV -- squarely inside the wall's own columns.
+    // Its TRUE footprint, once correctly mapped through the sub-rect, lands entirely over sky.
+    const f32 lo[3] = {-0.8f, -0.2f, 0.5f}, hi[3] = {-0.6f, 0.2f, 0.6f};
+
+    f32 legacyMinUV[2], legacyMaxUV[2], legacyZ = 0.0f;
+    check(projectAabbScreenBounds(kIdentity, lo, hi, legacyMinUV, legacyMaxUV, legacyZ),
+          "box projects under the legacy (whole-target) call");
+    const bool legacyHidden = conservativelyHidden(legacyMinUV, legacyMaxUV, legacyZ, GapPyramid::kW,
+                                                    GapPyramid::kH, GapPyramid::kMips, sample4);
+    check(legacyHidden, "the legacy mapping samples the wall's own columns and reports hidden "
+                         "(the false cull this fix removes)");
+
+    const ViewportRect rect{4.0f, 0.0f, 4.0f, 8.0f};   // the scene occupies only the target's right half
+    f32 rectMinUV[2], rectMaxUV[2], rectZ = 0.0f;
+    check(projectAabbScreenBounds(kIdentity, lo, hi, rect, GapPyramid::kW, GapPyramid::kH,
+                                   rectMinUV, rectMaxUV, rectZ),
+          "the same box projects under the rect-aware call");
+    const bool rectHidden = conservativelyHidden(rectMinUV, rectMaxUV, rectZ, GapPyramid::kW,
+                                                  GapPyramid::kH, GapPyramid::kMips, sample4);
+    check(!rectHidden, "the rect-aware call samples where the box REALLY projects (open sky) and "
+                        "reports visible -- a visible entity no longer gets occlusion-culled just "
+                        "because the Level tab does not fill the whole target");
+}
+
+// A true occluder INSIDE the mapped sub-rect must still cull -- the fix is not "always report
+// visible", it is "sample the right texels".
+static void checkTrueOccluder_InsideSubRect() {
+    AVER_INFO("a true occluder inside the sub-rect still culls (F7 does not just disable culling)");
+    f32 row[GapPyramid::kW];
+    for (u32 x = 0; x < GapPyramid::kW; ++x) row[x] = (x < 4) ? 1.0f : 0.30f;   // sky outside the rect | wall inside it
+    const GapPyramid pyr(row);
+    PyramidSample sample4 = [&](u32 mip, f32 u, f32 v) { return pyr.sample(mip, u, v); };
+
+    const f32 lo[3] = {-0.8f, -0.2f, 0.5f}, hi[3] = {-0.6f, 0.2f, 0.6f};
+    const ViewportRect rect{4.0f, 0.0f, 4.0f, 8.0f};
+    f32 minUV[2], maxUV[2], nearestZ = 0.0f;
+    check(projectAabbScreenBounds(kIdentity, lo, hi, rect, GapPyramid::kW, GapPyramid::kH, minUV, maxUV, nearestZ),
+          "box projects");
+    const bool hidden = conservativelyHidden(minUV, maxUV, nearestZ, GapPyramid::kW, GapPyramid::kH,
+                                              GapPyramid::kMips, sample4);
+    check(hidden, "a real occluder inside the mapped sub-rect still culls the box behind it");
+}
+
+// Footprint sweep, in the style of 0a848193's own regression (checkFalseCullRegression below):
+// selectConservativeMip's own invariant -- the footprint at the mip it picks never exceeds 1.0
+// texel -- is untouched by this fix (OcclusionMath.hpp's own "What must NOT change" note), but it
+// is only actually EXERCISED with sub-rect-mapped UVs once something feeds it those, which this
+// sweep does across a continuum of box widths rather than the one hand-picked width
+// checkFalseCullRegression uses.
+static void checkFootprintSweep_SubRectNeverExceedsOneTexel() {
+    AVER_INFO("footprint sweep (0a848193 style): sub-rect-mapped footprints never exceed 1 texel "
+              "at the mip selectConservativeMip picks for them");
+    const ViewportRect rect{4.0f, 0.0f, 4.0f, 8.0f};
+    const u32 targetW = GapPyramid::kW, targetH = GapPyramid::kH, maxMip = GapPyramid::kMips - 1;
+    for (u32 step = 1; step <= 40; ++step) {
+        const f32 halfWidth = 0.01f * static_cast<f32>(step);   // grows from a sliver to a wide box
+        const f32 lo[3] = {-halfWidth, -0.05f, 0.5f}, hi[3] = {halfWidth, 0.05f, 0.6f};
+        f32 minUV[2], maxUV[2], nearestZ = 0.0f;
+        if (!projectAabbScreenBounds(kIdentity, lo, hi, rect, targetW, targetH, minUV, maxUV, nearestZ)) continue;
+        const u32 mip = selectConservativeMip(maxUV[0] - minUV[0], maxUV[1] - minUV[1], targetW, targetH, maxMip);
+        const f32 mw = static_cast<f32>(std::max(targetW >> mip, 1u));
+        const f32 mh = static_cast<f32>(std::max(targetH >> mip, 1u));
+        const f32 texelW = (maxUV[0] - minUV[0]) * mw, texelH = (maxUV[1] - minUV[1]) * mh;
+        check(texelW <= 1.0001f && texelH <= 1.0001f,
+              "step " + std::to_string(step) + ": sub-rect-mapped footprint stays within 1 texel "
+              "at its chosen mip (width " + std::to_string(texelW) + ", height " + std::to_string(texelH) + ")");
+    }
+}
+
+// The plan's conditional last T2 case (section 4): "if lane A moves the teleport thresholds
+// (SandboxApp.cpp:5293-5297) into a pure occlusionFrameTrusted(basisValid, moveDist, rotRad,
+// rectChanged) helper, rectChanged must give false with identical constants -- otherwise skip
+// this last case." No such helper exists anywhere in this tree as of this lane's work (grepped
+// for occlusionFrameTrusted, no matches) -- it would live in SandboxApp.cpp, a file this lane does
+// not own, and this lane's own files (OcclusionMath.hpp/Occlusion.hpp/OcclusionCuller.cpp/
+// occlusion_test.hlsl) have no rectChanged concept at all today: the trust decision the plan
+// describes is entirely SandboxApp.cpp's, comparing ITS OWN cached rect to the one it just read
+// from e.device()->sceneViewport(). Per the plan's own conditional wording, this case is SKIPPED
+// rather than guessed at.
 
 static void checkMipSelect() {
     AVER_INFO("selectConservativeMip");
@@ -233,56 +451,9 @@ static void checkConservativelyHidden() {
 // 3 texel indices (anything over 1.0 texel, off any texel boundary) could land both corner samples
 // on occluded texels while a genuinely open texel sat, untested, between them -- see
 // OcclusionMath.hpp's selectConservativeMip for the derivation of why the safe bound is 1.0 texel,
-// not 2.0.
-//
-// Own small pyramid (not SyntheticPyramid above): a single ROW pattern is enough to demonstrate a
-// gap between two occluded texels, reduced through the same max()-of-2x2, edge-clamped rule
-// OcclusionCuller.cpp's CSReduce kernel runs on the GPU, so the mip chain this test exercises is
-// built the same way the real one is, not a hand-waved stand-in.
+// not 2.0. Uses GapPyramid, declared earlier in this file (beside SyntheticPyramid) since the F7
+// viewport-rect tests above need it too.
 // ---------------------------------------------------------------------------------------------
-struct GapPyramid {
-    static constexpr u32 kW = 8, kH = 8, kMips = 4;
-    f32 mip0[kH][kW];
-    f32 mip1[4][4];
-    f32 mip2[2][2];
-    f32 mip3[1][1];
-
-    explicit GapPyramid(const f32 (&baseRow)[kW]) {
-        for (u32 y = 0; y < kH; ++y)
-            for (u32 x = 0; x < kW; ++x)
-                mip0[y][x] = baseRow[x];
-        for (u32 y = 0; y < 4; ++y)
-            for (u32 x = 0; x < 4; ++x) {
-                f32 m = 0.0f;
-                for (u32 dy = 0; dy < 2; ++dy)
-                    for (u32 dx = 0; dx < 2; ++dx)
-                        m = std::max(m, mip0[y * 2 + dy][x * 2 + dx]);
-                mip1[y][x] = m;
-            }
-        for (u32 y = 0; y < 2; ++y)
-            for (u32 x = 0; x < 2; ++x) {
-                f32 m = 0.0f;
-                for (u32 dy = 0; dy < 2; ++dy)
-                    for (u32 dx = 0; dx < 2; ++dx)
-                        m = std::max(m, mip1[y * 2 + dy][x * 2 + dx]);
-                mip2[y][x] = m;
-            }
-        mip3[0][0] = std::max({mip2[0][0], mip2[0][1], mip2[1][0], mip2[1][1]});
-    }
-
-    f32 sample(u32 mip, f32 u, f32 v) const {
-        u32 w = std::max(kW >> mip, 1u), h = std::max(kH >> mip, 1u);
-        u32 x = static_cast<u32>(std::min(std::max(u * static_cast<f32>(w), 0.0f), static_cast<f32>(w) - 1.0f));
-        u32 y = static_cast<u32>(std::min(std::max(v * static_cast<f32>(h), 0.0f), static_cast<f32>(h) - 1.0f));
-        switch (mip) {
-            case 0: return mip0[y][x];
-            case 1: return mip1[y][x];
-            case 2: return mip2[y][x];
-            default: return mip3[0][0];
-        }
-    }
-};
-
 static void checkFalseCullRegression() {
     AVER_INFO("conservativelyHidden regression: BUG 1, false cull through an untested middle texel");
 
@@ -321,12 +492,123 @@ static void checkFalseCullRegression() {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// hashPackedBoxes: a generic byte-content fingerprint, still used as-is by anything that wants to
+// know whether a packed float buffer changed size/order/content call-to-call. CORRECTED: this used
+// to also be the fingerprint OcclusionCuller.cpp's testBatch() compared to catch a caller whose box
+// array changed IDENTITY across the one-call readback lag -- it no longer is (see
+// hashIdentityKey()'s own comment below and in OcclusionMath.hpp for why hashing box BOUNDS was the
+// wrong tool for an IDENTITY question). Kept and still tested here because it remains a correct,
+// generically useful function in its own right. Checked here with no GPU, the same split every
+// other function in this file already gets.
+// ---------------------------------------------------------------------------------------------
+static void checkHashPackedBoxes() {
+    AVER_INFO("hashPackedBoxes");
+    // Two independently-packed copies of the SAME three boxes, byte for byte: this is the common
+    // case (a static scene, no streaming churn between two consecutive testBatch() calls) and must
+    // hash equal, or the caller's readback would be treated as untrustworthy on every ordinary frame.
+    const f32 boxesA[24] = {
+        -1, -1, -1, 0,  1, 1, 1, 0,      // box 0
+         2,  0,  0, 0,  3, 1, 1, 0,      // box 1
+        -5, -5,  0, 0, -4,-4, 1, 0,      // box 2
+    };
+    f32 boxesB[24];
+    std::memcpy(boxesB, boxesA, sizeof(boxesA));
+    check(hashPackedBoxes(boxesA, 24, 3) == hashPackedBoxes(boxesB, 24, 3),
+          "identical box arrays (same count, same content) hash equal");
+
+    // Same COUNT, one box's content perturbed (this is the "same-count swap" the function's own
+    // comment says a bare count compare alone would miss) -- must hash different.
+    f32 boxesC[24];
+    std::memcpy(boxesC, boxesA, sizeof(boxesA));
+    boxesC[8] += 0.001f;   // nudge box 1's min.x
+    check(hashPackedBoxes(boxesA, 24, 3) != hashPackedBoxes(boxesC, 24, 3),
+          "same count, one box's content differs -> hashes differ");
+
+    // Same total bytes actually submitted would require the same count (8 floats/box), so the
+    // count fold is exercised by comparing a 2-box array against the first 16 floats of the
+    // 3-box one: identical BYTES, different COUNT (an entity despawning mid-array shifted here for
+    // a self-contained fixture) -- the fold must still tell them apart.
+    check(hashPackedBoxes(boxesA, 16, 2) != hashPackedBoxes(boxesA, 16, 3),
+          "identical bytes, different declared count -> hashes differ (the count fold matters)");
+
+    // A population that GREW (streaming added a box) changes the byte length outright -- the common
+    // real-world case this whole mechanism exists to catch.
+    check(hashPackedBoxes(boxesA, 24, 3) != hashPackedBoxes(boxesA, 16, 2),
+          "appending a box changes the hash");
+
+    // Reordering two boxes (same count, same multiset of bytes, different ARRAY ORDER) must also
+    // read as a change: index i means something different now even though nothing was added or
+    // removed, which is exactly the "one entity's box leaves an index the same call another's
+    // arrives there" case the function's own comment calls out as what a count-only check would miss.
+    f32 boxesSwapped[24];
+    std::memcpy(boxesSwapped, boxesA, sizeof(boxesA));
+    for (int i = 0; i < 8; ++i) std::swap(boxesSwapped[i], boxesSwapped[8 + i]);   // box 0 <-> box 1
+    check(hashPackedBoxes(boxesA, 24, 3) != hashPackedBoxes(boxesSwapped, 24, 3),
+          "swapping two boxes' positions in the array -> hashes differ");
+}
+
+// ---------------------------------------------------------------------------------------------
+// hashIdentityKey: the fingerprint OcclusionCuller.cpp's testBatch() now compares call-to-call
+// instead of hashPackedBoxes() above -- see that function's own comment (OcclusionMath.hpp) for
+// WHY the switch was needed: hashPackedBoxes() hashes box BOUNDS, and SandboxApp.cpp deliberately
+// changes every box's bounds by a motion-dependent margin on nearly every frame the camera moves
+// (its own "MOTION-SAFE TRUST GATE" comment), which made hashPackedBoxes() misreport that as a
+// population change 244 of 255 tested frames under a gentle --cam-wobble. hashIdentityKey() takes
+// the caller's entity-id sequence instead, so it cannot see a bounds change at all -- only an
+// actual change in which entities, or their order.
+// ---------------------------------------------------------------------------------------------
+static void checkHashIdentityKey() {
+    AVER_INFO("hashIdentityKey");
+    // Same ids, same order: the ordinary case (a static population, no streaming churn between two
+    // consecutive testBatch() calls) must hash equal.
+    const u32 idsA[5] = {10, 11, 12, 13, 14};
+    u32 idsB[5];
+    std::memcpy(idsB, idsA, sizeof(idsA));
+    check(hashIdentityKey(idsA, 5) == hashIdentityKey(idsB, 5),
+          "identical id sequences (same count, same order) hash equal");
+
+    // THE REGRESSION THIS FUNCTION EXISTS TO FIX: the SAME entity ids, in the SAME order, must hash
+    // equal regardless of what happened to those entities' BOUNDS this call -- hashIdentityKey()
+    // never even sees bounds, so there is nothing for a motion-dependent dilation margin to perturb.
+    // (hashPackedBoxes() above WOULD see that perturbation and hash differently -- see
+    // checkHashPackedBoxes()'s "one box's content perturbed" case, which is exactly what a changing
+    // margin does to every box, every frame, under camera motion.)
+    check(hashIdentityKey(idsA, 5) == hashIdentityKey(idsB, 5),
+          "identity is a function of WHICH entities, not their bounds -- unaffected by a per-frame "
+          "dilation margin the way hashPackedBoxes() was");
+
+    // A population that GREW (streaming added an entity) changes the byte length outright -- the
+    // real case this mechanism exists to catch.
+    const u32 idsGrown[6] = {10, 11, 12, 13, 14, 15};
+    check(hashIdentityKey(idsA, 5) != hashIdentityKey(idsGrown, 6), "appending an id changes the hash");
+
+    // Same count, one id swapped for a different one (an entity despawned and another streamed in
+    // at the same array slot the same frame) -- must hash different.
+    const u32 idsSwappedContent[5] = {10, 11, 99, 13, 14};
+    check(hashIdentityKey(idsA, 5) != hashIdentityKey(idsSwappedContent, 5),
+          "same count, one id differs -> hashes differ");
+
+    // Same MULTISET of ids, different ARRAY ORDER -- index i now names a different logical box even
+    // though nothing was added or removed, exactly the "one entity's box leaves an index the same
+    // call another's arrives there" case a count-only (or even a set-only) check would miss.
+    const u32 idsReordered[5] = {11, 10, 12, 13, 14};
+    check(hashIdentityKey(idsA, 5) != hashIdentityKey(idsReordered, 5),
+          "reordering the same ids -> hashes differ");
+}
+
 int main() {
     AVER_INFO("OcclusionMathTest");
     checkProjection();
+    checkViewportProjection();
+    checkFalseCull_ViewportSubRectIgnored();
+    checkTrueOccluder_InsideSubRect();
+    checkFootprintSweep_SubRectNeverExceedsOneTexel();
     checkMipSelect();
     checkConservativelyHidden();
     checkFalseCullRegression();
+    checkHashPackedBoxes();
+    checkHashIdentityKey();
     if (g_failures) AVER_ERROR("OcclusionMathTest: {} failure(s)", g_failures);
     else            AVER_INFO("OcclusionMathTest: all checks passed");
     return g_failures ? 1 : 0;

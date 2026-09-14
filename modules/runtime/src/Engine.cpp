@@ -44,6 +44,16 @@ int Engine::run(Application* app) {
         wd.width = cfg.windowWidth;
         wd.height = cfg.windowHeight;
         wd.activate = interactive;
+        // `interactive` is the same signal WindowDesc::fullscreen keys off internally; passing it
+        // through rather than short-circuiting here keeps the rule in ONE place (the platform layer),
+        // so a second caller cannot get it wrong.
+        wd.fullscreen = cfg.fullscreen;
+        // HIDDEN WHILE THE SPLASH IS UP. The window is fully created -- sized, DPI-resolved, ready
+        // for the swapchain that reads those numbers below -- it just has no pixels on screen. It sat
+        // behind the loading screen as a frozen grey rectangle otherwise, which reads as a hang.
+        // Only when a splash is actually being shown: a capture run has no splash and must keep
+        // behaving exactly as before, and a headless run has no window at all.
+        wd.startHidden = !cfg.headless && interactive;
         if (!window_->create(wd)) {
             AVER_WARN("[Engine] window creation failed — continuing headless");
             delete window_;
@@ -52,8 +62,13 @@ int Engine::run(Application* app) {
         }
     }
 
-    // --- RHI device. Default order is D3D12 -> D3D11 -> Vulkan -> Null; D3D11 and Vulkan are
-    //     13-line stubs that return nullptr today, so the default order really means D3D12 or Null.
+    // --- RHI device. Default order is D3D12 -> D3D11 -> Vulkan -> Null. D3D11 is still a 13-line
+    //     stub that returns nullptr; VULKAN IS NOT, and this comment claimed it was long after that
+    //     stopped being true. It is a real backend, compiled by default (AVER_RHI_VULKAN is ON as of
+    //     94e0091) and reachable from this fallback chain, so a machine without D3D12 now genuinely
+    //     gets a working device here rather than Null. It is not at D3D12 parity -- the shadow
+    //     cascade map is not written (see the Vulkan pushRenderScope note) -- so "falls through to
+    //     Vulkan" means a picture, not the same picture.
     rhi::DeviceDesc dd;
     dd.enableDebug = cfg.enableDebugLayer;
     dd.useWarp = cfg.useWarp;
@@ -100,12 +115,63 @@ int Engine::run(Application* app) {
     // materials and textures are loaded, scripts are hosted. The application reports its own stages
     // through this, which is why the splash is handed to it rather than kept private here.
     splash.setStatus("Compiling shaders");
+    // LIVE FOR AS LONG AS THE SPLASH IS ON SCREEN, which is NOT until onInit returns. This was
+    // cleared here, one line after onInit -- before the warm-up loop below, which renders the frames
+    // that finish the loading with the splash still covering the window. setLoadingStatus() is a
+    // no-op while this is null, so the text froze on whatever the last onInit stage happened to be
+    // and then sat there for the entire visible tail of the load. Cleared beside splash.close()
+    // instead, so the two facts -- "the splash exists" and "the app can write to it" -- stop and
+    // start together.
     splashForApp_ = &splash;
     app->onInit(*this);
-    splashForApp_ = nullptr;
     // Render one frame per modal-loop timer tick.
     if (window_) window_->setRenderTick(&Engine::renderTickThunk, this);
-    if (!cfg.headless) splash.close(1100);
+
+    // --- Hold the splash over the frames that finish the loading ------------------------------
+    //
+    // These frames are REAL frames, rendered into the window while the splash still covers it, so
+    // when it goes the editor is already drawing the loaded project rather than starting to. That is
+    // the whole point: see Application::startupComplete for why onInit() returning was never the
+    // right moment.
+    //
+    // BOUNDED THREE WAYS, because a loading screen that can outlive the loading is worse than one
+    // that goes early: a frame cap, a wall-clock cap, and the window closing. A subclass whose
+    // readiness never arrives costs a few seconds, not the session.
+    if (!cfg.headless && interactive) {
+        constexpr u32 kMaxWarmupFrames = 600;
+        constexpr f64 kMaxWarmupSeconds = 20.0;
+        // ACCUMULATED, because Clock::restart() is the only reader it has and it resets as it reads --
+        // there is no "how long since you were made" call to ask.
+        Clock warmupClock;
+        f64 warmupSeconds = 0.0;
+        u32 warmed = 0;
+        frameClock_ = Clock{};
+        while (!exit_ && warmed < kMaxWarmupFrames &&
+               warmupSeconds < kMaxWarmupSeconds && !app->startupComplete()) {
+            if (window_) {
+                window_->pumpEvents();
+                if (window_->shouldClose()) break;
+            }
+            frameStep();
+            warmupSeconds += warmupClock.restart();
+            ++warmed;
+        }
+        if (warmed >= kMaxWarmupFrames || warmupSeconds >= kMaxWarmupSeconds)
+            AVER_WARN("[Engine] startup did not report complete within {} frames / {:.0f}s -- showing "
+                      "the window anyway", kMaxWarmupFrames, kMaxWarmupSeconds);
+        else
+            AVER_INFO("[Engine] startup complete after {} warm-up frame(s)", warmed);
+    }
+
+    // 0, NOT 1100: the minimum-visible delay existed so a fast start did not flash the splash for a
+    // few frames. The wait above has already kept it up for as long as the loading actually took, so
+    // adding a second delay on top would only make a loaded editor sit behind a picture of itself.
+    // REVEALED BEFORE THE SPLASH GOES, not after: showing the window first means the loading screen
+    // lifts to a drawn editor rather than to the desktop for a frame. The warm-up loop above has
+    // already rendered real frames into it, so there is something to reveal.
+    if (window_ && !cfg.headless && interactive) window_->show(true);
+    splashForApp_ = nullptr;
+    if (!cfg.headless) splash.close(interactive ? 0 : 1100);
 
     // --- Frame loop ---
     frameClock_ = Clock{};
@@ -147,7 +213,13 @@ int Engine::run(Application* app) {
 // Names the startup stage on the splash's status line. See the header for why this exists.
 void Engine::setLoadingStatus(const std::string& stage) {
     if (!splashForApp_) return;
+    // PUMPED, NOT JUST SET. onInit is one long blocking call and nothing else services the splash's
+    // message queue while it runs, so a status written without a pump reached the window's state and
+    // never its pixels -- the text changed only when something else happened to pump later. That is
+    // what made a loading screen with stages still look frozen. LoadingScreen::stage already paired
+    // the two for its own splash; this is the same pairing for the borrowed one.
     static_cast<Splash*>(splashForApp_)->setStatus(stage);
+    static_cast<Splash*>(splashForApp_)->pump();
 }
 
 // One frame: sync swapchain to the window size, update, render, present.
@@ -169,6 +241,9 @@ void Engine::frameStep() {
     time_.dt = static_cast<f32>(dt);
     time_.total += time_.dt;
     time_.frame += 1;
+    // Handed to the RHI here, at the one place the clock advances, so every shader sees the same
+    // instant this frame shades. An animated material reads it from the engine's per-frame block.
+    device_->setFrameTime(time_.total, time_.dt);
 
     // A LOST DEVICE STOPS THE FRAME, and stops it HERE rather than three layers down.
     //

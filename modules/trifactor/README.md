@@ -1,11 +1,14 @@
 # Aver.Trifactor
 
 The virtualized-geometry cluster builder and LOD DAG. Plan: `docs/VIRTUALIZED_GEOMETRY.md` section 7,
-"Slice 0". Optional module, **OFF by default** (`AVER_MODULE_TRIFACTOR`) — see
-`CMakeLists.txt` for why: its one permitted dependency, meshoptimizer (MIT), is not vendored in this
-tree at `third_party/meshoptimizer` yet, and CORRECTION 1 in the task that built this module
-forbids any other dependency (no METIS, no hand-rolled partitioner) for licensing reasons
-(`docs/formats/FORMAT_SPECS.md:13`, `docs/ASSET_IMPORT.md`).
+"Slice 0". Written as an optional module, **OFF by default** (`AVER_MODULE_TRIFACTOR`), because its
+one permitted dependency, meshoptimizer (MIT), was not yet vendored at `third_party/meshoptimizer`,
+and CORRECTION 1 in the task that built this module forbids any other dependency (no METIS, no
+hand-rolled partitioner) for licensing reasons (`docs/formats/FORMAT_SPECS.md:13`,
+`docs/ASSET_IMPORT.md`). **That gate closed in the same commit that wrote this file** (`4911686`,
+which also vendored `third_party/meshoptimizer` v1.2) — see "What's NOT here" below for what that
+made obsolete. `AVER_MODULE_TRIFACTOR` is now `ON` by default in the `standard` and `full` editions
+(`CMakeLists.txt`'s `AVER_EDITION` presets) and `OFF` only in `slim`.
 
 ## What's here
 
@@ -25,33 +28,30 @@ forbids any other dependency (no METIS, no hand-rolled partitioner) for licensin
   conversion from this module's `Cluster`/`LodDag` to the format's `OcMeshMeshlet` lives at the one
   call site allowed to see both types: `tests/formats/src/ConvertTool.cpp`, behind
   `#if AVER_MODULE_TRIFACTOR`.
-- Only `buildClusters`' LOD-0 output is persisted. `.ocmesh` still writes a single `LodDesc` (see
-  `writeOcMesh`), so `buildLodHierarchy`'s coarser levels exist in memory and are exercised by
-  `tests/formats/src/TrifactorTest.cpp`, but are not yet written to disk -- multi-LOD `.ocmesh` is a
-  later slice.
+- `buildLodHierarchy`'s coarser levels no longer stop in memory. This bullet used to say multi-LOD
+  `.ocmesh` was "a later slice" that had not arrived; it has. `.ocmesh` now persists the whole DAG
+  (`OcMeshData::coarserLods`, `modules/formats/include/aver/formats/OcMesh.hpp`), added by commit
+  `81a4bb0` (".ocmesh persists the whole LOD hierarchy, with an error a runtime can use") and
+  extended through `5a1eb6f`/`c511662`/`3be919b`. See `modules/formats/README.md` for what
+  Aver.Formats owns today.
 - `SubmeshRange.MeshletStart/MeshletCount` (FORMAT_SPECS.md 5.6) are written as 0,0 even when
   meshlets are present: `buildClusters` partitions the mesh's WHOLE merged index buffer without
   regard to submesh/material boundaries, so a meshlet can straddle two submeshes and there is no
   honest per-submesh range to report yet. See the comment at that write site in `OcMesh.cpp`.
 - `tests/formats/src/TrifactorTest.cpp`, registered in `tests/formats/CMakeLists.txt` behind
-  `if(TARGET Aver.Trifactor)` (so it does not exist at all in the default
-  `AVER_MODULE_TRIFACTOR=OFF` tree, same as `MaterialTest`/`ActorScriptTest` needing
+  `if(TARGET Aver.Trifactor)` (so it does not exist at all when `AVER_MODULE_TRIFACTOR=OFF` --
+  now only the `slim` edition's default -- same as `MaterialTest`/`ActorScriptTest` needing
   `Aver.Formats.Material`).
 
 ## What's NOT here (or not yet PROVEN)
 
-- meshoptimizer itself. Still not vendored at `third_party/meshoptimizer` as of this phase --
-  re-checked directly (`Get-ChildItem -Recurse -Filter meshoptimizer*` across `C:\` found nothing)
-  before writing this note, not assumed from the previous phase's report. See the top-of-file
-  comment in `src/ClusterBuilder.cpp` for the full account of why it isn't vendored and what needs to
-  happen before this module builds.
-- Because of that, `-DAVER_MODULE_TRIFACTOR=ON` still fails at CMake CONFIGURE time with the
-  `FATAL_ERROR` this module's `CMakeLists.txt` is designed to raise (verified this phase: a real
-  `aver_build -DAVER_MODULE_TRIFACTOR=ON` against `build-trifactor` failed with `[build] configure
-  failed`). `ClusterBuilder.cpp` has therefore still never compiled, and `TrifactorTest.exe` has
-  never been built or run -- everything in this module and in `TrifactorTest.cpp` is written against
-  the documented meshoptimizer API and against this module's own header, not proven by execution.
-  What HAS been proven by execution this phase: the MLET read/write code in `OcMesh.cpp` (via
-  `MeshTest.exe`, which exercises the format independent of Trifactor), and that
-  `AVER_MODULE_TRIFACTOR=OFF` still builds clean and every pre-existing headless suite (42/42,
-  including `MeshTest`, `GltfTest`, `ImportTest`) still passes with this module absent.
+This section used to say meshoptimizer was still not vendored, that `-DAVER_MODULE_TRIFACTOR=ON`
+still failed at CMake configure time, and that `ClusterBuilder.cpp` had therefore never compiled and
+`TrifactorTest.exe` had never been built or run. All of that was wrong the moment it was written:
+`third_party/meshoptimizer` was vendored in the very same commit that wrote this README (`4911686`
+touches both paths, and `git log` shows no other commit ever touching `third_party/meshoptimizer` --
+it has been there since). Re-verified against the current tree: `AVER_MODULE_TRIFACTOR` is cached
+`ON` under the default `standard` edition (`build/CMakeCache.txt`, `build-release/CMakeCache.txt`),
+`Aver.Trifactor.lib` and `TrifactorTest.exe` are built in `build/`, `build-release/` and `build-vk/`,
+and running `TrifactorTest.exe` prints `=== all 201 Trifactor checks passed ===`. (The
+`SubmeshRange.MeshletStart/MeshletCount` gap noted above is still real and unrelated to any of this.)

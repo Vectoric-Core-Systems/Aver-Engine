@@ -9,6 +9,11 @@ aver_add_module(Aver.Formats
     src/OcAnim.cpp
     src/OcBeam.cpp
     src/OcGraph.cpp
+    # .ocinput -- named input actions and default key/mouse bindings (see OcInput.hpp for the format
+    # and why it needs no engine dependency). Beside the other AVR1-adjacent text readers for the same
+    # reason .ocparticle states for itself minus the module split: this one has no type from outside
+    # Aver.Formats to parse into at all (Aver.Framework is C#-only), so it never needed a third target.
+    src/OcInput.cpp
     src/OcMap.cpp
     src/OcMesh.cpp
     src/OcWorld.cpp
@@ -20,6 +25,13 @@ aver_add_module(Aver.Formats
     # nothing beyond Core/Platform/Assets -- it is the AVR1 container and arithmetic, no process, no
     # device, no .NET. That is what lets the landscape tests run on a machine with none of those.
     src/OcLand.cpp
+    # .oclightmap and its unwrapper. In the BASE target for GiCache.cpp's reason: both are the AVR1
+    # container plus arithmetic -- no device, no renderer, no .NET -- which is what lets their tests
+    # run on a machine with none of those. The unwrapper is here rather than in a tool because the
+    # runtime will need to VALIDATE an unwrap (vertex counts, UVs in range) even if only an offline
+    # baker ever produces one.
+    src/OcLightmap.cpp
+    src/LightmapUnwrap.cpp
     # The C# actor-script scanner. MOVED HERE FROM Aver.Formats.Material, where it never belonged:
     # it parses a generated region out of a C# file and contains not one reference to pbr:: or
     # MaterialDesc, but sat behind AVER_MODULE_PBR anyway. Four things outside the material system
@@ -39,6 +51,13 @@ aver_add_module(Aver.Formats
     # .ocsnd -- a procedural sound as a node graph. Beside the other AVR1 readers for the same
     # reason: a node array, a link array and a header, nothing that needs a mixer.
     src/OcSound.cpp
+    # .ocrig -- a control rig. TEXT rather than an AVR1 container, unlike its neighbours here:
+    # a rig is four lines a person writes and reads, not a baked array. See OcRig.hpp.
+    src/OcRig.cpp
+    # .ocfoliage -- one authored foliage type. Beside the other AVR1 readers for OcBt.cpp's own
+    # reason: a header record and a string table, nothing that needs Aver.Scene or Aver.Landscape --
+    # see OcFoliage.hpp for why the format itself stays independent of both.
+    src/OcFoliage.cpp
     src/Texture.cpp
   DEPS
     Aver.Core
@@ -61,6 +80,10 @@ if(AVER_MODULE_PBR)
     SOURCES
       src/OcMat.cpp
       src/MaterialScript.cpp
+      # Turning imported materials into .ocmat. Here rather than beside the importers for
+      # exactly the reason this target exists: it is the step that needs pbr::MaterialDesc, and the
+      # importers must stay in the PBR-free base target. Format-neutral: glTF, OBJ and USD feed it.
+      src/MaterialCook.cpp
     DEPS
       Aver.Formats
       Aver.Render.PBR

@@ -37,15 +37,50 @@ namespace aver::crash {
 
 // Why the process is reporting. Written into the report as UE writes its own CrashType, because the
 // first question anyone asks of a crash folder is "what kind of death was this".
-enum class Kind {
-    Crash,       // an unhandled structured exception -- access violation, divide by zero, stack overflow
-    Assert,      // AVER_ASSERT tripped: a programmer-invariant violation, not a runtime failure
-    Fatal,       // an explicit AVER_FATAL: the code knew it could not continue
-    GpuCrash,    // device removed / TDR. Distinct because the fix lives somewhere entirely different
-    Terminate,   // std::terminate: an unhandled C++ exception or a noexcept violation
+//
+// THE VALUES ARE EXPLICIT AND FROZEN, and the reason is the same one scripting_abi.h gives for the
+// log levels: this number is written into a crash report as `CrashTypeCode` and read back by
+// whatever triages the folder, so it outlives the build that produced it. A kind inserted in the
+// middle silently renumbers every report ever written. APPEND, NEVER INSERT.
+enum class Kind : int {
+    Crash     = 0,  // an unhandled structured exception -- access violation, divide by zero, stack overflow
+    Assert    = 1,  // AVER_ASSERT tripped: a programmer-invariant violation, not a runtime failure
+    Fatal     = 2,  // an explicit AVER_FATAL: the code knew it could not continue
+    GpuCrash  = 3,  // device removed / TDR. Distinct because the fix lives somewhere entirely different
+    Terminate = 4,  // std::terminate: an unhandled C++ exception or a noexcept violation
+
+    // ---- appended ------------------------------------------------------------------------------
+    //
+    // OutOfMemory is not a Crash even though it usually arrives as one. An allocation failure has a
+    // completely different first question -- what was the working set, and what asked for how much --
+    // and triaging it as an access violation sends the reader looking for a dangling pointer that
+    // does not exist. The engine already distinguishes the case: AbiError::AllocationFailed and
+    // LogLevel::Critical's own comment name "an allocation the engine needed and did not get".
+    // ARRIVES TWO WAYS, and both are wired: STATUS_NO_MEMORY (0xC0000017) through the structured
+    // exception filter, and a std::bad_alloc that escapes to std::terminate. There is deliberately no
+    // third, speculative raiser -- a kind nothing can produce is a word in a vocabulary nobody speaks.
+    OutOfMemory = 5,
 };
 
+// NOT HERE, and each for a reason worth stating, because "add a kind" is the obvious next thought:
+//
+//   A SHADER COMPILE FAILURE is not a crash in this engine. createShader logs AVER_ERROR and returns
+//   0; the caller degrades. Nothing dies, so there is no report to file a kind on.
+//
+//   DEVICE LOSS is a Critical, not a crash: noteDeviceRemoved logs one and the process keeps running
+//   with the last frame on screen. That Critical wakes the reporter to WATCH -- which is what
+//   GpuCrash is for, if the process then dies -- rather than to file a report of its own.
+
 const char* kindName(Kind k);
+
+// The numeric code written into the report. A free function rather than a cast at each call site so
+// that "what number is this kind" has exactly one answer, and so a reader grepping for the name
+// finds the contract beside it.
+inline int kindCode(Kind k) { return static_cast<int>(k); }
+
+// The name for a raw code read back OUT of a report, which may have been written by a newer build
+// than the one reading it. Never switches over the enum, for the reason abiErrorNameOf gives.
+const char* kindNameOf(int code);
 
 // Everything the report wants to know about the process that is not discoverable from inside a crash
 // handler. Filled at startup, when allocating and formatting are still safe -- a crash handler must

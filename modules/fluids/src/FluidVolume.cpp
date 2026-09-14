@@ -96,7 +96,7 @@ f32 fluidPressureFor(const FluidVolumeDesc& desc, f32 gravityCmPerS2) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// THE MATERIAL LAYER. See FluidVolume.hpp's own comments on FluidMaterial and each function below
+// THE MATERIAL LAYER. See FluidVolume.hpp's own comments on FluidPhysicsMaterial and each function below
 // for the full reasoning and the measured table; this file carries only the arithmetic.
 
 f32 fluidDampingForViscosity(f32 viscosityPaS) {
@@ -115,16 +115,16 @@ f32 fluidDampingForViscosity(f32 viscosityPaS) {
     return kDampingAnchorLow * std::pow(kDampingAnchorHigh / kDampingAnchorLow, tc);
 }
 
-std::optional<FluidMaterial> fluidMaterialPreset(std::string_view name) {
-    if (iequalsAscii(name, "water"))                                              return FluidMaterial::Water();
+std::optional<FluidPhysicsMaterial> fluidPhysicsMaterialPreset(std::string_view name) {
+    if (iequalsAscii(name, "water"))                                              return FluidPhysicsMaterial::Water();
     if (iequalsAscii(name, "lightoil") || iequalsAscii(name, "light oil") ||
-        iequalsAscii(name, "oil"))                                                return FluidMaterial::LightOil();
-    if (iequalsAscii(name, "honey"))                                              return FluidMaterial::Honey();
-    if (iequalsAscii(name, "lava"))                                               return FluidMaterial::Lava();
+        iequalsAscii(name, "oil"))                                                return FluidPhysicsMaterial::LightOil();
+    if (iequalsAscii(name, "honey"))                                              return FluidPhysicsMaterial::Honey();
+    if (iequalsAscii(name, "lava"))                                               return FluidPhysicsMaterial::Lava();
     return std::nullopt;
 }
 
-bool fluidResolveMaterial(FluidVolumeDesc& desc, std::string* outConflict) {
+bool fluidResolvePhysicsMaterial(FluidVolumeDesc& desc, std::string* outConflict) {
     if (!desc.material.has_value()) return true;   // nothing to resolve; today's behaviour exactly
 
     // THE PRECEDENCE RULE -- see this function's own header comment (FluidVolume.hpp) for why this
@@ -135,7 +135,7 @@ bool fluidResolveMaterial(FluidVolumeDesc& desc, std::string* outConflict) {
         if (outConflict) {
             const f32 impliedDamping = fluidDampingForViscosity(desc.material->viscosityPaS);
             *outConflict =
-                "a FluidMaterial (density=" + std::to_string(desc.material->densityKgM3) +
+                "a FluidPhysicsMaterial (density=" + std::to_string(desc.material->densityKgM3) +
                 "kg/m^3, viscosity=" + std::to_string(desc.material->viscosityPaS) +
                 "Pa*s, which maps to damping=" + std::to_string(impliedDamping) +
                 ") and a separately hand-set raw damping=" + std::to_string(desc.damping) +

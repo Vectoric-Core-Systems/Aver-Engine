@@ -904,6 +904,7 @@ bool buildLodHierarchy(const fmt::OcMeshData& mesh, LodDag& dag, std::string* wh
         std::vector<PendingGroup> pending;
         pending.reserve(groups.size());
         bool anyReduction = false;
+        usize levelIndicesIn = 0, levelIndicesOut = 0;
 
         for (const auto& group : groups) {
             // Sized once instead of letting push_back inside appendGlobalTriangles grow it by
@@ -1070,6 +1071,8 @@ bool buildLodHierarchy(const fmt::OcMeshData& mesh, LodDag& dag, std::string* wh
             simplified.resize(simplifiedCount);
 
             if (simplifiedCount < mergedIndices.size()) anyReduction = true;
+            levelIndicesIn  += mergedIndices.size();
+            levelIndicesOut += simplifiedCount;
 
             // meshopt_SimplifySparse makes `resultError` relative to THIS GROUP's own subset extent
             // (meshoptimizer.h:471's own doc: "error becomes relative to subset extents"), not the
@@ -1088,6 +1091,37 @@ bool buildLodHierarchy(const fmt::OcMeshData& mesh, LodDag& dag, std::string* wh
         }
 
         if (!anyReduction) break;
+
+        // ---- and a level that BARELY reduced is a level not worth storing ----------------------
+        //
+        // `anyReduction` asks whether a single triangle went. That is the right test for "is the
+        // simplifier stuck" and the wrong one for "is another level worth its bytes", and on FOLIAGE
+        // the two come apart badly. A leaf card is a disconnected quad, so a plant is thousands of
+        // separate shells that are almost entirely boundary edge and have nothing to collapse; each
+        // level sheds a handful of triangles, never zero. The loop then ran all the way to
+        // kMaxLevels -- whose own comment calls that "a safety cap against a non-converging loop,
+        // not an expected case" -- and stored thirty-odd near-identical copies of the whole mesh.
+        //
+        // MEASURED, on Intel's Jungle Ruins: JR_riverforest cooked to an 845 MB .ocmesh for 998,981
+        // triangles, about 846 bytes per triangle where the vertex and index streams together
+        // account for roughly 80. JR_grass_B's ladder read "25 level(s), 7842 tris at LOD0 -> 6668
+        // tris at the coarsest": twenty-four extra levels to remove 15% of one small mesh.
+        //
+        // AN EIGHTH IS THE BAR, and it is deliberately generous. A ladder earns its bytes when each
+        // rung is meaningfully cheaper than the one below it; the classic target is half. Requiring
+        // only 12.5% still admits every solid mesh's ladder -- those halve comfortably, and stop
+        // when meshopt genuinely cannot reduce, which `anyReduction` already catches -- while
+        // refusing the case this exists for: a level that costs a full copy of the mesh to save a
+        // rounding error.
+        //
+        // THE LEVEL JUST BUILT IS KEPT. It did reduce, and it is the first rung to fail the test, so
+        // it is the last one that could be worth having; what stops is going round again. Measured
+        // BEFORE Pass 2 and acted on after it, so the decision is about the level as a whole rather
+        // than about whichever group happened to be simplified last.
+        constexpr f32 kMinLevelReduction = 0.125f;
+        const bool converged =
+            levelIndicesIn > 0 &&
+            f32(levelIndicesIn - levelIndicesOut) / f32(levelIndicesIn) < kMinLevelReduction;
 
         // Pass 2: every group produced SOMETHING usable (even groups that individually did not
         // reduce still re-split into a valid, if unchanged, next level -- consistent DAG structure
@@ -1180,6 +1214,8 @@ bool buildLodHierarchy(const fmt::OcMeshData& mesh, LodDag& dag, std::string* wh
                 }
             }
         }
+
+        if (converged) break;
     }
 
     // ONE LINE, ONCE PER COOKED MESH, AS PERCENTAGES -- which is the form the only decision this

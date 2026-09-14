@@ -2,7 +2,9 @@
 // The UI draw list: what a widget tree produces and a renderer consumes.
 // Screen pixels, top-left origin. Knows nothing about the RHI.
 #include "aver/core/Types.hpp"
+#include "aver/ui/UiFont.hpp"
 
+#include <string_view>
 #include <vector>
 
 namespace aver::ui {
@@ -60,6 +62,38 @@ public:
     // Appends a textured rectangle with explicit UVs.
     void addTexturedRect(f32 x, f32 y, f32 w, f32 h, u64 texture, f32 u0, f32 v0, f32 u1, f32 v1, u32 rgba);
 
+    // ---- TEXT, which this draw list could not produce at all -----------------------------------
+    //
+    // (x, y) is the pen: the LEFT END OF THE BASELINE, not the top-left of a box. That is the
+    // convention every glyph's offY is expressed against, and picking the box corner instead would
+    // make two strings at different sizes fail to sit on the same line.
+    //
+    // One textured quad per glyph, all sharing the font's atlas, so a whole string merges into a
+    // single draw command through append()'s existing texture/clip check. A codepoint the font does
+    // not carry is SKIPPED, not boxed: a missing glyph should cost a gap, not a wall of tofu.
+    //
+    // Returns the pen's x after the last glyph, so a caller can chain runs (a label then a value)
+    // without measuring twice.
+    f32 addText(f32 x, f32 y, std::string_view text, const UiFont& font, u32 rgba);
+
+    // ---- HIT TESTING, which this draw list could not do either -----------------------------------
+    //
+    // A rectangle registered under a caller-chosen id. The draw list already knows the clip stack
+    // and the layer, which are exactly what decides whether a point actually reaches a widget, so
+    // this records both rather than making every caller re-derive them.
+    //
+    // NOT A WIDGET TREE, deliberately. This is the smallest thing that turns "the UI drew a button"
+    // into "the UI can tell you the pointer is over that button": a game builds its own widgets on
+    // top, and a retained tree is a much larger design that should not be smuggled in here.
+    void addHitRect(u64 id, f32 x, f32 y, f32 w, f32 h);
+
+    // The id under (x, y), or 0. TOPMOST WINS -- later layers first, and within a layer the LAST
+    // registration, because that is the one drawn on top and therefore the one a person sees.
+    u64 hitTest(f32 x, f32 y) const;
+
+    struct UiHitRect { u64 id; f32 x, y, w, h; UiClip clip; UiLayer layer; };
+    const std::vector<UiHitRect>& hitRects() const { return hits_; }
+
     const std::vector<UiVertex>& vertices() const { return verts_; }
     const std::vector<u32>&      indices()  const { return idx_; }
     const std::vector<UiDrawCmd>& commands(UiLayer l) const { return cmds_[static_cast<usize>(l)]; }
@@ -76,6 +110,7 @@ private:
     std::vector<u32>      idx_;
     std::vector<UiDrawCmd> cmds_[static_cast<usize>(UiLayer::Count)];
     std::vector<UiClip>   clipStack_;
+    std::vector<UiHitRect> hits_;
     UiClip                noClip_{-1 << 24, -1 << 24, 1 << 24, 1 << 24};
     UiLayer               layer_ = UiLayer::Content;
 };

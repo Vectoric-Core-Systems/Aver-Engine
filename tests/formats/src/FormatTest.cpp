@@ -5,6 +5,7 @@
 #include "aver/formats/OcProject.hpp"
 #include "aver/formats/OcWorld.hpp"
 #include "aver/assets/AssetId.hpp"
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/Hash.hpp"
 
@@ -139,6 +140,133 @@ static void checkOcproject() {
     const std::string again = writeOcproject(back, written);
     check(again == written, "writing an unchanged manifest reproduces it byte for byte");
 
+    // ---- the render keys the settings pages gained, and the two new sections ------------------
+    //
+    // EVERY ONE OF THESE COSTS FIVE PLACES in this format -- the field, hasRenderSettings, the
+    // parse branch, isOwnedKey, and the writer -- and missing the fourth is invisible until a save
+    // strips a key it never replaced. The byte-stable second write below is what catches that.
+    // A VERSION FROM THE FUTURE IS REFUSED, not read as version 1. The number was parsed and
+    // round-tripped and never compared to anything, so an OCPROJECT 2 would have been read as if
+    // every key still meant what it means today and then written back out having silently dropped
+    // whatever this build did not understand. Both halves are asserted: the refusal, and that the
+    // CURRENT version still opens -- a ceiling that rejects everything is the easy over-correction.
+    {
+        ProjectDesc future;
+        std::string ferr;
+        check(!parseOcproject("OCPROJECT 99\nNAME FromTheFuture\n", future, &ferr),
+              "an OCPROJECT version above this build's ceiling is REFUSED");
+        check(ferr.find("newer build") != std::string::npos,
+              "and the message says why rather than blaming the syntax: " + ferr);
+        ProjectDesc current;
+        check(parseOcproject("OCPROJECT 1\nNAME Current\n", current, &ferr),
+              "while the current version still parses");
+    }
+
+    {
+        ProjectDesc r;
+        check(parseOcproject("OCPROJECT 1\nNAME R\n"
+                             "RENDER.GICONES 9\n"
+                             "RENDER.REFRACTIONMODE 2\nRENDER.REFRACTIONSTRENGTH 0.75\n"
+                             "RENDER.REFRACTIONEDGEFADE 0.2\n"
+                             "RENDER.LODSELECT 1\nRENDER.LODTHRESHOLD 2.5\n"
+                             "RENDER.OCCLUSIONCULL 1\nRENDER.DEPTHPREPASS 1\n", r, &err),
+              "the five new render keys parse");
+        check(r.giCones == 9 && r.refractionMode == 2, "cone count and refraction mode survive");
+        check(std::fabs(r.refractionStrength - 0.75f) < 1e-6f &&
+              std::fabs(r.refractionEdgeFade - 0.2f) < 1e-6f, "and both refraction floats");
+        check(r.lodSelect == 1 && std::fabs(r.lodThresholdPx - 2.5f) < 1e-6f, "and LOD select plus threshold");
+        check(r.occlusionCull == 1 && r.depthPrepass == 1, "and the two culling toggles");
+        check(r.hasRenderSettings(), "and hasRenderSettings sees them -- it had to grow with them");
+
+        const std::string w = writeOcproject(r, "");
+        ProjectDesc b2;
+        check(parseOcproject(w, b2, &err), "they write and parse back");
+        check(b2.giCones == 9 && b2.occlusionCull == 1 && b2.depthPrepass == 1, "with the same values");
+        check(writeOcproject(b2, w) == w, "and a second write is byte-identical -- isOwnedKey covers them");
+    }
+    {
+        // ---- the four the UI could set and the file could not hold ----------------------------
+        //
+        // MSAA, mesh shaders and the GI volume were live controls in Project Settings that applied
+        // immediately and were gone on the next open, because nothing captured them and no key
+        // existed. RENDER.GIUPDATEINTERVAL closes a different hole: --gi-update-interval had a flag
+        // and no key, while giUpdateInterval is tier-derived, so a project open could silently
+        // re-derive over the flag.
+        ProjectDesc n;
+        check(parseOcproject("OCPROJECT 1\nNAME N\n"
+                             "RENDER.MSAA 8\nRENDER.MESHSHADERS 1\n"
+                             "RENDER.GIUPDATEINTERVAL 4\n"
+                             "RENDER.GIVOLUME -250 100 300 1800\n", n, &err),
+              "the four newest render keys parse");
+        check(n.msaa == 8 && n.meshShaders == 1, "MSAA and mesh shaders survive");
+        check(n.giUpdateInterval == 4, "and the GI update interval");
+        check(n.hasGiVolume, "the GI volume reports itself present");
+        // A NEGATIVE CENTRE COMPONENT, deliberately: this is why the volume needs a presence flag
+        // rather than appendKey's "negative means unstated" rule, exactly as gravity does below.
+        check(std::fabs(n.giCenter[0] + 250.0f) < 1e-3f &&
+              std::fabs(n.giCenter[1] - 100.0f) < 1e-3f &&
+              std::fabs(n.giCenter[2] - 300.0f) < 1e-3f, "with a negative centre component intact");
+        check(std::fabs(n.giExtent - 1800.0f) < 1e-3f, "and a scalar extent -- the volume is a cube");
+        check(n.hasRenderSettings(), "and hasRenderSettings grew with them");
+
+        const std::string w = writeOcproject(n, "");
+        check(w.find("RENDER.MSAA") != std::string::npos, "MSAA is written");
+        check(w.find("RENDER.GIVOLUME") != std::string::npos, "and the GI volume");
+        ProjectDesc b4;
+        check(parseOcproject(w, b4, &err), "they parse back");
+        check(b4.msaa == 8 && b4.giUpdateInterval == 4 && b4.hasGiVolume, "with the same values");
+        // THE FOURTH OF THE FIVE PLACES: without an isOwnedKey entry the writer would append a
+        // SECOND copy of each key beside the one it copied through, and only this catches it.
+        check(writeOcproject(b4, w) == w, "and a second write is byte-identical -- isOwnedKey covers them");
+    }
+    {
+        // GRAVITY POINTS DOWN, which is exactly why it needs a presence flag and not appendKey's
+        // "negative means unstated" rule. A sentinel here would make the only value anybody would
+        // ever write unwritable.
+        ProjectDesc g;
+        check(parseOcproject("OCPROJECT 1\nNAME G\nPHYSICS.GRAVITY 0 0 -980\nPHYSICS.FIXEDSTEP 0.0083\n",
+                             g, &err), "a physics section parses");
+        check(g.hasGravity && std::fabs(g.gravity[2] + 980.0f) < 1e-3f, "with a NEGATIVE gravity, which a sentinel could not express");
+        check(std::fabs(g.fixedStep - 0.0083f) < 1e-6f, "and the fixed step");
+        check(g.hasPhysicsSettings(), "and the section reports itself present");
+
+        const std::string w = writeOcproject(g, "");
+        check(w.find("PHYSICS.GRAVITY") != std::string::npos, "gravity is written");
+        ProjectDesc b3;
+        check(parseOcproject(w, b3, &err), "and parses back");
+        check(b3.hasGravity && std::fabs(b3.gravity[2] + 980.0f) < 1e-3f, "still negative");
+        check(writeOcproject(b3, w) == w, "byte-stable second write");
+
+        // A PARTIAL VECTOR IS NO VECTOR: two axes silently keeping a default the author thought
+        // they had replaced is worse than the line being ignored.
+        ProjectDesc part;
+        check(parseOcproject("OCPROJECT 1\nNAME P\nPHYSICS.GRAVITY 0 0\n", part, &err),
+              "a two-component gravity still parses the file");
+        check(!part.hasGravity, "but is NOT taken as a gravity");
+    }
+    {
+        // ZERO IS THE POINT for a mix: a project shipping with music muted has to be able to say
+        // so, and a `< 0 means unstated` rule would quietly turn that into 1.
+        ProjectDesc a;
+        check(parseOcproject("OCPROJECT 1\nNAME A\nAUDIO.MASTER 0.8\nAUDIO.BUS 1 0 0.5 0.25\n", a, &err),
+              "an audio mix parses");
+        check(a.hasAudioMix && std::fabs(a.masterVolume - 0.8f) < 1e-6f, "with its master volume");
+        check(std::fabs(a.busVolume[1]) < 1e-6f, "and a MUTED music bus, which a sentinel would have erased");
+        check(std::fabs(a.busVolume[3] - 0.25f) < 1e-6f, "and the UI bus");
+
+        const std::string w = writeOcproject(a, "");
+        ProjectDesc b4;
+        check(parseOcproject(w, b4, &err), "the mix writes and parses back");
+        check(b4.hasAudioMix && std::fabs(b4.busVolume[1]) < 1e-6f, "music still muted after a round trip");
+        check(writeOcproject(b4, w) == w, "byte-stable second write");
+
+        ProjectDesc none;
+        check(parseOcproject("OCPROJECT 1\nNAME N\n", none, &err), "a manifest with no audio parses");
+        check(!none.hasAudioMix, "and reports no opinion rather than a default mix");
+        check(writeOcproject(none, "").find("AUDIO.") == std::string::npos,
+              "and writing it back adds no AUDIO line -- a project cannot grow a mix by being saved");
+    }
+
     const std::string future = written + "COOKTARGET WindowsClient\n";
     ProjectDesc f;
     check(parseOcproject(future, f, &err), "a manifest with an unknown key still parses");
@@ -155,6 +283,38 @@ static void checkOcproject() {
     ProjectDesc nb;
     check(parseOcproject(fresh, nb, &err), "a manifest written from nothing parses");
     check(nb.name == "Fresh", "and carries its name");
+
+    // A PREAMBLE IS NOT A MANIFEST, and writing over one must still produce a header.
+    //
+    // THIS BROKE NEW PROJECT COMPLETELY. Only the empty-existing branch emitted OCPROJECT; the
+    // preserve-existing branch copied a header through if it found one and wrote none if it did
+    // not. ProjectScaffold::manifestText passes three comment lines as `existing`, so every
+    // project the editor scaffolded came out with all its keys and no header, was refused by
+    // loadOcproject a moment later ("not an .ocproject: no OCPROJECT header line") from the very
+    // function that had just written it, and the scaffold guard then deleted the half-made folder.
+    // Creating a project simply did not work, and the test above passed the whole time because it
+    // only ever wrote from "".
+    {
+        const std::string preamble = "# Created by the editor.\n# AUTHOR <your name>\n";
+        const std::string withPre  = writeOcproject(n, preamble);
+        check(withPre.rfind("OCPROJECT ", 0) == 0,
+              "a manifest written over a comment-only preamble starts with the header");
+        ProjectDesc pb;
+        std::string perr;
+        check(parseOcproject(withPre, pb, &perr),
+              "and therefore parses: " + perr);
+        check(pb.name == "Fresh", "carrying its name");
+        check(withPre.find("# AUTHOR <your name>") != std::string::npos,
+              "while still preserving the unowned lines it was given");
+
+        // And exactly one header, not one per save: writing over its own output must be stable.
+        const std::string again = writeOcproject(pb, withPre);
+        usize headers = 0;
+        for (usize at = again.find("OCPROJECT "); at != std::string::npos;
+             at = again.find("OCPROJECT ", at + 1)) ++headers;
+        check(headers == 1, "re-writing its own output keeps exactly one header, got " +
+                            std::to_string(headers));
+    }
 
     // EVERY RENDER KEY IS A THIRD LIST AWAY FROM DUPLICATING ITSELF. A key is read in
     // parseOcproject, written by appendKey, AND named in isOwnedKey -- and only the third one
@@ -179,6 +339,13 @@ static void checkOcproject() {
     rs.rtShadowDenoise = 0;
     rs.rtRenderMode = 0;
     rs.ptBounces = 1;
+    // THESE TWO ARE THE REASON THE LOOP BELOW MISSED A LIVE BUG. Both are skipped by appendKey
+    // unless set -- backend is guarded on !empty(), frameBudgetMs defaults to -1.0f and the f32
+    // overload returns early on a negative -- so a fixture that leaves them at their defaults
+    // never emits the keys, and a duplication check that never sees a key cannot catch it
+    // duplicating. They are exactly the two newest render settings.
+    rs.backend = "vulkan";
+    rs.frameBudgetMs = 16.7f;
     check(rs.hasRenderSettings(), "a desc stating render settings says so");
 
     const std::string once = writeOcproject(rs, "");
@@ -195,7 +362,8 @@ static void checkOcproject() {
     for (const char* key : {"RENDER.GI ", "RENDER.RAYTRACING", "RENDER.PATHTRACING",
                              "RENDER.VOXELRES", "RENDER.GIINTENSITY", "RENDER.GIDISTANCE",
                              "RENDER.RTSHADOWRAYS", "RENDER.RTPIXELSPERRAY",
-                             "RENDER.RTSHADOWDENOISE", "RENDER.RTRENDERMODE", "RENDER.PTBOUNCES"}) {
+                             "RENDER.RTSHADOWDENOISE", "RENDER.RTRENDERMODE", "RENDER.PTBOUNCES",
+                             "RENDER.BACKEND", "RENDER.FRAMEBUDGETMS"}) {
         check(countKey(thrice, key) == 1,
               std::string("after three saves, ") + key + " appears exactly once");
     }
@@ -206,6 +374,23 @@ static void checkOcproject() {
           "and the ray-driven keys read back the values they were written with");
     check(rb.rtShadowDenoise == 0 && rb.rtShadowRays == 1,
           "alongside the RT keys that predate them");
+    check(rb.backend == "vulkan", "and the backend the author chose survives three saves");
+
+    // THE SYMPTOM A USER ACTUALLY SEES, which counting alone does not describe: a CHANGED value
+    // reverting. An unowned duplicate is not merely untidy -- the writer splices its owned block in
+    // at the first owned key (near NAME) while the author's original line stays further down, and
+    // parseOcproject is last-write-wins, so the OLD line is the one that wins on reload. Switching
+    // the renderer would appear to work, save, and come back as the previous choice.
+    ProjectDesc changed = rs;
+    changed.backend = "d3d12";
+    changed.frameBudgetMs = 8.3f;
+    const std::string afterChange = writeOcproject(changed, once);
+    ProjectDesc reread;
+    check(parseOcproject(afterChange, reread, &err), "a manifest saved after a change parses");
+    check(reread.backend == "d3d12",
+          "and CHANGING the renderer sticks -- the previous value must not win on reload");
+    check(reread.frameBudgetMs > 8.0f && reread.frameBudgetMs < 8.6f,
+          "and so does changing the frame budget");
 
     // A ZERO IS A REAL ANSWER, NOT AN ABSENT KEY -- the same distinction the giQuality check at
     // the top of this function makes. rtRenderMode 0 means "the rasteriser finds the first
@@ -275,6 +460,225 @@ static void checkOcworld() {
         // The elevation rides along as a comment for a reader; it must not be read back as data.
         check(text.find("# elev") != std::string::npos, "the written SUN line carries a readable elevation");
         check(writeOcworld(b) == text, "and a second write reproduces the first byte for byte");
+    }
+
+    // ---- the environment fields added for the editor's Details panel -------------------------
+    //
+    // Roughly forty controls under Sun, Sky and Fog were live in the viewport and lost on exit,
+    // because the format had five of them. These check the ones whose failure mode is silent.
+    {
+        // EVERY NEW TOKEN, GIVEN EXPLICITLY, so nothing below is a struct default in disguise.
+        OcWorldData w;
+        check(parseOcworld("OCWORLD 1\nNAME T\n"
+                           "SUN dir 0 0 1 lux 50000 kelvin 6500 angular 1.25\n"
+                           "SKY model authored zenith 0.1 0.2 0.3 horizon 0.4 0.5 0.6 dome 0.8"
+                           " ground 0.11 0.12 0.13 groundblend 0.5 skylight 1.75"
+                           " mieextinction 0.0031 miephase 0.7 rayleighkm 9 miekm 1.4"
+                           " planetkm 6000 airkm 55\n"
+                           "FOG exp density 8e-6 color 0.7 0.8 0.9 falloff 0.004 height 1200"
+                           " start 250 maxopacity 0.85\n"
+                           "CLOUDS on coverage 0.7 density 2 bottom 90000 top 210000"
+                           " feature 32000 wind 12 -34\n", w, &err),
+              "a world with every environment token parses");
+        check(w.sunTemperatureK == 6500.0 && w.sunAngularDeg == 1.25, "the sun's temperature and disk size survive");
+        check(w.skyZenith[0] == 0.1 && w.skyHorizon[2] == 0.6 && w.skyDomeExponent == 0.8,
+              "so does the authored dome");
+        check(w.skyGroundAlbedo[1] == 0.12 && w.skyGroundBlend == 0.5 && w.skyLight == 1.75,
+              "and the ground and the sky light");
+        check(w.skyMiePhaseG == 0.7 && w.skyRayleighKm == 9.0 && w.skyPlanetKm == 6000.0,
+              "and the air parameters");
+        check(w.fogFalloff == 0.004 && w.fogHeight == 1200.0 && w.fogStart == 250.0 && w.fogMaxOpacity == 0.85,
+              "and all four height-fog values");
+        check(w.hasClouds && w.cloudsEnabled && w.cloudCoverage == 0.7 && w.cloudTop == 210000.0,
+              "and the CLOUDS record");
+        // A NEGATIVE WIND IS THE POINT: cloudWind is a direction, so any `>= 0 means set` rule
+        // would have made half the compass unauthorable.
+        check(w.cloudWind[0] == 12.0 && w.cloudWind[1] == -34.0, "including a negative wind component");
+    }
+    {
+        // "SPOKE ABOUT CLOUDS" AND "HAS CLOUDS" ARE TWO FACTS. Collapsing them would make an
+        // authored overcast level that the author turned OFF come back overcast on the next load,
+        // because "off" and "never mentioned" would be the same state and the writer omits the
+        // second. This is the check that a single bool cannot pass.
+        OcWorldData w;
+        check(parseOcworld("OCWORLD 1\nNAME T\nCLOUDS off coverage 0.9\n", w, &err), "CLOUDS off parses");
+        check(w.hasClouds && !w.cloudsEnabled, "and says the level SPOKE about clouds and turned them off");
+        const std::string text = writeOcworld(w);
+        check(text.find("CLOUDS off") != std::string::npos, "so the written file still carries the record");
+
+        OcWorldData none;
+        check(parseOcworld("OCWORLD 1\nNAME T\n", none, &err), "a world with no CLOUDS parses");
+        check(!none.hasClouds, "and reports no opinion rather than 'clouds off'");
+        check(writeOcworld(none).find("CLOUDS") == std::string::npos,
+              "and writing it back adds no CLOUDS line -- a level cannot grow a record by being saved");
+    }
+    {
+        // ZERO IS AN AUTHORED VALUE for fogHeight, fogStart and the cloud bounds -- they are world
+        // Z and a distance. The token's PRESENCE is the flag, so a zero must round-trip as a zero
+        // rather than being read back as the engine's default.
+        OcWorldData w;
+        w.name = "Zeroes";
+        w.hasFog = true;  w.fogHeight = 0.0; w.fogStart = 0.0; w.fogFalloff = 0.0; w.fogMaxOpacity = 0.0;
+        w.hasSky = true;  w.skyGroundBlend = 0.0; w.skyLight = 0.0;
+        w.hasClouds = true; w.cloudBottom = 0.0; w.cloudWind[0] = 0.0; w.cloudWind[1] = 0.0;
+        OcWorldData b;
+        check(parseOcworld(writeOcworld(w), b, &err), "a world whose environment is all zeroes parses");
+        check(b.fogHeight == 0.0 && b.fogStart == 0.0 && b.fogMaxOpacity == 0.0,
+              "and a zero fog height, start and max opacity come back as zero, not as defaults");
+        check(b.skyGroundBlend == 0.0 && b.skyLight == 0.0, "so does a ground blend and sky light of zero");
+        check(b.cloudBottom == 0.0 && b.cloudWind[0] == 0.0, "and a zero cloud base and wind");
+    }
+    {
+        // BYTE-STABLE SECOND WRITE over the full environment. This is the check that catches BOTH
+        // halves of the mirror hazard for free: a token added to the parser and not the writer
+        // disappears here, and one added to the writer and not the parser comes back different.
+        OcWorldData w;
+        w.name = "EnvRoundTrip";
+        w.hasSun = true;  w.sunTemperatureK = 5200.0; w.sunAngularDeg = 0.61;
+        w.hasSky = true;  w.skyPhysical = false; w.skyZenith[1] = 0.375; w.skyLight = 1.4;
+                          w.skyMieExtinction = 0.0033; w.skyPlanetKm = 6100.0;
+        w.hasFog = true;  w.fogFalloff = 0.0021; w.fogHeight = -400.0; w.fogMaxOpacity = 0.9;
+        w.hasClouds = true; w.cloudsEnabled = true; w.cloudFeatureSize = 24000.0; w.cloudWind[1] = -88.0;
+        const std::string text = writeOcworld(w);
+        OcWorldData b;
+        check(parseOcworld(text, b, &err), "the full environment writes and parses again");
+        check(writeOcworld(b) == text, "and a second write reproduces the first byte for byte");
+        // A NEGATIVE FOG HEIGHT is a level whose fog thins going up from below sea level, which is
+        // ordinary; it is also the value a `>= 0` sentinel would have silently discarded.
+        check(b.fogHeight == -400.0, "including a fog height below zero");
+    }
+    {
+        // OLD FILES ARE THE COMMON CASE. Every level in the tree predates these tokens, and each
+        // must load with the engine's own defaults rather than with zeroes -- which is what makes
+        // "the token's presence is the flag" safe in the first place.
+        OcWorldData w;
+        check(parseOcworld("OCWORLD 1\nNAME T\nSUN dir 0 0 1 lux 90000\nSKY model physical\n"
+                           "FOG exp density 4e-6\n", w, &err),
+              "a world written before these tokens existed still parses");
+        check(w.sunTemperatureK == 0.0, "an absent kelvin leaves the sun on its authored colour");
+        check(w.sunAngularDeg == 0.545, "an absent angular size keeps the real sun's disk");
+        check(w.fogMaxOpacity == 1.0, "an absent max opacity does not become zero and erase the fog");
+        check(w.skyLight == 1.0, "an absent sky light does not put the ambient term at zero");
+        check(!w.hasClouds, "and no CLOUDS record means no opinion about clouds");
+    }
+}
+
+// Checks the BEGIN / CHILD / END nesting: that a hierarchy survives a round trip, that the records
+// do not disturb a material the way braces would have, that a second write is byte-stable, and that
+// an unbalanced file FAILS with a message rather than loading a wrong scene.
+static void checkOcworldNesting() {
+    AVER_INFO("=== .ocworld BEGIN/CHILD/END nesting ===");
+    using namespace fmt;
+    std::string err;
+
+    const char* kNested =
+        "OCWORLD 1\nNAME Nest\n"
+        "PLACE  Meshes/table.ocmesh  0 0 0  0 0 0  1  M_Wood\n"
+        "BEGIN\n"
+        "  CHILD  Meshes/lamp.ocmesh  10 0 80  0 0 0  1  M_Brass\n"
+        "  BEGIN\n"
+        "    CHILD  Meshes/bulb.ocmesh  0 0 12  0 0 0  1  M_Glass\n"
+        "  END\n"
+        "  CHILD  Meshes/book.ocmesh  -5 0 80  0 0 0  1  M_Paper\n"
+        "END\n";
+
+    {
+        OcWorldData w;
+        check(parseOcworld(kNested, w, &err), "a nested world parses");
+        check(w.placements.size() == 4, "with all four placements, flat in memory");
+        check(w.placements[0].parent == -1, "the table is a root");
+        check(w.placements[1].parent == 0, "the lamp hangs from the table");
+        check(w.placements[2].parent == 1, "the bulb hangs from the LAMP, not the table -- BEGIN "
+                                           "attaches to the most recent placement, so depth is explicit");
+        check(w.placements[3].parent == 0, "and the book is the lamp's SIBLING, back at the table");
+
+        // THE PROPERTY BRACES WOULD HAVE BROKEN. `PLACE ... {` hits PLACE's material catch-all in a
+        // build that predates nesting, so the placement's material silently becomes "{" and the next
+        // save writes that back. Word records cannot do that: they are separate lines.
+        check(w.placements[0].material == "M_Wood"  && w.placements[1].material == "M_Brass",
+              "every material is intact -- no record was swallowed as a surface name");
+        check(w.placements[2].material == "M_Glass" && w.placements[3].material == "M_Paper",
+              "including the deepest child's and the sibling's");
+        check(w.placements[1].z == 80.0 && w.placements[2].z == 12.0,
+              "and a child's transform is stored as given, parent-relative");
+    }
+    {
+        // BYTE-STABLE SECOND WRITE, which catches parse-without-write and write-without-parse for
+        // free -- the same fixture shape checkOcworld already uses for the flat records.
+        OcWorldData w;
+        check(parseOcworld(kNested, w, &err), "the nested world parses again");
+        const std::string text = writeOcworld(w);
+        check(text.find("BEGIN") != std::string::npos && text.find("CHILD ") != std::string::npos,
+              "the writer emits the nesting rather than flattening it");
+        OcWorldData b;
+        check(parseOcworld(text, b, &err), "what the writer produced parses");
+        check(b.placements.size() == 4, "with the same four placements");
+        for (usize i = 0; i < 4; ++i)
+            check(b.placements[i].parent == w.placements[i].parent,
+                  "and the same parent for each -- the nesting IS the parent relation");
+        check(writeOcworld(b) == text, "and a second write reproduces the first byte for byte");
+    }
+    {
+        // THE PARSER'S NEW FAILURE MODE. Silently adopting the rest of a level as children of one
+        // table leg is exactly the outcome a dangling BEGIN must not have.
+        OcWorldData w;
+        err.clear();
+        check(!parseOcworld("OCWORLD 1\nNAME T\nPLACE a.ocmesh 0 0 0 0 0 0 1\nBEGIN\n"
+                            "  CHILD b.ocmesh 0 0 1 0 0 0 1\n", w, &err),
+              "a BEGIN that is never closed FAILS the parse");
+        check(err.find("unbalanced") != std::string::npos, "and says so -- the message names the cause");
+
+        err.clear();
+        check(!parseOcworld("OCWORLD 1\nNAME T\nPLACE a.ocmesh 0 0 0 0 0 0 1\nEND\n", w, &err),
+              "an END with no BEGIN FAILS too");
+        err.clear();
+        check(!parseOcworld("OCWORLD 1\nNAME T\nCHILD a.ocmesh 0 0 0 0 0 0 1\n", w, &err),
+              "and so does a CHILD with nothing to parent it to");
+        err.clear();
+        check(!parseOcworld("OCWORLD 1\nNAME T\nBEGIN\n", w, &err),
+              "and a BEGIN with no placement before it");
+    }
+    {
+        // A FLAT LEVEL IS UNCHANGED, which is what every file in the tree is today: no BEGIN, no
+        // CHILD, and a writer that emits neither.
+        OcWorldData w;
+        check(parseOcworld("OCWORLD 1\nNAME Flat\nPLACE a.ocmesh 0 0 0 0 0 0 1 M_A\n"
+                           "PLACE b.ocmesh 1 2 3 0 0 0 2 M_B\n", w, &err),
+              "a flat world still parses");
+        check(w.placements[0].parent == -1 && w.placements[1].parent == -1, "with every placement a root");
+        const std::string text = writeOcworld(w);
+        check(text.find("BEGIN") == std::string::npos && text.find("CHILD") == std::string::npos,
+              "and writing it back adds no nesting -- a level cannot grow a hierarchy by being saved");
+    }
+    {
+        // NON-UNIFORM SCALE ON A CHILD picks CHILDG, mirroring PLACE/PLACEG. Getting this wrong
+        // would silently make a stretched child uniform on the next save.
+        OcWorldData w;
+        w.name = "Childg";
+        OcWorldPlacement a; a.asset = "a.ocmesh";
+        OcWorldPlacement b; b.asset = "b.ocmesh"; b.parent = 0; b.sx = 1; b.sy = 2; b.sz = 3;
+        w.placements.push_back(a); w.placements.push_back(b);
+        const std::string text = writeOcworld(w);
+        check(text.find("CHILDG") != std::string::npos, "a non-uniformly scaled child writes as CHILDG");
+        OcWorldData r;
+        check(parseOcworld(text, r, &err), "and parses back");
+        check(r.placements.size() == 2 && r.placements[1].parent == 0, "still parented");
+        check(r.placements[1].sy == 2.0 && r.placements[1].sz == 3.0, "with its scale intact");
+    }
+    {
+        // A CYCLE cannot come out of the parser, but writeOcworld also serves callers that built the
+        // vector by hand. The walk must terminate and must not lose the rest of the level.
+        OcWorldData w;
+        w.name = "Cycle";
+        OcWorldPlacement a; a.asset = "a.ocmesh"; a.parent = 1;
+        OcWorldPlacement b; b.asset = "b.ocmesh"; b.parent = 0;
+        OcWorldPlacement c; c.asset = "c.ocmesh";
+        w.placements.push_back(a); w.placements.push_back(b); w.placements.push_back(c);
+        const std::string text = writeOcworld(w);
+        check(text.find("c.ocmesh") != std::string::npos,
+              "a placement outside a hand-built cycle is still written -- the walk terminates");
+        OcWorldData r;
+        check(parseOcworld(text, r, &err), "and what came out still parses");
     }
 }
 
@@ -608,6 +1012,44 @@ static void checkOcworldWater() {
         check(parseOcworld(text, back, &err) && back.waters.size() == 1 &&
               back.waters[0].preset == "honey", "and it survives the round trip");
         check(writeOcworld(back) == text, "a second write reproduces the first byte for byte");
+    }
+    {
+        // THE SURFACE MATERIAL, which is a THIRD thing this record calls "material" and the only one
+        // that decides how the water LOOKS. `preset` is the SOLVER's material (density + viscosity);
+        // `material` names an .ocmat. They are independent tokens and a record may carry both, which
+        // is exactly what this case proves -- a level wanting honey that also LOOKS like honey has
+        // to say both, because the preset has never carried an appearance.
+        OcWorldData w;
+        check(parseOcworld("OCWORLD 1\nNAME T\n"
+                           "WATER name Pool level -20 bounds 200 450 800 850 simulate "
+                           "preset honey material M_Honey\n", w, &err),
+              "a WATER record naming BOTH a solver preset and a surface material parses");
+        check(w.waters.size() == 1, "and is kept");
+        check(w.waters[0].preset == "honey", "the solver preset is unchanged by the new token");
+        check(w.waters[0].material == "M_Honey", "and the surface material is carried verbatim");
+
+        const std::string text = writeOcworld(w);
+        check(text.find("material M_Honey") != std::string::npos, "the written text keeps it");
+        check(text.find("preset honey") != std::string::npos, "...alongside the preset, not instead");
+
+        OcWorldData back;
+        check(parseOcworld(text, back, &err) && back.waters.size() == 1 &&
+              back.waters[0].material == "M_Honey" && back.waters[0].preset == "honey",
+              "and both survive the round trip");
+        check(writeOcworld(back) == text, "a second write reproduces the first byte for byte");
+    }
+    {
+        // A record naming NO surface material must not GAIN one. Same byte-stability rule every
+        // optional token here already follows: every .ocworld written before this token existed has
+        // to round-trip unchanged, or adding the field turns every level in the tree into a diff.
+        OcWorldData w;
+        check(parseOcworld("OCWORLD 1\nNAME T\n"
+                           "WATER name Pool level -20 bounds 200 450 800 850 simulate\n", w, &err),
+              "a WATER record with no surface material parses");
+        check(w.waters.size() == 1 && w.waters[0].material.empty(), "and carries an empty material");
+        const std::string text = writeOcworld(w);
+        check(text.find("material") == std::string::npos,
+              "and the writer invents no material token for it");
     }
     {
         // Hand-typed density/viscosity, WITHOUT a preset -- the other half of the material grammar,
@@ -1016,6 +1458,7 @@ int main(int argc, char** argv) {
     checkFnv();
     checkOcproject();
     checkOcworld();
+    checkOcworldNesting();
     checkOcworldScatter();
     checkOcworldLandscape();
     checkOcworldWater();
@@ -1024,7 +1467,7 @@ int main(int argc, char** argv) {
     checkLevelFileIsLegacyOcmap();
     if (argc < 2) {
         AVER_INFO("usage: FormatTest <file.ocbeam|file.ocmap> [more...]");
-        return g_failures;
+        return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
     }
     for (int i = 1; i < argc; ++i) {
         const std::string path = argv[i];
@@ -1036,5 +1479,5 @@ int main(int argc, char** argv) {
     }
     AVER_INFO("==================================================");
     AVER_INFO("Format tests done: {} failure(s)", g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

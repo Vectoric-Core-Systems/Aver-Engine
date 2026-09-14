@@ -127,13 +127,14 @@ struct OcTrack {
 // engine (see the CustomEvent node, which exists for exactly this shape). An enum would have made
 // every project share one vocabulary and required an engine change to add a footstep.
 //
-// NO DURATION, deliberately, and this is the one place this diverges from Unreal. Unreal has both a
-// Notify (instant) and a Notify State (begin/tick/end over a range), and the state form needs the
-// runtime to track which states are open, close them when a clip is interrupted, and decide what
-// happens when it loops mid-state. None of that machinery exists here yet, and a half-built version
-// that silently fails to close a state on interruption would be worse than not having it: the
-// symptom is a hit window that never shuts. Two instant notifies express the same thing today, and
-// say out loud that nothing is tracking the span between them.
+// A NOTIFY ITSELF IS STILL INSTANT -- `time` is the only moment it names, exactly as it always was.
+// A hit window that OPENS, STAYS OPEN and CLOSES is a NOTIFY STATE, and it is layered on top of this
+// record rather than folded into it: see OcAnimation::notifyDurations and notifyDuration() below.
+// It stayed unbuilt for a long time on purpose -- the runtime needs real open/close tracking (a
+// clock that remembers what is open, not a second point in time) before a duration means anything,
+// and a half-built version that sometimes fails to close is a hit window that never shuts, which is
+// worse than not having the feature. AnimSystem now carries that tracking; see its own comment on
+// the four ways an open state leaks and how each is closed.
 struct OcNotify {
     f32 time = 0.0f;      // seconds from the clip start
     std::string name;     // the event name fired; opaque here, exactly as OcAnimation::skeletonRef is
@@ -156,11 +157,38 @@ struct OcNotify {
 // SCALAR, NOT A VECTOR, and that is a real limit rather than an oversight. Unreal's curves are
 // float curves too, and every vector case decomposes into named components without needing the
 // format to grow a width field that every reader must then branch on.
+//
+// CUBICSPLINE USES REAL TANGENTS when the curve carries them -- see inTangents/outTangents below.
+// A curve authored before tonight, or one whose tangent arrays do not line up with its keys, has
+// none: sampleCurve (aver/anim/AnimSampler.hpp) reads it as LINEAR in that case, exactly as every
+// CubicSpline-tagged curve always has, rather than inventing a flat-tangent Hermite for data nobody
+// authored. That is what makes the format change purely additive -- see inTangents' own comment.
 struct OcCurve {
     std::string name;            // what a script asks for; opaque here
-    OcInterp interp = OcInterp::Linear;   // Step holds; CubicSpline is NOT supported -- see below
+    OcInterp interp = OcInterp::Linear;   // Step holds; CubicSpline uses tangents below when present
     std::vector<f32> times;      // seconds from the clip start, ascending
     std::vector<f32> values;     // one per time
+
+    // Per-key tangents for CubicSpline interpolation -- PARALLEL to times/values (index i is the
+    // in/out tangent pair for keys[i]), NOT a widening of the CRVE layout itself. A widened CRVE
+    // would change the byte layout -- and so the rewrite -- of every clip that already has a curve,
+    // Linear or Step, tangents or not; a separate optional chunk (CTAN, see OcAnim.cpp) leaves an
+    // untouched curve's bytes alone.
+    //
+    // EMPTY, NOT ZERO-FILLED, is how a curve says "nobody authored a tangent here" -- exactly the
+    // convention OcAnimation::notifyDurations uses and for the same reason: the CTAN chunk is
+    // omitted whenever every tangent in the clip is zero, checked BY VALUE rather than by these
+    // vectors being empty, so a zero-filled tangent array and an absent one write the identical
+    // file. See writeOcAnim's CTAN block for the full rule, including why a curve with no authored
+    // tangents of its own can still come back from disk with a dense (zero-filled) pair once ANOTHER
+    // curve in the same clip needs the chunk -- the chunk's granularity is the whole clip, matching
+    // NTFD's.
+    //
+    // Either both are empty or both are exactly times.size() long -- writeOcAnim refuses a curve
+    // where only one side was set, or where either is a different length than its keys, or carries
+    // a non-finite value, the same three refusals NTFD applies to notifyDurations.
+    std::vector<f32> inTangents;
+    std::vector<f32> outTangents;
 };
 
 struct OcAnimation {
@@ -176,6 +204,25 @@ struct OcAnimation {
     // every writer can be trusted to have done so. Empty for every clip written before they
     // existed, which is every clip: the NOTF chunk is optional and its absence is not an error.
     std::vector<OcNotify> notifies;
+
+    // How long each notify STAYS OPEN, in seconds -- one entry per notify, in the SAME order as
+    // `notifies` (entry i belongs to notifies[i]). 0 means that notify is instantaneous, which is
+    // every entry in every clip written before notify states existed.
+    //
+    // EMPTY, NOT ZERO-FILLED, is how a clip says "nothing here is a state" -- and that distinction is
+    // the whole reason this is a separate optional array rather than a field added to OcNotify. A
+    // clip with a plain notify and no state has an EMPTY vector, writes NO chunk for it (see the
+    // NTFD chunk in OcAnim.cpp), and rewrites byte-identically to a file saved before states existed.
+    // Widening OcNotify itself would have changed NOTF's own byte layout for every clip that has ever
+    // had a notify, state or not.
+    //
+    // When non-empty its size equals notifies.size(); see writeOcAnim, which refuses to write a
+    // mismatched pair rather than truncating or padding one of them.
+    std::vector<f32> notifyDurations;
+
+    // The duration of notifies[index], in seconds -- 0.0 (instant) when notifyDurations is empty or
+    // too short to cover it, which includes every out-of-range index a stale caller might hold.
+    f32 notifyDuration(u32 index) const;
 
     // Named float curves. Optional in the same way notifies are: a clip with none emits no chunk,
     // so a file written now is byte-identical to one written before curves existed.

@@ -150,6 +150,15 @@ f32 sampleCurve(const fmt::OcCurve& c, f32 seconds, f32 fallback) {
     // an infinity; holding the earlier value makes the jump land exactly at the later key.
     if (span <= 1e-9f) return c.values[lo];
     const f32 a = (seconds - c.times[lo]) / span;
+
+    // CUBICSPLINE, WITH REAL TANGENTS -- reuses the same hermite() helper the bone-track sampler
+    // above already uses (and AnimTest already checks), rather than a second derivation. Only taken
+    // when the curve's own tangent arrays line up 1:1 with its keys; every curve with no CTAN chunk
+    // -- every curve saved before tonight -- falls through to the LINEAR return below instead, which
+    // is what keeps an existing clip sampling EXACTLY as it did before this feature existed.
+    if (c.interp == fmt::OcInterp::CubicSpline && c.inTangents.size() == n && c.outTangents.size() == n)
+        return hermite(c.values[lo], c.outTangents[lo], c.values[hi], c.inTangents[hi], a, span);
+
     return c.values[lo] + (c.values[hi] - c.values[lo]) * a;
 }
 

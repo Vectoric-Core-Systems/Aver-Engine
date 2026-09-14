@@ -1,6 +1,8 @@
 // Brush edits to a landscape section's heights: see Sculpt.hpp.
 #include "aver/landscape/Sculpt.hpp"
 
+#include "aver/landscape/TerrainNoise.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <vector>
@@ -102,6 +104,53 @@ BrushRect applyBrush(fmt::OcLandData& d, const BrushParams& p, f32 amount) {
                     const f32 avg = (snap(xm, y) + snap(xp, y) + snap(x, ym) + snap(x, yp) + snap(x, y)) / 5.0f;
                     const f32 rate = std::min(1.0f, w * 4.0f);
                     h = snap(x, y) + (avg - snap(x, y)) * rate;
+                    break;
+                }
+                case BrushMode::Ramp: {
+                    // Project this sample onto the axis from rampStartCm to the CURRENT centerCm and
+                    // interpolate HEIGHT along that projection: t=0 at the start, t=1 at the current
+                    // brush position, clamped beyond either end so the ramp does not extrapolate past
+                    // its own endpoints. The radial weight `w` computed above (falloff + amount, from
+                    // distance to centerCm) is UNCHANGED -- it still decides how localized to the
+                    // brush footprint the edit is and how fast it converges, exactly the Flatten
+                    // idiom, only the target height now varies along one axis instead of being the
+                    // same constant everywhere.
+                    const f32 ax = p.centerCm[0] - p.rampStartCm[0];
+                    const f32 ay = p.centerCm[1] - p.rampStartCm[1];
+                    const f32 axisLenSq = ax * ax + ay * ay;
+                    // Named axisT, not t: the shared falloff block above already owns a `t`
+                    // (distance / radius) that every brush mode uses, and shadowing it here was a
+                    // real /W4 warning even though the two never mix.
+                    f32 axisT = 0.0f;
+                    if (axisLenSq > 1e-6f) {
+                        axisT = ((wx - p.rampStartCm[0]) * ax + (wy - p.rampStartCm[1]) * ay) / axisLenSq;
+                        axisT = std::clamp(axisT, 0.0f, 1.0f);
+                    }
+                    // lerp(rampStartHeightCm, rampStartHeightCm + strength, axisT): `strength` IS the
+                    // ramp's total rise, per BrushParams::rampStartCm's own comment.
+                    const f32 target = p.rampStartHeightCm + p.strength * axisT;
+                    const f32 rate = std::min(1.0f, w * 4.0f);
+                    h += (target - h) * rate;
+                    break;
+                }
+                case BrushMode::Noise: {
+                    // Deterministic per-stroke noise: TerrainNoise.hpp's ridged fBm is already a PURE
+                    // function of world (x, y) plus a seed (no internal state, no clock read), which
+                    // is exactly what "same stroke twice, identical result" needs -- reused rather
+                    // than inventing a second noise function. amplitudeCm is fixed at 1.0 here (NOT
+                    // p.strength) so the raw sample normalises to [-1, 1]; `w` (falloff * amount)
+                    // then applies p.strength as the bound, the same way every other mode turns
+                    // strength into a per-tick delta -- so Noise is bounded by p.strength exactly
+                    // like Raise/Lower are, not by TerrainNoise's own unrelated amplitude knob.
+                    // featureSizeCm scales with the BRUSH radius, not a fixed world size, so the
+                    // pattern stays "a few ripples across the brush" (localized) at any brush size.
+                    TerrainNoiseParams np;
+                    np.seed = p.noiseSeed;
+                    np.amplitudeCm = 1.0f;
+                    np.featureSizeCm = std::max(p.radiusCm * 0.4f, 1.0f);
+                    np.octaves = 4;
+                    const f32 n = terrainHeightAt(wx, wy, np);
+                    h += p.strength * n * w;
                     break;
                 }
             }

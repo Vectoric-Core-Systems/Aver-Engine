@@ -91,6 +91,40 @@ static std::string triangleJson(usize posOff, usize posLen, usize idxOff, usize 
       + "]}";
 }
 
+// The same triangle, plus whatever materials/images/textures the caller wants spliced in. The mesh's
+// primitive is given material 0 so the slot naming is exercised too.
+//
+// THE IMAGE BYTES NEED NOT BE A REAL PNG. The importer copies an image's bytes verbatim and never
+// decodes them, so a recognisable seven-byte pattern is a BETTER fixture than a real file: any
+// corruption is visible in the assertion rather than hidden inside a compressor.
+static std::string materialJson(usize posOff, usize posLen, usize idxOff, usize idxLen,
+                                const std::string& b64data, const std::string& extraTopLevel) {
+    return std::string("{")
+      + "\"asset\":{\"version\":\"2.0\"},"
+      + "\"scene\":0,"
+      + "\"scenes\":[{\"nodes\":[0]}],"
+      + "\"nodes\":[{\"mesh\":0}],"
+      + "\"meshes\":[{\"name\":\"Tri\",\"primitives\":[{\"attributes\":{\"POSITION\":0},"
+        "\"indices\":1,\"material\":0}]}],"
+      + "\"buffers\":[{\"uri\":\"data:application/octet-stream;base64," + b64data + "\","
+        "\"byteLength\":" + std::to_string(posLen + idxLen + 8) + "}],"
+      + "\"bufferViews\":["
+        + "{\"buffer\":0,\"byteOffset\":" + std::to_string(posOff) + ",\"byteLength\":" + std::to_string(posLen) + "},"
+        + "{\"buffer\":0,\"byteOffset\":" + std::to_string(idxOff) + ",\"byteLength\":" + std::to_string(idxLen) + "}"
+      + "],"
+      + "\"accessors\":["
+        + "{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"},"
+        + "{\"bufferView\":1,\"componentType\":5123,\"count\":3,\"type\":\"SCALAR\"}"
+      + "]," + extraTopLevel + "}";
+}
+
+// True when any unsupported note contains `needle` -- the notes are prose, so this asks whether the
+// importer SAID the thing, not whether it said it in one exact form.
+static bool noted(const fmt::GltfImportResult& r, const std::string& needle) {
+    for (const std::string& s : r.unsupported) if (s.find(needle) != std::string::npos) return true;
+    return false;
+}
+
 // Wraps JSON and binary into a GLB container.
 static std::vector<u8> makeGlb(const std::string& json, const std::vector<u8>& bin) {
     std::string j = json;
@@ -187,8 +221,20 @@ int main() {
         check(res.meshes[0].indices[1] == 1 && res.meshes[0].indices[2] == 2, "winding untouched when not converting");
     }
 
-    AVER_INFO("=== node transforms are applied ===");
+    AVER_INFO("=== a node's TRANSLATION becomes a placement, not geometry ===");
     {
+        // THIS TEST USED TO ASSERT THE OPPOSITE, and asserting it is what kept the bug alive: it
+        // checked that a node translated by 2 m produced a VERTEX at 200 cm, i.e. that the
+        // translation had been welded into the geometry. That is exactly what put every imported
+        // mesh's pivot metres away from itself -- measured on Intel Sponza as 115 of 115 meshes
+        // displaced, median 10.7 m, and an arch piece reporting a 14.2 m bounding radius for
+        // geometry a few metres across. The gizmo, the bounds, culling and F-focus all read that
+        // gap as real.
+        //
+        // The contract now: rotation and scale stay baked (they are what the mesh looks like), the
+        // translation comes out as a GltfPlacement. Both halves are asserted, because either alone
+        // can pass while the feature is broken -- geometry at the origin with no placement has
+        // simply lost the scene, and a placement whose geometry is still displaced double-counts.
         std::string json = triangleJson(tri.posOff, tri.posLen, tri.idxOff, tri.idxLen, true, b64(tri.bin));
         const std::string from = "\"nodes\":[{\"mesh\":0}]";
         const std::string to   = "\"nodes\":[{\"mesh\":0,\"translation\":[2,0,0]}]";
@@ -199,7 +245,39 @@ int main() {
         fmt::GltfImportResult res; std::string why;
         check(fmt::importGltfFromMemory(reinterpret_cast<const u8*>(json.data()), json.size(), "", res, {}, &why),
               "imports with a node translation: " + why);
-        checkNear(res.meshes[0].positions[1], 200.0f, 1e-2f, "node translation lands on engine +Y in centimetres");
+
+        // The vertex is where it would have been with no node transform at all: glTF +X (the
+        // triangle's own second vertex) still maps to engine +Y at 100 cm, NOT 300 cm.
+        checkNear(res.meshes[0].positions[4], 100.0f, 1e-2f,
+                  "the node translation is NOT welded into the vertex");
+        checkNear(res.meshes[0].positions[1], 0.0f, 1e-2f,
+                  "and the first vertex stays at the mesh's own origin");
+
+        // ...and the 2 m the geometry no longer carries is in the placement instead, through the
+        // same axis/unit conversion a position gets: glTF +X -> engine +Y, metres -> centimetres.
+        check(res.placements.size() == 1, "one placement, for the one node that instances a mesh");
+        if (res.placements.size() == 1) {
+            check(res.placements[0].meshIndex == 0, "the placement names mesh 0");
+            checkNear(res.placements[0].position.y, 200.0f, 1e-2f,
+                      "glTF +X translation of 2 m becomes engine +Y at 200 cm in the placement");
+            checkNear(res.placements[0].position.x, 0.0f, 1e-2f, "nothing on engine X");
+            checkNear(res.placements[0].position.z, 0.0f, 1e-2f, "nothing on engine Z");
+        }
+    }
+
+    AVER_INFO("=== a node at the origin produces a placement at the origin ===");
+    {
+        // The ordinary single-object export. A placement still exists -- one per node that
+        // instances a mesh -- it is simply at zero, so a caller can treat placements uniformly
+        // rather than special-casing "no transform".
+        const std::string json = triangleJson(tri.posOff, tri.posLen, tri.idxOff, tri.idxLen, true, b64(tri.bin));
+        fmt::GltfImportResult res; std::string why;
+        check(fmt::importGltfFromMemory(reinterpret_cast<const u8*>(json.data()), json.size(), "", res, {}, &why),
+              "imports the untransformed fixture: " + why);
+        check(res.placements.size() == 1, "an untransformed node still yields one placement");
+        if (res.placements.size() == 1)
+            checkNear(res.placements[0].position.x + res.placements[0].position.y +
+                      res.placements[0].position.z, 0.0f, 1e-4f, "and it sits at the origin");
     }
 
     AVER_INFO("=== generated normals face outward ===");
@@ -851,6 +929,151 @@ int main() {
             check(res.skeletons[0].bones.size() == 2 && res.skeletons[1].bones.size() == 1,
                   "each mesh kept its own skeleton's own, different, bone count");
         }
+    }
+
+    // ---- MATERIALS AND IMAGES ----------------------------------------------------------------
+    // Everything below reads what a glTF says about a SURFACE. Before this existed the importer
+    // answered the whole subject with two notes ("material definitions", "textures") and dropped it.
+    {
+        const Tri tri = makeTriangleBuffer();
+
+        // THE DEFAULTS, WHICH ARE THE EASIEST THING TO GET WRONG. A material that states none of
+        // these is, by the glTF spec, a fully rough METAL: metallicFactor and roughnessFactor are
+        // both 1.0. JsonValue::asFloat's own fallback is 0.0f, so taking it yields a plausible
+        // dielectric that is wrong on every asset relying on the spec -- and wrong in a way that
+        // reads as a lighting bug rather than an import bug.
+        const std::string json = materialJson(tri.posOff, tri.posLen, tri.idxOff, tri.idxLen, b64(tri.bin),
+            "\"materials\":[{\"name\":\"Bare\"}]");
+        fmt::GltfImportResult res; std::string why;
+        check(fmt::importGltfFromMemory(reinterpret_cast<const u8*>(json.data()), json.size(), "", res, {}, &why),
+              "a material-only glTF imports: " + why);
+        check(res.materials.size() == 1, "one material came across");
+        if (res.materials.size() == 1) {
+            const fmt::GltfMaterial& m = res.materials[0];
+            check(m.name == "Bare", "the material's name survives");
+            checkNear(m.metallicFactor,  1.0f, 1e-6f, "an ABSENT metallicFactor is 1.0, the spec default, NOT zero");
+            checkNear(m.roughnessFactor, 1.0f, 1e-6f, "an ABSENT roughnessFactor is 1.0, not zero");
+            checkNear(m.baseColorFactor[0], 1.0f, 1e-6f, "an absent baseColorFactor is white, not black");
+            checkNear(m.baseColorFactor[3], 1.0f, 1e-6f, "and opaque, not transparent");
+            checkNear(m.emissiveFactor[0], 0.0f, 1e-6f, "an absent emissiveFactor is black");
+            checkNear(m.normalScale, 1.0f, 1e-6f, "an absent normalScale is 1.0");
+            checkNear(m.occlusionStrength, 1.0f, 1e-6f, "an absent occlusionStrength is 1.0");
+            checkNear(m.alphaCutoff, 0.5f, 1e-6f, "an absent alphaCutoff is 0.5");
+            check(m.alphaMode == "OPAQUE", "an absent alphaMode is OPAQUE");
+            check(!m.doubleSided, "an absent doubleSided is false");
+        }
+    }
+    {
+        // THE SAME DEFAULTS, BUT WITH pbrMetallicRoughness PRESENT AND THE FACTORS MISSING FROM IT.
+        // This is the shape that actually occurs -- both Kenney materials in this tree state
+        // metallicFactor and omit roughnessFactor -- and it is a DIFFERENT code path from the block
+        // above, which has no pbrMetallicRoughness at all and so never reads a factor. Written after
+        // a falsification proved the earlier case could not catch a wrong fallback: breaking the
+        // default left that test green because the line never ran.
+        const Tri tri = makeTriangleBuffer();
+        const std::string json = materialJson(tri.posOff, tri.posLen, tri.idxOff, tri.idxLen, b64(tri.bin),
+            "\"materials\":[{\"name\":\"HalfStated\",\"pbrMetallicRoughness\":{\"metallicFactor\":0.0}}]");
+        fmt::GltfImportResult res; std::string why;
+        check(fmt::importGltfFromMemory(reinterpret_cast<const u8*>(json.data()), json.size(), "", res, {}, &why),
+              "a partly stated pbrMetallicRoughness imports: " + why);
+        if (res.materials.size() == 1) {
+            checkNear(res.materials[0].metallicFactor, 0.0f, 1e-6f,
+                      "a STATED metallicFactor of 0 is kept -- not confused with absence");
+            checkNear(res.materials[0].roughnessFactor, 1.0f, 1e-6f,
+                      "an absent roughnessFactor BESIDE a stated sibling is still 1.0, the spec default");
+            checkNear(res.materials[0].baseColorFactor[0], 1.0f, 1e-6f,
+                      "and an absent baseColorFactor inside a present pbr block is still white");
+        }
+    }
+    {
+        // STATED VALUES SURVIVE, including the ones that are also the defaults' neighbours.
+        const Tri tri = makeTriangleBuffer();
+        const std::string json = materialJson(tri.posOff, tri.posLen, tri.idxOff, tri.idxLen, b64(tri.bin),
+            "\"materials\":[{\"name\":\"Stated\",\"pbrMetallicRoughness\":{"
+              "\"baseColorFactor\":[0.8,0.6,0.4,0.5],\"metallicFactor\":0.25,\"roughnessFactor\":0.7},"
+              "\"emissiveFactor\":[0.1,0,0.2],\"alphaMode\":\"MASK\",\"alphaCutoff\":0.25,"
+              "\"doubleSided\":true}]");
+        fmt::GltfImportResult res; std::string why;
+        check(fmt::importGltfFromMemory(reinterpret_cast<const u8*>(json.data()), json.size(), "", res, {}, &why),
+              "a fully stated material imports: " + why);
+        if (res.materials.size() == 1) {
+            const fmt::GltfMaterial& m = res.materials[0];
+            checkNear(m.baseColorFactor[0], 0.8f, 1e-6f, "baseColorFactor r");
+            checkNear(m.baseColorFactor[3], 0.5f, 1e-6f, "baseColorFactor a -- the alpha channel is not dropped");
+            checkNear(m.metallicFactor,  0.25f, 1e-6f, "metallicFactor survives");
+            checkNear(m.roughnessFactor, 0.70f, 1e-6f, "roughnessFactor survives");
+            checkNear(m.emissiveFactor[2], 0.2f, 1e-6f, "emissiveFactor b");
+            checkNear(m.alphaCutoff, 0.25f, 1e-6f, "a stated alphaCutoff survives");
+            check(m.alphaMode == "MASK", "alphaMode survives verbatim");
+            check(m.doubleSided, "doubleSided survives");
+        }
+    }
+    {
+        // AN IMAGE THROUGH A data: URI, and its bytes must arrive unchanged. Nothing decodes or
+        // re-encodes an image: a round trip through a compressor would change bytes the source is
+        // entitled to get back, and would cost quality on a JPEG for nothing.
+        const std::vector<u8> want = {0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03};
+        const Tri tri = makeTriangleBuffer();
+        const std::string json = materialJson(tri.posOff, tri.posLen, tri.idxOff, tri.idxLen, b64(tri.bin),
+            "\"materials\":[{\"name\":\"Tex\",\"pbrMetallicRoughness\":{"
+              "\"baseColorTexture\":{\"index\":0}}}],"
+            "\"textures\":[{\"source\":0}],"
+            "\"images\":[{\"name\":\"pat\",\"mimeType\":\"image/png\",\"uri\":\"data:image/png;base64," + b64(want) + "\"}]");
+        fmt::GltfImportResult res; std::string why;
+        check(fmt::importGltfFromMemory(reinterpret_cast<const u8*>(json.data()), json.size(), "", res, {}, &why),
+              "a data: URI image imports: " + why);
+        check(res.images.size() == 1 && res.images[0].ok, "the image was read");
+        if (res.images.size() == 1) {
+            check(res.images[0].bytes == want, "its bytes are BYTE-IDENTICAL to the source -- nothing re-encoded");
+            check(res.images[0].ext == ".png", "the mimeType decided the extension");
+        }
+        check(res.materials.size() == 1 && res.materials[0].baseColorTex.imageIndex == 0,
+              "the material -> textureInfo -> textures[] -> images[] chain resolved to image 0");
+    }
+    {
+        // THE CASE BOTH REAL ASSETS IN THIS TREE HIT: a file naming a texture it does not ship.
+        // The slot must be left UNBOUND and the path must be NAMED -- a material carrying a texture
+        // reference to a file that is not there looks like a renderer fault, not an import one.
+        const Tri tri = makeTriangleBuffer();
+        const std::string json = materialJson(tri.posOff, tri.posLen, tri.idxOff, tri.idxLen, b64(tri.bin),
+            "\"materials\":[{\"name\":\"Dangling\",\"pbrMetallicRoughness\":{"
+              "\"baseColorTexture\":{\"index\":0}}}],"
+            "\"textures\":[{\"source\":0}],"
+            "\"images\":[{\"uri\":\"Textures/nosuch.png\"}]");
+        fmt::GltfImportResult res; std::string why;
+        check(fmt::importGltfFromMemory(reinterpret_cast<const u8*>(json.data()), json.size(), "", res, {}, &why),
+              "a dangling image reference does not fail the whole import: " + why);
+        check(res.images.size() == 1 && !res.images[0].ok, "the image is marked unread");
+        check(res.materials.size() == 1 && res.materials[0].baseColorTex.imageIndex < 0,
+              "the texture slot is left UNBOUND rather than pointed at a file that is not there");
+        check(noted(res, "nosuch.png"), "and the missing path is named in the notes, not merely counted");
+        if (res.materials.size() == 1)
+            checkNear(res.materials[0].metallicFactor, 1.0f, 1e-6f,
+                      "the rest of the material still imported -- one bad image is not a lost material");
+    }
+    {
+        // A SECOND UV SET HAS NOWHERE TO GO (OcMeshData carries one), and an unknown extension is a
+        // missing feature, not a detail. Both are said by name rather than dropped.
+        const Tri tri = makeTriangleBuffer();
+        const std::vector<u8> px = {0x11, 0x22};
+        const std::string json = materialJson(tri.posOff, tri.posLen, tri.idxOff, tri.idxLen, b64(tri.bin),
+            "\"materials\":[{\"name\":\"Odd\",\"pbrMetallicRoughness\":{"
+              "\"baseColorTexture\":{\"index\":0,\"texCoord\":1,"
+                "\"extensions\":{\"KHR_texture_transform\":{}}}},"
+              "\"extensions\":{\"KHR_materials_transmission\":{}}}],"
+            "\"textures\":[{\"source\":0}],"
+            "\"images\":[{\"name\":\"p\",\"mimeType\":\"image/png\",\"uri\":\"data:image/png;base64," + b64(px) + "\"}]");
+        fmt::GltfImportResult res; std::string why;
+        check(fmt::importGltfFromMemory(reinterpret_cast<const u8*>(json.data()), json.size(), "", res, {}, &why),
+              "a material with an unknown extension still imports: " + why);
+        check(noted(res, "KHR_materials_transmission"), "the MATERIAL's extension is named");
+        check(noted(res, "KHR_texture_transform"),
+              "and so is the one on the textureInfo -- where both real Kenney assets actually put it");
+        check(noted(res, "texCoord 1"), "a second UV set is reported rather than silently sampled as uv0");
+        check(res.materials.size() == 1 && res.materials[0].baseColorTex.texCoord == 0,
+              "and the slot falls back to uv0, the only set that exists");
+        check(res.materials.size() == 1 && res.materials[0].baseColorTex.imageIndex == 0,
+              "the texture still binds -- an unsupported extension does not cost the texture");
     }
 
     if (g_failures == 0) AVER_INFO("=== all glTF import tests passed ===");

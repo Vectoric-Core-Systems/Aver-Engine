@@ -1,6 +1,7 @@
 // Sweeps a project's .cs files and reports what the actor editor would make of each one.
 // Diagnostic only: it asserts nothing.
 #include "aver/formats/ActorScript.hpp"
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 
 #include <filesystem>
@@ -11,7 +12,7 @@ using namespace aver;
 
 // Parses every script under the directory named on the command line and prints a verdict per file.
 int main(int argc, char** argv) {
-    if (argc < 2) { AVER_ERROR("usage: ActorSweep <scripts-dir>"); return 2; }
+    if (argc < 2) { AVER_ERROR("usage: ActorSweep <scripts-dir>"); return exitCode(ExitCode::Usage); }
     namespace fs = std::filesystem;
     std::error_code ec;
 
@@ -56,5 +57,5 @@ int main(int argc, char** argv) {
         }
     }
     AVER_INFO("=== {} openable, {} skipped, {} declined ===", openable, skipped, declined);
-    return 0;
+    return exitCode(ExitCode::Ok);
 }

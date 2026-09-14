@@ -60,14 +60,14 @@ public static class Pbr
     [DllImport(Lib)] private static extern IntPtr aver_pbr_texture_slot_name(int slot);
     [DllImport(Lib)] private static extern IntPtr aver_pbr_alpha_mode_name(int mode);
 
-    [DllImport(Lib)] private static extern int aver_pbr_create([MarshalAs(UnmanagedType.LPStr)] string name);
+    [DllImport(Lib)] private static extern int aver_pbr_create([MarshalAs(UnmanagedType.LPUTF8Str)] string name);
     [DllImport(Lib)] private static extern int aver_pbr_destroy(int m);
     [DllImport(Lib)] private static extern int aver_pbr_valid(int m);
     [DllImport(Lib)] private static extern int aver_pbr_count();
     [DllImport(Lib)] private static extern int aver_pbr_at(int index);
 
     [DllImport(Lib)] private static extern IntPtr aver_pbr_get_name(int m);
-    [DllImport(Lib)] private static extern int aver_pbr_set_name(int m, [MarshalAs(UnmanagedType.LPStr)] string name);
+    [DllImport(Lib)] private static extern int aver_pbr_set_name(int m, [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
 
     [DllImport(Lib)] private static extern int aver_pbr_get_base_color_factor(int m, float[] out4);
     [DllImport(Lib)] private static extern int aver_pbr_set_base_color_factor(int m, float r, float g, float b, float a);
@@ -81,6 +81,10 @@ public static class Pbr
     [DllImport(Lib)] private static extern int aver_pbr_set_normal_scale(int m, float v);
     [DllImport(Lib)] private static extern float aver_pbr_get_occlusion_strength(int m);
     [DllImport(Lib)] private static extern int aver_pbr_set_occlusion_strength(int m, float v);
+    [DllImport(Lib)] private static extern float aver_pbr_get_reflectance(int m);
+    [DllImport(Lib)] private static extern int aver_pbr_set_reflectance(int m, float v);
+    [DllImport(Lib)] private static extern float aver_pbr_get_f90(int m);
+    [DllImport(Lib)] private static extern int aver_pbr_set_f90(int m, float v);
     [DllImport(Lib)] private static extern float aver_pbr_get_ior(int m);
     [DllImport(Lib)] private static extern int aver_pbr_set_ior(int m, float v);
     [DllImport(Lib)] private static extern float aver_pbr_get_transmission(int m);
@@ -111,7 +115,7 @@ public static class Pbr
     [DllImport(Lib)] private static extern IntPtr aver_pbr_uv_mode_name(int mode);
 
     [DllImport(Lib)] private static extern IntPtr aver_pbr_get_texture_path(int m, int slot);
-    [DllImport(Lib)] private static extern int aver_pbr_set_texture_path(int m, int slot, [MarshalAs(UnmanagedType.LPStr)] string path);
+    [DllImport(Lib)] private static extern int aver_pbr_set_texture_path(int m, int slot, [MarshalAs(UnmanagedType.LPUTF8Str)] string path);
     [DllImport(Lib)] private static extern long aver_pbr_get_texture_id(int m, int slot);
     [DllImport(Lib)] private static extern int aver_pbr_set_texture_id(int m, int slot, long id);
     [DllImport(Lib)] private static extern int aver_pbr_clear_texture(int m, int slot);
@@ -119,7 +123,13 @@ public static class Pbr
     [DllImport(Lib)] private static extern int aver_pbr_consume_dirty(int m);
 
     /// <summary>Marshals a native string pointer, or "?" when it is null.</summary>
-    private static string Str(IntPtr p) => Marshal.PtrToStringAnsi(p) ?? "?";
+    // UTF-8, NOT ANSI. The ABI is explicit -- scripting_abi.h: "Strings are UTF-8 const char*
+    // both ways" -- and every other binding in this tree already decodes that way
+    // (Aver.Framework/Native.cs, Aver.Scene/Native.cs). PtrToStringAnsi decodes through the
+    // OS ANSI codepage instead, so anything non-ASCII came back mangled. Most of what these
+    // return is an ASCII name table where the two agree by luck; aver_pbr_get_texture_path is
+    // not -- it carries a path the user typed into a free-text field.
+    private static string Str(IntPtr p) => Marshal.PtrToStringUTF8(p) ?? "?";
 
     /// <summary>---- feature introspection ----</summary>
     public static int FeatureCount => aver_pbr_feature_count();
@@ -211,6 +221,34 @@ public static class Pbr
         {
             get => aver_pbr_get_occlusion_strength(Handle);
             set => aver_pbr_set_occlusion_strength(Handle, value);
+        }
+
+        /// <summary>
+        /// Normal-incidence reflectance of the DIELECTRIC substrate, in [0,1]. 0.04 is the default
+        /// and is what almost every non-metal actually measures; raising it is how a surface reads
+        /// as gemstone or wet rather than as plastic.
+        /// </summary>
+        /// <remarks>
+        /// This is the F0 the multiple-scattering compensation uses for the diffuse lobe, so it
+        /// changes how much energy reaches diffuse as well as how bright the highlight is -- see
+        /// averIndirectTerms in material_prelude.hlsl. It has nothing to do with Metallic: a metal
+        /// takes its F0 from the base colour instead.
+        /// </remarks>
+        public float Reflectance
+        {
+            get => aver_pbr_get_reflectance(Handle);
+            set => aver_pbr_set_reflectance(Handle, value);
+        }
+
+        /// <summary>
+        /// Reflectance at grazing incidence, in [0,1]. 1.0 is the physical answer for a clean
+        /// surface and is the default; lowering it is a stylistic choice that softens the rim
+        /// every Fresnel term produces.
+        /// </summary>
+        public float F90
+        {
+            get => aver_pbr_get_f90(Handle);
+            set => aver_pbr_set_f90(Handle, value);
         }
 
         /// <summary>

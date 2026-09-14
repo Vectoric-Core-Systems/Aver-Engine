@@ -218,7 +218,8 @@ void SkinDrawTest::report() {
               raw(box.c[kPhaseAwayRtOn][0]), raw(box.c[kPhaseAwayRtOn][1]), raw(box.c[kPhaseAwayRtOn][2]),
               boxDelta);
 
-    if (boxDelta > kMinDelta)
+    const bool rasterOk = boxDelta > kMinDelta;
+    if (rasterOk)
         AVER_INFO("[Skin] draw test RASTER PASS: the same pixel changed when only the POSE changed, "
                   "so the rasteriser read the skinned vertex buffer");
     else
@@ -232,6 +233,10 @@ void SkinDrawTest::report() {
         AVER_WARN("[Skin] draw test: ray tracing is unavailable here, so the acceleration-structure "
                   "half DID NOT RUN. The raster result above stands alone and says nothing about "
                   "whether a skinned mesh's bottom-level structure follows its vertices.");
+        // A HALF THAT COULD NOT RUN IS NOT A FAILURE. The machine has no ray tracing; reporting a
+        // failure here would tell a script the skinned draw path is broken when the test never
+        // looked at it. The raster half is what was actually measured, so it is what is reported.
+        passed_ = rasterOk;
         return;
     }
 
@@ -253,6 +258,8 @@ void SkinDrawTest::report() {
 
     if (checked == 0) {
         AVER_ERROR("[Skin] draw test STRUCTURE INCONCLUSIVE: no ground probe read back in both halves");
+        // INCONCLUSIVE IS NOT A PASS. Nothing was measured, so there is nothing to report green.
+        passed_ = false;
         return;
     }
     if (shadowed == 0) {
@@ -261,6 +268,9 @@ void SkinDrawTest::report() {
                   "the bottom-level structure followed the skinned vertices instead of keeping the "
                   "silhouette it was built with",
                   kMinDelta, worstDark, worstAt);
+        // BOTH HALVES, not just this one: a structure pass beside a raster failure is still a
+        // failing run, and reporting it green would hide exactly the case this test exists for.
+        passed_ = rasterOk;
         return;
     }
     AVER_ERROR("[Skin] draw test STRUCTURE FAIL: {} of {} ground pixels went DARKER when ray tracing "

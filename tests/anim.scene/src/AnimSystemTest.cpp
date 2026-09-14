@@ -396,6 +396,74 @@ int main() {
         sys.setNotifySink(nullptr, nullptr);
     }
 
+    // THE POSE-MODIFIER SEAM. Until this hook existed, AnimSystem::tick went sample -> blend ->
+    // poseToSkinning with nothing able to sit between the last two. A control rig is exactly an edit
+    // made in that gap, so what this checks is that the gap is real: the modifier is called with the
+    // right entity and a matching skeleton, its edit survives into the POSE, and -- the part that
+    // actually matters -- into the SKINNING MATRICES, which is what the renderer consumes. A hook
+    // that fires but whose work is then overwritten would pass a weaker test than this one.
+    AVER_INFO("a pose modifier is called between sampling and skinning, and its edit reaches both");
+    {
+        const scene::Entity e = w.create("modified");
+        auto* sm = static_cast<scene::CSkeletalMesh*>(w.addComponent(e, scene::kComponentSkeletalMesh));
+        auto* an = static_cast<scene::CAnimator*>(w.addComponent(e, scene::kComponentAnimator));
+        check(sm && an, "the entity has a rig and an animator");
+        if (sm && an) {
+            sm->skeleton = kSkelId;
+            an->clip = kClipId;
+
+            struct Seen { int calls = 0; scene::Entity ent{}; u32 bones = 0; };
+            static Seen seen;
+            seen = Seen{};
+
+            // Moves bone 1 a long way along +X, far enough that no sampled value could be mistaken
+            // for it.
+            sys.setPoseModifier([](scene::Entity ent, const fmt::OcSkeleton& sk, anim::Pose& p, void*) {
+                ++seen.calls;
+                seen.ent = ent;
+                seen.bones = static_cast<u32>(sk.bones.size());
+                if (p.local.size() > 1) p.local[1].position.x += 500.0f;
+            }, nullptr);
+
+            sys.tick(w, 0.1f);
+
+            check(seen.calls == 1, "it was called exactly once for the one animated entity, got " +
+                  std::to_string(seen.calls));
+            check(seen.ent == e, "with that entity");
+            check(seen.bones > 0 && seen.bones == static_cast<u32>(seen.bones),
+                  "and a skeleton with " + std::to_string(seen.bones) + " bone(s)");
+
+            const anim::Pose* p = sys.pose(e);
+            check(p != nullptr && p->local.size() > 1, "the system kept a pose");
+            if (p && p->local.size() > 1)
+                check(p->local[1].position.x > 400.0f,
+                      "the edit is IN the pose, x = " + std::to_string(p->local[1].position.x));
+
+            // The real claim: skinning is computed AFTER the modifier, so the renderer sees the rig.
+            u32 count = 0;
+            const Mat4* skin = sys.skinning(e, count);
+            check(skin != nullptr && count > 1, "and skinning matrices exist");
+            if (skin && count > 1) {
+                bool moved = false;
+                for (u32 i = 0; i < count; ++i)
+                    if (std::fabs(skin[i].m[3][0]) > 100.0f) moved = true;
+                check(moved,
+                      "and the modifier's 500 cm shove shows up in them -- if this fails the hook "
+                      "fires but poseToSkinning ran BEFORE it, which is the ordering bug that would "
+                      "make a control rig invisible");
+            }
+
+            // Removing it restores the old behaviour exactly.
+            sys.setPoseModifier(nullptr, nullptr);
+            check(!sys.hasPoseModifier(), "the modifier can be removed");
+            const int before = seen.calls;
+            sys.tick(w, 0.1f);
+            check(seen.calls == before, "and is not called again once removed");
+        }
+        w.destroy(e);
+        w.flush();
+    }
+
     std::filesystem::remove_all(g_dir, ec);
     AVER_INFO(g_failures ? "AnimSystemTest: {} FAILURES" : "AnimSystemTest: all checks passed ({})",
               g_failures);

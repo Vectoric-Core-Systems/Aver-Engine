@@ -4,7 +4,9 @@
 #include "aver/core/Log.hpp"
 #include "aver/scene/ComponentPool.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <utility>
 
 namespace aver::anim {
 
@@ -45,6 +47,26 @@ f32 wrapClipTime(const fmt::OcAnimation& c, f32 time, bool once) {
     return t;
 }
 
+// Did this step cross `point`? EXACTLY notifiesCrossed's own per-index formula (AnimSampler.cpp),
+// pulled out to one point instead of one clip's worth, because a notify STATE needs the identical
+// interval test twice -- once for where it opens, once for where it closes -- and a second,
+// slightly different reimplementation of "was this instant crossed" is exactly the kind of drift
+// that would land a hit window's Begin on a different frame than an instant notify sitting at the
+// same time would fire on. Covers forward, backward, both wrapped, and "the step swept the whole
+// clip" (unconditionally true there, matching notifiesCrossed's "one step, one firing").
+bool crossedPoint(f32 point, f32 dur, const ClipStep& s) {
+    const f32 t = dur > 0.0f ? std::min(std::max(point, 0.0f), dur) : 0.0f;
+    if (s.sweptWholeClip) return true;
+    if (s.forward) {
+        return (s.now >= s.prev)
+                 ? (s.inclusiveStart ? (t >= s.prev && t <= s.now) : (t > s.prev && t <= s.now))
+                 : ((t > s.prev && t <= dur) || (t >= 0.0f && t <= s.now));
+    }
+    return (s.now <= s.prev)
+             ? (s.inclusiveStart ? (t <= s.prev && t >= s.now) : (t < s.prev && t >= s.now))
+             : ((t < s.prev && t >= 0.0f) || (t >= s.now && t <= dur));
+}
+
 } // namespace
 
 const fmt::OcSkeleton* AnimSystem::skeleton(u64 objectId) {
@@ -62,13 +84,35 @@ const fmt::OcAnimation* AnimSystem::clip(u64 objectId) {
 }
 
 void AnimSystem::clear() {
+    // REENTRANCY GUARD. Firing "_End" below runs the host's notify sink, which is arbitrary code (a
+    // graph node, in practice) -- if it reacts by calling clear() again, that reentrant call must do
+    // nothing at all: proceeding would drop clips_ out from under THIS call's loop just below, which
+    // is still reading clock.asset -- a pointer into clips_ -- for every entry it has not reached yet.
+    if (clearing_) return;
+    clearing_ = true;
+
+    // LEAK (e): see the header comment on both this method and stepNotifyStates. A reload drops
+    // every clock outright, and any notify state still open under one (a hit window a graph opened,
+    // say) would vanish with no "_End" ever telling that graph it's over.
+    //
+    // MOVED OUT, not iterated in place. The guard above stops the notify sink from clearing clips_
+    // or skeletons_ mid-loop, but it does not stop it touching clocks_ ITSELF through some other
+    // call (a fresh animator ticked from inside the callback, say) -- and inserting into the map
+    // this loop is walking would be exactly the iterator invalidation tick()'s own pruning loop
+    // avoids by erasing as it goes. Emptying the member first means any such call lands on a clean,
+    // empty map instead of one mid-iteration.
+    auto closing = std::move(clocks_);
+    clocks_.clear();
+    for (auto& [e, clock] : closing) closeAllOpen(e, clock);
+
     skeletons_.clear();
     clips_.clear();
     posed_.clear();
-    // The clock history goes with the clips it refers to. Keeping it would have the first tick after
-    // a project reload compare against times measured in a world that no longer exists.
-    clocks_.clear();
+    // Reset AFTER the fires above, matching notifiesFired()'s own contract ("since the last
+    // clear()") -- the forced Ends just delivered belong to the epoch that ended, not the one
+    // starting.
     fired_ = 0;
+    clearing_ = false;
 }
 
 void AnimSystem::tick(scene::World& world, f32 dt) {
@@ -83,8 +127,13 @@ void AnimSystem::tick(scene::World& world, f32 dt) {
     // its entity would hand a recycled handle somebody else's playhead, and the first step measured
     // from it could fire a burst of notifies that nothing in the new entity's clip ever passed.
     for (auto it = clocks_.begin(); it != clocks_.end(); ) {
-        if (world.valid(it->first) && !world.destroyPending(it->first)) ++it;
-        else it = clocks_.erase(it);
+        if (world.valid(it->first) && !world.destroyPending(it->first)) { ++it; continue; }
+        // LEAK (c): THE ENTITY IS GONE, mid-window or not. If a notify state was open under it,
+        // this is the only place left to close it -- there is no later tick on a dead entity to ever
+        // reach the point that would have closed it normally, so a hit window (say, a collider a
+        // graph switched on at _Begin) would otherwise stay live for the rest of the session.
+        closeAllOpen(it->first, it->second);
+        it = clocks_.erase(it);
     }
 
     scene::ComponentPool* animators = world.pool(scene::kComponentAnimator);
@@ -144,6 +193,15 @@ void AnimSystem::tick(scene::World& world, f32 dt) {
                 p.pose = blended;
             }
         }
+        // THE POSE MODIFIER SEAM. Everything above produced a local-space pose from a clip; this is
+        // the one point at which anything else may edit it, and it was empty until a control rig
+        // needed it -- sampleAnimation wrote p.pose and the next line consumed it.
+        //
+        // AFTER the sample and blend so a rig LAYERS on animation rather than fighting it, and
+        // BEFORE poseToSkinning so what the rig did is what gets skinned. Put it the other side of
+        // that call and the modifier would be editing a pose nothing reads again.
+        if (poseMod_) poseMod_(e, *skel, p.pose, poseModUser_);
+
         poseToSkinning(*skel, p.pose, p.skin);
     }
 
@@ -197,12 +255,28 @@ void AnimSystem::stepNotifies(scene::Entity e, const scene::CAnimator& a, f32 st
     if (!c || c->duration <= 0.0f) {
         // No clip, or one with no length to travel: forget any history so a later clip starts clean
         // rather than measuring its first step from a stranger's playhead.
-        clocks_.erase(e);
+        //
+        // LEAK (b)'s twin. Losing the clip out from under an open window -- unset, failed to load,
+        // or trimmed to zero length -- is the same hazard as pointing the animator at a DIFFERENT
+        // clip below: whatever the OLD clip (still sitting in the clock we are about to erase) had
+        // open must close first, or nothing ever will.
+        auto it = clocks_.find(e);
+        if (it != clocks_.end()) {
+            closeAllOpen(e, it->second);
+            clocks_.erase(it);
+        }
         return;
     }
 
     NotifyClock& clock = clocks_[e];
-    if (clock.clip != a.clip) { clock = NotifyClock{}; clock.clip = a.clip; }
+    if (clock.clip != a.clip) {
+        // LEAK (b): THE CLIP CHANGED WHILE A WINDOW WAS OPEN. clock.asset and clock.open still name
+        // the OLD clip at this point -- the very last chance to read them before the reset below
+        // throws them away with everything else a new clip needs a clean slate for.
+        closeAllOpen(e, clock);
+        clock = NotifyClock{};
+        clock.clip = a.clip;
+    }
 
     const f32 wrapped = wrapClipTime(*c, a.time, (a.flags & scene::kAnimatorOnce) != 0);
     // Published for curveValue BEFORE any of the early-outs below. A paused animator still has a
@@ -210,12 +284,22 @@ void AnimSystem::stepNotifies(scene::Entity e, const scene::CAnimator& a, f32 st
     // curve readout even though it fires no notifies.
     clock.asset = c;
     clock.wrapped = wrapped;
+    // One open flag per notify THIS clip has. Resizing only on a mismatch means this runs (and
+    // zeroes fresh) exactly once per clip switch, right after the reset above -- never on an
+    // ordinary tick, which is what lets an open flag survive as long as `prev` does.
+    if (clock.open.size() != c->notifies.size()) clock.open.assign(c->notifies.size(), 0);
 
     // A PAUSED ANIMATOR FIRES NOTHING, and this is the deliberate answer to scrubbing. A script (or
     // an editor) that writes CAnimator.time while paused is INSPECTING the clip, and delivering a
     // gunshot every time somebody drags a slider is the behaviour nobody wants. The playhead is
     // still recorded, so resuming continues from where the scrub left it rather than replaying the
     // span that was skipped.
+    //
+    // A NOTIFY STATE ALREADY OPEN WHEN A SCRUB LANDS INSIDE IT is not retroactively opened here --
+    // only a CROSSING of its start opens one, exactly as only a crossing fires an instant notify, so
+    // resuming from a scrub that landed mid-window closes it normally on its way out without ever
+    // having announced it began. That is a missed Begin, not a leak: nothing is left open past when
+    // playback actually leaves the window, which is the failure this system exists to prevent.
     if (paused || step == 0.0f || !clock.started) {
         const bool first = !clock.started;
         clock.started = true;
@@ -230,6 +314,7 @@ void AnimSystem::stepNotifies(scene::Entity e, const scene::CAnimator& a, f32 st
             s.forward = step > 0.0f;
             s.inclusiveStart = true;
             deliver(e, *c, s);
+            stepNotifyStates(e, *c, s, clock);
         }
         return;
     }
@@ -241,6 +326,75 @@ void AnimSystem::stepNotifies(scene::Entity e, const scene::CAnimator& a, f32 st
     s.sweptWholeClip = std::fabs(step) >= c->duration;
     clock.prev = wrapped;
     deliver(e, *c, s);
+    stepNotifyStates(e, *c, s, clock);
+}
+
+// See the header comment for the four leak shapes and where each is actually closed; this covers
+// (a) and, for free, (d).
+void AnimSystem::stepNotifyStates(scene::Entity e, const fmt::OcAnimation& c, const ClipStep& s,
+                                   NotifyClock& clock) {
+    const f32 dur = c.duration;
+    for (u32 i = 0; i < static_cast<u32>(c.notifies.size()); ++i) {
+        const f32 durI = c.notifyDuration(i);
+        if (durI <= 0.0f) continue;   // an ordinary instant notify: deliver() already handled it
+
+        const f32 beginT = dur > 0.0f ? std::min(std::max(c.notifies[i].time, 0.0f), dur) : 0.0f;
+        // CLAMPED TO `dur`, NEVER PAST IT -- an author can still drag a marker near the end and give
+        // it a window that would otherwise overrun the clip, but the window cannot survive the loop
+        // seam (leak (d)). Clamping here is what makes crossedPoint's existing wrap-aware formula
+        // close it for free below: a wrapped step's tail segment always runs up to `dur`, so an end
+        // point sitting exactly AT `dur` is always inside that segment.
+        const f32 endT = dur > 0.0f ? std::min(beginT + durI, dur) : 0.0f;
+
+        // Forward playback ENTERS the window at its start and LEAVES at its end; played backward
+        // (a negative CAnimator.speed) that is reversed -- the observer reaches the end point first.
+        // "Begin"/"End" name what crossing means to whoever is watching, not which literal point was
+        // crossed.
+        const f32 entryPoint = s.forward ? beginT : endT;
+        const f32 exitPoint  = s.forward ? endT   : beginT;
+        const bool entryHit = crossedPoint(entryPoint, dur, s);
+        const bool exitHit  = crossedPoint(exitPoint, dur, s);
+
+        if (!clock.open[i]) {
+            if (!entryHit) continue;
+            clock.open[i] = 1;
+            fireState(e, c, i, true);
+            // BOTH IN ONE STEP: a short window (or a step that swept the whole clip, where
+            // crossedPoint answers true unconditionally for every point -- see its own comment) can
+            // cross both of its own ends inside a single tick. beginT <= endT always, so along
+            // whichever direction this step travelled, entry is never later than exit -- firing End
+            // right behind Begin here is what keeps a state from sitting open an extra tick with
+            // nothing left to close it until crossedPoint happens to answer true again.
+            if (exitHit) { clock.open[i] = 0; fireState(e, c, i, false); }
+        } else if (exitHit) {
+            clock.open[i] = 0;
+            fireState(e, c, i, false);
+        }
+    }
+}
+
+// Fires one "<Name>_Begin" or "<Name>_End" and counts it, exactly like deliver() does for an instant
+// notify -- including doing nothing at all when no sink is installed, so installing one later still
+// delivers no backlog for a state either.
+void AnimSystem::fireState(scene::Entity e, const fmt::OcAnimation& c, u32 index, bool begin) {
+    if (!notify_) return;
+    ++fired_;
+    // A COPY, unlike deliver()'s pointer straight into OcNotify::name: "<Name>_Begin" and
+    // "<Name>_End" exist nowhere in the loaded clip for a pointer to alias, so one has to be built.
+    // It outlives the call below, which is all AnimNotifyFn's contract asks for.
+    const std::string suffixed = c.notifies[index].name + (begin ? "_Begin" : "_End");
+    notify_(e, suffixed.c_str(), notifyUser_);
+}
+
+// The shared tail of leaks (b) and (c): both are "this clock's bookkeeping is about to be thrown
+// away", and the only difference between them is what throws it away (a new clip, or a dead entity).
+void AnimSystem::closeAllOpen(scene::Entity e, NotifyClock& clock) {
+    if (!clock.asset) return;   // never observed a clip: nothing could be open
+    for (u32 i = 0; i < static_cast<u32>(clock.open.size()); ++i) {
+        if (!clock.open[i]) continue;
+        clock.open[i] = 0;
+        fireState(e, *clock.asset, i, false);
+    }
 }
 
 void AnimSystem::deliver(scene::Entity e, const fmt::OcAnimation& c, const ClipStep& s) {
@@ -248,6 +402,12 @@ void AnimSystem::deliver(scene::Entity e, const fmt::OcAnimation& c, const ClipS
     crossed_.clear();
     notifiesCrossed(c, s, crossed_);
     for (const u32 i : crossed_) {
+        // A NOTIFY STATE'S OWN CROSSING FIRES NOTHING HERE. notifiesCrossed has no idea a duration
+        // exists -- it reports `time` being crossed exactly as it always has, for every notify --
+        // so without this a hit window would announce itself under its bare name AND under
+        // "<Name>_Begin" from stepNotifyStates below. Skipped by VALUE (notifyDuration), not by a
+        // second index set, so this is the one and only place that decision is made.
+        if (c.notifyDuration(i) > 0.0f) continue;
         ++fired_;
         // BY INDEX INTO THE LIVE CLIP, and the sink is called immediately rather than queued. A
         // queue would need the names copied (the clip is cached and could in principle be evicted

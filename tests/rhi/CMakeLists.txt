@@ -72,3 +72,75 @@ if(AVER_RHI_VULKAN)
   endif()
   set_target_properties(RegisterBindMapTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
+
+# ShaderCacheSweepTest -- the DXIL blob cache's size bound, with no device and no backend.
+#
+# Unconditional and Aver.RHI-only: the sweeper is header-only std::filesystem over a temp directory,
+# and the property it decides is one no launch can show you. An unbounded cache WORKS -- it just
+# grows forever -- so on any machine whose cache has not filled yet, a sweeper that deleted
+# everything, nothing, or the newest files instead of the oldest would look identical to a correct
+# one. That is exactly the shape of defect this repo has been bitten by before.
+add_executable(ShaderCacheSweepTest src/ShaderCacheSweepTest.cpp)
+target_link_libraries(ShaderCacheSweepTest PRIVATE Aver.RHI Aver.Core Aver.Platform)
+set_target_properties(ShaderCacheSweepTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# PrecompiledShaderTest -- ShaderDesc::bytecode and PipelineLayout::constantSpace/samplerSpace,
+# together, against a real D3D12 device (WARP, so no GPU required).
+#
+# Together on purpose: D3D12 validates the shader against the root signature at
+# CreateComputePipelineState, so a pipeline that BUILDS is the runtime agreeing that the registers
+# were emitted in the spaces the bytecode declares. Neither capability could establish that alone,
+# and an assertion written beside the placement code could not establish it at all.
+#
+# It sources its bytecode from NRD rather than a fixture -- see the file's own comment -- so it
+# links Aver.Render.NRD, which exists in every configuration and reports SKIP when NRD is absent.
+# D3D12-only because the Vulkan backend deliberately REFUSES a non-zero register space.
+if(AVER_RHI_D3D12)
+  add_executable(PrecompiledShaderTest src/PrecompiledShaderTest.cpp)
+  target_link_libraries(PrecompiledShaderTest PRIVATE Aver.Render.NRD Aver.RHI Aver.RHI.D3D12 Aver.Core Aver.Platform)
+  # ITS OWN COMPOSITION ROOT, exactly as LineMeshTest and CbufferLayoutPatchTest above are, and for
+  # the same reason: Aver.RHI's createDevice() calls detail::createD3D11Device / createVulkanDevice
+  # behind AVER_HAS_*, so every consumer must supply EVERY enabled backend even when it only ever
+  # asks for one. Leaving these out links fine right up to LNK2019 on two symbols this test never
+  # names -- which is what happened.
+  if(AVER_RHI_D3D11)
+    target_link_libraries(PrecompiledShaderTest PRIVATE Aver.RHI.D3D11)
+  endif()
+  if(AVER_RHI_VULKAN)
+    target_link_libraries(PrecompiledShaderTest PRIVATE Aver.RHI.Vulkan)
+  endif()
+  set_target_properties(PrecompiledShaderTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
+# ShaderIncludeResolveTest -- can a deployed shader #include a file in a SUBDIRECTORY, and can it do
+# it with ANGLED brackets? Against a real D3D12 device (WARP, so no GPU required).
+#
+# It has to be a runtime test, because HLSL here compiles at runtime: both defects it pins shipped
+# as a clean build that failed in the editor, and one of them took every entry point in voxi.hlsl
+# down at once -- see the file's own comment.
+#
+# ITS FIXTURE IS DEPLOYED BY A DIRECTORY COPY, not aver_deploy_shaders, which globs *.hlsl/*.hlsli
+# and copies each by NAME alone. That helper flattens, and a flattened fixture would test nothing:
+# the whole subject here is that a path survives.
+if(AVER_RHI_D3D12)
+  add_executable(ShaderIncludeResolveTest src/ShaderIncludeResolveTest.cpp)
+  target_link_libraries(ShaderIncludeResolveTest PRIVATE Aver.RHI Aver.RHI.D3D12 Aver.Core Aver.Platform)
+  # Its own composition root, exactly as every device-creating test above is: Aver.RHI dispatches to
+  # detail::create*Device behind AVER_HAS_* without linking the backends, so a consumer must supply
+  # every ENABLED one even when it only ever asks for D3D12.
+  if(AVER_RHI_D3D11)
+    target_link_libraries(ShaderIncludeResolveTest PRIVATE Aver.RHI.D3D11)
+  endif()
+  if(AVER_RHI_VULKAN)
+    target_link_libraries(ShaderIncludeResolveTest PRIVATE Aver.RHI.Vulkan)
+  endif()
+  # POST_BUILD rather than a configure-time file(COPY): a fixture that only lands when CMake happens
+  # to re-run is a fixture that silently goes stale, and this suite would then be asserting on an
+  # old copy of the very thing it is testing.
+  add_custom_command(TARGET ShaderIncludeResolveTest POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/shaders/AverIncProbe"
+            "${CMAKE_BINARY_DIR}/bin/shaders/AverIncProbe"
+    COMMENT "Deploying the AverIncProbe include fixture")
+  set_target_properties(ShaderIncludeResolveTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()

@@ -33,9 +33,16 @@ namespace aver::game {
 
 // Everything GameApp needs that comes off the command line or out of game.json.
 struct GameConfig {
-    std::string title = "Aver Game";
-    u32 width = 1280;
-    u32 height = 720;
+    // NAMED CONSTANTS, so config() can tell "the caller asked for 1280" apart from "nobody said".
+    // Without that distinction a project's WINDOW.SIZE could never win, because the field is never
+    // empty -- it always holds something.
+    static constexpr const char* kDefaultTitle = "Aver Game";
+    static constexpr u32 kDefaultWidth  = 1280;
+    static constexpr u32 kDefaultHeight = 720;
+
+    std::string title = kDefaultTitle;
+    u32 width = kDefaultWidth;
+    u32 height = kDefaultHeight;
     u64 maxFrames = 0;      // 0 = run until the window closes
     bool headless = false;
     bool useWarp = false;
@@ -47,6 +54,26 @@ struct GameConfig {
     bool inputEcho = false;
     // Logs every path the engine opens, so verify-game.ps1 can assert none is outside the package.
     bool traceOpens = false;
+    // --scene-census: print one line describing what the loaded level put in the world, in the
+    // format aver::world::formatSceneCensus defines. Sandbox.exe prints the identical line for the
+    // identical project, and scripts/verify-game.ps1 compares the two. See SceneCensus.hpp for why
+    // this is a census and not a pixel diff.
+    bool sceneCensus = false;
+    // --stats [seconds]: periodically log the per-pass GPU breakdown a shipped game has ALWAYS been
+    // paying to collect and never had any way to look at. D3D12Device::initGpuTiming runs
+    // unconditionally, not behind a build flag or a CLI switch, so every AverGame.exe ever shipped
+    // has been timestamping every pass and throwing the numbers away -- the editor was the only host
+    // with a reader (its console's `frametime`), and a packaged game cannot include the editor.
+    //
+    // A LOG DUMP RATHER THAN AN OVERLAY, at least first: a profiler for a shipped build is something
+    // you capture from a session and read afterwards, often from a machine you do not have. An
+    // overlay would also need the game UI's text path and would change what a --screenshot capture
+    // contains, which would break verify-game's census comparison for a diagnostic feature.
+    //
+    // 0 means off. The interval is in SECONDS because the report is an average over frames since
+    // boot and only moves slowly (see GpuTimingReport::framesAccumulated); logging it per frame
+    // would be a flood of nearly identical trees.
+    f32 statsIntervalSec = 0.0f;
     // Fills a density volume on the GPU and compares every voxel against the CPU mirror, then
     // exits. The only way to check the HLSL against its reference: HLSL compiles at RUNTIME, so a
     // green build says nothing about whether the shader agrees with anything.
@@ -67,6 +94,32 @@ struct GameConfig {
     // are plain RHI calls, not an editor feature, so a --frames run can write a PNG here the same way.
     // Empty = no screenshot requested (the default, and the only behaviour before this field existed).
     std::string screenshotPath;
+    // --no-vsync (M7): AverGame's own measurement parity with SandboxApp.cpp's identical flag. False
+    // (DEFAULT) leaves vsync exactly as the backend opened it -- a shipped game syncs to the display
+    // the way a player expects. True disables it once, the instant a device exists, the same
+    // vsyncCanDisable()/setVSync(false) pair the editor uses; a display path that cannot tear (see
+    // rhi::IDevice::vsyncCanDisable's own comment) logs a warning and is left synced rather than
+    // silently ignored.
+    bool vsyncOff = false;
+    // --cam-wobble DEG PERIOD (M7): the SAME measurement-only yaw swing SandboxApp.cpp's own
+    // --cam-wobble drives -- see its setCamWobble's comment for why a sine that returns to zero,
+    // driven off the frame counter and never the clock. 0 (DEFAULT, either field) is no motion, so
+    // every existing --frames capture through this executable is bit-identical without it.
+    f32 camWobbleDeg = 0.0f;      // yaw amplitude in degrees
+    u32 camWobblePeriod = 0;      // period in FRAMES; sin() is 0 at every whole multiple
+
+    // --aversr off|quality|balanced|performance|auto (3.3 C, contract C2-12): the CLI's own AverSR
+    // level, parsed LOCALLY (GameApp.cpp's parseArgs) into the quality ladder's own numbering
+    // (QualityLadder.hpp's kAverSrOff=0/kAverSrQuality=1/kAverSrBalanced=2/kAverSrPerformance=3,
+    // section 3.2) rather than through aver::sr::parseQuality -- this struct, and GameApp behind it,
+    // must never include aver/sr/* (the module boundary Scalability.hpp's own header comment states:
+    // render.voxi and runtime.game must never depend on render.sr), so this stays a raw int the same
+    // way the engine's other pre-enum CLI overrides do. -1 (DEFAULT) means "the CLI said nothing" and
+    // is read identically to an explicit "auto": GameApp::onInit's resolveAverSrLevel call then falls
+    // through to the open project's RENDER.AVERSR and, failing that, the quality ladder's per-rung
+    // default (U2). UNMEASURED: this host's own frame cost at a reduced internal resolution has not
+    // been run.
+    int averSrArg = -1;   // -1 = unstated/auto, else the ladder's own numbering 0..3
 };
 
 // Parses the arguments a game executable accepts. Unknown arguments are ignored rather than fatal:
@@ -85,6 +138,21 @@ GameConfig parseArgs(int argc, char** argv);
 class GameApp final : public Application {
 public:
     explicit GameApp(GameConfig cfg);
+
+    // AverSR (3.3 C, contract C2-12): the composition root (game/src/GameMain.cpp, the one
+    // translation unit in this executable allowed to name sr::anything -- see its own header comment)
+    // hands this a function that builds a concrete aver::sr::SpatialUpscaler against a device and
+    // reports the render scale for a resolved level. GameApp itself never includes aver/sr/* and
+    // never names sr::Quality, matching the module boundary render.voxi and runtime.game must both
+    // respect (Scalability.hpp's own header comment: "render.voxi must never include render.sr").
+    // Called once by createApplication, before Engine::run ever calls onInit. LEFT NULL is the legal
+    // default for an AverGame.exe built with the SR module absent: onInit's apply step (below) still
+    // resolves a level through resolveAverSrLevel, it simply has nothing to install it with, and the
+    // game renders at native resolution exactly as it always did -- the SR module being absent from a
+    // build must never be a build failure or a run failure.
+    using AverSrInstaller = bool (*)(rhi::IDevice& dev, u32 level, std::unique_ptr<rhi::IUpscaler>& out,
+                                      f32& renderScale);
+    void setAverSrInstaller(AverSrInstaller fn) { averSrInstaller_ = fn; }
 
     BootConfig config() const override;
     void onInit(Engine&) override;
@@ -115,6 +183,11 @@ public:
     f32 viewAspect(const Engine&) const;
 
 private:
+    // Backing store for the window title config() may take from the project. BootConfig holds a
+    // `const char*`, so the string it points at has to outlive the call -- and config() is const,
+    // which is why this is mutable rather than a local.
+    mutable std::string windowTitleOwned_;
+
     // Loads cfg_.projectPath. Logs and leaves project_ invalid on failure rather than aborting: a
     // game with no world is a diagnosable state, and a process that dies before its first frame
     // tells the player nothing.
@@ -273,6 +346,17 @@ private:
 
     SceneDrawStats drawStats_;
 
+    // AverSR (3.3 C). NON-OWNING on the device's side, exactly like rhi::IDevice::setUpscaler's own
+    // comment describes for the editor's identical member: the device holds a bare pointer into this,
+    // so it is detached (setUpscaler(nullptr)) before this unique_ptr ever resets -- see onShutdown,
+    // first statement after `dev`, mirroring the ordering SandboxApp.cpp's own clearAverSrUpscaler /
+    // applyAverSrQuality already guard for the identical crash class (--aversr-cycle). Stays null for
+    // the whole run whenever averSrInstaller_ is null or onInit resolves Off.
+    std::unique_ptr<rhi::IUpscaler> averSrUpscaler_;
+    // Set once, from the composition root, by setAverSrInstaller -- see that method's own comment.
+    // Null is the ordinary, legal "this build has no SR module linked" case, not an error state.
+    AverSrInstaller averSrInstaller_ = nullptr;
+
 #if AVER_MODULE_VOXI
     // BY VALUE, and registered NON-OWNING with addRenderFeature. The device holds a bare pointer to
     // it, so it must outlive the device -- which is why it is a member here and torn down in
@@ -353,6 +437,14 @@ private:
     GameContent content_;
     GameLevel level_;
     u64 frames_ = 0;
+    // Seconds since the last --stats dump. See GameConfig::statsIntervalSec.
+    f32 statsTimer_ = 0.0f;
+    // M7: true once the one-shot END-OF-RUN --stats dump has fired on a bounded (--frames N) run --
+    // see onUpdate's own comment for why a bounded run needs this in addition to the periodic
+    // statsTimer_ dump above (a short --frames run can end before statsIntervalSec ever elapses once).
+    // Mirrors SandboxApp::gpuTimingDone_'s latch, same reasoning: fire exactly once, near the last
+    // frame, never again.
+    bool statsFinalDumped_ = false;
 };
 
 } // namespace aver::game

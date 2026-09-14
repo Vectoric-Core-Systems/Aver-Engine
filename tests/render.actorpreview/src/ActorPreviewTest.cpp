@@ -60,6 +60,7 @@ struct MockFactory final : public rhi::IResourceFactory {
     void destroyBindingSet(rhi::BindingSetHandle) override {}
     void setSrv(rhi::BindingSetHandle, u32, rhi::TextureHandle, u32) override {}
     void setUav(rhi::BindingSetHandle, u32, rhi::TextureHandle, u32) override {}
+    void clearSrv(rhi::BindingSetHandle, u32) override {}
     void setSrvTlas(rhi::BindingSetHandle, u32, rhi::TlasHandle) override {}
     void setSrvBuffer(rhi::BindingSetHandle, u32, rhi::BufferHandle, u32, u32, u32) override {}
     void setUavBuffer(rhi::BindingSetHandle, u32, rhi::BufferHandle, u32, u32, u32) override {}

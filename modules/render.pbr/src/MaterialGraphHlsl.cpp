@@ -614,6 +614,47 @@ struct Emitter {
         }
 
         // -- utility --
+        // THE CLOCK, and the node that makes a material graph able to MOVE. Without it a graph is a
+        // pure function of position and can only ever describe a still surface; with it, ripples,
+        // scrolling, flicker and pulsing are all just arithmetic on one more input.
+        //
+        // It reads gTime from the ENGINE's per-frame block (b0), not from any feature's or the
+        // material's, because a graph is emitted into every shader that shades a surface and b0 is
+        // the only block all of them agree about. See PerFrameCB::time.
+        //
+        //   Time         -- seconds, WRAPPED at an hour. This is the default and almost always the
+        //                   one wanted: sin() of an unwrapped clock degrades as the day wears on,
+        //                   because consecutive float32 values eventually skip whole periods.
+        //   Time.raw     -- unwrapped monotonic seconds, for anything that genuinely needs it and
+        //                   accepts that precision decays.
+        //   Time.delta   -- seconds since the previous frame.
+        //
+        // NO `scale` INPUT ON PURPOSE, though one is the obvious convenience. input() falls back to
+        // a pin's authored default and, for a pin nobody declared, to zero -- so an unconnected
+        // scale would multiply the clock by 0 and freeze every animation with no error anywhere.
+        // A Multiply beside this node costs one node and cannot fail that way.
+        // THE WATER SURFACE, so a graph shapes it from the SAME numbers the caustics project through.
+        //
+        //   WaveNormal.value  -- tangent-space normal of the wave set at `position` (world XY, cm)
+        //   WaveNormal.height -- its height in cm, for anything wanting the scalar
+        //   WaveNormal.focus  -- how strongly it converges light there, which is what caustics use
+        //
+        // A graph that wants a different ripple should change the wave set, not re-derive one out of
+        // Sin nodes: a hand-built one looks identical and silently stops agreeing with the caustics.
+        if (ciEquals(ty, "WaveNormal")) {
+            const Value p2 = input(n, "position", MatType::Float2);
+            if (ciEquals(pin, "height"))
+                return bind(n.id, pin, MatType::Float, "averWaveHeight(" + p2.expr + ")");
+            if (ciEquals(pin, "focus"))
+                return bind(n.id, pin, MatType::Float, "averWaveFocus(" + p2.expr + ")");
+            return bind(n.id, pin, MatType::Float3, "averWaveNormal(" + p2.expr + ")");
+        }
+        if (ciEquals(ty, "Time")) {
+            const char* src = ciEquals(pin, "raw")   ? "gTime.y"
+                            : ciEquals(pin, "delta") ? "gTime.z"
+                                                     : "gTime.x";
+            return bind(n.id, pin, MatType::Float, src);
+        }
         // Grazing-angle falloff, from the geometric normal and the view vector the renderer handed
         // in. Deliberately NOT from the normal-mapped one: this runs before a graph has decided what
         // the normal is, and reading a normal the same graph is still computing is a dependency the
@@ -667,6 +708,13 @@ constexpr OutputField kOutputFields[] = {
     {"SubsurfaceRadius", "subsurfaceRadius", MatType::Float},
     {"Ior",          "ior",          MatType::Float},
     {"Transmission", "transmission", MatType::Float},
+    // THE VOLUME. Together with Ior and Transmission above, these are what let a graph author glass
+    // rather than merely select it: attenuationColor is the transmittance after AttenuationDistance
+    // centimetres, so driving the pair per pixel is how one material becomes a thin clear pane at
+    // its face and a deep green edge down its length. A distance of 0 or less means "no volume",
+    // which is what every material that never mentions them keeps getting.
+    {"AttenuationColor",    "attenuationColor",    MatType::Float3},
+    {"AttenuationDistance", "attenuationDistance", MatType::Float},
     // THE COAT, drivable per pixel. This is where a coat earns a graph rather than three numbers on
     // the material: a weight mask is the difference between a uniformly lacquered object and one
     // that is polished where it is handled and bare where it is worn, and a roughness mask is how a
@@ -746,12 +794,16 @@ MaterialGraphBody compileMaterialGraph(const fmt::OcGraphData& g) {
     return r;
 }
 
-std::string materialGraphHlsl(const std::vector<MaterialGraphEntry>& entries) {
-    std::string s;
-    s += "// ---- generated from .ocgraph material graphs; do not edit ----\n";
-    s += "AverSurface averEvalMaterial(AverVertex v, AverLight l) {\n";
-    s += "    float2 uv = averSurfaceUV(v);\n";
-    s += "    AverAuthored a = averStockAuthored(uv, v.N);\n";
+// The switch itself, emitted once and shared. Split out of averEvalMaterial so a caller that cannot
+// use averStockAuthored can still run a graph.
+//
+// WHY THAT MATTERS: the ray-driven path has no material cbuffer and no bound texture slots -- it
+// reads gRtMaterials[materialIndex] and samples through averRtSampleSlot -- so it hand-builds its
+// surface and could never call averEvalMaterial. That is the entire reason "no material GRAPH runs
+// on any ray path" was true, on the renderer that is the DEFAULT path. Handing the switch its
+// AverAuthored as a parameter, rather than fetching one itself, is what lets both callers share it.
+static void emitSwitch(std::string& s, const std::vector<MaterialGraphEntry>& entries,
+                       const char* sampleFn) {
     // A UNIFORM SWITCH, not a chain of ifs: gMaterialGraphId is a constant across the whole draw,
     // so every lane takes the same arm and the cost is the arm's own, not the sum of all of them.
     s += "    switch (gMaterialGraphId) {\n";
@@ -762,13 +814,57 @@ std::string materialGraphHlsl(const std::vector<MaterialGraphEntry>& entries) {
         s += "\n    case ";
         s += std::to_string(e.id);
         s += ": {\n";
-        s += e.hlsl;
+        // The body verbatim, except for which sampler its SampleTexture nodes reach. Substituted
+        // textually rather than emitted twice from the graph, so the two copies cannot drift: there
+        // is one compile of each graph and one body string, differing only in this token.
+        if (std::string(sampleFn) == "averSampleSlot") {
+            s += e.hlsl;
+        } else {
+            std::string body = e.hlsl;
+            const std::string from = "averSampleSlot(";
+            const std::string to   = std::string(sampleFn) + "(";
+            for (usize p = body.find(from); p != std::string::npos; p = body.find(from, p + to.size()))
+                body.replace(p, from.size(), to);
+            s += body;
+        }
         s += "        break;\n    }\n";
     }
     s += "    default: break;   // no graph: exactly the stock material\n";
     s += "    }\n";
+}
+
+std::string materialGraphHlsl(const std::vector<MaterialGraphEntry>& entries) {
+    std::string s;
+    s += "// ---- generated from .ocgraph material graphs; do not edit ----\n";
+
+    // ---- the raster entry point, unchanged in behaviour ----
+    s += "AverSurface averEvalMaterial(AverVertex v, AverLight l) {\n";
+    s += "    float2 uv = averSurfaceUV(v);\n";
+    s += "    AverAuthored a = averStockAuthored(uv, v.N);\n";
+    emitSwitch(s, entries, "averSampleSlot");
     s += "    return averBuildSurface(v, l, a, uv);\n";
     s += "}\n";
+
+    // ---- the ray-driven twin ----
+    //
+    // TAKES AN AverAuthored RATHER THAN BUILDING ONE, because its caller has already assembled the
+    // stock values from the hit's own RtMaterial and bindless samples -- there is no cbuffer for
+    // averStockAuthored to read. It returns the mutated struct and does NOT build a surface: the ray
+    // path has its own hand-written surface assembly, matched line by line against averBuildSurface,
+    // and replacing that is a separate argument from making graphs run at all.
+    //
+    // averRtSampleSlotGraph is voxi.hlsl's own adapter -- see its definition there for why the
+    // material travels in a static rather than a parameter (the generated body cannot be given extra
+    // arguments without teaching the emitter about a type this module cannot see).
+    //
+    // GUARDED, because AVER_RT_BINDLESS is what declares that adapter. Without it this function
+    // would not compile, and every raster-only consumer of this text includes it.
+    s += "#ifdef AVER_RT_BINDLESS\n";
+    s += "AverAuthored averApplyMaterialGraphRt(AverAuthored a, AverVertex v, float2 uv) {\n";
+    emitSwitch(s, entries, "averRtSampleSlotGraph");
+    s += "    return a;\n";
+    s += "}\n";
+    s += "#endif\n";
     return s;
 }
 

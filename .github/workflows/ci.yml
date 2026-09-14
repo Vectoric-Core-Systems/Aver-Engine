@@ -1,0 +1,102 @@
+# Aver Engine CI.
+#
+# WHAT THIS IS FOR. Until it existed there was no CI of any kind, and tests/repo/SeparationTest.cpp
+# says so in its own source: "There are already two source-scanning scripts in scripts/, and no CI
+# to run either. A check nobody runs cannot fail, and a check that cannot fail is decoration."
+# That is also the structural reason this repo has a documented history of describing tests that
+# were never run. This is the smallest honest fix: build the engine, run every headless suite
+# through CTest, on a machine that is not the author's.
+#
+# WHAT IT DELIBERATELY DOES NOT COVER -- read this before trusting a green tick:
+#
+#   * THE RENDER GATES. scripts/gates.ps1 is the pixel oracle and it needs a GPU. GitHub-hosted
+#     Windows runners have none, so the only configuration that could run here is `warp` (the
+#     software rasteriser), and a WARP-only gate run would compare against numbers recorded on a
+#     Radeon. Those gates stay local and stay a human's call. A green tick here says NOTHING about
+#     whether the renderer still draws the right pixels.
+#   * THE C# / ROSLYN HALF beyond what the suites already reach. The managed build is pinned by
+#     global.json (SDK 10.0.400) and a NuGet.config with only a vendored source; that arrangement
+#     has been wrong about restoring without network before, so setup-dotnet is here to make the
+#     failure loud rather than to claim the problem is solved.
+#   * PACKAGING. scripts/stage-game.ps1 and verify-game.ps1 exist again, but verify-game runs the
+#     staged package and its divergence gate compares two hosts' scene censuses -- both want a real
+#     machine, and the allowlist audit is not a CI-shaped question either.
+#
+# EXIT CODES. Every script this workflow calls now speaks one table -- 0 ok, 1 failed, 2 usage,
+# 3 environment (modules/core/include/aver/core/ErrorCodes.hpp, and docs/DIAGNOSTICS.md). That
+# matters more here than locally: a 3 means the RUNNER is wrong (no build tree, no ctest) and a 1
+# means the ENGINE is wrong, and before this they were the same number. They used to be worse than
+# the same number -- test.ps1 forwarded ctest's own 8, and gates.ps1 exited the count of failed
+# gates, so two failures exited 2, which this table spells "you invoked me wrong".
+#
+# NOT YET RUN ANYWHERE. This file is committed by someone who cannot execute GitHub Actions; the
+# commands in it are the ones verified locally, but the workflow itself is unproven until it runs
+# once on a real runner. Treat its first red as information about the workflow, not the engine.
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # One run per ref: a long build is not worth doing twice for a branch someone is pushing to.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.config }} build + suites
+    runs-on: windows-2022
+    timeout-minutes: 120
+    strategy:
+      # BOTH CONFIGURATIONS, and not as belt-and-braces. Release compiles Jolt's asserts out, so a
+      # physics bug that a Debug assert would have caught passes silently there; and the two trees
+      # differ in floating-point codegen, which is why the render oracle keeps separate baselines.
+      # Neither build substitutes for the other.
+      fail-fast: false
+      matrix:
+        config: [Debug, Release]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pin the .NET SDK global.json asks for
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          cmake -S . -B build-ci -G Ninja `
+            -DCMAKE_BUILD_TYPE=${{ matrix.config }} `
+            -DAVER_BUILD_TESTS=ON
+        # Ninja, matching build.bat, so the CI tree is configured the same way a developer's is.
+        # AVER_RHI_VULKAN stays OFF (its default): no Vulkan SDK on the runner, and a green Vulkan
+        # build here would prove nothing anyway -- see docs on why a default build says nothing
+        # about that backend.
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build build-ci --parallel
+
+      - name: Run the headless suites
+        shell: pwsh
+        # scripts/test.ps1 is the same entry point a developer uses, pointed at the CI tree, so
+        # there is one definition of "run the tests" rather than two that can drift.
+        run: ./scripts/test.ps1 -BuildDir build-ci
+
+      - name: Upload CTest output on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-${{ matrix.config }}
+          path: build-ci/Testing/Temporary/
+          if-no-files-found: ignore

@@ -5,6 +5,13 @@
 
 using Aver.Scene;
 using Aver.Scripting;
+// AP: the raw Aver.Physics surface, aliased rather than `using`d unqualified because this file
+// ALREADY has a Body/Physics/Entity in scope -- Aver.Framework's own Vec3-flavoured shims (see
+// Aver.Framework/Physics.cs's file comment). Forces, joints, material, motion type and layers have
+// no shim here at all: Aver.Framework.Body never grew AddForce/SetFriction/SetMotionType/SetLayer
+// (Physics.cs's own comment says why -- that file predates them and is not being widened), so those
+// wrappers below construct an AP.Body/AP.Joint directly over the same int handle instead.
+using AP = Aver.Physics;
 
 namespace Aver.Framework;
 
@@ -258,6 +265,23 @@ internal static class GraphInterop
     internal static bool PlayAnimationForGraph(int entity, string clipAsset, bool loop) =>
         new Entity(entity).PlayAnimation(clipAsset, loop);
 
+    /// <summary>SetControlRig's own surface: binds an .ocrig by path so the entity's sampled pose is
+    /// modified before skinning, adding a CControlRig component if it has none. Wraps
+    /// <see cref="Entity.SetControlRig"/> (Animation.cs).
+    ///
+    /// <para>Unlike its two siblings above, the component this attaches is registered at RUNTIME, so
+    /// this returns false in a host that never registered CControlRig -- and false, not a throw, is
+    /// the right answer: a graph authored against a rig is not broken content when it runs somewhere
+    /// the rig system is absent, it simply does not get its rig.</para>
+    ///
+    /// <para>Ordering with SetSkeleton is a real constraint and it is the graph author's to satisfy:
+    /// a rig has nothing to modify until the entity has a skeleton, because the pose it edits is the
+    /// one AnimSystem samples for a skeleton. This node does not enforce that -- attaching in the
+    /// other order is harmless and self-corrects the moment a skeleton arrives, since the rig is
+    /// applied per tick from the component, not once at attach time.</para></summary>
+    internal static bool SetControlRigForGraph(int entity, string rigAsset, float weight) =>
+        new Entity(entity).SetControlRig(rigAsset, weight);
+
     /// <summary>CharacterMove's own surface: the last Blueprint-parity node, one coarse exec call
     /// wrapping <see cref="AverCharacter"/>.DriveFromGraph -- itself a one-line forward to the
     /// existing <c>protected</c> Drive(dt, moveAxis, yawDeltaDeg, pitchDeltaDeg), which owns the
@@ -421,6 +445,82 @@ internal static class GraphInterop
     internal static void PrintIntForGraph(string label, int value)
     {
         Log.Info($"[Graph] {label} = {value}");
+    }
+
+    /// <summary>PrintString: an authored message, with the node id kept as a prefix so two nodes
+    /// carrying the same text are still tellable apart. The one print that needs nothing wired but
+    /// exec, which is what makes it the node for "did control flow reach here".
+    ///
+    /// The "[Graph] " prefix is load-bearing beyond tidiness: the editor's on-screen print overlay
+    /// filters the engine log on exactly that prefix (SandboxApp::logSink), so a line without it is
+    /// written to the log and never appears in the viewport.</summary>
+    internal static void PrintStringForGraph(string label, string text)
+    {
+        Log.Info($"[Graph] {label}: {text}");
+    }
+
+    // ---- node-hit recording, for the editor's execution highlighting -----------------------------
+    //
+    // Every exec node calls this as it runs, so the graph editor can show which nodes are actually
+    // executing rather than leaving an author to infer it from prints. Visual scripting had no way at
+    // all to see control flow: you could print a value, and nothing showed you WHICH branch ran.
+    //
+    // OFF UNLESS THE EDITOR ASKS. This sits on the hot path of every exec node of every live graph
+    // instance, so with recording off it must cost a static bool test and nothing else -- no
+    // allocation, no dictionary probe, no time read. A packaged game never turns it on.
+    //
+    // NOT THE LOG CHANNEL, though that already reaches the editor. PrintStringForGraph is a string
+    // interpolation plus a Log.Info under the core log mutex, then a cross-thread substring filter on
+    // the other side; paying that per exec node per frame per instance would make the profiler part
+    // of what it profiles.
+    //
+    // KEYED BY (GRAPH NAME, NODE ID), BOTH COMPILE-TIME CONSTANTS. Not by entity: the compiled
+    // method's arguments come from the graph's declared PARAM list, so there is no "entity is always
+    // argument 0" to lean on, and a graph that declares no entity PARAM has none to report. Keying by
+    // graph name is also what the editor actually wants -- its canvas shows a CLASS, and any instance
+    // running a node should light that node.
+    //
+    // LAST-HIT TIME, NEVER A COUNTER. A diamond in the exec graph (two branch arms rejoining) makes
+    // the shared node's IL be emitted TWICE at compile time, so a counter would over-report by
+    // construction. "When did this last run" is both the honest measure and the one a fading
+    // highlight needs.
+    private static bool s_recordHits;
+    private static readonly Dictionary<string, double> s_nodeHits = new();
+    private static readonly System.Diagnostics.Stopwatch s_hitClock = System.Diagnostics.Stopwatch.StartNew();
+
+    internal static void RecordNodeHitForGraph(string graphName, string nodeId)
+    {
+        if (!s_recordHits) return;
+        lock (s_nodeHits) s_nodeHits[graphName + "\0" + nodeId] = s_hitClock.Elapsed.TotalSeconds;
+    }
+
+    /// <summary>Turns recording on or off. Called from the bridge when a graph editor tab opens or
+    /// closes, so the cost exists only while somebody is looking.</summary>
+    internal static void SetNodeHitRecording(bool on)
+    {
+        s_recordHits = on;
+        if (!on) lock (s_nodeHits) s_nodeHits.Clear();
+    }
+
+    /// <summary>Node ids of `graphName` hit within `maxAgeSeconds`, with their ages, as
+    /// "id:age;id:age". Ages rather than timestamps because the two sides do not share a clock.</summary>
+    internal static string CollectNodeHits(string graphName, double maxAgeSeconds)
+    {
+        var sb = new System.Text.StringBuilder();
+        string prefix = graphName + "\0";
+        lock (s_nodeHits)
+        {
+            double now = s_hitClock.Elapsed.TotalSeconds;
+            foreach (var kv in s_nodeHits)
+            {
+                if (!kv.Key.StartsWith(prefix, StringComparison.Ordinal)) continue;
+                double age = now - kv.Value;
+                if (age > maxAgeSeconds) continue;
+                if (sb.Length > 0) sb.Append(';');
+                sb.Append(kv.Key.AsSpan(prefix.Length)).Append(':').Append(age.ToString("0.000"));
+            }
+        }
+        return sb.ToString();
     }
 
     /// <summary>The character this entity is, or null with one warning line. Every character node
@@ -627,13 +727,27 @@ internal static class GraphInterop
     // native-side (the same path returns the same handle without decoding again), so calling these
     // every time the node runs costs a dictionary probe, not a decode.
 
+    /// <summary>Turns a graph's raw int pin into a <see cref="Bus"/>, saying so when it is not one.</summary>
+    ///
+    /// <remarks>THE ONE PLACE AN OUT-OF-RANGE BUS CAN ARRIVE. Every other caller now names a bus
+    /// through the enum, but a graph pin is an integer a person typed into a node. Native
+    /// <c>busOf</c> folds anything it does not recognise into Sfx and is right to -- but silently, so
+    /// a Set Bus Volume node set to 7 moves the SFX slider and nothing anywhere says why. This does
+    /// not change that behaviour, it just stops it being silent.</remarks>
+    private static Bus BusOfPin(int bus, string node)
+    {
+        if (System.Enum.IsDefined(typeof(Bus), bus)) return (Bus)bus;
+        Aver.Scripting.Log.Warn($"[{node}] bus {bus} is not one of Sfx(0)/Music(1)/Voice(2)/Ui(3); it plays on Sfx.");
+        return Bus.Sfx;
+    }
+
     /// <summary>PlaySound's own surface: load-by-path then play flat, as one scalar call. Returns
     /// the VOICE handle so a graph can stop or steer it later, and 0 when there is no audio device
     /// at all -- which is a supported configuration, not an error (see Audio's own comment).</summary>
     internal static bool PlaySoundForGraph(string path, float volume, float pitch, bool looping, int bus,
                                            out int voice)
     {
-        Voice v = Audio.PlayFile(path, volume, pitch, looping, bus);
+        Voice v = Audio.PlayFile(path, volume, pitch, looping, BusOfPin(bus, "PlaySound"));
         voice = v.Handle;
         return v.IsValid;
     }
@@ -644,7 +758,8 @@ internal static class GraphInterop
                                               float volume, float pitch, bool looping, int bus,
                                               float innerCm, float outerCm, out int voice)
     {
-        Voice v = Audio.PlayAt(Audio.Load(path), new Vec3(x, y, z), volume, pitch, looping, bus, innerCm, outerCm);
+        Voice v = Audio.PlayAt(Audio.Load(path), new Vec3(x, y, z), volume, pitch, looping,
+                              BusOfPin(bus, "PlaySoundAt"), innerCm, outerCm);
         voice = v.Handle;
         return v.IsValid;
     }
@@ -674,7 +789,7 @@ internal static class GraphInterop
     /// <summary>SetBusVolume: how a settings menu gives the player separate SFX and music sliders.</summary>
     internal static bool SetBusVolumeForGraph(int bus, float volume)
     {
-        Audio.SetBusVolume(bus, volume);
+        Audio.SetBusVolume(BusOfPin(bus, "SetBusVolume"), volume);
         return true;
     }
 
@@ -828,6 +943,26 @@ internal static class GraphInterop
         return true;
     }
 
+    /// <summary>Entity.SetLocalPosition: where this entity sits RELATIVE TO ITS PARENT.
+    ///
+    /// The node set had SetParent, SetBodyPosition (which is world space, and physics) and
+    /// SetLocalScale -- so a graph could attach a child and resize it, and could not move it. The
+    /// visible cost of that gap was the first-person viewmodel: AN_FPCharacter parents the blaster to
+    /// the camera node and then has no way to push it forward and down, so it renders centred on the
+    /// eye and fills the view. There was nothing wrong with the authoring; the node did not exist.
+    ///
+    /// LOCAL, not world, and that is the whole point of adding it rather than reusing SetBodyPosition:
+    /// a viewmodel has to hold its offset while the camera it hangs from moves and turns every frame,
+    /// which is exactly what a parent-relative transform is for. Writing a world position each tick
+    /// would fight the parent and lag it by a frame.</summary>
+    internal static bool SetLocalPositionForGraph(int entity, float x, float y, float z)
+    {
+        Entity e = new Entity(entity);
+        if (!e.IsAlive) return false;
+        e.SetLocalPosition(new Vec3(x, y, z));
+        return true;
+    }
+
     internal static bool SetLocalScaleForGraph(int entity, float x, float y, float z)
     {
         Entity e = new Entity(entity);
@@ -971,5 +1106,200 @@ internal static class GraphInterop
             return false;
         }
         return character.Jump();
+    }
+
+    // ---- PHYSICS: FORCES, MATERIAL, MOTION, LAYERS, JOINTS -----------------------------------------
+    // All of these go through AP.Body/AP.Joint/AP.Physics directly (see the AP alias comment at the
+    // top of this file) rather than through Aver.Framework's own Body/Physics shim, which never grew
+    // this surface. Same shape as AddBodyVelocityForGraph/SetBodyEntityForGraph above: construct the
+    // handle wrapper, check IsValid, call through, return bool (or the value, for a read) -- a joint
+    // creator additionally mirrors AddStaticBoxForGraph et al., which do NOT pre-check validity
+    // themselves: the native factory already returns handle 0 (Joint.None) for a dead bodyA, and
+    // bodyB == 0 is not "dead" here at all, it is the documented sentinel for "join to the world"
+    // (see the JOINTS banner in GraphNodeDefs.hpp), so gating on IsValid here would reject the one
+    // case the ABI exists to support.
+
+    internal static bool AddForceForGraph(int body, float x, float y, float z)
+    {
+        AP.Body b = new AP.Body(body);
+        return b.IsValid && b.AddForce(new AP.Float3(x, y, z));
+    }
+
+    internal static bool AddImpulseForGraph(int body, float x, float y, float z)
+    {
+        AP.Body b = new AP.Body(body);
+        return b.IsValid && b.AddImpulse(new AP.Float3(x, y, z));
+    }
+
+    internal static bool AddTorqueForGraph(int body, float x, float y, float z)
+    {
+        AP.Body b = new AP.Body(body);
+        return b.IsValid && b.AddTorque(new AP.Float3(x, y, z));
+    }
+
+    internal static bool AddAngularImpulseForGraph(int body, float x, float y, float z)
+    {
+        AP.Body b = new AP.Body(body);
+        return b.IsValid && b.AddAngularImpulse(new AP.Float3(x, y, z));
+    }
+
+    internal static bool BodyAngularVelocityForGraph(int body, out float x, out float y, out float z)
+    {
+        AP.Body b = new AP.Body(body);
+        x = y = z = 0.0f;
+        if (!b.IsValid) return false;
+        AP.Float3 v = b.AngularVelocity; x = v.X; y = v.Y; z = v.Z;
+        return true;
+    }
+
+    internal static bool SetBodyAngularVelocityForGraph(int body, float x, float y, float z)
+    {
+        AP.Body b = new AP.Body(body);
+        return b.IsValid && b.SetAngularVelocity(x, y, z);
+    }
+
+    internal static bool SetBodyFrictionForGraph(int body, float friction)
+    {
+        AP.Body b = new AP.Body(body);
+        return b.IsValid && b.SetFriction(friction);
+    }
+
+    internal static bool SetBodyRestitutionForGraph(int body, float restitution)
+    {
+        AP.Body b = new AP.Body(body);
+        return b.IsValid && b.SetRestitution(restitution);
+    }
+
+    internal static bool SetBodyGravityFactorForGraph(int body, float factor)
+    {
+        AP.Body b = new AP.Body(body);
+        return b.IsValid && b.SetGravityFactor(factor);
+    }
+
+    internal static bool SetBodyMassForGraph(int body, float massKg)
+    {
+        AP.Body b = new AP.Body(body);
+        return b.IsValid && b.SetMass(massKg);
+    }
+
+    /// <summary>DYNAMIC BODIES ONLY -- a static or kinematic body has infinite mass by definition and
+    /// reports 0 here, same as Aver.Physics.Body.Mass itself documents.</summary>
+    internal static bool BodyMassForGraph(int body, out float mass)
+    {
+        AP.Body b = new AP.Body(body);
+        mass = 0.0f;
+        if (!b.IsValid) return false;
+        mass = b.Mass;
+        return true;
+    }
+
+    internal static bool SetBodyMotionTypeForGraph(int body, int motionType)
+    {
+        AP.Body b = new AP.Body(body);
+        return b.IsValid && b.SetMotionType((AP.MotionType)motionType);
+    }
+
+    /// <summary>-1 (not a valid MotionType) for a dead handle -- 0 is Static, a real answer, which is
+    /// why `success` exists instead of trusting the int alone.</summary>
+    internal static bool BodyMotionTypeForGraph(int body, out int motionType)
+    {
+        AP.Body b = new AP.Body(body);
+        motionType = -1;
+        if (!b.IsValid) return false;
+        motionType = b.MotionTypeRaw;
+        return true;
+    }
+
+    internal static bool ActivateBodyForGraph(int body)
+    {
+        AP.Body b = new AP.Body(body);
+        return b.IsValid && b.Activate();
+    }
+
+    internal static bool BodyActiveForGraph(int body) => new AP.Body(body).IsActive;
+
+    internal static bool SetBodyLayerForGraph(int body, int layer)
+    {
+        AP.Body b = new AP.Body(body);
+        return b.IsValid && b.SetLayer(layer);
+    }
+
+    internal static bool BodyLayerForGraph(int body, out int layer)
+    {
+        AP.Body b = new AP.Body(body);
+        layer = -1;
+        if (!b.IsValid) return false;
+        layer = b.Layer;
+        return true;
+    }
+
+    /// <summary>No body handle at all -- this edits the world's shared layer-collision matrix, which
+    /// Aver.Physics.Physics owns directly rather than any one body.</summary>
+    internal static bool SetLayerCollisionForGraph(int layerA, int layerB, bool collide)
+        => AP.Physics.SetLayerCollision(layerA, layerB, collide);
+
+    internal static int JointFixedForGraph(int bodyA, int bodyB, float px, float py, float pz,
+                                            float axX, float axY, float axZ, float ayX, float ayY, float ayZ)
+        => AP.Joint.Fixed(new AP.Body(bodyA), new AP.Body(bodyB), new AP.Float3(px, py, pz),
+                           new AP.Float3(axX, axY, axZ), new AP.Float3(ayX, ayY, ayZ)).Handle;
+
+    internal static int JointPointForGraph(int bodyA, int bodyB, float px, float py, float pz)
+        => AP.Joint.Point(new AP.Body(bodyA), new AP.Body(bodyB), new AP.Float3(px, py, pz)).Handle;
+
+    internal static int JointDistanceForGraph(int bodyA, int bodyB, float paX, float paY, float paZ,
+                                               float pbX, float pbY, float pbZ, float minDist, float maxDist)
+        => AP.Joint.Distance(new AP.Body(bodyA), new AP.Body(bodyB), new AP.Float3(paX, paY, paZ),
+                              new AP.Float3(pbX, pbY, pbZ), minDist, maxDist).Handle;
+
+    /// <summary>normalAxis MUST be perpendicular to hingeAxis -- the ABI's own requirement (see
+    /// physics_joints_abi.h), not something this wrapper can fix up on the graph author's behalf.</summary>
+    internal static int JointHingeForGraph(int bodyA, int bodyB, float px, float py, float pz,
+                                            float hx, float hy, float hz, float nx, float ny, float nz,
+                                            float minAngleRad, float maxAngleRad)
+        => AP.Joint.Hinge(new AP.Body(bodyA), new AP.Body(bodyB), new AP.Float3(px, py, pz),
+                           new AP.Float3(hx, hy, hz), new AP.Float3(nx, ny, nz), minAngleRad, maxAngleRad).Handle;
+
+    /// <summary>normalAxis MUST be perpendicular to sliderAxis -- same ABI requirement as Hinge's.</summary>
+    internal static int JointSliderForGraph(int bodyA, int bodyB, float px, float py, float pz,
+                                             float sx, float sy, float sz, float nx, float ny, float nz,
+                                             float minCm, float maxCm)
+        => AP.Joint.Slider(new AP.Body(bodyA), new AP.Body(bodyB), new AP.Float3(px, py, pz),
+                            new AP.Float3(sx, sy, sz), new AP.Float3(nx, ny, nz), minCm, maxCm).Handle;
+
+    /// <summary>state is Aver.Physics.MotorState (0 Off, 1 Velocity, 2 Position). Axis 0 -- every
+    /// named joint above has at most one motorised axis; the six-DOF per-axis overload is not
+    /// exposed to the graph.</summary>
+    internal static bool JointSetMotorForGraph(int joint, int state, float target)
+    {
+        AP.Joint j = new AP.Joint(joint);
+        return j.IsValid && j.SetMotor((AP.MotorState)state, target);
+    }
+
+    internal static bool JointSetEnabledForGraph(int joint, bool enabled)
+    {
+        AP.Joint j = new AP.Joint(joint);
+        if (!j.IsValid) return false;
+        j.Enabled = enabled;
+        return true;
+    }
+
+    internal static bool JointRemoveForGraph(int joint)
+    {
+        AP.Joint j = new AP.Joint(joint);
+        return j.IsValid && j.Remove();
+    }
+
+    /// <summary>A hinge's angle (radians) or a slider's offset (centimetres). False for a dead handle
+    /// AND for a joint type with no single scalar to report -- every type except hinge and slider --
+    /// which is why this checks Value()'s own null rather than only IsValid.</summary>
+    internal static bool JointValueForGraph(int joint, out float value)
+    {
+        value = 0.0f;
+        AP.Joint j = new AP.Joint(joint);
+        if (!j.IsValid) return false;
+        float? v = j.Value();
+        if (v is null) return false;
+        value = v.Value;
+        return true;
     }
 }

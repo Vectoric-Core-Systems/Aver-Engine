@@ -1,6 +1,7 @@
 // The actor editor tab: opens a C# actor file, previews it in 3D, and writes placements back.
 
 #include "ActorEditor.hpp"
+#include "EditorKeybinds.hpp"
 #include "EditorEuler.hpp"
 #include "EditorTransform.hpp"
 #include "ToolGlyphs.hpp"
@@ -227,8 +228,16 @@ public:
     }
 
     const std::string& path() const override { return path_; }
-    std::string title() const override { return dirty_ ? title_ + " *" : title_; }
+    // No manual dirty marker -- see actorTabTitle's own comment in ActorEditor.hpp for why this
+    // used to double up with the host's ImGuiWindowFlags_UnsavedDocument, matching SoundEditor and
+    // BtEditor's own title()s.
+    std::string title() const override { return actorTabTitle(title_, dirty_); }
     bool dirty() const override { return dirty_; }
+
+    // Restores this tab's column widths. Every open actor tab shares ONE column-width pair
+    // (g_leftColW/g_rightColW below), so this simply forwards to the existing free function rather
+    // than owning per-instance state -- see resetActorEditorLayout()'s own comment further down.
+    void resetLayout() override { resetActorEditorLayout(); }
 
     // Latches an external change; the file is re-read on the next draw.
     void onFileChanged() override { externalChange_ = true; }
@@ -1268,11 +1277,16 @@ void ActorEditor::draw(Engine& e) {
 
             // Tools 1-4 and F, only while the pointer is over the viewport.
             if (ImGui::IsItemHovered() && !ImGui::GetIO().WantTextInput) {
-                if (ImGui::IsKeyPressed(ImGuiKey_1)) tool_ = ToolSelect;
-                if (ImGui::IsKeyPressed(ImGuiKey_2)) tool_ = ToolMove;
-                if (ImGui::IsKeyPressed(ImGuiKey_3)) tool_ = ToolRotate;
-                if (ImGui::IsKeyPressed(ImGuiKey_4)) tool_ = ToolScale;
-                if (ImGui::IsKeyPressed(ImGuiKey_F) && g_preview) g_preview->frameAll();
+                // The SAME four tool commands the level viewport uses, not clones: this editor
+                // hardcoded 1-4 and F a second time, so rebinding them on the Preferences page
+                // changed the level viewport and quietly did nothing here.
+                auto& kb = editor::keybinds();
+                using editor::CommandId;
+                if (kb.pressed(CommandId::ToolSelect, io)) tool_ = ToolSelect;
+                if (kb.pressed(CommandId::ToolMove, io))   tool_ = ToolMove;
+                if (kb.pressed(CommandId::ToolRotate, io)) tool_ = ToolRotate;
+                if (kb.pressed(CommandId::ToolScale, io))  tool_ = ToolScale;
+                if (kb.pressed(CommandId::ViewFrameSelected, io) && g_preview) g_preview->frameAll();
             }
 
             const bool haveSel = !live_ && tool_ != ToolSelect && selected_ >= 0

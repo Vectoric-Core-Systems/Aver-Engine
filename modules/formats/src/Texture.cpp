@@ -3,6 +3,7 @@
 #include "aver/assets/AssetId.hpp"
 #include "aver/core/Log.hpp"
 
+#include <array>
 #include <cmath>
 
 namespace aver::fmt {
@@ -10,9 +11,34 @@ namespace aver::fmt {
 namespace {
 
 // The exact sRGB transfer curve, matching a *_UNORM_SRGB view's hardware decode.
+//
+// W5: LOOKED UP, NOT RECOMPUTED, but bit-identically -- std::pow ran once per tap per channel inside
+// downsample() (below), which is 3 calls per source texel per mip level, and a project's textures all
+// decode through this same function on every open. The table has exactly 256 entries because the
+// input is a u8, so it is complete: every value this function could ever be asked for is already in
+// it, built once on first use rather than recomputed on every call.
+//
+// BIT-IDENTICAL BY CONSTRUCTION: kTable[i] is computed by the exact same expression this function
+// used to evaluate directly, from the exact same u8 promotion path (v -> c = v * (1/255) -> the
+// branch), with no /fp:fast anywhere in this tree (checked: no CMakeLists.txt here sets it) to let the
+// compiler reorder or approximate either version differently. TextureSrgbTableTest compares
+// generateMipChain's output against a verbatim copy of the pre-change std::pow form, byte for byte,
+// for exactly this reason -- a table that was merely CLOSE would still change every decoded texel in
+// the project.
+//
+// The hitch this saves is UNMEASURED: nothing here has timed a project open before and after.
 f32 srgbToLinear(u8 v) {
-    const f32 c = v * (1.0f / 255.0f);
-    return c <= 0.04045f ? c * (1.0f / 12.92f) : std::pow((c + 0.055f) / 1.055f, 2.4f);
+    static const std::array<f32, 256> kTable = [] {
+        std::array<f32, 256> t{};
+        for (int i = 0; i < 256; ++i) {
+            const u8 vv = static_cast<u8>(i);
+            const f32 c = vv * (1.0f / 255.0f);
+            t[static_cast<usize>(i)] =
+                c <= 0.04045f ? c * (1.0f / 12.92f) : std::pow((c + 0.055f) / 1.055f, 2.4f);
+        }
+        return t;
+    }();
+    return kTable[v];
 }
 // The inverse: linear to an 8-bit sRGB-encoded value.
 u8 linearToSrgb(f32 c) {

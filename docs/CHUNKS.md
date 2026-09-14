@@ -1,6 +1,16 @@
 # Chunked worlds, region streaming, and generation as you go
 
-> **STATUS: PLAN ONLY. No code has been written.**
+> **STATUS, corrected: this was true on 2026-08-08 and has not been true since.** Every slice through
+> §11's Slice 9 is now marked **DONE** in its own section below, and `modules/world` on disk backs
+> that up — eleven headers, eleven `.cpp` files, and its own README describing `LevelInstance`,
+> `ChunkPayload`, `ChunkPartition`, `BodyRegistry`, `RegionFile`/`RegionIndex`, `ChunkGenerator` and
+> `ChunkStreamer` as built rather than planned. `tests/world` builds ten of the suites this document
+> names as evidence — `ChunkCoordTest`, `FileRangeTest`, `LandscapeEvictTest`, `ChunkPartitionTest`,
+> `RegionFileTest`, `ChunkStreamTest`, `RegionWriteTest`, `ChunkGenerateTest`, `ChunkActorStreamTest`
+> and `LevelInstanceTest` — all present in `build/bin` alongside 85 other suites. This line was never
+> updated as the slices landed; read the per-slice status below, not this banner, for what is actually
+> built. Slice 10 (floating origin) is the one genuine exception — no rebasing code was found anywhere
+> in the tree, so it remains exactly what §11 already says: not done.
 >
 > This is revision 2, dated 2026-08-08. It **supersedes** the 2026-08-02 revision, which is in git
 > history at `0fcfcaa`. Revision 1 was written from reader evidence after its design agents died;

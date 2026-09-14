@@ -7,11 +7,12 @@
 #include <filesystem>
 #include <system_error>
 
-// UNCONDITIONAL, and it was inside the scene guard below. AssetType/assetTypeFromPath live in
-// modules/assets -- a leaf with no module switch at all, always linked through Aver.Formats -- and
-// they have TWO callers here: loadProjectMeshes(), which is scene-guarded, and
-// loadProjectMaterials(), which is PBR-guarded and has nothing to do with the scene. Scoping the
-// include to one of the two guards left the other branch without the type.
+// UNCONDITIONAL, deliberately. AssetType/assetTypeFromPath live in modules/assets -- a leaf with no
+// module switch at all, always linked through Aver.Formats -- and they have TWO callers here under
+// DIFFERENT guards: loadProjectMeshes(), which is scene-guarded, and loadProjectParticleEffects(),
+// which is particles-guarded. Scoping the include to either guard leaves the other branch without
+// the type. (A PBR-guarded loadProjectMaterials() was a third caller until it was removed as dead
+// code; that removal changes nothing here, because the two remaining guards still differ.)
 #include "aver/assets/AssetId.hpp"
 
 #if AVER_MODULE_PBR
@@ -414,6 +415,11 @@ void GameContent::loadProjectMeshes(rhi::IDevice& device) {
         const u64 id = fnv1a64(std::string_view(rel));
         sceneMeshes_[id] = h;
         meshBounds_[id] = {md.boundsMin, md.boundsMax};
+        // THE MESH'S OWN MATERIAL. .ocmesh has always carried a materialSlots table and nothing here
+        // read it, so an entity that named no material drew flat grey even though the mesh said what
+        // it was. See GameContent.hpp's meshDefaultMaterial for why 0 means "ask the mesh".
+        if (!md.materialSlots.empty() && !md.materialSlots[0].empty())
+            meshSlot0Material_[id] = aver_scene_material(0, md.materialSlots[0].c_str());
         projectMeshIds_.push_back(id);
 
         // THE COARSE STAND-IN THE SHADOW, GI-SHADOW AND VOXELISE PASSES DRAW INSTEAD OF THIS MESH.
@@ -467,11 +473,6 @@ void GameContent::loadProjectMeshes(rhi::IDevice& device) {
     if (loaded || failed)
         AVER_INFO("[Mesh] {} project mesh(es) loaded from {}{}", loaded, dir,
                   failed ? (", " + std::to_string(failed) + " failed") : "");
-}
-
-void GameContent::releaseProjectMeshes() {
-    for (const u64 id : projectMeshIds_) { sceneMeshes_.erase(id); meshBounds_.erase(id); }
-    projectMeshIds_.clear();
 }
 
 rhi::MeshHandle GameContent::meshFor(u64 id) const {
@@ -530,11 +531,24 @@ pbr::MaterialSystem::ResolvedTexture GameContent::resolveMaterialTexture(const p
     // THE SLOT DECIDES THE COLOUR SPACE, NEVER THE FILENAME. A normal map read as sRGB is a subtly
     // wrong lighting response that looks like a shading bug rather than a decode bug.
     assets::TextureUsage usage = assets::TextureUsage::Data;
+    // THE LAYER-1 SLOTS BELONG HERE TOO, and their absence was a decode bug rather than an omission
+    // of principle. MaterialSystem::colourClass classifies Layer1BaseColor as 'c' (sRGB) and
+    // Layer1Normal as 'n', and its own comment says "KEEP THIS IN STEP WITH THOSE TWO SWITCHES" --
+    // this being one of them. It drifted: everything not named fell through to Data, so a
+    // slope-blended material's SECOND base-colour layer was uploaded LINEAR when its pixels are sRGB.
+    //
+    // WHAT THAT LOOKS LIKE is why it went unnoticed: decoding sRGB texels as linear does not corrupt
+    // them, it LIFTS the midtones and flattens the contrast -- the layer reads pale and washed out
+    // beside the layer 0 it blends against, which reads as a lighting or blending problem rather than
+    // as a colour-space one. Layer1Normal had the matching fault the other way: routed to Data it lost
+    // the normal-map-aware mip generation that NormalMap selects.
     switch (slot) {
         case pbr::TextureSlot::BaseColor:
-        case pbr::TextureSlot::Emissive:  usage = assets::TextureUsage::Colour;    break;
-        case pbr::TextureSlot::Normal:    usage = assets::TextureUsage::NormalMap; break;
-        default:                          usage = assets::TextureUsage::Data;      break;
+        case pbr::TextureSlot::Layer1BaseColor:
+        case pbr::TextureSlot::Emissive:      usage = assets::TextureUsage::Colour;    break;
+        case pbr::TextureSlot::Normal:
+        case pbr::TextureSlot::Layer1Normal:  usage = assets::TextureUsage::NormalMap; break;
+        default:                              usage = assets::TextureUsage::Data;      break;
     }
 
     std::string err;
@@ -591,24 +605,6 @@ pbr::MaterialHandle GameContent::materialForSurface(const std::string& name) {
     return h;
 }
 
-void GameContent::loadProjectMaterials() {
-    const std::string dir = project_.contentDir();
-    if (dir.empty()) return;
-    const std::string matDir = dir + "\\Materials";
-    std::error_code ec;
-    if (!std::filesystem::exists(matDir, ec)) return;
-
-    u32 n = 0;
-    // NON-RECURSIVE, matching the editor: Content\Materials only, not every .ocmat in the tree.
-    for (std::filesystem::directory_iterator it(matDir, ec), end; it != end; it.increment(ec)) {
-        if (ec) break;
-        if (!it->is_regular_file(ec)) continue;
-        if (assetTypeFromPath(it->path().string()) != AssetType::Material) continue;
-        if (materialForSurface(it->path().stem().string())) ++n;
-    }
-    if (n) AVER_INFO("[Material] {} project material(s) loaded from {}", n, matDir);
-}
-
 void GameContent::releaseProjectMaterials() {
     materialAssets_.clear();
 #if AVER_MODULE_SCENE
@@ -619,6 +615,11 @@ void GameContent::releaseProjectMaterials() {
 #endif // AVER_MODULE_PBR
 
 #if AVER_MODULE_PBR && AVER_MODULE_SCENE
+i32 GameContent::meshDefaultMaterial(u64 meshId) const {
+    const auto it = meshSlot0Material_.find(meshId);
+    return it == meshSlot0Material_.end() ? 0 : it->second;
+}
+
 pbr::MaterialHandle GameContent::authoredFor(i32 token) const {
     const auto it = surfaceMaterials_.find(token);
     return it == surfaceMaterials_.end() ? 0 : it->second;

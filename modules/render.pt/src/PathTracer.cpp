@@ -6,14 +6,28 @@
 #include "aver/core/Log.hpp"
 #include "PtShaders.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <string>
+#include <vector>
+#include "aver/rhi/ShaderFiles.hpp"   // this pass's HLSL is a deployed file
 
 namespace aver::pt {
 
 namespace {
 
-// t0 acceleration structure, t1 vertices, t2 indices, t3 instances.
-constexpr u32 kSrvCount = 4;
+// t0 acceleration structure, t1 vertices, t2 indices, t3 instances, t4 the energy-compensation table.
+constexpr u32 kSrvCount = 5;
+
+// The E(cos(theta), roughness) table's dimensions. Small on purpose: E is a smooth, monotone-ish
+// function of both arguments with no features to resolve, so 32x32 bilinear is well under the
+// furnace's 5e-3 tolerance while the whole table is 4 KB.
+constexpr u32 kEnergyLutDim = 32;
+// Samples per cell when integrating it. Hammersley, not random: the table must be identical on every
+// run, or two runs of a progressive tracer would disagree and PtFurnaceTest's determinism pair would
+// be comparing a moving target.
+constexpr u32 kEnergyLutSamples = 4096;
 // u0 the accumulator.
 constexpr u32 kUavCount = 1;
 // The shader's [numthreads(8,8,1)].
@@ -24,8 +38,8 @@ constexpr u32 kGroup = 8;
 constexpr u32 kShaderModel = 65;
 constexpr u32 kRayTracingTier = 11;
 
-// RESOURCE BINDING TIER IS DELIBERATELY NOT CHECKED HERE, and this note exists so that stays a
-// decision rather than becoming an oversight someone "fixes" prematurely.
+// RESOURCE BINDING TIER IS NOT CHECKED FOR THE INTEGRATOR ITSELF, AND NOW IS FOR ITS TEXTURES.
+// This note used to end "until then"; that moment arrived, so here is what actually happened.
 //
 // The engine as a whole is explicitly not bindless -- RHIResources.hpp:3, a Resource Binding Tier 1
 // commitment that protects the MINIMUM tier (D3D12 FL 11_0: Kepler, GCN 1.0, Haswell). This tracer
@@ -33,23 +47,133 @@ constexpr u32 kRayTracingTier = 11;
 // So the tracer COULD use descriptor indexing without raising the engine's floor, because it is
 // already gated to hardware that has it.
 //
-// It does not need it yet. The integrator binds a fixed four SRVs and one UAV (kSrvCount/kUavCount
-// above) -- TLAS, vertices, indices, instances -- which Tier 1 satisfies comfortably. Adding a
-// resourceBindingTier >= 3 requirement TODAY would refuse the path tracer on hardware where it
-// currently runs correctly, buying nothing.
+// THE UNTEXTURED INTEGRATOR STILL DOES NOT NEED IT, and still does not ask. It binds a fixed five
+// SRVs and one UAV (kSrvCount/kUavCount above) -- TLAS, vertices, indices, instances and the energy
+// table -- every one of them an explicitly bound slot, which Tier 1 satisfies comfortably. Requiring tier 3 of THAT would refuse the path tracer on hardware where it
+// runs correctly, buying nothing. So the check lives on the textured twin only, which is why there
+// are two pipelines here rather than one with a branch: the capability difference is a ROOT
+// SIGNATURE difference, and a root signature is not something a dispatch can opt out of.
 //
-// IT BECOMES REQUIRED THE MOMENT MATERIALS DO. Sampling an arbitrary material's textures at a ray
-// hit is precisely what needs an unbounded, dynamically-indexed table; that work is what should add
-// the check, next to the feature that depends on it, so the refusal names a real reason. The
-// capability is already queried (DeviceCaps::resourceBindingTier) and already clampable for testing
-// (CapsOverride::maxResourceBindingTier, the `tier1` token in --force-caps), so nothing has to be
-// built first -- only used.
+// The predicate is DeviceCaps::rtBindlessTextures (rayTracingTier >= 11 && resourceBindingTier >= 3),
+// the same one VoxiRenderer's ray path uses -- not a bare resourceBindingTier read, so the two
+// features cannot drift on what "can this device index a texture from a ray hit" means. It stays
+// clampable for testing through CapsOverride (`tier1` in --force-caps), which is how the fallback
+// path gets exercised on hardware that would otherwise never take it.
 //
-// Until then the honest statement is: this tracer requires DXR 1.1 and SM 6.5, and happens to run
-// only on hardware that would also support bindless. That is a coincidence of GPU generations, not
-// an invariant this file enforces.
+// The honest statement is now: this tracer requires DXR 1.1 and SM 6.5; it samples material textures
+// additionally on hardware reporting binding tier 3, and falls back to flat per-surface albedo --
+// exactly what it did before this existed -- everywhere else, including all of Vulkan, whose
+// createBindlessTextureTable returns 0 by construction.
 
-// MIRRORS cbuffer PtFrame in kPathTracerHLSL, field for field. A shifted field here reads a camera
+// The bindless base-colour table's fixed size. FIXED because this backend serialises root signature
+// 1.0, so the HLSL array length and PipelineLayout::bindlessTextureCount must be one compile-time
+// number and must agree exactly -- declaring more in the shader reads past the root signature's
+// range. 4096 is Voxi's figure for the same job; a scene's DISTINCT materials, not its draws, is
+// what fills it, and nothing in this tree approaches four thousand of those.
+constexpr u32 kBindlessTexCapacity = 4096;
+
+// Builds E(cos(theta), roughness): the fraction of incident light a SINGLE-SCATTER GGX lobe with
+// F = 1 actually returns. Row-major, roughness outer, cos(theta) inner.
+//
+// THIS IS THE SHADER'S ptScatterSpecular WITH F = 1, DELIBERATELY DUPLICATED. Every line below has a
+// twin in pt_pathtrace.hlsl -- the same GGX half-vector sample, the same k = a/2 Smith pairing, the
+// same below-horizon rejection -- because the compensation is only exact if it divides by the energy
+// THIS estimator loses rather than the energy some published fit's estimator loses. If either copy
+// changes, the other must change with it; the furnace's white-conductor check is what notices if
+// they drift, since compensating for the wrong lobe cannot read exactly L.
+std::vector<f32> buildEnergyLut() {
+    std::vector<f32> lut(static_cast<usize>(kEnergyLutDim) * kEnergyLutDim, 1.0f);
+    for (u32 ri = 0; ri < kEnergyLutDim; ++ri) {
+        // ENDPOINT-INCLUSIVE: cell 0 is exactly 0 and cell D-1 is exactly 1, NOT texel centres.
+        //
+        // MEASURED, not a matter of taste. With centres the top row sat at roughness 0.984, so a
+        // query at exactly 1.0 -- which is where a fully rough material lands, and where the furnace
+        // asks -- read an E integrated for a smoother surface. E falls with roughness, so the table
+        // overstated it, the compensation was correspondingly too small, and the white-conductor
+        // check came back 5.4% short (0.9465 against a required 1.000) while both interior points
+        // passed. The corners of this table are real query points and have to be sampled exactly.
+        const f32 rough = static_cast<f32>(ri) / static_cast<f32>(kEnergyLutDim - 1);
+        const f32 a  = std::max(rough * rough, 1e-3f);
+        const f32 k  = a * 0.5f;
+        for (u32 mi = 0; mi < kEnergyLutDim; ++mi) {
+            // Endpoint-inclusive as above; clamped off zero because a view exactly in the surface
+            // plane has no reflection to integrate and would divide by zero below.
+            const f32 ndv = std::max(static_cast<f32>(mi) / static_cast<f32>(kEnergyLutDim - 1),
+                                     1e-3f);
+            // The view vector in a tangent frame where the normal is +Z. Only its elevation matters:
+            // GGX is isotropic here, so azimuth is a free choice and 0 is as good as any.
+            const f32 vx = std::sqrt(std::max(0.0f, 1.0f - ndv * ndv));
+            f64 sum = 0.0;
+            for (u32 s = 0; s < kEnergyLutSamples; ++s) {
+                // Hammersley: van der Corput radical inverse in base 2 for the second dimension.
+                const f32 u1 = (static_cast<f32>(s) + 0.5f) / static_cast<f32>(kEnergyLutSamples);
+                u32 bits = s;
+                bits = (bits << 16) | (bits >> 16);
+                bits = ((bits & 0x55555555u) << 1) | ((bits & 0xAAAAAAAAu) >> 1);
+                bits = ((bits & 0x33333333u) << 2) | ((bits & 0xCCCCCCCCu) >> 2);
+                bits = ((bits & 0x0F0F0F0Fu) << 4) | ((bits & 0xF0F0F0F0u) >> 4);
+                bits = ((bits & 0x00FF00FFu) << 8) | ((bits & 0xFF00FF00u) >> 8);
+                const f32 u2 = static_cast<f32>(static_cast<f64>(bits) * 2.3283064365386963e-10);
+
+                const f32 phi = 6.2831853071795864f * u1;
+                const f32 ct  = std::sqrt(std::max(0.0f, (1.0f - u2) / (1.0f + (a * a - 1.0f) * u2)));
+                const f32 st  = std::sqrt(std::max(0.0f, 1.0f - ct * ct));
+                const f32 hx = st * std::cos(phi), hy = st * std::sin(phi), hz = ct;
+
+                // l = reflect(-v, h) = 2(v.h)h - v
+                // Only the elevation of the reflected direction and (v.h) enter the weight; the
+                // azimuth cancels, so lx/ly are never formed.
+                const f32 vdh = vx * hx + ndv * hz;
+                const f32 lz  = 2.0f * vdh * hz - ndv;
+                if (!(lz > 0.0f) || !(vdh > 0.0f) || !(hz > 0.0f)) continue;   // below the horizon
+                (void)hy;
+
+                const f32 g1v = ndv / (ndv * (1.0f - k) + k);
+                const f32 g1l = lz  / (lz  * (1.0f - k) + k);
+                // F = 1, so the weight is exactly G * (v.h) / (n.v * n.h) -- ptScatterSpecular's
+                // expression with the Fresnel factor left out.
+                sum += static_cast<f64>(g1v * g1l * vdh / std::max(ndv * hz, 1e-6f));
+            }
+            const f32 e = static_cast<f32>(sum / static_cast<f64>(kEnergyLutSamples));
+            // CLAMPED AWAY FROM ZERO because the shader divides by this. E genuinely approaches 0 at
+            // grazing incidence on a rough surface, and 1/E there would be an infinity multiplying
+            // a term that should be small.
+            lut[static_cast<usize>(ri) * kEnergyLutDim + mi] = std::clamp(e, 1e-2f, 1.0f);
+        }
+    }
+    return lut;
+}
+
+// The integrator's pipeline layout. `bindlessTextures` non-zero appends the base-colour table in its
+// own register space AND the sampler that reads it; zero reproduces, field for field, the layout the
+// untextured integrator has always declared -- which is what keeps PtFurnaceTest's replay comparing
+// the same compiled arithmetic against itself.
+//
+// THE SAMPLER IS PART OF THE TEXTURED HALF, not unconditional. The untextured pass declares no
+// sampler at all today, and adding one to it would change its root signature for a resource it never
+// reads.
+rhi::PipelineLayout ptLayout(u32 bindlessTextures) {
+    rhi::PipelineLayout l{};
+    l.srvCount = kSrvCount;
+    l.uavCount = kUavCount;
+    // b4 stays a ROOT CBV (zero dwords): the block is 112 bytes, which is more than root constants
+    // should carry, and setConstantBuffer suballocates it from the frame's upload ring.
+    l.constantDwords[rhi::kFeatureFrameConstantRegister] = 0;
+    if (bindlessTextures) {
+        // WRAP, because UV tiling is a material's own business and a clamped sampler would smear the
+        // edge texel across every repeat. LINEAR rather than the material path's ANISOTROPIC: this
+        // shader samples with SampleLevel at an explicit mip, and anisotropy is a function of the
+        // screen-space derivatives a compute path-tracing kernel does not have -- asking for it would
+        // cost the sampler slot's extra state to change nothing.
+        l.samplers[0].filter  = rhi::Filter::Linear;
+        l.samplers[0].address = rhi::AddressMode::Wrap;
+        l.samplerCount = 1;
+        l.bindlessTextureCount = bindlessTextures;
+    }
+    return l;
+}
+
+// MIRRORS cbuffer PtFrame in rhi::shaderFile("pt_pathtrace.hlsl").c_str(), field for field. A shifted field here reads a camera
 // basis as a sample count -- silently, and only in the rendered image.
 struct FrameCB {
     f32 origin[4];
@@ -90,7 +214,7 @@ bool PathTracer::init(rhi::IDevice& dev) {
     }
 
     rhi::ShaderDesc sd;
-    sd.source  = kPathTracerHLSL;
+    sd.source  = rhi::shaderFile("pt_pathtrace.hlsl").c_str();
     // The engine's own declarations, which is where PI, skyColor and the averFurnace* contract come
     // from. Taking the environment from the shipped prelude rather than a private constant is what
     // makes the furnace a measurement of the engine and not of a test rig.
@@ -98,6 +222,10 @@ bool PathTracer::init(rhi::IDevice& dev) {
     sd.entry   = "CSPathTrace";
     sd.stage   = rhi::ShaderStage::Compute;
     sd.minShaderModel = kShaderModel;
+    // The energy table's dimension travels as a define rather than a literal in the HLSL, so the
+    // shader's index arithmetic and buildEnergyLut()'s layout cannot be edited apart.
+    const std::string baseDefs = "AVER_PT_ENERGY_DIM=" + std::to_string(kEnergyLutDim);
+    sd.defines = baseDefs.c_str();
     cs_ = res_->createShader(sd);
     if (!cs_) {
         // HLSL is compiled at RUNTIME by DXC, so this is the only place a shader error can surface.
@@ -108,33 +236,127 @@ bool PathTracer::init(rhi::IDevice& dev) {
 
     rhi::ComputePipelineDesc pd;
     pd.cs = cs_;
-    pd.layout.srvCount = kSrvCount;
-    pd.layout.uavCount = kUavCount;
-    // b4 stays a ROOT CBV (zero dwords): the block is 112 bytes, which is more than root constants
-    // should carry, and setConstantBuffer suballocates it from the frame's upload ring.
-    pd.layout.constantDwords[rhi::kFeatureFrameConstantRegister] = 0;
+    pd.layout = ptLayout(0);   // 0 == the layout this pass has always declared; see ptLayout
     pipeline_ = res_->createComputePipeline(pd);
     if (!pipeline_) { AVER_ERROR("[PT] integrator pipeline unavailable"); shutdown(); return false; }
+
+    // BUILT BEFORE ANY TARGET, because createTarget binds it into every target's descriptor table
+    // and a table slot left empty is a fault on the dispatch, not a warning.
+    {
+        const std::vector<f32> lut = buildEnergyLut();
+        rhi::BufferDesc ed;
+        ed.bytes = lut.size() * sizeof(f32);
+        // UPLOAD, not Default, and written once here rather than copied on a command list: this is
+        // 4 KB of read-only constants that never change after init, so a staging copy would buy
+        // nothing and would drag a command context into a function that needs none. Same shape as
+        // instanceBuf_ below.
+        ed.kind = rhi::BufferKind::Upload;
+        ed.debugName = "pt energy compensation";
+        energyLut_ = res_->createBuffer(ed);
+        if (!energyLut_ || !res_->writeBuffer(energyLut_, lut.data(), ed.bytes)) {
+            AVER_ERROR("[PT] the energy-compensation table could not be uploaded");
+            shutdown();
+            return false;
+        }
+    }
 
     AVER_INFO("[PT] path tracer ready (RayQuery, SM {}, {}x{} threads per group)",
               kShaderModel, kGroup, kGroup);
     return true;
 }
 
+// Builds the textured twin -- table, shader, pipeline -- on first demand. ONE ATTEMPT PER SESSION:
+// texTried_ latches whether it succeeded or not, so a device that cannot do this is asked once and
+// then left alone, rather than re-entering DXC on every material a scene streams in.
+bool PathTracer::ensureTexturing() {
+    if (texTried_) return texPipeline_ != 0;
+    texTried_ = true;
+    if (!res_ || !dev_ || !pipeline_) return false;
+
+    // The capability the long note at the top of this file promised to check HERE, next to the
+    // feature that needs it -- so a refusal names a real reason rather than being a blanket tier
+    // requirement on a tracer that mostly does not need one.
+    if (!dev_->caps().rtBindlessTextures) {
+        AVER_INFO("[PT] no bindless texture support on this device; surfaces shade from their flat "
+                  "albedo, exactly as before textures existed (said once)");
+        return false;
+    }
+
+    texTable_ = res_->createBindlessTextureTable(kBindlessTexCapacity);
+    if (!texTable_) {
+        AVER_WARN("[PT] the bindless texture table could not be created; surfaces keep their flat "
+                  "albedo (said once)");
+        return false;
+    }
+
+    rhi::ShaderDesc sd;
+    sd.source  = rhi::shaderFile("pt_pathtrace.hlsl").c_str();
+    sd.prelude = rhi::sharedShaderPrelude();
+    sd.entry   = "CSPathTrace";
+    sd.stage   = rhi::ShaderStage::Compute;
+    sd.minShaderModel = kShaderModel;
+    // AVER_PT_TEX_CAPACITY must equal the layout's bindlessTextureCount exactly -- both come from
+    // kBindlessTexCapacity here so they cannot be edited apart.
+    const std::string defs = "AVER_PT_BINDLESS=1;AVER_PT_TEX_CAPACITY=" +
+                             std::to_string(kBindlessTexCapacity) +
+                             ";AVER_PT_ENERGY_DIM=" + std::to_string(kEnergyLutDim);
+    sd.defines = defs.c_str();
+    texCs_ = res_->createShader(sd);
+    if (!texCs_) {
+        AVER_WARN("[PT] the textured integrator would not compile; flat albedo stands in");
+        return false;
+    }
+
+    rhi::ComputePipelineDesc pd;
+    pd.cs = texCs_;
+    pd.layout = ptLayout(kBindlessTexCapacity);
+    texPipeline_ = res_->createComputePipeline(pd);
+    if (!texPipeline_) {
+        AVER_WARN("[PT] the textured integrator pipeline could not be created; flat albedo stands in");
+        return false;
+    }
+    AVER_INFO("[PT] textured integrator ready ({} texture slots)", kBindlessTexCapacity);
+    return true;
+}
+
+u32 PathTracer::residentTexture(rhi::TextureHandle h) {
+    if (!h) return kUnboundTexture;
+    if (!ensureTexturing()) return kUnboundTexture;
+    if (const auto it = texIndex_.find(h); it != texIndex_.end()) return it->second;
+    if (texCount_ >= kBindlessTexCapacity) {
+        // REFUSED, NOT WRAPPED. Reusing slot 0 would silently paint one material with another's
+        // texture; an unbound index falls back to the flat albedo, which is merely flat.
+        if (!texWarned_) {
+            texWarned_ = true;
+            AVER_WARN("[PT] the {} bindless texture slots are full; further materials shade from "
+                      "their flat albedo (said once)", kBindlessTexCapacity);
+        }
+        return kUnboundTexture;
+    }
+    const u32 index = texCount_;
+    if (!res_->setBindlessTexture(texTable_, index, h)) return kUnboundTexture;
+    ++texCount_;
+    texIndex_.emplace(h, index);
+    return index;
+}
+
 void PathTracer::shutdown() {
     if (res_) {
+        if (energyLut_)   res_->destroyBuffer(energyLut_);
         if (verts_)       res_->destroyBuffer(verts_);
         if (indices_)     res_->destroyBuffer(indices_);
         if (instanceBuf_) res_->destroyBuffer(instanceBuf_);
-        // BLAS handles ARE released, and THIS is now the only place that does it: they are owned by
-        // blasCache_, which deliberately survives resetScene() (see its own comment). Iterating the
-        // CACHE rather than blas_ is what makes that correct -- blas_ holds only the meshes in the
-        // last snapshot, so freeing that instead would leak every mesh that had left the view.
+        // BLAS HANDLES ARE NOT RELEASED HERE, and the history of this comment is the reason to say so
+        // loudly. It once freed nothing (a per-toggle leak once a live editor could re-init this
+        // object), then freed everything in blasCache_. Neither is right now: prepare() ADOPTS
+        // structures other features built, via IResourceFactory::blasForMesh, so this map no longer
+        // holds only things this object made. Freeing one another feature is still tracing is a
+        // dangling handle inside a live TLAS build -- a device fault, not a quiet image bug.
         //
-        // This function used not to free them at all, which was inert while the only caller was
-        // process exit and became a per-toggle leak once a live editor could shut down and re-init a
-        // PathTracer repeatedly.
-        for (const auto& [mesh, b] : blasCache_) if (b) res_->destroyBlas(b);
+        // A BLAS belongs to its MESH. destroyMesh calls destroyBlasForMesh, which frees every
+        // structure for that mesh, so nothing outlives the geometry it describes and VoxiRenderer has
+        // always relied on exactly this. What is given up is releasing early when this view is
+        // toggled off while its meshes stay loaded -- memory the scene is very likely still using.
         // THE TLASES STILL CANNOT BE RELEASED: the RHI has no destroyTlas at all (see
         // IResourceFactory -- BLAS has one, TLAS does not), so what this object allocated outlives
         // it, for the life of the DEVICE. What changed is the COUNT: addScene reuses a handle PER
@@ -146,7 +368,21 @@ void PathTracer::shutdown() {
         tlasPoolCap_.clear();
         if (pipeline_)    res_->destroyPipeline(pipeline_);
         if (cs_)          res_->destroyShader(cs_);
+        if (texPipeline_) res_->destroyPipeline(texPipeline_);
+        if (texCs_)       res_->destroyShader(texCs_);
+        // THE TABLE IS NOT DESTROYED, and the omission is the RHI's shape rather than a leak this
+        // function is ignoring: destroyBindlessTextureTable exists, but the descriptors it hands back
+        // are only safe to recycle once no in-flight frame can still reference them, and this class
+        // has no fence to prove that. Voxi's table has the same lifetime for the same reason. What
+        // matters here is that the INDEX MAP is cleared alongside the handle below, so a re-init
+        // cannot hand out an index into a table it no longer owns.
     }
+    texTable_ = 0;
+    texIndex_.clear();
+    texCount_ = 0;
+    texTried_ = texWarned_ = false;
+    texPipeline_ = 0;
+    texCs_ = 0;
     blasCache_.clear();
     // CLEARED WITH THE BUFFERS IT DESCRIBES. Leaving it populated would let the next prepare() after
     // a re-init match its mesh set against a table whose verts_/indices_ were just destroyed, and
@@ -156,6 +392,7 @@ void PathTracer::shutdown() {
     geoVerts_ = geoIndices_ = 0;
     geometryReused_ = false;
     verts_ = indices_ = instanceBuf_ = 0;
+    energyLut_ = 0;
     pipeline_ = 0;
     cs_ = 0;
     surfaces_.clear();
@@ -247,8 +484,14 @@ bool PathTracer::prepare() {
         std::memcpy(inst.objectToWorld, surfaces_[i].world, sizeof(inst.objectToWorld));
         std::memcpy(inst.albedo, surfaces_[i].albedo, sizeof(inst.albedo));
         inst.ior = surfaces_[i].ior;
+        inst.baseColorTex  = surfaces_[i].baseColorTex;
+        inst.roughness     = surfaces_[i].roughness;
+        inst.metallic      = surfaces_[i].metallic;
+        inst.metalRoughTex = surfaces_[i].metalRoughTex;
+        inst.normalTex     = surfaces_[i].normalTex;
+        inst.normalScale   = surfaces_[i].normalScale;
         // The SHARED rows: every surface on this mesh reads the same geometry. What stays per
-        // surface is objectToWorld, albedo and ior, right here.
+        // surface is objectToWorld, albedo, ior and the base-colour index, right here.
         inst.firstVertex = row.firstVertex;
         inst.firstIndex  = row.firstIndex;
     }
@@ -324,6 +567,26 @@ bool PathTracer::prepare() {
             // test the whole cache rests on -- see blasCache_ for why that is sufficient.
             blas_[i] = hit->second;
             ++reused;
+            continue;
+        }
+        // ANOTHER FEATURE MAY ALREADY HAVE ONE, and before this asked, the answer being yes cost a
+        // whole second structure. VoxiRenderer keeps its own MeshHandle -> BlasHandle map and builds
+        // over the same static meshes this snapshot names, so in the standing configuration -- where
+        // Voxi paints the scene and this view is the reference -- every mesh here was already built.
+        // MEASURED on Sponza: 220 meshes, 154.3 ms of createBlas at load, all of it duplicating
+        // structures over byte-identical geometry, plus double the resident BLAS memory.
+        //
+        // NOT MARKED FRESH, deliberately: blasForMesh only returns a structure that has been BUILT,
+        // so there is nothing left to do for it. Marking it fresh would have this feature record a
+        // second build over another feature's scratch buffer in the same frame, which is a race
+        // rather than a redundancy.
+        //
+        // AND NOT OWNED: a shared structure belongs to the mesh, and destroyMesh frees it through
+        // destroyBlasForMesh. See shutdown(), which no longer frees these.
+        if (const rhi::BlasHandle shared = res_->blasForMesh(mesh)) {
+            blas_[i] = shared;
+            ++reused;
+            blasCache_.emplace(mesh, shared);
             continue;
         }
         blas_[i] = res_->createBlas(mesh);
@@ -436,6 +699,7 @@ bool PathTracer::createTarget(u32 scene, u32 width, u32 height, PtTarget& out) {
     bd.uavCount = kUavCount;
     bd.srvKinds[0] = rhi::SlotKind::AccelerationStructure;
     bd.srvKinds[1] = bd.srvKinds[2] = bd.srvKinds[3] = rhi::SlotKind::StructuredBuffer;
+    bd.srvKinds[4] = rhi::SlotKind::StructuredBuffer;
     bd.uavKinds[0] = rhi::SlotKind::StructuredBuffer;
     out.set = res_->createBindingSet(bd);
 
@@ -453,6 +717,7 @@ bool PathTracer::createTarget(u32 scene, u32 width, u32 height, PtTarget& out) {
     res_->setSrvBuffer(out.set, 2, indices_, sizeof(u32), totalIndices_, 0);
     res_->setSrvBuffer(out.set, 3, instanceBuf_, sizeof(Instance),
                        static_cast<u32>(instances_.size()), 0);
+    res_->setSrvBuffer(out.set, 4, energyLut_, sizeof(f32), kEnergyLutDim * kEnergyLutDim, 0);
     res_->setUavBuffer(out.set, 0, out.accum, kPtAccumStride,
                        width * height * kPtAccumElementsPerPixel, 0);
 
@@ -518,13 +783,39 @@ void PathTracer::accumulate(rhi::IRenderContext& ctx, const PtTarget& t, const P
     cb.sample[0] = d.firstSample;
     cb.sample[1] = d.samples;
     cb.sample[2] = d.reset ? 1u : 0u;
+    // gPtSample.w was the one unused slot in the block, so this needs no new row and the
+    // sizeof(FrameCB) assert below is untouched. 0 means "never roulette", which is what every
+    // caller that does not set it gets.
+    cb.sample[3] = d.rouletteDepth;
     cb.trace[0] = d.rayBias;
     cb.trace[1] = d.tMax;
+    // R5/F6: gPtTrace.z, decoded in pt_pathtrace.hlsl's miss branch. 1.0 keeps the pre-fix
+    // unmatched-reference-sky behaviour; the default (d.legacyEnvironment false) writes 0.0, which
+    // is also what an all-zero FrameCB (any caller from before this field existed) already read as,
+    // so PtFurnaceTest -- which never sets it -- is unaffected by construction.
+    cb.trace[2] = d.legacyEnvironment ? 1.0f : 0.0f;
 
+    // THE ONLY TIMED SPAN THIS MODULE HAS EVER HAD, and its absence was not cosmetic. Until this
+    // line the sole ScopedGpuStat anywhere in render.pt was on PtSceneView's present BLIT, so
+    // --gpu-timing could report what it cost to SHOW the image and nothing at all about tracing it.
+    // Every "the path tracer is Nx faster than raster" figure in this repository was therefore a
+    // whole-frame CPU number from --frame-time (which SandboxApp's own comment at :4854 describes as
+    // "WHOLE frames from the CPU"), set beside a GPU pass span from the renderer it was said to beat.
+    // That is a category error, and it survived precisely because nothing here was measurable enough
+    // to contradict it: a dispatch with no marker is a dispatch nobody can price.
+    rhi::ScopedGpuStat gpuStat(ctx, "PT accumulate");
     ctx.pushMarker("Aver.PathTracer");
     ctx.bufferBarrier(t.accum, rhi::ResourceState::Common, rhi::ResourceState::UnorderedAccess);
-    ctx.setPipeline(pipeline_);
+    // THE TEXTURED TWIN ONLY ONCE SOMETHING IS ACTUALLY RESIDENT. texturing() is false for every
+    // caller that never asked for a texture -- PtFurnaceTest above all -- so those dispatches run the
+    // original pipeline, the original root signature and the original compiled arithmetic, which is
+    // what its bit-identical replay check is entitled to assume.
+    const bool textured = texturing();
+    ctx.setPipeline(textured ? texPipeline_ : pipeline_);
     ctx.setBindingSet(t.set);
+    // AFTER setPipeline and setBindingSet: the table is a root parameter of the pipeline just bound,
+    // and binding it against the previous pipeline's root signature is a silent mismatch.
+    if (textured) ctx.setBindlessTable(texTable_);
     ctx.setConstantBuffer(rhi::kFeatureFrameConstantRegister, &cb, sizeof(cb));
     ctx.dispatch((t.width + kGroup - 1) / kGroup, (t.height + kGroup - 1) / kGroup, 1);
     // Back to Common before the frame ends: a buffer's state does not survive the command list.

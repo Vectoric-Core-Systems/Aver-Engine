@@ -173,6 +173,46 @@ bool step_0_4_to_0_5(const Context& ctx, std::string* err) {
     return true;
 }
 
+// A 0.5 PROJECT NEEDS NOTHING DONE TO IT EITHER -- reasoned again from what 0.6 actually changed, not
+// inherited from the four empty steps before it.
+//
+// What changed after 0.5.0 shipped, and why absence is the 0.5 behaviour in every case:
+//   - `.ocproject` gained RENDER.GIMODE and RENDER.DENOISER. Both parse an absent key as -1, "not
+//     stated", which leaves each setting at the engine's own default. A project that never states a key
+//     is not asking for anything, so there is nothing in its directory to repair.
+//   - `.ocproject` gained RENDER.RESTIRVISIBILITY (optimisation wave 2, U1). Absent parses to -1 and
+//     follows the GI tier's own ladder rung, the same N6 rule every other tier-derived knob here
+//     already gets -- NOT a migration in the sense above, because the rung an existing project follows
+//     is a real behaviour change rather than a no-op: a giMode-1 (ReSTIR) project at GI Low or Medium
+//     that never stated this key moves from tracing Full (the only behaviour that existed before this
+//     wave) to Reconstructed or HalfResolution respectively. That is the render fix's own kind of
+//     change -- how the engine shades a scene, not what the scene's file contains -- so it is disclosed
+//     here rather than repaired by a step. PTTest is GI Epic (PTTest.ocproject: RENDER.GI 4), whose own
+//     ladder rung is Full, so PTTest's own image is unchanged.
+//   - `.ocanim` gained an optional NTFD chunk (notify durations). Absent means every notify is
+//     instantaneous -- the only kind 0.5 had -- and the writer omits the chunk when every duration is zero.
+//   - `.ocanim` gained an optional CTAN chunk (curve tangents). Absent means empty tangents, and empty
+//     tangents sample LINEARLY, bit for bit what 0.5 produced -- including for a curve marked CubicSpline.
+//   - `.ocland` gained an optional LRNG chunk (the authored quantisation range). Absence is migrated BY THE
+//     FORMAT, not here: parseOcLand derives the range once from the LHDR bias/scale the file was already
+//     quantised against, and the next save writes the chunk. A step duplicating that would be a second
+//     owner of one migration.
+//   - `.ocfoliage` is a new format. No 0.5 project can contain one.
+//
+// WHAT 0.6 CHANGES THAT IS NOT A MIGRATION, and why each is deliberately left alone:
+//   - Foliage painting reads authored .ocfoliage types instead of inventing one per loaded mesh, so a 0.5
+//     project opens Foliage mode with an empty palette and a Create Foliage Type button. Generating types
+//     here would write files into the author's project on a guess -- the same rule that kept 0.4's
+//     hidden=owner fix a documented manual step rather than a silent one.
+//   - The editor resolves materials under Binaries/Materials before Content/Materials, matching the
+//     runtime. That changes where the engine LOOKS, not what a project must contain.
+//   - The ReSTIR GI store rejects non-finite reservoirs. That is how a scene renders, not what it holds.
+bool step_0_5_to_0_6(const Context& ctx, std::string* err) {
+    (void)ctx;
+    (void)err;
+    return true;
+}
+
 // EVERY STEP EVER SHIPPED, OLDEST FIRST, AND NONE OF THEM EDITED AFTER THE FACT. A project made in
 // 0.1 will still be opened years from now, and it will run exactly this function.
 const std::vector<Step> kSteps = {
@@ -188,6 +228,9 @@ const std::vector<Step> kSteps = {
     {{0, 4, 0}, {0, 5, 0},
      "Nothing to repair: 0.5's format changes are additive, and the coat reads absent as no coat",
      &step_0_4_to_0_5},
+    {{0, 5, 0}, {0, 6, 0},
+     "Nothing to repair: 0.6's format changes are optional records that read absent as the 0.5 behaviour",
+     &step_0_5_to_0_6},
 };
 
 } // namespace

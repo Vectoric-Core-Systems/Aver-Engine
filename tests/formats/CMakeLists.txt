@@ -14,6 +14,26 @@ target_link_libraries(LevelInspect PRIVATE Aver.Formats Aver.Core Aver.Platform)
 set_target_properties(LevelInspect PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# OcLightmapTest -- the .oclightmap container and its RGB9E5 texel encoding. See the test's own
+# banner for why the HDR round trip is the assertion that matters.
+#
+# NO add_test HERE, for either of the two below: aver_register_ctest_in (root CMakeLists) walks every
+# target whose name ends in Test and registers it with the TIMEOUT, WORKING_DIRECTORY and -- the part
+# that matters -- the FAIL_REGULAR_EXPRESSION "FAIL  |FAILED ===" every suite here is written
+# against. A hand-written add_test compiles and runs but silently opts out of that regex, so a suite
+# printing failures while returning 0 would pass.
+add_executable(OcLightmapTest src/OcLightmapTest.cpp)
+target_link_libraries(OcLightmapTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(OcLightmapTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# LightmapUnwrapTest -- the dependency-free chart-by-normal unwrapper. Its central assertion is the
+# occupancy grid proving two charts never overlap in the atlas; see the test's banner.
+add_executable(LightmapUnwrapTest src/LightmapUnwrapTest.cpp)
+target_link_libraries(LightmapUnwrapTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(LightmapUnwrapTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # OcGraphTest — the .ocgraph visual scripting format. Text parsing, round-tripping, unknown record
 # preservation, and deterministic output. See modules/formats/include/aver/formats/OcGraph.hpp.
 add_executable(OcGraphTest src/OcGraphTest.cpp)
@@ -24,6 +44,16 @@ target_link_libraries(OcGraphTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
 target_compile_definitions(OcGraphTest PRIVATE
   AVER_OCGRAPH_FIXTURE="${CMAKE_SOURCE_DIR}/scripting/csharp/Aver.Graph.Tests/cross_impl_test.ocgraph")
 set_target_properties(OcGraphTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# OcInputTest -- the .ocinput input-binding-scheme format, and the OcProject INPUT.SCHEME key that
+# names one (see modules/formats/include/aver/formats/OcInput.hpp for the grammar and
+# modules/formats/include/aver/formats/OcProject.hpp for the new key). The OcProject assertions live
+# in this same executable rather than a separate one: the point of INPUT.SCHEME is the pairing of the
+# two formats, and neither Aver.Formats target dependency changes by testing them together.
+add_executable(OcInputTest src/OcInputTest.cpp)
+target_link_libraries(OcInputTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(OcInputTest PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # OcParticleTest -- the .ocparticle format (particles DECIDED 3). Round-tripping, unknown-record and
@@ -114,6 +144,11 @@ if(TARGET Aver.Formats.Material)
   # and it is precisely the kind of hand-maintained cross-module layout that needs a test.
   target_link_libraries(MaterialTest PRIVATE
     Aver.Formats.Material Aver.Formats Aver.Render.PBR.Materials Aver.Core Aver.Platform)
+  # AVER_REPO_ROOT so the MaterialConstants block can READ the two HLSL files it claims to guard.
+  # It asserted C++ offsets only and called itself a three-way mirror check; the two shader copies
+  # it names were never opened. Same precedent as CoatEnergyTest and VoxiRtSeqTest, which each read
+  # the shader they mirror rather than describing it.
+  target_compile_definitions(MaterialTest PRIVATE AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
   set_target_properties(MaterialTest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
@@ -159,6 +194,14 @@ set_target_properties(ConvertTool PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BI
 # repo defaults to (modules/trifactor/CMakeLists.txt), and ConvertTool has to work in that tree.
 if(TARGET Aver.Trifactor)
   target_link_libraries(ConvertTool PRIVATE Aver.Trifactor)
+endif()
+# Cooking the imported glTF's materials is optional for the same reason clustering is, and guarded
+# the same way: `if(TARGET ...)`, not `if(AVER_MODULE_PBR)`, so ConvertTool still builds and still
+# imports geometry in a tree where PBR is off. With the target absent, the tool says materials were
+# skipped rather than leaving the user to wonder where they went.
+if(TARGET Aver.Formats.Material)
+  target_link_libraries(ConvertTool PRIVATE Aver.Formats.Material)
+  target_compile_definitions(ConvertTool PRIVATE AVER_HAVE_MATERIAL_COOK=1)
 endif()
 
 # MakeRig -- writes content/dev/Rig.gltf, the tree's ONLY skinned asset source. Registered here for
@@ -270,6 +313,18 @@ if(TARGET Aver.Formats.Material)
   # stb_image_write, for the packed metalRough PNG. A SECOND STB_IMAGE_WRITE_IMPLEMENTATION relative
   # to MakeFoliage is fine: they are separate executables, so there is no duplicate symbol to collide.
   target_include_directories(AverAssetC PRIVATE ${CMAKE_SOURCE_DIR}/third_party/stb)
+  # Emitting the material's own .ocgraph needs the graph->HLSL compiler on top, so that the tool can
+  # PROVE the graph it just wrote shades before pointing the .ocmat at it. Nested inside the material
+  # guard because a graph is only ever written beside a .ocmat.
+  #
+  # LINKING THE COMPILER COSTS NO DEVICE AND NO BACKEND -- MaterialGraphTest above links this exact
+  # set and creates neither (see its own comment); compileMaterialGraph is a pure function from an
+  # OcGraphData to HLSL text. Aver.RHI comes along because Aver.Render.PBR.Materials declares it
+  # PUBLIC, not because anything here calls it.
+  if(TARGET Aver.Render.PBR.Materials)
+    target_link_libraries(AverAssetC PRIVATE Aver.Render.PBR.Materials)
+    target_compile_definitions(AverAssetC PRIVATE AVER_HAVE_MATERIAL_GRAPH=1)
+  endif()
 endif()
 
 # AverAssetCTest -- the JSON contract Aver Exchange in the LAUNCHER parses.
@@ -287,3 +342,54 @@ target_compile_definitions(AverAssetCTest PRIVATE
   AVER_ASSETC_EXE="$<TARGET_FILE:AverAssetC>"
   AVER_REPO_ROOT="${CMAKE_SOURCE_DIR}")
 set_target_properties(AverAssetCTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# OcRigTest -- the .ocrig control-rig format. Text like .ocgraph and for the same reason (a rig is
+# four lines a person writes), so the checks are the ones text formats need: parse, round-trip
+# through both memory and disk, byte-stable rewrite, and a refusal with a reason for each malformed
+# shape.
+add_executable(OcRigTest src/OcRigTest.cpp)
+target_link_libraries(OcRigTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(OcRigTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# OcFoliageTest -- the .ocfoliage foliage-type format. An AVR1 binary container like .ocland/.ocbt,
+# not a text format like .ocrig/.ocgraph, so the checks are the ones a binary chunk format needs:
+# byte-identical round trip, valid()'s own refusals, container-level corruption (wrong subtype, a
+# missing required chunk), and -- the one this format's header comment calls out by name -- the
+# ABSENT-VS-ZERO rule: a chunk shorter than the reader expects must default the fields it could not
+# reach rather than zero them, and that default must stay visibly distinct from a full-length chunk
+# that explicitly authored zero/false for the same field.
+add_executable(OcFoliageTest src/OcFoliageTest.cpp)
+target_link_libraries(OcFoliageTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(OcFoliageTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# OcAnimTest -- the .ocanim NOTIFY DURATION chunk (NTFD), item 7.1's format half. Its own executable
+# rather than a block in MeshTest: MeshTest is about the AVR1 container generically, and this is
+# about ONE clip field whose whole point is a negative claim (absent means absent, byte-identically)
+# that deserves its own fixture rather than sharing MeshTest's.
+add_executable(OcAnimTest src/OcAnimTest.cpp)
+target_link_libraries(OcAnimTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(OcAnimTest PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# ProjectRenderApplyTest -- modules/render.voxi/include/aver/voxi/ProjectRenderApply.hpp, the shared
+# .ocproject <-> voxi::Settings apply/capture logic both hosts (the editor and the packaged game) now
+# call through instead of each carrying its own copy. Guarded on the TARGET rather than on
+# AVER_MODULE_VOXI for MaterialTest's own reason above: an AVER_MODULE_VOXI=OFF tree has no
+# Aver.Render.Voxi target to link, and the guard has to ask the question CMake can actually answer.
+if(TARGET Aver.Render.Voxi)
+  add_executable(ProjectRenderApplyTest src/ProjectRenderApplyTest.cpp)
+  target_link_libraries(ProjectRenderApplyTest PRIVATE
+    Aver.Render.Voxi Aver.Formats Aver.Assets Aver.Core Aver.Platform)
+  set_target_properties(ProjectRenderApplyTest PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
+
+# TextureSrgbTableTest -- W5's sRGB decode lookup table (modules/formats/src/Texture.cpp). Compares
+# the real, public generateMipChain() against a verbatim copy of the PRE-CHANGE std::pow form, byte
+# for byte, because a table that was merely CLOSE to the curve would still change every decoded texel
+# in a project -- see the test file's own header. NO add_test HERE, for MeshTest's own reason above:
+# aver_register_ctest_in (root CMakeLists) already walks every *Test target and registers it against
+# the FAIL_REGULAR_EXPRESSION every suite here is written to.
+add_executable(TextureSrgbTableTest src/TextureSrgbTableTest.cpp)
+target_link_libraries(TextureSrgbTableTest PRIVATE Aver.Formats Aver.Core Aver.Platform)
+set_target_properties(TextureSrgbTableTest PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

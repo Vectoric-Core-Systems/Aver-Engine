@@ -31,6 +31,23 @@ using AssetPathFn = std::string (*)(u64 objectId, void* user);
 // wants to keep it must copy it.
 using AnimNotifyFn = void (*)(scene::Entity e, const char* name, void* user);
 
+// A POSE MODIFIER: the seam a control rig lives in.
+//
+// Called once per animated entity per tick, AFTER the clip has been sampled and blended into `pose`
+// and BEFORE that pose becomes skinning matrices. Until this existed there was nothing between those
+// two statements -- sampleAnimation wrote the pose and poseToSkinning consumed it in the next line,
+// with no way for anything to sit in between. Foot placement, a head that tracks a target, a hand
+// held on a grip while the arm plays a canned clip: all of them are edits made in that gap.
+//
+// IT MUTATES `pose.local` IN PLACE, which is the whole reason this is cheap: anim::Pose is a flat
+// vector of local transforms with no accessor wall, so a modifier assigns to the bones it cares
+// about and leaves the rest of the sampled animation exactly as it was.
+//
+// EVERYTHING DOWNSTREAM ALREADY FOLLOWS. updateAttachments runs after every entity's pose exists, so
+// a socket on a bone this moves tracks it for free, and the skinning matrices are computed from the
+// modified pose rather than the sampled one.
+using PoseModifierFn = void (*)(scene::Entity e, const fmt::OcSkeleton& skel, Pose& pose, void* user);
+
 // Owns the loaded rigs and clips, and the pose of every animated entity.
 class AnimSystem {
 public:
@@ -38,11 +55,27 @@ public:
     // clocks, so a scrubbing editor works before any asset path is known.
     void setResolver(AssetPathFn fn, void* user) { resolve_ = fn; user_ = user; }
 
+    // The path an interned asset id resolves to, or empty when there is no resolver or it declines.
+    //
+    // Exposed because this class OWNS the resolver and other systems in this module need it: the
+    // control rig loads a .ocrig by the same asset id, through the same host-supplied mapping, so
+    // that a rig is found exactly the way a skeleton and a clip are. A second resolver installed
+    // beside this one would be a second answer to the same question.
+    std::string assetPath(u64 objectId) const {
+        return (resolve_ && objectId) ? resolve_(objectId, user_) : std::string{};
+    }
+
     // Installs the notify sink. Without one, crossings are still TRACKED (so installing a sink
     // mid-session does not deliver a backlog) but nothing is delivered -- an editor previewing a
     // clip has no graphs to fire at, and should not pay for pretending otherwise.
     void setNotifySink(AnimNotifyFn fn, void* user) { notify_ = fn; notifyUser_ = user; }
     bool hasNotifySink() const { return notify_ != nullptr; }
+
+    // Installs the pose modifier. Without one the tick is exactly what it was before the seam
+    // existed -- sample, blend, skin -- so the cost of having this hook and not using it is one null
+    // check per animated entity per frame.
+    void setPoseModifier(PoseModifierFn fn, void* user) { poseMod_ = fn; poseModUser_ = user; }
+    bool hasPoseModifier() const { return poseMod_ != nullptr; }
 
     // How many notifies this system has delivered since the last clear(). Exists so a test can
     // assert on the COUNT without installing a sink that records, and so a host can see at a glance
@@ -94,6 +127,15 @@ public:
     const fmt::OcAnimation* clip(u64 objectId);
 
     // Drops every cached asset and pose. Call when a project closes or content changes on disk.
+    //
+    // ALSO CLOSES ANY NOTIFY STATE STILL OPEN, firing its "_End" first -- the fifth way an open
+    // window leaks, and the one none of stepNotifyStates' four (see its own comment) can reach: a
+    // reload drops every clock outright, with no clip switch, no destroy and no later tick for any
+    // of those four to hang a close off of. Verified safe to fire rather than merely documented
+    // around: BOTH real callers (GameContent::adopt, SandboxApp::rebuildContentIndex) run at
+    // PROJECT-OPEN, before the old level's entities are torn down and before a new one is spawned --
+    // never at engine or world teardown -- so the sink this reaches is exactly as alive as it is on
+    // an ordinary tick, and staying silent here would BE the leak, not a way of avoiding one.
     void clear();
 
     u32 loadedSkeletons() const { return static_cast<u32>(skeletons_.size()); }
@@ -129,6 +171,15 @@ private:
         // curves is a real thing, and Posed exists only once a skeleton has resolved.
         const fmt::OcAnimation* asset = nullptr;
         f32 wrapped = 0.0f;   // `prev` is the last OBSERVATION; this is where the clock is NOW
+
+        // WHICH NOTIFY STATES ARE CURRENTLY OPEN, one byte per notify in `asset`, index-for-index --
+        // resized (and zeroed) only when it disagrees with asset->notifies.size(), which happens
+        // exactly once per clip switch, right after the reset below throws the old array away with
+        // everything else. This is the ONE piece of state a notify's Begin/End pairing depends on,
+        // and it lives here rather than being recomputed, for the identical reason `prev` does: an
+        // entity can be inspected (paused, scrubbed) for any number of ticks with nothing to
+        // recompute it from.
+        std::vector<u8> open;
     };
     // An asset that failed to load is cached as a null so a missing file is not re-opened every
     // frame for the life of the session.
@@ -154,13 +205,51 @@ private:
     // Runs one step's crossings out to the sink.
     void deliver(scene::Entity e, const fmt::OcAnimation& c, const ClipStep& s);
 
+    // NOTIFY STATES: a window that opens, stays open and closes, layered beside the instant notifies
+    // `deliver` already handles (see OcAnimation::notifyDurations for the format half). Runs the SAME
+    // step `deliver` just ran through every duration>0 notify in `c`, firing "<Name>_Begin" and
+    // "<Name>_End" through the identical sink -- two suffixed instant events, not a second wire, which
+    // is what keeps this reachable from a node with no C# involved.
+    //
+    // THE FOUR WAYS AN OPEN STATE LEAKS, and where each is actually closed:
+    //   (a) normal playback out the far side of the window -- closed HERE, by the ordinary crossing
+    //       test below reaching the window's end point on some later call.
+    //   (b) the clip changing while a window is open -- closed in stepNotifies, BEFORE the clock
+    //       resets for the new clip (see closeAllOpen there).
+    //   (c) the entity being destroyed or pruned mid-window -- closed in tick()'s clock-pruning loop,
+    //       for the identical reason (b) is: there is no later call on a dead entity to close it.
+    //   (d) the loop seam, playback wrapping past the end while a window is open -- closed HERE, for
+    //       free: the window's end point is clamped to `c.duration` (never past it, see the local
+    //       `endT` below), and a wrapped step's tail segment always runs up to `c.duration`, so a
+    //       clamped end point is always inside it. No separate "detect a wrap" branch exists because
+    //       none is needed once the end point cannot outrun the clip it belongs to.
+    //   (e) a full reload dropping every clock outright -- NOT closed here, because there is no
+    //       ClipStep for a reload to reuse this crossing math with. Closed in clear() instead; see
+    //       its own comment for why firing there is safe rather than merely documented as unsafe.
+    void stepNotifyStates(scene::Entity e, const fmt::OcAnimation& c, const ClipStep& s, NotifyClock& clock);
+    // Fires one "<Name>_Begin" or "<Name>_End" through the sink and counts it, exactly like `deliver`
+    // does for an instant notify -- including doing NOTHING when no sink is installed, so installing
+    // one later still delivers no backlog.
+    void fireState(scene::Entity e, const fmt::OcAnimation& c, u32 index, bool begin);
+    // Fires "_End" for every notify still open under `clock` and marks them closed. The shared tail
+    // of leaks (b) and (c): both are "this clock's bookkeeping is about to be thrown away", and the
+    // only difference between them is what throws it away.
+    void closeAllOpen(scene::Entity e, NotifyClock& clock);
+
     std::unordered_map<scene::Entity, NotifyClock> clocks_;
     AssetPathFn resolve_ = nullptr;
     void* user_ = nullptr;
     AnimNotifyFn notify_ = nullptr;
     void* notifyUser_ = nullptr;
+
+    PoseModifierFn poseMod_ = nullptr;
+    void* poseModUser_ = nullptr;
     u64 fired_ = 0;
     u32 attachmentsPlaced_ = 0;
+    // Set for the duration of clear() itself, so a notify sink that reacts to a forced "_End" by
+    // calling clear() again -- reentrantly, from inside the loop clear() is still running -- does
+    // nothing rather than clearing clips_/skeletons_ out from under that still-in-flight loop.
+    bool clearing_ = false;
     // Reused across entities and ticks so a frame of notifies costs no allocation after the first.
     std::vector<u32> crossed_;
 };

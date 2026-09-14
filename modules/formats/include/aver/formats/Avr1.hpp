@@ -67,7 +67,25 @@ struct Avr1File {
 };
 
 // Reads a container. Returns false with `why` set on bad magic, a header CRC mismatch, a truncated
-// file, a MinReaderVersion above ours, or an unknown Required chunk.
+// file, a chunk whose payload leaves the file, a chunk hash mismatch, or a MinReaderVersion above
+// ours.
+//
+// IT DOES NOT CHECK kAvrChunkRequired, and this comment used to claim it did. Nothing in the tree
+// reads that flag: writers set it (OcMesh, OcAnim, OcAudio, GiCache and the rest all mark their base
+// chunks Required) and no reader has ever looked. The claim was here long enough to be believed.
+//
+// It is also not a check parseAvr1 COULD make. "Unknown" is not a property of the container -- it is
+// a property of the reader, which is the only party that knows which chunk ids it understands.
+// parseAvr1 sees four bytes and a flag byte; it cannot tell a chunk this build has never heard of
+// from one the caller is about to look up by id. Enforcement has to live in each format reader,
+// where the known-id set exists: after find()ing what it wants, walk `chunks` once and refuse any
+// entry carrying kAvrChunkRequired that it did not claim.
+//
+// Until one does, kAvrChunkRequired is descriptive rather than load-bearing: a future writer adding a
+// Required chunk to mean "an old reader MUST refuse this file" will not get that behaviour, and an
+// old build will load the file with stale semantics instead. That is a real gap, deliberately left
+// stated rather than papered over with a helper no reader calls -- an unused enforcement API is the
+// same defect as an unenforced flag, one layer up.
 bool loadAvr1(const std::string& path, Avr1File& out, std::string* why = nullptr);
 bool parseAvr1(const u8* bytes, usize size, Avr1File& out, std::string* why = nullptr);
 

@@ -286,6 +286,14 @@ Copy `SandboxApp.cpp:1386-1510`, the whole `#if AVER_MODULE_SCENE` block, minus 
 
 `resolveMaterialTexture` picks `assets::TextureUsage` **from the slot, never the filename** (1146-1153: BaseColor/Emissive → Colour, Normal → NormalMap, else Data) and calls `assets::uploadTexture` (`modules/assets/include/aver/assets/TextureUpload.hpp:27-29`). `materialForSurface` tries three candidates **in this order** (1241-1245): `binariesDir()\Materials\<n>.ocmat`, `contentDir()\Materials\<n>.ocmat`, `contentDir()\<n>` (no extension appended on the third); the **first existing** candidate wins and a parse failure **breaks** rather than falling through. It caches `0` as a negative and never retries. `loadProjectMaterials` uses a **non-recursive** `directory_iterator` over `Content\Materials` only.
 
+> **CORRECTED 2026-09-13.** The runtime's lifted `loadProjectMaterials()` was never called and has been
+> **removed**. It was not a dropped step: `GameApp` opens a project with `loadProjectMeshes` ->
+> `loadProjectParticleEffects` -> `loadStartMap`, and `GameLevel::load` resolves each surface a level
+> references through `materialForSurface`, lazily and Binaries-first, so eagerly loading every project
+> material would only add load time and memory. The `openProject` order quoted below is the **editor's**
+> `applyProject`, not the runtime's. The editor keeps its own `loadProjectMaterials()`, which since
+> `6875e36b` scans `Binaries\Materials` as well as `Content\Materials`.
+
 `pbr::MaterialSystem` is a member of `VoxiRenderer` (`modules/render.voxi/include/aver/voxi/VoxiRenderer.hpp:83`), initialised only in `VoxiRenderer::init` (`modules/render.voxi/src/VoxiRenderer.cpp:129`), so textured drawing requires attaching a `VoxiRenderer` as a render feature. Copy `SandboxApp.cpp:836-886`: `rhi::DeviceCaps` → `voxi::DeviceInfo` (841-846), `voxi::Renderer::get().setDeviceInfo/setSettings`, `voxiRenderer_.setSettings(s)` **before** `voxiRenderer_.init(*e.device())`, then `addRenderFeature`, `voxiAttached_ = true`, deferred `applyProjectRenderSettings()`, `textureFactory_ = e.device()->resources()` (:882) and `voxiRenderer_.materials().setTextureResolver(&GameContent::resolveMaterialTexture, &content_)` (:883). **Keep 882 and 883 adjacent**, exactly as SandboxApp does — that adjacency is why the `!textureFactory_` guard at :1137 is unreachable.
 
 Restore the deferred pieces: `materialForSurface` at level load (`SandboxApp.cpp:5136-5141`) and the `surfaceMaterials_` branch of the draw walk (`:1466-1481`, including `col = white, metallic = roughness = 1.0` at 1470-1472 and the `setDrawBinding(ms.bindingSet(authored), &ms.constants(authored), sizeof(pbr::MaterialConstants))` at 1477-1480 guarded by `ms.ready()`).

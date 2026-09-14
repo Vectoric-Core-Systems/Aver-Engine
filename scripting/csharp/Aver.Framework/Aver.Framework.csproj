@@ -27,6 +27,10 @@
          Private="false" — see Sample.Game.csproj. -->
     <ProjectReference Include="..\Aver.Scripting\Aver.Scripting.csproj" />
     <ProjectReference Include="..\Aver.Scene\Aver.Scene.csproj" />
+    <!-- The physics binding. Aver.Framework's own Physics.cs is a shim over it now: the API game
+         scripts already use keeps its exact surface, and the 125-function ABI lives in the assembly
+         named after the native module it binds. -->
+    <ProjectReference Include="..\Aver.Physics\Aver.Physics.csproj" />
   </ItemGroup>
 
   <ItemGroup>

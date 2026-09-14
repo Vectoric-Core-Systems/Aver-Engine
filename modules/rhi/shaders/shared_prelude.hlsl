@@ -48,7 +48,66 @@ cbuffer PerFrame : register(AVER_CB_JOIN(b, AVER_FRAME_CB)) {
     // the same reason: nothing about them varies per pixel. Only written while the PHYSICAL
     // atmosphere is on; averSkyIrradiance reads them only under averAtmoOn() for that reason.
     float4   gSkySh[9];
+    // x seconds wrapped to 3600, y seconds raw, z delta seconds. See PerFrameCB::time for why the
+    // clock lives in THIS block and not in the material or feature ones, and why x is wrapped.
+    float4   gTime;
+    // The water wave set: xy = unit direction, z = k (rad/cm), w = angular speed (rad/s).
+    // gWaveParams: x amplitude, y live count. See PerFrameCB::wave for why they live in THIS block.
+    float4   gWave[3];
+    float4   gWaveParams;
 };
+
+// ---- THE WATER SURFACE, EVALUATED IN ONE PLACE ------------------------------------------------
+//
+// THE SINGLE SOURCE OF TRUTH FOR THE WAVES, and it exists because there were briefly two. The ripple
+// was authored as a material graph with its constants as pin defaults; the caustics were HLSL in the
+// renderer with the same three wavelengths typed again. Nothing kept them in step, and they describe
+// the same surface: one makes the bumps, the other decides where those bumps focus sunlight. Retune
+// either alone and the bright lines slide off the ripples casting them.
+//
+// So neither owns the numbers now. Both call these.
+
+// One wave's phase at a world XY position, in radians.
+float averWavePhase(float4 w, float2 p) { return dot(w.xy, p) * w.z + gTime.x * w.w; }
+
+// Surface height in centimetres, relative to the flat surface.
+float averWaveHeight(float2 p) {
+    const uint n = (uint)(gWaveParams.y + 0.5);
+    float h = 0.0;
+    [unroll] for (uint i = 0; i < 3; ++i)
+        if (i < n) h += sin(averWavePhase(gWave[i], p));
+    return h * gWaveParams.x;
+}
+
+// The tangent-space normal of that height field. ANALYTIC, not a finite difference: the derivative
+// of a sum of sines is a sum of cosines, so this is exact and costs the same as the height itself.
+// z = 1 keeps it a tilt, so amplitude reads directly as steepness once normalised.
+float3 averWaveNormal(float2 p) {
+    const uint n = (uint)(gWaveParams.y + 0.5);
+    float2 d = float2(0.0, 0.0);
+    [unroll] for (uint i = 0; i < 3; ++i)
+        if (i < n) d += gWave[i].xy * (gWave[i].z * cos(averWavePhase(gWave[i], p)));
+    return normalize(float3(-d * gWaveParams.x, 1.0));
+}
+
+// How strongly the surface FOCUSES light at this position: 0 where it spreads, 1 at the tightest
+// convergence the wave set can produce.
+//
+// This is the Laplacian of the same height field, negated and normalised. A concave patch converges
+// the rays crossing it and a convex one spreads them, and for a sum of sines the second derivative
+// is analytic -- each term contributes -k^2 sin(phase). That is the whole of why caustics here need
+// no ray tracing, no photon map and no texture: they are this function, sharpened.
+float averWaveFocus(float2 p) {
+    const uint n = (uint)(gWaveParams.y + 0.5);
+    float lap = 0.0, norm = 0.0;
+    [unroll] for (uint i = 0; i < 3; ++i) {
+        if (i >= n) continue;
+        const float k2 = gWave[i].z * gWave[i].z;
+        lap  -= k2 * sin(averWavePhase(gWave[i], p));
+        norm += k2;
+    }
+    return saturate(lap / max(norm, 1e-6));
+}
 // The per-draw block: transform plus shading constants. 32 dwords, matching kObjectConstantDwords.
 cbuffer PerObject : register(AVER_CB_JOIN(b, AVER_OBJECT_CB)) {
     float4x4 gWorld;
@@ -315,6 +374,27 @@ float3 averGroundRadiance() {
     return albedo * E / PI;
 }
 
+// The ground as the PHYSICAL model should see it: the same albedo, lit by a sun that has actually
+// travelled through the atmosphere to reach it.
+//
+// THE ONE LINE THAT SEPARATES THIS FROM averGroundRadiance IS sunT, AND IT IS THE WHOLE BUG. That
+// function multiplies the albedo by averSunRadiance() at full strength -- the sun as if no air stood
+// between it and the ground. A neutral 0.24 albedo under a 1.0/0.98/0.92 sun at 100k lux lands on
+// warm cream at EVERY sun elevation, including a sunset where the real ground is deep red-brown and
+// a fraction as bright. That is why an earlier attempt to blend the lower hemisphere toward it was
+// reported back as "brown" and abandoned: the blend was not the mistake, the sun feeding it was.
+//
+// Passing the same transmittance the sky march already computes makes the ground track the sun it is
+// actually lit by -- dim and red at sunset, bright and neutral at noon -- which is what lets it be
+// composited without dragging cream across the bottom of the frame.
+float3 averGroundRadianceLit(float3 sunT) {
+    if (averFurnaceOn()) return averFurnaceL();
+    float3 albedo = srgbToLin(gGroundColor.rgb);
+    float  ndl    = saturate(normalize(gLightDir.xyz).z);
+    float3 E = averSunRadiance() * sunT * ndl + PI * averSkyAbove(float3(0, 0, 0.5)) * gAmbient.r;
+    return albedo * E / PI;
+}
+
 // The whole authored dome: sky above the horizon, fading to the lit ground below it.
 float3 skyColorFull(float3 dir)
 {
@@ -335,15 +415,23 @@ float3 skyColorFull(float3 dir)
 // the bright band across the horizon and the warm brown below it -- two separate wrongs filling half
 // the view.
 //
-// Marched as authored now. A ray that meets the planet STOPS at the planet, so the air in front of
-// the ground is the air actually there: metres of it looking steeply down, tens of kilometres just
-// under the horizon. The ground is then composited the way every other surface in this file is --
-// background * transmittance + inscatter, exactly what averApplyFog does -- instead of replacing the
-// sky outright. Distant ground veils to the horizon's own colour, near ground does not, so the
-// effect follows the view instead of being stamped on at a constant angle. It also means the haze
-// only takes over the horizon once there is real distance to look through, which is the scale
-// argument: at room and arena size there is nothing between you and the ground to scatter, and the
-// band that used to sit there was never earned.
+// THAT PARAGRAPH USED TO SAY THE RAY IS MARCHED TO THE PLANET AND THE GROUND COMPOSITED IN FRONT
+// OF IT. It is not, and has not been since the horizon-seam fix below replaced it -- cosV is pinned
+// to 0 for the whole lower hemisphere, and until now nothing was composited over the result. The
+// comment survived the change and described the code as doing the opposite of what it does, which is
+// the class of mistake this file treats as a defect rather than untidiness.
+//
+// What the pinned march actually produces is the horizon-grazing colour, everywhere below the
+// horizon, flat. That closes the seam -- both sides evaluate the identical integral at dir.z = 0 --
+// but the horizon is the BRIGHTEST direction the model can return, because it is the longest path
+// through air toward the sun. Painting the entire lower hemisphere with it makes the bottom of the
+// frame the brightest thing on screen, which is backwards for any real view and was reported as the
+// void being far too bright: looking straight down at a sunset read 220,157,118.
+//
+// So the march stays pinned and a GROUND TERM is composited over it, weighted by how far below the
+// horizon the ray points -- zero AT the horizon, so the seam the pinning exists to close stays
+// closed, and full looking straight down. See averGroundRadianceLit for why this does not bring back
+// the cream that sank the earlier attempt.
 //
 // ABOVE THE HORIZON THIS IS BIT-IDENTICAL TO WHAT IT REPLACED. For dir.z >= 0 the planet's near root
 // is behind the camera, so tMax is still the far root of the atmosphere shell and cosV still equals
@@ -456,12 +544,23 @@ float3 averSkyPhysical(float3 dir) {
     // geometry, and the dome's ground only means anything zoomed out far enough for the planet to be
     // a planet.
     //
-    // So there is no ground term here at all. `sky` already IS the right answer, on its own: cosV is
-    // pinned to 0 for the entire lower hemisphere (the fix above), so every downward direction
-    // integrates the identical horizon-grazing path and returns the identical, correctly-coloured
-    // haze -- flat, yes, but flat and RIGHT is a better answer than graded and brown, and it is the
-    // same haze colour the sky immediately above the horizon is already drawing, so there is no seam
-    // to paper over with a second blend.
+    // THE GROUND, COMPOSITED OVER THE PINNED MARCH RATHER THAN REPLACING IT. The paragraph above
+    // argued there should be no ground term because the only one available went cream -- true of
+    // averGroundRadiance, and fixed by averGroundRadianceLit, which lights the same albedo with a sun
+    // that has been through the air. What is left of that argument still holds and is why this is a
+    // BLEND and not a substitution: the haze in front of distant ground is real, and just under the
+    // horizon there are tens of kilometres of it.
+    //
+    // WEIGHTED BY DEPTH BELOW THE HORIZON, AND ZERO AT IT. smoothstep(0, 0.45, -dir.z) is 0 for every
+    // ray at or above the horizon, so this cannot reopen the seam the cosV pinning exists to close --
+    // above the horizon this function is bit-identical to what it was. It reaches full weight around
+    // 27 degrees down, by which point there is little air left to look through and what you are
+    // looking at is the ground, not the sky beyond it.
+    //
+    // gGroundColor.a is the authored "how much of the ground replaces the sky" and is respected, so a
+    // project that wants the old flat haze sets it to 0 and gets exactly that.
+    const float below = smoothstep(0.0, 0.45, saturate(-dir.z)) * gGroundColor.a;
+    if (below > 0.0) sky = lerp(sky, averGroundRadianceLit(groundSunT), below);
     return sky;
 }
 
@@ -605,9 +704,35 @@ float3 averFogInscatter(float3 wpos, float3 t) {
 }
 
 // Applies the air between the camera and a surface: physical atmosphere, then height fog.
-float3 averApplyFog(float3 color, float3 wpos) {
+//
+// `aerial` EXISTS TO BE MEASURED. The height-fog term below is already branched, and its comment
+// records why; the aerial march above it never was, and no ablation could isolate it -- the existing
+// fog mode removes both at once. Splitting it here lets the aerial term's own cost be read off a
+// flag instead of argued about, which is the standard this file's other two gates were held to.
+// averApplyFog keeps its signature and its behaviour, so no caller changes.
+float3 averApplyFogEx(float3 color, float3 wpos, bool aerial) {
     float3 T = 1.0;
-    if (averAtmoOn()) {
+    // NO MAGNITUDE GATE ON THIS ONE, UNLIKE THE TWO BELOW IT, AND THAT IS NOW A MEASUREMENT
+    // RATHER THAN AN OVERSIGHT. It looks like the bug this file has already fixed twice -- an
+    // unconditional march whose result is near-zero for most pixels -- and the obvious fix is a
+    // distance threshold mirroring `fogF > 0.001` and `w > 0.01`. It was measured before being
+    // written, using the ablation the measurement needed (AVER_RD_ABL_AERIAL, voxi.hlsl), and
+    // the numbers say leave it alone. Sponza at 2750x1639, ray-driven primary:
+    //     baseline                       16.83 ms
+    //     aerial march ablated (mode 12) 16.64 ms   -> this term costs 0.19 ms, 1.1% of the pass
+    //     all of averApplyFog  (mode 11) 16.61 ms   -> height fog adds 0.03 ms on top
+    //
+    // AND IT IS NOT A NO-OP WHERE IT RUNS: ablating it changes 28.6% of the frame by up to 37
+    // codes. That is the whole difference from the 41%-of-a-frame case this file records. There,
+    // the march was multiplied by a weight that was zero exactly where fog was visible, so the
+    // work was provably discarded. Here the work is used, and a threshold trades a visible,
+    // physically-calibrated haze on mid-range geometry for at most a fifth of a millisecond.
+    //
+    // WHY IT IS SO CHEAP DESPITE BEING A LOOP: the pass around it is bound by ray traversal, not
+    // by arithmetic. A fixed four-step march with an analytic inner transmittance is ALU that
+    // largely hides behind memory latency the rays are already paying. Cost here is rays, and a
+    // gate on this term buys a rounding error against a real quality risk.
+    if (aerial && averAtmoOn()) {
         float3 inscatter = averAtmoAerial(wpos, T);
         color = color * T + inscatter;
     }
@@ -623,6 +748,8 @@ float3 averApplyFog(float3 color, float3 wpos) {
     if (fogF > 0.001) color = lerp(color, averFogInscatter(wpos, T), fogF);
     return color;
 }
+
+float3 averApplyFog(float3 color, float3 wpos) { return averApplyFogEx(color, wpos, true); }
 
 
 // The sky as light: the cosine-weighted average radiance over the hemisphere about N.
@@ -671,6 +798,58 @@ float3 averShIrradiance(float3 n) {
     // L2 can undershoot on a sky with a strong, small bright region; ambient light is never
     // negative, and a negative here would subtract light from whatever it is added to.
     return max(e, 0.0);
+}
+
+// The sky as RADIANCE ALONG ONE DIRECTION, from the same nine coefficients averShIrradiance reads.
+//
+// THE DIFFERENCE FROM averShIrradiance IS THE COSINE CONVOLUTION, and it is the whole distinction.
+// That function answers "how much light arrives at a surface facing n", so it folds in the
+// cosine-lobe factors A0=PI, A1=2PI/3, A2=PI/4 (and divides the PI back out). This one answers "how
+// bright is the sky if I look along d", which is the raw basis with no convolution -- so every
+// constant below is that function's constant with its A-factor divided out:
+//     0.282095 = 0.282095 / 1        (A0/PI = 1)
+//     0.488603 = 0.325735 / (2/3)    (A1/PI = 2/3)
+//     1.092548 = 0.273137 / (1/4)    (A2/PI = 1/4)
+//     0.315392 = 0.078848 / (1/4)
+//     0.546274 = 0.136569 / (1/4)
+// Using the wrong one of the two is not a small error: the convolved version is a hemispherical
+// average and is nearly flat across directions, so a caller wanting per-direction sky would get a
+// blurred constant and never see it was wrong.
+//
+// WHAT NINE COEFFICIENTS CANNOT DO: represent the sun disc, a cloud edge, or anything else small and
+// bright. This is a smooth, low-frequency reconstruction, correct for an AMBIENT gather over many
+// directions and wrong for a mirror reflection, which must keep marching the atmosphere. The sun is
+// handled as its own direct term everywhere in this engine, so it is not missing here, only absent.
+//
+// SELF-CHECK, matching averShIrradiance's: a UNIFORM sky of radiance L projects to
+// c[0] = L * 0.282095 * 4PI and nothing else, and this returns exactly L in every direction.
+float3 averShRadiance(float3 d) {
+    float3 e = gSkySh[0].rgb * 0.282095;
+    e += (gSkySh[1].rgb * d.y + gSkySh[2].rgb * d.z + gSkySh[3].rgb * d.x) * 0.488603;
+    e += (gSkySh[4].rgb * (d.x * d.y) + gSkySh[5].rgb * (d.y * d.z) +
+          gSkySh[7].rgb * (d.x * d.z)) * 1.092548;
+    e += gSkySh[6].rgb * ((3.0 * d.z * d.z - 1.0) * 0.315392);
+    e += gSkySh[8].rgb * ((d.x * d.x - d.y * d.y) * 0.546274);
+    // Same clamp and same reason as averShIrradiance: L2 undershoots on a sky with a strong, small
+    // bright region, and negative radiance is not a dim colour -- acesTonemap floors negative/NaN
+    // input at zero (color.hlsli, since ded8784a), so an unclamped negative here would render as
+    // confident BLACK rather than a plausible dim colour, not the BRIGHT this comment used to warn
+    // of from acesTonemap's pre-ded8784a behaviour. That failure mode -- a broken value reading as a
+    // plausible one -- is recorded in this tree already, just dark now instead of bright.
+    return max(e, 0.0);
+}
+
+// The per-direction sky a ray should use when it misses: averShRadiance under the physical
+// atmosphere, and the authored dome's own evaluation otherwise. Mirrors averSkyIrradiance's split so
+// a project on the authored sky is not silently handed a reconstruction of a sky it is not using.
+//
+// NOT skyColor(): that marches the atmosphere in 32 steps and is far too expensive to run once per
+// hemisphere sample. This is the cheap sibling, and the trade is high-frequency detail an ambient
+// term cannot see anyway.
+float3 averSkyRadianceCheap(float3 d) {
+    if (averFurnaceOn()) return averFurnaceL();
+    if (averAtmoOn()) return averShRadiance(d);
+    return skyColorFull(d);
 }
 
 float3 averSkyIrradiance(float3 N) {
@@ -738,7 +917,20 @@ float4 plainShadeSurface(VSOut i, float sunVis, float3 indirectRadiance, float a
     float rough = clamp(gMaterial.y, 0.045, 1.0);
 
     if (gMaterial.z > 0.5) {
-        return float4(gBaseColor.rgb, gBaseColor.a);
+        // UNLIT: hand the authored colour back with no shading at all. Used by editor chrome -- the
+        // selection outline -- where the colour is a signal ("this is selected") rather than a
+        // surface, so sun, sky ambient, specular and fog all have nothing to say about it.
+        //
+        // srgbToLin IS REQUIRED HERE, and its absence was a real bug the first live use of this
+        // bypass exposed. Every other exit of this function converts the authored colour with
+        // srgbToLin (see the `albedo` line just below) before doing anything with it, because what
+        // this shader writes is LINEAR radiance that the tonemap and sRGB encode downstream undo.
+        // Returning the sRGB triple raw skips only the first half of that round trip, so the value
+        // is tonemapped as though it were already linear: measured, selection orange (1.0, 0.62,
+        // 0.12) came out YELLOW, because ACES compresses the saturated red channel far harder than
+        // the middling green one and the ratio between them collapses. With the conversion the
+        // outline is the colour it was authored as, merely unshaded.
+        return float4(srgbToLin(gBaseColor.rgb), gBaseColor.a);
     }
 
     float3 albedo = srgbToLin(gBaseColor.rgb);

@@ -21,6 +21,7 @@
 #include "aver/formats/OcAnim.hpp"
 #include "aver/anim/Pose.hpp"
 #include "aver/anim/AnimSampler.hpp"
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 
 #include <cmath>
@@ -313,7 +314,7 @@ void verify(const std::string& path) {
 
 // Writes <dir>/Rig.gltf and verifies it. Returns 0 on success, 1 on a failed check, 2 on bad usage.
 int main(int argc, char** argv) {
-    if (argc < 2) { AVER_ERROR("usage: MakeRig <output-directory>"); return 2; }
+    if (argc < 2) { AVER_ERROR("usage: MakeRig <output-directory>"); return exitCode(ExitCode::Usage); }
 
     std::string dir = argv[1];
     while (!dir.empty() && (dir.back() == '\\' || dir.back() == '/')) dir.pop_back();
@@ -325,7 +326,7 @@ int main(int argc, char** argv) {
         std::fclose(fp);
     } else {
         AVER_ERROR("could not write {}", path);
-        return 1;
+        return exitCode(ExitCode::Failed);
     }
     AVER_INFO("wrote {} ({} bytes, {} vertices, 2 bones, 1 clip)",
               path, json.size(), kRings * 4);
@@ -334,5 +335,5 @@ int main(int argc, char** argv) {
     verify(path);
 
     AVER_INFO(g_failures ? "MakeRig: {} FAILURES" : "MakeRig: all checks passed ({})", g_failures);
-    return g_failures ? 1 : 0;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

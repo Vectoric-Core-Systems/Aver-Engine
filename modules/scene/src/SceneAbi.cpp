@@ -2,6 +2,11 @@
 // the material and string accessors need.
 #include "aver/scene/scene_abi.h"
 
+// The shared error vocabulary. See its header for why the codes travel on their own entry point
+// rather than on these functions' return values: every accessor here already means 0 = failed, and
+// a negative code would make `if (aver_scene_set_f32(...))` true on failure.
+#include "aver/core/ErrorCodes.hpp"
+
 #include "aver/scene/Components.hpp"
 #include "aver/scene/Fields.hpp"
 #include "aver/scene/World.hpp"
@@ -49,13 +54,41 @@ World& world() { return World::instance(); }
 Entity toEntity(int32_t e) { return static_cast<Entity>(static_cast<uint32_t>(e)); }
 
 // Resolves a field id to its descriptor, or nullptr for 0 / an unknown id.
-const FieldDesc* desc(int32_t f) { return world().field(static_cast<u32>(f)); }
+//
+// RECORDS THE REASON. This and fieldAddr below are the two places every field accessor funnels
+// through, so instrumenting them covers the two failures a caller cannot otherwise tell apart: a
+// field id that names nothing, and an entity that does not have the component the field lives in.
+const FieldDesc* desc(int32_t f) {
+    const FieldDesc* d = world().field(static_cast<u32>(f));
+    setAbiError(d ? AbiError::Ok : AbiError::BadHandle);
+    return d;
+}
 
 // The byte address of field `f` inside entity `e`'s component, or nullptr on any rejection.
 u8* fieldAddr(int32_t e, const FieldDesc* d) {
-    if (!d) return nullptr;
+    if (!d) { setAbiError(AbiError::BadHandle); return nullptr; }
     void* base = world().getComponent(toEntity(e), d->component);
+    // A dead handle and a live entity WITHOUT this component are both BadHandle here, and that is
+    // not a shrug: getComponent cannot distinguish them, and inventing a second code from a lookup
+    // that never made the distinction would be naming something this layer does not know.
+    setAbiError(base ? AbiError::Ok : AbiError::BadHandle);
     return base ? static_cast<u8*>(base) + d->offset : nullptr;
+}
+
+// Records WHY a field access was refused and hands back the caller's own zero, so each rejection
+// stays one expression at the two dozen sites that need it.
+//
+// THE CONDITION IS RE-TESTED, deliberately. Each accessor states its rejection as a single `||`
+// chain, which is the right shape for the path that succeeds and tells a caller nothing about the
+// one that did not. Unpicking it here costs nothing on a good call and is the entire point on a
+// bad one. Note the ORDER: a read-only field reached through a setter is Unsupported (the field is
+// real, this build will not write it), which is a different thing to say than "wrong kind".
+template <class T>
+T fieldReject(const FieldDesc* d, bool write, T zero) {
+    if (!d)                        setAbiError(AbiError::BadHandle);
+    else if (write && d->readOnly) setAbiError(AbiError::Unsupported);
+    else                           setAbiError(AbiError::InvalidArgument);
+    return zero;
 }
 
 // Bumps the transform revision after a write to any CLocal field.
@@ -96,6 +129,10 @@ int32_t aver_scene_abi_version(void) {
     return AVER_SCENE_ABI_VERSION;
 }
 
+// The reason channel. See scene_abi.h for why it is a separate entry point rather than a wider
+// return value on the calls that fail.
+int32_t aver_scene_last_error(void) { return static_cast<int32_t>(aver::lastAbiError()); }
+
 // Number of interned strings. A test hook, deliberately not declared in scene_abi.h.
 AVER_SCENE_ABI int64_t aver_scene_debug_string_pool_size(void) {
     return static_cast<int64_t>(stringPool().size());
@@ -105,8 +142,12 @@ AVER_SCENE_ABI int64_t aver_scene_debug_string_pool_size(void) {
 
 // Resolves "Component.field" to a dense field id, or 0.
 int32_t aver_scene_field(const char* qualifiedName) {
-    if (!qualifiedName) return 0;
-    return static_cast<int32_t>(world().fieldId(qualifiedName));
+    if (!qualifiedName) { setAbiError(AbiError::NullPointer); return 0; }
+    const int32_t id = static_cast<int32_t>(world().fieldId(qualifiedName));
+    // A name that resolves to nothing is a failure like any other. Without this it returned 0
+    // carrying whatever reason the PREVIOUS call left in the slot -- which is worse than none.
+    setAbiError(id ? AbiError::Ok : AbiError::InvalidArgument);
+    return id;
 }
 
 // The AVER_SCENE_KIND_* of a field id.
@@ -126,7 +167,7 @@ int32_t aver_scene_field_arity(int32_t f) {
 // Reads an F32 field. 0.0f on any rejection.
 float aver_scene_get_f32(int32_t e, int32_t f) {
     const FieldDesc* d = desc(f);
-    if (!d || d->kind != FieldKind::F32) return 0.0f;
+    if (!d || d->kind != FieldKind::F32) return fieldReject(d, false, 0.0f);
     const u8* a = fieldAddr(e, d);
     if (!a) return 0.0f;
     float v;
@@ -137,7 +178,7 @@ float aver_scene_get_f32(int32_t e, int32_t f) {
 // Writes an F32 field. 0 on any rejection.
 int32_t aver_scene_set_f32(int32_t e, int32_t f, float v) {
     const FieldDesc* d = desc(f);
-    if (!d || d->kind != FieldKind::F32 || d->readOnly) return 0;
+    if (!d || d->kind != FieldKind::F32 || d->readOnly) return fieldReject(d, true, 0);
     u8* a = fieldAddr(e, d);
     if (!a) return 0;
     std::memcpy(a, &v, sizeof(v));
@@ -149,9 +190,10 @@ int32_t aver_scene_set_f32(int32_t e, int32_t f, float v) {
 
 // Reads any float-kind field into `outv`, which must hold `arity` floats.
 int32_t aver_scene_get_vec(int32_t e, int32_t f, float* outv) {
-    if (!outv) return 0;
+    if (!outv) { setAbiError(AbiError::NullPointer); return 0; }
     const FieldDesc* d = desc(f);
-    if (!d || d->arity == 0) return 0;   // arity 0 == not a float kind, so it is the wrong family
+    // arity 0 == not a float kind, so it is the wrong family
+    if (!d || d->arity == 0) return fieldReject(d, false, 0);
     const u8* a = fieldAddr(e, d);
     if (!a) return 0;
     std::memcpy(outv, a, sizeof(float) * d->arity);
@@ -160,9 +202,10 @@ int32_t aver_scene_get_vec(int32_t e, int32_t f, float* outv) {
 
 // Writes any float-kind field from `arity` floats.
 int32_t aver_scene_set_vec(int32_t e, int32_t f, const float* v) {
-    if (!v) return 0;
+    if (!v) { setAbiError(AbiError::NullPointer); return 0; }
     const FieldDesc* d = desc(f);
-    if (!d || d->arity == 0 || d->readOnly) return 0;   // CWorld.matrix is a float kind but read-only
+    // CWorld.matrix is a float kind but read-only, which fieldReject reports as Unsupported
+    if (!d || d->arity == 0 || d->readOnly) return fieldReject(d, true, 0);
     u8* a = fieldAddr(e, d);
     if (!a) return 0;
     std::memcpy(a, v, sizeof(float) * d->arity);
@@ -175,7 +218,7 @@ int32_t aver_scene_set_vec(int32_t e, int32_t f, const float* v) {
 // Reads an I32 or Bool field. 0 on any rejection.
 int32_t aver_scene_get_i32(int32_t e, int32_t f) {
     const FieldDesc* d = desc(f);
-    if (!d || (d->kind != FieldKind::I32 && d->kind != FieldKind::Bool)) return 0;
+    if (!d || (d->kind != FieldKind::I32 && d->kind != FieldKind::Bool)) return fieldReject(d, false, 0);
     const u8* a = fieldAddr(e, d);
     if (!a) return 0;
     int32_t v;
@@ -186,7 +229,8 @@ int32_t aver_scene_get_i32(int32_t e, int32_t f) {
 // Writes an I32 or Bool field. 0 on any rejection.
 int32_t aver_scene_set_i32(int32_t e, int32_t f, int32_t v) {
     const FieldDesc* d = desc(f);
-    if (!d || (d->kind != FieldKind::I32 && d->kind != FieldKind::Bool) || d->readOnly) return 0;
+    if (!d || (d->kind != FieldKind::I32 && d->kind != FieldKind::Bool) || d->readOnly)
+        return fieldReject(d, true, 0);
     u8* a = fieldAddr(e, d);
     if (!a) return 0;
     std::memcpy(a, &v, sizeof(v));
@@ -199,7 +243,7 @@ int32_t aver_scene_set_i32(int32_t e, int32_t f, int32_t v) {
 // Reads an I64 field. 0 on any rejection.
 int64_t aver_scene_get_i64(int32_t e, int32_t f) {
     const FieldDesc* d = desc(f);
-    if (!d || d->kind != FieldKind::I64) return 0;
+    if (!d || d->kind != FieldKind::I64) return fieldReject(d, false, int64_t{0});
     const u8* a = fieldAddr(e, d);
     if (!a) return 0;
     int64_t v;
@@ -210,7 +254,7 @@ int64_t aver_scene_get_i64(int32_t e, int32_t f) {
 // Writes an I64 field. 0 on any rejection.
 int32_t aver_scene_set_i64(int32_t e, int32_t f, int64_t v) {
     const FieldDesc* d = desc(f);
-    if (!d || d->kind != FieldKind::I64 || d->readOnly) return 0;
+    if (!d || d->kind != FieldKind::I64 || d->readOnly) return fieldReject(d, true, 0);
     u8* a = fieldAddr(e, d);
     if (!a) return 0;
     std::memcpy(a, &v, sizeof(v));
@@ -223,7 +267,7 @@ int32_t aver_scene_set_i64(int32_t e, int32_t f, int64_t v) {
 // Reads an Entity field. 0 on any rejection.
 int32_t aver_scene_get_ref(int32_t e, int32_t f) {
     const FieldDesc* d = desc(f);
-    if (!d || d->kind != FieldKind::Entity) return 0;
+    if (!d || d->kind != FieldKind::Entity) return fieldReject(d, false, 0);
     const u8* a = fieldAddr(e, d);
     if (!a) return 0;
     Entity v;
@@ -234,7 +278,7 @@ int32_t aver_scene_get_ref(int32_t e, int32_t f) {
 // Writes an Entity field. 0 on any rejection; CHierarchy's links are read-only, use set_parent.
 int32_t aver_scene_set_ref(int32_t e, int32_t f, int32_t v) {
     const FieldDesc* d = desc(f);
-    if (!d || d->kind != FieldKind::Entity || d->readOnly) return 0;
+    if (!d || d->kind != FieldKind::Entity || d->readOnly) return fieldReject(d, true, 0);
     u8* a = fieldAddr(e, d);
     if (!a) return 0;
     const Entity ref = toEntity(v);
@@ -248,7 +292,7 @@ int32_t aver_scene_set_ref(int32_t e, int32_t f, int32_t v) {
 // Reads a String field as an interned pointer the caller must not free. "" on any rejection.
 const char* aver_scene_get_str(int32_t e, int32_t f) {
     const FieldDesc* d = desc(f);
-    if (!d || d->kind != FieldKind::String) return "";
+    if (!d || d->kind != FieldKind::String) return fieldReject(d, false, "");
     const u8* a = fieldAddr(e, d);
     if (!a) return "";
     int64_t id;
@@ -261,7 +305,7 @@ const char* aver_scene_get_str(int32_t e, int32_t f) {
 // Writes a String field, reusing the intern slot the field already owns. 0 on any rejection.
 int32_t aver_scene_set_str(int32_t e, int32_t f, const char* v) {
     const FieldDesc* d = desc(f);
-    if (!d || d->kind != FieldKind::String || d->readOnly) return 0;
+    if (!d || d->kind != FieldKind::String || d->readOnly) return fieldReject(d, true, 0);
     u8* a = fieldAddr(e, d);
     if (!a) return 0;
 
@@ -301,6 +345,13 @@ int32_t aver_scene_valid(int32_t e) {
     return world().valid(toEntity(e)) ? 1 : 0;
 }
 
+// Resolves a component type by registered name. 0 when unregistered -- which addComponent below
+// then rejects, so a typo fails closed rather than attaching some other pool.
+int32_t aver_scene_component(const char* name) {
+    if (!name) { setAbiError(AbiError::NullPointer); return 0; }
+    return static_cast<int32_t>(world().componentId(name));
+}
+
 // Attaches a component's storage to the entity.
 int32_t aver_scene_add_component(int32_t e, int32_t component) {
     return world().addComponent(toEntity(e), static_cast<u32>(component)) ? 1 : 0;
@@ -337,14 +388,18 @@ int32_t aver_scene_set_name(int32_t e, const char* name) {
 
 // The first live entity with this name, or 0.
 int32_t aver_scene_find(const char* name) {
-    if (!name) return 0;
+    if (!name) { setAbiError(AbiError::NullPointer); return 0; }
     return static_cast<int32_t>(world().find(std::string_view(name)));
 }
 
 // Writes the entity's world matrix into out16. Row-major, translation in row 3.
 int32_t aver_scene_world_matrix(int32_t e, float* out16) {
     const Entity ent = toEntity(e);
-    if (!out16 || !world().valid(ent)) return 0;
+    // Two reasons, and they are the caller's to tell apart: a null buffer is the caller's pointer,
+    // a stale handle is the caller's entity.
+    if (!out16)             { setAbiError(AbiError::NullPointer); return 0; }
+    if (!world().valid(ent)) { setAbiError(AbiError::BadHandle);  return 0; }
+    setAbiError(AbiError::Ok);
     const Mat4& m = world().worldMatrix(ent);
     std::memcpy(out16, &m.m[0][0], sizeof(float) * 16);
     return 1;

@@ -10,6 +10,7 @@
 
 #include <cmath>
 #include <cstring>
+#include "aver/rhi/ShaderFiles.hpp"   // the preview HLSL is deployed files
 
 namespace aver::render::preview {
 namespace {
@@ -100,50 +101,14 @@ const char* actorPreviewMaterialPrelude() {
 // source mentions AVER_MATERIAL_GRAPH" for the no-graph case and mean it literally: the macro name
 // never appears in ANY .source string, only in this prelude's own text.
 const char* actorPreviewMaterialShaderSource() {
-    static const std::string s = std::string(actorPreviewShaderSource()) + R"(
-// ---- the MATERIAL path: the same AverVertex/AverSurface contract PbrShaders.cpp declares, so the
-// graph editor can put a .ocgraph's own averEvalMaterial on this sphere ----
-//
-// Shaded with the EXACT SAME key light and hemisphere fill PreviewPS uses above -- not the material
-// system's own BRDF (averShadeDirect/averShadeIndirect), which PbrShaders.cpp's own tests already
-// exercise end to end. The only thing this entry point changes relative to PreviewPS is WHERE the
-// surface colour comes from: gBaseColor there, the graph's own averEvalMaterial here. Sharing the
-// lighting model is what keeps the two previews COMPARABLE side by side, rather than one reading
-// brighter or flatter because it took a different shading path.
-float4 PreviewMaterialPS(PreviewOut i) : SV_TARGET {
-    AverVertex v;
-    v.wpos = i.wpos;
-    v.N    = normalize(i.nrmWS);
-    v.V    = normalize(gPreviewEye.xyz - i.wpos);
-    // Two-sided, exactly like averVertexOf's own comment in PbrShaders.cpp: a closed preview sphere
-    // never needs this, but a future flat preview mesh (a plane, say) should not shade black on the
-    // half of it facing away from the light.
-    v.backFace = dot(v.N, v.V) < 0.0;
-    if (v.backFace) v.N = -v.N;
-    v.uv = i.uv;
-
-    // averBuildSurface reads l.direction alone, to build the half vector H. radiance and visibility
-    // exist for averShadeDirect/averShadeIndirect, neither of which this entry point calls, so there
-    // is nothing honest to compute for them here -- they are left at the identity rather than wired
-    // to a light this shader shades with its own formula, not the BRDF's.
-    AverLight l;
-    l.direction  = normalize(gPreviewKey.xyz);
-    l.radiance   = float3(0.0, 0.0, 0.0);
-    l.visibility = 1.0;
-
-    AverSurface s = averEvalMaterial(v, l);
-
-    float ndl = saturate(dot(s.N, l.direction));
-    float up = s.N.z * 0.5 + 0.5;
-    float3 fill = lerp(gPreviewAmbient.rgb * 0.35, gPreviewAmbient.rgb, up);
-    float3 lit = s.albedo * (fill + ndl * gPreviewKey.w);
-
-    float rim = pow(1.0 - saturate(dot(s.N, v.V)), 3.0);
-    lit += gPreviewAmbient.w * rim * float3(1.0, 0.62, 0.2);
-
-    return float4(toGamma(acesTonemap(lit)), 1.0);
-}
-)";
+    // The base text PLUS the material entry point, still concatenated in that order -- see
+    // actor_preview_material.hlsli for why they are two files rather than one with an #ifdef.
+    static std::string s;
+    static u64 built = ~0ull;
+    if (built != rhi::shaderFileRevision()) {
+        s = rhi::shaderFile("actor_preview.hlsl") + rhi::shaderFile("actor_preview_material.hlsli");
+        built = rhi::shaderFileRevision();
+    }
     return s.c_str();
 }
 #endif
@@ -180,59 +145,14 @@ void PreviewCamera::addZoom(f32 factor) {
 
 // The preview's HLSL, compiled as the tail of the shared prelude.
 const char* actorPreviewShaderSource() {
-    return R"(
-// The preview's own camera. Must be b4, the feature register: the backend rebinds b0 per setPipeline.
-cbuffer PreviewFrame : register(b4) {
-    float4x4 gPreviewViewProj;
-    float4   gPreviewEye;      // xyz = eye, w = unused
-    float4   gPreviewKey;      // xyz = direction TO the key light, w = its intensity
-    float4   gPreviewAmbient;  // rgb = sky fill, w = selection highlight strength
-};
-
-// What the preview vertex shader hands the pixel shader.
-struct PreviewOut {
-    float4 pos   : SV_POSITION;
-    float3 nrmWS : NORMAL;
-    float3 wpos  : TEXCOORD0;
-    // ADDED FOR THE MATERIAL PATH: AverVertex (PbrShaders.cpp) carries a uv, and a graph that
-    // samples a map needs one to sample it with. PreviewPS below still ignores it -- the simple
-    // shader has no texture to sample -- so this costs it one unread interpolant, not a behaviour
-    // change.
-    float2 uv    : TEXCOORD1;
-};
-
-// Transforms a vertex to clip space and its normal to world space.
-PreviewOut PreviewVS(VSIn i) {
-    PreviewOut o;
-    float4 wp = mul(float4(i.pos, 1.0), gWorld);
-    o.wpos  = wp.xyz;
-    o.pos   = mul(wp, gPreviewViewProj);
-    o.nrmWS = normalize(averTransformNormal(i.nrm, gWorld));
-    // Taken straight from VSIn, exactly like VSMain does in RHIShaders.cpp -- VSIn already carries
-    // it (every mesh in this engine does), so nothing upstream of this shader has to change.
-    o.uv    = i.uv;
-    return o;
-}
-
-// Shades a pixel with one key light, a hemisphere fill and a selection rim.
-float4 PreviewPS(PreviewOut i) : SV_TARGET {
-    float3 n = normalize(i.nrmWS);
-    float3 l = normalize(gPreviewKey.xyz);
-
-    float ndl = saturate(dot(n, l));
-    float3 base = gBaseColor.rgb;
-
-    float up = n.z * 0.5 + 0.5;
-    float3 fill = lerp(gPreviewAmbient.rgb * 0.35, gPreviewAmbient.rgb, up);
-
-    float3 lit = base * (fill + ndl * gPreviewKey.w);
-
-    float rim = pow(1.0 - saturate(dot(n, normalize(gPreviewEye.xyz - i.wpos))), 3.0);
-    lit += gPreviewAmbient.w * rim * float3(1.0, 0.62, 0.2);
-
-    return float4(toGamma(acesTonemap(lit)), 1.0);
-}
-)";
+    // Keyed on shaderFileRevision(): the loader owns the cache and reloadShaderFiles() clears it.
+    static std::string s;
+    static u64 built = ~0ull;
+    if (built != rhi::shaderFileRevision()) {
+        s = rhi::shaderFile("actor_preview.hlsl");
+        built = rhi::shaderFileRevision();
+    }
+    return s.c_str();
 }
 
 // Creates the feature. Returns null when the backend has no GPU support.

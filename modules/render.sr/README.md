@@ -53,9 +53,13 @@ the `[AverSR]` log tag — the same code path as a tree with no AverSR in it.
   `SpatialUpscaler::execute()`, and it said it had been "checked again this phase". Both halves are
   false and were false when written down most recently:
 
-      modules/rhi/include/aver/rhi/RHI.hpp:322   virtual void setUpscaler(IUpscaler* u)
-      modules/rhi/include/aver/rhi/RHI.hpp:323   virtual IUpscaler* upscaler() const
-      modules/rhi.d3d12/src/D3D12Device.cpp:4630 upscaler_->execute(*rhiContext_, in, presentHdrTex_);
+      modules/rhi/include/aver/rhi/RHI.hpp:335   virtual void setUpscaler(IUpscaler* u)
+      modules/rhi/include/aver/rhi/RHI.hpp:336   virtual IUpscaler* upscaler() const
+      modules/rhi.d3d12/src/D3D12Device.cpp:4561 upscaler_->execute(*rhiContext_, in, presentHdrTex_);
+
+  (Line numbers drift with unrelated edits to both files — if these no longer match, grep for
+  `setUpscaler`/`upscaler()` in RHI.hpp and `upscaler_->execute` in D3D12Device.cpp/VulkanDevice.cpp
+  rather than trusting the numbers.)
 
   The D3D12 composite runs the resample in HDR before the tonemap, and VulkanDevice mirrors it. A
   non-`Off` level produces AverSR's own Catmull-Rom pixels, not a backend bilinear stretch.
@@ -81,7 +85,10 @@ the `[AverSR]` log tag — the same code path as a tree with no AverSR in it.
 
 Built as its own module (`AVER_MODULE_SR=ON`, the default) alongside the rest of the engine, now
 with `sandbox` linking it (`sandbox/CMakeLists.txt`) and constructing `SpatialUpscaler` for real
-when a non-`Off` `--aversr` level or Editor Preferences combo selection is applied. **Not** verified
-by a GPU capture: `SpatialUpscaler::execute()` has still never been run against a live swapchain
-(or against anything), because nothing yet calls it — see "Backend wiring" above, which is the
-same gap the previous phase found, not yet closed.
+when a non-`Off` `--aversr` level or Editor Preferences combo selection is applied. **This section
+used to say `SpatialUpscaler::execute()` had never been run against a live swapchain "because
+nothing yet calls it" — false by the time "Backend wiring" above was written, since that section
+names the exact call site and a measured frame-time drop from it.** What is still true, and is a
+narrower gap than "nothing calls it": those PTTest numbers measure *frame time*, not pixels —
+`SpatialUpscaler::execute()` has still never been proven correct against a live swapchain by a GPU
+capture (docs/AVERSR.md says the same, at time of writing).

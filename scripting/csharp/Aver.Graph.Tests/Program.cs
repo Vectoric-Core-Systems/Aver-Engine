@@ -242,6 +242,12 @@ static int Main()
         // shapes and the wiring both compilers reach. See SynapseNodeTests.cs's own header comment.
         failures += SynapseNodeTests.RunAll();
 
+        // SetControlRig: the node that makes a control rig placeable from a level at all. The rig
+        // arithmetic is tested at the C++ level (IkTest, OcRigTest, ControlRigTest); this covers the
+        // pin shape, the rig= attribute, the unwired-weight default and the by-NAME component attach
+        // both compilers reach. See ControlRigNodeTests.cs's own header.
+        failures += ControlRigNodeTests.RunAll();
+
         // The parity-backlog four: CreateEntity/FindEntity (SetName's own name= family) and the two
         // Physics status reads. See NameAndPhysicsStatusNodeTests.cs's own header.
         failures += NameAndPhysicsStatusNodeTests.RunAll();
@@ -249,6 +255,19 @@ static int Main()
         // The six audio nodes -- the graph half of connecting a mixer nothing had ever called.
         // See AudioNodeTests.cs's own header for what these can and cannot prove.
         failures += AudioNodeTests.RunAll();
+
+        // Self: the node that makes a canvas-authored graph able to name its own entity at all.
+        // See SelfNodeTests.cs's header for why its absence, not polish, is what kept every
+        // gameplay graph in this repo hand-written.
+        failures += SelfNodeTests.RunAll();
+
+        // PrintString: the first node that can say "control flow got here" with nothing wired but
+        // exec. See PrintStringTests.cs for why invoking it, not just compiling it, is the test.
+        failures += PrintStringTests.RunAll();
+
+        // Node-hit recording: every exec node reporting that it ran, so the editor can highlight live
+        // control flow. See NodeHitTests.cs for why the branch and diamond cases are the real tests.
+        failures += NodeHitTests.RunAll();
 
         if (failures == 0)
             Console.WriteLine("\nAll tests passed.");

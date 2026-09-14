@@ -1,0 +1,35 @@
+.NET Compiler Platform ("Roslyn")
+Microsoft.CodeAnalysis.CSharp, Microsoft.CodeAnalysis.Common, Microsoft.CodeAnalysis.Analyzers
+https://github.com/dotnet/roslyn
+
+This file exists because the packages themselves do not carry one. Their .nuspec declares the
+licence by SPDX expression (<license type="expression">MIT</license>, licenseUrl
+https://licenses.nuget.org/MIT) and the only text inside the archives is ThirdPartyNotices for
+Roslyn's own dependencies. MIT requires the copyright notice to accompany redistribution, and
+Microsoft.CodeAnalysis.dll and Microsoft.CodeAnalysis.CSharp.dll are redistributed in the engine
+payload's bin/Tools/, so the notice has to come from somewhere. The copyright line below is the one
+the packages declare in their .nuspec <copyright> element; the body is the standard MIT text.
+
+--------------------------------------------------------------------------------
+
+The MIT License (MIT)
+
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

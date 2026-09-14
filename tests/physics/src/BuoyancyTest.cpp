@@ -7,6 +7,7 @@
 // private to itself.
 #include "aver/physics/physics_abi.h"
 
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 
 #include <cmath>
@@ -172,5 +173,5 @@ int main() {
     testStaticBodyIsUnmoved();
 
     AVER_INFO("BuoyancyTest: {}/{} checks passed", g_checks - g_failures, g_checks);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

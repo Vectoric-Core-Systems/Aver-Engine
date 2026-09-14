@@ -5,6 +5,8 @@
 #include <cstring>
 #include <exception>
 #include <mutex>
+#include <new>
+#include <string>
 #include <vector>
 
 #if defined(_WIN32)
@@ -64,13 +66,28 @@ bool  g_ringWrapped                  = false;
 
 const char* kindName(Kind k) {
     switch (k) {
-        case Kind::Crash:     return "Crash";
-        case Kind::Assert:    return "Assert";
-        case Kind::Fatal:     return "Fatal";
-        case Kind::GpuCrash:  return "GPUCrash";
-        case Kind::Terminate: return "Terminate";
+        case Kind::Crash:         return "Crash";
+        case Kind::Assert:        return "Assert";
+        case Kind::Fatal:         return "Fatal";
+        case Kind::GpuCrash:      return "GPUCrash";
+        case Kind::Terminate:     return "Terminate";
+        case Kind::OutOfMemory:   return "OutOfMemory";
     }
     return "Unknown";
+}
+
+// A RAW int, for a report written by a build newer than the one reading it. Switching over the enum
+// on such a value would be undefined behaviour; this names what it knows and admits the rest.
+const char* kindNameOf(int code) {
+    switch (code) {
+        case 0: return "Crash";
+        case 1: return "Assert";
+        case 2: return "Fatal";
+        case 3: return "GPUCrash";
+        case 4: return "Terminate";
+        case 5: return "OutOfMemory";
+        default: return "Unknown";
+    }
 }
 
 void noteLogLine(int level, std::string_view message) {
@@ -351,6 +368,14 @@ LONG WINAPI unhandledFilter(EXCEPTION_POINTERS* ep) {
         case EXCEPTION_PRIV_INSTRUCTION:      name = "privileged instruction";      break;
         case EXCEPTION_IN_PAGE_ERROR:         name = "in-page error";               break;
         case EXCEPTION_DATATYPE_MISALIGNMENT: name = "datatype misalignment";       break;
+        // STATUS_NO_MEMORY, named by value because winnt.h does not define it as an EXCEPTION_*.
+        // A real arrival path for an exhausted address space, and reported as a generic Crash it
+        // sends the reader hunting a dangling pointer that does not exist.
+        case 0xC0000017L:                     name = "out of memory";               break;
+        // MSVC's code for a C++ `throw`. THIS FILTER SEES AN ESCAPING EXCEPTION BEFORE
+        // std::terminate does -- measured with --crash-test oom, which filed a Crash until this
+        // existed -- so the Terminate kind has to be decided here, not only in terminateHandler.
+        case 0xE06D7363L:                     name = "an unhandled C++ exception escaped";  break;
         default: break;
     }
 
@@ -366,7 +391,11 @@ LONG WINAPI unhandledFilter(EXCEPTION_POINTERS* ep) {
         std::snprintf(msg, sizeof msg, "%s (0x%08lX)", name, code);
     }
 
-    writeReport(Kind::Crash, msg, ep);
+    // The KIND, not just the message, so a triage tool sorting on CrashTypeCode sees it too.
+    const Kind kind = code == 0xC0000017L ? Kind::OutOfMemory
+                    : code == 0xE06D7363L ? Kind::Terminate
+                                          : Kind::Crash;
+    writeReport(kind, msg, ep);
 
     // EXECUTE_HANDLER, not CONTINUE_SEARCH: the report is written, and letting the default handler
     // also run would put the OS "a program stopped working" dialog on top of our own reporter.
@@ -374,6 +403,25 @@ LONG WINAPI unhandledFilter(EXCEPTION_POINTERS* ep) {
 }
 
 void terminateHandler() {
+    // WHAT ESCAPED, when it is still knowable -- rethrowing inside a try recovers the in-flight
+    // exception's type, so the report carries its what() rather than a generic sentence.
+    //
+    // THIS IS NOT THE MAIN PATH FOR AN ESCAPING EXCEPTION, and the comment says so because the
+    // obvious reading is wrong: on Windows a `throw` that nobody catches raises SEH 0xE06D7363 and
+    // unhandledFilter takes it first. What reaches here is terminate called DIRECTLY -- a noexcept
+    // function that threw, a failed dynamic_cast on a reference in some configurations, an explicit
+    // call -- and in several of those current_exception() is null, which the fall-through covers.
+    if (std::current_exception()) {
+        try {
+            std::rethrow_exception(std::current_exception());
+        } catch (const std::bad_alloc& e) {
+            fatal(Kind::OutOfMemory, std::string("std::bad_alloc escaped: ") + e.what());
+        } catch (const std::exception& e) {
+            fatal(Kind::Terminate, std::string("an exception escaped: ") + e.what());
+        } catch (...) {
+            fatal(Kind::Terminate, "a non-std exception escaped");
+        }
+    }
     fatal(Kind::Terminate, "std::terminate called -- an exception escaped, or a noexcept function threw");
 }
 
@@ -388,6 +436,24 @@ void invalidParameterHandler(const wchar_t*, const wchar_t*, const wchar_t*, uns
     fatal(Kind::Fatal, "CRT invalid parameter -- a standard library function was called with arguments it rejects");
 }
 
+// EVERY FAILED ALLOCATION, and the only hook that reliably sees one. operator new calls the installed
+// new-handler and retries until the handler succeeds, throws, or ends the process -- so this runs
+// BEFORE std::bad_alloc is constructed, which matters twice over: the report is filed while the
+// handler still knows the allocation is what failed, and it does not depend on the throw reaching
+// anybody, which -- as `--crash-test oom` demonstrated -- it does not.
+//
+// WHY NOT std::terminate. That was the first design here, and it was wrong: on Windows an escaping
+// C++ exception raises SEH code 0xE06D7363 and is taken by SetUnhandledExceptionFilter before
+// std::terminate ever runs. The first `--crash-test oom` filed a `Crash`, not an `OutOfMemory`, and
+// that is what sent this to the new-handler instead. terminateHandler still matters for the case it
+// really does own -- a noexcept violation, or terminate called outright.
+void newHandler() {
+    fatal(Kind::OutOfMemory,
+          "operator new could not satisfy an allocation -- the process is out of address space or "
+          "the request was absurd. The working set and the requested size are the first questions, "
+          "not the call stack.");
+}
+
 }  // namespace
 
 // ------------------------------------------------------------------------------------- public API
@@ -400,6 +466,7 @@ void install(const Config& cfg) {
 
     g_prevFilter = SetUnhandledExceptionFilter(unhandledFilter);
     std::set_terminate(terminateHandler);
+    std::set_new_handler(newHandler);
     _set_purecall_handler(purecallHandler);
     _set_invalid_parameter_handler(invalidParameterHandler);
 
@@ -515,6 +582,10 @@ std::string writeReport(Kind kind, std::string_view message, void* exceptionPoin
     tag("CrashVersion",       "1");
     tag("CrashGUID",          id);
     tag("CrashType",          kindName(kind));
+    // THE NUMBER BESIDE THE NAME. A name is what a person reads; a stable code is what anything
+    // triaging a folder of reports can group by without string-matching a label that may be
+    // reworded. See Kind's own comment for why these values are frozen.
+    tag("CrashTypeCode",      std::to_string(kindCode(kind)));
     tag("ErrorMessage",       message);
     tag("TimeOfCrash",        when);
     tag("AppName",            g_cfg.appName);

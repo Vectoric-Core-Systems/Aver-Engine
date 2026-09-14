@@ -29,3 +29,7 @@ aver_add_module(Aver.Render.Skin
   SOURCES ${AVER_SKIN_SOURCES}
   DEPS    ${AVER_SKIN_DEPS}
 )
+
+# HLSL beside the executable, redeployed when a shader changes -- the same stamp mechanism
+# modules/rhi, render.pbr and render.voxi already use. See cmake/AvModule.cmake.
+aver_deploy_shaders(Aver.Render.Skin "${CMAKE_CURRENT_SOURCE_DIR}/shaders")

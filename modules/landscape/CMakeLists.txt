@@ -14,7 +14,7 @@ add_library(Aver.Landscape STATIC
   # The physics sample adapter. Emits a plain array, so this stays free of Aver.Physics.
   src/PhysicsBridge.cpp
   # Editor-facing but still RHI-free: a cursor ray against the surface, and the brush edits
-  # (raise/lower/smooth/flatten) that mutate an OcLandData's heights in place.
+  # (raise/lower/smooth/flatten/ramp/noise) that mutate an OcLandData's heights in place.
   src/HeightfieldRay.cpp
   src/Sculpt.cpp
   # The infinite fill past an authored section's own rim: a linkable copy of TerrainGenTool's noise

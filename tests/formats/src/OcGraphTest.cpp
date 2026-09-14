@@ -1,6 +1,7 @@
 // .ocgraph format test. Covers round-tripping, unknown records, and deterministic output.
 // Also tests malformed input rejection.
 #include "aver/formats/OcGraph.hpp"
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/platform/FileSystem.hpp"
 
@@ -30,6 +31,24 @@ static void check(bool cond, const std::string& what) {
 // that names a domain this build has never heard of has said out loud that it is not a gameplay
 // graph, and guessing otherwise is how a build one version behind compiles something it should have
 // skipped.
+// A graph claiming a version this build does not know is REFUSED rather than read as version 1.
+// Worse here than for a project manifest: the editor rewrites a graph WHOLLY on every save, so
+// reading a newer one optimistically would silently discard the records it did not understand --
+// somebody's gameplay logic, deleted by opening and saving.
+static void testVersionCeiling() {
+    AVER_INFO("=== .ocgraph version ceiling ===");
+    using namespace fmt;
+    OcGraphData g;
+    std::string err;
+    check(!parseOcgraph("OCGRAPH 99\nNAME FromTheFuture\n", g, &err),
+          "an OCGRAPH version above this build's ceiling is REFUSED");
+    check(err.find("newer build") != std::string::npos,
+          "and says why rather than blaming the syntax: " + err);
+    // The other half, because a ceiling that refuses everything would pass the assertion above.
+    check(parseOcgraph("OCGRAPH 1\nNAME Current\n", g, &err),
+          "while the current version still parses");
+}
+
 static void testDomainRecord() {
     AVER_INFO("=== .ocgraph DOMAIN (which kind of graph this is) ===");
     using namespace fmt;
@@ -1217,6 +1236,7 @@ int main(int argc, char** argv) {
     }
 
     testMeta();
+    testVersionCeiling();
     testDomainRecord();
     testBasicParse();
     testRoundTrip();
@@ -1237,5 +1257,5 @@ int main(int argc, char** argv) {
 
     AVER_INFO("==================================================");
     AVER_INFO("OcGraph tests done: {} failure(s)", g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

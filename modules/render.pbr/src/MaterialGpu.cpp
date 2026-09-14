@@ -31,6 +31,24 @@ MaterialConstants packMaterial(const MaterialDesc& d) {
     MaterialConstants c{};
     // Colour is decoded, coverage is not: glTF authors baseColorFactor's rgb in sRGB and its alpha
     // as a linear number.
+    //
+    // THAT PREMISE IS PROBABLY WRONG FOR glTF, AND IS DELIBERATELY LEFT ALONE PENDING A DECISION.
+    // The glTF 2.0 specification defines pbrMetallicRoughness.baseColorFactor as LINEAR multipliers
+    // on the sampled base-colour texels -- only the TEXTURE is sRGB-encoded, not the numeric factor.
+    // If that is right, this applies a second, spurious decode to every authored factor: pow(x, 2.2)
+    // on x in (0,1) pulls toward zero, so a tinted material renders DARKER and more saturated than
+    // authored. It is a no-op for the common {1,1,1,1}, which is why nothing has noticed.
+    //
+    // WHY IT IS NOT SIMPLY FLIPPED HERE: the three importers do not agree about what they hand over.
+    // OBJ's `Kd` is conventionally authored in sRGB, so for that source the decode is CORRECT; glTF
+    // and USD (diffuseColor) are linear, so for those it is not. One blanket rule is wrong whichever
+    // way it points -- the fix belongs in each importer, converting to a single documented convention
+    // before it reaches here, and it changes the appearance of every tinted material in every
+    // existing project. That is a content decision, not a cleanup.
+    //
+    // AND NOTHING CHECKS IT: MaterialTest.cpp:587-598 packs a factor and asserts only that ALPHA is
+    // exempt -- the three decoded channels are never compared against an expected value, so the
+    // premise this comment states has never been tested in either direction.
     for (u32 i = 0; i < 3; ++i) c.baseColorFactor[i] = srgbToLinear(d.baseColorFactor[i]);
     c.baseColorFactor[3] = d.baseColorFactor[3];
     std::memcpy(c.emissiveFactor,  d.emissiveFactor,  sizeof(c.emissiveFactor));
@@ -55,6 +73,15 @@ MaterialConstants packMaterial(const MaterialDesc& d) {
     c.coatRoughness     = d.coatRoughness;
     c.coatF0            = d.coatF0;
     c._coatPad          = 0.0f;   // assigned, not left to the {} above -- see the note below
+    // Volume absorption, forwarded verbatim. NOT clamped or normalised here: attenuationColor is a
+    // transmittance in [0,1] per channel and attenuationDistance is a length in centimetres, both
+    // already range-checked by pbr::sanitize (Material.cpp) the way every other authored float in
+    // this block is. A distance of 0 means "no volume" and the shader gates on it -- see
+    // MaterialConstants::attenuationDistance.
+    c.attenuationColor[0] = d.attenuationColor[0];
+    c.attenuationColor[1] = d.attenuationColor[1];
+    c.attenuationColor[2] = d.attenuationColor[2];
+    c.attenuationDistance = d.attenuationDistance;
     // The two floats above are what _pad0/_pad1 used to be. The struct carries no padding now, so
     // every one of its members is assigned here rather than some being left at the zero the
     // `MaterialConstants c{};` above gives them -- if a field is ever added back without a line in

@@ -25,7 +25,7 @@ tree is the shape that makes them impossible.
 | `Entity.hpp` | The handle: 24 bits of index, 7 of generation, bit 31 always clear |
 | `ComponentPool.hpp` | One sparse set per component type |
 | `Fields.hpp` | Field kinds and the `ComponentBuilder` that declares a table |
-| `Components.hpp` | The eight built-in components and their fixed dense ids |
+| `Components.hpp` | The built-in components and their fixed dense ids — **15** now (`CLocal`, `CWorld`, `CHierarchy`, `CName`, `CTags`, `CMeshRenderer`, `CLight`, `CCamera`, `CSkeletalMesh`, `CAnimator`, `CParticleEmitter`, `CAttachment`, `CSoftBody`, `CRigidBody`, `CJoint`), up from the original eight — `scene_abi.h` still only names fixed `AVER_SCENE_COMP_*` constants for the first twelve; the three physics ones are appended the same way but resolved by name/qualified field id rather than a published constant |
 | `World.hpp` | Lifetime, the registry, the hierarchy and the propagation pass |
 
 **Index 0 is never handed out and a live generation starts at 1**, so no legal handle can encode to

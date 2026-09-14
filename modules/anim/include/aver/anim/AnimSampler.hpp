@@ -28,11 +28,12 @@ void sampleAnimation(const fmt::OcAnimation& clip, f32 seconds, Pose& inOut);
 // return nothing from -- and the caller has already wrapped the CLOCK into the clip (clipTime), so
 // a time past the last key means the animator simply stopped keying before the clip ended.
 //
-// STEP HOLDS THE KEY BEFORE. Linear interpolates. CUBICSPLINE IS TREATED AS LINEAR and that is a
-// stated limit rather than a silent one: the format can carry the mode (a glTF importer would set
-// it), but a curve stores one value per key with no tangent slots, so there is nothing to build a
-// Hermite from. Reading it as linear is the closest honest answer; inventing tangents would be a
-// different curve than the one authored.
+// STEP HOLDS THE KEY BEFORE. Linear interpolates. CUBICSPLINE USES THE CURVE'S OWN TANGENTS (see
+// OcCurve::inTangents/outTangents) when they line up 1:1 with its keys, through the SAME hermite()
+// helper the bone-track sampler above already uses. When they do not -- every curve with no CTAN
+// chunk at all, which is every curve saved before tangents existed -- it reads as LINEAR, exactly as
+// it always did: there is nothing to build a Hermite from, and inventing flat tangents for data
+// nobody authored would be a different curve than the one saved.
 f32 sampleCurve(const fmt::OcCurve& c, f32 seconds, f32 fallback = 0.0f);
 
 // How a clock step is travelling through a clip. Everything notifiesCrossed needs that it cannot

@@ -17,6 +17,7 @@
 // provenance would be a step backwards. Comments are lexed away and ignored. The dangerous kind of
 // mention is a PATH or a code branch -- something the engine would act on -- and that lives in a
 // string literal, which is exactly what survives the lexer.
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 
 #include <algorithm>
@@ -237,8 +238,17 @@ static bool inSanctionedContentRoot(const std::string& rel) {
 // a test may legitimately hard-code an absolute path as INPUT (tests/audio reads C:/Windows/Media,
 // tests/render.voxi feeds a fake C:\Projects\Demo to the cache), and forbidding that would be
 // forbidding the wrong thing.
+// SHADERS ARE COVERED BY `modules/` AND `sandbox/`, which is worth stating because the two roots that
+// used to say so explicitly are gone. `interop/` and `shaders/` were top-level directories holding one
+// README each and no source at all; both were deleted, and neither ever contributed a path here.
+//
+// The 25 engine-authored .hlsl/.hlsli files this suite scans live at modules/<mod>/shaders/ and
+// sandbox/shaders/*.hlsl, so `startsWith(rel, "modules/")` and `startsWith(rel, "sandbox/")` already
+// reach every one of them, and `.hlsl`/`.hlsli` are in kExts below. A literal "modules/*/shaders/"
+// cannot be added in their place: kRoots is matched with startsWith, not a glob, so that string would
+// be a prefix of nothing and would silently narrow the sweep rather than widen it.
 static bool isEngineSource(const std::string& rel) {
-    static const char* kRoots[] = { "modules/", "sandbox/", "tools/", "scripting/", "interop/", "shaders/" };
+    static const char* kRoots[] = { "modules/", "sandbox/", "tools/", "scripting/" };
     static const char* kExcept[] = { "third_party/", "modules/physics.jolt/" };
     for (const char* x : kExcept)
         if (startsWith(rel, x)) return false;
@@ -355,6 +365,6 @@ int main() {
 
     if (g_failures == 0) { AVER_INFO("SeparationTest: ALL PASS"); return 0; }
     AVER_ERROR("SeparationTest: {} failure(s)", g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 #endif
 }

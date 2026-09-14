@@ -11,9 +11,11 @@ Every format is `.oc<suffix>`:
 |---|---|---|
 | `.ocbeam` | breakable/deformable skeletal (soft-body cage) mesh | carry-over + Object ID |
 | `.ocmap` | world container (references + positions) | carry-over, doubles |
-| `.ocmesh` | static mesh | new (Phase 3+) |
-| `.octex` `.ocmat` `.ocskel` `.ocanim` `.ocprefab` | texture / material / skeletal / animation / prefab | new (later) |
-| `.ocaero` | baked aero table | carry-over |
+| `.ocmesh` | static **or skinned** mesh (skinned = static + skin streams, bound to a `.ocskel`) | **built** — `modules/formats/{include/aver/formats,src}/OcMesh.{hpp,cpp}` |
+| `.ocmat` | material | **built** — `OcMat.{hpp,cpp}`; produced by `avermatc` from a `.cs` source, not hand-authored |
+| `.ocskel` `.ocanim` | skeleton / animation clip | **built** — both are AVR1 containers handled by the one pair `OcAnim.{hpp,cpp}` |
+| `.octex` `.ocprefab` | texture / prefab | still not built as distinct containers: textures decode straight from source image files via `Texture.{hpp,cpp}` (no `.octex` container exists), and no `.ocprefab` reader or writer exists anywhere in the tree |
+| `.ocaero` | baked aero table | carry-over, produced externally by the `aver-aerobake` Rust tool (`tools/README.md`) |
 
 ## `.ocbeam`
 
@@ -47,5 +49,8 @@ Every format is `.oc<suffix>`:
 
 ## `.ocmesh` and beyond
 
-Static meshes and the other new types follow the container design in FORMAT_SPECS.md,
-implemented alongside the renderer/import pipeline in later phases.
+This section used to say these were still future work: "the other new types follow the container
+design in FORMAT_SPECS.md, implemented alongside the renderer/import pipeline in later phases." That
+is no longer true for meshes, materials, skeletons or animation clips — see the table above; each now
+has a real reader/writer and, for `.ocmat`, a compiler (`avermatc`) that produces it. `.octex` and
+`.ocprefab` are the two names in the original table that never got a container of their own.

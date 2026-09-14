@@ -2,6 +2,7 @@
 // why the structural edits are free functions rather than members.
 
 #include "BtEditor.hpp"
+#include "EditorKeybinds.hpp"
 
 #include "aver/core/Log.hpp"
 
@@ -157,8 +158,27 @@ i32 btReparent(std::vector<fmt::OcBtNode>& nodes, i32 index, i32 newParent) {
     return it != remap.end() ? it->second : -1;
 }
 
+// Whether btMoveSibling below would do anything. Shares its reasoning by construction: the move
+// calls this first, so a disabled button and a refused move can never disagree about what is
+// possible. The two buttons used to be enabled at both ends and silently do nothing there.
+bool btCanMoveSibling(const std::vector<fmt::OcBtNode>& nodes, i32 index, i32 delta) {
+    if (!inRange(nodes, index) || index == 0 || delta == 0) return false;
+
+    const ChildOrder order = captureOrder(const_cast<std::vector<fmt::OcBtNode>&>(nodes));
+    const i32 parent = nodes[static_cast<usize>(index)].parent;
+    const auto it = order.find(parent);
+    if (it == order.end()) return false;
+    const std::vector<i32>& siblings = it->second;
+
+    const auto pos = std::find(siblings.begin(), siblings.end(), index);
+    if (pos == siblings.end()) return false;
+    const auto at = static_cast<i32>(pos - siblings.begin());
+    const i32 want = at + (delta < 0 ? -1 : 1);
+    return want >= 0 && want < static_cast<i32>(siblings.size());
+}
+
 i32 btMoveSibling(std::vector<fmt::OcBtNode>& nodes, i32 index, i32 delta) {
-    if (!inRange(nodes, index) || index == 0 || delta == 0) return -1;
+    if (!btCanMoveSibling(nodes, index, delta)) return -1;
 
     ChildOrder order = captureOrder(nodes);
     const i32 parent = nodes[static_cast<usize>(index)].parent;
@@ -170,7 +190,6 @@ i32 btMoveSibling(std::vector<fmt::OcBtNode>& nodes, i32 index, i32 delta) {
     if (pos == siblings.end()) return -1;
     const auto at = static_cast<i32>(pos - siblings.begin());
     const i32 want = at + (delta < 0 ? -1 : 1);
-    if (want < 0 || want >= static_cast<i32>(siblings.size())) return -1;   // already at that end
     std::swap(siblings[static_cast<usize>(at)], siblings[static_cast<usize>(want)]);
 
     const std::unordered_map<i32, i32> remap = rebuild(nodes, order);
@@ -187,6 +206,22 @@ void btSetKind(std::vector<fmt::OcBtNode>& nodes, i32 index, fmt::OcBtNodeKind k
         n.name = kind == fmt::OcBtNodeKind::Condition ? "HasTarget" : "Wait";
     else if (!needsName)
         n.name.clear();
+}
+
+fmt::OcBtData btStarterTree() {
+    fmt::OcBtData bt;
+
+    fmt::OcBtNode root;
+    root.kind = fmt::OcBtNodeKind::Selector;
+    root.parent = fmt::kOcBtNoParent;
+    bt.nodes.push_back(root);
+
+    // Built through btAddChild rather than hand-rolled, so the starter is produced by the same edit
+    // path every other node in this editor goes through -- including its choice of a registered name.
+    btAddChild(bt.nodes, 0, fmt::OcBtNodeKind::Action);
+    if (bt.nodes.size() > 1) bt.nodes[1].params[0] = 1.0f;   // Wait's duration, seconds
+
+    return bt;
 }
 
 // ================================================================================== the tab =======
@@ -206,8 +241,7 @@ void BtEditor::loadFromDisk() {
     loadError_.clear();
     dirty_ = false;
     selected_ = 0;
-    undoStack_.clear();
-    redoStack_.clear();
+    history_.clear();
 }
 
 std::string BtEditor::title() const {
@@ -240,27 +274,18 @@ void BtEditor::onFileChanged() {
 }
 
 void BtEditor::pushUndo() {
-    undoStack_.push_back(tree_);
-    constexpr usize kUndoCap = 200;   // GraphEditor::pushUndo's own cap
-    if (undoStack_.size() > kUndoCap) undoStack_.erase(undoStack_.begin());
-    redoStack_.clear();
+    history_.push(tree_);
 }
 
 void BtEditor::undo() {
-    if (undoStack_.empty()) return;
-    redoStack_.push_back(tree_);
-    tree_ = std::move(undoStack_.back());
-    undoStack_.pop_back();
+    if (!history_.undo(tree_)) return;
     dirty_ = true;
     // The selection is an INDEX, and undo can shrink the array under it.
     if (!inRange(tree_.nodes, selected_)) selected_ = 0;
 }
 
 void BtEditor::redo() {
-    if (redoStack_.empty()) return;
-    undoStack_.push_back(tree_);
-    tree_ = std::move(redoStack_.back());
-    redoStack_.pop_back();
+    if (!history_.redo(tree_)) return;
     dirty_ = true;
     if (!inRange(tree_.nodes, selected_)) selected_ = 0;
 }
@@ -271,7 +296,7 @@ void BtEditor::addChild(fmt::OcBtNodeKind kind) {
     // Added under whatever is selected, matching GraphEditor's own addComponent: building a
     // hierarchy means adding under the thing just clicked, not at the root every time.
     const i32 added = btAddChild(tree_.nodes, selected_, kind);
-    if (added < 0) { undoStack_.pop_back(); return; }
+    if (added < 0) { history_.cancelPush(); return; }
     selected_ = added;
     dirty_ = true;
 }
@@ -280,7 +305,7 @@ void BtEditor::deleteSelected() {
     if (!loaded_ || selected_ == 0) return;
     pushUndo();
     const i32 next = btDeleteSubtree(tree_.nodes, selected_);
-    if (next < 0) { undoStack_.pop_back(); return; }
+    if (next < 0) { history_.cancelPush(); return; }
     selected_ = next;
     dirty_ = true;
 }
@@ -289,7 +314,7 @@ void BtEditor::reparentSelected(i32 newParent) {
     if (!loaded_) return;
     pushUndo();
     const i32 moved = btReparent(tree_.nodes, selected_, newParent);
-    if (moved < 0) { undoStack_.pop_back(); return; }
+    if (moved < 0) { history_.cancelPush(); return; }
     selected_ = moved;
     dirty_ = true;
 }
@@ -298,7 +323,7 @@ void BtEditor::moveSelected(i32 delta) {
     if (!loaded_) return;
     pushUndo();
     const i32 moved = btMoveSibling(tree_.nodes, selected_, delta);
-    if (moved < 0) { undoStack_.pop_back(); return; }
+    if (moved < 0) { history_.cancelPush(); return; }
     selected_ = moved;
     dirty_ = true;
 }
@@ -319,6 +344,13 @@ namespace {
 // own conditions and actions into the same registry and the editor has no way to know them.
 const char* const kBuiltinConditions[] = {"HasTarget", "CanSeeTarget", "DistanceToTargetLess"};
 const char* const kBuiltinActions[] = {"MoveTo", "Wait", "LookAt", "FireEvent"};
+
+// The tree/details split -- see EditorWidgets.hpp's own top comment for why this is a FRACTION
+// (SplitPane) rather than ActorEditor's pixel-width convention. 0.45f is this tab's own PRE-EXISTING
+// default (it used to be `avail.x * 0.45f`, recomputed fresh every frame with no persistence at
+// all) -- kept exactly, so adopting the shared helper changes draggability and persistence only.
+constexpr f32 kDefaultTreeFraction = 0.45f;
+constexpr const char* kPrefTreeSplit = "btEditor.treeSplit";
 } // namespace
 
 void BtEditor::drawTreeRow(i32 index) {
@@ -445,9 +477,15 @@ void BtEditor::drawDetails() {
             }
             ImGui::EndCombo();
         }
+        // Disabled at the ends, like Undo/Redo/Delete beside them. These two were the only controls
+        // in this toolbar that stayed enabled when they could not act.
+        ImGui::BeginDisabled(!btCanMoveSibling(tree_.nodes, selected_, -1));
         if (ImGui::Button("Move up")) moveSelected(-1);
+        ImGui::EndDisabled();
         ImGui::SameLine();
+        ImGui::BeginDisabled(!btCanMoveSibling(tree_.nodes, selected_, 1));
         if (ImGui::Button("Move down")) moveSelected(1);
+        ImGui::EndDisabled();
         ImGui::SameLine();
         ImGui::TextDisabled("(order is execution order)");
     }
@@ -461,7 +499,7 @@ void BtEditor::draw(Engine& e) {
     }
 
     if (ImGui::Button("Save") || (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
-                                  ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false))) {
+                                  keybinds().pressed(CommandId::AssetSave, ImGui::GetIO()))) {
         std::string why;
         if (!save(&why)) AVER_ERROR("[BtEditor] save failed for '{}': {}", path_, why);
     }
@@ -489,14 +527,27 @@ void BtEditor::draw(Engine& e) {
 
     ImGui::Separator();
 
-    const float paneW = ImGui::GetContentRegionAvail().x * 0.45f;
+    // Draggable, persisted, through the shared SplitPane helper (EditorWidgets.hpp) -- see this
+    // file's own kDefaultTreeFraction comment for why 0.45f is not a new number.
+    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 avail = ImGui::GetContentRegionAvail().x;
+    const f32 minTree = 140.0f * dpi, minDetails = 200.0f * dpi;
+    const f32 paneW = splitPaneWidth(split_, kPrefTreeSplit, kDefaultTreeFraction, avail,
+                                      minTree, minDetails);
     if (ImGui::BeginChild("##bttree", ImVec2(paneW, 0), true)) {
         if (!tree_.nodes.empty()) drawTreeRow(0);
     }
     ImGui::EndChild();
-    ImGui::SameLine();
+    drawSplitHandle(split_, "##btsplit", kPrefTreeSplit, avail, minTree, minDetails, 6.0f * dpi);
     if (ImGui::BeginChild("##btdetails", ImVec2(0, 0), true)) drawDetails();
     ImGui::EndChild();
+}
+
+// Restores the tree/details split to its default proportion and persists that immediately -- see
+// AssetEditor.hpp's own resetLayout() comment for why "Reset Tab Layout" needs every tab to implement
+// this rather than just ActorEditor.
+void BtEditor::resetLayout() {
+    resetSplitPane(split_, kPrefTreeSplit, kDefaultTreeFraction);
 }
 
 #else   // AVER_WITH_IMGUI
@@ -505,6 +556,9 @@ void BtEditor::draw(Engine& e) {
 // undefined -- see tests/editor/CMakeLists.txt) still gets load/save/undo/edits; only the window is
 // absent. GraphEditor.cpp does exactly this.
 void BtEditor::draw(Engine& e) { (void)e; }
+
+// A headless build never lays the panels out at all, so there is nothing for a reset to restore.
+void BtEditor::resetLayout() {}
 
 #endif  // AVER_WITH_IMGUI
 

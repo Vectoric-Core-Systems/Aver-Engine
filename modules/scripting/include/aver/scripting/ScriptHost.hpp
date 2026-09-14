@@ -3,6 +3,8 @@
 #include "aver/core/Types.hpp"
 
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace aver::scripting {
 
@@ -75,6 +77,42 @@ public:
     // Whether the staged bridge exports GraphFire at all. Distinct from graphAvailable(): a bridge
     // built before this existed hosts graphs perfectly well and simply cannot be fired at.
     bool graphFireAvailable() const;
+
+    // VALIDATES .ocgraph TEXT, loading and running nothing. Returns true when the graph is valid;
+    // false with `err` set to the first thing wrong with it, in the words the managed validator
+    // already uses (they name the offending node and say what to do).
+    //
+    // TEXT, NOT A PATH, on purpose: the editor validates what is on the CANVAS, unsaved edits and
+    // all. Handing over a path would validate the last saved version and quietly disagree with what
+    // the author is looking at.
+    //
+    // Returns true with `err` cleared when validation is unavailable -- refusing to save a graph
+    // because the bridge is missing would be worse than not checking it. Ask
+    // graphValidateAvailable() when the distinction matters to the caller.
+    bool graphValidate(const std::string& text, std::string& err) const;
+
+    // Whether the staged bridge exports GraphValidate. Optional and separate from every group above,
+    // for GraphFire's reason: a bridge that predates it hosts, ticks and fires graphs correctly and
+    // is only unable to check one.
+    bool graphValidateAvailable() const;
+
+    // ---- per-node execution recording, for the graph editor's highlighting -------------------
+    //
+    // Turns recording on or off. It sits on the hot path of EVERY exec node of every live graph
+    // instance, so the editor arms it only while a graph tab is open and a packaged game never does.
+    // A no-op when the staged bridge predates it.
+    void graphSetHitRecording(bool on) const;
+
+    // Nodes of the graph NAMED `graphName` that ran within `maxAgeSeconds`, as "nodeId:age" pairs.
+    // Ages rather than timestamps because the two sides do not share a clock.
+    //
+    // BY NAME, NOT BY ENTITY, and that is forced rather than chosen: a compiled graph's arguments come
+    // from its own PARAM list, so the instrumentation point has no entity to name. It is also what the
+    // editor wants -- its canvas shows a class, so any instance running a node should light it.
+    void graphNodeHits(const std::string& graphName, f32 maxAgeSeconds,
+                       std::vector<std::pair<std::string, f32>>& out) const;
+
+    bool graphHitsAvailable() const;
 
     // GRAPH-AS-CLASS: bound OPTIONALLY, exactly like the graph three just above -- a bridge built
     // before these existed still boots; graphClassesAvailable() is false and both calls below are

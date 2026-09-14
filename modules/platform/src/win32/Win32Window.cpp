@@ -112,6 +112,13 @@ static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         case WM_CLOSE: {
             Event e; e.type = EventType::WindowClose;
             self->dispatch(e);
+            // ASK BEFORE CLOSING. A guard that returns false means the app has something unsaved and
+            // has put a prompt up; leaving shouldClose_ alone keeps the frame loop running so that
+            // prompt can actually be drawn and answered. Without this the editor's X button
+            // discarded an unsaved level with no warning -- Engine::run tests shouldClose() before
+            // frameStep(), so nothing the app might have done in response to the event above could
+            // ever reach the screen.
+            if (!self->mayClose()) return 0;
             self->requestClose();
             return 0;
         }
@@ -341,8 +348,15 @@ bool Window::create(const WindowDesc& desc) {
     wc.hIconSm = wc.hIcon;
     RegisterClassExW(&wc);
 
-    DWORD style = desc.resizable ? WS_OVERLAPPEDWINDOW
-                                 : (WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX);
+    // AND ONLY WHEN THE WINDOW IS INTERACTIVE. See WindowDesc::fullscreen: a capture run's window is
+    // the instrument every gate baseline was recorded through, so it keeps its fixed size no matter
+    // what this asks for.
+    const bool wantFullscreen = desc.fullscreen && desc.activate;
+
+    DWORD style = wantFullscreen
+                    ? (WS_POPUP | WS_VISIBLE)
+                    : (desc.resizable ? WS_OVERLAPPEDWINDOW
+                                      : (WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX));
 
     RECT rc = {0, 0, static_cast<LONG>(desc.width), static_cast<LONG>(desc.height)};
     AdjustWindowRect(&rc, style, FALSE);
@@ -379,8 +393,26 @@ bool Window::create(const WindowDesc& desc) {
     height_ = desc.height;
     dpiScale_ = queryDpiScale(hwnd);
 
+    // FULLSCREEN TAKES rcMonitor, NOT rcWork: the work area excludes the taskbar, which is exactly
+    // what a borderless-fullscreen window must cover. Sized in PHYSICAL pixels straight from the
+    // monitor, so the DPI scaling the windowed path applies below would be wrong here twice over --
+    // the monitor rect is already in the units the swapchain wants.
+    if (wantFullscreen) {
+        MONITORINFO mi{}; mi.cbSize = sizeof(mi);
+        if (GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi)) {
+            const int mw = mi.rcMonitor.right - mi.rcMonitor.left;
+            const int mh = mi.rcMonitor.bottom - mi.rcMonitor.top;
+            SetWindowPos(hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top, mw, mh,
+                         SWP_NOACTIVATE);   // WM_SIZE updates width_/height_
+            AVER_INFO("[Platform] borderless fullscreen {}x{}", mw, mh);
+        } else {
+            AVER_WARN("[Platform] fullscreen asked for but the monitor could not be queried; "
+                      "staying windowed");
+        }
+    }
+
     // desc.width/height are logical 96-DPI sizes: scale, clamp to the work area, centre.
-    {
+    if (!wantFullscreen) {
         int cw = static_cast<int>(desc.width * dpiScale_ + 0.5f);
         int ch = static_cast<int>(desc.height * dpiScale_ + 0.5f);
         MONITORINFO mi{}; mi.cbSize = sizeof(mi);
@@ -398,7 +430,10 @@ bool Window::create(const WindowDesc& desc) {
         }
     }
 
-    ShowWindow(hwnd, desc.activate ? SW_SHOW : SW_SHOWNOACTIVATE);
+    // startHidden skips the reveal ENTIRELY rather than showing and hiding, which would flash.
+    // Everything above this line has already run, so the window is sized, DPI-aware and ready to
+    // present -- see WindowDesc::startHidden.
+    if (!desc.startHidden) ShowWindow(hwnd, desc.activate ? SW_SHOW : SW_SHOWNOACTIVATE);
     // Push a capture window to the BOTTOM of the stack. SWP_NOMOVE|SWP_NOSIZE is load-bearing: the
     // centring SetWindowPos above already placed it, and a gate probe is a pixel at a fixed rect in
     // a client area of a fixed size, so this call may change the Z order and nothing else.
@@ -410,6 +445,13 @@ bool Window::create(const WindowDesc& desc) {
 }
 
 // Retitles a live window.
+// See the header. SW_SHOWNA rather than SW_SHOW when not activating, for the same reason create()
+// distinguishes them: a capture run must not take the keyboard from whoever owns the machine.
+void Window::show(bool activate) {
+    if (!nativeHandle_) return;
+    ShowWindow(static_cast<HWND>(nativeHandle_), activate ? SW_SHOW : SW_SHOWNA);
+}
+
 void Window::setTitle(const std::string& title) {
     if (nativeHandle_) SetWindowTextW(static_cast<HWND>(nativeHandle_), utf8ToWide(title).c_str());
 }

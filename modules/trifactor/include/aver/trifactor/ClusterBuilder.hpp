@@ -22,8 +22,14 @@ namespace aver::trifactor {
 
 // MLET spec limits (FORMAT_SPECS.md 5.7). Both meshopt_buildMeshlets call sites in this module are
 // sized to these exactly -- they ARE the mesh-shader/DXR contract, not a tunable.
-inline constexpr u32 kMaxClusterVertices  = 64;
-inline constexpr u32 kMaxClusterTriangles = 124;
+//
+// ALIASES, NOT A SECOND PAIR OF LITERALS, which is the same thing this header already does for
+// fmt::kInvalidClusterId and for the same stated reason: this module depends on Aver.Formats, so
+// the on-disk contract can own the number and be named from here. They used to be independent 64
+// and 124 in two files (three, counting a #define in a shared HLSL prelude), agreeing only because
+// nobody had changed one.
+inline constexpr u32 kMaxClusterVertices  = fmt::kMaxMeshletVertices;
+inline constexpr u32 kMaxClusterTriangles = fmt::kMaxMeshletTriangles;
 
 // ---- builder version stamp (task: "Stage 2, Part B") -------------------------------------------
 //
@@ -64,7 +70,7 @@ inline constexpr u32 kMaxClusterTriangles = 124;
 // under. It is also, not incidentally, the FIRST version this field is able to record at all: nothing
 // before this task ever wrote anything but 0 here, so there is no "version 0 algorithm" to distinguish
 // this one from on disk -- 0 already carries that meaning by the paragraph above.
-inline constexpr u32 kBuilderVersion = 1;
+inline constexpr u32 kBuilderVersion = 2;
 
 // ---- Stage 4: streaming topology (fallbackAncestorId, ownerGroupId, ClusterGroupNode) ----------
 //

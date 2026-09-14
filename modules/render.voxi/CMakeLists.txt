@@ -39,8 +39,12 @@ target_compile_features(Aver.Render.Voxi.Renderer PUBLIC cxx_std_20)
 # WRITES a file format (.cache, an AVR1 container), which is a real dependency rather than an
 # incidental one and belongs stated here. It is the same shape as the Aver.Render.PBR.Materials
 # entry above -- a library this renderer genuinely uses, not a backend leaking across the boundary.
+# Aver.Render.NRD is the NVIDIA denoiser seam. It is ALWAYS linkable -- the target exists whether
+# or not NRD itself is in the build (see its own CMakeLists) -- so this edge needs no guard, and
+# whether denoising actually runs stays a RUNTIME question answered by Recorder::create().
 target_link_libraries(Aver.Render.Voxi.Renderer PUBLIC Aver.Core Aver.RHI Aver.Render.Voxi
-                                                       Aver.Render.PBR.Materials Aver.Formats)
+                                                       Aver.Render.PBR.Materials Aver.Formats
+                                                       Aver.Render.NRD)
 
 set_target_properties(Aver.Render.Voxi.Renderer PROPERTIES FOLDER "modules")
 
@@ -63,4 +67,21 @@ target_compile_definitions(Aver.Render.Voxi.Renderer PRIVATE
 # POST_BUILD command: POST_BUILD runs on a RELINK, and a shader-only edit relinks nothing, so
 # the old text stayed deployed and silently kept being compiled. Mirrors modules/rhi/CMakeLists.txt --
 # see ShaderFiles.hpp for why bin/shaders is the only path a shipped build looks at.
+# ---- RTXDI's HLSL, deployed WITH ITS DIRECTORY STRUCTURE ----
+#
+# Copied whole into bin/shaders/Rtxdi/... rather than flattened, and the structure is the point.
+# <exe>/shaders used to be one flat, case-insensitive basename namespace: RTXDI ships Color.hlsli,
+# this engine ships color.hlsli, and deploying both left ONE file on disk -- the engine's colour
+# helpers silently gone, caught only by MaterialGraphTest failing on `undeclared identifier
+# srgbToLin`, because HLSL compiles at RUNTIME here and none of it was a build error. RTXDI's tree
+# also collides with itself (Reservoir.hlsli under DI/, GI/ and PT/). Keeping the directories means
+# neither collision can happen; DxcShaderInclude resolves path suffixes now, so the includes RTXDI
+# writes against a root ("Rtxdi/GI/Reservoir.hlsli") land on exactly these files.
+#
+# NOT via aver_deploy_shaders: that flattens into one directory and globs *.hlsl/*.hlsli only, while
+# RTXDI ships its shared host/shader structs as .h -- half an include closure, failing at runtime.
+# file(COPY) at configure time preserves both the tree and the extensions.
+file(COPY "${CMAKE_SOURCE_DIR}/third_party/rtxdi/Include/Rtxdi"
+     DESTINATION "${CMAKE_BINARY_DIR}/bin/shaders")
+
 aver_deploy_shaders(Aver.Render.Voxi.Renderer "${CMAKE_CURRENT_SOURCE_DIR}/shaders")

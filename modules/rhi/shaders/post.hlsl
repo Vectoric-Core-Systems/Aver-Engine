@@ -8,7 +8,8 @@ cbuffer AverPost : register(b0) {
     float4 gPostSrc;     // xy source size in texels,      zw its reciprocal
     float4 gPostAdapt;   // x min log2 luminance, y 1/log2 range, z adaption alpha, w pixels sampled
     float4 gPostLimit;   // x exposure min, y exposure max, z histogram low cut, w high cut
-    float4 gPostMisc;    // x middle grey, y auto-exposure on, z bloom filter radius, w unused
+    float4 gPostMisc;    // x middle grey, y auto-exposure on, z bloom filter radius, w tonemap mode
+    float4 gPostClamp;   // x pre-tonemap radiance ceiling (0 = no clamp), yzw spare
 };
 
 Texture2D<float4>     gPostSceneTex : register(t0);
@@ -54,12 +55,28 @@ AverPostVSOut PostVS(uint id : SV_VertexID) {
 }
 
 // Halves the scene into the pyramid's first level, Karis-averaged and soft-knee thresholded.
+// THE CEILING, APPLIED WHERE THE SCENE IS READ -- before exposure, and before the bloom threshold.
+//
+// PLACEMENT IS THE WHOLE FIX AND THE FIRST ATTEMPT GOT IT WRONG. Clamping in PSComposite after bloom
+// had been added does nothing useful: past about 8 the tonemap already returns pure white, so the sun
+// disc looks identical clamped or not. What the unclamped value actually does is drive the BLOOM --
+// the prefilter reads the same scene texture, thresholds at 1.0, and a disc sitting at ~42 (the sky
+// dome draws sunColour * sunIntensity * 14, and sunIntensity defaults to 3) bleeds a halo
+// proportional to all 42 of it. That halo is what reads as the void being overwhelmingly bright.
+//
+// 0 DISABLES IT rather than meaning "clamp to nothing".
+float3 averPostClampRadiance(float3 c) {
+    return gPostClamp.x > 0.0 ? min(c, gPostClamp.x) : c;
+}
+
 float4 PSBloomPrefilter(AverPostVSOut i) : SV_TARGET {
     float2 o = gPostSrc.zw;
     float3 a = gPostSceneTex.SampleLevel(gPostSamp, i.uv + float2(-o.x, -o.y), 0).rgb;
     float3 b = gPostSceneTex.SampleLevel(gPostSamp, i.uv + float2( o.x, -o.y), 0).rgb;
     float3 c = gPostSceneTex.SampleLevel(gPostSamp, i.uv + float2(-o.x,  o.y), 0).rgb;
     float3 d = gPostSceneTex.SampleLevel(gPostSamp, i.uv + float2( o.x,  o.y), 0).rgb;
+    a = averPostClampRadiance(a); b = averPostClampRadiance(b);
+    c = averPostClampRadiance(c); d = averPostClampRadiance(d);
     float3 sum = averBloomKaris(a) + averBloomKaris(b) + averBloomKaris(c) + averBloomKaris(d);
     return float4(averBloomPrefilter(sum * 0.25 * averPostExposure()), 1.0);
 }
@@ -139,9 +156,27 @@ void CSExposure() {
     float target = gPostTone.x;
 
     if (gPostMisc.y > 0.5) {
+        // BIN 0 IS READ AND DELIBERATELY NOT COUNTED, and getting that wrong disabled half of this
+        // function. CSHistogram puts every pixel with luminance <= 1e-4 in bin 0 -- "black", not a
+        // measured luminance -- and the averaging loop below starts at b = 1 to exclude it. `total`
+        // used to sum ALL 256 bins anyway, so the two percentile cuts were fractions of a
+        // population the loop never walks.
+        //
+        // WHAT THAT COST: `seen` only ever accumulates bins 1..255, so it can only reach highCut if
+        // the lit pixels alone exceed histogramHighPercent of the WHOLE frame. In an enclosed scene
+        // -- the arcade this engine is developed against, where bin 0 routinely holds a third of the
+        // frame -- it never does, and `hi` is zero for every bin. The high cut simply never fires.
+        // That cut is the only thing standing between a handful of blown-out pixels and the
+        // metering, which is exactly the guard a ray-traced GI estimator with fireflies needs most.
+        // The low cut misfires the same way in reverse: it discards `lowCut` genuinely-lit pixels
+        // as "the darkest", when the real darkest are all sitting in bin 0, unexamined.
+        //
+        // Counting the lit population only makes both cuts mean what histogramLowPercent and
+        // histogramHighPercent say they mean: percentiles of the pixels actually being averaged.
         uint total = 0;
         uint counts[256];
-        for (uint i = 0; i < 256; ++i) { counts[i] = gPostHist.Load(i * 4); total += counts[i]; }
+        counts[0] = gPostHist.Load(0);
+        for (uint i = 1; i < 256; ++i) { counts[i] = gPostHist.Load(i * 4); total += counts[i]; }
 
         float lowCut  = total * gPostLimit.z;
         float highCut = total * gPostLimit.w;
@@ -178,7 +213,7 @@ void CSExposure() {
 // ---- composite -----------------------------------------------------------------------------
 // Exposure, bloom, tonemap and gamma in one pass; the frame becomes a display image here.
 float4 PSComposite(AverPostVSOut i) : SV_TARGET {
-    float3 c = gPostSceneTex.SampleLevel(gPostSamp, i.uv, 0).rgb;
+    float3 c = averPostClampRadiance(gPostSceneTex.SampleLevel(gPostSamp, i.uv, 0).rgb);
 #ifdef AVER_POST_AUTOEXPOSURE
     c *= asfloat(gPostExpRead.Load(0));
 #else
@@ -187,5 +222,5 @@ float4 PSComposite(AverPostVSOut i) : SV_TARGET {
 #ifdef AVER_POST_BLOOM
     c += gPostBloomTex.SampleLevel(gPostSamp, i.uv, 0).rgb * gPostTone.y;
 #endif
-    return float4(toGamma(acesTonemap(c)), 1.0);
+    return float4(toGamma(averTonemap(c, gPostMisc.w)), 1.0);
 }

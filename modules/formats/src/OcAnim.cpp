@@ -5,6 +5,7 @@
 #include "aver/formats/Avr1.hpp"
 #include "aver/core/Hash.hpp"   // fnv1a64: how a component names a socket
 
+#include <cmath>                // std::isfinite: guards NTFD and CTAN against a NaN/Inf payload
 #include <cstring>
 #include "aver/platform/FileSystem.hpp"
 
@@ -29,6 +30,21 @@ constexpr u32 kChunkTRKS = avrFourCC("TRKS");
 constexpr u32 kChunkNOTF = avrFourCC("NOTF");
 // Optional, exactly as NOTF and SOCK are.
 constexpr u32 kChunkCRVE = avrFourCC("CRVE");
+// OPTIONAL, and DENSE rather than sparse: when present it holds exactly notifies.size() floats, one
+// per NOTF entry in the same order, entry i being how long notifies[i] stays open (0 = instant). A
+// clip where every notify is instantaneous -- which is every clip written before notify states
+// existed -- omits this chunk entirely rather than writing a column of zeros, which is what keeps
+// such a clip's rewrite byte-identical. See OcAnimation::notifyDurations for the full reasoning.
+constexpr u32 kChunkNTFD = avrFourCC("NTFD");
+// OPTIONAL, and DENSE PER CURVE rather than sparse, for NTFD's own reason applied one level deeper:
+// when present it holds, for EVERY curve in CRVE (same order, same key count), a KeyCount-long
+// in-tangent array followed by a KeyCount-long out-tangent array. A clip where every curve's every
+// tangent is zero -- which is every clip written before tangents existed, Linear and Step curves
+// included -- omits this chunk entirely, which is what keeps such a clip's rewrite byte-identical.
+// See OcCurve::inTangents/outTangents for the full reasoning, including the one place this differs
+// from a per-curve chunk would: a curve with no tangents of its own still gets a dense zero-filled
+// pair back from disk once another curve in the same clip needed the chunk written at all.
+constexpr u32 kChunkCTAN = avrFourCC("CTAN");
 
 // Sets `why` and returns false.
 bool fail(std::string* why, std::string m) { if (why) *why = std::move(m); return false; }
@@ -76,10 +92,14 @@ bool readWholeFile(const std::string& path, std::vector<u8>& out, std::string* w
 
 // Writes `bytes` to a file, truncating it. `what` prefixes any error message.
 bool writeWholeFile(const std::string& path, const std::vector<u8>& bytes, std::string* why, const char* what) {
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);
-    if (!f) return fail(why, std::string(what) + ": cannot write " + path);
-    f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-    if (!f) return fail(why, std::string(what) + ": write failed on " + path);
+    // ATOMIC, NOT TRUNCATE-THEN-WRITE. An ofstream opened with ios::trunc zeroes the file when the
+    // STREAM IS CONSTRUCTED, before a byte of `bytes` is written, and this overwrites a real asset in
+    // place -- so a crash, a kill or a full disk in that window destroyed the previously-good file and
+    // not merely the unsaved edit. writeFileBytesAtomic writes a temporary beside the target and swaps
+    // only a complete one into place; see its comment in FileSystem.hpp, which already names this
+    // class of caller.
+    if (!writeFileBytesAtomic(path, bytes.data(), bytes.size()))
+        return fail(why, std::string(what) + ": write failed on " + path);
     return true;
 }
 
@@ -115,6 +135,11 @@ const OcSocket* OcSkeleton::socket(const std::string& name) const {
 const OcCurve* OcAnimation::curve(const std::string& name) const {
     for (const OcCurve& c : curves) if (c.name == name) return &c;
     return nullptr;
+}
+
+f32 OcAnimation::notifyDuration(u32 index) const {
+    if (index >= notifyDurations.size()) return 0.0f;   // absent chunk, or a stale/out-of-range index
+    return notifyDurations[index];
 }
 
 const OcCurve* OcAnimation::curveById(u64 id) const {
@@ -321,6 +346,24 @@ bool writeOcAnim(const OcAnimation& in, std::vector<u8>& out, std::string* why) 
                              " time(s) and " + std::to_string(c.values.size()) + " value(s)");
     }
 
+    // TANGENTS -- same three refusals NTFD applies to notifyDurations, at curve granularity: only one
+    // side set, a side whose length does not match the curve's own keys, or a non-finite value. All
+    // caught here, where the caller still knows what it built, rather than reshaped into something
+    // that silently samples wrong.
+    for (const OcCurve& c : in.curves) {
+        if (c.inTangents.empty() != c.outTangents.empty())
+            return fail(why, ".ocanim: curve '" + c.name + "' has tangents on only one side");
+        if (!c.inTangents.empty() &&
+            (c.inTangents.size() != c.times.size() || c.outTangents.size() != c.times.size()))
+            return fail(why, ".ocanim: curve '" + c.name + "' has " + std::to_string(c.inTangents.size()) +
+                             " in-tangent(s) and " + std::to_string(c.outTangents.size()) +
+                             " out-tangent(s) for " + std::to_string(c.times.size()) + " key(s)");
+        for (const f32 v : c.inTangents)
+            if (!std::isfinite(v)) return fail(why, ".ocanim: curve '" + c.name + "' has a non-finite in-tangent");
+        for (const f32 v : c.outTangents)
+            if (!std::isfinite(v)) return fail(why, ".ocanim: curve '" + c.name + "' has a non-finite out-tangent");
+    }
+
     // Notifies, before AHDR only because both intern into the same string table and the table is
     // written last. A clip with none adds no chunk at all rather than an empty one.
     std::vector<u8> notf;
@@ -331,6 +374,29 @@ bool writeOcAnim(const OcAnimation& in, std::vector<u8>& out, std::string* why) 
             w.f32v(n.time);
             w.u32v(strt.add(n.name));
         }
+    }
+
+    // Notify DURATIONS -- see notifyDurations' own comment for why this is a separate chunk rather
+    // than a wider NOTF. Refused rather than silently reshaped when the caller built a mismatched
+    // pair: truncating or padding here would save a bad edit instead of surfacing it.
+    if (!in.notifyDurations.empty() && in.notifyDurations.size() != in.notifies.size())
+        return fail(why, ".ocanim: " + std::to_string(in.notifyDurations.size()) + " notify duration(s) for " +
+                         std::to_string(in.notifies.size()) + " notify(ies)");
+    for (const f32 d : in.notifyDurations)
+        if (!(d >= 0.0f)) return fail(why, ".ocanim: a notify duration is negative or NaN");
+
+    // OMITTED WHENEVER EVERY DURATION IS ZERO, checked by VALUE rather than by "is the vector
+    // empty" -- an editor that always sizes this array to match notifies (rather than leaving it
+    // empty until the first state is authored) must still get a byte-identical file for a clip
+    // where nobody ever set one above zero. That is what keeps an old clip's round trip intact
+    // regardless of which shape the caller happens to build.
+    std::vector<u8> ntfd;
+    bool anyDuration = false;
+    for (const f32 d : in.notifyDurations) if (d > 0.0f) { anyDuration = true; break; }
+    if (anyDuration) {
+        W w{ntfd};
+        w.u32v(static_cast<u32>(in.notifyDurations.size()));
+        for (const f32 d : in.notifyDurations) w.f32v(d);
     }
 
     // Curves. Same placement reasoning as the notifies above: built before AHDR only because the
@@ -345,6 +411,35 @@ bool writeOcAnim(const OcAnimation& in, std::vector<u8>& out, std::string* why) 
             w.u32v(static_cast<u32>(c.times.size()));
             for (const f32 t : c.times) w.f32v(t);
             for (const f32 v : c.values) w.f32v(v);
+        }
+    }
+
+    // Curve TANGENTS -- see OcCurve::inTangents and kChunkCTAN's own comment for why this is a
+    // separate chunk, parallel-indexed to CRVE, rather than a widening of it. OMITTED WHENEVER EVERY
+    // TANGENT IN THE WHOLE CLIP IS ZERO, checked BY VALUE rather than by a vector being empty -- the
+    // same rule NTFD applies to notifyDurations, so an editor that always sizes a curve's tangent
+    // arrays (rather than leaving them empty until a handle is first dragged) still gets a byte-
+    // identical file for a clip nobody has touched.
+    std::vector<u8> ctan;
+    bool anyTangent = false;
+    for (const OcCurve& c : in.curves) {
+        for (const f32 v : c.inTangents)  if (v != 0.0f) { anyTangent = true; break; }
+        if (anyTangent) break;
+        for (const f32 v : c.outTangents) if (v != 0.0f) { anyTangent = true; break; }
+        if (anyTangent) break;
+    }
+    if (anyTangent) {
+        W w{ctan};
+        w.u32v(static_cast<u32>(in.curves.size()));
+        for (const OcCurve& c : in.curves) {
+            const u32 n = static_cast<u32>(c.times.size());
+            w.u32v(n);
+            // DENSE even for a curve whose own tangents were never authored (inTangents empty): the
+            // chunk's granularity is the whole clip, so every curve gets an entry once ANY curve
+            // needs one, and an absent side reads as all zero here exactly as notifyDuration() reads
+            // an absent NTFD entry as zero.
+            for (u32 k = 0; k < n; ++k) w.f32v(k < c.inTangents.size()  ? c.inTangents[k]  : 0.0f);
+            for (u32 k = 0; k < n; ++k) w.f32v(k < c.outTangents.size() ? c.outTangents[k] : 0.0f);
         }
     }
 
@@ -375,7 +470,9 @@ bool writeOcAnim(const OcAnimation& in, std::vector<u8>& out, std::string* why) 
     f.add(kChunkAHDR, std::move(ahdr), kAvrChunkRequired);
     f.add(kChunkTRKS, std::move(trks));
     if (!notf.empty()) f.add(kChunkNOTF, std::move(notf));
+    if (!ntfd.empty()) f.add(kChunkNTFD, std::move(ntfd));
     if (!crve.empty()) f.add(kChunkCRVE, std::move(crve));
+    if (!ctan.empty()) f.add(kChunkCTAN, std::move(ctan));
     // AFTER the notify names have been interned, or the table would be written without them.
     f.add(kChunkSTRT, strt.bytes());
     return writeAvr1(f, out, why);
@@ -436,6 +533,41 @@ bool parseOcAnim(const u8* bytes, usize size, OcAnimation& out, std::string* why
         if (!c.ok) return fail(why, ".ocanim: truncated curve table");
     }
 
+    // CURVE TANGENTS. Absent is ordinary -- every clip predating tangents, and every clip whose
+    // curves' tangents are all still zero, has no CTAN chunk. Read AFTER curves, exactly as NTFD is
+    // read after NOTF, so the per-curve size checks below have something to check against; each
+    // curve's own key count (already bounds-checked above) is what bounds the tangent counts read
+    // here, so there is no separate huge-allocation guard to write.
+    if (const AvrChunk* ctan = f.find(kChunkCTAN)) {
+        R c{ctan->data.data(), ctan->data.data() + ctan->data.size()};
+        const u32 curveCount = c.u32v();
+        if (!c.ok) return fail(why, ".ocanim: truncated CTAN header");
+        // DENSE AND PARALLEL, to CRVE this time rather than to NOTF: a curve count that does not
+        // match cannot be lined up against it.
+        if (curveCount != out.curves.size())
+            return fail(why, ".ocanim: CTAN holds tangents for " + std::to_string(curveCount) +
+                             " curve(s) but CRVE has " + std::to_string(out.curves.size()) + " curve(s)");
+        for (u32 i = 0; i < curveCount; ++i) {
+            OcCurve& cur = out.curves[i];
+            const u32 keys = c.u32v();
+            if (!c.ok) return fail(why, ".ocanim: truncated CTAN curve header");
+            if (keys != cur.times.size())
+                return fail(why, ".ocanim: CTAN curve '" + cur.name + "' has " + std::to_string(keys) +
+                                 " tangent key(s) for " + std::to_string(cur.times.size()) + " CRVE key(s)");
+            cur.inTangents.resize(keys);
+            cur.outTangents.resize(keys);
+            for (u32 k = 0; k < keys; ++k) cur.inTangents[k] = c.f32v();
+            for (u32 k = 0; k < keys; ++k) cur.outTangents[k] = c.f32v();
+        }
+        if (!c.ok) return fail(why, ".ocanim: truncated CTAN chunk");
+        for (const OcCurve& cur : out.curves) {
+            for (const f32 v : cur.inTangents)
+                if (!std::isfinite(v)) return fail(why, ".ocanim: curve '" + cur.name + "' has a non-finite in-tangent");
+            for (const f32 v : cur.outTangents)
+                if (!std::isfinite(v)) return fail(why, ".ocanim: curve '" + cur.name + "' has a non-finite out-tangent");
+        }
+    }
+
     if (const AvrChunk* notf = f.find(kChunkNOTF)) {
         R n{notf->data.data(), notf->data.data() + notf->data.size()};
         const u32 count = n.u32v();
@@ -451,6 +583,28 @@ bool parseOcAnim(const u8* bytes, usize size, OcAnimation& out, std::string* why
             entry.name = std::string(strt.get(n.u32v()));
             out.notifies.push_back(std::move(entry));
         }
+    }
+
+    // NOTIFY DURATIONS. Absent is ordinary -- every clip predating notify states, and every clip
+    // whose notifies are all still instantaneous, has no NTFD chunk. Read AFTER notifies so the
+    // size check below has something to check against.
+    out.notifyDurations.clear();
+    if (const AvrChunk* ntfd = f.find(kChunkNTFD)) {
+        R d{ntfd->data.data(), ntfd->data.data() + ntfd->data.size()};
+        const u32 count = d.u32v();
+        // Bounded by what the chunk could possibly hold (4 bytes each) before reserving, the same
+        // guard NOTF and CRVE use against a corrupt count driving an enormous allocation.
+        if (count > ntfd->data.size() / 4) return fail(why, ".ocanim: NTFD says it holds more durations than it can");
+        out.notifyDurations.resize(count);
+        for (u32 i = 0; i < count; ++i) out.notifyDurations[i] = d.f32v();
+        if (!d.ok) return fail(why, ".ocanim: truncated NTFD chunk");
+        // DENSE AND PARALLEL is the whole contract: a count that does not match NOTF's cannot be
+        // lined up against it, so this is a malformed file rather than something to pad or trim.
+        if (out.notifyDurations.size() != out.notifies.size())
+            return fail(why, ".ocanim: NTFD holds " + std::to_string(out.notifyDurations.size()) +
+                             " duration(s) for " + std::to_string(out.notifies.size()) + " notify(ies)");
+        for (const f32 dur : out.notifyDurations)
+            if (!(dur >= 0.0f)) return fail(why, ".ocanim: a notify duration is negative or NaN");
     }
     if (!r.ok) return fail(why, ".ocanim: truncated AHDR");
     if (n == 0) return fail(why, ".ocanim: TrackCount is 0");

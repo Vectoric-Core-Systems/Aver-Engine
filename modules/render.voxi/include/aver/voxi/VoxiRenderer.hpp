@@ -1,4 +1,4 @@
-﻿// Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
+// Aver Engine — Copyright (c) 2026 Hydrogen-Isotope.
 // Developed by Vectoric-Core-Systems. All rights reserved.
 // Proprietary. See LICENSE.md at the repository root.
 #pragma once
@@ -6,6 +6,8 @@
 #include "aver/rhi/RHIResources.hpp"
 #include "aver/pbr/MaterialSystem.hpp"
 #include "aver/voxi/Voxi.hpp"
+#include "aver/voxi/GiDispatchBounds.hpp"   // W3: VoxelBox/GiDispatchConstants -- see the .cpp for how
+#include "aver/render/nrd/NrdRecorder.hpp"
 
 #include <unordered_map>
 #include "aver/formats/GiCache.hpp"
@@ -38,7 +40,8 @@ public:
     // IT DOES NOT TAKE A COLOUR OR AN AMBIENT, and that is the correction rather than an omission.
     // It used to take both, store them, and never read them -- the shaders get `gSunColor` and
     // `gAmbient` from the DEVICE's frame constant buffer, which `IDevice::setSkyAtmosphere` fills
-    // (D3D12Device.cpp:2181, :2191). Accepting them here made this look like a second place the sun
+    // (see D3D12Device::setSkyAtmosphere, which fills both). Accepting them here made this look like
+    // a second place the sun
     // could be configured, so anyone changing them expected a visual result and got nothing.
     // One source of truth for what the sun looks like; this one owns only where it points.
     void setSunDirection(const f32 dirToLight[3]);
@@ -53,6 +56,98 @@ public:
 
     // Replaces the scene with a raymarch of the volume.
     void setDebugView(bool on);
+    // The ReSTIR-GI poison debug view (Part 2's non-finite guards, voxi_restir.hlsli): on, it paints
+    // an unmistakable colour per guard wherever one fires this frame, instead of touching the scene
+    // at all -- unlike setDebugView above, which REPLACES the whole scene with a raymarch, this rides
+    // the existing PSMainVoxi/PSRayDriven pixel shaders and only overrides their own return value, so
+    // it needs no separate suppressesScene()-style plumbing. Seven of its colours are painted only
+    // inside giRestirIndirect (giMode==1); an eighth, violet (B1/F5), is painted directly in
+    // PSMainVoxi/PSRayDriven for the ray-traced specular term's own ceiling hit and fires under either
+    // giMode. See giRestirIndirect's own POISON DEBUG VIEW comment (and, for violet,
+    // aver_IsGiRestirPoisonColour just above PSMainVoxi in voxi.hlsl) for the legend, and
+    // gGiRestirParams.w (the repurposed cbuffer slot this forwards through, published unconditionally
+    // now -- see beginShadowHistory's own F5 comment) for how it reaches the shader. Reachable by hand
+    // via the console: `set voxi.giPoisonView true`.
+    void setGiPoisonView(bool on);
+
+    // U1/2.10 I: the ReSTIR-GI half-resolution VISIBILITY path-debug view, riding gAmbientParams.w
+    // bit 64 (see beginShadowHistory's own packAmbientW call and voxi_restir.hlsli's path-view block
+    // for the colour legend: yellow no ray, green reconstructed, blue half-res reconstruction, red
+    // half-res fallback traced, white traced/Full). NOT the same view as setGiPoisonView above --
+    // that one is suppressed while this is on, and vice versa; see giRestirIndirect's own comment for
+    // the precedence. NO LOG, same shape as setGiPoisonView immediately above: SandboxApp reasserts
+    // this from the console/--gi-vis-path-view slot every frame regardless of whether the user just
+    // touched it, and a debug view is not the kind of change resetGiHistory's neighbours log either.
+    // Reachable by hand via the console: `set voxi.giVisPathView true`.
+    void setGiVisPathView(bool on);
+
+    // W6/M5: LIVE PRICING SWITCH for the blended-history-write fix (see PSMainVoxi's own
+    // gAverHistoryWrite gate, voxi.hlsl, and the optimisation-wave-2 plan's section 4). OFF (the
+    // default) shades a blended (translucent) fragment's indirect diffuse through ReSTIR GI exactly
+    // like an opaque one, paying its own share of the ReSTIR/shadow/reflection/AO history work that
+    // W6's fix now lets it keep -- ON drops that fragment back to the voxel cone gather every other
+    // tier already ships, the cheaper term this switch exists to price against. Carried as
+    // gAmbientParams.w bit 16 (see beginShadowHistory's own packAmbientW call). REASSERT IDIOM, same
+    // shape as setNrdLegacyCamera/setLightingLegacyBits above: guarded on an actual CHANGE, because
+    // SandboxApp reasserts this from the console/--blended-gi slot every frame regardless of whether
+    // the user just touched it. Reachable by hand via the console: `set voxi.blendedGiCone true`.
+    void setBlendedGiCone(bool on);
+    bool blendedGiCone() const { return blendedGiCone_; }
+
+    // LIVE A/B SWITCH for the NRD camera-contract fix in beginShadowHistory (see that function's own
+    // comment on its NRD block for the mechanism and the third_party citations). Default OFF, i.e.
+    // bit-identical to the fixed behaviour for anyone who never touches this. ON reinstates the
+    // OLD, WRONG pre-fix encoding -- identity worldToView, the combined viewProj for viewToClip,
+    // read from LAST frame's curViewProj_/prevViewProj_ rather than this frame's fresh camera -- so
+    // the user can compare the two by hand, on the live editor, with no rebuild. NEVER a setting to
+    // leave on: it exists only so the fix's effect is provable, not because the old encoding is ever
+    // preferable. Toggling it EITHER way resets NRD's history on the next frame (see the .cpp) --
+    // the two encodings' notions of "the previous camera" are shaped differently, and blending one
+    // denoiser history across the switch would silently mix them. Reachable by hand via the console:
+    // `set voxi.nrdLegacyCamera true`.
+    void setNrdLegacyCamera(bool on);
+
+    // LIVE A/B SWITCHES for the lighting-contrast fix (contrast-fix plan, section 2's CONTRACT): a
+    // u32 BITMASK, one bit per superseded piece of transport, forwarded byte-for-byte into
+    // cb_.ambientParams[2] (gAmbientParams.z in voxi.hlsl/voxi_restir.hlsli/voxi_rt.hlsli/
+    // voxi_cone.hlsli) EVERY FRAME WITH NO CONDITION -- see the .cpp for that write. The shaders
+    // decode it inline, bit by bit, with no shared helper, so each one compiles on its own:
+    //   bit 1  (R0)  the ReSTIR candidate/sky-occlusion rays sample a fixed 45-degree ring
+    //   bit 2  (R1)  the receiver counts its own sky twice (traced AND through ambient)
+    //   bit 4  (R2)  the ReSTIR candidate hit's own indirect sky has no visibility test
+    //   bit 8  (R3)  a reused ReSTIR sample shades with no visibility test at all
+    //   bit 16 (R6)  the cone gather is cosine-distributed AND cosine-weighted (an effective cos^2)
+    //   bit 32 (M5)  a blended (translucent) fragment writes the shadow/reflection/AO histories and
+    //                reads NRD's denoised output back the OLD, WRONG way -- see PSMainVoxi's
+    //                gAverHistoryWrite gate (voxi.hlsl) and the optimisation-wave-2 plan's section 4.
+    //                Unlike bits 1/4/8/16 above, this one also resets RT history (shadow/reflection/
+    //                AO), not only GI and NRD -- see setLightingLegacyBits' own .cpp comment.
+    // 0 (the default) means every fix in the plan is live; setting a bit REINSTATES that one piece
+    // of the OLD, WRONG behaviour, for comparison only -- never a setting to leave on, the same
+    // posture setNrdLegacyCamera above takes. See EditorConsole.hpp's five voxi.legacy* variables
+    // (and --lighting-legacy, for a --frames capture with no console) for how a bit gets set, and
+    // this method's own .cpp comment for which bits reset which cross-frame history.
+    void setLightingLegacyBits(u32 bits);
+
+    // ---- per-history reset commands, each a plain bool flip -- NO reallocation, ever ----
+    // Driven from the console (resetgihistory/resetrthistory/resetaohistory/resetnrdhistory/
+    // resetallhistory in EditorConsole.hpp, via voxi::Renderer's own request/consume flags -- see
+    // Voxi.hpp's requestGiHistoryReset() and siblings) so the user can bisect which cross-frame GPU
+    // history is carrying a burned-in artifact, one at a time, without a resize. Every one of these
+    // is exactly what ensureShadowHistory already does to the same flag on a resize/RT-tier toggle --
+    // see each method's own body for the precise citation -- just without the surrounding teardown/
+    // rebuild, because none of these buffers needs one: the shader-side read gate treats the flag
+    // going false as "no real previous frame" for one frame, and the WRITE side runs unconditionally
+    // every frame regardless, so both ping-pong slices are clean again within two frames.
+    void resetGiHistory();
+    void resetRtHistory();
+    void resetAoHistory();   // alias of resetRtHistory today -- see its own body for why
+    void resetNrdHistory();
+
+    // The editor's Unlit view mode. Mirrors RhiDevice::setUnlit, which only ever reaches the
+    // RASTER path -- ray-driven primary visibility bypasses drawMesh entirely, so it has to be
+    // told separately or the mode silently does nothing in the default renderer.
+    void setUnlit(bool on) { unlit_ = on; }
 
     // A/B MEASUREMENT TOGGLE, not a quality setting: OFF forces cb_.voxelParams.w to 0, the same
     // "gates the cone trace" flag prePass already computes from giEnabled(), so PSMainVoxi's
@@ -104,13 +199,76 @@ public:
     void setGiUpdateInterval(u32 n);
     u32  giUpdateInterval() const { return giUpdateInterval_; }
 
+    // ---- M4/W3/W12: three independent measurement/optimisation dials, each off by default and each
+    // reasserted every frame by the host (SandboxApp's --gi-force-rebuild/--gi-bounded-dispatch/
+    // --gi-free-accumulator and their matching voxi.* console variables) -- so each setter below must
+    // be cheap on a no-op call and log only on an actual change, the same "reassert idiom" every other
+    // per-frame console dial in this class already follows. ----
+
+    // M4: forces every GI tick past the snapshot gate, so a --gi-force-rebuild run measures a bake on
+    // every single tick rather than the ~96-98% skip rate the gate normally achieves. ALSO bypasses
+    // the on-disk GI cache in both directions (neither read nor written) -- see the .cpp's rebuild
+    // branch for why a forced tick that hit the cache would measure a cache restore instead of the
+    // bake it exists to time. Default false: bit-identical to today's gated, cached behaviour.
+    void setGiForceRebuild(bool on);
+    bool giForceRebuild() const { return giForceRebuild_; }
+    // W3: bounds the clear/resolve/mip-filter dispatch to the box the draw list's own bounds say a
+    // rebuild can possibly change, instead of the whole [0,res)^3 grid, on a rebuild that doesn't need
+    // the full volume re-derived. See voxelizePass's own comment for the box selection and the
+    // induction argument for why a voxel outside the box is already the right answer. Default false:
+    // dispatch counts, barriers and the resulting image are bit-identical to today's full-grid
+    // behaviour until this is turned on -- and even then the CENSUS half of W3 (how big the box WOULD
+    // be) is measured every rebuild regardless of this flag, so its value can be judged before opting
+    // in.
+    void setGiBoundedDispatch(bool on);
+    bool giBoundedDispatch() const { return giBoundedDispatch_; }
+    // W12: frees the injection accumulator -- voxelResBuilt_^3*4 R32_UINT texels, 16 B/voxel, the
+    // single largest GI resource that sits idle between bakes -- after the rebuild gate has gone
+    // quiet (no rebuild, nothing converging) for kGiAccumulatorQuietTicks ticks in a row, and
+    // recreates it the next time a rebuild actually needs one. Default false: the accumulator is
+    // created once at startup and kept for the renderer's life, exactly as before this existed.
+    //
+    // THE ONE-TICK DELAY THIS BUYS. With the flag on, a rebuild that arrives while the accumulator is
+    // freed does not run that same tick: it asks for the accumulator back (see the .cpp's gate) and
+    // the rebuild actually happens on the NEXT tick, once manageInjectionAccumulator() has recreated
+    // it. That is an image-timing difference -- one extra tick of staleness on the volume the very
+    // first time a still scene starts moving again after being freed -- and it exists ONLY while this
+    // flag is on; it is never a behaviour change for anyone who leaves it at the default.
+    void setGiFreeAccumulator(bool on);
+    bool giFreeAccumulator() const { return giFreeAccumulator_; }
+    // M2(c): the CPU cost of buildAccelerationStructures' own per-draw loop over drawsPrev_ for the
+    // last build that reached it -- population pass through the loop's closing brace, NOT the BLAS/
+    // TLAS GPU recording around it, which already has its own GPU timestamp (rhi::ScopedGpuStat
+    // "Voxi acceleration structures"). 0 until the first build that reaches the loop; an early return
+    // (no ray tracing wanted, or an empty draw list) leaves whatever the previous build measured.
+    f64 lastAccelBuildCpuMs() const { return lastAccelBuildCpuMs_; }
+
     // WHAT THE SHADERS WERE ACTUALLY COMPILED FOR, which is not the same question as what
     // Settings::layeredBsdf currently holds. The setting can be changed at any time; the pipelines
     // were built once, and this reports what they contain. The editor compares the two to decide
     // whether to say a reload is needed -- see the Shading model combo on the Rendering page.
     bool layeredBsdfActive() const { return layeredBsdf_; }
 
+    // The edge length the GI volume was ACTUALLY built at, set once inside createVoxelVolume --
+    // not Settings::voxelResolution, which can be edited at any time before the next reload picks
+    // it up. The editor compares the two the same way it compares layeredBsdfActive() above, to
+    // decide whether a resolution change needs a reload note.
+    u32 voxelResolutionBuilt() const { return voxelResBuilt_; }
+
     // Turns on the frame-period report. See rtShadowRays_ for what it is for and what it is not.
+    // MEASUREMENT ONLY -- see AVER_RD_ABLATE's own block in voxi.hlsl for what each value removes and
+    // why a timestamp cannot answer this question. Must be set BEFORE init(), because it becomes a
+    // shader define and the pipelines are compiled once there. Any non-zero value renders a
+    // deliberately WRONG frame; it exists to be timed, never to be shipped or wired to a quality tier.
+    void setRayDrivenAblation(u32 mode) { rdAblate_ = mode; }
+    // --rt-denoise-motion: how fast the spatial shadow filter tapers off with the gather centre's
+    // reprojection velocity. 0 = no taper, which is the shipped default. A MEASUREMENT DIAL, and it
+    // needed this setter to actually be one: the field's own comment claimed it existed so the
+    // filter's motion contribution could be isolated "at runtime instead of by rebuilding with a
+    // line commented out", while nothing outside this class could set it. That is the same
+    // knob-with-no-plumbing shape giSkyOcclusionRays and giSkyOcclusionTile were both caught in.
+    void setRtDenoiseMotionTaper(f32 v) { rtDenoiseMotionTaper_ = v; }
+
     void setFrameTimeReport(bool on) { frameTimeReport_ = on; }
 
     // The largest ray count accepted. Not a hardware limit: there is a recorded TDR history on this
@@ -131,9 +289,12 @@ public:
     // submit, the cluster path, the packaged game -- keeps its exact behaviour without being touched.
     // Only submitDraw's blended branch passes true. See Draw::translucent for what the flag costs a
     // draw and what it buys it.
+    // `hiddenFromOwner` DEFAULTS FALSE for the same reason `translucent` does: every existing
+    // caller keeps its exact behaviour untouched. Only the editor's owner-hide branch passes true.
     void submit(rhi::MeshHandle mesh, const f32 world[16], const f32 baseColor[4],
                 f32 metallic, f32 roughness, rhi::BindingSetHandle drawBinding,
-                const void* drawConstants, u32 drawConstantBytes, bool translucent = false);
+                const void* drawConstants, u32 drawConstantBytes, bool translucent = false,
+                bool hiddenFromOwner = false);
     // `blended` is the one thing this override has to look at that submit() itself never sees, and
     // it has to look at it BEFORE anything reaches draws_/drawsPrev_, not after -- everything
     // downstream of that list treats membership in it as "this is opaque scene geometry": voxelizePass
@@ -185,6 +346,7 @@ public:
     rhi::PipelineHandle depthPrepassPipeline() const override;
 
     // True while the debug view replaces the scene, including the backend's line draws.
+    rhi::BindlessTableHandle sceneBindlessTable() const override;
     bool suppressesScene() const override;
     // ONLY the debug raymarch owns the whole frame. Ray-driven mode replaces how the first
     // surface is found and nothing else -- the sky, the gizmos and the particles in that frame are
@@ -227,6 +389,14 @@ private:
     bool createShadowResources();
     // Creates the radiance volume, the injection accumulator and every binding set over them.
     bool createVoxelVolume(u32 resolution);
+    // W12: just the injection accumulator (voxelAccumTex_) at the given resolution -- the same desc,
+    // debugName and error text createVoxelVolume has always used for it, factored out so
+    // manageInjectionAccumulator() can recreate it after a free without duplicating either.
+    bool createInjectionAccumulator(u32 resolution);
+    // W12: recreates or frees the injection accumulator for this frame -- see the .cpp for the two
+    // branches and prePass()'s own comment on why this must run before anything else this frame binds
+    // bindings_.
+    void manageInjectionAccumulator(rhi::IRenderContext& ctx);
     // Creates every pipeline the feature runs.
     bool createPipelines();
     // Creates the subset that bakes sample count and render-target formats -- now TWO pipelines per
@@ -397,6 +567,24 @@ private:
     // What the last frame's pass over the draw list actually cost, in structures. Logged only when
     // it CHANGES: a number this important should be visible, and a line every frame is noise.
     u32 lastBlasRebuilds_ = 0xFFFFFFFFu;
+
+    // ---- W10: buildAccelerationStructures' own per-build scratch, hoisted out of the function ----
+    // USED TO BE TWO LOCALS -- `std::vector<rhi::TlasInstance> inst` and
+    // `std::unordered_map<u64, pbr::MaterialConstants> matConstantsByKey` -- reallocated from empty
+    // every single build, a std::vector and an unordered_map both paying a heap allocation, every
+    // frame, for a container whose SHAPE (how many instances, how many distinct materials) barely
+    // moves build to build even though its CONTENT does. .clear() at the top of
+    // buildAccelerationStructures (right after the early-return, beside rtInstanceData_.clear() and
+    // the rest of that build's per-frame state) keeps the underlying storage, so a steady-state scene
+    // reuses the same allocation indefinitely; only a build whose instance/material count grows past
+    // the previous high-water mark pays a reallocation, exactly like rebuiltThisFrame_ above already
+    // does for the identical reason.
+    std::vector<rhi::TlasInstance> tlasInstScratch_;
+    std::unordered_map<u64, pbr::MaterialConstants> matConstantsScratch_;
+
+    // ---- M2(c): what buildAccelerationStructures' own per-draw loop cost, CPU side ----
+    // See lastAccelBuildCpuMs()'s own comment for the exact bracket this measures.
+    f64 lastAccelBuildCpuMs_ = 0.0;
     // Occlusion rays per pixel toward the sun's disc. FOUR by default: one gives the hard aliased
     // edge this replaced, and the cost is linear, so this is the knob to turn down first if ray
     // tracing ever starts costing frames. There is a recorded TDR history on this machine, so it
@@ -407,10 +595,20 @@ private:
     u32 rtPixelsPerRayTile_ = 1;
     // The SPATIAL filter radius, mirrored from Settings::rtShadowDenoise by applySettings.
     u32 rtShadowDenoise_ = 0;
+    // How fast the spatial filter tapers off with the gather centre's reprojection velocity.
+    // 0 = no taper. A MEASUREMENT KNOB, not a tier setting: temporal accumulation is what actually
+    // fixes the motion flicker, and this exists so the spatial filter's own share of it can be
+    // isolated at runtime instead of by rebuilding with a line commented out.
+    f32 rtDenoiseMotionTaper_ = 0.0f;
     // Settings::rtRenderMode, cached at setSettings like the knobs above it. 1 asks for
     // ray-driven primary visibility; whether it is HONOURED is rayDrivenActive(), which also
     // requires the device and the pipeline to have cooperated.
     u32 rtRenderMode_ = 0;
+    // Settings::giMode, cached at setSettings like rtRenderMode_ above. Whether it is HONOURED is
+    // giRestirWanted(), which also requires ray tracing to be wanted -- this field alone is just
+    // "what was asked for", read by ensureShadowHistory to decide whether to (re)build
+    // giReservoirs_/giSurfPosHist_/giSurfNrmHist_ and by prePass to fill cb_.giRestirParams.
+    u32 giMode_ = 0;
     // Whether the coat lobe is compiled into this process's material pipelines.
     //
     // LATCHED AT THE FIRST setSettings AND NEVER AGAIN, which is the design and not an accident:
@@ -419,6 +617,12 @@ private:
     // is a project-level decision; changing it takes a project reload. See voxi::Settings.
     bool layeredBsdf_ = false;
     bool layeredBsdfLatched_ = false;
+    // ONCE PER PROCESS, not once per frame. The mismatch this reports is a STANDING condition -- the
+    // setting really does disagree with the compiled shaders for the rest of the session -- so the
+    // warning it drives fired on EVERY applySettings call. Measured in an ordinary bounded run: ~30
+    // copies of the same line, which is not a louder warning, it is a log nobody can read. Same
+    // idiom as drawCapReported_ a few members down, for the same reason.
+    bool layeredBsdfWarned_ = false;
     // Settings::ptBounces. Spent only while pathTracingWanted() -- see where cb_.ptBounceParams
     // is filled, which is the one place that decision is made.
     u32 ptBounces_ = 1;
@@ -444,6 +648,9 @@ private:
     // It exists because "the cost is linear in the ray count" was an assertion with no instrument
     // behind it. Changing exactly one thing and re-reading the same number is a measurement; a
     // profiler capture that cannot be checked into the repository is not.
+    // The backdrop handle currently bound at t10, so a re-bind only happens when it moves.
+    rhi::TextureHandle boundBackdrop_ = 0;
+    u32  rdAblate_ = 0;            // --rd-ablate: AVER_RD_ABLATE for PSRayDriven, 0 = normal
     bool frameTimeReport_ = false;
     u64  frameTimeLastNs_ = 0;          // steady_clock, nanoseconds; 0 = no previous frame
     u32  frameTimeSeen_ = 0;            // frames sampled, including the discarded warm-up
@@ -584,6 +791,25 @@ private:
     // The TEXTURED ray-driven pipeline. Separate from rayDrivenPso_ because the bindless range is
     // part of the root signature: preferred when it exists, and rayDrivenPso_ is the fallback.
     rhi::PipelineHandle rayDrivenTexPso_ = 0;
+    // ITS G-BUFFER TWIN, and the reason it exists is a measurement trap rather than a feature.
+    //
+    // scenePass() used to pick the textured pipeline only when the G-buffer was OFF:
+    //     const bool textured = rayDrivenTexPso_ != 0 && !dev_->gBufferEnabled();
+    // because there was no textured pipeline that also wrote the four targets, and pickGbuf() must
+    // return a pair that agree about their root signature. The consequence was silent and severe:
+    // passing --gbuffer did not merely add three render targets, it UNTEXTURED the renderer. Any A/B
+    // taken across that flag was comparing a textured image against a flat-albedo one and attributing
+    // the difference to the G-buffer. That flag sits directly on the path of every measurement the
+    // deferred-lighting work needs, which is why this is being closed before that work starts rather
+    // than after it produces a number somebody believes.
+    //
+    // Optional exactly like every other twin here: 0 when it did not compile, and the picker falls
+    // back to the flat G-buffer pipeline rather than to an untextured non-G-buffer one.
+    rhi::PipelineHandle rayDrivenTexGbufPso_ = 0;
+    // The TEXTURED blended (glass) variant: PSMainVoxi compiled with the bindless table declared,
+    // so a reflection seen IN a windowpane samples the reflected surface's texture. Preferred over
+    // sceneRtBlendedPso_ whenever it built and the G-buffer is off.
+    rhi::PipelineHandle sceneRtBlendedTexPso_ = 0;
 
     rhi::BindlessTableHandle rtTexTable_ = 0;
     std::unordered_map<rhi::TextureHandle, u32> rtTexIndex_;
@@ -696,6 +922,24 @@ private:
     // comment. This tracker is the ready-to-connect other half; wiring it is the next build's job,
     // gated on that coordinated ABI change landing in VoxiShaders.hpp.
     //
+    // OFF UNTIL SOMETHING READS IT, and this is the switch the comment above means by "wiring it is
+    // the next build's job". Every map operation below runs once per draw per frame to produce
+    // rtInstancePrevWorld_, which -- as that comment states plainly -- is never bound to a
+    // descriptor. A repo-wide grep agrees: the only read of the vector is `.size()` in the one-time
+    // memory log. So the whole tracker is, today, work whose sole output is discarded.
+    //
+    // A CONSTANT RATHER THAN A DELETION, deliberately. This is not dead code that nobody meant; it is
+    // a carefully reasoned half of a feature whose other half needs a coordinated RtInstance ABI
+    // change that another agent owns. Deleting it would throw away the population gate, the ordinal
+    // scheme and the two-map swap, all of which are correct and all of which would have to be
+    // rediscovered. Flipping this to true is step one of finishing the job; until then the compiler
+    // removes the cost entirely.
+    //
+    // MEASURE BEFORE BELIEVING IT MATTERS: on PTTest (20 entities) the frame is GPU-bound with the
+    // CPU scene walk at 0.0 ms, so this buys nothing there. It is a per-draw cost, so what it is
+    // worth scales with the draw count, not with this scene.
+    static constexpr bool kTrackPrevTransforms = false;
+
     // Groups by (mesh, drawBinding). FNV-1a, matching giDrawsKey()/buildGeometryTable's own mixing
     // constants so a reader who already knows those two recognises the recipe rather than learning a
     // third one.
@@ -764,6 +1008,19 @@ private:
         // drawsPrev_ and a parallel list would mean four walk sites each needing to remember to visit
         // it. One flag tested in one place per pass cannot be forgotten by a fifth pass added later.
         bool translucent = false;
+
+        // HIDDEN FROM ITS OWNER: in everything, out of the ray-driven primary ray alone.
+        //
+        // The peer of `translucent` above and the exact complement of it: that flag keeps a draw in
+        // the TLAS and out of the depth-only passes; this one keeps a draw in every pass it already
+        // reached -- shadow cascade, GI voxelisation, reflections, bounce rays -- and removes it
+        // from ONE traversal, the primary visibility ray, because that ray begins inside this
+        // mesh. See AVER_RT_MASK_OWNER_HIDDEN in voxi.hlsl for why the fix belongs in the instance
+        // mask rather than in whether the instance exists.
+        //
+        // A FLAG ON THE DRAW, for the reason `translucent` gives directly above: the alternative is
+        // a parallel list every pass has to remember to visit.
+        bool hiddenFromOwner = false;
     };
     std::vector<Draw> draws_, drawsPrev_;
 
@@ -850,6 +1107,30 @@ private:
         // The reprojected NDC lands in THIS rect, not at [0,1] of the whole history texture: the
         // editor docks the 3D view in a sub-rect of the backbuffer, same as prevViewProj above.
         f32 sceneViewport[4] = {};
+        // THIS frame's scene viewport rect, in the same (x, y, w, h) target pixels.
+        //
+        // A SECOND COPY IS NOT REDUNDANT: sceneViewport above is the PREVIOUS frame's, because every
+        // reader of it pairs it with prevViewProj to reproject into last frame's history. A reader
+        // that projects with THIS frame's gViewProj -- refraction does -- needs this frame's rect,
+        // and reusing the previous one silently mismatches for a frame after any viewport change.
+        f32 sceneViewportCur[4] = {};
+        // THE MEDIUM THE CAMERA IS CURRENTLY INSIDE. x = 1 when the eye is within a blended,
+        // single-sided volume; y = that material's ior; z, w spare.
+        //
+        // Needed because a closed volume seen FROM WITHIN has no front faces at all -- every face
+        // points away from the eye -- so the back-face discard that keeps a water box from
+        // compositing four coats of alpha also deletes the surface entirely once you swim under it.
+        // The shader inverts that discard rather than switching it off; see PSMainVoxi.
+        f32 cameraMedium[4] = {};
+        // THE WATER VOLUME THAT CASTS CAUSTICS, in world centimetres: min.xyz and max.xyz of its
+        // axis-aligned box, with min.w = 1 when there is one at all and max.w its strength.
+        //
+        // The volume's TOP (max.z) is the surface light refracts through, and everything inside the
+        // footprint and below that height is lit through it. Published from the renderer rather than
+        // read from the fluids module because Voxi renders and plugins do not: what arrives here is
+        // a box, and nothing about this says "water".
+        f32 causticMin[4] = {};
+        f32 causticMax[4] = {};
         // The GI-only shadow map's light view-projection, fitted to the GI volume rather than the
         // camera -- see fitGiShadow(). Read only by PSVoxel through giShadowFactor(); PSMainVoxi
         // keeps using cascadeViewProj/shadowFactor above for the camera cascades.
@@ -860,7 +1141,12 @@ private:
         // The SPATIAL shadow denoiser -- mirrored as gRtDenoiseParams. x = filter radius in
         // pixels (0 = off), y = how much of the filtered value to take (0 discards it while
         // still paying for the taps, which is how the cost is measured before the filter is
-        // trusted), z/w unused.
+        // trusted), z = how fast to taper the filter off as the gather centre's reprojection
+        // velocity rises (0 = no taper, the behaviour before the knob existed);
+        // w = 1 while the AMBIENT history pair is bound this frame. It needs its own bit rather
+        // than riding gRtHistParams.x with the shadow and reflection pairs, because unlike those
+        // two it is allocated only at the tiers that trace the sky-occlusion ray -- High and
+        // Epic; see aoHistoryWanted().
         f32 rtDenoiseParams[4] = {};
         // Ray-driven bounce control -- mirrored as gRtBounceParams. x = how many bounces a ray
         // takes AFTER the first hit (1 is one bounce, which is what reflections already do);
@@ -869,18 +1155,97 @@ private:
         // fine for a week and then costs an afternoon.
         f32 ptBounceParams[4] = {};
         // GI gather control -- mirrored as gGiParams. x = how many cones the diffuse gather
-        // traces, total, including the axial one; y/z/w unused. Its own float4 for the reason
-        // ptBounceParams above has one.
+        // traces, total, including the axial one. y/z/w are REFRACTION, not spare:
+        // y = Settings::refractionMode, z = refractionStrength, w = refractionEdgeFade, all
+        // three written every frame in VoxiRenderer.cpp and read by averRefractedBackdropUV.
+        // Its own float4 for the reason ptBounceParams above has one.
         f32 giParams[4] = {};
+        // Ambient control -- mirrored as gAmbientParams. x = how many sky-visibility rays the
+        // ambient term traces per pixel, 0 meaning "use the cone gather's own occlusion", which is
+        // what every tier below the top does and what this renderer did before the rays existed.
+        // y IS THE COHERENCE TILE EDGE the sky-occlusion rays share a direction across (1 = a fresh
+        // direction per pixel, the identity). It was claimed spare here while already being read by
+        // the shader -- which is precisely what the giParams note above warns happens to a row
+        // described as free. z is now ALSO spent: setLightingLegacyBits' u32 legacy bitmask (see its
+        // own comment above for the bit table), stored as a float and decoded back with a u32 cast in
+        // every shader that reads gAmbientParams.z -- 0 means every lighting-contrast fix is live.
+        //
+        // w IS NOW ALSO SPENT -- U1/2.9's own bitmask, packed and decoded by givis::packAmbientW
+        // (GiVisibility.hpp), the SAME numeric-cast idiom z above already uses (a plain
+        // static_cast<f32> of the u32 word, decoded back with `(uint)gAmbientParams.w` in every
+        // shader that reads it -- NOT a bit-reinterpretation). bits 0-1 (& 3u) are
+        // Settings::giRestirVisibility (0 NoRay, 1 Reconstructed, 2 HalfResolution, 3 Full), clamped;
+        // bit 4 (& 4u) says the half-resolution ReSTIR visibility pair (t16/u10, giVisHist_) is bound
+        // this frame; bit 8 (& 8u) says t16 holds a real previous frame; bit 16 (& 16u) is W6/M5's
+        // setBlendedGiCone -- a blended fragment's indirect diffuse takes the voxel cone gather
+        // instead of ReSTIR; bit 32 (& 32u) says the backend replays translucent draws blended THIS
+        // frame (D3D12 only -- see setBlendedGiCone's own header comment for why Vulkan never sets
+        // it); bit 64 (& 64u) is setGiVisPathView's debug view. Single writer: beginShadowHistory,
+        // which publishes it twice -- once unconditionally near the top of the function (histBound/
+        // histValid false, the same F5 reasoning giRestirParams.w's own comment below gives for why
+        // giMode 0 needs a live value too) and again inside the giSurf block once it actually knows
+        // whether the sixth pair bound and holds a valid previous frame.
+        //
+        // Its own float4, not a spare component of gRtDenoiseParams or gGiShadowParams, for the
+        // reason ptBounceParams states: a field whose name says "denoise" carrying a ray count
+        // reads fine for a week and then costs an afternoon.
+        f32 ambientParams[4] = {};
+        // EDITOR VIEW MODES that the ray-driven path has to honour itself. x = unlit (flat
+        // authored albedo, no lighting); z/w spare.
+        //
+        // A PASS-LEVEL FIELD, not a per-draw one, because a ray hit has no per-draw cbuffer
+        // to read: gShadingModel rides in the b1 block that the raster path sets per mesh,
+        // and PSRayDriven never binds it. That asymmetry is the whole reason unlit reached
+        // the rasteriser and not the renderer that actually draws the scene by default.
+        //
+        // y WAS SPARE; NOW Settings::giRadianceCeiling (mirrored as AVER_VOX_MAXRAD in voxi.hlsl /
+        // voxi_gi.hlsli -- see that field's own comment in Voxi.hpp for the full story). 0 here reads
+        // as "unset" and the shader macro falls back to 16.0, so a FrameConstants block nobody has
+        // written yet (giFrameConstants() read before this renderer's first prePass -- SandboxApp.cpp
+        // documents exactly that all-zero-block window for the cluster-GI binder) behaves exactly as
+        // it always has. A repurposed bit, not a new field -- packing/size unchanged, same shape as
+        // gGiRestirParams.w below.
+        f32 viewParams[4] = {};
+        // RTXDI ReSTIR GI control -- mirrored as gGiRestirParams. x = 1 while giMode==1 is ACTUALLY
+        // running this frame (giRestirWanted(): hardware, tier and giMode all agree) -- NOT a raw
+        // copy of Settings::giMode, because the reservoir buffer/surface-history pair are only ever allocated
+        // when giRestirWanted() is true, and a shader branching on the raw setting instead would
+        // read the null-filled t12/u6/u7 slots on a device that requested ReSTIR GI but cannot run
+        // it. y = 1 once the surface-history pair ALSO holds a real previous frame (own flag, not gRtHistParams.y
+        // -- see giHistValid_ for why the shared one is the wrong test the one frame this pair is
+        // freshly created while the shadow/reflection pair already isn't). z = which of the
+        // reservoir buffer's two array slices (rtxdi::c_NumReSTIRGIReservoirBuffers) THIS frame
+        // writes -- shares rtHistWriteIdx_'s cadence (see beginShadowHistory) since both flip in the
+        // same lockstep whenever ray tracing is active. w = the ReSTIR-GI poison debug view
+        // (giPoisonView_ / setGiPoisonView); was "spare" -- a repurposed bit, not a new field, so
+        // this struct's size and every other field's offset are unchanged. Published unconditionally,
+        // near the top of beginShadowHistory, so it reaches PSMainVoxi/PSRayDriven's OWN violet
+        // specular-ceiling marker (B1/F5, voxi.hlsl) on every giMode, not only the frames that reach
+        // this comment's giRestirWanted() block further down -- see beginShadowHistory's own F5
+        // comment for why. See voxi_restir.hlsli's giRestirIndirect for the giMode==1 shader side.
+        f32 giRestirParams[4] = {};
     } cb_;
 
     // THE MIRROR THIS FILE HAS ALWAYS HAD AND NEVER GUARDED. `cbuffer VoxiFrame : register(b4)` in
-    // VoxiShaders.hpp repeats every field above by hand, and nothing checked that the two agreed --
-    // the same unguarded-mirror bug already fixed for PathTracer's FrameCB and PcgVolume's VolumeCB.
-    // VoxiFrame was simply the one that never got the assert. Appending here without appending there
-    // reads garbage off the end of the block in every Voxi shader at once.
-    static_assert(sizeof(FrameConstants) == 624,
-                  "cbuffer VoxiFrame in VoxiShaders.hpp mirrors this byte for byte");
+    // modules/render.voxi/shaders/voxi.hlsl repeats every field above by hand, and nothing checked
+    // that the two agreed -- the same unguarded-mirror bug already fixed for PathTracer's FrameCB
+    // and PcgVolume's VolumeCB. VoxiFrame was simply the one that never got the assert. Appending
+    // here without appending there reads garbage off the end of the block in every Voxi shader at
+    // once, and INSERTING in the middle -- which is what adding sceneViewportCur beside its
+    // previous-frame twin does -- shifts every field after it instead, which is worse: it is silent
+    // and it is wrong everywhere rather than at the end.
+    //
+    // The file this used to name, VoxiShaders.hpp, no longer exists: the HLSL moved out of C++
+    // string literals into shaders/ and the message was never updated. It sent me to a deleted file
+    // when this assert did its job. Naming the real one now.
+    //
+    // ALSO MIRRORED IN modules/render.voxi/shaders/voxi_gi.hlsli's OWN `cbuffer VoxiFrame` -- that
+    // file's header comment states plainly it declares the FULL block so a caller can bind
+    // giFrameConstants() verbatim, and its own tail comment says "when you append there, append
+    // here too". giRestirParams above is appended in both places for exactly that reason, even
+    // though nothing in voxi_gi.hlsli's cone-only prelude reads it.
+    static_assert(sizeof(FrameConstants) == 736,
+                  "cbuffer VoxiFrame in modules/render.voxi/shaders/voxi.hlsl mirrors this byte for byte");
     static_assert(sizeof(FrameConstants) % 16 == 0, "must be a legal constant-buffer size");
 
     // ---- the GI rebuild gate: skip a revoxelisation whose result would be bit-identical ----
@@ -911,6 +1276,20 @@ private:
     u64 giDrawsKey() const;
 
     u64 giDrawsKey_ = 0;
+    // WHICH PART OF THE DRAW LIST MOVED. giDrawsKey_ alone says only "different", and knowing that
+    // was not enough twice over: making the hash order-independent was expected to stop the gate
+    // rejecting under camera rotation and changed the skip rate by two points. These split the same
+    // inputs into independent axes so the next answer is measured rather than guessed.
+    u64 giDrawsCount_ = 0;     // how many draws were hashed
+    u64 giDrawsMeshKey_ = 0;   // mesh handles only, order-independent
+    u64 giDrawsWorldKey_ = 0;  // world transforms only
+    u64 giDrawsMatKey_ = 0;    // colour/metallic/roughness only
+    mutable u64 giDrawsRejects_ = 0;
+    mutable u64 giDrawsCountMoved_ = 0, giDrawsMeshMoved_ = 0, giDrawsWorldMoved_ = 0, giDrawsMatMoved_ = 0;
+    mutable u64 giDrawsNextReport_ = 32;
+    std::vector<rhi::MeshHandle> giSnapMeshes_;   // sorted mesh multiset at the last bake
+    mutable u32 giDrawsDiffReports_ = 0;
+    void giDrawsSubKeys(u64& count, u64& mesh, u64& world, u64& mat) const;
     rhi::SkyAtmosphere giSky_{};
     f32 giSnapCenter_[3] = {};
     f32 giSnapExtent_ = -1.0f;   // negative = no snapshot yet, so the first tick always rebuilds
@@ -921,6 +1300,73 @@ private:
     bool         drawCapReported_ = false;   // the draw-list-full warning is worth saying once, not every frame
     u64  giGateNextReport_ = 64;   // doubles each time, so the steady state gets reported too
     u64  giGateLastTicks_ = 0, giGateLastSkipped_ = 0;
+
+    // ---- M4: force every tick past the gate above, bypassing the cache in both directions --------
+    // See setGiForceRebuild's own comment (public section, next to setGiUpdateInterval) for the full
+    // contract. Backing store only; the setter is where a change gets logged.
+    bool giForceRebuild_ = false;
+
+    // ---- W3: bound the clear/resolve/mip-filter dispatch to the box a rebuild can actually change --
+    // See setGiBoundedDispatch's own comment for the contract and voxelizePass's own comment for the
+    // box-selection rule and the induction argument that makes it safe. Backing store plus the
+    // bookkeeping a rebuild needs to know what the LAST rebuild's box covered.
+    bool giBoundedDispatch_ = false;
+    // This rebuild's own box0 (what clear/resolve actually ran over), stashed so filterMips can
+    // derive each mip level's own box from it via mipBox() without voxelizePass having to pass it as
+    // a parameter or filterMips having to recompute the pre-pass walk over drawsPrev_ a second time.
+    VoxelBox giDispatchBox0_{};
+    // The LAST rebuild's own draws box (the union of every surviving draw's world AABB, NOT box0 --
+    // box0 also folds in THIS rebuild's own draws box, and unioning box0 into next rebuild's box would
+    // let the covered region grow forever instead of tracking only the two rebuilds a voxel's value
+    // can actually still depend on). See voxelizePass's own comment for why the union of exactly these
+    // two draws boxes is enough.
+    VoxelBox giBoxPrevDraws_{};
+    // False whenever the box above cannot be trusted as "last rebuild's box": no rebuild has run yet,
+    // the last rebuild had a draw with no usable AABB (anyUnbounded), or the volume was just restored
+    // whole from the on-disk cache (giCacheRestore sets this false on a hit -- a restore doesn't know
+    // what box the file's bake used). False forces the NEXT rebuild's box0 to be the full grid.
+    bool giBoxPrevValid_ = false;
+    // The resolution/centre/extent the box above was recorded under. A volume that moved, resized or
+    // rebuilt at a different resolution since invalidates the box even though giBoxPrevValid_ itself
+    // is still true -- the STORED coordinates would describe a different volume than the one about to
+    // be voxelised.
+    u32 giBoxRes_ = 0;
+    f32 giBoxCentre_[3] = {};
+    f32 giBoxExtent_ = -1.0f;
+
+    // ---- W12: free the injection accumulator after the gate has gone quiet for a while -----------
+    // See setGiFreeAccumulator's own comment for the contract and manageInjectionAccumulator()'s own
+    // comment (.cpp) for the two branches and the Vulkan ordering hazard that fixes where it is called
+    // from.
+    bool giFreeAccumulator_ = false;
+    // Set by the rebuild gate the tick it finds voxelAccumTex_ missing and needs it -- consumed (and
+    // cleared) by manageInjectionAccumulator() the NEXT prePass, which is the one-tick delay
+    // setGiFreeAccumulator's own comment documents. Also true's-equivalent path: !giFreeAccumulator_
+    // alone is enough to recreate (turning the flag off must bring the accumulator straight back), so
+    // this flag only matters while giFreeAccumulator_ is actually on.
+    bool giAccumWanted_ = false;
+    // Latched so a recreate failure (out of memory, most likely) warns once rather than every tick it
+    // keeps failing -- same idiom as layeredBsdfWarned_/nrdWarnedMsaa_ elsewhere in this class. Reset
+    // on the next successful recreate, so a LATER failure (a different cause) is not silenced by an
+    // EARLIER one already having been reported.
+    bool giAccumRecreateFailedLogged_ = false;
+    // Consecutive GI ticks with nothing to do: the skip branch increments this while
+    // giConvergeTicks_ == 0 (a converging bake is busy, whatever the snapshot gate alone would have
+    // said), and any rebuild resets it to 0. Compared against kGiAccumulatorQuietTicks below to decide
+    // whether the accumulator has been idle long enough to free.
+    u32 giQuietTicks_ = 0;
+    // A tiny stand-in UAV (4x1x1, R32_UINT) bound to bindings_/clearBindings_/resolveBindings_ slot 1
+    // in place of voxelAccumTex_ while it is freed -- every binding set that names a resource must be
+    // rebound to something else BEFORE that resource is destroyed (aver-view-outlives-its-buffer.md),
+    // and this is that something else. Created once on the first free, kept until shutdown().
+    rhi::TextureHandle voxelAccumPlaceholder_ = 0;
+    // UNMEASURED. How many consecutive quiet GI ticks before the accumulator is freed -- a guess at
+    // "long enough that a still editor session is actually done lighting for now, short enough that
+    // scrubbing a timeline or nudging the sun doesn't recreate it every few seconds", not a number
+    // anyone has timed a real editing session against. 240 ticks is a few seconds at Epic's default
+    // giUpdateInterval of 1; raising or lowering it only trades how eagerly the memory comes back
+    // against how often a idle-then-resumed session pays the one-tick recreate delay.
+    static constexpr u32 kGiAccumulatorQuietTicks = 240;
 
     // ---- the GI derived-data cache -------------------------------------------------------------
     //
@@ -960,6 +1406,57 @@ private:
     u64  giCacheBufBytes_ = 0;
     u32  giCacheDumpCountdown_ = 0;   // 0 = nothing pending
     fmt::GiCacheKey giCachePendingKey_{};
+
+    // ---- the write-behind buffer -------------------------------------------------------------
+    //
+    // BAKES LAND IN RAM AND GO TO DISK IN BATCHES. Every completed bake used to be an ~18 MiB file
+    // write on the frame it finished, and an author nudging the sun produces a bake per nudge --
+    // so a minute of lighting work was tens of writes and a directory that had to be swept after
+    // each one. The volumes now accumulate here and reach the filesystem when the budget is
+    // exceeded or the editor shuts down.
+    //
+    // SAFE BECAUSE OF WHAT THIS CACHE IS, not because the window is small. GiCache.hpp states the
+    // contract plainly: "nothing here is authored and nothing here is precious: the whole directory
+    // can be deleted at any time and the only cost is one rebuild." Losing the buffer to a crash
+    // costs exactly one revoxelisation, which is the same thing a cold cache costs.
+    std::vector<fmt::GiCacheEntry> giCachePendingEntries_;
+    u64 giCachePendingBytes_ = 0;
+    // Default 256 MiB: about fourteen entries at the ~18 MiB a 128^3 volume takes, comfortably more
+    // than a lighting session produces, and small enough to be unremarkable next to the volume
+    // textures themselves. Editor Preferences > Derived Data Cache moves it.
+    u64 giCacheRamBudget_ = 256ull * 1024ull * 1024ull;
+    // True when the rebuild about to run was triggered by NOTHING but the cloud clock. The gate
+    // tests clouds last precisely so this can mean that, and giCacheScheduleDump uses it to
+    // decline writing a volume whose key cannot describe what changed. Cleared at the top of
+    // every gate evaluation.
+    // mutable because giSnapshotUnchanged is const and should stay that way: it ANSWERS a question
+    // about the world rather than changing it, and this records which answer it gave -- the same
+    // reason giGateWhyMask_ beside it is written from that const method.
+    mutable bool giRebuildCloudOnly_ = false;
+
+    // THE ONE DEFINITION OF "voxelizePass will inject this draw". giDrawsKey, giDrawsSubKeys and
+    // voxelizePass all have to agree about this exactly -- both hash functions say so in as many
+    // words -- and they agreed on two of the three tests while the third, the volume-bounds cull,
+    // existed only in the pass. Three hand-copied predicates is how that happened; one is how it
+    // stops happening.
+    bool giVoxelisedDraw(const Draw& d) const;
+    // Latched so the "this volume is bigger than the whole budget" warning is said once rather than
+    // once per bake. Never cleared: raising the budget mid-session does not make the earlier
+    // explanation wrong, and a second copy of it would only be noise.
+    bool giCacheOversizeWarned_ = false;
+
+public:
+    // The write-behind budget, in bytes. Lowering it below what is already buffered flushes
+    // immediately rather than leaving the buffer over its own limit until the next bake.
+    void setGiCacheRamBudget(u64 bytes);
+    u64  giCacheRamBudget() const { return giCacheRamBudget_; }
+    // What is buffered but not yet written -- for the preferences page to show.
+    u64  giCachePendingBytes() const { return giCachePendingBytes_; }
+    u32  giCachePendingCount() const { return static_cast<u32>(giCachePendingEntries_.size()); }
+    // Writes every buffered entry, sweeps the directory once, and empties the buffer. Returns how
+    // many files were written. Safe to call with nothing pending.
+    u32  giCacheFlush();
+private:
     // Per-mip byte offsets inside the readback buffer, in the BACKEND's footprint layout.
     std::vector<u64> giCacheMipOffsets_;
     bool giCacheUnsupported_ = false;   // textureCopyFootprint said no; stop asking
@@ -970,6 +1467,9 @@ private:
     bool giCacheRestore(rhi::IRenderContext& ctx);
     // Schedules a readback of voxelTex_ so it can be written out once the GPU is past it.
     void giCacheScheduleDump(rhi::IRenderContext& ctx);
+    // Warns once that a volume is too big to cache. Shared by the two places that can decide it:
+    // giCacheScheduleDump before the readback, giCacheTick as a guard after it.
+    void giCacheWarnOversize(u64 bytes);
     // Ticks the countdown and writes the file when it reaches zero.
     void giCacheTick();
     // Sizes giCacheReadback_/giCacheUpload_ and giCacheMipOffsets_ for the current volume.
@@ -1015,11 +1515,252 @@ private:
     // on an already-populated texel.
     rhi::TextureHandle rtShadowHist_[2] = {0, 0};
     rhi::TextureHandle rtReflHist_[2] = {0, 0};
+    // THE THIRD PAIR, and the one the sky-occlusion ray needs for the same reason the shadow
+    // ray needed the first: at one ray per pixel that estimator is `open = hit ? 0 : 1`, a
+    // BINARY mask -- the noisiest thing a Monte Carlo estimate can be. It was made bearable by
+    // firing four rays and correlating them across a 4x4 tile, which trades salt-and-pepper for
+    // visible BLOCKS and costs four incoherent rays to do it. Accumulating against a reprojected
+    // history buys the sample count over time instead: one ray, no tile, no blocks.
+    // RG32Float like the shadow pair, x = openness, y = linear depth for the disocclusion test.
+    rhi::TextureHandle rtAoHist_[2] = {0, 0};
+    // THE SKY-OCCLUSION RAY'S HIT DISTANCE, in [0,1] as a fraction of the ray's own TMax
+    // (Settings::giMaxDistance). NOT ping-ponged and NOT a history: it is this frame's raw
+    // measurement, overwritten whole every frame, and the thing that reads it keeps whatever
+    // history it wants of its own.
+    //
+    // WHY IT EXISTS AT ALL, since nothing in Voxi reads it. An external denoiser cannot filter an
+    // occlusion signal from the occlusion alone -- it needs to know how FAR away the occluder was,
+    // because that is what sets how wide a filter may spread the sample without crossing a real
+    // edge. NVIDIA NRD's REBLUR_DIFFUSE_OCCLUSION calls this IN_DIFF_HITDIST and will not run
+    // without it (modules/render.nrd/README.md). The ray already computes the distance and threw
+    // it away; this is where it stops being thrown away.
+    //
+    // R16Unorm, one channel: the value is a fraction, 16 bits of it is finer than the ray count
+    // could justify, and 2 bytes/pixel beside the 112 MB the RG32Float history pair above already
+    // costs at the tiers where either exists is not a number worth optimising.
+    rhi::TextureHandle rtAoHitDist_ = 0;
+
+    // ---- NVIDIA NRD, denoising the sky-occlusion signal rtAoHitDist_ above feeds ----
+    //
+    // WHY THIS SIGNAL FIRST, out of everything that is noisy: it is the one already measured. NRD's
+    // own AVER_README puts ambient/sky occlusion at 78% of the engine's remaining speckle, and
+    // IN_DIFF_HITDIST -- the one input NRD needs that an engine does not usually already have -- is
+    // written today, because closing that was the third of NRD's three original blockers. Every
+    // other input (view Z, motion vectors, packed normal/roughness) comes from the G-buffer.
+    //
+    // IT REQUIRES THE G-BUFFER, which is off by default, so nrdWanted() asks for it rather than
+    // assuming it. A denoiser handed a null input texture is refused by Recorder::record rather
+    // than binding one, so the failure is a log line and an undenoised frame, never a crash.
+    //
+    // OPTIONAL AT EVERY LEVEL AND THAT IS THE POINT: absent on Vulkan (NRD's register spaces), absent
+    // in a build with AVER_WITH_NRD off, absent without the G-buffer. nrdOutput_ being 0 means "not
+    // denoised this frame" and the shader falls back to the hand-written temporal filter, which is
+    // what every tier below this already ships.
+    render::nrd::Recorder nrd_;
+    bool                  nrdActive_  = false;   // create() succeeded AND this frame has its inputs
+    rhi::TextureHandle    nrdOutput_  = 0;       // OUT_DIFF_HITDIST, 0 when not denoised
+    u32                   nrdFrame_   = 0;
+    bool                  nrdWarnedEncoding_ = false;
+    bool                  nrdWarnedMsaa_     = false;
+    // ---- NRD's OWN previous camera, separate from curViewProj_/prevViewProj_ ----
+    // Those two describe the COMBINED viewProj every other reprojection consumer in this file wants;
+    // NRD needs the FACTORISED pair (CameraFactor.hpp), a different shape, so it keeps its own
+    // latch rather than reusing theirs -- see beginShadowHistory's NRD block for where these are
+    // read and written. Row-major, same layout as viewProj itself (so a memcpy into
+    // FrameSettings::worldToViewPrev/viewToClipPrev is exactly as direct as into worldToView/
+    // viewToClip). Valid only once nrdPrevCameraValid_ is true: latched after a frame's
+    // FrameSettings were built from a SUCCESSFULLY FACTORISED camera, and invalidated both by a
+    // factorisation failure and by beginShadowHistory's own skipped-frame branch (shadowHistoryActive()
+    // false) -- see each site's own comment for why.
+    f32                   nrdPrevWorldToView_[16] = {};
+    f32                   nrdPrevViewToClip_[16]  = {};
+    bool                  nrdPrevCameraValid_     = false;
+    // Set the first time CameraFactor::factor() rejects this frame's camera (or dev_->camera() has
+    // none to give) while the legacy A/B switch is off -- see beginShadowHistory's own comment for
+    // why that frame skips the NRD dispatch entirely rather than falling back to a wrong encoding.
+    // Warned once for the same reason nrdWarnedMsaa_ is: a condition that cannot self-heal by
+    // waiting would just repeat the same WARN every frame.
+    bool                  nrdWarnedCameraFactor_ = false;
+    // 3.4 b: set the first time this frame's G-buffer inputs (viewZ/motionVectors/normalRoughness)
+    // disagree in size with the signal NRD is about to be resized to (rtAoHitDist_/giRadiance_) --
+    // see beginShadowHistory's own NRD-rect-vs-resource guard for why this can happen even though
+    // targets are reallocated together on an ordinary resize (3.4 a). Cleared the moment the sizes
+    // agree again, UNLIKE nrdWarnedMsaa_/nrdWarnedCameraFactor_ above: this condition is expected to
+    // self-heal within a frame or two, and a LATER, unrelated mismatch episode should still warn.
+    bool                  nrdWarnedInputSizeMismatch_ = false;
+    // voxi.nrdLegacyCamera's live backing store -- see setNrdLegacyCamera's own comment (VoxiRenderer.hpp)
+    // for what ON reinstates and why toggling either way resets NRD's history.
+    bool                  nrdLegacyCamera_ = false;
+    // Set the first time applyReblurTuning() fails while nrd_ reports itself valid -- a real error
+    // (NRD rejected the settings), not the ordinary "not created yet" case setReblurTuning() already
+    // no-ops on silently. Warned once, same shape as nrdWarnedEncoding_/nrdWarnedMsaa_ above: this can
+    // run every frame once NRD exists, and a per-frame WARN for a condition that will not self-heal is
+    // noise, not information.
+    bool                  nrdWarnedReblurRetune_ = false;
+    // The ReSTIR GI radiance handed to NRD (u9): rgb indirect diffuse, a normalised hit distance.
+    // NOT ping-ponged, unlike every history pair here -- it is this frame's raw measurement handed
+    // to a filter that keeps its OWN history in NRD's permanent pool, so a second copy would buy
+    // nothing. Allocated only when ReSTIR GI is the active estimator, because nothing else writes it.
+    rhi::TextureHandle    giRadiance_ = 0;
+    rhi::TextureHandle    nrdGiOutput_ = 0;   // OUT_DIFF_RADIANCE_HITDIST, 0 when not denoised
+
+    // ---- RTXDI ReSTIR GI: the reservoir buffer and the previous-frame surface it resamples against ----
+    //
+    // giReservoirs_ IS THE STORAGE THE VENDORED SDK OWNS THE SHAPE OF. RTXDI_PackedGIReservoir
+    // (third_party/rtxdi/Include/Rtxdi/GI/ReSTIRGIParameters.h) is 32 bytes; one RWStructuredBuffer
+    // holds BOTH of rtxdi::c_NumReSTIRGIReservoirBuffers' ping-pong copies, addressed by
+    // RTXDI_ReservoirPositionToPointer's own `reservoirArrayIndex * reservoirArrayPitch` term
+    // (Utils/ReservoirAddressing.hlsli) -- so this is ONE buffer, ONE binding (u6, StructuredBuffer),
+    // never rebound mid-frame the way the ping-ponged TEXTURE pairs below are; only which array
+    // slice each side of the pointer arithmetic reads/writes changes, which is cb_.giRestirParams.z,
+    // not a descriptor swap.
+    //
+    // SIZED FROM giSurfPosHist_'s OWN RESOLUTION, not a separately-tracked width/height: the reservoir
+    // buffer and the surface history are created together in ensureShadowHistory from the same
+    // width/height, and the SHADER derives the identical block-pitch formula from
+    // gGiSurfHist.GetDimensions() (voxi.hlsl's giReservoirBufferParams) -- so there is exactly one
+    // source of truth for the resolution both sides compute pitch from, rather than a cbuffer field
+    // that could drift from the texture it is supposed to describe.
+    rhi::BufferHandle giReservoirs_ = 0;
+    // Element count (RTXDI_PackedGIReservoir units) the buffer was actually sized for -- the whole
+    // POINT of caching this is so a resize that does not grow the pitch (most resolution changes,
+    // since the pitch rounds up to 16-pixel blocks) skips the destroy/recreate entirely, the same
+    // "only rebuild when the size actually changed" rule ensureShadowHistory already applies to
+    // rtShadowHist_ itself.
+    u32  giReservoirElemCapacity_ = 0;
+
+    // THE ENGINE GAP THE TASK BRIEF NAMED: RAB_GetGBufferSurface(idx, /*prevFrame*/true) needs a
+    // PREVIOUS frame's primary surface, and nothing in Voxi carried one before this pair existed --
+    // the deferred G-buffer (when even on) is current-frame-only, and AVER_GBUFFER_HISTORY's own
+    // gGBufNormalHist (voxi.hlsl) is exactly this gap's own unfinished half-attempt: declared,
+    // referenced in three tap loops, gated behind a define nothing ever sets to 1, because it never
+    // grew the ping-pong pair (VoxiRenderer.hpp/.cpp) or the resolve of what "t10 IS A GUESS" (its
+    // own comment) should really be. THAT one is left exactly as found -- reusing an admittedly-
+    // guessed slot for a DIFFERENT feature (a crease term for the spatial shadow/reflection filters,
+    // gated on the G-buffer being on at all) risks the very drift its own comment warns about, and
+    // ReSTIR GI needs to work whether or not the G-buffer is even enabled. This is a NEW pair.
+    //
+    // TWO RG32Float TEXTURES, NOT ONE RGBA32F -- rhi::Format (RHIResources.hpp) HAS NO FOUR-CHANNEL
+    // 32-BIT FLOAT FORMAT (checked against the enum directly: RGBA16F, R32Float and RG32Float are
+    // the only float formats it declares), so a single-texture design was not an option regardless
+    // of how the four values were packed. Full 32-bit float precision is worth the second texture:
+    // RTXDI_CalculateJacobian's partial-Jacobian terms are distance-squared RATIOS, and RGBA16F's
+    // ~11-bit mantissa was considered and rejected on paper -- at a few thousand centimetres of scene
+    // extent its relative error is already comparable to the very ratio the Jacobian is measuring.
+    //
+    // giSurfPosHist_: xy = the world position's x/y. giSurfNrmHist_: x = the world position's z,
+    // y = RTXDI_EncodeNormalizedVectorToSnorm2x16's packed uint, bit-reinterpreted with asfloat so a
+    // single RG32Float channel holds a whole octahedral-packed normal -- reusing the vendored SDK's
+    // own packing rather than inventing another, and splitting position/normal across the PAIR
+    // rather than, say, xy/z-of-position in one and normal whole in the other, so a reader who wants
+    // just the position (RAB_GetSurfaceWorldPos) or just validity (the packed-normal channel) knows
+    // which texture to touch without cross-referencing both for every field.
+    //
+    // 0 IN THE PACKED-NORMAL CHANNEL is reserved as "nothing written here" (a sky miss in
+    // PSRayDriven, or a pixel from BEFORE this pair was ever written): the write side nudges an
+    // exact-zero encoding to 1 so that sentinel is never produced by a legitimate normal (see the
+    // write site in voxi.hlsl) -- WHY A SENTINEL AT ALL rather than trusting a freshly-created
+    // texture to read as zero: this repo's own render-scale/device-loss and stale-worktree incidents
+    // are both reminders that "the driver probably zero-fills a fresh allocation" is not a
+    // documented API guarantee, and RTXDI's own 5-sample temporal search plus fallback-sampling mode
+    // is designed to shrug off an occasional false "no surface here" from one rejected candidate --
+    // so an EXPLICIT, cheap-to-check sentinel costs nothing this file doesn't already have machinery
+    // to tolerate, and buys not depending on that assumption.
+    //
+    // DEPTH FOR THE RAB SIMILARITY TEST IS NOT STORED A THIRD TIME: it is re-derived as
+    // `mul(float4(storedWorldPos, 1.0), gPrevViewProj).w` (voxi.hlsl's RAB_GetGBufferSurface) --
+    // free (gPrevViewProj already exists for the shadow/reflection histories), exact (not requantised
+    // through a texture format), and one fewer thing that could disagree with the position it is
+    // supposed to describe.
+    //
+    // THE ENGINE GAP THE TASK BRIEF NAMED, this pair's whole reason to exist:
+    // RAB_GetGBufferSurface(idx, /*prevFrame*/true) needs a PREVIOUS frame's primary surface, and
+    // nothing in Voxi carried one before this -- the deferred G-buffer (when even on) is
+    // current-frame-only, and AVER_GBUFFER_HISTORY's own gGBufNormalHist (voxi.hlsl) is exactly this
+    // gap's own unfinished half-attempt: declared, referenced in three tap loops, gated behind a
+    // define nothing ever sets to 1, because it never grew a ping-pong pair of its own or resolved
+    // what "t10 IS A GUESS" (its own comment) should really be. THAT one is left exactly as found --
+    // reusing an admittedly-guessed slot for a DIFFERENT feature (a crease term for the spatial
+    // shadow/reflection filters, tied to the G-buffer being on at all) risks the very drift its own
+    // comment warns about, and ReSTIR GI needs to work whether or not the G-buffer is even enabled.
+    //
+    // BOTH PING-PONGED LIKE rtShadowHist_/rtReflHist_/rtAoHist_ -- share their rtHistWriteIdx_ swap
+    // cadence in beginShadowHistory (all flip in lockstep whenever ray tracing is active at all),
+    // but NOT their rtHistValid_ flag -- see giHistValid_ below for why sharing it would be wrong.
+    rhi::TextureHandle giSurfPosHist_[2] = {0, 0};
+    rhi::TextureHandle giSurfNrmHist_[2] = {0, 0};
+
+    // ---- U1/2.11: the half-resolution ReSTIR VISIBILITY history pair (t16/u10) ----
+    // See giVisHistWanted() for when this is wanted (a strict subset of giRestirWanted() -- only
+    // Settings::giRestirVisibility's HalfResolution mode), and ensureShadowHistory/beginShadowHistory
+    // for creation, the starting bind and the per-frame ping-pong swap. Half the linear dimension of
+    // giSurfPosHist_/giSurfNrmHist_, rounded up: 2.10 D/E write exactly one full-resolution pixel per
+    // 2x2 block per frame, so one texel per block is all this needs to hold. RGBA16F: r = the F3
+    // reuse-visibility EMA, g = the F2 traced-luminance EMA, b = the F2 unoccluded-sky-luminance EMA,
+    // a = 1 written / 0 never (giVisReconstruct's own validity test against it, voxi_restir.hlsli).
+    rhi::TextureHandle giVisHist_[2] = {0, 0};
+    // True only once a full write+swap cycle has happened with the pair actually bound this frame --
+    // the SAME shape giHistValid_ below has, and independent for the identical reason THAT flag is
+    // independent of rtHistValid_: giRestirVisibility_ can move to or away from
+    // HalfResolution mid-session while giHistValid_ (or rtHistValid_) is already true from an
+    // unrelated cycle, so trusting either shared flag here would feed giVisReconstruct a "previous
+    // frame" that never actually existed for THIS pair.
+    bool giVisHistValid_ = false;
+    // Latched so an allocation failure (the pair is small, but a device can already be out of memory
+    // by the time this frame's create runs) warns once rather than every frame it keeps failing --
+    // same idiom as giAccumRecreateFailedLogged_/nrdWarnedMsaa_ elsewhere in this class. Cleared on
+    // the next successful create, same reason giAccumRecreateFailedLogged_'s own comment gives.
+    bool giVisHistFailLogged_ = false;
+    // Settings::giRestirVisibility, cached at setSettings like giMode_ beside it. 2 (HalfResolution)
+    // matches the struct default Voxi.hpp gives it (Quality::Medium's own ladder rung), so a renderer
+    // that somehow renders a frame before its first setSettings call behaves as Medium would rather
+    // than as NoRay (0), which is what an un-initialised u32 read as before this field existed.
+    u32 giRestirVisibility_ = 2;
+    // voxi.blendedGiCone's live backing store -- see setBlendedGiCone's own comment.
+    bool blendedGiCone_ = false;
+    // voxi.giVisPathView's live backing store -- see setGiVisPathView's own comment.
+    bool giVisPathView_ = false;
+
+    // False right after the pair is (re)created (construction, a resize, or giMode's OWN on/off
+    // edge) and true only once a full write+swap cycle has happened with giRestirWanted() true.
+    //
+    // DELIBERATELY SEPARATE FROM rtHistValid_, even though every other ping-ponged pair in this file
+    // shares that one flag (see aoHistoryWanted()'s own pair, gated by cb_.rtDenoiseParams.w but
+    // read by the shader against the SHARED gRtHistParams.y, not a fourth flag of its own). Sharing
+    // it here would be wrong in a case those three pairs cannot hit: rtShadowHist_/rtReflHist_/
+    // rtAoHist_ are all driven by the SAME condition family (rayTracingWanted(), aoHistoryWanted()),
+    // so by the time any of them exists, rtHistValid_ already means "has been through at least one
+    // real cycle under conditions close enough to today's". giMode is an INDEPENDENT switch a user
+    // can flip mid-session while ray tracing has already been running for a long time -- turning it
+    // on would find rtHistValid_ already true (the shadow/reflection pair have been cycling for
+    // frames) while this pair itself was allocated THIS frame and holds whatever a fresh
+    // allocation happens to hold. Trusting the shared flag there would feed RTXDI's temporal
+    // resampling a "previous frame" that never actually existed. Its own flag closes exactly that
+    // gap and no other.
+    bool giHistValid_ = false;
+
     u32  rtShadowHistW_ = 0, rtShadowHistH_ = 0;
     u32  rtHistWriteIdx_ = 0;
     // False right after creation or a resize: the textures hold no real previous frame yet, and
     // cb_.rtParams.w must say so rather than let the shader blend against garbage.
     bool rtHistValid_ = false;
+    // THE SUN THE HISTORY WAS ACCUMULATED UNDER. The temporal denoiser blends up to 90% of the
+    // previous frame's visibility, and its only validity test is GEOMETRIC -- a screen-space
+    // reprojection plus a depth match. Nothing in it knows the light can move. So with a still
+    // camera and a moving sun the reprojection passes every frame and the displayed shadow keeps
+    // ~90% of a value traced against the OLD sun direction: the ray is correct and the picture is
+    // ten frames behind it. That is "the shadows don't update properly when the light has moved".
+    //
+    // THE SUN FIELDS ONLY, NOT THE WHOLE SkyAtmosphere, and that restriction is the difference
+    // between a fix and a regression: the struct carries a cloud clock that advances every frame,
+    // so comparing all of it would invalidate the history on every frame and turn the denoiser back
+    // into the raw one-ray noise it exists to remove. giSnapshotUnchanged excludes cloudTime for the
+    // same reason; this is the narrower question of what the SHADOW ray actually depends on.
+    f32  rtHistSunDir_[3]   = {0, 0, 0};
+    f32  rtHistSunColor_[3] = {0, 0, 0};
+    f32  rtHistSunIntensity_ = -1.0f;   // negative so the first frame always counts as a change
+    // True when this frame's sun differs from the one above; see beginShadowHistory.
+    bool rtHistSunMoved() const;
     // This frame's camera view-projection, captured where fitCascades() already reads the camera,
     // and copied into prevViewProj_ at the end of prePass for NEXT frame's cb_.prevViewProj.
     f32  curViewProj_[16] = {};
@@ -1033,6 +1774,16 @@ private:
     // match, and resets rtHistValid_ when it does -- the old contents belong to a resolution that
     // no longer exists. DESTROYS all four instead when rayTracingWanted() is false; see there.
     bool ensureShadowHistory(u32 width, u32 height);
+    // Builds a render::nrd::Denoiser::ReblurTuning from settings_'s three live REBLUR dials
+    // (reblurDiffusePrepassBlurRadius/reblurMaxAccumulatedFrameNum/reblurMaxStabilizedFrameNum) plus
+    // the engine's own fixed hitDistA/B/C/enableAntiFirefly, and hands it to nrd_.setReblurTuning.
+    // Called both right after nrd_.create() succeeds (so creation-time tuning already reflects
+    // whatever was set before NRD existed, rather than ReblurTuning{}'s bare defaults) and from
+    // setSettings() every time it runs thereafter (nrd::SetDenoiserSettings is documented, NRD.h, as
+    // legal to call every frame -- see setSettings' own comment) -- so a console change to one of the
+    // three dials takes effect on the NEXT frame without tearing the NRD instance down. A no-op
+    // before nrd_.valid(): setReblurTuning() itself checks that and returns false.
+    void applyReblurTuning();
     // The size onRenderTargetsChanged last asked for, kept because the histories are created and
     // destroyed on the ray-tracing on/off edge as well as on a resize -- and setSettings, which is
     // where that edge is seen, is not told a resolution.
@@ -1057,6 +1808,51 @@ private:
     // off -- and VRAM pressure severe enough to force eviction looks exactly like an unexplained
     // frame-rate drop, which is the complaint that led here.
     bool rayTracingWanted() const { return rtSupported_ && settings_.rayTracing != Quality::Off; }
+    // The AMBIENT history pair is wanted only where the ray that fills it is traced -- High and Epic.
+    // Low and Medium keep the cone gather's own occlusion (giSkyOcclusionRaysForQuality returns 0),
+    // and allocating a pair they never write is 112 MB of full-screen target at 3532x1987 held for a
+    // feature that does not run. That is the same argument ensureShadowHistory already makes for
+    // releasing all of them when ray tracing is off, and the tiers it applies to are precisely the
+    // ones most likely to be memory-bound.
+    bool aoHistoryWanted() const { return rayTracingWanted() && settings_.giSkyOcclusionRays > 0; }
+    // Whether ReSTIR GI (Settings::giMode == 1) will ACTUALLY run this frame: ray tracing must be
+    // wanted (hardware AND the rayTracing tier both say yes -- giMode's own candidate ray needs the
+    // identical acceleration structure and geometry table the shadow/reflection rays already use),
+    // in addition to giMode_ itself asking for it. Gates giReservoirs_/the surface-history pair's allocation the
+    // same way aoHistoryWanted() gates the ambient pair's, and is what cb_.giRestirParams.x reports
+    // to the shader -- NEVER the raw setting, so a project that requests ReSTIR GI on hardware that
+    // cannot run it gets the cone gather back silently rather than a shader reading a null-filled
+    // t12/u6/u7.
+    // giEnabled() too, not just ray tracing: giMode only ever matters for the diffuse INDIRECT term
+    // (both call sites nest their giMode branch inside `gVoxelParams.w > 0.5`, itself gated on
+    // giEnabled()), so a project with globalIllumination == Off has no use for the reservoir
+    // buffer/surface history regardless of what giMode asks for -- same VRAM-consciousness
+    // aoHistoryWanted() applies to its own pair.
+    bool giRestirWanted() const { return rayTracingWanted() && giEnabled() && giMode_ == 1u; }
+
+    // U1/2.11: whether the half-resolution ReSTIR VISIBILITY history pair (t16/u10, giVisHist_) is
+    // wanted this frame -- a STRICT SUBSET of giRestirWanted() above, gated further on
+    // Settings::giRestirVisibility actually asking for HalfResolution (2). Full (3), Reconstructed
+    // (1) and NoRay (0) never read or write this pair, so allocating it for them would be VRAM held
+    // for a mode that is not running -- the same VRAM-consciousness aoHistoryWanted()/
+    // giRestirWanted() already apply to their own pairs. Gates giVisHist_'s own allocation in
+    // ensureShadowHistory the same way giRestirWanted() gates the surface-history pair's.
+    bool giVisHistWanted() const { return giRestirWanted() && giRestirVisibility_ == 2u; }
+
+public:
+    // THE SKY-OCCLUSION RAY'S HIT DISTANCE FOR THIS FRAME, or 0 when the ray is not running at this
+    // tier (Low and Medium never trace it) or ray tracing is off entirely. See rtAoHitDist_.
+    //
+    // The texture rests in ResourceState::UnorderedAccess, which a caller must transition from
+    // before sampling it -- this returns a handle, not a promise about state, exactly like every
+    // other texture accessor that hands out something a different pass wrote.
+    //
+    // 0 IS THE ANSWER, NOT AN ERROR, and a caller must handle it: the tier that has no ray has
+    // nothing to denoise, and the correct behaviour there is to skip the denoiser rather than to
+    // filter a texture that does not exist.
+    [[nodiscard]] rhi::TextureHandle ambientHitDistanceTexture() const { return rtAoHitDist_; }
+
+private:
     // PATH TRACING WANTED, which is a different question from ray tracing wanted and deliberately
     // asks the other setting. Both need the hardware -- a path tracer is built out of rays -- but
     // a project may want ray-traced shadows and no path tracing at all, which is the default.
@@ -1074,6 +1870,48 @@ private:
     // which is a working image rather than a black one.
     bool rayDrivenActive() const { return rtActive_ && rtRenderMode_ == 1u && rayDrivenPso_ != 0; }
 
+public:
+    // PREDICTS suppressesScene() (== debugViewActive() || rayDrivenActive(), see the .cpp) for THIS
+    // frame, for the one caller that needs an answer before this frame's real one exists yet:
+    // SandboxApp::syncPtSceneView(), called from onUpdate(), BEFORE device_->beginFrame() runs this
+    // frame's prePass() (see that function's own header comment for why it must run there).
+    //
+    // debugViewActive() is read straight -- no race. It depends on giReady_/giEnabled()/debugView_,
+    // none of which prePass() is about to touch, so its value right now already IS this frame's value.
+    //
+    // rayDrivenActive() is the racy half being fixed. It reads rtActive_, and rtActive_ is reset to
+    // false at the TOP of buildAccelerationStructures() and set true only after a successful TLAS
+    // build over drawsPrev_ -- and buildAccelerationStructures() runs from prePass(), which runs
+    // inside THIS frame's beginFrame(), AFTER beginScene() (called immediately before prePass(), over
+    // every feature, in that same beginFrame()) has already done `drawsPrev_.swap(draws_);
+    // draws_.clear();`. So the drawsPrev_ this frame's build is about to consume is NOT the member's
+    // value right now -- that list was already consumed by LAST frame's build, back when THIS frame's
+    // onUpdate() had not even run yet. It is today's draws_: whatever onRender submitted last frame,
+    // sitting here unswapped, at the exact moment onUpdate() calls this accessor. Reading rtActive_
+    // (what rayDrivenActive() does) answers last frame's question a second time; reading draws_
+    // instead answers the question THIS frame's election is actually about to ask.
+    //
+    // rtRenderMode_ and rayDrivenPso_ carry no such race and are read unchanged: neither is reset or
+    // reassigned anywhere inside beginFrame -- both are only ever written by setSettings() or pipeline
+    // creation, long before any frame that reads them starts, so their value right now already IS
+    // this frame's value.
+    //
+    // NOT REPLAYED: whether the per-draw loop over drawsPrev_ actually yields a non-empty TLAS
+    // instance list. buildAccelerationStructures() can still end with rtActive_ == false on a
+    // non-empty draws_ if every draw's mesh fails to produce a BLAS (e.g. a mesh destroyed since it
+    // was last drawn) -- a per-mesh runtime outcome this accessor has no cheap way to replay without
+    // duplicating that whole loop here. draws_ non-empty is treated as sufficient: the gap this
+    // leaves is the SAME SHAPE as the one-frame race being fixed (a rare, brief disagreement), never
+    // a new kind of one, and it only opens on a frame where a draw's mesh is destroyed the very frame
+    // its draw would otherwise have entered the TLAS.
+    bool willSuppressSceneThisFrame() const {
+        const bool rayDrivenWillBeActive = rtSupported_ && settings_.rayTracing != Quality::Off &&
+                                            !draws_.empty() && rtRenderMode_ == 1u &&
+                                            rayDrivenPso_ != 0;
+        return debugViewActive() || rayDrivenWillBeActive;
+    }
+
+private:
     // Whether the ray-traced history textures will be read and written this frame.
     //
     // TESTS debugViewActive(), NOT suppressesScene(), and the difference is load-bearing. Both
@@ -1082,11 +1920,15 @@ private:
     // rtShadowTemporal exactly as PSMainVoxi does, so it needs the history prepared and bound --
     // asking suppressesScene() here would leave it sampling and writing resources this frame never
     // transitioned.
+    // DELIBERATELY DOES NOT REQUIRE THE AMBIENT PAIR. It gates the shadow and reflection histories,
+    // which exist at every ray-tracing tier; the ambient pair exists only at High and Epic, so
+    // requiring it here would switch SHADOW accumulation off at Low and Medium as a side effect.
+    // The ambient path has its own flag, gRtDenoiseParams.w -- see beginShadowHistory.
     bool shadowHistoryActive() const {
         return rtActive_ && rtShadowHist_[0] && rtShadowHist_[1] &&
                rtReflHist_[0] && rtReflHist_[1] && !debugViewActive();
     }
-    // Swaps the read/write roles, transitions all four textures, rebinds them and sets
+    // Swaps the read/write roles, transitions all six textures, rebinds them and sets
     // cb_.prevViewProj / rtHistParams for this frame. Called before shadowPass() so the UAVs are
     // writable and the constants are ready by the time the scene loop runs PSMainVoxi.
     void beginShadowHistory(rhi::IRenderContext& ctx);
@@ -1102,8 +1944,24 @@ private:
                         rhi::SkyAtmosphere{}.sunDirection[2]};
     // No sunColor_ and no ambient_ here on purpose. See setSunDirection.
 
+    // HOW MANY EXTRA BAKES A CHANGE BUYS. PSVoxel's feedback term adds one bounce per rebuild, so
+    // this is literally the bounce depth the volume converges to after the scene settles. 5 puts the
+    // residual of a 0.5-albedo room at 3% -- past the point anything is visible -- and each tick is
+    // one voxelise, paid only in the frames right after something actually moved.
+    static constexpr u32 kGiConvergeTicks = 5;
+    u32  giConvergeTicks_ = 0;
+
     u32  voxelMips_ = 0, voxelResBuilt_ = 0;
     bool giReady_ = false, rtSupported_ = false, rtActive_ = false, debugView_ = false;
+    // See setGiPoisonView's own comment. Independent of debugView_ above -- the two can never be
+    // confused for each other because this one never sets debugViewActive()/suppressesScene().
+    bool giPoisonView_ = false;
+    // See setLightingLegacyBits' own header comment for the bit table. 0 (every fix in the
+    // contrast-fix plan live) until a console command or --lighting-legacy sets a bit; forwarded
+    // into cb_.ambientParams[2] every frame with no condition, same as giPoisonView_ feeds
+    // giRestirParams.w every frame regardless of whether anyone has ever touched it.
+    u32 lightingLegacyBits_ = 0;
+    bool unlit_ = false;   // --unlit / the viewport view-mode dropdown; see setUnlit
     // See setConeTraceEnabled's own comment. Defaults to true, i.e. bit-identical to every build
     // before this toggle existed -- nobody who never calls the setter sees any difference at all.
     bool coneTraceEnabled_ = true;

@@ -34,4 +34,34 @@ void flushEditorPrefs();
 // Where the file is. Empty before the first access.
 const std::string& editorPrefsPath();
 
+// THE DECISION THAT KEEPS A BAD READ FROM DESTROYING A GOOD FILE, as a pure function so it can be
+// tested. `readFileText` returns false for a file that is absent AND for one that exists but could
+// not be opened, and those two need opposite answers:
+//
+//   absent      -- the ordinary first run. The store is legitimately empty and MUST be allowed to
+//                  write, or preferences could never be created at all.
+//   unreadable  -- a lock, a permissions change, a network share that blinked. The store is empty
+//                  only because the read failed, and writing it back would replace a good file with
+//                  a header and nothing else, atomically and irreversibly.
+//
+// Returns true when the store must refuse to write for the rest of the session.
+bool prefsShouldRefuseWrite(bool readSucceeded, bool fileExists);
+
+// True when this session latched read-only because the file existed and could not be read. The
+// editor surfaces this; nothing else should have to care.
+bool editorPrefsReadOnly();
+
+// THE MERGE RULE FOR RECOVERING FROM READ-ONLY, pulled out as its own pure decision for the same
+// reason prefsShouldRefuseWrite above is: a read-only store's file can become readable again mid-
+// session (see the .cpp's tryRecoverReadOnly), and the moment it does, every key already in memory
+// and every key still only on disk have to be reconciled into one map before anything gets written.
+//
+// SESSION VALUES WIN. `sessionAlreadyHasKey` is true for a key this session set through setPref*
+// while the store thought it had nothing on disk to lose -- adopting the file's older value for
+// that key instead would silently discard the very edit the user is waiting to see saved, which is
+// the read-only bug coming back wearing a recovery feature as a disguise. A key the session never
+// touched has no such edit to protect, so the file's copy of it is exactly what recovering means to
+// restore.
+bool prefsShouldAdoptFromFile(bool sessionAlreadyHasKey);
+
 } // namespace aver::editor

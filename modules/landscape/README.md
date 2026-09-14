@@ -2,7 +2,14 @@
 
 - **Language:** C++
 - **Depends on:** Core, Formats
-- **Status:** stages 1–2 implemented — the whole CPU model. **Nothing is rendered yet.**
+- **Status:** stages 1–4 of 5 implemented (`docs/STATUS.md` §"Landscape"): the CPU model (1–2), the
+  physics-heightfield adapter (3), and a real GPU renderer target with a residency cache that evicts
+  correctly (4). This line used to say "stages 1–2 — nothing is rendered yet", true when it was
+  written and false since `Aver.Landscape.Renderer` (`src/LandscapeRenderer.cpp`) landed. **What is
+  still true: no pixel of landscape has ever reached a screen** — stage 5 (the editor tab, sculpt
+  brushes, storage) has not started, and nothing in the editor calls `LandscapeRenderer::draw`. See
+  [`docs/LANDSCAPE_EDITOR.md`](../../docs/LANDSCAPE_EDITOR.md) for the plan to close that gap and the
+  survey that caught this README being stale in the first place.
 
 Chunked heightfield terrain: the sample grid, the node quadtree, screen-space-error LOD selection,
 frustum culling, and chunk geometry with skirts.
@@ -80,8 +87,8 @@ at 2 Hz is far more visible than the extra detail is worth.
 ## Axes
 
 Heights are **+Z**; sample `(ix, iy)` sits at `(origin.x + ix·s, origin.y + iy·s, h)`, so a column runs
-+X and a row +Y. Jolt's heightfield is Y-up with its own row order, so the physics adapter must
-transpose — stage 3. A reader who assumed they agreed would get terrain colliding ninety degrees from
-where it is drawn.
++X and a row +Y. Jolt's heightfield is Y-up with its own row order, so the physics adapter transposes
+(`src/PhysicsBridge.cpp`, stage 3, `28f128c`) — a reader who assumed they agreed would get terrain
+colliding ninety degrees from where it is drawn.
 
 See [docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md) for the module DAG.

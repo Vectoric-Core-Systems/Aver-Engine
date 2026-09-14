@@ -8,6 +8,7 @@
 
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <string>
 
 using namespace aver;
@@ -387,7 +388,11 @@ int main() {
     {
         fmt::OcAnimation a;
         a.duration = 2.5f;
-        a.flags = fmt::kOcAnimLoop;
+        // ITEM 1.3: all three clip flags, not just Loop -- so this format round trip actually
+        // exercises kOcAnimAdditiveBase and kOcAnimRootMotion too, not merely the one bit AnimEditor
+        // used to display. flags is a plain u8 the parser copies whole, so all three already
+        // survived; nothing here needed to change in OcAnim.cpp itself.
+        a.flags = fmt::kOcAnimLoop | fmt::kOcAnimAdditiveBase | fmt::kOcAnimRootMotion;
         a.skeletonRef = "SK_Character";
 
         fmt::OcTrack t0;
@@ -424,7 +429,8 @@ int main() {
         check(fmt::parseOcAnim(bytes.data(), bytes.size(), b, &why), "reads: " + why);
 
         checkNear(b.duration, 2.5f, 1e-6f, "duration survives");
-        check(b.flags == fmt::kOcAnimLoop, "flags survive");
+        check(b.flags == (fmt::kOcAnimLoop | fmt::kOcAnimAdditiveBase | fmt::kOcAnimRootMotion),
+              "all three flag bits survive together (loop, additive base, root motion)");
         check(b.skeletonRef == "SK_Character", "skeleton reference survives");
         check(b.tracks.size() == 3, "three tracks");
 
@@ -439,6 +445,81 @@ int main() {
         check(b.tracks[2].componentsPerKey() == 9, "cubicspline stride is 3 components x 3 tangents");
         check(b.tracks[2].values == a.tracks[2].values, "cubicspline tangents survive exactly");
         check(b.tracks[2].values.size() == b.tracks[2].times.size() * 9, "value count matches the stride");
+    }
+
+    AVER_INFO("=== ITEM 1.3: the three clip flags survive the path AnimEditor actually uses ===");
+    {
+        // AnimEditor.cpp's own persistence is a thin wrapper over exactly these two functions --
+        // reloadIfNeeded() calls fmt::loadOcAnim(path_, c, &why) and save() calls
+        // fmt::saveOcAnim(path_, clip_, why) -- so exercising THEM, through a real file on disk, in
+        // a load -> edit -> save -> reload cycle, is "the path the editor actually uses" at the
+        // persistence layer. save() rewrites the WHOLE asset from the parsed struct, so a field the
+        // parser did not capture is one that save silently drops -- the CRITICAL TRAP the task brief
+        // calls out. This proves it does not, for all three bits, individually and together, and
+        // that the clip's own data survives alongside them.
+        //
+        // WHAT THIS DOES NOT COVER: the three ImGui::Checkbox calls AnimEditor::flagCheckbox itself
+        // makes. SandboxApp.cpp / ActorEditor / AssetEditor belong to another lane this slice must
+        // not touch, and unlike GraphEditor/BtEditor/SoundEditor (each a named class with its own
+        // header, exercised headlessly by tests/editor), AnimEditor is anonymous-namespace-local to
+        // AnimEditor.cpp with no public surface beyond AssetEditor's virtual path()/title()/dirty()/
+        // save()/draw() -- there is no headless entry point to reach flagCheckbox() from a test.
+        // Whether clicking a checkbox actually reaches clip_.flags is therefore verified VISUALLY
+        // only, in the running editor, not by this suite.
+        const std::filesystem::path dir =
+            std::filesystem::temp_directory_path() / "aver-animeditor-flags-test";
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        const std::string path = (dir / "flags.ocanim").string();
+
+        fmt::OcAnimation a;
+        a.duration = 1.0f;
+        a.flags = 0;   // none set yet: an authored one-shot, non-additive, no-root-motion clip
+        fmt::OcTrack t;
+        t.boneIndex = 0;
+        t.channels = fmt::kOcChannelTranslation;
+        t.times = {0.0f, 1.0f};
+        t.values = {0,0,0, 1,1,1};
+        a.tracks = {t};
+        std::string why;
+        check(fmt::saveOcAnim(path, a, &why), "the clip's initial save, through the file path (" + why + ")");
+
+        // load -> edit -> save -> reload, once per bit, exactly the sequence a checkbox toggle
+        // followed by Save followed by the tab (or a fresh open) picking the file back up performs.
+        struct Bit { u8 mask; const char* name; };
+        const Bit bits[] = {
+            {fmt::kOcAnimLoop,         "loop"},
+            {fmt::kOcAnimAdditiveBase, "additive base"},
+            {fmt::kOcAnimRootMotion,   "root motion"},
+        };
+        for (const Bit& bit : bits) {
+            fmt::OcAnimation loaded;
+            check(fmt::loadOcAnim(path, loaded, &why),
+                  std::string("loads before setting ") + bit.name + " (" + why + ")");
+            check((loaded.flags & bit.mask) == 0, std::string(bit.name) + " starts clear");
+
+            loaded.flags = static_cast<u8>(loaded.flags | bit.mask);   // flagCheckbox's own mutation
+            check(fmt::saveOcAnim(path, loaded, &why),
+                  std::string("saves with ") + bit.name + " set (" + why + ")");
+
+            fmt::OcAnimation reloaded;
+            check(fmt::loadOcAnim(path, reloaded, &why),
+                  std::string("reloads after setting ") + bit.name + " (" + why + ")");
+            check((reloaded.flags & bit.mask) != 0,
+                  std::string(bit.name) + " SURVIVED the load -> edit -> save -> reload cycle");
+            // The trap, made concrete: a save rewriting the whole asset from a partial struct would
+            // also have dropped the track this clip already had. It did not.
+            check(reloaded.tracks.size() == 1 && reloaded.tracks[0].boneIndex == 0,
+                  "and the clip's own track survived the same save, untouched");
+        }
+
+        // All three together, surviving on top of one another -- not just one bit at a time.
+        fmt::OcAnimation loaded;
+        check(fmt::loadOcAnim(path, loaded, &why), "loads with all three now set (" + why + ")");
+        check(loaded.flags == (fmt::kOcAnimLoop | fmt::kOcAnimAdditiveBase | fmt::kOcAnimRootMotion),
+              "all three survive TOGETHER after three separate edit/save cycles, not just individually");
+
+        std::filesystem::remove_all(dir, ec);
     }
 
     AVER_INFO("=== .ocsave: a whole world, captured generically ===");

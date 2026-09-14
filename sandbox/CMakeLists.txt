@@ -1,4 +1,11 @@
-add_executable(Sandbox
+# WIN32 -- /SUBSYSTEM:WINDOWS, so the editor never opens a console window of its own. It was a
+# console-subsystem program until 0.5.0, which meant every launch from Explorer, a shortcut or the
+# Aver Launcher put a black rectangle on screen beside the editor for the whole session.
+#
+# THE OUTPUT IS NOT LOST: EntryPoint.hpp calls attachParentConsole(), which adopts the launching
+# terminal's console when there is one and leaves redirection untouched -- see Console.hpp. gates.ps1,
+# test.ps1 and the MCP runner all capture stdout through pipes and are unaffected either way.
+add_executable(Sandbox WIN32
   src/SandboxApp.cpp
   src/AssetEditor.cpp
   src/ActorEditor.cpp
@@ -7,8 +14,12 @@ add_executable(Sandbox
   src/SkinSceneTest.cpp
   src/ReflTest.cpp
   src/ProjectBrowser.cpp
+  src/RecentProjects.cpp
   src/ProjectScaffold.cpp
   src/EditorPrefs.cpp
+  src/EditorNotifications.cpp
+  src/InputOwnership.cpp
+  src/ViewportIconRenderer.cpp
   src/EngineScaffold.cpp
   src/McpConf.cpp
   src/IdeIntegration.cpp
@@ -17,10 +28,14 @@ add_executable(Sandbox
   src/ToolsMenu.cpp
   src/GraphEditorGeometry.cpp
   src/GraphEditor.cpp
+  src/AnimCurveGeometry.cpp
   src/BtEditor.cpp
   src/SoundEditor.cpp
+  src/ParticleEditor.cpp
+  src/FoliageTypeEditor.cpp
   src/EditorKeybinds.cpp
   src/EditorEntitySnapshot.cpp
+  src/PhysicsSceneSync.cpp
   src/ThumbnailCache.cpp
   Sandbox.rc)
 target_link_libraries(Sandbox PRIVATE Aver.Runtime Aver.Formats)
@@ -104,14 +119,19 @@ endif()
 # own `#include "aver/sound/Synth.hpp"` needs. Aver.Audio.Abi is the mixer seam, and only the
 # PREVIEW BUTTON needs that: a tree configured without the audio seam still gets the whole editor,
 # a real render and a real waveform, and only loses the ability to make a noise. That distinction is
-# what AVER_SOUND_EDITOR_AUDIO carries into the source, and it is why the tab does not simply reuse
+# what AVER_WITH_AUDIO_ABI carries into the source, and it is why the tab does not simply reuse
 # AVER_WITH_IMGUI to mean both things.
+#
+# THE MACRO IS A CAPABILITY, NOT A TAB, and it was named after the tab until 0.5.1 -- which is how
+# the game runtime came to be excluded from the audio device without anyone noticing. The same
+# block now exists in modules/runtime.game/CMakeLists.txt; the two must stay in step, and
+# verify-game.ps1 is where that belongs to be asserted rather than remembered.
 if(TARGET Aver.Sound)
   target_link_libraries(Sandbox PRIVATE Aver.Sound)
 endif()
 if(TARGET Aver.Audio.Abi)
   target_link_libraries(Sandbox PRIVATE Aver.Audio.Abi)
-  target_compile_definitions(Sandbox PRIVATE AVER_SOUND_EDITOR_AUDIO=1)
+  target_compile_definitions(Sandbox PRIVATE AVER_WITH_AUDIO_ABI=1)
 endif()
 # The actor editor's preview. Its own mesh registry, deliberately: an asset editor that reached
 # into the level editor's table could not exist or be tested without one.
@@ -250,6 +270,21 @@ add_custom_command(
 add_custom_target(Sandbox.Logo DEPENDS ${CMAKE_BINARY_DIR}/bin/logo.png)
 add_dependencies(Sandbox Sandbox.Logo)
 set_target_properties(Sandbox.Logo PROPERTIES FOLDER "sandbox")
+
+# Ship the Player Start's viewport marker. Same OUTPUT/DEPENDS rule as the splash and logo above.
+# Unlike those two this one is drawn into the 3D SCENE rather than blitted into an ImGui panel --
+# see EditorIconRenderer -- but it is staged identically because it is loaded the identical way, by
+# path, next to the executable.
+add_custom_command(
+  OUTPUT ${CMAKE_BINARY_DIR}/bin/player-start-icon.png
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          ${CMAKE_SOURCE_DIR}/branding/player-start-icon.png ${CMAKE_BINARY_DIR}/bin/player-start-icon.png
+  DEPENDS ${CMAKE_SOURCE_DIR}/branding/player-start-icon.png
+  COMMENT "Staging player-start-icon.png"
+  VERBATIM)
+add_custom_target(Sandbox.PlayerStartIcon DEPENDS ${CMAKE_BINARY_DIR}/bin/player-start-icon.png)
+add_dependencies(Sandbox Sandbox.PlayerStartIcon)
+set_target_properties(Sandbox.PlayerStartIcon PROPERTIES FOLDER "sandbox")
 
 # Ship the Compile C# status sprite sheet (three tiles: built / failed / stale). Same OUTPUT/DEPENDS
 # rule as the splash and logo above, so editing the artwork alone re-stages it without a relink.
@@ -412,4 +447,34 @@ endif()
 # happens to be the one that tips it over.
 if(MSVC)
   set_source_files_properties(src/SandboxApp.cpp PROPERTIES COMPILE_OPTIONS "/bigobj")
+  # WIN32 above sets /SUBSYSTEM:WINDOWS, which makes the linker look for WinMain. The entry point
+  # this engine generates is main(), so point the CRT's startup at the one that calls it. Identical
+  # to game/CMakeLists.txt, whose comment claimed Sandbox already did this long before it did.
+  target_link_options(Sandbox PRIVATE /ENTRY:mainCRTStartup)
 endif()
+
+# The editor's own two shaders (the cluster PS and the G-buffer debug view). The same stamp
+# mechanism the modules use -- aver_deploy_shaders takes any target, executables included.
+aver_deploy_shaders(Sandbox "${CMAKE_CURRENT_SOURCE_DIR}/shaders")
+
+# Ship the game UI's baked font next to the executable. Same OUTPUT/DEPENDS rule as the splash and
+# logo above, for the same reason: a POST_BUILD would leave a re-baked font unstaged after a build
+# that did not relink.
+#
+# TWO FILES, ONE TARGET: the .ocfont is the glyph table and the .png is the atlas it indexes, and a
+# half-staged pair is a font that parses and draws nothing. Baked by scripts/bake-font.py -- see its
+# header for why the game UI bakes offline rather than rasterising at runtime.
+add_custom_command(
+  OUTPUT ${CMAKE_BINARY_DIR}/bin/Roboto-Regular.ocfont ${CMAKE_BINARY_DIR}/bin/Roboto-Regular.png
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          ${CMAKE_SOURCE_DIR}/assets/fonts/Roboto-Regular.ocfont ${CMAKE_BINARY_DIR}/bin/Roboto-Regular.ocfont
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          ${CMAKE_SOURCE_DIR}/assets/fonts/Roboto-Regular.png ${CMAKE_BINARY_DIR}/bin/Roboto-Regular.png
+  DEPENDS ${CMAKE_SOURCE_DIR}/assets/fonts/Roboto-Regular.ocfont
+          ${CMAKE_SOURCE_DIR}/assets/fonts/Roboto-Regular.png
+  COMMENT "Staging the game-UI font"
+  VERBATIM)
+add_custom_target(Sandbox.UiFont DEPENDS
+  ${CMAKE_BINARY_DIR}/bin/Roboto-Regular.ocfont ${CMAKE_BINARY_DIR}/bin/Roboto-Regular.png)
+add_dependencies(Sandbox Sandbox.UiFont)
+set_target_properties(Sandbox.UiFont PROPERTIES FOLDER "sandbox")

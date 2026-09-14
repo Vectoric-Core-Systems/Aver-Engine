@@ -15,7 +15,8 @@ enum ToolKind { ToolSelect = 0, ToolMove = 1, ToolRotate = 2, ToolScale = 3 };
 
 // Draws a compact vector icon into a cell. kind: 0 Select, 1 Move, 2 Rotate, 3 Scale, and -- only
 // drawn where AVER_MODULE_LANDSCAPE's sculpt tools reuse this same button -- 4 Sculpt Raise, 5
-// Sculpt Lower, 6 Sculpt Smooth, 7 Sculpt Flatten, all a brush ring around a mode glyph.
+// Sculpt Lower, 6 Sculpt Smooth, 7 Sculpt Flatten, 8 Sculpt Ramp, 9 Sculpt Noise, all a brush ring
+// around a mode glyph.
 inline void drawToolGlyph(ImDrawList* dl, ImVec2 p, f32 sz, int kind, ImU32 fg, f32 dpi) {
     auto P = [&](f32 fx, f32 fy){ return ImVec2(p.x+fx*sz, p.y+fy*sz); };
     const f32 th = std::fmax(1.6f, 2.0f*dpi);
@@ -56,9 +57,19 @@ inline void drawToolGlyph(ImDrawList* dl, ImVec2 p, f32 sz, int kind, ImU32 fg, 
         dl->PathBezierQuadraticCurveTo(P(0.38f,0.34f), P(0.5f,0.56f));
         dl->PathBezierQuadraticCurveTo(P(0.62f,0.78f), P(0.74f,0.56f));
         dl->PathStroke(fg, 0, th);
-    } else { // kind 7, sculpt flatten (also the fallback for any stray kind): brush ring, flat bar
+    } else if (kind == 7) { // sculpt flatten: brush ring, flat bar
         dl->AddCircle(P(0.5f,0.5f), 0.32f*sz, fg, 20, th);
         dl->AddLine(P(0.28f,0.5f), P(0.72f,0.5f), fg, th*1.4f);
+    } else if (kind == 8) { // sculpt ramp: brush ring, a rising diagonal (a slope, not a mound)
+        dl->AddCircle(P(0.5f,0.5f), 0.32f*sz, fg, 20, th);
+        dl->AddLine(P(0.30f,0.66f), P(0.70f,0.34f), fg, th*1.4f);
+    } else { // kind 9, sculpt noise (also the fallback for any stray kind): brush ring, scattered dots
+        dl->AddCircle(P(0.5f,0.5f), 0.32f*sz, fg, 20, th);
+        const f32 r = 0.045f * sz;
+        dl->AddCircleFilled(P(0.40f,0.40f), r, fg, 10);
+        dl->AddCircleFilled(P(0.62f,0.45f), r, fg, 10);
+        dl->AddCircleFilled(P(0.47f,0.62f), r, fg, 10);
+        dl->AddCircleFilled(P(0.62f,0.66f), r, fg, 10);
     }
 }
 

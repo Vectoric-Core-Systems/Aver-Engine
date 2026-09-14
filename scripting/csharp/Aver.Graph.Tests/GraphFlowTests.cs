@@ -38,7 +38,86 @@ static class GraphFlowTests
         failures += TestExecTypedParamIsRejectedAtParseTime();
         failures += TestOutReferencingAnExecPinIsRejectedAtCompileTime();
         failures += TestDataCycleIsACompileErrorNotAProcessKill();
+        failures += TestExecOutputDrivingTwoLinksIsRejectedByValidate();
+        failures += TestDataOutputMayStillFanOutToManyReaders();
         return failures;
+    }
+
+    // AN EXEC OUTPUT MAY DRIVE EXACTLY ONE LINK, and this asserts the check runs in Validate() rather
+    // than only inside the compiler's exec walk.
+    //
+    // The rule was always enforced -- GraphCompiler.FindExecTarget throws for it -- but only at
+    // COMPILE time, only for a node the walk actually reaches, and as an exception rather than a
+    // validation error. That put an author's first sight of it in the engine log at project open. In
+    // Validate() it reaches the editor's Validate button, and therefore the canvas.
+    private static int TestExecOutputDrivingTwoLinksIsRejectedByValidate()
+    {
+        Console.WriteLine("Test: an exec output wired to two links is rejected by Validate()");
+        var text = @"
+OCGRAPH 1
+ENTRY t OnTick
+NODE t OnTick
+NODE a PrintString text=first
+NODE b PrintString text=second
+LINK t.exec a.exec
+LINK t.exec b.exec
+";
+        if (OcGraphParser.Parse(text, out var g, out var err))
+        {
+            Console.WriteLine("  FAIL: expected the parse to be refused, but it succeeded");
+            return 1;
+        }
+        // NAMES THE NODE FIRST, because GraphEditor.errorNodeId reads the first single-quoted token
+        // and badges it only when it is a real node id. Leading with 'nodeId.pinName' -- which the
+        // compiler's own message does -- would badge nothing on the canvas.
+        if (err == null || !err.StartsWith("Node 't'"))
+        {
+            Console.WriteLine($"  FAIL: the message must lead with the offending node id, got: {err}");
+            return 1;
+        }
+        if (!err.Contains("Sequence"))
+        {
+            Console.WriteLine($"  FAIL: the message should point at Sequence as the fix, got: {err}");
+            return 1;
+        }
+        Console.WriteLine("  PASS: refused, naming the node and pointing at Sequence");
+        return 0;
+    }
+
+    // THE OTHER HALF, and the one that would break real graphs if the check were written carelessly:
+    // a DATA output may fan out to as many readers as want it. Only control flow cannot fork.
+    private static int TestDataOutputMayStillFanOutToManyReaders()
+    {
+        Console.WriteLine("Test: a data output may still feed several nodes");
+        var text = @"
+OCGRAPH 1
+NODE k ConstFloat value=3
+NODE addA Add
+NODE addB Add
+LINK k.value addA.a
+LINK k.value addB.a
+LINK k.value addA.b
+OUT addA result
+";
+        if (!OcGraphParser.Parse(text, out var g, out var err))
+        {
+            Console.WriteLine($"  FAIL: a fanned-out DATA pin must still be legal, got: {err}");
+            return 1;
+        }
+        var fn = new GraphCompiler(g).Compile(out var cerr);
+        if (fn == null)
+        {
+            Console.WriteLine($"  FAIL: it must still compile, got: {cerr}");
+            return 1;
+        }
+        var got = fn.DynamicInvoke();
+        if (!(got is float f) || Math.Abs(f - 6.0f) > 1e-6f)
+        {
+            Console.WriteLine($"  FAIL: expected 3+3=6 from the shared constant, got {got}");
+            return 1;
+        }
+        Console.WriteLine("  PASS: one constant feeding three inputs is legal and computes 6");
+        return 0;
     }
 
     // ---- The one failure mode in this compiler that cannot be reported, only survived. ---------------

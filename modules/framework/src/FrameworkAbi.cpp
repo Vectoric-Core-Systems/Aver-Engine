@@ -1001,10 +1001,21 @@ int32_t aver_fw_player_controller(int32_t i)    { return i == 0 ? playerCtrlRef(
 int32_t aver_fw_play_state(void)                { return playStateRef(); }
 
 // Per-process input the app pushes each frame. cur/prev give edge detection. Frame thread only.
+//
+// curVk/prevVk and prevMouse are ADDITIVE to the original cur/prev/mouse trio -- see framework_abi.h's
+// own RAW WIN32 VK and NAMED ACTIONS sections for why each exists. Both new arrays are rolled by the
+// SAME aver_fw_input_new_frame below, so there is still exactly one "once a frame" tick for every
+// flavour of input state in this file, not a second one a caller could forget to call.
 struct InputState {
     unsigned char cur[AVER_FW_KEY_COUNT]  = {};
     unsigned char prev[AVER_FW_KEY_COUNT] = {};
     float         mouse[3]                = {0, 0, 0};   // dx, dy, wheel
+    float         prevMouse[3]            = {0, 0, 0};   // last frame's dx, dy, wheel -- see
+                                                           // NAMED ACTIONS below for why a mouse-
+                                                           // sourced action needs this to detect an
+                                                           // edge, the same thing cur/prev give a key
+    unsigned char curVk[AVER_FW_VK_COUNT]  = {};          // raw Win32 VK twin, framework_abi.h's own
+    unsigned char prevVk[AVER_FW_VK_COUNT] = {};          // RAW WIN32 VK section explains why
 };
 // The process-wide input state.
 InputState& inputState() { static InputState s; return s; }
@@ -1013,6 +1024,12 @@ InputState& inputState() { static InputState s; return s; }
 void aver_fw_input_new_frame(void) {
     InputState& s = inputState();
     std::memcpy(s.prev, s.cur, sizeof(s.cur));
+    std::memcpy(s.prevVk, s.curVk, sizeof(s.curVk));
+    // prevMouse snapshots THIS (about-to-be-cleared) frame's delta, not last frame's -- order
+    // matters here. It has to run BEFORE the zero three lines down, or a mouse-sourced action would
+    // always read its own previous frame as "nothing moved", and WasPressed/WasReleased on a mouse
+    // binding would never fire.
+    s.prevMouse[0] = s.mouse[0]; s.prevMouse[1] = s.mouse[1]; s.prevMouse[2] = s.mouse[2];
     s.mouse[0] = s.mouse[1] = s.mouse[2] = 0.0f;
 }
 // Sets the held state of a key. Out-of-range keys are ignored.
@@ -1046,6 +1063,241 @@ void aver_fw_input_mouse(float* out3) {
     if (!out3) return;
     const InputState& s = inputState();
     out3[0] = s.mouse[0]; out3[1] = s.mouse[1]; out3[2] = s.mouse[2];
+}
+
+// ---- RAW WIN32 VK, ADDITIVE TWIN TO AVER_FW_KEY_* ----------------------------------------------
+// See framework_abi.h's own RAW WIN32 VK section for why this exists instead of growing the named
+// enum. Mechanically identical to the cur/prev pair above, just indexed by vk instead of by
+// AVER_FW_KEY_*, and backed by the SAME InputState (curVk/prevVk), rolled by the SAME new_frame.
+
+// Sets the held state of a raw Win32 VK. Out-of-range is ignored.
+void aver_fw_input_set_vk(int32_t vk, int32_t down) {
+    if (vk < 0 || vk >= AVER_FW_VK_COUNT) return;
+    inputState().curVk[vk] = down ? 1 : 0;
+}
+// 1 while the raw VK is held.
+int32_t aver_fw_input_vk(int32_t vk) {
+    return (vk >= 0 && vk < AVER_FW_VK_COUNT) ? inputState().curVk[vk] : 0;
+}
+// 1 on the frame the raw VK went down.
+int32_t aver_fw_input_vk_pressed(int32_t vk) {
+    if (vk < 0 || vk >= AVER_FW_VK_COUNT) return 0;
+    const InputState& s = inputState();
+    return (s.curVk[vk] && !s.prevVk[vk]) ? 1 : 0;
+}
+// 1 on the frame the raw VK went up.
+int32_t aver_fw_input_vk_released(int32_t vk) {
+    if (vk < 0 || vk >= AVER_FW_VK_COUNT) return 0;
+    const InputState& s = inputState();
+    return (!s.curVk[vk] && s.prevVk[vk]) ? 1 : 0;
+}
+
+// ---- GAMEPAD, SHAPE ONLY -- NO POLLING ----------------------------------------------------------
+// See framework_abi.h's own GAMEPAD section for why this stops at "state in, state out" and does not
+// open XInput itself: zero consumers today, and a real poller's hotplug/dead-zone/rumble cost is not
+// something to take on speculatively.
+
+// Gamepad button/axis state. No cur/prev pair -- unlike keys, nothing above asks for gamepad edge
+// detection (aver_fw_input_gamepad_button is a plain level read), so there is nothing to roll and
+// aver_fw_input_new_frame does not touch this struct at all.
+struct GamepadState {
+    unsigned char buttons[AVER_FW_GAMEPAD_BUTTON_COUNT] = {};
+    float         axes[AVER_FW_GAMEPAD_AXIS_COUNT]      = {};
+};
+// The process-wide gamepad state. Single pad (index 0) -- see aver_fw_input_set_gamepad_button's own
+// comment for why every function here rejects any other `pad` value.
+GamepadState& gamepadState() { static GamepadState g; return g; }
+
+// Sets one button's held state. `pad` must be 0; an out-of-range pad or button is ignored.
+void aver_fw_input_set_gamepad_button(int32_t pad, int32_t button, int32_t down) {
+    if (pad != 0 || button < 0 || button >= AVER_FW_GAMEPAD_BUTTON_COUNT) return;
+    gamepadState().buttons[button] = down ? 1 : 0;
+}
+// Sets one axis's value. Unclamped -- no dead zone lives in this ABI.
+void aver_fw_input_set_gamepad_axis(int32_t pad, int32_t axis, float value) {
+    if (pad != 0 || axis < 0 || axis >= AVER_FW_GAMEPAD_AXIS_COUNT) return;
+    gamepadState().axes[axis] = value;
+}
+// 1 while the button is held. 0 for `pad` != 0 or an out-of-range button.
+int32_t aver_fw_input_gamepad_button(int32_t pad, int32_t button) {
+    if (pad != 0 || button < 0 || button >= AVER_FW_GAMEPAD_BUTTON_COUNT) return 0;
+    return gamepadState().buttons[button];
+}
+// The axis's last-set value. 0.0 for `pad` != 0 or an out-of-range axis.
+float aver_fw_input_gamepad_axis(int32_t pad, int32_t axis) {
+    if (pad != 0 || axis < 0 || axis >= AVER_FW_GAMEPAD_AXIS_COUNT) return 0.0f;
+    return gamepadState().axes[axis];
+}
+
+// ---- NAMED ACTIONS (Enhanced Input) -------------------------------------------------------------
+// Ports scripting/csharp/Aver.Framework/EnhancedInput.cs's algorithm onto this ABI -- see
+// framework_abi.h's own NAMED ACTIONS section for why the algorithm moved and what changed in the
+// move (no context handle; no separate per-frame Update()).
+
+// One declared action. Unlike EnhancedInput.cs's InputAction, `Raw`/`Prev` are NOT stored here --
+// see the header comment: both are recomputed on demand from InputState's cur/prev/mouse/prevMouse
+// on every query, so an action can never read a different answer than aver_fw_input_key does for the
+// identical key. Only the declaration itself needs to persist: `name` for find-by-name, `valueType`
+// kept for a future consumer that wants to know an action's declared shape (nothing enforces it
+// today, matching EnhancedInput.cs's own ValueType, which is documentation, not a gate, there too).
+struct ActionDef {
+    std::string name;
+    int32_t     valueType;
+};
+std::vector<ActionDef>& actionDefs() { static std::vector<ActionDef> v; return v; }
+
+// One binding: an action, a source, and (for AVER_FW_ACTION_SRC_KEY) the framework key it reads.
+// `priority` is this binding's context tier -- see aver_fw_action_bind's own header comment for why
+// a plain int stands in for EnhancedInput.cs's InputMappingContext object.
+struct ActionBinding {
+    int32_t action;
+    int32_t source;
+    int32_t key;
+    float   scale;
+    int32_t component;
+    int32_t priority;
+};
+std::vector<ActionBinding>& actionBindings() { static std::vector<ActionBinding> v; return v; }
+
+// True when a STRICTLY HIGHER priority binding also reads this key -- EnhancedInput.cs's own
+// Update() `consumed.Contains(b.Key)` check, generalized from "layer order in a priority-sorted
+// list" to "priority number compared directly", because this ABI has no layer object to sort (see
+// the header's own opening comment on the NAMED ACTIONS section). Bindings at the SAME priority
+// never block each other, matching EnhancedInput.cs's own comment there: "Consumption is per layer,
+// so two bindings in one context can share a key."
+bool actionKeyConsumedByHigherPriority(int32_t key, int32_t priority) {
+    const std::vector<ActionBinding>& bindings = actionBindings();
+    for (usize i = 0; i < bindings.size(); ++i) {
+        const ActionBinding& b = bindings[i];
+        if (b.source == AVER_FW_ACTION_SRC_KEY && b.key == key && b.priority > priority) return true;
+    }
+    return false;
+}
+
+// Sums every binding of `action` into out[3], reading CURRENT input state when useCurrent, or the
+// PREVIOUS frame's when not -- the two evaluations aver_fw_action_pressed/_released compare, exactly
+// as EnhancedInput.cs's Update() compares this frame's freshly-recomputed Raw against the Prev it
+// snapshotted a moment before recomputing.
+void actionAccumulate(int32_t action, bool useCurrent, float out[3]) {
+    out[0] = out[1] = out[2] = 0.0f;
+    const InputState& s = inputState();
+    const std::vector<ActionBinding>& bindings = actionBindings();
+    for (usize i = 0; i < bindings.size(); ++i) {
+        const ActionBinding& b = bindings[i];
+        if (b.action != action) continue;
+
+        float v = 0.0f;
+        switch (b.source) {
+            case AVER_FW_ACTION_SRC_KEY:
+                // A key consumed by a higher-priority binding contributes nothing to THIS action,
+                // whether or not that higher binding's own action happens to be active right now --
+                // EnhancedInput.cs consumes by KEY, not by whether the consumer read a nonzero value.
+                if (!actionKeyConsumedByHigherPriority(b.key, b.priority)) {
+                    const bool down = useCurrent ? s.cur[b.key] != 0 : s.prev[b.key] != 0;
+                    v = down ? b.scale : 0.0f;
+                }
+                break;
+            case AVER_FW_ACTION_SRC_MOUSE_X:
+                v = (useCurrent ? s.mouse[0] : s.prevMouse[0]) * b.scale;
+                break;
+            case AVER_FW_ACTION_SRC_MOUSE_Y:
+                v = (useCurrent ? s.mouse[1] : s.prevMouse[1]) * b.scale;
+                break;
+            case AVER_FW_ACTION_SRC_MOUSE_WHEEL:
+                v = (useCurrent ? s.mouse[2] : s.prevMouse[2]) * b.scale;
+                break;
+            default:
+                break;
+        }
+
+        // 0=X, 1=Y, anything else=Z -- EnhancedInput.cs's own Accumulate() switch, verbatim.
+        if (b.component == 0)      out[0] += v;
+        else if (b.component == 1) out[1] += v;
+        else                        out[2] += v;
+    }
+}
+
+// True when any channel exceeds the dead zone -- EnhancedInput.cs's own Active(), pinned at 0.15
+// (see framework_abi.h's own comment for why this is not a parameter).
+bool actionActive(const float v[3]) {
+    const float kDeadZone = 0.15f;
+    return std::fabs(v[0]) > kDeadZone || std::fabs(v[1]) > kDeadZone || std::fabs(v[2]) > kDeadZone;
+}
+
+// A handle is valid iff it was handed back by aver_fw_action_register: 1-based, never past the
+// number of declarations made so far. 0 (and anything negative) is always invalid.
+bool actionHandleValid(int32_t action) {
+    return action >= 1 && static_cast<usize>(action) <= actionDefs().size();
+}
+
+// The handle for a previously registered action name, or 0.
+int32_t aver_fw_action_find(const char* name) {
+    if (!name || !*name) return 0;
+    const std::vector<ActionDef>& defs = actionDefs();
+    for (usize i = 0; i < defs.size(); ++i)
+        if (defs[i].name == name) return static_cast<int32_t>(i + 1);
+    return 0;
+}
+
+// Declares a named action, idempotent by name -- see framework_abi.h's own comment for why (the same
+// reason aver_fw_class_declare is idempotent: a script re-registering on every possession must not
+// multiply the action).
+int32_t aver_fw_action_register(const char* name, int32_t valueType) {
+    if (!name || !*name) return 0;
+    if (valueType != AVER_FW_ACTION_DIGITAL && valueType != AVER_FW_ACTION_AXIS1D &&
+        valueType != AVER_FW_ACTION_AXIS2D) return 0;
+    const int32_t existing = aver_fw_action_find(name);
+    if (existing) return existing;
+    std::vector<ActionDef>& defs = actionDefs();
+    defs.push_back(ActionDef{name, valueType});
+    return static_cast<int32_t>(defs.size());   // 1-based handle, 0 stays invalid
+}
+
+// Adds one binding. See framework_abi.h's own comment for every parameter's meaning.
+void aver_fw_action_bind(int32_t action, int32_t source, int32_t key, float scale,
+                         int32_t component, int32_t contextPriority) {
+    if (!actionHandleValid(action)) return;
+    if (source < AVER_FW_ACTION_SRC_KEY || source > AVER_FW_ACTION_SRC_MOUSE_WHEEL) return;
+    if (source == AVER_FW_ACTION_SRC_KEY && (key < 0 || key >= AVER_FW_KEY_COUNT)) return;
+    actionBindings().push_back(ActionBinding{action, source, key, scale, component, contextPriority});
+}
+
+// Drops every binding. Registrations survive -- see framework_abi.h's own comment.
+void aver_fw_action_clear_bindings(void) { actionBindings().clear(); }
+
+// Writes {X, Y} of the action's current value. {0, 0} for an invalid handle.
+void aver_fw_action_value2(int32_t action, float* out2) {
+    if (!out2) return;
+    if (!actionHandleValid(action)) { out2[0] = out2[1] = 0.0f; return; }
+    float raw[3];
+    actionAccumulate(action, /*useCurrent=*/true, raw);
+    out2[0] = raw[0]; out2[1] = raw[1];
+}
+
+// 1 while the action is active.
+int32_t aver_fw_action_held(int32_t action) {
+    if (!actionHandleValid(action)) return 0;
+    float raw[3];
+    actionAccumulate(action, true, raw);
+    return actionActive(raw) ? 1 : 0;
+}
+
+// 1 on the frame the action became active.
+int32_t aver_fw_action_pressed(int32_t action) {
+    if (!actionHandleValid(action)) return 0;
+    float raw[3], prev[3];
+    actionAccumulate(action, true, raw);
+    actionAccumulate(action, false, prev);
+    return (actionActive(raw) && !actionActive(prev)) ? 1 : 0;
+}
+
+// 1 on the frame the action stopped being active.
+int32_t aver_fw_action_released(int32_t action) {
+    if (!actionHandleValid(action)) return 0;
+    float raw[3], prev[3];
+    actionAccumulate(action, true, raw);
+    actionAccumulate(action, false, prev);
+    return (!actionActive(raw) && actionActive(prev)) ? 1 : 0;
 }
 
 // The camera a possessed character asks for.

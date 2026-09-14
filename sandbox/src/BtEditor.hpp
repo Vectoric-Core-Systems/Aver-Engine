@@ -8,6 +8,8 @@
 // and nothing else. draw(Engine&) carries no dpi, but this tab needs none (it has no canvas to
 // scale, unlike GraphEditor's node graph), so there is no push-setter counterpart here.
 #include "AssetEditor.hpp"
+#include "EditorWidgets.hpp"
+#include "SnapshotUndo.hpp"
 
 #include "aver/formats/OcBt.hpp"
 
@@ -49,10 +51,29 @@ i32 btDeleteSubtree(std::vector<fmt::OcBtNode>& nodes, i32 index);
 // when either is out of range.
 i32 btReparent(std::vector<fmt::OcBtNode>& nodes, i32 index, i32 newParent);
 
+// The tree the Content Browser's "New Behaviour Tree" writes: a Selector root over one `Wait`.
+//
+// DECLARED HERE SO A TEST CAN CHECK IT, exactly as snStarterGraph is in SoundEditor.hpp. This one has
+// a sharper reason than convention: BtEditor's constructor refuses a file it cannot load (it sets
+// loaded_ = false and shows an error instead of an editable tree), so a starter that fails
+// OcBtData::valid() would be written successfully and then rejected by the very editor the create
+// path opens for it -- a failure that looks like success at the moment it happens and only appears
+// one step later. A test that saves this and loads it back is what makes that impossible.
+//
+// `Wait` rather than a bare structural root because it is one of the registered built-ins (see
+// btAddChild above, which picks the same name for the same reason): the tree resolves and runs,
+// instead of being a shape that validates and does nothing.
+fmt::OcBtData btStarterTree();
+
 // Moves `index` one place earlier (delta < 0) or later (delta > 0) among its siblings. ORDER IS
 // SEMANTIC HERE, not cosmetic -- see btChildrenOf -- so this is a real behaviour edit, not a tidy-up.
 // Returns its new index; -1 when it is already at that end, is the root, or is out of range.
 i32 btMoveSibling(std::vector<fmt::OcBtNode>& nodes, i32 index, i32 delta);
+
+// Whether btMoveSibling would move anything -- so a toolbar can disable the control at either end
+// rather than accepting a click that does nothing. btMoveSibling calls this itself, so the two can
+// never disagree.
+bool btCanMoveSibling(const std::vector<fmt::OcBtNode>& nodes, i32 index, i32 delta);
 
 // Changes `index`'s kind, keeping the tree valid(): a node becoming a Condition/Action gains a
 // default built-in name if it had none, and one leaving those kinds has its name cleared, because
@@ -79,6 +100,13 @@ public:
     bool save(std::string* why) override;
     void onFileChanged() override;
 
+    // Restores the tree/details split to its default proportion and persists that -- see
+    // EditorWidgets.hpp's own comment for why this tab's split is a FRACTION (SplitPane) rather than
+    // ActorEditor's pixel-width convention. Declared unconditionally (matching draw()/save() above)
+    // but only does anything `#if AVER_WITH_IMGUI` -- see the .cpp: a headless build never lays the
+    // panels out at all, so there is nothing for a reset to restore.
+    void resetLayout() override;
+
     // Reachable for a headless test, and for the same reason the edits above are free functions.
     bool loaded() const { return loaded_; }
     const std::string& loadError() const { return loadError_; }
@@ -86,14 +114,15 @@ public:
     i32 selected() const { return selected_; }
     void select(i32 index) { selected_ = index; }
 
-    // Snapshot undo, copying GraphEditor::pushUndo's own whole-state approach rather than command
-    // objects -- a behaviour tree is a short vector, so a full copy per edit is cheaper than the
-    // bookkeeping an undoable-command layer would need. Every structural edit calls pushUndo first.
+    // Snapshot undo, through the shared SnapshotUndo<State> template (SnapshotUndo.hpp) now --
+    // Sound/GraphEditor migrated to the same template in the same change; a full tree copy per edit
+    // is cheaper here than the bookkeeping an undoable-command layer would need. Every structural
+    // edit calls pushUndo first.
     void pushUndo();
     void undo();
     void redo();
-    bool canUndo() const { return !undoStack_.empty(); }
-    bool canRedo() const { return !redoStack_.empty(); }
+    bool canUndo() const { return history_.canUndo(); }
+    bool canRedo() const { return history_.canRedo(); }
 
     // The structural edits as the TAB performs them: push undo, apply, remap the selection, mark
     // dirty. A test drives these to check the tab's own bookkeeping, not just the free functions'.
@@ -114,8 +143,12 @@ private:
     bool dirty_ = false;
     i32 selected_ = 0;
 
-    std::vector<fmt::OcBtData> undoStack_;
-    std::vector<fmt::OcBtData> redoStack_;
+    SnapshotUndo<fmt::OcBtData> history_;
+
+    // The tree/details divider. A plain SplitPane (EditorWidgets.hpp), not gated on AVER_WITH_IMGUI,
+    // for ParticleEditor.hpp's own reason: an editor tab's fields must keep compiling headless even
+    // though only draw() and resetLayout() actually read or write it.
+    SplitPane split_;
 
 #if AVER_WITH_IMGUI
     void drawTreeRow(i32 index);

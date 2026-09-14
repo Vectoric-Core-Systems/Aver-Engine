@@ -10,11 +10,17 @@
 #include "imgui.h"
 
 #include "aver/core/Types.hpp"
+// For editor::Scope, which this header used to define itself.
+#include "InputOwnership.hpp"
 
 #include <array>
 #include <string>
 
 namespace aver::editor {
+
+// Forward-declared rather than included: this header is reached from a headless test, and the
+// registry is only ever dereferenced inside the .cpp.
+class UiRegistry;
 
 // One chord: a key plus the modifiers this editor's shortcuts ever combine with it. No Super/Cmd --
 // nothing here binds it, and Windows reserves most of that row anyway.
@@ -35,23 +41,15 @@ enum class CommandId : u8 {
     ModeToggleLandscape, ViewFrameSelected,
     PlayReleaseMouse, PlayStop,
     DrawerDismiss, DrawerToggleContent, DrawerToggleConsole,
-    EditDelete, EditUndo, EditRedo, EditCopy, EditPaste, EditDuplicate,
+    EditDelete, EditUndo, EditRedo, EditCopy, EditPaste, EditDuplicate, EditSelectAll,
+    AssetSave, LevelSave, GraphCommentBox, GraphFrameAll,
     Count
 };
 inline constexpr usize kCommandCount = static_cast<usize>(CommandId::Count);
 
-// Which editor context(s) a command's chord is live in. Two commands sharing a chord is only a REAL
-// conflict -- the kind that leaves "which command does this key mean" genuinely ambiguous -- when
-// their scopes overlap. Tool.Select (1) and Sculpt.Raise (1) never can, because the editor is only
-// ever in Object mode or Landscape mode, never both; Play.Stop (Escape) and Drawer.Dismiss (Escape)
-// never can, because a play session and an open drawer are different UI states. See conflictWith().
-enum Scope : u32 {
-    kScopeObjectMode    = 1u << 0,
-    kScopeLandscapeMode = 1u << 1,
-    kScopePlaySession   = 1u << 2,
-    kScopeDrawerOpen    = 1u << 3,
-    kScopeGlobalUI      = 1u << 4,
-};
+// Scope moved to InputOwnership.hpp -- see that header for why (this file is whole-file
+// `#if AVER_WITH_IMGUI`, and the arbitration table that now hands out the live scope mask must be
+// testable with no ImGui at all). Same namespace, same values, one definition.
 
 // One command's fixed identity: its persisted key, its label, its default chord, which scope(s) it
 // fires in, and how its modifiers and repeat behaviour are checked. checkCtrl/checkShift/repeatAllowed
@@ -70,15 +68,42 @@ struct KeybindDef {
     bool repeatAllowed;
 };
 
+// THE PROCESS-WIDE REGISTRY, and the reason it exists is the same one that gave the notification
+// queue an accessor: the asset editors (GraphEditor, ActorEditor, AnimEditor, BtEditor) live in
+// editor:: and cannot see SandboxApp, but their keys belong in the same table as everything else --
+// otherwise "rebindable" means "rebindable unless you are in a tab".
+//
+// The alternative was widening AssetEditor::draw's signature to carry a registry, which this
+// header's own note about not widening an interface for one subclass argues against. Two seams
+// solved two different ways would be the worst of the three options.
+//
+// SandboxApp still OWNS the lifetime question in practice: it loads from prefs at startup and saves
+// on change. This is a reference to the one instance, not a second one.
+class KeybindRegistry;
+KeybindRegistry& keybinds();
+
+// The bindable-key vocabulary, exposed so a test can sweep the WHOLE table rather than re-listing
+// it. A key absent from it cannot be displayed, parsed or captured, so this is the one place that
+// decides what a user is allowed to bind.
+usize       keyNameCount();
+const char* keyNameAt(usize i);
+
 // The compiled-in defaults, one row per CommandId, in declaration order.
 const std::array<KeybindDef, kCommandCount>& keybindDefs();
 // Looks up a command's def by id (keybindDefs()[(size_t)id] with the cast done once, in one place).
 const KeybindDef& keybindDef(CommandId id);
 
-// Renders a chord as "Ctrl+Shift+D" / "Delete" / "F" / "1" / "(unbound)". A small hand-written
-// table, not ImGui::GetKeyName() -- this needs no live ImGui context, and chordToString/parseChord
-// read the SAME table in opposite directions, so the file format and the display text can't drift
-// apart from each other the way two independently-maintained tables could.
+// Renders a chord as "Ctrl+Shift+D" / "Delete" / "F" / "1" / "none". A small hand-written table,
+// not ImGui::GetKeyName() -- this needs no live ImGui context, and chordToString/parseChord read the
+// SAME table in opposite directions, so the file format and the display text can't drift apart from
+// each other the way two independently-maintained tables could.
+//
+// "none", NOT "(unbound)", and this comment said the latter for as long as the function existed.
+// The distinction is not cosmetic: the string chordToString emits is what saveToPrefs writes into
+// editor.ini, so it is a FILE FORMAT token, and changing it to match the comment would silently
+// unbind every command a user had cleared. The comment was corrected to the code, not the reverse.
+// parseChord additionally accepts "(unbound)" on the way IN, so a file hand-edited by someone who
+// read the old comment still loads.
 std::string chordToString(const Chord& c);
 // Parses chordToString's own format. Empty or unrecognised text yields an unbound chord.
 Chord parseChord(const std::string& text);
@@ -92,7 +117,6 @@ public:
 
     // The command's live chord (possibly rebound).
     const Chord& chordFor(CommandId id) const { return current_[static_cast<usize>(id)]; }
-    Chord defaultFor(CommandId id) const { return keybindDef(id).def; }
 
     // The other command already holding `chord` in a scope that overlaps `scope`, or Count if free.
     // Comparing against `scope` (the chord's own intended scope) rather than always comparing
@@ -133,7 +157,15 @@ public:
     // `dpi` scales the two button columns the same way every other hardcoded pixel size in this
     // editor is scaled (e.g. SandboxApp.cpp's own `560.0f*dpi_`) -- this file has no dpi_ member of
     // its own, so the caller's is passed in rather than duplicated.
-    bool drawPreferencesSection(f32 dpi = 1.0f);
+    // `visible` is whether the caller's CollapsingHeader is open. It is passed rather than used to
+    // skip the call, because a capture in progress has to be cancelled when the section goes away --
+    // otherwise `listening_` stays latched and the row reads "Press a chord..." forever.
+    //
+    // `reg` is optional and may be null (the headless test passes nothing). When given, each row's
+    // Rebind/Clear/Reset is registered under "prefs.keybind.<strId>.<action>", so UI automation can
+    // address one specific row instead of hunting for a rect. Every other control on the
+    // Preferences page is tracked; these were the only ones that were not.
+    bool drawPreferencesSection(f32 dpi = 1.0f, bool visible = true, UiRegistry* reg = nullptr);
 
 private:
     std::array<Chord, kCommandCount> current_{};

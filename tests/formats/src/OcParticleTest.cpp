@@ -6,6 +6,7 @@
 // Test content is deliberately NOT a weapon effect (a smoke plume, a burst of embers, falling
 // snow) -- see the task brief's own expressiveness requirement.
 #include "aver/formats/OcParticle.hpp"
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/platform/FileSystem.hpp"
 
@@ -420,5 +421,5 @@ int main() {
 
     AVER_INFO("==================================================");
     AVER_INFO("OcParticle tests done: {} failure(s)", g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

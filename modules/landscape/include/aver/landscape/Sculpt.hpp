@@ -1,8 +1,13 @@
 #pragma once
-// Brush edits to a landscape section's heights: raise, lower, smooth, flatten. Pure CPU, in place --
-// like the rest of Aver.Landscape, no rhi:: types, no device. What happens to the SELECTED, BUILT
-// quadtree and the RESIDENT gpu meshes an edit can make stale is the caller's job (LandscapeTree::
-// build() and LandscapeRenderer::forgetOverlapping() respectively); this module only owns the heights.
+// Brush edits to a landscape section's heights: raise, lower, smooth, flatten, ramp, noise. Pure CPU,
+// in place -- like the rest of Aver.Landscape, no rhi:: types, no device. What happens to the
+// SELECTED, BUILT quadtree and the RESIDENT gpu meshes an edit can make stale is the caller's job
+// (LandscapeTree::build() and LandscapeRenderer::forgetOverlapping() respectively); this module only
+// owns the heights.
+//
+// EXPLICITLY OUT OF SCOPE: hydraulic/thermal erosion. That is a materially bigger CPU algorithm (an
+// iterative sediment-transport simulation, not a per-sample closed form like every brush below) and
+// is its own planned item -- see plan item 5.2's own notes.
 #include "aver/formats/OcLand.hpp"
 
 namespace aver::landscape {
@@ -10,7 +15,7 @@ namespace aver::landscape {
 using aver::f32;
 using aver::u32;
 
-enum class BrushMode { Raise, Lower, Smooth, Flatten };
+enum class BrushMode { Raise, Lower, Smooth, Flatten, Ramp, Noise };
 
 // One brush application. `centerCm` is the world XY the cursor ray hit (see HeightfieldRay.hpp);
 // radiusCm and strength are the brush's own. `flattenTargetCm` is read only by Flatten, and is
@@ -31,6 +36,30 @@ struct BrushParams {
     // behaviour. 0 is a hard disc: full weight to the rim, nothing past it. Values between raise the
     // curve toward a plateau, widening the flat top and narrowing the shoulder.
     f32 falloff = 1.0f;
+
+    // Ramp only: its OTHER endpoint. A ramp needs two (position, height) pairs to interpolate
+    // between. `centerCm` above -- the brush's current position, which is all a moving stroke ever
+    // gives a caller to work with -- already supplies one end (position) each tick; `strength` above
+    // supplies its height, reused as the ramp's total RISE from start to current rather than a
+    // per-tick amount, the same way Raise/Lower already overload it as "how far", just measured
+    // end-to-end instead of per tick. That leaves exactly one thing a moving centerCm cannot give:
+    // where the stroke BEGAN. `rampStartCm`/`rampStartHeightCm` capture that, and -- like
+    // flattenTargetCm above -- must be captured exactly ONCE, at the first sample of the stroke, or
+    // the ramp's start would chase the cursor along with everything else and never hold a fixed
+    // slope. The direction of the ramp is then simply centerCm - rampStartCm; no separate direction
+    // field is needed.
+    f32 rampStartCm[2] = {0.0f, 0.0f};
+    f32 rampStartHeightCm = 0.0f;
+
+    // Noise only: the per-stroke seed. Passed straight through to TerrainNoiseParams::seed (see
+    // TerrainNoise.hpp), which is already a PURE function of world (x, y) and this seed -- no
+    // internal state, no wall-clock read -- so the determinism this needs ("same stroke twice,
+    // identical result") falls out for free as long as the CALLER seeds it from something stable
+    // rather than the clock. Captured once per stroke, same idiom as flattenTargetCm/rampStartCm:
+    // the editor seeds it from the stroke's start position (see SandboxApp.cpp's handleSculpt), so
+    // replaying a recorded stroke -- or a test constructing BrushParams directly -- reproduces the
+    // exact same terrain every time.
+    u32 noiseSeed = 0;
 };
 
 // The inclusive sample-space rectangle a brush can reach, clamped to the section's grid.

@@ -216,6 +216,33 @@ private:
     TextureResolver resolve_ = nullptr;
     void*           resolveUser_ = nullptr;
 
+    // ---- M2(a)/M2(b): update() cost, and how much of it is building an Entry from scratch ----
+    // (rather than merely re-uploading one that already exists). Self-reported timing only -- see
+    // this system's C-7 log lines -- never claimed as a measurement of anything a profiler saw.
+    //
+    // updateCalls_ drives the [PBR] material update line's power-of-two cadence, same idiom as
+    // D3D12Device.cpp's shader-compile report.
+    u64 updateCalls_ = 0;
+    // entryFor()'s BUILD branch (a fresh binding set plus writeSlots) is reached from update()'s own
+    // loop AND, lazily, from bindingSet()/constants() at an arbitrary draw site the first time a
+    // material nobody has drawn yet is asked for -- see entryFor()'s header comment. Both call sites
+    // funnel through the SAME function, so the split between them is which one is CURRENTLY calling
+    // it, tracked by this flag rather than by two copies of entryFor().
+    bool inUpdate_ = false;
+    // A run of builds accumulates here until a call to update() finds nothing built since the
+    // previous one, at which point the [PBR] "{} material(s) built" line fires once for the whole
+    // run and these reset -- see update()'s own comment for why a per-build log line would be one
+    // line per imported texture on project open.
+    u32 buildsPending_ = 0;
+    u32 buildsInUpdate_ = 0;
+    u32 buildsOnDraw_ = 0;
+    f64 buildMsPending_ = 0.0;
+    // Snapshot of buildsPending_ taken at the END of the previous update() call -- compared against
+    // the CURRENT buildsPending_ at the START of this one to tell "a build happened somewhere in
+    // between" (still the same burst) from "nothing built since we last looked" (the burst is over,
+    // report it). See update()'s own comment for the full trace.
+    u32 buildsPendingAtLastUpdateEnd_ = 0;
+
     // The dense GPU material table (see gpuMaterialTable() above) and its handle-to-row index,
     // rebuilt together by update() from the SAME walk over MaterialLibrary's enumeration so they can
     // never disagree with each other. gpuIndexOf_ is deliberately a SEPARATE map from entries_
@@ -231,6 +258,22 @@ private:
     // See gpuMaterialRevision(): bumped by update() only when gpuIndexOf_'s CONTENT (not merely its
     // size) differs from what it held before that call.
     u32 gpuRevision_ = 0;
+
+    // W10: a SECOND, PERSISTENT pair update() builds the next generation into, never the same
+    // container it is about to compare against. DO-NOT-DO #21 names the bug this avoids: reusing one
+    // container (clear it, refill it, then compare it to itself) makes `indexOf != gpuIndexOf_`
+    // compare an object with itself, which is always false -- gpuRevision_ stops advancing and every
+    // material created after the first update() call never reaches gpuIndexOf_/gpuTable_, so a ray
+    // hit reading gpuMaterialIndex() for it silently gets row 0 (the fallback) forever.
+    //
+    // After update()'s swap these two hold the PREVIOUS generation (whatever gpuIndexOf_/gpuTable_
+    // held before the call) rather than being destroyed -- swap(), not assign, is the whole point:
+    // it hands the old backing storage to next frame's build instead of freeing and reallocating it
+    // every update(). Cleared at the START of the next update() (not left to be read), and cleared by
+    // shutdown() alongside gpuIndexOf_/gpuTable_ for the same "0 rows is the honest answer once this
+    // system owns no device" reasoning as that comment already gives.
+    std::unordered_map<MaterialHandle, u32> indexOfScratch_;
+    std::vector<MaterialConstants> tableScratch_;
 };
 
 } // namespace aver::pbr

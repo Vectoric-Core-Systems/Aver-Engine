@@ -30,8 +30,6 @@ static_assert(AVER_SCENE_KIND_MAT4   == static_cast<u32>(FieldKind::Mat4),   "Oc
 
 bool fail(std::string* why, std::string m) { if (why) *why = std::move(m); return false; }
 
-// Components a snapshot deliberately never writes, each for a stated reason. A SMALL NAMED LIST
-// rather than an opt-in flag on the component, because the default must be "a component nobody
 // GRAPH-LOCAL VARIABLES, as a SYNTHETIC component riding the same OcSaveComponent/OcSaveField
 // shape every real component already uses -- not a new chunk, not a new list on OcSaveEntity, so
 // every reader this format already has (including one built before this existed) round-trips a
@@ -388,6 +386,27 @@ bool restore(const fmt::OcSaveData& in, scene::World& w, const RestoreOptions& o
             e = w.create(en.name, parent, Transform{});
         }
         if (e == scene::kInvalidEntity) {
+            // THE DOCUMENTED POSTCONDITION IS "EMPTY", and up to here this loop was not honouring it.
+            // SaveWorld.hpp promises restore() "leaves the world EMPTY on a failure part-way -- a
+            // half-restored world is worse than an empty one, because it looks playable", and this
+            // early return used to walk away from every entity already created in made[0..i-1].
+            // Reached whenever spawnClass refuses a name: saveSpawnClass returns kInvalidEntity for a
+            // className this build no longer has (a class renamed or deleted since the save was
+            // written), so a save that is merely OUT OF DATE -- not corrupt -- left a partial world
+            // behind that the caller was told to treat as untouched.
+            //
+            // Torn down through the same two-branch rule the teardown block above uses, and for the
+            // same reason: an actor has to go back through the framework so its managed instance is
+            // released, and only a plain entity may be destroyed directly. classOf is asked rather
+            // than assuming en.className, because the spawner is what decided what was actually made.
+            for (usize j = 0; j < i; ++j) {
+                const scene::Entity done = made[j];
+                if (done == scene::kInvalidEntity || w.destroyPending(done)) continue;
+                const char* cn = opt.host.classOf ? opt.host.classOf(done, opt.host.user) : nullptr;
+                if (cn && *cn && opt.host.destroyActor) opt.host.destroyActor(done, opt.host.user);
+                else                                    w.destroy(done);
+            }
+            w.flush();
             return fail(why, "save: could not recreate entity '" + en.name + "'");
         }
         made[i] = e;
@@ -438,8 +457,17 @@ bool restore(const fmt::OcSaveData& in, scene::World& w, const RestoreOptions& o
             }
             if (isDerivedComponent(type)) continue;
             if (!w.addComponent(e, type)) continue;
-            for (const fmt::OcSaveField& f : sc.fields)
+            for (const fmt::OcSaveField& f : sc.fields) {
+                // ENTITY fields belong to the second pass alone -- see its own comment for why they
+                // cannot be applied here. Applying them in BOTH passes was harmless for a field that
+                // worked (the second write is identical to the first) but double-counted every field
+                // that did not: a single renamed reference reported "2 field(s) were dropped", so the
+                // one number a player or a bug report can quote was wrong by a factor of two exactly
+                // when it mattered. Skipped rather than deducted, because the second pass is the pass
+                // that can actually resolve a forward reference.
+                if (f.kind == AVER_SCENE_KIND_ENTITY) continue;
                 if (!applyField(w, e, type, sc, f, made)) ++droppedFields;
+            }
         }
 
         // THE DIRTY BIT, or nothing downstream notices. addComponent hands back zero-filled bytes

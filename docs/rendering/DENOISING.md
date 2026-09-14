@@ -1,5 +1,16 @@
 # Denoising, and why NVIDIA NRD is not the answer here
 
+> **SUPERSEDED ON THE LICENCE QUESTION, 2026-09-09.** NRD is now vendored at `third_party/nrd`. The
+> owner was shown this document's licence argument — that the NVIDIA RTX SDKs License grants
+> distribution only "as incorporated in object code format into a software application" and without
+> the right to sublicense, so every Aver licensee would need their own grant — and accepted it
+> anyway. `third_party/nrd/AVER_README.md` records the decision and the flow-through consequence for
+> Aver's own EULA.
+>
+> **Everything else on this page still stands**, including the technical analysis of what NRD needs
+> from a renderer and the description of what the hand-written filters do. Read the licence section
+> below as history rather than as current policy.
+
 **Investigated 2026-08-27.** The question was whether to vendor NVIDIA's Real-time Denoisers (NRD) to
 replace the hand-written spatial/temporal filters in `modules/render.voxi`.
 
@@ -16,17 +27,23 @@ replace the hand-written spatial/temporal filters in `modules/render.voxi`.
 | Temporal reprojection | `rtReprojectHistory` / `rtReprojectReflection`. Current world position through **last frame's** view-projection. |
 | Ray-tile amortisation | `rtPixelsPerRayTile`. |
 
-Two of those are switched off in everything we ship, which is worth stating plainly because it is
-easy to look at the code and conclude otherwise:
+One of those was switched off in everything we shipped at the time this page was investigated, which
+is worth stating plainly because it was easy to look at the code and conclude otherwise:
 
-- **`rtShadowDenoiseForQuality` returns 0 at every tier, Epic included** (`Voxi.cpp`). Radius 0 hits
-  an early return, so the spatial shadow filter is a **permanent no-op in the shipped product** — the
-  loop, its cost and its weighting are all implemented and none of them execute.
 - **`rtPixelsPerRayTileForQuality` returns 1 at every tier**, which forces `tileBits = 0`, so the
-  "reuse last frame's ray" path is dead too. Every pixel traces a fresh shadow ray every frame.
+  "reuse last frame's ray" path is dead. Every pixel traces a fresh shadow ray every frame.
 
-So the honest description of the shipped denoiser, before this session, was: **a temporal
-reprojection for shadows, nothing at all for reflections, and a spatial filter that never runs.**
+**`rtShadowDenoiseForQuality` no longer returns 0 at every tier — this page originally said it did,
+and by the time it was committed that was already wrong.** The same commit that added this file
+(`31c06a4`) also changed the radius rungs elsewhere in `Voxi.cpp`, from 0 at every tier to `Low`/
+`Medium`/`High` = 2, `Epic` = 1 (`Off` stays 0, correctly, since RT is not running to have anything
+to filter). Nothing in that commit's own message mentions the change, and this page never caught up
+to its own sibling edit. The spatial shadow filter is therefore a **live pass in the shipped product**,
+not a permanent no-op — see the re-measurement note at the end of §6.
+
+So the honest description of the shipped denoiser is now: **a temporal reprojection for shadows, a
+spatial shadow filter that runs at every tier except Off, and a full spatial+temporal pipeline for
+reflections (§6).**
 
 ## 2. What NRD would need, and what this renderer has
 
@@ -34,17 +51,31 @@ NRD resolves noise using per-pixel G-buffer guides. Its three required inputs ar
 
 | NRD input | What it is | Does Aver have it? |
 |---|---|---|
-| `IN_MV` | Motion vectors; NVIDIA recommends 2.5D or 3D over 2D | **No.** Nothing in this engine produces motion vectors. |
-| `IN_VIEWZ` | Linearised view-space depth of primary hits | **No** — as a texture. Depth exists in the depth buffer; nothing resolves it for a compute pass. |
-| `IN_NORMAL_ROUGHNESS` | World normal + linear roughness + material ID, packed | **No.** Both exist only in pixel-shader registers. |
+| `IN_MV` | Motion vectors; NVIDIA recommends 2.5D or 3D over 2D | **Declared and implemented, but dormant** — see the correction below. |
+| `IN_VIEWZ` | Linearised view-space depth of primary hits | **Declared and implemented, but dormant** — same correction. |
+| `IN_NORMAL_ROUGHNESS` | World normal + linear roughness + material ID, packed | **Declared and implemented, but dormant** — same correction. |
 
-That is not a near miss. **Aver is a forward renderer**: `PSMainVoxi` returns a single `SV_TARGET`,
-and normal, roughness and albedo are local values that never reach a texture. The complete set of
-full-screen textures the Voxi shaders declare is the voxel volume, the shadow atlas, the GI-only
-shadow map, and the two ping-ponged RT history pairs. There is no G-buffer to guide anything with.
+That was not a near miss when this page was written, and the practical answer today is still "not
+usable" — but the reason changed underneath this page without the page saying so. **The very commit
+that added this file (`31c06a4`) also added the prerequisite §5 calls for**: `IDevice::
+setGBufferEnabled`, `gBufferVelocityTexture()`, `gBufferViewZTexture()` and
+`gBufferNormalRoughnessTexture()` (`RHI.hpp`), fully implemented — not just declared — in
+`D3D12Device.cpp` (velocity RG16F, view-space depth R32F, normal+roughness RGB10A2, ~54 MB when on,
+matching this page's own §5 estimate almost exactly). ~~**Nothing calls `setGBufferEnabled(true)`
+anywhere in the tree**~~ — **corrected 2026-09-09: the editor does, every frame, behind `--gbuffer`
+and `--gbuffer-debug` (`sandbox/src/SandboxApp.cpp`), and the viewport's G-buffer debug view reads
+all three accessors back. The packaged runtime still never turns it on.** It defaults off, so a
+build that leaves the flag alone allocates nothing and renders bit-identically to before it existed — and the Vulkan backend has no implementation at all, only the
+inert base-class default. So "Aver is a forward renderer with no G-buffer" is no longer quite right;
+"Aver has a G-buffer nothing turns on" is the current, more precise statement, and `PSMainVoxi` itself
+is unchanged — it still returns a single `SV_TARGET`, and the G-buffer above is written by the
+backend's own pass, not by that shader.
 
-The declaration `UpscalerNeeds::MotionVectors` exists in `RHIResources.hpp`, and its own comment
-already says the truth: nothing in this engine produces them.
+The declaration `UpscalerNeeds::MotionVectors` exists in `RHIResources.hpp`, and its comment no
+longer says nothing produces them — it says `gBufferVelocityTexture()` writes exactly this quantity
+whenever the (still-never-enabled) G-buffer is on, and that wiring it into `UpscalerInput::
+motionVectors` is "the next step, not this one," citing this very page. That next step has not been
+taken as of this correction.
 
 Two consequences follow, and the second is the one that matters:
 
@@ -78,18 +109,35 @@ one of two independent blockers. Refusing NRD on the same grounds is not a new p
 ## 4. The permissively-licensed alternative has the same problem
 
 **AMD FidelityFX Denoiser is MIT**, and this repository already vendors FidelityFX FSR 1 under
-exactly that licence, so the precedent and the review are both already done. It ships a
-spatio-temporal **shadow denoiser** built for at most one jittered shadow ray per pixel — which
-describes `rtShadow` precisely — and a **reflection denoiser**.
+exactly that licence, so the precedent and the review are both already done — and, as of the same
+day this page was investigated, so is the vendoring itself: it now also lives at
+`third_party/fidelityfx-denoiser` (header-only HLSL, no C++ side), its own README reaching the same
+conclusion this page does. It ships a spatio-temporal **shadow denoiser** built for at most one
+jittered shadow ray per pixel — which describes `rtShadow` precisely — and a **reflection denoiser**.
 
 It requires depth, **motion vectors** and normals.
 
-So the licence is not what is actually gating this. **The G-buffer is.** Any denoiser worth vendoring
-wants the same three buffers, and we have none of them.
+So the licence is not what is actually gating this. **The G-buffer is — or rather, was; see §2's
+correction.** Any denoiser worth vendoring wants the same three buffers. We now have them declared
+and, on D3D12, implemented, and the editor turns them on behind `--gbuffer`. **Superseded again on
+2026-09-09**: NRD is vendored and linked (`modules/render.nrd`), and the fourth input it needs —
+a per-pixel hit distance from the sky-occlusion ray, which nothing produced — is now written by
+`modules/render.voxi` to its own R16Unorm target. What is still missing is the pass that records
+NRD's dispatches; see `modules/render.nrd/README.md` for the current state rather than this page.
 
 ## 5. What to do instead
 
 **Do not vendor a denoiser. Build the prerequisite, then choose.**
+
+**Half of this has since happened, in the very commit that added this page (`31c06a4`), without this
+page being updated to say so — see the corrections in §2 and §4.** The denoiser (FidelityFX Denoiser,
+MIT) is vendored. The prerequisite is declared and, on D3D12, implemented. What has NOT happened is
+either half being wired to a consumer. (The "no code calls `setGBufferEnabled(true)`" that stood
+here was already false when written — see §2's correction.) No pass populates
+`UpscalerInput::motionVectors` from it, and Vulkan has no G-buffer implementation at all.
+The description immediately below is therefore still the accurate statement of what remains to be
+*built* in the sense of "connected and exercised," even though the raw render-target plumbing it
+describes already exists in the D3D12 backend:
 
 The prerequisite is a thin G-buffer plus motion vectors, written by the existing forward pass as
 extra render targets:
@@ -137,11 +185,14 @@ Not blocked on any of the above, because none of it needs a G-buffer:
 - **The reflection cutoff moved from 0.5 to 0.75 roughness**, with the fade demoted from mechanism to
   seam-hider across the last quarter of the range.
 
-**Still true, and still worth fixing:** `rtShadowDenoise` remains 0 at every tier. The spatial shadow
-filter is better than it was and still never runs. Turning it on is a measurement, not a code change,
-and it should be made against a **moving** camera — every frame budget this project recorded before
-2026-08-27 was taken with a parked one, which hid both the GI interval's ~10.5 ms benefit and the
-shadow tile's artefact.
+**No longer true, and this page said so for a while after it stopped being true:** `rtShadowDenoise`
+does not remain 0 at every tier — see the correction in §1. The spatial shadow filter, better than it
+was, now also runs (radius 2 at Low/Medium/High, 1 at Epic). Whether that turn-on was actually
+measured against a **moving** camera, the way this paragraph originally called for, is not stated
+anywhere in the commit that made the change (`31c06a4`) and this page finds no later measurement
+either — every frame budget this project recorded before 2026-08-27 was taken with a parked camera,
+which hid both the GI interval's ~10.5 ms benefit and the shadow tile's artefact, and nothing in the
+tree today says that gap has since been closed for this specific knob.
 
 ---
 
@@ -153,4 +204,6 @@ shadow tile's artefact.
   [1.3 manual](https://gpuopen.com/manuals/fidelityfx_sdk/techniques/denoiser/) — MIT, and its input requirements
 - [GPUOpen-Effects/FidelityFX-Denoiser](https://github.com/GPUOpen-Effects/FidelityFX-Denoiser) — the shader source
 - In-tree: `docs/ASSET_IMPORT.md` (licence policy), `third_party/fidelityfx-fsr/README.md` (the DLSS
-  and FSR 2/3 precedent), `docs/rendering/RENDERING.md` (the FidelityFX plan)
+  and FSR 2/3 precedent), `docs/rendering/RENDERING.md` (the FidelityFX plan),
+  `third_party/fidelityfx-denoiser/README.md` (the vendored denoiser itself, now in-tree),
+  `modules/rhi/include/aver/rhi/RHI.hpp` (the G-buffer declaration, `IDevice::setGBufferEnabled`)

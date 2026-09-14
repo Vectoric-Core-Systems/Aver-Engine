@@ -12,9 +12,29 @@ struct WindowDesc {
     u32 width = 1280;
     u32 height = 720;
     bool resizable = true;
+    // Created but NOT SHOWN. For a startup that puts a loading screen in front: the window is fully
+    // real -- WM_SIZE has fired from the SetWindowPos calls in create(), so width/height/dpiScale are
+    // established and the swapchain that reads them afterwards is correct -- it simply has no pixels
+    // on screen yet. Without this the editor sat behind the splash as a frozen grey rectangle for the
+    // whole load, which reads as a hang rather than as progress.
+    //
+    // The window is revealed with show(), NOT by a second create. Whoever sets this owns calling it.
+    bool startHidden = false;
     // False shows the window without taking focus. An automated capture run has no business
     // stealing the keyboard from whatever the machine's owner is doing.
     bool activate = true;
+    // BORDERLESS fullscreen -- a WS_POPUP sized to the monitor's full bounds, never DXGI's exclusive
+    // mode. Exclusive fullscreen takes ownership of the display mode, breaks alt-tab, and interacts
+    // badly with the editor's other windows; borderless costs nothing here because the swapchain is
+    // already sized from the client area either way.
+    //
+    // IGNORED WHEN activate IS FALSE, and that is load-bearing rather than a convenience: a capture
+    // run's window is a MEASURING INSTRUMENT. Every recorded gate probe is a pixel at a fixed rect
+    // inside a client area of a fixed size (the baselines carry `rect=0,270 2750x1639`), so a capture
+    // window that sized itself to whatever monitor it happened to run on would move all 223 baseline
+    // rows and mean nothing was comparable across machines. Interactive runs get fullscreen; capture
+    // runs keep the exact window the oracle was recorded through.
+    bool fullscreen = false;
 };
 
 // Minimal OS window (Win32 backend). create() returns false rather than aborting.
@@ -34,9 +54,28 @@ public:
 
     // Retitles a live window.
     void setTitle(const std::string& title);
+    // Reveals a window created with WindowDesc::startHidden. Idempotent and harmless on a window
+    // that is already visible, so a caller does not have to track which case it is in.
+    void show(bool activate = true);
 
     bool shouldClose() const { return shouldClose_; }
     void requestClose() { shouldClose_ = true; }
+
+    // MAY THE WINDOW CLOSE? Asked synchronously from inside WM_CLOSE, before shouldClose_ is set.
+    // Returning false vetoes the close and the app stays up.
+    //
+    // WHY A VETO AND NOT AN EVENT. WM_CLOSE already dispatches a WindowClose event, and an app could
+    // in principle react to it -- except that the same handler then sets shouldClose_, and
+    // Engine::run tests shouldClose() BEFORE calling frameStep(). So by the time an app could draw
+    // anything in response, the frame loop has already broken. Every unsaved-changes prompt the
+    // editor has was reachable only from its own File > Exit; the window's own X button and Alt+F4
+    // went straight past all of them and took the work with them.
+    //
+    // The guard runs on the message thread inside the window procedure, so it must only decide --
+    // set a flag, return. It must not block, and it must not itself try to close the window.
+    using CloseGuard = bool (*)(void* user);
+    void setCloseGuard(CloseGuard g, void* user) { closeGuard_ = g; closeGuardUser_ = user; }
+    bool mayClose() { return closeGuard_ ? closeGuard_(closeGuardUser_) : true; }
 
     u32 width() const { return width_; }
     u32 height() const { return height_; }
@@ -137,6 +176,8 @@ private:
     EventCallback callback_ = nullptr;
     void* callbackUser_ = nullptr;
     MessageHook messageHook_ = nullptr;
+    CloseGuard closeGuard_ = nullptr;
+    void* closeGuardUser_ = nullptr;
     OpenRequestHook openRequestHook_ = nullptr;
     void* openRequestHookUser_ = nullptr;
     bool hasPendingOpenRequest_ = false;

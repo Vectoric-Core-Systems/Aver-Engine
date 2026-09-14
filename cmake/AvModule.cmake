@@ -123,16 +123,41 @@ function(aver_deploy_shaders target dir)
                             "deploys nothing is a silent gap -- the shader loader would fall back "
                             "to an empty string and DXC would blame the missing declarations.")
     endif()
+    # THE DEPLOYED FILES ARE THE OUTPUT, not just a stamp beside them.
+    #
+    # This used to declare only ${target}.shaders.stamp. The stamp records "the sources were last
+    # seen at time T", which answers "did a shader change?" and cannot answer "is the shader still
+    # THERE?" -- so deleting bin/shaders/voxi.hlsl left every later build reporting OK with the file
+    # still gone. MEASURED: removed bin/shaders/viewport_icon.hlsl, rebuilt clean, still missing.
+    # shaderFile()'s own comment says what that costs -- DXC then fails on missing declarations
+    # rather than on a missing file, so the error names the wrong thing entirely.
+    #
+    # Naming them also makes a basename collision a CONFIGURE-TIME error instead of a silent
+    # overwrite: all fourteen call sites copy into one shared bin/shaders, so two modules shipping
+    # the same filename currently means one clobbers the other with nothing said. Ninja refuses two
+    # rules generating one path, so that now cannot be built at all. (None collide today -- checked.)
+    set(_av_deployed "")
+    foreach(_av_src IN LISTS _av_shader_files)
+        get_filename_component(_av_name "${_av_src}" NAME)
+        list(APPEND _av_deployed "${CMAKE_BINARY_DIR}/bin/shaders/${_av_name}")
+    endforeach()
+
     set(_av_stamp "${CMAKE_CURRENT_BINARY_DIR}/${target}.shaders.stamp")
     add_custom_command(
-        OUTPUT  "${_av_stamp}"
+        OUTPUT  ${_av_deployed} "${_av_stamp}"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/bin/shaders"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_av_shader_files} "${CMAKE_BINARY_DIR}/bin/shaders"
-        COMMAND ${CMAKE_COMMAND} -E touch "${_av_stamp}"
+        # TOUCHED BECAUSE copy_if_different PRESERVES THE SOURCE MTIME. Without this the deployed
+        # copy can be OLDER than the file it came from -- a source touched by a branch switch with
+        # no content change is copied over, so the destination keeps the PREVIOUS source's time.
+        # Ninja reads output-older-than-input as dirty, so the rule would then re-run on every
+        # single build, forever, and never come clean. Copying only on a real change and stamping
+        # the result keeps both properties: no needless rewrite, no perpetual rebuild.
+        COMMAND ${CMAKE_COMMAND} -E touch ${_av_deployed} "${_av_stamp}"
         DEPENDS ${_av_shader_files}
         COMMENT "${target}: shaders -> bin/shaders"
         VERBATIM)
-    add_custom_target(${target}.Shaders DEPENDS "${_av_stamp}")
+    add_custom_target(${target}.Shaders DEPENDS ${_av_deployed} "${_av_stamp}")
     add_dependencies(${target} ${target}.Shaders)
     set_target_properties(${target}.Shaders PROPERTIES FOLDER "modules/shaders")
 endfunction()

@@ -86,8 +86,30 @@ public:
     //
     // Left unset, every draw uses its base colour, which is exactly right for a caller that has no
     // material system at all (PtFurnaceTest brings its own geometry and never sets one).
+    //
+    // ONE STRUCT RATHER THAN A GROWING OUT-PARAMETER LIST. This started as a single float3 and has
+    // since needed a base-colour texture, a metal-rough texture, a normal map and three scalars;
+    // threading each as its own pointer makes every future field a signature change at both ends,
+    // and makes it easy to fill six of seven and leave the last reading whatever was on the stack.
+    struct ResolvedMaterial {
+        // THE FACTOR when baseColorTex is set, THE FINISHED COLOUR when it is not. That ambiguity is
+        // deliberate and is why one call answers both: a resolver that hands back the texture's mean
+        // AND its handle applies the texture twice, which reads as a uniformly too-dark scene with
+        // no assert and nothing logged.
+        f32 albedo[3] = {1, 1, 1};
+        // NEGATIVE MEANS LAMBERTIAN, matching PtSurface::roughness -- a resolver that knows nothing
+        // about gloss leaves this alone and the surface keeps the diffuse-only BSDF the tracer had
+        // before specular existed. When metalRoughTex is set these two are FACTORS multiplying it,
+        // exactly as the .ocmat authoring means them.
+        f32 roughness = -1.0f;
+        f32 metallic = 0.0f;
+        f32 normalScale = 1.0f;
+        rhi::TextureHandle baseColorTex = 0;
+        rhi::TextureHandle metalRoughTex = 0;
+        rhi::TextureHandle normalTex = 0;
+    };
     using AlbedoResolver = std::function<bool(rhi::BindingSetHandle set, const void* constants,
-                                              u32 bytes, f32 outAlbedo[3])>;
+                                              u32 bytes, ResolvedMaterial& out)>;
     void setAlbedoResolver(AlbedoResolver r) { resolveAlbedo_ = std::move(r); }
 
     const char* name() const override { return "Aver.PathTracer.SceneView"; }
@@ -134,6 +156,17 @@ private:
         rhi::MeshHandle mesh = 0;
         f32 world[16];
         f32 albedo[3];
+        // The material this draw's binding resolved to. Textures are kept as RHI HANDLES rather than
+        // resolved bindless indices because submitDraw runs during the frame's draw walk while
+        // residency is a PathTracer question answered at rebuildScene time; storing handles keeps
+        // the two apart and keeps drawsKey() hashing something stable (a handle is never recycled,
+        // an index could in principle be renumbered).
+        f32 roughness = -1.0f;
+        f32 metallic = 0.0f;
+        f32 normalScale = 1.0f;
+        rhi::TextureHandle baseColorTex = 0;
+        rhi::TextureHandle metalRoughTex = 0;
+        rhi::TextureHandle normalTex = 0;
         // 0.0 = opaque Lambertian (every draw the backend never marked `blended`); kDefaultGlassIor
         // for a blended one. See PtSurface::ior for why one field carries both the kind and the
         // value, and this class's own MATERIALS comment for why the value is a fixed constant.
@@ -163,6 +196,17 @@ public:
     void setQuality(u32 rung);
     u32  quality() const { return quality_; }
 
+    // R5/F6 (contrast-fix plan): true restores the pre-fix reference sky (skyColor() on every miss,
+    // unmatched to the raster's calibrated diffuse ambient); false (the default PtDispatch::
+    // legacyEnvironment already carries) is the matched, corrected environment. Idempotent, like
+    // setQuality above -- safe to call every frame from wherever the caller stores the console/CLI
+    // slot. A change RE-ARMS ACCUMULATION (resets sampleCursor_, not the scene or the target: no
+    // acceleration structure or resolution is affected) because every sample already summed into the
+    // buffer was drawn under the OTHER environment, same reasoning as the sun/sky-change branch in
+    // prePass(). Logs one AVER_INFO line on an actual change.
+    void setLegacyEnvironment(bool legacy);
+    bool legacyEnvironment() const { return legacyEnvironment_; }
+
 private:
     // An order-sensitive FNV-1a hash of drawsPrev_ (mesh, world bits, albedo bits) -- the exact same
     // shape and constants VoxiRenderer::giDrawsKey() uses, for the same reason: a cache whose
@@ -184,6 +228,19 @@ private:
     u32 accumWidth_  = kAccumWidthLow;
     u32 accumHeight_ = kAccumHeightLow;
     bool     haveCam_ = false;
+    // The lighting this accumulator's samples were drawn under. accumulate() packs only the camera
+    // into its constants -- the sun and sky reach the integrator through the shared per-frame block
+    // inside the shader -- so without this a moving sun blends two times of day into one mean with
+    // no reset and no warning. Compared the way VoxiRenderer::giSnapshotUnchanged compares it, whose
+    // comment records the two traps (padding in a by-value return, and cloudTime being a clock).
+    rhi::SkyAtmosphere sky_{};
+    bool     haveSky_ = false;
+    // R5/F6: mirrors into every accumulate() dispatch's PtDispatch::legacyEnvironment; see
+    // setLegacyEnvironment's own comment above.
+    bool     legacyEnvironment_ = false;
+    // Said once per restart cause, so a permanently-restarting accumulator is distinguishable from a
+    // working one in a log. It was silent before, which is why nobody could tell.
+    bool     camResetLogged_ = false;
 
     u64  sceneKey_ = 0;
     bool sceneReady_ = false;
@@ -260,16 +317,48 @@ private:
 
     // ---- the bounded numbers this stays inside; see the class comment's PERFORMANCE point ----
     //
-    // Bounded and independent of the swapchain: this is a reference view, never a render mode, and
-    // its cost must not scale with however large the editor's viewport happens to be. But it is no
-    // longer FIXED -- see setQuality() and kAccumLadder for why a single hardcoded 480x270 was the
-    // single most visible thing wrong with this view.
+    // Bounded and independent of the swapchain: its cost must not scale with however large the
+    // editor's viewport happens to be. But it is no longer FIXED -- see setQuality() and kAccumLadder
+    // for why a single hardcoded 480x270 was the single most visible thing wrong with this view.
+    //
+    // THIS USED TO READ "a reference view, NEVER a render mode", and that is now an open question
+    // rather than a settled one. It is still true of the class as it stands -- accumulation restarts
+    // on any camera change (see prePass), the denoiser is three spatial a-trous passes with no
+    // temporal component, and what a moving viewport shows is exactly one 8-sample step. Those are
+    // the things that would have to change, not this sentence. It is softened rather than deleted so
+    // that a reader does not take the old absolute as a reason not to ask.
     static constexpr u32 kAccumWidthLow  = 480;
     static constexpr u32 kAccumHeightLow = 270;
     static constexpr u32 kMaxBounces  = 4;
-    // 8 samples per still frame, at (bounces+1)*samples = 40 RayQuery traces per pixel per dispatch
-    // over 480x270 = ~5.2M traces/dispatch -- see PtSceneView.cpp's own comment at the accumulate()
-    // call site for how that compares to VoxiRenderer's own measured, TDR-conscious ray budget.
+    // The first bounce Russian roulette may terminate a path at; see PtDispatch::rouletteDepth for
+    // the technique and for why it is off unless a caller asks. THIS view asks and PtFurnaceTest does
+    // not, which is the whole reason the switch is a dispatch field rather than a shader define.
+    //
+    // 2, NOT 0, and with kMaxBounces at 4 that leaves bounces 2, 3 and 4 eligible. Bounces 0 and 1
+    // carry nearly all of a pixel's energy, so rouletting them buys almost no traversal -- a path
+    // killed at b=0 skips at most four iterations the miss/horizon exits often skip anyway -- while
+    // adding variance exactly where the image is brightest and any noise is most visible.
+    //
+    // MEASURED, and it is the largest single win available to this integrator. Sponza at Epic
+    // (1280x720, 4 bounces, 8 spp/step), --no-vsync, --gpu-timing, same camera, only this constant
+    // differing:
+    //
+    //     kRouletteDepth 0 (off) -- "PT accumulate" 44.72 ms
+    //     kRouletteDepth 2       -- "PT accumulate" 28.68 ms      36% cheaper
+    //
+    // AND THE IMAGE DID NOT MOVE: the probe read 10,9,9 in both runs. That pairing -- a third of the
+    // cost gone with a bit-identical probe -- is what "unbiased" means in practice, and it is the
+    // check to repeat if this constant is ever changed. A roulette that CHANGED the probe would mean
+    // the throughput division was wrong, not that the estimator had been tuned.
+    static constexpr u32 kRouletteDepth = 2;
+    // 8 samples per still frame. THE TRACE COUNT IS TWO PER BOUNCE, NOT ONE, and this comment said
+    // one for as long as next-event estimation has existed: the bounce ray is joined by ptDirectSun's
+    // shadow ray at every non-dielectric hit, which pt_pathtrace.hlsl:306 states outright ("COSTS ONE
+    // EXTRA RayQuery PER DIFFUSE HIT"). So the budget is up to (bounces+1)*2 = 10 traces per sample
+    // and 80 per pixel per dispatch -- 480x270 = ~10.4M traces/dispatch, twice the 5.2M this used to
+    // claim. The old figure was not a rounding error; it halved the headline number in every
+    // comparison drawn against it. See PtSceneView.cpp's own comment at the accumulate() call site
+    // for how the corrected budget sits beside VoxiRenderer's measured, TDR-conscious ray budget.
     static constexpr u32 kSamplesPerStep = 8;
     // Stops issuing further accumulate() dispatches once this many samples have landed, so leaving
     // the camera still for a long unattended session does not keep issuing GPU work forever. The
@@ -297,16 +386,47 @@ private:
     // what reads as a shimmering mess while flying. Spending the tier on samples instead would
     // sharpen an image nobody can see the pixels of.
     //
-    // COST, MEASURED, not predicted -- and it is NOT linear in pixels, which is why the top rung is
-    // where it is. On a real project with a moving camera, against a raster frame of 9.5 ms on the
-    // same scene:
+    // COST: WITHDRAWN. This comment used to carry a ladder --
     //
     //     Low 480x270  4.5 ms | Medium 640x360  5.0 ms | High 960x540  5.5 ms | Epic 1280x720  6.9 ms
     //
-    // 7.1x the pixels costs 1.5x the frame, so most of the bottom rung is fixed per-frame overhead
-    // rather than tracing -- and EVERY rung, including the top, is cheaper than the raster view it
-    // suppresses. The first draft of this comment asserted the opposite (that the top two rungs
-    // would be slower than raster); it was written before the measurement and was simply wrong.
+    // -- against "a raster frame of 9.5 ms", and concluded that EVERY rung is cheaper than the view
+    // it suppresses. That conclusion does not survive reading the code behind it, and it is recorded
+    // here rather than deleted because it was quoted for weeks:
+    //
+    //   THE NUMBERS ARE CPU WHOLE-FRAME PERIODS from --frame-time, not GPU spans, and they were set
+    //   beside GPU pass spans from the other renderer. Different quantities.
+    //   THE TRACED FRAME DOES STRICTLY LESS WORK. This class does not override suppressesWholeFrame(),
+    //   so it inherits `return suppressesScene()` and sets frameSuppressed_, which skips the deferred
+    //   sky, the blended replay and all particles/lines/chrome (D3D12Device.cpp :4545, :4578, :4786).
+    //   VoxiRenderer's own override is `debugViewActive()` -- false in ray-driven -- so THAT path
+    //   pays all three. The whole 2.6 ms margin is of the same order as the passes being skipped.
+    //   IT MEASURED A DIFFERENT TRACER. At the commit that recorded it (18210ce0) this shader had
+    //   zero texture fetches, no bindless, and no GGX lobe -- its own message says "still shades flat
+    //   per surface". Three mip-0 bindless samples per hit, an energy-LUT fetch and a two-lobe
+    //   specular branch have been added since.
+    //   AND IT WAS AGAINST THE RASTERISER. rtRenderMode defaulted to 0 then; ray-driven primary
+    //   visibility did not become the default until six days later.
+    //
+    // The rungs are still the right SHAPE -- resolution, not sample count, is what the tier should
+    // buy while the camera moves -- and that reasoning above is untouched by any of this. What is
+    // gone is the claim that any of it is cheaper than raster.
+    //
+    // AND THE REAL NUMBER, now that "PT accumulate" and "PT denoise" exist as GPU spans. Sponza (112
+    // entities), --no-vsync, --gpu-timing, Epic on both sides:
+    //
+    //     PT accumulate (1280x720)                    28.68 ms
+    //     Voxi ray-driven primary (2750x1639)         12.25 ms
+    //
+    // THE TRACER IS 2.3x SLOWER THAN THE PASS IT WAS SAID TO BEAT BY 5x, and per PIXEL it is worse
+    // still -- 0.92 M pixels against 4.5 M, so roughly 11x the cost each. This is with Russian
+    // roulette already saving it 36% (see kRouletteDepth). The old figure was not merely measured
+    // badly; it had the sign backwards.
+    //
+    // NOTE WHAT IS AND IS NOT BEING COMPARED. "Voxi ray-driven primary" is the WHOLE deferred shade
+    // in one draw, not just visibility, and the PT frame skips the sky, the blended replay and all
+    // chrome because it suppresses them. Neither of those rescues the ratio at this magnitude, but
+    // both belong in any statement of it.
     struct AccumRung { u32 width; u32 height; };
     static constexpr AccumRung kAccumLadder[4] = {
         { 480, 270},   // Low    -- 1.0x, what this view always used to be

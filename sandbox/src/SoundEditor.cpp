@@ -2,6 +2,7 @@
 // the structural edits are free functions, and for why this is a list rather than a canvas.
 
 #include "SoundEditor.hpp"
+#include "EditorKeybinds.hpp"
 
 #include "EditorIcons.hpp"
 #include "aver/core/Log.hpp"
@@ -17,12 +18,12 @@
 #  include "imgui.h"
 #endif
 
-// AVER_SOUND_EDITOR_AUDIO is defined by sandbox/CMakeLists.txt when Aver.Audio.Abi is linked into
+// AVER_WITH_AUDIO_ABI is defined by sandbox/CMakeLists.txt when Aver.Audio.Abi is linked into
 // this binary. GUARDED SEPARATELY FROM AVER_WITH_IMGUI ON PURPOSE, even though today the two are on
 // together: they mean different things, and conflating them would make "this build has no mixer"
 // read as "this build has no window". tests/editor's target defines neither, and a build configured
 // without the audio seam still compiles the whole tab -- it just cannot make a sound.
-#if AVER_SOUND_EDITOR_AUDIO
+#if AVER_WITH_AUDIO_ABI
 #  include "aver/audio/audio_abi.h"
 #endif
 
@@ -338,8 +339,7 @@ void SoundEditor::loadFromDisk() {
     // output is the node whose panel actually describes the sound, and it is where an author
     // reading somebody else's graph starts.
     selected_ = static_cast<i32>(graph_.outputNode);
-    undoStack_.clear();
-    redoStack_.clear();
+    history_.clear();
     previewPcm_.clear();
     previewError_.clear();
 }
@@ -373,27 +373,18 @@ void SoundEditor::onFileChanged() {
 }
 
 void SoundEditor::pushUndo() {
-    undoStack_.push_back(graph_);
-    constexpr usize kUndoCap = 200;   // GraphEditor::pushUndo's own cap
-    if (undoStack_.size() > kUndoCap) undoStack_.erase(undoStack_.begin());
-    redoStack_.clear();
+    history_.push(graph_);
 }
 
 void SoundEditor::undo() {
-    if (undoStack_.empty()) return;
-    redoStack_.push_back(graph_);
-    graph_ = std::move(undoStack_.back());
-    undoStack_.pop_back();
+    if (!history_.undo(graph_)) return;
     dirty_ = true;
     // The selection is an INDEX, and undo can shrink the array under it.
     if (!inRange(graph_, selected_)) selected_ = 0;
 }
 
 void SoundEditor::redo() {
-    if (redoStack_.empty()) return;
-    undoStack_.push_back(graph_);
-    graph_ = std::move(redoStack_.back());
-    redoStack_.pop_back();
+    if (!history_.redo(graph_)) return;
     dirty_ = true;
     if (!inRange(graph_, selected_)) selected_ = 0;
 }
@@ -409,7 +400,7 @@ void SoundEditor::deleteSelected() {
     if (!loaded_) return;
     pushUndo();
     const i32 next = snDeleteNode(graph_, selected_);
-    if (next < 0) { undoStack_.pop_back(); return; }
+    if (next < 0) { history_.cancelPush(); return; }
     selected_ = next;
     dirty_ = true;
 }
@@ -426,7 +417,7 @@ void SoundEditor::linkInto(i32 from, i32 to, u32 toInput) {
     if (!loaded_) return;
     pushUndo();
     const i32 moved = snAddLink(graph_, from, to, toInput);
-    if (moved < 0) { undoStack_.pop_back(); return; }
+    if (moved < 0) { history_.cancelPush(); return; }
     // The re-sort can have moved `to`; follow it, so the panel the author is looking at stays on
     // the node they were wiring rather than jumping to whatever landed at the old index.
     selected_ = moved;
@@ -436,7 +427,7 @@ void SoundEditor::linkInto(i32 from, i32 to, u32 toInput) {
 void SoundEditor::unlink(i32 from, i32 to, u32 toInput) {
     if (!loaded_) return;
     pushUndo();
-    if (!snRemoveLink(graph_, from, to, toInput)) { undoStack_.pop_back(); return; }
+    if (!snRemoveLink(graph_, from, to, toInput)) { history_.cancelPush(); return; }
     dirty_ = true;
 }
 
@@ -481,7 +472,7 @@ bool SoundEditor::renderPreview(std::string* why) {
 }
 
 void SoundEditor::stopPreview() {
-#if AVER_SOUND_EDITOR_AUDIO
+#if AVER_WITH_AUDIO_ABI
     if (previewVoice_ != 0) { aver_audio_stop(previewVoice_); previewVoice_ = 0; }
     if (previewSound_ != 0) {
         aver_audio_unload(previewSound_);
@@ -497,13 +488,22 @@ void SoundEditor::stopPreview() {
 
 #if AVER_WITH_IMGUI
 
+namespace {
+// The list/details split -- see EditorWidgets.hpp's own top comment for why this is a FRACTION
+// (SplitPane) rather than ActorEditor's pixel-width convention. 0.32f is this tab's own PRE-EXISTING
+// default (it used to be `avail.x * 0.32f`, recomputed fresh every frame with no persistence at
+// all) -- kept exactly, so adopting the shared helper changes draggability and persistence only.
+constexpr f32 kDefaultListFraction = 0.32f;
+constexpr const char* kPrefListSplit = "soundEditor.listSplit";
+} // namespace
+
 void SoundEditor::playPreview() {
     std::string why;
     if (!renderPreview(&why)) {
         AVER_ERROR("[SoundEditor] preview failed for '{}': {}", path_, why);
         return;
     }
-#if AVER_SOUND_EDITOR_AUDIO
+#if AVER_WITH_AUDIO_ABI
     stopPreview();
     // Idempotent, and 0 when the machine has no output device -- which the ABI states is not an
     // error. The editor has never opened the device for anything else, so this is where it happens.
@@ -693,7 +693,7 @@ void SoundEditor::draw(Engine& e) {
 
     if (ImGui::Button(ICON_SAVE " Save") ||
         (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
-         ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S, false))) {
+         editor::keybinds().pressed(editor::CommandId::AssetSave, ImGui::GetIO()))) {
         std::string why;
         if (!save(&why)) AVER_ERROR("[SoundEditor] save failed for '{}': {}", path_, why);
     }
@@ -732,17 +732,31 @@ void SoundEditor::draw(Engine& e) {
     const f32 rowH    = ImGui::GetFrameHeightWithSpacing();
     const f32 plotH   = ImGui::GetTextLineHeight() * 5.0f;
     const f32 reserve = rowH + plotH + ImGui::GetStyle().ItemSpacing.y * 4.0f;
-    const f32 listW = ImGui::GetContentRegionAvail().x * 0.32f;
+    // Draggable, persisted, through the shared SplitPane helper (EditorWidgets.hpp) -- see this
+    // file's own kDefaultListFraction comment for why 0.32f is not a new number. dpi is taken from
+    // the font metrics, the same proxy the reserve above already relies on.
+    const f32 dpi = ImGui::GetFontSize() / 16.0f;
+    const f32 avail = ImGui::GetContentRegionAvail().x;
+    const f32 minList = 140.0f * dpi, minDetails = 220.0f * dpi;
+    const f32 listW = splitPaneWidth(split_, kPrefListSplit, kDefaultListFraction, avail,
+                                      minList, minDetails);
     // Never squeezes the panes to nothing on a short window -- the transport scrolls away instead.
     const f32 paneH = std::max(ImGui::GetContentRegionAvail().y - reserve, rowH * 3.0f);
     if (ImGui::BeginChild("##sndlist", ImVec2(listW, paneH), true)) drawNodeList();
     ImGui::EndChild();
-    ImGui::SameLine();
+    drawSplitHandle(split_, "##sndsplit", kPrefListSplit, avail, minList, minDetails, 6.0f * dpi);
     if (ImGui::BeginChild("##snddetails", ImVec2(0, paneH), true)) drawDetails();
     ImGui::EndChild();
 
     ImGui::Separator();
     drawTransport();
+}
+
+// Restores the list/details split to its default proportion and persists that immediately -- see
+// AssetEditor.hpp's own resetLayout() comment for why "Reset Tab Layout" needs every tab to implement
+// this rather than just ActorEditor.
+void SoundEditor::resetLayout() {
+    resetSplitPane(split_, kPrefListSplit, kDefaultListFraction);
 }
 
 #else   // AVER_WITH_IMGUI
@@ -751,6 +765,9 @@ void SoundEditor::draw(Engine& e) {
 // undefined -- see tests/editor/CMakeLists.txt) still gets load / save / undo / edits and
 // renderPreview(); only the window is absent. GraphEditor.cpp and BtEditor.cpp do exactly this.
 void SoundEditor::draw(Engine& e) { (void)e; }
+
+// A headless build never lays the panels out at all, so there is nothing for a reset to restore.
+void SoundEditor::resetLayout() {}
 
 #endif  // AVER_WITH_IMGUI
 

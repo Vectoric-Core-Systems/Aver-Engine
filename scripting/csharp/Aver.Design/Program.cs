@@ -5,6 +5,7 @@
 // Output mirrors, field for field, the built-in scanner in modules/formats; that scanner is the
 // specification. `averdesign <file.cs>` prints JSON; `averdesign --probe` prints its version.
 using System.Globalization;
+using System.Reflection;
 using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
@@ -26,7 +27,12 @@ internal static class Program
     {
         if (args.Length == 1 && args[0] == "--probe")
         {
-            Console.Out.Write("averdesign 1\n");
+            // The leading "averdesign <schema>" is the CONTRACT: AverDesign.cpp accepts the tool on
+            // `rfind("averdesign", 0) == 0` and reads nothing further, so the Roslyn version rides
+            // along without changing what the caller parses. It is here because a tool built against
+            // one Roslyn and staged beside another is otherwise invisible, and the editor logs this
+            // whole line at AverDesign.cpp:147.
+            Console.Out.Write($"averdesign 1 roslyn {RoslynVersion()}\n");
             return 0;
         }
         if (args.Length != 1)
@@ -43,7 +49,15 @@ internal static class Program
         string text = DecodeUtf8(bytes, out int bomChars);
         var toByte = new ByteOffsets(text, bomChars);
 
-        SyntaxTree tree = CSharpSyntaxTree.ParseText(text);
+        // LanguageVersion.Latest, STATED RATHER THAN INHERITED. The no-options overload this used to
+        // call means LanguageVersion.Default, which is "the newest major this package happens to
+        // support" -- a value that moves silently with the PackageReference and reads, in source, as
+        // no decision at all. The tool's job is to read what the SDK's own csc compiles, and that is
+        // C# 14 today, so the intent is written down. Nothing here inspects diagnostics: a construct
+        // the parser does not know does not fail, it recovers, and the walk below then reports
+        // whatever the recovered tree happens to say.
+        SyntaxTree tree = CSharpSyntaxTree.ParseText(
+            text, new CSharpParseOptions(LanguageVersion.Latest));
         CompilationUnitSyntax root = tree.GetCompilationUnitRoot();
 
         var sb = new StringBuilder(64 * 1024);
@@ -54,6 +68,21 @@ internal static class Program
         sb.Append('}');
         Console.Out.Write(sb.ToString());
         return 0;
+    }
+
+    // The Roslyn build actually loaded, e.g. "5.6.0-2.26263.10" for the 5.6.0 package -- Roslyn stamps
+    // an internal build suffix that the package version does not carry, which is exactly why the
+    // assembly is asked rather than the version being written out here as a constant. Informational
+    // version where there is one, since the assembly version alone rounds every 5.6.x to the same four
+    // numbers; the "+<commit>" tail is cut because it is longer than the rest of the line and
+    // identifies nothing a reader here can act on.
+    private static string RoslynVersion()
+    {
+        Assembly asm = typeof(CSharpSyntaxTree).Assembly;
+        string? v = asm.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+        if (string.IsNullOrEmpty(v)) return asm.GetName().Version?.ToString() ?? "unknown";
+        int plus = v.IndexOf('+');
+        return plus < 0 ? v : v[..plus];
     }
 
     // Maps a UTF-16 char offset in the decoded text to a UTF-8 byte offset in the file.

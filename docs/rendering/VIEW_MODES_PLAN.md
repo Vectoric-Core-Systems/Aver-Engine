@@ -10,6 +10,24 @@ workflow concurrently, so every line number is "as read at the time of this pass
 file will still read that way tomorrow; and per this task's own rules, nothing here has been built or
 run — every behavioural claim is a trace through source, not a screenshot.
 
+> **The caveat above was not hypothetical — corrected 2026-09-02.** Commit `063e84e` ("Compress
+> comments in the eight heaviest source files") landed the same day as this plan and shrank comment
+> blocks, unevenly, in `SandboxApp.cpp`, `D3D12Device.cpp`, `VoxiRenderer.cpp`, `VulkanCommon.hpp` and
+> `VulkanDevice.cpp` — five of the files this plan cites by line number. Spot-checked against the tree
+> as it reads today: `scenePipeline()`'s wireframe decline, quoted below as `VoxiRenderer.cpp:2068-
+> 2071`, is now at `:2640`; `suppressesScene()`/`suppressesWholeFrame()`, quoted as `:1860`/`:1867`,
+> are now at `:2329`/`:2336`. Every other line number below has almost certainly moved by a similar,
+> uneven amount and should be re-derived from the quoted symbol or code snippet, not trusted as a
+> coordinate. The code and mechanisms shown at each citation were re-checked for this correction pass
+> and still read exactly as described; only the numbers are stale. Separately, as of this same pass,
+> none of this plan's changes have shipped: no `ViewMode` enum exists in `SandboxApp.cpp`, no
+> `ShadingOverride`/`setFeatureCostView` exists anywhere in the RHI or Voxi headers, and no
+> `IDevice::frameSuppressed()` accessor exists — the private `frameSuppressed_` member §1b describes
+> does exist on both backends now and is already used to gate sky/particle drawing under ray-driven
+> mode, but it is still not exposed, and the selection outline (now `SandboxApp.cpp:5966`, moved from
+> the `:5450` cited below) still guards on `sceneSuppressed()`, exactly the bug §1b describes. This
+> remains a plan, not a report.
+
 ---
 
 ## 1. The two bugs
@@ -458,9 +476,19 @@ The switch already exists and is already dispatched per draw, not baked into any
 s.model = gShadingModel;
 ```
 
+> **STATUS, 2026-09-08: the Unlit half of this plan has LANDED (31fe41f1), and the analysis below
+> describes the tree BEFORE it. What changed: `writeShadingConstants` takes an `unlit` argument on
+> both backends and writes `AVER_MODEL_UNLIT`; D3D12's `if (unlit_) break;` diversion is gone;
+> `s.displayColor` carries the sampled albedo rather than the raw factor; the GPU cluster path's
+> hand-built PerObject block honours the mode too; and PSRayDriven answers it directly from a
+> pass-level `gViewParams`, so Unlit now works under ray-driven primary visibility and the editor
+> no longer disables it. WIREFRAME is still unavailable in ray-driven, and this document's verdict
+> on that -- structurally impossible as currently built -- still stands, for the reason given: it
+> needs a different rasteriser state rather than a different shading branch.
+
 `gShadingModel` is a `uint` inside `PerObject` (`RHIShaders.cpp:151-155`), a 32-dword root-constant
-block rewritten by every `drawMesh()` call via `writeShadingConstants()`. Today, every writer of that
-slot hardcodes `AVER_MODEL_STANDARD`, with no exception anywhere in the tree:
+block rewritten by every `drawMesh()` call via `writeShadingConstants()`. At the time of writing,
+every writer of that slot hardcoded `AVER_MODEL_STANDARD`, with no exception anywhere in the tree:
 
 ```cpp
 // D3D12Device.cpp:211-213 and byte-identically VulkanDevice.cpp:377-379
@@ -473,8 +501,9 @@ const u32 shadingModel = 0;   // AVER_MODEL_STANDARD
 ```
 
 So the switch arm is real and correctly implemented downstream (`averShadeDirect`/`averShadeIndirect`
-at `PbrShaders.cpp:580-591` and `:660-679` both have working `AVER_MODEL_UNLIT` cases) but 100% dead
-today, because nothing ever writes anything else into the slot. Making Unlit real is, for the ordinary
+at `PbrShaders.cpp:580-591` and `:660-679` both have working `AVER_MODEL_UNLIT` cases) but was 100%
+dead, because nothing ever wrote anything else into the slot. Three writers do now -- see the
+status note at the top. Making Unlit real is, for the ordinary
 raster and cluster paths, a matter of adding exactly one more writer — a per-frame override, checked
 right before the existing assignment:
 

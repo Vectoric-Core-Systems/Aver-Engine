@@ -13,7 +13,10 @@
 // byte-identically through GraphEditor's real save() path (not just the pure autoLayoutPositions()
 // function in isolation, which GraphEditorGeometryTest already covers).
 #include "GraphEditor.hpp"
+#include "GraphNodeDefs.hpp"
+#include "LevelClassSave.hpp"
 
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 
 #include <cstdio>
@@ -453,6 +456,58 @@ static std::string variablesFixtureText() {
         "OUT gv value\n";
 }
 
+// A Const node's literal is EDITABLE, and both copies of it agree on disk.
+//
+// THE BUG THIS PINS, and it is the reason every graph in this repo is hand-written text: a Const
+// spawned from the palette declared no `value` attribute, so the details panel drew "This node type
+// has no attributes" and offered nowhere to type a number. Every constant in an editor-built graph
+// compiled to its spawn default of 0, permanently -- no speed, no duration, no key code, no
+// direction could be authored without leaving the editor.
+//
+// AND THE SECOND HALF, which is what makes this more than a one-line catalog change: the literal is
+// written into the file TWICE -- the NODE line's `value=` and the output PIN's default. The C#
+// parser turns both into a ConstantOutput for the same node and the compiler takes FirstOrDefault,
+// so the attribute wins only because a NODE line precedes its own PIN lines. Correct, resting on
+// emission order alone. Asserting BOTH land is what stops a future writer change from silently
+// resetting every constant in every graph to its spawn default.
+static void testConstNodeValueIsEditable() {
+    AVER_INFO("=== a Const node's value can be authored, and both copies agree ===");
+    const std::string tmp = (std::filesystem::path(scratchDir()) / "const_value_test.ocgraph").string();
+    // A raw string literal, for the reason graphStarterText gives: tooling in this repo has eaten a
+    // backslash-n four times now, landing a real newline inside a narrow literal and producing a wall
+    // of C2001. Raw literals cannot be mangled that way.
+    writeFile(tmp, R"(OCGRAPH 1
+DOMAIN gameplay
+NAME ConstTest
+NODE cf ConstFloat 0 0
+PIN cf value out float 0
+)");
+
+    GraphEditor ed(tmp);
+    check(ed.setAttribute("cf", "value", "0.35"),
+          "setAttribute('cf', 'value', ...) succeeds -- the attribute is declared now");
+
+    const fmt::OcGraphNode* cf = nullptr;
+    for (const auto& n : ed.graph().nodes) if (n.id == "cf") { cf = &n; break; }
+    check(cf != nullptr, "the Const node is still there");
+    if (cf) {
+        const GraphNodeAttribute a = getNodeAttribute(*cf, "value");
+        check(a.found && a.value == "0.35", "the NODE line carries value=0.35");
+        bool pinMatches = false;
+        for (const fmt::OcGraphPin& p : cf->pins)
+            if (p.isOutput && p.name == "value") pinMatches = (p.defaultValue == "0.35");
+        check(pinMatches,
+              "and the output PIN's default was updated to match, so the file cannot contradict itself");
+    }
+
+    std::string why;
+    check(ed.save(&why), "it saves (why='" + why + "')");
+    const std::string onDisk = readFile(tmp);
+    check(onDisk.find("value=0.35") != std::string::npos, "value=0.35 reached the file");
+    check(onDisk.find("PIN cf value out float 0.35") != std::string::npos,
+          "and so did the pin default -- both copies, one number");
+}
+
 static void testVariablesParseAndByteIdenticalRoundTrip() {
     AVER_INFO("=== variables: parse into GraphEditor::variables() and round-trip byte-identically ===");
     const std::string text = variablesFixtureText();
@@ -852,6 +907,55 @@ static void testAddingAnEventNodeAlsoDeclaresItsEntry() {
     check(ed.save(&why), "save() succeeds (why='" + why + "')");
     check(readFile(tmp).find("ENTRY " + tickId + " OnTick") != std::string::npos,
           "and the ENTRY record reached the file");
+}
+
+// SetControlRig dropped from the palette must carry weight=1 INTO THE FILE.
+//
+// THE FAILURE THIS FORBIDS IS SILENT AT EVERY LAYER. Both graph compilers fall back to a literal 0
+// for an input pin with no LINK and no PINVAL. For every other node in the palette that zero is a
+// harmless starting value; for this one it means the rig is attached, its asset loads, its bone
+// names resolve against the skeleton -- and then every op is scaled to nothing. The character simply
+// stands there, exactly as if the rig had been authored for a different skeleton, with no warning
+// from the loader, the compiler, the editor or the rig system.
+//
+// So the default has to be real data in the saved file, not a number that only exists in the
+// palette's declaration. This is also the assertion the C# side cannot make: those delegates are
+// DynamicMethods whose GetMethodBody() throws, so ControlRigNodeTests.cs can prove a float reaches
+// the call but not WHICH float. Here the file itself is the evidence.
+static void testControlRigNodeCarriesItsWeightDefault() {
+    AVER_INFO("=== a SetControlRig dropped from the palette saves weight=1, not 0 ===");
+    const std::string tmp = (std::filesystem::path(scratchDir()) / "controlrig_default.ocgraph").string();
+    writeFile(tmp, "OCGRAPH 1\nNAME R\n");
+    GraphEditor ed(tmp);
+
+    const std::string rigId = ed.addNodeFromCatalog("SetControlRig", Vec2{60.0f, 60.0f});
+    check(!rigId.empty(), "the catalog knows SetControlRig");
+
+    const fmt::OcGraphNode* n = nullptr;
+    for (const fmt::OcGraphNode& candidate : ed.graph().nodes)
+        if (candidate.id == rigId) n = &candidate;
+    check(n != nullptr, "and the node reached the graph");
+
+    if (n) {
+        const fmt::OcGraphPin* weight = nullptr;
+        for (const fmt::OcGraphPin& p : n->pins)
+            if (p.name == "weight") weight = &p;
+        check(weight != nullptr, "it has a weight pin");
+        if (weight) {
+            check(weight->type == "float", "which is a float, got '" + weight->type + "'");
+            check(weight->defaultValue == "1",
+                  "and defaults to 1 -- NOT 0, which would attach a rig that does nothing at all. Got '" +
+                      weight->defaultValue + "'");
+        }
+    }
+
+    std::string why;
+    check(ed.save(&why), "save() succeeds (why='" + why + "')");
+    const std::string onDisk = readFile(tmp);
+    check(onDisk.find("weight") != std::string::npos, "the weight pin reached the file");
+    check(onDisk.find("weight in float 1") != std::string::npos,
+          "carrying its default of 1, so the compilers never see an unwired weight for an "
+          "editor-made node");
 }
 
 static void testDeletingANodeTakesItsEntryAndOutRecords() {
@@ -1267,10 +1371,519 @@ static void testLoadFailure() {
     check(!why.empty(), "the failure reason is non-empty, not a silent false");
 }
 
+static void testContentBrowserStarterOpensAndKeepsItsClass() {
+    AVER_INFO("=== the Content Browser's starter graph opens, and keeps the CLASS line ===");
+
+    // WHAT THIS GUARDS. "New Aver Node Graph" writes graphStarterText() and opens the file. The C++
+    // OcGraphData does not model the CLASS record at all, so the obvious implementation -- build an
+    // OcGraphData and hand it to fmt::saveOcgraph -- would produce a graph with NO CLASS LINE. It
+    // would open cleanly, look finished, and be impossible to place in a level, because a level
+    // placement names a class rather than a file. Nothing about that failure is visible at the moment
+    // it happens.
+    //
+    // So the starter is written as TEXT, and this asserts the property that forced it.
+    const std::string dir = scratchDir();
+    const std::string path = dir + "/NewGraph.ocgraph";
+    const std::string text = graphStarterText("NewGraph");
+
+    check(text.find("CLASS AN_NewGraph") != std::string::npos,
+          "the starter declares a class derived from the file stem");
+    check(text.find("OCGRAPH 1") == 0, "and opens with the format header");
+    check(text.find("DOMAIN gameplay") != std::string::npos, "and names its domain");
+
+    writeFile(path, text);
+
+    // It parses at all, through the same reader the editor uses.
+    fmt::OcGraphData parsed;
+    std::string err;
+    check(fmt::parseOcgraph(text, parsed, &err), "it parses: " + err);
+    check(parsed.name == "NewGraph", "with the NAME the stem gave it, got '" + parsed.name + "'");
+
+    // And the tab opens it -- the step the menu item takes immediately after writing.
+    auto ed = makeGraphEditor(path);
+    check(ed != nullptr, "the editor the create path opens for it ACCEPTS it");
+
+    if (ed) {
+        // A load -> save with no edits must be byte-identical, which is this editor's stated contract.
+        // For the starter that is the CLASS line's survival: it is an unrecognised record, carried
+        // only by writeOcgraph's pass-through of the original text, so a save that dropped it would
+        // silently un-place every instance of this class in every level.
+        std::string why;
+        check(ed->save(&why), "and saves it back: " + why);
+        const std::string after = readFile(path);
+        check(after == text, "byte-identically -- the unmodelled CLASS record survived the round trip");
+        check(after.find("CLASS AN_NewGraph") != std::string::npos,
+              "and is still there to be named by a placement");
+    }
+
+    // AND THE FALSIFICATION, kept rather than run once and discarded: the obvious implementation
+    // really does lose the class. Round-tripping the starter through OcGraphData and fmt::saveOcgraph
+    // -- which is how a starter would naturally be built, and how this one nearly was -- drops the
+    // CLASS line, because the struct has no field for it and saveOcgraph writes fresh with no
+    // original text to pass through. If this check ever starts failing, the C++ layer has learned to
+    // model CLASS and graphStarterText may go back to being structured data.
+    {
+        const std::string viaStruct = dir + "/viaStruct.ocgraph";
+        fmt::OcGraphData g;
+        std::string err;
+        check(fmt::parseOcgraph(text, g, &err), "the starter parses into an OcGraphData: " + err);
+        check(fmt::saveOcgraph(viaStruct, g, &err), "which saveOcgraph will happily write: " + err);
+        const std::string lost = readFile(viaStruct);
+        check(lost.find("CLASS") == std::string::npos,
+              "and the CLASS line is GONE from it -- which is why the starter is written as text");
+        check(lost.find("NAME NewGraph") != std::string::npos,
+              "while everything the struct DOES model survives, so the loss is silent");
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
+static void testClassPlacementsCarryTheEditorsMoves() {
+    AVER_INFO("=== a moved graph-class placement survives the save ===");
+
+    // THE BUG THIS ENCODES. saveLevel used to write class placements straight from the copy it read
+    // off disk, defended by a comment saying "the editor cannot currently EDIT a class placement
+    // (there is no entity to select and drag)". The premise was false: spawnClassPlacements spawns a
+    // real entity per placement, aver_fw_spawn's handle IS a scene entity, and the World Outliner
+    // lists anything with a mesh or a name. So you could select a placed graph class, drag it, save,
+    // reload -- and find it exactly where it started, with nothing logged. A discarded edit.
+
+    std::vector<fmt::OcWorldPlacement> authored(3);
+    for (auto& p : authored) { p.x = 1; p.y = 2; p.z = 3; p.sx = p.sy = p.sz = 1; }
+    authored[0].className = "AN_Alpha";
+    authored[1].className = "AN_Beta";
+    authored[2].className = "AN_Gamma";
+    authored[2].snapToGround = true;
+    authored[2].z = 25;            // an OFFSET above the ground, not a height
+
+    // Placement 0 never spawned -- its class was not declared, which is a warning and not an error,
+    // and is the ordinary state of a level opened before its project's scripts are compiled.
+    // THIS IS THE PAIRING TRAP: the first live entity is the SECOND placement.
+    std::vector<editor::LevelClassInstance> live = {{1, 41}, {2, 42}};
+
+    const auto transformOf = [](int32_t e, Transform& xf) {
+        if (e == 41) { xf.position = Vec3{100, 200, 300}; xf.scale = Vec3{2, 2, 2}; return true; }
+        if (e == 42) { xf.position = Vec3{-50, -60, 999}; xf.scale = Vec3{1, 1, 1}; return true; }
+        return false;   // anything else is gone
+    };
+
+    std::vector<fmt::OcWorldPlacement> out;
+    editor::appendClassPlacements(authored, live, transformOf, out);
+
+    check(out.size() == 3, "every placement is written -- none is dropped for want of an entity");
+    if (out.size() != 3) return;
+
+    check(out[0].className == "AN_Alpha" && out[0].x == 1 && out[0].y == 2 && out[0].z == 3,
+          "the one with no live entity is written EXACTLY as it was read");
+
+    check(out[1].className == "AN_Beta",
+          "the entity paired with placement 1 landed on placement 1, not placement 0 -- pairing is by "
+          "recorded index, and the two vectors are not parallel when a class fails to resolve");
+    check(out[1].x == 100 && out[1].y == 200 && out[1].z == 300,
+          "and it carries the position the editor moved it to");
+    check(out[1].sx == 2 && out[1].sy == 2 && out[1].sz == 2, "and the scale");
+
+    check(out[2].x == -50 && out[2].y == -60,
+          "a SNAPPED placement moves in x and y like any other");
+    check(out[2].z == 25,
+          "but keeps its authored z, because snap makes z an offset above the ground and the live "
+          "entity's z is the resolved world height -- writing 999 back would bake the terrain in and "
+          "the placement would climb on every save/load");
+}
+
+static void testPaletteSearchRanksSensibly() {
+    AVER_INFO("=== the add-node palette search ===");
+
+    // 240 node types across 23 categories used to be reachable only through a submenu per category
+    // with no filter, so finding a node meant already knowing which family it was filed under.
+    // The ranking is the part with logic in it, and a flat substring match gets it wrong.
+
+    check(graphPaletteSearch("", kDomainGameplay).empty(),
+          "an empty query matches nothing -- the caller shows its category menus instead");
+    check(graphPaletteSearch("zzzznotanode", kDomainGameplay).empty(),
+          "and a query nothing matches returns nothing rather than everything");
+
+    {
+        const auto hits = graphPaletteSearch("add", kDomainGameplay);
+        check(!hits.empty(), "'add' finds something");
+        if (!hits.empty()) {
+            // THE RANKING TEST. `Add` starts with the query; `VecAdd` merely contains it. A flat
+            // substring match would order them by catalog position and could put VecAdd first.
+            check(hits[0]->displayName.size() >= 3 &&
+                  editor::detail::ciFind(hits[0]->displayName, "add") == 0,
+                  "and the best match STARTS with it, got '" + hits[0]->displayName + "'");
+
+            usize add = hits.size(), vecAdd = hits.size();
+            for (usize i = 0; i < hits.size(); ++i) {
+                if (hits[i]->typeId == "Add")    add = i;
+                if (hits[i]->typeId == "VecAdd") vecAdd = i;
+            }
+            if (add < hits.size() && vecAdd < hits.size())
+                check(add < vecAdd, "Add outranks VecAdd, which only contains the query");
+        }
+    }
+
+    {
+        // A category name is searchable too, which is the whole point for someone who knows the
+        // family but not the node: "vector" should reach the Vector rows even though none of their
+        // display names contain the word.
+        const auto hits = graphPaletteSearch("vector", kDomainGameplay);
+        check(!hits.empty(), "a CATEGORY name finds its nodes");
+        bool anyVector = false;
+        for (const auto* d : hits) if (d->category == "Vector") anyVector = true;
+        check(anyVector, "and they really are the Vector family");
+    }
+
+    {
+        // Domain filtering must hold, for the reason the category menus filter: offering a gameplay
+        // node to a material graph offers a node whose only outcome is a compile error.
+        const auto play = graphPaletteSearch("branch", kDomainGameplay);
+        const auto mat  = graphPaletteSearch("branch", kDomainMaterial);
+        // NOT A VACUOUS PAIR: the gameplay side must actually find Branch, or "material found none"
+        // would be satisfied by a search that finds nothing anywhere.
+        check(!play.empty(), "'branch' is a real gameplay node");
+        check(mat.empty(),
+              "and a MATERIAL graph is not offered it -- a material has nothing to branch on, and "
+              "suggesting it would suggest a node whose only outcome is a compile error, got " +
+              std::to_string(mat.size()) + " hit(s)");
+        for (const auto* d : mat)
+            check((d->domain & kDomainMaterial) != 0u,
+                  "a material search never returns a gameplay-only node (" + d->typeId + ")");
+    }
+
+    {
+        // The cap must be a cap, and the count must be honest about what it hides -- a truncated list
+        // that looks complete teaches the reader that a node does not exist.
+        const auto capped = graphPaletteSearch("e", kDomainGameplay, 5);
+        check(capped.size() <= 5, "the limit is respected, got " + std::to_string(capped.size()));
+        const usize total = graphPaletteSearchCount("e", kDomainGameplay);
+        check(total >= capped.size(), "and the uncapped count is at least as large, got " +
+              std::to_string(total));
+    }
+
+    // Function rows stay out, for the same reason the category menu skips them: they are created by
+    // the Functions panel, which knows which function they belong to, and a bare one has no pins.
+    for (const auto* d : graphPaletteSearch("function", kDomainGameplay))
+        check(d->category != "Function", "no bare Function row is offered (" + d->typeId + ")");
+}
+
+static void testCopyPasteRemapsIdsAndLinks() {
+    AVER_INFO("=== copy / paste / duplicate ===");
+
+    const std::string dir = scratchDir();
+    const std::string path = dir + "/paste.ocgraph";
+    // A RAW LITERAL: the escape for a newline does not survive every tool that writes this file,
+    // and MSVC reports the result as a wall of "newline in string literal". Nothing to escape here.
+    writeFile(path, R"(OCGRAPH 1
+DOMAIN gameplay
+NAME Paste
+NODE tick OnTick
+NODE a Add
+NODE b Add
+LINK a.result b.a
+ENTRY tick OnTick
+)");
+
+    auto ed = makeGraphEditor(path);
+    check(ed != nullptr, "the fixture opens");
+    if (!ed) return;
+    auto* g = static_cast<GraphEditor*>(ed.get());
+
+    const usize nodes0 = g->graph().nodes.size();
+    check(nodes0 == 3, "the fixture parsed three nodes, got " + std::to_string(nodes0));
+    const usize links0 = g->graph().links.size();
+
+    // Copy the two Add nodes AND the link between them.
+    g->selectNodes({"a", "b"});
+    check(g->selectedNodes().size() == 2, "two nodes select, got " + std::to_string(g->selectedNodes().size()));
+    g->copySelection();
+    g->pasteClipboard(Vec2{500.0f, 500.0f});
+
+    check(g->graph().nodes.size() == nodes0 + 2, "two nodes arrived, got " +
+          std::to_string(g->graph().nodes.size() - nodes0));
+    check(g->graph().links.size() == links0 + 1,
+          "and the link BETWEEN them came too, got " +
+          std::to_string(g->graph().links.size() - links0));
+
+    // THE REMAP IS THE POINT. The pasted link must join the two NEW nodes, not reach back into the
+    // originals -- a copy wired to the thing it was copied from is the one outcome this must not have.
+    const auto& pasted = g->selectedNodes();
+    check(pasted.size() == 2, "the paste is what is selected afterwards");
+    if (pasted.size() == 2) {
+        check(pasted[0] != "a" && pasted[1] != "b", "the copies have new ids");
+        bool joined = false;
+        for (const auto& l : g->graph().links)
+            if ((l.sourceNode == pasted[0] && l.destNode == pasted[1]) ||
+                (l.sourceNode == pasted[1] && l.destNode == pasted[0])) joined = true;
+        check(joined, "and the new link joins the two COPIES, not the originals");
+
+        for (const auto& l : g->graph().links) {
+            const bool srcNew = l.sourceNode == pasted[0] || l.sourceNode == pasted[1];
+            const bool dstNew = l.destNode   == pasted[0] || l.destNode   == pasted[1];
+            check(srcNew == dstNew,
+                  "no link straddles the copy and the original (" + l.sourceNode + " -> " +
+                  l.destNode + ")");
+        }
+    }
+
+    // A LINK WITH ONE END OUTSIDE THE SELECTION IS NOT COPIED. Selecting only `b` copies no link,
+    // because the link's source `a` was not part of the copy and has nothing to map to.
+    {
+        const usize before = g->graph().links.size();
+        g->selectNodes({"b"});
+        g->copySelection();
+        g->pasteClipboard(Vec2{700.0f, 700.0f});
+        check(g->graph().links.size() == before,
+              "copying one end of a link copies no link at all, got " +
+              std::to_string(g->graph().links.size() - before) + " new");
+    }
+
+    // AN EVENT NODE PASTED GETS ITS OWN ENTRY, exactly as one dropped from the palette does. Without
+    // it the node exists, the graph saves, and the event never fires -- with no error at any layer.
+    {
+        const usize entries = g->graph().entryPoints.size();
+        g->selectNodes({"tick"});
+        g->copySelection();
+        g->pasteClipboard(Vec2{900.0f, 900.0f});
+        check(g->graph().entryPoints.size() == entries + 1,
+              "a pasted OnTick carries an ENTRY record, got " +
+              std::to_string(g->graph().entryPoints.size() - entries));
+        if (!g->selectedNodes().empty()) {
+            bool found = false;
+            for (const auto& e : g->graph().entryPoints)
+                if (e.first == g->selectedNodes()[0] && e.second == "OnTick") found = true;
+            check(found, "and it names the pasted node and the right event");
+        }
+    }
+
+    // Undo puts each paste back -- one pushUndo per paste, not per node.
+    {
+        const usize n = g->graph().nodes.size();
+        g->undoForTest();
+        check(g->graph().nodes.size() < n, "undo removes a whole paste at once, not one node of it");
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
 static void testWrongExtensionIsRejectedByFactory() {
     AVER_INFO("=== factory only claims .ocgraph ===");
     check(makeGraphEditor("something.ocmesh") == nullptr, "makeGraphEditor declines a .ocmesh path");
     check(makeGraphEditor("something.OCGRAPH") != nullptr, "makeGraphEditor accepts .ocgraph case-insensitively");
+}
+
+// ==================================================================================== break links =
+// Break Links keeps the NODES and removes only the WIRES. Worth a test rather than an eyeball
+// because "delete the links touching these nodes" and "delete these nodes" are one careless
+// predicate apart, and the failure -- nodes silently gone -- would be blamed on Delete.
+//
+// It is also the only part of the new node context menu with any logic in it: the rest of that menu
+// calls copySelection/pasteClipboard/duplicateSelection/deleteSelection, which are already covered.
+static void testBreakLinksKeepsTheNodes() {
+    AVER_INFO("=== Break Links removes the wires on a selection and leaves everything else ===");
+
+    // c1 -> add.a, c2 -> add.b, and an UNTOUCHED pair d1 -> other.a, so this can tell "removed the
+    // selection's links" apart from "removed all links" -- a predicate bug would pass without it.
+    //
+    // A RAW STRING LITERAL, not a run of quoted lines: there is then no escape sequence anywhere in
+    // the fixture for a tool to mangle on the way in, which is what happened to this test's first
+    // draft (every "\n" arrived as a real newline and the file would not compile).
+    const std::string text = R"(OCGRAPH 1
+NODE c1 ConstFloat 0 0
+PIN c1 value out float 1
+NODE c2 ConstFloat 0 60
+PIN c2 value out float 2
+NODE add Add 200 0
+PIN add a in float
+PIN add b in float
+PIN add result out float
+NODE d1 ConstFloat 0 200
+PIN d1 value out float 3
+NODE other Add 200 200
+PIN other a in float
+PIN other b in float
+PIN other result out float
+LINK c1.value add.a
+LINK c2.value add.b
+LINK d1.value other.a
+)";
+
+    const std::string tmp = (std::filesystem::path(scratchDir()) / "break_links.ocgraph").string();
+    writeFile(tmp, text);
+
+    GraphEditor ed(tmp);
+    check(ed.graph().links.size() == 3, "three links to start with");
+    check(ed.graph().nodes.size() == 5, "five nodes to start with");
+
+    // Nothing selected: a no-op, and specifically not an undo step that changes nothing.
+    ed.breakLinksOnSelection();
+    check(ed.graph().links.size() == 3, "with nothing selected it does nothing");
+    check(!ed.dirty(), "and does not mark the document dirty for a no-op");
+
+    ed.selectNodes({"add"});
+    check(ed.selectionHasLinks(), "the Add node has links, so the menu item is enabled");
+    ed.breakLinksOnSelection();
+
+    check(ed.graph().nodes.size() == 5, "EVERY NODE SURVIVES -- this breaks wires, not nodes");
+    check(ed.graph().links.size() == 1, "the two links touching the selection are gone");
+    const bool untouchedSurvives = ed.graph().links.size() == 1 &&
+                                   ed.graph().links[0].sourceNode == "d1" &&
+                                   ed.graph().links[0].destNode == "other";
+    check(untouchedSurvives, "and the unrelated d1 -> other link is untouched");
+    check(ed.dirty(), "the document is dirty afterwards");
+    check(!ed.selectionHasLinks(), "the selection has no links left, so the item greys out again");
+
+    // ONE undo step for both wires, not one per wire -- the property that makes this usable.
+    ed.undoForTest();
+    check(ed.graph().links.size() == 3, "a single undo restores BOTH removed links");
+}
+
+// ================================================================================ link drop =
+// DRAGGING A WIRE INTO EMPTY SPACE opens the palette filtered to types that accept it, and connects
+// the one picked. The whole gesture is modelled with no ImGui in it precisely so this can drive it:
+// arm it, ask what the palette would show, pick one, check the link.
+//
+// The filter is the half worth testing. Its two ways to be wrong are both silent -- offering a node
+// whose link the editor will then refuse, and searching the wrong END of the candidate (looking for
+// an output when the wire needs an input), which offers exactly the wrong half of the palette.
+static void testLinkDropFiltersAndConnects() {
+    AVER_INFO("=== dropping a wire on empty canvas offers only nodes that accept it, then wires up ===");
+
+    const std::string text = R"(OCGRAPH 1
+NODE c1 ConstFloat 0 0
+PIN c1 value out float 1
+NODE flag ConstBool 0 100
+PIN flag value out bool false
+)";
+    const std::string tmp = (std::filesystem::path(scratchDir()) / "link_drop.ocgraph").string();
+    writeFile(tmp, text);
+
+    GraphEditor ed(tmp);
+    const GraphNodeDesc* add = findGraphNodeDesc("Add");        // two float inputs, one float output
+    const GraphNodeDesc* cfloat = findGraphNodeDesc("ConstFloat"); // one float OUTPUT, no inputs
+    check(add != nullptr && cfloat != nullptr, "the catalog has Add and ConstFloat to test against");
+    if (!add || !cfloat) return;
+
+    check(!ed.linkDropPending(), "nothing is pending before the gesture starts");
+    check(!ed.linkDropAccepts(*add), "and with nothing pending nothing is offered");
+
+    // Dragging FROM c1's float OUTPUT: candidates need a float INPUT.
+    ed.beginLinkDrop("c1", "value", /*fromIsOutput=*/true);
+    check(ed.linkDropPending(), "the gesture arms from a real pin");
+    check(ed.linkDropAccepts(*add), "Add is offered -- it has a float input to land on");
+    check(!ed.linkDropAccepts(*cfloat),
+          "ConstFloat is NOT offered -- its only float pin is an OUTPUT, and two outputs cannot wire");
+
+    const std::string made = ed.spawnAndConnectLinkDrop("Add", Vec2{300.0f, 0.0f});
+    check(!made.empty(), "picking Add spawns it");
+    check(!ed.linkDropPending(), "and disarms the gesture");
+    const bool wired = ed.graph().links.size() == 1 &&
+                       ed.graph().links[0].sourceNode == "c1" &&
+                       ed.graph().links[0].sourcePin == "value" &&
+                       ed.graph().links[0].destNode == made &&
+                       ed.graph().links[0].destPin == "a";
+    check(wired, "the wire is committed to the new node's FIRST accepting input, 'a'");
+
+    // A BOOL output must not be offered a float input. Same node type, opposite answer -- which is
+    // what tells a real type check from one that just returns true for anything with an input pin.
+    ed.beginLinkDrop("flag", "value", /*fromIsOutput=*/true);
+    check(!ed.linkDropAccepts(*add), "a bool output is not offered Add, whose inputs are floats");
+    ed.cancelLinkDrop();
+    check(!ed.linkDropPending(), "cancelling disarms it");
+
+    // Dragging from an INPUT is the other direction: candidates now need a matching OUTPUT, and
+    // ConstFloat -- refused above -- becomes the obvious answer.
+    const usize before = ed.graph().links.size();
+    ed.beginLinkDrop(made, "b", /*fromIsOutput=*/false);
+    check(ed.linkDropAccepts(*cfloat), "dragging from a float INPUT now offers ConstFloat");
+    const std::string k = ed.spawnAndConnectLinkDrop("ConstFloat", Vec2{0.0f, 300.0f});
+    check(!k.empty(), "and picking it spawns one");
+    const bool wired2 = ed.graph().links.size() == before + 1 &&
+                        ed.graph().links.back().sourceNode == k &&
+                        ed.graph().links.back().destNode == made &&
+                        ed.graph().links.back().destPin == "b";
+    check(wired2, "wired the NEW node's output into the pin the drag started from");
+
+    // A pin that does not exist must not arm the gesture -- otherwise the next palette pick would
+    // try to wire to nothing.
+    ed.beginLinkDrop("c1", "noSuchPin", true);
+    check(!ed.linkDropPending(), "a drag from a pin that is not there does not arm anything");
+}
+
+// ================================================================================= validation =
+// The editor can finally ask the managed validator whether a graph is valid. The VALIDATOR itself is
+// C# and needs a .NET runtime, so what is tested here is everything on this side of that boundary,
+// with a stub validator standing in for the bridge:
+//
+//   - the "no validator" answer, which must NOT read as "valid" (an absence of evidence is not
+//     evidence of correctness -- the failure mode this repo has been bitten by repeatedly);
+//   - what gets sent: exactly the bytes save() would write, not the live graph with its synthesized
+//     pins, or the validator would be answering about pins the author never wrote;
+//   - errorNodeId, a heuristic over prose and therefore the piece most worth pinning down.
+static void testValidationPlumbing() {
+    AVER_INFO("=== validation: unavailable is not 'valid', and the message's node is resolved ===");
+
+    const std::string text = R"(OCGRAPH 1
+NODE c1 ConstFloat 0 0
+PIN c1 value out float 1
+NODE add Add 200 0
+PIN add a in float
+PIN add b in float
+PIN add result out float
+LINK c1.value add.a
+)";
+    const std::string tmp = (std::filesystem::path(scratchDir()) / "validate.ocgraph").string();
+    writeFile(tmp, text);
+
+    GraphEditor ed(tmp);
+    check(!ed.validatorInstalled(), "an editor built with no validator says so");
+
+    std::string err, node;
+    check(!ed.validateNow(err, node),
+          "AND validateNow REFUSES rather than returning 'valid' -- nothing checked the graph");
+    check(err.find("no validator") != std::string::npos,
+          "with a message that says why, not a bare false: '" + err + "'");
+
+    // What actually crosses the boundary. save() strips the pins synthesizeMissingPins invented, and
+    // validation has to send the same bytes or it is answering about a different document.
+    std::string sent;
+    ed.setValidator([&](const std::string& t, std::string&) { sent = t; return true; });
+    check(ed.validatorInstalled(), "installing one is visible");
+    check(ed.validateNow(err, node), "a validator that approves gives a clean pass");
+    check(err.empty() && node.empty(), "with nothing reported");
+    check(sent == ed.serializeForSave(),
+          "and it was handed EXACTLY what save() would write, synthesized pins stripped");
+
+    // A refusal naming a real node resolves to that node, so the canvas can ring it.
+    ed.setValidator([](const std::string&, std::string& e) {
+        e = "Node 'add' is a Param node but has no param= attribute naming which parameter it reads";
+        return false;
+    });
+    check(!ed.validateNow(err, node), "a refusal is reported as one");
+    check(node == "add", "and the node the message names is resolved for the badge");
+
+    // THE TIMID HALF, which is what makes the heuristic safe. A quoted token that is not a node id
+    // in this graph resolves to nothing, so a message about a pin, an event or a parameter cannot
+    // ring an unrelated node.
+    ed.setValidator([](const std::string&, std::string& e) {
+        e = "Node references undeclared parameter 'entity' -- add 'PARAM entity int'";
+        return false;
+    });
+    check(!ed.validateNow(err, node), "still a refusal");
+    check(node.empty(), "but 'entity' is not a node id here, so NOTHING is badged rather than the wrong thing");
+
+    ed.setValidator([](const std::string&, std::string& e) { e = "something went wrong"; return false; });
+    check(!ed.validateNow(err, node) && node.empty(), "a message with no quotes badges nothing");
+
+    // Directly, on the static, including the shapes validateNow cannot easily reach.
+    const fmt::OcGraphData& g = ed.graph();
+    check(GraphEditor::errorNodeId("Node 'c1' is wrong", g) == "c1", "errorNodeId reads the first quoted token");
+    check(GraphEditor::errorNodeId("'c1' then 'add'", g) == "c1", "and only the FIRST one");
+    check(GraphEditor::errorNodeId("no quotes at all", g).empty(), "no quotes, no answer");
+    check(GraphEditor::errorNodeId("an empty '' pair", g).empty(), "an empty pair is not a node id");
+    check(GraphEditor::errorNodeId("one 'unterminated", g).empty(), "an unterminated quote is not either");
 }
 
 int main() {
@@ -1304,7 +1917,16 @@ int main() {
     testFunctionsInTheEditor();
     testLoadFailure();
     testWrongExtensionIsRejectedByFactory();
+    testConstNodeValueIsEditable();
+    testContentBrowserStarterOpensAndKeepsItsClass();
+    testClassPlacementsCarryTheEditorsMoves();
+    testPaletteSearchRanksSensibly();
+    testCopyPasteRemapsIdsAndLinks();
+    testControlRigNodeCarriesItsWeightDefault();
+    testBreakLinksKeepsTheNodes();
+    testLinkDropFiltersAndConnects();
+    testValidationPlumbing();
 
     AVER_INFO("======== {} failure(s) ========", g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

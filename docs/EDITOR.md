@@ -44,8 +44,8 @@ virtual void drawLines(MeshHandle,const f32 world[16],const f32 color[4]){}
 virtual u32  pickId(u32 x,u32 y){ (void)x;(void)y; return 0; } // optional GPU id-pick
 ```
 
-**0.3 D3D12 impl** (`D3D12Device.cpp`)
-- `imguiInit`: create a SHADER_VISIBLE `CBV_SRV_UAV` heap; `ImGui_ImplDX12_Init(device, kFrameCount, kBackbufferFormat, srvHeap, cpuHandle, gpuHandle)`. It holds **16** descriptors, not the 64 this line used to claim — `kUiSrvCount` in `modules/rhi.d3d12/src/D3D12Device.cpp`. Every texture the UI samples comes out of that one pool: the editor's own icons, and any offscreen target a panel draws. That budget is why the actor preview (§Phase 8) is shared rather than one per tab.
+**0.3 D3D12 impl** (moved since this was written — see the correction below)
+- `imguiInit`: create a SHADER_VISIBLE `CBV_SRV_UAV` heap; `ImGui_ImplDX12_Init(device, kFrameCount, kBackbufferFormat, srvHeap, cpuHandle, gpuHandle)`. It holds **16** descriptors, not the 64 this line used to claim — `UiSrvPool::kCount` in `modules/rhi.d3d12.imgui/src/ImGuiUiBackend.cpp` (that file's own comment says it was "moved verbatim from D3D12Device.cpp's former g_uiSrv/kUiSrvCount/uiSrvAlloc/uiSrvFree" — the whole ImGui/DX12 binding now lives in a separate module, `Aver.RHI.D3D12.ImGui`, not inline in `D3D12Device.cpp` as this phase originally described; there is now a Vulkan counterpart too, `Aver.RHI.Vulkan.ImGui`, unmentioned below because it postdates this document). Every texture the UI samples comes out of that one pool: the editor's own icons, and any offscreen target a panel draws. That budget is why the actor preview (§Phase 8) is shared rather than one per tab.
 - `imguiRender` (called from `onRender`, after 3D draws): `cmdList->SetDescriptorHeaps(1,&srvHeap); ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), cmdList);`. Safe because the mesh PSO uses only root CBV b0 + root constants b1 (no descriptor tables), so binding ImGui's heap doesn't disturb already-recorded mesh draws, and ImGui rebinds its own root sig/PSO.
 - `setFillMode`: pre-create a wireframe clone of `pso_` (identical except FILL_MODE); bind per draw.
 - `pickId` (optional): reuse the existing `captureBuf_` readback pattern.
@@ -72,7 +72,25 @@ Fullscreen host window with a **pass-through central node** — the DX12 backbuf
 
 - Host flags: `NoTitleBar|NoResize|NoMove|NoBringToFrontOnFocus|NoNavFocus|MenuBar|NoBackground`, `WindowRounding=0`, `WindowPadding={0,0}`.
 - `DockSpace(id, {0,0}, ImGuiDockNodeFlags_PassthruCentralNode)`.
-- First-run default layout via `DockBuilder`, then persisted by `imgui.ini`: Left 0.18 → **Outliner**; Right 0.24 → **Inspector**; Down 0.22 → **Console**; central node = Viewport (never covered).
+- Default layout via `DockBuilder`, rebuilt **every launch** — Left 0.18 → **Outliner**; Right 0.24 → **Inspector**; Down 0.22 → **Console**; central node = Viewport (never covered).
+- **The layout persists**, to `%LOCALAPPDATA%\AverEngine\editor-layout.ini` — window sizes, dock
+  arrangement, table column widths and collapsing-header state. Both UI backends point
+  `io.IniFilename` at the SAME file, so a layout is not lost by launching with `--backend vulkan`.
+  This section used to say the opposite and argue for it ("Turning ImGui's own persistence on is a
+  separate decision, not an oversight"). It was a decision, and it was the wrong one: rebuilding the
+  default every launch is paid by everyone on every start, and an editor that forgets where you put
+  the Outliner is one nobody trusts with anything larger.
+  - The one-shot `DockBuilder` pass (guarded by `dockBuilt_`) now runs only when there is **no**
+    restored layout — a dockspace node with children is one that came from the ini. Rebuilding over
+    it would mean the file is written faithfully on exit and ignored on load, which is worse than
+    not saving at all, because it would look like it worked. A `[Editor] dock layout restored from
+    editor-layout.ini` line makes which path ran observable.
+  - **View ▸ Reset Layout** sets `dockResetRequested_` as well as clearing `dockBuilt_`, so it beats
+    the restore and rebuilds the default. That escape hatch is what makes persisting safe: a layout
+    that ends up unusable is one menu item from being fixed.
+  - Per-widget state that ImGui does not model still goes through `EditorPrefs` into `editor.ini` —
+    `actorEditor.leftColumn` is the pattern. The two files are separate on purpose: one is ImGui's
+    own format and disposable, the other is ours.
 
 Layout target:
 ```
@@ -199,7 +217,7 @@ An `AssetEditor` is `path()` / `title()` / `dirty()` / `draw(Engine&)` / `save(s
 | Drawn after the docked panels, before the status bar | an asset editor floats over the level editor rather than being clipped by a dockspace it does not belong to |
 | Closes deferred until after the draw loop | erasing mid-iteration frees an editor whose ImGui window is still on this frame's draw list |
 
-**Two things the header promises and the code does not do.** `AssetEditor::dirty()`'s comment says the host asks before closing and asks again before the application exits. Neither prompt exists: closing a dirty editor logs `AVER_WARN` and drops the edits, and `AssetEditorHost::anyDirty()` — the call exit would have to make — has no callers anywhere in the tree.
+**One of the two things the header promises, the code still does not do — the other now landed.** `AssetEditor::dirty()`'s comment says the host asks before closing and asks again before the application exits. Closing a single dirty editor tab is still silent: it logs `AVER_WARN("[Editor] closed '{}' with unsaved changes", …)` and drops the edits, no prompt. But the exit half now exists — `SandboxApp::requestExitChecked` calls `assetEditors_.anyDirty()` and, if it is true, raises an "Unsaved changes" modal (`drawExitPrompt`) naming every dirty editor rather than exiting straight through; a comment at the call site says plainly that this used to be the exact bug this section originally described, with `anyDirty()` having no caller at all.
 
 **Superseded — a `.cs` now routes here.** `cbOpenEntry` tests `cbIsSourceFile` first and `.cs` is in that list, so a double-click in the Content Browser hands a designer file to the IDE and `assetEditors_.open` is never reached for one. The actor editor below is registered and drawn, and its two halves have tests (`ActorScriptTest` over the parse and rewrite, `ActorPreviewTest` over the feature against a recording device rather than a GPU), but the tab itself has no test and today **no route from the UI**; a `.ocmesh` is the only thing a double-click opens in a tab.
 
@@ -240,8 +258,10 @@ A file with no region — the single-mesh actor declared on the class — is a *
 
 **The Roslyn backend exists.** `averdesign` is a console tool at
 `scripting/csharp/Aver.Design/`, staged to `bin/Tools/`, built on `Microsoft.CodeAnalysis.CSharp`
-(MIT, and already in the SDK's package cache, so it restores offline). It is the repo's only NuGet
-consumer.
+(MIT, pinned at 5.6.0 and **checked in** at `third_party/nuget`, so it restores offline). It is the
+repo's only NuGet consumer. This used to say the package was "already in the SDK's package cache" —
+the SDK ships Roslyn as compiler DLLs, never as a package, so that was wrong; see
+[ACTOR_EDITOR.md §4d](ACTOR_EDITOR.md).
 
 It runs **only** when the builtin scanner returns `Malformed`, which is exactly the signal that the
 text has left the locked grammar of `docs/DESIGNER_REWRITE.md` rather than that the text is wrong.
@@ -337,7 +357,7 @@ The manifest names `STARTMAP Maps/Default.ocmap` and **no map file is written**,
 
 ## Driving it from the command line
 
-Flags on `Sandbox.exe`, alongside `--frames`, `--screenshot`, `--probe` and the rest. The four below exist for one reason: each names a path whose only proof was that somebody had clicked it once.
+Flags on `Sandbox.exe`, alongside `--frames`, `--screenshot`, `--probe` and the rest. Those below exist for one reason: each names a path whose only proof was that somebody had clicked it once.
 
 | Flag | What it does |
 |---|---|
@@ -345,8 +365,13 @@ Flags on `Sandbox.exe`, alongside `--frames`, `--screenshot`, `--probe` and the 
 | `--new-project <location> <name>` | scaffolds a Blank project and exits, touching no device. Creation was reachable only from the browser's modal, so a generated `Scripts.csproj` that MSBuild refuses to load is exactly the kind of thing that ships silently — nobody creates a project on the day they change the generator |
 | `--new-project-template <location> <name> <templateId>` | the same, from one of the shipped `templates\` directories (see the New Project modal's template picker) instead of Blank. `templateId` is the template's folder name, e.g. `FirstPerson`. Exits 1 with a clear message if no template by that id is found — the same discovery `listTemplates()` does for the modal, so this is what a test drives instead of clicking a card |
 | `--upgrade-project <path.ocproject>` | applies what the prompt would apply, logs each fix, and exits. The prompt is how a person does this; a flag is the only way a test does, and the apply path edits somebody's build file |
+| `--save-level <out.ocmap>` | writes the **open level** to `<out>` once, on the first frame after the renderer attaches, and logs the path. `saveLevel` had no caller but a mouse — Ctrl+S, `File ▸ Save Level`, the toolbar button — so no round-trip could be checked without a person in front of the window. It writes **elsewhere**, never over `levelPath_`, so proving the save costs nothing it proved on. Pair it with `--open-legacy` to save a level exactly as it exists on disk |
+| `--ray-probe <sx> <sy>` | reports what `viewportRay` returns for one screen point, on the same late frame `--gpu-timing` uses. `pick`, `handleSculpt`, `handleFoliage` and `dropWorldPoint` all go through that one function and none of them is reachable without a mouse, so the editor's screen-to-world conversion had no headless witness at all. It prints the origin's distance **in front of the eye** along the view axis -- which must equal the near plane, and was exactly 0 while the origin was hardcoded to `eye_` -- and the reprojection of a point on the ray, which must come back to the pixel that was asked for |
 
-All four project flags are matched before every other argument and call `std::exit`; none opens a window.
+The four project flags — `--new-project`, `--new-project-template`, `--upgrade-project` and
+`--save-project` — are matched before every other argument and call `std::exit`; none opens a
+window. `--save-level` is the exception and has to be: it needs a level open and a renderer
+attached, so it rides a normal `--frames` run rather than short-circuiting one.
 
 ---
 
@@ -358,9 +383,9 @@ Dark base `#1e1e1e`, neutral chrome, **one accent = Aver Amber `ImVec4(1.0,0.42,
 
 ## Build wiring
 
-**This section described a target that was never built, and it is worth saying so plainly.** There is no `Aver.Editor`, no `AVER_BUILD_EDITOR`, and `add_subdirectory(editor)` appears nowhere — `editor/` holds a README for a C# editor that has no source. The editor **is** `Sandbox`, and there is no second binary: the same executable runs the oracle gates under `--frames`.
+**This section described a target that was never built, and it is worth saying so plainly.** There is no `Aver.Editor`, no `AVER_BUILD_EDITOR`, and `add_subdirectory(editor)` appears nowhere. `editor/` used to hold a README for a C# editor with no source behind it; that directory has since been **deleted**, because a folder whose only content describes something that was never started is a second, worse copy of this paragraph. The editor **is** `Sandbox`, and there is no second binary: the same executable runs the oracle gates under `--frames`.
 
-What actually builds it is `sandbox/CMakeLists.txt` behind `option(AVER_BUILD_SANDBOX ON)`: `SandboxApp.cpp` plus `AssetEditor`, `ActorEditor`, `ProjectBrowser`, `ProjectScaffold`, `EngineScaffold`, `IdeIntegration`, `ShellIntegration` and `ToolsMenu`, linking `Aver.Runtime Aver.Formats Aver.UI Aver.Render.UI Aver.UI.Abi Aver.Render.ActorPreview` unconditionally and each optional module when its target exists. ImGui is `third_party/imgui`, added under `option(AVER_ENABLE_UI ON)` and reaching the executable transitively through `Aver.RHI.D3D12`, which links it `PUBLIC` and defines `AVER_WITH_IMGUI=1` — which is why every editor source guards on that macro rather than on a target. ImGuizmo is not vendored and never was.
+What actually builds it is `sandbox/CMakeLists.txt` behind `option(AVER_BUILD_SANDBOX ON)`: `SandboxApp.cpp` plus `AssetEditor`, `ActorEditor`, `ProjectBrowser`, `ProjectScaffold`, `EngineScaffold`, `IdeIntegration`, `ShellIntegration` and `ToolsMenu`, linking `Aver.Runtime Aver.Formats Aver.UI Aver.Render.UI Aver.UI.Abi Aver.Render.ActorPreview` unconditionally and each optional module when its target exists. **The next sentence has been overtaken by a split.** ImGui is still `third_party/imgui`, added under `option(AVER_ENABLE_UI ON)`, but it no longer reaches the executable "transitively through `Aver.RHI.D3D12`" — `Aver.RHI.D3D12` never links imgui or defines `AVER_WITH_IMGUI` itself any more. The concrete Dear ImGui binding is its own module, `Aver.RHI.D3D12.ImGui` (`modules/rhi.d3d12.imgui`, DEPS on `Aver.RHI.D3D12`, nested under `if(AVER_ENABLE_UI)`), and `sandbox/CMakeLists.txt` defines `AVER_WITH_IMGUI=1` itself, gated on `if(TARGET Aver.RHI.D3D12.ImGui)` — which the file's own comment says "reproduces exactly the pre-split behaviour" seen from Sandbox's side. A Vulkan counterpart now exists too, `Aver.RHI.Vulkan.ImGui`, wired the same way behind its own `AVER_WITH_IMGUI_VULKAN` macro; this document predates it entirely. ImGuizmo is not vendored and never was.
 
 ## One-line data flow
 `WndProc → (ImGui hook | Event)` → **onUpdate**: ImGui builds panels, mutates `EditorState` (tool/selected/camera/per-object Transform+baseColor), pushes `setCamera/setLight/setClearColor`, `ImGui::Render()` → **beginFrame** → **onRender**: `setFillMode` + grid + `drawMesh(toMatrix, baseColor[+tint])` + cage + `imguiRender()` → **endFrame/present**.

@@ -16,6 +16,7 @@
 
 #include "aver/core/Log.hpp"
 #include "aver/framework/framework_abi.h"
+#include "aver/framework/InputKeys.hpp"
 #include "aver/platform/InputState.hpp"
 
 #include <string>
@@ -23,41 +24,11 @@
 namespace aver::game {
 namespace {
 
-// Win32 virtual key -> framework key. Returns -1 for keys the framework has no slot for.
-//
-// VK_SHIFT/VK_CONTROL/VK_MENU and NOT VK_LSHIFT/VK_LCONTROL/VK_LMENU: WM_KEYDOWN delivers the
-// UNSIDED code unless the receiver does the extended-key dance, so mapping the sided ones would
-// produce a Shift key that never registers. The framework's slot is named LSHIFT but means "shift".
-i32 frameworkKey(i32 vk) {
-    if (vk >= 'A' && vk <= 'Z') return AVER_FW_KEY_A + (vk - 'A');
-    if (vk >= '0' && vk <= '9') return AVER_FW_KEY_0 + (vk - '0');
-    switch (vk) {
-        case 0x20: return AVER_FW_KEY_SPACE;    // VK_SPACE
-        case 0x10: return AVER_FW_KEY_LSHIFT;   // VK_SHIFT
-        case 0x11: return AVER_FW_KEY_LCTRL;    // VK_CONTROL
-        case 0x12: return AVER_FW_KEY_LALT;     // VK_MENU
-        case 0x0D: return AVER_FW_KEY_ENTER;    // VK_RETURN
-        case 0x1B: return AVER_FW_KEY_ESCAPE;   // VK_ESCAPE
-        case 0x09: return AVER_FW_KEY_TAB;      // VK_TAB
-        case 0x25: return AVER_FW_KEY_LEFT;
-        case 0x26: return AVER_FW_KEY_UP;
-        case 0x27: return AVER_FW_KEY_RIGHT;
-        case 0x28: return AVER_FW_KEY_DOWN;
-        default:   return -1;
-    }
-}
-
-const char* frameworkKeyName(i32 k) {
-    static const char* kNames[] = {
-        "A","B","C","D","E","F","G","H","I","J","K","L","M",
-        "N","O","P","Q","R","S","T","U","V","W","X","Y","Z",
-        "0","1","2","3","4","5","6","7","8","9",
-        "SPACE","LSHIFT","LCTRL","LALT","ENTER","ESCAPE","TAB",
-        "LEFT","RIGHT","UP","DOWN","MOUSE_LEFT","MOUSE_RIGHT","MOUSE_MIDDLE",
-    };
-    if (k < 0 || k >= AVER_FW_KEY_COUNT) return "?";
-    return kNames[k];
-}
+// The VK mapping and the key names moved to aver/framework/InputKeys.hpp so the editor can use the
+// same table -- see that header for why a mapping that disagrees between two hosts is worse than
+// most. Pulled into this namespace by name so every call site below reads exactly as it did.
+using aver::fw::frameworkKeyFromVk;
+using aver::fw::frameworkKeyName;
 
 } // namespace
 
@@ -83,13 +54,25 @@ void publishInput(const InputState& in, bool focused, std::string* echo) {
     // InputBridgeTest asserts this directly.
     if (focused) {
         for (i32 vk = 0; vk < static_cast<i32>(InputState::kKeyCount); ++vk) {
-            const i32 fw = frameworkKey(vk);
+            const i32 fw = frameworkKeyFromVk(vk);
             if (fw >= 0 && in.keyHeld(vk)) held[fw] = true;
         }
         held[AVER_FW_KEY_MOUSE_LEFT]   = in.mouseHeld(0);
         held[AVER_FW_KEY_MOUSE_RIGHT]  = in.mouseHeld(1);
         held[AVER_FW_KEY_MOUSE_MIDDLE] = in.mouseHeld(2);
     }
+
+    // The raw Win32 VK twin (framework_abi.h's own RAW WIN32 VK section) gets the SAME "unfocused
+    // means every key publishes as up" discipline as the named slots just above, and for the exact
+    // same reason this function's own header comment spells out: an early return, or any path that
+    // skips a slot instead of writing an explicit 0 to it, leaves that slot frozen at whatever it
+    // last was while aver_fw_tick keeps running. That bug already bit the named enum once
+    // (InputBridgeTest asserts against it there); reintroducing it for the 200-odd VKs the named
+    // enum cannot reach would be the same defect wearing a new array. `focused &&` is ANDed into the
+    // value itself, not a guard around the loop, so every one of the AVER_FW_VK_COUNT calls below
+    // still runs and publishes an explicit answer every frame, focused or not.
+    for (i32 vk = 0; vk < static_cast<i32>(InputState::kKeyCount); ++vk)
+        aver_fw_input_set_vk(vk, (focused && in.keyHeld(vk)) ? 1 : 0);
 
     std::string names;
     for (i32 k = 0; k < AVER_FW_KEY_COUNT; ++k) {

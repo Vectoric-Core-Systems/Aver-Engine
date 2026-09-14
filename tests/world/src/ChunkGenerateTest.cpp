@@ -10,6 +10,7 @@
 // So the test re-executes itself. The child generates the same chunks and COOKS A REGION from them;
 // the parent reads that region back and compares it against what it generates itself. Nothing is
 // shared but the file.
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/formats/Avr1.hpp"
 #include "aver/platform/FileSystem.hpp"
@@ -713,5 +714,5 @@ int main(int argc, char** argv) {
 
     if (g_failures == 0) AVER_INFO("=== {} assertions, 0 failed ===", g_checks);
     else AVER_ERROR("=== {} assertions, {} failed ===", g_checks, g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

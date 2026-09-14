@@ -26,13 +26,38 @@ extern "C" {
 /* MINOR 1 adds aver_scene_material_name. Additive only -- no existing binding changes. */
 /* MINOR 2 adds AVER_SCENE_COMP_PARTICLE_EMITTER (11th built-in). Additive only. */
 /* MINOR 3 adds AVER_SCENE_COMP_ATTACHMENT (12th built-in). Additive only. */
+/* MINOR 4 adds aver_scene_component, which resolves a DYNAMICALLY registered component type by
+ * name. Additive only -- the AVER_SCENE_COMP_* built-ins keep their fixed ids and every existing
+ * binding is unchanged. */
+/* MINOR 5 adds aver_scene_last_error, the reason channel. Additive only -- every existing
+ * entry point keeps its 1/0 return exactly, which is the whole design; see that function. */
 #define AVER_SCENE_ABI_VERSION_MAJOR 1
-#define AVER_SCENE_ABI_VERSION_MINOR 3
+#define AVER_SCENE_ABI_VERSION_MINOR 5
 #define AVER_SCENE_ABI_VERSION \
     ((AVER_SCENE_ABI_VERSION_MAJOR << 16) | AVER_SCENE_ABI_VERSION_MINOR)
 
 /* Returns AVER_SCENE_ABI_VERSION as the DLL was BUILT with, so a caller can catch a stale binary. */
 AVER_SCENE_ABI int32_t aver_scene_abi_version(void);
+
+/* WHY the last call failed, as an aver::AbiError (modules/core/include/aver/core/ErrorCodes.hpp):
+   0 ok, -1 bad handle, -2 null pointer, -4 out of range, -5 unsupported, -6 invalid argument.
+   Every code except 0 is negative, so `< 0` means "failed" even for one added after your binding.
+
+   A SEPARATE ENTRY POINT, not a changed return value, and that is the load-bearing decision. Every
+   setter here returns 1/0 and every caller writes `if (aver_scene_set_f32(...))`; a negative code on
+   those returns would be TRUE, silently inverting each of those call sites with no compile error.
+
+   WHAT IT SEPARATES. `aver_scene_set_f32` returning 0 currently means one of four different things
+   and says which of them nowhere: no field has that id (-1), the entity has no such component (-1),
+   the field is real but of another kind (-6), or the field is real, of the right kind, and READ-ONLY
+   (-5) -- CWorld.matrix being the case that has actually confused people.
+
+   THREAD-LOCAL, and per-DLL: it reports scene failures only. Aver.Core is linked statically into
+   each ABI DLL, so this slot and aver_phys_last_error's are different slots.
+
+   SET ON SUCCESS TOO (to 0), so a stale reason cannot outlive the failure that produced it. A call
+   that resolves neither a field nor an entity leaves it alone. */
+AVER_SCENE_ABI int32_t aver_scene_last_error(void);
 
 /* FIELD KINDS — pinned one-for-one to aver::scene::FieldKind in Fields.hpp. */
 #define AVER_SCENE_KIND_F32    0
@@ -101,6 +126,18 @@ AVER_SCENE_ABI int32_t aver_scene_create(void);
 AVER_SCENE_ABI int32_t aver_scene_destroy(int32_t e);
 /* 1 if the handle addresses a live entity, else 0 (rejects 0, a stale generation, and a freed slot). */
 AVER_SCENE_ABI int32_t aver_scene_valid(int32_t e);
+/* Resolve a component TYPE by its registered name (e.g. "CControlRig") to the id the two calls
+ * below take; 0 when nothing of that name is registered.
+ *
+ * THIS IS THE ONLY WAY A BINDING CAN REACH A DYNAMICALLY REGISTERED COMPONENT. The AVER_SCENE_COMP_*
+ * ids above are fixed and cover the built-ins only, so a type registered at runtime through
+ * World::registerComponent -- CControlRig, CSynapseAgent and anything else that deliberately stays
+ * out of Components.hpp -- has an id that is not knowable ahead of time and differs with
+ * registration order. Fields of such a component were always reachable (aver_scene_field resolves
+ * "CControlRig.rig" by name against the same registry), but ATTACHING one was not, which left every
+ * dynamic component addable from C++ and from nowhere else. */
+AVER_SCENE_ABI int32_t aver_scene_component(const char* name);
+
 /* Attach a component pool's storage to `e`; returns 1 (idempotent), 0 if the type or handle is bad. */
 AVER_SCENE_ABI int32_t aver_scene_add_component(int32_t e, int32_t component);
 /* Reparent; parent 0 makes `child` a root. Refuses a cycle, a self-parent, or a doomed parent. */

@@ -230,6 +230,11 @@ enum class OcGraphDomain {
 };
 
 // A complete visual scripting graph.
+// The highest OCGRAPH version this build can read. A file claiming more is REFUSED rather than read
+// as version 1 -- see parseOcgraph, and note that the editor rewrites a graph wholly on every save,
+// so reading a newer one optimistically would silently discard whatever it did not understand.
+inline constexpr int kOcGraphVersion = 1;
+
 struct OcGraphData {
     int version = 1;
     std::string name;        // Graph name; empty = "untitled"

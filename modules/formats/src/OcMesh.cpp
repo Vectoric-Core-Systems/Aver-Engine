@@ -20,13 +20,10 @@ constexpr u32 kChunkIDXS = avrFourCC("IDXS");
 constexpr u32 kChunkMADR = avrFourCC("MADR");
 constexpr u32 kChunkMLET = avrFourCC("MLET");
 
-// MLET limits (FORMAT_SPECS.md 5.7). Duplicated from Aver.Trifactor's ClusterBuilder.hpp
-// (kMaxClusterVertices/kMaxClusterTriangles) ON PURPOSE, not an oversight: Aver.Formats sits BELOW
-// Aver.Trifactor in the module DAG (cmake/AvModule.cmake) and must load/save .ocmesh with
-// AVER_MODULE_TRIFACTOR=OFF, so this file cannot include Trifactor's header. These two numbers are
-// the on-disk MLET contract's own, not a borrowed constant.
-constexpr u32 kMaxMeshletVertices  = 64;
-constexpr u32 kMaxMeshletTriangles = 124;
+// MLET limits (FORMAT_SPECS.md 5.7) now live in OcMesh.hpp, so Trifactor can ALIAS them rather
+// than declare a second pair. The reasoning that put them here was half right: Formats sits below
+// Trifactor and cannot include its header -- but that argues against the wrong direction only, and
+// the DAG running one way is exactly what lets Formats own the number. See OcMesh.hpp.
 
 // MLET chunk versions (FORMAT_SPECS.md 5.7). Version is a property of the whole MLET chunk (every
 // LOD's sub-arrays inside it share one AvrChunk::version), not per meshlet -- there is exactly one
@@ -1196,10 +1193,14 @@ bool loadOcMesh(const std::string& path, OcMeshData& out, std::string* why) {
 bool saveOcMesh(const std::string& path, const OcMeshData& in, std::string* why) {
     std::vector<u8> bytes;
     if (!writeOcMesh(in, bytes, why)) return false;
-    std::ofstream f(path, std::ios::binary | std::ios::trunc);
-    if (!f) return fail(why, ".ocmesh: cannot write " + path);
-    f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-    if (!f) return fail(why, ".ocmesh: write failed on " + path);
+    // ATOMIC, NOT TRUNCATE-THEN-WRITE. An ofstream opened with ios::trunc zeroes the file when the
+    // STREAM IS CONSTRUCTED, before a byte of `bytes` is written, and this overwrites a real asset in
+    // place -- so a crash, a kill or a full disk in that window destroyed the previously-good file and
+    // not merely the unsaved edit. writeFileBytesAtomic writes a temporary beside the target and swaps
+    // only a complete one into place; see its comment in FileSystem.hpp, which already names this
+    // class of caller.
+    if (!writeFileBytesAtomic(path, bytes.data(), bytes.size()))
+        return fail(why, ".ocmesh: write failed on " + path);
     return true;
 }
 

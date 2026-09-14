@@ -52,8 +52,10 @@
 // GraphEditorGeometry.hpp's computeAttributeRows (see its own header comment for why that split is a
 // hybrid, not a fully generic key=value editor: a node TYPE still gets to say what it expects, the way
 // it already says what pins it has, but nothing the table doesn't know about is ever dropped).
+#include <algorithm>    // stable_sort, for graphPaletteSearch's ranking
 #include <cstdint>
 #include <string>
+#include <string_view>  // graphPaletteSearch takes its query as one
 #include <utility>
 #include <vector>
 
@@ -147,9 +149,22 @@ inline GraphAttributeSpec attr(std::string key, std::string label) {
 inline std::vector<GraphNodeDesc> buildCatalog() {
     std::vector<GraphNodeDesc> t;
     // -- constants: a single output pin carrying the literal as its default value --
-    t.push_back({"ConstFloat", "Const Float", "Const", {pin("value", "float", true, "0")}});
-    t.push_back({"ConstInt",   "Const Int",   "Const", {pin("value", "int",   true, "0")}});
-    t.push_back({"ConstBool",  "Const Bool",  "Const", {pin("value", "bool",  true, "false")}});
+    //
+    // THE `value` ATTRIBUTE IS WHAT MAKES THESE USABLE AT ALL, and its absence was the single
+    // biggest hole in this editor. A Const spawned from the palette carried only its PIN default, and
+    // the details panel renders a row per DECLARED attribute (plus any key=value the node already
+    // has) -- so a fresh Const showed "This node type has no attributes." and there was no
+    // affordance anywhere to type a number into it. Every constant in an editor-built graph was 0,
+    // permanently. That is most of the reason every graph in this repo is hand-written text: you
+    // could not author a speed, a duration, a key code or a direction without leaving the editor.
+    //
+    // The parser has read `value=` on a Const all along, and reads it BY THE NODE'S DECLARED TYPE
+    // (OcGraphParser.cs) rather than by guessing from the literal's shape -- so `value=100` on a
+    // ConstFloat is refused by name rather than silently compiled to 0.0f. Declaring it here is all
+    // that was missing to reach it.
+    t.push_back({"ConstFloat", "Const Float", "Const", {pin("value", "float", true, "0")}, {attr("value", "Value")}});
+    t.push_back({"ConstInt",   "Const Int",   "Const", {pin("value", "int",   true, "0")}, {attr("value", "Value")}});
+    t.push_back({"ConstBool",  "Const Bool",  "Const", {pin("value", "bool",  true, "false")}, {attr("value", "Value")}});
     // -- arithmetic: a, b in; result out --
     t.push_back({"Add",      "Add",      "Math", {pin("a", "float", false), pin("b", "float", false), pin("result", "float", true)}});
     // -- Print: the node this vocabulary has never had, and the one a Blueprint author reaches for
@@ -231,6 +246,10 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"IsAlive", "Is Alive", "Transform", {pin("entity", "int", false), pin("alive", "bool", true)}});
     t.push_back({"IsActor", "Is Actor", "Transform", {pin("entity", "int", false), pin("isActor", "bool", true)}});
     t.push_back({"Translate", "Translate", "Transform", {pin("exec", "exec", false), pin("entity", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    // SetLocalPosition sits beside SetLocalScale and shares its pin shape exactly -- see
+    // OcGraphParser's own note on the pair. Moving a child and resizing one should not be two
+    // different things to learn. Translate above is the RELATIVE peer; this one is absolute.
+    t.push_back({"SetLocalPosition", "Set Local Position", "Transform", {pin("exec", "exec", false), pin("entity", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
     t.push_back({"SetLocalScale", "Set Local Scale", "Transform", {pin("exec", "exec", false), pin("entity", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
     t.push_back({"DestroyEntity", "Destroy Entity", "Transform", {pin("exec", "exec", false), pin("entity", "int", false), pin("then", "exec", true), pin("success", "bool", true)}});
     // -- PHYSICS. A BODY IS NOT AN ENTITY: a body is a Jolt handle with a shape and a velocity, an
@@ -262,6 +281,69 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"AddSensorBox", "Add Sensor Box", "Physics", {pin("exec", "exec", false), pin("cx", "float", false), pin("cy", "float", false), pin("cz", "float", false), pin("hx", "float", false), pin("hy", "float", false), pin("hz", "float", false), pin("then", "exec", true), pin("body", "int", true)}});
     t.push_back({"AddSensorSphere", "Add Sensor Sphere", "Physics", {pin("exec", "exec", false), pin("cx", "float", false), pin("cy", "float", false), pin("cz", "float", false), pin("radius", "float", false), pin("then", "exec", true), pin("body", "int", true)}});
     t.push_back({"SphereCast", "Sphere Cast", "Physics", {pin("exec", "exec", false), pin("originX", "float", false), pin("originY", "float", false), pin("originZ", "float", false), pin("dirX", "float", false), pin("dirY", "float", false), pin("dirZ", "float", false), pin("maxDist", "float", false), pin("radius", "float", false), pin("then", "exec", true), pin("hit", "bool", true), pin("body", "int", true), pin("pointX", "float", true), pin("pointY", "float", true), pin("pointZ", "float", true)}});
+
+    // -- PHYSICS: FORCES, MATERIAL, MOTION AND LAYERS. Four more families on the same body handle the
+    //    creators above return. A force/torque lasts one physics step and must be re-applied to push
+    //    continuously; an impulse changes velocity instantly and does not accumulate -- see
+    //    Aver.Physics/Body.cs's own section comment for the exact unit derivations (force is
+    //    kg*cm/s^2, torque is kg*cm^2/s^2). Angular velocity is RADIANS per second about each engine
+    //    axis, never degrees, matching every rotation in this file.
+    t.push_back({"AddForce", "Add Force", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"AddImpulse", "Add Impulse", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"AddTorque", "Add Torque", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"AddAngularImpulse", "Add Angular Impulse", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"GetBodyAngularVelocity", "Get Body Angular Velocity", "Physics", {pin("body", "int", false), pin("x", "float", true), pin("y", "float", true), pin("z", "float", true), pin("success", "bool", true)}});
+    t.push_back({"SetBodyAngularVelocity", "Set Body Angular Velocity", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("x", "float", false), pin("y", "float", false), pin("z", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    //    Material and mass: DYNAMIC BODIES ONLY for mass -- a static or kinematic body has infinite
+    //    mass by definition, so SetBodyMass on one simply fails (success=false) rather than changing
+    //    what the body is.
+    t.push_back({"SetBodyFriction", "Set Body Friction", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("friction", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"SetBodyRestitution", "Set Body Restitution", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("restitution", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"SetBodyGravityFactor", "Set Body Gravity Factor", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("factor", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"SetBodyMass", "Set Body Mass", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("mass", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"GetBodyMass", "Get Body Mass", "Physics", {pin("body", "int", false), pin("mass", "float", true), pin("success", "bool", true)}});
+    //    Motion type and sleeping. motionType rides an INT PIN: 0 Static, 1 Kinematic, 2 Dynamic --
+    //    Aver.Physics.MotionType's own numbering. GetBodyMotionType answers -1 for a dead handle,
+    //    which is why success exists instead of trusting the int alone (0 is a real answer, Static).
+    t.push_back({"SetBodyMotionType", "Set Body Motion Type", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("motionType", "int", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"GetBodyMotionType", "Get Body Motion Type", "Physics", {pin("body", "int", false), pin("motionType", "int", true), pin("success", "bool", true)}});
+    t.push_back({"ActivateBody", "Activate Body", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"IsBodyActive", "Is Body Active", "Physics", {pin("body", "int", false), pin("active", "bool", true)}});
+    //    Layers: 0..15, the same bitmask family Physics.SetLayerCollision (below) enables/disables
+    //    pairs of. Changing a body's layer never changes whether it is static or dynamic.
+    t.push_back({"SetBodyLayer", "Set Body Layer", "Physics", {pin("exec", "exec", false), pin("body", "int", false), pin("layer", "int", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"GetBodyLayer", "Get Body Layer", "Physics", {pin("body", "int", false), pin("layer", "int", true), pin("success", "bool", true)}});
+    //    SetLayerCollision has NO body pin -- it edits the world's shared layer matrix, SYMMETRIC
+    //    ((a,b) also sets (b,a)), the same matrix a level teardown resets to all-colliding.
+    t.push_back({"SetLayerCollision", "Set Layer Collision", "Physics", {pin("exec", "exec", false), pin("layerA", "int", false), pin("layerB", "int", false), pin("collide", "bool", false), pin("then", "exec", true), pin("success", "bool", true)}});
+
+    // -- JOINTS. A constraint between two body handles, created ONCE at a WORLD-SPACE point/axis --
+    //    move the bodies to where they belong FIRST, then join them there, exactly like Add*Box above
+    //    places a shape before anything can touch it. BODY B == 0 (what an unwired int pin already
+    //    reads as) JOINS BODY A TO THE WORLD instead of to nothing -- a door hinged to a wall that is
+    //    not itself simulated, not a joint with a missing argument. A JOINT HANDLE RIDES AN INT PIN
+    //    LIKE A BODY HANDLE, BUT THE TWO ARE NOT INTERCHANGEABLE: Jolt's own handle ranges overlap, so
+    //    GetBodyPosition on a joint handle (or JointRemove on a body handle) is a silent wrong answer
+    //    that only the graph author can avoid by keeping the two straight -- there is no type system
+    //    here to catch it. Angles are RADIANS, distances/points CENTIMETRES, matching every other
+    //    physics node in this file. Hinge and Slider each take a SECOND axis pin trio (nx/ny/nz) that
+    //    MUST be perpendicular to the first -- it is the zero-angle/zero-offset reference the limits
+    //    are measured from, not a second direction of travel.
+    t.push_back({"JointFixed", "Joint: Fixed", "Physics", {pin("exec", "exec", false), pin("bodyA", "int", false), pin("bodyB", "int", false), pin("px", "float", false), pin("py", "float", false), pin("pz", "float", false), pin("axX", "float", false), pin("axY", "float", false), pin("axZ", "float", false), pin("ayX", "float", false), pin("ayY", "float", false), pin("ayZ", "float", false), pin("then", "exec", true), pin("joint", "int", true)}});
+    t.push_back({"JointPoint", "Joint: Point", "Physics", {pin("exec", "exec", false), pin("bodyA", "int", false), pin("bodyB", "int", false), pin("px", "float", false), pin("py", "float", false), pin("pz", "float", false), pin("then", "exec", true), pin("joint", "int", true)}});
+    t.push_back({"JointDistance", "Joint: Distance", "Physics", {pin("exec", "exec", false), pin("bodyA", "int", false), pin("bodyB", "int", false), pin("paX", "float", false), pin("paY", "float", false), pin("paZ", "float", false), pin("pbX", "float", false), pin("pbY", "float", false), pin("pbZ", "float", false), pin("minDist", "float", false), pin("maxDist", "float", false), pin("then", "exec", true), pin("joint", "int", true)}});
+    t.push_back({"JointHinge", "Joint: Hinge", "Physics", {pin("exec", "exec", false), pin("bodyA", "int", false), pin("bodyB", "int", false), pin("px", "float", false), pin("py", "float", false), pin("pz", "float", false), pin("hx", "float", false), pin("hy", "float", false), pin("hz", "float", false), pin("nx", "float", false), pin("ny", "float", false), pin("nz", "float", false), pin("minAngleRad", "float", false), pin("maxAngleRad", "float", false), pin("then", "exec", true), pin("joint", "int", true)}});
+    t.push_back({"JointSlider", "Joint: Slider", "Physics", {pin("exec", "exec", false), pin("bodyA", "int", false), pin("bodyB", "int", false), pin("px", "float", false), pin("py", "float", false), pin("pz", "float", false), pin("sx", "float", false), pin("sy", "float", false), pin("sz", "float", false), pin("nx", "float", false), pin("ny", "float", false), pin("nz", "float", false), pin("minCm", "float", false), pin("maxCm", "float", false), pin("then", "exec", true), pin("joint", "int", true)}});
+    //    Motor/limit/enable/remove/value all key off the JOINT handle, never a body. state on
+    //    JointSetMotor is Aver.Physics.MotorState: 0 Off, 1 Velocity (target is radians or
+    //    centimetres PER SECOND), 2 Position (target is the absolute radians/centimetres to hold).
+    //    Always axis 0 -- every named joint above has at most one motorised axis; the six-DOF
+    //    per-axis motor is not exposed to the graph.
+    t.push_back({"JointSetMotor", "Joint Set Motor", "Physics", {pin("exec", "exec", false), pin("joint", "int", false), pin("state", "int", false), pin("target", "float", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"JointSetEnabled", "Joint Set Enabled", "Physics", {pin("exec", "exec", false), pin("joint", "int", false), pin("enabled", "bool", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"JointRemove", "Joint Remove", "Physics", {pin("exec", "exec", false), pin("joint", "int", false), pin("then", "exec", true), pin("success", "bool", true)}});
+    t.push_back({"GetJointValue", "Get Joint Value", "Physics", {pin("joint", "int", false), pin("value", "float", true), pin("success", "bool", true)}});
+
     // -- FUNCTION. The three node types a user-defined function is made of. They are in this catalog
     //    for their DISPLAY NAME and their HEADER COLOUR, and deliberately NOT for dropping: the
     //    palette skips the whole "Function" category (see GraphEditor.cpp's Add Node popup), because
@@ -331,6 +413,17 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         pin("exec", "exec", false), pin("value", "int", false), pin("then", "exec", true)}});
     t.push_back({"Print", "Print", "Debug", {
         pin("exec", "exec", false), pin("value", "float", false), pin("then", "exec", true)}});
+    // -- PRINT STRING: the node that answers "did control flow reach here, and in what order".
+    //    Print and PrintInt cannot: both need a VALUE wired to say anything at all, so proving a
+    //    branch was taken meant inventing a number to print through it. There is no string PIN type
+    //    (PinType is Float/Int/Bool/Exec), so the message is a NODE-line ATTRIBUTE -- the same "the
+    //    value IS the data" treatment sound=/mesh=/clip= already get, and for the same reason.
+    //
+    //    It also fixes the labelling complaint the other two carry: Print labels its line with the
+    //    node's auto-generated id, so a log reads "print3 = 1" and the author works out which node
+    //    that was. Here the author writes the label.
+    t.push_back({"PrintString", "Print String", "Debug", {
+        pin("exec", "exec", false), pin("then", "exec", true)}, {attr("text", "Text")}});
     t.push_back({"Multiply", "Multiply", "Math", {pin("a", "float", false), pin("b", "float", false), pin("result", "float", true)}});
     t.push_back({"Subtract", "Subtract", "Math", {pin("a", "float", false), pin("b", "float", false), pin("result", "float", true)}});
     t.push_back({"Divide",   "Divide",   "Math", {pin("a", "float", false), pin("b", "float", false), pin("result", "float", true)}});
@@ -434,6 +527,11 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     //    neither read is expensive the way a physics query is. Pin sets copied field for field from
     //    OcGraphParser.AddDefaultPins's "mousedelta"/"moveaxis" cases. MoveAxis has no "z" pin --
     //    Input.MoveAxis's own Z is hardcoded 0 always (Aver.Framework/Input.cs).
+    //
+    //    THE LOW-LEVEL PATH, now that InputAction exists below: these read the device directly, with
+    //    no name and no rebinding in between -- right for a raw camera look, wrong for anything a
+    //    project wants a player (or a rebinding UI) to reconfigure, where InputAction is the one to
+    //    reach for instead. Unchanged by InputAction's addition.
     t.push_back({"MouseDelta", "Mouse Delta", "Input", {
         pin("exec", "exec", false), pin("then", "exec", true),
         pin("deltaX", "float", true), pin("deltaY", "float", true), pin("wheel", "float", true)}});
@@ -459,6 +557,29 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         pin("key", "int", false), pin("triggered", "bool", true)}});
     t.push_back({"InputKeyReleased", "Input Key Released", "Input", {
         pin("key", "int", false), pin("triggered", "bool", true)}});
+    // -- InputAction / InputActionPressed / InputActionReleased: the PREFERRED input path over
+    //    InputKey/MouseDelta/MoveAxis above -- one named, rebindable ACTION (aver_fw_action_register/
+    //    bind/value2/held/pressed/released, framework_abi.h's Named Actions section, minor 5) instead
+    //    of a literal key code or a raw device axis. `action` is a HANDLE -- the int
+    //    aver_fw_action_register/_find returned -- NOT a name: this format has no string pin (PinType
+    //    is Float/Int/Bool/Exec) and the name-by-attribute mechanism ClassName/EventName/CurveName use
+    //    lives on Node in Graph.cs, outside this slice's owned files. See
+    //    scripting/csharp/Aver.Graph/GraphCompiler.cs's EmitInputAction comment for the full accounting
+    //    -- including why that makes the handle less stable to author than InputKey's own "key" int --
+    //    and what a future name pin would need.
+    //
+    //    InputAction mirrors InputKey's shape (NO exec pins -- both native calls behind it,
+    //    aver_fw_action_value2/_held, are pure array-scan reads with no side effect, cheap enough to
+    //    redundantly pull the same way GetForward's six-output read already is) but widens InputKey's
+    //    single `down` bool into the float2 + held an action (digital, 1D or 2D axis alike) can carry.
+    //    InputActionPressed/Released are InputKeyPressed/Released's exact twins, one level up. --
+    t.push_back({"InputAction", "Input Action", "Input", {
+        pin("action", "int", false),
+        pin("x", "float", true), pin("y", "float", true), pin("held", "bool", true)}});
+    t.push_back({"InputActionPressed", "Input Action Pressed", "Input", {
+        pin("action", "int", false), pin("triggered", "bool", true)}});
+    t.push_back({"InputActionReleased", "Input Action Released", "Input", {
+        pin("action", "int", false), pin("triggered", "bool", true)}});
     // -- Select: pick one of two values by a bool. Pure data, no exec pins. In the PULL compiler BOTH
     //    arms are computed regardless of cond -- see GraphCompiler.EmitSelect, which explains why
     //    that is correct and not a missing short-circuit. --
@@ -489,6 +610,25 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     //    always prefers the node's own recorded pins over this table (see the header comment).
     //    param= names which declared PARAM this node reads. --
     t.push_back({"Param", "Param", "Param", {pin("value", "float", true)}, {attr("param", "Param Name")}});
+    // -- SELF: THE NODE WITHOUT WHICH A CANVAS-AUTHORED GRAPH COULD NOT DRIVE ANYTHING.
+    //    Nearly every Scene, Character, Physics, Animation and Audio node takes an `entity` pin, and
+    //    the only way to reach the graph's own handle was `PARAM entity int` plus a Param node --
+    //    a top-level record the editor cannot write, because OcGraphData does not model parameters
+    //    at all (modules/formats/include/aver/formats/OcGraph.hpp). So the Param row above was
+    //    unusable from the canvas: it can name a parameter but nothing here can declare one. That is
+    //    the reason every gameplay graph in this repository is hand-written text, alongside the
+    //    Const rows' missing `value` attribute.
+    //
+    //    NO ATTRIBUTES, deliberately: there is nothing to configure. Graph.ResolveSelfNodes rewrites
+    //    it into `Param entity` at parse time and declares the PARAM if the file did not, so by the
+    //    time the compiler, GraphHost or the C++ writer sees the graph there is no Self node left --
+    //    which is why this row needs no counterpart anywhere in GraphCompiler.cs.
+    //    THE OUTPUT PIN IS CALLED `value`, NOT `entity`, and that is not cosmetic. The desugar
+    //    turns this node into a Param node and nothing else -- EmitParam stores the loaded argument
+    //    into the local for the pin named "value" and no other, so a pin called "entity" would have
+    //    left the value on the stack and stored nothing. Matching Param's pin name is what keeps
+    //    the rewrite a pure type change, with no pin renaming and no LINK rewriting to go wrong.
+    t.push_back({"Self", "Self", "Param", {pin("value", "int", true)}});
 
     // -- flow / exec: control flow, not data flow. "exec" is a PIN TYPE, exactly like "float"/"int"/
     //    "bool" above -- see modules/formats/include/aver/formats/OcGraph.hpp's comment on
@@ -811,6 +951,28 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
     t.push_back({"PlayAnimation", "Play Animation", "Scene", {
         pin("entity", "int", false), pin("loop", "bool", false, "true"), pin("success", "bool", true)},
         {attr("clip", "Clip")}});
+    // -- SetControlRig: the third of the animation family, and the node that makes a control rig
+    //    reachable from a LEVEL. Everything under it was already built and tested -- anim::twoBoneIk
+    //    and anim::aimAt, the .ocrig format, CControlRig applied through AnimSystem's pose-modifier
+    //    seam -- but a rig could only be attached from C++, so a rigged character could not be placed
+    //    in a map at all. A skinned character reaches a level through a graph CLASS (there is no
+    //    skeleton field on an .ocworld PLACE record), which makes THIS node the missing link rather
+    //    than a new level-format attribute.
+    //
+    //    THE COMPONENT IT ATTACHES IS NOT A BUILT-IN, which is what separates it from SetSkeleton
+    //    directly above. CControlRig is registered at runtime (docs/SYNAPSE.md section 6's pattern),
+    //    so it has no AVER_SCENE_COMP_* id and is attached by NAME through aver_scene_component --
+    //    scene ABI 1.4, added for exactly this and useful to every other dynamic component after it.
+    //    In a host that never registered CControlRig the node returns false and changes nothing.
+    //
+    //    weight is a PIN and rig= is an attribute, for the same split PlayAnimation's loop pin
+    //    documents just above: which rig an entity wears is edit-time naming, but how strongly it is
+    //    worn is genuine runtime data a graph may compute -- fading a reach out as the hand arrives,
+    //    or dropping it to 0 on death, is the ordinary use, and 0 disables the rig without detaching
+    //    it. The default "1" matches Entity.SetControlRig's own default parameter.
+    t.push_back({"SetControlRig", "Set Control Rig", "Scene", {
+        pin("entity", "int", false), pin("weight", "float", false, "1"), pin("success", "bool", true)},
+        {attr("rig", "Rig")}});
 
     // ============================================================================================
     // MATERIAL NODES -- DOMAIN material, compiled to HLSL by aver::pbr::compileMaterialGraph()
@@ -1031,10 +1193,10 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
 
     // -- OUTPUT: the one sink a material graph has. NO OUTPUT PINS AT ALL -- nothing ever reads a
     //    MaterialOutput, by construction, since it is where the backward walk that reads everything
-    //    else in the graph starts. AND NO DEFAULT VALUE ON ANY OF ITS TWELVE INPUTS -- that emptiness
+    //    else in the graph starts. AND NO DEFAULT VALUE ON ANY OF ITS SEVENTEEN INPUTS -- that emptiness
     //    is load-bearing, not an oversight: compileMaterialGraph treats an input as DRIVEN when it is
     //    linked OR carries a NON-EMPTY literal, so a default here would make a freshly spawned
-    //    MaterialOutput drive all eight fields the moment it exists, destroying the partial-graph
+    //    MaterialOutput drive all seventeen fields the moment it exists, destroying the partial-graph
     //    behaviour that lets a real graph say only "base colour is red" and leave roughness, the
     //    normal map and alpha exactly what the stock material already had. See
     //    compileMaterialGraph's own "ONLY THE FIELDS THE AUTHOR ACTUALLY DROVE" comment for the full
@@ -1054,6 +1216,12 @@ inline std::vector<GraphNodeDesc> buildCatalog() {
         // with a frosted band, or a bottle with an opaque label, instead of two meshes and two
         // materials. Ior is per-pixel for the same reason, though it moves far less often.
         pin("Ior", "float", false), pin("Transmission", "float", false),
+        // The volume, alongside Ior/Transmission above: AttenuationColor is the transmittance after
+        // AttenuationDistance centimetres (see kOutputFields in MaterialGraphHlsl.cpp), so driving
+        // the pair per pixel is a thin clear pane at a mesh's face and a deep green edge down its
+        // length, instead of one uniform tint. Same no-default rule as every pin here -- a distance
+        // of 0 or less already means "no volume" for every material that never drives this pin.
+        pin("AttenuationColor", "float3", false), pin("AttenuationDistance", "float", false),
         // The coat, and this is where a coat stops being three numbers and starts being a surface:
         // a weight mask makes one material polished where an object is handled and bare where it is
         // worn, and a roughness mask puts a clear panel and a scuffed edge on the same car-paint
@@ -1116,6 +1284,84 @@ inline const GraphNodeDesc* findGraphNodeDescIn(const std::string& typeId, Graph
         if (detail::ciEquals(d.typeId, typeId) && (d.domain & domain) != 0u) return &d;
     }
     return findGraphNodeDesc(typeId);
+}
+
+// ---- searching the palette ---------------------------------------------------------------------
+//
+// WHY A SEARCH EXISTS AT ALL. This catalog holds 240 node types across 23 categories, and the only
+// way to add one was a right-click menu with a submenu per category and no filter. Finding `VecAdd`
+// meant knowing it is filed under Vector rather than Math; finding `SetFieldVec3` meant knowing it is
+// Scene rather than Transform. A palette you can only use if you already know where everything is
+// is a palette for the person who wrote it.
+//
+// HERE RATHER THAN IN THE POPUP, so it can be tested with no ImGui context -- the same reason
+// GraphEditor.cpp keeps addNodeFromCatalog separate from the menu item that calls it.
+
+namespace detail {
+
+// Case-insensitive find. Returns npos when absent, like std::string::find.
+inline usize ciFind(std::string_view hay, std::string_view needle) {
+    if (needle.empty()) return 0;
+    if (needle.size() > hay.size()) return std::string_view::npos;
+    const auto lower = [](char c) { return c >= 'A' && c <= 'Z' ? char(c - 'A' + 'a') : c; };
+    for (usize i = 0; i + needle.size() <= hay.size(); ++i) {
+        usize j = 0;
+        while (j < needle.size() && lower(hay[i + j]) == lower(needle[j])) ++j;
+        if (j == needle.size()) return i;
+    }
+    return std::string_view::npos;
+}
+
+} // namespace detail
+
+// Palette rows in `domain` matching `query`, best first, at most `limit` of them.
+//
+// THE RANKING IS THE WHOLE POINT and it is three tiers, because a flat substring match puts
+// `SetFieldVec3` above `Add` when you type "add":
+//   0  the display name STARTS with the query        -- "add" -> Add, AddChild
+//   1  the display name contains it                  -- "add" -> VecAdd
+//   2  only the type id or the category contains it   -- "vector" -> every Vector row
+// Ties keep catalog order, which groups a family together rather than shuffling it.
+//
+// An empty query returns nothing: the caller shows its category menus instead, and a search box that
+// answers "everything" to an empty box would just be the catalog with extra steps.
+inline std::vector<const GraphNodeDesc*> graphPaletteSearch(std::string_view query,
+                                                            GraphNodeDomain domain,
+                                                            usize limit = 40) {
+    std::vector<const GraphNodeDesc*> out;
+    if (query.empty() || limit == 0) return out;
+
+    std::vector<std::pair<int, const GraphNodeDesc*>> hits;
+    for (const GraphNodeDesc& d : graphNodeCatalog()) {
+        if ((d.domain & domain) == 0u) continue;
+        // Function rows are excluded for the reason the category menu excludes them: they are created
+        // by the Functions panel, which knows which function they belong to, and a bare one has no
+        // pins and no owner.
+        if (d.category == "Function") continue;
+
+        const usize inName = detail::ciFind(d.displayName, query);
+        int rank = -1;
+        if (inName == 0)                              rank = 0;
+        else if (inName != std::string_view::npos)    rank = 1;
+        else if (detail::ciFind(d.typeId, query) != std::string_view::npos ||
+                 detail::ciFind(d.category, query) != std::string_view::npos) rank = 2;
+        if (rank >= 0) hits.push_back({rank, &d});
+    }
+
+    std::stable_sort(hits.begin(), hits.end(),
+                     [](const auto& a, const auto& b) { return a.first < b.first; });
+    for (const auto& h : hits) {
+        if (out.size() >= limit) break;
+        out.push_back(h.second);
+    }
+    return out;
+}
+
+// How many rows `graphPaletteSearch` would return with no limit -- so a capped list can say how many
+// it is not showing instead of silently ending. A truncated list that looks complete is the reason
+// this is reported rather than assumed.
+inline usize graphPaletteSearchCount(std::string_view query, GraphNodeDomain domain) {
+    return graphPaletteSearch(query, domain, static_cast<usize>(-1)).size();
 }
 
 } // namespace aver::editor

@@ -57,7 +57,20 @@
 #include <dxcapi.h>
 #include <wrl/client.h>
 
+#include "aver/rhi/DxcShaderInclude.hpp"
+// W13: the SPIR-V blob cache. shaderCorpusHash() folds every shader file's text into the cache key
+// (see its own comment for why a top-level source string alone is not enough); sweepShaderCache
+// bounds the cache directory; userDataDir() names it -- the SAME directory D3D12Device.cpp's DXIL
+// cache lives in, distinguished only by extension (".spv" vs ".dxil").
+#include "aver/rhi/ShaderFiles.hpp"
+#include "aver/rhi/ShaderCacheSweep.hpp"
+#include "aver/platform/FileSystem.hpp"
+
+#include <chrono>
 #include <cstring>
+#include <cwchar>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -79,6 +92,52 @@ std::vector<std::string> splitDefines(const char* defines) {
     }
     return out;
 }
+
+// ---- W13: SPIR-V blob cache -----------------------------------------------------------------
+// FNV-1a 64, one field at a time with a separator between fields -- the identical shape to
+// D3D12Device.cpp's ShaderCompiler::cacheKey (:144-149), so "ab"+"c" hashes differently from
+// "a"+"bc" here too. Three overloads rather than one templated mix: the inputs this key folds in
+// are a mix of raw bytes (the version, the corpus hash), narrow C strings (src/entry/target) and
+// the WIDE strings DXC's own `args` vector actually holds -- the last is the one D3D12's original
+// never needed, since its cache key is built from std::string args, not LPCWSTR ones.
+u64 mixBytes(u64 h, const void* data, size_t bytes) {
+    const auto* p = static_cast<const unsigned char*>(data);
+    for (size_t i = 0; i < bytes; ++i) { h ^= p[i]; h *= 0x100000001b3ull; }
+    h ^= 0xffu; h *= 0x100000001b3ull;   // field separator -- see D3D12's identical comment
+    return h;
+}
+u64 mixStr(u64 h, const char* s) { return mixBytes(h, s, std::strlen(s)); }
+u64 mixWide(u64 h, LPCWSTR s) { return mixBytes(h, s, std::wcslen(s) * sizeof(wchar_t)); }
+
+// The vendored (SPIR-V-capable) dxcompiler.dll escape hatch -- bump when it changes. A SEPARATE
+// constant from D3D12Device.cpp's kCacheVersion (:142) on purpose: the two caches hold different
+// bytes (SPIR-V vs DXIL) from what may end up being different compiler builds one day, and a DXIL
+// cache bump must not silently invalidate SPIR-V blobs that are still perfectly valid, or vice
+// versa.
+constexpr u32 kVkSpirvCacheVersion = 1;
+
+// %LOCALAPPDATA%/AverEngine/ShaderCache/%016llx.spv -- the SAME directory D3D12Device.cpp's own
+// cachePath() writes DXIL blobs into (see its comment on the std::filesystem::path join that fixed
+// a silently-wrong sibling directory), distinguished only by extension: sweepShaderCache filters by
+// extension before it ever lists a file, so the two caches share a directory with independent
+// budgets and neither sweep can evict the other's blobs.
+std::string spirvCachePath(u64 key) {
+    const std::string dir = aver::userDataDir();
+    if (dir.empty()) return {};
+    char name[32];
+    std::snprintf(name, sizeof name, "%016llx.spv", static_cast<unsigned long long>(key));
+    return (std::filesystem::path(dir) / "ShaderCache" / name).string();
+}
+
+constexpr u64 kSpirvCacheBudgetBytes = 256ull * 1024ull * 1024ull;
+
+// Running totals for the C-7 power-of-two report, same shape as D3D12Device.cpp's own
+// s_compiles/s_compileMs/s_cacheHits (:177-179) -- a separate set of counters because this is a
+// separate compiler instance with its own cache, not a re-use of the D3D12 numbers.
+u32 s_spirvRequests = 0;
+f64 s_spirvCompileMs = 0.0;
+u32 s_spirvCacheHits = 0;
+
 } // namespace
 
 // Loads dxcompiler.dll once and resolves DxcCreateInstance.
@@ -119,6 +178,24 @@ void VulkanShaderCompiler::init() {
     utils_ = utils;
     compiler_ = compiler;
     AVER_INFO("[RHI.Vulkan] shader compiler: DXC (-spirv, shader model 6.x)");
+
+    // W13: bound the on-disk SPIR-V cache once per process, mirroring D3D12Device.cpp's own DXIL
+    // sweep (:2048-2060) byte for byte in intent. Failure is ignored on purpose -- a cache that
+    // cannot be swept still serves hits, and refusing to start this backend because a stale blob
+    // could not be deleted would be a far worse trade. Filtered to ".spv" (ShaderCacheSweep.hpp's
+    // own extension note), so this never touches the ".dxil" cache sharing the same directory.
+    {
+        const std::string udir = aver::userDataDir();
+        if (!udir.empty()) {
+            const auto res = sweepShaderCache(std::filesystem::path(udir) / "ShaderCache",
+                                              kSpirvCacheBudgetBytes, ".spv");
+            if (res.filesRemoved)
+                AVER_INFO("[RHI.Vulkan] SPIR-V shader cache swept: {} blob(s), {:.1f} MB freed; "
+                          "{:.1f} MB in {} file(s) kept",
+                          res.filesRemoved, static_cast<f64>(res.bytesRemoved) / (1024.0 * 1024.0),
+                          static_cast<f64>(res.bytesRemaining) / (1024.0 * 1024.0), res.filesRemaining);
+        }
+    }
 }
 
 bool VulkanShaderCompiler::usingDxc() const { return compiler_ != nullptr; }
@@ -163,6 +240,12 @@ bool VulkanShaderCompiler::compile(const char* src, const char* entry, ShaderSta
         // Vulkan 1.3: dynamic rendering, buffer device address, mesh shaders -- everything this
         // backend's VulkanDevice already requires of the device.
         L"-fspv-target-env=vulkan1.3",
+        // Angled `#include <...>` searches ONLY the -I list, which is empty without this, so DXC
+        // never consults the include handler for one -- see D3D12Device.cpp's copy of this argument
+        // for the full argument. Kept identical on both backends deliberately: a shader that
+        // compiles on one and not the other because of an include-resolution difference is the
+        // exact class of divergence DxcShaderInclude.hpp was put in Aver.RHI to prevent.
+        L"-I", L".",
     };
     // THE SHIFT AND THE EXPLICIT MAP ARE MUTUALLY EXCLUSIVE -- DXC rejects the combination outright
     // ("-fvk-u-shift cannot be used together with -fvk-bind-register"), which is how this was found.
@@ -216,9 +299,85 @@ bool VulkanShaderCompiler::compile(const char* src, const char* entry, ShaderSta
     }
     for (const std::wstring& d : wDefines) { args.push_back(L"-D"); args.push_back(d.c_str()); }
 
+    // ---- W13: SPIR-V blob cache -- READ SIDE. `args` is now FULLY BUILT (every define, the shift
+    // or the explicit bind-register map, -fvk-invert-y, the target env, everything DXC will actually
+    // see), so the key below is computed from it in place rather than from a hand-picked subset --
+    // an argument added above without a matching addition here is exactly the "COMPOSED SOURCE
+    // STOPPED BEING THE WHOLE INPUT" trap D3D12Device.cpp's own cache learned about the shared
+    // prelude (:132-138), just one layer further down the same file. `quiet` is deliberately NOT
+    // mixed in: it only changes how a FAILURE is logged, never the bytes a success produces, so
+    // including it would double every entry for no benefit.
+    const bool cacheBypassed = [] {
+        const char* v = std::getenv("AVER_VK_NO_SHADER_CACHE");
+        return v && *v;
+    }();
+    const auto compileT0 = std::chrono::steady_clock::now();
+    struct Report {
+        std::chrono::steady_clock::time_point t0;
+        ~Report() {
+            s_spirvCompileMs += std::chrono::duration<f64, std::milli>(
+                                    std::chrono::steady_clock::now() - t0).count();
+            ++s_spirvRequests;
+            if ((s_spirvRequests & (s_spirvRequests - 1)) == 0)
+                AVER_INFO("[RHI.Vulkan] {} shader request(s): {} served from the SPIR-V blob cache, "
+                          "{} compiled in {:.0f} ms",
+                          s_spirvRequests, s_spirvCacheHits, s_spirvRequests - s_spirvCacheHits, s_spirvCompileMs);
+        }
+    } report{compileT0};
+
+    u64 ckey = 0xcbf29ce484222325ull;
+    ckey = mixBytes(ckey, &kVkSpirvCacheVersion, sizeof kVkSpirvCacheVersion);
+    const u64 corpus = shaderCorpusHash();   // aver::rhi::shaderCorpusHash(), found via enclosing-namespace lookup -- see shaderFile()'s identical unqualified use elsewhere in this backend
+    ckey = mixBytes(ckey, &corpus, sizeof corpus);
+    ckey = mixStr(ckey, "spirv");
+    ckey = mixStr(ckey, src);
+    ckey = mixStr(ckey, entry);
+    ckey = mixStr(ckey, target.c_str());
+    for (LPCWSTR a : args) ckey = mixWide(ckey, a);
+
+    if (!cacheBypassed) {
+        if (const std::string cp = spirvCachePath(ckey); !cp.empty()) {
+            std::ifstream f(cp, std::ios::binary | std::ios::ate);
+            if (f) {
+                const std::streamoff n = f.tellg();
+                // Accepted only as a whole, non-empty number of SPIR-V words with the right magic --
+                // a truncated write (a crash, a full disk, a race with another process's own write)
+                // must fall through to a normal compile rather than hand vkCreateShaderModule bytes
+                // that are not really SPIR-V at all.
+                if (n > 0 && n % 4 == 0) {
+                    f.seekg(0);
+                    std::vector<u32> words(static_cast<size_t>(n) / sizeof(u32));
+                    if (f.read(reinterpret_cast<char*>(words.data()), n) && words.front() == 0x07230203u) {
+                        outSpirv = std::move(words);
+                        ++s_spirvCacheHits;
+                        // Still honours AVER_VK_DUMP_SPIRV on a cache hit, same as a real compile
+                        // below -- the diagnostic's whole point is inspecting what a pipeline was
+                        // actually built from, and that is just as true when the bytes came from
+                        // disk instead of DXC.
+                        if (const char* dumpDir = std::getenv("AVER_VK_DUMP_SPIRV")) {
+                            const std::string path = std::string(dumpDir) + "/" + entry + ".spv";
+                            if (std::FILE* df = std::fopen(path.c_str(), "wb")) {
+                                std::fwrite(outSpirv.data(), 1, outSpirv.size() * sizeof(u32), df);
+                                std::fclose(df);
+                                AVER_TRACE("[RHI.Vulkan] dumped {} ({} bytes, cache hit)", path, outSpirv.size() * sizeof(u32));
+                            }
+                        }
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    // ---- end read side; a miss (or a bypass) falls through to the ordinary compile below ----
+
     auto* compiler = static_cast<IDxcCompiler3*>(compiler_);
+    // The same include handler D3D12 uses, from the same header, so a shader that #includes compiles
+    // identically on both backends -- see DxcShaderInclude.hpp. utils_ is held as void* here (this
+    // class keeps DXC out of VulkanCommon.hpp's public surface), so it is cast back at the one point
+    // that needs the real type.
+    DxcShaderInclude includes(static_cast<IDxcUtils*>(utils_));
     ComPtr<IDxcResult> result;
-    HRESULT hr = compiler->Compile(&buf, args.data(), static_cast<UINT32>(args.size()), nullptr,
+    HRESULT hr = compiler->Compile(&buf, args.data(), static_cast<UINT32>(args.size()), &includes,
                                    IID_PPV_ARGS(&result));
     if (SUCCEEDED(hr) && result) result->GetStatus(&hr);
     if (FAILED(hr)) {
@@ -251,6 +410,22 @@ bool VulkanShaderCompiler::compile(const char* src, const char* entry, ShaderSta
     // outSpirv is left untouched on every failure above, which section 8's declaration promises.
     outSpirv.resize(bytes / sizeof(u32));
     std::memcpy(outSpirv.data(), obj->GetBufferPointer(), bytes);
+
+    // ---- W13: SPIR-V blob cache -- WRITE SIDE. Written best-effort and never checked, the same
+    // shape as D3D12Device.cpp's own DXIL write (:293-301): a read-only install, a full disk, or a
+    // race with another process losing this write costs one recompile at the next launch and
+    // nothing else. Skipped under AVER_VK_NO_SHADER_CACHE too, so the bypass also stops the cache
+    // from being REFILLED while it is set, not just read. FAILURES NEVER REACH HERE -- every early
+    // `return false` above happens before outSpirv is ever written, so there is no failure path this
+    // could accidentally cache.
+    if (!cacheBypassed) {
+        if (const std::string cp = spirvCachePath(ckey); !cp.empty()) {
+            std::error_code ec;
+            std::filesystem::create_directories(std::filesystem::path(cp).parent_path(), ec);
+            std::ofstream w(cp, std::ios::binary | std::ios::trunc);
+            if (w) w.write(reinterpret_cast<const char*>(outSpirv.data()), static_cast<std::streamsize>(bytes));
+        }
+    }
 
     // AVER_VK_DUMP_SPIRV=<dir> writes every compiled module out as <entry>.spv.
     //

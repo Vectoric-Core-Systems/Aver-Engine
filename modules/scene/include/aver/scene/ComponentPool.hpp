@@ -36,18 +36,13 @@ public:
     const void* dataAt(usize i) const;
 
     usize stride() const { return stride_; }
-    usize align() const  { return align_; }
     u32   typeId() const { return typeId_; }
-
-    // Copies this pool's whole state into `dst`, which must be the same component type.
-    void snapshotTo(ComponentPool& dst) const;
 
 private:
     struct Storage;
     Storage* s_;
     u32      typeId_;
     usize    stride_;
-    usize    align_;
 };
 
 } // namespace aver::scene

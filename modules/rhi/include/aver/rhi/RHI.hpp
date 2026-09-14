@@ -157,12 +157,82 @@ struct PostSettings {
     // Eye adaptation, from a luminance histogram of the frame.
     bool autoExposure   = true;
     f32  exposureMin    = 0.05f;   // clamps on the computed multiplier, not on scene luminance
+    // THE CEILING WAS 8, AND 8 IS THE EXPOSURE AT WHICH COLOUR DIES. It was almost certainly copied
+    // from maxRadiance below, where 8 is genuinely derived -- "the input past which the tone curve
+    // has nothing left to say, acesTonemap(8) = 1.003, pure white". That is the correct ceiling for
+    // a RADIANCE clamp and exactly the wrong one for an exposure MULTIPLIER: it licenses the
+    // adaptation to scale the scene until the AVERAGE pixel sits where the curve maps everything to
+    // white, and no tone operator preserves chroma past its own shoulder.
+    //
+    // MEASURED on PTTest Sponza (an enclosed arcade -- dark enough that the adaptation pegs at this
+    // clamp), 3D viewport means, --frames 244, one run per row:
+    //
+    //   exposure    mean    R-B (chroma)
+    //   1 (off)     19.38   3.32
+    //   2           29.79   4.47   <- peak
+    //   3.2         38.66   4.34
+    //   5           48.76   3.28
+    //   8           61.61   1.40   <- what auto-exposure was picking
+    //
+    // Chroma peaks around 2 and has collapsed by 8, and above 5 BLUE overtakes GREEN -- a warm stone
+    // interior rendering cold, which is what "the colours look washed out" was. `--exposure 8`
+    // reproduces the auto-exposed image to within 0.02 per channel, which is how the clamp was
+    // identified as the thing being hit rather than the metering being wrong.
+    //
+    // THE CEILING WENT BACK TO 8, because capping it was treating the symptom. It was briefly 3,
+    // which did remove the washout and was immediately reported as "too dark" -- correctly: the
+    // scene needs the gain, it just could not survive it. The cause was the CURVE, not the ceiling,
+    // and tonemap mode 2 (acesLumaTonemap) fixes it at the source by tonemapping luminance and
+    // keeping chromaticity. Measured at exposure 8, same frame: mode 1 gives chroma 1.41, mode 2
+    // gives 3.09, at the same brightness. With a curve that holds its colour there is no reason to
+    // forbid the exposure that makes an enclosed scene readable.
     f32  exposureMax    = 8.0f;
     f32  exposureSpeed  = 3.0f;    // adaptation rate, in e-folds per second
     f32  exposureKey    = 0.18f;   // middle grey the average luminance is driven towards
     // Fraction of the histogram discarded at each end before averaging.
     f32  histogramLowPercent  = 0.30f;
     f32  histogramHighPercent = 0.85f;
+
+    // WHICH TONE CURVE. 0 is the original per-channel Narkowicz/Hill approximation; 1 is the same
+    // curve applied between the ACES input/output matrices (colour.hlsli's acesFittedTonemap).
+    //
+    // 2 IS THE DEFAULT NOW: acesLumaTonemap, which tonemaps LUMINANCE and puts the original
+    // chromaticity back, so hue and saturation survive any exposure by construction.
+    //
+    // WHY THE CHANGE. 1 desaturates less than 0 but it still runs a shoulder per channel after the
+    // matrices, so a big exposure -- which an enclosed scene needs, and which the eye adaptation
+    // will reach for -- lands every channel on the flat part and the frame arrives grey. That was
+    // the whole of a "colours are washed out" report. MEASURED on PTTest Sponza, chroma (mean R-B)
+    // against exposure, mode 1: 1x -> 3.32, 2x -> 4.47, 5x -> 3.28, 8x -> 1.40. Mode 2 at that same
+    // 8x holds 3.09 at identical brightness, and above 5x mode 1 also lets BLUE overtake GREEN --
+    // a warm stone interior rendering cold.
+    //
+    // 1 IS KEPT and is still the right answer for anything that must match a recorded baseline: it
+    // desaturates less than 0 because the matrixed form rotates into a space where the curve behaves
+    // and rotates back, which is the entire reason ACES has those matrices. It is only mode 2 that
+    // declines to let the curve decide colour at all.
+    //
+    // 0 IS KEPT, and not only for taste: every recorded gate baseline in scripts/ was measured
+    // through it, so it is the setting that reproduces them.
+    u32  tonemap = 2;
+
+    // Ceiling applied to scene radiance immediately before the tonemap; 0 disables it.
+    //
+    // WHY IT EXISTS: nothing else in this renderer bounds radiance. The sun disc alone is drawn at
+    // sunColour * sunIntensity * 14 (scene.hlsl PSky) and reaches ~42x at the default intensity of
+    // 3, with no clamp anywhere between there and here. The tonemap flattens it to white regardless,
+    // so the disc looks the same either way -- but the auto-exposure histogram reads the unclamped
+    // value and lets a few enormous pixels pull the whole frame darker.
+    //
+    // 8 IS DERIVED, NOT TASTE: it is the input past which the tone curve has nothing left to say.
+    // acesTonemap(8) = 1.003, which saturates to pure white, so every value above 8 produces the
+    // IDENTICAL pixel -- clamping there cannot change how anything looks. What it does change is the
+    // bloom, which thresholds the same unclamped radiance and so bleeds a halo in proportion to a sun
+    // disc sitting at ~42. The disc stays blazing white; its halo stops being unbounded.
+    //
+    // Raise it if a project genuinely wants larger bloom from very bright sources; 0 turns the clamp
+    // off entirely and restores the previous behaviour exactly.
+    f32  maxRadiance = 8.0f;
 };
 
 // Which sky the engine draws. Authored is a two-colour dome; Physical derives the dome, the direct
@@ -291,6 +361,26 @@ struct GpuTimingReport {
     std::vector<GpuTimingNode> nodes;
 };
 
+// A snapshot of the adapter's video memory budget and current usage, split the way both backends'
+// own APIs split it: LOCAL is memory on the GPU's own bus (VRAM on a discrete card, the whole pool
+// on a UMA/integrated one); NON_LOCAL is everything else the driver can spill into (system memory
+// reached over PCIe on a discrete card, effectively unused on UMA). "Budget" is the OS's current
+// ceiling for this process, not the adapter's physical total -- it moves as other applications and
+// the desktop compositor claim or release their own share, which is exactly why this is polled
+// rather than read once at startup.
+//
+// `supported` is the same two-state shape as GpuTimingReport::supported just above: false means the
+// backend could not answer THIS call (no IDXGIAdapter3 on this device, the Vulkan extension absent,
+// or the query itself failed), and every numeric field is then 0 rather than a stale or guessed
+// value -- a caller must check this before trusting zero to mean "no memory used".
+struct VideoMemoryInfo {
+    bool supported = false;
+    u64  localBudgetBytes = 0;      // D3D12 DXGI_MEMORY_SEGMENT_GROUP_LOCAL Budget / Vulkan: sum of heapBudget over DEVICE_LOCAL memory heaps
+    u64  localUsageBytes = 0;       // ...CurrentUsage / sum of heapUsage over DEVICE_LOCAL memory heaps
+    u64  nonLocalBudgetBytes = 0;   // ...NON_LOCAL Budget / sum over every other heap
+    u64  nonLocalUsageBytes = 0;    // ...NON_LOCAL CurrentUsage / sum over every other heap
+};
+
 // One GPU device: frame loop, scene state, immediate drawing, capture and in-window UI.
 class IDevice {
 public:
@@ -368,8 +458,12 @@ public:
     // which the editor UI and the backbuffer/viewport texture stay pinned to (they never see this
     // value). Clamped to [0.25, 1.0]. 1.0 (the default) reproduces the pre-existing behaviour of
     // sizing the scene 1:1 with the swapchain, byte-for-byte -- a backend that never implements this
-    // is exactly that default, permanently. Rebuilds the scene-sized targets immediately if a
-    // swapchain already exists.
+    // is exactly that default, permanently. Deferred to the next beginFrame() when a swapchain
+    // already exists (optimisation-wave-2, C2-13): D3D12Device and VulkanDevice both PARK the value
+    // and apply it through their own applyPendingRenderScale(), called as the first statement of
+    // beginFrame(), rather than rebuilding immediately here -- see either implementation's own
+    // setRenderScale comment for why an immediate rebuild mid-frame is what actually loses the
+    // device (aver-render-scale-device-loss).
     virtual void setRenderScale(f32 scale) { (void)scale; }
     virtual f32  renderScale() const { return 1.0f; }
 
@@ -444,6 +538,49 @@ public:
         (void)verts; (void)vertexCount; (void)indices; (void)indexCount; return 0;
     }
 
+    // Polls the adapter's current video memory budget and usage (see VideoMemoryInfo's own comment
+    // for the LOCAL/NON_LOCAL split and what `supported` false means). Defaults to an unsupported,
+    // all-zero report so D3D11, Null, and every test mock compile and behave unchanged without
+    // implementing this.
+    virtual VideoMemoryInfo videoMemory() const { return {}; }
+
+    // Chooses which GPU heap createMesh() uploads a static mesh's vertex/index buffers to, for every
+    // call made AFTER this one -- meshes already created keep whatever heap they were built on.
+    // Default false = BufferKind::Upload, which is today's behaviour on every backend: the buffer
+    // lives in CPU-visible, GPU-cacheable memory the whole engine already reads correctly, at the
+    // cost of every draw, shadow, voxelisation, and BLAS build fetching it back across the bus on a
+    // discrete card rather than out of local VRAM. True moves new static meshes to the Default heap,
+    // trading a one-shot upload-time copy (see the D3D12 implementation's own comment on why that
+    // copy is synchronous) for that per-frame bus traffic. See VoxiRenderer.cpp's own ray-tracing
+    // geometry, which already puts BLAS-backing buffers on the Default heap for the identical reason
+    // -- this generalises that precedent to ordinary raster meshes rather than introducing a new one.
+    // A backend that never implements this (D3D11, Null, every mock) is that default, permanently.
+    virtual void setStaticMeshHeapDefault(bool onDefaultHeap) { (void)onDefaultHeap; }
+    virtual bool staticMeshHeapDefault() const { return false; }
+
+    // Creates a new mesh that SHARES `source`'s vertex buffer and has its own, independent index
+    // buffer -- the inverse split from createSkinTargetMesh's shared-index/own-vertices shape just
+    // below, and the one an LOD ladder actually wants: coarser LOD levels of the same asset reuse
+    // the same vertex positions/normals/uvs and only thin out which triangles reference them, so
+    // duplicating the vertex stream per level is pure waste -- W11 in the engine optimisation plan.
+    // The vertex buffer is REFCOUNTED across every mesh sharing it (source plus every
+    // createMeshSharingVertices call against it); destroyMesh on any of them while shares remain
+    // outstanding is refused rather than freeing memory a sibling mesh still draws.
+    //
+    // `source` must be alive and its own vertices must not already be compute-written (a skin target
+    // -- sharing a buffer a compute pass writes into would make every sharer's geometry jitter with
+    // whatever the source was last posed to, not a bug a caller would think to suspect). Bounds
+    // (centre/radius/AABB) are copied from `source`, since a coarser index list over the same vertex
+    // positions cannot exceed the source's own extents.
+    //
+    // Returns 0 on any refusal -- unsupported backend, dead or invalid source, or a compute-written
+    // source -- and the caller MUST THEN FALL BACK TO createMesh with its own full, independent
+    // vertex array, exactly as if this entry point did not exist. A backend that never implements
+    // this (D3D11, Null, every mock, and Vulkan until it does) is that fallback path, permanently.
+    virtual MeshHandle createMeshSharingVertices(MeshHandle source, const u32* indices, u32 indexCount) {
+        (void)source; (void)indices; (void)indexCount; return 0;
+    }
+
     // Releases a mesh's GPU memory. False if the handle is invalid, already dead, or still shared.
     //
     // WHY THIS DID NOT EXIST, AND WHY IT HAD TO. Until this, every mesh ever created lived until the
@@ -514,6 +651,16 @@ public:
     // caller culling with it can produce a false "might be visible", never a false "definitely is
     // not". False when the backend has no bounds to give, which is the signal to skip culling for
     // that mesh rather than treat an all-zero sphere as a real, radius-zero point.
+    // The mesh's LOCAL-space axis-aligned extents, or false where the backend never measured them.
+    //
+    // The sphere below is the right shape for a frustum cull -- one centre, one radius, one dot
+    // product -- and the wrong one for containment. A sphere around a wide shallow pool bulges above
+    // its own surface, so "is the camera in the water" answered yes from the poolside. Callers that
+    // need to know whether a POINT is inside a volume, or where that volume's top actually is, want
+    // this instead.
+    virtual bool meshBoundsAabb(MeshHandle mesh, f32 outMin[3], f32 outMax[3]) const {
+        (void)mesh; (void)outMin; (void)outMax; return false;
+    }
     virtual bool meshBounds(MeshHandle mesh, f32 outCentre[3], f32* outRadius) const {
         (void)mesh; (void)outCentre; (void)outRadius; return false;
     }
@@ -535,6 +682,23 @@ public:
     // Sets the directional light and the ambient term.
     virtual void setLight(const f32 dirToLight[3], const f32 color[3], f32 ambient) { (void)dirToLight; (void)color; (void)ambient; }
     // Sets the sky, the sun and the air. Supersedes setLight for the sun.
+    // The engine's clock, forwarded into PerFrameCB::time so that ANY shader can animate.
+    //
+    // Separate from SkyAtmosphere::cloudTime, which is the cloud layer's own drift and is authored
+    // weather rather than a wall clock -- a level that pauses its sky must not thereby freeze every
+    // animated material in it. `seconds` is raw and monotonic; the backend does the wrapping the
+    // shader needs (see PerFrameCB::time for why it wraps at all).
+    // The water wave set both the surface shader and the caustics read -- see PerFrameCB::wave for
+    // why one array rather than a copy each. `waves` is up to 3 entries of
+    // {dirX, dirY, k (rad/cm), speed (rad/s)}; `count` 0 disables the surface entirely.
+    //
+    // A CALLER MAY GENERATE THESE HOWEVER IT LIKES -- authored WAVE records, a PCG pass, a gameplay
+    // system reacting to weather. The renderer neither knows nor cares where they came from, which
+    // is the point of putting the seam here.
+    virtual void setWaterWaves(const f32 (*waves)[4], u32 count, f32 amplitude) {
+        (void)waves; (void)count; (void)amplitude;
+    }
+    virtual void setFrameTime(f32 seconds, f32 deltaSeconds) { (void)seconds; (void)deltaSeconds; }
     virtual void setSkyAtmosphere(const SkyAtmosphere& s) { (void)s; }
     virtual SkyAtmosphere skyAtmosphere() const { return {}; }
     // Sets the camera post-processing chain.
@@ -652,9 +816,49 @@ public:
 
     // Renders subsequent meshes as wireframe until toggled off.
     virtual void setWireframe(bool on) { (void)on; }
+    // Draws the next mesh with NO LIGHTING -- flat gBaseColor, no sun, no ambient, no fog.
+    //
+    // IT TURNS ON A PATH THAT ALREADY EXISTED AND COULD NOT BE REACHED. plainShadeSurface has carried
+    // `if (gMaterial.z > 0.5) return float4(gBaseColor.rgb, gBaseColor.a);` since it was written
+    // (shared_prelude.hlsl, and its constant block documents the slot as "z=unlit(0/1)"), and every
+    // single call site that fills that constant hardcoded it to 0 -- so the branch was dead in the
+    // shader with nothing on either backend able to select it.
+    //
+    // A SETTER, NOT A WIDER drawMesh, matching setWireframe/setDrawBlended/setLineDepth beside it.
+    // Widening the call would drag IRenderFeature::submitDraw's signature and every feature with it,
+    // for a flag no feature ever sees: the editor's one caller draws in WIREFRAME, and wireframe is
+    // exactly the case where VoxiRenderer declines the pipeline, so the draw has already fallen
+    // through to the backend's own before this matters.
+    //
+    // STICKY, like setWireframe: nothing resets it per frame, so a caller brackets its own draw.
+    virtual void setUnlit(bool on) { (void)on; }
 
     // Line depth testing. Default true; false draws subsequent lines as an always-on-top overlay.
     virtual void setLineDepth(bool testDepth) { (void)testDepth; }
+
+    // How much scene radiance a line writes, as a multiple of the colour it was authored with.
+    // 1.0 is exactly the old behaviour: the line lands at the display colour the vertex named.
+    // Above 1.0 the line is BRIGHTER THAN WHITE in the pre-tonemap target, which is what makes the
+    // camera's own bloom pick it up -- lines already draw into the HDR scene target and bloom runs
+    // before the tonemap, so this needs no glow shader of its own, only headroom.
+    //
+    // WHY A MULTIPLIER AND NOT A BRIGHTER AUTHORED COLOUR. PSLine writes
+    // averInverseTonemap(srgbToLin(col)), and that curve is near-vertical at the top: it clamps at
+    // 1.0329, because its `2.43y - 2.51` denominator reaches zero there. Two of the six baked gizmo
+    // hues already sit at exactly 1.0 on a channel, where averInverseTonemap(srgbToLin(1.0)) is
+    // about 7.24 -- and at 1.4 it clamps and evaluates to about 1931. A 270x jump, with the other
+    // channels washing toward white on the way. Scaling AFTER the inverse tonemap has no ceiling
+    // and no hue shift: every channel moves by the same factor, so red stays red.
+    //
+    // STICKY, like setLineDepth above it, and drawLines writes the constant on EVERY call rather
+    // than only when it is non-default -- the value shares dword 16 of the per-object block with
+    // gBaseColor.x, so a line drawn after any mesh would otherwise inherit that mesh's red channel
+    // as its glow. Callers still bracket, so the sticky value is 1.0 outside a bracket.
+    //
+    // NOT EXPOSURE-STABLE, stated rather than fixed: PSLine never divides by gPostTone.x, so under
+    // auto-exposure the apparent strength drifts with scene brightness. That is pre-existing --
+    // the authored line colour has always had it -- and acceptable for a cosmetic effect.
+    virtual void setLineGlow(f32 gain) { (void)gain; }
 
     // Captures the backbuffer pixel at (x,y) during the next presented frame; poll getCapture().
     virtual void requestCapture(u32 x, u32 y) { (void)x; (void)y; }
@@ -693,6 +897,31 @@ public:
     // other size-dependent target this interface exposes.
     virtual TextureHandle sceneDepthTexture() { return 0; }
 
+    // THE OPAQUE SCENE, COPIED, SO A TRANSLUCENT SURFACE CAN READ WHAT IS BEHIND IT.
+    //
+    // WHY THIS HAS TO EXIST. Hardware alpha blending attenuates the destination by ONE scalar
+    // (1 - src.a), which cannot differ per channel. Volume absorption is Beer-Lambert and is
+    // per-channel by definition -- glass is green because iron passes green and eats red, and the
+    // effect grows with path length. So a blended surface can be made to go DARKER with depth by
+    // raising its alpha, but it can never TINT what is behind it. That is the whole reason glass in
+    // this engine could not show the green edge that real glass shows.
+    //
+    // The way out is to hand the shader the background as a texture, so it does the composite itself
+    // instead of leaving it to one blend factor. This returns a copy of the scene colour taken just
+    // BEFORE the blended draws replay -- the same trick the AverSR path already uses to give the
+    // upscaler a TextureHandle for a raw render target.
+    //
+    // ONE COPY, TAKEN ONCE. A second translucent layer therefore samples a background that does not
+    // include the first: glass over water reads the water's own backdrop, not the water. That is the
+    // standard trade (UE's distortion pass makes it too) and it is the price of this approach over
+    // per-channel destination blending, which D3D12 cannot offer here because the blended pass binds
+    // four render targets when the G-buffer is on and dual-source blending requires exactly one.
+    //
+    // 0 when unavailable, and the shader must fall back to the scalar composite when it is: before
+    // the first resize, on a backend that has not implemented it, and under MSAA, where the scene
+    // target is multisampled and a plain CopyResource into a single-sample texture is invalid.
+    virtual TextureHandle sceneColorBackdropTexture() { return 0; }
+
     // ---------------------------------------------------------------------------------------
     // G-buffer: velocity, view-space depth, and world normal+roughness, written ALONGSIDE the
     // ordinary forward scene pass at scene resolution -- three extra render targets and nothing
@@ -718,9 +947,19 @@ public:
     // ADDITIVE AND DEFAULTED, THE WHOLE WAY DOWN. setGBufferEnabled defaults to OFF, and every
     // accessor below defaults to its own "nothing here" value (0 for a texture, false/true for the
     // bools, chosen as whichever is the SAFE reading for a caller that forgot to check
-    // gBufferEnabled() first). A build that never calls setGBufferEnabled(true) -- which is every
-    // build today, since nothing yet does -- allocates none of these three targets, records no
-    // extra writes, and renders a frame BIT-IDENTICAL to one from before this declaration existed.
+    // gBufferEnabled() first). A build that never calls setGBufferEnabled(true) allocates none of
+    // these three targets, records no extra writes, and renders a frame BIT-IDENTICAL to one from
+    // before this declaration existed.
+    //
+    // "WHICH IS EVERY BUILD TODAY, SINCE NOTHING YET DOES" STOOD HERE AND WAS FALSE, from the day
+    // after it was written (2026-08-29) until it was corrected. The editor calls this every frame:
+    // sandbox/src/SandboxApp.cpp passes `gbufferOverride_ || gbufferDebugView_ != Mode::Off`, driven
+    // by --gbuffer and --gbuffer-debug, and the viewport's G-buffer debug view reads all three
+    // accessors back. The packaged runtime still never turns it on, which is the true half of what
+    // the sentence was reaching for -- but a reader checking whether this surface has ever been
+    // exercised would have concluded "no" and been wrong, which is the entire cost of the mistake.
+    // Left in rather than deleted because this file has a recorded history of stale absolutes
+    // outliving the thing they described.
     // That is not a nicety: a render-gate oracle (18 gates x 9 configurations) and 89 headless
     // suites both assume it, and a backend that allocates or writes any of this while reporting
     // gBufferEnabled() == false would fail both without the failure pointing at why.
@@ -765,17 +1004,23 @@ public:
     // 0 when gBufferEnabled() is false or unimplemented, matching gBufferVelocityTexture() above.
     virtual TextureHandle gBufferViewZTexture() { return 0; }
 
-    // Scene-resolution normal and roughness, Format::RGB10A2Unorm. xyz: the shaded surface's
-    // WORLD-SPACE (not view-space, not tangent-space) normal, ENCODED from its real range of
-    // [-1, 1] into the unorm-storable range [0, 1] via n*0.5 + 0.5 -- a reader must decode with
-    // n*2 - 1 before using it as a direction, and a reader that forgets the decode gets a vector
-    // that LOOKS plausible (still roughly unit-length-ish, still roughly pointing outward) while
-    // being wrong at every pixel, which is exactly the shape of bug that survives a casual visual
-    // check. w: perceptual roughness, already [0, 1], stored as-is with no further transform -- it
-    // gets only 2 bits of the format's 10/10/10/2 split, which is deliberately coarse: this channel
-    // is read by a denoiser's edge-stopping weight (FFX_DNSR_Shadows_ReadNormals reads roughness
-    // alongside the normal for exactly that), never by anything doing actual PBR shading with it,
-    // so 2-bit banding here costs nothing a consumer of this field would notice.
+    // Scene-resolution normal and roughness, Format::RGB10A2Unorm -- packed to NRD's OWN
+    // NRD_NORMAL_ENCODING_R10G10B10A2_UNORM layout (third_party/nrd/Shaders/NRDConfig.hlsli), NOT
+    // the plain n*0.5+0.5-with-roughness-in-w scheme an earlier version of this contract documented
+    // (that was NRD's #else layout, for encodings 0/3 -- wrong for the format this texture actually
+    // is, and the reason REBLUR used to decode a garbage normal and a view-angle-dependent
+    // roughness instead of the real ones). xyz JOINTLY encode the normal AND the roughness: an
+    // improved-octahedral fold puts N into x/y, and z carries roughness's MAGNITUDE with the SIGN
+    // OF N.z riding on z's own sign (roughness can never be exactly 0, or that sign bit has nothing
+    // to carry it). See averPackNormalRoughness (modules/render.voxi/shaders/voxi.hlsl, transcribed
+    // byte-exact from NRD's _NRD_EncodeNormalRoughness101010) for the encode, and
+    // sandbox/shaders/gbuffer_debug.hlsl for the matching decode. w: materialID/3 in NRD's
+    // convention -- this engine has no material-ID concept yet, so it is always 0 here, NOT
+    // roughness. A raw sample of this texture is NOT directly interpretable with a cheap n*2-1 on
+    // xyz; a reader needs the full decode (NRD_FrontEnd_UnpackNormalAndRoughness's own job, or the
+    // transcribed pair named above) to recover either channel, and a reader that assumes the OLD
+    // contract gets a vector that LOOKS plausible while being wrong at every pixel -- exactly the
+    // shape of bug that survives a casual visual check, and exactly how this one did.
     //
     // 0 when gBufferEnabled() is false or unimplemented, matching the two accessors above.
     virtual TextureHandle gBufferNormalRoughnessTexture() { return 0; }

@@ -1,17 +1,32 @@
 # Packaging an Aver project into a shippable game
 
-> **STATUS: REMOVED, 2026-08-17. THIS DOCUMENT IS HISTORY, NOT A DESCRIPTION OF THE ENGINE.**
-> `AverGame.exe` (`game/`), `scripts/stage-game.ps1`, `scripts/verify-game.ps1`,
-> `scripts/game.allowlist` and the editor's **Package Project** item have all been deleted. Nothing
-> below can be run today, and the file paths it cites no longer exist. It is kept because the design
-> reasoning — the allowlist split, the `--trace-opens` verification, the ImGui/RHI separation it
-> forced — outlived the feature and is cited from live code comments.
+> **STATUS: LIVE AGAIN, 2026-09-05, WITH THE CHECK THAT WAS MISSING.** Removed 2026-08-17
+> (`b262c73`), restored today. `AverGame.exe` (`game/`), `scripts/stage-game.ps1`,
+> `scripts/verify-game.ps1`, `scripts/game.allowlist` and the editor's **Package Project** item all
+> exist and all work; everything below can be run.
 >
-> **What replaced it: nothing, deliberately.** The editor is how a project is run. A second host that
-> rendered a different subset of the scene was a standing source of confusion about what "the game"
-> actually shows, and it was the reason a graph-only project appeared broken when the real gap was
-> elsewhere. `modules/runtime.game` survives as a LIBRARY, driven by `tests/game`, which is what the
-> `AVER_BUILD_GAME` option now switches.
+> **WHY IT WAS REMOVED, AND WHAT IS DIFFERENT NOW.** The stated reason was real: a second host
+> "rendered a different subset of the scene than the editor", and nothing in the tree could notice
+> — no CI, no packaging test, and `verify-payload.ps1` compares `Sandbox.exe` against
+> `Sandbox.exe`. Restoring the executable without answering that would have restored the problem.
+>
+> `verify-game.ps1` now runs a **divergence gate**: both hosts open the same project with
+> `--scene-census` and their censuses must match — entity counts, distinct meshes and materials,
+> and an order-independent hash of every (mesh, material) pair. It is a census and not a frame
+> comparison on purpose; see `modules/world/include/aver/world/SceneCensus.hpp` for why (different
+> viewports, different aspect ratios, different cameras by design).
+>
+> **It found a real defect on its first run.** A staged package reported
+> `VSMain (vs_6_0): error: missing entry point definition`, fell back to `backend=Null` and refused
+> every mesh. The cause was not a shader bug: `game.allowlist` predated the migration of HLSL out of
+> C++ literals into `modules/*/shaders/`, so the package shipped the HLSL compiler and no HLSL —
+> the same hole `payload.allowlist` had already grown an entry to close. A missing shader file is
+> deliberately non-fatal, which is exactly why this surfaced as something that looks like a shader
+> bug rather than a packaging one.
+>
+> The runtime never left: `modules/runtime.game` kept building and growing for the nineteen days it
+> had no executable, and `GameApp::onInit` is a superset of the editor's `applyProject`. What was
+> deleted was ~30 lines of glue and three scripts.
 >
 > **Was BUILT before removal, further than this header used to admit.** A project did package, ran
 > from a scratch directory with the working directory outside the tree, and failed correctly when a
@@ -98,6 +113,9 @@ Two new directories:
 - `src/GameApp.cpp` — the `aver::Application` subclass: `config()`, `onInit`, `onUpdate`, `onRender`, `onShutdown`.
 - `src/ContentIndex.cpp` — `rebuildContentIndex`, `resolveAssetPath`, `resolveAnimAsset`, `resolveSceneMesh`, `materialForSurface`, `loadProjectMeshes`, `loadProjectMaterials`. All of that currently sits inside `#if AVER_MODULE_PBR`, so a `PBR=OFF, SCENE=ON` build resolves no assets by id and hands the anim system no resolver.
 
+  > **CORRECTED 2026-09-13.** `loadProjectMaterials` no longer exists in the runtime: it had no caller
+  > and was removed. Per-surface material resolution goes through `materialForSurface`.
+
   > **CORRECTED 2026-08-02, twice.** The block opens at `SandboxApp.cpp:1132` and closes at `:1347`,
   > not the 1130/1345 written here — this section was authored against `ae47a2f` despite the header
   > claiming `5714ba3`. And the claim that relocating the code "fixes a bug" is **wrong**: a verbatim
@@ -120,7 +138,7 @@ Two new directories:
 - **`imgui`** — and this is not a matter of discipline, it is a structural problem. `modules/rhi.d3d12/CMakeLists.txt:14-16` links `imgui` **PUBLIC** on `Aver.RHI.D3D12` and propagates `AVER_WITH_IMGUI=1` **PUBLIC**. `Aver.Runtime` links `Aver.RHI.D3D12` PUBLIC. **You cannot build an ImGui-free `AverGame` out of an `AVER_ENABLE_UI=ON` tree.** Decision for slice 1: **a second build tree**, `build-game`, configured `-DAVER_ENABLE_UI=OFF -DAVER_BUILD_SANDBOX=OFF -DAVER_BUILD_TESTS=OFF`. Splitting ImGui hosting out of the D3D12 backend is the right fix and it is Slice 4, not Slice 1. Say so in the commit message rather than implying the exclusion is enforced by the link line, because it is not.
 - **`Aver.Formats.Roslyn`** and everything under `bin\Tools\` — `avermatc`, `averdesign`, `Microsoft.CodeAnalysis.dll` (3.0 MB), `Microsoft.CodeAnalysis.CSharp.dll` (6.6 MB) and 26 localization satellites. A shipped game has no reason to carry a C# compiler. Note that `payload.allowlist:104` gates `Tools/**` on `?AVER_MODULE_PBR`, so a game payload that reused that allowlist would ship ~10 MB of Roslyn for nothing.
 - **`Aver.Render.ActorPreview`**, **`Aver.Render.PathTracer`** (`--pt-furnace` only), **`Aver.Mcp`**, **`Aver.Formats.Audio`** (Media Foundation import, editor-only).
-- **`Aver.Audio.Abi.dll`** — do not ship it. It is built and staged by `payload.allowlist:44` and has **zero callers**: the managed `Aver.Audio` its own `modules/audio.abi/CMakeLists.txt:7-10` describes does not exist in `scripting/csharp/`, no `DllImport` names it, and it is not in any import table. Slice 1 ships a **silent game** and says so out loud.
+- **`Aver.Audio.Abi.dll`** — do not ship it (for slice 1's purposes; see the (e) table and (h) correction below for what changed since). It is built and staged by `payload.allowlist:44`. **Corrected:** this bullet originally said it had zero callers anywhere, managed or native. That stopped being true at `dbfd6a6` ("The audio stack had no callers at all; now a game can make a noise"): `scripting/csharp/Aver.Framework/Audio.cs` now wraps the whole ABI, six Aver Node nodes call it, and `SandboxApp.cpp:1559` now calls `aver_audio_init()` on entering Play — so the editor itself, which is how a project runs, is no longer silent. Slice 1 as scoped still ships no such wiring in `AverGame`/`GameApp`, which is now moot: `AverGame.exe` was deleted before slice 1 shipped (see the header).
 
 ### What does not exist and blocks the exe from being a game
 
@@ -181,8 +199,8 @@ Every binary that must ship, with what actually pulls it in and whether it may b
 | `Scripting\Aver.{Framework,Scene,Scripting,UI}.dll` + `Aver.Scripting.Bridge.*` | ours | ours | yes |
 | `Binaries\Scripts\*.dll` | the project's | the project's | yes |
 | `FSharp.Core.dll` | .NET SDK `library-packs` | **MIT** | yes **if** F# is used — **currently in NO allowlist section, so it neither ships nor gets a notice.** Newly *redistributed* the moment a game ships. |
-| `Microsoft.CodeAnalysis(.CSharp).dll` + 26 satellites | `bin\Tools\` | **MIT** | **NO.** No game needs a compiler. Note in passing: these ship in the *engine* payload today and `THIRD-PARTY-NOTICES.txt` never mentions Roslyn — MIT requires the copyright notice. That is a live compliance miss in `stage-payload.ps1`. |
-| `Aver.Audio.Abi.dll` | ours | ours | **NO** — zero callers (see (b)) |
+| `Microsoft.CodeAnalysis(.CSharp).dll` + 26 satellites | `bin\Tools\` | **MIT** | **NO.** No game needs a compiler. Note in passing: these ship in the *engine* payload today and `THIRD-PARTY-NOTICES.txt` never mentioned Roslyn — MIT requires the copyright notice. **Fixed:** `stage-payload.ps1` now emits a Roslyn section whenever it finds `Microsoft.CodeAnalysis*.dll` in the staged tree, concatenating `third_party/nuget/LICENSE.roslyn.txt`. The licence file had to be written rather than vendored: the packages declare MIT by SPDX expression and carry no licence text of their own. |
+| `Aver.Audio.Abi.dll` | ours | ours | **NO** in this plan's own scope — but "zero callers" is stale; see (b) and the (h) correction |
 
 ### The one that is missing and is a hard blocker
 
@@ -317,12 +335,12 @@ The extraction in Slice 2 is behaviour-preserving by construction, so **the edit
   - **Reachable two ways: a C# call, or an Aver Node graph with no entity pin at all.** `SaveGame`/`LoadGame` are exec nodes in the `Game` category (`sandbox/src/GraphNodeDefs.hpp:200-203`) carrying one node-line attribute, `path=` — the same "value is data, not a pin" mechanism `socket=`/`curve=`/`mesh=` already use, because `PinType` has no string member. Both act on the *whole* world, which is why neither takes an entity input.
   - **What a save captures.** `aver::save::capture()` (`modules/save/src/SaveWorld.cpp`) walks every live entity through the engine's reflection API — every registered component, every non-`readOnly` field, by name — with no hardcoded list of "known" components. Three kinds of state are excluded, each named, not silently dropped: `CWorld` (recomposed from `CLocal` every frame — writing it would restore a matrix the next flush overwrites anyway), `CHierarchy` (parent/child travel as an array index instead, since an entity handle means nothing in a file), and `CName`'s raw `offset`/`len` (a slice into this process's own name blob). Graph-local `VAR`s are a fourth, narrower case: they live entirely in managed memory with no native component behind them, so they ride along as a synthetic `$GraphVars` component — captured only for entities whose class is `GameInstance` or a subclass (`HostBridge.cs:1580-1591`, `FindPersistedGraphHost`), not for every graph-hosted actor. A plain level-dressing graph's VARs still reset to their declared defaults on load; that is a stated design choice ("persistent state belongs to the class meant to carry it across a level transition"), not a bug.
   - **What restore does that a naive "spawn then patch" would get wrong.** `aver_fw_spawn` (`FrameworkAbi.cpp:620-624`) is a three-line wrapper that calls the static `spawnActor` helper with `dispatchBeginPlay=true`, and `spawnActor` (`FrameworkAbi.cpp:535-580`) is what actually runs `bind → build_models → beginPlay` inline — restoring an actor and then writing its saved fields over it would already have run `OnBeginPlay` against the class defaults — a door reading `isOpen` sees the *wrong* answer. `aver_fw_dispatch_begin_play` (added `66843a6`) splits that: `aver_fw_spawn_preview` creates the actor without dispatching begin-play, fields are restored, and only then is `OnBeginPlay` dispatched for every restored actor at once (so one actor's begin-play sees every *other* restored actor already in the world, not just the ones created before it). Teardown before a load destroys the current world through the framework's own destroy path, so `OnEndPlay` runs and no managed instance is torn out from under live C# code. A field whose type changed or no longer exists is dropped and counted, not crashed on; a component the build no longer registers logs a warning and the entity restores without it; a failed restore leaves the world **empty**, not half-populated.
-  - **Where it's actually installed, and what that implies.** Both composition roots — `SandboxApp.cpp:1816` and `modules/runtime.game/src/GameApp.cpp:875` — install the same provider pair. The editor installs it too, and its own comment says why: **"given there is no packaged game today, [the editor] is the only place [save/load] can be tested at all"** (`SandboxApp.cpp:1813-1815`). That is the honest state of this feature — real, tested at the C++ level (`tests/save/src/SaveWorldTest.cpp`, `SaveActorTest.cpp`, a real-CLR test) and at the graph level (`Aver.Graph.Tests/SaveLoadGameNodeTests.cs`) — but never exercised by a standalone game process, because there is no standalone game process.
+  - **Where it's actually installed, and what that implies.** Both composition roots — `SandboxApp.cpp:2185` (line drifted again, from the `2352` previously recorded here, itself drifted from the `1816` first recorded) and `modules/runtime.game/src/GameApp.cpp:875` — install the same provider pair. The editor installs it too, and its own comment says why: **"given there is no packaged game today, [the editor] is the only place [save/load] can be tested at all"** (`SandboxApp.cpp:2182-2184`). That is the honest state of this feature — real, tested at the C++ level (`tests/save/src/SaveWorldTest.cpp`, `SaveActorTest.cpp`, a real-CLR test) and at the graph level (`Aver.Graph.Tests/SaveLoadGameNodeTests.cs`) — but never exercised by a standalone game process, because there is no standalone game process.
   - **What is NOT there.** No skip predicate is wired up by either composition root, even though `CaptureOptions`/`RestoreOptions` both carry one specifically for a host that streams world chunks (`SaveWorld.hpp`'s own comment: to avoid double-persisting content `world::RegionFile` already owns). A project using chunk streaming would have its streamed content captured into the save file a second time today. There is no save-slot UI, no thumbnail/metadata, no versioning beyond a dropped-field warning, and no encryption. Physics body state (velocity, wake state) round-trips only to the extent it is an ordinary, non-`readOnly` component field — it is not treated specially.
 
-  **Settings are a separate, smaller story.** `modules/settings` (`aver_settings_open/get_*/set_*`, added `103e4df`) is a durable key/value store, deliberately not part of a save — but it has **zero callers** anywhere in the tree: no composition root ever calls `aver_settings_open`, and there is no C# binding, so nothing reachable from a script or a graph can read or write a setting today. `aver_settings_default_path()` would resolve to `%LOCALAPPDATA%\AverEngine\settings.ini` if anything called it. `%LOCALAPPDATA%\AverEngine` remains the *editor's* separate prefs store regardless (`EditorPrefs.cpp:145`: "Nothing about a PROJECT is stored here") — settings and editor prefs are two different files, and as of today, a per-project settings value written by gameplay code has nowhere to land in practice.
-- **Audio.** No managed contract assembly exists; the game is silent.
-- **Gamepad.** No path exists at all.
+  **Settings are a separate, smaller story — corrected.** `modules/settings` (`aver_settings_open/get_*/set_*`, added `103e4df`) is a durable key/value store, deliberately not part of a save. This paragraph originally said it had zero callers *and* no C# binding, so nothing reachable from a script or a graph could read or write a setting. The second half stopped being true at `160bcdd`: `scripting/csharp/Aver.Framework/Settings.cs` now wraps the whole ABI (`Open`/`OpenDefault`/`Flush`/`GetFloat`/`GetInt`/`GetBool`/`GetString`/`SetFloat`/`SetInt`/`SetBool`/`SetString`/`Has`/`Remove`/`Count`) — its own header comment calls itself "the FIRST C# binding to it," written with per-player input rebinds as the intended first caller. Nothing calls it yet: no script or graph anywhere in the tree references `Aver.Framework.Settings`, and no composition root calls `aver_settings_open` natively either, so the practical conclusion is unchanged — a per-project settings value written by gameplay code has nowhere to land in practice, but the reason is now "declared but unread" rather than "unreachable." `aver_settings_default_path()` resolves to `%LOCALAPPDATA%\AverEngine\settings.ini` (verified in `FileSystem.cpp`'s `userDataDir()` + `Settings.cpp`'s `aver_settings_default_path`). `%LOCALAPPDATA%\AverEngine` remains the *editor's* separate prefs store regardless (`EditorPrefs.cpp:145`: "Nothing about a PROJECT is stored here") — settings and editor prefs are two different files.
+- **Audio — corrected.** This used to say no managed contract assembly existed and the game was silent. Both halves are stale: `Aver.Framework/Audio.cs` now wraps the full ABI and the editor opens the audio device on entering Play (`SandboxApp.cpp:1559`, landed `dbfd6a6`), so the editor — which is how a project runs, per the header — is not silent. There is still no packaged, standalone game exe to be silent or not; that half of the sentence was overtaken by the exe's deletion, not fixed.
+- **Gamepad — partly corrected.** This said no path existed at all. Since `160bcdd`, `framework_abi.h` and `Aver.Framework/Input.cs` carry a full gamepad ABI shape (buttons, axes, get/set) modelled on XInput — but its own header comment says so plainly: "SHAPE ONLY -- NO POLLING" and "ZERO CONSUMERS. Nothing in this tree reads a gamepad today." No physical controller's input reaches it. The practical claim stands: nothing plugs a gamepad in.
 - **Dedicated server / true `--headless` game mode.** `Engine::run` knows "capture run" and "no window"; neither is a server.
 - **Splitting ImGui out of `Aver.RHI.D3D12`.** Worked around with a second build tree.
 - **`Scripts.csproj` `<Reference>`+`<HintPath>` conversion.** Real bug, wrong slice — packaging excludes that file entirely.

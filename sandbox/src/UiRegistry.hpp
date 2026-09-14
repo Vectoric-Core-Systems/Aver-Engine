@@ -65,12 +65,6 @@ public:
         return out;
     }
 
-    // How many widgets last frame published.
-    usize count() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return published_.size();
-    }
-
 private:
     mutable std::mutex mutex_;
     std::vector<TrackedWidget> building_;    // this frame, main thread only

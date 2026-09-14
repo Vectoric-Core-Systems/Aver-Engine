@@ -51,3 +51,6 @@ aver_add_module(Aver.Fluids
 if(AVER_MODULE_PHYSICS)
   target_compile_definitions(Aver.Fluids PUBLIC AVER_FLUIDS_SIMULATED=1)
 endif()
+
+# HLSL beside the executable -- see cmake/AvModule.cmake.
+aver_deploy_shaders(Aver.Fluids "${CMAKE_CURRENT_SOURCE_DIR}/shaders")

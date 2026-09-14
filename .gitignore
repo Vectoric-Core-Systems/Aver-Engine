@@ -42,12 +42,19 @@ Thumbs.db
 # --- Third-party fetched deps (kept out of VCS; pulled by CMake) ---
 /third_party/_deps/
 
+# NRD writes its build-time configuration header back into its own source tree: the ShaderMake run
+# uses third_party/nrd/Shaders as its source directory, so NRDConfig.hlsli has to live there. It is
+# generated from the NRD_* CMake options (see cmake/AverNRD.cmake) and is not upstream content.
+/third_party/nrd/Shaders/NRDConfig.hlsli
+/third_party/nrd/_Shaders/
+
 # C# scripting build output
 scripting/**/bin/
 scripting/**/obj/
 
-# Agent worktrees (transient, created by tooling)
-.claude/worktrees/
+# Claude Code's per-checkout folder: agent worktrees, scratch output and local tool state. All of it is
+# machine-local and transient, so the whole folder stays out of VCS rather than one subfolder at a time.
+.claude/
 
 # Python bytecode, from importing tools/mcp/aver_mcp.py to test it
 __pycache__/
@@ -68,3 +75,14 @@ __pycache__/
 # change to the baker look gate-clean while the file in the tree still described the old behaviour.
 # A real project's .ocnav is shipped content and is NOT covered by this -- the path is deliberate.
 test-content/**/*.ocnav
+
+# THE GI DERIVED DATA CACHE, wherever it appears. Its own header states the case: nothing in it is
+# authored and nothing in it is precious -- the whole directory can be deleted at any time and the
+# only cost is one rebuild. Six of these accumulated untracked under test-content/ and were pure
+# `git add -A` hazards.
+#
+# UNANCHORED, unlike the test-content/**/*.ocnav rule just above, and the difference is deliberate.
+# A .ocnav IS shippable content for a real project, so that rule is scoped to test content on
+# purpose. A DerivedDataCache never is, anywhere -- it is regenerable by definition -- so there is
+# no location where committing one would be right.
+DerivedDataCache/

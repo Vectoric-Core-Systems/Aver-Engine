@@ -90,6 +90,16 @@ private:
         kOpenDielectricGlass,      // ior 1.5, correct -- must read L
         kOpenDielectricDiamond,    // ior 2.42, correct -- must ALSO read L ("whatever the IOR")
         kOpenDielectricDefect,     // ior 1.5, PT_DEFECT_DIELECTRIC_NO_PDF_CANCEL
+        // THE METAL/ROUGH LOBE, held to the SAME absolute claim as everything above it: an albedo-1
+        // surface in a uniform environment of radiance L must read exactly L, whatever BSDF it wears.
+        // Three points because the ways a GGX lobe loses energy are not uniform across the parameter
+        // space -- a conductor at high roughness is where single-scattering microfacet models are
+        // known to go dark (the shadowing term removes light that a real surface would have scattered
+        // again between facets and this model never puts back), and a near-smooth one is where they
+        // look fine. Testing only the flattering point is how a 45% energy loss ships.
+        kOpenSpecDielectric,       // roughness 1.0, metallic 0
+        kOpenSpecMetalRough,       // roughness 1.0, metallic 1
+        kOpenSpecMetalSmooth,      // roughness 0.3, metallic 1
         kCaveShallow,
         kCaveDeep,
         kSeedFirst,     // the first sample block, traced on the FIRST accumulation frame

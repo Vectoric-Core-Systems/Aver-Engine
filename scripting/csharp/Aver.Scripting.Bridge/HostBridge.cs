@@ -11,6 +11,11 @@ using System.Text;
 
 using Aver.Framework;
 using Aver.Graph;
+// Assets.ObjectIdOf -- the ONE managed spelling of the engine's fnv1a64. This file used to carry a
+// private copy of the algorithm, which is the thing an asset id must never have two of: Hash.hpp's
+// own comment says it "must match the C# side's spelling in Aver.Scene/Native.cs", and a third
+// spelling here made that sentence untrue.
+using Aver.Scene;
 
 namespace Aver.Scripting.Bridge;
 
@@ -135,7 +140,7 @@ public static class HostBridge
         while (walk != 0 && visited.Add(walk))
         {
             string name = Fw.Str(Fw.aver_fw_class_name(walk));
-            if (s_classes.TryGetValue(unchecked((long)Fnv1a64(name)), out ClassInfo? info))
+            if (s_classes.TryGetValue(Assets.ObjectIdOf(name), out ClassInfo? info))
                 return info.Type;
             walk = Fw.aver_fw_class_parent(walk);
         }
@@ -518,6 +523,137 @@ public static class HostBridge
         }
     }
 
+    /// <summary>Parses and validates .ocgraph TEXT and reports the first thing wrong with it.
+    /// Returns 0 when the graph is valid, 1 when it is not (with <paramref name="buffer"/> filled),
+    /// and -1 on a bad argument. Nothing is loaded, compiled, spawned or ticked -- this reads text.
+    ///
+    /// WHY THIS EXPORT EXISTS. Graph.Validate() and OcGraphParser between them carry about thirty
+    /// carefully-worded errors that name the offending node and say what to do -- "Node 'x' is a
+    /// Param node but has no param= attribute naming which parameter it reads", and so on -- and
+    /// THE EDITOR NEVER CALLED ANY OF THEM. It could not: the checks are C# and the editor is C++,
+    /// with no channel between them for this. An author's first sight of any of these messages was
+    /// the engine log at project open, long after the mistake, if they thought to look.
+    ///
+    /// TEXT IN, NOT A PATH. The editor validates the graph currently ON THE CANVAS, including
+    /// unsaved edits; a path would validate the last saved version and quietly disagree with what
+    /// the author is looking at.
+    ///
+    /// OPTIONAL ON THE HOST SIDE (ScriptHost binds it with the same graceful-degradation rule as
+    /// GraphFire), so a bridge built before this existed still boots and the editor simply reports
+    /// that validation is unavailable.</summary>
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static unsafe int GraphValidate(IntPtr utf8Text, byte* buffer, int capacity)
+    {
+        try
+        {
+            if (buffer is null || capacity <= 1) return -1;
+            buffer[0] = 0;
+            string? text = Marshal.PtrToStringUTF8(utf8Text);
+            if (text is null) return -1;
+
+            // Parse() runs Validate() itself at the end, so one call covers both vocabularies of
+            // error -- a malformed record and a well-formed graph that does not hang together.
+            string? err;
+            if (OcGraphParser.Parse(text, out _, out err)) return 0;
+
+            byte[] utf8 = System.Text.Encoding.UTF8.GetBytes(err ?? "the graph is not valid");
+            int n = Math.Min(utf8.Length, capacity - 1);
+            for (int i = 0; i < n; ++i) buffer[i] = utf8[i];
+            buffer[n] = 0;
+            return 1;
+        }
+        catch (Exception ex)
+        {
+            // NEVER THROWS ACROSS THE ABI, for GraphFire's reason: an exception escaping an
+            // UnmanagedCallersOnly frame tears the process down with no usable diagnostic. Reported
+            // as "not valid" with the exception described, which is true and actionable -- a graph
+            // whose validation crashed is not one to trust.
+            try
+            {
+                byte[] utf8 = System.Text.Encoding.UTF8.GetBytes($"validation threw: {Describe(ex)}");
+                int n = Math.Min(utf8.Length, capacity - 1);
+                for (int i = 0; i < n; ++i) buffer[i] = utf8[i];
+                buffer[n] = 0;
+            }
+            catch { }
+            return 1;
+        }
+    }
+
+    /// <summary>Turns per-node execution recording on or off. The editor arms it ONCE at startup and
+    /// leaves it armed: the record call is a static bool test when off, which is cheaper than tracking
+    /// graph-tab lifetimes to switch it. A packaged game has no editor and never calls this at all, so
+    /// the cost on the hot path of every exec node of every live instance stays at that one test.
+    ///
+    /// (An earlier version said the editor calls this "when a graph tab opens or closes". It does not,
+    /// and the arming site in SandboxApp says so -- this was the third copy of that same wrong claim.)
+    ///
+    /// Returns 1 when the request was applied, 0 if the framework could not be reached.</summary>
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static int GraphSetHitRecording(int on)
+    {
+        try
+        {
+            Aver.Framework.GraphInterop.SetNodeHitRecording(on != 0);
+            return 1;
+        }
+        catch (Exception ex)
+        {
+            // NEVER THROWS ACROSS THE ABI, for GraphFire's reason.
+            Emit((int)Log.Level.Error, $"[Graph] hit recording could not be {(on != 0 ? "enabled" : "disabled")}: {Describe(ex)}");
+            return 0;
+        }
+    }
+
+    /// <summary>Writes the nodes of `utf8GraphName` that ran within `maxAgeSeconds` into
+    /// <paramref name="buffer"/> as "nodeId:age;nodeId:age", UTF-8 and NUL-terminated. Returns the
+    /// byte count written, or 0.
+    ///
+    /// AGES, NOT TIMESTAMPS, because the two sides do not share a clock -- the managed side counts
+    /// from its own Stopwatch and the editor from ImGui's frame time, and handing over a raw
+    /// timestamp would make the editor subtract two unrelated origins.
+    ///
+    /// BY GRAPH NAME, not by entity: the canvas shows a CLASS, and any instance running a node should
+    /// light that node. It is also the only key available -- a compiled graph's arguments come from
+    /// its own PARAM list, so there is no entity to name at the instrumentation point.</summary>
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    public static unsafe int GraphGetHits(IntPtr utf8GraphName, byte* buffer, int capacity, float maxAgeSeconds)
+    {
+        try
+        {
+            if (buffer is null || capacity <= 1) return 0;
+            buffer[0] = 0;
+            string? name = Marshal.PtrToStringUTF8(utf8GraphName);
+            if (string.IsNullOrEmpty(name)) return 0;
+
+            string joined = Aver.Framework.GraphInterop.CollectNodeHits(name, maxAgeSeconds);
+            if (joined.Length == 0) return 0;
+            byte[] utf8 = System.Text.Encoding.UTF8.GetBytes(joined);
+            int n = Math.Min(utf8.Length, capacity - 1);
+            // TRUNCATED AT A SEPARATOR, never mid-entry: a half-written "nodeId:0.1" would parse as a
+            // node id nothing on the canvas matches -- silent, rather than visibly wrong.
+            //
+            // ONLY WHEN IT ACTUALLY DID NOT FIT, and getting that wrong cost a debugging round: the
+            // first version walked back to the last ';' unconditionally, so a payload that fitted
+            // perfectly still lost its final entry. The managed unit tests could not catch it -- they
+            // call CollectNodeHits directly and never cross this boundary -- and the symptom was a
+            // node that provably executed (it printed) never lighting up.
+            if (n < utf8.Length)
+            {
+                while (n > 0 && utf8[n - 1] != (byte)';') --n;
+                if (n > 0) --n;   // drop the trailing separator itself
+            }
+            for (int i = 0; i < n; ++i) buffer[i] = utf8[i];
+            buffer[n] = 0;
+            return n;
+        }
+        catch (Exception ex)
+        {
+            Emit((int)Log.Level.Error, $"[Graph] collecting node hits threw: {Describe(ex)}");
+            return 0;
+        }
+    }
+
     // ------------------------------------------------------------------ graph classes
     //
     // GRAPH-AS-CLASS: a .ocgraph carrying a CLASS record becomes a real registered actor class,
@@ -639,7 +775,7 @@ public static class HostBridge
                 // A warning rather than a refusal: the last-wins behaviour is aver_fw_class_declare's
                 // own (it is idempotent by name), it is deterministic here, and refusing both would
                 // turn a rename-in-progress into a level that cannot load at all.
-                long classKey = unchecked((long)Fnv1a64(graph.ClassName));
+                long classKey = Assets.ObjectIdOf(graph.ClassName);
                 if (s_graphClasses.TryGetValue(classKey, out GraphClassInfo prior))
                     Emit((int)Log.Level.Warn,
                          $"[Graph] class '{graph.ClassName}' is declared by more than one graph: "
@@ -1226,7 +1362,7 @@ public static class HostBridge
             Emit((int)Log.Level.Warn,
                  $"[Scripting] class '{name}' did not seal - check its parent '{parent}' is a declared class");
 
-        s_classes[unchecked((long)Fnv1a64(name))] =
+        s_classes[Assets.ObjectIdOf(name)] =
             new ClassInfo { Type = type, Ticks = builder.WantsTick, TickGroup = builder.TickGroupId, RegistryName = name, Handle = c };
     }
 
@@ -1267,20 +1403,6 @@ public static class HostBridge
         if (typeof(AverGameMode).IsAssignableFrom(type)) return "GameMode";
         if (typeof(AverGameInstance).IsAssignableFrom(type)) return "GameInstance";
         return "Actor";
-    }
-
-    // FNV-1a 64-bit over the UTF-8 bytes: must stay byte-for-byte the native aver::fnv1a64 (Hash.hpp).
-    private static ulong Fnv1a64(string s)
-    {
-        const ulong offset = 0xcbf29ce484222325UL;
-        const ulong prime = 1099511628211UL;
-        ulong h = offset;
-        foreach (byte b in Encoding.UTF8.GetBytes(s))
-        {
-            h ^= b;
-            h *= prime;
-        }
-        return h;
     }
 
     // Disables one actor and says which hook threw.
@@ -1429,17 +1551,22 @@ public static class HostBridge
         catch (Exception ex) { DisableActor(live, "OnBeginPlay", ex); }
     }
 
-    // Ticks every actor in one group, and refreshes the frame's input before the first group.
+    // Ticks every actor in one group.
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
     private static void DispTickAll(int group, float dt)
     {
         if (group < 0 || group >= TickGroupCount) return;
 
-        if (group == 0)
-        {
-            try { EnhancedInput.Update(); }
-            catch (Exception ex) { Emit(3, $"[bridge] input update threw: {ex.Message}"); }
-        }
+        // GROUP 0 USED TO ALSO CALL EnhancedInput.Update() HERE, refreshing every action's value
+        // before the first tick group ran so every actor in the frame agreed on a "was pressed" edge
+        // regardless of tick order. That call is GONE, not just relocated: EnhancedInput.cs is now a
+        // thin wrapper over aver_fw_action_held/pressed/released/value2 (framework_abi.h's NAMED
+        // ACTIONS section, minor 5), which read InputState's cur/prev/mouse/prevMouse ON DEMAND --
+        // the SAME bytes aver_fw_input_key already reads -- so there is no separate per-frame copy
+        // left for this dispatcher to roll. The cross-actor-agreement guarantee above still holds; it
+        // now falls out of every actor reading the identical native state instead of a C#-side
+        // snapshot this method used to take once per frame. See EnhancedInput.cs's own top-of-file
+        // comment for the rest of the reasoning.
         // A SNAPSHOT, not the live list. The walk used to index s_tickBuckets[group] directly, and
         // DispUnbind REMOVES from that same list (:808) -- so an actor destroying an actor during
         // OnTick shifted every later element down one, and the next ++i stepped straight over

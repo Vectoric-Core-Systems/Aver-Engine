@@ -8,6 +8,9 @@
 // behind (the generic descriptor-heap plumbing that has nothing to do with ImGui).
 #include "aver/rhi/d3d12/ImGuiUiBackend.hpp"
 #include "aver/core/Log.hpp"
+#include "aver/platform/FileSystem.hpp"   // userDataDir, for where the layout ini lives
+
+#include <string>
 
 #include <wrl/client.h>
 #include "imgui.h"
@@ -29,7 +32,20 @@ namespace {
 // now a plain member instead of a file-static global: this module only ever has one instance anyway
 // (Sandbox constructs exactly one), but a member is one fewer global for no cost.
 struct UiSrvPool {
-    static constexpr u32 kCount = 16;
+    // 16 UNTIL IT WAS MEASURED AGAINST WHAT ACTUALLY WANTS A SLOT, and 16 was far too few. The
+    // permanent residents alone -- three icon sheets, the splash logo, the compile-status icon, the
+    // scene viewport, the shared asset-editor preview, and the thumbnail cache's own preview target
+    // -- account for about eight before ImGui's atlases are subtracted. That left roughly half a
+    // dozen for Content Browser thumbnails, while ThumbnailCache advertises a cap of 64: the coded
+    // cap was an order of magnitude above the real ceiling, so browsing a folder of meshes silently
+    // stopped generating previews after the first few tiles and fell back to the type glyph.
+    //
+    // 512 IS STILL SMALL. A shader-visible CBV/SRV/UAV heap can hold a million descriptors; this one
+    // is 512 * 32 bytes, about 16 KB of GPU memory. The number is not a budget, it is a headroom
+    // choice -- the real budget is ThumbnailCache's own VRAM cap, which is what should decide how
+    // many thumbnails live at once. Sizing this so the descriptor heap is never the binding
+    // constraint puts that decision back where it is actually reasoned about.
+    static constexpr u32 kCount = 512;
     u64 cpuBase = 0, gpuBase = 0;
     u32 stride = 0;
     bool used[kCount] = {};
@@ -96,7 +112,27 @@ public:
         ImGui::CreateContext();
         ImGuiIO& io = ImGui::GetIO();
         io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-        io.IniFilename = nullptr;
+        // THE LAYOUT PERSISTS NOW, AND IT DELIBERATELY DID NOT BEFORE. `io.IniFilename = nullptr`
+        // meant every window size, dock arrangement, table column width and collapsing-header state
+        // was thrown away on exit, and a one-shot DockBuilder pass rebuilt the default each launch --
+        // so resizing the Outliner and restarting put it straight back. That was a real decision
+        // rather than an oversight (docs/EDITOR.md argued it), and it was the wrong one: it is paid
+        // on every single start, by everyone, forever.
+        //
+        // BESIDE editor.ini, not beside the executable, and for the same reason editor.ini lives
+        // there: this is per-machine, per-user, disposable state, and writing it next to a binary
+        // that may sit in Program Files fails on exactly the installs that matter. Held in a static
+        // because ImGui stores the POINTER and reads it at shutdown -- a local would dangle.
+        //
+        // THE ESCAPE HATCH ALREADY EXISTS: View > Reset Layout clears dockBuilt_ and rebuilds the
+        // default, which is what makes turning this on safe. A layout that ends up unusable is one
+        // menu item from being fixed rather than a reason to reinstall.
+        static std::string s_iniPath;
+        if (s_iniPath.empty()) {
+            const std::string dir = aver::userDataDir();
+            if (!dir.empty()) s_iniPath = dir + "\\editor-layout.ini";
+        }
+        io.IniFilename = s_iniPath.empty() ? nullptr : s_iniPath.c_str();
         ImGui::StyleColorsDark();
 
         if (!ImGui_ImplWin32_Init(hwnd)) {

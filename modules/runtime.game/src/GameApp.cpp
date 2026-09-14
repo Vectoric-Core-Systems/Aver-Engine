@@ -6,6 +6,9 @@
 #include "aver/platform/Window.hpp"
 #include "aver/platform/FileSystem.hpp"
 #include "aver/core/Log.hpp"
+// The shared GPU-timing tree formatter -- see --stats in GameConfig, and the header's own note on
+// why it moved out of the editor console.
+#include "aver/rhi/GpuTimingFormat.hpp"
 
 // --screenshot (captureScreenshotIfDue). A SECOND STB_IMAGE_WRITE_IMPLEMENTATION relative to
 // sandbox/src/SandboxApp.cpp's own is fine -- tests/formats/CMakeLists.txt's MakeFoliage target
@@ -15,9 +18,13 @@
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
 
+#if AVER_WITH_AUDIO_ABI
+#  include "aver/audio/audio_abi.h"
+#endif
 #if AVER_MODULE_SCENE
 #  include "aver/scene/World.hpp"
 #  include "aver/anim/AnimSystem.hpp"
+#  include "aver/anim/ControlRig.hpp"
 #  include "aver/save/SaveWorld.hpp"
 #  include "aver/formats/OcSave.hpp"
 #endif
@@ -35,8 +42,30 @@
 #  include "aver/scene/scene_abi.h"
 #  include "aver/core/Hash.hpp"
 #endif
+#include "aver/assets/LevelSky.hpp"
+// The divergence census both hosts print, so "the game draws what the editor draws" is a check
+// rather than a claim. Header-only; see SceneCensus.hpp for why a census and not a pixel diff.
+#include "aver/world/SceneCensus.hpp"
 #if AVER_MODULE_VOXI
 #  include "aver/voxi/Voxi.hpp"
+// ProjectRenderApply.hpp: the shared, header-only two-phase manifest apply (Lane 2 of the settings-
+// separation pass) -- see attachVoxi and applyProjectRenderSettings below for the two call sites.
+// Pulls in RenderSettingsResolver.hpp (voxi::resolve, for pushFrame's G-buffer switch) along the way.
+#  include "aver/voxi/ProjectRenderApply.hpp"
+// Scalability.hpp (3.3 C, contract C2-12): resolveAverSrLevel/autoAverSrLevel/AverSrDecision/
+// AverSrSource, for onInit's AverSR apply block below. Pulls in QualityLadder.hpp (the
+// kAverSrOff..kAverSrPerformance numbering) and, through RenderSettingsResolver.hpp, Voxi.hpp itself
+// -- already included one line up, so this adds no new dependency, only new names from a header this
+// translation unit did not previously reach into.
+#  include "aver/voxi/Scalability.hpp"
+// NrdDenoiser.hpp, for Denoiser::available() alone -- attachVoxi's nrdSupported computation below is
+// the SandboxApp.cpp:2508-2514 mirror site R1 requires (same expression, `backend() == D3D12 &&
+// available()`). Aver.Render.NRD is "ALWAYS linkable" (its own CMakeLists' own words) and reaches this
+// translation unit transitively: Aver.Runtime.Game links Aver.Render.Voxi.Renderer PUBLICly, which
+// itself links Aver.Render.NRD PUBLICly (modules/render.voxi/CMakeLists.txt) -- the same edge
+// VoxiRenderer.hpp already rides unconditionally (its own #include of NrdRecorder.hpp carries no
+// AVER_MODULE_RENDER_NRD guard), so this include needs none either.
+#  include "aver/render/nrd/NrdDenoiser.hpp"
 #endif
 #if AVER_MODULE_VOXI && AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
 // particles DECIDED 4's GI seam glue (particleGiPrepare/particleGiBind, below) is the ONLY reason
@@ -201,6 +230,23 @@ u32 parseU32(const char* s, u32 fallback) {
     return static_cast<u32>(v);
 }
 
+// M7 (C-7): the SAME [Stats] video-memory line for every --stats dump this host prints -- one shared
+// shape rather than the periodic and one-shot end-of-run dumps (onUpdate, below) each spelling it out
+// and drifting apart. Mirrors SandboxApp.cpp's gpuTimingCheck [GPU] line and the RHI backends' own
+// init-time [RHI.D3D12]/[RHI.Vulkan] line -- same fields, same MB rounding (bytes/1048576), different
+// prefix. `supported` false (D3D11, a Vulkan device with no VK_EXT_memory_budget, every mock) prints a
+// distinct sentence rather than a row of zeros a reader could mistake for "nothing in use".
+void logStatsVideoMemory(rhi::IDevice& dev) {
+    const rhi::VideoMemoryInfo vm = dev.videoMemory();
+    if (vm.supported) {
+        AVER_INFO("[Stats] video memory: local {} MB used of {} MB budget, non-local {} MB used of {} MB budget",
+                  vm.localUsageBytes / 1048576, vm.localBudgetBytes / 1048576,
+                  vm.nonLocalUsageBytes / 1048576, vm.nonLocalBudgetBytes / 1048576);
+    } else {
+        AVER_INFO("[Stats] video memory: not reported by this backend");
+    }
+}
+
 #if AVER_MODULE_SYNAPSE_SCENE
 // A level's own .ocnav sits beside it with the same stem -- e.g. Content/Maps/Arena.ocworld ->
 // Content/Maps/Arena.ocnav. Deliberately a SEPARATE copy of sandbox/src/NavBakeCommand.cpp's own
@@ -313,6 +359,43 @@ bool isOcproject(const char* p) {
     return true;
 }
 
+#if AVER_MODULE_VOXI
+// [AverSR] log naming (3.3 C). The line's shape is C2-10's fixed "[AverSR] {level} ({source}): scene
+// {}x{} -> present {}x{}" -- these two functions supply the two words. This file must not include
+// aver/sr/AverSrQuality.hpp (the module boundary render.voxi and runtime.game both have to respect,
+// Scalability.hpp's own header comment), so the level's name is typed out locally rather than
+// borrowed from aver::sr::qualityName's identical table. This is NOT a second source of truth for the
+// NUMBERING itself: `level` is the quality ladder's own kAverSrOff..kAverSrPerformance
+// (QualityLadder.hpp, 3.2), and game/src/GameMain.cpp's own static_asserts (3.2) are what actually
+// cross-check that numbering against aver::sr::Quality's, under AVER_MODULE_SR -- this function only
+// has to spell the same four words sr::qualityName already does.
+const char* averSrLevelName(u32 level) {
+    switch (level) {
+        case voxi::ladder::kAverSrOff:         return "Off";
+        case voxi::ladder::kAverSrQuality:     return "Quality";
+        case voxi::ladder::kAverSrBalanced:    return "Balanced";
+        case voxi::ladder::kAverSrPerformance: return "Performance";
+        default:                               return "Off";
+    }
+}
+
+// Mirrors the editor's own Project Settings source vocabulary (3.3 A) for the subset a packaged game
+// can actually produce. GameApp::onInit always passes userLevel=-1 to resolveAverSrLevel (no Display
+// page to prefer from -- U2's own "the packaged game uses the same chain minus the user choice") and
+// never forces a crash cookie, so User and ForcedOff are named here defensively; that call site
+// should never actually produce them.
+const char* averSrSourceName(voxi::AverSrSource source) {
+    switch (source) {
+        case voxi::AverSrSource::Auto:      return "Auto";
+        case voxi::AverSrSource::Manifest:  return "project default";
+        case voxi::AverSrSource::User:      return "your Display preference";
+        case voxi::AverSrSource::Cli:       return "--aversr";
+        case voxi::AverSrSource::ForcedOff: return "forced Off after a failed launch";
+    }
+    return "Auto";
+}
+#endif
+
 } // namespace
 
 GameConfig parseArgs(int argc, char** argv) {
@@ -330,10 +413,53 @@ GameConfig parseArgs(int argc, char** argv) {
         else if (std::strcmp(a, "--project") == 0)     { c.projectPath = valueAfter(argc, argv, i, ""); ++i; }
         else if (std::strcmp(a, "--input-echo") == 0)  { c.inputEcho = true; }
         else if (std::strcmp(a, "--trace-opens") == 0) { c.traceOpens = true; }
+        // --scene-census: print one canonical line describing what the level actually put in
+        // the world, and exit-safe either way. scripts/verify-game.ps1 asks BOTH hosts for it
+        // and compares -- the divergence check whose absence is why this executable was
+        // deleted. Sandbox.exe accepts the identical flag and prints the identical format.
+        else if (std::strcmp(a, "--scene-census") == 0) { c.sceneCensus = true; }
+        // --stats [seconds]: the interval is OPTIONAL, so a bare --stats works. valueAfter is only
+        // consumed when it parses as a number, or "--stats --headless" would silently eat the next
+        // flag and run with no window for a reason nobody could see.
+        else if (std::strcmp(a, "--stats") == 0) {
+            const char* v = valueAfter(argc, argv, i, nullptr);
+            const f32 secs = v ? static_cast<f32>(std::atof(v)) : 0.0f;
+            if (secs > 0.0f) { c.statsIntervalSec = secs; ++i; }
+            else             { c.statsIntervalSec = 5.0f; }
+        }
         else if (std::strcmp(a, "--pcg-volume-test") == 0) { c.pcgVolumeTest = true; }
         else if (std::strcmp(a, "--no-particle-gi") == 0)  { c.noParticleGi = true; }
         else if (std::strcmp(a, "--particle-test") == 0)   { c.particleTest = true; }
         else if (std::strcmp(a, "--screenshot") == 0)      { c.screenshotPath = valueAfter(argc, argv, i, ""); ++i; }
+        // --no-vsync (M7): measurement parity with SandboxApp.cpp's identical flag -- see
+        // GameConfig::vsyncOff for where and how it is applied.
+        else if (std::strcmp(a, "--no-vsync") == 0) { c.vsyncOff = true; }
+        // --cam-wobble DEG PERIOD (M7): the SAME measurement-only yaw swing SandboxApp.cpp's own
+        // --cam-wobble drives -- see GameConfig::camWobbleDeg/camWobblePeriod. Both values are
+        // consumed only when BOTH are present (i+2<argc): a lone --cam-wobble with nothing after it,
+        // or with only one number, leaves the config untouched rather than eating whatever argument
+        // happened to follow as if it were the period.
+        else if (std::strcmp(a, "--cam-wobble") == 0 && i + 2 < argc) {
+            c.camWobbleDeg = static_cast<f32>(std::atof(argv[i + 1]));
+            const int period = std::atoi(argv[i + 2]);
+            c.camWobblePeriod = period > 0 ? static_cast<u32>(period) : 0u;
+            i += 2;
+        }
+        // --aversr off|quality|balanced|performance|auto (3.3 C): see GameConfig::averSrArg's own
+        // comment for why this is parsed LOCALLY, into a raw int, rather than through
+        // aver::sr::parseQuality. equalsAsciiCI is the same case-insensitive comparator
+        // ocgraphRecord/ocgraphDeclaresClass already use above; v is guarded for null before use
+        // exactly like this function's own valueAfter callers do everywhere else. An unrecognised
+        // value is ignored, matching this parser's own convention (see the header) that a bad or
+        // foreign argument must never be fatal.
+        else if (std::strcmp(a, "--aversr") == 0) {
+            const char* v = valueAfter(argc, argv, i, nullptr);
+            if      (v && equalsAsciiCI(v, "off"))         { c.averSrArg = 0;  ++i; }
+            else if (v && equalsAsciiCI(v, "quality"))     { c.averSrArg = 1;  ++i; }
+            else if (v && equalsAsciiCI(v, "balanced"))    { c.averSrArg = 2;  ++i; }
+            else if (v && equalsAsciiCI(v, "performance")) { c.averSrArg = 3;  ++i; }
+            else if (v && equalsAsciiCI(v, "auto"))        { c.averSrArg = -1; ++i; }
+        }
         // A bare path ending .ocproject is the project, so double-clicking one or dropping it on the
         // exe works. A packaged game is launched with no arguments at all and finds its manifest in
         // its own directory instead -- see openProject.
@@ -355,6 +481,45 @@ BootConfig GameApp::config() const {
     b.useWarp          = cfg_.useWarp;
     b.enableDebugLayer = cfg_.debugLayer;
     b.backend          = cfg_.backend.empty() ? nullptr : cfg_.backend.c_str();
+
+    // ---- WINDOW.* FROM THE MANIFEST, read HERE and not in onInit ------------------------------
+    //
+    // This is the only moment the answer is usable: the window is created from this BootConfig,
+    // before onInit runs, so a title or resolution the project states has to be known now. That is
+    // why the manifest is read twice -- once here for four keys, once in openProject for everything
+    // -- and reading a small text file twice is a much smaller price than a window that has to be
+    // resized after it is already on screen.
+    //
+    // THE SAME TWO PLACES openProject looks, in the same order: an explicit path, else
+    // Game.ocproject beside the executable, which is what stage-game.ps1 writes for a packaged game
+    // launched with no arguments at all.
+    //
+    // THE COMMAND LINE STILL WINS, and that is the standing rule in this repo rather than a
+    // preference here: a flag exists so a human at the keyboard can override recorded state, so
+    // --width/--height/--title are applied over the manifest, not under it. Only a value the caller
+    // did NOT state falls through to the project.
+    {
+        std::string manifest = cfg_.projectPath;
+        if (manifest.empty()) {
+            const std::string beside = executableDir() + "\\Game.ocproject";
+            std::error_code ec;
+            if (std::filesystem::exists(beside, ec)) manifest = beside;
+        }
+        if (!manifest.empty()) {
+            fmt::ProjectDesc d;
+            std::string why;
+            if (fmt::loadOcproject(manifest, d, &why)) {
+                if (cfg_.title.empty() || cfg_.title == GameConfig::kDefaultTitle) {
+                    // The project's own WINDOW.TITLE, else its NAME -- a shipped game showing the
+                    // engine's default title is the sort of thing nobody notices until a player does.
+                    windowTitleOwned_ = !d.windowTitle.empty() ? d.windowTitle : d.name;
+                    if (!windowTitleOwned_.empty()) b.windowTitle = windowTitleOwned_.c_str();
+                }
+                if (cfg_.width  == GameConfig::kDefaultWidth  && d.windowWidth  > 0) b.windowWidth  = static_cast<u32>(d.windowWidth);
+                if (cfg_.height == GameConfig::kDefaultHeight && d.windowHeight > 0) b.windowHeight = static_cast<u32>(d.windowHeight);
+            }
+        }
+    }
     return b;
 }
 
@@ -383,7 +548,8 @@ void GameApp::tickGameplay(f32 dt) {
     // in a game.
     if (aver_fw_play_state() != AVER_FW_PLAY_PLAYING) return;
 
-    // ORDER COPIED FROM THE CODE, NOT FROM THE COMMENT ABOVE IT. SandboxApp.cpp:1049 says the tick
+    // ORDER COPIED FROM THE CODE, NOT FROM THE COMMENT ABOVE IT. SandboxApp's tick-group comment
+    // (search: "bracket the physics step") says the tick
     // groups "bracket the physics step: PrePhysics -> Physics -> PostPhysics", which describes the
     // GROUPS and not where the step lands. The step actually sits between PRE_PHYSICS and PHYSICS,
     // so PHYSICS-group ticks observe the results of this frame's simulation. Reordering to match
@@ -551,10 +717,59 @@ void GameApp::attachVoxi(Engine& e) {
     di.typedUavLoads = caps.typedUavLoads; di.conservativeRaster = caps.conservativeRaster;
     di.shaderModel = caps.shaderModel; di.meshShaderTier = caps.meshShaderTier;
     di.dxcAvailable = caps.dxcAvailable;
+    // R1: computed only at this site and SandboxApp.cpp's own DeviceInfo build (:2508-2514 there),
+    // same expression -- see NrdDenoiser.hpp's include comment above for why this needs no module
+    // guard. rhi::DeviceCaps itself is untouched; this is derived from the device, not read off caps.
+    di.nrdSupported = dev->backend() == rhi::Backend::D3D12 && render::nrd::Denoiser::available();
     voxi::Renderer::get().setDeviceInfo(di);
 
+    // SEED THE MANIFEST'S RENDER SETTINGS BEFORE init() (N2). VoxiRenderer::init calls
+    // createVoxelVolume(settings_.voxelResolution) and that is the ONLY place the volume is ever
+    // sized -- nothing downstream watches the field afterwards. Before this fix, a packaged game's
+    // only encounter with the manifest was the LATER applyProjectRenderSettings call, by which point
+    // init() had already built the default 128^3 grid: a project stating RENDER.VOXELRES 512 shipped
+    // a grid 64x smaller than it asked for, silently. Seeding here mirrors openProject's own manifest
+    // resolution (cfg_.projectPath, else Game.ocproject beside the executable) rather than waiting for
+    // project_ itself, which openProject does not load until well after this function returns.
+    //
+    // A LOCAL fmt::ProjectDesc, deliberately not project_: the member is not populated until
+    // openProject runs, and this function has no business writing to it early -- openProject's own
+    // later call to applyProjectRenderSettings re-applies the same file through project_ once it is
+    // actually loaded, which is intentional and idempotent (see that function's own comment): by then
+    // every tier this seed already committed equals what phase 1 would derive again, so nothing
+    // re-derives and phase 2 writes the same knob values back.
+    //
+    // THIS ALSO FIXES N10: layeredBsdf is read once, before VoxiRenderer's raster PSOs are built
+    // (Settings::layeredBsdf's own comment), and the unseeded path used to latch it from Settings{}'s
+    // default (Off) regardless of what RENDER.LAYEREDBSDF asked for -- a manifest with a layer above
+    // Off warned about a latch it could never actually resolve, on every launch.
+    int manifestMsaa = -1;
+    {
+        std::string manifestPath = cfg_.projectPath;
+        if (manifestPath.empty()) {
+            const std::string beside = executableDir() + "\\Game.ocproject";
+            if (fileExists(beside)) manifestPath = beside;
+        }
+        if (!manifestPath.empty()) {
+            fmt::ProjectDesc seed;
+            std::string seedErr;
+            if (fmt::loadOcproject(manifestPath, seed, &seedErr) && seed.hasRenderSettings()) {
+                manifestMsaa = seed.msaa;
+                voxi::Renderer& vx = voxi::Renderer::get();
+                voxi::Settings seeded = vx.settings();
+                voxi::applyManifestTwoPhase(seed, seeded, [&]() {
+                    vx.setSettings(seeded);
+                    seeded = vx.settings();
+                });
+            }
+        }
+    }
+
     voxi::Settings s = voxi::Renderer::get().settings();
-    s.msaa = static_cast<voxi::Msaa>(dev->sampleCount());
+    // ONLY WHEN RENDER.MSAA IS UNSTATED: the seed above already applied an explicit manifest MSAA
+    // through applyManifestKnobs (same "-1 means unstated" sentinel every other knob here uses), and
+    // this device-derived fallback must not un-pin it.
+    if (manifestMsaa < 0) s.msaa = static_cast<voxi::Msaa>(dev->sampleCount());
     voxi::Renderer::get().setSettings(s);
     voxiRenderer_.setSettings(s);
 
@@ -790,8 +1005,10 @@ void GameApp::openProject(Engine& e) {
     // OPTIONAL, and silently so: most levels have no baked navigation, loadOcNav's own failure path
     // leaves gameNav_ default-constructed (empty, OcNavData::valid() == false), and
     // AgentSystem::tick already treats that identically to "no grid yet" -- an agent with a goal
-    // simply waits rather than failing. Only worth a WARN, never an ERROR: this is not the game
-    // failing to start.
+    // simply waits rather than failing. Logged at INFO, not WARN: a project with no navigation at all
+    // -- which every graph-driven game without agents is -- would otherwise open with a warning about
+    // a feature it never asked for. (An earlier version of this comment said "only worth a WARN",
+    // which no branch below has ever done.)
     {
         std::string navErr;
         const std::string navPath = navPathForLevel(level_.path());
@@ -809,6 +1026,16 @@ void GameApp::openProject(Engine& e) {
 #endif
     // Apply the project's render settings to Voxi
     applyProjectRenderSettings();
+#if AVER_WITH_AUDIO_ABI
+    // AUDIO.* FROM THE MANIFEST, the third thing this host read past. SandboxApp applies these when
+    // a project opens; here the master and bus volumes stayed at their defaults, so a project that
+    // ships a quiet mix shipped a loud game. Safe with no device: the ABI's setters are no-ops until
+    // aver_audio_init has succeeded.
+    if (project_.hasAudioMix) {
+        aver_audio_set_master_volume(project_.masterVolume);
+        for (int b = 0; b < 4; ++b) aver_audio_set_bus_volume(b, project_.busVolume[b]);
+    }
+#endif
 }
 
 void GameApp::initScripting() {
@@ -912,15 +1139,6 @@ void GameApp::initScripting() {
 #endif
 }
 
-    // THE ANIMATION-NOTIFY WIRE. A clip crossed a marker; that marker names a graph event; the
-    // entity playing the clip is the one to raise it on. Every part of that sentence belongs to a
-    // different module, and this function is the only place they meet -- which is exactly why the
-    // anim module takes a function pointer instead of knowing what a graph is.
-    //
-    // A MISSING HANDLER IS NOT AN ERROR HERE. graphFire returns false for an entity with no graph,
-    // a graph with no such event, and a bridge too old to be fired at, and none of those is worth a
-    // line per frame from an animation tick -- the managed router already logs each once per
-    // (entity, event) pair with a message that says which it was.
 // The animation system's answer to the framework's relayed curve query. See framework_abi.h for
 // why this is a function pointer rather than a link edge.
 i32 GameApp::animCurve(i32 entity, i64 nameHash, f32* outValue, void*) {
@@ -961,6 +1179,19 @@ i32 GameApp::synapsePerception(i32 entity, i32* outCanSee, i32* outLastTarget, f
 }
 #endif
 
+// THE ANIMATION-NOTIFY WIRE. A clip crossed a marker; that marker names a graph event; the entity
+// playing the clip is the one to raise it on. Every part of that sentence belongs to a different
+// module, and this function is the only place they meet -- which is exactly why the anim module takes
+// a function pointer instead of knowing what a graph is. Perception and the BT "FireEvent" action
+// reach a graph through this same sink; their NotifyFn signatures are byte-for-byte identical.
+//
+// A MISSING HANDLER IS NOT AN ERROR HERE. graphFire returns false for an entity with no graph, a
+// graph with no such event, and a bridge too old to be fired at, and none of those is worth a line
+// per frame from an animation tick -- the managed router already logs each once per (entity, event)
+// pair with a message saying which it was.
+//
+// (This comment had drifted ~50 lines up the file, where it sat after a closing brace and above
+// animCurve, which has a doc comment of its own. Re-homed.)
 void GameApp::animNotify(scene::Entity e, const char* name, void* user) {
 #if AVER_MODULE_SCRIPTING
     auto* self = static_cast<GameApp*>(user);
@@ -1152,33 +1383,24 @@ void GameApp::particleGiBind(rhi::IResourceFactory& res, rhi::BindingSetHandle s
 
 void GameApp::applyLevelSky() {
 #if AVER_MODULE_SCENE
-    if (!level_.hasSun() && !level_.hasSky()) return;
+    const fmt::OcWorldEnv& w = level_.env();
+    if (!w.hasSun && !w.hasSky && !w.hasFog && !w.hasClouds) return;
 
-    if (level_.hasSun()) {
-        const f64* sunDir = level_.sunDir();
-        const f64* sunColor = level_.sunColor();
-        for (int i = 0; i < 3; ++i) {
-            sky_.sunDirection[i] = static_cast<f32>(sunDir[i]);
-            sunColor_[i] = static_cast<f32>(sunColor[i]);
-        }
-        // Apply sunLux as a multiplier on the default intensity
-        // OcWorldData defaults to 100000, rhi::SkyAtmosphere defaults to 3.0
-        sky_.sunIntensity = static_cast<f32>(level_.sunLux() / (100000.0 / 3.0));
-        AVER_INFO("[Level] applied sun settings: dir[{:.3f} {:.3f} {:.3f}], intensity {:.2f}",
-                  sunDir[0], sunDir[1], sunDir[2], sky_.sunIntensity);
-    }
+    // ONE SHARED MAPPING, so the game and the editor cannot drift. This function used to read five
+    // of the format's fields; aver::voxi::applyLevelEnv reads all of them, which is how a level's
+    // clouds, height fog, authored dome and sun temperature reach a running game at all -- until
+    // now they were authorable in the editor and dropped on the floor here.
+    assets::applyLevelEnv(w, sky_);
 
-    if (level_.hasSky()) {
-        sky_.model = level_.skyPhysical() ? rhi::SkyModel::Physical : rhi::SkyModel::Authored;
-        if (level_.skyMieScatter() >= 0.0) sky_.air.mieScatter = static_cast<f32>(level_.skyMieScatter());
-        if (level_.skyMultiScatter() >= 0.0) sky_.air.multiScatterGain = static_cast<f32>(level_.skyMultiScatter());
-        if (level_.skyViewSteps() > 0) sky_.air.viewSteps = level_.skyViewSteps();
-        if (level_.skyAerialSteps() > 0) sky_.air.aerialSteps = level_.skyAerialSteps();
-        AVER_INFO("[Level] applied sky settings: model={}, mie={:.2f}, multi={:.2f}, view={}, aerial={}",
-                  level_.skyPhysical() ? "physical" : "authored",
-                  level_.skyMieScatter(), level_.skyMultiScatter(),
-                  level_.skyViewSteps(), level_.skyAerialSteps());
-    }
+    // RESEEDED FROM THE ATMOSPHERE, not from the level, because the frame loop copies sunColor_
+    // back over sky_.sunColor every frame -- so applying the level and not doing this would show
+    // the level's sun for exactly zero frames. See LevelSky.hpp's note on host-owned mirrors.
+    for (int i = 0; i < 3; ++i) sunColor_[i] = sky_.sunColor[i];
+    if (w.hasFog) fogDensity_ = sky_.fogDensity;
+
+    AVER_INFO("[Level] applied environment: sun={} sky={} fog={} clouds={}, intensity {:.2f}, "
+              "model {}", w.hasSun, w.hasSky, w.hasFog, w.hasClouds, sky_.sunIntensity,
+              w.skyPhysical ? "physical" : "authored");
 #endif
 }
 
@@ -1207,28 +1429,49 @@ void GameApp::applyProjectRenderSettings() {
     if (!project_.valid() || !project_.hasRenderSettings()) return;
     if (!voxiAttached_) return;
 
-    voxi::Renderer& vx = voxi::Renderer::get();
-    voxi::Settings s = vx.settings();
-    if (project_.giQuality >= 0) s.globalIllumination = static_cast<voxi::Quality>(project_.giQuality);
-    if (project_.rayTracing >= 0) s.rayTracing = static_cast<voxi::Quality>(project_.rayTracing);
-    if (project_.pathTracing >= 0) s.pathTracing = static_cast<voxi::Quality>(project_.pathTracing);
-    if (project_.voxelResolution > 0) s.voxelResolution = static_cast<u32>(project_.voxelResolution);
-    if (project_.giIntensity >= 0.0f) s.giIntensity = project_.giIntensity;
-    if (project_.giMaxDistance >= 0.0f) s.giMaxDistance = project_.giMaxDistance;
-    if (project_.rtShadowRays >= 0) s.rtShadowRays = static_cast<u32>(project_.rtShadowRays);
-    if (project_.rtPixelsPerRayTile >= 0) s.rtPixelsPerRayTile = static_cast<u32>(project_.rtPixelsPerRayTile);
-    if (project_.rtShadowDenoise >= 0) s.rtShadowDenoise = static_cast<u32>(project_.rtShadowDenoise);
     // BOTH ROOTS OR NEITHER. A render setting the editor applies and the shipped game ignores is
     // this repo's most-repeated defect: the project looks right while it is being made and ships
-    // looking different. These two lines are the whole reason the key exists in OcProject rather
-    // than in the editor's own preferences.
-    if (project_.rtRenderMode >= 0) s.rtRenderMode = static_cast<u32>(project_.rtRenderMode);
-    if (project_.ptBounces >= 0) s.ptBounces = static_cast<u32>(project_.ptBounces);
-    vx.setSettings(s);
+    // looking different. This whole function is the reason RENDER.* lives in OcProject rather than
+    // in the editor's own preferences.
+    //
+    // TWO-PHASE, NOT ONE (R2): tiers commit first, so the derivation that fills in an unstated
+    // derived knob (voxelResolution, giCones, ...) runs against the NEW tier before the manifest's
+    // OWN knob values are laid on top of it -- see ProjectRenderApply.hpp's own comment for the
+    // regression a single merged call reintroduces.
+    voxi::Renderer& vx = voxi::Renderer::get();
+    voxi::Settings s = vx.settings();
+    voxi::applyManifestTwoPhase(project_, s, [&]() {
+        vx.setSettings(s);
+        s = vx.settings();
+    });
     voxiRenderer_.setSettings(vx.settings());
     AVER_INFO("[Project] applied render settings: gi={}, rt={}, pt={}, voxelRes={}, giIntensity={}, giDist={}",
               static_cast<int>(s.globalIllumination), static_cast<int>(s.rayTracing),
               static_cast<int>(s.pathTracing), s.voxelResolution, s.giIntensity, s.giMaxDistance);
+
+    // A MANIFEST CONTRADICTION -- RENDER.GIMODE/DENOISER/RTRENDERMODE/REFRACTIONMODE asking for
+    // something that did not survive into the effective settings (RenderSettingsResolver.hpp's own
+    // prerequisite table) -- logs one WARN per project open. Skips any report whose reason already
+    // has a Feature attached that refuse() logged once already for this device (Renderer::
+    // refusalLogged, reset on setDeviceInfo): the four hardware reasons would otherwise say the same
+    // thing twice, once here and once from setSettings' own refusal path.
+    voxi::ManifestAsks asks;
+    asks.giMode         = project_.giMode;
+    asks.denoiser       = project_.denoiser;
+    asks.rtRenderMode   = project_.rtRenderMode;
+    asks.refractionMode = project_.refractionMode;
+    voxi::FieldReport reports[4];
+    const u32 reportCount = voxi::manifestContradictions(vx.settings(), vx.deviceInfo(), asks, reports);
+    for (u32 i = 0; i < reportCount; ++i) {
+        voxi::Feature alreadyReportedBy;
+        if (voxi::refusalFeatureFor(reports[i].reason, alreadyReportedBy) &&
+            vx.refusalLogged(alreadyReportedBy)) {
+            continue;
+        }
+        AVER_WARN("[Project] RENDER.{} asked for {} but it is not in effect: {}",
+                  reports[i].manifestKey, reports[i].requested,
+                  voxi::disableReasonText(reports[i].reason));
+    }
 #endif
 }
 
@@ -1256,7 +1499,24 @@ void GameApp::pushFrame(Engine& e) {
     // NO setViewportRect. The editor confines the scene to the dockspace's central node; a game
     // renders to the whole backbuffer, so leaving the rect alone is the correct behaviour and not
     // an omission.
-    const Vec3 fwd    = camForward();
+    //
+    // --cam-wobble DEG PERIOD (M7): identical formula and reasoning to SandboxApp::onUpdate's own
+    // --cam-wobble application -- a sine that returns to zero at every whole multiple of the period,
+    // driven off the frame counter (frames_, incremented once at the top of onUpdate before pushFrame
+    // ever runs this frame) rather than the clock, so the path is identical every run. Applied as a
+    // TEMPORARY offset to yaw_ for exactly this camForward() call and then restored immediately,
+    // never accumulated onto yaw_ itself: yaw_ is the free camera's real orientation, and drivePlayCamera
+    // rewrites it from the possessed pawn every frame a session is playing, so there is nowhere safe
+    // to accumulate drift the way a standalone member could.
+    f32 wobble = 0.0f;
+    if (cfg_.camWobbleDeg != 0.0f && cfg_.camWobblePeriod != 0) {
+        wobble = cfg_.camWobbleDeg * 0.01745329252f *
+                 std::sin(6.2831853f * static_cast<f32>(frames_ - 1) / static_cast<f32>(cfg_.camWobblePeriod));
+    }
+    const f32 yawBeforeWobble = yaw_;
+    yaw_ += wobble;
+    const Vec3 fwd = camForward();
+    yaw_ = yawBeforeWobble;
     const f32  aspect = viewAspect(e);
     const Mat4 view   = Mat4::lookAtLH(camPos_, camPos_ + fwd, Vec3{0, 0, 1});
     const f32  zNear = 2.0f, zFar = 200000.0f;   // centimetres
@@ -1274,10 +1534,9 @@ void GameApp::pushFrame(Engine& e) {
                   aspect, zNear, zFar);
     }
 
-    f32 fog = fogDensity_;
-#if AVER_MODULE_SCENE
-    if (level_.hasFog()) fog = level_.fogDensity();
-#endif
+    // ONE MEMBER FOR ONE VALUE, matching the editor's own fix: applyLevelSky seeds fogDensity_ from
+    // the level, so there is no second member for this to lose a race with.
+    const f32 fog = fogDensity_;
     // FROZEN: sunDirection stays unnormalised here -- the shaders normalise it.
     sky_.enabled = true;
     for (int i = 0; i < 3; ++i) {
@@ -1350,6 +1609,18 @@ void GameApp::pushFrame(Engine& e) {
 
 #if AVER_MODULE_VOXI
     if (voxiAttached_) {
+        voxi::Renderer& vx = voxi::Renderer::get();
+        // N4: the game never allocated the G-buffer or pushed a live MSAA change, so DENOISER 1 in a
+        // manifest ran with no G-buffer written and NRD silently skipped itself (its own WARN-once
+        // path, gated on nrdWarnedMsaa_/the create check, never even got a G-buffer to complain about
+        // upstream of it), and RENDER.MSAA changed mid-session never reached the device at all. Both
+        // mirror SandboxApp.cpp's own onUpdate pattern (:3865-3882 there): the G-buffer switch reads
+        // resolve()'s denoiserGBufferWanted (wanted whenever only the soft MSAA-above-1x reason, or
+        // nothing, stands between "requested" and "running" -- see RenderSettingsResolver.hpp), and
+        // the MSAA push is the same one-shot consumeMsaaDirty() flag setSettings raises on a change.
+        dev->setGBufferEnabled(voxi::resolve(vx.settings(), vx.deviceInfo()).denoiserGBufferWanted);
+        if (vx.consumeMsaaDirty()) dev->setSampleCount(static_cast<u32>(vx.settings().msaa));
+
         // The volume the editor would be showing, pushed every frame exactly as the editor pushes it
         // (SandboxApp.cpp:1641). Centre and extent are the LEVEL's, fitted once at load by
         // fitGiVolumeToLevel -- deliberately not the camera's. A camera-following volume is a
@@ -1400,6 +1671,20 @@ void GameApp::onInit(Engine& e) {
     AVER_INFO("[Game] modules: PBR={} SCENE={} VOXI={} PHYSICS={} FRAMEWORK={} SCRIPTING={} PARTICLES={}",
               AVER_MODULE_PBR, AVER_MODULE_SCENE, AVER_MODULE_VOXI,
               AVER_MODULE_PHYSICS, AVER_MODULE_FRAMEWORK, AVER_MODULE_SCRIPTING, AVER_MODULE_PARTICLES);
+    // --no-vsync (M7): applied HERE, the first point in onInit a device is guaranteed to exist --
+    // Engine::run creates it before calling onInit at all, unlike argv parsing (parseArgs), which
+    // runs before any device does. Mirrors SandboxApp.cpp's own vsyncOffRequested_ handling
+    // (vsyncCanDisable() then setVSync(false), else WARN) with a [Game] prefix instead of [Sandbox].
+    // A one-shot call, not a per-frame reassert: unlike the editor, nothing in a shipped game flips
+    // vsync back on mid-run, so there is nothing later to win back over.
+    if (cfg_.vsyncOff) {
+        if (rhi::IDevice* dev = e.device()) {
+            if (dev->vsyncCanDisable()) { dev->setVSync(false); AVER_INFO("[Game] vsync OFF (--no-vsync)"); }
+            else AVER_WARN("[Game] --no-vsync ignored: this display path cannot tear");
+        } else {
+            AVER_WARN("[Game] --no-vsync ignored: no device");
+        }
+    }
     // FIRST of the render features. Its prePass stages this frame's bone matrices, and the scene
     // pass then asks drawHandle() for a posed handle that must already exist.
     attachSkinning(e);
@@ -1407,6 +1692,23 @@ void GameApp::onInit(Engine& e) {
     attachParticles(e);
     if (cfg_.pcgVolumeTest) attachPcgTest(e);
     initPhysics();      // BEFORE openProject: level load builds a static body per colliding placement
+#if AVER_WITH_AUDIO_ABI
+    // OPENING THE AUDIO DEVICE, WHICH A PACKAGED GAME HAS NEVER DONE. Every entry in audio_abi.h
+    // gates on a started flag that only this call sets, so until now Audio.Load succeeded, PlaySound
+    // returned a handle and nothing ever made a sound in a shipped build -- while the identical
+    // graph worked in the editor, because SandboxApp does call this. The macro guarding it was named
+    // after a tab in the editor and defined on the editor target alone; see this host's CMakeLists.
+    //
+    // BEFORE openProject, matching initPhysics() above: applying a project's AUDIO.* mix settings
+    // needs a started device, and openProject is where those are read.
+    //
+    // 0 is not an error -- the ABI defines it as "no output device" -- so this stays quiet where
+    // physics warns. No sound card is a machine fact; no collision is a broken engine.
+    if (aver_audio_init()) {
+        AVER_INFO("[Game] audio started ({} Hz, {} channel(s))",
+                  aver_audio_sample_rate(), aver_audio_channels());
+    }
+#endif
 #if AVER_MODULE_SYNAPSE_SCENE
     // BEFORE openProject, matching initPhysics() immediately above -- registration needs no level
     // and no physics, and a class placement spawned by openProject that carries CSynapseAgent (a
@@ -1420,7 +1722,63 @@ void GameApp::onInit(Engine& e) {
     // it does not itself require one, but there is no reason to race the ordering.
     synapse::registerBuiltinBehaviors(synapse::btSystem());
 #endif
+#if AVER_MODULE_SCENE
+    // THE CONTROL RIG, WHICH A SHIPPED GAME HAS NEVER HAD. SandboxApp::onInit registers and installs
+    // it (see the block there for why installation belongs in the same breath as registration); this
+    // host registered every other runtime-registered component -- the three Synapse ones directly
+    // above -- and never this one. Consequence: `Set Control Rig` returned false and every IK and
+    // aim rig was inert in a packaged build while working perfectly in Play, which is the worst
+    // shape a bug can have because the editor is where anyone would look for it.
+    //
+    // Not a missing dependency: Aver.Anim.Scene is already linked into this target and
+    // anim::animSystem() is already ticked in onUpdate. It was two calls that were never written.
+    //
+    // BEFORE openProject, for the same reason initPhysics() and the Synapse registrations above are:
+    // a class placement the level spawns carrying a CControlRig must find the type already there.
+    anim::controlRigSystem().registerComponents(scene::World::instance());
+    anim::controlRigSystem().install(anim::animSystem(), scene::World::instance());
+#endif
     openProject(e);
+#if AVER_MODULE_VOXI
+    // AverSR (3.3 C, contract C2-12): resolved and installed right here, directly after openProject --
+    // applyProjectRenderSettings (called from inside openProject, see its own comment) has already
+    // committed the open project's GI/RT tiers into voxi::Renderer::get().settings() by this point,
+    // which is what makes autoAverSrLevel's Custom -> max(GI tier, RT tier) fallback (Scalability.hpp)
+    // read the PROJECT's tiers rather than the compiled-in Settings{} default. CLI (--aversr) beats
+    // the project's RENDER.AVERSR beats Auto -- the same resolveAverSrLevel chain the editor uses,
+    // with userLevel pinned to -1 always: a packaged game has no Display page to prefer from (U2's own
+    // "the packaged game uses the same chain minus the user choice").
+    if (rhi::IDevice* dev = e.device()) {
+        const voxi::Renderer& vx = voxi::Renderer::get();
+        const voxi::AverSrDecision dec = voxi::resolveAverSrLevel(
+            cfg_.averSrArg, -1, project_.averSr, voxi::autoAverSrLevel(vx.settings(), vx.deviceInfo()));
+
+        // NULL WHEN THE SR MODULE IS NOT LINKED into this build, and that is the legal default --
+        // averSrInstaller_ is set only from game/src/GameMain.cpp under its own AVER_MODULE_SR guard,
+        // the sole translation unit in this executable allowed to name sr::anything (setAverSrInstaller's
+        // own comment). A resolved level with no installer present stays at native scale below: the
+        // game must still BUILD AND RUN with the SR module absent, not merely compile with it
+        // unreachable.
+        f32 scale = 1.0f;
+        if (dec.level != voxi::ladder::kAverSrOff && averSrInstaller_ &&
+            averSrInstaller_(*dev, dec.level, averSrUpscaler_, scale)) {
+            dev->setRenderScale(scale);
+            dev->setUpscaler(averSrUpscaler_.get());
+        }
+
+        // "scene {}x{} -> present {}x{}" mirrors rhi::IDevice::setRenderScale's own documented formula
+        // ("the scene renders at round(present * scale)", RHI.hpp) -- there is no public scene-size
+        // accessor on IDevice to read back (a backend's own sceneWidth_/sceneHeight_ are private), so
+        // this computes the same round() a backend would, from the window's present size and whatever
+        // scale actually ended up in effect just above (native 1.0 unless the installer just ran).
+        const u32 presentW = e.window() ? e.window()->width()  : cfg_.width;
+        const u32 presentH = e.window() ? e.window()->height() : cfg_.height;
+        const u32 sceneW = static_cast<u32>(std::lround(static_cast<f64>(presentW) * scale));
+        const u32 sceneH = static_cast<u32>(std::lround(static_cast<f64>(presentH) * scale));
+        AVER_INFO("[AverSR] {} ({}): scene {}x{} -> present {}x{}",
+                  averSrLevelName(dec.level), averSrSourceName(dec.source), sceneW, sceneH, presentW, presentH);
+    }
+#endif
 #if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
     // AFTER openProject: needs registerBuiltins' unit cube (or spawns it itself when no project ever
     // reached that call -- see spawnParticleTestContent's own comment) and overrides the camera
@@ -1476,6 +1834,24 @@ void GameApp::onInit(Engine& e) {
     // just above (so a reader sees what loaded before seeing whether it started playing). See this
     // function's own comment for why "declares a GameMode" is the generic, content-driven switch this
     // is gated on, matching the shape haveGraphs/haveScriptAssembly already uses just above.
+    // BEFORE beginPlay, and that placement is the whole point.
+    //
+    // Taken after it instead, this host reported entities=24 meshRenderers=20 against the editor's
+    // 20/19 -- a difference that is REAL and entirely legitimate: the game had spawned and possessed
+    // a pawn, and the editor was still editing. Comparing a playing host against an editing one
+    // measures the lifecycle, not the content, and would have made this gate cry wolf on every
+    // project that declares a GameMode.
+    //
+    // What the census is for is the LEVEL's content -- the placements, the meshes and the materials
+    // each host resolved -- which is what b262c73 meant by "a different subset of the scene". So it
+    // is taken at the point both hosts have finished loading the level and spawning its class
+    // placements, and neither has started playing.
+#if AVER_MODULE_SCENE
+    if (cfg_.sceneCensus) {
+        AVER_INFO("[Census] {}",
+                  world::formatSceneCensus(world::takeSceneCensus(scene::World::instance())));
+    }
+#endif
     beginPlayIfGameModeDeclared();
     AVER_INFO("[Game] ready");
 }
@@ -1483,6 +1859,59 @@ void GameApp::onInit(Engine& e) {
 void GameApp::onUpdate(Engine& e, const Timestep& t) {
     ++frames_;
     cloudTime_ += t.dt;
+
+#if AVER_WITH_AUDIO_ABI
+    // The other half of opening the device: a finished voice's slot is reclaimed here or not at all.
+    // aver_audio_collect had exactly one caller in the tree, the editor's, so a graph-started voice
+    // in a packaged game would have leaked its slot until the mixer ran out. Every frame, not gated
+    // on any play state -- voices outlive the thing that started them.
+    aver_audio_collect();
+#endif
+
+    // THE PROFILER A SHIPPED GAME NEVER HAD. See GameConfig::statsIntervalSec for why this is a log
+    // dump and not an overlay, and why the numbers were already being collected.
+    //
+    // FIRST DUMP AT THE FULL INTERVAL, not immediately: gpuTiming() reports an average over frames
+    // since boot, so asking in the first second gets either "nothing collected yet" or a number
+    // dominated by the first frames, which are the least representative ones a game ever renders.
+    if (cfg_.statsIntervalSec > 0.0f && e.device()) {
+        statsTimer_ += t.dt;
+        if (statsTimer_ >= cfg_.statsIntervalSec) {
+            statsTimer_ = 0.0f;
+            const f64 gpuMs = rhi::formatGpuTiming(e.device()->gpuTiming(),
+                                                   [](const std::string& line) { AVER_INFO("[Stats] {}", line); });
+            // The same rough GPU-bound/CPU-bound signal the editor console prints, and the same
+            // caveat: different sources, different moments, deliberately not a matched pair. A GPU
+            // total well under the CPU frame says CPU-bound; close to or above it says GPU-bound.
+            if (gpuMs > 0.0)
+                AVER_INFO("[Stats] GPU total (marked passes): {:.2f}ms  |  CPU frame (this instant): "
+                          "{:.2f}ms -- a rough bound signal, not a matched pair.",
+                          gpuMs, static_cast<f64>(t.dt) * 1000.0);
+            logStatsVideoMemory(*e.device());
+        }
+    }
+    // M7: the ONE-SHOT END-OF-RUN dump, distinct from the periodic one directly above. A bounded
+    // (--frames N) capture can end before statsIntervalSec ever elapses once -- a 60-frame run at 60
+    // FPS is one second long, and the default interval alone is 5 -- so a script that passes both
+    // --frames and --stats to price a specific short scenario could see NO dump at all without this.
+    // Fires at the SAME frame gpuTimingCheck/rayProbeCheck use in SandboxApp.cpp (maxFrames-2, or
+    // maxFrames-1 for a very short run) so a script comparing this host's numbers against the
+    // editor's own --gpu-timing/--ray-probe dumps is reading the same instant in both. Gated on
+    // cfg_.statsIntervalSec > 0 (i.e. --stats was actually asked for) so a run with no --stats pays
+    // nothing extra, and latched by statsFinalDumped_ so it can never fire twice.
+    if (cfg_.statsIntervalSec > 0.0f && cfg_.maxFrames > 0 && !statsFinalDumped_ && e.device()) {
+        const u64 want = cfg_.maxFrames > 8 ? cfg_.maxFrames - 2 : cfg_.maxFrames - 1;
+        if (frames_ >= want) {
+            statsFinalDumped_ = true;
+            const f64 gpuMs = rhi::formatGpuTiming(e.device()->gpuTiming(),
+                                                   [](const std::string& line) { AVER_INFO("[Stats] {}", line); });
+            if (gpuMs > 0.0)
+                AVER_INFO("[Stats] GPU total (marked passes): {:.2f}ms  |  CPU frame (this instant): "
+                          "{:.2f}ms -- a rough bound signal, not a matched pair.",
+                          gpuMs, static_cast<f64>(t.dt) * 1000.0);
+            logStatsVideoMemory(*e.device());
+        }
+    }
     // Input is READ here, never rolled here. See onRender for why.
 #if AVER_MODULE_FRAMEWORK
     // BEFORE the gameplay tick, so a PrePhysics actor reads THIS frame's input rather than last
@@ -1567,7 +1996,7 @@ void GameApp::onUpdate(Engine& e, const Timestep& t) {
     //     onUpdate -> beginFrame -> onRender -> endFrame
     //
     // and beginFrame takes the ONE snapshot of PerFrameCB into the GPU-visible buffer
-    // (D3D12Device.cpp:2022 is the sole write to frameCBPtr_). setCamera, setLight and
+    // (D3D12Device::beginFrame is the sole write to frameCBPtr_). setCamera, setLight and
     // setSkyAtmosphere only touch the CPU-side shadow copy.
     //
     // This used to be the first line of onRender, which is AFTER beginFrame -- so every pixel of
@@ -1641,6 +2070,16 @@ void GameApp::onShutdown(Engine& e) {
     // exactly this reason -- it must outlive the device, which it does by construction, but only if
     // it is unregistered before the device goes.
     rhi::IDevice* dev = e.device();
+    // AverSR (3.3 C, contract C2-12): DETACH BEFORE DESTROY, the FIRST statement after `dev` exists --
+    // the device holds a RAW, non-owning pointer into averSrUpscaler_ (rhi::IDevice::setUpscaler's own
+    // comment), so resetting the unique_ptr before telling the device to forget it would leave that
+    // pointer dangling for however many frames remain before the device itself goes. Unconditional and
+    // harmless when AverSR was never installed this run: setUpscaler(nullptr) on an already-null slot,
+    // and reset() on an already-null unique_ptr, are both no-ops. Mirrors the exact ordering
+    // SandboxApp.cpp's own clearAverSrUpscaler/applyAverSrQuality guard for the identical crash class
+    // (search: "--aversr-cycle").
+    if (dev) dev->setUpscaler(nullptr);
+    averSrUpscaler_.reset();
     if (dev && pcgAttached_) { dev->removeRenderFeature(&pcgVolume_); pcgAttached_ = false; }
     pcgVolume_.shutdown();
 #if AVER_MODULE_PARTICLES && AVER_MODULE_SCENE
@@ -1679,6 +2118,11 @@ void GameApp::onShutdown(Engine& e) {
 #endif
 #if AVER_MODULE_PHYSICS
     aver_phys_shutdown();
+#endif
+#if AVER_WITH_AUDIO_ABI
+    // Stops the mixer, releases the device and forgets every loaded sound. Idempotent, and a no-op
+    // when the device was never opened -- so a machine with no output device is unaffected.
+    aver_audio_shutdown();
 #endif
 #if AVER_MODULE_SCRIPTING
     // Drains every loaded graph/behaviour and closes the CLR host, if one ever came up. Nothing above

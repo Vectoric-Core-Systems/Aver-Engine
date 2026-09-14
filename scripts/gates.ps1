@@ -11,7 +11,17 @@
 #   ./scripts/gates.ps1 -Config baseline,warp # several
 #   ./scripts/gates.ps1 -Record               # re-record the baseline (ONLY with a reason, see below)
 #
-# Exit code 0 = every gate matched. Non-zero = the number of gates that did not.
+# EXIT CODES, from the engine's own table in modules/core/include/aver/core/ErrorCodes.hpp:
+#
+#     0  ok           every gate matched
+#     1  failed       at least one gate did not -- the COUNT is on the last line, not in the code
+#     2  usage        an unknown -Config name
+#     3  environment  no Sandbox.exe to run: the tree was never built
+#
+# This used to `exit $failures`, and that was wrong in two ways that only show up from a script. Two
+# moved gates exited 2, which the table above spells 'you invoked me wrong' -- so a caller could not
+# tell a renderer regression from a typo in a -Config name. And a shell truncates an exit code to a
+# byte, so 256 failing gates would have exited 0. A count is a thing to PRINT; it is not a code.
 #
 # RE-RECORDING is a decision, not a chore. A moved number means either the change was announced as
 # oracle-moving and is understood, or something broke. Say which in the commit message, and say it in
@@ -331,9 +341,36 @@ function Invoke-Gate($exe, [string[]] $gateArgs, [string[]] $extra, [int] $frame
     # every API call and is a per-call tax no ordinary run should pay, but the per-gate C/E/W counts
     # below come out of it, and a gate that reported no corruption because nothing was watching
     # would be worse than no gate at all.
-    $all = @('--frames', "$frames", '--debug-layer') + $gateArgs + $extra
-    $out = & $exe @all 2>&1 | Out-String
-    $exit = $LASTEXITCODE
+    # AverSR (0.6 optimisation wave 2, U2) now defaults to Auto at every quality rung, and Auto
+    # applies to --frames runs the same as an interactive session (docs/AVERSR.md, "Default: Auto").
+    # A gate's whole method is reading a raw probe pixel out of the composited frame; scaling the
+    # internal resolution before that composite would change what pixel raw() is even reading,
+    # regardless of which rung the running scene resolves to. Pin native resolution explicitly rather
+    # than rely on whatever Auto would otherwise pick.
+    $all = @('--frames', "$frames", '--debug-layer', '--aversr', 'off') + $gateArgs + $extra
+
+    # START-PROCESS, NOT `& $exe`, AND THAT IS NOT A STYLE CHOICE. Sandbox.exe is linked
+    # /SUBSYSTEM:WINDOWS as of 0.5.0 so the editor never opens a console window, and Windows
+    # PowerShell does not wait for a GUI-subsystem process nor capture its output: `& $exe ... 2>&1`
+    # returns ZERO lines and a BLANK $LASTEXITCODE, measured. Every gate would then read NO-PROBE and
+    # the oracle would be silently blind -- the exact shape of failure this repo has a documented
+    # history of. Start-Process -Wait waits whatever the subsystem is, and the redirect files give
+    # the same text the pipe used to.
+    #
+    # FILES RATHER THAN A PIPE because -RedirectStandardOutput takes a path, and separate files for
+    # out and err because Start-Process refuses to point both at one. They are read back and joined,
+    # so callers downstream see exactly what `2>&1` used to hand them.
+    $tmpOut = [System.IO.Path]::GetTempFileName()
+    $tmpErr = [System.IO.Path]::GetTempFileName()
+    try {
+        $p = Start-Process -FilePath $exe -ArgumentList $all -NoNewWindow -Wait -PassThru `
+                           -RedirectStandardOutput $tmpOut -RedirectStandardError $tmpErr
+        $exit = $p.ExitCode
+        $out = ((Get-Content -LiteralPath $tmpOut -Raw -ErrorAction SilentlyContinue) + "`n" +
+                (Get-Content -LiteralPath $tmpErr -Raw -ErrorAction SilentlyContinue))
+    } finally {
+        Remove-Item -LiteralPath $tmpOut, $tmpErr -Force -ErrorAction SilentlyContinue
+    }
     $r = [pscustomobject]@{ raw = 'NO-PROBE'; place = '?'; debug = 'NO-TOTALS'; exit = $exit; rect = '?'
                             rectW = 0; rectH = 0 }
     $probe = $out -split "`r?`n" | Select-String 'probe \(' | Select-Object -First 1
@@ -363,14 +400,16 @@ function Invoke-Gate($exe, [string[]] $gateArgs, [string[]] $extra, [int] $frame
 # ---------------------------------------------------------------- run
 
 $buildHint = if ($Release) { './scripts/build.ps1 -Release' } else { './scripts/build.ps1' }
-if (-not (Test-Path $Exe)) { Write-Error "Sandbox.exe not found at $Exe - run $buildHint first"; exit 1 }
+# Environment, not Failed: nothing was measured and nothing is wrong with the renderer -- there is no
+# build tree to point at. CI wants to report this differently from a gate that moved.
+if (-not (Test-Path $Exe)) { Write-Error "Sandbox.exe not found at $Exe - run $buildHint first"; exit 3 }
 $Exe = (Resolve-Path $Exe).Path
 
 $selected = if ($Config.Count -gt 0) { $Config } else { @($Configs.Keys) }
 foreach ($c in $selected) {
     if (-not $Configs.Contains($c)) {
         Write-Error "unknown configuration '$c'; known: $($Configs.Keys -join ', ')"
-        exit 1
+        exit 2   # usage: the caller named something that does not exist
     }
 }
 
@@ -541,7 +580,7 @@ if ($Record) {
         if ($flaky -gt 0) {
             Write-Host "A FLAKY gate has no value to freeze -- compare its two viewport rects first." -ForegroundColor Red
         }
-        exit $(if ($failures -gt 0) { $failures } else { $flaky })
+        exit 1   # the counts are printed above; the CODE just says it did not work
     }
     # Only the configurations that were actually run are rewritten; the rest of the file survives, so
     # recording one configuration cannot quietly erase the baseline of another.
@@ -562,4 +601,4 @@ if ($flaky -gt 0) {
     Write-Host "$flaky GATE(S) FLAKY -- passed on retry. Compare the two viewport rects on each line."
 }
 Write-Host $(if ($failures -eq 0) { "ALL GATES PASS" } else { "$failures GATE(S) FAILED" })
-exit $failures
+exit $(if ($failures -eq 0) { 0 } else { 1 })

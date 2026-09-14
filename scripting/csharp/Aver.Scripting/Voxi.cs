@@ -50,6 +50,8 @@ public static class Voxi
     [DllImport(Lib)] private static extern int aver_voxi_set_voxel_resolution(int res);
     [DllImport(Lib)] private static extern float aver_voxi_get_gi_intensity();
     [DllImport(Lib)] private static extern int aver_voxi_set_gi_intensity(float v);
+    [DllImport(Lib)] private static extern int aver_voxi_get_gi_update_interval();
+    [DllImport(Lib)] private static extern int aver_voxi_set_gi_update_interval(int frames);
     [DllImport(Lib)] private static extern float aver_voxi_get_gi_max_distance();
     [DllImport(Lib)] private static extern int aver_voxi_set_gi_max_distance(float cm);
     [DllImport(Lib)] private static extern int aver_voxi_ray_tracing_tier();
@@ -60,7 +62,13 @@ public static class Voxi
     [DllImport(Lib)] private static extern int aver_voxi_set_mesh_shaders(int on);
 
     /// <summary>Marshals a native string pointer, or "?" when it is null.</summary>
-    private static string Str(IntPtr p) => Marshal.PtrToStringAnsi(p) ?? "?";
+    // UTF-8, NOT ANSI. The ABI is explicit -- scripting_abi.h: "Strings are UTF-8 const char*
+    // both ways" -- and every other binding in this tree already decodes that way
+    // (Aver.Framework/Native.cs, Aver.Scene/Native.cs). PtrToStringAnsi decodes through the
+    // OS ANSI codepage instead, so anything non-ASCII came back mangled. Most of what these
+    // return is an ASCII name table where the two agree by luck; aver_pbr_get_texture_path is
+    // not -- it carries a path the user typed into a free-text field.
+    private static string Str(IntPtr p) => Marshal.PtrToStringUTF8(p) ?? "?";
 
     /// <summary>---- feature introspection ----</summary>
     public static int FeatureCount => aver_voxi_feature_count();
@@ -137,6 +145,23 @@ public static class Voxi
     {
         get => aver_voxi_get_gi_max_distance();
         set => aver_voxi_set_gi_max_distance(value);
+    }
+    /// <summary>
+    /// How many frames apart the GI volume is re-voxelised. 1 rebuilds every frame and is
+    /// bit-identical to having no amortisation at all; clamped to [1, 8].
+    /// </summary>
+    /// <remarks>
+    /// The one native knob for the cost that dominates under camera motion -- a moving camera takes
+    /// the GI update from about 7 ms to about 36 ms -- and it was exported and left unbound, so no
+    /// script could reach it. The trade is TEMPORAL, not spatial: indirect light lags scene changes
+    /// by up to N-1 frames and a still scene converges to exactly the same image, which is what
+    /// makes raising this during a chase and dropping it back a reasonable thing for gameplay to do.
+    /// The cone trace itself is unaffected -- it is a per-pixel lookup and still runs every frame.
+    /// </remarks>
+    public static int GiUpdateInterval
+    {
+        get => aver_voxi_get_gi_update_interval();
+        set => aver_voxi_set_gi_update_interval(value);
     }
 
     // ---- device capabilities ----

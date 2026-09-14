@@ -88,10 +88,12 @@ struct MaterialConstants {
     u32 graphId;
 
     // ---- dielectric transmission, read only where AVER_MAT_ALPHA_BLEND is set ----
-    // Mirrors MaterialDesc::ior/transmission. ior travels with the block for completeness (and for
-    // whatever future refraction pass wants it) but nothing reads it yet -- the only consumer today
-    // is transmission, via averBuildSurface's alpha computation in PbrShaders.cpp. See
-    // MaterialDesc::ior's own comment for why the two are not independent.
+    // Mirrors MaterialDesc::ior/transmission. THE "future refraction pass" THIS COMMENT USED TO
+    // ANTICIPATE ARRIVED: ior is read by voxi.hlsl's averRefractedBackdropUV, through the shared
+    // gIor cbuffer field this struct is uploaded into, to compute the Snell bend whenever
+    // Settings::refractionMode is not Off. transmission's own consumer is unchanged --
+    // averBuildSurface's alpha computation in PbrShaders.cpp. See MaterialDesc::ior's own comment
+    // for why the two are not independent.
     f32 ior;
     f32 transmission;
 
@@ -144,17 +146,41 @@ struct MaterialConstants {
     // there first), so a zero-initialised material would silently sample another material's
     // base colour rather than fall back -- the kind of wrong that looks like a content bug.
     u32 texIndex[kTextureSlotCount];
+
+    // ---- volume absorption, and the growth to 160 ----
+    //
+    // Mirrors MaterialDesc::attenuationColor/attenuationDistance; see that field's own comment for
+    // what the two mean and why the pair is authored as "colour at a distance" rather than as a raw
+    // extinction. Read wherever a surface knows how far light travelled through it -- the blended
+    // raster branch and PSRayDriven both -- through averVolumeTransmittance in material_prelude.hlsl,
+    // which is the one implementation both paths call so they cannot drift.
+    //
+    // EXACTLY ONE 16-BYTE ROW, which is the smallest legal growth and takes the block 144 -> 160.
+    // Appended AFTER texIndex rather than slotted beside ior/transmission where it belongs
+    // logically: texIndex is eight u32s that three hand-maintained mirrors index by slot number, and
+    // shifting it to gain tidier ordering would be churn in the one place a silent offset mistake is
+    // hardest to see. The layout test in tests/formats/src/MaterialTest.cpp asserts both.
+    //
+    // STILL CHEAP TO CARRY, checked rather than assumed: kMaxDrawConstantBytes is 256
+    // (RHIResources.hpp) and enforced in both backends, so 160 leaves 96 bytes of headroom at a
+    // register every material-shaded draw already binds. No new binding and nothing to plumb.
+    //
+    // Zero is off -- attenuationDistance <= 0 means no volume, which is what a material authored
+    // before this existed already has in these bytes, so every such material shades bit-identically
+    // and the gate baselines do not move.
+    f32 attenuationColor[3];
+    f32 attenuationDistance;
 };
 
 // No texture in that slot. Deliberately not 0; see MaterialConstants::texIndex.
 inline constexpr u32 kUnboundTexture = 0xFFFFFFFFu;
 
 // SIZED FROM THE ENUM, so adding a TextureSlot is a compile error here rather than a silent
-// mismatch against the HLSL mirror. 8 is asserted separately because the 144-byte figure below
+// mismatch against the HLSL mirror. 8 is asserted separately because the 160-byte figure below
 // depends on it: a ninth slot is a deliberate decision about the constant-buffer size, not a
 // change to wave through.
-static_assert(kTextureSlotCount == 8, "texIndex sizing and the 144-byte block below assume 8 slots");
-static_assert(sizeof(MaterialConstants) == 144, "the HLSL cbuffer mirrors this byte for byte");
+static_assert(kTextureSlotCount == 8, "texIndex sizing and the 160-byte block below assume 8 slots");
+static_assert(sizeof(MaterialConstants) == 160, "the HLSL cbuffer mirrors this byte for byte");
 static_assert(sizeof(MaterialConstants) % 16 == 0, "must be a legal constant-buffer size");
 
 // Packs the authored description into the block the GPU reads. A slot counts as bound when either

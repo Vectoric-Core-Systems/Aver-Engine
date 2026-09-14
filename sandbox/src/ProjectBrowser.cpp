@@ -22,8 +22,6 @@
 namespace aver::editor {
 namespace {
 
-constexpr usize kMaxRecents = 10;
-
 std::string recentsPath() { return userDataDir() + "\\recent.txt"; }
 
 // ADOPTS a project that records no CREATEDWITH: stamps it with this engine and writes the manifest
@@ -94,25 +92,15 @@ void setBuf(char* dst, usize cap, const std::string& s) {
 // Loads the recent project list, dropping entries whose file is gone, and seeds the new-project
 // location.
 void ProjectBrowser::init() {
-    recents_.clear();
-
     std::string text;
-    if (readFileText(recentsPath(), text)) {
-        usize pos = 0;
-        while (pos <= text.size() && recents_.size() < kMaxRecents) {
-            usize nl = text.find('\n', pos);
-            if (nl == std::string::npos) nl = text.size();
-            std::string line = text.substr(pos, nl - pos);
-            pos = nl + 1;
-            while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
-            if (!line.empty() && fileExists(line)) recents_.push_back(line);
-        }
-    }
+    if (!readFileText(recentsPath(), text)) text.clear();
+    // fileExists is the keep-predicate: a project that has gone from disk is dropped on read.
+    list_.parse(text, [](const std::string& p) { return fileExists(p); });
 
     setBuf(locBuf_, sizeof locBuf_, documentsDir() + "\\Aver Projects");
 
     // Once per session: the shipped templates directory cannot change while the editor is running,
-    // unlike the projects folder (rescan() re-reads that one every time cardsDirty_ is set). A
+    // unlike the projects folder (rescan() re-reads that one whenever the cards go stale). A
     // missing, empty or entirely-malformed templates\ all resolve to the same empty vector here --
     // see listTemplates()'s own comment -- so New Project falls back to Blank-only with no error.
     templates_ = listTemplates();
@@ -121,45 +109,61 @@ void ProjectBrowser::init() {
 }
 
 // Writes the recent project list to disk.
+//
+// ATOMIC, WITH THE SAME DirectWrite FALLBACK EditorPrefs.cpp uses for editor.ini, and for the same
+// reason: recent.txt is exactly as cache-grade as that file -- it is rebuilt from ProjectBrowser's
+// own folder scan (rescan(), above) plus whatever survives here, never the only copy of anything,
+// and "lost the most-recent-first ordering once" is a far smaller failure than "a preference change
+// silently never reaches disk", which is the failure this lane's brief was written to chase down.
+// This used to be a plain writeFileText -- no temp file, no rename -- so a crash mid-write could
+// truncate it to nothing; it now gets the crash-safe swap AND the retry that swap gained in
+// FileSystem.cpp for free, plus the same escape hatch when the swap genuinely cannot complete.
 void ProjectBrowser::saveRecents() const {
     createDirectories(userDataDir());
-    std::string text;
-    for (const std::string& p : recents_) text += p + "\n";
-    if (!writeFileText(recentsPath(), text))
-        AVER_WARN("[Editor] could not write the recent project list to {}", recentsPath());
-}
-
-// Drops one path from the recent list.
-void ProjectBrowser::forget(const std::string& manifestPath) {
-    for (usize i = 0; i < recents_.size(); ++i) {
-        if (recents_[i] == manifestPath) { recents_.erase(recents_.begin() + static_cast<isize>(i)); return; }
+    AtomicWriteError err;
+    if (!writeFileTextAtomic(recentsPath(), list_.serialise(), AtomicFallback::DirectWrite, &err)) {
+        const std::string detail = err.errorCode ? describePlatformError(err.errorCode) : std::string();
+        if (!detail.empty())
+            AVER_WARN("[Editor] could not write the recent project list to {} ({}, error {}: {})",
+                      recentsPath(), err.op.empty() ? "unknown step" : err.op, err.errorCode, detail);
+        else
+            AVER_WARN("[Editor] could not write the recent project list to {}", recentsPath());
     }
 }
 
-// Rebuilds the card list: the recent projects first, in their order, then every other .ocproject
-// found one level under the projects folder.
+// Finds every project worth showing: the recent list, plus every .ocproject one level under the
+// projects folder.
 //
 // THE FOLDER IS SCANNED, not just the recent list, because "recent" is per-machine state in
 // AppData and the projects are not. Copy a project onto another machine, or reinstall, and the
 // recent list is empty while the work is right there in Documents\Aver Projects.
+//
+// THE FILESYSTEM HALF ONLY. Ordering, de-duplication and what becomes of the selection all live in
+// RecentProjects::rebuild, where a test can reach them; this walks the disk and reads the stamps.
 void ProjectBrowser::rescan() {
-    cards_.clear();
-    cardsDirty_ = false;
+    std::vector<ProjectCard> found;
 
-    const auto push = [this](const std::string& path, bool recent) {
-        for (const Card& c : cards_) if (c.path == path) return;   // recents win; no duplicates
-        Card c;
+    const auto describe = [&found](const std::string& path) {
+        ProjectCard c;
         c.path = path;
         c.name = displayName(path);
-        c.recent = recent;
-        // The version only: a full load would validate the ENGINE line and reject the very
-        // projects this screen exists to show, which is the opposite of useful in a browser.
+        // The manifest is read for the version anyway, so take the NAME from it too. The file stem
+        // is a poor label on its own: the convention for a project's manifest is `Game.ocproject`,
+        // so a list built from stems showed six consecutive rows reading "Game" and made the recent
+        // list unusable for exactly the projects that follow the convention. The stem stays as the
+        // fallback for a manifest that will not load or records no name.
+        //
+        // The version only, otherwise: a full load would validate the ENGINE line and reject the
+        // very projects this screen exists to show, which is the opposite of useful in a browser.
         fmt::ProjectDesc d;
-        if (fmt::loadOcproject(path, d, nullptr)) c.version = d.createdWith;
-        cards_.push_back(std::move(c));
+        if (fmt::loadOcproject(path, d, nullptr)) {
+            c.version = d.createdWith;
+            if (!d.name.empty()) c.name = d.name;
+        }
+        found.push_back(std::move(c));
     };
 
-    for (const std::string& r : recents_) push(r, true);
+    for (const std::string& r : list_.recents()) describe(r);
 
     std::error_code ec;
     const std::filesystem::path root = std::filesystem::path(std::string(locBuf_));
@@ -168,10 +172,12 @@ void ProjectBrowser::rescan() {
             if (!sub.is_directory(ec)) continue;
             for (const auto& f : std::filesystem::directory_iterator(sub.path(), ec)) {
                 if (f.is_regular_file(ec) && f.path().extension() == ".ocproject")
-                    push(f.path().string(), false);
+                    describe(f.path().string());
             }
         }
     }
+
+    list_.rebuild(found);
 }
 
 // Opens a project unless it predates this engine's series, in which case the author is asked first.
@@ -191,10 +197,10 @@ bool ProjectBrowser::openOrOfferUpgrade(const std::string& path, std::string* er
     if (open(path, &err)) return true;
     error_ = err;
     if (errOut) *errOut = err;
-    forget(path);
+    // A project that would not open is dropped from the list. forget() marks the cards stale
+    // itself, so the two can no longer disagree about what row means what.
+    list_.forget(path);
     saveRecents();
-    cardsDirty_ = true;
-    recentSel_ = -1;
     return false;
 }
 
@@ -205,9 +211,7 @@ bool ProjectBrowser::open(const std::string& manifestPath, std::string* err) {
     project_ = desc;
     adoptVersionStamp(project_);
 
-    forget(project_.manifestPath);
-    recents_.insert(recents_.begin(), project_.manifestPath);
-    if (recents_.size() > kMaxRecents) recents_.resize(kMaxRecents);
+    list_.remember(project_.manifestPath);
     saveRecents();
 
     AVER_INFO("[Editor] project '{}' loaded from {}", project_.name, project_.manifestPath);
@@ -278,23 +282,44 @@ BrowserAction ProjectBrowser::draw(f32 dpi, ImFont* medium, u64 logoTex, f32 log
     if (medium) ImGui::PopFont();
     ImGui::Spacing();
     ImGui::BeginChild("##recentlist", ImVec2(0, 0), ImGuiChildFlags_Borders);
-    if (cardsDirty_) rescan();
-    if (cards_.empty()) {
+    if (list_.dirty()) rescan();
+    if (list_.cards().empty()) {
         ImGui::Dummy(ImVec2(0, 6.0f * dpi));
         ImGui::TextDisabled("  No projects yet.");
         ImGui::TextDisabled("  Use New Project to scaffold one, or Open Project to");
         ImGui::TextDisabled("  point the editor at an existing .ocproject.");
     }
-    for (int i = 0; i < (int)cards_.size(); ++i) {
-        const Card& card = cards_[i];
+    for (int i = 0; i < (int)list_.cards().size(); ++i) {
+        const ProjectCard& card = list_.cards()[static_cast<usize>(i)];
         ImGui::PushID(i);
         const std::string label = "  " + card.name;
-        if (ImGui::Selectable(label.c_str(), recentSel_ == i,
+        if (ImGui::Selectable(label.c_str(), list_.selection() == i,
                               ImGuiSelectableFlags_AllowDoubleClick, ImVec2(0, 40.0f * dpi))) {
-            recentSel_ = i;
+            list_.select(i);
             if (ImGui::IsMouseDoubleClicked(0) && openOrOfferUpgrade(card.path))
                 action = BrowserAction::Open;
         }
+        // Right-click a row to drop it. RecentProjects::forget has been public since the class
+        // existed and was reachable from exactly one place: the FAILURE path, when a project would
+        // not open. A project you simply no longer want listed could only be removed by deleting it
+        // from disk or hand-editing recent.txt.
+        //
+        // It removes the ENTRY, never the project, and the wording says so -- this menu sits one
+        // slip away from reading as "delete", and the two are not the same thing at all.
+        if (ImGui::BeginPopupContextItem()) {
+            ImGui::TextDisabled("%s", card.name.c_str());
+            ImGui::Separator();
+            if (ImGui::MenuItem("Remove from this list")) {
+                list_.forget(card.path);
+                saveRecents();
+                // Still on disk, so the folder scan may legitimately bring it straight back as a
+                // non-recent card. That is correct: the list is recents PLUS what is in the projects
+                // folder, and forgetting is about the recent half.
+            }
+            ImGui::TextDisabled("The project itself is left on disk.");
+            ImGui::EndPopup();
+        }
+
         const ImVec2 rmin = ImGui::GetItemRectMin();
         const ImVec2 rmax = ImGui::GetItemRectMax();
         ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -337,9 +362,10 @@ BrowserAction ProjectBrowser::draw(f32 dpi, ImFont* medium, u64 logoTex, f32 log
         const std::string start = std::string(locBuf_);
         if (openFileDialog("Open Aver project", "Aver project (*.ocproject)", "*.ocproject",
                            directoryExists(start) ? start : std::string(), picked)) {
-            std::string err;
-            if (open(picked, &err)) action = BrowserAction::Open;
-            else error_ = err;
+            // openOrOfferUpgrade, not open: this used to be one of THREE controls that walked past
+            // the upgrade gate, so a project from an older series opened here loaded unmigrated and
+            // could then be saved over. The header's contract says every path passes the same gate.
+            if (openOrOfferUpgrade(picked)) action = BrowserAction::Open;
         }
     }
     ImGui::Dummy(ImVec2(0, 10.0f * dpi));
@@ -348,11 +374,15 @@ BrowserAction ProjectBrowser::draw(f32 dpi, ImFont* medium, u64 logoTex, f32 log
     const bool submitted = ImGui::InputTextWithHint("##path", "C:\\...\\Name.ocproject", pathBuf_,
                                                     sizeof pathBuf_, ImGuiInputTextFlags_EnterReturnsTrue);
     ImGui::PopItemWidth();
+    // Disabled on an empty field rather than accepting a click that silently does nothing.
+    ImGui::BeginDisabled(!pathBuf_[0]);
     const bool goPressed = ImGui::Button("Open Path", wide);
+    ImGui::EndDisabled();
+    if (!pathBuf_[0] && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("Type the path to a .ocproject first");
     if ((submitted || goPressed) && pathBuf_[0]) {
-        std::string err;
-        if (open(pathBuf_, &err)) action = BrowserAction::Open;
-        else error_ = err;
+        // The third of the three paths that skipped the upgrade gate. See "Open Project..." above.
+        if (openOrOfferUpgrade(pathBuf_)) action = BrowserAction::Open;
     }
     ImGui::EndChild();
 
@@ -364,13 +394,21 @@ BrowserAction ProjectBrowser::draw(f32 dpi, ImFont* medium, u64 logoTex, f32 log
     ImGui::SameLine();
     const f32 btn = 150.0f * dpi;
     ImGui::SetCursorPosX(ImGui::GetWindowWidth() - (btn * 2 + 100.0f * dpi + 30.0f * dpi));
-    ImGui::BeginDisabled(recentSel_ < 0 || recentSel_ >= (int)recents_.size());
+    // THROUGH selectedPath(), NOT AN INDEX. This used to read `recents_[recentSel_]` while the
+    // selection indexed `cards_` -- so it refused to open any project the folder scan had found
+    // rather than the recent list, and after a failed open it could open a DIFFERENT project than
+    // the row that was highlighted. Both were the same missing invariant; see RecentProjects.hpp.
+    //
+    // Same gate as a double-click, too: openOrOfferUpgrade rather than open, so a legacy project
+    // reaches the upgrade prompt whichever control opened it.
+    const std::string selected = list_.selectedPath();
+    ImGui::BeginDisabled(selected.empty());
     if (ImGui::Button("Open Selected", ImVec2(btn, 0))) {
-        std::string err;
-        if (open(recents_[recentSel_], &err)) action = BrowserAction::Open;
-        else { error_ = err; forget(recents_[recentSel_]); saveRecents(); recentSel_ = -1; }
+        if (openOrOfferUpgrade(selected)) action = BrowserAction::Open;
     }
     ImGui::EndDisabled();
+    if (selected.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("Pick a project from the list first");
     ImGui::SameLine();
     if (ImGui::Button("Skip", ImVec2(btn, 0))) action = BrowserAction::Skip;
     ImGui::SameLine();
@@ -518,7 +556,9 @@ BrowserAction ProjectBrowser::draw(f32 dpi, ImFont* medium, u64 logoTex, f32 log
             } else if (!open(copied, &err)) {
                 upgradeError_ = err;
             } else {
-                cardsDirty_ = true;
+                // No dirty flag to set by hand: open() remembers the project, and remembering
+                // marks the cards stale. That used to be two separate things a caller had to keep
+                // in step, and forgetting it here is how the selection came to mean another row.
                 upgradePath_.clear();
                 action = BrowserAction::Open;
                 ImGui::CloseCurrentPopup();
@@ -543,7 +583,9 @@ BrowserAction ProjectBrowser::draw(f32 dpi, ImFont* medium, u64 logoTex, f32 log
             } else if (!open(upgradePath_, &err)) {
                 upgradeError_ = err;
             } else {
-                cardsDirty_ = true;
+                // No dirty flag to set by hand: open() remembers the project, and remembering
+                // marks the cards stale. That used to be two separate things a caller had to keep
+                // in step, and forgetting it here is how the selection came to mean another row.
                 upgradePath_.clear();
                 action = BrowserAction::Open;
                 ImGui::CloseCurrentPopup();

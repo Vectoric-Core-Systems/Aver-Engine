@@ -35,9 +35,18 @@ namespace aver::editor {
 // kMaxThumbnails is sized against.
 inline constexpr u32 kThumbnailPx = 512;
 
-// How many thumbnails may be resident at once. A hard cap rather than an LRU eviction, for this
-// slice: eviction needs a use-ordering the browser does not currently report, and a cap that LOGS
-// when it is reached is honest about stopping, where a silent LRU that thrashes is not.
+// How many thumbnails may be resident at once, as a VRAM budget: 64 MB at kThumbnailPx.
+//
+// NOW AN LRU BOUND RATHER THAN A WALL. This was a hard cap on the stated grounds that "eviction
+// needs a use-ordering the browser does not currently report" -- but it does report one, and always
+// did: request() is called for every VISIBLE tile every frame, so the frame an asset was last
+// requested IS its recency, with no new plumbing. Reaching the cap now evicts the coldest entry
+// instead of refusing every asset thereafter for the rest of the process.
+//
+// WHY THE WALL HAD TO GO: entries_ is never cleared between projects (init/shutdown are tied to
+// process start and exit), so the cap was cumulative across every project opened in one session. A
+// user browsing a few hundred meshes -- an imported Sponza is 115 on its own -- passed it and then
+// silently got the typed glyph for everything new, permanently, with one log line as the only clue.
 inline constexpr u32 kMaxThumbnails = 64;
 
 class ThumbnailCache {
@@ -69,9 +78,6 @@ public:
     // per frame by the host, BEFORE the render features run.
     void update();
 
-    u32 residentCount() const { return static_cast<u32>(entries_.size()); }
-    u32 pendingCount() const { return static_cast<u32>(pending_.size()); }
-
     // The feature that performs the copy. Registered by init(); exposed so the host can unregister
     // it at shutdown, matching how every other feature in the editor is torn down.
     rhi::IRenderFeature* copyFeature();
@@ -81,7 +87,27 @@ private:
         rhi::TextureHandle tex = 0;
         u64  uiId = 0;
         bool ready = false;   // false until the copy has actually run for it
+        // HOW MANY TIMES THE COPY HAS BEEN ATTEMPTED AND NOT FINISHED.
+        //
+        // An entry used to be created by update() BEFORE the copy ran, and request() refuses any
+        // asset already in entries_ -- so a single failed attempt left an entry that was never ready
+        // and could never be asked for again. The copy can fail for reasons that are transient by
+        // nature: the preview's colour target is momentarily 0 while createTargets rebuilds it after
+        // a resize (ActorPreview.cpp sets color_ = 0 before recreating), and uiTextureId can return 0
+        // for a texture the backend has not yet given a descriptor. Both pass. The old code turned
+        // either into a permanently blank tile, for whichever assets happened to be in the queue at
+        // the time -- alphabetically first, in a browser that queues in listing order.
+        u32  attempts = 0;
+        // THE FRAME THIS ASSET WAS LAST ASKED FOR, which is what makes eviction possible without the
+        // browser telling us anything new: request() runs for every visible tile every frame, so a
+        // tile scrolled out of view simply stops updating this and drifts to the back of the queue.
+        u64  lastSeen = 0;
     };
+
+    // ATTEMPTS BEFORE GIVING UP ON ONE ASSET. Bounded rather than unbounded so a genuinely broken
+    // asset costs a handful of frames and one log line instead of re-queueing forever; generous
+    // enough that a device rebuild in the middle of a browse recovers on its own.
+    static constexpr u32 kMaxThumbnailAttempts = 8;
 
     // The feature half, separate from the cache so the cache itself is not an IRenderFeature -- it
     // is called from UI code every frame and a render feature is called from the backend, and
@@ -99,7 +125,15 @@ private:
     // The asset the preview was pointed at this frame, and therefore the one the copy must write
     // into. Zero when the preview was not driven this frame and no copy should happen at all.
     u64 inFlight_ = 0;
+    // Ticked once per update(). Only ever compared against itself, so wrap is not a concern at one
+    // increment per frame.
+    u64 frame_ = 0;
     bool cappedWarned_ = false;
+
+    // Frees the coldest resident entry to make room for one more. Returns false when there is
+    // nothing evictable -- every resident entry was touched this frame, which means the visible tile
+    // count genuinely exceeds the budget and dropping the request is the only honest answer.
+    bool evictColdest(u64 protectId);
 };
 
 } // namespace aver::editor

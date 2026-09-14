@@ -85,6 +85,15 @@ endif()
 if(TARGET Aver.Framework)
   target_link_libraries(Aver.Runtime.Game PUBLIC Aver.Framework)
 endif()
+# THE MIXER SEAM, WHICH THIS HOST HAS NEVER LINKED. Mirrors sandbox/CMakeLists.txt's own block --
+# see the longer note there for why the macro is a capability rather than an editor tab, and what it
+# cost while it was named after one: every audio call site in the tree sat behind a definition that
+# existed on the editor target alone, so aver_audio_init was unreachable from a packaged game. The
+# device was never opened, Audio.Load succeeded into nothing and a shipped game was silent.
+if(TARGET Aver.Audio.Abi)
+  target_link_libraries(Aver.Runtime.Game PUBLIC Aver.Audio.Abi)
+  target_compile_definitions(Aver.Runtime.Game PUBLIC AVER_WITH_AUDIO_ABI=1)
+endif()
 # The lift plan's C1 list omitted this while its own DONE-WHEN expected SCRIPTING=1, and the module
 # report caught the contradiction on the first run. A game runs the project's C# gameplay, so it
 # needs the CLR host as much as the editor does -- more, since it has no other way to run anything.

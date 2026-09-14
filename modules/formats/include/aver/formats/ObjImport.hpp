@@ -11,6 +11,7 @@
 // forward, in centimetres. Sharing one convention with the glTF path means a model exported to both
 // formats lands in the same place, and means there is one basis change in this codebase to get
 // wrong rather than two.
+#include "aver/formats/ImportedMaterial.hpp"
 #include "aver/formats/OcMesh.hpp"
 
 #include <string>
@@ -88,5 +89,24 @@ bool importObjFromMemory(const char* text, usize size, const std::string& baseDi
 
 // Parses a .mtl on its own, for a caller that wants the materials without the geometry.
 bool importMtl(const std::string& path, std::vector<ObjMaterial>& out, std::string* why = nullptr);
+
+// Converts .mtl materials into the shared import shape the material cook consumes, loading each
+// referenced texture from disk relative to `baseDir` (the directory the .obj/.mtl sits in, which is
+// what its map_* paths are relative to -- NOT the project content root, which this layer still does
+// not know about).
+//
+// WHY A CONVERSION AND NOT A REPLACEMENT. ObjMaterial stays as the faithful record of what a .mtl
+// said, Phong terms and all: Ks and Ns have no home in a PBR material and would be silently lost if
+// this struct were simply retired. Where the file gave no Pr/Pm, roughness is DERIVED from Ns here
+// rather than guessed at parse time, so the .mtl's own words and the engine's interpretation of them
+// stay separable.
+//
+// A texture that cannot be read leaves its slot UNSET and is named in `warnings` -- a material
+// pointing at a file that is not there reads as a renderer fault rather than the import failure it
+// is. `outImages` is index-parallel to the TexRefs written into `outMats`.
+void objMaterialsToImported(const std::vector<ObjMaterial>& in, const std::string& baseDir,
+                            std::vector<ImportedMaterial>& outMats,
+                            std::vector<ImportedImage>& outImages,
+                            std::vector<std::string>* warnings = nullptr);
 
 } // namespace aver::fmt

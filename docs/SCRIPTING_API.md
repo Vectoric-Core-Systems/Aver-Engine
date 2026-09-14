@@ -364,20 +364,34 @@ field has focus). Read it from `OnTick`.
 
 `Input` is the device. `EnhancedInput` is the layer above it, for gameplay that should name *what the
 player is doing* rather than which key they pressed — so a pawn asks whether `Fire` happened and never
-mentions a key (`scripting/csharp/Aver.Framework/EnhancedInput.cs`).
+mentions a key (`scripting/csharp/Aver.Framework/EnhancedInput.cs`). **Actions are native as of this
+build**: `EnhancedInput`/`InputAction`/`InputMappingContext` keep the exact same public shape below, but
+every read now goes straight through to the framework ABI's own action layer
+(`aver_fw_action_register/find/bind/value2/held/pressed/released` — `framework_abi.h`'s Named Actions
+section), not a pure-C# reimplementation. The practical effect is that a native caller (a C++ system, or
+an Aver Node graph — see the box at the end of this section) sees the *identical* answer a C# pawn does,
+because both read the identical `cur`/`prev` bytes rather than two independently maintained copies.
 
 | Type | Description |
 |---|---|
-| `InputAction` | A thing the player can do. `InputAction.Digital(name)` / `.Axis1D(name)` / `.Axis2D(name)`. Read `IsHeld`, `WasPressed`, `WasReleased`, `Value1D`, `Value2D`. Declare each **once**, usually as a `static readonly` field on a class shared between the pawn that reads it and the context that binds it. |
+| `InputAction` | A thing the player can do. `InputAction.Digital(name)` / `.Axis1D(name)` / `.Axis2D(name)`. Read `IsHeld`, `WasPressed`, `WasReleased`, `Value1D`, `Value2D`. Declare each **once**, usually as a `static readonly` field on a class shared between the pawn that reads it and the context that binds it — enforced now, not just advised: two declarations sharing a name resolve to the same underlying action, never two independent ones. |
 | `InputMappingContext` | A set of key→action bindings pushed and popped as a whole. Derive it and bind in the constructor: `BindKey`, `BindAxis1D(action, positive, negative)`, `BindAxis2D(action, up, down, right, left)`, `BindMouseLook`, `BindMouseWheel`. |
 | `EnhancedInput` | The router: `AddContext(context, priority = 0)`, `RemoveContext`, `ClearContexts`, `ContextCount`. |
 
-A **higher-priority context consumes the keys it binds**, so a lower one never sees them — pushing a
-menu or vehicle context suppresses the walking bindings without anything having to disable them.
-Consumption is per *context*, not per binding, so one key can still feed two actions in the same
-context. Actions are recomputed once per frame before the first tick group, so every actor in a frame
-reads the same input; polling per actor would let two pawns disagree about a "was pressed" edge purely
-because of tick order.
+A **strictly-higher-priority binding consumes a key it shares with a lower one**, so the lower binding
+never sees it — pushing a menu or vehicle context at a higher priority suppresses the walking bindings
+without anything having to disable them. Consumption compares the raw priority NUMBER passed to
+`AddContext`, not the context object: two contexts pushed at the *same* priority never block each
+other's shared keys, whether or not they are the same object. Reading an action is a plain function of
+this frame's (and, for an edge, last frame's) device state, so it needs no once-per-frame precompute —
+every actor in a frame that asks the same question gets the same answer, in whatever order they ask it.
+
+> **Also reachable from an Aver Node graph.** `InputAction` / `InputActionPressed` / `InputActionReleased`
+> nodes read the same actions this section describes — see the node reference's Input category. The
+> graph-side `action` pin is the numeric **handle** `aver_fw_action_register`/`aver_fw_action_find`
+> returned, not the name string this section's `InputAction.Digital("Jump")` takes, so a graph reads an
+> action a C# script (or a project's own setup code) has already registered and bound; it does not do
+> either itself.
 
 ```csharp
 static class GameActions
@@ -735,8 +749,9 @@ the slot's space into the `TEX` line and the reader validates it, so the two can
 > guard against them drifting is weaker than it sounds, and worth knowing before trusting it:
 > `testGeneratedByCsharp` in `tests/formats/src/MaterialTest.cpp` parses a **pasted, verbatim** sample
 > of `MaterialBuilder.Emit`'s output with the C++ reader. Nothing runs the C# emitter, so a change made
-> only to `Emit` goes unnoticed until somebody re-pastes the sample. (The comment in `MaterialBuilder.cs`
-> claiming a `MaterialCompilerTest` does this is wrong — no such test exists.)
+> only to `Emit` goes unnoticed until somebody re-pastes the sample. (This paragraph used to add that
+> `MaterialBuilder.cs` carried a doc comment wrongly claiming a `MaterialCompilerTest` did this instead
+> — that comment is gone now, fixed in `4c1e111`, and the file makes no such claim today.)
 
 ---
 

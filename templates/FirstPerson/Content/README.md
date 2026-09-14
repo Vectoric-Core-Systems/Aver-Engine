@@ -87,9 +87,11 @@ Named rather than quietly omitted:
   detects the press itself. What stops it being one shot per tick is a plain rate limit — a
   `cooldown` VAR set to 0.35 and counted down by `deltaTime` — so held fire is about three shots a
   second rather than sixty. That is a weapon fire rate, not edge detection, and the difference
-  shows the moment you want a single-shot weapon or a charge-up.
-  `aver_fw_input_key_pressed` exists at the ABI but no node reaches it yet, so a real
-  once-per-press weapon needs either that node or a VAR remembering last frame's state.
+  shows the moment you want a single-shot weapon or a charge-up. This template still doesn't use
+  it, but as of `160bcdd` (2026-09-01) a node does reach `aver_fw_input_key_pressed`: `InputKeyPressed`
+  (and its twin `InputKeyReleased`) give a `triggered` pin true for exactly one frame per press, so a
+  real once-per-press weapon no longer needs a VAR remembering last frame's state to get edge
+  detection out of `InputKey`'s level-triggered `down`.
 - **There is no combined score.** Each target owns its own `score`. `FireEvent` carries no payload,
   and nothing hands a graph a list of entities by class, so a single total would have to be faked.
 - **Targets are `Character`-parented, which looks odd.** A `class=` placement gets no physics body

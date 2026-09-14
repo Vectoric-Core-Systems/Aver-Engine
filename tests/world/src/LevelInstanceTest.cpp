@@ -11,6 +11,7 @@
 // runs headless. It is also the direct precursor to the "chunked equals flat" test docs/CHUNKS.md
 // names as the strongest check in the streaming plan -- that one compares two instantiations, and
 // this one establishes what a single instantiation is supposed to produce.
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/Math.hpp"
 #include "aver/formats/OcWorld.hpp"
@@ -84,6 +85,59 @@ int main() {
     checkNear(static_cast<f32>(w.spawnYaw), 90.0f, 0.0f, "spawn yaw");
     check(w.build == 7, "BUILD survived the parse");
     check(w.contentId == 0xABull, "ID survived the parse and was not recomputed from NAME");
+
+    // ---- CAMERA: the editor viewpoint, which is NOT the player spawn ------------------------------
+    // The world text above deliberately has no CAMERA line, because that is every level authored
+    // before the record existed and the absence has to stay meaningful: hasCamera false means "no
+    // opinion, frame it the way you always did", and a level that silently gained a stored origin
+    // would send the camera to 0,0,0 on open.
+    check(!w.hasCamera, "a level with no CAMERA line does NOT claim to have one");
+    {
+        fmt::OcWorldData cw;
+        std::string cwhy;
+        check(fmt::parseOcworld(
+                  "OCWORLD 1\nNAME cam\n"
+                  "CAMERA 1200 -3400 950 -135.5 -22.25 6400\n"
+                  "PLACEG Meshes/cube.ocmesh 0 0 0 0 0 0 1 1 1\n", cw, &cwhy),
+              "a world with a CAMERA line parses: " + cwhy);
+        check(cw.hasCamera, "CAMERA sets hasCamera");
+        checkNear(static_cast<f32>(cw.camX), 1200.0f, 0.0f, "camera x");
+        checkNear(static_cast<f32>(cw.camY), -3400.0f, 0.0f, "camera y");
+        checkNear(static_cast<f32>(cw.camZ), 950.0f, 0.0f, "camera z");
+        checkNear(static_cast<f32>(cw.camYaw), -135.5f, 0.0f, "camera yaw survives a negative");
+        checkNear(static_cast<f32>(cw.camPitch), -22.25f, 0.0f, "camera pitch survives a fraction");
+        checkNear(static_cast<f32>(cw.camSpeed), 6400.0f, 0.0f, "camera speed");
+
+        // ROUND TRIP, which is the assertion that actually protects the feature: a viewpoint that
+        // parses but does not write back is the same to a user as one that was never saved.
+        const std::string out = fmt::writeOcworld(cw);
+        fmt::OcWorldData back;
+        std::string bwhy;
+        check(fmt::parseOcworld(out, back, &bwhy), "the written world re-parses: " + bwhy);
+        check(back.hasCamera, "CAMERA survives a write/parse round trip");
+        checkNear(static_cast<f32>(back.camX), 1200.0f, 0.0f, "round-tripped camera x");
+        checkNear(static_cast<f32>(back.camYaw), -135.5f, 0.0f, "round-tripped camera yaw");
+        checkNear(static_cast<f32>(back.camPitch), -22.25f, 0.0f, "round-tripped camera pitch");
+        checkNear(static_cast<f32>(back.camSpeed), 6400.0f, 0.0f, "round-tripped camera speed");
+
+        // A SHORT LINE MUST NOT FAIL THE PARSE. The speed is optional, so a five-token CAMERA has to
+        // degrade to "unstated" rather than rejecting the whole level -- an editor that refuses to
+        // open a file over a trailing number is worse than one that forgets a fly speed.
+        fmt::OcWorldData sw;
+        std::string swhy;
+        check(fmt::parseOcworld("OCWORLD 1\nNAME s\nCAMERA 1 2 3 4 5\n", sw, &swhy),
+              "a CAMERA line with no speed still parses: " + swhy);
+        check(sw.hasCamera, "the short CAMERA line still sets hasCamera");
+        checkNear(static_cast<f32>(sw.camSpeed), 0.0f, 0.0f, "a missing speed reads as 0 = unstated");
+
+        // AND A LEVEL WITHOUT ONE MUST NOT GROW ONE. writeOcworld is what saveLevel calls, so if it
+        // emitted CAMERA unconditionally every untouched level in the repo would gain a line the
+        // first time it was opened and saved.
+        fmt::OcWorldData nw;
+        check(fmt::parseOcworld("OCWORLD 1\nNAME n\n", nw, &swhy), "a world with no CAMERA parses");
+        check(fmt::writeOcworld(nw).find("CAMERA") == std::string::npos,
+              "a level with no camera writes NO CAMERA line");
+    }
 
     // ---- instantiation ---------------------------------------------------------------------------
     std::vector<std::pair<i32, std::string>> bound;
@@ -211,5 +265,5 @@ int main() {
 
     if (g_failures == 0) AVER_INFO("=== {} assertions, 0 failed ===", g_checks);
     else AVER_ERROR("=== {} assertions, {} failed ===", g_checks, g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

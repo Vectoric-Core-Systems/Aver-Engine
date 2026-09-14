@@ -62,14 +62,13 @@ target_compile_definitions(Aver.RHI.Vulkan PRIVATE
   VK_USE_PLATFORM_WIN32_KHR=1
 )
 
-# In-window UI: NOT wired up in this pass. modules/rhi.d3d12 hosts Dear ImGui through
-# imgui_impl_dx12 (see its own CMakeLists.txt, gated on AVER_ENABLE_UI). Vulkan's equivalent is the
-# SEPARATE imgui_impl_vulkan backend -- a real, not-yet-vendored dependency (its own license check,
-# its own render-target/command-buffer contract) rather than a recompile of the same code against a
-# different header. Until it is vendored, VulkanDevice simply does not override IDevice's ui*
-# methods, which default to false/no-op (RHI.hpp) -- an honest "no UI on this backend yet". Revisit
-# alongside AVER_ENABLE_UI once imgui_impl_vulkan clears the same permissive-license bar as
-# everything else under third_party/.
+# In-window UI: DONE, and this comment said otherwise long after it stopped being true. It claimed
+# imgui_impl_vulkan was "a real, not-yet-vendored dependency" and that "VulkanDevice simply does not
+# override IDevice's ui* methods". Both are stale: modules/rhi.vulkan.imgui exists and is added by
+# the root CMakeLists under AVER_RHI_VULKAN AND AVER_ENABLE_UI, and a `--backend vulkan` run logs
+# "[RHI.Vulkan.ImGui] ImGui UI initialised (docking, dynamic rendering)" and draws the whole editor.
+# Left as a correction rather than deleted: this file's other stale claim (SPIR-V codegen) cost the
+# backend months of being dead, and the pattern is worth being able to see twice.
 
 # DXC redistributables (dxcompiler.dll / dxil.dll) are copied beside the executable by
 # modules/rhi.d3d12/CMakeLists.txt whenever that module is part of the build. VulkanShaderCompiler
@@ -77,34 +76,31 @@ target_compile_definitions(Aver.RHI.Vulkan PRIVATE
 # SPIR-V instead of DXIL via the `-spirv` argument, so this module adds no new copy step of its
 # own.
 #
-# ############################################################################################
-# THAT LAST SENTENCE IS WRONG, AND IT IS THE CURRENT BLOCKER. Measured, not reasoned: running
-# `Sandbox.exe --backend vulkan` gets all the way to a live VkDevice with caps queried (MSAA 8x,
-# RT tier 11, SM 65, mesh-shader tier 1) and then dies on the first shader with
+# THAT WAS WRONG FOR A LONG TIME, AND IS NOW FIXED -- the history is kept because the failure was
+# invisible from the build and cost this backend its entire life. `Sandbox.exe --backend vulkan`
+# reached a live VkDevice with caps queried (MSAA 8x, RT tier 11, SM 65, mesh-shader tier 1) and then
+# died on the first shader with
 #
 #     [RHI.Vulkan] VSMain (vs_6_0): SPIR-V CodeGen not available.
 #                                    Please recompile with -DENABLE_SPIRV_CODEGEN=ON.
 #
-# The dxcompiler.dll being loaded comes from the WINDOWS SDK -- see modules/rhi.d3d12/
-# CMakeLists.txt's `find_file(AVER_DXCOMPILER dxcompiler.dll HINTS "${_wsdk_bin}" ...)` -- and
-# Microsoft builds their redistributable WITHOUT the SPIR-V backend compiled in. `-spirv` is
-# accepted as an argument and then refused at codegen. Only the Khronos DirectXShaderCompiler
-# GitHub releases and the LunarG Vulkan SDK ship a dxcompiler.dll built with
-# ENABLE_SPIRV_CODEGEN=ON.
+# because the dxcompiler.dll beside the exe came from the WINDOWS SDK, and Microsoft build that
+# redistributable WITHOUT the SPIR-V backend: `-spirv` is accepted as an argument and refused at
+# codegen. The premise this backend was designed on -- "the engine already has DXC, which emits
+# SPIR-V with -spirv" -- was false for the DLL the engine actually had.
 #
-# So the premise this whole backend was designed on -- "the engine already has DXC, which emits
-# SPIR-V with -spirv, so no glslang/shaderc either" -- does not hold for the DLL the engine
-# actually has. Closing it needs ONE of:
-#   (a) vendor a SPIR-V-capable dxcompiler.dll (Khronos DXC release; check its licence against
-#       docs/ASSET_IMPORT.md's accepted list) and load THAT by an explicit path here rather than
-#       whichever one the SDK put beside the exe;
-#   (b) vendor glslang/shaderc after all, which this module's README deliberately ruled out for
-#       being a second source of truth for the same HLSL;
-#   (c) accept the LunarG SDK as a build dependency, which third_party/vulkan-headers/README.md
-#       deliberately ruled out.
-# (a) is the only one that keeps both earlier decisions intact. It is an external dependency
-# fetch, so it is the user's call, not something to do silently.
-# ############################################################################################ Every configuration this engine currently builds keeps AVER_RHI_D3D12 ON alongside
+# RESOLVED by option (a) of the three that were on the table: a SPIR-V-capable DXC is vendored at
+# third_party/dxc-spirv (official Microsoft DXC v1.9.2607, MIT + LLVM licences, both checked in), and
+# modules/rhi.d3d12/CMakeLists.txt's find_file HINTS it FIRST, ahead of the Windows SDK, so the DLL
+# copied beside the executable emits both DXIL and SPIR-V. The two alternatives stay ruled out for
+# their original reasons: glslang/shaderc would be a second source of truth for the same HLSL, and
+# the LunarG SDK as a build dependency is what third_party/vulkan-headers/README.md exists to avoid.
+#
+# WHAT IS STILL NOT TRUE is that this backend is at parity. The cascade shadow map is not written at
+# all (pushRenderScope discards the caller's render targets), and RT shadows mask it. Compiling and
+# running are not the same as correct; see docs and the module README before trusting a picture.
+#
+# Every configuration this engine currently builds keeps AVER_RHI_D3D12 ON alongside
 # AVER_RHI_VULKAN (scripts/module-matrix.ps1's vulkan-on row layers Vulkan ON TOP of the default
 # set rather than replacing it), so that copy step is always present when this module is. Flagged
 # here so it is not a silent gap the day a Vulkan-only, D3D12-off configuration is asked for.

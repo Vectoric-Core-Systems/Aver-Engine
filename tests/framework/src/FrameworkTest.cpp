@@ -1,6 +1,7 @@
 // Test for Aver.Framework: the class registry, defaults, spawn, possession, managed dispatch, the
 // play lifecycle and input. Drives the C ABI and reads back through the one process-global World.
 // Exit code = failure count.
+#include "aver/core/ErrorCodes.hpp"
 #include "aver/core/Log.hpp"
 #include "aver/core/Math.hpp"
 #include "aver/framework/framework_abi.h"
@@ -740,6 +741,179 @@ static void testInput() {
     check(mode == AVER_FW_VIEW_FIRST_PERSON && eye == 170.0f && boom == 500.0f, "the play-view request round-trips");
 }
 
+// Checks the raw Win32 VK twin: the same edge-detection shape as testInput's key checks above, plus
+// independence from the named AVER_FW_KEY_* array and out-of-range handling. See framework_abi.h's
+// own RAW WIN32 VK section for why this parallel array exists at all.
+static void testRawVk() {
+    AVER_INFO("=== raw Win32 VK twin: edge detection, independence, and out-of-range ===");
+
+    const int32_t kF1 = 0x70;   // VK_F1 -- exactly the kind of key AVER_FW_KEY_* cannot reach
+                                // (frameworkKeyFromVk falls through to -1 for it, InputKeys.hpp:48)
+
+    aver_fw_input_new_frame();
+    aver_fw_input_set_vk(kF1, 1);
+    check(aver_fw_input_vk(kF1) == 1, "a set raw VK reads held");
+    check(aver_fw_input_vk_pressed(kF1) == 1, "and pressed this frame (was up last frame)");
+    check(aver_fw_input_vk_released(kF1) == 0, "not released");
+
+    aver_fw_input_new_frame();                 // held across the frame boundary -> no longer a press edge
+    aver_fw_input_set_vk(kF1, 1);
+    check(aver_fw_input_vk(kF1) == 1, "still held next frame");
+    check(aver_fw_input_vk_pressed(kF1) == 0, "no longer a pressed edge");
+
+    aver_fw_input_new_frame();                 // release
+    aver_fw_input_set_vk(kF1, 0);
+    check(aver_fw_input_vk(kF1) == 0, "released reads up");
+    check(aver_fw_input_vk_released(kF1) == 1, "released this frame");
+
+    aver_fw_input_set_vk(-1, 1);                // out of range: ignored, and reads 0
+    aver_fw_input_set_vk(AVER_FW_VK_COUNT, 1);
+    check(aver_fw_input_vk(-1) == 0, "a negative VK reads 0, not a crash");
+    check(aver_fw_input_vk(AVER_FW_VK_COUNT) == 0, "a VK at/past AVER_FW_VK_COUNT reads 0");
+
+    // The named AVER_FW_KEY_* slots and the raw VK twin are two SEPARATE arrays, not aliases of one
+    // another -- setting one must never leak into the other. 'W' the char literal IS VK_W (Win32's
+    // letter VKs are plain ASCII uppercase, the same fact frameworkKeyFromVk relies on).
+    aver_fw_input_new_frame();
+    aver_fw_input_set_key(AVER_FW_KEY_W, 1);
+    check(aver_fw_input_vk('W') == 0, "setting the named W slot does not also set raw vk 'W'");
+    aver_fw_input_set_vk('W', 1);
+    check(aver_fw_input_key(AVER_FW_KEY_W) == 1, "and the named slot keeps reading what set_key gave it");
+}
+
+// Checks the gamepad ABI's round trip and out-of-range handling. No polling exists behind it (see
+// framework_abi.h's own GAMEPAD section), so this is pure state in / state out.
+static void testGamepad() {
+    AVER_INFO("=== gamepad: button/axis round trip, and out-of-range pad/button/axis ===");
+
+    check(aver_fw_input_gamepad_button(0, AVER_FW_GAMEPAD_A) == 0, "an unset button reads up");
+    aver_fw_input_set_gamepad_button(0, AVER_FW_GAMEPAD_A, 1);
+    check(aver_fw_input_gamepad_button(0, AVER_FW_GAMEPAD_A) == 1, "a set button reads held");
+    aver_fw_input_set_gamepad_button(0, AVER_FW_GAMEPAD_A, 0);
+    check(aver_fw_input_gamepad_button(0, AVER_FW_GAMEPAD_A) == 0, "and clears back to up");
+
+    aver_fw_input_set_gamepad_axis(0, AVER_FW_GAMEPAD_AXIS_LEFT_X, 0.75f);
+    check(aver_fw_input_gamepad_axis(0, AVER_FW_GAMEPAD_AXIS_LEFT_X) == 0.75f, "an axis round-trips exactly");
+    aver_fw_input_set_gamepad_axis(0, AVER_FW_GAMEPAD_AXIS_LEFT_X, -3.0f);
+    check(aver_fw_input_gamepad_axis(0, AVER_FW_GAMEPAD_AXIS_LEFT_X) == -3.0f, "unclamped -- no dead zone of its own");
+
+    // Only pad 0 exists -- aver_fw_player_controller's own "player 0 only" precedent, applied here.
+    aver_fw_input_set_gamepad_button(1, AVER_FW_GAMEPAD_A, 1);
+    check(aver_fw_input_gamepad_button(1, AVER_FW_GAMEPAD_A) == 0, "pad != 0 is refused on both setter and getter");
+    aver_fw_input_set_gamepad_axis(1, AVER_FW_GAMEPAD_AXIS_LEFT_X, 1.0f);
+    check(aver_fw_input_gamepad_axis(1, AVER_FW_GAMEPAD_AXIS_LEFT_X) == 0.0f, "same for an axis on pad != 0");
+
+    aver_fw_input_set_gamepad_button(0, -1, 1);
+    aver_fw_input_set_gamepad_button(0, AVER_FW_GAMEPAD_BUTTON_COUNT, 1);
+    check(aver_fw_input_gamepad_button(0, -1) == 0, "a negative button index reads 0, not a crash");
+    check(aver_fw_input_gamepad_button(0, AVER_FW_GAMEPAD_BUTTON_COUNT) == 0, "a button index at/past COUNT reads 0");
+
+    aver_fw_input_set_gamepad_axis(0, -1, 1.0f);
+    aver_fw_input_set_gamepad_axis(0, AVER_FW_GAMEPAD_AXIS_COUNT, 1.0f);
+    check(aver_fw_input_gamepad_axis(0, -1) == 0.0f, "a negative axis index reads 0, not a crash");
+    check(aver_fw_input_gamepad_axis(0, AVER_FW_GAMEPAD_AXIS_COUNT) == 0.0f, "an axis index at/past COUNT reads 0");
+}
+
+// Checks the named-action layer ported from Aver.Framework's EnhancedInput.cs: registration
+// identity, held/pressed/released edge detection, the 0.15 dead zone, and the layer's central
+// behaviour -- two different-priority "contexts" (here: two contextPriority values) binding the SAME
+// key, where the higher one consumes it and the lower one must never see it. The assertions below
+// are EnhancedInput.cs's own documented behaviour (its Update() bindings loop and the "Consumption
+// is per layer" comment on its consumed-set pass), ported into checks rather than re-derived.
+static void testActions() {
+    AVER_INFO("=== named actions: registration, edges, dead zone, and priority key consumption ===");
+
+    aver_fw_action_clear_bindings();
+
+    // ---- registration is idempotent by name, like aver_fw_class_declare ----
+    const int32_t jump1 = aver_fw_action_register("Jump", AVER_FW_ACTION_DIGITAL);
+    const int32_t jump2 = aver_fw_action_register("Jump", AVER_FW_ACTION_DIGITAL);
+    check(jump1 != 0, "register returns a non-zero handle");
+    check(jump1 == jump2, "registering the same name twice returns the SAME handle");
+    check(aver_fw_action_find("Jump") == jump1, "find resolves the name to that handle");
+    check(aver_fw_action_find("NoSuchAction") == 0, "an unknown name resolves to 0");
+    check(aver_fw_action_register("", AVER_FW_ACTION_DIGITAL) == 0, "an empty name is refused");
+    check(aver_fw_action_register("BadType", 99) == 0, "an out-of-range valueType is refused");
+
+    // ---- held state and edge detection: one key, one binding, scale 1.0 (well clear of the dead zone) ----
+    aver_fw_action_bind(jump1, AVER_FW_ACTION_SRC_KEY, AVER_FW_KEY_SPACE, 1.0f, 0, /*contextPriority=*/0);
+
+    aver_fw_input_new_frame();
+    aver_fw_input_set_key(AVER_FW_KEY_SPACE, 1);
+    check(aver_fw_action_held(jump1) == 1, "the action is held while its bound key is down");
+    check(aver_fw_action_pressed(jump1) == 1, "and pressed this frame (was up last frame)");
+    check(aver_fw_action_released(jump1) == 0, "not released");
+
+    aver_fw_input_new_frame();                 // held across the frame boundary
+    aver_fw_input_set_key(AVER_FW_KEY_SPACE, 1);
+    check(aver_fw_action_held(jump1) == 1, "still held next frame");
+    check(aver_fw_action_pressed(jump1) == 0, "no longer a pressed edge");
+
+    aver_fw_input_new_frame();                 // release
+    aver_fw_input_set_key(AVER_FW_KEY_SPACE, 0);
+    check(aver_fw_action_held(jump1) == 0, "released reads not-held");
+    check(aver_fw_action_released(jump1) == 1, "released this frame");
+
+    // ---- the dead zone, ported verbatim from EnhancedInput.cs's Active() (0.15) ----
+    const int32_t move = aver_fw_action_register("Move", AVER_FW_ACTION_AXIS1D);
+    aver_fw_action_bind(move, AVER_FW_ACTION_SRC_KEY, AVER_FW_KEY_D, 0.10f, 0, 0);   // under 0.15
+    aver_fw_input_new_frame();
+    aver_fw_input_set_key(AVER_FW_KEY_D, 1);
+    float v2[2] = {-1.0f, -1.0f};
+    aver_fw_action_value2(move, v2);
+    check(v2[0] == 0.10f, "value2 reports the raw accumulated value regardless of the dead zone");
+    check(aver_fw_action_held(move) == 0, "but held is 0 -- 0.10 does not clear the 0.15 dead zone");
+
+    aver_fw_action_clear_bindings();
+    aver_fw_action_bind(move, AVER_FW_ACTION_SRC_KEY, AVER_FW_KEY_D, 0.20f, 0, 0);   // over 0.15
+    aver_fw_input_new_frame();
+    aver_fw_input_set_key(AVER_FW_KEY_D, 1);
+    check(aver_fw_action_held(move) == 1, "0.20 clears the dead zone");
+
+    // ---- the central behaviour: two priorities on the SAME key, higher consumes it ----
+    aver_fw_action_clear_bindings();
+    const int32_t fireHigh = aver_fw_action_register("FireHighPriority", AVER_FW_ACTION_DIGITAL);
+    const int32_t fireLow  = aver_fw_action_register("FireLowPriority",  AVER_FW_ACTION_DIGITAL);
+    // EnhancedInput.cs sorts layers so the higher priority runs FIRST, and its own pass over the
+    // consumed set blocks every key IT bound before the lower layer is ever evaluated. Ported here
+    // as "any STRICTLY higher priority binding on the same key blocks this one" -- the same rule
+    // with no layer object needed to express it (see aver_fw_action_bind's own header comment).
+    aver_fw_action_bind(fireHigh, AVER_FW_ACTION_SRC_KEY, AVER_FW_KEY_MOUSE_LEFT, 1.0f, 0, 10);
+    aver_fw_action_bind(fireLow,  AVER_FW_ACTION_SRC_KEY, AVER_FW_KEY_MOUSE_LEFT, 1.0f, 0, 0);
+
+    aver_fw_input_new_frame();
+    aver_fw_input_set_key(AVER_FW_KEY_MOUSE_LEFT, 1);
+    check(aver_fw_action_held(fireHigh) == 1, "the higher-priority action sees the key");
+    check(aver_fw_action_held(fireLow) == 0, "the lower-priority action does NOT -- its key was consumed");
+
+    // Remove the higher-priority binding (clear + re-bind without it): consumption is a property of
+    // what is CURRENTLY bound, not a permanent lockout, so the lower-priority action sees the key again.
+    aver_fw_action_clear_bindings();
+    aver_fw_action_bind(fireLow, AVER_FW_ACTION_SRC_KEY, AVER_FW_KEY_MOUSE_LEFT, 1.0f, 0, 0);
+    check(aver_fw_action_held(fireLow) == 1, "with the higher-priority binding gone, the lower one sees the key");
+
+    // Two bindings at the SAME priority never consume each other -- EnhancedInput.cs's own comment:
+    // "Consumption is per layer, so two bindings in one context can share a key."
+    aver_fw_action_clear_bindings();
+    const int32_t both = aver_fw_action_register("BothMouseButtons", AVER_FW_ACTION_DIGITAL);
+    aver_fw_action_bind(both, AVER_FW_ACTION_SRC_KEY, AVER_FW_KEY_MOUSE_LEFT,  1.0f, 0, 0);
+    aver_fw_action_bind(both, AVER_FW_ACTION_SRC_KEY, AVER_FW_KEY_MOUSE_RIGHT, 1.0f, 0, 0);
+    aver_fw_input_new_frame();
+    aver_fw_input_set_key(AVER_FW_KEY_MOUSE_LEFT, 1);
+    aver_fw_input_set_key(AVER_FW_KEY_MOUSE_RIGHT, 1);
+    check(aver_fw_action_held(both) == 1, "two same-priority bindings on one action both contribute");
+
+    // ---- invalid handles are quiet, not crashes ----
+    check(aver_fw_action_held(0) == 0, "action 0 (invalid) reads not-held");
+    check(aver_fw_action_pressed(-1) == 0, "a negative handle reads not-pressed");
+    check(aver_fw_action_released(999999) == 0, "a handle past every registration reads not-released");
+    float bad[2] = {7.0f, 7.0f};
+    aver_fw_action_value2(0, bad);
+    check(bad[0] == 0.0f && bad[1] == 0.0f, "value2 zeroes the output for an invalid handle");
+
+    aver_fw_action_clear_bindings();   // leave global state clean for anything that runs after this
+}
+
 // Runs every framework test. Returns the failure count as the exit code.
 int main() {
     AVER_INFO("Aver.Framework test");
@@ -757,7 +931,10 @@ int main() {
     testPossessReentrancy();
     testPlayLifecycle();
     testInput();
+    testRawVk();
+    testGamepad();
+    testActions();
 
     AVER_INFO("=== {} assertions, {} failed ===", g_checks, g_failures);
-    return g_failures;
+    return exitCode(g_failures ? ExitCode::Failed : ExitCode::Ok);
 }

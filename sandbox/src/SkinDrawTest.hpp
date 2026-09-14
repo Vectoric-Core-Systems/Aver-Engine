@@ -79,6 +79,14 @@ public:
 
     bool finished() const { return done_; }
 
+    // THE VERDICT, KEPT rather than only printed. report() used to write PASS or FAIL to the log and
+    // hold on to nothing, so exitCode() had no way to consult it and --skin-draw-test exited 0
+    // however it went. Anything scripting this test was green by construction.
+    //
+    // FALSE UNTIL report() RUNS, so a run that never reached its verdict cannot read as a pass --
+    // pair it with finished(), the same way exitCode() treats --skin-scene-test.
+    bool passed() const { return passed_; }
+
 private:
     void report();
 
@@ -114,6 +122,7 @@ private:
     u32   phase_ = kPhaseNearRtOn;
     bool  rtAvailable_ = false;
     bool  done_ = false;
+    bool  passed_ = false;   // set by report(); see passed() above for why it is kept at all
 };
 
 } // namespace aver::editor

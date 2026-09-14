@@ -4,7 +4,9 @@
 
 > **Three README files in this tree are stale and should be read as historical.** `abi/README.md:3` describes "Aver.ABI — stable `extern "C"` interop seam … Everything non-C++ binds here". `modules/abi/README.md:7-11` describes "The flat extern "C" seam: opaque handles, out-pointer returns, aver_abi_version(). The single interop boundary C#/Rust bind against", adding that it will be wired into the build "when Phase 7 implements it". Neither describes anything that exists: both directories contain exactly one file — that README — with no header, no source and no `CMakeLists.txt`, and neither is named by an `add_subdirectory` in the top-level `CMakeLists.txt` (verified by directory listing and by grep over the tree). No symbol named `aver_abi_version` exists anywhere; the only hits are those READMEs and `docs/ARCHITECTURE.md:158, 230, 303, 307`, which carries the same sketch and is stale the same way. `interop/README.md:3` promises "Generated P/Invoke (C#) and bindgen (Rust) bindings derived from abi/ headers"; that directory also holds only its README, the C# bindings under `scripting/csharp/` are hand-written, and a search for `*.rs` and `Cargo.toml` over the whole tree returns nothing — there is no Rust in this repository.
 
-**204 exported C functions declared across seven headers**, plus five reverse entry points the script host binds by name. Counts verified by grepping each header for its export macro at line start: scene 35, framework 48, framework hooks 4, physics 37, PBR 48, Voxi 21, UI 11. Read that number as *declared in headers*: the shipped DLLs export 205, because `aver_scene_debug_string_pool_size` is `AVER_SCENE_ABI`-exported from `modules/scene/src/SceneAbi.cpp:111` and declared in no header (§3). A `dumpbin /exports` will therefore show one more than this document lists, and that is the one. (Physics moved 36 → 37 when `aver_phys_set_entity` was added to stamp a body or character with the scene entity that owns it — see §6.)
+**346 exported C functions declared across eleven headers**, plus five reverse entry points the script host binds by name. Counts verified by grepping each header for its export macro at line start: scene 36, framework 85, framework hooks 4, physics 125 (across five headers, not one — see §6), PBR 62, Voxi 23, UI 11. Read that number as *declared in headers*: the shipped Scene DLL exports one more than its header, because `aver_scene_debug_string_pool_size` is `AVER_SCENE_ABI`-exported from `modules/scene/src/SceneAbi.cpp:100` and declared in no header (§3) — so 347 is the true total across all seven DLLs.
+
+> **This paragraph used to say 204, across seven headers, and every seam but framework-hooks and UI has grown since.** Scene 35→36 (`aver_scene_material_name` was added, reversing `aver_scene_material`'s name→token intern so the render side's token can be resolved back to a name). Framework 48→85, and its minor version moved 1.1→1.5: save/load providers, a raw-VK input pair, a named-action binding layer, sky-cloud authoring, and fluid-spawn (plus fluid-spawn-material) providers were all added; §4 below still documents only the 1.1 surface. PBR 48→62: an IOR getter/setter, transmission, a three-parameter clear coat (weight/roughness/F0), and subsurface weight/radius were added; §7 below still documents only the original factor set. Voxi 21→23: `aver_voxi_get_gi_update_interval`/`_set_gi_update_interval` were added; §8 below does not mention them. **Physics is the largest single change, by far** — one header of 37 exports became five headers totaling 125 — and §6 has been rewritten to describe it; §§3, 4, 7 and 8 have not had the same treatment and should be read as describing each seam's *original* surface, not its current one. None of this touches the architectural rules in §11–§17, which were re-checked against the current tree and still hold. Where this document is silent on a newer entry point, the header is the source of truth.
 
 ---
 
@@ -85,12 +87,12 @@ Keyed on the job, not the module. If your job is here, the seam is decided.
 
 | Seam | Header | Export macro / build define | Library | Exports | Version | Handles | Direct C ABI test |
 |---|---|---|---|---|---|---|---|
-| **Aver.Scene** | `modules/scene/include/aver/scene/scene_abi.h` | `AVER_SCENE_ABI` / `AVER_SCENE_BUILD` | SHARED | 35 | **1.0** | generational entity `int32_t` | `tests/scene/src/SceneTest.cpp` |
-| **Aver.Framework** | `modules/framework/include/aver/framework/framework_abi.h` | `AVER_FW_ABI` / `AVER_FW_BUILD` | SHARED | 46 | **1.1** | class (non-generational) + entity | `tests/framework/src/FrameworkTest.cpp` |
+| **Aver.Scene** | `modules/scene/include/aver/scene/scene_abi.h` | `AVER_SCENE_ABI` / `AVER_SCENE_BUILD` | SHARED | 36 | **1.0** | generational entity `int32_t` | `tests/scene/src/SceneTest.cpp` |
+| **Aver.Framework** | `modules/framework/include/aver/framework/framework_abi.h` | `AVER_FW_ABI` / `AVER_FW_BUILD` | SHARED | 85 | **1.5** | class (non-generational) + entity | `tests/framework/src/FrameworkTest.cpp` |
 | **Aver.Framework (hooks)** | `…/framework/framework_hooks.h` | `AVER_FW_ABI` (+ `AVER_FW_CALL` = `__cdecl`) | same DLL | 4 | table contracts **2** / **1** | by-value tables, no handles | partly, in `FrameworkTest.cpp` |
-| **Aver.Physics** | `modules/physics/include/aver/physics/physics_abi.h` | `AVER_PHYS_API` / `AVER_PHYS_BUILD` | SHARED | 36 | **none declared** | dense `int32_t`, never reissued | `tests/physics/src/PhysicsTest.cpp` |
-| **Aver.Render.PBR** | `modules/render.pbr/include/aver/pbr/pbr_abi.h` | `AVER_PBR_ABI` / `AVER_PBR_BUILD` | SHARED | 48 | **none declared** | generational material `int32_t` | **none** |
-| **Aver.Render.Voxi** | `modules/render.voxi/include/aver/voxi/voxi_abi.h` | `AVER_VOXI_ABI` / `AVER_VOXI_BUILD` | SHARED | 21 | **none declared** | **none** — global settings | **none** |
+| **Aver.Physics** | `modules/physics/include/aver/physics/physics_abi.h` **+ 4 more** (see §6) | `AVER_PHYS_API` / `AVER_PHYS_BUILD` | SHARED | 125 across 5 headers | **none declared** | dense `int32_t`, never reissued (joints: a separate counter, §6) | `tests/physics/src/*.cpp` — nine suites now, not one (`PhysicsTest`, `SoftBodyTest`, `CharacterTest`, `LayerTest`, `ShapeTest`, `JointTest`, `BodyDynamicsTest`, `BuoyancyTest`, `FluidDampingCalibrationTest`) |
+| **Aver.Render.PBR** | `modules/render.pbr/include/aver/pbr/pbr_abi.h` | `AVER_PBR_ABI` / `AVER_PBR_BUILD` | SHARED | 62 | **none declared** | generational material `int32_t` | **none** |
+| **Aver.Render.Voxi** | `modules/render.voxi/include/aver/voxi/voxi_abi.h` | `AVER_VOXI_ABI` / `AVER_VOXI_BUILD` | SHARED | 23 | **none declared** | **none** — global settings | **none** |
 | **Aver.UI** | `modules/ui.abi/include/aver/ui/ui_abi.h` | `AVER_UI_API` / `AVER_UI_ABI_BUILD` | SHARED | 11 | **none declared** | **none** — one global draw list | `tests/render.ui` covers the renderer, not this |
 | **Aver.Scripting** | `modules/scripting/include/aver/scripting/scripting_abi.h` | **no export macro at all** | STATIC (`Aver.Scripting.Host`) | 0 exported; 5 bound by name | contract **2** | none — one blittable struct | **none** |
 
@@ -102,7 +104,7 @@ Two spellings break the pattern, harmlessly but worth knowing: physics uses `AVE
 
 ## 3. `Aver.Scene` — `scene_abi.h`
 
-**Header** `modules/scene/include/aver/scene/scene_abi.h` · **DLL** `Aver.Scene` (SHARED, links `PUBLIC Aver.Core Aver.Assets` — `modules/scene/CMakeLists.txt:12, 21`) · **Version** `AVER_SCENE_ABI_VERSION` = `(1 << 16) | 0` (`scene_abi.h:54-57`) · **35 entry points.**
+**Header** `modules/scene/include/aver/scene/scene_abi.h` · **DLL** `Aver.Scene` (SHARED, links `PUBLIC Aver.Core Aver.Assets` — `modules/scene/CMakeLists.txt:12, 21`) · **Version** `AVER_SCENE_ABI_VERSION` = `(1 << 16) | 5` · **38 entry points**. The minors, each additive: 1 `aver_scene_material_name` (the reverse of `aver_scene_material` below — it resolves an interned token back to the name it was interned from), 2 and 3 two new built-in component ids, 4 `aver_scene_component` (resolving a *dynamically* registered component by name), 5 `aver_scene_last_error`.
 
 **Handle.** A `int32_t` entity. The C++ side is `aver::scene::Entity = AvId`: index in bits 0–23, generation in bits 24–30, bit 31 always clear (`Entity.hpp:23-42`). Index 0 is never handed out and a live generation starts at 1, so no live handle is 0 and every live handle crosses as a **positive** `int32_t`. A `static_assert` pins the bit-31 rule at compile time (`Entity.hpp:48-49`). Field ids and component ids are also `int32_t` with `0 == invalid`.
 
@@ -157,7 +159,16 @@ The flag is registered where the built-ins are declared, `modules/scene/src/Buil
 
 > **The `CHierarchy` case is a hang, not a tidiness rule.** `SceneAbi.cpp:240-242` records exactly what the flag prevents: `World::setParent` keeps the hierarchy acyclic — it refuses self-parenting and walks the ancestor chain — and a raw byte write through `set_ref` bypasses all of it. A single `set_ref(e, CHierarchy.parent, e)`, or a pair of writes forming a two-cycle, "makes `composeChain()`/`worldMatrix()` loop with no visited guard and grow unbounded (hang/`bad_alloc`)". There is no visited guard in the walk, and the read-only flag is what stands in for one. **Structural edits go through `aver_scene_set_parent`**; `get_ref` on those fields is a read and is unaffected. A binding that "helpfully" exposes generic field writes over the whole field table without honouring the rejection is handing scripts a way to hang the process.
 
-There is no ABI entry point that reports whether a field is read-only. A binding cannot ask; it can only observe the 0 and must not treat it as a stale handle.
+**Since scene ABI minor 5 a binding can ask why.** `aver_scene_last_error()` returns `-5`
+(`AbiError::Unsupported`) for exactly this case, distinct from `-1` (bad handle, whether the field id
+or the entity), `-6` (the field is real and of another kind) and `-2` (a null pointer). The setters
+themselves are unchanged and still return 1/0 — a negative code on *their* return would read as true
+under `if (aver_scene_set_...)` and invert every existing call site. See `docs/DIAGNOSTICS.md` for
+the full table and why the channel is a separate entry point.
+
+There is still no entry point that reports whether a field is read-only *before* you try to write it.
+The reason is available only after the rejection, which is enough to stop a binding misreporting a
+read-only field as a stale handle — the mistake this section exists to prevent.
 
 ### Entity lifetime and hierarchy editing
 *You are making, unmaking or re-parenting something, or checking whether a handle you kept from last frame still addresses anything.*
@@ -218,9 +229,10 @@ Indices are dense over live entities and **shift on the next flush**, so a `(cou
 
 ```c
 AVER_SCENE_ABI int32_t aver_scene_material(int32_t name0, const char* name);
+AVER_SCENE_ABI const char* aver_scene_material_name(int32_t token);   /* "" for an unknown token — added after this doc's original 35-entry-point count */
 ```
 
-`name0` is the content-pack id (0 = default pack). Materials belong to `Aver.Render.PBR`, which this module must not link, so this is a pure per-name intern into a table local to the scene DLL and **never** a call into the material library (`scene_abi.h:188-193`). What that token means once the PBR material it names has been destroyed is not stated anywhere — see §18.
+`name0` is the content-pack id (0 = default pack). Materials belong to `Aver.Render.PBR`, which this module must not link, so this is a pure per-name intern into a table local to the scene DLL and **never** a call into the material library (`scene_abi.h:188-193`). `aver_scene_material_name` is the reverse lookup, and the header states why it had to exist: a token is `table.size() + 1` at the moment its name was first seen **in this process** — it depends on startup order and means nothing in a different run — so anything writing a surface out (the editor's level save, and the region writer after it) must turn the token back into a name before persisting, and until this function existed it could not: `saveLevel` simply dropped every material it had loaded (`scene_abi.h:147-154`). What that token means once the PBR material it names has been destroyed is still not stated anywhere — see §18.
 
 ### One export not declared in this header
 `aver_scene_debug_string_pool_size()` is defined at `modules/scene/src/SceneAbi.cpp:111` and exported, but declared in no header. It exists so a same-process test can prove that repeated `set_str` into one field reuses its slot instead of leaking a pool entry per write; `tests/scene/src/SceneTest.cpp:22` declares it itself with `__declspec(dllimport)`. It is not part of the 35, it is the reason a `dumpbin /exports` shows 191 rather than 190, and nothing else should call it.
@@ -229,9 +241,9 @@ AVER_SCENE_ABI int32_t aver_scene_material(int32_t name0, const char* name);
 
 ## 4. `Aver.Framework` — `framework_abi.h`
 
-**Header** `modules/framework/include/aver/framework/framework_abi.h` · **DLL** `Aver.Framework` (SHARED, links `PUBLIC Aver.Core Aver.Assets Aver.Scene` — `modules/framework/CMakeLists.txt:12, 17`) · **Version** `AVER_FW_ABI_VERSION` = `(1 << 16) | 1` (`framework_abi.h:53-58`) · **46 entry points.**
+**Header** `modules/framework/include/aver/framework/framework_abi.h` · **DLL** `Aver.Framework` (SHARED, links `PUBLIC Aver.Core Aver.Assets Aver.Scene` — `modules/framework/CMakeLists.txt:12, 17`) · **Version** `AVER_FW_ABI_VERSION` = `(1 << 16) | 5` (`framework_abi.h:37, 55-57`) · **85 entry points** (was 46/48 at minor 1; see below for what minors 2–5 added).
 
-The minor is 1 because `aver_fw_set_view_entity` / `aver_fw_view_entity` were added; the header records the justification in place — additive only, every 1.0 entry point unchanged in shape and meaning (`framework_abi.h:54-55`).
+The minor was 1 because `aver_fw_set_view_entity` / `aver_fw_view_entity` were added; the header records the justification in place — additive only, every 1.0 entry point unchanged in shape and meaning. It has since moved to 5, additive at every step (the header's own changelog comment, `framework_abi.h:38-54`, states this for each): **2** added sky-cloud authoring (`aver_fw_set_sky_clouds` / `aver_fw_sky_clouds` / `aver_fw_clear_sky_clouds`); **3** added a fluid-spawn provider (`aver_fw_set_fluid_spawn_provider` / `aver_fw_fluid_spawn`); **4** added the material layer on top of that (`aver_fw_set_fluid_spawn_material_provider` / `aver_fw_fluid_spawn_material`); **5** added a named-action binding layer (`aver_fw_action_register`/`find`/`bind`/`clear_bindings`/`value2`/`held`/`pressed`/`released`, porting `EnhancedInput.cs`'s algorithm onto the ABI), a raw-VK input pair (`aver_fw_input_set_vk`/`vk`/`vk_pressed`/`vk_released`) for the Win32 VK range the named `AVER_FW_KEY_*` enum cannot grow to cover, and the gamepad ABI's shape with deliberately no polling behind it yet (`aver_fw_input_set_gamepad_button`/`axis`, `aver_fw_input_gamepad_button`/`axis`). None of these five additions (nor `aver_fw_dispatch_begin_play` or the `aver_fw_set_save_provider`/`aver_fw_save_write`/`aver_fw_save_load` save/load trio, also new) is documented in the entry-point groups below — the groups still describe the surface as it stood at minor 1.
 
 **A class is data.** There is no C++ base type behind a class handle and no virtual dispatch behind a spawn: a class is a registry row holding a flattened component list and one contiguous blob of defaults, and spawning is a loop of `memcpy` over that blob into the scene's pools (`framework_abi.h:80-84`).
 
@@ -456,13 +468,26 @@ Begin/end reasons are `AVER_FW_BEGIN_SPAWN` / `_PLAY` / `_RELOAD` and `AVER_FW_E
 
 ---
 
-## 6. `Aver.Physics` — `physics_abi.h`
+## 6. `Aver.Physics` — `physics_abi.h` and four sibling headers
 
-**Header** `modules/physics/include/aver/physics/physics_abi.h` · **DLL** `Aver.Physics` (SHARED, `PUBLIC Aver.Core`, `PRIVATE Jolt` — `modules/physics/CMakeLists.txt:9, 14`) · **No version macro and no version entry point** · **37 entry points.**
+**Header** `modules/physics/include/aver/physics/physics_abi.h` · **DLL** `Aver.Physics` (SHARED, `PUBLIC Aver.Core`, `PRIVATE Jolt` — `modules/physics/CMakeLists.txt:9, 14`) · **No version macro and no version entry point** · **74 entry points** in this header alone (was 37 when this document was written; see below for what was added), **plus four more headers totalling 51 more, for 125 across the seam.**
+
+> **The seam grew from one header to five, and this section originally described only the first.** `physics_abi.h` itself gained per-body material properties (`aver_phys_body_set/get_friction`, `_restitution`, `_gravity_factor`, `_damping`, `_mass`, and `_activate`/`_deactivate`/`_is_active`), a water plane and per-body water-volume overrides with buoyancy (`aver_phys_set/clear_water_plane`, `aver_phys_water_plane`, `aver_phys_set/clear_water_volume`, `aver_phys_buoyant_body_count`), and soft bodies — including skinned soft bodies driven by joint matrices — with their own create/skin/read-back/impulse entry points (`aver_phys_softbody_create[_skinned]`, `_skin`, `_vertex_count`, `_vertices`, `_apply_impulse`). None of that is documented below; the groups in this section still describe the ABI as it stood at 37 exports. Four **sibling** headers were added beside it, each self-contained (needing nothing from `physics_abi.h` but the handle convention, which each restates) so that a per-file ABI-parity test can pair one header with one C# file:
+>
+> | Header | Exports | Covers |
+> |---|---|---|
+> | `physics_character_abi.h` | 14 | The character settings `aver_phys_character_create` couldn't reach: max slope angle, stair-stepping, ground state/normal/position/body/velocity, re-shaping, mass, and max push strength. |
+> | `physics_joints_abi.h` | 24 | Jolt's twelve constraint classes, previously compiled into the binary (`Constraints/*.obj`) with no entry point at all: fixed, point, distance, hinge, slider, cone, swing-twist, six-DOF, gear, rack-and-pinion, pulley and path joints, plus per-joint enable/remove/query and a motor/limit/value interface. **Joints are a third handle family with their own counter** — see Handles, below. |
+> | `physics_layers_abi.h` | 11 | 16 named collision layers (`AVER_PHYS_LAYER_COUNT`) and a collision matrix between them, a per-body layer assignment, and `_ex` query variants (`aver_phys_raycast_ex`, `_overlap_sphere_ex`, `_sphere_cast_ex`) that filter by layer. Layer 0 is the default and, unchanged, collides with everything — a project that never calls this header behaves exactly as it did before the header existed. |
+> | `physics_shapes_abi.h` | 11 | Rigid-body shapes beyond box/sphere/hull/mesh/heightfield: static and dynamic capsule, cylinder, tapered capsule, and compound-of-boxes. Capsule and tapered-capsule height is **total**, matching `aver_phys_character_create`'s existing convention. |
+>
+> All four are new since this document's physics section was last written in full; only their existence, export counts and one-line purpose are recorded here. Treat each header's own file comment, and `tests/physics/src/CharacterTest.cpp` / `JointTest.cpp` / `LayerTest.cpp` / `ShapeTest.cpp`, as the source of truth for behaviour — this document does not re-derive it.
 
 Jolt is linked **private** on purpose: it is an implementation detail, and nothing above should be able to include a `JPH::` header by accident, because the moment something does, swapping the backend stops being a decision about this module and becomes a decision about the whole tree (`modules/physics/CMakeLists.txt:5-8`). Everything here is in the **engine's** contract — centimetres, +X forward, +Y right, +Z up, left-handed — and no caller ever sees a Jolt type, a metre or a +Y-up vector; the translation happens once behind this boundary (`physics_abi.h:5-7`).
 
 **Handles.** `int32_t` for both bodies and characters, drawn from **one** counter so the two families never collide: `int32_t nextHandle = 1;` (`modules/physics/src/PhysicsWorld.cpp:133`). 0 is always invalid. Handles are looked up in `std::unordered_map<int32_t, JPH::BodyID> bodies` and `<int32_t, JPH::Ref<JPH::CharacterVirtual>> characters` (`PhysicsWorld.cpp:131-133`). Jolt's own `BodyID` is a packed index+generation that would satisfy the 0-invalid rule too, but exposing it would leak a Jolt type through an ABI whose entire point is that it does not (`PhysicsWorld.cpp:128-130`).
+
+**A third handle family exists now, and it deliberately does NOT share that counter.** `physics_joints_abi.h`'s own file comment states the reasoning: a joint handle is not a body handle, and the two number spaces are allowed to overlap — joint 1 and body 1 can both exist — because no function in either family ever looks in the other's table (`aver_phys_joint_*` consults only the joint map). Sharing the one counter above would mean joint creation could exhaust body handles, and every joint-taking call would need an "is this actually a joint" check that a separate table gives for free. This is a departure from the "one counter, one number space" description above, made deliberately for joints alone — bodies and characters are unaffected.
 
 **Staleness.** Not generational, and it does not need to be: `nextHandle` only ever increments, so a removed body's handle is never reissued and a stale lookup simply misses — reported as 0 with the out-params left untouched (`physics_abi.h:66-67`). That guarantee is what makes entity association (next) safe without generation checks of its own: a dead handle cannot be re-stamped (`aver_phys_set_entity` returns 0 against it, `PhysicsWorld.cpp`), and a NEW body created at the same handle-reissue-free slot always gets a fresh, unstamped user-data field, so a stale handle can resolve to *nothing* but never to *someone else's* entity.
 
@@ -590,7 +615,7 @@ AVER_PHYS_API int32_t aver_phys_sphere_cast(float ox, float oy, float oz,
 
 ## 7. `Aver.Render.PBR` — `pbr_abi.h`
 
-**Header** `modules/render.pbr/include/aver/pbr/pbr_abi.h` · **DLL** `Aver.Render.PBR` (SHARED, links `PUBLIC Aver.Core` **only** — `modules/render.pbr/CMakeLists.txt:9, 14`) · **No version macro and no version entry point** · **48 entry points.**
+**Header** `modules/render.pbr/include/aver/pbr/pbr_abi.h` · **DLL** `Aver.Render.PBR` (SHARED, links `PUBLIC Aver.Core` **only** — `modules/render.pbr/CMakeLists.txt:9, 14`) · **No version macro and no version entry point** · **62 entry points** (was 48; an IOR getter/setter, transmission, a three-parameter clear coat — weight, roughness, F0 — and subsurface weight/radius were added since, none of them covered in the groups below).
 
 **The two-target split is the rule made physical.** The GPU half is a *second*, static target, `Aver.Render.PBR.Materials`, linking `PUBLIC Aver.Core Aver.RHI Aver.Render.PBR` (`CMakeLists.txt:30-37`). It exists because giving the DLL an RHI dependency would put render-hardware types on the P/Invoke boundary; the comment names `Aver.RHI` (generic) and **never** `Aver.RHI.D3D12`, and states that a link line is the only place that rule can actually be enforced (`CMakeLists.txt:25-29`).
 
@@ -720,7 +745,7 @@ AVER_PBR_ABI int32_t aver_pbr_consume_dirty(aver_pbr_material m);
 
 ## 8. `Aver.Render.Voxi` — `voxi_abi.h`
 
-**Header** `modules/render.voxi/include/aver/voxi/voxi_abi.h` · **DLL** `Aver.Render.Voxi` (SHARED, links `PUBLIC Aver.Core` only — `modules/render.voxi/CMakeLists.txt:6, 11`) · **No version macro and no version entry point** · **21 entry points.**
+**Header** `modules/render.voxi/include/aver/voxi/voxi_abi.h` · **DLL** `Aver.Render.Voxi` (SHARED, links `PUBLIC Aver.Core` only — `modules/render.voxi/CMakeLists.txt:6, 11`) · **No version macro and no version entry point** · **23 entry points** (was 21; `aver_voxi_get_gi_update_interval` / `aver_voxi_set_gi_update_interval` were added since, not covered in the groups below).
 
 Same two-target split as PBR: `Aver.Render.Voxi.Renderer` is STATIC and links `Aver.Core Aver.RHI Aver.Render.Voxi Aver.Render.PBR.Materials` (`CMakeLists.txt:25-38`). The dependency on the material system is the architecture on a link line — Voxi supplies visibility and irradiance and calls the shading model; the material owns the BRDF; the arrow runs this way and never the other (`CMakeLists.txt:33-36`). The top-level build forces `AVER_MODULE_VOXI` off if `AVER_MODULE_PBR` is off, because Voxi renders materials and the failure without that line is a C1083 four includes deep that reads as a broken include path rather than as an invalid module combination (root `CMakeLists.txt:85-93`).
 
@@ -943,7 +968,7 @@ It is uniform, and **unenforceable by construction** — an `int32_t` return is 
 
 **The scheme.** `(major << 16) | minor`, **per module, versioned independently**. MAJOR changes when an existing entry point changes shape or meaning, and a binding compiled against a different major must refuse to run. MINOR changes when entry points are only **added**, so an older binding still works against a newer engine and checks `minor >= what it needs` (`scene_abi.h:44-57`; `framework_abi.h:50-58`; restated in prose at `modules/scene/README.md:91-95` and `modules/framework/README.md:53-57`). Independence is deliberate: the framework's surface will move while the scene's is still settling, and a single shared number would force a lockstep neither module needs (`framework_abi.h:50-52`).
 
-The encoding is real where it exists — Scene MAJOR 1 / MINOR 0 (`scene_abi.h:54-57`), Framework MAJOR 1 / MINOR 1 (`framework_abi.h:53-58`) — and both DLLs report the compiled-in constant rather than a header value (`modules/scene/src/SceneAbi.cpp:102-106`; `modules/framework/src/FrameworkAbi.cpp:361-363`). The minor-bump discipline is being followed by hand: the framework's bump to 1 carries its own justification in the header beside the two entry points that caused it. But **nothing in the build ties the constant to the surface** — an entry point could change shape with the major untouched and the build would be green. What would catch that: nothing automatic.
+The encoding is real where it exists — Scene MAJOR 1 / MINOR 5, Framework MAJOR 1 / MINOR 5 — and both DLLs report the compiled-in constant rather than a header value (`modules/scene/src/SceneAbi.cpp:102-106`; `modules/framework/src/FrameworkAbi.cpp:361-363`). The minor-bump discipline is being followed by hand: the framework's bump to 1 carries its own justification in the header beside the two entry points that caused it. But **nothing in the build ties the constant to the surface** — an entry point could change shape with the major untouched and the build would be green. What would catch that: nothing automatic.
 
 **The scheme exists on only two of the six seams.** `physics_abi.h`, `pbr_abi.h` and `voxi_abi.h` declare no version constant and export no version function at all (verified by reading all three headers end to end and by grepping the tree for `abi_version`: the only symbols that exist are `aver_scene_abi_version`, `aver_fw_abi_version`, `aver_fw_scene_abi_version` and `aver_fw_scene_abi_matches`). Three seams therefore have **no way** for a caller to detect a stale binary.
 
@@ -958,7 +983,7 @@ The encoding is real where it exists — Scene MAJOR 1 / MINOR 0 (`scene_abi.h:5
 | 5 | **Per-module C ABI version** | `AVER_SCENE_ABI_VERSION`, `AVER_FW_ABI_VERSION` | **Nowhere in shipping code.** | **Nothing happens.** See below. |
 | 6 | **Every hand-mirrored constant block** (component ids, class flags, tick groups, play states, begin/end reasons, key codes, PBR and Voxi enums) | none — they carry no version at all | **Nowhere, in either language.** | **Nothing happens; the numbers just disagree.** See §18. |
 
-> **The per-module version scheme is documentation, not a safeguard.** No shipping code path queries any module ABI version. Four greps over the tree find exactly two callers, and both are test executables: `tests/scene/src/SceneTest.cpp:682` — `check(aver_scene_abi_version() == AVER_SCENE_ABI_VERSION, "the DLL reports the header's ABI version")` — and `tests/framework/src/FrameworkTest.cpp:808` — `check(aver_fw_scene_abi_matches() == 1, …)`. Plus one caller internal to the framework DLL, inside `aver_fw_scene_abi_matches` itself (`FrameworkAbi.cpp:376`). A grep for `abi_version|abi_matches` across `sandbox/src`, `editor/` and `modules/runtime/` returns nothing at all; the sandbox links all five DLLs as import libraries (`sandbox/CMakeLists.txt:13, 22, 32, 38, 44`) and never asks any of them what version they are. The same grep over `scripting/csharp/**/*.cs` also returns nothing: no managed assembly binds either version function.
+> **The per-module version scheme is documentation, not a safeguard.** No shipping code path queries any module ABI version. Four greps over the tree find exactly two callers, and both are test executables: `tests/scene/src/SceneTest.cpp:682` — `check(aver_scene_abi_version() == AVER_SCENE_ABI_VERSION, "the DLL reports the header's ABI version")` — and `tests/framework/src/FrameworkTest.cpp:808` — `check(aver_fw_scene_abi_matches() == 1, …)`. Plus one caller internal to the framework DLL, inside `aver_fw_scene_abi_matches` itself (`FrameworkAbi.cpp:376`). A grep for `abi_version|abi_matches` across `sandbox/src` and `modules/runtime/` returns nothing at all (this originally also named `editor/`, deleted since — see `docs/STALE_CODE.md` — the editor is `sandbox/`, and grepping the deleted directory would trivially return nothing too, so this finding does not depend on it); the sandbox links all five DLLs as import libraries (`sandbox/CMakeLists.txt:13, 22, 32, 38, 44`) and never asks any of them what version they are. The same grep over `scripting/csharp/**/*.cs` also returns nothing: no managed assembly binds either version function.
 >
 > The cost is precisely the failure the headers describe. `framework_abi.h:64-67` spells it out: a framework built against scene major 1 loaded beside a scene major 2 "is a mismatch the loader will not catch — the import lib resolves by NAME, and every name still exists". The repair function was written, it works, and nobody calls it outside a test. `docs/SCENE_FRAMEWORK.md:1722-1725` specifies the missing check — "Bind-time sanity check, in `Bootstrap`: assert `aver_scene_abi_version() == 1` and `aver_fw_abi_version() == 1` and decline loudly on mismatch" — and it has not been implemented. **Treat that as PLANNED.** (Note the same passage adds "There is no `NativeLibrary.SetDllImportResolver` anywhere in this tree", which is now itself out of date — see §15.)
 
@@ -994,7 +1019,7 @@ Every file below must change in the same commit. There is no generator and no li
    - **C++ side:** a `static_assert` in the same style as `SceneAbi.cpp:25-42`. Only the scene does this today; a grep over `modules/render.pbr/src`, `modules/render.voxi/src`, `modules/physics/src` and `modules/framework/src` finds one unrelated assert (`VoxiRenderer.cpp:36`) and no ABI pinning at all. Doing it elsewhere is how that spreads.
    - **C# side:** there is no mechanism. Change the mirror by hand and say so in the commit message. §18 lists every mirror that exists; adding a component id, class flag, tick group, play state, begin/end reason, key code or render enum without editing the matching C# file leaves the managed side silently wrong, and nothing anywhere will say so.
 6. **Add the test.** `tests/scene/src/SceneTest.cpp`, `tests/framework/src/FrameworkTest.cpp` or `tests/physics/src/PhysicsTest.cpp`. Cover the success path **and** the stale-handle neutral, and — on the scene — the read-only rejection if the field can be one. For PBR and Voxi there is no test executable to add to; see §18.
-7. **Add the C# binding**, in whichever assembly owns that seam: `scripting/csharp/Aver.Scene/Native.cs`, `Aver.Framework/Native.cs` (classes `Fw` and `SceneNative`), `Aver.Framework/Physics.cs`, `Aver.Scripting/Pbr.cs` or `Aver.Scripting/Voxi.cs`. Inbound strings marshal as `[MarshalAs(UnmanagedType.LPUTF8Str)]`; outbound `const char*` binds as `IntPtr` and decodes through the file's `Str` helper. **Match the file you are editing** — `Pbr.cs` and `Voxi.cs` currently use ANSI (§18). Two more files are part of this step and are easy to miss: a new component or a cached field id belongs in `scripting/csharp/Aver.Scene/SceneIds.cs` (ids at `:18-25`), and a new `AVER_FW_KEY_*` belongs in `Aver.Framework/Input.cs` (the `Key` enum at `:7-15`), which `Aver.Framework/EnhancedInput.cs` binds against.
+7. **Add the C# binding**, in whichever assembly owns that seam: `scripting/csharp/Aver.Scene/Native.cs`, `Aver.Framework/Native.cs` (classes `Fw` and `SceneNative`), `Aver.Physics/Native.cs` (physics moved into its own assembly — `Aver.Framework/Physics.cs` is now only a thin shim over it, see §18), `Aver.Scripting/Pbr.cs` or `Aver.Scripting/Voxi.cs`. Inbound strings marshal as `[MarshalAs(UnmanagedType.LPUTF8Str)]`; outbound `const char*` binds as `IntPtr` and decodes through the file's `Str` helper. **`Pbr.cs` and `Voxi.cs` used to be the exception and marshal ANSI instead; both now match the rest of the tree** (§18) — there is no longer a file in this list that needs special-casing. Two more files are part of this step and are easy to miss: a new component or a cached field id belongs in `scripting/csharp/Aver.Scene/SceneIds.cs` (ids at `:18-25`), and a new `AVER_FW_KEY_*` belongs in `Aver.Framework/Input.cs` (the `Key` enum at `:7-15`), which `Aver.Framework/EnhancedInput.cs` binds against.
 8. **Wrap it in the managed surface** if scripts should see it, and record it in `docs/SCRIPTING_API.md` — that document, not this one, is the C# reference.
 9. **If you touched `framework_hooks.h`**, the two contract constants and their C# mirrors must move together: `AVER_FW_DISPATCH_VERSION` (`framework_hooks.h:128`) ↔ `ManagedDispatch.cs:27`, and the struct field order ↔ `ManagedDispatch.cs:35-46`. Nothing generates one from the other.
 10. **If you touched `scripting_abi.h`**, bump `AVER_SCRIPTING_CONTRACT_VERSION` (`:35`) and its hand-written mirror at `HostBridge.cs:27`, and say in the header comment what the new version added — as the v2 note at `:32-34` does.
@@ -1036,25 +1061,111 @@ Everything below is what the audit found unenforced, unchecked, untested or unst
 - **`aver_fw_scene_abi_matches()` must keep genuinely calling into Aver.Scene** or the check becomes a tautology (`framework_abi.h:70-77`). It does today (`FrameworkAbi.cpp:376`), but nothing in the build enforces its presence — and the header's supporting argument, that the framework would otherwise import nothing from the scene, no longer holds: `FrameworkAbi.cpp:13-15` includes the scene's C++ headers and `:36` calls `World::instance()`.
 - **Read-only fields are enforced in code but stated in no header.** Six setters reject them (`SceneAbi.cpp:146, 169, 193, 215, 243, 268`); the flags are registered at `Builtins.cpp:44, 52, 63, 76, 93`; the only prose is `modules/scene/README.md:15-16`. `scene_abi.h` never uses the words, so a binding author reading only the header cannot know that a 0 from a setter may mean "this field is not yours to write". See §3 — and note that on `CHierarchy` the flag is what stands between a script and an unbounded loop in `composeChain()`/`worldMatrix()` (`SceneAbi.cpp:240-242`).
 
-### Hand-mirrored constants — at least ten pairs, and nothing checks any of them
-The headers themselves claim these are "pinned". They are not pinned by anything executable; the word describes an intention. `static_assert`s exist in exactly one file in the engine, `modules/scene/src/SceneAbi.cpp:25-42`, and they pin C constants to **C++** enums — never to C#. A grep for `static_assert` over `modules/render.pbr/src`, `modules/render.voxi/src`, `modules/physics/src` and `modules/framework/src` turns up one unrelated assert at `VoxiRenderer.cpp:36`.
+### Hand-mirrored constants — twenty-two checked, two that a text comparison cannot reach
+When this audit was written the headers claimed these were "pinned" and nothing executable pinned
+them. **`tests/abi/src/AbiEnumTest.cpp` closed most of the gap since**: it reads the C headers and the
+`.cs` files as text and compares each group by normalised name, so adding a member to both sides needs
+no edit in the test and adding it to one side fails. It also compares the physics and audio *function
+signatures* — return type, parameter types, parameter names, in order.
+
+**This table was wrong twice, in the same direction both times.** It first said nothing checked any
+of these, long after `AbiEnumTest` had started checking eight. Corrected, it then listed *one*
+remaining gap — because it only ever listed the pairs somebody had happened to notice. A sweep of
+every ABI header against every C# mirror found **fourteen** unchecked pairs, not one. All fourteen are
+now checked, a fifteenth was closed by writing the mirror that was missing, and the two genuinely
+uncheckable cases are named below rather than left off.
+
+The lesson is the table's own: a list of known gaps is not a list of gaps. What follows is derived
+from `kGroups` in `tests/abi/src/AbiEnumTest.cpp`, which is the thing that actually runs.
 
 | # | Native | C# mirror | Checked by |
 |---|---|---|---|
 | 1 | `AVER_SCRIPTING_CONTRACT_VERSION` (`scripting_abi.h:35`) | `HostBridge.cs:27` | **run-time check** — boundary 1, §14 |
 | 2 | `AVER_FW_DISPATCH_VERSION` (`framework_hooks.h:128`) | `ManagedDispatch.cs:27` | **run-time check** — boundary 3 |
 | 3 | `AvManagedDispatch` field order (`framework_hooks.h:144-157`) | `ManagedDispatch.cs:35-46` | only indirectly, by the `structBytes` check |
-| 4 | `AVER_SCENE_COMP_*` (`scene_abi.h:85-92`) | `SceneIds.cs:18-25` | **nothing** |
-| 5 | `AVER_SCENE_KIND_*` (`scene_abi.h:70-83`) | no C# mirror; C++ side pinned at `SceneAbi.cpp:25-42` | C++ only |
-| 6 | `AVER_FW_CLASS_*` (`framework_abi.h:99-106`; the comment at `:97` says "pinned to Aver.Framework's ClassFlags (Enums.cs)") | `Enums.cs:69-76` | **nothing** |
-| 7 | `AVER_FW_TICK_*` (`framework_abi.h:109-112`; comment at `:108`) | `Enums.cs:48-50` | **nothing** |
-| 8 | `AVER_FW_PLAY_*` (`framework_abi.h:174-176`) | `Enums.cs:56-58` | **nothing** |
-| 9 | `AVER_FW_BEGIN_*` / `AVER_FW_END_*` (`framework_hooks.h:58-65`; comment at `:51-53` says they pin "integer for integer" to `Enums.cs`) | `Enums.cs:23-25` / `:35-38` | **nothing** |
-| 10 | `AVER_FW_KEY_*` (`framework_abi.h:205-218`) | `Input.cs:7-15` (`Key`), consumed by `EnhancedInput.cs` | **nothing** |
-| 11 | `AVER_PBR_FEATURE_*` / `_STATUS_*` / `_TEX_*` / `_ALPHA_*` / `_UV_*` (`pbr_abi.h:44-74`) | `Pbr.cs:6, 20, 31, 41, 52` | **nothing** |
-| 12 | `AVER_VOXI_FEATURE_*` / `_STATUS_*` / `_QUALITY_*` (`voxi_abi.h:31-48`) | `Voxi.cs:6, 17, 27` | **nothing** |
+| 4 | `AVER_FW_CLASS_*` (`framework_abi.h`) | `Enums.cs` `ClassFlags` | `AbiEnumTest` |
+| 5 | `AVER_FW_TICK_*` (`framework_abi.h`) | `Enums.cs` `TickGroup` | `AbiEnumTest` |
+| 6 | `AVER_FW_PLAY_*` (`framework_abi.h`) | `Enums.cs` `PlayState` | `AbiEnumTest` |
+| 7 | `AVER_FW_BEGIN_*` / `AVER_FW_END_*` (`framework_hooks.h`) | `Enums.cs` `BeginReason` / `EndReason` | `AbiEnumTest` |
+| 8 | `AVER_FW_KEY_*` (`framework_abi.h`) | `Input.cs` `Key` | `AbiEnumTest` — all 50, by position |
+| 9 | `AVER_FW_GAMEPAD_*` (`framework_abi.h`) | `Input.cs` `GamepadButton` | `AbiEnumTest` |
+| 10 | `AVER_FW_GAMEPAD_AXIS_*` (`framework_abi.h`) | `Input.cs` `GamepadAxis` | `AbiEnumTest` |
+| 11 | `AVER_FW_VIEW_*` (`framework_abi.h`) | `Character.cs` `CameraView` | `AbiEnumTest` |
+| 12 | `AVER_FW_ACTION_*` (`framework_abi.h`) | `EnhancedInput.cs` `InputValueType` | `AbiEnumTest` |
+| 13 | `AVER_FW_ACTION_SRC_*` (`framework_abi.h`) | `EnhancedInput.cs` `InputSource` | `AbiEnumTest` |
+| 14 | `AVER_SCENE_COMP_*` (`scene_abi.h`) | `SceneIds.cs` `SceneIds` **and** `Component.cs` `Component` | `AbiEnumTest` — **two** mirrors, both compared |
+| 15 | `AVER_SCENE_KIND_*` (`scene_abi.h`) | no named C# type — see below | `static_assert`, C++ only |
+| 16 | `AVER_PHYS_MOTION_*` / `_MOTOR_*` / `_DOF_*` / `_GROUND_*` | `Aver.Physics/Enums.cs` `MotionType`, `MotorState`, `SixDofAxis`, `GroundState` | `AbiEnumTest` |
+| 17 | `AVER_PBR_FEATURE_*` / `_STATUS_*` / `_TEX_*` / `_ALPHA_*` / `_UV_*` (`pbr_abi.h`) | `Pbr.cs` — five enums | `AbiEnumTest` |
+| 18 | `AVER_VOXI_FEATURE_*` / `_STATUS_*` / `_QUALITY_*` (`voxi_abi.h`) | `Voxi.cs` | `AbiEnumTest` |
+| 19 | `AVER_UI_LAYER_*` (`ui_abi.h`) | `Aver.UI/Hud.cs` `Layer` | `AbiEnumTest` |
+| 20 | `AVER_SCRIPT_LOG_*` (`scripting_abi.h`) and `aver::LogLevel` (`Log.hpp`, by POSITION) | `Aver.Scripting/Log.cs` `Level` | `AbiEnumTest` |
+| 21 | `aver::AbiError` (`core/ErrorCodes.hpp`) | `Aver.Physics` `PhysicsError`, `Aver.Scene` `SceneError` | `AbiEnumTest` — all three compared |
+| 22 | `AVER_AUDIO_BUS_*` (`audio_abi.h`) | `Aver.Framework/Audio.cs` `Bus` | `AbiEnumTest` — see below |
+| 23 | `AVER_SCRIPT_OK` / `_ERR_CONTRACT` / `_ERR_MANAGED_FAULT` (`scripting_abi.h`) | three private fields of `HostBridge` | **nothing** — see below |
 
-Rows 4 and 6–12 fail silently and at run time, in whatever feature happens to use the wrong number: a component that is never attached, a pawn flag that never matches, an actor placed in the wrong tick group, a key that never fires. None of it throws.
+### The audio buses: the mirror was missing, not drifting
+
+This pair was listed here as unreachable because **there was no C# side at all** — `Audio.Play` and
+`SetBusVolume` took a bare `int bus = 0`, so a script naming a bus wrote the number. That is worth
+separating from the two below it: those cannot be checked, this one had nothing to check.
+
+The two native halves have been pinned to each other by `static_assert` since they were written —
+`AudioAbi.cpp` is the one translation unit that includes both `audio_abi.h` and `Sound.hpp`, and it
+asserts all four values *and* `Bus::Count == 4`, so adding a bus without its macro fails to compile.
+That file's own comment names the failure those asserts cannot reach:
+
+> every managed `SetBusVolume(1, ...)` meant for Music keeps compiling and starts moving whatever
+> landed in that slot, with no error anywhere
+
+`Aver.Framework.Bus` is that third copy, and row 22 is what pins it. `Play`, `PlayAt`, `PlayFile`,
+`GetBusVolume` and `SetBusVolume` now take `Bus` rather than `int`.
+
+**An out-of-range value is still folded to Sfx, not rejected.** `busOf` on the native side does that
+deliberately, because an ABI must not trust its caller, and throwing on the managed side would make
+one call behave differently depending on which language made it. The one place an out-of-range bus
+can still arrive is a **graph pin** — an integer a person typed into a Set Bus Volume node — so
+`GraphInterop.BusOfPin` logs a warning there. The behaviour is unchanged; it is no longer silent.
+
+### The two that a text comparison cannot reach
+
+These are not oversights, and none of them is one `kGroups` row away. Each is here so the list above
+can be read as complete.
+
+- **`AVER_SCENE_KIND_*`'s C# side is not a type.** `GraphCompiler.cs` declares two of the nine as
+  private `const int` fields on the compiler class, and `HostBridge.cs`'s `SceneKindOf` is a `switch`
+  *expression* mapping three `PinType`s to bare literals with the constant named only in a trailing
+  comment. `csMembers` looks for a named `enum` or `class` body; there is no name to give it. Both are
+  deliberate partial mirrors (3 of 9, 2 of 9), so even the count check would be wrong.
+- **The scripting bootstrap codes sit in a 1000-line static class.** `HostBridge.cs:29-31` declares
+  `Ok`, `ErrContract` and `ErrManagedFault` as private fields directly inside `HostBridge`, whose body
+  also contains every other member of that class — so pointing `csMembers` at the type name would
+  compare three constants against the whole file. `AVER_SCRIPT_` is also a prefix of every
+  `AVER_SCRIPT_LOG_*` name in the same header, which `cExclude` could handle but the C# shape cannot.
+  Extracting the three into their own small type would make this checkable.
+
+### How the readers grew to cover the rest
+
+`cDefines` and `csMembers` between them could not see an **implicit-value enum**, where a member's
+value comes from its POSITION rather than an `=`. That is the shape of the whole framework input
+seam — of `Key`'s 50 members exactly 3 carry an `=` on the C# side — so six pairs were invisible for
+a mechanical reason rather than a decided one. Three additions closed them:
+
+- **`cEnumValues`** reads an anonymous C `enum { … }` block, selected by an **anchor member** rather
+  than by prefix. Both halves matter: an anonymous enum has no type name to find it by, and
+  `AVER_FW_GAMEPAD_` is a prefix of every `AVER_FW_GAMEPAD_AXIS_*` name, so a prefix scan would read
+  the six axes into the fourteen buttons.
+- **`csMembers` gained a running counter**, used only inside an `enum` — in a `static class` of
+  `const int`s a chunk without an `=` is not a member that omitted its value, it is not a member.
+- **Comments come off before the split, on both sides.** `framework_abi.h`'s key block carries
+  `/* A..Z = 0..25 */` *between commas*, and every C# member carries a `///` summary containing
+  commas and `<see cref="…"/>`. Splitting the raw body glues a comment onto the next member's chunk
+  and finds an `=` inside it.
+
+Plus two table fields for divergences that are real rather than drift: `csStrip` for a whole-group
+prefix (`SceneIds` spells them `CLocal`), and `kMemberWaivers` for thirteen individual members of the
+key group — ten of which are **forced by C# itself**, because an identifier cannot begin with a digit,
+so `AVER_FW_KEY_0..9` are mirrored as `Key.D0..D9`. A waived member's *value* is still compared.
 
 ### Two stale comments in the C# tree
 - **`scripting/csharp/Aver.Framework/Native.cs:16-18`** asserts that "The in-progress `Aver.Scene/Native.cs` currently uses ANSI `LPStr`; that is the defect". No longer true — `Aver.Scene/Native.cs` uses `LPUTF8Str` throughout and decodes with `PtrToStringUTF8` (`:36, 53, 67, 71, 76`). The file that still uses ANSI is `Aver.Scripting/Pbr.cs`.
@@ -1078,11 +1189,11 @@ There is genuine C ABI test coverage here, more than this project's history woul
 
 | Test | Size | `check()` calls | Distinct entry points driven |
 |---|---|---|---|
-| `tests/scene/src/SceneTest.cpp` | 971 lines | 274 | 36 `aver_scene_*` — every export in the header, plus the undeclared `aver_scene_debug_string_pool_size` |
-| `tests/framework/src/FrameworkTest.cpp` | 825 lines | 219 | 44 `aver_fw_*` — registry, defaults, spawn, possession, play lifecycle, input, the dispatch install/clear pair, `aver_fw_tick` |
-| `tests/physics/src/PhysicsTest.cpp` | 279 lines | 43 | 21 `aver_phys_*` |
+| `tests/scene/src/SceneTest.cpp` | 935 lines (was 971) | 274 | 36 `aver_scene_*` — every export **except the newly added `aver_scene_material_name`**, plus the undeclared `aver_scene_debug_string_pool_size`. (Line count dropped even though `check()` count did not; re-verify before trusting either as a proxy for coverage.) |
+| `tests/framework/src/FrameworkTest.cpp` | 939 lines (was 825) | 275 (was 219) | 62 `aver_fw_*` (was 44) — registry, defaults, spawn, possession, play lifecycle, input, the dispatch install/clear pair, `aver_fw_tick` |
+| `tests/physics/src/*.cpp` — **nine suites now, not one** | 3,764 lines total across all nine (`PhysicsTest.cpp` alone: 452, was 279) | 413 total across all nine (`PhysicsTest.cpp` alone: 79, was 43) | 94 distinct `aver_phys_*` across all nine suites (was 21, one suite) — out of 125 declared across the now-five physics headers (§6) |
 
-- **Five framework entry points are not among those 44, and two of them are the newest surface on the seam.** Extracting the distinct `aver_fw_*` names called by `FrameworkTest.cpp` leaves out **`aver_fw_set_view_entity`** and **`aver_fw_view_entity`** — precisely the pair that caused the 1.0 → 1.1 minor bump and that carries the header's longest rationale (`framework_abi.h:242-259`) — along with **`aver_fw_class_get_flags`**, **`aver_fw_class_reset`**, **`aver_fw_abi_version`** and **`aver_fw_scene_abi_version`**. The view pair is bound and used by the editor; it is simply not exercised by any test.
+- **The untested set has grown, not shrunk, even though `FrameworkTest.cpp` now drives 62 names instead of 44.** The five originally named here are all **still** untested: **`aver_fw_set_view_entity`** and **`aver_fw_view_entity`** — the pair that caused the 1.0 → 1.1 minor bump — along with **`aver_fw_class_get_flags`**, **`aver_fw_class_reset`**, **`aver_fw_abi_version`** and **`aver_fw_scene_abi_version`**. On top of those, essentially none of what minors 2–5 added has a test either: the sky-cloud trio, the fluid-spawn pair and its material-layer pair, the save/load trio, the named-action layer, the raw-VK input pair and the gamepad shape (§4) are all new since 44/48 and none is called from `FrameworkTest.cpp`. The header nearly doubled (48 → 85 entry points); the test did not keep pace, so the *fraction* of the seam under direct C ABI test has fallen even though the raw count of names it drives went up.
 - **The PBR and Voxi seams have no test at all.** A grep for `aver_pbr_` and `aver_voxi_` across the whole `tests/` tree returns **zero** matches. `MaterialTest.cpp` tests the `.ocmat` reader/writer and the mip filter and links `Aver.Render.PBR.Materials` for `packMaterial`, but never calls a C ABI entry point. Those two seams are also the only ones bound by the `Aver.Scripting` assembly.
 - **The host ↔ bridge contract has no test either.**
 - **The C# side of every seam is covered by nothing.** There is no managed test project. The P/Invoke declarations are checked by nothing — not names, not types, not string encodings, and not one of the twelve constant mirrors above. A misspelt entry point surfaces as an `EntryPointNotFoundException` on first call, at run time, in whatever feature happened to touch it.
@@ -1092,15 +1203,15 @@ There is genuine C ABI test coverage here, more than this project's history woul
 
 | Assembly | Seam | Bound / exported | Not bound |
 |---|---|---|---|
-| `Aver.Scene/Native.cs` + `Aver.Framework/Native.cs` (`SceneNative`) | Scene | **34 / 35** | `aver_scene_abi_version` |
-| `Aver.Framework/Native.cs` + `ManagedDispatch.cs` | Framework (+ hooks) | **41 / 50** | `aver_fw_abi_version`, `aver_fw_scene_abi_version`, `aver_fw_scene_abi_matches`, `aver_fw_begin_play`, `aver_fw_end_play`, `aver_fw_set_paused`, `aver_fw_find_class_with_flags`, `aver_fw_view`, `aver_fw_tick` |
-| `Aver.Framework/Physics.cs` | Physics | **30 / 37** | `aver_phys_init`, `_shutdown`, `_step`, `_set_fixed_step`, `_add_convex_hull`, `_add_mesh`, `_add_heightfield` |
-| `Aver.Scripting/Pbr.cs` | PBR | **44 / 48** | `aver_pbr_get_reflectance`, `_set_reflectance`, `_get_f90`, `_set_f90` |
-| `Aver.Scripting/Voxi.cs` | Voxi | **21 / 21** | — the only seam with complete managed coverage |
+| `Aver.Scene/Native.cs` + `Aver.Framework/Native.cs` (`SceneNative`) | Scene | **34 / 36** (was 34/35) | `aver_scene_abi_version`, and now also `aver_scene_material_name` (new, §3) |
+| `Aver.Framework/Native.cs` + `ManagedDispatch.cs` | Framework (+ hooks) | **~69 / 85** (was 41/50) | The nine originally named here are unchanged; add nearly all of minors 2–5's new surface (§4) — sky clouds, fluid spawn and its material layer, the save/load providers, the graph-var and anim-curve/synapse provider hooks — which is native-only or simply not yet bound. Not independently re-verified name by name; treat the ratio as approximate. |
+| `Aver.Physics/Native.cs` (+ a small legacy shim retained in `Aver.Framework/Physics.cs`) | Physics | **125 / 125** | none found — every declared export across all five physics headers (§6) has a matching `DllImport`. **This is a structural change, not just a count**: physics C# bindings moved out of `Aver.Framework/Physics.cs` into their own `Aver.Physics` assembly (`scripting/csharp/Aver.Physics/`), which — being a leaf with no reference to `Aver.Scene`/`Aver.Framework` — uses its own `Float3`/`Quaternion`/`int` types rather than the engine's `Vec3`/`Quat`/`Entity`; `Aver.Framework/Physics.cs` is now a thin shim converting between the two, plus a few direct bindings (character + `aver_phys_set_entity`) that `Character.cs` still calls directly. |
+| `Aver.Scripting/Pbr.cs` | PBR | **62 / 62** (was 58/62) | none. The four this table had named since it was first written — `aver_pbr_get_reflectance`, `_set_reflectance`, `_get_f90`, `_set_f90` — are bound as of 0.5.1, as `Material.Reflectance` and `Material.F90`. |
+| `Aver.Scripting/Voxi.cs` | Voxi | **23 / 23** (was 21/23) | none. `aver_voxi_get_gi_update_interval` / `_set_gi_update_interval` are bound as of 0.5.1, as `Voxi.GiUpdateInterval`. |
 
-(Counts produced by diffing each header's exported names against the `DllImport` names in each assembly.) The unbound lifecycle and session entry points are a coherent split — the native app owns them. The unbound **version** functions are the finding in §14. The three unbound bulk-geometry constructors mean a script cannot build a hull, mesh or heightfield collider today.
+(Counts produced by diffing each header's exported names against the `DllImport` names in each assembly.) The unbound lifecycle and session entry points are a coherent split — the native app owns them. The unbound **version** functions are the finding in §14. PBR's four unbound factors, which this document named across three separate revisions without them ever being bound, are bound as of 0.5.1; so is Voxi's pair. Scene, Physics, PBR and Voxi are now complete, and Framework is the only seam left with a real gap.
 
-**String encoding disagrees across the tree, and the headers caused it.** `Pbr.cs` marshals inbound strings as `[MarshalAs(UnmanagedType.LPStr)]` — ANSI — at lines 73, 80 and 110, and decodes outbound pointers with `Marshal.PtrToStringAnsi` at line 117; `Voxi.cs:62` does the same. Every scene and framework binding uses `LPUTF8Str` / `PtrToStringUTF8`. This is **not** a stack-shape mismatch and will never corrupt anything — a `char*` is a `char*` either way — but it silently mangles any non-ASCII material name or texture path, re-encoding it in the process ANSI code page. The root cause is that `pbr_abi.h` and `voxi_abi.h` are **silent on encoding** and on ownership alike: they say `const char*` and nothing more, so the binding author had nothing to bind against. `scene_abi.h:100-104` is the model of how it should be stated. Voxi's **two** outbound strings (`voxi_abi.h:52, :54`) are fixed English feature and status names, so it is currently harmless there — until one is localised. PBR has seven, and they include user-authored material names and texture paths, where it is not harmless.
+> **The string-encoding gap this section used to report on PBR and Voxi is fixed.** It read: "`Pbr.cs` marshals inbound strings as `[MarshalAs(UnmanagedType.LPStr)]` — ANSI — ... and decodes outbound pointers with `Marshal.PtrToStringAnsi`; `Voxi.cs` does the same." That is no longer true of either file. Both now marshal inbound strings `[MarshalAs(UnmanagedType.LPUTF8Str)]` and decode outbound pointers with `Marshal.PtrToStringUTF8`, matching every scene and framework binding — and both files carry a comment explaining exactly why, in terms that match this document's own reasoning almost word for word (`Aver.Scripting/Pbr.cs`, `Voxi.cs`, the `Str` helper in each). `pbr_abi.h` and `voxi_abi.h` are still silent on encoding and ownership in the header text itself (that part of the finding stands — see below), but the binding author evidently read the reasoning somewhere and fixed the mismatch anyway.
 
 **Calling convention is pinned nowhere on the P/Invoke seams.** `framework_hooks.h:32-40` pins `__cdecl` for the dispatch tables and `HostBridge.cs:96` pins `CallConvCdecl` on the reverse entries — both because a mismatch there would corrupt the stack on the first call. The five P/Invoke headers say nothing, and every `DllImport` correspondingly leaves `CallingConvention` at its default of `Winapi` (noted approvingly at `Aver.Scene/Native.cs:8`). This is safe on x64, where there is one convention, **and only on x64**. No csproj sets `PlatformTarget` (they are AnyCPU), so nothing records the assumption.
 
@@ -1123,7 +1234,7 @@ There is genuine C ABI test coverage here, more than this project's history woul
 - **`AvActorVTable` and the native per-class tick path.** The struct is declared at `framework_hooks.h:91-98`; the registrar `aver_fw_class_set_vtable` and the tick loop are a documented follow-up, and nothing reads the table today (`framework_hooks.h:80-83`; `FrameworkAbi.cpp:807`). The registrar's only appearance in **code** is the comment at `framework_hooks.h:82` — no header declares it, no source defines it. It is named four times in the documentation: `docs/SCENE_FRAMEWORK.md:1223` carries a planned declaration returning `aver_class` rather than the tree-wide `int32_t` 1/0, `:1876` and `:2122` discuss it, and `docs/DESIGNER_REWRITE.md:183` already records the return-type contradiction and the conclusion that the header should return `int32_t` 1/0. Anyone implementing it should implement the corrected signature.
 - **The bind-time version check** (`docs/SCENE_FRAMEWORK.md:1722-1723`).
 - **The consolidated `Aver.ABI`** described in `abi/README.md`, `modules/abi/README.md` and `docs/ARCHITECTURE.md` §7 is not planned. It has been **dropped**. Those files are stale.
-- **Rust bindings** promised by `interop/README.md:3` do not exist and there is no Rust in this repository.
+- **Rust bindings** were promised by a top-level `interop/` directory that held one README and no code. They do not exist, there is no Rust in this repository, and that directory has since been deleted rather than corrected.
 
 ---
 

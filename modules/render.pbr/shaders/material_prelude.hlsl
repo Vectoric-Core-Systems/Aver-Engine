@@ -44,20 +44,24 @@ cbuffer AverMaterial : register(b2) {
     // fields are not independent, and averBuildSurface below for the one thing gTransmission
     // currently feeds (the AVER_MAT_ALPHA_BLEND coverage term).
     //
-    // gIor IS READ BY NOTHING, and this comment used to claim otherwise -- it said gIor "is no
-    // longer unread: it sets the critical angle in averTotalInternalReflection". That was true
-    // while the total-internal-reflection override existed; the override was removed because it
-    // could not fire legitimately from a rasterised back face (see averBuildSurface's alpha branch
-    // for the Snell argument and the measured cost), and this line went back to being false with it.
-    // The honest state: ior is authored, packed, transported to the GPU and copied into
-    // AverAuthored, and no shading term consumes it. The physically correct consumer is F0 --
+    // gIor IS READ, BY REFRACTION -- and this comment has now been wrong in both directions.
+    // It first claimed gIor set the critical angle in averTotalInternalReflection; that override
+    // was removed because it could not fire legitimately from a rasterised back face (see
+    // averBuildSurface's alpha branch for the Snell argument and the measured cost), so the
+    // comment was corrected to "read by nothing" -- and then refraction landed and made THAT
+    // false too, without anyone editing this file. voxi.hlsl's averRefractedBackdropUV reads gIor
+    // directly (`const float ior = max(gIor, 1.0001);`) to bend the refracted backdrop UV, on both
+    // the screen-space and ray-traced paths, whenever Settings::refractionMode is not Off -- which
+    // is the DEFAULT. This prelude is prepended to voxi.hlsl before compilation, so that is the
+    // same global, not a same-named twin. The physically correct consumer is still F0 --
     // F0 = ((1-n)/(1+n))^2 -- which today is authored SEPARATELY as `reflectance`, so a material
     // can state an ior and a reflectance that contradict each other (M_Glass.ocmat's own comment
     // warns about exactly that and keeps them in sync by hand). Deriving one from the other would
     // change F0 for every material that does not already agree, so it is a decision, not a tidy-up.
     //
     // Both are copied into AverAuthored rather than read directly at their use sites, so a material
-    // graph can drive either per pixel; still nothing here does refraction.
+    // graph can drive either per pixel. The refraction that consumes gIor lives in voxi.hlsl, not
+    // here -- this file only transports it.
     float  gIor;
     float  gTransmission;
     // EXPLICIT PADDING, MIRRORING MaterialConstants::_pad0/_pad1. Not load-bearing for THIS cbuffer
@@ -89,6 +93,14 @@ cbuffer AverMaterial : register(b2) {
     // shades every material in one pass and has no per-draw table to bind.
     uint4  gTexIndex0;   // slots 0..3: BaseColor, MetalRough, Normal, Occlusion
     uint4  gTexIndex1;   // slots 4..7: Emissive, Layer1BaseColor, Layer1MetalRough, Layer1Normal
+
+    // Volume absorption, mirroring MaterialConstants::attenuationColor/attenuationDistance -- the
+    // row that took the block from 144 to 160. gAttenuationColor is the transmittance after exactly
+    // gAttenuationDistance CENTIMETRES of the medium; gAttenuationDistance <= 0 means the material
+    // has no volume at all, which is every material authored before this row existed. Read only
+    // through averVolumeTransmittance below.
+    float3 gAttenuationColor;
+    float  gAttenuationDistance;
 };
 
 // gMaterialFlags bits, mirroring pbr::MaterialFlag.
@@ -117,6 +129,34 @@ cbuffer AverMaterial : register(b2) {
 
 // Schlick Fresnel. f90 is the grazing-angle reflectance.
 float3 fresnelSchlick(float ct, float3 F0, float f90){ return F0 + (f90-F0)*pow(saturate(1.0-ct),5.0); }
+
+// ---- volume absorption: Beer-Lambert across a known thickness ----
+//
+// THE ONE IMPLEMENTATION BOTH PATHS CALL. The raster blended branch reads its material from
+// `cbuffer AverMaterial` and PSRayDriven reads its own RtMaterial out of a StructuredBuffer, so
+// this takes the two values as PARAMETERS and reads no global. That is not style: a ray hit has NO
+// material cbuffer bound (see the note further down this file), so a shared helper that reached for
+// gAttenuationColor would silently shade every ray-driven pixel with whatever material the last
+// raster draw happened to leave in b2. That exact mistake has already been made in this tree once.
+//
+// attenuationColor is the transmittance after `attenuationDistance` centimetres, so the extinction
+// is -log(colour)/distance and the transmittance over `thicknessCm` is exp(-extinction * thickness).
+// Written as a pow() of the ratio, which is the same function with one fewer transcendental and no
+// intermediate that can overflow:
+//     exp(log(c) * (t / d))  ==  pow(c, t / d)
+//
+// RETURNS float3(1,1,1) -- perfect transmission, i.e. no volume -- for any material that did not
+// author one, which is every material that predates this row. Guarding on distance <= 0 rather than
+// on a flag bit is deliberate: the off state is representable in the data itself, so a
+// zero-initialised material is already correct and no MaterialFlag had to be spent.
+float3 averVolumeTransmittance(float3 attenuationColor, float attenuationDistance, float thicknessCm) {
+    if (attenuationDistance <= 0.0) return float3(1.0, 1.0, 1.0);
+    // Negative thickness means the caller could not measure one (a ray that found no exit, a depth
+    // sample behind the near plane); treat it as "no path through the medium" rather than letting a
+    // negative exponent AMPLIFY the light, which is the failure mode that looks like a glowing pool.
+    const float t = max(thicknessCm, 0.0);
+    return pow(max(attenuationColor, 1e-4), t / attenuationDistance);
+}
 // GGX normal distribution. Takes alpha (rough*rough).
 float distGGX(float ndh, float a){ float a2=a*a; float d=ndh*ndh*(a2-1.0)+1.0; return a2/(PI*d*d+1e-6); }
 
@@ -152,7 +192,12 @@ struct AverVertex {
 struct AverLight {
     float3 direction;   // unit vector TO the light
     float3 radiance;    // linear radiance arriving along `direction`
-    float  visibility;  // 0 = fully occluded, 1 = fully lit
+    // PER CHANNEL, so a light arriving through a tinted medium keeps that medium's colour.
+    // (0,0,0) = fully occluded, (1,1,1) = fully lit; a scalar assignment promotes, so every
+    // caller that has only a scalar visibility -- the whole raster shadow-map path -- is
+    // unchanged and needed no edit. It is only ever MULTIPLIED into the result below, which is
+    // why widening it costs those callers nothing.
+    float3 visibility;
 };
 
 // Everything reaching the surface that did not come straight from a light, as RAW radiance.
@@ -209,6 +254,12 @@ struct AverSurface {
     // on every ray-driven pixel. sssWeight/sssRadius above are on the surface for exactly this reason.
     float  coatWeight, coatRough, coatF0;
 #endif
+    // THE VOLUME THIS SURFACE BELONGS TO, carried on the surface rather than read from the material
+    // cbuffer at the point of use. That indirection is the point: a graph may have overridden these
+    // per pixel, and a consumer reading gAttenuationColor directly would silently get the authored
+    // constant back and quietly ignore the graph. Same reason sssWeight/sssRadius sit here.
+    float3 attenuationColor;
+    float  attenuationDistance;
     // Carried through from AverVertex -- see its own comment. Read only by the transmissive branch
     // below, for total internal reflection.
     bool   backFace;
@@ -276,7 +327,29 @@ float3 averPerturbNormal(float3 N, float3 wpos, float2 uv, float3 nTS) {
     float3 T = dp2perp * du1.x + dp1perp * du2.x;
     float3 B = dp2perp * du1.y + dp1perp * du2.y;
     float m = max(dot(T, T), dot(B, B));
-    if (m <= 0.0) return N;
+    if (m <= 0.0) {
+        // NO USABLE UV FRAME, WHICH USED TO MEAN "SILENTLY NO NORMAL AT ALL". The frame above comes
+        // from ddx/ddy of the UVs, so a mesh whose UVs are constant across a triangle -- generated
+        // geometry very often has none worth the name -- collapses T and B to zero and this returned
+        // the geometric normal, discarding the perturbation without a word. That is how a material
+        // graph driving Normal can be compiled, registered, dispatched and correct, and still change
+        // absolutely nothing: measured on the pool's fluid shell, graph on versus off was 0 differing
+        // pixels, and every part of the chain except this line looked healthy.
+        //
+        // A WORLD-ANCHORED FRAME, NOT ONE FROM THE POSITION DERIVATIVES. dp1/dp2 are screen-space
+        // quantities, so a frame built from them rotates as the camera does and the ripple would
+        // swim when you turned your head. Picking the world axis least parallel to N gives a frame
+        // that depends only on the surface, so a world-space pattern stays put.
+        //
+        // The tangent DIRECTION is arbitrary here, and that is honest rather than a compromise: a
+        // mesh with no UVs has no authored tangent direction to respect. What matters is that the
+        // frame is orthonormal, continuous over the surface, and stable in world space -- which is
+        // exactly what a world-space ripple or triplanar pattern needs.
+        const float3 up = abs(N.z) < 0.999 ? float3(0, 0, 1) : float3(1, 0, 0);
+        const float3 T2 = normalize(cross(up, N));
+        const float3 B2 = cross(N, T2);
+        return normalize(T2 * nTS.x + B2 * nTS.y + N * nTS.z);
+    }
     float invmax = rsqrt(m);
     return normalize(T * (nTS.x * invmax) + B * (nTS.y * invmax) + N * nTS.z);
 }
@@ -429,6 +502,14 @@ struct AverAuthored {
     // is how one mesh becomes a window with a frosted band, or a bottle with a label.
     float  ior;
     float  transmission;
+    // THE VOLUME, AUTHORED PER PIXEL RATHER THAN PER MATERIAL. These mirror gAttenuationColor and
+    // gAttenuationDistance, and they are here so a GRAPH can drive them -- which is the whole
+    // difference between "this engine ships a green glass" and "anyone can author one". The tint of
+    // real glass is its iron content and its thickness, and both vary across a pane; a constant
+    // could express neither. attenuationDistance <= 0 still means "no volume", exactly as the
+    // constant did, so every material authored before this existed is unaffected.
+    float3 attenuationColor;
+    float  attenuationDistance;
     // THE COAT TRIPLE IS NOT BEHIND AVER_LAYERED_BSDF, and that is deliberate even though the only
     // thing that reads it is. Putting it behind the define would make the shape of AverAuthored --
     // and therefore the generated material-graph HLSL, which assigns into it by field name --
@@ -463,6 +544,8 @@ AverAuthored averStockAuthored(float2 uv, float3 geoN) {
     a.subsurfaceRadius = (gMaterialFlags & AVER_MAT_SUBSURFACE) ? saturate(gSubsurfaceRadius) : 0.0;
     a.ior              = gIor;
     a.transmission     = gTransmission;
+    a.attenuationColor    = gAttenuationColor;
+    a.attenuationDistance = gAttenuationDistance;
     // Gated here once, like subsurface above, and for the same reason: a graph driving the pin
     // writes after this and must not then be vetoed by the flag.
     a.coatWeight       = (gMaterialFlags & AVER_MAT_COAT) ? saturate(gCoatWeight)    : 0.0;
@@ -486,8 +569,16 @@ AverSurface averBuildSurface(AverVertex v, AverLight l, AverAuthored a, float2 u
     s.f90 = gMatF90;
     s.reflectance = gMatReflectance;
     s.display = gShadingModel == AVER_MODEL_UNLIT;
-    s.displayColor = float4(gBaseColor.rgb, gBaseColor.a);
     s.albedo = srgbToLin(gBaseColor.rgb) * a.baseColor;
+    // THE SAMPLED TEXTURE AND THE LINEARISED FACTOR, i.e. exactly s.albedo, because this is what an
+    // unlit surface hands to the backbuffer. Reading gBaseColor alone was two bugs at once, and both
+    // of them render as WHITE rather than as anything that looks like a colour mistake: the draw
+    // loops deliberately neutralise gBaseColor to 1,1,1 for any material that carries its colour in
+    // a texture (see SandboxApp's authored branch and GameRender.cpp), so dropping a.baseColor drops
+    // the entire colour; and skipping srgbToLin hands an sRGB triple to a tonemap that assumes
+    // linear, which is the same round-trip fault the selection outline hit in plainShadeSurface.
+    // s.alpha rather than gBaseColor.a so an unlit surface fades with opacity like every other one.
+    s.displayColor = float4(s.albedo, s.alpha);
     if (gMaterialFlags & AVER_MAT_ALPHA_MASK) clip(s.alpha - a.alphaCutoff);
     s.ndv = saturate(dot(s.N, v.V));
     s.F0 = lerp(gMatReflectance.xxx, s.albedo, s.metallic);
@@ -500,6 +591,13 @@ AverSurface averBuildSurface(AverVertex v, AverLight l, AverAuthored a, float2 u
     // energy it never received. Every other use of transmission in this file was on s.alpha
     // (coverage) alone, so the diffuse lobe kept its full albedo no matter how see-through the author
     // said the surface was.
+    //
+    // MEASURED AGAINST THE MATERIAL AS IT STOOD THEN, and it has changed since: M_Glass now authors
+    // baseColorFactor 0.97 0.98 0.97 0.10, because the flat green tint moved out of the base colour
+    // and into attenuationColor where a path length can act on it. The numbers below are left EXACTLY
+    // as they were taken -- re-writing a measurement to match today's asset turns a record into a
+    // claim -- so read them as evidence for the MECHANISM (an undimmed diffuse lobe dominating the
+    // reflection), not as values to reproduce.
     //
     // MEASURED, on PTTest's M_Glass (baseColorFactor 0.86 0.93 0.88 0.12, transmission 0.92) over the
     // dark pool. Probing one pixel of pane against the water beside it, and bisecting this function's
@@ -520,6 +618,8 @@ AverSurface averBuildSurface(AverVertex v, AverLight l, AverAuthored a, float2 u
     s.kdAlbedo = (1.0 - s.metallic) * s.albedo * (1.0 - saturate(a.transmission));
     // GATED ON THE FLAG, not on the float, so the whole subsurface branch folds away for every
     // material that does not want it.
+    s.attenuationColor    = a.attenuationColor;
+    s.attenuationDistance = a.attenuationDistance;
     s.backFace  = v.backFace;
     // FROM THE AUTHORED STRUCT, not from the cbuffer. Reading gSubsurfaceWeight here instead would
     // work identically for the stock material and silently ignore every material graph that drove
@@ -1009,4 +1109,50 @@ void averShadeSplit(AverSurface s, AverLight l, AverIndirect ind, out float3 dif
 // straight-alpha glass read as tinted plastic instead of glass in the first place.
 float4 averBlendedOutput(AverSurface s, float3 diffuse, float3 specular) {
     return float4(specular + diffuse * s.alpha, s.alpha);
+}
+
+// The same composite, for a surface that also has a VOLUME behind it.
+//
+// `T` is the per-channel transmittance across the path the light actually travelled through the
+// medium -- averVolumeTransmittance of a measured thickness, not of an authored guess.
+//
+// THE DERIVATION, since the alpha is not obvious. The blend state is PremultipliedAlpha, so the
+// framebuffer computes out = src + dst * (1 - a). Background light must survive with weight
+// (1 - s.alpha) * T instead of (1 - s.alpha), which fixes the coverage:
+//     a = 1 - (1 - s.alpha) * Tavg
+// and nothing else changes: the medium REMOVES light, it does not add any.
+//
+// IT REDUCES EXACTLY TO THE FUNCTION ABOVE WHEN THERE IS NO VOLUME. At T = 1 the added term is zero
+// and a collapses to s.alpha, so a material that authors no attenuationDistance composites
+// bit-identically to before this existed -- which is what keeps every existing blended draw, glass
+// included, off the gate baselines. At T = 0 it goes fully opaque with full diffuse, which is a
+// column deep enough to swallow everything behind it.
+//
+// ONE LIMITATION, STATED RATHER THAN HIDDEN, and it is the same one the fluid shader documented
+// before it: the hardware blend carries a single SCALAR alpha, so the background can only be
+// attenuated by the AVERAGE transmittance. attenuationColor therefore controls HOW FAST a volume
+// goes opaque with depth -- which is the dominant cue, and the one the old fluid shader could not
+// have at all -- but its HUE does not yet tint what is behind the surface. A volume's own colour
+// comes from its authored base colour meanwhile, exactly as the fluid shader's gFluidBody did.
+//
+// Per-channel removal genuinely needs the background, and there are two ways to get it: a
+// scene-colour SRV (IRenderContext::copyTexture exists and is proven, one caller today), or a
+// per-channel destination blend factor -- INV_SRC_COLOR multiplies dst by (1 - src.rgb) per channel.
+// The second is nearly free but changes the blend state for every blended draw, so neither is a
+// change to make in passing. Both are real follow-ups; neither is a dead end.
+float4 averBlendedOutputVolume(AverSurface s, float3 diffuse, float3 specular, float3 T) {
+    const float Tavg  = dot(T, float3(1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0));
+    const float alpha = saturate(1.0 - (1.0 - s.alpha) * Tavg);
+    // The SAME composite as averBlendedOutput, with the volume-corrected coverage in place of the
+    // surface's own. That is the whole change, and it is deliberately not more than that.
+    //
+    // WHAT WAS TRIED AND IS WRONG, recorded so it is not re-attempted: adding an in-scattering term
+    // `diffuse * (1 - s.alpha) * (1 - T)`. It reads plausibly -- the medium fills in as the
+    // background is absorbed -- but (1 - T) is LARGEST in the channel the medium absorbs MOST, so a
+    // green-transmitting glass gains red and blue. It is the complement of the right colour. Measured
+    // on an 8 cm M_Glass pane authored (0.15, 0.85, 0.35) at 4 cm: the pane darkened by (29, 28, 27),
+    // i.e. uniformly, with no green anywhere -- the tint cancelling itself against the term meant to
+    // produce it. glTF's volume is pure ABSORPTION: it has no scattering albedo, so there is nothing
+    // for a correct in-scattering term to be made of.
+    return float4(specular + diffuse * alpha, alpha);
 }

@@ -11,6 +11,7 @@
 aver_add_module(Aver.UI
   SOURCES
     src/UiDrawList.cpp
+    src/UiFont.cpp
   DEPS
     Aver.Core
 )

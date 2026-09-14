@@ -6,6 +6,7 @@ aver_add_module(Aver.Platform
     src/InputState.cpp
     src/win32/Win32Window.cpp
     src/win32/Win32Splash.cpp
+    src/win32/Win32Console.cpp
     src/win32/Win32DirectoryWatcher.cpp
   DEPS
     Aver.Core

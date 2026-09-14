@@ -76,8 +76,11 @@ public:
     // The material a surface token names, loading it on first use. 0 when the project has none.
     pbr::MaterialHandle materialForSurface(const std::string& name);
 
-    // Loads every .ocmat under Content\Materials. NON-RECURSIVE, matching the editor.
-    void loadProjectMaterials();
+    // NO loadProjectMaterials(), deliberately. The runtime carried a copy of the editor's, nothing
+    // ever called it, and it was removed: a level resolves each surface it references through
+    // materialForSurface(), lazily and Binaries-first, so eagerly loading every project material would
+    // only cost load time and memory. If an eager preload is ever wanted, wire one deliberately --
+    // scanning Binaries\Materials as well as Content\Materials -- rather than reviving a stale copy.
     void releaseProjectMaterials();
 #endif
 
@@ -85,6 +88,15 @@ public:
     // Remembers that an interned surface token has an authored material behind it.
     void bindSurfaceMaterial(i32 token, pbr::MaterialHandle h) { surfaceMaterials_[token] = h; }
     pbr::MaterialHandle authoredFor(i32 token) const;
+
+    /// The material token this mesh's own materialSlots[0] names, or 0 when it names none.
+    ///
+    /// THE EDITOR'S RULE, HELD HERE TOO, and it has to be: a fallback the editor honours and the
+    /// packaged game does not is this repo's most-repeated defect shape, and the divergence gate in
+    /// scripts/verify-game.ps1 exists because of it. An entity whose CMeshRenderer.material is 0 is
+    /// not saying "draw me flat", it is saying nothing -- and the mesh it points at already declares
+    /// a material. A non-zero material stays an override, exactly as before.
+    i32 meshDefaultMaterial(u64 meshId) const;
 #endif
 
 #if AVER_MODULE_SCENE
@@ -98,9 +110,18 @@ public:
     // how the SandboxApp god object started.
     void loadProjectMeshes(rhi::IDevice& device);
 
-    // Drops the project's meshes from the id table. The built-in primitives survive, which is why
-    // they are tracked separately.
-    void releaseProjectMeshes();
+    // THERE IS DELIBERATELY NO releaseProjectMeshes() TWIN of releaseProjectMaterials().
+    // There was one, it had zero callers, and it was wrong: it erased sceneMeshes_/meshBounds_/
+    // meshSlot0Material_ entries without ever calling IDevice::destroyMesh on the handles they held,
+    // so the first caller to wire it up would have leaked the GPU vertex/index buffers (and any BLAS
+    // built from them) instead of freeing them. It could not have done otherwise -- it took no
+    // device, and this class only gets one as an argument to loadProjectMeshes.
+    //
+    // Nothing needs it today: openProject runs exactly once per process in the packaged game, so the
+    // device's own teardown reclaims everything. Whoever adds a project-reload path should write the
+    // correct version then -- taking rhi::IDevice&, destroying each handle before erasing it, and
+    // mirroring the editor's SandboxApp::releaseProjectMeshes, which also has to destroy per-material
+    // split parts and outline line meshes this class does not have.
 
     rhi::MeshHandle meshFor(u64 id) const;
     usize meshCount() const { return sceneMeshes_.size(); }
@@ -127,8 +148,8 @@ public:
     // keyed by fnv1a64(relative path) -- the SAME id space contentIndex_ already uses for every other
     // project asset (adopt()'s own "FROZEN" comment), so a CParticleEmitter::effect a level or a
     // script names resolves the identical way a CMeshRenderer::mesh or CAnimator::clip does. Recursive
-    // over the whole content root, matching loadProjectMeshes rather than loadProjectMaterials'
-    // Content\Materials convention: DECIDED 3 gave .ocparticle no such folder rule.
+    // over the whole content root, matching loadProjectMeshes rather than the Materials-folder
+    // convention .ocmat follows: DECIDED 3 gave .ocparticle no such folder rule.
     //
     // particles::particleEffects() is the SAME process-global table SandboxApp.cpp's
     // loadProjectParticleEffects() fills and --particle-test's hardcoded content calls set() on
@@ -144,6 +165,8 @@ private:
 #if AVER_MODULE_SCENE
     std::unordered_map<u64, rhi::MeshHandle>       sceneMeshes_;
     std::unordered_map<u64, std::pair<Vec3, Vec3>> meshBounds_;
+    // mesh id -> the material token its materialSlots[0] names. See meshDefaultMaterial.
+    std::unordered_map<u64, i32>                   meshSlot0Material_;
     std::vector<u64>                               projectMeshIds_;
     std::unordered_map<i32, SurfaceLook>           surfaceLooks_;
     // Depth proxy map: LOD meshes used instead of full detail in depth passes

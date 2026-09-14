@@ -4,6 +4,7 @@
 #include "Application.hpp"
 #include "aver/core/CrashReport.hpp"
 #include "aver/core/Version.hpp"
+#include "aver/platform/Console.hpp"
 
 #include <string>
 
@@ -33,6 +34,16 @@ int main(int argc, char** argv) {
         }
         aver::crash::install(cfg);
     }
+
+    // A CONSOLE NOBODY ASKED FOR IS NOISE, so both hosts are linked /SUBSYSTEM:WINDOWS and Windows
+    // never makes one. This puts the output back for the runs that want it -- a terminal, or a
+    // script reading stdout -- and does nothing when launched from Explorer or the launcher.
+    // See Console.hpp for why redirection is left strictly alone.
+    //
+    // AFTER crash::install and BEFORE createApplication: the crash handler must be armed first (its
+    // own comment says why), and createApplication is the first thing that logs, so attaching here
+    // means nothing has been printed yet that the console would have missed.
+    aver::platform::attachParentConsole();
 
     aver::Application* app = aver::createApplication(argc, argv);
     if (!app) return 1;

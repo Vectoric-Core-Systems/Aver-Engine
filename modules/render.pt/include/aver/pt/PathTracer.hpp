@@ -38,11 +38,52 @@ constexpr u32 kPtAccumStride = 16;
 enum class PtDefect : u32 { None = 0, TimesPi = 1, NoCosine = 2, DielectricNoPdfCancel = 3 };
 
 // One surface the tracer can hit: a mesh, where it is, and what it reflects.
+// "This slot holds no texture." NOT ZERO -- zero is a real, reachable bindless index, so a
+// zero-initialised field would silently mean "sample slot 0" (whatever material happened to land
+// there first) instead of "sample nothing". Same value and same reasoning as pbr::kUnboundTexture,
+// restated rather than included: this module links Aver.RHI and Aver.Core only, deliberately, and
+// naming a pbr:: symbol here is precisely the dependency the resolver callback exists to avoid.
+inline constexpr u32 kUnboundTexture = 0xFFFFFFFFu;
+
 struct PtSurface {
     rhi::MeshHandle mesh = 0;
     // ENGINE convention: row-major / row-vector, cm, +Z up. Handed to TlasInstance untouched.
     f32 world[16] = {1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 1, 0,  0, 0, 0, 1};
+    // THE FACTOR, NOT THE FINISHED COLOUR, whenever baseColorTex is bound -- the sampled texel
+    // multiplies this. A caller that supplies a texture must pass baseColorFactor here and NOT the
+    // texture's mean: mean x texel applies the texture twice, which reads as a too-dark scene with
+    // no assert and no log. (Every caller that binds no texture is unaffected and keeps meaning
+    // "the surface colour", which is what PtFurnaceTest and every pre-texture caller rely on.)
     f32 albedo[3] = {1, 1, 1};
+    // Index into the tracer's bindless base-colour table, or kUnboundTexture. Obtain it from
+    // PathTracer::residentTexture() -- NEVER by counting draws, because an index that moves when the
+    // visible set changes moves PtSceneView::drawsKey() with it and the accumulator then re-arms
+    // every frame, never reaching sample 1.
+    u32 baseColorTex = kUnboundTexture;
+
+    // NEGATIVE MEANS "NO SPECULAR LOBE AT ALL" -- the pure Lambertian surface this tracer shipped
+    // with, and the default, so every caller written before specular existed keeps byte-identical
+    // behaviour. That matters more here than anywhere else in this file: PtFurnaceTest's oracle is
+    // an ABSOLUTE claim about an albedo-1 surface reading exactly L, and a dielectric specular lobe
+    // -- even a 0.04 one -- is extra energy leaving that surface. Making metallic/roughness merely
+    // default to 0/1 would have silently changed what every existing furnace configuration measures.
+    //
+    // Same idiom as `ior` directly below: a value no real surface can hold doubles as the kind, so
+    // there is no separate flag and nothing to keep in step. Roughness is a [0,1] quantity; -1 is
+    // not a rough surface, it is the absence of the question.
+    f32 roughness = -1.0f;
+    // Only read when roughness >= 0. 0 = dielectric (F0 0.04), 1 = conductor (F0 = albedo).
+    f32 metallic = 0.0f;
+
+    // glTF packing: occlusion in R, roughness in G, metallic in B. When bound, `roughness` and
+    // `metallic` above are FACTORS multiplying the sampled channels, which is what .ocmat authoring
+    // means by roughnessFactor/metallicFactor -- so a material with `metallicFactor 1` and a metal
+    // map is not a mirror, it is whatever the map says.
+    u32 metalRoughTex = kUnboundTexture;
+    // Tangent-space normal map. The tangent frame is derived per triangle from the UV gradient (the
+    // mesh carries no tangent stream), so this needs no extra vertex data.
+    u32 normalTex = kUnboundTexture;
+    f32 normalScale = 1.0f;
     // 0.0 (the default) means OPAQUE LAMBERTIAN -- every existing addSurface() caller that never
     // touches this field keeps the exact diffuse-only behaviour it always had. Any value > 0 means a
     // SMOOTH DIELECTRIC with that index of refraction (ordinary glass ~1.5, water ~1.33, diamond
@@ -79,6 +120,40 @@ struct PtDispatch {
     bool     reset       = false;// overwrite rather than add; the first dispatch must set it
     f32      rayBias     = 0.05f;// cm, along the normal and as TMin
     f32      tMax        = 1.0e7f;
+    // RUSSIAN ROULETTE: the bounce index at which paths start being terminated in proportion to how
+    // little energy they still carry. 0 is OFF and is the DEFAULT ON PURPOSE -- see the shader for
+    // the technique, and below for why the default is off rather than on.
+    //
+    // The integrator ran without it entirely until now: the bounce loop is `for (b = 0; b <= bounce)`
+    // with no early exit, so a path that has scattered off three dark surfaces carries a few percent
+    // of its original throughput, contributes almost nothing to the pixel, and still pays a full
+    // closest-hit traversal plus a next-event shadow ray for every bounce it has left.
+    //
+    // WHY OFF BY DEFAULT, when the technique is unbiased and standard. PtFurnaceTest is an ORACLE,
+    // and its identity is not simply "the mean is right": it reads back the ESCAPED FRACTION and
+    // predicts L times that fraction (see CSPathTrace's own comment at the bounce-budget break). A
+    // rouletted path neither escapes nor hits -- it stops -- so the escaped count falls while the
+    // radiance estimate stays correct, and the oracle's prediction breaks for a reason that has
+    // nothing to do with the BRDF it exists to check. Rather than teach the furnace about roulette,
+    // the furnace simply does not ask for it: this defaults to 0, PtFurnaceTest never sets it, and
+    // its arithmetic is bit-identical to before. PtSceneView opts in.
+    u32      rouletteDepth = 0;
+
+    // R5/F6 (contrast-fix plan): a MISS following a cosine-hemisphere-sampled bounce reads
+    // averSkyRadianceCheap() -- the SAME calibrated, SH-sourced sky the raster's diffuse ambient and
+    // ReSTIR already use -- instead of the raw, uncalibrated skyColor() every miss used before. See
+    // pt_pathtrace.hlsl's ptEnvironment/lastDiffuse comments for the full arithmetic; camera rays and
+    // a miss straight after a SPECULAR or dielectric bounce are unaffected either way, matching the
+    // raster's own specular reflections (also uncalibrated skyColor()).
+    //
+    // DEFAULTS FALSE, i.e. corrected/matched -- the user's own call (contrast-fix plan section 8):
+    // the path tracer is meant as pt-compare's REFERENCE, and a reference whose sky is 8x dimmer than
+    // the renderer it is checking (kSkyIrradianceCalibration) cannot tell the two apart. true
+    // restores the old, unmatched behaviour, byte-identical to before this field existed, for
+    // comparison only -- see PtSceneView::setLegacyEnvironment. PtFurnaceTest never sets this either:
+    // averSkyRadianceCheap() returns averFurnaceL() under the furnace exactly as skyColor() does
+    // (shared_prelude.hlsl), so which branch fires cannot change the furnace's arithmetic.
+    bool     legacyEnvironment = false;
 };
 
 // Where one camera's accumulation lands: the buffer, and the descriptors naming its scene.
@@ -104,6 +179,30 @@ public:
     bool init(rhi::IDevice& dev);
     void shutdown();
     bool available() const { return pipeline_ != 0; }
+
+    // Makes `h` resident in the tracer's own bindless base-colour table and returns its index, or
+    // kUnboundTexture if this device has no bindless support, the table could not be created, or it
+    // is full. Idempotent: the same handle always returns the same index for the life of the
+    // tracer.
+    //
+    // APPEND-ONLY AND NEVER FREED, and that is a correctness property rather than laziness. The
+    // index travels into PtSurface and therefore into PtSceneView::drawsKey(); if an index could be
+    // reused or renumbered, a scene whose visible set merely changed would hash differently, re-arm
+    // the accumulator, and a progressive tracer that re-arms every frame never accumulates anything.
+    // 4096 slots against a scene's distinct materials is not a budget anyone reaches.
+    //
+    // WHY THE TRACER OWNS THIS TABLE rather than borrowing the rasteriser's: Voxi's table is 0 under
+    // --no-gi, 0 when Voxi is detached mid-session, and 0 on any device without ray tracing, none of
+    // which has anything to do with whether the PATH TRACER can sample a texture. Binding a stale or
+    // zero handle leaves a declared root range unbound, which is a fault on the next dispatch, not a
+    // warning. This class already owns res_, its pipeline and its dispatch; the table belongs with them.
+    u32 residentTexture(rhi::TextureHandle h);
+
+    // The tracer samples textures only once something has actually been made resident. Until then it
+    // dispatches the ORIGINAL, texture-free pipeline -- which is what keeps PtFurnaceTest (which never
+    // calls residentTexture) running the identical compiled arithmetic it always has, and its
+    // bit-identical replay check meaningful.
+    bool texturing() const { return texPipeline_ != 0 && texCount_ != 0; }
 
     // Registers a surface and returns the id a hit reads back as CommittedInstanceID().
     // Surfaces are declared BEFORE any scene, because the flat geometry table is built over all of
@@ -187,8 +286,21 @@ private:
         u32 firstVertex = 0;
         f32 albedo[3] = {1, 1, 1};
         f32 ior = 0.0f;
+        // APPENDED, never inserted: any earlier position shifts albedo/ior and every existing
+        // instance silently reads the wrong fields. 88 -> 112, every field naturally aligned on a
+        // 4-byte boundary, so the structured-buffer stride stays sizeof(Instance) with no padding
+        // and no straddle for DXC to disagree with us about. Deliberately grown ONCE for the whole
+        // material rather than a field at a time: this ABI is hand-mirrored into HLSL with nothing
+        // but a static_assert on its size watching, so each edit is a chance to shift a field on one
+        // side only, and three edits are three chances.
+        u32 baseColorTex = kUnboundTexture;
+        f32 roughness = -1.0f;   // negative = pure Lambertian; see PtSurface::roughness
+        f32 metallic = 0.0f;
+        u32 metalRoughTex = kUnboundTexture;
+        u32 normalTex = kUnboundTexture;
+        f32 normalScale = 1.0f;
     };
-    static_assert(sizeof(Instance) == 88, "PtInstance is the HLSL PtInstance ABI");
+    static_assert(sizeof(Instance) == 112, "PtInstance is the HLSL PtInstance ABI");
 
     struct Scene {
         rhi::TlasHandle  tlas = 0;
@@ -198,8 +310,40 @@ private:
     rhi::IDevice*          dev_ = nullptr;
     rhi::IResourceFactory* res_ = nullptr;
 
+    // THE SINGLE-SCATTER DIRECTIONAL ALBEDO TABLE, E(cos(theta), roughness), built once on the CPU
+    // at init and never touched again. It is what the multiple-scattering compensation divides by:
+    // a microfacet lobe with Smith shadowing returns only E of the light it receives, the rest being
+    // inter-facet scattering the single-scatter model has no term for, and the compensation puts
+    // exactly that missing (1 - E) back.
+    //
+    // INTEGRATED WITH THE SHADER'S OWN ESTIMATOR rather than taken from a published analytic fit.
+    // The fits in circulation are for a height-correlated Smith with a particular k and no
+    // below-horizon rejection; this sampler uses k = a/2 and DOES discard samples whose reflected
+    // direction falls under the surface. A fit would therefore compensate for a slightly different
+    // lobe than the one being corrected, and the furnace's 5e-3 tolerance is tight enough to see the
+    // difference. Computing E from the identical maths makes the compensation exact by construction.
+    rhi::BufferHandle energyLut_ = 0;
+
     rhi::ShaderHandle   cs_ = 0;
     rhi::PipelineHandle pipeline_ = 0;
+
+    // THE TEXTURED TWIN, a second PSO rather than a runtime branch inside the first. The bindless
+    // range is part of the ROOT SIGNATURE, not a uniform, so it cannot be toggled per dispatch --
+    // the same reason VoxiRenderer builds rayDrivenTexPso_ separately. Built lazily, on the first
+    // successful residentTexture(), so a device with no bindless support and every caller that never
+    // asks for a texture (PtFurnaceTest) pay neither the compile nor the descriptor range.
+    // Builds texTable_/texCs_/texPipeline_ on first demand. Returns whether texturing is usable;
+    // one attempt per session, latched by texTried_.
+    bool ensureTexturing();
+
+    rhi::ShaderHandle   texCs_ = 0;
+    rhi::PipelineHandle texPipeline_ = 0;
+    rhi::BindlessTableHandle texTable_ = 0;
+    // Handle -> slot, append-only. See residentTexture() for why it is never cleared.
+    std::unordered_map<rhi::TextureHandle, u32> texIndex_;
+    u32  texCount_ = 0;
+    bool texTried_ = false;   // one attempt per session; a failure is remembered, not retried
+    bool texWarned_ = false;
 
     std::vector<PtSurface> surfaces_;
     std::vector<Instance>  instances_;
